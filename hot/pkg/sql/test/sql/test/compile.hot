@@ -1,0 +1,106 @@
+::sql::test::compile ns
+meta ["test"]
+
+::compile ::sql::compile
+
+// ============================================================================
+// Positional ? placeholders
+// ============================================================================
+
+test-dollar-positional
+meta ["test"] fn () {
+    out ::compile/compile("SELECT * FROM users WHERE id = ? AND active = ?", "dollar")
+    assert-eq("SELECT * FROM users WHERE id = $1 AND active = $2", out.sql)
+    assert-eq(2, out.count)
+    assert-eq([null, null], out.names)
+}
+
+test-question-positional-passthrough
+meta ["test"] fn () {
+    out ::compile/compile("SELECT * FROM t WHERE a = ? AND b = ?", "question")
+    assert-eq("SELECT * FROM t WHERE a = ? AND b = ?", out.sql)
+    assert-eq(2, out.count)
+}
+
+test-no-placeholders
+meta ["test"] fn () {
+    out ::compile/compile("SELECT 1", "dollar")
+    assert-eq("SELECT 1", out.sql)
+    assert-eq(0, out.count)
+}
+
+// ============================================================================
+// Named :name placeholders
+// ============================================================================
+
+test-dollar-named
+meta ["test"] fn () {
+    out ::compile/compile("UPDATE users SET name = :name WHERE id = :id", "dollar")
+    assert-eq("UPDATE users SET name = $1 WHERE id = $2", out.sql)
+    assert-eq(["name", "id"], out.names)
+}
+
+test-dollar-named-dedupes-repeats
+meta ["test"] fn () {
+    out ::compile/compile("SELECT * FROM t WHERE a = :x OR b = :x OR c = :y", "dollar")
+    assert-eq("SELECT * FROM t WHERE a = $1 OR b = $1 OR c = $2", out.sql)
+    assert-eq(["x", "y"], out.names)
+    assert-eq(2, out.count)
+}
+
+test-question-named-repeats-per-occurrence
+meta ["test"] fn () {
+    out ::compile/compile("SELECT * FROM t WHERE a = :x OR b = :x", "question")
+    assert-eq("SELECT * FROM t WHERE a = ? OR b = ?", out.sql)
+    assert-eq(["x", "x"], out.names)
+}
+
+test-mixed-placeholders-error
+meta ["test"] fn () {
+    out ::compile/compile("SELECT * FROM t WHERE a = ? AND b = :b", "dollar")
+    assert(is-err(out), "mixing ? and :name should error")
+}
+
+// ============================================================================
+// Skipped regions
+// ============================================================================
+
+test-question-in-string-literal-ignored
+meta ["test"] fn () {
+    out ::compile/compile("SELECT 'a?b' FROM t WHERE id = ?", "dollar")
+    assert-eq("SELECT 'a?b' FROM t WHERE id = $1", out.sql)
+    assert-eq(1, out.count)
+}
+
+test-escaped-quote-in-string
+meta ["test"] fn () {
+    out ::compile/compile("SELECT 'it''s a ?' WHERE id = ?", "dollar")
+    assert-eq("SELECT 'it''s a ?' WHERE id = $1", out.sql)
+}
+
+test-quoted-identifier-ignored
+meta ["test"] fn () {
+    out ::compile/compile("SELECT \"weird?col\" FROM t WHERE id = ?", "dollar")
+    assert-eq("SELECT \"weird?col\" FROM t WHERE id = $1", out.sql)
+}
+
+test-line-comment-ignored
+meta ["test"] fn () {
+    out ::compile/compile("SELECT 1 -- what? :nope\n WHERE id = ?", "dollar")
+    assert-eq("SELECT 1 -- what? :nope\n WHERE id = $1", out.sql)
+    assert-eq(1, out.count)
+}
+
+test-block-comment-ignored
+meta ["test"] fn () {
+    out ::compile/compile("SELECT /* ? :x /* nested ? */ still */ ?", "dollar")
+    assert-eq("SELECT /* ? :x /* nested ? */ still */ $1", out.sql)
+    assert-eq(1, out.count)
+}
+
+test-postgres-cast-not-a-named-param
+meta ["test"] fn () {
+    out ::compile/compile("SELECT id::text FROM t WHERE id = :id", "dollar")
+    assert-eq("SELECT id::text FROM t WHERE id = $1", out.sql)
+    assert-eq(["id"], out.names)
+}

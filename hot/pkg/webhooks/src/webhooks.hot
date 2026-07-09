@@ -1,0 +1,150 @@
+::webhooks ns
+meta {
+    doc: """
+    Webhook signature verification primitives.
+
+    Nearly every provider signs webhooks with one of a handful of HMAC
+    recipes; getting the encoding wrong (hex vs base64, digest vs string)
+    is the classic webhook bug. This package provides the recipes once,
+    with constant-time comparison, plus ready-made verifiers for GitHub
+    (`::webhooks::github`) and Slack (`::webhooks::slack`).
+
+    Provider packages with their own conventions (stripe, twilio,
+    whatsapp, discord) ship their own `verify-request`; use this package
+    when integrating a provider that doesn't have a Hot package yet.
+
+    **Recipes**
+
+    | Provider style | Function |
+    |---|---|
+    | hex HMAC-SHA256 (GitHub, Meta, ...) | `verify-hmac-sha256-hex` |
+    | base64 HMAC-SHA256 | `verify-hmac-sha256-base64` |
+    | base64 HMAC-SHA1 (legacy) | `verify-hmac-sha1-base64` |
+    | timestamped hex HMAC-SHA256 (Slack, Stripe style) | `verify-timestamped-hmac-sha256` |
+    """
+}
+
+::hmac ::hot::hmac
+::hex ::hot::hex
+::b64 ::hot::base64
+::time ::hot::time
+
+DEFAULT_TOLERANCE_SECONDS 300
+
+now-seconds
+meta {
+    doc: """Current Unix time in whole seconds. Exposed so callers and tests can build timestamped signatures."""
+}
+fn (): Int {
+  Int(floor(div(::time/now().epochNanoseconds, 1000000000)))
+}
+
+verify-hmac-sha256-hex
+meta {
+    doc: """
+    Verify a lowercase/uppercase hex HMAC-SHA256 signature over `message`
+    (usually the raw request body). Constant-time comparison; returns
+    false for a missing or malformed signature.
+
+    **Example**
+
+    ```hot
+    ::webhooks/verify-hmac-sha256-hex(secret, request.body-raw, signature-hex)
+    ```
+    """
+}
+fn (secret: Str, message: Any, signature-hex: Str): Bool {
+  cond {
+    is-empty(signature-hex) => { false }
+    => {
+      expected ::hmac/hmac-sha256(secret, message)
+      secure-compare(expected, lowercase(signature-hex))
+    }
+  }
+}
+
+verify-hmac-sha256-base64
+meta {
+    doc: """Verify a base64-encoded HMAC-SHA256 signature over `message`. Constant-time comparison."""
+}
+fn (secret: Str, message: Any, signature-b64: Str): Bool {
+  cond {
+    is-empty(signature-b64) => { false }
+    => {
+      expected ::b64/encode(::hex/decode(::hmac/hmac-sha256(secret, message)))
+      secure-compare(expected, signature-b64)
+    }
+  }
+}
+
+verify-hmac-sha1-base64
+meta {
+    doc: """Verify a base64-encoded HMAC-SHA1 signature over `message` (legacy providers, e.g. Twilio-style). Constant-time comparison."""
+}
+fn (secret: Str, message: Any, signature-b64: Str): Bool {
+  cond {
+    is-empty(signature-b64) => { false }
+    => {
+      expected ::b64/encode(::hex/decode(::hmac/hmac-sha1(secret, message)))
+      secure-compare(expected, signature-b64)
+    }
+  }
+}
+
+timestamp-within-tolerance
+meta {
+    doc: """True when `timestamp` (Unix seconds, Str or Int) is within `tolerance-seconds` of now. False for non-numeric input. Use tolerance 0 to skip the check."""
+}
+fn (timestamp: Any, tolerance-seconds: Int): Bool {
+  cond {
+    eq(tolerance-seconds, 0) => { true }
+    => {
+      parsed if(is-int(timestamp), timestamp, Int(Str(timestamp)))
+      cond {
+        is-err(parsed) => { false }
+        => {
+          age sub(now-seconds(), parsed)
+          and(gte(age, sub(0, tolerance-seconds)), lte(age, tolerance-seconds))
+        }
+      }
+    }
+  }
+}
+
+verify-timestamped-hmac-sha256
+meta {
+    doc: """
+    Verify a timestamped hex HMAC-SHA256 signature: the signed message is
+    built by the caller from the provider's timestamp and raw body (e.g.
+    Slack's `v0:{ts}:{body}`), and the timestamp is checked against a
+    replay-attack tolerance window (default 300s; 0 disables).
+
+    **Example**
+
+    ```hot
+    base `v0:${ts}:${request.body-raw}`
+    ::webhooks/verify-timestamped-hmac-sha256(secret, base, ts, signature-hex, 300)
+    ```
+    """
+}
+fn
+(secret: Str, message: Any, timestamp: Any, signature-hex: Str): Bool {
+  verify-timestamped-hmac-sha256(secret, message, timestamp, signature-hex, DEFAULT_TOLERANCE_SECONDS)
+},
+(secret: Str, message: Any, timestamp: Any, signature-hex: Str, tolerance-seconds: Int): Bool {
+  cond {
+    not(verify-hmac-sha256-hex(secret, message, signature-hex)) => { false }
+    => { timestamp-within-tolerance(timestamp, tolerance-seconds) }
+  }
+}
+
+strip-prefix
+meta {
+    doc: """Strip a signature scheme prefix (e.g. `"sha256="`, `"v0="`) from a header value. Returns an empty string when the prefix doesn't match — verifiers then fail closed."""
+}
+fn (header: Str, prefix: Str): Str {
+  cond {
+    starts-with(header, prefix) => { slice(header, length(prefix)) }
+    => { "" }
+  }
+}

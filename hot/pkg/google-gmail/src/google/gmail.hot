@@ -1,0 +1,137 @@
+::google::gmail ns
+meta {
+    doc: """
+    Gmail API bindings. Authentication is configured once via the
+    `google.*` context variables — see the `google-core` package.
+
+    **Quick start**
+
+    ```hot
+    ::gmail ::google::gmail
+
+    ::gmail/send-message("alice@example.com", "Weekly report", "All green this week.")
+
+    inbox ::gmail/list-messages("is:unread newer_than:7d")
+    message ::gmail/get-message(inbox.messages[0].id)
+    ```
+    """
+}
+
+::api ::google::api
+::b64 ::hot::base64
+
+BASE_URL "https://gmail.googleapis.com/gmail/v1"
+
+SEND_SCOPE "https://www.googleapis.com/auth/gmail.send"
+READ_SCOPE "https://www.googleapis.com/auth/gmail.readonly"
+MODIFY_SCOPE "https://www.googleapis.com/auth/gmail.modify"
+
+// ============================================================================
+// MIME building
+// ============================================================================
+
+build-mime
+meta {
+    doc: """
+    Build a minimal RFC 2822 plain-text message. `headers` is a Map of
+    additional headers (e.g. `{From: "me@example.com", Cc: "x@y.z"}`).
+    Returns the raw message string — `send-raw` base64url-encodes it.
+    """
+}
+fn
+(to: Str, subject: Str, text: Str): Str {
+  build-mime(to, subject, text, {})
+},
+(to: Str, subject: Str, text: Str, headers: Map): Str {
+  extra join(map(keys(headers), (k) { `${k}: ${get(headers, k)}\r\n` }), "")
+  `To: ${to}\r\nSubject: ${subject}\r\n${extra}Content-Type: text/plain; charset="UTF-8"\r\nMIME-Version: 1.0\r\n\r\n${text}`
+}
+
+// ============================================================================
+// Sending
+// ============================================================================
+
+send-raw
+meta {
+    doc: """POST /users/me/messages/send - Send a raw RFC 2822 message (built with `build-mime` or by hand). Returns the sent message resource."""
+}
+fn (mime: Str): Map {
+  ::api/json(SEND_SCOPE, "POST", `${BASE_URL}/users/me/messages/send`, {}, {
+    raw: ::b64/encode-url(mime)
+  })
+}
+
+send-message
+meta {
+    doc: """
+    Send a plain-text email. The From address is the authenticated user.
+
+    **Example**
+
+    ```hot
+    ::google::gmail/send-message("alice@example.com", "Hi", "Hello from Hot!")
+    ```
+    """
+}
+fn
+(to: Str, subject: Str, text: Str): Map {
+  send-raw(build-mime(to, subject, text))
+},
+(to: Str, subject: Str, text: Str, headers: Map): Map {
+  send-raw(build-mime(to, subject, text, headers))
+}
+
+// ============================================================================
+// Reading
+// ============================================================================
+
+list-messages
+meta {
+    doc: """
+    GET /users/me/messages - List message ids, optionally filtered with
+    Gmail search syntax (`q`), e.g. `"from:boss is:unread newer_than:2d"`.
+    Returns `{messages: [{id, threadId}], nextPageToken?}`.
+    """
+}
+fn
+(): Map {
+  ::api/json(READ_SCOPE, "GET", `${BASE_URL}/users/me/messages`)
+},
+(query: Str): Map {
+  ::api/json(READ_SCOPE, "GET", `${BASE_URL}/users/me/messages?q=${::hot::uri/encode(query)}`)
+}
+
+get-message
+meta {
+    doc: """GET /users/me/messages/{id} - Fetch a full message (headers, body parts, labels)."""
+}
+fn (id: Str): Map {
+  ::api/json(READ_SCOPE, "GET", `${BASE_URL}/users/me/messages/${id}?format=full`)
+}
+
+trash-message
+meta {
+    doc: """POST /users/me/messages/{id}/trash - Move a message to the trash."""
+}
+fn (id: Str): Map {
+  ::api/json(MODIFY_SCOPE, "POST", `${BASE_URL}/users/me/messages/${id}/trash`, {}, {})
+}
+
+modify-labels
+meta {
+    doc: """POST /users/me/messages/{id}/modify - Add and remove label ids, e.g. `modify-labels(id, ["STARRED"], ["UNREAD"])` to star and mark read."""
+}
+fn (id: Str, add-label-ids: Vec, remove-label-ids: Vec): Map {
+  ::api/json(MODIFY_SCOPE, "POST", `${BASE_URL}/users/me/messages/${id}/modify`, {}, {
+    addLabelIds: add-label-ids,
+    removeLabelIds: remove-label-ids
+  })
+}
+
+list-labels
+meta {
+    doc: """GET /users/me/labels - List the mailbox's labels (system and user)."""
+}
+fn (): Map {
+  ::api/json(READ_SCOPE, "GET", `${BASE_URL}/users/me/labels`)
+}

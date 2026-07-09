@@ -1,0 +1,141 @@
+::google::drive ns
+meta {
+    doc: """
+    Google Drive API bindings. Authentication is configured once via the
+    `google.*` context variables — see the `google-core` package.
+
+    **Quick start**
+
+    ```hot
+    ::drive ::google::drive
+
+    page ::drive/list-files("name contains 'report' and trashed = false")
+    file ::drive/upload-file("notes.txt", "hello", "text/plain")
+    content ::drive/download-file(file.id)
+    ```
+    """
+}
+
+::api ::google::api
+::uri ::hot::uri
+
+BASE_URL "https://www.googleapis.com/drive/v3"
+UPLOAD_URL "https://www.googleapis.com/upload/drive/v3"
+
+SCOPE "https://www.googleapis.com/auth/drive"
+READ_SCOPE "https://www.googleapis.com/auth/drive.readonly"
+
+MULTIPART_BOUNDARY "hot-drive-multipart-boundary"
+
+// ============================================================================
+// Listing / reading
+// ============================================================================
+
+list-files
+meta {
+    doc: """
+    GET /files - List files, optionally filtered by a Drive query
+    (https://developers.google.com/drive/api/guides/search-files), e.g.
+    `"mimeType = 'application/pdf' and modifiedTime > '2026-01-01'"`.
+    Returns `{files: [...], nextPageToken?}`.
+    """
+}
+fn
+(): Map {
+  ::api/json(READ_SCOPE, "GET", `${BASE_URL}/files`)
+},
+(query: Str): Map {
+  ::api/json(READ_SCOPE, "GET", `${BASE_URL}/files?q=${::uri/encode(query)}`)
+}
+
+get-file
+meta {
+    doc: """GET /files/{id} - File metadata (name, mimeType, size, parents, ...)."""
+}
+fn (id: Str): Map {
+  ::api/json(READ_SCOPE, "GET", `${BASE_URL}/files/${id}?fields=id,name,mimeType,size,parents,webViewLink,modifiedTime`)
+}
+
+download-file
+meta {
+    doc: """GET /files/{id}?alt=media - Download a file's content (Bytes for binary files, Str for text)."""
+}
+fn (id: Str): Any {
+  ::api/json(READ_SCOPE, "GET", `${BASE_URL}/files/${id}?alt=media`)
+}
+
+export-file
+meta {
+    doc: """GET /files/{id}/export - Export a Google Doc/Sheet/Slides file to another format, e.g. `export-file(id, "application/pdf")` or `"text/csv"`."""
+}
+fn (id: Str, mime-type: Str): Any {
+  ::api/json(READ_SCOPE, "GET", `${BASE_URL}/files/${id}/export?mimeType=${::uri/encode(mime-type)}`)
+}
+
+// ============================================================================
+// Writing
+// ============================================================================
+
+build-multipart
+meta {
+    doc: """Build a `multipart/related` upload body from JSON metadata and content. Exposed for testing; `upload-file` uses it."""
+}
+fn (metadata: Map, content: Any, mime-type: Str): Str {
+  b MULTIPART_BOUNDARY
+  `--${b}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n${to-json(untype(metadata))}\r\n--${b}\r\nContent-Type: ${mime-type}\r\n\r\n${content}\r\n--${b}--`
+}
+
+upload-file
+meta {
+    doc: """
+    POST /upload/files?uploadType=multipart - Create a file with content in
+    one request. `parent` (4-arity) is the folder id.
+
+    **Example**
+
+    ```hot
+    file ::google::drive/upload-file("report.csv", csv-text, "text/csv", folder.id)
+    file.id
+    ```
+    """
+}
+fn
+(name: Str, content: Any, mime-type: Str): Map {
+  metadata {name: name}
+  ::api/json(SCOPE, "POST", `${UPLOAD_URL}/files?uploadType=multipart`,
+    {Content-Type: `multipart/related; boundary=${MULTIPART_BOUNDARY}`},
+    build-multipart(metadata, content, mime-type))
+},
+(name: Str, content: Any, mime-type: Str, parent: Str): Map {
+  metadata {name: name, parents: [parent]}
+  ::api/json(SCOPE, "POST", `${UPLOAD_URL}/files?uploadType=multipart`,
+    {Content-Type: `multipart/related; boundary=${MULTIPART_BOUNDARY}`},
+    build-multipart(metadata, content, mime-type))
+}
+
+create-folder
+meta {
+    doc: """POST /files - Create a folder; pass a `parent` folder id with the 2-arity form."""
+}
+fn
+(name: Str): Map {
+  ::api/json(SCOPE, "POST", `${BASE_URL}/files`, {}, {
+    name: name,
+    mimeType: "application/vnd.google-apps.folder"
+  })
+},
+(name: Str, parent: Str): Map {
+  ::api/json(SCOPE, "POST", `${BASE_URL}/files`, {}, {
+    name: name,
+    mimeType: "application/vnd.google-apps.folder",
+    parents: [parent]
+  })
+}
+
+delete-file
+meta {
+    doc: """DELETE /files/{id} - Permanently delete a file (skips the trash)."""
+}
+fn (id: Str): Any {
+  ::api/json(SCOPE, "DELETE", `${BASE_URL}/files/${id}`)
+}

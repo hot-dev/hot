@@ -1,0 +1,93 @@
+::google::api ns
+
+::auth ::google::auth
+
+http-request ::hot::http/request
+is-ok-response ::hot::http/is-ok-response
+HttpRequest ::hot::http/HttpRequest
+HttpResponse ::hot::http/HttpResponse
+
+HttpError type {
+    status: Int,
+    headers: Map,
+    body: Any
+}
+
+HttpResponse -> HttpError fn (response: HttpResponse): HttpError {
+  HttpError({
+    status: response.status,
+    headers: response.headers,
+    body: response.body
+  })
+}
+
+request
+meta {
+    doc: """
+    Make an authenticated request to a Google API. `scope` is the OAuth
+    scope the call needs (service packages pass their own); the token is
+    resolved via `::google::auth/access-token`. JSON bodies are encoded
+    automatically; pass a Bytes/Str body with an explicit Content-Type
+    header for raw uploads.
+
+    **Example**
+
+    ```hot
+    response ::google::api/request(
+      "https://www.googleapis.com/auth/drive.readonly",
+      "GET", "https://www.googleapis.com/drive/v3/files", {}, "")
+    ```
+    """
+}
+fn
+(scope: Str, method: Str, url: Str): HttpResponse {
+  request(scope, method, url, {}, "")
+},
+(scope: Str, method: Str, url: Str, additional-headers: Map, body: Any): HttpResponse {
+  token ::auth/access-token(scope)
+  cond {
+    is-err(token) => { token }
+    => {
+      default-headers {
+        Authorization: `Bearer ${token}`
+      }
+
+      is-raw or(is-bytes(body), and(is-str(body), not(is-empty(body))))
+      encoded-body cond {
+        eq(body, "") => { "" }
+        is-raw => { body }
+        => { to-json(untype(body)) }
+      }
+      headers cond {
+        eq(body, "") => { default-headers }
+        is-raw => { default-headers }
+        => { {...default-headers, Content-Type: "application/json"} }
+      }
+      final-headers {...headers, ...additional-headers}
+
+      ::hot::http/request(HttpRequest({
+        method,
+        url,
+        headers: final-headers,
+        body: encoded-body
+      }))
+    }
+  }
+}
+
+json
+meta {
+    doc: """Like `request`, but unwraps the response: returns the decoded JSON body on 2xx, or an Err carrying `HttpError`. The shape used by all google-* endpoint functions."""
+}
+fn
+(scope: Str, method: Str, url: Str): Any {
+  json(scope, method, url, {}, "")
+},
+(scope: Str, method: Str, url: Str, additional-headers: Map, body: Any): Any {
+  response request(scope, method, url, additional-headers, body)
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { response.body }
+    => { err(HttpError(response)) }
+  }
+}

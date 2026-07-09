@@ -1,0 +1,32 @@
+::openai-compatible::models ns
+
+api-request ::openai-compatible::api/request
+HttpError ::openai-compatible::api/HttpError
+is-ok-response ::hot::http/is-ok-response
+
+list-models
+meta {
+    doc: """
+    GET /models - List the models the provider (or router) exposes.
+
+    **Example**
+
+    ```hot
+    page ::openai-compatible::models/list-models()
+    map(page.data, (m) { m.id })
+    ```
+    """
+}
+fn (): Map {
+  response api-request("GET", "/models")
+  if(is-ok-response(response), response.body, err(HttpError(response)))
+}
+
+get-model
+meta {
+    doc: """GET /models/{model} - Retrieve one model's metadata."""
+}
+fn (model: Str): Map {
+  response api-request("GET", `/models/${model}`)
+  if(is-ok-response(response), response.body, err(HttpError(response)))
+}

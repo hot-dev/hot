@@ -46,6 +46,29 @@ resend
 supabase
 supabase-admin
 
+# Data
+#pg
+#redis
+#sql
+
+# Auth & Webhook Primitives
+#jwt
+#oauth2
+#webhooks
+
+# Voice AI
+#elevenlabs
+
+# Model Routers
+#openai-compatible
+
+# Google Workspace
+#google-core
+#google-gmail
+#google-drive
+#google-sheets
+#google-calendar
+
 # Communication (SMS/Voice)
 #twilio
 #telegram

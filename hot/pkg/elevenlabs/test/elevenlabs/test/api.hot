@@ -1,0 +1,26 @@
+::elevenlabs::test::api ns
+meta ["test"]
+
+::tts ::elevenlabs::tts
+
+test-base-url
+meta ["test"] fn () {
+    assert-eq("https://api.elevenlabs.io", ::elevenlabs/BASE_URL)
+}
+
+test-tts-path-with-and-without-format
+meta ["test"] fn () {
+    assert-eq("/v1/text-to-speech/v123", ::tts/tts-path("v123", null))
+    assert-eq("/v1/text-to-speech/v123?output_format=ulaw_8000", ::tts/tts-path("v123", "ulaw_8000"))
+}
+
+test-tts-request-type
+meta ["test"] fn () {
+    request ::tts/TextToSpeechRequest({
+        text: "hello",
+        model_id: "eleven_flash_v2_5",
+        voice_settings: {stability: 0.5}
+    })
+    assert-eq("hello", request.text)
+    assert(is-null(request.seed), "unset optionals are null")
+}

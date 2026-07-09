@@ -1,0 +1,53 @@
+::openai-compatible ns
+meta {
+    doc: """
+    Generic client for OpenAI-compatible APIs.
+
+    One package for every provider that speaks the OpenAI wire format:
+    OpenRouter, Together, Fireworks, DeepSeek, Groq, Ollama, and private
+    OpenAI-compatible gateways. Point it at a base URL, give it a key, and
+    use the same chat/models/embeddings surface everywhere.
+
+    **Setup** — context variables:
+    - `openai-compatible.base.url` — e.g. `https://openrouter.ai/api/v1`
+    - `openai-compatible.api.key` — the provider's API key
+
+    **Example (OpenRouter)**
+
+    ```hot
+    ::chat ::openai-compatible::chat
+
+    response ::chat/chat-completion(::chat/ChatCompletionRequest({
+      model: "anthropic/claude-sonnet-4.5",
+      messages: [{role: "user", content: "Hello!"}]
+    }))
+    response.choices[0].message.content
+    ```
+
+    Known base URLs are provided as constants for convenience.
+    """
+}
+
+OPENROUTER_BASE_URL
+meta {doc: """OpenRouter: one key for hundreds of models with fallback and routing. https://openrouter.ai/docs"""}
+"https://openrouter.ai/api/v1"
+
+TOGETHER_BASE_URL
+meta {doc: """Together AI serverless endpoints."""}
+"https://api.together.xyz/v1"
+
+FIREWORKS_BASE_URL
+meta {doc: """Fireworks AI serverless inference."""}
+"https://api.fireworks.ai/inference/v1"
+
+DEEPSEEK_BASE_URL
+meta {doc: """DeepSeek platform API."""}
+"https://api.deepseek.com/v1"
+
+GROQ_BASE_URL
+meta {doc: """Groq cloud inference."""}
+"https://api.groq.com/openai/v1"
+
+OLLAMA_BASE_URL
+meta {doc: """Local Ollama with its OpenAI-compatible endpoint enabled."""}
+"http://localhost:11434/v1"

@@ -1,0 +1,105 @@
+::google::calendar ns
+meta {
+    doc: """
+    Google Calendar API bindings. Authentication is configured once via
+    the `google.*` context variables — see the `google-core` package.
+
+    **Quick start**
+
+    ```hot
+    ::cal ::google::calendar
+
+    events ::cal/list-events("primary", {timeMin: "2026-07-09T00:00:00Z", maxResults: 10})
+
+    ::cal/create-event("primary", {
+      summary: "Ship the packages",
+      start: {dateTime: "2026-07-10T10:00:00-05:00"},
+      end: {dateTime: "2026-07-10T10:30:00-05:00"}
+    })
+    ```
+    """
+}
+
+::api ::google::api
+::uri ::hot::uri
+
+BASE_URL "https://www.googleapis.com/calendar/v3"
+
+SCOPE "https://www.googleapis.com/auth/calendar"
+READ_SCOPE "https://www.googleapis.com/auth/calendar.readonly"
+
+list-calendars
+meta {
+    doc: """GET /users/me/calendarList - The calendars on the authenticated user's list."""
+}
+fn (): Map {
+  ::api/json(READ_SCOPE, "GET", `${BASE_URL}/users/me/calendarList`)
+}
+
+query-string fn (params: Map): Str {
+  filtered filter-vals(params, is-some)
+  cond {
+    is-empty(filtered) => { "" }
+    => { `?${::uri/encode-query(filtered)}` }
+  }
+}
+
+list-events
+meta {
+    doc: """
+    GET /calendars/{id}/events - List events. `params` supports the API's
+    query params: `timeMin`/`timeMax` (RFC3339), `q` (text search),
+    `maxResults`, `singleEvents`, `orderBy`, `pageToken`.
+    """
+}
+fn
+(calendar-id: Str): Map {
+  list-events(calendar-id, {})
+},
+(calendar-id: Str, params: Map): Map {
+  ::api/json(READ_SCOPE, "GET", `${BASE_URL}/calendars/${::uri/encode(calendar-id)}/events${query-string(params)}`)
+}
+
+get-event
+meta {
+    doc: """GET /calendars/{id}/events/{eventId} - One event."""
+}
+fn (calendar-id: Str, event-id: Str): Map {
+  ::api/json(READ_SCOPE, "GET", `${BASE_URL}/calendars/${::uri/encode(calendar-id)}/events/${event-id}`)
+}
+
+create-event
+meta {
+    doc: """
+    POST /calendars/{id}/events - Create an event. The event Map uses the
+    API's resource shape: `summary`, `description`, `start`/`end`
+    (`{dateTime}` or `{date}` for all-day), `attendees`, `reminders`, ...
+    """
+}
+fn (calendar-id: Str, event: Map): Map {
+  ::api/json(SCOPE, "POST", `${BASE_URL}/calendars/${::uri/encode(calendar-id)}/events`, {}, event)
+}
+
+quick-add
+meta {
+    doc: """POST /calendars/{id}/events/quickAdd - Create an event from natural language, e.g. `"Lunch with Sam tomorrow at noon"`."""
+}
+fn (calendar-id: Str, text: Str): Map {
+  ::api/json(SCOPE, "POST", `${BASE_URL}/calendars/${::uri/encode(calendar-id)}/events/quickAdd?text=${::uri/encode(text)}`, {}, {})
+}
+
+update-event
+meta {
+    doc: """PATCH /calendars/{id}/events/{eventId} - Update the provided fields of an event."""
+}
+fn (calendar-id: Str, event-id: Str, changes: Map): Map {
+  ::api/json(SCOPE, "PATCH", `${BASE_URL}/calendars/${::uri/encode(calendar-id)}/events/${event-id}`, {}, changes)
+}
+
+delete-event
+meta {
+    doc: """DELETE /calendars/{id}/events/{eventId} - Delete an event."""
+}
+fn (calendar-id: Str, event-id: Str): Any {
+  ::api/json(SCOPE, "DELETE", `${BASE_URL}/calendars/${::uri/encode(calendar-id)}/events/${event-id}`)
+}

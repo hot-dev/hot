@@ -1,0 +1,182 @@
+::sql::compile ns
+meta {
+    doc: """
+    Placeholder compilation for portable SQL.
+
+    User-facing SQL uses `?` (positional) or `:name` (named) placeholders.
+    `compile` rewrites them for a driver's placeholder style — `"dollar"`
+    (`$1, $2, ...`, PostgreSQL) or `"question"` (`?`, MySQL/SQLite) — while
+    leaving string literals, quoted identifiers, comments, and PostgreSQL
+    `::type` casts untouched.
+    """
+}
+
+::regex ::hot::regex
+
+at fn (s: Str, i: Int): Str {
+  slice(s, i, add(i, 1))
+}
+
+is-name-char fn (c: Str): Bool {
+  ::regex/is-match(c, "^[A-Za-z0-9_]$")
+}
+
+// Position (0-based) of `name` in `names`, or -1.
+name-index fn (names: Vec, name: Str): Int {
+  found reduce(names, (acc, entry) {
+    cond {
+      gte(acc.idx, 0) => { acc }
+      eq(entry, name) => { {idx: acc.pos, pos: add(acc.pos, 1)} }
+      => { {idx: acc.idx, pos: add(acc.pos, 1)} }
+    }
+  }, {idx: -1, pos: 0})
+  found.idx
+}
+
+// Collect a run of name characters starting at `i`; returns {name, next}.
+collect-name fn (sql: Str, i: Int): Map {
+  cond {
+    gte(i, length(sql)) => { {name: "", next: i} }
+    is-name-char(at(sql, i)) => {
+      rest collect-name(sql, add(i, 1))
+      {name: concat(at(sql, i), rest.name), next: rest.next}
+    }
+    => { {name: "", next: i} }
+  }
+}
+
+compile
+meta {
+    doc: """
+    Compile `?` / `:name` placeholders in `sql` for a driver placeholder
+    style. Returns `{sql: Str, names: Vec, count: Int}` where `names` has
+    one entry per bound parameter position — the parameter name for named
+    placeholders, `null` for positional `?`.
+
+    For the `"dollar"` style, repeated `:name` placeholders reuse the same
+    `$N` position. For the `"question"` style every occurrence becomes its
+    own `?` (the binder repeats the value).
+
+    Mixing `?` and `:name` in one statement returns an error.
+
+    Skipped regions: `'...'` strings (with `''` escapes), `"..."`
+    identifiers, `--` line comments, `/* ... */` block comments (nested),
+    and `::type` casts.
+
+    **Example**
+
+    ```hot
+    ::sql::compile/compile("SELECT * FROM users WHERE id = ? AND active = ?", "dollar")
+    // => {sql: "SELECT * FROM users WHERE id = $1 AND active = $2", names: [null, null], count: 2}
+
+    ::sql::compile/compile("UPDATE users SET name = :name WHERE id = :id", "dollar")
+    // => {sql: "UPDATE users SET name = $1 WHERE id = $2", names: ["name", "id"], count: 2}
+    ```
+    """
+}
+fn (sql: Str, style: Str): Map {
+  result scan(sql, 0, style, "", [], "sql", 0)
+  cond {
+    is-err(result) => { result }
+    => {
+      has-positional gt(length(filter(result.names, is-null)), 0)
+      has-named gt(length(filter(result.names, is-some)), 0)
+      cond {
+        and(has-positional, has-named) => {
+          err("sql: cannot mix ? and :name placeholders in one statement")
+        }
+        => { {sql: result.sql, names: result.names, count: length(result.names)} }
+      }
+    }
+  }
+}
+
+// Character scanner. `mode` is one of "sql", "squote", "dquote", "line",
+// "block"; `depth` tracks nested block comments.
+scan fn (sql: Str, i: Int, style: Str, out: Str, names: Vec, mode: Str, depth: Int): Map {
+  len length(sql)
+  cond {
+    gte(i, len) => { {sql: out, names: names} }
+    eq(mode, "squote") => {
+      c at(sql, i)
+      cond {
+        and(eq(c, "'"), and(lt(add(i, 1), len), eq(at(sql, add(i, 1)), "'"))) => {
+          scan(sql, add(i, 2), style, concat(out, "''"), names, "squote", depth)
+        }
+        eq(c, "'") => { scan(sql, add(i, 1), style, concat(out, c), names, "sql", depth) }
+        => { scan(sql, add(i, 1), style, concat(out, c), names, "squote", depth) }
+      }
+    }
+    eq(mode, "dquote") => {
+      c at(sql, i)
+      cond {
+        and(eq(c, "\""), and(lt(add(i, 1), len), eq(at(sql, add(i, 1)), "\""))) => {
+          scan(sql, add(i, 2), style, concat(out, "\"\""), names, "dquote", depth)
+        }
+        eq(c, "\"") => { scan(sql, add(i, 1), style, concat(out, c), names, "sql", depth) }
+        => { scan(sql, add(i, 1), style, concat(out, c), names, "dquote", depth) }
+      }
+    }
+    eq(mode, "line") => {
+      c at(sql, i)
+      next-mode if(eq(c, "\n"), "sql", "line")
+      scan(sql, add(i, 1), style, concat(out, c), names, next-mode, depth)
+    }
+    eq(mode, "block") => {
+      c at(sql, i)
+      cond {
+        and(eq(c, "*"), and(lt(add(i, 1), len), eq(at(sql, add(i, 1)), "/"))) => {
+          new-depth sub(depth, 1)
+          next-mode if(eq(new-depth, 0), "sql", "block")
+          scan(sql, add(i, 2), style, concat(out, "*/"), names, next-mode, new-depth)
+        }
+        and(eq(c, "/"), and(lt(add(i, 1), len), eq(at(sql, add(i, 1)), "*"))) => {
+          scan(sql, add(i, 2), style, concat(out, "/*"), names, "block", add(depth, 1))
+        }
+        => { scan(sql, add(i, 1), style, concat(out, c), names, "block", depth) }
+      }
+    }
+    // mode "sql"
+    => {
+      c at(sql, i)
+      next if(lt(add(i, 1), len), at(sql, add(i, 1)), "")
+      cond {
+        eq(c, "'") => { scan(sql, add(i, 1), style, concat(out, c), names, "squote", depth) }
+        eq(c, "\"") => { scan(sql, add(i, 1), style, concat(out, c), names, "dquote", depth) }
+        and(eq(c, "-"), eq(next, "-")) => {
+          scan(sql, add(i, 2), style, concat(out, "--"), names, "line", depth)
+        }
+        and(eq(c, "/"), eq(next, "*")) => {
+          scan(sql, add(i, 2), style, concat(out, "/*"), names, "block", 1)
+        }
+        eq(c, "?") => {
+          emitted if(eq(style, "dollar"), concat("$", Str(add(length(names), 1))), "?")
+          scan(sql, add(i, 1), style, concat(out, emitted), concat(names, [null]), "sql", depth)
+        }
+        and(eq(c, ":"), eq(next, ":")) => {
+          scan(sql, add(i, 2), style, concat(out, "::"), names, "sql", depth)
+        }
+        and(eq(c, ":"), is-name-char(next)) => {
+          collected collect-name(sql, add(i, 1))
+          cond {
+            eq(style, "dollar") => {
+              existing name-index(names, collected.name)
+              cond {
+                gte(existing, 0) => {
+                  scan(sql, collected.next, style, concat(out, "$", Str(add(existing, 1))), names, "sql", depth)
+                }
+                => {
+                  scan(sql, collected.next, style, concat(out, "$", Str(add(length(names), 1))), concat(names, [collected.name]), "sql", depth)
+                }
+              }
+            }
+            => {
+              scan(sql, collected.next, style, concat(out, "?"), concat(names, [collected.name]), "sql", depth)
+            }
+          }
+        }
+        => { scan(sql, add(i, 1), style, concat(out, c), names, "sql", depth) }
+      }
+    }
+  }
+}

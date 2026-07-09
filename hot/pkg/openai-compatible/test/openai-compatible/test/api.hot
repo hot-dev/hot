@@ -1,0 +1,31 @@
+::openai-compatible::test::api ns
+meta ["test"]
+
+::api ::openai-compatible::api
+::oc ::openai-compatible
+::chat ::openai-compatible::chat
+
+test-url-join-normalizes-slashes
+meta ["test"] fn () {
+    assert-eq("https://openrouter.ai/api/v1/chat/completions", ::api/url("/chat/completions", "https://openrouter.ai/api/v1"))
+    assert-eq("https://openrouter.ai/api/v1/chat/completions", ::api/url("chat/completions", "https://openrouter.ai/api/v1/"))
+    assert-eq("https://openrouter.ai/api/v1/models", ::api/url("/models", ::oc/OPENROUTER_BASE_URL))
+}
+
+test-known-base-urls
+meta ["test"] fn () {
+    assert-eq("https://openrouter.ai/api/v1", ::oc/OPENROUTER_BASE_URL)
+    assert(starts-with(::oc/OLLAMA_BASE_URL, "http://localhost"))
+}
+
+test-chat-request-type-accepts-openrouter-routing
+meta ["test"] fn () {
+    request ::chat/ChatCompletionRequest({
+        model: "anthropic/claude-sonnet-4.5",
+        messages: [{role: "user", content: "hi"}],
+        models: ["anthropic/claude-sonnet-4.5", "openai/gpt-5.2"],
+        provider: {sort: "throughput"}
+    })
+    assert-eq("anthropic/claude-sonnet-4.5", request.model)
+    assert-eq(2, length(request.models))
+}

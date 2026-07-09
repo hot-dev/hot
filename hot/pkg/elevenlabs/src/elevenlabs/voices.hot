@@ -1,0 +1,51 @@
+::elevenlabs::voices ns
+
+api-request ::elevenlabs::api/request
+HttpError ::elevenlabs::api/HttpError
+is-ok-response ::hot::http/is-ok-response
+
+list-voices
+meta {
+    doc: """
+    GET /v2/voices - List the voices available to your account (premade
+    and cloned). Returns `{voices: [...], has_more, total_count}`.
+
+    **Example**
+
+    ```hot
+    page ::elevenlabs::voices/list-voices()
+    map(page.voices, (v) { {id: v.voice_id, name: v.name} })
+    ```
+    """
+}
+fn (): Map {
+  response api-request("GET", "/v2/voices")
+  if(is-ok-response(response), response.body, err(HttpError(response)))
+}
+
+search-voices
+meta {
+    doc: """GET /v2/voices?search= - Search your voices by name, description, or labels."""
+}
+fn (search: Str): Map {
+  response api-request("GET", `/v2/voices?search=${::hot::uri/encode(search)}`)
+  if(is-ok-response(response), response.body, err(HttpError(response)))
+}
+
+get-voice
+meta {
+    doc: """GET /v1/voices/{voice_id} - Retrieve one voice's metadata and settings."""
+}
+fn (voice-id: Str): Map {
+  response api-request("GET", `/v1/voices/${voice-id}`)
+  if(is-ok-response(response), response.body, err(HttpError(response)))
+}
+
+get-default-voice-settings
+meta {
+    doc: """GET /v1/voices/settings/default - The default voice settings (stability, similarity_boost, ...) as a starting point for tuning."""
+}
+fn (): Map {
+  response api-request("GET", "/v1/voices/settings/default")
+  if(is-ok-response(response), response.body, err(HttpError(response)))
+}

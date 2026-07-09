@@ -59,22 +59,33 @@ hot.project.hot-pkg-all.test.paths [
     "./hot/pkg/anthropic/test",
     "./hot/pkg/aws-eventstream/test",
     "./hot/pkg/discord/test",
+    "./hot/pkg/elevenlabs/test",
     "./hot/pkg/ffmpeg/test",
+    "./hot/pkg/google-core/test",
+    "./hot/pkg/google-drive/test",
+    "./hot/pkg/google-gmail/test",
     "./hot/pkg/hot-ai/test",
     "./hot/pkg/hot-ai-agent/test",
     "./hot/pkg/hot-std/test",
     "./hot/pkg/imagemagick/test",
+    "./hot/pkg/jwt/test",
     "./hot/pkg/libreoffice/test",
     "./hot/pkg/mcp/test",
+    "./hot/pkg/oauth2/test",
     "./hot/pkg/openai/test",
+    "./hot/pkg/openai-compatible/test",
     "./hot/pkg/pandoc/test",
+    "./hot/pkg/pg/test",
     "./hot/pkg/playwright/test",
+    "./hot/pkg/redis/test",
     "./hot/pkg/sox/test",
+    "./hot/pkg/sql/test",
     "./hot/pkg/stripe/test",
     "./hot/pkg/supabase/test",
     "./hot/pkg/supabase-admin/test",
     "./hot/pkg/tesseract/test",
     "./hot/pkg/twilio/test",
+    "./hot/pkg/webhooks/test",
     "./hot/pkg/whatsapp/test",
     "./hot/pkg/whisper/test"
 ]
@@ -96,29 +107,42 @@ hot.project.hot-pkg-all.deps {
     "hot.dev/aws-sns": { "local": "./hot/pkg/aws-sns" },
     "hot.dev/aws-sqs": { "local": "./hot/pkg/aws-sqs" },
     "hot.dev/discord": { "local": "./hot/pkg/discord" },
+    "hot.dev/elevenlabs": { "local": "./hot/pkg/elevenlabs" },
     "hot.dev/ffmpeg": { "local": "./hot/pkg/ffmpeg" },
     "hot.dev/gemini": { "local": "./hot/pkg/gemini" },
+    "hot.dev/google-calendar": { "local": "./hot/pkg/google-calendar" },
+    "hot.dev/google-core": { "local": "./hot/pkg/google-core" },
+    "hot.dev/google-drive": { "local": "./hot/pkg/google-drive" },
+    "hot.dev/google-gmail": { "local": "./hot/pkg/google-gmail" },
+    "hot.dev/google-sheets": { "local": "./hot/pkg/google-sheets" },
     "hot.dev/hot-ai": { "local": "./hot/pkg/hot-ai" },
     "hot.dev/hot-ai-agent": { "local": "./hot/pkg/hot-ai-agent" },
     "hot.dev/imagemagick": { "local": "./hot/pkg/imagemagick" },
     "hot.dev/json-rpc": { "local": "./hot/pkg/json-rpc" },
+    "hot.dev/jwt": { "local": "./hot/pkg/jwt" },
+    "hot.dev/oauth2": { "local": "./hot/pkg/oauth2" },
     "hot.dev/libreoffice": { "local": "./hot/pkg/libreoffice" },
     "hot.dev/mcp": { "local": "./hot/pkg/mcp" },
     "hot.dev/openai": { "local": "./hot/pkg/openai" },
+    "hot.dev/openai-compatible": { "local": "./hot/pkg/openai-compatible" },
     "hot.dev/pandoc": { "local": "./hot/pkg/pandoc" },
+    "hot.dev/pg": { "local": "./hot/pkg/pg" },
     "hot.dev/playwright": { "local": "./hot/pkg/playwright" },
     "hot.dev/postmark": { "local": "./hot/pkg/postmark" },
     "hot.dev/qwen": { "local": "./hot/pkg/qwen" },
+    "hot.dev/redis": { "local": "./hot/pkg/redis" },
     "hot.dev/resend": { "local": "./hot/pkg/resend" },
     "hot.dev/slack": { "local": "./hot/pkg/slack" },
     "hot.dev/slack-admin": { "local": "./hot/pkg/slack-admin" },
     "hot.dev/sox": { "local": "./hot/pkg/sox" },
+    "hot.dev/sql": { "local": "./hot/pkg/sql" },
     "hot.dev/stripe": { "local": "./hot/pkg/stripe" },
     "hot.dev/supabase": { "local": "./hot/pkg/supabase" },
     "hot.dev/supabase-admin": { "local": "./hot/pkg/supabase-admin" },
     "hot.dev/telegram": { "local": "./hot/pkg/telegram" },
     "hot.dev/tesseract": { "local": "./hot/pkg/tesseract" },
     "hot.dev/twilio": { "local": "./hot/pkg/twilio" },
+    "hot.dev/webhooks": { "local": "./hot/pkg/webhooks" },
     "hot.dev/whatsapp": { "local": "./hot/pkg/whatsapp" },
     "hot.dev/whisper": { "local": "./hot/pkg/whisper" },
     "hot.dev/xai": { "local": "./hot/pkg/xai" }
@@ -340,6 +364,63 @@ hot.project.pkg-test-stripe.test.paths ["./hot/pkg/stripe/test"]
 hot.project.pkg-test-stripe.test.capture true
 hot.project.pkg-test-stripe.deps {}
 
+// google-* unit tests (SA claims, MIME + multipart builders — hermetic)
+hot.project.pkg-test-google.src.paths [
+    "./hot/pkg/google-core/src",
+    "./hot/pkg/google-gmail/src",
+    "./hot/pkg/google-drive/src",
+    "./hot/pkg/google-sheets/src",
+    "./hot/pkg/google-calendar/src"
+]
+hot.project.pkg-test-google.test.paths [
+    "./hot/pkg/google-core/test",
+    "./hot/pkg/google-gmail/test",
+    "./hot/pkg/google-drive/test"
+]
+hot.project.pkg-test-google.test.capture true
+hot.project.pkg-test-google.deps {
+    "hot.dev/jwt": { "local": "./hot/pkg/jwt" },
+    "hot.dev/oauth2": { "local": "./hot/pkg/oauth2" }
+}
+
+// openai-compatible unit tests (url joining + types, hermetic)
+hot.project.pkg-test-openai-compatible.src.paths ["./hot/pkg/openai-compatible/src"]
+hot.project.pkg-test-openai-compatible.test.paths ["./hot/pkg/openai-compatible/test"]
+hot.project.pkg-test-openai-compatible.test.capture true
+hot.project.pkg-test-openai-compatible.deps {}
+
+// elevenlabs unit tests (path building + types, hermetic)
+hot.project.pkg-test-elevenlabs.src.paths ["./hot/pkg/elevenlabs/src"]
+hot.project.pkg-test-elevenlabs.test.paths ["./hot/pkg/elevenlabs/test"]
+hot.project.pkg-test-elevenlabs.test.capture true
+hot.project.pkg-test-elevenlabs.deps {}
+
+// oauth2 unit tests (PKCE, authorize-url, grant bodies — hermetic)
+hot.project.pkg-test-oauth2.src.paths ["./hot/pkg/oauth2/src"]
+hot.project.pkg-test-oauth2.test.paths ["./hot/pkg/oauth2/test"]
+hot.project.pkg-test-oauth2.test.capture true
+hot.project.pkg-test-oauth2.deps {}
+
+// webhooks unit tests (HMAC recipes + GitHub/Slack verifiers, hermetic)
+hot.project.pkg-test-webhooks.src.paths ["./hot/pkg/webhooks/src"]
+hot.project.pkg-test-webhooks.test.paths ["./hot/pkg/webhooks/test"]
+hot.project.pkg-test-webhooks.test.capture true
+hot.project.pkg-test-webhooks.deps {}
+
+// jwt unit tests (HS256/RS256 sign+verify, hermetic)
+hot.project.pkg-test-jwt.src.paths ["./hot/pkg/jwt/src"]
+hot.project.pkg-test-jwt.test.paths ["./hot/pkg/jwt/test"]
+hot.project.pkg-test-jwt.test.capture true
+hot.project.pkg-test-jwt.deps {}
+
+// sql unit tests (placeholder compilation + runtime over fake drivers)
+hot.project.pkg-test-sql.src.paths ["./hot/pkg/sql/src"]
+hot.project.pkg-test-sql.test.paths ["./hot/pkg/sql/test"]
+hot.project.pkg-test-sql.test.capture true
+hot.project.pkg-test-sql.deps {
+    "hot.dev/pg": { "local": "./hot/pkg/pg" }
+}
+
 // whatsapp unit tests (pure-Hot webhook signature verification)
 hot.project.pkg-test-whatsapp.src.paths ["./hot/pkg/whatsapp/src"]
 hot.project.pkg-test-whatsapp.test.paths ["./hot/pkg/whatsapp/test"]
@@ -512,6 +593,26 @@ hot.project.pkg-integration-aws-sns.deps {
 hot.project.pkg-aws-eventstream.src.paths ["./hot/pkg/aws-eventstream/src"]
 hot.project.pkg-aws-eventstream.test.paths ["./hot/pkg/aws-eventstream/test"]
 hot.project.pkg-aws-eventstream.test.capture true
+
+// OpenAI-compatible integration tests (requires base url + api key in ctx)
+hot.project.pkg-integration-openai-compatible.src.paths ["./hot/pkg/openai-compatible/src"]
+hot.project.pkg-integration-openai-compatible.test.paths ["./hot/pkg/openai-compatible/integration-test"]
+hot.project.pkg-integration-openai-compatible.test.capture true
+hot.project.pkg-integration-openai-compatible.deps {}
+
+// ElevenLabs integration tests (requires elevenlabs.api.key; uses quota)
+hot.project.pkg-integration-elevenlabs.src.paths ["./hot/pkg/elevenlabs/src"]
+hot.project.pkg-integration-elevenlabs.test.paths ["./hot/pkg/elevenlabs/integration-test"]
+hot.project.pkg-integration-elevenlabs.test.capture true
+hot.project.pkg-integration-elevenlabs.deps {}
+
+// SQL integration tests (requires a live PostgreSQL; see SQL_TEST_* env vars)
+hot.project.pkg-integration-sql.src.paths ["./hot/pkg/sql/src"]
+hot.project.pkg-integration-sql.test.paths ["./hot/pkg/sql/integration-test"]
+hot.project.pkg-integration-sql.test.capture true
+hot.project.pkg-integration-sql.deps {
+    "hot.dev/pg": { "local": "./hot/pkg/pg" }
+}
 
 // Stripe integration tests
 hot.project.pkg-integration-stripe.src.paths ["./hot/pkg/stripe/src"]

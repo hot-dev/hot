@@ -1,0 +1,26 @@
+::elevenlabs::models ns
+
+api-request ::elevenlabs::api/request
+HttpError ::elevenlabs::api/HttpError
+is-ok-response ::hot::http/is-ok-response
+
+list-models
+meta {
+    doc: """
+    GET /v1/models - List available TTS models with their capabilities and
+    language support (e.g. `eleven_multilingual_v2`, `eleven_flash_v2_5`).
+    """
+}
+fn (): Vec {
+  response api-request("GET", "/v1/models")
+  if(is-ok-response(response), response.body, err(HttpError(response)))
+}
+
+get-user
+meta {
+    doc: """GET /v1/user - Account info including subscription tier and remaining character quota."""
+}
+fn (): Map {
+  response api-request("GET", "/v1/user")
+  if(is-ok-response(response), response.body, err(HttpError(response)))
+}

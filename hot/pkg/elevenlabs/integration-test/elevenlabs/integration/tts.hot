@@ -1,0 +1,33 @@
+::elevenlabs::integration::tts ns
+meta ["test"]
+
+// =============================================================================
+// Integration Tests (live ElevenLabs; consumes a small amount of quota)
+// =============================================================================
+// Requires ctx: elevenlabs.api.key
+// Run with: hot test --project pkg-integration-elevenlabs
+
+::tts ::elevenlabs::tts
+::voices ::elevenlabs::voices
+::models ::elevenlabs::models
+
+test-list-voices
+meta ["test"] fn () {
+    page ::voices/list-voices()
+    assert(gt(length(page.voices), 0), "account should have voices")
+}
+
+test-list-models
+meta ["test"] fn () {
+    models ::models/list-models()
+    assert(gt(length(models), 0), "at least one TTS model")
+}
+
+test-text-to-speech-returns-audio
+meta ["test"] fn () {
+    audio ::tts/text-to-speech(::elevenlabs/GEORGE_VOICE_ID, ::tts/TextToSpeechRequest({
+        text: "Hot.",
+        model_id: "eleven_flash_v2_5"
+    }))
+    assert(gt(length(audio), 1000), "should return non-trivial audio bytes")
+}

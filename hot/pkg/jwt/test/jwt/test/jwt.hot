@@ -1,0 +1,158 @@
+::jwt::test ns
+meta ["test"]
+
+::jwt ::jwt
+::hex ::hot::hex
+
+// Independently generated with Python hmac/hashlib/base64:
+//   header {"alg":"HS256","typ":"JWT"}, payload {"sub":"42","name":"Ada"},
+//   secret "test-secret"
+KNOWN_TOKEN "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiI0MiIsIm5hbWUiOiJBZGEifQ.Uj1pcABU3gzYNe0xmmVPWwc63LvhuUzR3-Ryv_AADRM"
+SECRET "test-secret"
+
+// Throwaway RSA test key (never used anywhere real)
+TEST_RSA_PEM """-----BEGIN PRIVATE KEY-----
+MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQCrYPuXclov+8mi
+QdHLEqzPRBYk680SEdPgKvJYB3ennG7GuR1KXk3i9pvVHqtN+g2sfvSYxd2IZubt
+Z0cfBDG6a8idkH9tZDqfOB48BABntG3Kxkjjm5OUXcLu48VN+TLpl0j1jVr9jy/a
+Zhci+YJNOox+GqZJ7YiDJKXgMrRGMwChPuK0A++p1DJteS2Kv9lGZdYcH6I4CHLR
+xOXuyFYL/3KWWxCWf3xORTXgHCLcTT+gdKm1rnkUAkVE5J7fgWBcT8tvwJ44lZ/U
+mzhbId2El1TmTkjfil+813QxZRJbkPDrDQWJT/9Zh389hcP5jffaLI6fzjXMX27/
+e1yKC/dfAgMBAAECggEADywl/TzEZRTtDBgfEaDEu0RwLQxrp0rI9iktmgNU1OCu
+fAB3UK/nRFpustNx+Uegi0hIF/hrvWY8a2f/1DkKVmwX1djgamTIiqasvCwWHxhK
+huLyhz556W8HN+zi+TbAcUBecLYQu3vZ3p0em9v47PGe7sRZB+WA9vjsVVxLBbkP
+O76TRYU+kQU6gxOCS7bZ2TbIxvCTFzzi4AObeDy493jQe49HJJF31BWfWQnd61aC
+Fe5ipcmfEVuuzqWpNIYfq8f/O/+4EKRrxPNAkF9cWDMLUiUFr6uRrIDHqwjfPtb5
+jVuyfaJpgCrshVIc5KSd38GERzQfGoQMpzgtBNaP9QKBgQDhS/Orc+2wMt9Knx1J
+tee9+GcqT88p3prgI2abKI3bMTegnrkbJUfxjmh6p94JqvFHUQ97nM4qucvaOXXD
+MX8Yf/HvKc4NiNnJRzGvi41I+J5ewK1xKfEJhuCT+iZulTPpTZpZXTs1Wz0WVQa+
+xGmY/RL405kpR57t8aYEF+dHdQKBgQDCu/g545bEVKbtZWjXS5wNzOxkSeD0dr5g
+mkoJUmU5ntv+p7mhTLXAxAHoNUpIR5CLbbwZ6+CpN9JZ4B/UOChrgbgwzWCkaSKD
+h4VhEJEIN/k/VkQ1C5g6NBLVMYiVqOOX3syYaJgm25HsVRDKM2l8oktrXV0zFpzG
+iMTkBmp9AwKBgAJoCUY/ir5jDLeDU5DB/KOuz4tIJvJPil/ygNoPaNR6hhmVGG0N
+zOLrnnoQ6PI5fTJBz2SGnD0glujRzEw1byIX28GuNKE4YPshY4p4dx3cafShIjkf
+NY/gfO2Xsmlj9pX7WjayJDvBqblfVx8agfY8XcOCnxQty6jG9/r7NmExAoGBAKUG
+zNaqI5OgNZKLVSzW+5nKZy6aWVRy6OVO+50owXXyRXdqxmqGaqTAtukFeD0GwN0Y
+EsdY2RwunUnjILYlHUP2O5TIB7VtD32ttH/MnUv8u3JMdiMJ/2ibxrX7c0d5R97l
+RjeGtCKCAwjoEgF5TlT76LRE+/2WlSe+sjSXp1jnAoGAYC+BiprgvwdVfGuWzvcf
+KU1nCqCFUaY4zu6FYeHCss2skbLb2fJf5XcNRc6KxdTwc0iVyxVTtth6YqraCPyG
+vpgguFcjN8C7xIYtsVn/Vl0ehcacqupv7NdBeFbLXR3dalZHhnQyOInT8+b6BGLO
+iv1mq913odV3grjJZoH4zkk=
+-----END PRIVATE KEY-----"""
+TEST_RSA_MODULUS_HEX "ab60fb97725a2ffbc9a241d1cb12accf441624ebcd1211d3e02af2580777a79c6ec6b91d4a5e4de2f69bd51eab4dfa0dac7ef498c5dd8866e6ed67471f0431ba6bc89d907f6d643a9f381e3c040067b46dcac648e39b93945dc2eee3c54df932e99748f58d5afd8f2fda661722f9824d3a8c7e1aa649ed888324a5e032b4463300a13ee2b403efa9d4326d792d8abfd94665d61c1fa2380872d1c4e5eec8560bff72965b10967f7c4e4535e01c22dc4d3fa074a9b5ae7914024544e49edf81605c4fcb6fc09e38959fd49b385b21dd849754e64e48df8a5fbcd7743165125b90f0eb0d05894fff59877f3d85c3f98df7da2c8e9fce35cc5f6eff7b5c8a0bf75f"
+
+// ============================================================================
+// HS256
+// ============================================================================
+
+test-sign-matches-independent-vector
+meta ["test"] fn () {
+    token ::jwt/sign({sub: "42", name: "Ada"}, SECRET)
+    assert-eq(KNOWN_TOKEN, token)
+}
+
+test-verify-accepts-known-token
+meta ["test"] fn () {
+    claims ::jwt/verify(KNOWN_TOKEN, SECRET)
+    assert-eq("42", claims.sub)
+    assert-eq("Ada", claims.name)
+}
+
+test-verify-rejects-wrong-secret
+meta ["test"] fn () {
+    out ::jwt/verify(KNOWN_TOKEN, "other-secret")
+    assert(is-err(out), "wrong secret should fail")
+}
+
+test-verify-rejects-tampered-payload
+meta ["test"] fn () {
+    parts split(KNOWN_TOKEN, ".")
+    forged-payload ::hot::base64/encode-url(to-json({sub: "1", name: "Eve"}))
+    forged `${parts[0]}.${forged-payload}.${parts[2]}`
+    assert(is-err(::jwt/verify(forged, SECRET)), "tampered payload should fail")
+}
+
+test-verify-rejects-malformed-token
+meta ["test"] fn () {
+    assert(is-err(::jwt/verify("not-a-jwt", SECRET)))
+    assert(is-err(::jwt/verify("a.b", SECRET)))
+}
+
+// ============================================================================
+// Claims validation
+// ============================================================================
+
+test-verify-rejects-expired
+meta ["test"] fn () {
+    token ::jwt/sign({sub: "42", exp: 1000}, SECRET)
+    out ::jwt/verify(token, SECRET, {now: 2000})
+    assert(is-err(out), "expired token should fail")
+}
+
+test-verify-accepts-within-leeway
+meta ["test"] fn () {
+    token ::jwt/sign({sub: "42", exp: 1000}, SECRET)
+    claims ::jwt/verify(token, SECRET, {now: 1030})
+    assert-eq("42", claims.sub, "30s past exp is inside the default 60s leeway")
+}
+
+test-verify-rejects-nbf-in-future
+meta ["test"] fn () {
+    token ::jwt/sign({sub: "42", nbf: 5000}, SECRET)
+    assert(is-err(::jwt/verify(token, SECRET, {now: 1000})), "nbf in future should fail")
+}
+
+test-verify-checks-issuer-and-audience
+meta ["test"] fn () {
+    token ::jwt/sign({sub: "42", iss: "me", aud: "you"}, SECRET)
+    ok ::jwt/verify(token, SECRET, {issuer: "me", audience: "you", now: 1})
+    assert-eq("42", ok.sub)
+    assert(is-err(::jwt/verify(token, SECRET, {issuer: "them"})), "wrong issuer fails")
+    assert(is-err(::jwt/verify(token, SECRET, {audience: "nobody"})), "wrong audience fails")
+}
+
+// ============================================================================
+// decode (unverified inspection)
+// ============================================================================
+
+test-decode-exposes-header-and-payload
+meta ["test"] fn () {
+    decoded ::jwt/decode(KNOWN_TOKEN)
+    assert-eq("HS256", decoded.header.alg)
+    assert-eq("42", decoded.payload.sub)
+}
+
+// ============================================================================
+// RS256
+// ============================================================================
+
+rsa-n fn (): Bytes { ::hex/decode(TEST_RSA_MODULUS_HEX) }
+rsa-e fn (): Bytes { ::hex/decode("010001") }
+
+test-rs256-sign-verify-roundtrip
+meta ["test"] fn () {
+    token ::jwt/sign({iss: "svc@example.iam", scope: "email"}, TEST_RSA_PEM, "RS256")
+    claims ::jwt/verify-rs256(token, rsa-n(), rsa-e())
+    assert-eq("svc@example.iam", claims.iss)
+}
+
+test-rs256-rejects-tampered-token
+meta ["test"] fn () {
+    token ::jwt/sign({iss: "svc"}, TEST_RSA_PEM, "RS256")
+    parts split(token, ".")
+    forged-payload ::hot::base64/encode-url(to-json({iss: "attacker"}))
+    forged `${parts[0]}.${forged-payload}.${parts[2]}`
+    assert(is-err(::jwt/verify-rs256(forged, rsa-n(), rsa-e())), "tampered RS256 should fail")
+}
+
+test-rs256-rejects-hs256-token
+meta ["test"] fn () {
+    // Algorithm-confusion guard: an HS256 token must not pass verify-rs256
+    assert(is-err(::jwt/verify-rs256(KNOWN_TOKEN, rsa-n(), rsa-e())))
+}
+
+test-sign-rejects-unknown-algorithm
+meta ["test"] fn () {
+    assert(is-err(::jwt/sign({a: 1}, "k", "none")), "alg none must not be signable")
+}
+

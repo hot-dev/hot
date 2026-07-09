@@ -1,0 +1,94 @@
+::google::auth ns
+meta {
+    doc: """Google OAuth token acquisition. Usually used indirectly through `::google::api/request`."""
+}
+
+::ctx ::hot::ctx
+::jwt ::jwt
+::oauth2 ::oauth2
+
+build-service-account-claims
+meta {
+    doc: """Build the RFC 7523 assertion claims for a service-account token request. `subject` (optional) enables domain-wide delegation — the user to impersonate."""
+}
+fn (client-email: Str, scope: Str, subject: Any): Map {
+  now ::jwt/now-seconds()
+  base {
+    iss: client-email,
+    scope: scope,
+    aud: ::google/TOKEN_URL,
+    iat: now,
+    exp: add(now, 3600)
+  }
+  if(is-null(subject), base, {...base, sub: subject})
+}
+
+service-account-token
+meta {
+    doc: """Exchange a service-account JSON key (parsed Map) for an access token with the given scope. Returns the token response (`access_token`, `expires_in`) or an Err."""
+}
+fn (service-account: Map, scope: Str, subject: Any): Map {
+  claims build-service-account-claims(service-account.client_email, scope, subject)
+  assertion ::jwt/sign(claims, service-account.private_key, "RS256")
+  cond {
+    is-err(assertion) => { assertion }
+    => { ::oauth2/jwt-bearer(::google/TOKEN_URL, assertion) }
+  }
+}
+
+access-token
+meta {
+    ctx: {
+        "google.access.token": {required: false},
+        "google.oauth.client-id": {required: false},
+        "google.oauth.client-secret": {required: false},
+        "google.oauth.refresh-token": {required: false},
+        "google.service.account": {required: false},
+        "google.impersonate": {required: false}
+    },
+    doc: """
+    Resolve an access token for `scope` from context, checking in order:
+    an explicit `google.access.token`, a refresh-token trio
+    (`google.oauth.client-id`/`client-secret`/`refresh-token`), then a
+    `google.service.account` JSON key (with optional `google.impersonate`
+    for domain-wide delegation).
+
+    Returns the bearer token string, or an Err when no credentials are
+    configured or the exchange fails.
+    """
+}
+fn (scope: Str): Str {
+  explicit or(::ctx/get("google.access.token"), "")
+  refresh-token or(::ctx/get("google.oauth.refresh-token"), "")
+  sa-json or(::ctx/get("google.service.account"), "")
+  cond {
+    not(is-empty(explicit)) => { explicit }
+    not(is-empty(refresh-token)) => {
+      tokens ::oauth2/refresh(::google/TOKEN_URL, {
+        client-id: ::ctx/get("google.oauth.client-id"),
+        client-secret: ::ctx/get("google.oauth.client-secret"),
+        refresh-token: refresh-token
+      })
+      cond {
+        is-err(tokens) => { tokens }
+        => { tokens.access_token }
+      }
+    }
+    not(is-empty(sa-json)) => {
+      sa from-json(sa-json)
+      cond {
+        is-err(sa) => { err("google: google.service.account is not valid JSON") }
+        => {
+          tokens service-account-token(sa, scope, ::ctx/get("google.impersonate"))
+          cond {
+            is-err(tokens) => { tokens }
+            => { tokens.access_token }
+          }
+        }
+      }
+    }
+    => {
+      err("google: no credentials configured. Set google.access.token, the google.oauth.* refresh trio, or google.service.account in Context Variables.")
+    }
+  }
+}

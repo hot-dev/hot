@@ -1,0 +1,79 @@
+::sql::integration::pg ns
+meta ["test"]
+
+// =============================================================================
+// Integration Tests (live PostgreSQL)
+// =============================================================================
+// Requires a reachable PostgreSQL. Connection settings come from env:
+//   SQL_TEST_HOST (default 127.0.0.1), SQL_TEST_PORT (default 5432),
+//   SQL_TEST_USER (default postgres), SQL_TEST_PASSWORD (default password),
+//   SQL_TEST_DATABASE (default postgres)
+// Run with: hot test --project pkg-integration-sql
+
+::env ::hot::env
+
+open-db fn (): ::sql/Db {
+  ::sql::pg/open({
+    host: ::env/get("SQL_TEST_HOST", "127.0.0.1"),
+    port: Int(::env/get("SQL_TEST_PORT", "5432")),
+    user: ::env/get("SQL_TEST_USER", "postgres"),
+    password: ::env/get("SQL_TEST_PASSWORD", "password"),
+    database: ::env/get("SQL_TEST_DATABASE", "postgres")
+  })
+}
+
+test-roundtrip-positional-and-named
+meta ["test"] fn () {
+    db open-db()
+    assert(not(is-err(db)), "should connect to PostgreSQL")
+
+    one ::sql/scalar(db, "SELECT ?::int + ?::int", [20, 22])
+    assert-eq(42, one)
+
+    named ::sql/query-one(db, "SELECT :a::int AS a, :a::int + :b::int AS total", {a: 40, b: 2})
+    assert-eq(40, named.a)
+    assert-eq(42, named.total)
+
+    ::sql/close(db)
+}
+
+Answer type {
+  n: Int
+}
+
+test-typed-query-against-live-pg
+meta ["test"] fn () {
+    db open-db()
+    q ::sql/Query({sql: "SELECT ?::int AS n", returns: Answer, mode: "one"})
+    row ::sql/run(db, q, [7])
+    assert-eq(7, row.n)
+    ::sql/close(db)
+}
+
+test-transaction-rolls-back-on-error
+meta ["test"] fn () {
+    db open-db()
+    ::sql/execute(db, "CREATE TEMP TABLE sql_itest (id int PRIMARY KEY)")
+
+    out ::sql/transaction(db, (tx) {
+        if-ok(::sql/execute(tx, "INSERT INTO sql_itest VALUES (?)", [1]), (inserted) {
+            err("abort on purpose")
+        })
+    })
+    assert(is-err(out), "body error propagates")
+
+    n ::sql/scalar(db, "SELECT count(*) FROM sql_itest")
+    assert-eq(0, n, "rolled back insert should not be visible")
+    ::sql/close(db)
+}
+
+test-sql-error-carries-sqlstate
+meta ["test"] fn () {
+    db open-db()
+    out ::sql/query(db, "SELECT * FROM table_that_does_not_exist_xyz")
+    assert(is-err(out))
+    e if-err(out, (e) { e })
+    assert-eq("42P01", e.code, "undefined_table SQLSTATE")
+    assert-eq("pg", e.driver)
+    ::sql/close(db)
+}

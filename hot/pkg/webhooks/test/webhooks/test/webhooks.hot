@@ -1,0 +1,117 @@
+::webhooks::test ns
+meta ["test"]
+
+// All signature vectors generated independently with Python hmac/hashlib.
+
+::wh ::webhooks
+
+// ============================================================================
+// Generic recipes
+// ============================================================================
+
+test-hmac-sha256-hex-accepts-vector
+meta ["test"] fn () {
+    body """{"action":"opened","number":1}"""
+    sig "09e66d98da1d7d68ec3a007f256b022814415af661b4f5e59ed977726db32fa9"
+    assert(::wh/verify-hmac-sha256-hex("gh_test_secret", body, sig))
+    assert(::wh/verify-hmac-sha256-hex("gh_test_secret", body, uppercase(sig)), "hex compare is case-insensitive")
+}
+
+test-hmac-sha256-hex-rejects
+meta ["test"] fn () {
+    body """{"action":"opened","number":1}"""
+    sig "09e66d98da1d7d68ec3a007f256b022814415af661b4f5e59ed977726db32fa9"
+    assert(not(::wh/verify-hmac-sha256-hex("wrong", body, sig)), "wrong secret fails")
+    assert(not(::wh/verify-hmac-sha256-hex("gh_test_secret", "tampered", sig)), "tampered body fails")
+    assert(not(::wh/verify-hmac-sha256-hex("gh_test_secret", body, "")), "empty signature fails")
+}
+
+test-hmac-sha256-base64-vector
+meta ["test"] fn () {
+    assert(::wh/verify-hmac-sha256-base64("k256", "msg-256", "73dpfzJsOpy/9WDLp/IWt5L0osBTCjXq49RUaJ36Qb0="))
+    assert(not(::wh/verify-hmac-sha256-base64("k256", "other", "73dpfzJsOpy/9WDLp/IWt5L0osBTCjXq49RUaJ36Qb0=")))
+}
+
+test-hmac-sha1-base64-vector
+meta ["test"] fn () {
+    assert(::wh/verify-hmac-sha1-base64("k1", "msg-1", "kn2vurdkxzLWcUCdAGeNZogID+Y="))
+    assert(not(::wh/verify-hmac-sha1-base64("k1", "msg-2", "kn2vurdkxzLWcUCdAGeNZogID+Y=")))
+}
+
+test-timestamp-tolerance
+meta ["test"] fn () {
+    assert(::wh/timestamp-within-tolerance(::wh/now-seconds(), 300), "now is within tolerance")
+    assert(not(::wh/timestamp-within-tolerance(sub(::wh/now-seconds(), 3600), 300)), "an hour ago is not")
+    assert(::wh/timestamp-within-tolerance("12345", 0), "tolerance 0 disables the check")
+    assert(not(::wh/timestamp-within-tolerance("garbage", 300)), "non-numeric timestamp fails closed")
+}
+
+test-strip-prefix
+meta ["test"] fn () {
+    assert-eq("abc", ::wh/strip-prefix("sha256=abc", "sha256="))
+    assert-eq("", ::wh/strip-prefix("md5=abc", "sha256="), "wrong scheme yields empty (fails closed)")
+}
+
+// ============================================================================
+// GitHub
+// ============================================================================
+
+test-github-verify-accepts-vector
+meta ["test"] fn () {
+    request {
+        headers: {x-hub-signature-256: "sha256=09e66d98da1d7d68ec3a007f256b022814415af661b4f5e59ed977726db32fa9"},
+        body-raw: """{"action":"opened","number":1}"""
+    }
+    assert(::webhooks::github/verify-request(request, "gh_test_secret"))
+}
+
+test-github-verify-rejects
+meta ["test"] fn () {
+    request {
+        headers: {x-hub-signature-256: "sha256=09e66d98da1d7d68ec3a007f256b022814415af661b4f5e59ed977726db32fa9"},
+        body-raw: """{"action":"opened","number":2}"""
+    }
+    assert(not(::webhooks::github/verify-request(request, "gh_test_secret")), "tampered body fails")
+    no-header {headers: {}, body-raw: "{}"}
+    assert(not(::webhooks::github/verify-request(no-header, "gh_test_secret")), "missing header fails")
+}
+
+// ============================================================================
+// Slack
+// ============================================================================
+
+SLACK_BODY "token=xyz&team_id=T123&command=%2Fdeploy"
+SLACK_TS "1700000000"
+SLACK_SIG "90a8c5585a4aca7b3b2a63131cd768fadca1c8947ca766293a81ad47f551ea76"
+
+slack-request fn (sig: Str, ts: Str): Map {
+  {
+    headers: {x-slack-signature: `v0=${sig}`, x-slack-request-timestamp: ts},
+    body-raw: SLACK_BODY
+  }
+}
+
+test-slack-verify-accepts-vector-with-tolerance-disabled
+meta ["test"] fn () {
+    // The vector's timestamp is fixed in the past; disable tolerance to
+    // check the pure signature path against the independent vector.
+    assert(::webhooks::slack/verify-request(slack-request(SLACK_SIG, SLACK_TS), "slack_test_secret", 0))
+}
+
+test-slack-verify-rejects-stale-timestamp
+meta ["test"] fn () {
+    assert(not(::webhooks::slack/verify-request(slack-request(SLACK_SIG, SLACK_TS), "slack_test_secret")), "default tolerance rejects a 2023 timestamp")
+}
+
+test-slack-verify-accepts-fresh-signature
+meta ["test"] fn () {
+    ts Str(::webhooks/now-seconds())
+    base `v0:${ts}:${SLACK_BODY}`
+    sig ::hot::hmac/hmac-sha256("slack_test_secret", base)
+    assert(::webhooks::slack/verify-request(slack-request(sig, ts), "slack_test_secret"))
+}
+
+test-slack-verify-rejects-wrong-secret
+meta ["test"] fn () {
+    assert(not(::webhooks::slack/verify-request(slack-request(SLACK_SIG, SLACK_TS), "other", 0)))
+}

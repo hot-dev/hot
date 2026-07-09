@@ -1,0 +1,52 @@
+::sql::pg ns
+meta {
+    doc: """PostgreSQL driver for `::sql`, backed by the pure-Hot `hot.dev/pg` wire-protocol client."""
+}
+
+// Adapt ::pg to the driver contract: the runtime always passes a params
+// Vec, and ::pg expects `$N` placeholders — which is exactly what the
+// runtime compiles `?` / `:name` into for the "dollar" style.
+pg-query fn (conn: Any, sql: Str, params: Vec): Vec {
+  cond {
+    is-empty(params) => { ::pg/query(conn, sql) }
+    => { ::pg/query(conn, sql, params) }
+  }
+}
+
+pg-execute fn (conn: Any, sql: Str, params: Vec): Map {
+  cond {
+    is-empty(params) => { ::pg/execute(conn, sql) }
+    => { ::pg/execute(conn, sql, params) }
+  }
+}
+
+driver
+meta {
+    doc: """The PostgreSQL `::sql/Driver`. Usually used through `::sql::pg/open`."""
+}
+::sql/Driver({
+  name: "pg",
+  placeholder: "dollar",
+  connect: ::pg/connect,
+  query: pg-query,
+  execute: pg-execute,
+  close: ::pg/close
+})
+
+open
+meta {
+    doc: """
+    Open a PostgreSQL-backed `::sql/Db`. Options are `::pg/PgOptions`
+    (`host`, `port`, `user`, `password`, `database`, `ssl`, `tls`,
+    `timeout`).
+
+    **Example**
+
+    ```hot
+    db ::sql::pg/open({user: "postgres", password: "secret", database: "app"})
+    ```
+    """
+}
+fn (options: Map): ::sql/Db {
+  ::sql/open(driver, options)
+}

@@ -1,0 +1,20 @@
+::google ns
+meta {
+    doc: """
+    Google API foundation shared by the google-* packages (gmail, drive,
+    sheets, calendar, ...).
+
+    **Authentication** — set ONE of these in context, checked in order:
+
+    1. `google.access.token` — a ready OAuth access token you manage
+    2. `google.oauth.client-id` + `google.oauth.client-secret` +
+       `google.oauth.refresh-token` — a user's offline refresh token
+    3. `google.service.account` — a service-account JSON key (the full
+       JSON string); domain-wide delegation via `google.impersonate`
+
+    Service packages request the scopes they need automatically; see
+    `::google::auth/access-token` and `::google::api/request`.
+    """
+}
+
+TOKEN_URL "https://oauth2.googleapis.com/token"

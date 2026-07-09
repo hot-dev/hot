@@ -1,0 +1,86 @@
+::elevenlabs::tts ns
+
+api-request ::elevenlabs::api/request
+api-request-stream ::elevenlabs::api/request-stream
+HttpError ::elevenlabs::api/HttpError
+is-ok-response ::hot::http/is-ok-response
+
+// ============================================================================
+// Text to Speech
+// ============================================================================
+
+TextToSpeechRequest type {
+    text: Str,
+    model_id: Str?,
+    voice_settings: Map?,
+    language_code: Str?,
+    seed: Int?,
+    previous_text: Str?,
+    next_text: Str?,
+    apply_text_normalization: Str?
+}
+
+tts-path fn (voice-id: Str, output-format: Any): Str {
+  base `/v1/text-to-speech/${voice-id}`
+  if(is-null(output-format), base, `${base}?output_format=${output-format}`)
+}
+
+text-to-speech
+meta {
+    doc: """
+    POST /v1/text-to-speech/{voice_id} - Convert text to speech. Returns
+    the audio as Bytes (mp3 44.1kHz 128kbps by default; pass an
+    `output-format` like "mp3_44100_192", "pcm_16000", or "ulaw_8000" for
+    telephony).
+
+    `model_id` defaults to the provider default; "eleven_multilingual_v2"
+    is the quality choice, "eleven_flash_v2_5" the low-latency one.
+
+    **Example**
+
+    ```hot
+    ::tts ::elevenlabs::tts
+
+    audio ::tts/text-to-speech(::elevenlabs/GEORGE_VOICE_ID, ::tts/TextToSpeechRequest({
+      text: "It works!",
+      model_id: "eleven_multilingual_v2",
+      voice_settings: {stability: 0.5, similarity_boost: 0.75}
+    }))
+    ::hot::file/write("hot://out/speech.mp3", audio)
+    ```
+    """
+}
+fn
+(voice-id: Str, request: TextToSpeechRequest): Any {
+  text-to-speech(voice-id, request, null)
+},
+(voice-id: Str, request: TextToSpeechRequest, output-format: Any): Any {
+  response api-request("POST", tts-path(voice-id, output-format), {}, request)
+  if(is-ok-response(response), response.body, err(HttpError(response)))
+}
+
+text-to-speech-stream
+meta {
+    doc: """
+    POST /v1/text-to-speech/{voice_id}/stream - Stream speech as it is
+    generated. Returns a `StreamingHttpResponse` whose body iterates raw
+    audio chunks (Bytes) — collect them or forward them as they arrive.
+
+    **Example**
+
+    ```hot
+    response ::elevenlabs::tts/text-to-speech-stream(voice-id, ::elevenlabs::tts/TextToSpeechRequest({
+      text: long-article,
+      model_id: "eleven_flash_v2_5"
+    }))
+    chunks collect(response.body)
+    ```
+    """
+}
+fn
+(voice-id: Str, request: TextToSpeechRequest): ::hot::http/StreamingHttpResponse {
+  api-request-stream("POST", `/v1/text-to-speech/${voice-id}/stream`, {}, request)
+},
+(voice-id: Str, request: TextToSpeechRequest, output-format: Str): ::hot::http/StreamingHttpResponse {
+  api-request-stream("POST", `/v1/text-to-speech/${voice-id}/stream?output_format=${output-format}`, {}, request)
+}

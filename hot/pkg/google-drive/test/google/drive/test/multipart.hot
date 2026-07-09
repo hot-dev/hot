@@ -1,0 +1,20 @@
+::google::drive::test ns
+meta ["test"]
+
+::drive ::google::drive
+
+test-build-multipart-shape
+meta ["test"] fn () {
+    body ::drive/build-multipart({name: "notes.txt"}, "hello world", "text/plain")
+    b ::drive/MULTIPART_BOUNDARY
+    assert(starts-with(body, `--${b}\r\n`))
+    assert(ends-with(body, `--${b}--`), "closing boundary")
+    assert(contains(body, """{"name":"notes.txt"}"""), "metadata part is compact JSON")
+    assert(contains(body, "Content-Type: text/plain\r\n\r\nhello world"), "content part carries the payload")
+}
+
+test-base-urls
+meta ["test"] fn () {
+    assert-eq("https://www.googleapis.com/drive/v3", ::drive/BASE_URL)
+    assert-eq("https://www.googleapis.com/upload/drive/v3", ::drive/UPLOAD_URL)
+}

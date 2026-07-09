@@ -1,0 +1,109 @@
+::openai-compatible::chat ns
+
+api-request ::openai-compatible::api/request
+api-request-stream ::openai-compatible::api/request-stream
+HttpError ::openai-compatible::api/HttpError
+is-ok-response ::hot::http/is-ok-response
+
+// ============================================================================
+// Types (common OpenAI chat surface)
+// ============================================================================
+
+Role type "user" | "system" | "assistant" | "tool"
+
+Message type {
+    role: Role,
+    content: Any,
+    name: Str?,
+    tool_calls: Vec<Map>?,
+    tool_call_id: Str?
+}
+
+Tool type {
+    type: Str,
+    function: FunctionDefinition
+}
+
+FunctionDefinition type {
+    name: Str,
+    description: Str?,
+    parameters: Any?
+}
+
+ChatCompletionRequest type {
+    model: Str,
+    messages: Vec<Message>,
+    max_tokens: Int?,
+    temperature: Dec?,
+    top_p: Dec?,
+    stop: Any?,
+    frequency_penalty: Dec?,
+    presence_penalty: Dec?,
+    seed: Int?,
+    response_format: Map?,
+    tools: Vec<Tool>?,
+    tool_choice: Any?,
+    user: Str?,
+    // OpenRouter routing extensions (ignored by other providers)
+    models: Vec<Str>?,
+    provider: Map?,
+    transforms: Vec<Str>?
+}
+
+// ============================================================================
+// Chat completions
+// ============================================================================
+
+chat-completion
+meta {
+    doc: """
+    POST /chat/completions - Create a chat completion. Returns the decoded
+    response Map (`choices`, `usage`, ...), or an Err carrying an
+    `HttpError`.
+
+    **Example**
+
+    ```hot
+    ::chat ::openai-compatible::chat
+
+    response ::chat/chat-completion(::chat/ChatCompletionRequest({
+      model: "anthropic/claude-sonnet-4.5",
+      messages: [
+        {role: "system", content: "You are terse."},
+        {role: "user", content: "Why is the sky blue?"}
+      ],
+      max_tokens: 300
+    }))
+    response.choices[0].message.content
+    ```
+    """
+}
+fn (request: ChatCompletionRequest): Map {
+  response api-request("POST", "/chat/completions", {}, request)
+  if(is-ok-response(response), response.body, err(HttpError(response)))
+}
+
+chat-completion-stream
+meta {
+    doc: """
+    POST /chat/completions with `stream: true`. Returns a
+    `StreamingHttpResponse` whose body iterates SSE events; each event's
+    `data` is a chunk with `choices[0].delta`.
+
+    **Example**
+
+    ```hot
+    response ::chat/chat-completion-stream(::chat/ChatCompletionRequest({
+      model: "anthropic/claude-sonnet-4.5",
+      messages: [{role: "user", content: "Count to five."}]
+    }))
+    for-each(response.body, (event) {
+      ...handle event.data.choices[0].delta.content...
+    })
+    ```
+    """
+}
+fn (request: ChatCompletionRequest): ::hot::http/StreamingHttpResponse {
+  streaming-request {...untype(request), stream: true}
+  api-request-stream("POST", "/chat/completions", {}, streaming-request)
+}
