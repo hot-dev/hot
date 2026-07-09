@@ -1,0 +1,86 @@
+::web-search ns
+meta {
+    doc: """
+    Web search for agents and apps.
+
+    Three providers behind one normalized call: set whichever key you
+    have — `tavily.api.key`, `brave.api.key`, or `exa.api.key` — and
+    `::web-search/search` uses it. Each provider module also exposes its
+    full native API (`::web-search::tavily`, `::web-search::brave`,
+    `::web-search::exa`).
+
+    **Quick start**
+
+    ```hot
+    results ::web-search/search("hot programming language site:news.ycombinator.com")
+    map(results, (r) { `${r.title} — ${r.url}` })
+    ```
+
+    Normalized results are `Vec<{title, url, content, score}>`, best
+    match first. `content` is the provider's snippet/summary text.
+    """
+}
+
+::ctx ::hot::ctx
+
+SearchResult
+meta {
+    doc: """One normalized search hit: `title`, `url`, `content` (snippet text), `score` (provider relevance, 0-1 range where available)."""
+}
+type {
+  title: Str,
+  url: Str,
+  content: Str?,
+  score: Dec?
+}
+
+configured-provider
+meta {
+    doc: """Which provider the context is configured for: "tavily", "brave", or "exa" (checked in that order), or null when no key is set."""
+}
+fn (): Any {
+  cond {
+    not(is-empty(or(::ctx/get("tavily.api.key"), ""))) => { "tavily" }
+    not(is-empty(or(::ctx/get("brave.api.key"), ""))) => { "brave" }
+    not(is-empty(or(::ctx/get("exa.api.key"), ""))) => { "exa" }
+    => { null }
+  }
+}
+
+search
+meta {
+    ctx: {
+        "tavily.api.key": {required: false},
+        "brave.api.key": {required: false},
+        "exa.api.key": {required: false}
+    },
+    doc: """
+    Search the web with whichever provider is configured. Returns
+    normalized `Vec<SearchResult>` (best first), or an Err when no
+    provider key is set or the provider call fails.
+
+    The 2-arity form caps results (default 10).
+
+    **Example**
+
+    ```hot
+    results ::web-search/search("PostgreSQL 18 release notes", 5)
+    first(results).url
+    ```
+    """
+}
+fn
+(query: Str): Vec<SearchResult> {
+  search(query, 10)
+},
+(query: Str, max-results: Int): Vec<SearchResult> {
+  provider configured-provider()
+  cond {
+    eq(provider, "tavily") => { ::web-search::tavily/search-normalized(query, max-results) }
+    eq(provider, "brave") => { ::web-search::brave/search-normalized(query, max-results) }
+    eq(provider, "exa") => { ::web-search::exa/search-normalized(query, max-results) }
+    => {
+      err("web-search: no provider configured. Set tavily.api.key, brave.api.key, or exa.api.key in Context Variables.")
+    }
+  }
+}

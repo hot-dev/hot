@@ -56,6 +56,15 @@ supabase-admin
 #oauth2
 #webhooks
 
+# Developer Workflow
+#github
+#linear
+
+# Knowledge & Retrieval
+#notion
+#pinecone
+#web-search
+
 # Voice AI
 #elevenlabs
 

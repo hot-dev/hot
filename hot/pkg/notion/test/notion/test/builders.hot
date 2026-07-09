@@ -1,0 +1,48 @@
+::notion::test ns
+meta ["test"]
+
+test-rich-text
+meta ["test"] fn () {
+    rt ::notion/rich-text("hello")
+    assert-eq(1, length(rt))
+    assert-eq("text", first(rt).type)
+    assert-eq("hello", first(rt).text.content)
+}
+
+test-paragraph-block
+meta ["test"] fn () {
+    p ::notion/paragraph("body text")
+    assert-eq("paragraph", p.type)
+    assert-eq("body text", first(p.paragraph.rich_text).text.content)
+}
+
+test-heading-levels
+meta ["test"] fn () {
+    assert-eq("heading_1", ::notion/heading(1, "t").type)
+    assert-eq("heading_2", ::notion/heading(2, "t").type)
+    assert-eq("heading_3", ::notion/heading(3, "t").type)
+}
+
+test-to-do-block
+meta ["test"] fn () {
+    t ::notion/to-do("review PR", true)
+    assert-eq("to_do", t.type)
+    assert(t.to_do.checked)
+    assert(not(::notion/to-do("later").to_do.checked), "unchecked by default")
+}
+
+test-plain-text-roundtrip
+meta ["test"] fn () {
+    rt ::notion/rich-text("round trip")
+    assert-eq("round trip", ::notion/plain-text(rt))
+}
+
+test-plain-text-from-api-shape
+meta ["test"] fn () {
+    // API responses carry plain_text alongside the text object
+    rich [
+        {type: "text", plain_text: "Hello ", text: {content: "Hello "}},
+        {type: "text", plain_text: "world", text: {content: "world"}}
+    ]
+    assert-eq("Hello world", ::notion/plain-text(rich))
+}

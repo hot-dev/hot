@@ -1,0 +1,11 @@
+::notion::integration ns
+meta ["test"]
+
+// Requires ctx: notion.token (integration with at least one shared page)
+// Run with: hot test --project pkg-integration-notion
+
+test-search
+meta ["test"] fn () {
+    hits ::notion::blocks/search("")
+    assert(is-some(hits.results), "search should return a results array")
+}

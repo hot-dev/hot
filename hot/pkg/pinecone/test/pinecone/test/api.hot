@@ -1,0 +1,16 @@
+::pinecone::test ns
+meta ["test"]
+
+::api ::pinecone::api
+
+test-normalize-host
+meta ["test"] fn () {
+    assert-eq("https://docs-abc.svc.aped-4627.pinecone.io", ::api/normalize-host("docs-abc.svc.aped-4627.pinecone.io"))
+    assert-eq("https://docs-abc.svc.aped-4627.pinecone.io", ::api/normalize-host("https://docs-abc.svc.aped-4627.pinecone.io"))
+}
+
+test-constants
+meta ["test"] fn () {
+    assert-eq("https://api.pinecone.io", ::pinecone/CONTROL_URL)
+    assert-eq("2025-01", ::pinecone/API_VERSION)
+}

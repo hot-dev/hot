@@ -1,0 +1,61 @@
+::pinecone::api ns
+meta {ctx: {"pinecone.api.key": {required: true}}}
+
+::ctx ::hot::ctx
+
+http-request ::hot::http/request
+is-ok-response ::hot::http/is-ok-response
+HttpRequest ::hot::http/HttpRequest
+HttpResponse ::hot::http/HttpResponse
+
+HttpError type {
+    status: Int,
+    headers: Map,
+    body: Any
+}
+
+HttpResponse -> HttpError fn (response: HttpResponse): HttpError {
+  HttpError({
+    status: response.status,
+    headers: response.headers,
+    body: response.body
+  })
+}
+
+normalize-host
+meta {
+    doc: """Accept a bare index host (`docs-abc123.svc...pinecone.io`) or a full URL and return the `https://` base. Exposed for testing."""
+}
+fn (host: Str): Str {
+  cond {
+    starts-with(host, "https://") => { host }
+    starts-with(host, "http://") => { host }
+    => { `https://${host}` }
+  }
+}
+
+json
+meta {
+    doc: """Make an authenticated Pinecone request against a full URL and unwrap: decoded JSON on 2xx, Err carrying `HttpError` otherwise. Sends `Api-Key` and the pinned `X-Pinecone-API-Version`."""
+}
+fn (method: Str, url: Str, body: Any): Any {
+  default-headers {
+    Api-Key: ::ctx/get("pinecone.api.key"),
+    X-Pinecone-API-Version: ::pinecone/API_VERSION,
+    Accept: "application/json"
+  }
+  headers if(eq(body, ""), default-headers, {...default-headers, Content-Type: "application/json"})
+  encoded-body if(eq(body, ""), "", to-json(untype(body)))
+
+  response ::hot::http/request(HttpRequest({
+    method,
+    url,
+    headers: headers,
+    body: encoded-body
+  }))
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { response.body }
+    => { err(HttpError(response)) }
+  }
+}

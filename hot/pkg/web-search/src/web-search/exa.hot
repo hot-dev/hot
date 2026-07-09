@@ -1,0 +1,98 @@
+::web-search::exa ns
+meta {
+    doc: """Exa — neural/semantic web search (https://docs.exa.ai). Context variable: `exa.api.key`."""
+}
+
+::ctx ::hot::ctx
+
+http-request ::hot::http/request
+is-ok-response ::hot::http/is-ok-response
+HttpRequest ::hot::http/HttpRequest
+
+BASE_URL "https://api.exa.ai"
+
+post fn (path: Str, body: Map): Any {
+  response ::hot::http/request(HttpRequest({
+    method: "POST",
+    url: `${BASE_URL}${path}`,
+    headers: {
+      x-api-key: ::ctx/get("exa.api.key"),
+      Content-Type: "application/json"
+    },
+    body: to-json(untype(body))
+  }))
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { response.body }
+    => { err({status: response.status, body: response.body}) }
+  }
+}
+
+search
+meta {
+    ctx: {"exa.api.key": {required: true}},
+    doc: """
+    POST /search - Exa search. `options` supports `type`
+    ("auto"/"neural"/"keyword"), `numResults`, `category`,
+    `includeDomains`, `startPublishedDate`, and `contents`
+    (e.g. `{text: true}` to return page text inline).
+
+    **Example**
+
+    ```hot
+    out ::web-search::exa/search("startups building sql runtimes", {
+      type: "neural",
+      numResults: 5,
+      contents: {text: true}
+    })
+    ```
+    """
+}
+fn
+(query: Str): Map {
+  search(query, {})
+},
+(query: Str, options: Map): Map {
+  post("/search", {query: query, ...options})
+}
+
+get-contents
+meta {
+    ctx: {"exa.api.key": {required: true}},
+    doc: """POST /contents - Fetch clean page text for URLs or Exa result ids. Returns `{results: [{url, title, text}]}`."""
+}
+fn (urls: Vec): Map {
+  post("/contents", {urls: urls, text: true})
+}
+
+find-similar
+meta {
+    ctx: {"exa.api.key": {required: true}},
+    doc: """POST /findSimilar - Pages semantically similar to a URL."""
+}
+fn (url: Str): Map {
+  post("/findSimilar", {url: url})
+}
+
+normalize
+meta {
+    doc: """Normalize an Exa search response into `Vec<::web-search/SearchResult>`. Exposed for testing."""
+}
+fn (body: Map): Vec {
+  map(get(body, "results", []), (r) {
+    ::web-search/SearchResult({
+      title: or(get(r, "title"), ""),
+      url: get(r, "url", ""),
+      content: get(r, "text"),
+      score: get(r, "score")
+    })
+  })
+}
+
+search-normalized fn (query: Str, max-results: Int): Vec {
+  out search(query, {numResults: max-results})
+  cond {
+    is-err(out) => { out }
+    => { normalize(out) }
+  }
+}

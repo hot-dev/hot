@@ -1,0 +1,87 @@
+::web-search::tavily ns
+meta {
+    doc: """Tavily — search built for LLM agents (https://docs.tavily.com). Context variable: `tavily.api.key` (`tvly-...`)."""
+}
+
+::ctx ::hot::ctx
+
+http-request ::hot::http/request
+is-ok-response ::hot::http/is-ok-response
+HttpRequest ::hot::http/HttpRequest
+
+BASE_URL "https://api.tavily.com"
+
+post fn (path: Str, body: Map): Any {
+  response ::hot::http/request(HttpRequest({
+    method: "POST",
+    url: `${BASE_URL}${path}`,
+    headers: {
+      Authorization: `Bearer ${::ctx/get("tavily.api.key")}`,
+      Content-Type: "application/json"
+    },
+    body: to-json(untype(body))
+  }))
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { response.body }
+    => { err({status: response.status, body: response.body}) }
+  }
+}
+
+search
+meta {
+    ctx: {"tavily.api.key": {required: true}},
+    doc: """
+    POST /search - Tavily search. `options` supports `search_depth`
+    ("basic"/"advanced"), `topic` ("general"/"news"), `max_results`,
+    `include_answer` (LLM-written answer in `.answer`), `include_domains`,
+    `exclude_domains`, `time_range`.
+
+    **Example**
+
+    ```hot
+    out ::web-search::tavily/search("qdrant vs pinecone pricing", {include_answer: true})
+    out.answer
+    map(out.results, (r) { r.url })
+    ```
+    """
+}
+fn
+(query: Str): Map {
+  search(query, {})
+},
+(query: Str, options: Map): Map {
+  post("/search", {query: query, ...options})
+}
+
+extract
+meta {
+    ctx: {"tavily.api.key": {required: true}},
+    doc: """POST /extract - Fetch and clean page content for a Vec of URLs. Returns `{results: [{url, raw_content}], failed_results}` — the read-a-page half of an agent's browsing loop."""
+}
+fn (urls: Vec): Map {
+  post("/extract", {urls: urls})
+}
+
+normalize
+meta {
+    doc: """Normalize a Tavily search response into `Vec<::web-search/SearchResult>`. Exposed for testing."""
+}
+fn (body: Map): Vec {
+  map(get(body, "results", []), (r) {
+    ::web-search/SearchResult({
+      title: get(r, "title", ""),
+      url: get(r, "url", ""),
+      content: get(r, "content"),
+      score: get(r, "score")
+    })
+  })
+}
+
+search-normalized fn (query: Str, max-results: Int): Vec {
+  out search(query, {max_results: max-results})
+  cond {
+    is-err(out) => { out }
+    => { normalize(out) }
+  }
+}

@@ -1,0 +1,11 @@
+::pinecone::integration ns
+meta ["test"]
+
+// Requires ctx: pinecone.api.key
+// Run with: hot test --project pkg-integration-pinecone
+
+test-list-indexes
+meta ["test"] fn () {
+    out ::pinecone::indexes/list-indexes()
+    assert(is-some(out.indexes), "should return an indexes array")
+}

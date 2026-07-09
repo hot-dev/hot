@@ -1,0 +1,12 @@
+::web-search::integration ns
+meta ["test"]
+
+// Requires one of: tavily.api.key / brave.api.key / exa.api.key
+// Run with: hot test --project pkg-integration-web-search
+
+test-normalized-search
+meta ["test"] fn () {
+    results ::web-search/search("hot.dev programming language", 3)
+    assert(gt(length(results), 0), "should return results")
+    assert(starts-with(first(results).url, "http"))
+}

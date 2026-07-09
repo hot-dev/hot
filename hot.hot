@@ -61,6 +61,7 @@ hot.project.hot-pkg-all.test.paths [
     "./hot/pkg/discord/test",
     "./hot/pkg/elevenlabs/test",
     "./hot/pkg/ffmpeg/test",
+    "./hot/pkg/github/test",
     "./hot/pkg/google-core/test",
     "./hot/pkg/google-drive/test",
     "./hot/pkg/google-gmail/test",
@@ -70,12 +71,15 @@ hot.project.hot-pkg-all.test.paths [
     "./hot/pkg/imagemagick/test",
     "./hot/pkg/jwt/test",
     "./hot/pkg/libreoffice/test",
+    "./hot/pkg/linear/test",
     "./hot/pkg/mcp/test",
+    "./hot/pkg/notion/test",
     "./hot/pkg/oauth2/test",
     "./hot/pkg/openai/test",
     "./hot/pkg/openai-compatible/test",
     "./hot/pkg/pandoc/test",
     "./hot/pkg/pg/test",
+    "./hot/pkg/pinecone/test",
     "./hot/pkg/playwright/test",
     "./hot/pkg/redis/test",
     "./hot/pkg/sox/test",
@@ -85,6 +89,7 @@ hot.project.hot-pkg-all.test.paths [
     "./hot/pkg/supabase-admin/test",
     "./hot/pkg/tesseract/test",
     "./hot/pkg/twilio/test",
+    "./hot/pkg/web-search/test",
     "./hot/pkg/webhooks/test",
     "./hot/pkg/whatsapp/test",
     "./hot/pkg/whisper/test"
@@ -110,6 +115,7 @@ hot.project.hot-pkg-all.deps {
     "hot.dev/elevenlabs": { "local": "./hot/pkg/elevenlabs" },
     "hot.dev/ffmpeg": { "local": "./hot/pkg/ffmpeg" },
     "hot.dev/gemini": { "local": "./hot/pkg/gemini" },
+    "hot.dev/github": { "local": "./hot/pkg/github" },
     "hot.dev/google-calendar": { "local": "./hot/pkg/google-calendar" },
     "hot.dev/google-core": { "local": "./hot/pkg/google-core" },
     "hot.dev/google-drive": { "local": "./hot/pkg/google-drive" },
@@ -122,11 +128,14 @@ hot.project.hot-pkg-all.deps {
     "hot.dev/jwt": { "local": "./hot/pkg/jwt" },
     "hot.dev/oauth2": { "local": "./hot/pkg/oauth2" },
     "hot.dev/libreoffice": { "local": "./hot/pkg/libreoffice" },
+    "hot.dev/linear": { "local": "./hot/pkg/linear" },
     "hot.dev/mcp": { "local": "./hot/pkg/mcp" },
+    "hot.dev/notion": { "local": "./hot/pkg/notion" },
     "hot.dev/openai": { "local": "./hot/pkg/openai" },
     "hot.dev/openai-compatible": { "local": "./hot/pkg/openai-compatible" },
     "hot.dev/pandoc": { "local": "./hot/pkg/pandoc" },
     "hot.dev/pg": { "local": "./hot/pkg/pg" },
+    "hot.dev/pinecone": { "local": "./hot/pkg/pinecone" },
     "hot.dev/playwright": { "local": "./hot/pkg/playwright" },
     "hot.dev/postmark": { "local": "./hot/pkg/postmark" },
     "hot.dev/qwen": { "local": "./hot/pkg/qwen" },
@@ -142,6 +151,7 @@ hot.project.hot-pkg-all.deps {
     "hot.dev/telegram": { "local": "./hot/pkg/telegram" },
     "hot.dev/tesseract": { "local": "./hot/pkg/tesseract" },
     "hot.dev/twilio": { "local": "./hot/pkg/twilio" },
+    "hot.dev/web-search": { "local": "./hot/pkg/web-search" },
     "hot.dev/webhooks": { "local": "./hot/pkg/webhooks" },
     "hot.dev/whatsapp": { "local": "./hot/pkg/whatsapp" },
     "hot.dev/whisper": { "local": "./hot/pkg/whisper" },
@@ -363,6 +373,39 @@ hot.project.pkg-test-stripe.src.paths ["./hot/pkg/stripe/src"]
 hot.project.pkg-test-stripe.test.paths ["./hot/pkg/stripe/test"]
 hot.project.pkg-test-stripe.test.capture true
 hot.project.pkg-test-stripe.deps {}
+
+// web-search unit tests (provider selection + normalizers, hermetic)
+hot.project.pkg-test-web-search.src.paths ["./hot/pkg/web-search/src"]
+hot.project.pkg-test-web-search.test.paths ["./hot/pkg/web-search/test"]
+hot.project.pkg-test-web-search.test.capture true
+hot.project.pkg-test-web-search.deps {}
+
+// notion unit tests (rich-text and block builders, hermetic)
+hot.project.pkg-test-notion.src.paths ["./hot/pkg/notion/src"]
+hot.project.pkg-test-notion.test.paths ["./hot/pkg/notion/test"]
+hot.project.pkg-test-notion.test.capture true
+hot.project.pkg-test-notion.deps {}
+
+// pinecone unit tests (host normalization, hermetic)
+hot.project.pkg-test-pinecone.src.paths ["./hot/pkg/pinecone/src"]
+hot.project.pkg-test-pinecone.test.paths ["./hot/pkg/pinecone/test"]
+hot.project.pkg-test-pinecone.test.capture true
+hot.project.pkg-test-pinecone.deps {}
+
+// github unit tests (App JWT claims, query strings, content decoding)
+hot.project.pkg-test-github.src.paths ["./hot/pkg/github/src"]
+hot.project.pkg-test-github.test.paths ["./hot/pkg/github/test"]
+hot.project.pkg-test-github.test.capture true
+hot.project.pkg-test-github.deps {
+    "hot.dev/jwt": { "local": "./hot/pkg/jwt" },
+    "hot.dev/webhooks": { "local": "./hot/pkg/webhooks" }
+}
+
+// linear unit tests (auth forms, GraphQL unwrapping, inputs — hermetic)
+hot.project.pkg-test-linear.src.paths ["./hot/pkg/linear/src"]
+hot.project.pkg-test-linear.test.paths ["./hot/pkg/linear/test"]
+hot.project.pkg-test-linear.test.capture true
+hot.project.pkg-test-linear.deps {}
 
 // google-* unit tests (SA claims, MIME + multipart builders — hermetic)
 hot.project.pkg-test-google.src.paths [
@@ -593,6 +636,39 @@ hot.project.pkg-integration-aws-sns.deps {
 hot.project.pkg-aws-eventstream.src.paths ["./hot/pkg/aws-eventstream/src"]
 hot.project.pkg-aws-eventstream.test.paths ["./hot/pkg/aws-eventstream/test"]
 hot.project.pkg-aws-eventstream.test.capture true
+
+// web-search integration tests (requires a provider key; read-only)
+hot.project.pkg-integration-web-search.src.paths ["./hot/pkg/web-search/src"]
+hot.project.pkg-integration-web-search.test.paths ["./hot/pkg/web-search/integration-test"]
+hot.project.pkg-integration-web-search.test.capture true
+hot.project.pkg-integration-web-search.deps {}
+
+// notion integration tests (requires notion.token; read-only)
+hot.project.pkg-integration-notion.src.paths ["./hot/pkg/notion/src"]
+hot.project.pkg-integration-notion.test.paths ["./hot/pkg/notion/integration-test"]
+hot.project.pkg-integration-notion.test.capture true
+hot.project.pkg-integration-notion.deps {}
+
+// pinecone integration tests (requires pinecone.api.key; read-only)
+hot.project.pkg-integration-pinecone.src.paths ["./hot/pkg/pinecone/src"]
+hot.project.pkg-integration-pinecone.test.paths ["./hot/pkg/pinecone/integration-test"]
+hot.project.pkg-integration-pinecone.test.capture true
+hot.project.pkg-integration-pinecone.deps {}
+
+// GitHub integration tests (requires github.token; read-only)
+hot.project.pkg-integration-github.src.paths ["./hot/pkg/github/src"]
+hot.project.pkg-integration-github.test.paths ["./hot/pkg/github/integration-test"]
+hot.project.pkg-integration-github.test.capture true
+hot.project.pkg-integration-github.deps {
+    "hot.dev/jwt": { "local": "./hot/pkg/jwt" },
+    "hot.dev/webhooks": { "local": "./hot/pkg/webhooks" }
+}
+
+// Linear integration tests (requires linear.api.key; read-only)
+hot.project.pkg-integration-linear.src.paths ["./hot/pkg/linear/src"]
+hot.project.pkg-integration-linear.test.paths ["./hot/pkg/linear/integration-test"]
+hot.project.pkg-integration-linear.test.capture true
+hot.project.pkg-integration-linear.deps {}
 
 // OpenAI-compatible integration tests (requires base url + api key in ctx)
 hot.project.pkg-integration-openai-compatible.src.paths ["./hot/pkg/openai-compatible/src"]

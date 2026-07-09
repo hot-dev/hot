@@ -1,0 +1,60 @@
+::pinecone::vectors ns
+
+::api ::pinecone::api
+normalize-host ::pinecone::api/normalize-host
+
+upsert
+meta {
+    doc: """
+    POST {host}/vectors/upsert - Write vectors:
+    `[{id, values, metadata?, sparseValues?}]`. The 3-arity form targets a
+    namespace. Returns `{upsertedCount}`.
+    """
+}
+fn
+(host: Str, vectors: Vec): Map {
+  ::api/json("POST", `${normalize-host(host)}/vectors/upsert`, {vectors: vectors})
+},
+(host: Str, vectors: Vec, namespace: Str): Map {
+  ::api/json("POST", `${normalize-host(host)}/vectors/upsert`, {vectors: vectors, namespace: namespace})
+}
+
+query
+meta {
+    doc: """
+    POST {host}/query - Nearest-neighbor search. `options`: `vector` (or
+    `id` to query by an existing vector), `topK` (default 10),
+    `includeMetadata`, `includeValues`, `filter` (metadata filter with
+    `$eq`/`$in`/`$gte`/...), `namespace`. Returns `{matches: [{id, score,
+    metadata?}]}`.
+    """
+}
+fn (host: Str, options: Map): Map {
+  body {topK: 10, ...options}
+  ::api/json("POST", `${normalize-host(host)}/query`, body)
+}
+
+fetch
+meta {
+    doc: """GET {host}/vectors/fetch?ids= - Fetch vectors by id. Returns `{vectors: {id: {...}}}`."""
+}
+fn (host: Str, ids: Vec): Map {
+  params join(map(ids, (id) { `ids=${::hot::uri/encode(id)}` }), "&")
+  ::api/json("GET", `${normalize-host(host)}/vectors/fetch?${params}`, "")
+}
+
+delete-vectors
+meta {
+    doc: """POST {host}/vectors/delete - Delete by ids (`{ids: [...]}`), by metadata filter (`{filter: {...}}`), or everything in a namespace (`{deleteAll: true, namespace: "x"}`)."""
+}
+fn (host: Str, options: Map): Map {
+  ::api/json("POST", `${normalize-host(host)}/vectors/delete`, options)
+}
+
+describe-stats
+meta {
+    doc: """POST {host}/describe_index_stats - Vector counts per namespace, dimension, and fullness."""
+}
+fn (host: Str): Map {
+  ::api/json("POST", `${normalize-host(host)}/describe_index_stats`, {})
+}

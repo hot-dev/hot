@@ -1,0 +1,38 @@
+::pinecone ns
+meta {
+    doc: """
+    Pinecone vector database bindings — production RAG beyond Hot-store
+    prototypes. Pair with an embeddings source (`openai`,
+    `openai-compatible`, `qwen`) for the vectors.
+
+    **Setup** — context variable `pinecone.api.key`.
+
+    **Quick start**
+
+    ```hot
+    ::indexes ::pinecone::indexes
+    ::vectors ::pinecone::vectors
+
+    index ::indexes/describe-index("docs")
+
+    ::vectors/upsert(index.host, [
+      {id: "doc-1", values: embedding, metadata: {source: "guide.md"}}
+    ])
+
+    hits ::vectors/query(index.host, {
+      vector: question-embedding,
+      topK: 5,
+      includeMetadata: true,
+      filter: {source: {"$eq": "guide.md"}}
+    })
+    map(hits.matches, (m) { m.metadata.source })
+    ```
+
+    Data-plane calls (`::pinecone::vectors`) take the index `host` from
+    `describe-index` / `create-index`; control-plane calls
+    (`::pinecone::indexes`) go to api.pinecone.io.
+    """
+}
+
+CONTROL_URL "https://api.pinecone.io"
+API_VERSION "2025-01"
