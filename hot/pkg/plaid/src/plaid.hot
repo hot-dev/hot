@@ -51,15 +51,24 @@ meta {
     ctx: {"plaid.client-id": {required: true}, "plaid.secret": {required: true}},
     doc: """POST a Plaid endpoint with credentials injected into the body. The escape hatch for endpoints not wrapped below."""
 }
-fn (path: Str, body: Map): Any {
+fn
+(path: Str, body: Map): Any {
+  post(path, body, ::ctx/get("plaid.client-id"), ::ctx/get("plaid.secret"))
+},
+// 4-arity: explicit credential override (environment still from `plaid.env`)
+(path: Str, body: Map, client-id: Str, secret: Str): Any {
+  post(path, body, client-id, secret, or(::ctx/get("plaid.env"), "sandbox"))
+},
+// 5-arity: explicit credentials + environment ("sandbox" or "production")
+(path: Str, body: Map, client-id: Str, secret: Str, env: Str): Any {
   full-body {
-    client_id: ::ctx/get("plaid.client-id"),
-    secret: ::ctx/get("plaid.secret"),
+    client_id: client-id,
+    secret: secret,
     ...body
   }
   response ::hot::http/request(::hot::http/HttpRequest({
     method: "POST",
-    url: `${base-url()}${path}`,
+    url: `${env-base-url(env)}${path}`,
     headers: {Content-Type: "application/json"},
     body: to-json(untype(full-body))
   }))

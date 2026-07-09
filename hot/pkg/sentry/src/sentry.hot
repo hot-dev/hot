@@ -30,9 +30,14 @@ base-url fn (): Str {
   `${root}/api/0`
 }
 
-request fn (method: Str, path: Str, body: Any): Any {
+request fn
+(method: Str, path: Str, body: Any): Any {
+  request(method, path, body, ::ctx/get("sentry.token"))
+},
+// 4-arity: explicit token override (instance URL still from `sentry.url`)
+(method: Str, path: Str, body: Any, token: Str): Any {
   base-headers {
-    Authorization: `Bearer ${::ctx/get("sentry.token")}`
+    Authorization: `Bearer ${token}`
   }
   headers cond {
     eq(body, "") => { base-headers }

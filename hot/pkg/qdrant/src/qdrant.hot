@@ -26,13 +26,20 @@ meta {
 
 ::ctx ::hot::ctx
 
-base-url fn (): Str {
-  url or(::ctx/get("qdrant.url"), "http://localhost:6333")
+base-url fn
+(): Str {
+  base-url(or(::ctx/get("qdrant.url"), "http://localhost:6333"))
+},
+(url: Str): Str {
   if(ends-with(url, "/"), slice(url, 0, sub(length(url), 1)), url)
 }
 
-request fn (method: Str, path: Str, body: Any): Any {
-  api-key or(::ctx/get("qdrant.api.key"), "")
+request fn
+(method: Str, path: Str, body: Any): Any {
+  request(method, path, body, base-url(), or(::ctx/get("qdrant.api.key"), ""))
+},
+// 5-arity: explicit instance URL + API key override ("" sends no auth header)
+(method: Str, path: Str, body: Any, url: Str, api-key: Str): Any {
   base-headers cond {
     is-empty(api-key) => { {} }
     => { {api-key: api-key} }
@@ -44,7 +51,7 @@ request fn (method: Str, path: Str, body: Any): Any {
   encoded if(eq(body, ""), "", to-json(untype(body)))
   response ::hot::http/request(::hot::http/HttpRequest({
     method,
-    url: `${base-url()}${path}`,
+    url: `${base-url(url)}${path}`,
     headers: headers,
     body: encoded
   }))

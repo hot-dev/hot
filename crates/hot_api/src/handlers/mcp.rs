@@ -1135,6 +1135,7 @@ async fn handle_tools_call_streaming(
     let caller_val = build_request_val(
         "POST",
         &url_path,
+        None,
         headers,
         &empty_query,
         None,
@@ -3795,6 +3796,7 @@ mod tests {
         build_request_val(
             "POST",
             url,
+            None,
             headers,
             &std::collections::HashMap::new(),
             None,

@@ -19,11 +19,16 @@ verify-request
 meta {
     ctx: {"hubspot.client.secret": {required: false}},
     doc: """
-    Verify a HubSpot v3 webhook request. `request` needs `method`, `url`
-    (the full public URL HubSpot called), `headers`, and `body-raw`.
-    Returns true when the signature matches and the millisecond timestamp
-    is within 5 minutes. Uses the `hubspot.client.secret` context
-    variable by default, or accepts an explicit secret.
+    Verify a HubSpot v3 webhook request. `request` needs `method`,
+    `original-url` (the URL HubSpot called, as delivered by the platform),
+    `headers`, and `body-raw`. Returns true when the signature matches and
+    the millisecond timestamp is within 5 minutes. Uses the
+    `hubspot.client.secret` context variable by default, or accepts an
+    explicit secret.
+
+    HubSpot signs the exact URL configured in your app. The 3-arity form
+    takes that URL explicitly for when the platform-reconstructed
+    `original-url` differs from it (e.g. a rewriting proxy in front).
     """
 }
 fn
@@ -35,14 +40,18 @@ fn
   verify-request(request, secret)
 },
 (request: Map, client-secret: Str): Bool {
+  verify-request(request, client-secret, or(get(request, "original-url", ""), ""))
+},
+// 3-arity: explicit URL override — must be the exact URL configured at HubSpot
+(request: Map, client-secret: Str, url: Str): Bool {
   signature get(request.headers, "x-hubspot-signature-v3", "")
   timestamp get(request.headers, "x-hubspot-request-timestamp", "")
   raw-body or(get(request, "body-raw", ""), "")
   method or(get(request, "method", "POST"), "POST")
-  url or(get(request, "url", ""), "")
 
   cond {
     or(is-empty(signature), is-empty(timestamp)) => { false }
+    is-empty(url) => { false }
     => {
       base build-base-string(method, url, raw-body, timestamp)
       cond {

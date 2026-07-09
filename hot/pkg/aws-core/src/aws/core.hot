@@ -427,8 +427,12 @@ meta {
     Used internally by all AWS service packages.
     """
 }
-fn (method: Str, url: Str, service: Str, region: Str, headers: Map, body: Str | Bytes): HttpResponse {
-    credentials get-credentials()
+fn
+(method: Str, url: Str, service: Str, region: Str, headers: Map, body: Str | Bytes): HttpResponse {
+    request(method, url, service, region, headers, body, get-credentials())
+},
+// 7-arity: explicit Credentials override (e.g. assumed-role or cross-account keys)
+(method: Str, url: Str, service: Str, region: Str, headers: Map, body: Str | Bytes, credentials: Credentials): HttpResponse {
     signed-headers sign-request(method, url, region, service, credentials, headers, body)
     http-request(HttpRequest({
         method: method,

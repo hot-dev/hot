@@ -12,12 +12,17 @@ HttpRequest ::hot::http/HttpRequest
 
 BASE_URL "https://api.search.brave.com/res/v1"
 
-get-json fn (path: Str): Any {
+get-json fn
+(path: Str): Any {
+  get-json(path, ::ctx/get("brave.api.key"))
+},
+// 2-arity: explicit API key override
+(path: Str, api-key: Str): Any {
   response ::hot::http/request(HttpRequest({
     method: "GET",
     url: `${BASE_URL}${path}`,
     headers: {
-      X-Subscription-Token: ::ctx/get("brave.api.key"),
+      X-Subscription-Token: api-key,
       Accept: "application/json"
     }
   }))

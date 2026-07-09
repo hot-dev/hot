@@ -45,8 +45,12 @@ fn
   request(method, path, {}, "")
 },
 (method: Str, path: Str, additional-headers: Map, body: Any): HttpResponse {
+  request(method, path, additional-headers, body, ::ctx/get("hubspot.token"))
+},
+// 5-arity: explicit token override
+(method: Str, path: Str, additional-headers: Map, body: Any, token: Str): HttpResponse {
   default-headers {
-    Authorization: `Bearer ${::ctx/get("hubspot.token")}`
+    Authorization: `Bearer ${token}`
   }
 
   headers if(eq(body, ""), default-headers, {...default-headers, Content-Type: "application/json"})
@@ -71,6 +75,15 @@ fn
 },
 (method: Str, path: Str, additional-headers: Map, body: Any): Any {
   response request(method, path, additional-headers, body)
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { response.body }
+    => { err(HttpError(response)) }
+  }
+},
+// 5-arity: explicit token override
+(method: Str, path: Str, additional-headers: Map, body: Any, token: Str): Any {
+  response request(method, path, additional-headers, body, token)
   cond {
     is-err(response) => { response }
     is-ok-response(response) => { response.body }

@@ -35,12 +35,17 @@ query-string fn (params: Map): Str {
   }
 }
 
-request fn (path: Str, content-type: Str, body: Any): Any {
+request fn
+(path: Str, content-type: Str, body: Any): Any {
+  request(path, content-type, body, ::ctx/get("deepgram.api.key"))
+},
+// 4-arity: explicit API key override
+(path: Str, content-type: Str, body: Any, api-key: Str): Any {
   response ::hot::http/request(::hot::http/HttpRequest({
     method: "POST",
     url: `${BASE_URL}${path}`,
     headers: {
-      Authorization: `Token ${::ctx/get("deepgram.api.key")}`,
+      Authorization: `Token ${api-key}`,
       Content-Type: content-type
     },
     body: body

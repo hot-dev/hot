@@ -36,9 +36,14 @@ base-url fn (): Str {
   or(::ctx/get("cal-com.url"), "https://api.cal.com/v2")
 }
 
-request fn (method: Str, path: Str, body: Any): Any {
+request fn
+(method: Str, path: Str, body: Any): Any {
+  request(method, path, body, ::ctx/get("cal-com.api.key"))
+},
+// 4-arity: explicit API key override
+(method: Str, path: Str, body: Any, api-key: Str): Any {
   base-headers {
-    Authorization: `Bearer ${::ctx/get("cal-com.api.key")}`,
+    Authorization: `Bearer ${api-key}`,
     cal-api-version: API_VERSION
   }
   headers cond {

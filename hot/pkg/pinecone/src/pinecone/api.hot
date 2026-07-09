@@ -38,9 +38,14 @@ json
 meta {
     doc: """Make an authenticated Pinecone request against a full URL and unwrap: decoded JSON on 2xx, Err carrying `HttpError` otherwise. Sends `Api-Key` and the pinned `X-Pinecone-API-Version`."""
 }
-fn (method: Str, url: Str, body: Any): Any {
+fn
+(method: Str, url: Str, body: Any): Any {
+  json(method, url, body, ::ctx/get("pinecone.api.key"))
+},
+// 4-arity: explicit API key override
+(method: Str, url: Str, body: Any, api-key: Str): Any {
   default-headers {
-    Api-Key: ::ctx/get("pinecone.api.key"),
+    Api-Key: api-key,
     X-Pinecone-API-Version: ::pinecone/API_VERSION,
     Accept: "application/json"
   }

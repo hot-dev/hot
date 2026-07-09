@@ -27,9 +27,14 @@ meta {
 BASE_URL "https://api.intercom.io"
 API_VERSION "2.13"
 
-request fn (method: Str, path: Str, body: Any): Any {
+request fn
+(method: Str, path: Str, body: Any): Any {
+  request(method, path, body, ::ctx/get("intercom.token"))
+},
+// 4-arity: explicit access token override
+(method: Str, path: Str, body: Any, token: Str): Any {
   base-headers {
-    Authorization: `Bearer ${::ctx/get("intercom.token")}`,
+    Authorization: `Bearer ${token}`,
     Intercom-Version: API_VERSION,
     Accept: "application/json"
   }

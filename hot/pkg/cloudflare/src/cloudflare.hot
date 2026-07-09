@@ -30,9 +30,14 @@ meta {
 
 BASE_URL "https://api.cloudflare.com/client/v4"
 
-request fn (method: Str, path: Str, body: Any, content-type: Str): Any {
+request fn
+(method: Str, path: Str, body: Any, content-type: Str): Any {
+  request(method, path, body, content-type, ::ctx/get("cloudflare.token"))
+},
+// 5-arity: explicit token override
+(method: Str, path: Str, body: Any, content-type: Str, token: Str): Any {
   base-headers {
-    Authorization: `Bearer ${::ctx/get("cloudflare.token")}`
+    Authorization: `Bearer ${token}`
   }
   headers cond {
     eq(body, "") => { base-headers }
@@ -51,9 +56,15 @@ request fn (method: Str, path: Str, body: Any, content-type: Str): Any {
   }
 }
 
-json fn (method: Str, path: Str, body: Any): Any {
+json fn
+(method: Str, path: Str, body: Any): Any {
   encoded if(eq(body, ""), "", to-json(untype(body)))
   request(method, path, encoded, "application/json")
+},
+// 4-arity: explicit token override
+(method: Str, path: Str, body: Any, token: Str): Any {
+  encoded if(eq(body, ""), "", to-json(untype(body)))
+  request(method, path, encoded, "application/json", token)
 }
 
 account fn (): Str {

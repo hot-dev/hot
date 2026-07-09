@@ -285,7 +285,7 @@ verify-request
 meta {
     ctx: {"discord.public.key": {required: false}},
     doc: """
-  Verify a Discord interaction webhook using Ed25519 signature. Returns true if the request is authentic. Uses the `discord.public.key` context variable by default, or accepts an explicit public key as a second argument.
+  Verify a Discord interaction webhook using Ed25519 signature. Returns true if the request is authentic and its timestamp is within the replay window (default 300 seconds; pass 0 as the third argument to disable). Uses the `discord.public.key` context variable by default, or accepts an explicit public key as a second argument.
 
   Discord requires interaction endpoints to verify every request. Failing verification should return a 401 response.
 
@@ -309,6 +309,10 @@ fn
   verify-request(request, public-key)
 },
 (request: Map, public-key: Str): Bool {
+  verify-request(request, public-key, 300)
+},
+// 3-arity: explicit replay tolerance in seconds (0 disables the check)
+(request: Map, public-key: Str, tolerance-seconds: Int): Bool {
   signature get(request.headers, "x-signature-ed25519", "")
   timestamp get(request.headers, "x-signature-timestamp", "")
 
@@ -317,8 +321,19 @@ fn
     is-empty(signature) => { false }
     is-empty(timestamp) => { false }
     => {
-      message `${timestamp}${request.body-raw}`
-      ::hot::hash/ed25519-verify(public-key, message, signature)
+      // Replay window first: cheap, and skips the Ed25519 check for stale
+      // or non-numeric timestamps (fail closed).
+      fresh cond {
+        eq(tolerance-seconds, 0) => { true }
+        => { ::hot::time/within-seconds-of-now(timestamp, tolerance-seconds) }
+      }
+      cond {
+        not(fresh) => { false }
+        => {
+          message `${timestamp}${request.body-raw}`
+          ::hot::hash/ed25519-verify(public-key, message, signature)
+        }
+      }
     }
   }
 }

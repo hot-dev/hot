@@ -38,10 +38,15 @@ query-string fn (params: Map): Str {
   }
 }
 
-request fn (method: Str, path: Str, body: Any): Any {
+request fn
+(method: Str, path: Str, body: Any): Any {
+  request(method, path, body, ::ctx/get("airtable.token"))
+},
+// 4-arity: explicit token override
+(method: Str, path: Str, body: Any, token: Str): Any {
   headers cond {
-    eq(body, "") => { {Authorization: `Bearer ${::ctx/get("airtable.token")}`} }
-    => { {Authorization: `Bearer ${::ctx/get("airtable.token")}`, Content-Type: "application/json"} }
+    eq(body, "") => { {Authorization: `Bearer ${token}`} }
+    => { {Authorization: `Bearer ${token}`, Content-Type: "application/json"} }
   }
   encoded if(eq(body, ""), "", to-json(untype(body)))
   response ::hot::http/request(::hot::http/HttpRequest({

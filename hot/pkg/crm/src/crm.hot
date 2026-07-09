@@ -60,17 +60,33 @@ meta {
     ctx: {
         "hubspot.token": {required: false},
         "salesforce.access.token": {required: false},
-        "salesforce.client-id": {required: false},
+        "salesforce.client-secret": {required: false},
+        "salesforce.private.key": {required: false},
         "attio.api.key": {required: false}
     },
-    doc: """Which CRM the context is configured for: "hubspot", "salesforce", or "attio" (checked in that order), or null when none is."""
+    doc: """Which CRM the context is configured for: "hubspot", "salesforce", or "attio" (checked in that order), or null when none is. Salesforce is selected only when a credential that can actually mint a session is present (an access token, a client secret, or a private key) — a bare `salesforce.client-id` is not enough to authenticate."""
 }
 fn (): Any {
+  select-provider(
+    or(::ctx/get("hubspot.token"), ""),
+    or(::ctx/get("salesforce.access.token"), ""),
+    or(::ctx/get("salesforce.client-secret"), ""),
+    or(::ctx/get("salesforce.private.key"), ""),
+    or(::ctx/get("attio.api.key"), "")
+  )
+}
+
+select-provider
+meta {
+    doc: """The provider-selection rule behind `configured-provider`, as a pure function of the credential values. Salesforce requires a credential that can mint a session (mirroring `::salesforce::auth/session`'s three flows: explicit token, client-credentials, JWT-bearer) — a bare client-id cannot authenticate. Exposed for testing."""
+}
+fn (hubspot-token: Str, sf-access-token: Str, sf-client-secret: Str, sf-private-key: Str, attio-key: Str): Any {
   cond {
-    not(is-empty(or(::ctx/get("hubspot.token"), ""))) => { "hubspot" }
-    not(is-empty(or(::ctx/get("salesforce.access.token"), ""))) => { "salesforce" }
-    not(is-empty(or(::ctx/get("salesforce.client-id"), ""))) => { "salesforce" }
-    not(is-empty(or(::ctx/get("attio.api.key"), ""))) => { "attio" }
+    not(is-empty(hubspot-token)) => { "hubspot" }
+    not(is-empty(sf-access-token)) => { "salesforce" }
+    not(is-empty(sf-client-secret)) => { "salesforce" }
+    not(is-empty(sf-private-key)) => { "salesforce" }
+    not(is-empty(attio-key)) => { "attio" }
     => { null }
   }
 }

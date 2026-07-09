@@ -26,8 +26,8 @@ meta {
 ::b64 ::hot::base64
 ::uri ::hot::uri
 
-base-url fn (): Str {
-  `https://${::ctx/get("zendesk.subdomain")}.zendesk.com/api/v2`
+base-url fn (subdomain: Str): Str {
+  `https://${subdomain}.zendesk.com/api/v2`
 }
 
 auth-header
@@ -39,9 +39,14 @@ fn (email: Str, token: Str): Str {
   `Basic ${::b64/encode(Bytes(credentials))}`
 }
 
-request fn (method: Str, path: Str, body: Any): Any {
+request fn
+(method: Str, path: Str, body: Any): Any {
+  request(method, path, body, ::ctx/get("zendesk.subdomain"), ::ctx/get("zendesk.email"), ::ctx/get("zendesk.api.token"))
+},
+// 6-arity: explicit subdomain + credential override
+(method: Str, path: Str, body: Any, subdomain: Str, email: Str, api-token: Str): Any {
   base-headers {
-    Authorization: auth-header(::ctx/get("zendesk.email"), ::ctx/get("zendesk.api.token")),
+    Authorization: auth-header(email, api-token),
     Accept: "application/json"
   }
   headers cond {
@@ -51,7 +56,7 @@ request fn (method: Str, path: Str, body: Any): Any {
   encoded if(eq(body, ""), "", to-json(untype(body)))
   response ::hot::http/request(::hot::http/HttpRequest({
     method,
-    url: `${base-url()}${path}`,
+    url: `${base-url(subdomain)}${path}`,
     headers: headers,
     body: encoded
   }))

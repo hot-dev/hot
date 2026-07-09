@@ -47,9 +47,14 @@ meta {
     ctx: {"hot-api.key": {required: true}, "hot-api.url": {required: false}},
     doc: """Make an authenticated request against the Hot API. The escape hatch for endpoints not wrapped below; returns the decoded body on 2xx or an Err `{status, body}`."""
 }
-fn (method: Str, path: Str, body: Any): Any {
+fn
+(method: Str, path: Str, body: Any): Any {
+  request(method, path, body, ::ctx/get("hot-api.key"))
+},
+// 4-arity: explicit API key override (URL still from `hot-api.url`)
+(method: Str, path: Str, body: Any, api-key: Str): Any {
   base-headers {
-    Authorization: `Bearer ${::ctx/get("hot-api.key")}`
+    Authorization: `Bearer ${api-key}`
   }
   headers cond {
     eq(body, "") => { base-headers }

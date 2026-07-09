@@ -76,7 +76,7 @@ HS_SIG "H7ZiMnrj1J2lbxVhk3XPpKzmrc2EWoB2kKzPeDKzc6Q="
 hs-request fn (sig: Str, ts: Str): Map {
   {
     method: "POST",
-    url: HS_URL,
+    original-url: HS_URL,
     headers: {x-hubspot-signature-v3: sig, x-hubspot-request-timestamp: ts},
     body-raw: HS_BODY
   }
@@ -113,10 +113,38 @@ meta ["test"] fn () {
     sig ::hot::base64/encode(::hot::hex/decode(::hot::hmac/hmac-sha256(HS_SECRET, base)))
     tampered {
         method: "POST",
-        url: HS_URL,
+        original-url: HS_URL,
         headers: {x-hubspot-signature-v3: sig, x-hubspot-request-timestamp: ts},
         body-raw: """{"eventId":999}"""
     }
     assert(not(::wh/verify-request(tampered, HS_SECRET)), "tampered body fails")
     assert(not(::wh/verify-request(hs-request(sig, "garbage"), HS_SECRET)), "non-numeric timestamp fails closed")
+}
+
+test-webhook-fails-closed-without-original-url
+meta ["test"] fn () {
+    ts Str(mul(::hot::time/epoch-seconds(), 1000))
+    base ::wh/build-base-string("POST", HS_URL, HS_BODY, ts)
+    sig ::hot::base64/encode(::hot::hex/decode(::hot::hmac/hmac-sha256(HS_SECRET, base)))
+    request {
+        method: "POST",
+        headers: {x-hubspot-signature-v3: sig, x-hubspot-request-timestamp: ts},
+        body-raw: HS_BODY
+    }
+    assert(not(::wh/verify-request(request, HS_SECRET)), "no original-url means no verifiable URL — fail closed")
+}
+
+test-webhook-explicit-url-arity
+meta ["test"] fn () {
+    ts Str(mul(::hot::time/epoch-seconds(), 1000))
+    base ::wh/build-base-string("POST", HS_URL, HS_BODY, ts)
+    sig ::hot::base64/encode(::hot::hex/decode(::hot::hmac/hmac-sha256(HS_SECRET, base)))
+    // No original-url on the request; the exact configured URL is passed explicitly.
+    request {
+        method: "POST",
+        headers: {x-hubspot-signature-v3: sig, x-hubspot-request-timestamp: ts},
+        body-raw: HS_BODY
+    }
+    assert(::wh/verify-request(request, HS_SECRET, HS_URL), "explicit URL override should verify")
+    assert(not(::wh/verify-request(request, HS_SECRET, "https://other.example.com/hook")), "wrong explicit URL should fail")
 }

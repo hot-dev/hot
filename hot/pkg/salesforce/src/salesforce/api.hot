@@ -46,24 +46,27 @@ fn
   session ::auth/session()
   cond {
     is-err(session) => { session }
-    => {
-      headers cond {
-        eq(body, "") => { {Authorization: `Bearer ${session.token}`} }
-        => { {Authorization: `Bearer ${session.token}`, Content-Type: "application/json"} }
-      }
-      encoded-body if(eq(body, ""), "", to-json(untype(body)))
+    => { json(method, path, body, session) }
+  }
+},
+// 4-arity: explicit session override — a `{token, instance-url}` map, e.g.
+// from `::salesforce::auth/session()` or tokens managed by the caller
+(method: Str, path: Str, body: Any, session: Map): Any {
+  headers cond {
+    eq(body, "") => { {Authorization: `Bearer ${session.token}`} }
+    => { {Authorization: `Bearer ${session.token}`, Content-Type: "application/json"} }
+  }
+  encoded-body if(eq(body, ""), "", to-json(untype(body)))
 
-      response ::hot::http/request(HttpRequest({
-        method,
-        url: `${session.instance-url}${data-path(path)}`,
-        headers: headers,
-        body: encoded-body
-      }))
-      cond {
-        is-err(response) => { response }
-        is-ok-response(response) => { response.body }
-        => { err(HttpError(response)) }
-      }
-    }
+  response ::hot::http/request(HttpRequest({
+    method,
+    url: `${session.instance-url}${data-path(path)}`,
+    headers: headers,
+    body: encoded-body
+  }))
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { response.body }
+    => { err(HttpError(response)) }
   }
 }

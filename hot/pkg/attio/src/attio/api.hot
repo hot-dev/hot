@@ -31,9 +31,13 @@ fn
   json(method, path, "")
 },
 (method: Str, path: Str, body: Any): Any {
+  json(method, path, body, ::ctx/get("attio.api.key"))
+},
+// 4-arity: explicit API key override
+(method: Str, path: Str, body: Any, api-key: Str): Any {
   headers cond {
-    eq(body, "") => { {Authorization: `Bearer ${::ctx/get("attio.api.key")}`} }
-    => { {Authorization: `Bearer ${::ctx/get("attio.api.key")}`, Content-Type: "application/json"} }
+    eq(body, "") => { {Authorization: `Bearer ${api-key}`} }
+    => { {Authorization: `Bearer ${api-key}`, Content-Type: "application/json"} }
   }
   encoded-body if(eq(body, ""), "", to-json(untype(body)))
 

@@ -172,9 +172,13 @@ validate-claims fn (payload: Map, options: Map): Any {
     is-null(expected-iss) => { false }
     => { ne(get(payload, "iss"), expected-iss) }
   }
+  // RFC 7519: aud may be a single string or an array of strings (common in
+  // OIDC); the expected audience must equal it or be a member of it.
+  aud get(payload, "aud")
   wrong-aud cond {
     is-null(expected-aud) => { false }
-    => { ne(get(payload, "aud"), expected-aud) }
+    is-vec(aud) => { not(in(expected-aud, aud)) }
+    => { ne(aud, expected-aud) }
   }
 
   cond {
@@ -184,7 +188,7 @@ validate-claims fn (payload: Map, options: Map): Any {
       err(`jwt: issuer mismatch: expected '${expected-iss}', got '${get(payload, "iss")}'`)
     }
     wrong-aud => {
-      err(`jwt: audience mismatch: expected '${expected-aud}', got '${get(payload, "aud")}'`)
+      err(`jwt: audience mismatch: expected '${expected-aud}', got '${aud}'`)
     }
     => { payload }
   }
@@ -266,6 +270,8 @@ fn
       e-bytes if(is-bytes(e), e, ::b64/decode-url(e))
       signature ::b64/decode-url(decoded.signature)
       cond {
+        is-err(n-bytes) => { err("jwt: RSA modulus (n) is not valid base64url") }
+        is-err(e-bytes) => { err("jwt: RSA exponent (e) is not valid base64url") }
         is-err(signature) => { err("jwt: signature is not valid base64url") }
         => {
           valid ::crypto/rsa-sha256-verify(n-bytes, e-bytes, decoded.signing-input, signature)

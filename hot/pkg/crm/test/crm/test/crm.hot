@@ -11,6 +11,26 @@ meta ["test"] fn () {
     assert(is-err(out), "no configured CRM should be a clear error")
 }
 
+test-provider-selection
+meta ["test"] fn () {
+    assert-eq(null, ::crm/select-provider("", "", "", "", ""), "nothing configured selects nothing")
+    assert-eq("hubspot", ::crm/select-provider("hs-tok", "sf-tok", "", "", "attio-key"), "hubspot wins when its token is set")
+    assert-eq("salesforce", ::crm/select-provider("", "sf-tok", "", "", ""), "explicit access token selects salesforce")
+    assert-eq("salesforce", ::crm/select-provider("", "", "sf-secret", "", ""), "client-credentials secret selects salesforce")
+    assert-eq("salesforce", ::crm/select-provider("", "", "", "sf-pem", ""), "JWT-bearer private key selects salesforce")
+    assert-eq("attio", ::crm/select-provider("", "", "", "", "attio-key"), "attio selected when only its key is set")
+}
+
+test-provider-selection-ignores-bare-client-id
+meta ["test"] fn () {
+    // A client-id alone cannot mint a Salesforce session (auth requires a
+    // token, secret, or private key), so it must not select salesforce.
+    // It isn't even an input to the selection rule — with only attio
+    // configured, attio wins regardless of any salesforce.client-id.
+    assert-eq("attio", ::crm/select-provider("", "", "", "", "attio-key"))
+    assert-eq(null, ::crm/select-provider("", "", "", "", ""))
+}
+
 // ============================================================================
 // Normalizers (shapes from each provider's documented responses)
 // ============================================================================

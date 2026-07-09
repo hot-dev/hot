@@ -111,6 +111,15 @@ meta ["test"] fn () {
     assert(is-err(::jwt/verify(token, SECRET, {audience: "nobody"})), "wrong audience fails")
 }
 
+test-verify-accepts-array-audience
+meta ["test"] fn () {
+    // RFC 7519 allows aud to be an array; OIDC providers commonly send one.
+    token ::jwt/sign({sub: "42", aud: ["you", "someone-else"]}, SECRET)
+    ok ::jwt/verify(token, SECRET, {audience: "you", now: 1})
+    assert-eq("42", ok.sub, "expected audience found in array aud")
+    assert(is-err(::jwt/verify(token, SECRET, {audience: "nobody", now: 1})), "audience absent from array aud fails")
+}
+
 // ============================================================================
 // decode (unverified inspection)
 // ============================================================================
@@ -149,6 +158,17 @@ test-rs256-rejects-hs256-token
 meta ["test"] fn () {
     // Algorithm-confusion guard: an HS256 token must not pass verify-rs256
     assert(is-err(::jwt/verify-rs256(KNOWN_TOKEN, rsa-n(), rsa-e())))
+}
+
+test-rs256-rejects-malformed-jwks-components
+meta ["test"] fn () {
+    // Malformed base64url n/e (e.g. a corrupted JWKS fetch) must return an
+    // Err value, never halt the run.
+    token ::jwt/sign({iss: "svc"}, TEST_RSA_PEM, "RS256")
+    bad-n ::jwt/verify-rs256(token, "!!not-base64url!!", "AQAB")
+    assert(is-err(bad-n), "malformed n yields an Err")
+    bad-e ::jwt/verify-rs256(token, ::hot::base64/encode-url(rsa-n()), "!!not-base64url!!")
+    assert(is-err(bad-e), "malformed e yields an Err")
 }
 
 test-sign-rejects-unknown-algorithm

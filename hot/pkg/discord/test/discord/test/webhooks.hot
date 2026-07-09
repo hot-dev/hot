@@ -5,7 +5,8 @@ meta ["test"]
 
 // RFC 8032 test vector 2: message is the single byte "r". Discord's signed
 // message is `${timestamp}${raw-body}`, so timestamp "r" + empty body
-// reproduces it exactly.
+// reproduces it exactly. The vector timestamp is not a real epoch, so
+// signature-correctness tests disable the replay window (tolerance 0).
 TEST_PUBLIC_KEY "3d4017c3e843895a92b70aa74d1b7ebc9c982ccf2ec4968cc0cd55f12af4660c"
 TEST_SIGNATURE "92a009a9f0d4cab8720e820b5f642540a2b27b5416503f8fb3762223ebdb69da085ac1e43e15996e458f3613d0f11d8c387b2eaeb4302aeeb00d291612bb0c00"
 
@@ -20,28 +21,48 @@ test-verify-accepts-known-vector
 meta ["test"]
 fn () {
     request make-request("r", TEST_SIGNATURE, "")
-    assert(::webhooks/verify-request(request, TEST_PUBLIC_KEY), "known Ed25519 vector should verify")
+    assert(::webhooks/verify-request(request, TEST_PUBLIC_KEY, 0), "known Ed25519 vector should verify")
 }
 
 test-verify-rejects-tampered-body
 meta ["test"]
 fn () {
     request make-request("r", TEST_SIGNATURE, "tampered")
-    assert(not(::webhooks/verify-request(request, TEST_PUBLIC_KEY)), "tampered body should fail")
+    assert(not(::webhooks/verify-request(request, TEST_PUBLIC_KEY, 0)), "tampered body should fail")
 }
 
 test-verify-rejects-wrong-timestamp
 meta ["test"]
 fn () {
     request make-request("x", TEST_SIGNATURE, "")
-    assert(not(::webhooks/verify-request(request, TEST_PUBLIC_KEY)), "wrong timestamp should fail")
+    assert(not(::webhooks/verify-request(request, TEST_PUBLIC_KEY, 0)), "wrong timestamp should fail")
 }
 
 test-verify-rejects-malformed-signature
 meta ["test"]
 fn () {
     request make-request("r", "not-hex-at-all", "")
-    assert(not(::webhooks/verify-request(request, TEST_PUBLIC_KEY)), "malformed signature should fail, not error")
+    assert(not(::webhooks/verify-request(request, TEST_PUBLIC_KEY, 0)), "malformed signature should fail, not error")
+}
+
+test-verify-default-replay-window
+meta ["test"]
+fn () {
+    // The default 2-arity enforces a 300s window: a stale epoch timestamp
+    // and a non-numeric one must both fail closed before the signature runs.
+    stale make-request("1700000000", TEST_SIGNATURE, "")
+    assert(not(::webhooks/verify-request(stale, TEST_PUBLIC_KEY)), "stale timestamp fails the default replay window")
+    non-numeric make-request("r", TEST_SIGNATURE, "")
+    assert(not(::webhooks/verify-request(non-numeric, TEST_PUBLIC_KEY)), "non-numeric timestamp fails closed")
+}
+
+test-verify-fresh-timestamp-still-requires-valid-signature
+meta ["test"]
+fn () {
+    // A fresh timestamp passes the window but the signature (signed over a
+    // different message) must still fail.
+    fresh make-request(Str(::hot::time/epoch-seconds()), TEST_SIGNATURE, "")
+    assert(not(::webhooks/verify-request(fresh, TEST_PUBLIC_KEY)), "fresh timestamp with wrong signature fails")
 }
 
 test-verify-rejects-missing-headers
