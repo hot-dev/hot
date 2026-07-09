@@ -10,11 +10,6 @@ hot.pkg.shopify {
   license: "Apache-2.0",
   tags: ["commerce", "shopify"],
   deps: {
-    "hot.dev/webhooks": {
-      local: "../webhooks",
-      git: "https://github.com/hot-dev/hot",
-      path: "hot/pkg/webhooks"
-    }
   },
   src-paths: ["src/"],
   test-paths: ["test/"]

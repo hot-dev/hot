@@ -9,13 +9,7 @@ hot.pkg.hubspot {
   email: "support@hot.dev",
   license: "Apache-2.0",
   tags: ["crm", "hubspot"],
-  deps: {
-    "hot.dev/webhooks": {
-      local: "../webhooks",
-      git: "https://github.com/hot-dev/hot",
-      path: "hot/pkg/webhooks"
-    }
-  },
+  deps: {},
   src-paths: ["src/"],
   test-paths: ["test/"]
 }

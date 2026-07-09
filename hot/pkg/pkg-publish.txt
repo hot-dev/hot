@@ -54,7 +54,6 @@ supabase-admin
 # Auth & Webhook Primitives
 #jwt
 #oauth2
-#webhooks
 
 # Developer Workflow
 #github

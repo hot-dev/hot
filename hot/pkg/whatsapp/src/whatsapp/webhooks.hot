@@ -46,9 +46,7 @@ fn
     => {
       signature slice(header, 7)
       raw-body or(get(request, "body-raw", ""), "")
-      // hmac-sha256 returns the digest as a lowercase hex string
-      expected ::hmac/hmac-sha256(app-secret, raw-body)
-      secure-compare(expected, lowercase(signature))
+      ::hmac/hmac-verify-hex(app-secret, raw-body, signature, "sha256")
     }
   }
 }

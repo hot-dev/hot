@@ -1,6 +1,6 @@
 # hubspot
 
-HubSpot CRM bindings for Hot. One generic CRM v3 objects surface (CRUD, search, associations) that covers contacts, companies, deals, tickets, and custom objects — with typed conveniences, activity notes, and v3 webhook verification on the `hot.dev/webhooks` recipes.
+HubSpot CRM bindings for Hot. One generic CRM v3 objects surface (CRUD, search, associations) that covers contacts, companies, deals, tickets, and custom objects — with typed conveniences, activity notes, and v3 webhook verification.
 
 ## Setup
 

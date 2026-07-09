@@ -79,3 +79,27 @@ meta ["test"] fn () {
     hmac512 ::hot::hmac/hmac-sha512(key, data)
     assert(::hot::hmac/hmac-verify(key, data, hmac512, "sha512"), "SHA512 HMAC should verify")
 }
+
+
+// Vectors generated independently with Python hmac/hashlib/base64.
+
+test-hmac-verify-hex
+meta ["test"]
+fn () {
+    body "{\"action\":\"opened\",\"number\":1}"
+    sig "09e66d98da1d7d68ec3a007f256b022814415af661b4f5e59ed977726db32fa9"
+    assert(::hot::hmac/hmac-verify-hex("gh_test_secret", body, sig, "sha256"))
+    assert(::hot::hmac/hmac-verify-hex("gh_test_secret", body, uppercase(sig), "sha256"), "case-insensitive")
+    assert(not(::hot::hmac/hmac-verify-hex("wrong", body, sig, "sha256")))
+    assert(not(::hot::hmac/hmac-verify-hex("gh_test_secret", body, "", "sha256")), "empty fails closed")
+    assert(not(::hot::hmac/hmac-verify-hex("gh_test_secret", body, "zz-not-hex", "sha256")), "malformed fails closed")
+}
+
+test-hmac-verify-base64
+meta ["test"]
+fn () {
+    assert(::hot::hmac/hmac-verify-base64("k256", "msg-256", "73dpfzJsOpy/9WDLp/IWt5L0osBTCjXq49RUaJ36Qb0=", "sha256"))
+    assert(::hot::hmac/hmac-verify-base64("k1", "msg-1", "kn2vurdkxzLWcUCdAGeNZogID+Y=", "sha1"))
+    assert(not(::hot::hmac/hmac-verify-base64("k256", "other", "73dpfzJsOpy/9WDLp/IWt5L0osBTCjXq49RUaJ36Qb0=", "sha256")))
+    assert(not(::hot::hmac/hmac-verify-base64("k256", "msg-256", "", "sha256")), "empty fails closed")
+}

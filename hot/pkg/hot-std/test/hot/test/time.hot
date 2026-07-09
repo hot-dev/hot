@@ -864,3 +864,23 @@ meta ["test"] fn () {
     zdt ZonedDateTime("2026-01-15T10:00:00+00:00[UTC]")
     assert-eq("UTC", format(zdt, "z"), "UTC should be UTC")
 }
+
+
+test-epoch-seconds
+meta ["test"]
+fn () {
+    s ::hot::time/epoch-seconds()
+    assert(gt(s, 1700000000), "after Nov 2023")
+    assert(lt(s, 4102444800), "before 2100")
+}
+
+test-within-seconds-of-now
+meta ["test"]
+fn () {
+    now ::hot::time/epoch-seconds()
+    assert(::hot::time/within-seconds-of-now(now, 300))
+    assert(::hot::time/within-seconds-of-now(Str(now), 300), "numeric strings accepted")
+    assert(not(::hot::time/within-seconds-of-now(sub(now, 3600), 300)), "an hour ago is outside")
+    assert(not(::hot::time/within-seconds-of-now(add(now, 3600), 300)), "an hour ahead is outside")
+    assert(not(::hot::time/within-seconds-of-now("garbage", 300)), "non-numeric fails closed")
+}

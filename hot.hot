@@ -97,6 +97,7 @@ hot.project.hot-pkg-all.test.paths [
     "./hot/pkg/salesforce/test",
     "./hot/pkg/sentry/test",
     "./hot/pkg/shopify/test",
+    "./hot/pkg/slack/test",
     "./hot/pkg/sox/test",
     "./hot/pkg/sql/test",
     "./hot/pkg/stripe/test",
@@ -105,7 +106,6 @@ hot.project.hot-pkg-all.test.paths [
     "./hot/pkg/tesseract/test",
     "./hot/pkg/twilio/test",
     "./hot/pkg/web-search/test",
-    "./hot/pkg/webhooks/test",
     "./hot/pkg/whatsapp/test",
     "./hot/pkg/whisper/test",
     "./hot/pkg/zendesk/test"
@@ -183,7 +183,6 @@ hot.project.hot-pkg-all.deps {
     "hot.dev/tesseract": { "local": "./hot/pkg/tesseract" },
     "hot.dev/twilio": { "local": "./hot/pkg/twilio" },
     "hot.dev/web-search": { "local": "./hot/pkg/web-search" },
-    "hot.dev/webhooks": { "local": "./hot/pkg/webhooks" },
     "hot.dev/whatsapp": { "local": "./hot/pkg/whatsapp" },
     "hot.dev/whisper": { "local": "./hot/pkg/whisper" },
     "hot.dev/xai": { "local": "./hot/pkg/xai" },
@@ -470,9 +469,7 @@ hot.project.pkg-test-sentry.deps {}
 hot.project.pkg-test-shopify.src.paths ["./hot/pkg/shopify/src"]
 hot.project.pkg-test-shopify.test.paths ["./hot/pkg/shopify/test"]
 hot.project.pkg-test-shopify.test.capture true
-hot.project.pkg-test-shopify.deps {
-    "hot.dev/webhooks": { "local": "./hot/pkg/webhooks" }
-}
+hot.project.pkg-test-shopify.deps {}
 
 // zendesk unit tests (hermetic)
 hot.project.pkg-test-zendesk.src.paths ["./hot/pkg/zendesk/src"]
@@ -488,7 +485,6 @@ hot.project.pkg-test-crm.deps {
     "hot.dev/hubspot": { "local": "./hot/pkg/hubspot" },
     "hot.dev/salesforce": { "local": "./hot/pkg/salesforce" },
     "hot.dev/attio": { "local": "./hot/pkg/attio" },
-    "hot.dev/webhooks": { "local": "./hot/pkg/webhooks" },
     "hot.dev/jwt": { "local": "./hot/pkg/jwt" },
     "hot.dev/oauth2": { "local": "./hot/pkg/oauth2" }
 }
@@ -497,9 +493,7 @@ hot.project.pkg-test-crm.deps {
 hot.project.pkg-test-hubspot.src.paths ["./hot/pkg/hubspot/src"]
 hot.project.pkg-test-hubspot.test.paths ["./hot/pkg/hubspot/test"]
 hot.project.pkg-test-hubspot.test.capture true
-hot.project.pkg-test-hubspot.deps {
-    "hot.dev/webhooks": { "local": "./hot/pkg/webhooks" }
-}
+hot.project.pkg-test-hubspot.deps {}
 
 // salesforce unit tests (JWT claims, data paths — hermetic)
 hot.project.pkg-test-salesforce.src.paths ["./hot/pkg/salesforce/src"]
@@ -540,7 +534,6 @@ hot.project.pkg-test-github.test.paths ["./hot/pkg/github/test"]
 hot.project.pkg-test-github.test.capture true
 hot.project.pkg-test-github.deps {
     "hot.dev/jwt": { "local": "./hot/pkg/jwt" },
-    "hot.dev/webhooks": { "local": "./hot/pkg/webhooks" }
 }
 
 // linear unit tests (auth forms, GraphQL unwrapping, inputs — hermetic)
@@ -586,17 +579,17 @@ hot.project.pkg-test-oauth2.test.paths ["./hot/pkg/oauth2/test"]
 hot.project.pkg-test-oauth2.test.capture true
 hot.project.pkg-test-oauth2.deps {}
 
-// webhooks unit tests (HMAC recipes + GitHub/Slack verifiers, hermetic)
-hot.project.pkg-test-webhooks.src.paths ["./hot/pkg/webhooks/src"]
-hot.project.pkg-test-webhooks.test.paths ["./hot/pkg/webhooks/test"]
-hot.project.pkg-test-webhooks.test.capture true
-hot.project.pkg-test-webhooks.deps {}
-
 // jwt unit tests (HS256/RS256 sign+verify, hermetic)
 hot.project.pkg-test-jwt.src.paths ["./hot/pkg/jwt/src"]
 hot.project.pkg-test-jwt.test.paths ["./hot/pkg/jwt/test"]
 hot.project.pkg-test-jwt.test.capture true
 hot.project.pkg-test-jwt.deps {}
+
+// slack unit tests (webhook signature verification, hermetic)
+hot.project.pkg-test-slack.src.paths ["./hot/pkg/slack/src"]
+hot.project.pkg-test-slack.test.paths ["./hot/pkg/slack/test"]
+hot.project.pkg-test-slack.test.capture true
+hot.project.pkg-test-slack.deps {}
 
 // sql unit tests (placeholder compilation + runtime over fake drivers)
 hot.project.pkg-test-sql.src.paths ["./hot/pkg/sql/src"]
@@ -787,7 +780,6 @@ hot.project.pkg-integration-crm.deps {
     "hot.dev/hubspot": { "local": "./hot/pkg/hubspot" },
     "hot.dev/salesforce": { "local": "./hot/pkg/salesforce" },
     "hot.dev/attio": { "local": "./hot/pkg/attio" },
-    "hot.dev/webhooks": { "local": "./hot/pkg/webhooks" },
     "hot.dev/jwt": { "local": "./hot/pkg/jwt" },
     "hot.dev/oauth2": { "local": "./hot/pkg/oauth2" }
 }
@@ -838,9 +830,7 @@ hot.project.pkg-integration-cal-com.deps {}
 hot.project.pkg-integration-shopify.src.paths ["./hot/pkg/shopify/src"]
 hot.project.pkg-integration-shopify.test.paths ["./hot/pkg/shopify/integration-test"]
 hot.project.pkg-integration-shopify.test.capture true
-hot.project.pkg-integration-shopify.deps {
-    "hot.dev/webhooks": { "local": "./hot/pkg/webhooks" }
-}
+hot.project.pkg-integration-shopify.deps {}
 
 // plaid integration tests (requires credentials; read-only or self-cleaning)
 hot.project.pkg-integration-plaid.src.paths ["./hot/pkg/plaid/src"]
@@ -870,9 +860,7 @@ hot.project.pkg-integration-hot-api.deps {}
 hot.project.pkg-integration-hubspot.src.paths ["./hot/pkg/hubspot/src"]
 hot.project.pkg-integration-hubspot.test.paths ["./hot/pkg/hubspot/integration-test"]
 hot.project.pkg-integration-hubspot.test.capture true
-hot.project.pkg-integration-hubspot.deps {
-    "hot.dev/webhooks": { "local": "./hot/pkg/webhooks" }
-}
+hot.project.pkg-integration-hubspot.deps {}
 
 // Salesforce integration tests (requires salesforce.* auth; read-only)
 hot.project.pkg-integration-salesforce.src.paths ["./hot/pkg/salesforce/src"]
@@ -913,7 +901,6 @@ hot.project.pkg-integration-github.test.paths ["./hot/pkg/github/integration-tes
 hot.project.pkg-integration-github.test.capture true
 hot.project.pkg-integration-github.deps {
     "hot.dev/jwt": { "local": "./hot/pkg/jwt" },
-    "hot.dev/webhooks": { "local": "./hot/pkg/webhooks" }
 }
 
 // Linear integration tests (requires linear.api.key; read-only)

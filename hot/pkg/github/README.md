@@ -1,6 +1,6 @@
 # github
 
-GitHub API bindings for Hot: repos, issues, pull requests, Actions, and search — the developer-workflow surface agents and automations actually use. Built on the `jwt` and `webhooks` primitives.
+GitHub API bindings for Hot: repos, issues, pull requests, Actions, and search — the developer-workflow surface agents and automations actually use. Built on the `jwt` primitives.
 
 ## Setup
 

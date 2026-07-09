@@ -45,7 +45,7 @@ meta {
     doc: """Current Unix time in whole seconds — convenient for building `exp` / `iat` / `nbf` claims."""
 }
 fn (): Int {
-  Int(floor(div(::time/now().epochNanoseconds, 1000000000)))
+  ::time/epoch-seconds()
 }
 
 encode-segment fn (value: Map): Str {

@@ -178,7 +178,7 @@ fn (email: Str): Any {
 verify-request
 meta {
     ctx: {"shopify.webhook.secret": {required: false}},
-    doc: """Verify a Shopify webhook: base64 HMAC-SHA256 of the raw body in `X-Shopify-Hmac-Sha256`, using your app's webhook secret (`hot.dev/webhooks` recipe under the hood)."""
+    doc: """Verify a Shopify webhook: base64 HMAC-SHA256 of the raw body in `X-Shopify-Hmac-Sha256`, using your app's webhook secret."""
 }
 fn
 (request: Map): Bool {
@@ -191,5 +191,5 @@ fn
 (request: Map, secret: Str): Bool {
   signature get(request.headers, "x-shopify-hmac-sha256", "")
   raw-body or(get(request, "body-raw", ""), "")
-  ::webhooks/verify-hmac-sha256-base64(secret, raw-body, signature)
+  ::hot::hmac/hmac-verify-base64(secret, raw-body, signature, "sha256")
 }

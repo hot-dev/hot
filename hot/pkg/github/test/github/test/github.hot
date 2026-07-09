@@ -54,3 +54,26 @@ test-decode-content-passthrough
 meta ["test"] fn () {
     assert-eq("raw", ::repos/decode-content({content: "raw", encoding: "utf-8"}))
 }
+
+// ============================================================================
+// Webhook verification (vector generated independently with Python)
+// ============================================================================
+
+test-webhook-verify-accepts-vector
+meta ["test"] fn () {
+    request {
+        headers: {x-hub-signature-256: "sha256=09e66d98da1d7d68ec3a007f256b022814415af661b4f5e59ed977726db32fa9"},
+        body-raw: """{"action":"opened","number":1}"""
+    }
+    assert(::github::webhooks/verify-request(request, "gh_test_secret"))
+}
+
+test-webhook-verify-rejects
+meta ["test"] fn () {
+    good-sig "sha256=09e66d98da1d7d68ec3a007f256b022814415af661b4f5e59ed977726db32fa9"
+    tampered {headers: {x-hub-signature-256: good-sig}, body-raw: """{"action":"opened","number":2}"""}
+    assert(not(::github::webhooks/verify-request(tampered, "gh_test_secret")), "tampered body fails")
+    wrong-scheme {headers: {x-hub-signature-256: "sha1=abc"}, body-raw: "{}"}
+    assert(not(::github::webhooks/verify-request(wrong-scheme, "gh_test_secret")), "wrong scheme fails closed")
+    assert(not(::github::webhooks/verify-request({headers: {}, body-raw: "{}"}, "gh_test_secret")), "missing header fails")
+}

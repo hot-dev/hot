@@ -1,9 +1,11 @@
 ::hubspot::webhooks ns
 meta {
-    doc: """HubSpot v3 webhook signature verification: base64 HMAC-SHA256 of `method + uri + body + timestamp` with your app's client secret, delivered as `X-HubSpot-Signature-v3` + `X-HubSpot-Request-Timestamp` (millisecond timestamp, 5-minute window). Composed from the `hot.dev/webhooks` recipes."""
+    doc: """HubSpot v3 webhook signature verification: base64 HMAC-SHA256 of `method + uri + body + timestamp` with your app's client secret, delivered as `X-HubSpot-Signature-v3` + `X-HubSpot-Request-Timestamp` (millisecond timestamp, 5-minute window)."""
 }
 
 ::ctx ::hot::ctx
+::hmac ::hot::hmac
+::time ::hot::time
 
 build-base-string
 meta {
@@ -44,13 +46,13 @@ fn
     => {
       base build-base-string(method, url, raw-body, timestamp)
       cond {
-        not(::webhooks/verify-hmac-sha256-base64(client-secret, base, signature)) => { false }
+        not(::hmac/hmac-verify-base64(client-secret, base, signature, "sha256")) => { false }
         => {
           // Header is milliseconds; the shared tolerance check is seconds.
           parsed Int(timestamp)
           cond {
             is-err(parsed) => { false }
-            => { ::webhooks/timestamp-within-tolerance(Int(floor(div(parsed, 1000))), 300) }
+            => { ::time/within-seconds-of-now(Int(floor(div(parsed, 1000))), 300) }
           }
         }
       }

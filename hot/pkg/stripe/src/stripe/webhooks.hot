@@ -96,15 +96,7 @@ fn
 }
 
 timestamp-within-tolerance fn (timestamp: Str, tolerance-seconds: Int): Bool {
-  parsed Int(timestamp)
-  cond {
-    is-err(parsed) => { false }
-    => {
-      now-seconds Int(floor(div(::time/now().epochNanoseconds, 1000000000)))
-      age sub(now-seconds, parsed)
-      and(gte(age, sub(0, tolerance-seconds)), lte(age, tolerance-seconds))
-    }
-  }
+  ::time/within-seconds-of-now(timestamp, tolerance-seconds)
 }
 
 // ============================================================================

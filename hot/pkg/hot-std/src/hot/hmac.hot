@@ -106,3 +106,71 @@ meta {
 fn (key: Str | Bytes, data: Str | Bytes, expected: Str, algorithm: Str): Bool {
     call-lib(::hot::hmac/hmac-verify, [key, data, expected, algorithm])
 }
+
+
+hmac-verify-hex
+meta {
+    doc: """
+    Verify a hex-encoded HMAC signature over `data` using constant-time
+    comparison. `algorithm` is "sha256", "sha512", or "sha1". Comparison
+    is case-insensitive; a malformed or empty signature returns false
+    rather than erroring — safe for attacker-controlled input (unlike
+    `hmac-verify`, which errors on invalid hex).
+
+    The recipe behind GitHub- and Meta-style webhook signatures.
+
+    **Example**
+
+    ```hot
+    ::hot::hmac/hmac-verify-hex(secret, request.body-raw, signature-hex, "sha256")
+    ```
+    """
+}
+fn (key: Str | Bytes, data: Str | Bytes, expected-hex: Str, algorithm: Str): Bool {
+    computed cond {
+        eq(algorithm, "sha256") => { hmac-sha256(key, data) }
+        eq(algorithm, "sha512") => { hmac-sha512(key, data) }
+        eq(algorithm, "sha1") => { hmac-sha1(key, data) }
+        => { err(`hmac-verify-hex: unsupported algorithm '${algorithm}'`) }
+    }
+    cond {
+        is-err(computed) => { computed }
+        is-empty(expected-hex) => { false }
+        => { secure-compare(computed, lowercase(expected-hex)) }
+    }
+}
+
+
+hmac-verify-base64
+meta {
+    doc: """
+    Verify a base64-encoded HMAC signature (base64 of the raw digest)
+    over `data` using constant-time comparison. `algorithm` is "sha256",
+    "sha512", or "sha1". A malformed or empty signature returns false.
+
+    The recipe behind Shopify-, HubSpot-, and Twilio-style webhook
+    signatures.
+
+    **Example**
+
+    ```hot
+    ::hot::hmac/hmac-verify-base64(secret, request.body-raw, signature-b64, "sha256")
+    ```
+    """
+}
+fn (key: Str | Bytes, data: Str | Bytes, expected-b64: Str, algorithm: Str): Bool {
+    computed-hex cond {
+        eq(algorithm, "sha256") => { hmac-sha256(key, data) }
+        eq(algorithm, "sha512") => { hmac-sha512(key, data) }
+        eq(algorithm, "sha1") => { hmac-sha1(key, data) }
+        => { err(`hmac-verify-base64: unsupported algorithm '${algorithm}'`) }
+    }
+    cond {
+        is-err(computed-hex) => { computed-hex }
+        is-empty(expected-b64) => { false }
+        => {
+            computed ::hot::base64/encode(::hot::hex/decode(computed-hex))
+            secure-compare(computed, expected-b64)
+        }
+    }
+}
