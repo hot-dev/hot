@@ -7,7 +7,10 @@ meta {
 
     **Setup** — context variable `cal-com.api.key` (`cal_...` from
     Settings → Developer → API keys). Works with cal.com cloud and
-    self-hosted (`cal-com.url` overrides the base URL).
+    self-hosted (`cal-com.url` overrides the base URL). Cal.com v2
+    versions each endpoint family separately; every call pins the
+    matching `cal-api-version` header (see the `VERSION_*` constants),
+    so a self-hosted instance must be recent enough to serve them.
 
     **Quick start**
 
@@ -30,21 +33,32 @@ meta {
 ::ctx ::hot::ctx
 ::uri ::hot::uri
 
-API_VERSION "2024-08-13"
+// Cal.com v2 versions each endpoint family independently via the
+// cal-api-version header; sending another family's version returns an
+// error or a legacy response shape. Current values are documented per
+// endpoint at https://cal.com/docs/api-reference.
+VERSION_EVENT_TYPES "2024-06-14"
+VERSION_SLOTS "2024-09-04"
+VERSION_BOOKINGS "2024-08-13"
 
 base-url fn (): Str {
   or(::ctx/get("cal-com.url"), "https://api.cal.com/v2")
 }
 
-request fn
-(method: Str, path: Str, body: Any): Any {
-  request(method, path, body, ::ctx/get("cal-com.api.key"))
+request
+meta {
+    ctx: {"cal-com.api.key": {required: true}, "cal-com.url": {required: false}},
+    doc: """Make an authenticated Cal.com v2 request with an explicit per-family `cal-api-version` header. The escape hatch for endpoints not wrapped below; returns the response's `data` (or the whole body when there is none) on 2xx, or an Err `{status, body}`."""
+}
+fn
+(method: Str, path: Str, body: Any, api-version: Str): Any {
+  request(method, path, body, api-version, ::ctx/get("cal-com.api.key"))
 },
-// 4-arity: explicit API key override
-(method: Str, path: Str, body: Any, api-key: Str): Any {
+// 5-arity: explicit API key override
+(method: Str, path: Str, body: Any, api-version: Str, api-key: Str): Any {
   base-headers {
     Authorization: `Bearer ${api-key}`,
-    cal-api-version: API_VERSION
+    cal-api-version: api-version
   }
 
   headers cond {
@@ -68,11 +82,10 @@ request fn
 
 list-event-types
 meta {
-    ctx: {"cal-com.api.key": {required: true}},
     doc: """GET /event-types - Your event types (the bookable meeting kinds) with their ids and durations."""
 }
 fn (): Any {
-  request("GET", "/event-types", "")
+  request("GET", "/event-types", "", VERSION_EVENT_TYPES)
 }
 
 get-slots
@@ -90,7 +103,7 @@ fn (event-type-id: Any, start-date: Str, end-date: Str, time-zone: Str): Any {
     end: end-date,
     timeZone: time-zone
   })
-  request("GET", `/slots?${params}`, "")
+  request("GET", `/slots?${params}`, "", VERSION_SLOTS)
 }
 
 create-booking
@@ -102,7 +115,7 @@ meta {
     """
 }
 fn (booking: Map): Any {
-  request("POST", "/bookings", booking)
+  request("POST", "/bookings", booking, VERSION_BOOKINGS)
 }
 
 list-bookings
@@ -111,10 +124,10 @@ meta {
 }
 fn
 (): Any {
-  request("GET", "/bookings", "")
+  request("GET", "/bookings", "", VERSION_BOOKINGS)
 },
 (status: Str): Any {
-  request("GET", `/bookings?status=${status}`, "")
+  request("GET", `/bookings?status=${status}`, "", VERSION_BOOKINGS)
 }
 
 get-booking
@@ -122,7 +135,7 @@ meta {
     doc: """GET /bookings/{uid} - One booking by uid."""
 }
 fn (uid: Str): Any {
-  request("GET", `/bookings/${uid}`, "")
+  request("GET", `/bookings/${uid}`, "", VERSION_BOOKINGS)
 }
 
 cancel-booking
@@ -130,7 +143,7 @@ meta {
     doc: """POST /bookings/{uid}/cancel - Cancel a booking with a reason."""
 }
 fn (uid: Str, reason: Str): Any {
-  request("POST", `/bookings/${uid}/cancel`, {cancellationReason: reason})
+  request("POST", `/bookings/${uid}/cancel`, {cancellationReason: reason}, VERSION_BOOKINGS)
 }
 
 reschedule-booking
@@ -138,5 +151,5 @@ meta {
     doc: """POST /bookings/{uid}/reschedule - Move a booking to a new start time (UTC RFC3339)."""
 }
 fn (uid: Str, new-start: Str): Any {
-  request("POST", `/bookings/${uid}/reschedule`, {start: new-start})
+  request("POST", `/bookings/${uid}/reschedule`, {start: new-start}, VERSION_BOOKINGS)
 }
