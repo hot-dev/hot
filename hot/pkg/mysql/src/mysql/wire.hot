@@ -29,7 +29,9 @@ int4 fn (n: Int): Bytes { ::bytes/from-int(n, 4, "le") }
 int8 fn (n: Int): Bytes { ::bytes/from-int(n, 8, "le") }
 
 lenenc-int
-meta {doc: """Encode a length-encoded integer (the packed varint MySQL uses for lengths and counts)."""}
+meta {
+    doc: """Encode a length-encoded integer (the packed varint MySQL uses for lengths and counts)."""
+}
 fn (n: Int): Bytes {
     cond {
         lt(n, 251) => { int1(n) }
@@ -53,7 +55,9 @@ cstring fn (s: Str): Bytes { concat(Bytes(s), Bytes([0])) }
 // ---------------------------------------------------------------------------
 
 frame
-meta {doc: """Frame a payload as a MySQL packet with the given sequence id. Payloads ≥ 16MB are not supported."""}
+meta {
+    doc: """Frame a payload as a MySQL packet with the given sequence id. Payloads ≥ 16MB are not supported."""
+}
 fn (seq: Int, payload: Bytes): Bytes {
     cond {
         gt(length(payload), 16777214) => { err("mysql: packet too large (>= 16MB payloads unsupported)") }
@@ -110,7 +114,9 @@ read-int8 fn (buf: Bytes, pos: Int): Vec {
 }
 
 read-lenenc-int
-meta {doc: """Read a length-encoded integer at `pos`. -> [value, next-pos]. 0xFB (NULL) is the caller's job to check first."""}
+meta {
+    doc: """Read a length-encoded integer at `pos`. -> [value, next-pos]. 0xFB (NULL) is the caller's job to check first."""
+}
 fn (buf: Bytes, pos: Int): Vec {
     first-byte ::bytes/to-uint(slice(buf, pos, add(pos, 1)))
     cond {
@@ -147,7 +153,9 @@ fn (buf: Bytes, pos: Int): Vec {
 }
 
 read-cstring
-meta {doc: """Read a null-terminated string at `pos`. -> [Str, position-after-terminator]."""}
+meta {
+    doc: """Read a null-terminated string at `pos`. -> [Str, position-after-terminator]."""
+}
 fn (buf: Bytes, pos: Int): Vec {
     end ::bytes/index-of(buf, 0, pos)
     [Str(slice(buf, pos, end)), add(end, 1)]

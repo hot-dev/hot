@@ -103,25 +103,30 @@ scan fn (sql: Str, i: Int, style: Str, out: Str, names: Vec, mode: Str, depth: I
         and(eq(c, "'"), and(lt(add(i, 1), len), eq(at(sql, add(i, 1)), "'"))) => {
           scan(sql, add(i, 2), style, concat(out, "''"), names, "squote", depth)
         }
+
         eq(c, "'") => { scan(sql, add(i, 1), style, concat(out, c), names, "sql", depth) }
         => { scan(sql, add(i, 1), style, concat(out, c), names, "squote", depth) }
       }
     }
+
     eq(mode, "dquote") => {
       c at(sql, i)
       cond {
         and(eq(c, "\""), and(lt(add(i, 1), len), eq(at(sql, add(i, 1)), "\""))) => {
           scan(sql, add(i, 2), style, concat(out, "\"\""), names, "dquote", depth)
         }
+
         eq(c, "\"") => { scan(sql, add(i, 1), style, concat(out, c), names, "sql", depth) }
         => { scan(sql, add(i, 1), style, concat(out, c), names, "dquote", depth) }
       }
     }
+
     eq(mode, "line") => {
       c at(sql, i)
       next-mode if(eq(c, "\n"), "sql", "line")
       scan(sql, add(i, 1), style, concat(out, c), names, next-mode, depth)
     }
+
     eq(mode, "block") => {
       c at(sql, i)
       cond {
@@ -130,6 +135,7 @@ scan fn (sql: Str, i: Int, style: Str, out: Str, names: Vec, mode: Str, depth: I
           next-mode if(eq(new-depth, 0), "sql", "block")
           scan(sql, add(i, 2), style, concat(out, "*/"), names, next-mode, new-depth)
         }
+
         and(eq(c, "/"), and(lt(add(i, 1), len), eq(at(sql, add(i, 1)), "*"))) => {
           scan(sql, add(i, 2), style, concat(out, "/*"), names, "block", add(depth, 1))
         }
@@ -146,16 +152,20 @@ scan fn (sql: Str, i: Int, style: Str, out: Str, names: Vec, mode: Str, depth: I
         and(eq(c, "-"), eq(next, "-")) => {
           scan(sql, add(i, 2), style, concat(out, "--"), names, "line", depth)
         }
+
         and(eq(c, "/"), eq(next, "*")) => {
           scan(sql, add(i, 2), style, concat(out, "/*"), names, "block", 1)
         }
+
         eq(c, "?") => {
           emitted if(eq(style, "dollar"), concat("$", Str(add(length(names), 1))), "?")
           scan(sql, add(i, 1), style, concat(out, emitted), concat(names, [null]), "sql", depth)
         }
+
         and(eq(c, ":"), eq(next, ":")) => {
           scan(sql, add(i, 2), style, concat(out, "::"), names, "sql", depth)
         }
+
         and(eq(c, ":"), is-name-char(next)) => {
           collected collect-name(sql, add(i, 1))
           cond {

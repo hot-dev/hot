@@ -29,7 +29,9 @@ meta {
 }
 
 OPENROUTER_BASE_URL
-meta {doc: """OpenRouter: one key for hundreds of models with fallback and routing. https://openrouter.ai/docs"""}
+meta {
+    doc: """OpenRouter: one key for hundreds of models with fallback and routing. https://openrouter.ai/docs"""
+}
 "https://openrouter.ai/api/v1"
 
 TOGETHER_BASE_URL

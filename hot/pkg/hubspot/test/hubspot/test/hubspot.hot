@@ -117,6 +117,7 @@ meta ["test"] fn () {
         headers: {x-hubspot-signature-v3: sig, x-hubspot-request-timestamp: ts},
         body-raw: """{"eventId":999}"""
     }
+
     assert(not(::wh/verify-request(tampered, HS_SECRET)), "tampered body fails")
     assert(not(::wh/verify-request(hs-request(sig, "garbage"), HS_SECRET)), "non-numeric timestamp fails closed")
 }
@@ -131,6 +132,7 @@ meta ["test"] fn () {
         headers: {x-hubspot-signature-v3: sig, x-hubspot-request-timestamp: ts},
         body-raw: HS_BODY
     }
+
     assert(not(::wh/verify-request(request, HS_SECRET)), "no original-url means no verifiable URL — fail closed")
 }
 
@@ -145,6 +147,7 @@ meta ["test"] fn () {
         headers: {x-hubspot-signature-v3: sig, x-hubspot-request-timestamp: ts},
         body-raw: HS_BODY
     }
+
     assert(::wh/verify-request(request, HS_SECRET, HS_URL), "explicit URL override should verify")
     assert(not(::wh/verify-request(request, HS_SECRET, "https://other.example.com/hook")), "wrong explicit URL should fail")
 }

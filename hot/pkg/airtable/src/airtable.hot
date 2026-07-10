@@ -40,6 +40,7 @@ request fn
     eq(body, "") => { {Authorization: `Bearer ${token}`} }
     => { {Authorization: `Bearer ${token}`, Content-Type: "application/json"} }
   }
+
   encoded if(eq(body, ""), "", to-json(untype(body)))
   response ::hot::http/request(::hot::http/HttpRequest({
     method,

@@ -38,6 +38,7 @@ driver
 meta {
     doc: """The SQLite `::sql/Driver`. Usually used through `::sql::sqlite/open`."""
 }
+
 ::sql/Driver({
   name: "sqlite",
   placeholder: "question",

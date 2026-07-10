@@ -110,7 +110,9 @@ CLIENT-CONNECT-WITH-DB 8
 CLIENT-PLUGIN-AUTH-LENENC 2097152
 
 client-capabilities
-meta {doc: """The capability flags this client sends: protocol 4.1, secure auth, plugin auth with lenenc responses, transactions; plus connect-with-db and/or SSL when requested."""}
+meta {
+    doc: """The capability flags this client sends: protocol 4.1, secure auth, plugin auth with lenenc responses, transactions; plus connect-with-db and/or SSL when requested."""
+}
 fn (with-db: Bool, with-ssl: Bool): Int {
     base add(add(add(add(add(
         CLIENT-LONG-PASSWORD,

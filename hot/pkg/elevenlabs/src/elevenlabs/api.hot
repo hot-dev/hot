@@ -79,6 +79,7 @@ fn
     xi-api-key: api-key,
     Content-Type: "application/json"
   }
+
   final-headers {...default-headers, ...additional-headers}
 
   ::hot::http/request-stream(HttpRequest({

@@ -5,4 +5,3 @@ test-base-url-default
 meta ["test"] fn () {
     assert-eq("https://api.hot.dev/v1", ::hot-api/base-url())
 }
-

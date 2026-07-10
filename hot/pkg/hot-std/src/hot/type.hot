@@ -854,6 +854,7 @@ fn (lazy result: Any): Str {
         is-err(forced) => { err-value(forced) }
         => { forced }
     }
+
     cond {
         is-str(payload) => { payload }
         => {

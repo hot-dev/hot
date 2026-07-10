@@ -139,8 +139,10 @@ maybe-auth fn (conn: RedisConnection, username, password, resp3: Bool): Any {
                 is-null(username) => { ["HELLO", "3", "AUTH", "default", password] }
                 => { ["HELLO", "3", "AUTH", username, password] }
             }
+
             command(conn, hello-args)
         }
+
         is-null(password) => { null }
         is-null(username) => { command(conn, ["AUTH", password]) }
         => { command(conn, ["AUTH", username, password]) }
@@ -217,7 +219,9 @@ fn (conn: RedisConnection, key: Str, value: Any): Str {
 }
 
 set-ex
-meta {doc: """Set `key` to `value` with an expiry in `seconds`, like `set`. Returns "OK"."""}
+meta {
+    doc: """Set `key` to `value` with an expiry in `seconds`, like `set`. Returns "OK"."""
+}
 fn (conn: RedisConnection, key: Str, value: Any, seconds: Int): Str {
     command(conn, ["SET", key, value, "EX", Str(seconds)])
 }
@@ -239,7 +243,9 @@ meta {doc: """Increment the integer at `key` by one and return the new value."""
 fn (conn: RedisConnection, key: Str): Int { command(conn, ["INCR", key]) }
 
 expire
-meta {doc: """Set a `seconds` TTL on `key`. Returns 1 if set, 0 if the key does not exist."""}
+meta {
+    doc: """Set a `seconds` TTL on `key`. Returns 1 if set, 0 if the key does not exist."""
+}
 fn (conn: RedisConnection, key: Str, seconds: Int): Int {
     command(conn, ["EXPIRE", key, Str(seconds)])
 }

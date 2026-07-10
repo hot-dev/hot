@@ -56,6 +56,7 @@ fn (): Map {
         => { {token: explicit, instance-url: instance} }
       }
     }
+
     not(is-empty(client-secret)) => {
       tokens ::oauth2/client-credentials(token-url, {
         client-id: ::ctx/get("salesforce.client-id"),
@@ -66,6 +67,7 @@ fn (): Map {
         => { {token: tokens.access_token, instance-url: tokens.instance_url} }
       }
     }
+
     not(is-empty(private-key)) => {
       claims build-jwt-claims(::ctx/get("salesforce.client-id"), ::ctx/get("salesforce.username"), login-url())
       assertion ::jwt/sign(claims, private-key, "RS256")

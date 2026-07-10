@@ -51,6 +51,7 @@ encode-pairs fn (key: Str, value: Any): Vec<Str> {
         concat(acc, encode-pairs(`${key}[${k}]`, get(value, k)))
       }, [])
     }
+
     is-vec(value) => {
       nested map-indexed(value, (i, item) { encode-pairs(`${key}[${i}]`, item) })
       reduce(nested, (acc, pairs) { concat(acc, pairs) }, [])

@@ -56,6 +56,7 @@ fn
     eq(body, "") => { {Authorization: `Bearer ${session.token}`} }
     => { {Authorization: `Bearer ${session.token}`, Content-Type: "application/json"} }
   }
+
   encoded-body if(eq(body, ""), "", to-json(untype(body)))
 
   response ::hot::http/request(HttpRequest({

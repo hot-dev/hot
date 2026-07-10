@@ -24,6 +24,7 @@ driver
 meta {
     doc: """The PostgreSQL `::sql/Driver`. Usually used through `::sql::pg/open`."""
 }
+
 ::sql/Driver({
   name: "pg",
   placeholder: "dollar",

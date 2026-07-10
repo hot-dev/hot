@@ -27,6 +27,7 @@ meta {
     """
 }
 type
+
 fn
 (coll: Vec<Any> | Map<Any, Any> | Str): Iter {
     call-lib(::hot::iter/Iter, [coll])

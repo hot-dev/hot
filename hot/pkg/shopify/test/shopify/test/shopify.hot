@@ -16,6 +16,7 @@ meta ["test"] fn () {
         headers: {x-shopify-hmac-sha256: "AU5n5C4JV1EbE8g4yEzV+ZHbqkXpM29HXkzNAa5zicA="},
         body-raw: """{"id":820982911946154508}"""
     }
+
     assert(::shopify/verify-request(request, "shpss_test_secret"))
     assert(not(::shopify/verify-request({headers: {x-shopify-hmac-sha256: "AU5n5C4JV1EbE8g4yEzV+ZHbqkXpM29HXkzNAa5zicA="}, body-raw: "tampered"}, "shpss_test_secret")))
 }

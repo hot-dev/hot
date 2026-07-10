@@ -133,6 +133,7 @@ fn (key: Str | Bytes, data: Str | Bytes, expected-hex: Str, algorithm: Str): Boo
         eq(algorithm, "sha1") => { hmac-sha1(key, data) }
         => { err(`hmac-verify-hex: unsupported algorithm '${algorithm}'`) }
     }
+
     cond {
         is-err(computed) => { computed }
         is-empty(expected-hex) => { false }
@@ -165,6 +166,7 @@ fn (key: Str | Bytes, data: Str | Bytes, expected-b64: Str, algorithm: Str): Boo
         eq(algorithm, "sha1") => { hmac-sha1(key, data) }
         => { err(`hmac-verify-base64: unsupported algorithm '${algorithm}'`) }
     }
+
     cond {
         is-err(computed-hex) => { computed-hex }
         is-empty(expected-b64) => { false }

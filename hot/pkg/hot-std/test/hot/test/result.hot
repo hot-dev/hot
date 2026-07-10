@@ -161,6 +161,7 @@ meta ["test"] fn () {
         e err("the real reason")
         add(e, 1)
     }
+
     caught ::hot::internal::exec/contain(use-it)
     assert(is-err(caught), "escalation caught at the boundary")
     assert(contains(Str(err-value(caught)), "the real reason"), "halt carries the payload message")

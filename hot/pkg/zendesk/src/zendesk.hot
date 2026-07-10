@@ -49,10 +49,12 @@ request fn
     Authorization: auth-header(email, api-token),
     Accept: "application/json"
   }
+
   headers cond {
     eq(body, "") => { base-headers }
     => { {...base-headers, Content-Type: "application/json"} }
   }
+
   encoded if(eq(body, ""), "", to-json(untype(body)))
   response ::hot::http/request(::hot::http/HttpRequest({
     method,

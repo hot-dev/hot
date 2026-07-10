@@ -49,6 +49,7 @@ fn
     X-Pinecone-API-Version: ::pinecone/API_VERSION,
     Accept: "application/json"
   }
+
   headers if(eq(body, ""), default-headers, {...default-headers, Content-Type: "application/json"})
   encoded-body if(eq(body, ""), "", to-json(untype(body)))
 

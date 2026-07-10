@@ -275,6 +275,7 @@ bind-params fn (compiled: Map, params: Any): Vec {
         => { err("sql: statement has no placeholders but parameters were provided") }
       }
     }
+
     named => {
       cond {
         not(is-map(untype(params))) => {
@@ -297,6 +298,7 @@ bind-params fn (compiled: Map, params: Any): Vec {
         not(is-vec(params)) => {
           err("sql: statement uses ? placeholders; pass a Vec of parameters")
         }
+
         ne(length(params), compiled.count) => {
           err(`sql: expected ${compiled.count} parameters, got ${length(params)}`)
         }
@@ -495,6 +497,7 @@ fn
             => { coerce-row(q, first(rows)) }
           }
         }
+
         eq(mode, "scalar") => {
           cond {
             is-empty(rows) => { null }

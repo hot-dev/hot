@@ -30,6 +30,7 @@ meta ["test"] fn () {
             {title: "Second", url: "https://b.example", content: "snippet b", score: 0.72}
         ]
     }
+
     out ::tavily/normalize(body)
     assert-eq(2, length(out))
     assert-eq("First", first(out).title)
@@ -46,6 +47,7 @@ meta ["test"] fn () {
             ]
         }
     }
+
     out ::brave/normalize(body)
     assert-eq(1, length(out))
     assert-eq("desc text", first(out).content)
@@ -65,6 +67,7 @@ meta ["test"] fn () {
             {title: null, url: "https://e.example"}
         ]
     }
+
     out ::exa/normalize(body)
     assert-eq("page text", first(out).content)
     assert-eq("", last(out).title, "null titles normalize to empty string")

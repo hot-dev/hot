@@ -63,11 +63,13 @@ fn
     is-raw => { body }
     => { to-json(untype(body)) }
   }
+
   headers cond {
     eq(body, "") => { default-headers }
     is-raw => { default-headers }
     => { {...default-headers, Content-Type: "application/json"} }
   }
+
   final-headers {...headers, ...additional-headers}
 
   ::hot::http/request(HttpRequest({

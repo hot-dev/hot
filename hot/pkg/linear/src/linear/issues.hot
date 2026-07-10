@@ -53,6 +53,7 @@ fn
     first: or(get(options, "first"), 50),
     after: get(options, "after")
   }
+
   data ::api/graphql(query, filter-vals(variables, is-some))
   cond {
     is-err(data) => { data }

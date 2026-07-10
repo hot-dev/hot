@@ -158,6 +158,7 @@ negotiate-ssl fn (socket, ssl-mode: Str, host: Str, tls-opts: Map): Any {
                             // upgrade secures the socket handle in place.
                             if-ok(::tls/upgrade(socket, {...tls-opts, server-name: get(tls-opts, "server-name", host)}), (upgraded) { true })
                         }
+
                         eq(ssl-mode, "require") => {
                             err("pg: server does not support TLS but ssl=require")
                         }
@@ -179,16 +180,19 @@ startup-loop fn (socket, user: Str, password: Str, conn: Map): Map {
                 startup-loop(socket, user, password, conn)
             })
         }
+
         eq(msg.type, "S") => {
             k ::wire/read-cstring(msg.payload, 0)
             v ::wire/read-cstring(msg.payload, k[1])
             startup-loop(socket, user, password, assoc-in(conn, ["parameters", k[0]], v[0]))
         }
+
         eq(msg.type, "K") => {
             pid ::wire/read-int32(msg.payload, 0)
             key ::wire/read-int32(msg.payload, pid[1])
             startup-loop(socket, user, password, {...conn, backend-pid: pid[0], backend-key: key[0]})
         }
+
         eq(msg.type, "Z") => { conn }
         eq(msg.type, "E") => {
             e ::decode/parse-error(msg.payload)
@@ -214,16 +218,20 @@ collect-results fn (socket, fields: Vec, rows: Vec, command: Str, error): Map {
         eq(msg.type, "T") => {
             collect-results(socket, ::decode/parse-row-description(msg.payload), rows, command, error)
         }
+
         eq(msg.type, "D") => {
             collect-results(socket, fields, concat(rows, [::decode/parse-data-row(msg.payload, fields)]), command, error)
         }
+
         eq(msg.type, "C") => {
             tag ::wire/read-cstring(msg.payload, 0)
             collect-results(socket, fields, rows, tag[0], error)
         }
+
         eq(msg.type, "E") => {
             collect-results(socket, fields, rows, command, ::decode/parse-error(msg.payload))
         }
+
         eq(msg.type, "Z") => {
             cond {
                 is-null(error) => { {rows: rows, command: command} }
@@ -249,6 +257,7 @@ encode-param fn (value: Any): Bytes {
             text Bytes(concat("\\x", ::hex/encode(value)))
             concat(::wire/int32(length(text)), text)
         }
+
         is-bool(value) => {
             text Bytes(if(value, "t", "f"))
             concat(::wire/int32(length(text)), text)

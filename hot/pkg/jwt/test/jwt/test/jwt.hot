@@ -175,4 +175,3 @@ test-sign-rejects-unknown-algorithm
 meta ["test"] fn () {
     assert(is-err(::jwt/sign({a: 1}, "k", "none")), "alg none must not be signable")
 }
-

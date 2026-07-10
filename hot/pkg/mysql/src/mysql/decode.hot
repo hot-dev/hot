@@ -29,7 +29,9 @@ fn (payload: Bytes): Map {
 }
 
 parse-err
-meta {doc: """Parse an ERR packet (0xFF header) into an Err carrying `{code, sqlstate, message}`."""}
+meta {
+    doc: """Parse an ERR packet (0xFF header) into an Err carrying `{code, sqlstate, message}`."""
+}
 fn (payload: Bytes): Any {
     code-out ::wire/read-int2(payload, 1)
     // '#' marker + 5-byte sqlstate (protocol 4.1)
@@ -107,24 +109,30 @@ dec-type fn (t: Int): Bool {
 }
 
 coerce-text
-meta {doc: """Coerce a text-protocol value by column type: integer types to Int, float/decimal to Dec, binary charset to Bytes, everything else Str."""}
+meta {
+    doc: """Coerce a text-protocol value by column type: integer types to Int, float/decimal to Dec, binary charset to Bytes, everything else Str."""
+}
 fn (col: Map, raw: Bytes): Any {
     cond {
         int-type(col.type) => {
             parsed Int(Str(raw))
             if-err(parsed, (e) { Str(raw) })
         }
+
         dec-type(col.type) => {
             parsed Dec(Str(raw))
             if-err(parsed, (e) { Str(raw) })
         }
+
         and(eq(col.charset, 63), not(in(col.type, [TYPE-DATE, TYPE-TIME, TYPE-DATETIME, TYPE-TIMESTAMP]))) => { raw }
         => { Str(raw) }
     }
 }
 
 decode-text-row
-meta {doc: """Decode one text-protocol row against the column list: lenenc values, 0xFB = NULL. Returns a row Map."""}
+meta {
+    doc: """Decode one text-protocol row against the column list: lenenc values, 0xFB = NULL. Returns a row Map."""
+}
 fn (cols: Vec, payload: Bytes): Map {
     out reduce(cols, (acc, col) {
         pos acc[1]
@@ -190,7 +198,9 @@ read-binary-time fn (payload: Bytes, pos: Int): Vec {
 }
 
 read-binary-value
-meta {doc: """Read one binary-protocol value at `pos` for a column. -> [value, next-pos]."""}
+meta {
+    doc: """Read one binary-protocol value at `pos` for a column. -> [value, next-pos]."""
+}
 fn (col: Map, payload: Bytes, pos: Int): Vec {
     t col.type
     cond {
@@ -201,9 +211,11 @@ fn (col: Map, payload: Bytes, pos: Int): Vec {
         eq(t, TYPE-FLOAT) => {
             [::bytes/to-float(slice(payload, pos, add(pos, 4)), "le"), add(pos, 4)]
         }
+
         eq(t, TYPE-DOUBLE) => {
             [::bytes/to-float(slice(payload, pos, add(pos, 8)), "le"), add(pos, 8)]
         }
+
         in(t, [TYPE-DATE, TYPE-DATETIME, TYPE-TIMESTAMP]) => { read-binary-datetime(payload, pos) }
         eq(t, TYPE-TIME) => { read-binary-time(payload, pos) }
         eq(t, TYPE-NEWDECIMAL) => {

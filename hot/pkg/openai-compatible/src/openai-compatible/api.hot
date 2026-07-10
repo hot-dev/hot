@@ -1,5 +1,7 @@
 ::openai-compatible::api ns
-meta {ctx: {"openai-compatible.url": {required: true}, "openai-compatible.api.key": {required: true}}}
+meta {
+    ctx: {"openai-compatible.url": {required: true}, "openai-compatible.api.key": {required: true}}
+}
 
 ::ctx ::hot::ctx
 
@@ -97,6 +99,7 @@ fn
     Authorization: `Bearer ${api-key}`,
     Content-Type: "application/json"
   }
+
   final-headers {...default-headers, ...additional-headers}
 
   ::hot::http/request-stream(HttpRequest({

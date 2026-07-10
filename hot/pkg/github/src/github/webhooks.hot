@@ -42,6 +42,7 @@ fn
     starts-with(header, "sha256=") => { slice(header, 7) }
     => { "" }
   }
+
   raw-body ::hot::http/raw-body(request)
   ::hmac/hmac-verify-hex(secret, raw-body, signature, "sha256")
 }

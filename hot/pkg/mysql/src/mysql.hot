@@ -183,6 +183,7 @@ finish-connect fn (socket, handshake: Map, user: Str, password: Str, database: S
         }
         => { socket }
     }
+
     cond {
         is-err(upgraded) => { upgraded }
         => {
@@ -244,6 +245,7 @@ read-rows fn (socket, cols: Vec, binary: Bool, acc: Vec): Any {
                 binary => { ::decode/decode-binary-row(cols, packet.payload) }
                 => { ::decode/decode-text-row(cols, packet.payload) }
             }
+
             read-rows(socket, cols, binary, concat(acc, [row]))
         }
     }
@@ -316,7 +318,9 @@ null-bitmap fn (params: Vec): Bytes {
 }
 
 stmt-execute-payload
-meta {doc: """Build the COM_STMT_EXECUTE payload for a statement id and params. Exposed for testing."""}
+meta {
+    doc: """Build the COM_STMT_EXECUTE payload for a statement id and params. Exposed for testing."""
+}
 fn (stmt-id: Int, params: Vec): Bytes {
     head concat(
         ::wire/int1(COM-STMT-EXECUTE),

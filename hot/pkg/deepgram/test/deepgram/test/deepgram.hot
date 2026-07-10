@@ -8,6 +8,7 @@ meta ["test"] fn () {
             channels: [{alternatives: [{transcript: "hello hot", confidence: 0.99}]}]
         }
     }
+
     assert-eq("hello hot", ::deepgram/transcript(response))
 }
 
@@ -17,4 +18,3 @@ meta ["test"] fn () {
     assert-eq("", ::deepgram/transcript({results: {channels: []}}))
     assert-eq("", ::deepgram/transcript({results: {channels: [{alternatives: []}]}}))
 }
-

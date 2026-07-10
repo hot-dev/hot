@@ -40,6 +40,7 @@ driver
 meta {
     doc: """The MySQL `::sql/Driver`. Usually used through `::sql::mysql/open`."""
 }
+
 ::sql/Driver({
   name: "mysql",
   placeholder: "question",

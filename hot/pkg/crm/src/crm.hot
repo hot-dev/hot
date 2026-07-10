@@ -141,6 +141,7 @@ fn (contact: Any, body: Str): Any {
     is-str(contact) => { find-contact(contact) }
     => { contact }
   }
+
   cond {
     is-err(resolved) => { resolved }
     is-null(resolved) => { err(`crm: no contact found for '${contact}'`) }

@@ -92,6 +92,7 @@ fn
       signature ::b64/encode-url(::hmac/hmac-sha256-bytes(key, signing-input))
       `${signing-input}.${signature}`
     }
+
     eq(algorithm, "RS256") => {
       raw ::crypto/rsa-sha256-sign(key, signing-input)
       cond {
@@ -164,10 +165,12 @@ validate-claims fn (payload: Map, options: Map): Any {
     is-null(exp) => { false }
     => { gt(now, add(exp, leeway)) }
   }
+
   premature cond {
     is-null(nbf) => { false }
     => { lt(now, sub(nbf, leeway)) }
   }
+
   wrong-iss cond {
     is-null(expected-iss) => { false }
     => { ne(get(payload, "iss"), expected-iss) }
@@ -187,6 +190,7 @@ validate-claims fn (payload: Map, options: Map): Any {
     wrong-iss => {
       err(`jwt: issuer mismatch: expected '${expected-iss}', got '${get(payload, "iss")}'`)
     }
+
     wrong-aud => {
       err(`jwt: audience mismatch: expected '${expected-aud}', got '${aud}'`)
     }

@@ -329,6 +329,7 @@ fn
         eq(tolerance-seconds, 0) => { true }
         => { ::hot::time/within-seconds-of-now(timestamp, tolerance-seconds) }
       }
+
       cond {
         not(fresh) => { false }
         => {

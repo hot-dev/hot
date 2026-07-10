@@ -66,6 +66,7 @@ fn
     secret: secret,
     ...body
   }
+
   response ::hot::http/request(::hot::http/HttpRequest({
     method: "POST",
     url: `${env-base-url(env)}${path}`,
@@ -131,6 +132,7 @@ fn (access-token: Str, cursor: Any): Any {
     is-null(cursor) => { {access_token: access-token} }
     => { {access_token: access-token, cursor: cursor} }
   }
+
   post("/transactions/sync", body)
 }
 
