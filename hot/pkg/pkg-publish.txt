@@ -51,6 +51,9 @@ supabase-admin
 #pg
 #redis
 #sql
+#sql-mysql
+#sql-pg
+#sql-sqlite
 
 # Auth & Webhook Primitives
 #jwt

@@ -4,23 +4,12 @@ hot.pkg.sql {
   name: "hot.dev/sql",
   version: "0.1.0",
   hot-min-version: "2.6.1",
-  description: "Typed SQL runtime for Hot. Portable `?` and `:name` placeholders, typed Query values, transactions, and one driver contract across PostgreSQL (hot.dev/pg), MySQL (hot.dev/mysql), and SQLite (embedded via ::hot::sqlite).",
+  description: "Typed SQL runtime for Hot. Portable `?` and `:name` placeholders, typed Query values, transactions, and the driver contract implemented by hot.dev/sql-pg, hot.dev/sql-mysql, and hot.dev/sql-sqlite.",
   author: "Hot Dev",
   email: "support@hot.dev",
   license: "Apache-2.0",
   tags: ["database", "sql"],
-  deps: {
-    "hot.dev/mysql": {
-      local: "../mysql",
-      git: "https://github.com/hot-dev/hot",
-      path: "hot/pkg/mysql"
-    },
-    "hot.dev/pg": {
-      local: "../pg",
-      git: "https://github.com/hot-dev/hot",
-      path: "hot/pkg/pg"
-    }
-  },
+  deps: {},
   src-paths: ["src/"],
   test-paths: ["test/"]
 }

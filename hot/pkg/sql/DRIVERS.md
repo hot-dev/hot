@@ -1,5 +1,12 @@
 # Adding drivers to hot.dev/sql
 
+Packaging shape (decided 2026-07): `hot.dev/sql` is the runtime and
+Driver contract with ZERO deps. Each driver ships as an adapter package
+— `sql-pg`, `sql-mysql`, `sql-sqlite` — that defines the `::sql::<db>`
+namespace and depends on `sql` plus its wire client (sqlite needs only
+the runtime natives). A new driver = a new `sql-<db>` package; never
+add driver deps to `sql` itself.
+
 The `::sql/Driver` contract is intentionally small — `name`, a
 `placeholder` style, and four functions (`connect`, `query`, `execute`,
 `close`). The runtime owns placeholder compilation, binding, typed

@@ -16,6 +16,7 @@ meta {
 
     ```hot
     ::sql ::sql
+    // drivers install separately: hot.dev/sql-pg, sql-mysql, sql-sqlite
     db ::sql::pg/open({user: "postgres", database: "app"})
     // or: ::sql::mysql/open({user: "root", database: "app"})
     // or: ::sql::sqlite/open("data/app.db")   — embedded, no server

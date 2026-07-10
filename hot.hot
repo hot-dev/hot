@@ -100,6 +100,8 @@ hot.project.hot-pkg-all.test.paths [
     "./hot/pkg/shopify/test",
     "./hot/pkg/slack/test",
     "./hot/pkg/sox/test",
+    "./hot/pkg/sql-mysql/test",
+    "./hot/pkg/sql-sqlite/test",
     "./hot/pkg/sql/test",
     "./hot/pkg/stripe/test",
     "./hot/pkg/supabase-admin/test",
@@ -178,6 +180,9 @@ hot.project.hot-pkg-all.deps {
     "hot.dev/slack-admin": { "local": "./hot/pkg/slack-admin" },
     "hot.dev/sox": { "local": "./hot/pkg/sox" },
     "hot.dev/sql": { "local": "./hot/pkg/sql" },
+    "hot.dev/sql-mysql": { "local": "./hot/pkg/sql-mysql" },
+    "hot.dev/sql-pg": { "local": "./hot/pkg/sql-pg" },
+    "hot.dev/sql-sqlite": { "local": "./hot/pkg/sql-sqlite" },
     "hot.dev/stripe": { "local": "./hot/pkg/stripe" },
     "hot.dev/supabase": { "local": "./hot/pkg/supabase" },
     "hot.dev/supabase-admin": { "local": "./hot/pkg/supabase-admin" },
@@ -597,9 +602,24 @@ hot.project.pkg-test-slack.deps {}
 hot.project.pkg-test-sql.src.paths ["./hot/pkg/sql/src"]
 hot.project.pkg-test-sql.test.paths ["./hot/pkg/sql/test"]
 hot.project.pkg-test-sql.test.capture true
-hot.project.pkg-test-sql.deps {
+// sql runtime tests use a fake driver; real-driver coverage lives in
+// pkg-test-sql-sqlite / pkg-test-sql-mysql / pkg-integration-sql.
+
+// sql-sqlite driver tests (hermetic — embedded sqlite, service-mode storage)
+hot.project.pkg-test-sql-sqlite.src.paths ["./hot/pkg/sql-sqlite/src"]
+hot.project.pkg-test-sql-sqlite.test.paths ["./hot/pkg/sql-sqlite/test"]
+hot.project.pkg-test-sql-sqlite.test.capture true
+hot.project.pkg-test-sql-sqlite.deps {
+    "hot.dev/sql": { "local": "./hot/pkg/sql" }
+}
+
+// sql-mysql adapter tests (hermetic — quoting and driver shape)
+hot.project.pkg-test-sql-mysql.src.paths ["./hot/pkg/sql-mysql/src"]
+hot.project.pkg-test-sql-mysql.test.paths ["./hot/pkg/sql-mysql/test"]
+hot.project.pkg-test-sql-mysql.test.capture true
+hot.project.pkg-test-sql-mysql.deps {
     "hot.dev/mysql": { "local": "./hot/pkg/mysql" },
-    "hot.dev/pg": { "local": "./hot/pkg/pg" }
+    "hot.dev/sql": { "local": "./hot/pkg/sql" }
 }
 
 // mysql unit tests (hermetic wire/auth/decode vectors)
@@ -608,11 +628,11 @@ hot.project.pkg-test-mysql.test.paths ["./hot/pkg/mysql/test"]
 hot.project.pkg-test-mysql.test.capture true
 
 // mysql integration tests (needs a live MySQL; see integration-test/)
-hot.project.pkg-integration-mysql.src.paths ["./hot/pkg/mysql/src"]
+hot.project.pkg-integration-mysql.src.paths ["./hot/pkg/sql-mysql/src"]
 hot.project.pkg-integration-mysql.test.paths ["./hot/pkg/mysql/integration-test"]
 hot.project.pkg-integration-mysql.test.capture true
 hot.project.pkg-integration-mysql.deps {
-    "hot.dev/pg": { "local": "./hot/pkg/pg" },
+    "hot.dev/mysql": { "local": "./hot/pkg/mysql" },
     "hot.dev/sql": { "local": "./hot/pkg/sql" }
 }
 
@@ -939,11 +959,12 @@ hot.project.pkg-integration-elevenlabs.test.capture true
 hot.project.pkg-integration-elevenlabs.deps {}
 
 // SQL integration tests (requires a live PostgreSQL; see SQL_TEST_* env vars)
-hot.project.pkg-integration-sql.src.paths ["./hot/pkg/sql/src"]
+hot.project.pkg-integration-sql.src.paths ["./hot/pkg/sql-pg/src"]
 hot.project.pkg-integration-sql.test.paths ["./hot/pkg/sql/integration-test"]
 hot.project.pkg-integration-sql.test.capture true
 hot.project.pkg-integration-sql.deps {
-    "hot.dev/pg": { "local": "./hot/pkg/pg" }
+    "hot.dev/pg": { "local": "./hot/pkg/pg" },
+    "hot.dev/sql": { "local": "./hot/pkg/sql" }
 }
 
 // Stripe integration tests

@@ -2,11 +2,14 @@
 
 Typed SQL runtime for Hot. Portable placeholders, typed query values, transactions, and one result/error shape across drivers:
 
-| Driver | Open | Placeholder | Identifiers | Notes |
+This package is the runtime and driver contract only — install the
+adapter package for your database (`sql` arrives transitively):
+
+| Install | Open | Placeholder | Identifiers | Notes |
 |---|---|---|---|---|
-| PostgreSQL | `::sql::pg/open({...})` | `$1` | ANSI `"..."` | pure-Hot wire client ([`hot.dev/pg`](../pg)) |
-| MySQL | `::sql::mysql/open({...})` | `?` | backtick `` `...` `` | pure-Hot wire client ([`hot.dev/mysql`](../mysql)); params always use binary prepared statements |
-| SQLite | `::sql::sqlite/open("path.db")` | `?` | ANSI `"..."` | embedded (`::hot::sqlite` natives), `file.mode`-aware — managed-storage checkout/commit in service mode |
+| [`hot.dev/sql-pg`](../sql-pg) | `::sql::pg/open({...})` | `$1` | ANSI `"..."` | pure-Hot wire client ([`hot.dev/pg`](../pg)) |
+| [`hot.dev/sql-mysql`](../sql-mysql) | `::sql::mysql/open({...})` | `?` | backtick `` `...` `` | pure-Hot wire client ([`hot.dev/mysql`](../mysql)); params always use binary prepared statements |
+| [`hot.dev/sql-sqlite`](../sql-sqlite) | `::sql::sqlite/open("path.db")` | `?` | ANSI `"..."` | embedded (`::hot::sqlite` natives), `file.mode`-aware — managed-storage checkout/commit in service mode |
 
 Inspired by Rust's sqlx: SQL stays SQL — this is not an ORM.
 
