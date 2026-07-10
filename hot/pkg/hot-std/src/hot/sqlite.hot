@@ -9,9 +9,11 @@ meta {
     - `service` (managed default) — `path` names a file in managed
       storage. Opening checks the database out into a local scratch
       copy; queries run at local speed; `close`/`sync` commit the bytes
-      back. Commits refuse to overwrite a file that changed since
-      checkout (an Err — reopen and retry). A crash between commits
-      loses writes since the last `sync`, and commit cost is
+      back. Commits are an atomic compare-and-swap on the stored file's
+      version: when the file changed since checkout, the commit loses
+      cleanly with an Err (reopen and retry) — never a silent overwrite.
+      A crash between commits loses writes since the last `sync`, and
+      commit cost is
       proportional to the file size, so service mode fits small,
       session-shaped workloads; high-frequency writers belong on a
       server database (see `hot.dev/pg`).

@@ -236,6 +236,21 @@ pub trait FileStorage: Send + Sync {
     ) -> Result<FileMetadata, String>;
 
     /// Read file from storage
+    /// Conditionally write: succeeds only while the stored record still
+    /// matches `expected_etag` (or does not exist yet, for None). Returns
+    /// Ok(None) when the compare-and-swap loses. The record is flipped
+    /// BEFORE the blob bytes are written, so exactly one concurrent writer
+    /// proceeds to the byte write — this is the serialization point for
+    /// read-modify-write consumers like ::hot::sqlite.
+    async fn write_file_if(
+        &self,
+        path: &str,
+        content: &[u8],
+        content_type: Option<&str>,
+        expected_etag: Option<&str>,
+        ctx: &FileStorageContext,
+    ) -> Result<Option<FileMetadata>, String>;
+
     async fn read_file(&self, path: &str, ctx: &FileStorageContext) -> Result<Vec<u8>, String>;
 
     /// Delete file from storage and mark inactive in database
@@ -349,6 +364,109 @@ pub trait FileStorage: Send + Sync {
 // ============================================================================
 
 /// Normalize a file path to prevent directory traversal
+/// Quota checks shared by the conditional write path (mirrors write_file).
+async fn check_write_quota(ctx: &FileStorageContext, content_len: i64) -> Result<(), String> {
+    use crate::db::Features;
+    use crate::db::file::get_storage_usage_by_org;
+
+    let features = Features::resolve_for_org(&ctx.db, &ctx.org_id).await;
+    let max_file_bytes = ctx.effective_file_max_bytes(features.file_upload_max_bytes());
+    if content_len > max_file_bytes {
+        return Err(format!(
+            "File size {} bytes exceeds maximum allowed {} bytes",
+            content_len, max_file_bytes
+        ));
+    }
+    let storage_limit = features.storage_bytes();
+    if storage_limit >= 0 {
+        let current_usage = get_storage_usage_by_org(&ctx.db, ctx.org_id)
+            .await
+            .unwrap_or(0);
+        if current_usage + content_len > storage_limit {
+            return Err(format!(
+                "Storage quota exceeded: current usage {} + file {} > limit {}",
+                current_usage, content_len, storage_limit
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// The record compare-and-swap behind write_file_if: conditional update when
+/// an etag is expected, plain insert (racing on the partial unique index
+/// over active (org_id, env_id, path)) when the file must not exist yet.
+/// Ok(None) = the CAS lost.
+#[allow(clippy::too_many_arguments)]
+async fn cas_file_record(
+    backend: &str,
+    storage_path: &str,
+    normalized_path: &str,
+    content_len: i64,
+    etag: &str,
+    content_type: Option<&str>,
+    expected_etag: Option<&str>,
+    ctx: &FileStorageContext,
+) -> Result<Option<FileMetadata>, String> {
+    if let Err(e) = ctx.ensure_run_row().await {
+        tracing::debug!(
+            path = %normalized_path,
+            "Conditional file write: could not ensure run row: {}",
+            e
+        );
+    }
+    match expected_etag {
+        Some(expected) => {
+            let existing =
+                match get_file_by_path(&ctx.db, normalized_path, ctx.org_id, ctx.env_id).await {
+                    Ok(r) => r,
+                    // Deleted (or never existed) since checkout: the CAS loses.
+                    Err(_) => return Ok(None),
+                };
+            let updated = crate::db::file::update_file_record_if_etag(
+                &ctx.db,
+                existing.file_id,
+                expected,
+                content_len,
+                Some(etag),
+                content_type,
+                storage_path,
+                ctx.user_id,
+                ctx.run_id,
+            )
+            .await?;
+            Ok(updated.map(FileMetadata::from_file_record))
+        }
+        None => {
+            match insert_file_record(
+                &ctx.db,
+                normalized_path,
+                content_len,
+                Some(etag),
+                content_type,
+                backend,
+                storage_path,
+                ctx.org_id,
+                ctx.env_id,
+                ctx.user_id,
+                ctx.run_id,
+            )
+            .await
+            {
+                Ok(rec) => Ok(Some(FileMetadata::from_file_record(rec))),
+                // A concurrent creator won the unique index race: CAS lost.
+                Err(msg)
+                    if msg.contains("UNIQUE")
+                        || msg.contains("unique")
+                        || msg.contains("duplicate key") =>
+                {
+                    Ok(None)
+                }
+                Err(e) => Err(e),
+            }
+        }
+    }
+}
+
 pub fn normalize_path(path: &str) -> Result<String, String> {
     // Accept the same hot:// paths that the in-container hotbox CLI accepts.
     // hotbox strips this scheme before it asks the file server for /files/<path>,
@@ -637,6 +755,52 @@ impl FileStorage for LocalFileStorage {
 
         tracing::debug!("Wrote file {} to local storage", normalized_path);
         Ok(file_metadata)
+    }
+
+    async fn write_file_if(
+        &self,
+        path: &str,
+        content: &[u8],
+        content_type: Option<&str>,
+        expected_etag: Option<&str>,
+        ctx: &FileStorageContext,
+    ) -> Result<Option<FileMetadata>, String> {
+        let normalized_path = normalize_path(path)?;
+        validate_path_security(&normalized_path)?;
+        check_write_quota(ctx, content.len() as i64).await?;
+
+        let etag = compute_md5(content);
+        let content_type_final = content_type
+            .map(|s| s.to_string())
+            .or_else(|| detect_content_type(&normalized_path, content));
+        let full_path = self.full_path(&normalized_path, ctx);
+        let storage_path = full_path.to_string_lossy().to_string();
+
+        // Flip the record first: the CAS is the serialization point.
+        let meta = cas_file_record(
+            "local",
+            &storage_path,
+            &normalized_path,
+            content.len() as i64,
+            &etag,
+            content_type_final.as_deref(),
+            expected_etag,
+            ctx,
+        )
+        .await?;
+        let Some(meta) = meta else {
+            return Ok(None);
+        };
+
+        if let Some(parent) = full_path.parent() {
+            tokio::fs::create_dir_all(parent)
+                .await
+                .map_err(|e| format!("Failed to create parent directories: {}", e))?;
+        }
+        tokio::fs::write(&full_path, content)
+            .await
+            .map_err(|e| format!("Failed to write file to storage: {}", e))?;
+        Ok(Some(meta))
     }
 
     async fn read_file(&self, path: &str, ctx: &FileStorageContext) -> Result<Vec<u8>, String> {
@@ -1229,6 +1393,58 @@ pub mod s3 {
             Ok(file_metadata)
         }
 
+        async fn write_file_if(
+            &self,
+            path: &str,
+            content: &[u8],
+            content_type: Option<&str>,
+            expected_etag: Option<&str>,
+            ctx: &FileStorageContext,
+        ) -> Result<Option<FileMetadata>, String> {
+            let normalized_path = normalize_path(path)?;
+            validate_path_security(&normalized_path)?;
+            check_write_quota(ctx, content.len() as i64).await?;
+
+            let etag = compute_md5(content);
+            let content_type_final = content_type
+                .map(|s| s.to_string())
+                .or_else(|| detect_content_type(&normalized_path, content));
+            let key = self.s3_key(&normalized_path, ctx);
+
+            // Flip the record first: the CAS is the serialization point.
+            let meta = cas_file_record(
+                "s3",
+                &key,
+                &normalized_path,
+                content.len() as i64,
+                &etag,
+                content_type_final.as_deref(),
+                expected_etag,
+                ctx,
+            )
+            .await?;
+            let Some(meta) = meta else {
+                return Ok(None);
+            };
+
+            let byte_stream = ByteStream::from(content.to_vec());
+            let mut put_request = self
+                .client
+                .put_object()
+                .bucket(&self.bucket)
+                .key(&key)
+                .body(byte_stream);
+            if let Some(ct) = &content_type_final {
+                put_request = put_request.content_type(ct);
+            }
+            put_request.send().await.map_err(|e| {
+                format!(
+                    "Failed to upload file to S3 (bucket: {}, key: {}, path: {}): {}",
+                    self.bucket, key, normalized_path, e
+                )
+            })?;
+            Ok(Some(meta))
+        }
         async fn read_file(&self, path: &str, ctx: &FileStorageContext) -> Result<Vec<u8>, String> {
             // Normalize and validate path
             let normalized_path = normalize_path(path)?;

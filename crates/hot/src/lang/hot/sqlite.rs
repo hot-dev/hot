@@ -4,21 +4,21 @@
 // - "direct": open the host path with sqlite3_open_v2 (default for CLI).
 // - "service": check the database file out of FileStorage into a local
 //   scratch copy, run SQLite against the copy, and commit the bytes back
-//   on close/sync. Conflict detection is best-effort compare-before-write:
-//   the remote content hash recorded at checkout must still match at
-//   commit time or the commit fails with a conflict error.
+//   on close/sync. Commits go through FileStorage::write_file_if — an
+//   atomic compare-and-swap on the file record's etag — so a concurrent
+//   commit loses cleanly with a conflict error instead of clobbering.
 //
 // Connections are Val::Box handles (like ::hot::tcp): an Arc'd inner with
 // a mutex-serialized raw sqlite3 pointer. Connections are opened with
 // SQLITE_OPEN_FULLMUTEX, and every use goes through the state mutex, so a
 // handle crossing VM/task boundaries is safe (serialized, never faster).
 
+use crate::file_storage::compute_md5;
 use crate::lang::hot::file::{get_file_context, get_file_mode};
 use crate::lang::hot::r#type::HotResult;
 use crate::lang::runtime::vm::VirtualMachine;
 use crate::val::Val;
 use crate::validate_args;
-use aws_lc_rs::digest::{self, SHA256};
 use libsqlite3_sys as ffi;
 use std::any::Any;
 use std::ffi::{CStr, CString};
@@ -49,9 +49,9 @@ unsafe impl Send for DbPtr {}
 struct ServiceCheckout {
     /// Path within FileStorage (what the caller passed to open).
     storage_path: String,
-    /// Content hash of the remote file at checkout (None when the file
-    /// did not exist yet — first commit creates it).
-    checkout_hash: Option<[u8; 32]>,
+    /// Record etag at checkout (None when the file did not exist yet —
+    /// the first commit creates it, racing on the unique index).
+    checkout_etag: Option<String>,
     read_only: bool,
 }
 
@@ -329,13 +329,6 @@ fn get_handle<'a>(args: &'a [Val], fn_name: &str) -> Result<&'a SqliteConnection
     }
 }
 
-fn sha256_of(bytes: &[u8]) -> [u8; 32] {
-    let d = digest::digest(&SHA256, bytes);
-    let mut out = [0u8; 32];
-    out.copy_from_slice(d.as_ref());
-    out
-}
-
 fn scratch_path(id: &str) -> PathBuf {
     let dir = std::env::temp_dir().join("hot-sqlite");
     let _ = std::fs::create_dir_all(&dir);
@@ -398,19 +391,24 @@ pub fn open(vm: &mut VirtualMachine, args: &[Val]) -> HotResult<Val> {
         };
 
         let scratch = scratch_path(&id);
-        let checkout_hash = if exists {
+        let checkout_etag = if exists {
             let bytes = match block_on_storage(file_storage.read_file(&path, &ctx)) {
                 Ok(b) => b,
                 Err(e) => return HotResult::Err(Val::from(format!("::hot::sqlite/open: {}", e))),
             };
-            let hash = sha256_of(&bytes);
+            let meta = match block_on_storage(file_storage.get_file_metadata(&path, &ctx)) {
+                Ok(m) => m,
+                Err(e) => return HotResult::Err(Val::from(format!("::hot::sqlite/open: {}", e))),
+            };
             if let Err(e) = std::fs::write(&scratch, &bytes) {
                 return HotResult::Err(Val::from(format!(
                     "::hot::sqlite/open: scratch write failed: {}",
                     e
                 )));
             }
-            Some(hash)
+            // Legacy records without an etag can't CAS; hash what we read so
+            // the commit still has an expectation to compare against skips.
+            Some(meta.etag.unwrap_or_else(|| compute_md5(&bytes)))
         } else if read_only {
             return HotResult::Err(Val::from(format!(
                 "::hot::sqlite/open: '{}' does not exist (read-only open)",
@@ -424,7 +422,7 @@ pub fn open(vm: &mut VirtualMachine, args: &[Val]) -> HotResult<Val> {
             scratch,
             Some(ServiceCheckout {
                 storage_path: path.clone(),
-                checkout_hash,
+                checkout_etag,
                 read_only,
             }),
         )
@@ -583,42 +581,32 @@ fn commit_service(
 
     let local_bytes = std::fs::read(&state.local_path)
         .map_err(|e| format!("{}: scratch read failed: {}", fn_name, e))?;
-    let local_hash = sha256_of(&local_bytes);
+    let local_etag = compute_md5(&local_bytes);
 
     // Skip the upload when nothing changed since checkout.
-    if service.checkout_hash == Some(local_hash) {
+    if service.checkout_etag.as_deref() == Some(local_etag.as_str()) {
         return Ok(());
     }
 
-    // Best-effort conflict detection (see module docs for the caveat: the
-    // check and the write are not atomic).
-    let exists = block_on_storage(file_storage.file_exists(&service.storage_path, &ctx))?;
-    match (exists, service.checkout_hash) {
-        (true, Some(expected)) => {
-            let remote = block_on_storage(file_storage.read_file(&service.storage_path, &ctx))?;
-            if sha256_of(&remote) != expected {
-                return Err(format!(
-                    "{}: conflict — '{}' changed since checkout; reopen and retry",
-                    fn_name, service.storage_path
-                ));
-            }
+    // Atomic compare-and-swap on the record etag: exactly one concurrent
+    // committer wins; losers get a conflict Err and never touch the blob.
+    let committed = block_on_storage(file_storage.write_file_if(
+        &service.storage_path,
+        &local_bytes,
+        None,
+        service.checkout_etag.as_deref(),
+        &ctx,
+    ))?;
+    match committed {
+        Some(meta) => {
+            service.checkout_etag = Some(meta.etag.unwrap_or(local_etag));
+            Ok(())
         }
-        (true, None) => {
-            return Err(format!(
-                "{}: conflict — '{}' was created since checkout; reopen and retry",
-                fn_name, service.storage_path
-            ));
-        }
-        (false, Some(_)) => {
-            // Deleted underneath us; recreating it from our copy is the
-            // least surprising outcome.
-        }
-        (false, None) => {}
+        None => Err(format!(
+            "{}: conflict — '{}' changed since checkout; reopen and retry",
+            fn_name, service.storage_path
+        )),
     }
-
-    block_on_storage(file_storage.write_file(&service.storage_path, &local_bytes, None, &ctx))?;
-    service.checkout_hash = Some(local_hash);
-    Ok(())
 }
 
 /// ::hot::sqlite/sync — commit the service-mode checkout without closing.

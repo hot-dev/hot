@@ -391,6 +391,108 @@ async fn update_file_record_attempt(
     }
 }
 
+/// Conditionally update a file record: succeeds only while the stored etag
+/// still equals `expected_etag`. Returns Ok(None) when the record changed
+/// since it was read (the compare-and-swap lost) — the caller must not
+/// write the blob bytes in that case.
+#[allow(clippy::too_many_arguments)]
+pub async fn update_file_record_if_etag(
+    db: &DatabasePool,
+    file_id: Uuid,
+    expected_etag: &str,
+    size: i64,
+    etag: Option<&str>,
+    content_type: Option<&str>,
+    storage_path: &str,
+    updated_by_user_id: Uuid,
+    updated_by_run_id: Option<Uuid>,
+) -> Result<Option<FileRecord>, String> {
+    let now = Utc::now();
+    match db {
+        DatabasePool::Postgres(pool) => {
+            let query = r#"
+            UPDATE file SET
+                size = $2,
+                etag = $3,
+                content_type = $4,
+                storage_path = $5,
+                updated_by_user_id = $6,
+                updated_by_run_id = $7,
+                updated_at = $8
+            WHERE file_id = $1 AND etag = $9
+            RETURNING file_id, path, size, etag, content_type,
+                      storage_backend, storage_path, org_id, env_id,
+                      created_by_run_id, updated_by_run_id,
+                      created_at, updated_at, created_by_user_id, updated_by_user_id
+            "#;
+            let row = sqlx::query(query)
+                .bind(file_id)
+                .bind(size)
+                .bind(etag)
+                .bind(content_type)
+                .bind(storage_path)
+                .bind(updated_by_user_id)
+                .bind(updated_by_run_id)
+                .bind(now)
+                .bind(expected_etag)
+                .fetch_optional(pool)
+                .await
+                .map_err(|e| format!("Failed to conditionally update file record: {}", e))?;
+            let Some(row) = row else {
+                return Ok(None);
+            };
+            let fwe = |e: sqlx::Error| format!("Failed to read updated file record: {}", e);
+            Ok(Some(FileRecord {
+                file_id: row.try_get("file_id").map_err(fwe)?,
+                path: row.try_get("path").map_err(fwe)?,
+                size: row.try_get("size").map_err(fwe)?,
+                etag: row.try_get("etag").map_err(fwe)?,
+                content_type: row.try_get("content_type").map_err(fwe)?,
+                storage_backend: row.try_get("storage_backend").map_err(fwe)?,
+                storage_path: row.try_get("storage_path").map_err(fwe)?,
+                org_id: row.try_get("org_id").map_err(fwe)?,
+                env_id: row.try_get("env_id").map_err(fwe)?,
+                created_by_run_id: row.try_get("created_by_run_id").map_err(fwe)?,
+                updated_by_run_id: row.try_get("updated_by_run_id").map_err(fwe)?,
+                created_at: row.try_get("created_at").map_err(fwe)?,
+                updated_at: row.try_get("updated_at").map_err(fwe)?,
+                created_by_user_id: row.try_get("created_by_user_id").map_err(fwe)?,
+                updated_by_user_id: row.try_get("updated_by_user_id").map_err(fwe)?,
+            }))
+        }
+        DatabasePool::Sqlite(pool) => {
+            let query = r#"
+            UPDATE file SET
+                size = ?,
+                etag = ?,
+                content_type = ?,
+                storage_path = ?,
+                updated_by_user_id = ?,
+                updated_by_run_id = ?,
+                updated_at = ?
+            WHERE file_id = ? AND etag = ?
+            "#;
+            let result = sqlx::query(query)
+                .bind(size)
+                .bind(etag)
+                .bind(content_type)
+                .bind(storage_path)
+                .bind(updated_by_user_id)
+                .bind(updated_by_run_id)
+                .bind(now)
+                .bind(file_id)
+                .bind(expected_etag)
+                .execute(pool)
+                .await
+                .map_err(|e| format!("Failed to conditionally update file record: {}", e))?;
+            if result.rows_affected() == 0 {
+                return Ok(None);
+            }
+            get_file_by_id(db, file_id).await.map(Some)
+        }
+    }
+}
+
 /// Get file record by path, org_id, and env_id (SECURITY: prevents cross-org and cross-env access)
 pub async fn get_file_by_path(
     db: &DatabasePool,
@@ -1961,6 +2063,69 @@ mod tests {
         .unwrap();
 
         assert_eq!(record.created_by_run_id, Some(run_id));
+    }
+
+    #[tokio::test]
+    async fn conditional_update_wins_once_then_conflicts() {
+        let db = setup_fk_db().await;
+        let org_id = Uuid::now_v7();
+        let user_id = Uuid::now_v7();
+
+        let inserted = insert_file_record(
+            &db,
+            "dbs/app.db",
+            10,
+            Some("etag-v1"),
+            None,
+            "local",
+            "/tmp/storage/dbs/app.db",
+            org_id,
+            None,
+            user_id,
+            None,
+        )
+        .await
+        .unwrap();
+
+        // First CAS with the current etag wins.
+        let won = update_file_record_if_etag(
+            &db,
+            inserted.file_id,
+            "etag-v1",
+            20,
+            Some("etag-v2"),
+            None,
+            "/tmp/storage/dbs/app.db",
+            user_id,
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            won.as_ref().and_then(|r| r.etag.clone()),
+            Some("etag-v2".to_string())
+        );
+
+        // A second writer still holding the old etag loses cleanly.
+        let lost = update_file_record_if_etag(
+            &db,
+            inserted.file_id,
+            "etag-v1",
+            30,
+            Some("etag-v3"),
+            None,
+            "/tmp/storage/dbs/app.db",
+            user_id,
+            None,
+        )
+        .await
+        .unwrap();
+        assert!(lost.is_none(), "stale etag must not win the CAS");
+
+        // The record still reflects the winner.
+        let current = get_file_by_id(&db, inserted.file_id).await.unwrap();
+        assert_eq!(current.etag.as_deref(), Some("etag-v2"));
+        assert_eq!(current.size, 20);
     }
 
     #[tokio::test]

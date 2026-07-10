@@ -41,9 +41,10 @@ ANSI quote-ident).
 - `direct` — host paths, opened in place.
 - `service` — checkout/commit against FileStorage: open copies the file
   to a local scratch, queries run locally, close/sync commit the bytes
-  back. Conflict handling is compare-before-write on the checkout hash
-  (an Err, never a clobber; the check and write are not atomic — see
-  module docs). Commit cost is O(file size): fits small session-shaped
+  back. Conflict handling is an atomic
+  compare-and-swap on the file record's etag (FileStorage::write_file_if:
+  the record flips before the bytes are written, so exactly one
+  concurrent committer proceeds — losers get an Err, never a clobber). Commit cost is O(file size): fits small session-shaped
   workloads; high-frequency writers belong on pg. Possible future work:
   content-addressed scratch cache, transfer compression, page-level
   delta sync (Litestream-style) if the write-amplification cases start
