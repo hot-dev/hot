@@ -90,7 +90,6 @@ supabase-admin
 
 # Infrastructure & Platform
 #cloudflare
-#hot-api
 #sentry
 
 # Model Routers

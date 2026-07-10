@@ -74,7 +74,6 @@ hot.project.hot-pkg-all.test.paths [
     "./hot/pkg/google-gmail/test",
     "./hot/pkg/hot-ai-agent/test",
     "./hot/pkg/hot-ai/test",
-    "./hot/pkg/hot-api/test",
     "./hot/pkg/hot-std/test",
     "./hot/pkg/hubspot/test",
     "./hot/pkg/imagemagick/test",
@@ -149,7 +148,6 @@ hot.project.hot-pkg-all.deps {
     "hot.dev/google-sheets": { "local": "./hot/pkg/google-sheets" },
     "hot.dev/hot-ai": { "local": "./hot/pkg/hot-ai" },
     "hot.dev/hot-ai-agent": { "local": "./hot/pkg/hot-ai-agent" },
-    "hot.dev/hot-api": { "local": "./hot/pkg/hot-api" },
     "hot.dev/hubspot": { "local": "./hot/pkg/hubspot" },
     "hot.dev/imagemagick": { "local": "./hot/pkg/imagemagick" },
     "hot.dev/intercom": { "local": "./hot/pkg/intercom" },
@@ -441,12 +439,6 @@ hot.project.pkg-test-firecrawl.src.paths ["./hot/pkg/firecrawl/src"]
 hot.project.pkg-test-firecrawl.test.paths ["./hot/pkg/firecrawl/test"]
 hot.project.pkg-test-firecrawl.test.capture true
 hot.project.pkg-test-firecrawl.deps {}
-
-// hot-api unit tests (hermetic)
-hot.project.pkg-test-hot-api.src.paths ["./hot/pkg/hot-api/src"]
-hot.project.pkg-test-hot-api.test.paths ["./hot/pkg/hot-api/test"]
-hot.project.pkg-test-hot-api.test.capture true
-hot.project.pkg-test-hot-api.deps {}
 
 // intercom unit tests (hermetic)
 hot.project.pkg-test-intercom.src.paths ["./hot/pkg/intercom/src"]
@@ -886,12 +878,6 @@ hot.project.pkg-integration-cloudflare.src.paths ["./hot/pkg/cloudflare/src"]
 hot.project.pkg-integration-cloudflare.test.paths ["./hot/pkg/cloudflare/integration-test"]
 hot.project.pkg-integration-cloudflare.test.capture true
 hot.project.pkg-integration-cloudflare.deps {}
-
-// hot-api integration tests (requires credentials; read-only or self-cleaning)
-hot.project.pkg-integration-hot-api.src.paths ["./hot/pkg/hot-api/src"]
-hot.project.pkg-integration-hot-api.test.paths ["./hot/pkg/hot-api/integration-test"]
-hot.project.pkg-integration-hot-api.test.capture true
-hot.project.pkg-integration-hot-api.deps {}
 
 // HubSpot integration tests (requires hubspot.token; read-only)
 hot.project.pkg-integration-hubspot.src.paths ["./hot/pkg/hubspot/src"]
