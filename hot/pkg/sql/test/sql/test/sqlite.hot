@@ -114,3 +114,39 @@ meta ["test"] fn () {
     assert-eq("INSERT", ::sqlite/command-tag("insert into t values (1)"))
     assert-eq("SELECT", ::sqlite/command-tag("  SELECT 1"))
 }
+
+test-sync-refuses-open-transaction
+meta ["test"] fn () {
+    // A raw-bytes snapshot mid-transaction would be inconsistent; sync and
+    // close must refuse until the transaction finishes.
+    conn ::hot::sqlite/open(db-path("txn-guard"))
+    ::hot::sqlite/execute(conn, "CREATE TABLE t (x INTEGER)", [])
+    ::hot::sqlite/execute(conn, "BEGIN", [])
+    ::hot::sqlite/execute(conn, "INSERT INTO t (x) VALUES (1)", [])
+
+    blocked ::hot::sqlite/sync(conn)
+    assert(is-err(blocked), "sync inside an open transaction is an Err")
+    blocked-close ::hot::sqlite/close(conn)
+    assert(is-err(blocked-close), "close inside an open transaction is an Err")
+
+    ::hot::sqlite/execute(conn, "COMMIT", [])
+    assert(is-ok(::hot::sqlite/sync(conn)), "sync succeeds after COMMIT")
+    assert(is-ok(::hot::sqlite/close(conn)))
+}
+
+test-wal-mode-commits-survive
+meta ["test"] fn () {
+    // A user may enable WAL; the checkpoint before commit must fold the
+    // WAL frames into the snapshot so nothing is lost across reopen.
+    path db-path("wal")
+    conn ::hot::sqlite/open(path)
+    ::hot::sqlite/query(conn, "PRAGMA journal_mode=WAL", [])
+    ::hot::sqlite/execute(conn, "CREATE TABLE t (x INTEGER)", [])
+    ::hot::sqlite/execute(conn, "INSERT INTO t (x) VALUES (7)", [])
+    assert(is-ok(::hot::sqlite/close(conn)))
+
+    conn2 ::hot::sqlite/open(path)
+    rows ::hot::sqlite/query(conn2, "SELECT x FROM t", [])
+    assert-eq(7, first(rows).x, "WAL-mode write survives commit and reopen")
+    assert(is-ok(::hot::sqlite/close(conn2)))
+}

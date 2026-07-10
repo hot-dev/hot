@@ -565,17 +565,34 @@ fn commit_service(
     let file_storage = vm.get_file_storage().ok_or("file storage not configured")?;
     let ctx = get_file_context(vm)?;
 
-    // Make sure everything SQLite buffered is in the main db file.
     if let Some(db) = state.db.as_ref() {
+        // Refuse to snapshot mid-transaction: the main file may hold
+        // uncommitted pages whose pre-images live in the journal, so raw
+        // bytes read here would be an inconsistent database.
+        if unsafe { ffi::sqlite3_get_autocommit(db.0) } == 0 {
+            return Err(format!(
+                "{}: a transaction is open — COMMIT or ROLLBACK before sync/close",
+                fn_name
+            ));
+        }
+        // Fold any WAL frames into the main db file. Must succeed, or the
+        // bytes we read next would silently miss recent commits.
         let pragma = CString::new("PRAGMA wal_checkpoint(TRUNCATE);").unwrap();
-        unsafe {
+        let rc = unsafe {
             ffi::sqlite3_exec(
                 db.0,
                 pragma.as_ptr(),
                 None,
                 std::ptr::null_mut(),
                 std::ptr::null_mut(),
-            );
+            )
+        };
+        if rc != ffi::SQLITE_OK {
+            return Err(format!(
+                "{}: wal checkpoint failed: {}",
+                fn_name,
+                last_errmsg(db.0)
+            ));
         }
     }
 
@@ -659,6 +676,12 @@ pub fn close(vm: &mut VirtualMachine, args: &[Val]) -> HotResult<Val> {
     }
     if state.service.is_some() {
         let _ = std::fs::remove_file(&state.local_path);
+        // Abnormal shutdowns can leave journal sidecars in the scratch dir.
+        for suffix in ["-wal", "-shm", "-journal"] {
+            let mut sidecar = state.local_path.as_os_str().to_owned();
+            sidecar.push(suffix);
+            let _ = std::fs::remove_file(std::path::PathBuf::from(sidecar));
+        }
     }
     HotResult::Ok(Val::Bool(true))
 }
