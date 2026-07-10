@@ -1013,6 +1013,17 @@ async fn hydrate_event_message_from_db(
         event_data
     };
 
+    // Webhook original-url values are persisted token-redacted; the queue
+    // envelope carries the raw URL. Re-attach it for delivery — verifiers
+    // hash the exact URL the provider called. Slots the envelope cannot
+    // corroborate are dropped so verifiers fail closed on absence instead
+    // of hashing a placeholder.
+    let mut event_data = event_data;
+    hot::webhook_url::restore_event_data_original_urls(
+        &mut event_data,
+        &event_message.body.event.event_data,
+    );
+
     Ok(EventMessage {
         body: hot::lang::event::queue::EventMessageBody {
             event: hot::lang::event::Event {

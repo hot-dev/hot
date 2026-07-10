@@ -44,6 +44,13 @@ pub fn hash_sensitive_request_fields(
         hash_secret_value_recursive(auth_val, &mut hashes);
     }
 
+    // The original-url carries the webhook capability token verbatim
+    // (URL-signing providers hash the exact configured URL); mask it in
+    // run logs like any other secret.
+    if let Some(original_url) = request_map.get(&Val::from(hot::webhook_url::ORIGINAL_URL_KEY)) {
+        hash_secret_value_recursive(original_url, &mut hashes);
+    }
+
     // Hash only sensitive header values
     if let Some(Val::Map(headers_map)) = request_map.get(&Val::from("headers")) {
         for (key, value) in headers_map.iter() {

@@ -596,8 +596,13 @@ async fn webhook_handler_inner(
     // as the `hot.request` context variable.
     let args_val = Val::Vec(vec![http_request.clone()]);
     let event_data_val = build_call_event_data(&function_name, args_val, Some(http_request));
-    let event_data_json =
-        serde_json::to_value(event_data_val.to_hot_data_repr()).unwrap_or(serde_json::Value::Null);
+    // The persisted copy must not retain the webhook capability token that
+    // original-url carries: store it token-redacted. The raw value rides only
+    // in the queue message below and is re-attached by the worker at
+    // delivery (hot::webhook_url::restore_event_data_original_urls).
+    let persisted_event_data = hot::webhook_url::redact_event_data_original_urls(&event_data_val);
+    let event_data_json = serde_json::to_value(persisted_event_data.to_hot_data_repr())
+        .unwrap_or(serde_json::Value::Null);
 
     // Create call event for the worker queue
     let call_event = hot::lang::event::Event {
