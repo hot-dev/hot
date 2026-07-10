@@ -12,7 +12,8 @@ meta {
     doc: """
     Verify a GitHub webhook request. Returns true if the request is
     authentic. Uses the `github.webhook.secret` context variable by
-    default, or accepts an explicit secret.
+    default (failing when it is unset), or accepts an explicit secret —
+    an empty explicit secret never verifies.
 
     **Example**
 
@@ -43,6 +44,12 @@ fn
     => { "" }
   }
 
-  raw-body ::hot::http/raw-body(request)
-  ::hmac/hmac-verify-hex(secret, raw-body, signature, "sha256")
+  cond {
+    // An empty key would make every signature forgeable: fail closed.
+    is-empty(secret) => { false }
+    => {
+      raw-body ::hot::http/raw-body(request)
+      ::hmac/hmac-verify-hex(secret, raw-body, signature, "sha256")
+    }
+  }
 }

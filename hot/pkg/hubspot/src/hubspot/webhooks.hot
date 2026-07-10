@@ -24,13 +24,16 @@ meta {
     `headers`, and `body-raw`. Returns true when the signature matches and
     the millisecond timestamp is within 5 minutes. Uses the
     `hubspot.client.secret` context variable by default, or accepts an
-    explicit secret.
+    explicit secret — an empty explicit secret never verifies.
 
     HubSpot signs the exact URL configured in your app. The 3-arity form
     takes that URL explicitly for when the platform-reconstructed
     `original-url` differs from it — e.g. a rewriting proxy in front, or
     a plain `http://` endpoint behind an edge that doesn't set
-    `x-forwarded-proto` (reconstruction defaults to `https`).
+    `x-forwarded-proto` (reconstruction defaults to `https`). The
+    platform also withholds `original-url` on redelivery paths it cannot
+    corroborate (it is never persisted with the webhook token intact), so
+    re-verifying a replayed event needs the explicit-URL form too.
     """
 }
 fn
@@ -52,6 +55,8 @@ fn
   method or(get(request, "method", "POST"), "POST")
 
   cond {
+    // An empty key would make every signature forgeable: fail closed.
+    is-empty(client-secret) => { false }
     or(is-empty(signature), is-empty(timestamp)) => { false }
     is-empty(url) => { false }
     => {

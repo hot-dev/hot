@@ -11,8 +11,10 @@ meta {
     ::app ::github::app
 
     token ::app/installation-token(app-id, private-key-pem, installation-id)
-    // use token.token as github.token for the next hour
-    issues ::github::issues/list-issues("acme", "api", {}, token.token)
+    // Tokens live ~1 hour. Set the runtime-minted secret for this run;
+    // every ::github wrapper then authenticates with it.
+    ::hot::ctx/set-secret("github.token", token.token)
+    issues ::github::issues/list-issues("acme", "api")
     ```
     """
 }
@@ -45,8 +47,10 @@ meta {
     doc: """
     POST /app/installations/{id}/access_tokens - Mint an installation
     access token (~1 hour). Returns `{token, expires_at, permissions}`.
-    Pass `token.token` as the `token` argument of the endpoint functions,
-    or set it as `github.token` for the run.
+    Set `token.token` as the `github.token` context variable
+    (`::hot::ctx/set-secret("github.token", token.token)` for
+    runtime-minted tokens) so the endpoint wrappers pick it up, or pass
+    it explicitly via the final arity of `::github::api/request`/`json`.
     """
 }
 fn (app-id: Any, private-key-pem: Str, installation-id: Any): Map {

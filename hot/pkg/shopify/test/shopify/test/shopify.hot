@@ -27,3 +27,13 @@ meta ["test"] fn () {
     assert-eq("\"a OR email:*\"", ::shopify/quote-search-term("a OR email:*"), "operators stay inside the quoted term")
     assert-eq("\"say \\\"hi\\\"\"", ::shopify/quote-search-term("say \"hi\""), "embedded quotes escaped")
 }
+
+test-webhook-empty-secret-fails-closed
+meta ["test"] fn () {
+    // Even a signature correctly computed with an empty key must not
+    // verify: an empty secret means "not configured", not "no security".
+    body """{"id":820982911946154508}"""
+    sig ::hot::base64/encode(::hot::hex/decode(::hot::hmac/hmac-sha256("", body)))
+    request {headers: {x-shopify-hmac-sha256: sig}, body-raw: body}
+    assert(not(::shopify/verify-request(request, "")), "empty secret fails closed")
+}

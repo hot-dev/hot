@@ -151,3 +151,13 @@ meta ["test"] fn () {
     assert(::wh/verify-request(request, HS_SECRET, HS_URL), "explicit URL override should verify")
     assert(not(::wh/verify-request(request, HS_SECRET, "https://other.example.com/hook")), "wrong explicit URL should fail")
 }
+
+test-webhook-empty-secret-fails-closed
+meta ["test"] fn () {
+    // Even a signature correctly computed with an empty key must not
+    // verify: an empty secret means "not configured", not "no security".
+    ts Str(mul(::hot::time/epoch-seconds(), 1000))
+    base ::wh/build-base-string("POST", HS_URL, HS_BODY, ts)
+    sig ::hot::base64/encode(::hot::hex/decode(::hot::hmac/hmac-sha256("", base)))
+    assert(not(::wh/verify-request(hs-request(sig, ts), "")), "empty secret fails closed")
+}

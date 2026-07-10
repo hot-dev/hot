@@ -5,7 +5,8 @@ meta {
 
     **Setup** — set `github.token` in context: a fine-grained or classic
     personal access token, or an App installation token (mint those with
-    `::github::app`).
+    `::github::app` and set for the run via
+    `::hot::ctx/set-secret("github.token", ...)` — they expire hourly).
 
     **Quick start**
 
