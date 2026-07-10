@@ -150,3 +150,29 @@ meta ["test"] fn () {
     assert-eq(7, first(rows).x, "WAL-mode write survives commit and reopen")
     assert(is-ok(::hot::sqlite/close(conn2)))
 }
+
+test-transaction-on-real-driver
+meta ["test"] fn () {
+    // ::sql/transaction issues BEGIN/COMMIT through the driver; the body
+    // result comes back, a failing body rolls back, and the sqlite
+    // service-mode txn guard never fires because close happens after COMMIT.
+    db ::sqlite/open(db-path("txn"))
+    ::sql/execute(db, "CREATE TABLE t (x INTEGER)", [])
+
+    out ::sql/transaction(db, (tx) {
+        ::sql/execute(tx, "INSERT INTO t (x) VALUES (?)", [1])
+        ::sql/execute(tx, "INSERT INTO t (x) VALUES (?)", [2])
+        "done"
+    })
+    assert-eq("done", out)
+    assert-eq(2, ::sql/scalar(db, "SELECT COUNT(*) FROM t"))
+
+    rolled ::sql/transaction(db, (tx) {
+        ::sql/execute(tx, "INSERT INTO t (x) VALUES (?)", [3])
+        err("abort")
+    })
+    assert(is-err(rolled), "body error propagates")
+    assert-eq(2, ::sql/scalar(db, "SELECT COUNT(*) FROM t"), "rolled back")
+
+    assert(is-ok(::sql/close(db)))
+}

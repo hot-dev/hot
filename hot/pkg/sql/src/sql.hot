@@ -5,7 +5,8 @@ meta {
 
     Write portable SQL with `?` (positional) or `:name` (named)
     placeholders; drivers compile them to their native style (`$1` for
-    PostgreSQL). Results and errors have one shape across drivers.
+    PostgreSQL; `?` passes through for MySQL and SQLite). Results and
+    errors have one shape across drivers.
 
     **Error contract:** every function returns a `Result.Err` carrying a
     `SqlError` on failure — branch with `is-err` / `if-err`. An unhandled
@@ -16,6 +17,8 @@ meta {
     ```hot
     ::sql ::sql
     db ::sql::pg/open({user: "postgres", database: "app"})
+    // or: ::sql::mysql/open({user: "root", database: "app"})
+    // or: ::sql::sqlite/open("data/app.db")   — embedded, no server
 
     rows ::sql/query(db, "SELECT id, email FROM users WHERE active = ?", [true])
     user ::sql/query-one(db, "SELECT * FROM users WHERE id = ?", [42])

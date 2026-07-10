@@ -1,6 +1,12 @@
 # sql
 
-Typed SQL runtime for Hot. Portable placeholders, typed query values, transactions, and one result/error shape across drivers — PostgreSQL today via the pure-Hot [`hot.dev/pg`](../pg) client, with room for MySQL/SQLite drivers behind the same contract.
+Typed SQL runtime for Hot. Portable placeholders, typed query values, transactions, and one result/error shape across drivers:
+
+| Driver | Open | Placeholder | Identifiers | Notes |
+|---|---|---|---|---|
+| PostgreSQL | `::sql::pg/open({...})` | `$1` | ANSI `"..."` | pure-Hot wire client ([`hot.dev/pg`](../pg)) |
+| MySQL | `::sql::mysql/open({...})` | `?` | backtick `` `...` `` | pure-Hot wire client ([`hot.dev/mysql`](../mysql)); params always use binary prepared statements |
+| SQLite | `::sql::sqlite/open("path.db")` | `?` | ANSI `"..."` | embedded (`::hot::sqlite` natives), `file.mode`-aware — managed-storage checkout/commit in service mode |
 
 Inspired by Rust's sqlx: SQL stays SQL — this is not an ORM.
 
@@ -20,7 +26,7 @@ n ::sql/scalar(db, "SELECT count(*) FROM users")
 
 ## Placeholders
 
-Write `?` (positional, bind a `Vec`) or `:name` (named, bind a `Map`) — never both in one statement. The runtime compiles them to the driver's native style (`$1, $2, ...` for PostgreSQL) while leaving string literals, quoted identifiers, comments, and `::type` casts alone. Repeated `:name` placeholders bind one value.
+Write `?` (positional, bind a `Vec`) or `:name` (named, bind a `Map`) — never both in one statement. The runtime compiles them to the driver's native style (`$1, $2, ...` for PostgreSQL; `?` for MySQL and SQLite) while leaving string literals, quoted identifiers, comments, and `::type` casts alone. Repeated `:name` placeholders bind one value.
 
 ## Typed queries
 
