@@ -7,28 +7,26 @@ queries, transactions, and error normalization. This note captures the
 design considerations for the next two drivers so they get a deliberate
 pass rather than a rushed one.
 
-## MySQL — pure-Hot wire client (the pg approach)
+## MySQL — SHIPPED (hot.dev/mysql + ::sql::mysql driver)
 
-The right shape is a `hot.dev/mysql` package mirroring `hot.dev/pg`:
-the MySQL client/server protocol over `::hot::tcp` / `::hot::tls`, then
-a thin `::sql::mysql/driver` adapter (placeholder style `"question"`,
-so `?` passes through untouched).
+Implemented 2026-07 on the decided design: a pure-Hot wire client
+(`hot.dev/mysql`, mirroring `hot.dev/pg`) over `::hot::tcp`/`::hot::tls`
+with `caching_sha2_password` (fast path over any transport; full auth
+requires TLS — plaintext full-auth errs with guidance rather than
+implementing the RSA path) and `mysql_native_password`. Text protocol
+(`COM_QUERY`) for parameterless statements; the binary prepared-statement
+protocol (`COM_STMT_PREPARE`/`EXECUTE`, params sent as VAR_STRING/BLOB,
+binary row decoding incl. IEEE-754 via `::hot::bytes/to-float`) for all
+parameter binding. `::sql::mysql/driver` adapter: placeholder
+`"question"`, backtick `quote-ident`.
 
-Work items:
-- Handshake v10 + `caching_sha2_password` auth (needs SHA-256 which
-  hot-std has; the full-auth path needs RSA public-key encryption of the
-  password over non-TLS connections — prefer requiring TLS, like modern
-  servers do, to avoid that path entirely).
-- Text protocol first (`COM_QUERY`), matching pg's text-format decode
-  approach; column type decoding from the result-set metadata.
-- Prepared statements (`COM_STMT_PREPARE`/`EXECUTE`) can come later —
-  the text protocol with client-side escaping is NOT acceptable for
-  parameter binding, so parameters need the binary prepared-statement
-  path from day one (unlike pg, MySQL's text protocol has no parameter
-  placeholders).
-
-Estimated scope: comparable to pg (~1.5k lines + wire tests). CI needs
-a mysql service container next to the existing postgres one.
+Verified against a live MySQL 8 container (TLS + full auth + both
+protocols): `docker run --rm -d --name hot-mysql -p 3306:3306 -e
+MYSQL_ROOT_PASSWORD=hot_test -e MYSQL_DATABASE=hot_test mysql:8`, then
+`hot test --project pkg-integration-mysql`. CI still needs the container
+wired next to the postgres one. Not yet done: statement caching (each
+parameterized call prepares/closes), unsigned BIGINT above i64, >=16MB
+packets, multi-result-sets.
 
 ## SQLite — SHIPPED (::hot::sqlite natives + ::sql::sqlite driver)
 

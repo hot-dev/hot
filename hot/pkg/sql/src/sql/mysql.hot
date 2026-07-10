@@ -1,0 +1,68 @@
+::sql::mysql ns
+meta {
+    doc: """MySQL driver for `::sql`, backed by the pure-Hot `hot.dev/mysql` wire-protocol client. Placeholder style `"question"` — `?` passes through to MySQL's prepared-statement protocol untouched."""
+}
+
+quote-ident
+meta {
+    doc: """
+    Quote an identifier for MySQL: backtick-wrapped with embedded
+    backticks doubled (MySQL's default mode does not honor ANSI double
+    quotes). Errs on empty or NUL-containing names.
+    """
+}
+fn (name: Str): Str {
+    cond {
+        is-empty(name) => { err("sql: identifier must not be empty") }
+        ::hot::str/contains(name, Str(Bytes([0]))) => { err("sql: identifier must not contain NUL") }
+        => {
+            escaped join(split(name, "`"), "``")
+            `${Str(Bytes([96]))}${escaped}${Str(Bytes([96]))}`
+        }
+    }
+}
+
+mysql-query fn (conn: Any, sql: Str, params: Vec): Vec {
+    cond {
+        is-empty(params) => { ::mysql/query(conn, sql) }
+        => { ::mysql/query(conn, sql, params) }
+    }
+}
+
+mysql-execute fn (conn: Any, sql: Str, params: Vec): Map {
+    cond {
+        is-empty(params) => { ::mysql/execute(conn, sql) }
+        => { ::mysql/execute(conn, sql, params) }
+    }
+}
+
+driver
+meta {
+    doc: """The MySQL `::sql/Driver`. Usually used through `::sql::mysql/open`."""
+}
+::sql/Driver({
+  name: "mysql",
+  placeholder: "question",
+  connect: ::mysql/connect,
+  query: mysql-query,
+  execute: mysql-execute,
+  close: ::mysql/close,
+  quote-ident: quote-ident
+})
+
+open
+meta {
+    doc: """
+    Open a MySQL-backed `::sql/Db`. Options are `::mysql/MySqlOptions`
+    (`host`, `port`, `user`, `password`, `database`, `ssl`, `tls`).
+
+    **Example**
+
+    ```hot
+    db ::sql::mysql/open({user: "root", password: "secret", database: "app"})
+    ```
+    """
+}
+fn (options: Map): ::sql/Db {
+  ::sql/open(driver, options)
+}

@@ -1,0 +1,62 @@
+::mysql::integration ns
+meta ["test"]
+
+// Live-server integration tests. Run with a local MySQL 8:
+//   docker run --rm -d --name hot-mysql -p 3306:3306 \
+//     -e MYSQL_ROOT_PASSWORD=hot_test -e MYSQL_DATABASE=hot_test mysql:8
+//   hot test --project pkg-integration-mysql
+// Ctx/env: defaults match the docker line above; override host/port/user/
+// password via the options map below if needed.
+
+options fn (): Map {
+    // ssl + insecure mode: the docker container's certs are self-signed,
+    // and TLS is what lets caching_sha2_password complete full auth.
+    {host: "127.0.0.1", port: 3306, user: "root", password: "hot_test", database: "hot_test",
+     ssl: true, tls: {mode: "insecure"}}
+}
+
+test-connect-roundtrip
+meta ["test"] fn () {
+    conn ::mysql/connect(options())
+    assert(is-ok(conn), `connect should succeed: ${if-err(conn, (e) { Str(e) })}`)
+
+    created ::mysql/execute(conn, "CREATE TABLE IF NOT EXISTS hot_it (id BIGINT AUTO_INCREMENT PRIMARY KEY, name VARCHAR(64), score DOUBLE, data BLOB, at DATETIME)")
+    assert(is-ok(created), `create: ${if-err(created, (e) { Str(e) })}`)
+    cleaned ::mysql/execute(conn, "DELETE FROM hot_it")
+
+    inserted ::mysql/execute(conn, "INSERT INTO hot_it (name, score, data, at) VALUES (?, ?, ?, ?)",
+        ["Ada", 99.5, Bytes([1, 2, 3]), "2026-07-09 08:30:05"])
+    assert(is-ok(inserted), `insert: ${if-err(inserted, (e) { Str(e) })}`)
+    assert-eq(1, inserted.rows-affected)
+    assert(gt(inserted.last-insert-id, 0))
+
+    // Binary protocol (prepared) read-back
+    rows ::mysql/query(conn, "SELECT id, name, score, data, at FROM hot_it WHERE name = ?", ["Ada"])
+    assert(is-ok(rows), `prepared query: ${if-err(rows, (e) { Str(e) })}`)
+    row first(rows)
+    assert-eq("Ada", row.name)
+    assert-eq(99.5, row.score)
+    assert-eq(Bytes([1, 2, 3]), row.data)
+    assert-eq("2026-07-09 08:30:05", row.at)
+
+    // Text protocol read-back
+    text-rows ::mysql/query(conn, "SELECT COUNT(*) AS n FROM hot_it")
+    assert-eq(1, first(text-rows).n)
+
+    // Errors are Err values with server details
+    bad ::mysql/query(conn, "SELECT * FROM hot_it_missing")
+    assert(is-err(bad))
+    e if-err(bad, (v) { v })
+    assert-eq(1146, e.code)
+
+    assert(::mysql/close(conn))
+}
+
+test-sql-facade-end-to-end
+meta ["test"] fn () {
+    db ::sql::mysql/open(options())
+    assert(is-ok(db), "sql facade open")
+    rows ::sql/query(db, "SELECT :a + :b AS total", {a: 2, b: 3})
+    assert-eq(5.0, first(rows).total, "named params compile to ? and bind (string params coerce to DOUBLE)")
+    assert(is-ok(::sql/close(db)))
+}

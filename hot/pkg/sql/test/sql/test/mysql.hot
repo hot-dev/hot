@@ -1,0 +1,21 @@
+::sql::test::mysql ns
+meta ["test"]
+
+// Hermetic tests for the mysql driver adapter. Live-server coverage is
+// in hot/pkg/mysql/integration-test (pkg-integration-mysql).
+
+::mysql-driver ::sql::mysql
+
+test-quote-ident-backticks
+meta ["test"] fn () {
+    assert-eq("`users`", ::mysql-driver/quote-ident("users"))
+    assert-eq("`weird ``name```", ::mysql-driver/quote-ident("weird `name`"))
+    assert(is-err(::mysql-driver/quote-ident("")), "empty identifier is an Err")
+}
+
+test-driver-shape
+meta ["test"] fn () {
+    d ::mysql-driver/driver
+    assert-eq("mysql", d.name)
+    assert-eq("question", d.placeholder)
+}

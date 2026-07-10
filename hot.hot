@@ -83,6 +83,7 @@ hot.project.hot-pkg-all.test.paths [
     "./hot/pkg/libreoffice/test",
     "./hot/pkg/linear/test",
     "./hot/pkg/mcp/test",
+    "./hot/pkg/mysql/test",
     "./hot/pkg/notion/test",
     "./hot/pkg/oauth2/test",
     "./hot/pkg/openai-compatible/test",
@@ -155,6 +156,7 @@ hot.project.hot-pkg-all.deps {
     "hot.dev/libreoffice": { "local": "./hot/pkg/libreoffice" },
     "hot.dev/linear": { "local": "./hot/pkg/linear" },
     "hot.dev/mcp": { "local": "./hot/pkg/mcp" },
+    "hot.dev/mysql": { "local": "./hot/pkg/mysql" },
     "hot.dev/notion": { "local": "./hot/pkg/notion" },
     "hot.dev/oauth2": { "local": "./hot/pkg/oauth2" },
     "hot.dev/openai": { "local": "./hot/pkg/openai" },
@@ -596,7 +598,22 @@ hot.project.pkg-test-sql.src.paths ["./hot/pkg/sql/src"]
 hot.project.pkg-test-sql.test.paths ["./hot/pkg/sql/test"]
 hot.project.pkg-test-sql.test.capture true
 hot.project.pkg-test-sql.deps {
+    "hot.dev/mysql": { "local": "./hot/pkg/mysql" },
     "hot.dev/pg": { "local": "./hot/pkg/pg" }
+}
+
+// mysql unit tests (hermetic wire/auth/decode vectors)
+hot.project.pkg-test-mysql.src.paths ["./hot/pkg/mysql/src"]
+hot.project.pkg-test-mysql.test.paths ["./hot/pkg/mysql/test"]
+hot.project.pkg-test-mysql.test.capture true
+
+// mysql integration tests (needs a live MySQL; see integration-test/)
+hot.project.pkg-integration-mysql.src.paths ["./hot/pkg/mysql/src"]
+hot.project.pkg-integration-mysql.test.paths ["./hot/pkg/mysql/integration-test"]
+hot.project.pkg-integration-mysql.test.capture true
+hot.project.pkg-integration-mysql.deps {
+    "hot.dev/pg": { "local": "./hot/pkg/pg" },
+    "hot.dev/sql": { "local": "./hot/pkg/sql" }
 }
 
 // whatsapp unit tests (pure-Hot webhook signature verification)

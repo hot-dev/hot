@@ -1,0 +1,220 @@
+::mysql::test ns
+meta ["test"]
+
+::wire ::mysql::wire
+::auth ::mysql::auth
+::decode ::mysql::decode
+::hex ::hot::hex
+
+// ============================================================================
+// Wire: lenenc + framing (vectors from the protocol spec)
+// ============================================================================
+
+test-lenenc-int-roundtrip
+meta ["test"] fn () {
+    assert-eq(Bytes([250]), ::wire/lenenc-int(250))
+    assert-eq(Bytes([252, 251, 0]), ::wire/lenenc-int(251))
+    assert-eq(Bytes([252, 255, 255]), ::wire/lenenc-int(65535))
+    assert-eq(Bytes([253, 0, 0, 1]), ::wire/lenenc-int(65536))
+
+    assert-eq([250, 1], ::wire/read-lenenc-int(Bytes([250]), 0))
+    assert-eq([251, 3], ::wire/read-lenenc-int(Bytes([252, 251, 0]), 0))
+    assert-eq([65536, 4], ::wire/read-lenenc-int(Bytes([253, 0, 0, 1]), 0))
+}
+
+test-lenenc-str
+meta ["test"] fn () {
+    encoded ::wire/lenenc-bytes("abc")
+    assert-eq(Bytes([3, 97, 98, 99]), encoded)
+    assert-eq(["abc", 4], ::wire/read-lenenc-str(encoded, 0))
+}
+
+test-frame-header
+meta ["test"] fn () {
+    framed ::wire/frame(1, Bytes([16, 0, 0]))
+    // 3-byte LE length (3), then seq (1), then payload.
+    assert-eq(Bytes([3, 0, 0, 1, 16, 0, 0]), framed)
+}
+
+// ============================================================================
+// Auth scrambles (vectors generated independently with Python hashlib)
+//   nonce: bytes 0x01..0x14, password: "secret"
+// ============================================================================
+
+TEST-NONCE ::hex/decode("0102030405060708090a0b0c0d0e0f1011121314")
+
+test-native-password-scramble
+meta ["test"] fn () {
+    out ::auth/native-password-scramble("secret", TEST-NONCE)
+    assert-eq("b32bb3a583e1340c0a1108d58b1be49781ad8c2f", ::hex/encode(out))
+}
+
+test-caching-sha2-scramble
+meta ["test"] fn () {
+    out ::auth/caching-sha2-scramble("secret", TEST-NONCE)
+    assert-eq("746ebe205d56a0707acb3e796e834e0dd7b1d61743b26bd5202c7a623230c7c9", ::hex/encode(out))
+}
+
+test-scramble-dispatch
+meta ["test"] fn () {
+    assert-eq(Bytes([]), ::auth/scramble("caching_sha2_password", "", TEST-NONCE), "empty password sends empty response")
+    unknown ::auth/scramble("sha256_password", "x", TEST-NONCE)
+    assert(is-err(unknown), "unknown plugin is an Err")
+}
+
+// ============================================================================
+// Handshake parsing (synthetic v10 payload)
+// ============================================================================
+
+make-handshake fn (): Bytes {
+    concat(
+        Bytes([10]),                                  // protocol 10
+        ::wire/cstring("8.4.0"),                      // server version
+        ::wire/int4(99),                              // thread id
+        slice(TEST-NONCE, 0, 8),                      // auth data part 1
+        Bytes([0]),                                   // filler
+        ::wire/int2(65535),                           // capabilities low
+        ::wire/int1(45),                              // charset
+        ::wire/int2(2),                               // status
+        ::wire/int2(53247),                           // capabilities high
+        ::wire/int1(21),                              // auth data len
+        Bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0]),        // reserved
+        slice(TEST-NONCE, 8, 20), Bytes([0]),         // auth data part 2 (12 + NUL)
+        ::wire/cstring("caching_sha2_password"))
+}
+
+test-parse-handshake
+meta ["test"] fn () {
+    out ::auth/parse-handshake(make-handshake())
+    assert-eq(10, out.protocol)
+    assert-eq("8.4.0", out.server-version)
+    assert-eq(99, out.thread-id)
+    assert-eq(TEST-NONCE, out.nonce, "nonce reassembled from both parts")
+    assert-eq("caching_sha2_password", out.auth-plugin)
+}
+
+test-parse-handshake-rejects-old-protocol
+meta ["test"] fn () {
+    out ::auth/parse-handshake(Bytes([9, 0]))
+    assert(is-err(out))
+}
+
+// ============================================================================
+// OK / ERR / EOF packets
+// ============================================================================
+
+test-parse-ok
+meta ["test"] fn () {
+    // 0x00 header, 3 affected, insert id 7, status+warnings.
+    out ::decode/parse-ok(Bytes([0, 3, 7, 2, 0, 0, 0]))
+    assert-eq(3, out.rows-affected)
+    assert-eq(7, out.last-insert-id)
+}
+
+test-parse-err
+meta ["test"] fn () {
+    payload concat(Bytes([255]), ::wire/int2(1146), Bytes("#"), Bytes("42S02"), Bytes("Table 'x.t' doesn't exist"))
+    out ::decode/parse-err(payload)
+    assert(is-err(out))
+    e if-err(out, (v) { v })
+    assert-eq(1146, e.code)
+    assert-eq("42S02", e.sqlstate)
+    assert-eq("Table 'x.t' doesn't exist", e.message)
+}
+
+test-is-eof
+meta ["test"] fn () {
+    assert(::decode/is-eof(Bytes([254, 0, 0, 2, 0])))
+    assert(not(::decode/is-eof(Bytes([0, 0, 0]))), "OK is not EOF")
+}
+
+// ============================================================================
+// Column definitions and rows
+// ============================================================================
+
+make-column fn (name: Str, type-id: Int, charset: Int): Bytes {
+    concat(
+        ::wire/lenenc-bytes("def"),
+        ::wire/lenenc-bytes("db"), ::wire/lenenc-bytes("t"), ::wire/lenenc-bytes("t"),
+        ::wire/lenenc-bytes(name), ::wire/lenenc-bytes(name),
+        ::wire/int1(12),
+        ::wire/int2(charset), ::wire/int4(255),
+        ::wire/int1(type-id), ::wire/int2(0), ::wire/int1(0),
+        Bytes([0, 0]))
+}
+
+test-parse-column
+meta ["test"] fn () {
+    col ::decode/parse-column(make-column("id", 8, 63))
+    assert-eq("id", col.name)
+    assert-eq(8, col.type)
+    assert-eq(63, col.charset)
+}
+
+test-decode-text-row
+meta ["test"] fn () {
+    cols [
+        ::decode/parse-column(make-column("id", 8, 63)),
+        ::decode/parse-column(make-column("name", 253, 45)),
+        ::decode/parse-column(make-column("score", 5, 63))
+    ]
+    // Text row: "42", NULL, "1.5"
+    payload concat(::wire/lenenc-bytes("42"), Bytes([251]), ::wire/lenenc-bytes("1.5"))
+    row ::decode/decode-text-row(cols, payload)
+    assert-eq(42, row.id, "LONGLONG coerces to Int")
+    assert-eq(null, row.name)
+    assert-eq(1.5, row.score, "DOUBLE coerces to Dec")
+}
+
+test-decode-binary-row
+meta ["test"] fn () {
+    cols [
+        ::decode/parse-column(make-column("id", 8, 63)),
+        ::decode/parse-column(make-column("name", 253, 45)),
+        ::decode/parse-column(make-column("score", 5, 63))
+    ]
+    // Binary row: header 0x00, bitmap (name NULL -> bit 3 = 0x08),
+    // id LONGLONG 42 LE, score DOUBLE 1.5 LE.
+    payload concat(
+        Bytes([0]), Bytes([8]),
+        ::hot::bytes/from-int(42, 8, "le"),
+        ::hot::bytes/from-float(1.5, 8, "le"))
+    row ::decode/decode-binary-row(cols, payload)
+    assert-eq(42, row.id)
+    assert-eq(null, row.name)
+    assert-eq(1.5, row.score)
+}
+
+test-binary-datetime
+meta ["test"] fn () {
+    cols [::decode/parse-column(make-column("at", 12, 63))]
+    // DATETIME len 7: 2026-07-09 08:30:05
+    payload concat(
+        Bytes([0]), Bytes([0]),
+        Bytes([7]), ::hot::bytes/from-int(2026, 2, "le"), Bytes([7, 9, 8, 30, 5]))
+    row ::decode/decode-binary-row(cols, payload)
+    assert-eq("2026-07-09 08:30:05", row.at)
+}
+
+// ============================================================================
+// COM_STMT_EXECUTE payload
+// ============================================================================
+
+test-stmt-execute-payload
+meta ["test"] fn () {
+    out ::mysql/stmt-execute-payload(5, ["Ada", null, Bytes([1, 2])])
+    expected concat(
+        Bytes([23]), ::hot::bytes/from-int(5, 4, "le"), Bytes([0]), ::hot::bytes/from-int(1, 4, "le"),
+        Bytes([2]),                       // null bitmap: param 1 null -> bit 1
+        Bytes([1]),                       // new-params-bound
+        Bytes([253, 0, 253, 0, 252, 0]),  // types: VAR_STRING, VAR_STRING, BLOB
+        ::wire/lenenc-bytes("Ada"), ::wire/lenenc-bytes(Bytes([1, 2])))
+    assert-eq(expected, out)
+}
+
+test-null-bitmap-wraps-bytes
+meta ["test"] fn () {
+    params [null, "a", "b", "c", "d", "e", "f", "g", null]
+    bitmap ::mysql/null-bitmap(params)
+    assert-eq(Bytes([1, 1]), bitmap, "nulls at positions 0 and 8")
+}

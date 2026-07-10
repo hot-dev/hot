@@ -1,0 +1,160 @@
+::mysql::wire ns
+meta {
+    doc: """
+    MySQL client/server protocol framing: packets, length-encoded
+    values, and cursor-style payload readers. Internal to the `mysql`
+    package.
+
+    Every packet is `[3-byte LE payload length][1-byte sequence id]
+    [payload]`. Integers are little-endian throughout (the opposite of
+    PostgreSQL). Sequence ids start at 0 for each command and increment
+    per packet.
+    """
+}
+
+::tcp ::hot::tcp
+::bytes ::hot::bytes
+
+// Text-protocol NULL marker and the lenenc prefixes.
+NULL-MARKER 251
+
+// ---------------------------------------------------------------------------
+// Field encoders (little-endian)
+// ---------------------------------------------------------------------------
+
+int1 fn (n: Int): Bytes { ::bytes/from-int(n, 1) }
+int2 fn (n: Int): Bytes { ::bytes/from-int(n, 2, "le") }
+int3 fn (n: Int): Bytes { ::bytes/from-int(n, 3, "le") }
+int4 fn (n: Int): Bytes { ::bytes/from-int(n, 4, "le") }
+int8 fn (n: Int): Bytes { ::bytes/from-int(n, 8, "le") }
+
+lenenc-int
+meta {doc: """Encode a length-encoded integer (the packed varint MySQL uses for lengths and counts)."""}
+fn (n: Int): Bytes {
+    cond {
+        lt(n, 251) => { int1(n) }
+        lt(n, 65536) => { concat(Bytes([252]), int2(n)) }
+        lt(n, 16777216) => { concat(Bytes([253]), int3(n)) }
+        => { concat(Bytes([254]), int8(n)) }
+    }
+}
+
+lenenc-bytes
+meta {doc: """Encode bytes (or a string) with a length-encoded-integer prefix."""}
+fn (data: Str | Bytes): Bytes {
+    b if(is-str(data), Bytes(data), data)
+    concat(lenenc-int(length(b)), b)
+}
+
+cstring fn (s: Str): Bytes { concat(Bytes(s), Bytes([0])) }
+
+// ---------------------------------------------------------------------------
+// Packet framing
+// ---------------------------------------------------------------------------
+
+frame
+meta {doc: """Frame a payload as a MySQL packet with the given sequence id. Payloads ≥ 16MB are not supported."""}
+fn (seq: Int, payload: Bytes): Bytes {
+    cond {
+        gt(length(payload), 16777214) => { err("mysql: packet too large (>= 16MB payloads unsupported)") }
+        => { concat(int3(length(payload)), int1(seq), payload) }
+    }
+}
+
+read-packet
+meta {
+    doc: """
+    Read one packet off the socket. Returns `{seq: Int, payload: Bytes}`
+    or an Err from the transport. Blocks until a full packet arrives.
+    """
+}
+fn (socket): Map {
+    header ::tcp/read-exact(socket, 4)
+    cond {
+        is-err(header) => { header }
+        => {
+            len ::bytes/to-int(slice(header, 0, 3), "le")
+            seq ::bytes/to-uint(slice(header, 3, 4))
+            payload if(gt(len, 0), ::tcp/read-exact(socket, len), Bytes([]))
+            cond {
+                is-err(payload) => { payload }
+                => { {seq: seq, payload: payload} }
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Cursor readers — parse a payload by threading a position.
+// Each returns [value, next-position].
+// ---------------------------------------------------------------------------
+
+read-int1 fn (buf: Bytes, pos: Int): Vec {
+    [::bytes/to-uint(slice(buf, pos, add(pos, 1))), add(pos, 1)]
+}
+
+read-int2 fn (buf: Bytes, pos: Int): Vec {
+    [::bytes/to-uint(slice(buf, pos, add(pos, 2)), "le"), add(pos, 2)]
+}
+
+read-int3 fn (buf: Bytes, pos: Int): Vec {
+    [::bytes/to-uint(slice(buf, pos, add(pos, 3)), "le"), add(pos, 3)]
+}
+
+read-int4 fn (buf: Bytes, pos: Int): Vec {
+    [::bytes/to-uint(slice(buf, pos, add(pos, 4)), "le"), add(pos, 4)]
+}
+
+read-int8 fn (buf: Bytes, pos: Int): Vec {
+    [::bytes/to-int(slice(buf, pos, add(pos, 8)), "le"), add(pos, 8)]
+}
+
+read-lenenc-int
+meta {doc: """Read a length-encoded integer at `pos`. -> [value, next-pos]. 0xFB (NULL) is the caller's job to check first."""}
+fn (buf: Bytes, pos: Int): Vec {
+    first-byte ::bytes/to-uint(slice(buf, pos, add(pos, 1)))
+    cond {
+        lt(first-byte, 251) => { [first-byte, add(pos, 1)] }
+        eq(first-byte, 252) => { read-int2(buf, add(pos, 1)) }
+        eq(first-byte, 253) => { read-int3(buf, add(pos, 1)) }
+        eq(first-byte, 254) => { read-int8(buf, add(pos, 1)) }
+        => { err(`mysql: invalid lenenc prefix ${first-byte}`) }
+    }
+}
+
+read-lenenc-bytes
+meta {doc: """Read length-encoded bytes at `pos`. -> [Bytes, next-pos]."""}
+fn (buf: Bytes, pos: Int): Vec {
+    out read-lenenc-int(buf, pos)
+    cond {
+        is-err(out) => { out }
+        => {
+            len out[0]
+            start out[1]
+            [slice(buf, start, add(start, len)), add(start, len)]
+        }
+    }
+}
+
+read-lenenc-str
+meta {doc: """Read a length-encoded string at `pos`. -> [Str, next-pos]."""}
+fn (buf: Bytes, pos: Int): Vec {
+    out read-lenenc-bytes(buf, pos)
+    cond {
+        is-err(out) => { out }
+        => { [Str(out[0]), out[1]] }
+    }
+}
+
+read-cstring
+meta {doc: """Read a null-terminated string at `pos`. -> [Str, position-after-terminator]."""}
+fn (buf: Bytes, pos: Int): Vec {
+    end ::bytes/index-of(buf, 0, pos)
+    [Str(slice(buf, pos, end)), add(end, 1)]
+}
+
+read-rest
+meta {doc: """Read from `pos` to the end of the buffer. -> Bytes."""}
+fn (buf: Bytes, pos: Int): Bytes {
+    slice(buf, pos, length(buf))
+}
