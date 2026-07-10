@@ -5,8 +5,11 @@ meta {
 
     Write portable SQL with `?` (positional) or `:name` (named)
     placeholders; drivers compile them to their native style (`$1` for
-    PostgreSQL; `?` passes through for MySQL and SQLite). Results and
-    errors have one shape across drivers.
+    PostgreSQL; `?` passes through for MySQL and SQLite). `??` escapes a
+    literal `?` (PostgreSQL JSONB operators: `??`, `??|`, `??&`), and
+    strings, quoted identifiers, comments, casts, and dollar-quoted
+    bodies are never rewritten (see `::sql::compile/compile`). Results
+    and errors have one shape across drivers.
 
     **Error contract:** every function returns a `Result.Err` carrying a
     `SqlError` on failure — branch with `is-err` / `if-err`. An unhandled
@@ -64,7 +67,9 @@ meta {
     shared runtime.
 
     **Fields**
-    - `name` — driver label used in `SqlError.driver` (e.g. `"pg"`)
+    - `name` — driver label used in `SqlError.driver`; also selects the
+      placeholder compiler's dialect lexing (`"pg"`, `"mysql"`,
+      `"sqlite"` — other names get the placeholder style's defaults)
     - `placeholder` — `"dollar"` (`$1, $2, ...`) or `"question"` (`?`)
     - `connect` — `fn (options: Map)` returning a connection or Err
     - `query` — `fn (conn, sql: Str, params: Vec)` returning `Vec<Map>` or Err
@@ -310,7 +315,7 @@ bind-params fn (compiled: Map, params: Any): Vec {
 
 // Compile + bind + dispatch through the driver's query fn.
 run-query fn (db: Db, sql: Str, params: Any): Vec {
-  compiled ::compile/compile(sql, db.driver.placeholder)
+  compiled ::compile/compile(sql, db.driver.placeholder, db.driver.name)
   cond {
     is-err(compiled) => { err(wrap-error(db.driver.name, if-err(compiled, (e) { e }))) }
     => {
@@ -331,7 +336,7 @@ run-query fn (db: Db, sql: Str, params: Any): Vec {
 }
 
 run-execute fn (db: Db, sql: Str, params: Any): Map {
-  compiled ::compile/compile(sql, db.driver.placeholder)
+  compiled ::compile/compile(sql, db.driver.placeholder, db.driver.name)
   cond {
     is-err(compiled) => { err(wrap-error(db.driver.name, if-err(compiled, (e) { e }))) }
     => {

@@ -1,6 +1,6 @@
 ::sql::mysql ns
 meta {
-    doc: """MySQL driver for `::sql`, backed by the pure-Hot `hot.dev/mysql` wire-protocol client. Placeholder style `"question"` — `?` passes through to MySQL's prepared-statement protocol untouched."""
+    doc: """MySQL driver for `::sql`, backed by the pure-Hot `hot.dev/mysql` wire-protocol client. Placeholder style `"question"` — `?` passes through to MySQL's prepared-statement protocol untouched. Placeholder compilation lexes MySQL dialect syntax: backslash escapes inside strings, `#` line comments, and backtick-quoted identifiers are never rewritten."""
 }
 
 quote-ident

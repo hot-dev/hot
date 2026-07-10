@@ -104,3 +104,93 @@ meta ["test"] fn () {
     assert-eq("SELECT id::text FROM t WHERE id = $1", out.sql)
     assert-eq(["id"], out.names)
 }
+
+// ============================================================================
+// ?? escape (PostgreSQL JSONB operators)
+// ============================================================================
+
+test-double-question-escapes-literal
+meta ["test"] fn () {
+    out ::compile/compile("SELECT * FROM t WHERE data ?? 'key' AND id = ?", "dollar")
+    assert-eq("SELECT * FROM t WHERE data ? 'key' AND id = $1", out.sql)
+    assert-eq(1, out.count)
+}
+
+test-double-question-operator-variants
+meta ["test"] fn () {
+    out ::compile/compile("SELECT data ??| array['a'] , data ??& array['b'] FROM t", "dollar")
+    assert-eq("SELECT data ?| array['a'] , data ?& array['b'] FROM t", out.sql)
+    assert-eq(0, out.count)
+}
+
+// ============================================================================
+// Array slices are not named placeholders
+// ============================================================================
+
+test-array-slice-not-a-named-param
+meta ["test"] fn () {
+    out ::compile/compile("SELECT arr[1:3] FROM t WHERE id = ?", "dollar")
+    assert-eq("SELECT arr[1:3] FROM t WHERE id = $1", out.sql)
+    assert-eq([null], out.names)
+}
+
+// ============================================================================
+// Dollar-quoted strings (dollar style)
+// ============================================================================
+
+test-dollar-quoted-string-ignored
+meta ["test"] fn () {
+    out ::compile/compile("SELECT $$literal ? :x$$ , ?", "dollar")
+    assert-eq("SELECT $$literal ? :x$$ , $1", out.sql)
+    assert-eq(1, out.count)
+}
+
+test-tagged-dollar-quote-ignored
+meta ["test"] fn () {
+    out ::compile/compile("CREATE FUNCTION f() AS $fn$ SELECT ?; $$ still inside $fn$ WHERE id = ?", "dollar")
+    assert-eq("CREATE FUNCTION f() AS $fn$ SELECT ?; $$ still inside $fn$ WHERE id = $1", out.sql)
+    assert-eq(1, out.count)
+}
+
+test-bare-dollar-passes-through
+meta ["test"] fn () {
+    // "$1" is not a dollar-quote opener (tags are identifier-shaped).
+    out ::compile/compile("SELECT '$'::text , ? , 5 $ 3", "dollar")
+    assert-eq("SELECT '$'::text , $1 , 5 $ 3", out.sql)
+}
+
+// ============================================================================
+// MySQL dialect lexing
+// ============================================================================
+
+test-mysql-backslash-escaped-quote
+meta ["test"] fn () {
+    // With MySQL's default sql_mode, \' stays inside the string; without
+    // backslash handling the string would end early and swallow the ?.
+    out ::compile/compile("SELECT 'it\\'s a ?' FROM t WHERE id = ?", "question", "mysql")
+    assert-eq("SELECT 'it\\'s a ?' FROM t WHERE id = ?", out.sql)
+    assert-eq(1, out.count)
+}
+
+test-mysql-hash-comment
+meta ["test"] fn () {
+    out ::compile/compile("SELECT 1 # what? :nope\nFROM t WHERE id = ?", "question", "mysql")
+    assert-eq("SELECT 1 # what? :nope\nFROM t WHERE id = ?", out.sql)
+    assert-eq(1, out.count)
+}
+
+test-backtick-identifier-ignored
+meta ["test"] fn () {
+    out ::compile/compile("SELECT `weird ? col` FROM t WHERE id = :id", "question", "mysql")
+    assert-eq("SELECT `weird ? col` FROM t WHERE id = ?", out.sql)
+    assert-eq(["id"], out.names)
+}
+
+test-pg-string-backslash-is-literal
+meta ["test"] fn () {
+    // PostgreSQL standard strings treat backslash literally: '\' is a
+    // complete string and the following ? is a real placeholder.
+    out ::compile/compile("SELECT '\\' , ?", "dollar", "pg")
+    assert-eq("SELECT '\\' , $1", out.sql)
+    assert-eq(1, out.count)
+}

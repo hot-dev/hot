@@ -6,8 +6,18 @@ meta {
     User-facing SQL uses `?` (positional) or `:name` (named) placeholders.
     `compile` rewrites them for a driver's placeholder style — `"dollar"`
     (`$1, $2, ...`, PostgreSQL) or `"question"` (`?`, MySQL/SQLite) — while
-    leaving string literals, quoted identifiers, comments, and PostgreSQL
-    `::type` casts untouched.
+    leaving string literals, quoted identifiers, comments, PostgreSQL
+    `::type` casts, and dollar-quoted strings untouched.
+
+    `??` escapes a literal `?` (for PostgreSQL's JSONB operators, write
+    `??`, `??|`, `??&`). Named placeholders start with a letter or
+    underscore, so array slices like `arr[1:3]` pass through unchanged.
+
+    Dialect-specific syntax is enabled by the optional third argument
+    (`"pg"`, `"mysql"`, `"sqlite"`): MySQL adds backslash escapes inside
+    strings and `#` line comments. Backtick identifier quoting is handled
+    for the `"question"` style (MySQL native, SQLite-compatible), and
+    dollar-quoted strings for the `"dollar"` style.
     """
 }
 
@@ -19,6 +29,11 @@ at fn (s: Str, i: Int): Str {
 
 is-name-char fn (c: Str): Bool {
   ::regex/is-match(c, "^[A-Za-z0-9_]$")
+}
+
+// Named placeholders (and dollar-quote tags) start like identifiers.
+is-name-start fn (c: Str): Bool {
+  ::regex/is-match(c, "^[A-Za-z_]$")
 }
 
 // Position (0-based) of `name` in `names`, or -1.
@@ -45,6 +60,44 @@ collect-name fn (sql: Str, i: Int): Map {
   }
 }
 
+// Match a dollar-quote opener at `i` (which holds "$"): `$$` or `$tag$`
+// where tag is identifier-shaped. Returns the full opener or "" when this
+// `$` does not start a dollar quote.
+dollar-quote-tag fn (sql: Str, i: Int): Str {
+  len length(sql)
+  next if(lt(add(i, 1), len), at(sql, add(i, 1)), "")
+  cond {
+    eq(next, "$") => { "$$" }
+    is-name-start(next) => {
+      collected collect-name(sql, add(i, 1))
+      cond {
+        and(lt(collected.next, len), eq(at(sql, collected.next), "$")) => {
+          concat("$", collected.name, "$")
+        }
+        => { "" }
+      }
+    }
+    => { "" }
+  }
+}
+
+// Lexing switches derived from placeholder style + dialect.
+scan-opts fn (style: Str, dialect: Str): Map {
+  {
+    style: style,
+    // MySQL strings treat backslash as an escape by default
+    // (NO_BACKSLASH_ESCAPES off); PostgreSQL standard strings and SQLite
+    // treat it as a literal character.
+    backslash-strings: eq(dialect, "mysql"),
+    // MySQL also opens line comments with '#'.
+    hash-comments: eq(dialect, "mysql"),
+    // Backtick identifier quoting: MySQL native, SQLite-compatible.
+    backtick-identifiers: eq(style, "question"),
+    // Dollar-quoted strings are PostgreSQL.
+    dollar-quotes: eq(style, "dollar")
+  }
+}
+
 compile
 meta {
     doc: """
@@ -57,11 +110,19 @@ meta {
     `$N` position. For the `"question"` style every occurrence becomes its
     own `?` (the binder repeats the value).
 
-    Mixing `?` and `:name` in one statement returns an error.
+    Mixing `?` and `:name` in one statement returns an error. `??` emits a
+    literal `?` and binds nothing (PostgreSQL JSONB operators: `??`,
+    `??|`, `??&`).
 
-    Skipped regions: `'...'` strings (with `''` escapes), `"..."`
-    identifiers, `--` line comments, `/* ... */` block comments (nested),
-    and `::type` casts.
+    Skipped regions: `'...'` strings (with `''` escapes, plus `\\`
+    escapes for the `"mysql"` dialect), `"..."` identifiers, `` `...` ``
+    identifiers (question style), `--` line comments (`#` too for
+    `"mysql"`), `/* ... */` block comments (nested), `::type` casts, and
+    `$$ ... $$` / `$tag$ ... $tag$` dollar-quoted strings (dollar style).
+
+    The optional `dialect` argument (`"pg"`, `"mysql"`, `"sqlite"`)
+    enables the dialect-specific lexing above; the two-argument form uses
+    the style's defaults.
 
     **Example**
 
@@ -74,8 +135,12 @@ meta {
     ```
     """
 }
-fn (sql: Str, style: Str): Map {
-  result scan(sql, 0, style, "", [], "sql", 0)
+fn
+(sql: Str, style: Str): Map {
+  compile(sql, style, "")
+},
+(sql: Str, style: Str, dialect: Str): Map {
+  result scan(sql, 0, scan-opts(style, dialect), "", [], "sql", 0, "")
   cond {
     is-err(result) => { result }
     => {
@@ -91,21 +156,26 @@ fn (sql: Str, style: Str): Map {
   }
 }
 
-// Character scanner. `mode` is one of "sql", "squote", "dquote", "line",
-// "block"; `depth` tracks nested block comments.
-scan fn (sql: Str, i: Int, style: Str, out: Str, names: Vec, mode: Str, depth: Int): Map {
+// Character scanner. `mode` is one of "sql", "squote", "dquote", "btick",
+// "line", "block", "dollarq"; `depth` tracks nested block comments and
+// `tag` the active dollar-quote opener.
+scan fn (sql: Str, i: Int, opts: Map, out: Str, names: Vec, mode: Str, depth: Int, tag: Str): Map {
   len length(sql)
   cond {
     gte(i, len) => { {sql: out, names: names} }
     eq(mode, "squote") => {
       c at(sql, i)
       cond {
-        and(eq(c, "'"), and(lt(add(i, 1), len), eq(at(sql, add(i, 1)), "'"))) => {
-          scan(sql, add(i, 2), style, concat(out, "''"), names, "squote", depth)
+        and(opts.backslash-strings, and(eq(c, "\\"), lt(add(i, 1), len))) => {
+          scan(sql, add(i, 2), opts, concat(out, c, at(sql, add(i, 1))), names, "squote", depth, tag)
         }
 
-        eq(c, "'") => { scan(sql, add(i, 1), style, concat(out, c), names, "sql", depth) }
-        => { scan(sql, add(i, 1), style, concat(out, c), names, "squote", depth) }
+        and(eq(c, "'"), and(lt(add(i, 1), len), eq(at(sql, add(i, 1)), "'"))) => {
+          scan(sql, add(i, 2), opts, concat(out, "''"), names, "squote", depth, tag)
+        }
+
+        eq(c, "'") => { scan(sql, add(i, 1), opts, concat(out, c), names, "sql", depth, tag) }
+        => { scan(sql, add(i, 1), opts, concat(out, c), names, "squote", depth, tag) }
       }
     }
 
@@ -113,18 +183,30 @@ scan fn (sql: Str, i: Int, style: Str, out: Str, names: Vec, mode: Str, depth: I
       c at(sql, i)
       cond {
         and(eq(c, "\""), and(lt(add(i, 1), len), eq(at(sql, add(i, 1)), "\""))) => {
-          scan(sql, add(i, 2), style, concat(out, "\"\""), names, "dquote", depth)
+          scan(sql, add(i, 2), opts, concat(out, "\"\""), names, "dquote", depth, tag)
         }
 
-        eq(c, "\"") => { scan(sql, add(i, 1), style, concat(out, c), names, "sql", depth) }
-        => { scan(sql, add(i, 1), style, concat(out, c), names, "dquote", depth) }
+        eq(c, "\"") => { scan(sql, add(i, 1), opts, concat(out, c), names, "sql", depth, tag) }
+        => { scan(sql, add(i, 1), opts, concat(out, c), names, "dquote", depth, tag) }
+      }
+    }
+
+    eq(mode, "btick") => {
+      c at(sql, i)
+      cond {
+        and(eq(c, "`"), and(lt(add(i, 1), len), eq(at(sql, add(i, 1)), "`"))) => {
+          scan(sql, add(i, 2), opts, concat(out, "``"), names, "btick", depth, tag)
+        }
+
+        eq(c, "`") => { scan(sql, add(i, 1), opts, concat(out, c), names, "sql", depth, tag) }
+        => { scan(sql, add(i, 1), opts, concat(out, c), names, "btick", depth, tag) }
       }
     }
 
     eq(mode, "line") => {
       c at(sql, i)
       next-mode if(eq(c, "\n"), "sql", "line")
-      scan(sql, add(i, 1), style, concat(out, c), names, next-mode, depth)
+      scan(sql, add(i, 1), opts, concat(out, c), names, next-mode, depth, tag)
     }
 
     eq(mode, "block") => {
@@ -133,13 +215,23 @@ scan fn (sql: Str, i: Int, style: Str, out: Str, names: Vec, mode: Str, depth: I
         and(eq(c, "*"), and(lt(add(i, 1), len), eq(at(sql, add(i, 1)), "/"))) => {
           new-depth sub(depth, 1)
           next-mode if(eq(new-depth, 0), "sql", "block")
-          scan(sql, add(i, 2), style, concat(out, "*/"), names, next-mode, new-depth)
+          scan(sql, add(i, 2), opts, concat(out, "*/"), names, next-mode, new-depth, tag)
         }
 
         and(eq(c, "/"), and(lt(add(i, 1), len), eq(at(sql, add(i, 1)), "*"))) => {
-          scan(sql, add(i, 2), style, concat(out, "/*"), names, "block", add(depth, 1))
+          scan(sql, add(i, 2), opts, concat(out, "/*"), names, "block", add(depth, 1), tag)
         }
-        => { scan(sql, add(i, 1), style, concat(out, c), names, "block", depth) }
+        => { scan(sql, add(i, 1), opts, concat(out, c), names, "block", depth, tag) }
+      }
+    }
+
+    eq(mode, "dollarq") => {
+      end add(i, length(tag))
+      cond {
+        and(lte(end, len), eq(slice(sql, i, end), tag)) => {
+          scan(sql, end, opts, concat(out, tag), names, "sql", depth, "")
+        }
+        => { scan(sql, add(i, 1), opts, concat(out, at(sql, i)), names, "dollarq", depth, tag) }
       }
     }
     // mode "sql"
@@ -147,45 +239,70 @@ scan fn (sql: Str, i: Int, style: Str, out: Str, names: Vec, mode: Str, depth: I
       c at(sql, i)
       next if(lt(add(i, 1), len), at(sql, add(i, 1)), "")
       cond {
-        eq(c, "'") => { scan(sql, add(i, 1), style, concat(out, c), names, "squote", depth) }
-        eq(c, "\"") => { scan(sql, add(i, 1), style, concat(out, c), names, "dquote", depth) }
+        eq(c, "'") => { scan(sql, add(i, 1), opts, concat(out, c), names, "squote", depth, tag) }
+        eq(c, "\"") => { scan(sql, add(i, 1), opts, concat(out, c), names, "dquote", depth, tag) }
+        and(eq(c, "`"), opts.backtick-identifiers) => {
+          scan(sql, add(i, 1), opts, concat(out, c), names, "btick", depth, tag)
+        }
+
         and(eq(c, "-"), eq(next, "-")) => {
-          scan(sql, add(i, 2), style, concat(out, "--"), names, "line", depth)
+          scan(sql, add(i, 2), opts, concat(out, "--"), names, "line", depth, tag)
+        }
+
+        and(eq(c, "#"), opts.hash-comments) => {
+          scan(sql, add(i, 1), opts, concat(out, c), names, "line", depth, tag)
         }
 
         and(eq(c, "/"), eq(next, "*")) => {
-          scan(sql, add(i, 2), style, concat(out, "/*"), names, "block", 1)
+          scan(sql, add(i, 2), opts, concat(out, "/*"), names, "block", 1, tag)
+        }
+
+        and(eq(c, "$"), opts.dollar-quotes) => {
+          opener dollar-quote-tag(sql, i)
+          cond {
+            is-empty(opener) => {
+              scan(sql, add(i, 1), opts, concat(out, c), names, "sql", depth, tag)
+            }
+            => {
+              scan(sql, add(i, length(opener)), opts, concat(out, opener), names, "dollarq", depth, opener)
+            }
+          }
+        }
+
+        and(eq(c, "?"), eq(next, "?")) => {
+          // `??` escapes a literal `?` (PostgreSQL JSONB operators).
+          scan(sql, add(i, 2), opts, concat(out, "?"), names, "sql", depth, tag)
         }
 
         eq(c, "?") => {
-          emitted if(eq(style, "dollar"), concat("$", Str(add(length(names), 1))), "?")
-          scan(sql, add(i, 1), style, concat(out, emitted), concat(names, [null]), "sql", depth)
+          emitted if(eq(opts.style, "dollar"), concat("$", Str(add(length(names), 1))), "?")
+          scan(sql, add(i, 1), opts, concat(out, emitted), concat(names, [null]), "sql", depth, tag)
         }
 
         and(eq(c, ":"), eq(next, ":")) => {
-          scan(sql, add(i, 2), style, concat(out, "::"), names, "sql", depth)
+          scan(sql, add(i, 2), opts, concat(out, "::"), names, "sql", depth, tag)
         }
 
-        and(eq(c, ":"), is-name-char(next)) => {
+        and(eq(c, ":"), is-name-start(next)) => {
           collected collect-name(sql, add(i, 1))
           cond {
-            eq(style, "dollar") => {
+            eq(opts.style, "dollar") => {
               existing name-index(names, collected.name)
               cond {
                 gte(existing, 0) => {
-                  scan(sql, collected.next, style, concat(out, "$", Str(add(existing, 1))), names, "sql", depth)
+                  scan(sql, collected.next, opts, concat(out, "$", Str(add(existing, 1))), names, "sql", depth, tag)
                 }
                 => {
-                  scan(sql, collected.next, style, concat(out, "$", Str(add(length(names), 1))), concat(names, [collected.name]), "sql", depth)
+                  scan(sql, collected.next, opts, concat(out, "$", Str(add(length(names), 1))), concat(names, [collected.name]), "sql", depth, tag)
                 }
               }
             }
             => {
-              scan(sql, collected.next, style, concat(out, "?"), concat(names, [collected.name]), "sql", depth)
+              scan(sql, collected.next, opts, concat(out, "?"), concat(names, [collected.name]), "sql", depth, tag)
             }
           }
         }
-        => { scan(sql, add(i, 1), style, concat(out, c), names, "sql", depth) }
+        => { scan(sql, add(i, 1), opts, concat(out, c), names, "sql", depth, tag) }
       }
     }
   }

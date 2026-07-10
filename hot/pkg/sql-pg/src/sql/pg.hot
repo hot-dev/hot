@@ -1,6 +1,6 @@
 ::sql::pg ns
 meta {
-    doc: """PostgreSQL driver for `::sql`, backed by the pure-Hot `hot.dev/pg` wire-protocol client."""
+    doc: """PostgreSQL driver for `::sql`, backed by the pure-Hot `hot.dev/pg` wire-protocol client. Placeholders compile to `$N`; write `??` / `??|` / `??&` for the JSONB operators, and dollar-quoted bodies pass through unrewritten."""
 }
 
 // Adapt ::pg to the driver contract: the runtime always passes a params
