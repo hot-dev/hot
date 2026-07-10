@@ -406,8 +406,11 @@ pub fn open(vm: &mut VirtualMachine, args: &[Val]) -> HotResult<Val> {
                     e
                 )));
             }
-            // Legacy records without an etag can't CAS; hash what we read so
-            // the commit still has an expectation to compare against skips.
+            // Records without an etag (multipart uploads, legacy rows) carry
+            // no version info; hash what we read so the unchanged-since-
+            // checkout skip still works. The record CAS treats a NULL stored
+            // etag as matching any expectation (first winner stamps a real
+            // etag), so the commit still serializes correctly.
             Some(meta.etag.unwrap_or_else(|| compute_md5(&bytes)))
         } else if read_only {
             return HotResult::Err(Val::from(format!(
@@ -606,7 +609,8 @@ fn commit_service(
     }
 
     // Atomic compare-and-swap on the record etag: exactly one concurrent
-    // committer wins; losers get a conflict Err and never touch the blob.
+    // committer wins; losers get a conflict Err and their staged bytes are
+    // discarded without ever becoming visible.
     let committed = block_on_storage(file_storage.write_file_if(
         &service.storage_path,
         &local_bytes,

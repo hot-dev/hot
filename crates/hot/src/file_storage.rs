@@ -235,13 +235,16 @@ pub trait FileStorage: Send + Sync {
         ctx: &FileStorageContext,
     ) -> Result<FileMetadata, String>;
 
-    /// Read file from storage
     /// Conditionally write: succeeds only while the stored record still
     /// matches `expected_etag` (or does not exist yet, for None). Returns
-    /// Ok(None) when the compare-and-swap loses. The record is flipped
-    /// BEFORE the blob bytes are written, so exactly one concurrent writer
-    /// proceeds to the byte write — this is the serialization point for
-    /// read-modify-write consumers like ::hot::sqlite.
+    /// Ok(None) when the compare-and-swap loses.
+    ///
+    /// Atomicity: the bytes are staged at a unique per-attempt storage key
+    /// first, and the record swap to that key is the commit point. A failed
+    /// byte write or a lost race leaves the record (and the bytes it
+    /// references) untouched, and concurrent winners can never clobber each
+    /// other's blobs — this is the serialization point for read-modify-write
+    /// consumers like ::hot::sqlite.
     async fn write_file_if(
         &self,
         path: &str,
@@ -392,10 +395,25 @@ async fn check_write_quota(ctx: &FileStorageContext, content_len: i64) -> Result
     Ok(())
 }
 
+/// Unique per-attempt relative storage location for a conditional write.
+/// Each attempt stages its bytes at its own key and then swaps the record's
+/// storage_path to reference them, so no two attempts ever share a blob and
+/// a loser's cleanup can never delete a winner's bytes.
+fn cas_blob_rel_path(normalized_path: &str) -> String {
+    format!("{}.cas-{}", normalized_path, Uuid::new_v4().simple())
+}
+
 /// The record compare-and-swap behind write_file_if: conditional update when
 /// an etag is expected, plain insert (racing on the partial unique index
 /// over active (org_id, env_id, path)) when the file must not exist yet.
-/// Ok(None) = the CAS lost.
+///
+/// The blob bytes must already be durably written at `storage_path` when
+/// this runs — the record swap is the commit point, and a reader may follow
+/// the new storage_path the instant the swap lands.
+///
+/// Ok(None) = the CAS lost. On a win, the second tuple element carries the
+/// storage path the record previously referenced (now unreachable) so the
+/// caller can clean up the superseded blob.
 #[allow(clippy::too_many_arguments)]
 async fn cas_file_record(
     backend: &str,
@@ -406,7 +424,7 @@ async fn cas_file_record(
     content_type: Option<&str>,
     expected_etag: Option<&str>,
     ctx: &FileStorageContext,
-) -> Result<Option<FileMetadata>, String> {
+) -> Result<Option<(FileMetadata, Option<String>)>, String> {
     if let Err(e) = ctx.ensure_run_row().await {
         tracing::debug!(
             path = %normalized_path,
@@ -422,6 +440,11 @@ async fn cas_file_record(
                     // Deleted (or never existed) since checkout: the CAS loses.
                     Err(_) => return Ok(None),
                 };
+            // Accurate when the update below wins: a win means the record was
+            // untouched between this read and the swap (any interleaved write
+            // would have changed the etag and made the swap lose).
+            let previous_storage_path =
+                (!existing.storage_path.is_empty()).then(|| existing.storage_path.clone());
             let updated = crate::db::file::update_file_record_if_etag(
                 &ctx.db,
                 existing.file_id,
@@ -434,7 +457,7 @@ async fn cas_file_record(
                 ctx.run_id,
             )
             .await?;
-            Ok(updated.map(FileMetadata::from_file_record))
+            Ok(updated.map(|r| (FileMetadata::from_file_record(r), previous_storage_path)))
         }
         None => {
             match insert_file_record(
@@ -452,7 +475,7 @@ async fn cas_file_record(
             )
             .await
             {
-                Ok(rec) => Ok(Some(FileMetadata::from_file_record(rec))),
+                Ok(rec) => Ok(Some((FileMetadata::from_file_record(rec), None))),
                 // A concurrent creator won the unique index race: CAS lost.
                 Err(msg)
                     if msg.contains("UNIQUE")
@@ -730,6 +753,15 @@ impl FileStorage for LocalFileStorage {
                     )
                     .await?;
 
+                    // If the record previously pointed at a conditional-write
+                    // staged blob, that blob is now unreachable (best-effort).
+                    if existing.storage_backend == "local"
+                        && !existing.storage_path.is_empty()
+                        && existing.storage_path != storage_path
+                    {
+                        let _ = tokio::fs::remove_file(&existing.storage_path).await;
+                    }
+
                     FileMetadata::from_file_record(updated)
                 }
                 Err(_) => {
@@ -773,11 +805,23 @@ impl FileStorage for LocalFileStorage {
         let content_type_final = content_type
             .map(|s| s.to_string())
             .or_else(|| detect_content_type(&normalized_path, content));
-        let full_path = self.full_path(&normalized_path, ctx);
-        let storage_path = full_path.to_string_lossy().to_string();
 
-        // Flip the record first: the CAS is the serialization point.
-        let meta = cas_file_record(
+        // Stage the bytes at a unique key first; the record swap below is
+        // the commit point. A failure or lost race past this write leaves
+        // only an unreferenced staged blob, never a record pointing at
+        // missing or stale bytes.
+        let staged_path = self.full_path(&cas_blob_rel_path(&normalized_path), ctx);
+        let storage_path = staged_path.to_string_lossy().to_string();
+        if let Some(parent) = staged_path.parent() {
+            tokio::fs::create_dir_all(parent)
+                .await
+                .map_err(|e| format!("Failed to create parent directories: {}", e))?;
+        }
+        tokio::fs::write(&staged_path, content)
+            .await
+            .map_err(|e| format!("Failed to write file to storage: {}", e))?;
+
+        match cas_file_record(
             "local",
             &storage_path,
             &normalized_path,
@@ -787,20 +831,27 @@ impl FileStorage for LocalFileStorage {
             expected_etag,
             ctx,
         )
-        .await?;
-        let Some(meta) = meta else {
-            return Ok(None);
-        };
-
-        if let Some(parent) = full_path.parent() {
-            tokio::fs::create_dir_all(parent)
-                .await
-                .map_err(|e| format!("Failed to create parent directories: {}", e))?;
+        .await
+        {
+            Ok(Some((meta, previous_storage_path))) => {
+                // The record now references the staged bytes; the superseded
+                // blob is unreachable and can go (best-effort).
+                if let Some(old) = previous_storage_path
+                    && old != storage_path
+                {
+                    let _ = tokio::fs::remove_file(&old).await;
+                }
+                Ok(Some(meta))
+            }
+            Ok(None) => {
+                let _ = tokio::fs::remove_file(&staged_path).await;
+                Ok(None)
+            }
+            Err(e) => {
+                let _ = tokio::fs::remove_file(&staged_path).await;
+                Err(e)
+            }
         }
-        tokio::fs::write(&full_path, content)
-            .await
-            .map_err(|e| format!("Failed to write file to storage: {}", e))?;
-        Ok(Some(meta))
     }
 
     async fn read_file(&self, path: &str, ctx: &FileStorageContext) -> Result<Vec<u8>, String> {
@@ -809,10 +860,18 @@ impl FileStorage for LocalFileStorage {
         validate_path_security(&normalized_path)?;
 
         // Check database first for access control
-        get_file_by_path(&ctx.db, &normalized_path, ctx.org_id, ctx.env_id).await?;
+        let record = get_file_by_path(&ctx.db, &normalized_path, ctx.org_id, ctx.env_id).await?;
 
-        // Read from filesystem
-        let full_path = self.full_path(&normalized_path, ctx);
+        // The record's storage_path is authoritative — conditional writes
+        // commit by swapping it to a staged blob key. Fall back to the
+        // deterministic location for records that predate storage_path or
+        // whose base directory moved.
+        let recorded_path = (record.storage_backend == "local" && !record.storage_path.is_empty())
+            .then(|| PathBuf::from(&record.storage_path));
+        let full_path = match recorded_path {
+            Some(p) if p.exists() => p,
+            _ => self.full_path(&normalized_path, ctx),
+        };
 
         if !full_path.exists() {
             return Err(format!("File not found in storage: {}", normalized_path));
@@ -829,12 +888,11 @@ impl FileStorage for LocalFileStorage {
         validate_path_security(&normalized_path)?;
 
         // Check if file exists in database first
-        let file_existed =
-            (get_file_by_path(&ctx.db, &normalized_path, ctx.org_id, ctx.env_id).await).is_ok();
-
-        if !file_existed {
-            return Ok(false); // File didn't exist
-        }
+        let record = match get_file_by_path(&ctx.db, &normalized_path, ctx.org_id, ctx.env_id).await
+        {
+            Ok(record) => record,
+            Err(_) => return Ok(false), // File didn't exist
+        };
 
         // Mark inactive in database
         mark_file_inactive(
@@ -847,13 +905,22 @@ impl FileStorage for LocalFileStorage {
         )
         .await?;
 
-        // Delete from filesystem
+        // Delete from the filesystem: the recorded storage path (which may be
+        // a conditional-write staged blob) plus the deterministic location.
         let full_path = self.full_path(&normalized_path, ctx);
-
-        if full_path.exists() {
-            tokio::fs::remove_file(&full_path)
-                .await
-                .map_err(|e| format!("Failed to delete file from storage: {}", e))?;
+        let mut targets = vec![full_path];
+        if record.storage_backend == "local" && !record.storage_path.is_empty() {
+            let recorded = PathBuf::from(&record.storage_path);
+            if !targets.contains(&recorded) {
+                targets.push(recorded);
+            }
+        }
+        for target in targets {
+            if target.exists() {
+                tokio::fs::remove_file(&target)
+                    .await
+                    .map_err(|e| format!("Failed to delete file from storage: {}", e))?;
+            }
         }
 
         tracing::debug!("Deleted file {} from local storage", normalized_path);
@@ -1018,6 +1085,13 @@ impl FileStorage for LocalFileStorage {
                         ctx.run_id,
                     )
                     .await?;
+                    // Superseded conditional-write blob cleanup (best-effort).
+                    if existing.storage_backend == "local"
+                        && !existing.storage_path.is_empty()
+                        && existing.storage_path != storage_path
+                    {
+                        let _ = tokio::fs::remove_file(&existing.storage_path).await;
+                    }
                     FileMetadata::from_file_record(updated)
                 }
                 Err(_) => {
@@ -1241,6 +1315,22 @@ pub mod s3 {
 
             key_parts.join("/")
         }
+
+        /// Resolve a stored storage_path back to (bucket, key). Accepts the
+        /// canonical `s3://bucket/key` form; a bare value is treated as a key
+        /// in this storage's bucket. Returns None for empty paths.
+        fn parse_storage_path(&self, storage_path: &str) -> Option<(String, String)> {
+            if storage_path.is_empty() {
+                return None;
+            }
+            match storage_path.strip_prefix("s3://") {
+                Some(rest) => {
+                    let (bucket, key) = rest.split_once('/')?;
+                    Some((bucket.to_string(), key.to_string()))
+                }
+                None => Some((self.bucket.clone(), storage_path.to_string())),
+            }
+        }
     }
 
     #[async_trait]
@@ -1366,6 +1456,23 @@ pub mod s3 {
                         )
                         .await?;
 
+                        // If the record previously pointed at a conditional-write
+                        // staged blob, that blob is now unreachable (best-effort).
+                        if existing.storage_backend == "s3"
+                            && !existing.storage_path.is_empty()
+                            && existing.storage_path != storage_path
+                            && let Some((old_bucket, old_key)) =
+                                self.parse_storage_path(&existing.storage_path)
+                        {
+                            let _ = self
+                                .client
+                                .delete_object()
+                                .bucket(&old_bucket)
+                                .key(&old_key)
+                                .send()
+                                .await;
+                        }
+
                         FileMetadata::from_file_record(updated)
                     }
                     Err(_) => {
@@ -1409,23 +1516,13 @@ pub mod s3 {
             let content_type_final = content_type
                 .map(|s| s.to_string())
                 .or_else(|| detect_content_type(&normalized_path, content));
-            let key = self.s3_key(&normalized_path, ctx);
 
-            // Flip the record first: the CAS is the serialization point.
-            let meta = cas_file_record(
-                "s3",
-                &key,
-                &normalized_path,
-                content.len() as i64,
-                &etag,
-                content_type_final.as_deref(),
-                expected_etag,
-                ctx,
-            )
-            .await?;
-            let Some(meta) = meta else {
-                return Ok(None);
-            };
+            // Stage the bytes at a unique key first; the record swap below
+            // is the commit point. A failed upload or a lost race leaves
+            // only an unreferenced staged object, never a record pointing
+            // at missing or stale bytes.
+            let key = self.s3_key(&cas_blob_rel_path(&normalized_path), ctx);
+            let storage_path = format!("s3://{}/{}", self.bucket, key);
 
             let byte_stream = ByteStream::from(content.to_vec());
             let mut put_request = self
@@ -1443,7 +1540,47 @@ pub mod s3 {
                     self.bucket, key, normalized_path, e
                 )
             })?;
-            Ok(Some(meta))
+
+            match cas_file_record(
+                "s3",
+                &storage_path,
+                &normalized_path,
+                content.len() as i64,
+                &etag,
+                content_type_final.as_deref(),
+                expected_etag,
+                ctx,
+            )
+            .await
+            {
+                Ok(Some((meta, previous_storage_path))) => {
+                    // The record now references the staged object; the
+                    // superseded blob is unreachable and can go (best-effort).
+                    if let Some(old) = previous_storage_path
+                        && old != storage_path
+                        && let Some((old_bucket, old_key)) = self.parse_storage_path(&old)
+                    {
+                        let _ = self
+                            .client
+                            .delete_object()
+                            .bucket(&old_bucket)
+                            .key(&old_key)
+                            .send()
+                            .await;
+                    }
+                    Ok(Some(meta))
+                }
+                lost_or_err => {
+                    let _ = self
+                        .client
+                        .delete_object()
+                        .bucket(&self.bucket)
+                        .key(&key)
+                        .send()
+                        .await;
+                    lost_or_err.map(|_| None)
+                }
+            }
         }
         async fn read_file(&self, path: &str, ctx: &FileStorageContext) -> Result<Vec<u8>, String> {
             // Normalize and validate path
@@ -1451,15 +1588,23 @@ pub mod s3 {
             validate_path_security(&normalized_path)?;
 
             // Check database first for access control
-            get_file_by_path(&ctx.db, &normalized_path, ctx.org_id, ctx.env_id).await?;
+            let record =
+                get_file_by_path(&ctx.db, &normalized_path, ctx.org_id, ctx.env_id).await?;
 
-            // Read from S3
-            let key = self.s3_key(&normalized_path, ctx);
+            // The record's storage_path is authoritative — conditional writes
+            // commit by swapping it to a staged blob key. Fall back to the
+            // deterministic key for records that predate storage_path.
+            let (bucket, key) = if record.storage_backend == "s3" {
+                self.parse_storage_path(&record.storage_path)
+                    .unwrap_or_else(|| (self.bucket.clone(), self.s3_key(&normalized_path, ctx)))
+            } else {
+                (self.bucket.clone(), self.s3_key(&normalized_path, ctx))
+            };
 
             let result = self
                 .client
                 .get_object()
-                .bucket(&self.bucket)
+                .bucket(&bucket)
                 .key(&key)
                 .send()
                 .await;
@@ -1470,7 +1615,7 @@ pub mod s3 {
                     // Extract detailed error information
                     let error_msg = format!(
                         "Failed to retrieve file from S3 (bucket: {}, key: {}, path: {}): {}",
-                        self.bucket, key, normalized_path, e
+                        bucket, key, normalized_path, e
                     );
                     tracing::error!("{}", error_msg);
 
@@ -1494,7 +1639,7 @@ pub mod s3 {
                 .map_err(|e| {
                     let error_msg = format!(
                         "Failed to read S3 response body for file {} (bucket: {}, key: {}): {}",
-                        normalized_path, self.bucket, key, e
+                        normalized_path, bucket, key, e
                     );
                     tracing::error!("{}", error_msg);
                     error_msg
@@ -1512,12 +1657,11 @@ pub mod s3 {
             validate_path_security(&normalized_path)?;
 
             // Check if file exists in database first
-            let file_existed =
-                (get_file_by_path(&ctx.db, &normalized_path, ctx.org_id, ctx.env_id).await).is_ok();
-
-            if !file_existed {
-                return Ok(false); // File didn't exist
-            }
+            let record =
+                match get_file_by_path(&ctx.db, &normalized_path, ctx.org_id, ctx.env_id).await {
+                    Ok(record) => record,
+                    Err(_) => return Ok(false), // File didn't exist
+                };
 
             // Mark inactive in database
             mark_file_inactive(
@@ -1530,13 +1674,20 @@ pub mod s3 {
             )
             .await?;
 
-            // Delete from S3
-            let key = self.s3_key(&normalized_path, ctx);
+            // Delete from S3 at the recorded storage path (which may be a
+            // conditional-write staged key), falling back to the
+            // deterministic key.
+            let (bucket, key) = if record.storage_backend == "s3" {
+                self.parse_storage_path(&record.storage_path)
+                    .unwrap_or_else(|| (self.bucket.clone(), self.s3_key(&normalized_path, ctx)))
+            } else {
+                (self.bucket.clone(), self.s3_key(&normalized_path, ctx))
+            };
 
             let result = self
                 .client
                 .delete_object()
-                .bucket(&self.bucket)
+                .bucket(&bucket)
                 .key(&key)
                 .send()
                 .await;
@@ -1550,7 +1701,7 @@ pub mod s3 {
                     // Extract detailed error information
                     let error_msg = format!(
                         "Failed to delete file from S3 (bucket: {}, key: {}, path: {}): {}",
-                        self.bucket, key, normalized_path, e
+                        bucket, key, normalized_path, e
                     );
                     tracing::error!("{}", error_msg);
 
@@ -1737,6 +1888,21 @@ pub mod s3 {
                             ctx.run_id,
                         )
                         .await?;
+                        // Superseded conditional-write blob cleanup (best-effort).
+                        if existing.storage_backend == "s3"
+                            && !existing.storage_path.is_empty()
+                            && existing.storage_path != storage_path
+                            && let Some((old_bucket, old_key)) =
+                                self.parse_storage_path(&existing.storage_path)
+                        {
+                            let _ = self
+                                .client
+                                .delete_object()
+                                .bucket(&old_bucket)
+                                .key(&old_key)
+                                .send()
+                                .await;
+                        }
                         FileMetadata::from_file_record(updated)
                     }
                     Err(_) => {
@@ -2073,8 +2239,10 @@ mod tests {
         .await
         .unwrap();
 
+        // Mirrors migration 007: NULL env_id collapses to a sentinel so
+        // env-less contexts still dedupe active paths.
         sqlx::query(
-            "CREATE UNIQUE INDEX idx_file_org_env_path_active_unique ON file(org_id, env_id, path) WHERE active = 1",
+            "CREATE UNIQUE INDEX idx_file_org_env_path_active_unique ON file(org_id, coalesce(env_id, x'00000000000000000000000000000000'), path) WHERE active = 1",
         )
         .execute(&pool)
         .await
@@ -2182,6 +2350,176 @@ mod tests {
                 .unwrap(),
             b"video"
         );
+    }
+
+    #[tokio::test]
+    async fn test_write_file_if_create_and_conditional_update() {
+        let (storage, ctx, _temp_dir) = setup_test_storage().await;
+
+        // Create-if-absent succeeds and the bytes are readable back.
+        let v1 = storage
+            .write_file_if("dbs/app.db", b"version-1", None, None, &ctx)
+            .await
+            .unwrap()
+            .expect("create should win");
+        assert_eq!(
+            storage.read_file("dbs/app.db", &ctx).await.unwrap(),
+            b"version-1"
+        );
+
+        // A second create-if-absent loses without touching the content.
+        let lost = storage
+            .write_file_if("dbs/app.db", b"intruder", None, None, &ctx)
+            .await
+            .unwrap();
+        assert!(lost.is_none());
+        assert_eq!(
+            storage.read_file("dbs/app.db", &ctx).await.unwrap(),
+            b"version-1"
+        );
+
+        // Conditional update with the current etag wins; the superseded
+        // staged blob is cleaned up.
+        let v1_storage_path = v1.storage_path.clone();
+        let v2 = storage
+            .write_file_if("dbs/app.db", b"version-2", None, v1.etag.as_deref(), &ctx)
+            .await
+            .unwrap()
+            .expect("matching etag should win");
+        assert_eq!(
+            storage.read_file("dbs/app.db", &ctx).await.unwrap(),
+            b"version-2"
+        );
+        assert!(!std::path::Path::new(&v1_storage_path).exists());
+
+        // A writer still holding the old etag loses; content stays intact
+        // and its staged bytes are discarded.
+        let stale = storage
+            .write_file_if("dbs/app.db", b"stale-write", None, v1.etag.as_deref(), &ctx)
+            .await
+            .unwrap();
+        assert!(stale.is_none());
+        assert_eq!(
+            storage.read_file("dbs/app.db", &ctx).await.unwrap(),
+            b"version-2"
+        );
+        assert!(std::path::Path::new(&v2.storage_path).exists());
+    }
+
+    #[tokio::test]
+    async fn test_write_file_if_null_env_create_race_is_serialized() {
+        let (storage, ctx, _temp_dir) = setup_test_storage().await;
+        let mut envless_ctx = ctx.clone();
+        envless_ctx.env_id = None;
+
+        let won = storage
+            .write_file_if("dbs/shared.db", b"first", None, None, &envless_ctx)
+            .await
+            .unwrap();
+        assert!(won.is_some());
+
+        // Without the NULL-collapsing unique index, this second insert
+        // would create a duplicate active record instead of losing.
+        let lost = storage
+            .write_file_if("dbs/shared.db", b"second", None, None, &envless_ctx)
+            .await
+            .unwrap();
+        assert!(lost.is_none());
+        assert_eq!(
+            storage
+                .read_file("dbs/shared.db", &envless_ctx)
+                .await
+                .unwrap(),
+            b"first"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_write_file_if_loses_after_delete_and_can_recreate() {
+        let (storage, ctx, _temp_dir) = setup_test_storage().await;
+
+        let v1 = storage
+            .write_file_if("dbs/cycle.db", b"alive", None, None, &ctx)
+            .await
+            .unwrap()
+            .expect("create should win");
+
+        assert!(storage.delete_file("dbs/cycle.db", &ctx).await.unwrap());
+        // The CAS blob is gone from disk too.
+        assert!(!std::path::Path::new(&v1.storage_path).exists());
+
+        // An update expecting the pre-delete etag must lose (the active
+        // record is gone), not resurrect the inactive row.
+        let stale = storage
+            .write_file_if("dbs/cycle.db", b"zombie", None, v1.etag.as_deref(), &ctx)
+            .await
+            .unwrap();
+        assert!(stale.is_none());
+        assert!(!storage.file_exists("dbs/cycle.db", &ctx).await.unwrap());
+
+        // Create-if-absent works again after the delete.
+        let recreated = storage
+            .write_file_if("dbs/cycle.db", b"rebirth", None, None, &ctx)
+            .await
+            .unwrap();
+        assert!(recreated.is_some());
+        assert_eq!(
+            storage.read_file("dbs/cycle.db", &ctx).await.unwrap(),
+            b"rebirth"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_write_file_if_matches_null_etag_record_once() {
+        let (storage, ctx, _temp_dir) = setup_test_storage().await;
+
+        // Simulate a record without an etag (multipart uploads and legacy
+        // rows store NULL): write normally, then null the etag out.
+        storage
+            .write_file("dbs/legacy.db", b"legacy-bytes", None, &ctx)
+            .await
+            .unwrap();
+        let crate::db::DatabasePool::Sqlite(pool) = ctx.db.as_ref() else {
+            panic!("test uses sqlite");
+        };
+        sqlx::query("UPDATE file SET etag = NULL")
+            .execute(pool)
+            .await
+            .unwrap();
+
+        // A commit whose expectation is a content hash (what ::hot::sqlite
+        // checkout computes for etag-less records) must still win once...
+        let checkout_hash = compute_md5(b"legacy-bytes");
+        let won = storage
+            .write_file_if(
+                "dbs/legacy.db",
+                b"migrated",
+                None,
+                Some(&checkout_hash),
+                &ctx,
+            )
+            .await
+            .unwrap();
+        let won = won.expect("NULL-etag record should accept the first CAS");
+        assert_eq!(
+            storage.read_file("dbs/legacy.db", &ctx).await.unwrap(),
+            b"migrated"
+        );
+
+        // ...and the winner stamps a real etag, so a second stale writer
+        // now loses strictly.
+        let stale = storage
+            .write_file_if(
+                "dbs/legacy.db",
+                b"late-write",
+                None,
+                Some(&checkout_hash),
+                &ctx,
+            )
+            .await
+            .unwrap();
+        assert!(stale.is_none());
+        assert_eq!(won.etag, Some(compute_md5(b"migrated")));
     }
 
     #[tokio::test]

@@ -391,10 +391,18 @@ async fn update_file_record_attempt(
     }
 }
 
-/// Conditionally update a file record: succeeds only while the stored etag
-/// still equals `expected_etag`. Returns Ok(None) when the record changed
-/// since it was read (the compare-and-swap lost) — the caller must not
-/// write the blob bytes in that case.
+/// Conditionally update a file record: succeeds only while the record is
+/// still active and its stored etag equals `expected_etag`. Returns Ok(None)
+/// when the record changed (or was deleted) since it was read — the
+/// compare-and-swap lost and the caller must not treat its bytes as current.
+///
+/// Legacy records with a NULL etag carry no version information, so any
+/// expectation matches them; the row-level atomicity of the UPDATE still
+/// guarantees exactly one concurrent writer wins, and the winner stamps a
+/// real etag so later swaps compare strictly.
+///
+/// Like `update_file_record`, a foreign-key violation on `updated_by_run_id`
+/// is retried once with a NULL run id (the run row may not be flushed yet).
 #[allow(clippy::too_many_arguments)]
 pub async fn update_file_record_if_etag(
     db: &DatabasePool,
@@ -407,6 +415,60 @@ pub async fn update_file_record_if_etag(
     updated_by_user_id: Uuid,
     updated_by_run_id: Option<Uuid>,
 ) -> Result<Option<FileRecord>, String> {
+    let attempt = update_file_record_if_etag_attempt(
+        db,
+        file_id,
+        expected_etag,
+        size,
+        etag,
+        content_type,
+        storage_path,
+        updated_by_user_id,
+        updated_by_run_id,
+    )
+    .await;
+
+    match attempt {
+        Ok(record) => Ok(record),
+        Err(FileWriteError::ForeignKey(msg)) if updated_by_run_id.is_some() => {
+            tracing::warn!(
+                "Conditional file record update for '{}' hit a foreign-key violation ({}); \
+                 retrying with updated_by_run_id = NULL because run {} is not persisted yet \
+                 (async emitter backlog) or run tracking is disabled",
+                file_id,
+                msg,
+                updated_by_run_id.unwrap_or_default(),
+            );
+            update_file_record_if_etag_attempt(
+                db,
+                file_id,
+                expected_etag,
+                size,
+                etag,
+                content_type,
+                storage_path,
+                updated_by_user_id,
+                None,
+            )
+            .await
+            .map_err(FileWriteError::into_message)
+        }
+        Err(e) => Err(e.into_message()),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn update_file_record_if_etag_attempt(
+    db: &DatabasePool,
+    file_id: Uuid,
+    expected_etag: &str,
+    size: i64,
+    etag: Option<&str>,
+    content_type: Option<&str>,
+    storage_path: &str,
+    updated_by_user_id: Uuid,
+    updated_by_run_id: Option<Uuid>,
+) -> Result<Option<FileRecord>, FileWriteError> {
     let now = Utc::now();
     match db {
         DatabasePool::Postgres(pool) => {
@@ -419,7 +481,7 @@ pub async fn update_file_record_if_etag(
                 updated_by_user_id = $6,
                 updated_by_run_id = $7,
                 updated_at = $8
-            WHERE file_id = $1 AND etag = $9
+            WHERE file_id = $1 AND active = true AND (etag = $9 OR etag IS NULL)
             RETURNING file_id, path, size, etag, content_type,
                       storage_backend, storage_path, org_id, env_id,
                       created_by_run_id, updated_by_run_id,
@@ -437,11 +499,12 @@ pub async fn update_file_record_if_etag(
                 .bind(expected_etag)
                 .fetch_optional(pool)
                 .await
-                .map_err(|e| format!("Failed to conditionally update file record: {}", e))?;
+                .map_err(|e| {
+                    FileWriteError::from_sqlx("Failed to conditionally update file record", e)
+                })?;
             let Some(row) = row else {
                 return Ok(None);
             };
-            let fwe = |e: sqlx::Error| format!("Failed to read updated file record: {}", e);
             Ok(Some(FileRecord {
                 file_id: row.try_get("file_id").map_err(fwe)?,
                 path: row.try_get("path").map_err(fwe)?,
@@ -470,7 +533,7 @@ pub async fn update_file_record_if_etag(
                 updated_by_user_id = ?,
                 updated_by_run_id = ?,
                 updated_at = ?
-            WHERE file_id = ? AND etag = ?
+            WHERE file_id = ? AND active = 1 AND (etag = ? OR etag IS NULL)
             "#;
             let result = sqlx::query(query)
                 .bind(size)
@@ -484,11 +547,16 @@ pub async fn update_file_record_if_etag(
                 .bind(expected_etag)
                 .execute(pool)
                 .await
-                .map_err(|e| format!("Failed to conditionally update file record: {}", e))?;
+                .map_err(|e| {
+                    FileWriteError::from_sqlx("Failed to conditionally update file record", e)
+                })?;
             if result.rows_affected() == 0 {
                 return Ok(None);
             }
-            get_file_by_id(db, file_id).await.map(Some)
+            get_file_by_id(db, file_id)
+                .await
+                .map(Some)
+                .map_err(FileWriteError::Other)
         }
     }
 }
@@ -2201,5 +2269,169 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[tokio::test]
+    async fn conditional_update_matches_null_etag_exactly_once() {
+        let db = setup_fk_db().await;
+        let org_id = Uuid::now_v7();
+        let user_id = Uuid::now_v7();
+
+        // Multipart uploads and legacy rows store a NULL etag; a CAS whose
+        // expectation is a checkout-computed hash must still be able to win.
+        let inserted = insert_file_record(
+            &db,
+            "dbs/legacy.db",
+            10,
+            None,
+            None,
+            "local",
+            "/tmp/storage/dbs/legacy.db",
+            org_id,
+            None,
+            user_id,
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(inserted.etag, None);
+
+        let won = update_file_record_if_etag(
+            &db,
+            inserted.file_id,
+            "any-checkout-hash",
+            20,
+            Some("etag-v1"),
+            None,
+            "/tmp/storage/dbs/legacy-v1.db",
+            user_id,
+            None,
+        )
+        .await
+        .unwrap();
+        assert!(won.is_some(), "NULL-etag record must accept the first CAS");
+
+        // The winner stamped a real etag; a second writer with the same
+        // stale expectation now loses strictly.
+        let lost = update_file_record_if_etag(
+            &db,
+            inserted.file_id,
+            "any-checkout-hash",
+            30,
+            Some("etag-v2"),
+            None,
+            "/tmp/storage/dbs/legacy-v2.db",
+            user_id,
+            None,
+        )
+        .await
+        .unwrap();
+        assert!(lost.is_none());
+    }
+
+    #[tokio::test]
+    async fn conditional_update_loses_against_inactive_record() {
+        let db = setup_fk_db().await;
+        let org_id = Uuid::now_v7();
+        let user_id = Uuid::now_v7();
+
+        let inserted = insert_file_record(
+            &db,
+            "dbs/deleted.db",
+            10,
+            Some("etag-v1"),
+            None,
+            "local",
+            "/tmp/storage/dbs/deleted.db",
+            org_id,
+            None,
+            user_id,
+            None,
+        )
+        .await
+        .unwrap();
+
+        // Soft-delete the record out from under a checked-out writer.
+        if let DatabasePool::Sqlite(pool) = &db {
+            sqlx::query("UPDATE file SET active = 0 WHERE file_id = ?")
+                .bind(inserted.file_id)
+                .execute(pool)
+                .await
+                .unwrap();
+        }
+
+        // Even with a matching etag, the CAS must not write into (or
+        // resurrect) a deleted record.
+        let lost = update_file_record_if_etag(
+            &db,
+            inserted.file_id,
+            "etag-v1",
+            20,
+            Some("etag-v2"),
+            None,
+            "/tmp/storage/dbs/deleted-v2.db",
+            user_id,
+            None,
+        )
+        .await
+        .unwrap();
+        assert!(lost.is_none());
+
+        // The inactive row is untouched.
+        if let DatabasePool::Sqlite(pool) = &db {
+            let row = sqlx::query("SELECT etag, active FROM file WHERE file_id = ?")
+                .bind(inserted.file_id)
+                .fetch_one(pool)
+                .await
+                .unwrap();
+            use sqlx::Row;
+            assert_eq!(
+                row.get::<Option<String>, _>("etag").as_deref(),
+                Some("etag-v1")
+            );
+            assert_eq!(row.get::<i64, _>("active"), 0);
+        }
+    }
+
+    #[tokio::test]
+    async fn conditional_update_falls_back_to_null_run_id_when_run_row_is_missing() {
+        let db = setup_fk_db().await;
+        let org_id = Uuid::now_v7();
+        let user_id = Uuid::now_v7();
+
+        let inserted = insert_file_record(
+            &db,
+            "dbs/fk.db",
+            10,
+            Some("etag-v1"),
+            None,
+            "local",
+            "/tmp/storage/dbs/fk.db",
+            org_id,
+            None,
+            user_id,
+            None,
+        )
+        .await
+        .unwrap();
+
+        // The run row for this run id was never flushed (async emitter);
+        // the CAS must drop the provenance instead of failing hard.
+        let won = update_file_record_if_etag(
+            &db,
+            inserted.file_id,
+            "etag-v1",
+            20,
+            Some("etag-v2"),
+            None,
+            "/tmp/storage/dbs/fk-v2.db",
+            user_id,
+            Some(Uuid::now_v7()),
+        )
+        .await
+        .expect("conditional update should survive a missing run row");
+        let won = won.expect("CAS with matching etag should win");
+        assert_eq!(won.etag.as_deref(), Some("etag-v2"));
+        assert_eq!(won.updated_by_run_id, None);
     }
 }
