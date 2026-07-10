@@ -45,6 +45,7 @@ pub mod regex;
 pub mod resource;
 pub mod run;
 pub mod schedule;
+pub mod sqlite;
 pub mod store;
 pub mod str;
 pub mod stream;

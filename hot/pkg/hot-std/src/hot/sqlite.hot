@@ -1,0 +1,103 @@
+::hot::sqlite ns
+meta {
+    doc: """
+    SQLite databases, embedded in the runtime (no server, no wire
+    protocol). Respects `file.mode`:
+
+    - `direct` (CLI default) — `path` is a host filesystem path, opened
+      in place.
+    - `service` (managed default) — `path` names a file in managed
+      storage. Opening checks the database out into a local scratch
+      copy; queries run at local speed; `close`/`sync` commit the bytes
+      back. Commits refuse to overwrite a file that changed since
+      checkout (an Err — reopen and retry). A crash between commits
+      loses writes since the last `sync`, and commit cost is
+      proportional to the file size, so service mode fits small,
+      session-shaped workloads; high-frequency writers belong on a
+      server database (see `hot.dev/pg`).
+
+    Most callers should use the `::sql` package's sqlite driver rather
+    than these functions directly — it adds placeholder compilation,
+    typed queries, and transactions.
+
+    **Example**
+
+    ```hot
+    conn ::hot::sqlite/open("/tmp/app.db")
+    ::hot::sqlite/execute(conn, "CREATE TABLE t (id INTEGER PRIMARY KEY, name TEXT)", [])
+    ::hot::sqlite/execute(conn, "INSERT INTO t (name) VALUES (?)", ["Ada"])
+    rows ::hot::sqlite/query(conn, "SELECT * FROM t WHERE name = ?", ["Ada"])
+    ::hot::sqlite/close(conn)
+    ```
+    """
+}
+
+open
+meta {
+    doc: """
+    Open a SQLite database. Pass a path string, or an options map:
+
+    - `path` — the database file (host path in `direct` mode, managed
+      storage path in `service` mode). Created if missing (unless
+      read-only).
+    - `read-only` — open without write access; in service mode this
+      skips the commit entirely (and never uploads).
+
+    Returns a connection handle, or an Err. Foreign keys are ON and the
+    busy timeout is 5s.
+    """
+}
+fn
+(path-or-options: Str | Map): Any {
+    call-lib(::hot::sqlite/open, [path-or-options])
+}
+
+execute
+meta {
+    doc: """
+    Run one statement (INSERT/UPDATE/DELETE/DDL) with `?` positional
+    parameters. Returns `{rows-affected, last-insert-id}` or an Err.
+    One statement per call; parameter count must match the statement.
+    Bindable types: Int, Dec, Str, Bytes, Bool (as 0/1), null.
+    """
+}
+fn (conn: Any, sql: Str, params: Vec): Map {
+    call-lib(::hot::sqlite/execute, [conn, sql, params])
+}
+
+query
+meta {
+    doc: """
+    Run one SELECT with `?` positional parameters. Returns a Vec of row
+    Maps keyed by column name, or an Err. Column types map to Int, Dec
+    (REAL), Str, Bytes (BLOB), and null.
+    """
+}
+fn (conn: Any, sql: Str, params: Vec): Vec {
+    call-lib(::hot::sqlite/query, [conn, sql, params])
+}
+
+sync
+meta {
+    doc: """
+    Commit the service-mode checkout back to managed storage without
+    closing (durability point for long-lived connections). No-op in
+    `direct` mode and for read-only opens. Errs on conflict — the
+    stored file changed since checkout.
+    """
+}
+fn (conn: Any): Bool {
+    call-lib(::hot::sqlite/sync, [conn])
+}
+
+close
+meta {
+    doc: """
+    Close the connection. In service mode this commits the checkout
+    first (an Err leaves the connection open so data can be read back
+    out) and removes the scratch copy. Idempotent.
+    """
+}
+fn (conn: Any): Bool {
+    call-lib(::hot::sqlite/close, [conn])
+}

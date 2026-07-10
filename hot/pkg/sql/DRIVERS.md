@@ -30,30 +30,23 @@ Work items:
 Estimated scope: comparable to pg (~1.5k lines + wire tests). CI needs
 a mysql service container next to the existing postgres one.
 
-## SQLite — needs a runtime native (design decision required)
+## SQLite — SHIPPED (::hot::sqlite natives + ::sql::sqlite driver)
 
-SQLite is a file format + C library, not a wire protocol, so a pure-Hot
-client isn't realistic. Options:
+Implemented 2026-07 on the decided design: natives in `crates/hot/src/
+lang/hot/sqlite.rs` against the `libsqlite3-sys` already in the binary
+(same node as sqlx-sqlite's transitive pin — no new dependency, no async
+bridge), surfaced as `::hot::sqlite/{open,execute,query,sync,close}` in
+hot-std, wrapped by `::sql::sqlite/driver` (placeholder `"question"`,
+ANSI quote-ident).
 
-1. **Natives backed by the `sqlx-sqlite` crate already in the
-   workspace** (`libsqlite3-sys` is compiled into the hot binary today
-   for the engine's own storage). The catch: sqlx is async and VM
-   natives are synchronous — the natives would need a `block_on`
-   bridge or a dedicated blocking connection pool, and connection
-   handles crossing VM/task boundaries need ownership rules like
-   `::hot::tcp` sockets have.
-2. **`rusqlite` (synchronous)** as a new dependency — cleaner native
-   shape (no async bridge), at the cost of a second sqlite binding in
-   the binary.
-3. **Engine-mediated**: expose the engine's existing sqlite pool with
-   per-project database files (`hot://db/...`), making sqlite a managed
-   platform feature rather than a raw driver.
-
-Option 3 is the most "Hot-like" (files under `hot://`, no host paths,
-works identically in cloud runs) and is probably the right product
-answer; options 1/2 are faster to ship. Either way the Hot surface is
-the same: `::sql::sqlite/open({path})` returning a `::sql/Driver`-shaped
-connection with placeholder style `"question"`.
-
-Decision needed before implementation: 1/2 vs 3, and whether sqlite
-files live under `hot://` storage.
+`file.mode` aware:
+- `direct` — host paths, opened in place.
+- `service` — checkout/commit against FileStorage: open copies the file
+  to a local scratch, queries run locally, close/sync commit the bytes
+  back. Conflict handling is compare-before-write on the checkout hash
+  (an Err, never a clobber; the check and write are not atomic — see
+  module docs). Commit cost is O(file size): fits small session-shaped
+  workloads; high-frequency writers belong on pg. Possible future work:
+  content-addressed scratch cache, transfer compression, page-level
+  delta sync (Litestream-style) if the write-amplification cases start
+  to matter.

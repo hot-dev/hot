@@ -2712,6 +2712,7 @@ dependencies = [
  "ignore",
  "indexmap",
  "libc",
+ "libsqlite3-sys",
  "md5",
  "mime2ext",
  "mime_guess",

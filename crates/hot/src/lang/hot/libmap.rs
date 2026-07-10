@@ -1653,6 +1653,27 @@ pub fn get_hotlib_map() -> &'static HotLibMap {
         );
 
         // File functions
+        // ::hot::sqlite — SQLite over libsqlite3-sys (file.mode aware)
+        map.insert(
+            "::hot::sqlite/open".to_string(),
+            HotLibFn::VmAwareFn(sqlite::open),
+        );
+        map.insert(
+            "::hot::sqlite/execute".to_string(),
+            HotLibFn::LibFn(sqlite::execute),
+        );
+        map.insert(
+            "::hot::sqlite/query".to_string(),
+            HotLibFn::LibFn(sqlite::query),
+        );
+        map.insert(
+            "::hot::sqlite/sync".to_string(),
+            HotLibFn::VmAwareFn(sqlite::sync),
+        );
+        map.insert(
+            "::hot::sqlite/close".to_string(),
+            HotLibFn::VmAwareFn(sqlite::close),
+        );
         map.insert(
             "::hot::file/read-file".to_string(),
             HotLibFn::VmAwareFn(file::read_file),
