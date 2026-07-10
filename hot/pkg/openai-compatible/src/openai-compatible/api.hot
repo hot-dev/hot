@@ -1,5 +1,5 @@
 ::openai-compatible::api ns
-meta {ctx: {"openai-compatible.base.url": {required: true}, "openai-compatible.api.key": {required: true}}}
+meta {ctx: {"openai-compatible.url": {required: true}, "openai-compatible.api.key": {required: true}}}
 
 ::ctx ::hot::ctx
 
@@ -30,7 +30,7 @@ meta {
 }
 fn
 (path: Str): Str {
-  url(path, ::ctx/get("openai-compatible.base.url"))
+  url(path, ::ctx/get("openai-compatible.url"))
 },
 (path: Str, base-url: Str): Str {
   base if(ends-with(base-url, "/"), slice(base-url, 0, sub(length(base-url), 1)), base-url)
@@ -42,7 +42,7 @@ request
 meta {
     doc: """
     Make an authenticated request to the configured OpenAI-compatible API.
-    `path` is relative to `openai-compatible.base.url` (e.g.
+    `path` is relative to `openai-compatible.url` (e.g.
     `/chat/completions`). Additional headers merge over the defaults —
     useful for OpenRouter's optional `HTTP-Referer` / `X-Title`
     attribution headers.

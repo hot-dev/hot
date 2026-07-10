@@ -9,7 +9,7 @@ meta {
     use the same chat/models/embeddings surface everywhere.
 
     **Setup** — context variables:
-    - `openai-compatible.base.url` — e.g. `https://openrouter.ai/api/v1`
+    - `openai-compatible.url` — e.g. `https://openrouter.ai/api/v1`
     - `openai-compatible.api.key` — the provider's API key
 
     **Example (OpenRouter)**

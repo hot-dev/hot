@@ -32,7 +32,7 @@ This registers a `POST /events` endpoint under the `slack` service. External ser
 ```hot
 ::myapp::payments ns
 
-::ctx ::hot::ctx
+::stripe-wh ::stripe::webhooks
 
 stripe-payment
 meta {
@@ -48,8 +48,7 @@ meta {
 fn (request: HttpRequest): HttpResponse {
   // Verify the request came from Stripe before trusting it
   // (see "Provider Signature Verification" below)
-  secret ::ctx/get("stripe.webhook.secret")
-  if(not(verify-stripe-signature(request, secret)),
+  if(not(::stripe-wh/verify-request(request)),
     HttpResponse({status: 401, body: {error: "Invalid signature"}}),
     {
       event from-json(request.body-raw)
@@ -84,18 +83,22 @@ Your function receives an `HttpRequest` with the full details of the incoming HT
 
 ```hot
 HttpRequest type {
-  method: Str,     // HTTP method (GET, POST, etc.)
-  url: Str,        // Request URL path
-  headers: Map?,   // HTTP headers (lowercase keys)
-  query: Map?,     // Query string parameters
-  body: Any?,      // Parsed body (JSON-decoded if applicable)
-  body-raw: Str?,  // Raw request body as a string
-  ip: Str?,        // Client IP address (from proxy headers)
-  auth: Map?       // Caller identity (when auth is "required")
+  method: Str,          // HTTP method (GET, POST, etc.)
+  url: Str,             // Request URL path (internal, token-free — safe to log)
+  original-url: Str?,   // The URL as the caller requested it, pre-rewrite
+  headers: Map?,        // HTTP headers (lowercase keys)
+  query: Map?,          // Query string parameters
+  body: Any?,           // Parsed body (JSON-decoded if applicable)
+  body-raw: Str?,       // Raw request body as a string
+  body-bytes: Bytes?,   // Verbatim body bytes (only when not valid UTF-8)
+  ip: Str?,             // Client IP address (from proxy headers)
+  auth: Map?            // Caller identity (when auth is "required")
 }
 ```
 
 When Hot delivers a webhook request, all common fields are populated. The `ip` field is extracted from `x-forwarded-for` or `x-real-ip` proxy headers. The `auth` field is only present when the endpoint has `auth: "required"` and the caller authenticates successfully — see [Caller Identity](#caller-identity-hotrequest) for the full structure.
+
+Two fields exist specifically for signature verification. `original-url` is the full URL the provider actually called — scheme, host, path (webhook token included), and query string intact — which is what providers that sign their request URL (Twilio, HubSpot) hash; it contains the webhook token, so don't log it. `body-bytes` carries the verbatim body bytes only when the body is not valid UTF-8 (in that case `body-raw` is a lossy conversion); use `::hot::http/raw-body(request)` to get the right one without checking.
 
 This is the same `HttpRequest` type used by [MCP tools](/docs/mcp#caller-identity-hotrequest) (via `hot.request`), providing a unified request representation across both systems.
 
@@ -258,7 +261,9 @@ fn (request: HttpRequest): HttpResponse {
 }
 ```
 
-The Hot [Slack package](https://hot.dev/pkg/hot.dev/slack) includes `verify-request` for Slack signature verification. Similar helpers can be written for other providers using `::hot::hmac` functions.
+Hot's provider packages ship `verify-request` functions with the correct recipe for each provider: Slack, Stripe, GitHub, Shopify, WhatsApp, and Discord verify over the payload (and timestamp, where the provider signs one), while Twilio and HubSpot — which sign the URL they call — verify against `request.original-url` automatically. Each takes the secret from a context variable in its 1-arity form or explicitly in its 2-arity form, and the timestamp-checking verifiers accept a replay-window tolerance (0 disables it).
+
+For providers without a package, write a verifier with the fail-closed helpers in `::hot::hmac` (`hmac-verify-hex`, `hmac-verify-base64` — constant-time, false on malformed input) and `::hot::time/within-seconds-of-now` for replay windows, hashing `::hot::http/raw-body(request)`.
 
 ## API Key Permissions
 
@@ -324,7 +329,7 @@ Use the `send()` pattern shown above to defer work to event handlers that suppor
 
 **Verify signatures.** Always verify webhook signatures for external providers. Never trust incoming requests without verification—webhook URLs are public and can receive spoofed requests.
 
-**Use body-raw for signature verification.** Signature verification requires the exact bytes the sender signed. Use `request.body-raw` (the original string), not `request.body` (which is parsed).
+**Use the raw body for signature verification.** Signature verification requires the exact bytes the sender signed — never `request.body` (which is parsed). Use `::hot::http/raw-body(request)`: it returns `body-raw` (the original string) for normal payloads and `body-bytes` for non-UTF-8 payloads, where `body-raw` alone would be lossy.
 
 **Return appropriate status codes.** Return `200` for success, `401` for authentication failures, and `400` for bad requests. Many providers will retry on `5xx` errors, so only return 500 for genuine failures.
 

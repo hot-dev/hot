@@ -6,7 +6,7 @@ Generic client for OpenAI-compatible APIs. One package for every provider that s
 
 | Context Variable | Description |
 |---|---|
-| `openai-compatible.base.url` | e.g. `https://openrouter.ai/api/v1` (constants provided) |
+| `openai-compatible.url` | e.g. `https://openrouter.ai/api/v1` (constants provided) |
 | `openai-compatible.api.key` | The provider's API key |
 
 ## Usage

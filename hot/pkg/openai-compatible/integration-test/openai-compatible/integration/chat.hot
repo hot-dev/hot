@@ -4,7 +4,7 @@ meta ["test"]
 // =============================================================================
 // Integration Tests (live OpenRouter or any OpenAI-compatible endpoint)
 // =============================================================================
-// Requires ctx: openai-compatible.base.url + openai-compatible.api.key
+// Requires ctx: openai-compatible.url + openai-compatible.api.key
 // Run with: hot test --project pkg-integration-openai-compatible
 
 ::chat ::openai-compatible::chat
