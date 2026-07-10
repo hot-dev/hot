@@ -61,7 +61,8 @@ jobs:
         run: bash ./scripts/check-ai-assets-sync.sh
 
       # `hot-static-checks.sh check` runs the default project check, the package
-      # aggregate check, and validates {{snippet:...}} references in docs.
+      # aggregate check, `hot fmt --check` over all Hot source, and validates
+      # {{snippet:...}} references in docs.
       - name: Hot static checks
         run: ./scripts/hot-static-checks.sh check
 

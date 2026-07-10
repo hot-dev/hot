@@ -45,4 +45,13 @@ if [ $? -ne 0 ]; then
     exit 1
 fi
 
+echo "Checking Hot formatting..."
+for root in hot/pkg hot/src hot/test; do
+    if ! cargo run --quiet -- fmt --check "$root" > /dev/null 2>&1; then
+        echo "Hot formatting drift in $root — run 'cargo run -- fmt $root'. Aborting commit."
+        cargo run --quiet -- fmt --check "$root" 2>&1 | grep -v "properly formatted" || true
+        exit 1
+    fi
+done
+
 exit 0
