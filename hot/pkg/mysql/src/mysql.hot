@@ -16,6 +16,11 @@ meta {
     the server demands full authentication, connect errs with guidance:
     enable `ssl: true`, or use a `mysql_native_password` account.
 
+    A connection is a single TCP socket with no request pipelining and
+    is NOT safe for concurrent use. Hot runs independent expressions in
+    parallel — do not share one connection across parallel branches or
+    spawned tasks; open a connection per branch instead.
+
     **Example**
 
     ```hot
@@ -355,36 +360,44 @@ run-prepared fn (conn: Map, sql: Str, params: Vec): Any {
                     num-params-out ::wire/read-int2(packet.payload, num-cols-out[1])
                     stmt-id stmt-id-out[0]
 
-                    // Drain param definitions + EOF, column definitions + EOF.
-                    params-drained drain-defs(socket, num-params-out[0])
+                    result execute-prepared(socket, stmt-id, num-params-out[0], num-cols-out[0], params)
+                    // Always release the server-side statement (fire and
+                    // forget, no response) — error paths included, or every
+                    // failed call leaks a statement that survives until the
+                    // connection closes and counts against
+                    // max_prepared_stmt_count.
+                    close-payload concat(::wire/int1(COM-STMT-CLOSE), ::wire/int4(stmt-id))
+                    closed write-packet(socket, 0, close-payload)
                     cond {
-                        is-err(params-drained) => { params-drained }
-                        => {
-                            cols-drained drain-defs(socket, num-cols-out[0])
-                            cond {
-                                is-err(cols-drained) => { cols-drained }
-                                ne(length(params), num-params-out[0]) => {
-                                    err(`mysql: statement expects ${num-params-out[0]} parameters, got ${length(params)}`)
-                                }
-                                => {
-                                    sent2 write-packet(socket, 0, stmt-execute-payload(stmt-id, params))
-                                    cond {
-                                        is-err(sent2) => { sent2 }
-                                        => {
-                                            result read-result-set(socket, true)
-                                            // Best-effort statement cleanup (no response).
-                                            close-payload concat(::wire/int1(COM-STMT-CLOSE), ::wire/int4(stmt-id))
-                                            closed write-packet(socket, 0, close-payload)
-                                            cond {
-                                                is-err(result) => { result }
-                                                is-err(closed) => { closed }
-                                                => { result }
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
+                        is-err(result) => { result }
+                        is-err(closed) => { closed }
+                        => { result }
+                    }
+                }
+            }
+        }
+    }
+}
+
+// Everything between a successful COM_STMT_PREPARE and the COM_STMT_CLOSE
+// that run-prepared always sends: drain metadata, check arity, execute,
+// read the result set.
+execute-prepared fn (socket, stmt-id: Int, num-params: Int, num-cols: Int, params: Vec): Any {
+    params-drained drain-defs(socket, num-params)
+    cond {
+        is-err(params-drained) => { params-drained }
+        => {
+            cols-drained drain-defs(socket, num-cols)
+            cond {
+                is-err(cols-drained) => { cols-drained }
+                ne(length(params), num-params) => {
+                    err(`mysql: statement expects ${num-params} parameters, got ${length(params)}`)
+                }
+                => {
+                    sent write-packet(socket, 0, stmt-execute-payload(stmt-id, params))
+                    cond {
+                        is-err(sent) => { sent }
+                        => { read-result-set(socket, true) }
                     }
                 }
             }
@@ -434,6 +447,14 @@ meta {
     Run a query. Without params, uses the text protocol (`COM_QUERY`);
     with params, the binary prepared-statement protocol (`?`
     placeholders only). Returns rows as `Vec<Map>` or an Err.
+
+    Bindable params: Int, Dec, Str, Bool (as 1/0), Bytes, and null —
+    sent as VAR_STRING/BLOB and coerced by MySQL to the column type.
+
+    Column values decode by type and signedness: integers to Int
+    (unsigned BIGINT above Int range promotes to an exact Dec),
+    FLOAT/DOUBLE/DECIMAL to Dec, binary-charset columns to Bytes,
+    DATE/TIME/DATETIME to strings, everything else to Str.
     """
 }
 fn
@@ -476,19 +497,35 @@ fn
     sent write-packet(conn.socket, 0, concat(::wire/int1(COM-QUERY), Bytes(sql)))
     cond {
         is-err(sent) => { sent }
-        => { execute-result(read-result-set(conn.socket, false), sql) }
+        => {
+            // Bind first: an Err argument to a regular fn halts the run,
+            // so the error must be surfaced before execute-result runs.
+            result read-result-set(conn.socket, false)
+            cond {
+                is-err(result) => { result }
+                => { execute-result(result, sql) }
+            }
+        }
     }
 },
 (conn: Map, sql: Str, params: Vec): Any {
     cond {
         is-empty(params) => { execute(conn, sql) }
-        => { execute-result(run-prepared(conn, sql, params), sql) }
+        => {
+            // Bind first: an Err argument to a regular fn halts the run,
+            // so the error must be surfaced before execute-result runs.
+            result run-prepared(conn, sql, params)
+            cond {
+                is-err(result) => { result }
+                => { execute-result(result, sql) }
+            }
+        }
     }
 }
 
+// Callers must guard: an Err argument would halt before the body runs.
 execute-result fn (result: Any, sql: Str): Any {
     cond {
-        is-err(result) => { result }
         is-null(result.ok) => { {command: command-word(sql), rows-affected: 0, last-insert-id: 0} }
         => {
             {

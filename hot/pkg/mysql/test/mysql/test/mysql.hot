@@ -132,14 +132,18 @@ meta ["test"] fn () {
 // Column definitions and rows
 // ============================================================================
 
-make-column fn (name: Str, type-id: Int, charset: Int): Bytes {
+make-column fn
+(name: Str, type-id: Int, charset: Int): Bytes {
+    make-column(name, type-id, charset, 0)
+},
+(name: Str, type-id: Int, charset: Int, flags: Int): Bytes {
     concat(
         ::wire/lenenc-bytes("def"),
         ::wire/lenenc-bytes("db"), ::wire/lenenc-bytes("t"), ::wire/lenenc-bytes("t"),
         ::wire/lenenc-bytes(name), ::wire/lenenc-bytes(name),
         ::wire/int1(12),
         ::wire/int2(charset), ::wire/int4(255),
-        ::wire/int1(type-id), ::wire/int2(0), ::wire/int1(0),
+        ::wire/int1(type-id), ::wire/int2(flags), ::wire/int1(0),
         Bytes([0, 0]))
 }
 
@@ -217,4 +221,58 @@ meta ["test"] fn () {
     params [null, "a", "b", "c", "d", "e", "f", "g", null]
     bitmap ::mysql/null-bitmap(params)
     assert-eq(Bytes([1, 1]), bitmap, "nulls at positions 0 and 8")
+}
+
+// ============================================================================
+// Integer signedness (column UNSIGNED flag)
+// ============================================================================
+
+test-binary-signed-integers
+meta ["test"] fn () {
+    cols [
+        ::decode/parse-column(make-column("t", 1, 63)),
+        ::decode/parse-column(make-column("s", 2, 63)),
+        ::decode/parse-column(make-column("i", 3, 63)),
+        ::decode/parse-column(make-column("m", 9, 63)),
+        ::decode/parse-column(make-column("b", 8, 63))
+    ]
+    payload concat(
+        Bytes([0]), Bytes([0]),
+        Bytes([255]),                                       // TINY -1
+        Bytes([254, 255]),                                  // SHORT -2
+        Bytes([253, 255, 255, 255]),                        // LONG -3
+        Bytes([251, 255, 255, 255]),                        // INT24 -5 (sign-extended)
+        Bytes([252, 255, 255, 255, 255, 255, 255, 255]))    // LONGLONG -4
+    row ::decode/decode-binary-row(cols, payload)
+    assert-eq(-1, row.t)
+    assert-eq(-2, row.s)
+    assert-eq(-3, row.i)
+    assert-eq(-5, row.m)
+    assert-eq(-4, row.b)
+}
+
+test-binary-unsigned-integers
+meta ["test"] fn () {
+    cols [
+        ::decode/parse-column(make-column("t", 1, 63, 32)),
+        ::decode/parse-column(make-column("b", 8, 63, 32)),
+        ::decode/parse-column(make-column("small", 8, 63, 32))
+    ]
+    payload concat(
+        Bytes([0]), Bytes([0]),
+        Bytes([255]),                                       // TINY UNSIGNED 255
+        Bytes([255, 255, 255, 255, 255, 255, 255, 255]),    // BIGINT UNSIGNED max
+        ::hot::bytes/from-int(42, 8, "le"))
+    row ::decode/decode-binary-row(cols, payload)
+    assert-eq(255, row.t, "unsigned TINY keeps the raw value")
+    assert-eq(Dec("18446744073709551615"), row.b, "unsigned BIGINT above Int range promotes to Dec")
+    assert-eq(42, row.small, "in-range unsigned BIGINT stays Int")
+}
+
+test-text-unsigned-bigint-overflow
+meta ["test"] fn () {
+    cols [::decode/parse-column(make-column("id", 8, 63, 32))]
+    payload ::wire/lenenc-bytes("18446744073709551615")
+    row ::decode/decode-text-row(cols, payload)
+    assert-eq(Dec("18446744073709551615"), row.id, "text-protocol overflow decodes as Dec")
 }

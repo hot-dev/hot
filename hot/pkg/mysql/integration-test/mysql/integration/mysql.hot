@@ -60,3 +60,63 @@ meta ["test"] fn () {
     assert-eq(5.0, first(rows).total, "named params compile to ? and bind (string params coerce to DOUBLE)")
     assert(is-ok(::sql/close(db)))
 }
+
+test-integer-signedness-live
+meta ["test"] fn () {
+    conn ::mysql/connect(options())
+    created ::mysql/execute(conn, "CREATE TABLE IF NOT EXISTS hot_it_ints (t TINYINT, s SMALLINT, m MEDIUMINT, i INT, b BIGINT, ut TINYINT UNSIGNED, ub BIGINT UNSIGNED)")
+    assert(is-ok(created), `create: ${if-err(created, (e) { Str(e) })}`)
+    cleaned ::mysql/execute(conn, "DELETE FROM hot_it_ints")
+
+    inserted ::mysql/execute(conn,
+        "INSERT INTO hot_it_ints VALUES (?, ?, ?, ?, ?, ?, ?)",
+        [-1, -2, -5, -3, -4, 255, "18446744073709551615"])
+    assert(is-ok(inserted), `insert: ${if-err(inserted, (e) { Str(e) })}`)
+
+    // Binary protocol (prepared): the UNSIGNED column flag drives decode.
+    rows ::mysql/query(conn, "SELECT * FROM hot_it_ints WHERE t = ?", [-1])
+    row first(rows)
+    assert-eq(-1, row.t, "signed TINYINT")
+    assert-eq(-2, row.s, "signed SMALLINT")
+    assert-eq(-5, row.m, "signed MEDIUMINT")
+    assert-eq(-3, row.i, "signed INT")
+    assert-eq(-4, row.b, "signed BIGINT")
+    assert-eq(255, row.ut, "unsigned TINYINT")
+    assert-eq(Dec("18446744073709551615"), row.ub, "unsigned BIGINT max promotes to Dec")
+
+    // Text protocol takes the string-parse path instead of the flag.
+    text-rows ::mysql/query(conn, "SELECT * FROM hot_it_ints")
+    text-row first(text-rows)
+    assert-eq(-1, text-row.t)
+    assert-eq(-4, text-row.b)
+    assert-eq(Dec("18446744073709551615"), text-row.ub)
+
+    dropped ::mysql/execute(conn, "DROP TABLE hot_it_ints")
+    assert(::mysql/close(conn))
+}
+
+test-failed-prepared-calls-do-not-leak-statements
+meta ["test"] fn () {
+    conn ::mysql/connect(options())
+
+    prepared-stmt-count fn (c) {
+        rows ::mysql/query(c, "SHOW GLOBAL STATUS LIKE 'Prepared_stmt_count'")
+        Int(first(rows).Value)
+    }
+
+    before prepared-stmt-count(conn)
+
+    // Param-count mismatch errs AFTER the server prepared the statement;
+    // without close-on-error each attempt leaks one server-side statement.
+    bad1 ::mysql/query(conn, "SELECT ? + ?", [1])
+    assert(is-err(bad1), "param-count mismatch errs")
+    bad2 ::mysql/query(conn, "SELECT ? + ?", [1])
+    assert(is-err(bad2))
+    bad3 ::mysql/execute(conn, "SELECT ? + ?", [1, 2, 3])
+    assert(is-err(bad3))
+
+    after prepared-stmt-count(conn)
+    assert-eq(before, after, "failed prepared calls must release their statements")
+
+    assert(::mysql/close(conn))
+}

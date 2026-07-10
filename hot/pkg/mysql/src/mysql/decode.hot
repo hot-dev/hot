@@ -100,6 +100,29 @@ TYPE-DATETIME 12
 TYPE-YEAR 13
 TYPE-NEWDECIMAL 246
 
+// ColumnDefinition41 flag bit: the column is UNSIGNED.
+FLAG-UNSIGNED 32
+
+UINT64-WRAP Dec("18446744073709551616")
+
+is-unsigned fn (col: Map): Bool {
+    gt(::hot::bit/and(col.flags, FLAG-UNSIGNED), 0)
+}
+
+// Undo an unsigned little-endian read for a signed column: values at or
+// above 2^(bits-1) are two's-complement negatives. Used for 8/16/32-bit
+// reads; 64-bit values are read signed and reinterpreted the other way.
+to-signed fn (v: Int, bits: Int): Int {
+    half ::hot::bit/shift-left(1, sub(bits, 1))
+    if(gte(v, half), sub(v, ::hot::bit/shift-left(1, bits)), v)
+}
+
+// Reinterpret a signed 64-bit read as unsigned; values that wrapped
+// negative gain 2^64 back, promoting to Dec (exact at 256 bits).
+to-unsigned-64 fn (v: Int): Any {
+    if(lt(v, 0), add(Dec(v), UINT64-WRAP), v)
+}
+
 int-type fn (t: Int): Bool {
     in(t, [TYPE-TINY, TYPE-SHORT, TYPE-LONG, TYPE-LONGLONG, TYPE-INT24, TYPE-YEAR])
 }
@@ -110,13 +133,18 @@ dec-type fn (t: Int): Bool {
 
 coerce-text
 meta {
-    doc: """Coerce a text-protocol value by column type: integer types to Int, float/decimal to Dec, binary charset to Bytes, everything else Str."""
+    doc: """Coerce a text-protocol value by column type: integer types to Int (falling back to Dec above Int range, e.g. unsigned BIGINT), float/decimal to Dec, binary charset to Bytes, everything else Str."""
 }
 fn (col: Map, raw: Bytes): Any {
     cond {
         int-type(col.type) => {
             parsed Int(Str(raw))
-            if-err(parsed, (e) { Str(raw) })
+            // Unsigned BIGINT above Int range still decodes as a number:
+            // exact as Dec (256-bit).
+            if-err(parsed, (e) {
+                dec-parsed Dec(Str(raw))
+                if-err(dec-parsed, (e2) { Str(raw) })
+            })
         }
 
         dec-type(col.type) => {
@@ -204,10 +232,29 @@ meta {
 fn (col: Map, payload: Bytes, pos: Int): Vec {
     t col.type
     cond {
-        eq(t, TYPE-TINY) => { ::wire/read-int1(payload, pos) }
-        in(t, [TYPE-SHORT, TYPE-YEAR]) => { ::wire/read-int2(payload, pos) }
-        in(t, [TYPE-LONG, TYPE-INT24]) => { ::wire/read-int4(payload, pos) }
-        eq(t, TYPE-LONGLONG) => { ::wire/read-int8(payload, pos) }
+        // Integer reads are unsigned little-endian off the wire (except the
+        // 8-byte read, which is signed); the column's UNSIGNED flag decides
+        // the reinterpretation.
+        eq(t, TYPE-TINY) => {
+            out ::wire/read-int1(payload, pos)
+            [if(is-unsigned(col), out[0], to-signed(out[0], 8)), out[1]]
+        }
+
+        in(t, [TYPE-SHORT, TYPE-YEAR]) => {
+            out ::wire/read-int2(payload, pos)
+            [if(is-unsigned(col), out[0], to-signed(out[0], 16)), out[1]]
+        }
+
+        in(t, [TYPE-LONG, TYPE-INT24]) => {
+            out ::wire/read-int4(payload, pos)
+            [if(is-unsigned(col), out[0], to-signed(out[0], 32)), out[1]]
+        }
+
+        eq(t, TYPE-LONGLONG) => {
+            out ::wire/read-int8(payload, pos)
+            [if(is-unsigned(col), to-unsigned-64(out[0]), out[0]), out[1]]
+        }
+
         eq(t, TYPE-FLOAT) => {
             [::bytes/to-float(slice(payload, pos, add(pos, 4)), "le"), add(pos, 4)]
         }
