@@ -1,0 +1,23 @@
+::airtable::integration::ctx ns
+meta {
+    doc: """Placeholder credential wiring for the airtable integration suite: copies `AIRTABLE_TOKEN` from the environment into context at load. Unset variables are skipped."""
+}
+
+set-ctx fn (key: Str, env-name: Str, secret: Bool): Null {
+    value ::hot::env/get(env-name, "")
+    cond {
+        is-empty(value) => { null }
+        secret => {
+            ::hot::ctx/set-secret(key, value)
+            null
+        }
+        => {
+            ::hot::ctx/set(key, value)
+            null
+        }
+    }
+}
+
+wired [
+    set-ctx("airtable.token", "AIRTABLE_TOKEN", true)
+]

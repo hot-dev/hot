@@ -1,0 +1,24 @@
+::cal-com::integration::ctx ns
+meta {
+    doc: """Placeholder credential wiring for the cal-com integration suite: copies `CAL_COM_API_KEY`, `CAL_COM_URL` from the environment into context at load. Unset variables are skipped."""
+}
+
+set-ctx fn (key: Str, env-name: Str, secret: Bool): Null {
+    value ::hot::env/get(env-name, "")
+    cond {
+        is-empty(value) => { null }
+        secret => {
+            ::hot::ctx/set-secret(key, value)
+            null
+        }
+        => {
+            ::hot::ctx/set(key, value)
+            null
+        }
+    }
+}
+
+wired [
+    set-ctx("cal-com.api.key", "CAL_COM_API_KEY", true),
+    set-ctx("cal-com.url", "CAL_COM_URL", false)
+]

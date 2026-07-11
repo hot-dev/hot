@@ -1,0 +1,24 @@
+::stripe::integration::ctx ns
+meta {
+    doc: """Placeholder credential wiring for the stripe integration suite: copies `STRIPE_API_KEY`, `STRIPE_WEBHOOK_SECRET` from the environment into context at load. Unset variables are skipped."""
+}
+
+set-ctx fn (key: Str, env-name: Str, secret: Bool): Null {
+    value ::hot::env/get(env-name, "")
+    cond {
+        is-empty(value) => { null }
+        secret => {
+            ::hot::ctx/set-secret(key, value)
+            null
+        }
+        => {
+            ::hot::ctx/set(key, value)
+            null
+        }
+    }
+}
+
+wired [
+    set-ctx("stripe.api.key", "STRIPE_API_KEY", true),
+    set-ctx("stripe.webhook.secret", "STRIPE_WEBHOOK_SECRET", true)
+]

@@ -1,0 +1,25 @@
+::sentry::integration::ctx ns
+meta {
+    doc: """Placeholder credential wiring for the sentry integration suite: copies `SENTRY_TOKEN`, `SENTRY_ORG`, `SENTRY_URL` from the environment into context at load. Unset variables are skipped."""
+}
+
+set-ctx fn (key: Str, env-name: Str, secret: Bool): Null {
+    value ::hot::env/get(env-name, "")
+    cond {
+        is-empty(value) => { null }
+        secret => {
+            ::hot::ctx/set-secret(key, value)
+            null
+        }
+        => {
+            ::hot::ctx/set(key, value)
+            null
+        }
+    }
+}
+
+wired [
+    set-ctx("sentry.token", "SENTRY_TOKEN", true),
+    set-ctx("sentry.org", "SENTRY_ORG", false),
+    set-ctx("sentry.url", "SENTRY_URL", false)
+]

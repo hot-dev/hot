@@ -1,0 +1,24 @@
+::slack::integration::ctx ns
+meta {
+    doc: """Placeholder credential wiring for the slack integration suite: copies `SLACK_API_KEY`, `SLACK_SIGNING_SECRET` from the environment into context at load. Unset variables are skipped."""
+}
+
+set-ctx fn (key: Str, env-name: Str, secret: Bool): Null {
+    value ::hot::env/get(env-name, "")
+    cond {
+        is-empty(value) => { null }
+        secret => {
+            ::hot::ctx/set-secret(key, value)
+            null
+        }
+        => {
+            ::hot::ctx/set(key, value)
+            null
+        }
+    }
+}
+
+wired [
+    set-ctx("slack.api.key", "SLACK_API_KEY", true),
+    set-ctx("slack.signing.secret", "SLACK_SIGNING_SECRET", true)
+]

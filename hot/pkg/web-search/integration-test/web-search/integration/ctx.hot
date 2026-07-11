@@ -1,0 +1,25 @@
+::web-search::integration::ctx ns
+meta {
+    doc: """Placeholder credential wiring for the web-search integration suite: copies `TAVILY_API_KEY`, `BRAVE_API_KEY`, `EXA_API_KEY` from the environment into context at load. Unset variables are skipped."""
+}
+
+set-ctx fn (key: Str, env-name: Str, secret: Bool): Null {
+    value ::hot::env/get(env-name, "")
+    cond {
+        is-empty(value) => { null }
+        secret => {
+            ::hot::ctx/set-secret(key, value)
+            null
+        }
+        => {
+            ::hot::ctx/set(key, value)
+            null
+        }
+    }
+}
+
+wired [
+    set-ctx("tavily.api.key", "TAVILY_API_KEY", true),
+    set-ctx("brave.api.key", "BRAVE_API_KEY", true),
+    set-ctx("exa.api.key", "EXA_API_KEY", true)
+]

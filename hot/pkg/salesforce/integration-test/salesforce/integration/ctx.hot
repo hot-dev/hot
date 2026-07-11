@@ -1,0 +1,29 @@
+::salesforce::integration::ctx ns
+meta {
+    doc: """Placeholder credential wiring for the salesforce integration suite: copies `SALESFORCE_CLIENT_ID`, `SALESFORCE_CLIENT_SECRET`, `SALESFORCE_PRIVATE_KEY`, `SALESFORCE_USERNAME`, `SALESFORCE_ACCESS_TOKEN`, `SALESFORCE_INSTANCE_URL`, `SALESFORCE_LOGIN_URL` from the environment into context at load. Unset variables are skipped."""
+}
+
+set-ctx fn (key: Str, env-name: Str, secret: Bool): Null {
+    value ::hot::env/get(env-name, "")
+    cond {
+        is-empty(value) => { null }
+        secret => {
+            ::hot::ctx/set-secret(key, value)
+            null
+        }
+        => {
+            ::hot::ctx/set(key, value)
+            null
+        }
+    }
+}
+
+wired [
+    set-ctx("salesforce.client-id", "SALESFORCE_CLIENT_ID", false),
+    set-ctx("salesforce.client-secret", "SALESFORCE_CLIENT_SECRET", true),
+    set-ctx("salesforce.private.key", "SALESFORCE_PRIVATE_KEY", true),
+    set-ctx("salesforce.username", "SALESFORCE_USERNAME", false),
+    set-ctx("salesforce.access.token", "SALESFORCE_ACCESS_TOKEN", true),
+    set-ctx("salesforce.instance.url", "SALESFORCE_INSTANCE_URL", false),
+    set-ctx("salesforce.login.url", "SALESFORCE_LOGIN_URL", false)
+]

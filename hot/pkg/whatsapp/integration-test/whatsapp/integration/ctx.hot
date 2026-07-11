@@ -1,0 +1,25 @@
+::whatsapp::integration::ctx ns
+meta {
+    doc: """Placeholder credential wiring for the whatsapp integration suite: copies `WHATSAPP_ACCESS_TOKEN`, `WHATSAPP_APP_SECRET`, `WHATSAPP_VERIFY_TOKEN` from the environment into context at load. Unset variables are skipped."""
+}
+
+set-ctx fn (key: Str, env-name: Str, secret: Bool): Null {
+    value ::hot::env/get(env-name, "")
+    cond {
+        is-empty(value) => { null }
+        secret => {
+            ::hot::ctx/set-secret(key, value)
+            null
+        }
+        => {
+            ::hot::ctx/set(key, value)
+            null
+        }
+    }
+}
+
+wired [
+    set-ctx("whatsapp.access.token", "WHATSAPP_ACCESS_TOKEN", true),
+    set-ctx("whatsapp.app.secret", "WHATSAPP_APP_SECRET", true),
+    set-ctx("whatsapp.verify.token", "WHATSAPP_VERIFY_TOKEN", true)
+]
