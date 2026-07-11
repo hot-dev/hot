@@ -1,23 +1,9 @@
 ::deepgram::integration::ctx ns
-meta {
-    doc: """Placeholder credential wiring for the deepgram integration suite: copies `DEEPGRAM_API_KEY` from the environment into context at load. Unset variables are skipped."""
-}
 
-set-ctx fn (key: Str, env-name: Str, secret: Bool): Null {
-    value ::hot::env/get(env-name, "")
-    cond {
-        is-empty(value) => { null }
-        secret => {
-            ::hot::ctx/set-secret(key, value)
-            null
-        }
-        => {
-            ::hot::ctx/set(key, value)
-            null
-        }
-    }
-}
+::env ::hot::env
 
-wired [
-    set-ctx("deepgram.api.key", "DEEPGRAM_API_KEY", true)
-]
+// Placeholder credentials for the deepgram integration suite. Empty strings
+// are falsy, so unset variables behave exactly like absent context.
+::hot::ctx/set({
+    "deepgram.api.key": ::env/get("DEEPGRAM_API_KEY", ""),
+})

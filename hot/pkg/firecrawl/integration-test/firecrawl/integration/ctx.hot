@@ -1,23 +1,9 @@
 ::firecrawl::integration::ctx ns
-meta {
-    doc: """Placeholder credential wiring for the firecrawl integration suite: copies `FIRECRAWL_API_KEY` from the environment into context at load. Unset variables are skipped."""
-}
 
-set-ctx fn (key: Str, env-name: Str, secret: Bool): Null {
-    value ::hot::env/get(env-name, "")
-    cond {
-        is-empty(value) => { null }
-        secret => {
-            ::hot::ctx/set-secret(key, value)
-            null
-        }
-        => {
-            ::hot::ctx/set(key, value)
-            null
-        }
-    }
-}
+::env ::hot::env
 
-wired [
-    set-ctx("firecrawl.api.key", "FIRECRAWL_API_KEY", true)
-]
+// Placeholder credentials for the firecrawl integration suite. Empty strings
+// are falsy, so unset variables behave exactly like absent context.
+::hot::ctx/set({
+    "firecrawl.api.key": ::env/get("FIRECRAWL_API_KEY", ""),
+})

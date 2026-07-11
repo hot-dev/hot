@@ -1,23 +1,9 @@
 ::attio::integration::ctx ns
-meta {
-    doc: """Placeholder credential wiring for the attio integration suite: copies `ATTIO_API_KEY` from the environment into context at load. Unset variables are skipped."""
-}
 
-set-ctx fn (key: Str, env-name: Str, secret: Bool): Null {
-    value ::hot::env/get(env-name, "")
-    cond {
-        is-empty(value) => { null }
-        secret => {
-            ::hot::ctx/set-secret(key, value)
-            null
-        }
-        => {
-            ::hot::ctx/set(key, value)
-            null
-        }
-    }
-}
+::env ::hot::env
 
-wired [
-    set-ctx("attio.api.key", "ATTIO_API_KEY", true)
-]
+// Placeholder credentials for the attio integration suite. Empty strings
+// are falsy, so unset variables behave exactly like absent context.
+::hot::ctx/set({
+    "attio.api.key": ::env/get("ATTIO_API_KEY", ""),
+})

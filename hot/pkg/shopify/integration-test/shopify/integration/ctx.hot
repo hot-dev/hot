@@ -1,25 +1,11 @@
 ::shopify::integration::ctx ns
-meta {
-    doc: """Placeholder credential wiring for the shopify integration suite: copies `SHOPIFY_SHOP`, `SHOPIFY_ACCESS_TOKEN`, `SHOPIFY_WEBHOOK_SECRET` from the environment into context at load. Unset variables are skipped."""
-}
 
-set-ctx fn (key: Str, env-name: Str, secret: Bool): Null {
-    value ::hot::env/get(env-name, "")
-    cond {
-        is-empty(value) => { null }
-        secret => {
-            ::hot::ctx/set-secret(key, value)
-            null
-        }
-        => {
-            ::hot::ctx/set(key, value)
-            null
-        }
-    }
-}
+::env ::hot::env
 
-wired [
-    set-ctx("shopify.shop", "SHOPIFY_SHOP", false),
-    set-ctx("shopify.access.token", "SHOPIFY_ACCESS_TOKEN", true),
-    set-ctx("shopify.webhook.secret", "SHOPIFY_WEBHOOK_SECRET", true)
-]
+// Placeholder credentials for the shopify integration suite. Empty strings
+// are falsy, so unset variables behave exactly like absent context.
+::hot::ctx/set({
+    "shopify.shop": ::env/get("SHOPIFY_SHOP", ""),
+    "shopify.access.token": ::env/get("SHOPIFY_ACCESS_TOKEN", ""),
+    "shopify.webhook.secret": ::env/get("SHOPIFY_WEBHOOK_SECRET", ""),
+})

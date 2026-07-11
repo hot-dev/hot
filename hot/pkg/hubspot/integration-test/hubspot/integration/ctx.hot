@@ -1,24 +1,10 @@
 ::hubspot::integration::ctx ns
-meta {
-    doc: """Placeholder credential wiring for the hubspot integration suite: copies `HUBSPOT_TOKEN`, `HUBSPOT_CLIENT_SECRET` from the environment into context at load. Unset variables are skipped."""
-}
 
-set-ctx fn (key: Str, env-name: Str, secret: Bool): Null {
-    value ::hot::env/get(env-name, "")
-    cond {
-        is-empty(value) => { null }
-        secret => {
-            ::hot::ctx/set-secret(key, value)
-            null
-        }
-        => {
-            ::hot::ctx/set(key, value)
-            null
-        }
-    }
-}
+::env ::hot::env
 
-wired [
-    set-ctx("hubspot.token", "HUBSPOT_TOKEN", true),
-    set-ctx("hubspot.client.secret", "HUBSPOT_CLIENT_SECRET", true)
-]
+// Placeholder credentials for the hubspot integration suite. Empty strings
+// are falsy, so unset variables behave exactly like absent context.
+::hot::ctx/set({
+    "hubspot.token": ::env/get("HUBSPOT_TOKEN", ""),
+    "hubspot.client.secret": ::env/get("HUBSPOT_CLIENT_SECRET", ""),
+})

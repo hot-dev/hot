@@ -1,25 +1,11 @@
 ::zendesk::integration::ctx ns
-meta {
-    doc: """Placeholder credential wiring for the zendesk integration suite: copies `ZENDESK_SUBDOMAIN`, `ZENDESK_EMAIL`, `ZENDESK_API_TOKEN` from the environment into context at load. Unset variables are skipped."""
-}
 
-set-ctx fn (key: Str, env-name: Str, secret: Bool): Null {
-    value ::hot::env/get(env-name, "")
-    cond {
-        is-empty(value) => { null }
-        secret => {
-            ::hot::ctx/set-secret(key, value)
-            null
-        }
-        => {
-            ::hot::ctx/set(key, value)
-            null
-        }
-    }
-}
+::env ::hot::env
 
-wired [
-    set-ctx("zendesk.subdomain", "ZENDESK_SUBDOMAIN", false),
-    set-ctx("zendesk.email", "ZENDESK_EMAIL", false),
-    set-ctx("zendesk.api.token", "ZENDESK_API_TOKEN", true)
-]
+// Placeholder credentials for the zendesk integration suite. Empty strings
+// are falsy, so unset variables behave exactly like absent context.
+::hot::ctx/set({
+    "zendesk.subdomain": ::env/get("ZENDESK_SUBDOMAIN", ""),
+    "zendesk.email": ::env/get("ZENDESK_EMAIL", ""),
+    "zendesk.api.token": ::env/get("ZENDESK_API_TOKEN", ""),
+})

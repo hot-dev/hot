@@ -1,24 +1,10 @@
 ::cloudflare::integration::ctx ns
-meta {
-    doc: """Placeholder credential wiring for the cloudflare integration suite: copies `CLOUDFLARE_TOKEN`, `CLOUDFLARE_ACCOUNT_ID` from the environment into context at load. Unset variables are skipped."""
-}
 
-set-ctx fn (key: Str, env-name: Str, secret: Bool): Null {
-    value ::hot::env/get(env-name, "")
-    cond {
-        is-empty(value) => { null }
-        secret => {
-            ::hot::ctx/set-secret(key, value)
-            null
-        }
-        => {
-            ::hot::ctx/set(key, value)
-            null
-        }
-    }
-}
+::env ::hot::env
 
-wired [
-    set-ctx("cloudflare.token", "CLOUDFLARE_TOKEN", true),
-    set-ctx("cloudflare.account.id", "CLOUDFLARE_ACCOUNT_ID", false)
-]
+// Placeholder credentials for the cloudflare integration suite. Empty strings
+// are falsy, so unset variables behave exactly like absent context.
+::hot::ctx/set({
+    "cloudflare.token": ::env/get("CLOUDFLARE_TOKEN", ""),
+    "cloudflare.account.id": ::env/get("CLOUDFLARE_ACCOUNT_ID", ""),
+})

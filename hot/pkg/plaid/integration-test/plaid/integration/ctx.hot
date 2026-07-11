@@ -1,25 +1,11 @@
 ::plaid::integration::ctx ns
-meta {
-    doc: """Placeholder credential wiring for the plaid integration suite: copies `PLAID_CLIENT_ID`, `PLAID_SECRET`, `PLAID_ENV` from the environment into context at load. Unset variables are skipped."""
-}
 
-set-ctx fn (key: Str, env-name: Str, secret: Bool): Null {
-    value ::hot::env/get(env-name, "")
-    cond {
-        is-empty(value) => { null }
-        secret => {
-            ::hot::ctx/set-secret(key, value)
-            null
-        }
-        => {
-            ::hot::ctx/set(key, value)
-            null
-        }
-    }
-}
+::env ::hot::env
 
-wired [
-    set-ctx("plaid.client-id", "PLAID_CLIENT_ID", false),
-    set-ctx("plaid.secret", "PLAID_SECRET", true),
-    set-ctx("plaid.env", "PLAID_ENV", false)
-]
+// Placeholder credentials for the plaid integration suite. Empty strings
+// are falsy, so unset variables behave exactly like absent context.
+::hot::ctx/set({
+    "plaid.client-id": ::env/get("PLAID_CLIENT_ID", ""),
+    "plaid.secret": ::env/get("PLAID_SECRET", ""),
+    "plaid.env": ::env/get("PLAID_ENV", ""),
+})

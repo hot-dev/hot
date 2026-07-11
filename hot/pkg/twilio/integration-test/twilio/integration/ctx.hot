@@ -1,24 +1,10 @@
 ::twilio::integration::ctx ns
-meta {
-    doc: """Placeholder credential wiring for the twilio integration suite: copies `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN` from the environment into context at load. Unset variables are skipped."""
-}
 
-set-ctx fn (key: Str, env-name: Str, secret: Bool): Null {
-    value ::hot::env/get(env-name, "")
-    cond {
-        is-empty(value) => { null }
-        secret => {
-            ::hot::ctx/set-secret(key, value)
-            null
-        }
-        => {
-            ::hot::ctx/set(key, value)
-            null
-        }
-    }
-}
+::env ::hot::env
 
-wired [
-    set-ctx("twilio.account.sid", "TWILIO_ACCOUNT_SID", false),
-    set-ctx("twilio.auth.token", "TWILIO_AUTH_TOKEN", true)
-]
+// Placeholder credentials for the twilio integration suite. Empty strings
+// are falsy, so unset variables behave exactly like absent context.
+::hot::ctx/set({
+    "twilio.account.sid": ::env/get("TWILIO_ACCOUNT_SID", ""),
+    "twilio.auth.token": ::env/get("TWILIO_AUTH_TOKEN", ""),
+})

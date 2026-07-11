@@ -1,24 +1,10 @@
 ::github::integration::ctx ns
-meta {
-    doc: """Placeholder credential wiring for the github integration suite: copies `GITHUB_TOKEN`, `GITHUB_WEBHOOK_SECRET` from the environment into context at load. Unset variables are skipped."""
-}
 
-set-ctx fn (key: Str, env-name: Str, secret: Bool): Null {
-    value ::hot::env/get(env-name, "")
-    cond {
-        is-empty(value) => { null }
-        secret => {
-            ::hot::ctx/set-secret(key, value)
-            null
-        }
-        => {
-            ::hot::ctx/set(key, value)
-            null
-        }
-    }
-}
+::env ::hot::env
 
-wired [
-    set-ctx("github.token", "GITHUB_TOKEN", true),
-    set-ctx("github.webhook.secret", "GITHUB_WEBHOOK_SECRET", true)
-]
+// Placeholder credentials for the github integration suite. Empty strings
+// are falsy, so unset variables behave exactly like absent context.
+::hot::ctx/set({
+    "github.token": ::env/get("GITHUB_TOKEN", ""),
+    "github.webhook.secret": ::env/get("GITHUB_WEBHOOK_SECRET", ""),
+})

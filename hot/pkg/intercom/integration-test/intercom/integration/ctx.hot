@@ -1,24 +1,10 @@
 ::intercom::integration::ctx ns
-meta {
-    doc: """Placeholder credential wiring for the intercom integration suite: copies `INTERCOM_TOKEN`, `INTERCOM_ADMIN_ID` from the environment into context at load. Unset variables are skipped."""
-}
 
-set-ctx fn (key: Str, env-name: Str, secret: Bool): Null {
-    value ::hot::env/get(env-name, "")
-    cond {
-        is-empty(value) => { null }
-        secret => {
-            ::hot::ctx/set-secret(key, value)
-            null
-        }
-        => {
-            ::hot::ctx/set(key, value)
-            null
-        }
-    }
-}
+::env ::hot::env
 
-wired [
-    set-ctx("intercom.token", "INTERCOM_TOKEN", true),
-    set-ctx("intercom.admin.id", "INTERCOM_ADMIN_ID", false)
-]
+// Placeholder credentials for the intercom integration suite. Empty strings
+// are falsy, so unset variables behave exactly like absent context.
+::hot::ctx/set({
+    "intercom.token": ::env/get("INTERCOM_TOKEN", ""),
+    "intercom.admin.id": ::env/get("INTERCOM_ADMIN_ID", ""),
+})
