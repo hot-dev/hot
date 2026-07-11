@@ -2750,6 +2750,18 @@ unsafe extern "C" fn hot_jit_call_vm_by_name(
                     Ok(result) => new_owned_val(result),
                     Err(err) => vm_error_to_owned_val(err, error_capture),
                 }
+            } else if let Some(function_ref) =
+                b.as_any()
+                    .downcast_ref::<crate::lang::runtime::function_ref::FunctionRef>()
+            {
+                // Enum-variant constructors (e.g. ::hot::type/Result.Err from
+                // the err() wrapper) and other by-name targets reach compiled
+                // code as FunctionRef boxes; dispatch by name exactly like the
+                // interpreter does.
+                match vm.execute_function_call_by_name(&function_ref.name, &args) {
+                    Ok(result) => new_owned_val(result),
+                    Err(err) => vm_error_to_owned_val(err, error_capture),
+                }
             } else {
                 new_owned_val(Val::err(Val::Str(
                     format!("Cannot call non-function value: {:?}", name_val).into(),
