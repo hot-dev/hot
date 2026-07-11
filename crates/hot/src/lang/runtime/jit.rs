@@ -2053,12 +2053,21 @@ unsafe extern "C" fn hot_jit_call_lib(fn_name_ptr: i64, args_ptr: i64) -> i64 {
         }
     } else {
         let function_name = vm.value_to_string(fn_val);
-        let args_slice: &[Val] = match args_val {
-            Val::Vec(vec) => vec.as_slice(),
-            other => std::slice::from_ref(other),
+        let args_owned: Vec<Val> = match args_val {
+            Val::Vec(vec) => vec.to_vec(),
+            other => vec![other.clone()],
+        };
+        // Strict-argument law: same preparation as the interpreter's
+        // CallLibBuiltin handler (Ok auto-unwraps, Err halts).
+        let args_prepared = match vm.prepare_lib_call_args(&function_name, args_owned) {
+            Ok(args) => args,
+            Err(err) => {
+                tracing::trace!("[JIT] call_lib arg preparation halted: {}", err);
+                return vm_error_to_owned_val(err, error_capture);
+            }
         };
 
-        match vm.execute_call_lib(&function_name, args_slice) {
+        match vm.execute_call_lib(&function_name, &args_prepared) {
             Ok(result) => {
                 tracing::trace!("[JIT] call_lib result: {:?}", result);
                 new_owned_val(result)
