@@ -2,8 +2,9 @@
 
 ::env ::hot::env
 
-// Placeholder credentials for the airtable integration suite. Empty strings
-// are falsy, so unset variables behave exactly like absent context.
-::hot::ctx/set({
+// Placeholder credentials for the airtable integration suite. Unset
+// environment variables are skipped entirely, so absent credentials
+// behave exactly as if never configured.
+::hot::ctx/set(filter-vals({
     "airtable.token": ::env/get("AIRTABLE_TOKEN", ""),
-})
+}, (v) { not(is-empty(v)) }))

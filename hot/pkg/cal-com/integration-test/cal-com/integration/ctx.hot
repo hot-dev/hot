@@ -2,9 +2,10 @@
 
 ::env ::hot::env
 
-// Placeholder credentials for the cal-com integration suite. Empty strings
-// are falsy, so unset variables behave exactly like absent context.
-::hot::ctx/set({
+// Placeholder credentials for the cal-com integration suite. Unset
+// environment variables are skipped entirely, so absent credentials
+// behave exactly as if never configured.
+::hot::ctx/set(filter-vals({
     "cal-com.api.key": ::env/get("CAL_COM_API_KEY", ""),
     "cal-com.url": ::env/get("CAL_COM_URL", ""),
-})
+}, (v) { not(is-empty(v)) }))

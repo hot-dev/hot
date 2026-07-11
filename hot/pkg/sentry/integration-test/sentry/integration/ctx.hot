@@ -2,10 +2,11 @@
 
 ::env ::hot::env
 
-// Placeholder credentials for the sentry integration suite. Empty strings
-// are falsy, so unset variables behave exactly like absent context.
-::hot::ctx/set({
+// Placeholder credentials for the sentry integration suite. Unset
+// environment variables are skipped entirely, so absent credentials
+// behave exactly as if never configured.
+::hot::ctx/set(filter-vals({
     "sentry.token": ::env/get("SENTRY_TOKEN", ""),
     "sentry.org": ::env/get("SENTRY_ORG", ""),
     "sentry.url": ::env/get("SENTRY_URL", ""),
-})
+}, (v) { not(is-empty(v)) }))
