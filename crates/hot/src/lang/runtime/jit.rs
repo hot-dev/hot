@@ -2,7 +2,7 @@ use crate::lang::bytecode::{
     BytecodeProgram, Constant, FlowResultModifier, FlowType, FunctionId, FunctionInfo, Instruction,
     LambdaInfo,
 };
-use crate::lang::runtime::vm::VirtualMachine;
+use crate::lang::runtime::vm::{VirtualMachine, VmResult};
 use crate::val::Val;
 use ahash::AHashMap;
 use cranelift_codegen::ir::{
@@ -1979,10 +1979,25 @@ unsafe extern "C" fn hot_jit_call_vm(
     }
 
     let error_capture = vm.error_capture_active;
+    let args = match prepare_jit_call_args(vm, args) {
+        Ok(args) => args,
+        Err(err) => return vm_error_to_owned_val(err, error_capture),
+    };
     match vm.execute_compiled_user_function(function_id as u32, &args) {
         Ok(result) => new_owned_val(result),
         Err(err) => vm_error_to_owned_val(err, error_capture),
     }
+}
+
+/// Apply the same strict-argument preparation as interpreter `Call*`
+/// instructions before a JIT trampoline dispatches a callee. Lazy arguments
+/// arrive as `LambdaInfo` thunks and are intentionally preserved by
+/// `unwrap_result_if_ok`.
+fn prepare_jit_call_args(vm: &mut VirtualMachine, mut args: Vec<Val>) -> VmResult<Vec<Val>> {
+    for arg in &mut args {
+        *arg = vm.unwrap_result_if_ok(arg)?;
+    }
+    Ok(args)
 }
 
 /// JIT helper: promote a typed value to an OwnedVal.
@@ -2734,6 +2749,10 @@ unsafe extern "C" fn hot_jit_call_vm_by_name(
     }
 
     let error_capture = vm.error_capture_active;
+    let args = match prepare_jit_call_args(vm, args) {
+        Ok(args) => args,
+        Err(err) => return vm_error_to_owned_val(err, error_capture),
+    };
 
     match name_val {
         Val::Str(s) => match vm.execute_function_call_by_name(s.as_ref(), &args) {
@@ -2794,11 +2813,16 @@ unsafe extern "C" fn hot_jit_call_with_spread(
     let count = args_count as usize;
     let mask = spread_mask as u64;
 
+    let error_capture = vm.error_capture_active;
     let mut expanded_args = Vec::new();
     for i in 0..count {
         let kind = unsafe { *args_ptr.add(i * 2) };
         let raw = unsafe { *args_ptr.add(i * 2 + 1) };
         let val = unsafe { decode_helper_val(kind, raw) };
+        let val = match vm.unwrap_result_if_ok(&val) {
+            Ok(val) => val,
+            Err(err) => return vm_error_to_owned_val(err, error_capture),
+        };
         if (mask >> i) & 1 == 1 {
             if let Val::Vec(elements) = &val {
                 for elem in elements {
@@ -2812,7 +2836,6 @@ unsafe extern "C" fn hot_jit_call_with_spread(
         }
     }
 
-    let error_capture = vm.error_capture_active;
     let name_val_ptr = name_ptr as *const Val;
     let name_val = unsafe { &*name_val_ptr };
 

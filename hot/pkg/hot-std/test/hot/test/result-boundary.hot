@@ -226,3 +226,37 @@ meta ["test"] fn () {
     out ::exec/contain(() { keep-big([1, -1, 100]) })
     assert(is-err(out), "JIT-warm filter halts on predicate Err like the interpreter")
 }
+
+test-walk-family-callback-errs-halt
+meta ["test"] fn () {
+    fail-on-two fn (value: Any): Any {
+        if(eq(value, 2), err("walk-callback-err"), value)
+    }
+
+    walk-out ::exec/contain(() { walk(fail-on-two, (value) { value }, [1, 2, 3]) })
+    prewalk-out ::exec/contain(() { prewalk(fail-on-two, [1, 2, 3]) })
+    postwalk-out ::exec/contain(() { postwalk(fail-on-two, [1, 2, 3]) })
+
+    assert(is-err(walk-out), "walk inner callback Err halts")
+    assert(is-err(prewalk-out), "prewalk callback Err halts")
+    assert(is-err(postwalk-out), "postwalk callback Err halts")
+}
+
+test-walk-applies-inner-then-outer
+meta ["test"] fn () {
+    result walk(add(%, 1), (values) { concat(values, [99]) }, [1, 2, 3])
+    assert-eq([2, 3, 4, 99], result)
+}
+
+test-update-in-callback-err-halts
+meta ["test"] fn () {
+    nested ::exec/contain(() {
+        update-in({a: {b: 1}}, ["a", "b"], (value) { err(`update-in-callback-err-${value}`) })
+    })
+    root ::exec/contain(() {
+        update-in({a: 1}, [], (value) { err(`update-in-root-callback-err-${value.a}`) })
+    })
+
+    assert(is-err(nested), "update-in nested callback Err halts")
+    assert(is-err(root), "update-in root callback Err halts")
+}

@@ -189,6 +189,50 @@ length(f(200))"#;
         assert_eq!(out, Val::Int(1690), "unexpected concat length");
     }
 
+    #[test]
+    fn jit_function_ref_constructor_dispatches_by_name() {
+        let src = r#"::t ns
+make-error fn (n: Int): Any { err(`jit-constructor-${n}`) }
+make-error(1)
+make-error(2)
+make-error(3)"#;
+        let out = compile_and_run_with_std_conf(
+            src,
+            Some(crate::val!({"jit": {"threshold": 1}})),
+        )
+        .expect("JIT FunctionRef constructor call");
+        assert!(out.is_err(), "expected Result.Err, got {out:?}");
+        assert!(
+            out.unwrap_err()
+                .is_some_and(|value| value.to_string().contains("jit-constructor-3")),
+            "unexpected Result.Err payload: {out:?}"
+        );
+    }
+
+    #[test]
+    fn jit_user_call_halts_on_strict_err_argument() {
+        let src = r#"::t ns
+ignore fn (_value: Any): Str { "callee-ran" }
+through-strict-call fn (bad: Bool): Str {
+    value if(bad, err("jit-strict-argument"), 1)
+    ignore(value)
+}
+through-strict-call(false)
+through-strict-call(false)
+through-strict-call(true)"#;
+        let out = compile_and_run_with_std_conf(
+            src,
+            Some(crate::val!({"jit": {"threshold": 1}})),
+        )
+        .expect("JIT strict-argument run");
+        assert!(out.is_err(), "expected strict-argument Err, got {out:?}");
+        assert!(
+            out.unwrap_err()
+                .is_some_and(|value| value.to_string().contains("jit-strict-argument")),
+            "unexpected strict-argument error: {out:?}"
+        );
+    }
+
     /// Helper to compile and execute Hot code with hot-std included and an
     /// explicit conf (e.g. to toggle the `jit.hof.fusion` kill switch).
     pub(super) fn compile_and_run_with_std_conf(

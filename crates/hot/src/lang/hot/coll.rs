@@ -3314,66 +3314,56 @@ pub fn range(args: &[Val]) -> HotResult<Val> {
     }
 }
 
-/// Walk a nested data structure, applying a function to each element
+/// Walk one level of a data structure: apply `inner` to each child, rebuild
+/// the collection, then apply `outer` to the rebuilt value.
 pub fn walk(vm: &mut crate::lang::runtime::vm::VirtualMachine, args: &[Val]) -> HotResult<Val> {
-    if args.len() != 2 {
+    if args.len() != 3 {
         return HotResult::Err(Val::from(format!(
-            "::hot::coll/walk expects 2 arguments, got {}",
+            "::hot::coll/walk expects 3 arguments, got {}",
             args.len()
         )));
     }
 
-    let function_val = &args[0];
-    let data = &args[1];
+    let inner = &args[0];
+    let outer = &args[1];
+    let form = &args[2];
 
-    fn walk_recursive(
-        vm: &mut crate::lang::runtime::vm::VirtualMachine,
-        function_val: &Val,
-        data: &Val,
-    ) -> HotResult<Val> {
-        match data {
-            Val::Vec(items) => {
-                let mut result = Vec::new();
-                for item in items {
-                    match walk_recursive(vm, function_val, item) {
-                        HotResult::Ok(walked_item) => result.push(walked_item),
-                        HotResult::Err(err) => return HotResult::Err(err),
-                    }
-                }
-                let walked_vec = Val::Vec(result);
-                match call_function_with_vm(vm, function_val, &walked_vec)
+    let walked = match form {
+        Val::Vec(items) => {
+            let mut result = Vec::with_capacity(items.len());
+            for item in items {
+                match call_function_with_vm(vm, inner, item)
                     .and_then(|val| apply_onerr_disposition(vm, val, OnErrDisposition::Force))
                 {
-                    Ok(val) => HotResult::Ok(val),
-                    Err(err) => HotResult::Err(Val::from(err)),
+                    Ok(value) => result.push(value),
+                    Err(err) => return HotResult::Err(Val::from(err)),
                 }
             }
-            Val::Map(map) => {
-                let mut result_map = indexmap::IndexMap::new();
-                for (key, value) in map.iter() {
-                    match walk_recursive(vm, function_val, value) {
-                        HotResult::Ok(walked_value) => {
-                            result_map.insert(key.clone(), walked_value);
-                        }
-                        HotResult::Err(err) => return HotResult::Err(err),
-                    }
-                }
-                let walked_map = Val::Map(Box::new(result_map));
-                match call_function_with_vm(vm, function_val, &walked_map)
-                    .and_then(|val| apply_onerr_disposition(vm, val, OnErrDisposition::Force))
-                {
-                    Ok(val) => HotResult::Ok(val),
-                    Err(err) => HotResult::Err(Val::from(err)),
-                }
-            }
-            _ => match call_function_with_vm(vm, function_val, data) {
-                Ok(val) => HotResult::Ok(val),
-                Err(err) => HotResult::Err(Val::from(err)),
-            },
+            Val::Vec(result)
         }
-    }
+        Val::Map(map) => {
+            let mut result = IndexMap::with_capacity(map.len());
+            for (key, value) in map.iter() {
+                match call_function_with_vm(vm, inner, value)
+                    .and_then(|val| apply_onerr_disposition(vm, val, OnErrDisposition::Force))
+                {
+                    Ok(walked_value) => {
+                        result.insert(key.clone(), walked_value);
+                    }
+                    Err(err) => return HotResult::Err(Val::from(err)),
+                }
+            }
+            Val::Map(Box::new(result))
+        }
+        _ => form.clone(),
+    };
 
-    walk_recursive(vm, function_val, data)
+    match call_function_with_vm(vm, outer, &walked)
+        .and_then(|val| apply_onerr_disposition(vm, val, OnErrDisposition::Force))
+    {
+        Ok(value) => HotResult::Ok(value),
+        Err(err) => HotResult::Err(Val::from(err)),
+    }
 }
 
 /// Pre-order walk a nested data structure, applying a function to each element
@@ -3394,7 +3384,9 @@ pub fn prewalk(vm: &mut crate::lang::runtime::vm::VirtualMachine, args: &[Val]) 
         data: &Val,
     ) -> HotResult<Val> {
         // Apply function first (pre-order)
-        let transformed = match call_function_with_vm(vm, function_val, data) {
+        let transformed = match call_function_with_vm(vm, function_val, data)
+            .and_then(|val| apply_onerr_disposition(vm, val, OnErrDisposition::Force))
+        {
             Ok(val) => val,
             Err(err) => return HotResult::Err(Val::from(err)),
         };
@@ -3475,7 +3467,9 @@ pub fn postwalk(vm: &mut crate::lang::runtime::vm::VirtualMachine, args: &[Val])
         };
 
         // Then apply function (post-order)
-        match call_function_with_vm(vm, function_val, &walked) {
+        match call_function_with_vm(vm, function_val, &walked)
+            .and_then(|val| apply_onerr_disposition(vm, val, OnErrDisposition::Force))
+        {
             Ok(val) => HotResult::Ok(val),
             Err(err) => HotResult::Err(Val::from(err)),
         }
@@ -3723,7 +3717,9 @@ pub fn update_in(
     };
 
     if path.is_empty() {
-        return match call_function_with_vm(vm, &args[2], &args[0]) {
+        return match call_function_with_vm(vm, &args[2], &args[0])
+            .and_then(|val| apply_onerr_disposition(vm, val, OnErrDisposition::Force))
+        {
             Ok(result) => HotResult::Ok(result),
             Err(e) => HotResult::Err(Val::from(e)),
         };
@@ -3739,7 +3735,9 @@ pub fn update_in(
     };
 
     // Apply the function to the current value
-    let new_value = match call_function_with_vm(vm, &args[2], &current) {
+    let new_value = match call_function_with_vm(vm, &args[2], &current)
+        .and_then(|val| apply_onerr_disposition(vm, val, OnErrDisposition::Force))
+    {
         Ok(result) => result,
         Err(e) => return HotResult::Err(Val::from(e)),
     };
