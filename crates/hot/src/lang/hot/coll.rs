@@ -214,7 +214,17 @@ pub(crate) fn apply_onerr_disposition(
     disposition: OnErrDisposition,
 ) -> Result<Val, String> {
     match disposition {
-        OnErrDisposition::Force => vm.unwrap_result_if_ok(&val).map_err(|err| err.to_string()),
+        OnErrDisposition::Force => {
+            // Force is the HOF's explicit contract decision on a fully
+            // returned callback result. Ambient result-check suppression can
+            // still be active here (a lazy branch bracket in the callback's
+            // tail position spans the lambda return) and must not disable it.
+            let prev = vm.get_suppress_result_checking();
+            vm.set_suppress_result_checking(false);
+            let out = vm.unwrap_result_if_ok(&val).map_err(|err| err.to_string());
+            vm.set_suppress_result_checking(prev);
+            out
+        }
         OnErrDisposition::Preserve => Ok(unwrap_ok_preserve_err(val)),
     }
 }
@@ -536,7 +546,9 @@ pub fn filter(vm: &mut crate::lang::runtime::vm::VirtualMachine, args: &[Val]) -
             // Apply predicate to each item and keep those that return truthy
             for item in items {
                 // Call the predicate function with the item using VM context
-                let predicate_result = match call_prepared_with_vm(vm, &predicate, item) {
+                let predicate_result = match call_prepared_with_vm(vm, &predicate, item)
+                    .and_then(|val| apply_onerr_disposition(vm, val, OnErrDisposition::Force))
+                {
                     Ok(val) => val,
                     Err(err) => {
                         return HotResult::Err(Val::from(format!(
@@ -579,7 +591,9 @@ pub fn filter(vm: &mut crate::lang::runtime::vm::VirtualMachine, args: &[Val]) -
                     vm,
                     &predicate,
                     &[key.clone(), value.clone()],
-                ) {
+                )
+                .and_then(|val| apply_onerr_disposition(vm, val, OnErrDisposition::Force))
+                {
                     Ok(val) => val,
                     Err(err) => {
                         return HotResult::Err(Val::from(format!(
@@ -609,7 +623,9 @@ pub fn filter(vm: &mut crate::lang::runtime::vm::VirtualMachine, args: &[Val]) -
                 let char_val = Val::from(ch.to_string());
 
                 // Call the predicate function with the character using VM context
-                let predicate_result = match call_prepared_with_vm(vm, &predicate, &char_val) {
+                let predicate_result = match call_prepared_with_vm(vm, &predicate, &char_val)
+                    .and_then(|val| apply_onerr_disposition(vm, val, OnErrDisposition::Force))
+                {
                     Ok(val) => val,
                     Err(err) => {
                         return HotResult::Err(Val::from(format!(
@@ -666,7 +682,9 @@ pub fn filter(vm: &mut crate::lang::runtime::vm::VirtualMachine, args: &[Val]) -
                     }
 
                     // Apply the predicate to each value
-                    let predicate_result = match call_prepared_with_vm(vm, &predicate, &value) {
+                    let predicate_result = match call_prepared_with_vm(vm, &predicate, &value)
+                        .and_then(|val| apply_onerr_disposition(vm, val, OnErrDisposition::Force))
+                    {
                         Ok(val) => val,
                         Err(err) => {
                             return HotResult::Err(Val::from(format!(
@@ -1156,7 +1174,9 @@ pub fn reduce(vm: &mut crate::lang::runtime::vm::VirtualMachine, args: &[Val]) -
                     vm,
                     &function,
                     &[accumulator.clone(), item.clone()],
-                ) {
+                )
+                .and_then(|val| apply_onerr_disposition(vm, val, OnErrDisposition::Force))
+                {
                     Ok(val) => val,
                     Err(err) => {
                         return HotResult::Err(Val::from(format!(
@@ -1185,7 +1205,9 @@ pub fn reduce(vm: &mut crate::lang::runtime::vm::VirtualMachine, args: &[Val]) -
                     vm,
                     &function,
                     &[accumulator.clone(), pair],
-                ) {
+                )
+                .and_then(|val| apply_onerr_disposition(vm, val, OnErrDisposition::Force))
+                {
                     Ok(val) => val,
                     Err(err) => {
                         return HotResult::Err(Val::from(format!(
@@ -1243,7 +1265,9 @@ pub fn reduce(vm: &mut crate::lang::runtime::vm::VirtualMachine, args: &[Val]) -
                         vm,
                         &function,
                         &[accumulator.clone(), value],
-                    ) {
+                    )
+                    .and_then(|val| apply_onerr_disposition(vm, val, OnErrDisposition::Force))
+                    {
                         Ok(val) => val,
                         Err(err) => {
                             return HotResult::Err(Val::from(format!(
@@ -1310,7 +1334,9 @@ pub fn some(vm: &mut crate::lang::runtime::vm::VirtualMachine, args: &[Val]) -> 
             // Apply predicate to each item and return true if any is truthy
             for item in items {
                 // Call the predicate with the item using VM context
-                let predicate_result = match call_prepared_with_vm(vm, &predicate, item) {
+                let predicate_result = match call_prepared_with_vm(vm, &predicate, item)
+                    .and_then(|val| apply_onerr_disposition(vm, val, OnErrDisposition::Force))
+                {
                     Ok(val) => val,
                     Err(err) => {
                         return HotResult::Err(Val::from(format!(
@@ -1334,7 +1360,9 @@ pub fn some(vm: &mut crate::lang::runtime::vm::VirtualMachine, args: &[Val]) -> 
                 let pair = Val::Vec(vec![key.clone(), value.clone()]);
 
                 // Call the predicate with the key-value pair using VM context
-                let predicate_result = match call_prepared_with_vm(vm, &predicate, &pair) {
+                let predicate_result = match call_prepared_with_vm(vm, &predicate, &pair)
+                    .and_then(|val| apply_onerr_disposition(vm, val, OnErrDisposition::Force))
+                {
                     Ok(val) => val,
                     Err(err) => {
                         return HotResult::Err(Val::from(format!(
@@ -1383,7 +1411,9 @@ pub fn some(vm: &mut crate::lang::runtime::vm::VirtualMachine, args: &[Val]) -> 
                         break;
                     }
 
-                    let predicate_result = match call_prepared_with_vm(vm, &predicate, &value) {
+                    let predicate_result = match call_prepared_with_vm(vm, &predicate, &value)
+                        .and_then(|val| apply_onerr_disposition(vm, val, OnErrDisposition::Force))
+                    {
                         Ok(val) => val,
                         Err(err) => {
                             return HotResult::Err(Val::from(format!(
@@ -1463,7 +1493,9 @@ pub fn find_first(
     match collection {
         Val::Vec(items) => {
             for item in items {
-                let predicate_result = match call_function_with_vm(vm, predicate_val, item) {
+                let predicate_result = match call_function_with_vm(vm, predicate_val, item)
+                    .and_then(|val| apply_onerr_disposition(vm, val, OnErrDisposition::Force))
+                {
                     Ok(val) => val,
                     Err(err) => {
                         return HotResult::Err(Val::from(format!(
@@ -1484,7 +1516,9 @@ pub fn find_first(
             for (key, value) in map.iter() {
                 let pair = Val::Vec(vec![key.clone(), value.clone()]);
 
-                let predicate_result = match call_function_with_vm(vm, predicate_val, &pair) {
+                let predicate_result = match call_function_with_vm(vm, predicate_val, &pair)
+                    .and_then(|val| apply_onerr_disposition(vm, val, OnErrDisposition::Force))
+                {
                     Ok(val) => val,
                     Err(err) => {
                         return HotResult::Err(Val::from(format!(
@@ -1532,7 +1566,9 @@ pub fn find_first(
                         break;
                     }
 
-                    let predicate_result = match call_function_with_vm(vm, predicate_val, &value) {
+                    let predicate_result = match call_function_with_vm(vm, predicate_val, &value)
+                        .and_then(|val| apply_onerr_disposition(vm, val, OnErrDisposition::Force))
+                    {
                         Ok(val) => val,
                         Err(err) => {
                             return HotResult::Err(Val::from(format!(
@@ -1556,6 +1592,111 @@ pub fn find_first(
         }
         _ => HotResult::Err(Val::from(
             "find-first requires a collection (Vec, Map, or Iter)",
+        )),
+    }
+}
+
+/// Apply a function to each element for its side effects; results are
+/// forced through the strict-argument law (a callback Err halts, matching
+/// `map`'s default) and then discarded. Accepts Vec, Map, Str, or Iter —
+/// iterators are pulled lazily, so infinite sources work with `take`-style
+/// callbacks that stop externally.
+pub fn for_each(vm: &mut crate::lang::runtime::vm::VirtualMachine, args: &[Val]) -> HotResult<Val> {
+    if args.len() != 2 {
+        return HotResult::Err(Val::from(format!(
+            "::hot::iter/for-each expects 2 arguments, got {}",
+            args.len()
+        )));
+    }
+
+    let collection = &args[0];
+    let function_val = &args[1];
+
+    if matches!(collection, Val::Null) {
+        return HotResult::Ok(Val::Null);
+    }
+
+    let run = |vm: &mut crate::lang::runtime::vm::VirtualMachine, item: &Val| -> Result<(), Val> {
+        match call_function_with_vm(vm, function_val, item)
+            .and_then(|val| apply_onerr_disposition(vm, val, OnErrDisposition::Force))
+        {
+            Ok(_) => Ok(()),
+            Err(err) => Err(Val::from(format!("for-each function call failed: {}", err))),
+        }
+    };
+
+    match collection {
+        Val::Vec(items) => {
+            for item in items {
+                if let Err(e) = run(vm, item) {
+                    return HotResult::Err(e);
+                }
+            }
+            HotResult::Ok(Val::Null)
+        }
+        Val::Map(map) => {
+            for (key, value) in map.iter() {
+                let pair = Val::Vec(vec![key.clone(), value.clone()]);
+                if let Err(e) = run(vm, &pair) {
+                    return HotResult::Err(e);
+                }
+            }
+            HotResult::Ok(Val::Null)
+        }
+        Val::Str(s) => {
+            for ch in s.chars() {
+                let char_val = Val::from(ch.to_string());
+                if let Err(e) = run(vm, &char_val) {
+                    return HotResult::Err(e);
+                }
+            }
+            HotResult::Ok(Val::Null)
+        }
+        Val::Box(boxed) => {
+            if let Some(iter_box) = boxed
+                .as_any()
+                .downcast_ref::<crate::lang::hot::iter::IteratorBox>()
+            {
+                loop {
+                    let (value, done) = {
+                        let mut guard = match iter_box.inner.lock() {
+                            Ok(g) => g,
+                            Err(e) => {
+                                return HotResult::Err(Val::from(format!(
+                                    "for-each: failed to lock iterator: {}",
+                                    e
+                                )));
+                            }
+                        };
+                        match guard.next() {
+                            Ok(r) => r,
+                            Err(e) => {
+                                return HotResult::Err(Val::from(format!(
+                                    "for-each: iterator error: {}",
+                                    e
+                                )));
+                            }
+                        }
+                    };
+
+                    if done {
+                        break;
+                    }
+
+                    if let Err(e) = run(vm, &value) {
+                        return HotResult::Err(e);
+                    }
+                }
+
+                HotResult::Ok(Val::Null)
+            } else {
+                HotResult::Err(Val::from(
+                    "for-each requires a collection (Vec, Map, Str, or Iter)",
+                ))
+            }
+        }
+        _ => HotResult::Err(Val::from(
+            "for-each requires a collection (Vec, Map, Str, or Iter)",
         )),
     }
 }
@@ -2001,7 +2142,9 @@ pub fn remove(vm: &mut crate::lang::runtime::vm::VirtualMachine, args: &[Val]) -
         Val::Vec(items) => {
             let mut result = Vec::new();
             for item in items {
-                match call_function_with_vm(vm, predicate_val, item) {
+                match call_function_with_vm(vm, predicate_val, item)
+                    .and_then(|val| apply_onerr_disposition(vm, val, OnErrDisposition::Force))
+                {
                     Ok(predicate_result) => {
                         // Remove means keep items where predicate is false
                         if !is_truthy(&predicate_result) {
@@ -2025,7 +2168,9 @@ pub fn remove(vm: &mut crate::lang::runtime::vm::VirtualMachine, args: &[Val]) -
                     vm,
                     predicate_val,
                     &[key.clone(), value.clone()],
-                ) {
+                )
+                .and_then(|val| apply_onerr_disposition(vm, val, OnErrDisposition::Force))
+                {
                     Ok(predicate_result) => {
                         // Remove means keep items where predicate is false
                         if !is_truthy(&predicate_result) {
@@ -2046,7 +2191,9 @@ pub fn remove(vm: &mut crate::lang::runtime::vm::VirtualMachine, args: &[Val]) -
             let mut out = String::new();
             for ch in s.chars() {
                 let ch_val = Val::from(ch.to_string());
-                match call_function_with_vm(vm, predicate_val, &ch_val) {
+                match call_function_with_vm(vm, predicate_val, &ch_val)
+                    .and_then(|val| apply_onerr_disposition(vm, val, OnErrDisposition::Force))
+                {
                     Ok(predicate_result) => {
                         if !is_truthy(&predicate_result) {
                             out.push(ch);
@@ -2293,7 +2440,9 @@ pub fn partition(
             let mut false_items = Vec::new();
 
             for item in items {
-                match call_function_with_vm(vm, predicate_val, item) {
+                match call_function_with_vm(vm, predicate_val, item)
+                    .and_then(|val| apply_onerr_disposition(vm, val, OnErrDisposition::Force))
+                {
                     Ok(predicate_result) => {
                         if is_truthy(&predicate_result) {
                             true_items.push(item.clone());
@@ -2319,7 +2468,9 @@ pub fn partition(
 
             for (key, value) in map.iter() {
                 let pair = Val::Vec(vec![key.clone(), value.clone()]);
-                match call_function_with_vm(vm, predicate_val, &pair) {
+                match call_function_with_vm(vm, predicate_val, &pair)
+                    .and_then(|val| apply_onerr_disposition(vm, val, OnErrDisposition::Force))
+                {
                     Ok(predicate_result) => {
                         if is_truthy(&predicate_result) {
                             true_map.insert(key.clone(), value.clone());
@@ -2379,7 +2530,9 @@ pub fn partition_by(
             let mut current_key: Option<Val> = None;
 
             for item in items {
-                match call_function_with_vm(vm, function_val, item) {
+                match call_function_with_vm(vm, function_val, item)
+                    .and_then(|val| apply_onerr_disposition(vm, val, OnErrDisposition::Force))
+                {
                     Ok(key) => {
                         if let Some(ref prev_key) = current_key {
                             // Compare keys - if different, start new group
@@ -2555,7 +2708,9 @@ pub fn sort_by(vm: &mut crate::lang::runtime::vm::VirtualMachine, args: &[Val]) 
             let mut keyed_items = Vec::new();
 
             for item in items {
-                match call_function_with_vm(vm, key_fn, item) {
+                match call_function_with_vm(vm, key_fn, item)
+                    .and_then(|val| apply_onerr_disposition(vm, val, OnErrDisposition::Force))
+                {
                     Ok(key) => keyed_items.push((key, item.clone())),
                     Err(err) => {
                         return HotResult::Err(Val::from(format!(
@@ -2784,7 +2939,9 @@ pub fn all(vm: &mut crate::lang::runtime::vm::VirtualMachine, args: &[Val]) -> H
     match collection {
         Val::Vec(items) => {
             for item in items {
-                match call_prepared_with_vm(vm, &predicate, item) {
+                match call_prepared_with_vm(vm, &predicate, item)
+                    .and_then(|val| apply_onerr_disposition(vm, val, OnErrDisposition::Force))
+                {
                     Ok(predicate_result) => {
                         if !is_truthy(&predicate_result) {
                             return HotResult::Ok(Val::Bool(false));
@@ -2803,7 +2960,9 @@ pub fn all(vm: &mut crate::lang::runtime::vm::VirtualMachine, args: &[Val]) -> H
         Val::Map(map) => {
             for (key, value) in map.iter() {
                 let pair = Val::Vec(vec![key.clone(), value.clone()]);
-                match call_prepared_with_vm(vm, &predicate, &pair) {
+                match call_prepared_with_vm(vm, &predicate, &pair)
+                    .and_then(|val| apply_onerr_disposition(vm, val, OnErrDisposition::Force))
+                {
                     Ok(predicate_result) => {
                         if !is_truthy(&predicate_result) {
                             return HotResult::Ok(Val::Bool(false));
@@ -2850,7 +3009,9 @@ pub fn all(vm: &mut crate::lang::runtime::vm::VirtualMachine, args: &[Val]) -> H
                         break;
                     }
 
-                    let predicate_result = match call_prepared_with_vm(vm, &predicate, &value) {
+                    let predicate_result = match call_prepared_with_vm(vm, &predicate, &value)
+                        .and_then(|val| apply_onerr_disposition(vm, val, OnErrDisposition::Force))
+                    {
                         Ok(val) => val,
                         Err(err) => {
                             return HotResult::Err(Val::from(format!(
@@ -3180,7 +3341,9 @@ pub fn walk(vm: &mut crate::lang::runtime::vm::VirtualMachine, args: &[Val]) -> 
                     }
                 }
                 let walked_vec = Val::Vec(result);
-                match call_function_with_vm(vm, function_val, &walked_vec) {
+                match call_function_with_vm(vm, function_val, &walked_vec)
+                    .and_then(|val| apply_onerr_disposition(vm, val, OnErrDisposition::Force))
+                {
                     Ok(val) => HotResult::Ok(val),
                     Err(err) => HotResult::Err(Val::from(err)),
                 }
@@ -3196,7 +3359,9 @@ pub fn walk(vm: &mut crate::lang::runtime::vm::VirtualMachine, args: &[Val]) -> 
                     }
                 }
                 let walked_map = Val::Map(Box::new(result_map));
-                match call_function_with_vm(vm, function_val, &walked_map) {
+                match call_function_with_vm(vm, function_val, &walked_map)
+                    .and_then(|val| apply_onerr_disposition(vm, val, OnErrDisposition::Force))
+                {
                     Ok(val) => HotResult::Ok(val),
                     Err(err) => HotResult::Err(Val::from(err)),
                 }

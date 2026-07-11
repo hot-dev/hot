@@ -348,6 +348,10 @@ pub fn get_hotlib_map() -> &'static HotLibMap {
             HotLibFn::vm_callback(coll::find_first),
         );
         map.insert(
+            "::hot::iter/for-each".to_string(),
+            HotLibFn::vm_callback(coll::for_each),
+        );
+        map.insert(
             "::hot::coll/remove".to_string(),
             HotLibFn::vm_callback(coll::remove),
         );
