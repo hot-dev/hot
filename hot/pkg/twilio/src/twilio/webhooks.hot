@@ -88,12 +88,10 @@ fn
         }
         => {
           // Form mode: URL + sorted POST param key-value pairs
-          params if(is-some(request.body-raw),
-            ::uri/decode-query(request.body-raw),
-            {}
-          )
-          sorted-keys sort(keys(params))
-          param-string reduce(sorted-keys, (acc, k) { concat(acc, k, get(params, k)) }, "")
+          params if(is-some(request.body-raw), ::uri/decode-query(request.body-raw), {})
+          param-string keys(params)
+              |> sort()
+              |> reduce((acc, k) { concat(acc, k, get(params, k)) }, "")
 
           // Twilio signatures are base64 of the raw HMAC-SHA1 digest
           ::hmac/hmac-verify-base64(auth-token, `${url}${param-string}`, signature, "sha1")

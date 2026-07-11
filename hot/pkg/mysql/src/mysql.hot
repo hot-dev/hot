@@ -71,9 +71,10 @@ type {
 
 write-packet fn (socket, seq: Int, payload: Bytes): Any {
     framed ::wire/frame(seq, payload)
-    cond {
-        is-err(framed) => { framed }
-        => { ::tcp/write(socket, framed) }
+    match framed {
+        Result.Err => { err(framed) }
+
+        _ => { ::tcp/write(socket, framed) }
     }
 }
 
@@ -81,9 +82,10 @@ write-packet fn (socket, seq: Int, payload: Bytes): Any {
 // may send AuthSwitchRequest (0xFE) or AuthMoreData (0x01) before OK.
 auth-loop fn (socket, password: Str, over-tls: Bool, seq: Int): Any {
     packet ::wire/read-packet(socket)
-    cond {
-        is-err(packet) => { packet }
-        => {
+    match packet {
+        Result.Err => { err(packet) }
+
+        _ => {
             header ::decode/first-byte(packet.payload)
             cond {
                 eq(header, 0) => { true }
@@ -93,13 +95,15 @@ auth-loop fn (socket, password: Str, over-tls: Bool, seq: Int): Any {
                     plugin-out ::wire/read-cstring(packet.payload, 1)
                     nonce slice(::wire/read-rest(packet.payload, plugin-out[1]), 0, 20)
                     response ::auth/scramble(plugin-out[0], password, nonce)
-                    cond {
-                        is-err(response) => { response }
-                        => {
+                    match response {
+                        Result.Err => { err(response) }
+
+                        _ => {
                             written write-packet(socket, add(packet.seq, 1), response)
-                            cond {
-                                is-err(written) => { written }
-                                => { auth-loop(socket, password, over-tls, add(packet.seq, 2)) }
+                            match written {
+                                Result.Err => { err(written) }
+
+                                _ => { auth-loop(socket, password, over-tls, add(packet.seq, 2)) }
                             }
                         }
                     }
@@ -116,9 +120,10 @@ auth-loop fn (socket, password: Str, over-tls: Bool, seq: Int): Any {
                                     // Full auth over TLS: the cleartext
                                     // password, null-terminated.
                                     written write-packet(socket, add(packet.seq, 1), ::wire/cstring(password))
-                                    cond {
-                                        is-err(written) => { written }
-                                        => { auth-loop(socket, password, over-tls, add(packet.seq, 2)) }
+                                    match written {
+                                        Result.Err => { err(written) }
+
+                                        _ => { auth-loop(socket, password, over-tls, add(packet.seq, 2)) }
                                     }
                                 }
                                 => {
@@ -156,18 +161,20 @@ fn (options: MySqlOptions | Map): Any {
         or(is-null(user), is-empty(or(user, ""))) => { err("mysql: options must include `user`") }
         => {
             socket ::tcp/connect(host, port)
-            cond {
-                is-err(socket) => { socket }
-                => {
+            match socket {
+                Result.Err => { err(socket) }
+
+                _ => {
                     greeting ::wire/read-packet(socket)
                     cond {
                         is-err(greeting) => { greeting }
                         eq(::decode/first-byte(greeting.payload), 255) => { ::decode/parse-err(greeting.payload) }
                         => {
                             handshake ::auth/parse-handshake(greeting.payload)
-                            cond {
-                                is-err(handshake) => { handshake }
-                                => { finish-connect(socket, handshake, user, password, database, use-ssl, get(options, "tls")) }
+                            match handshake {
+                                Result.Err => { err(handshake) }
+
+                                _ => { finish-connect(socket, handshake, user, password, database, use-ssl, get(options, "tls")) }
                             }
                         }
                     }
@@ -181,31 +188,36 @@ finish-connect fn (socket, handshake: Map, user: Str, password: Str, database: S
     upgraded cond {
         use-ssl => {
             sent write-packet(socket, 1, ::auth/ssl-request(not(is-empty(database))))
-            cond {
-                is-err(sent) => { sent }
-                => { ::tls/upgrade(socket, {...or(tls-options, {}), host: null}) }
+            match sent {
+                Result.Err => { err(sent) }
+
+                _ => { ::tls/upgrade(socket, {...or(tls-options, {}), host: null}) }
             }
         }
         => { socket }
     }
 
-    cond {
-        is-err(upgraded) => { upgraded }
-        => {
+    match upgraded {
+        Result.Err => { err(upgraded) }
+
+        _ => {
             response-seq if(use-ssl, 2, 1)
             scrambled ::auth/scramble(handshake.auth-plugin, password, handshake.nonce)
-            cond {
-                is-err(scrambled) => { scrambled }
-                => {
+            match scrambled {
+                Result.Err => { err(scrambled) }
+
+                _ => {
                     payload ::auth/handshake-response(user, database, scrambled, handshake.auth-plugin, use-ssl)
                     written write-packet(upgraded, response-seq, payload)
-                    cond {
-                        is-err(written) => { written }
-                        => {
+                    match written {
+                        Result.Err => { err(written) }
+
+                        _ => {
                             authed auth-loop(upgraded, password, use-ssl, add(response-seq, 1))
-                            cond {
-                                is-err(authed) => { authed }
-                                => { {socket: upgraded, server-version: handshake.server-version} }
+                            match authed {
+                                Result.Err => { err(authed) }
+
+                                _ => { {socket: upgraded, server-version: handshake.server-version} }
                             }
                         }
                     }
@@ -224,16 +236,18 @@ read-columns fn (socket, remaining: Int, acc: Vec): Any {
         eq(remaining, 0) => {
             // The EOF packet that terminates the column definitions.
             eof ::wire/read-packet(socket)
-            cond {
-                is-err(eof) => { eof }
-                => { acc }
+            match eof {
+                Result.Err => { err(eof) }
+
+                _ => { acc }
             }
         }
         => {
             packet ::wire/read-packet(socket)
-            cond {
-                is-err(packet) => { packet }
-                => { read-columns(socket, sub(remaining, 1), concat(acc, [::decode/parse-column(packet.payload)])) }
+            match packet {
+                Result.Err => { err(packet) }
+
+                _ => { read-columns(socket, sub(remaining, 1), concat(acc, [::decode/parse-column(packet.payload)])) }
             }
         }
     }
@@ -269,13 +283,15 @@ read-result-set fn (socket, binary: Bool): Any {
         => {
             count-out ::wire/read-lenenc-int(packet.payload, 0)
             cols read-columns(socket, count-out[0], [])
-            cond {
-                is-err(cols) => { cols }
-                => {
+            match cols {
+                Result.Err => { err(cols) }
+
+                _ => {
                     rows read-rows(socket, cols, binary, [])
-                    cond {
-                        is-err(rows) => { rows }
-                        => { {rows: rows, ok: null} }
+                    match rows {
+                        Result.Err => { err(rows) }
+
+                        _ => { {rows: rows, ok: null} }
                     }
                 }
             }
@@ -347,9 +363,10 @@ fn (stmt-id: Int, params: Vec): Bytes {
 run-prepared fn (conn: Map, sql: Str, params: Vec): Any {
     socket conn.socket
     sent write-packet(socket, 0, concat(::wire/int1(COM-STMT-PREPARE), Bytes(sql)))
-    cond {
-        is-err(sent) => { sent }
-        => {
+    match sent {
+        Result.Err => { err(sent) }
+
+        _ => {
             packet ::wire/read-packet(socket)
             cond {
                 is-err(packet) => { packet }
@@ -384,9 +401,10 @@ run-prepared fn (conn: Map, sql: Str, params: Vec): Any {
 // read the result set.
 execute-prepared fn (socket, stmt-id: Int, num-params: Int, num-cols: Int, params: Vec): Any {
     params-drained drain-defs(socket, num-params)
-    cond {
-        is-err(params-drained) => { params-drained }
-        => {
+    match params-drained {
+        Result.Err => { err(params-drained) }
+
+        _ => {
             cols-drained drain-defs(socket, num-cols)
             cond {
                 is-err(cols-drained) => { cols-drained }
@@ -395,9 +413,10 @@ execute-prepared fn (socket, stmt-id: Int, num-params: Int, num-cols: Int, param
                 }
                 => {
                     sent write-packet(socket, 0, stmt-execute-payload(stmt-id, params))
-                    cond {
-                        is-err(sent) => { sent }
-                        => { read-result-set(socket, true) }
+                    match sent {
+                        Result.Err => { err(sent) }
+
+                        _ => { read-result-set(socket, true) }
                     }
                 }
             }
@@ -410,13 +429,15 @@ drain-defs fn (socket, remaining: Int): Any {
         eq(remaining, 0) => { true }
         => {
             drained drain-packets(socket, remaining)
-            cond {
-                is-err(drained) => { drained }
-                => {
+            match drained {
+                Result.Err => { err(drained) }
+
+                _ => {
                     eof ::wire/read-packet(socket)
-                    cond {
-                        is-err(eof) => { eof }
-                        => { true }
+                    match eof {
+                        Result.Err => { err(eof) }
+
+                        _ => { true }
                     }
                 }
             }
@@ -429,9 +450,10 @@ drain-packets fn (socket, remaining: Int): Any {
         eq(remaining, 0) => { true }
         => {
             packet ::wire/read-packet(socket)
-            cond {
-                is-err(packet) => { packet }
-                => { drain-packets(socket, sub(remaining, 1)) }
+            match packet {
+                Result.Err => { err(packet) }
+
+                _ => { drain-packets(socket, sub(remaining, 1)) }
             }
         }
     }
@@ -460,13 +482,15 @@ meta {
 fn
 (conn: Map, sql: Str): Any {
     sent write-packet(conn.socket, 0, concat(::wire/int1(COM-QUERY), Bytes(sql)))
-    cond {
-        is-err(sent) => { sent }
-        => {
+    match sent {
+        Result.Err => { err(sent) }
+
+        _ => {
             result read-result-set(conn.socket, false)
-            cond {
-                is-err(result) => { result }
-                => { result.rows }
+            match result {
+                Result.Err => { err(result) }
+
+                _ => { result.rows }
             }
         }
     }
@@ -476,9 +500,10 @@ fn
         is-empty(params) => { query(conn, sql) }
         => {
             result run-prepared(conn, sql, params)
-            cond {
-                is-err(result) => { result }
-                => { result.rows }
+            match result {
+                Result.Err => { err(result) }
+
+                _ => { result.rows }
             }
         }
     }
@@ -495,15 +520,17 @@ meta {
 fn
 (conn: Map, sql: Str): Any {
     sent write-packet(conn.socket, 0, concat(::wire/int1(COM-QUERY), Bytes(sql)))
-    cond {
-        is-err(sent) => { sent }
-        => {
+    match sent {
+        Result.Err => { err(sent) }
+
+        _ => {
             // Bind first: an Err argument to a regular fn halts the run,
             // so the error must be surfaced before execute-result runs.
             result read-result-set(conn.socket, false)
-            cond {
-                is-err(result) => { result }
-                => { execute-result(result, sql) }
+            match result {
+                Result.Err => { err(result) }
+
+                _ => { execute-result(result, sql) }
             }
         }
     }
@@ -515,9 +542,10 @@ fn
             // Bind first: an Err argument to a regular fn halts the run,
             // so the error must be surfaced before execute-result runs.
             result run-prepared(conn, sql, params)
-            cond {
-                is-err(result) => { result }
-                => { execute-result(result, sql) }
+            match result {
+                Result.Err => { err(result) }
+
+                _ => { execute-result(result, sql) }
             }
         }
     }

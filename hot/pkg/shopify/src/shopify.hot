@@ -95,9 +95,10 @@ fn (limit: Int): Any {
   }
   """
   data graphql(query, {first: limit})
-  cond {
-    is-err(data) => { data }
-    => { data.orders.nodes }
+  match data {
+    Result.Err => { err(data) }
+
+    _ => { data.orders.nodes }
   }
 }
 
@@ -117,9 +118,10 @@ fn (id: Str): Any {
   }
   """
   data graphql(query, {id: id})
-  cond {
-    is-err(data) => { data }
-    => { data.order }
+  match data {
+    Result.Err => { err(data) }
+
+    _ => { data.order }
   }
 }
 
@@ -139,9 +141,10 @@ fn (search-query: Str, limit: Int): Any {
   }
   """
   data graphql(query, {query: search-query, first: limit})
-  cond {
-    is-err(data) => { data }
-    => { data.products.nodes }
+  match data {
+    Result.Err => { err(data) }
+
+    _ => { data.products.nodes }
   }
 }
 

@@ -31,9 +31,10 @@ meta {
 fn (service-account: Map, scope: Str, subject: Any): Map {
   claims build-service-account-claims(service-account.client_email, scope, subject)
   assertion ::jwt/sign(claims, service-account.private_key, "RS256")
-  cond {
-    is-err(assertion) => { assertion }
-    => { ::oauth2/jwt-bearer(::google/TOKEN_URL, assertion) }
+  match assertion {
+    Result.Err => { err(assertion) }
+
+    _ => { ::oauth2/jwt-bearer(::google/TOKEN_URL, assertion) }
   }
 }
 
@@ -70,21 +71,24 @@ fn (scope: Str): Str {
         client-secret: ::ctx/get("google.oauth.client-secret"),
         refresh-token: refresh-token
       })
-      cond {
-        is-err(tokens) => { tokens }
-        => { tokens.access_token }
+      match tokens {
+        Result.Err => { err(tokens) }
+
+        _ => { tokens.access_token }
       }
     }
 
     not(is-empty(sa-json)) => {
       sa from-json(sa-json)
-      cond {
-        is-err(sa) => { err("google: google.service.account is not valid JSON") }
-        => {
+      match sa {
+        Result.Err => { err("google: google.service.account is not valid JSON") }
+
+        _ => {
           tokens service-account-token(sa, scope, ::ctx/get("google.impersonate"))
-          cond {
-            is-err(tokens) => { tokens }
-            => { tokens.access_token }
+          match tokens {
+            Result.Err => { err(tokens) }
+
+            _ => { tokens.access_token }
           }
         }
       }

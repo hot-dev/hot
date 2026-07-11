@@ -105,13 +105,11 @@ meta {
 }
 fn (url: Str): Map {
     // Remove protocol
-    without-protocol if(starts-with(url, "https://"),
-        slice(url, 8, length(url)),
-        if(starts-with(url, "http://"),
-            slice(url, 7, length(url)),
-            url
-        )
-    )
+    without-protocol cond {
+        starts-with(url, "https://") => { slice(url, 8, length(url)) }
+        starts-with(url, "http://") => { slice(url, 7, length(url)) }
+        => { url }
+    }
 
     // FIRST split by "?" to separate query string (which may contain "/" in values)
     url-query-parts split(without-protocol, "?")
@@ -122,10 +120,10 @@ fn (url: Str): Map {
     parts-by-slash split(host-and-path, "/")
     host first(parts-by-slash)
     rest-parts rest(parts-by-slash)
-    path if(is-empty(rest-parts),
-        "/",
-        `/${join(rest-parts, "/")}`
-    )
+    path cond {
+        is-empty(rest-parts) => { "/" }
+        => { `/${join(rest-parts, "/")}` }
+    }
 
     {host, path, query}
 }
@@ -254,8 +252,7 @@ fn (param: Str): Str {
         {
             key first(parts)
             // Value is everything after the first =
-            value-parts rest(parts)
-            value join(value-parts, "=")
+            value rest(parts) |> join("=")
             encoded-value url-encode-value(value)
             `${key}=${encoded-value}`
         }
@@ -268,14 +265,14 @@ meta {
     doc: """Sort and URL-encode query parameters for AWS canonical request"""
 }
 fn (query: Str): Str {
-    if(or(is-null(query), eq(query, "")),
-        "",
-        query
+    cond {
+        or(is-null(query), eq(query, "")) => { "" }
+        => { query
             |> split("&")
             |> map(encode-query-param)
             |> sort
-            |> join("&")
-    )
+            |> join("&") }
+    }
 }
 
 // Create canonical headers string
@@ -286,9 +283,11 @@ meta {
 fn (headers: Map): Str {
     // Get sorted lowercase header names and values
     // For now, just format the headers we have
-    header-lines map(keys(headers), `${lowercase(%)}:${trim(Str(headers[%]))}`)
-    sorted-lines sort(header-lines)
-    `${join(sorted-lines, "\n")}\n`
+    canonical keys(headers)
+        |> map(`${lowercase(%)}:${trim(Str(headers[%]))}`)
+        |> sort()
+        |> join("\n")
+    `${canonical}\n`
 }
 
 // Create signed headers string
@@ -310,12 +309,11 @@ meta {
     doc: """Derive AWS signing key using HMAC-SHA256 chain"""
 }
 fn (secret_key: Str, date_stamp: Str, region: Str, service: Str): Bytes {
-    k-secret `AWS4${secret_key}`
-    k-date hmac-sha256-bytes(k-secret, date_stamp)
-    k-region hmac-sha256-bytes(k-date, region)
-    k-service hmac-sha256-bytes(k-region, service)
-    k-signing hmac-sha256-bytes(k-service, "aws4_request")
-    k-signing
+    // date -> region -> service -> "aws4_request", each keyed on the last
+    hmac-sha256-bytes(`AWS4${secret_key}`, date_stamp)
+        |> hmac-sha256-bytes(region)
+        |> hmac-sha256-bytes(service)
+        |> hmac-sha256-bytes("aws4_request")
 }
 
 // Create the canonical request string
@@ -358,16 +356,16 @@ fn (method: Str, url: Str, region: Str, service: Str, credentials: Credentials, 
     base-headers {...headers, "x-amz-date": amz-date, "x-amz-content-sha256": payload-hash}
 
     // Add session token if present (not null and not empty)
-    with-token if(or(is-null(credentials.session_token), eq(credentials.session_token, "")),
-        base-headers,
-        {...base-headers, "x-amz-security-token": credentials.session_token}
-    )
+    with-token cond {
+        or(is-null(credentials.session_token), eq(credentials.session_token, "")) => { base-headers }
+        => { {...base-headers, "x-amz-security-token": credentials.session_token} }
+    }
 
     // Ensure host header is present
-    all-headers if(is-null(with-token.Host),
-        {...with-token, "Host": url-parts.host},
-        with-token
-    )
+    all-headers cond {
+        is-null(with-token.Host) => { {...with-token, "Host": url-parts.host} }
+        => { with-token }
+    }
 
     // Create canonical request components
     // URL-encode the path for the canonical URI (encodes : but not /)
@@ -494,20 +492,19 @@ fn
     ]
 
     // Add session token if present
-    params-with-token if(or(is-null(credentials.session_token), eq(credentials.session_token, "")),
-        base-params,
-        concat(base-params, [`X-Amz-Security-Token=${url-encode-value(credentials.session_token)}`])
-    )
+    params-with-token cond {
+        or(is-null(credentials.session_token), eq(credentials.session_token, "")) => { base-params }
+        => { concat(base-params, [`X-Amz-Security-Token=${url-encode-value(credentials.session_token)}`]) }
+    }
 
     // Combine with existing query params
-    all-params if(eq(existing-query, ""),
-        params-with-token,
-        concat(params-with-token, split(existing-query, "&"))
-    )
+    all-params cond {
+        eq(existing-query, "") => { params-with-token }
+        => { concat(params-with-token, split(existing-query, "&")) }
+    }
 
     // Sort all query parameters for canonical query string
-    sorted-params sort(all-params)
-    canonical-query-string join(sorted-params, "&")
+    canonical-query-string sort(all-params) |> join("&")
 
     // Build canonical headers (only host for presigned URLs)
     canonical-headers-str `host:${host}\n`
@@ -571,10 +568,10 @@ meta {
     doc: """Get the S3 endpoint URL for a given bucket and region"""
 }
 fn (bucket: Str, region: Str): Str {
-    if(eq(region, "us-east-1"),
-        `https://${bucket}.s3.amazonaws.com`,
-        `https://${bucket}.s3.${region}.amazonaws.com`
-    )
+    cond {
+        eq(region, "us-east-1") => { `https://${bucket}.s3.amazonaws.com` }
+        => { `https://${bucket}.s3.${region}.amazonaws.com` }
+    }
 }
 
 // SES endpoint helper

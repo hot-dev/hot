@@ -55,9 +55,10 @@ meta {
 }
 fn (app-id: Any, private-key-pem: Str, installation-id: Any): Map {
   bearer app-jwt(app-id, private-key-pem)
-  cond {
-    is-err(bearer) => { bearer }
-    => {
+  match bearer {
+    Result.Err => { err(bearer) }
+
+    _ => {
       ::github::api/json("POST", `/app/installations/${installation-id}/access_tokens`, {}, {}, bearer)
     }
   }
@@ -69,8 +70,9 @@ meta {
 }
 fn (app-id: Any, private-key-pem: Str): Any {
   bearer app-jwt(app-id, private-key-pem)
-  cond {
-    is-err(bearer) => { bearer }
-    => { ::github::api/json("GET", "/app/installations", {}, "", bearer) }
+  match bearer {
+    Result.Err => { err(bearer) }
+
+    _ => { ::github::api/json("GET", "/app/installations", {}, "", bearer) }
   }
 }

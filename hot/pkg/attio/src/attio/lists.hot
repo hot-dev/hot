@@ -38,9 +38,10 @@ fn
       entry_values: entry-values
     }
   })
-  cond {
-    is-err(out) => { out }
-    => { out.data }
+  match out {
+    Result.Err => { err(out) }
+
+    _ => { out.data }
   }
 }
 

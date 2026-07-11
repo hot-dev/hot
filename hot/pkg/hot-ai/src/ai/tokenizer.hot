@@ -144,9 +144,7 @@ meta {
 }
 fn (text: Str, model: Str): Int {
     enc encoding-for-model(model)
-    if(is-null(enc),
-       count-text-heuristic(text),
-       ::hot::internal::tokenizer/count(text, enc))
+    if(is-null(enc), count-text-heuristic(text), ::hot::internal::tokenizer/count(text, enc))
 }
 
 count-with-encoding

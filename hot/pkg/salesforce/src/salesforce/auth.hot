@@ -62,22 +62,25 @@ fn (): Map {
         client-id: ::ctx/get("salesforce.client-id"),
         client-secret: client-secret
       })
-      cond {
-        is-err(tokens) => { tokens }
-        => { {token: tokens.access_token, instance-url: tokens.instance_url} }
+      match tokens {
+        Result.Err => { err(tokens) }
+
+        _ => { {token: tokens.access_token, instance-url: tokens.instance_url} }
       }
     }
 
     not(is-empty(private-key)) => {
       claims build-jwt-claims(::ctx/get("salesforce.client-id"), ::ctx/get("salesforce.username"), login-url())
       assertion ::jwt/sign(claims, private-key, "RS256")
-      cond {
-        is-err(assertion) => { assertion }
-        => {
+      match assertion {
+        Result.Err => { err(assertion) }
+
+        _ => {
           tokens ::oauth2/jwt-bearer(token-url, assertion)
-          cond {
-            is-err(tokens) => { tokens }
-            => { {token: tokens.access_token, instance-url: tokens.instance_url} }
+          match tokens {
+            Result.Err => { err(tokens) }
+
+            _ => { {token: tokens.access_token, instance-url: tokens.instance_url} }
           }
         }
       }

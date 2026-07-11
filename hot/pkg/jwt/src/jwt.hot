@@ -95,9 +95,10 @@ fn
 
     eq(algorithm, "RS256") => {
       raw ::crypto/rsa-sha256-sign(key, signing-input)
-      cond {
-        is-err(raw) => { raw }
-        => { `${signing-input}.${::b64/encode-url(raw)}` }
+      match raw {
+        Result.Err => { err(raw) }
+
+        _ => { `${signing-input}.${::b64/encode-url(raw)}` }
       }
     }
     => { err(`jwt: unsupported algorithm '${algorithm}' (use HS256 or RS256)`) }

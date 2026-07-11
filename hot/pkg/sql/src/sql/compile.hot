@@ -141,9 +141,10 @@ fn
 },
 (sql: Str, style: Str, dialect: Str): Map {
   result scan(sql, 0, scan-opts(style, dialect), "", [], "sql", 0, "")
-  cond {
-    is-err(result) => { result }
-    => {
+  match result {
+    Result.Err => { err(result) }
+
+    _ => {
       has-positional gt(length(filter(result.names, is-null)), 0)
       has-named gt(length(filter(result.names, is-some)), 0)
       cond {

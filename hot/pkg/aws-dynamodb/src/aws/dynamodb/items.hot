@@ -67,11 +67,12 @@ fn
         Item: item
     }
 
-    with-condition if(is-null(condition_expression), request-body,
-        {...request-body,
+    with-condition cond {
+        is-null(condition_expression) => { request-body }
+        => { {...request-body,
             ConditionExpression: condition_expression,
-            ExpressionAttributeValues: expression_attribute_values}
-    )
+            ExpressionAttributeValues: expression_attribute_values} }
+    }
 
     body to-json(with-condition)
 
@@ -85,13 +86,13 @@ fn
 
     response http-request("POST", url, signed-headers, body)
 
-    if(is-ok-response(response),
-        PutItemResponse({
+    cond {
+        is-ok-response(response) => { PutItemResponse({
             attributes: response.body.Attributes,
             consumed_capacity: response.body.ConsumedCapacity
-        }),
-        err(AwsError(response))
-    )
+        }) }
+        => { err(AwsError(response)) }
+    }
 },
 (table_name: Str, item: Map): PutItemResponse | AwsError {
     put-item(table_name, item, null, null)
@@ -126,9 +127,9 @@ fn
         ConsistentRead: consistent_read
     }
 
-    with-projection if(is-null(projection_expression), request-body,
-        {...request-body, ProjectionExpression: projection_expression}
-    )
+    with-projection merge(request-body, filter-vals({
+        ProjectionExpression: projection_expression
+    }, is-some))
 
     body to-json(with-projection)
 
@@ -142,13 +143,13 @@ fn
 
     response http-request("POST", url, signed-headers, body)
 
-    if(is-ok-response(response),
-        GetItemResponse({
+    cond {
+        is-ok-response(response) => { GetItemResponse({
             item: response.body.Item,
             consumed_capacity: response.body.ConsumedCapacity
-        }),
-        err(AwsError(response))
-    )
+        }) }
+        => { err(AwsError(response)) }
+    }
 },
 (table_name: Str, key: Map, consistent_read: Bool): GetItemResponse | AwsError {
     get-item(table_name, key, consistent_read, null)
@@ -183,11 +184,12 @@ fn
         Key: key
     }
 
-    with-condition if(is-null(condition_expression), request-body,
-        {...request-body,
+    with-condition cond {
+        is-null(condition_expression) => { request-body }
+        => { {...request-body,
             ConditionExpression: condition_expression,
-            ExpressionAttributeValues: expression_attribute_values}
-    )
+            ExpressionAttributeValues: expression_attribute_values} }
+    }
 
     body to-json(with-condition)
 
@@ -201,13 +203,13 @@ fn
 
     response http-request("POST", url, signed-headers, body)
 
-    if(is-ok-response(response),
-        DeleteItemResponse({
+    cond {
+        is-ok-response(response) => { DeleteItemResponse({
             attributes: response.body.Attributes,
             consumed_capacity: response.body.ConsumedCapacity
-        }),
-        err(AwsError(response))
-    )
+        }) }
+        => { err(AwsError(response)) }
+    }
 },
 (table_name: Str, key: Map): DeleteItemResponse | AwsError {
     delete-item(table_name, key, null, null)
@@ -250,9 +252,9 @@ fn
         ReturnValues: "ALL_NEW"
     }
 
-    with-names if(is-null(expression_attribute_names), request-body,
-        {...request-body, ExpressionAttributeNames: expression_attribute_names}
-    )
+    with-names merge(request-body, filter-vals({
+        ExpressionAttributeNames: expression_attribute_names
+    }, is-some))
 
     body to-json(with-names)
 
@@ -266,13 +268,13 @@ fn
 
     response http-request("POST", url, signed-headers, body)
 
-    if(is-ok-response(response),
-        UpdateItemResponse({
+    cond {
+        is-ok-response(response) => { UpdateItemResponse({
             attributes: response.body.Attributes,
             consumed_capacity: response.body.ConsumedCapacity
-        }),
-        err(AwsError(response))
-    )
+        }) }
+        => { err(AwsError(response)) }
+    }
 },
 (table_name: Str, key: Map, update_expression: Str, expression_attribute_values: Map): UpdateItemResponse | AwsError {
     update-item(table_name, key, update_expression, expression_attribute_values, null)

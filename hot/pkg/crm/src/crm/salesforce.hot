@@ -62,22 +62,25 @@ upsert-contact fn (fields: Map): ::crm/Contact {
     is-err(existing) => { existing }
     is-null(existing) => {
       created ::sobjects/create-record("Contact", to-fields(fields))
-      cond {
-        is-err(created) => { created }
-        => {
+      match created {
+        Result.Err => { err(created) }
+
+        _ => {
           fetched ::sobjects/get-record("Contact", created.id, ["Id", "Email", "FirstName", "LastName"])
-          cond {
-            is-err(fetched) => { fetched }
-            => { normalize-contact(fetched) }
+          match fetched {
+            Result.Err => { err(fetched) }
+
+            _ => { normalize-contact(fetched) }
           }
         }
       }
     }
     => {
       updated ::sobjects/update-record("Contact", existing.id, to-fields(fields))
-      cond {
-        is-err(updated) => { updated }
-        => { find-contact(fields.email) }
+      match updated {
+        Result.Err => { err(updated) }
+
+        _ => { find-contact(fields.email) }
       }
     }
   }
@@ -111,16 +114,18 @@ upsert-company fn (fields: Map): ::crm/Company {
     is-err(existing) => { existing }
     is-null(existing) => {
       created ::sobjects/create-record("Account", account-fields)
-      cond {
-        is-err(created) => { created }
-        => { find-company(fields.domain) }
+      match created {
+        Result.Err => { err(created) }
+
+        _ => { find-company(fields.domain) }
       }
     }
     => {
       updated ::sobjects/update-record("Account", existing.id, account-fields)
-      cond {
-        is-err(updated) => { updated }
-        => { find-company(fields.domain) }
+      match updated {
+        Result.Err => { err(updated) }
+
+        _ => { find-company(fields.domain) }
       }
     }
   }

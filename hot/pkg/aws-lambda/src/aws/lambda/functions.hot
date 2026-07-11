@@ -69,10 +69,10 @@ fn
     region get-region()
     credentials get-credentials()
 
-    query-params if(is-null(marker),
-        `?MaxItems=${max_items}`,
-        `?MaxItems=${max_items}&Marker=${marker}`
-    )
+    query-params cond {
+        is-null(marker) => { `?MaxItems=${max_items}` }
+        => { `?MaxItems=${max_items}&Marker=${marker}` }
+    }
 
     url `https://lambda.${region}.amazonaws.com/2015-03-31/functions${query-params}`
 
@@ -84,9 +84,11 @@ fn
 
     response http-request("GET", url, signed-headers, "")
 
-    if(is-ok-response(response),
-        ListFunctionsResponse({
-            functions: if(is-null(response.body.Functions), [], map(response.body.Functions, FunctionConfiguration({
+    cond {
+        is-ok-response(response) => { ListFunctionsResponse({
+            functions: cond {
+                is-null(response.body.Functions) => { [] }
+                => { map(response.body.Functions, FunctionConfiguration({
                 function_name: %.FunctionName,
                 function_arn: %.FunctionArn,
                 runtime: %.Runtime,
@@ -105,11 +107,12 @@ fn
                 state_reason: %.StateReason,
                 state_reason_code: %.StateReasonCode,
                 architectures: %.Architectures
-            }))),
+            })) }
+            },
             next_marker: response.body.NextMarker
-        }),
-        err(AwsError(response))
-    )
+        }) }
+        => { err(AwsError(response)) }
+    }
 },
 (max_items: Int): ListFunctionsResponse | AwsError {
     list-functions(max_items, null)
@@ -148,9 +151,11 @@ fn (function_name: Str): GetFunctionResponse | AwsError {
 
     response http-request("GET", url, signed-headers, "")
 
-    if(is-ok-response(response),
-        GetFunctionResponse({
-            configuration: if(is-null(response.body.Configuration), null, FunctionConfiguration({
+    cond {
+        is-ok-response(response) => { GetFunctionResponse({
+            configuration: cond {
+                is-null(response.body.Configuration) => { null }
+                => { FunctionConfiguration({
                 function_name: response.body.Configuration.FunctionName,
                 function_arn: response.body.Configuration.FunctionArn,
                 runtime: response.body.Configuration.Runtime,
@@ -169,12 +174,13 @@ fn (function_name: Str): GetFunctionResponse | AwsError {
                 state_reason: response.body.Configuration.StateReason,
                 state_reason_code: response.body.Configuration.StateReasonCode,
                 architectures: response.body.Configuration.Architectures
-            })),
+            }) }
+            },
             code: response.body.Code,
             tags: response.body.Tags
-        }),
-        err(AwsError(response))
-    )
+        }) }
+        => { err(AwsError(response)) }
+    }
 }
 
 // Get function configuration only
@@ -208,8 +214,8 @@ fn (function_name: Str): FunctionConfiguration | AwsError {
 
     response http-request("GET", url, signed-headers, "")
 
-    if(is-ok-response(response),
-        FunctionConfiguration({
+    cond {
+        is-ok-response(response) => { FunctionConfiguration({
             function_name: response.body.FunctionName,
             function_arn: response.body.FunctionArn,
             runtime: response.body.Runtime,
@@ -228,7 +234,7 @@ fn (function_name: Str): FunctionConfiguration | AwsError {
             state_reason: response.body.StateReason,
             state_reason_code: response.body.StateReasonCode,
             architectures: response.body.Architectures
-        }),
-        err(AwsError(response))
-    )
+        }) }
+        => { err(AwsError(response)) }
+    }
 }

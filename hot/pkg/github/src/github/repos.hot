@@ -69,16 +69,18 @@ meta {
 fn
 (owner: Str, repo: Str, path: Str): Map {
   resource ::api/json("GET", `/repos/${owner}/${repo}/contents/${path}`)
-  cond {
-    is-err(resource) => { resource }
-    => { {path: resource.path, sha: resource.sha, content: decode-content(resource)} }
+  match resource {
+    Result.Err => { err(resource) }
+
+    _ => { {path: resource.path, sha: resource.sha, content: decode-content(resource)} }
   }
 },
 (owner: Str, repo: Str, path: Str, ref: Str): Map {
   resource ::api/json("GET", `/repos/${owner}/${repo}/contents/${path}?ref=${ref}`)
-  cond {
-    is-err(resource) => { resource }
-    => { {path: resource.path, sha: resource.sha, content: decode-content(resource)} }
+  match resource {
+    Result.Err => { err(resource) }
+
+    _ => { {path: resource.path, sha: resource.sha, content: decode-content(resource)} }
   }
 }
 

@@ -485,10 +485,10 @@ upsert-path fn (request: UpsertRequest): Str {
 }
 
 upsert-headers fn (request: UpsertRequest): Map {
-  resolution if(and(is-some(request.ignore-duplicates), request.ignore-duplicates),
-    "resolution=ignore-duplicates",
-    "resolution=merge-duplicates"
-  )
+  resolution cond {
+      and(is-some(request.ignore-duplicates), request.ignore-duplicates) => { "resolution=ignore-duplicates" }
+      => { "resolution=merge-duplicates" }
+  }
 
   should-return or(request.return, true)
   prefer-parts []

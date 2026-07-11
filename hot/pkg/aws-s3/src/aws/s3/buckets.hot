@@ -65,10 +65,10 @@ fn (): ListBucketsResponse | AwsError {
 
     response http-request("GET", url, signed-headers, "")
 
-    if(is-ok-response(response),
-        ListBucketsResponse(response.body),
-        err(AwsError(response))
-    )
+    cond {
+        is-ok-response(response) => { ListBucketsResponse(response.body) }
+        => { err(AwsError(response)) }
+    }
 }
 
 // Create a bucket
@@ -94,12 +94,12 @@ fn
     url `https://s3.${region}.amazonaws.com/${bucket}`
 
     // Create bucket configuration for non-us-east-1 regions
-    body if(eq(region, "us-east-1"),
-        "",
-        `<CreateBucketConfiguration xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
+    body cond {
+        eq(region, "us-east-1") => { "" }
+        => { `<CreateBucketConfiguration xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
             <LocationConstraint>${region}</LocationConstraint>
-        </CreateBucketConfiguration>`
-    )
+        </CreateBucketConfiguration>` }
+    }
 
     headers {
         "Host": `s3.${region}.amazonaws.com`
@@ -109,12 +109,12 @@ fn
 
     response http-request("PUT", url, signed-headers, body)
 
-    if(is-ok-response(response),
-        CreateBucketResponse({
+    cond {
+        is-ok-response(response) => { CreateBucketResponse({
             location: response.headers.Location
-        }),
-        err(AwsError(response))
-    )
+        }) }
+        => { err(AwsError(response)) }
+    }
 },
 (bucket: Str): CreateBucketResponse | AwsError {
     create-bucket(bucket, get-region())
@@ -147,10 +147,10 @@ fn (bucket: Str): Bool | AwsError {
 
     response http-request("DELETE", url, signed-headers, "")
 
-    if(is-ok-response(response),
-        true,
-        AwsError(response)
-    )
+    cond {
+        is-ok-response(response) => { true }
+        => { AwsError(response) }
+    }
 }
 
 // Head a bucket (check if exists)
@@ -180,11 +180,11 @@ fn (bucket: Str): HeadBucketResponse | AwsError {
 
     response http-request("HEAD", url, signed-headers, "")
 
-    if(is-ok-response(response),
-        HeadBucketResponse({
+    cond {
+        is-ok-response(response) => { HeadBucketResponse({
             exists: true,
             region: null
-        }),
-        err(AwsError(response))
-    )
+        }) }
+        => { err(AwsError(response)) }
+    }
 }

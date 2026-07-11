@@ -1020,9 +1020,10 @@ meta {
 }
 fn (timestamp: Any, tolerance-seconds: Int): Bool {
     parsed if(is-int(timestamp), timestamp, Int(Str(timestamp)))
-    cond {
-        is-err(parsed) => { false }
-        => {
+    match parsed {
+        Result.Err => { false }
+
+        _ => {
             age sub(epoch-seconds(), parsed)
             and(gte(age, sub(0, tolerance-seconds)), lte(age, tolerance-seconds))
         }

@@ -55,9 +55,10 @@ fn
   }
 
   data ::api/graphql(query, filter-vals(variables, is-some))
-  cond {
-    is-err(data) => { data }
-    => { data.issues }
+  match data {
+    Result.Err => { err(data) }
+
+    _ => { data.issues }
   }
 }
 
@@ -72,9 +73,10 @@ fn (id: Str): Map {
   }
   ```
   data ::api/graphql(query, {id: id})
-  cond {
-    is-err(data) => { data }
-    => { data.issue }
+  match data {
+    Result.Err => { err(data) }
+
+    _ => { data.issue }
   }
 }
 
@@ -122,9 +124,10 @@ fn
   }
   ```
   data ::api/graphql(query, {input: build-create-input(team-id, title, options)})
-  cond {
-    is-err(data) => { data }
-    => { data.issueCreate.issue }
+  match data {
+    Result.Err => { err(data) }
+
+    _ => { data.issueCreate.issue }
   }
 }
 
@@ -142,9 +145,10 @@ fn (id: Str, changes: Map): Map {
   }
   ```
   data ::api/graphql(query, {id: id, input: changes})
-  cond {
-    is-err(data) => { data }
-    => { data.issueUpdate.issue }
+  match data {
+    Result.Err => { err(data) }
+
+    _ => { data.issueUpdate.issue }
   }
 }
 
@@ -162,9 +166,10 @@ fn (issue-id: Str, body: Str): Map {
   }
   ```
   data ::api/graphql(query, {input: {issueId: issue-id, body: body}})
-  cond {
-    is-err(data) => { data }
-    => { data.commentCreate.comment }
+  match data {
+    Result.Err => { err(data) }
+
+    _ => { data.commentCreate.comment }
   }
 }
 
@@ -182,8 +187,9 @@ fn (term: Str): Map {
   }
   ```
   data ::api/graphql(query, {term: term})
-  cond {
-    is-err(data) => { data }
-    => { data.searchIssues }
+  match data {
+    Result.Err => { err(data) }
+
+    _ => { data.searchIssues }
   }
 }

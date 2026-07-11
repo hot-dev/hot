@@ -42,9 +42,10 @@ meta {
 }
 fn (object: Str, record-id: Str): Map {
   out ::api/json("GET", `/objects/${object}/records/${record-id}`)
-  cond {
-    is-err(out) => { out }
-    => { out.data }
+  match out {
+    Result.Err => { err(out) }
+
+    _ => { out.data }
   }
 }
 
@@ -58,9 +59,10 @@ meta {
 }
 fn (object: Str, values: Map): Map {
   out ::api/json("POST", `/objects/${object}/records`, {data: {values: values}})
-  cond {
-    is-err(out) => { out }
-    => { out.data }
+  match out {
+    Result.Err => { err(out) }
+
+    _ => { out.data }
   }
 }
 
@@ -83,9 +85,10 @@ meta {
 }
 fn (object: Str, matching-attribute: Str, values: Map): Map {
   out ::api/json("PUT", `/objects/${object}/records?matching_attribute=${matching-attribute}`, {data: {values: values}})
-  cond {
-    is-err(out) => { out }
-    => { out.data }
+  match out {
+    Result.Err => { err(out) }
+
+    _ => { out.data }
   }
 }
 
@@ -95,9 +98,10 @@ meta {
 }
 fn (object: Str, record-id: Str, values: Map): Map {
   out ::api/json("PATCH", `/objects/${object}/records/${record-id}`, {data: {values: values}})
-  cond {
-    is-err(out) => { out }
-    => { out.data }
+  match out {
+    Result.Err => { err(out) }
+
+    _ => { out.data }
   }
 }
 

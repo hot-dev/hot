@@ -62,14 +62,14 @@ fn (request_items: Map): BatchGetResponse | AwsError {
 
     response http-request("POST", url, signed-headers, body)
 
-    if(is-ok-response(response),
-        BatchGetResponse({
+    cond {
+        is-ok-response(response) => { BatchGetResponse({
             responses: if(is-null(response.body.Responses), {}, response.body.Responses),
             unprocessed_keys: response.body.UnprocessedKeys,
             consumed_capacity: response.body.ConsumedCapacity
-        }),
-        err(AwsError(response))
-    )
+        }) }
+        => { err(AwsError(response)) }
+    }
 }
 
 // Batch write items to multiple tables
@@ -117,13 +117,13 @@ fn (request_items: Map): BatchWriteResponse | AwsError {
 
     response http-request("POST", url, signed-headers, body)
 
-    if(is-ok-response(response),
-        BatchWriteResponse({
+    cond {
+        is-ok-response(response) => { BatchWriteResponse({
             unprocessed_items: response.body.UnprocessedItems,
             consumed_capacity: response.body.ConsumedCapacity
-        }),
-        err(AwsError(response))
-    )
+        }) }
+        => { err(AwsError(response)) }
+    }
 }
 
 // Helper to create a batch get request for a single table

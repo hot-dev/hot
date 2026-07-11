@@ -8,9 +8,10 @@ meta {
 }
 fn (): Map {
   data ::api/graphql("query { viewer { id name email } }")
-  cond {
-    is-err(data) => { data }
-    => { data.viewer }
+  match data {
+    Result.Err => { err(data) }
+
+    _ => { data.viewer }
   }
 }
 
@@ -20,9 +21,10 @@ meta {
 }
 fn (): Map {
   data ::api/graphql("query { teams { nodes { id key name } } }")
-  cond {
-    is-err(data) => { data }
-    => { data.teams }
+  match data {
+    Result.Err => { err(data) }
+
+    _ => { data.teams }
   }
 }
 
@@ -32,9 +34,10 @@ meta {
 }
 fn (key: Str): Any {
   teams list-teams()
-  cond {
-    is-err(teams) => { teams }
-    => {
+  match teams {
+    Result.Err => { err(teams) }
+
+    _ => {
       matches filter(teams.nodes, (t) { eq(t.key, key) })
       if(is-empty(matches), null, first(matches))
     }
@@ -54,8 +57,9 @@ fn (team-id: Str): Map {
   }
   """
   data ::api/graphql(query, {teamId: team-id})
-  cond {
-    is-err(data) => { data }
-    => { data.team.states }
+  match data {
+    Result.Err => { err(data) }
+
+    _ => { data.team.states }
   }
 }

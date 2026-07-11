@@ -44,9 +44,10 @@ fn
 },
 (method: Str, path: Str, body: Any): Any {
   session ::auth/session()
-  cond {
-    is-err(session) => { session }
-    => { json(method, path, body, session) }
+  match session {
+    Result.Err => { err(session) }
+
+    _ => { json(method, path, body, session) }
   }
 },
 // 4-arity: explicit session override — a `{token, instance-url}` map, e.g.

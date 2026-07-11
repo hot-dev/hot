@@ -22,9 +22,10 @@ fn (sql: Str): Str {
 
 sqlite-execute fn (conn: Any, sql: Str, params: Vec): Map {
   out ::hot::sqlite/execute(conn, sql, params)
-  cond {
-    is-err(out) => { out }
-    => {
+  match out {
+    Result.Err => { err(out) }
+
+    _ => {
       {
         command: command-tag(sql),
         rows-affected: out.rows-affected,

@@ -99,21 +99,12 @@ fn
         messages: messages
     }
 
-    with-system if(is-null(system), request-body,
-        merge(request-body, { system: system })
-    )
-
-    with-inference if(is-null(inference_config), with-system,
-        merge(with-system, { inferenceConfig: inference_config })
-    )
-
-    with-tools if(is-null(tool_config), with-inference,
-        merge(with-inference, { toolConfig: tool_config })
-    )
-
-    with-guardrail if(is-null(guardrail_config), with-tools,
-        merge(with-tools, { guardrailConfig: guardrail_config })
-    )
+    with-guardrail merge(request-body, filter-vals({
+        system: system,
+        inferenceConfig: inference_config,
+        toolConfig: tool_config,
+        guardrailConfig: guardrail_config
+    }, is-some))
 
     body-str to-json(with-guardrail)
 
@@ -127,15 +118,15 @@ fn
 
     response http-request("POST", url, signed-headers, body-str)
 
-    if(is-ok-response(response),
-        ConverseResponse({
+    cond {
+        is-ok-response(response) => { ConverseResponse({
             output: response.body.output,
             stop_reason: response.body.stopReason,
             usage: response.body.usage,
             metrics: response.body.metrics
-        }),
-        err(AwsError(response))
-    )
+        }) }
+        => { err(AwsError(response)) }
+    }
 },
 (model_id: Str, messages: Vec<Map>, system: Vec<Map>, inference_config: Map): ConverseResponse | AwsError {
     converse(model_id, messages, system, inference_config, null, null)
@@ -175,17 +166,11 @@ fn
         messages: messages
     }
 
-    with-system if(is-null(system), request-body,
-        merge(request-body, { system: system })
-    )
-
-    with-inference if(is-null(inference_config), with-system,
-        merge(with-system, { inferenceConfig: inference_config })
-    )
-
-    with-tools if(is-null(tool_config), with-inference,
-        merge(with-inference, { toolConfig: tool_config })
-    )
+    with-tools merge(request-body, filter-vals({
+        system: system,
+        inferenceConfig: inference_config,
+        toolConfig: tool_config
+    }, is-some))
 
     body-str to-json(with-tools)
 
@@ -199,10 +184,10 @@ fn
 
     response http-request("POST", url, signed-headers, body-str)
 
-    if(is-ok-response(response),
-        response,
-        AwsError(response)
-    )
+    cond {
+        is-ok-response(response) => { response }
+        => { AwsError(response) }
+    }
 },
 (model_id: Str, messages: Vec<Map>, system: Vec<Map>): HttpResponse | AwsError {
     converse-stream(model_id, messages, system, null, null)
@@ -323,17 +308,11 @@ fn
         maxTokens: max_tokens
     }
 
-    with-temp if(is-null(temperature), config,
-        merge(config, { temperature: temperature })
-    )
-
-    with-top-p if(is-null(top_p), with-temp,
-        merge(with-temp, { topP: top_p })
-    )
-
-    with-stop if(is-null(stop_sequences), with-top-p,
-        merge(with-top-p, { stopSequences: stop_sequences })
-    )
+    with-stop merge(config, filter-vals({
+        temperature: temperature,
+        topP: top_p,
+        stopSequences: stop_sequences
+    }, is-some))
 
     with-stop
 },

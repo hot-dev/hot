@@ -36,9 +36,11 @@ fn (data: Map): Str {
   filtered filter-vals(data, is-some)
   parts reduce(keys(filtered), (acc, key) {
     value get(filtered, key)
-    pairs if(is-vec(value),
-      map(value, (item) { encode-pair(key, item) }),
-      [encode-pair(key, value)])
+    pairs cond {
+        is-vec(value) => { map(value, (item) { encode-pair(key, item) }) }
+        => { [encode-pair(key, value)] }
+    }
+
     concat(acc, pairs)
   }, [])
   join(parts, "&")

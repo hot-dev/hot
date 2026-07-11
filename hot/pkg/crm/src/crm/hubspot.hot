@@ -47,16 +47,18 @@ upsert-contact fn (fields: Map): ::crm/Contact {
     is-err(existing) => { existing }
     is-null(existing) => {
       created ::contacts/create-contact(to-properties(fields))
-      cond {
-        is-err(created) => { created }
-        => { normalize-contact(created) }
+      match created {
+        Result.Err => { err(created) }
+
+        _ => { normalize-contact(created) }
       }
     }
     => {
       updated ::contacts/update-contact(Str(existing.id), to-properties(fields))
-      cond {
-        is-err(updated) => { updated }
-        => { normalize-contact(updated) }
+      match updated {
+        Result.Err => { err(updated) }
+
+        _ => { normalize-contact(updated) }
       }
     }
   }
@@ -82,16 +84,18 @@ upsert-company fn (fields: Map): ::crm/Company {
     is-err(existing) => { existing }
     is-null(existing) => {
       created ::companies/create-company(props)
-      cond {
-        is-err(created) => { created }
-        => { normalize-company(created) }
+      match created {
+        Result.Err => { err(created) }
+
+        _ => { normalize-company(created) }
       }
     }
     => {
       updated ::companies/update-company(Str(existing.id), props)
-      cond {
-        is-err(updated) => { updated }
-        => { normalize-company(updated) }
+      match updated {
+        Result.Err => { err(updated) }
+
+        _ => { normalize-company(updated) }
       }
     }
   }

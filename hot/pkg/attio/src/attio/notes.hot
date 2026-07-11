@@ -32,9 +32,10 @@ meta {
 }
 fn (parent-object: Str, parent-record-id: Str, title: Str, content: Str): Map {
   out ::api/json("POST", "/notes", build-note-payload(parent-object, parent-record-id, title, content))
-  cond {
-    is-err(out) => { out }
-    => { out.data }
+  match out {
+    Result.Err => { err(out) }
+
+    _ => { out.data }
   }
 }
 
@@ -56,8 +57,9 @@ fn
 },
 (content: Str, options: Map): Map {
   out ::api/json("POST", "/tasks", {data: {content: content, format: "plaintext", is_completed: false, ...options}})
-  cond {
-    is-err(out) => { out }
-    => { out.data }
+  match out {
+    Result.Err => { err(out) }
+
+    _ => { out.data }
   }
 }

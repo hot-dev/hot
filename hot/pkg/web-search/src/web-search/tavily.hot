@@ -85,8 +85,9 @@ fn (body: Map): Vec {
 
 search-normalized fn (query: Str, max-results: Int): Vec {
   out search(query, {max_results: max-results})
-  cond {
-    is-err(out) => { out }
-    => { normalize(out) }
+  match out {
+    Result.Err => { err(out) }
+
+    _ => { normalize(out) }
   }
 }

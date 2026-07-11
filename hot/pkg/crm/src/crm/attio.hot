@@ -59,9 +59,10 @@ fn (fields: Map): Map {
 
 upsert-contact fn (fields: Map): ::crm/Contact {
   asserted ::records/assert-record("people", "email_addresses", build-person-values(fields))
-  cond {
-    is-err(asserted) => { asserted }
-    => { normalize-contact(asserted) }
+  match asserted {
+    Result.Err => { err(asserted) }
+
+    _ => { normalize-contact(asserted) }
   }
 }
 
@@ -87,8 +88,9 @@ upsert-company fn (fields: Map): ::crm/Company {
     name: if(is-null(get(fields, "name")), null, [{value: get(fields, "name")}])
   }, is-some)
   asserted ::records/assert-record("companies", "domains", values)
-  cond {
-    is-err(asserted) => { asserted }
-    => { normalize-company(asserted) }
+  match asserted {
+    Result.Err => { err(asserted) }
+
+    _ => { normalize-company(asserted) }
   }
 }

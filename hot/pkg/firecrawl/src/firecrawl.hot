@@ -67,9 +67,10 @@ fn
 },
 (url: Str, options: Map): Map {
   out request("POST", "/scrape", {url: url, ...options})
-  cond {
-    is-err(out) => { out }
-    => { out.data }
+  match out {
+    Result.Err => { err(out) }
+
+    _ => { out.data }
   }
 }
 

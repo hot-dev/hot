@@ -66,9 +66,10 @@ fn
         => {
           // Header is milliseconds; the shared tolerance check is seconds.
           parsed Int(timestamp)
-          cond {
-            is-err(parsed) => { false }
-            => { ::time/within-seconds-of-now(Int(floor(div(parsed, 1000))), 300) }
+          match parsed {
+            Result.Err => { false }
+
+            _ => { ::time/within-seconds-of-now(Int(floor(div(parsed, 1000))), 300) }
           }
         }
       }

@@ -724,9 +724,7 @@ fn
         builtin-read-skill-r(resolver),
         builtin-apply-skill-r(resolver, skill-context)
     ]
-    if(is-null(resolver.search-fn),
-       base,
-       concat(base, [builtin-search-skills-r(resolver)]))
+    if(is-null(resolver.search-fn), base, concat(base, [builtin-search-skills-r(resolver)]))
 }
 
 // ----------------------------------------------------------------------------

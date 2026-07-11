@@ -69,8 +69,7 @@ fn (mime: Str?): Bool {
     cond {
         is-null(mime) => { false }
         => {
-            normalized lowercase(or(first(split(mime, ";")), mime))
-            trimmed trim(normalized)
+            trimmed or(first(split(mime, ";")), mime) |> lowercase() |> trim()
             not(is-null(find-first(text-extractable-types, (t) { eq(t, trimmed) })))
         }
     }

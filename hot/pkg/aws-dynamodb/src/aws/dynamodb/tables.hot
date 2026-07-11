@@ -66,9 +66,9 @@ fn
 
     request-body if(is-null(limit), {}, { Limit: limit })
 
-    with-start if(is-null(exclusive_start_table_name), request-body,
-        {...request-body, ExclusiveStartTableName: exclusive_start_table_name}
-    )
+    with-start merge(request-body, filter-vals({
+        ExclusiveStartTableName: exclusive_start_table_name
+    }, is-some))
 
     body to-json(with-start)
 
@@ -82,13 +82,13 @@ fn
 
     response http-request("POST", url, signed-headers, body)
 
-    if(is-ok-response(response),
-        ListTablesResponse({
+    cond {
+        is-ok-response(response) => { ListTablesResponse({
             table_names: if(is-null(response.body.TableNames), [], response.body.TableNames),
             last_evaluated_table_name: response.body.LastEvaluatedTableName
-        }),
-        err(AwsError(response))
-    )
+        }) }
+        => { err(AwsError(response)) }
+    }
 },
 (limit: Int): ListTablesResponse | AwsError {
     list-tables(limit, null)
@@ -133,9 +133,11 @@ fn (table_name: Str): DescribeTableResponse | AwsError {
 
     response http-request("POST", url, signed-headers, body)
 
-    if(is-ok-response(response),
-        DescribeTableResponse({
-            table: if(is-null(response.body.Table), null, TableDescription({
+    cond {
+        is-ok-response(response) => { DescribeTableResponse({
+            table: cond {
+                is-null(response.body.Table) => { null }
+                => { TableDescription({
                 table_name: response.body.Table.TableName,
                 table_status: response.body.Table.TableStatus,
                 table_arn: response.body.Table.TableArn,
@@ -149,8 +151,9 @@ fn (table_name: Str): DescribeTableResponse | AwsError {
                 table_size_bytes: response.body.Table.TableSizeBytes,
                 global_secondary_indexes: response.body.Table.GlobalSecondaryIndexes,
                 local_secondary_indexes: response.body.Table.LocalSecondaryIndexes
-            }))
-        }),
-        err(AwsError(response))
-    )
+            }) }
+            }
+        }) }
+        => { err(AwsError(response)) }
+    }
 }

@@ -45,9 +45,10 @@ fn
 },
 (scope: Str, method: Str, url: Str, additional-headers: Map, body: Any): HttpResponse {
   token ::auth/access-token(scope)
-  cond {
-    is-err(token) => { token }
-    => { request(scope, method, url, additional-headers, body, token) }
+  match token {
+    Result.Err => { err(token) }
+
+    _ => { request(scope, method, url, additional-headers, body, token) }
   }
 },
 // 6-arity: explicit access token override — bypasses ::google::auth

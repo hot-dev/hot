@@ -74,15 +74,17 @@ meta {
 }
 fn (socket): Map {
     header ::tcp/read-exact(socket, 4)
-    cond {
-        is-err(header) => { header }
-        => {
+    match header {
+        Result.Err => { err(header) }
+
+        _ => {
             len ::bytes/to-int(slice(header, 0, 3), "le")
             seq ::bytes/to-uint(slice(header, 3, 4))
             payload if(gt(len, 0), ::tcp/read-exact(socket, len), Bytes([]))
-            cond {
-                is-err(payload) => { payload }
-                => { {seq: seq, payload: payload} }
+            match payload {
+                Result.Err => { err(payload) }
+
+                _ => { {seq: seq, payload: payload} }
             }
         }
     }
@@ -132,9 +134,10 @@ read-lenenc-bytes
 meta {doc: """Read length-encoded bytes at `pos`. -> [Bytes, next-pos]."""}
 fn (buf: Bytes, pos: Int): Vec {
     out read-lenenc-int(buf, pos)
-    cond {
-        is-err(out) => { out }
-        => {
+    match out {
+        Result.Err => { err(out) }
+
+        _ => {
             len out[0]
             start out[1]
             [slice(buf, start, add(start, len)), add(start, len)]
@@ -146,9 +149,10 @@ read-lenenc-str
 meta {doc: """Read a length-encoded string at `pos`. -> [Str, next-pos]."""}
 fn (buf: Bytes, pos: Int): Vec {
     out read-lenenc-bytes(buf, pos)
-    cond {
-        is-err(out) => { out }
-        => { [Str(out[0]), out[1]] }
+    match out {
+        Result.Err => { err(out) }
+
+        _ => { [Str(out[0]), out[1]] }
     }
 }
 

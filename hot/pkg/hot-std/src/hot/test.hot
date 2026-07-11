@@ -171,9 +171,11 @@ format-source-location fn (source-info) {
 // print the failure line, and return false
 record-failure fn (description: Str): Bool {
     current-test-name ::hot::ctx/get("current-test-name")
-    if(current-test-name,
-        assertion-failed-with-details(current-test-name, description),
-        assertion-failed())
+    cond {
+        current-test-name => { assertion-failed-with-details(current-test-name, description) }
+        => { assertion-failed() }
+    }
+
     println(`    ${bright-red("✗")} ${description}`)
     false
 }
@@ -333,26 +335,34 @@ fn (f, capture-output) {
 
     // Check if test had any execution errors (real engine/compiler errors)
     test-had-execution-error is-err(result)
-    did-pass if(test-had-execution-error, {
+    did-pass cond {
+        test-had-execution-error => {
         // For actual execution errors, print the error details
         println(`    ${::hot::term/bright-red("✗")} Test execution error: ${err-value(result)}`)
         false
-    }, {
+    }
+        => {
         current-test-assertions-passed()
-    })
+    }
+    }
 
     // Update test counters
-    if(did-pass, {
+    cond {
+        did-pass => {
         test-passed()
-        if(capture-output,
-            println(`${bright-green(pad-start("ok", 4))}`),
-            println(`... ${bright-green(pad-start("ok", 48))}\n`))
-    }, {
+        cond {
+            capture-output => { println(`${bright-green(pad-start("ok", 4))}`) }
+            => { println(`... ${bright-green(pad-start("ok", 48))}\n`) }
+        }
+    }
+        => {
         test-failed(f-str)
-        if(capture-output,
-            println(`${::hot::term/bright-red(pad-start("fail", 4))}`),
-            println(`... ${::hot::term/bright-red(pad-start("fail", 48))}`))
-    })
+        cond {
+            capture-output => { println(`${::hot::term/bright-red(pad-start("fail", 4))}`) }
+            => { println(`... ${::hot::term/bright-red(pad-start("fail", 48))}`) }
+        }
+    }
+    }
 
     did-pass
 }
@@ -383,9 +393,11 @@ fn () {
                     println(`\nfailed assertions:\n`)
                     map(failed-assertions, (assertion-failure) {
                             // Display in IDE-friendly format: test-name at file:line:column
-                            location-display if(assertion-failure.location,
-                                ` at ${assertion-failure.location}`,
-                                "")
+                            location-display cond {
+                                assertion-failure.location => { ` at ${assertion-failure.location}` }
+                                => { "" }
+                            }
+
                             println(`  ${::hot::term/bright-red(assertion-failure.test)}${location-display}`)
                             println(`    ${assertion-failure.assertion}`)
                             println("")
@@ -420,16 +432,18 @@ fn () {
         }
     }
 
-    if(is-zero(tests-failed),
-        println(`\n${bright-green("all tests passed!\n")}`),
-        println(`\n${::hot::term/bright-red(tests-failed)} tests failed.\n`))
+    cond {
+        is-zero(tests-failed) => { println(`\n${bright-green("all tests passed!\n")}`) }
+        => { println(`\n${::hot::term/bright-red(tests-failed)} tests failed.\n`) }
+    }
 
     // Print total duration
     end-ms ::hot::time/epoch-millis(::hot::time/now())
     start-ms ::hot::ctx/get("test-run-start-ms")
-    if(start-ms,
-        println(`duration: ${::hot::math/div(::hot::math/sub(end-ms, start-ms), 1000)}s`),
-        false)
+    cond {
+        start-ms => { println(`duration: ${::hot::math/div(::hot::math/sub(end-ms, start-ms), 1000)}s`) }
+        => { false }
+    }
 
 }
 
