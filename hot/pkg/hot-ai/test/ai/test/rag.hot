@@ -273,3 +273,17 @@ meta ["test"] fn () {
     assert(contains(out, "- untagged note"))
     assert(not(contains(out, "assistant chat")))
 }
+
+test-build-context-errs-without-embedding-provider
+meta ["test"] fn () {
+    // The test env has stores but no embedding provider: semantic search
+    // errs, and build-context must surface that as an Err VALUE — not
+    // hand the Err to the line formatters (which would iterate the Err's
+    // internals and emit VM concat warnings).
+    m test-memory()
+    out ::rag/build-context(m, "hello", {})
+    assert(is-err(out), "unconfigured embedding provider should be an Err, not garbage")
+
+    // The -safe variant degrades to "" so interactive paths stay up.
+    assert-eq("", ::rag/build-context-safe(m, "hello", {}))
+}
