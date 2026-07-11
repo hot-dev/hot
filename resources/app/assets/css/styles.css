@@ -440,9 +440,6 @@
   .left-1\/2 {
     left: calc(1 / 2 * 100%);
   }
-  .isolate {
-    isolation: isolate;
-  }
   .z-0 {
     z-index: 0;
   }
