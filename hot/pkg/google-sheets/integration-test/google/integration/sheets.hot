@@ -1,0 +1,30 @@
+::google::integration::sheets ns
+meta ["test"]
+
+// Live Sheets roundtrip (self-cleaning via Drive delete). Requires
+// GOOGLE_SERVICE_ACCOUNT.
+
+test-spreadsheet-roundtrip
+meta ["test"] fn () {
+    if(is-empty(::hot::env/get("GOOGLE_SERVICE_ACCOUNT", "")),
+        fail("Set GOOGLE_SERVICE_ACCOUNT in .env")
+    )
+
+    sheet ::google::sheets/create-spreadsheet(`hot-it-${Uuid()}`)
+    assert(not(is-err(sheet)), `create-spreadsheet: ${if-err(sheet, (e) { Str(e) })}`)
+    id sheet.spreadsheetId
+
+    written ::google::sheets/update-values(id, "Sheet1!A1:B2", [["alpha", "beta"], ["gamma", "delta"]])
+    assert(not(is-err(written)), `update-values: ${if-err(written, (e) { Str(e) })}`)
+
+    values ::google::sheets/get-values(id, "Sheet1!A1:B2")
+    assert-eq([["alpha", "beta"], ["gamma", "delta"]], values.values, "written values read back")
+
+    appended ::google::sheets/append-values(id, "Sheet1!A:B", [["epsilon", "zeta"]])
+    assert(not(is-err(appended)), `append-values: ${if-err(appended, (e) { Str(e) })}`)
+    after ::google::sheets/get-values(id, "Sheet1!A1:B3")
+    assert-eq(3, length(after.values), "append adds a row")
+
+    cleaned ::google::drive/delete-file(id)
+    assert(not(is-err(cleaned)), "cleanup should succeed")
+}

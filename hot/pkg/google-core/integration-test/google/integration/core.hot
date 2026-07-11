@@ -1,0 +1,20 @@
+::google::integration::core ns
+meta ["test"]
+
+// Live token acquisition. Requires GOOGLE_SERVICE_ACCOUNT (the key JSON)
+// or GOOGLE_ACCESS_TOKEN in the environment.
+
+HAS_CREDS not(and(
+    is-empty(::hot::env/get("GOOGLE_SERVICE_ACCOUNT", "")),
+    is-empty(::hot::env/get("GOOGLE_ACCESS_TOKEN", ""))
+))
+
+test-access-token-mints
+meta ["test"] fn () {
+    if(not(HAS_CREDS),
+        fail("Set GOOGLE_SERVICE_ACCOUNT (or GOOGLE_ACCESS_TOKEN) in .env")
+    )
+    token ::google::auth/access-token("https://www.googleapis.com/auth/drive.readonly")
+    assert(not(is-err(token)), `token exchange should succeed: ${if-err(token, (e) { Str(e) })}`)
+    assert(gt(length(token), 20), "bearer token should be non-trivial")
+}

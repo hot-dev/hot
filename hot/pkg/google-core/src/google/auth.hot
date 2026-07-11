@@ -21,7 +21,9 @@ fn (client-email: Str, scope: Str, subject: Any): Map {
     exp: add(now, 3600)
   }
 
-  if(is-null(subject), base, {...base, sub: subject})
+  // Empty string counts as absent (ctx placeholders wire "" for unset
+  // env vars); a literal sub: "" would make Google reject the assertion.
+  if(is-empty(or(subject, "")), base, {...base, sub: subject})
 }
 
 service-account-token

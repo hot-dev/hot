@@ -69,9 +69,11 @@ hot.project.hot-pkg-all.test.paths [
     "./hot/pkg/ffmpeg/test",
     "./hot/pkg/firecrawl/test",
     "./hot/pkg/github/test",
+    "./hot/pkg/google-calendar/test",
     "./hot/pkg/google-core/test",
     "./hot/pkg/google-drive/test",
     "./hot/pkg/google-gmail/test",
+    "./hot/pkg/google-sheets/test",
     "./hot/pkg/hot-ai-agent/test",
     "./hot/pkg/hot-ai/test",
     "./hot/pkg/hot-std/test",
@@ -550,9 +552,11 @@ hot.project.pkg-test-google.src.paths [
     "./hot/pkg/google-calendar/src"
 ]
 hot.project.pkg-test-google.test.paths [
+    "./hot/pkg/google-calendar/test",
     "./hot/pkg/google-core/test",
+    "./hot/pkg/google-drive/test",
     "./hot/pkg/google-gmail/test",
-    "./hot/pkg/google-drive/test"
+    "./hot/pkg/google-sheets/test"
 ]
 hot.project.pkg-test-google.test.capture true
 hot.project.pkg-test-google.deps {
@@ -924,6 +928,29 @@ hot.project.pkg-integration-github.test.paths ["./hot/pkg/github/integration-tes
 hot.project.pkg-integration-github.test.capture true
 hot.project.pkg-integration-github.deps {
     "hot.dev/jwt": { "local": "./hot/pkg/jwt" },
+}
+
+// Google integration tests (requires GOOGLE_SERVICE_ACCOUNT; gmail and
+// calendar additionally need GOOGLE_IMPERSONATE — a Workspace user — via
+// domain-wide delegation; self-cleaning)
+hot.project.pkg-integration-google.src.paths [
+    "./hot/pkg/google-core/src",
+    "./hot/pkg/google-gmail/src",
+    "./hot/pkg/google-drive/src",
+    "./hot/pkg/google-sheets/src",
+    "./hot/pkg/google-calendar/src"
+]
+hot.project.pkg-integration-google.test.paths [
+    "./hot/pkg/google-core/integration-test",
+    "./hot/pkg/google-gmail/integration-test",
+    "./hot/pkg/google-drive/integration-test",
+    "./hot/pkg/google-sheets/integration-test",
+    "./hot/pkg/google-calendar/integration-test"
+]
+hot.project.pkg-integration-google.test.capture true
+hot.project.pkg-integration-google.deps {
+    "hot.dev/jwt": { "local": "./hot/pkg/jwt" },
+    "hot.dev/oauth2": { "local": "./hot/pkg/oauth2" }
 }
 
 // Linear integration tests (requires linear.api.key; read-only)

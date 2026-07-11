@@ -1,0 +1,33 @@
+::google::integration::gmail ns
+meta ["test"]
+
+// Live Gmail against a Workspace mailbox via domain-wide delegation.
+// Requires GOOGLE_SERVICE_ACCOUNT and GOOGLE_IMPERSONATE (the Workspace
+// user whose mailbox is exercised); the send test mails that user only,
+// and trashes the sent message afterwards.
+
+IMPERSONATE ::hot::env/get("GOOGLE_IMPERSONATE", "")
+
+test-list-labels
+meta ["test"] fn () {
+    if(is-empty(IMPERSONATE),
+        fail("Set GOOGLE_IMPERSONATE to a Workspace user for domain-wide delegation")
+    )
+    labels ::google::gmail/list-labels()
+    assert(not(is-err(labels)), `list-labels: ${if-err(labels, (e) { Str(e) })}`)
+    names map(labels.labels, (l) { l.id })
+    assert(gt(length(filter(names, (n) { eq(n, "INBOX") })), 0), "INBOX label present")
+}
+
+test-send-to-self-and-trash
+meta ["test"] fn () {
+    if(is-empty(IMPERSONATE),
+        fail("Set GOOGLE_IMPERSONATE to a Workspace user for domain-wide delegation")
+    )
+    subject `hot integration ${Uuid()}`
+    sent ::google::gmail/send-message(IMPERSONATE, subject, "Sent by the hot google-gmail integration suite; trashed immediately.")
+    assert(not(is-err(sent)), `send-message: ${if-err(sent, (e) { Str(e) })}`)
+
+    trashed ::google::gmail/trash-message(sent.id)
+    assert(not(is-err(trashed)), "sent message trashed (self-cleaning)")
+}

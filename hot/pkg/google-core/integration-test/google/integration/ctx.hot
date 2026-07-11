@@ -1,0 +1,15 @@
+::google::integration::ctx ns
+
+::env ::hot::env
+
+// Placeholder credentials for the google integration suites. Empty strings
+// are falsy, so unset variables behave exactly like absent context.
+// GOOGLE_SERVICE_ACCOUNT holds the service-account key JSON itself:
+//   export GOOGLE_SERVICE_ACCOUNT="$(cat service-account.json)"
+// GOOGLE_IMPERSONATE (a Workspace user email) enables domain-wide
+// delegation — required for the gmail and calendar suites.
+::hot::ctx/set({
+    "google.service.account": ::env/get("GOOGLE_SERVICE_ACCOUNT", ""),
+    "google.impersonate": ::env/get("GOOGLE_IMPERSONATE", ""),
+    "google.access.token": ::env/get("GOOGLE_ACCESS_TOKEN", ""),
+})

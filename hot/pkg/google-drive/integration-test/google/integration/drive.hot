@@ -1,0 +1,30 @@
+::google::integration::drive ns
+meta ["test"]
+
+// Live Drive roundtrip (self-cleaning). Requires GOOGLE_SERVICE_ACCOUNT;
+// with GOOGLE_IMPERSONATE set, files are created in (and removed from)
+// that user's Drive, otherwise the service account's own Drive.
+
+test-file-roundtrip
+meta ["test"] fn () {
+    if(is-empty(::hot::env/get("GOOGLE_SERVICE_ACCOUNT", "")),
+        fail("Set GOOGLE_SERVICE_ACCOUNT in .env")
+    )
+
+    folder ::google::drive/create-folder(`hot-it-${Uuid()}`)
+    assert(not(is-err(folder)), `create-folder: ${if-err(folder, (e) { Str(e) })}`)
+
+    body `hot drive integration ${Uuid()}`
+    file ::google::drive/upload-file("hot-it.txt", body, "text/plain", folder.id)
+    assert(not(is-err(file)), `upload-file: ${if-err(file, (e) { Str(e) })}`)
+
+    fetched ::google::drive/get-file(file.id)
+    assert-eq("hot-it.txt", fetched.name)
+
+    content ::google::drive/download-file(file.id)
+    assert(contains(Str(content), "hot drive integration"), "downloaded content roundtrips")
+
+    ::google::drive/delete-file(file.id)
+    deleted ::google::drive/delete-file(folder.id)
+    assert(not(is-err(deleted)), "cleanup should succeed")
+}
