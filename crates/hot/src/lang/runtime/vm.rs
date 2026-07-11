@@ -5912,7 +5912,7 @@ impl VirtualMachine {
                 1 => match function_name {
                     "not" => match &args[0] {
                         Val::Bool(b) => fast_return!(bool::fast_not_bool(*b)),
-                        _ => fast_return_hr!(bool::not(args)),
+                        _ => fast_return_hr!(bool::not(self, args)),
                     },
                     "is-zero" => match &args[0] {
                         Val::Int(a) => fast_return!(math::fast_is_zero_int(*a)),
@@ -7109,14 +7109,28 @@ impl VirtualMachine {
     }
 
     /// The `::hot::type` Result natives take Result values as arguments by
-    /// contract (the sanctioned inspection points of the error model).
+    /// contract (the sanctioned inspection points of the error model), and
+    /// the `::hot::bool` truthiness natives do too: Err is falsy in the
+    /// unified truthiness (matching `if`/`cond`, whose lazy conditions
+    /// already receive Errs), so or/and/not/is-truthy must see the value.
     fn is_result_aware_native(function_name: &str) -> bool {
         let name = function_name
             .strip_prefix("::hot::type/")
+            .or_else(|| function_name.strip_prefix("::hot::bool/"))
             .unwrap_or(function_name);
         matches!(
             name,
-            "is-ok" | "is-err" | "if-ok" | "if-err" | "is-result" | "ok-value" | "err-value"
+            "is-ok"
+                | "is-err"
+                | "if-ok"
+                | "if-err"
+                | "is-result"
+                | "ok-value"
+                | "err-value"
+                | "is-truthy"
+                | "not"
+                | "or"
+                | "and"
         )
     }
 

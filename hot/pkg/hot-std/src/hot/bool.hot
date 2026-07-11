@@ -5,20 +5,23 @@ is-truthy
 meta {
     core: true,
     doc: """
-    Check if `value` is truthy (not false, null, or 0).
+    Check if `value` is truthy. Falsy is `false`, `null`, and Err —
+    everything else (including `0`, `""`, `[]`, and `{}`) is truthy,
+    exactly as in `if`/`cond`. Test emptiness with `is-empty`.
 
     **Example**
 
     ```hot
-    is-truthy(true)    // true
-    is-truthy(1)       // true
-    is-truthy("hi")  // true
-    is-truthy(false)   // false
-    is-truthy(null)    // false
+    is-truthy(true)     // true
+    is-truthy(0)        // true
+    is-truthy("")       // true
+    is-truthy(false)    // false
+    is-truthy(null)     // false
+    is-truthy(err("e")) // false
     ```
     """
 }
-fn (value: Any): Bool {
+fn (lazy value: Any): Bool {
     call-lib(::hot::bool/is-truthy, [value])
 }
 
@@ -53,25 +56,25 @@ and
 meta {
     core: true,
     doc: """
-    Returns the first falsy value, or the last value if all are truthy. Short-circuits evaluation.
+    Returns the first falsy value, or the last value if all are truthy.
+    Falsy is `false`, `null`, and Err — everything else (including `0`,
+    `""`, `[]`, and `{}`) is truthy, exactly as in `if`/`cond`.
 
     **Example**
 
     ```hot
     and(true, true)       // true
     and(true, false)      // false
-    and(false, true)      // false
     and(1, 2, 3)          // 3 (all truthy, returns last)
     and(1, null, 3)       // null (first falsy)
+    and("", "x")          // "x" — "" is a value, not falseness
     ```
     """
 }
-fn (x: Any, ...rest): Any {
-    cond {
-        not(is-truthy(x)) => { x }
-        is-empty(rest) => { x }
-        => { and(...rest) }
-    }
+fn (lazy x: Any, ...rest): Any {
+    // Lazy first parameter so Err values reach the truthiness check —
+    // Err is falsy — instead of halting; the native forces the thunk.
+    call-lib(::hot::bool/and, [x, ...rest])
 }
 
 
@@ -79,25 +82,28 @@ or
 meta {
     core: true,
     doc: """
-    Returns the first truthy value, or the last value if all are falsy. Short-circuits evaluation.
+    Returns the first truthy value, or the last value if all are falsy.
+    Falsy is `false`, `null`, and Err — everything else (including `0`,
+    `""`, `[]`, and `{}`) is truthy, exactly as in `if`/`cond`. This
+    makes `or` the null-coalescing idiom: `or(::hot::ctx/get(k), default)`
+    yields the default only when the value is absent, never because it
+    is empty or zero. Test emptiness explicitly with `is-empty`.
 
     **Example**
 
     ```hot
     or(true, false)   // true
-    or(false, true)   // true
-    or(false, false)  // false
-    or(null, 0, 42)   // 42 (first truthy)
+    or(null, 0, 42)   // 0 (0 is truthy)
     or(null, false)   // false (all falsy, returns last)
+    or("", "x")       // "" — "" is a value, not falseness
+    or(err("e"), "x") // "x" — Err is falsy, so or() recovers
     ```
     """
 }
-fn (x: Any, ...rest): Any {
-    cond {
-        is-truthy(x) => { x }
-        is-empty(rest) => { x }
-        => { or(...rest) }
-    }
+fn (lazy x: Any, ...rest): Any {
+    // Lazy first parameter so Err values reach the truthiness check —
+    // Err is falsy — instead of halting; the native forces the thunk.
+    call-lib(::hot::bool/or, [x, ...rest])
 }
 
 
@@ -114,10 +120,10 @@ meta {
     not(false)  // true
     not(null)   // true
     not(1)      // false
-    not(0)      // true
+    not(0)      // false (0 is truthy; falsy is only false, null, Err)
     ```
     """
 }
-fn (x: Any): Bool {
+fn (lazy x: Any): Bool {
     call-lib(::hot::bool/not, [x])
 }

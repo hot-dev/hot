@@ -1437,17 +1437,10 @@ pub fn some(vm: &mut crate::lang::runtime::vm::VirtualMachine, args: &[Val]) -> 
     }
 }
 
-/// Helper function to check if a value is truthy
+/// Helper function to check if a value is truthy (the language-wide
+/// Val::is_truthy semantics: only false, null, and Err are falsy).
 fn is_truthy(val: &Val) -> bool {
-    match val {
-        Val::Bool(b) => *b,
-        Val::Null => false,
-        Val::Int(i) => *i != 0,
-        Val::Str(s) => !s.is_empty(),
-        Val::Vec(v) => !v.is_empty(),
-        Val::Map(m) => !m.is_empty(),
-        _ => true, // Other values are considered truthy
-    }
+    val.is_truthy()
 }
 
 /// Check if a value is a Reduced wrapper (short-circuit signal for reduce).

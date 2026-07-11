@@ -83,7 +83,7 @@ Use `cond` for conditional branching. The first matching condition wins:
 
 The `=>` arrow separates the condition from the result. A branch without a condition is the default case.
 
-Conditions are checked for **truthiness**: any value that isn't `false` or `null` is considered true. This means you can use values directly as conditions:
+Conditions are checked for **truthiness**: any value that isn't `false`, `null`, or an Err is considered true — including `0`, `""`, `[]`, and `{}`. The same rule backs `and`, `or`, `not`, and `is-truthy`; test emptiness explicitly with `is-empty`. This means you can use values directly as conditions:
 
 {{snippet:flows#cond-truthy}}
 

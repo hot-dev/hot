@@ -8053,9 +8053,20 @@ fn truthy_value(
 ) -> Result<cranelift_codegen::ir::Value, String> {
     let raw = builder.use_var(registers[remap_reg(remap, reg)?]);
     match register_kind(remap, register_kinds, reg)? {
-        RawKind::Bool | RawKind::Int | RawKind::TypeTag | RawKind::StringConst => Ok(builder
-            .ins()
-            .icmp_imm(cranelift_codegen::ir::condcodes::IntCC::NotEqual, raw, 0)),
+        RawKind::Bool => {
+            Ok(builder
+                .ins()
+                .icmp_imm(cranelift_codegen::ir::condcodes::IntCC::NotEqual, raw, 0))
+        }
+        // Ints, type tags, and interned strings are never falsy
+        // (Val::is_truthy: only false, null, and Err are) — including 0
+        // and "". Mirrors the constant-true Dec arm below.
+        RawKind::Int | RawKind::TypeTag | RawKind::StringConst => {
+            let one = builder.ins().iconst(types::I64, 1);
+            Ok(builder
+                .ins()
+                .icmp_imm(cranelift_codegen::ir::condcodes::IntCC::NotEqual, one, 0))
+        }
         RawKind::Dec => {
             let one = builder.ins().iconst(types::I64, 1);
             Ok(builder

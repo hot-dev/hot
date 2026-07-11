@@ -1359,9 +1359,20 @@ pub fn get_hotlib_map() -> &'static HotLibMap {
         // Bool functions
         map.insert(
             "::hot::bool/is-truthy".to_string(),
-            HotLibFn::LibFn(bool::is_truthy),
+            HotLibFn::vm_callback(bool::is_truthy),
         );
-        map.insert("::hot::bool/not".to_string(), HotLibFn::LibFn(bool::not));
+        map.insert(
+            "::hot::bool/not".to_string(),
+            HotLibFn::vm_callback(bool::not),
+        );
+        map.insert(
+            "::hot::bool/or".to_string(),
+            HotLibFn::vm_callback(bool::or),
+        );
+        map.insert(
+            "::hot::bool/and".to_string(),
+            HotLibFn::vm_callback(bool::and),
+        );
 
         // Additional string functions
         map.insert(
