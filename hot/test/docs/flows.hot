@@ -407,3 +407,55 @@ meta ["test"] fn () {
 
   assert-eq("error", result, "inline match on Result.Err should return value")
 }
+
+// =============================================================================
+// Union arms, optional sugar, and Any (flows.md "Union Arms" and friends)
+// =============================================================================
+
+test-match-union-arms
+meta ["test"] fn () {
+  describe fn match (value: Any): Str {
+    "" | Null => { "blank" }
+    Int | Dec => { "number" }
+    "yes" | "y" | true => { "affirmative" }
+    => { "other" }
+  }
+
+  assert-eq("blank", describe(""), "empty string hits the union arm")
+  assert-eq("blank", describe(null), "null hits the union arm")
+  assert-eq("number", describe(1.5), "dec hits Int | Dec")
+  assert-eq("affirmative", describe("y"), "literal union with mixed types")
+  assert-eq("other", describe([1]), "vec falls through to default")
+}
+
+test-match-union-variants-exhaustive
+meta ["test"] fn () {
+  // Exhaustive without a default arm: the unions cover all four variants
+  classify fn match (s: Direction): Str {
+    Direction.Up | Direction.Down => { "vertical" }
+    Direction.Left | Direction.Right => { "horizontal" }
+  }
+
+  assert-eq("vertical", classify(Direction.Up), "Up in vertical union")
+  assert-eq("horizontal", classify(Direction.Right), "Right in horizontal union")
+}
+
+test-match-optional-sugar-and-any
+meta ["test"] fn () {
+  greet fn (name: Str?): Str {
+    match name {
+      Str? => { `Hello, ${or(name, "stranger")}` }  // same as Str | Null
+      _ => { "Hello, whatever you are" }
+    }
+  }
+
+  assert-eq("Hello, Ada", greet("Ada"), "Str? matches a string")
+  assert-eq("Hello, stranger", greet(null), "Str? matches null")
+
+  kind match 42 {
+    Str => { "string" }
+    Any (v) => { `something else: ${v}` }
+  }
+
+  assert-eq("something else: 42", kind, "Any matches and binds")
+}

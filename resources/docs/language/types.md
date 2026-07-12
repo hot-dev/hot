@@ -180,8 +180,9 @@ Use `is-type` for dynamic type checking:
 ### Exhaustive Matching
 
 `match` on a closed enum must cover every variant or fall through to a `_`
-default arm. The compiler reports `[non-exhaustive-match]` and lists
-the missing variants if neither holds.
+default arm. Union arms (`A | B`) count each variant they name, and an
+`Any` arm covers everything. The compiler reports `[non-exhaustive-match]`
+and lists the missing variants if none of these hold.
 
 ```hot
 Direction enum { Up, Down, Left, Right }
@@ -194,10 +195,9 @@ travel fn match (d: Direction): Str {
   Direction.Right => { "east" }
 }
 
-// Also exhaustive — `_` catches the rest
+// Also exhaustive — the union arm covers Up and Down, `_` catches the rest
 classify fn match (d: Direction): Str {
-  Direction.Up => { "vertical" }
-  Direction.Down => { "vertical" }
+  Direction.Up | Direction.Down => { "vertical" }
   _ => { "horizontal" }
 }
 ```

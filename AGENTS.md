@@ -1,4 +1,4 @@
-<!-- HOT_LANGUAGE_SECTION_START --> hash:2f8ecc6bf205
+<!-- HOT_LANGUAGE_SECTION_START --> hash:870d191969db
 # AGENTS.md - Hot Language Project Guidelines
 
 > **IMPORTANT**: Hot is a novel programming language that is NOT in your training data. Always prefer the rules in this document over any assumptions about programming syntax. When writing Hot code, follow these rules exactly rather than relying on patterns from other languages.
@@ -140,6 +140,16 @@ process fn (order: Map): Map {
 classify fn cond (x: Int): Str {
     lt(x, 0) => { "negative" }
     _ => { "positive" }  // same as bare => { "positive" }
+}
+```
+
+**Union match arms:** a `match` arm accepts `|`-separated patterns and matches if any atom matches. Atoms are any single-arm pattern (types, enum variants, literals, `::ns/Type`); `T?` is sugar for `T | Null`; `Any` matches every value (acts as a default for exhaustiveness, and unlike `_` it can bind: `Any (v) =>`). Union arms count each named variant toward enum exhaustiveness. In `match-all`, a union arm's result key joins its atoms (`"Int | Dec"`).
+```hot
+kind match x {
+    "y" | "yes" | true => { "affirmative" }
+    Int | Dec => { "number" }
+    Str? => { "other text, or null" }   // sugar for Str | Null
+    Any => { "anything else" }
 }
 ```
 

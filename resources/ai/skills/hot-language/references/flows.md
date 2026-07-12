@@ -169,8 +169,10 @@ render fn match (shape: Shape, color: Str): Str {
 ### Exhaustiveness
 
 A `match` on a closed `enum` must cover every variant or include a `_` /
-bare `=>` default arm. Missing variants produce **`non-exhaustive-match`**
-at compile time.
+bare `=>` default arm. Union arms (`A | B`) count every variant they name
+toward coverage, and an `Any` arm covers everything (it also satisfies
+the open-enum default requirement below). Missing variants produce
+**`non-exhaustive-match`** at compile time.
 
 A `match` on an `open enum` MUST include a `_` / bare `=>` default arm,
 because new variants can be enrolled at any time via arrows. Missing the
@@ -219,6 +221,40 @@ describe fn match (value: Any): Str {
     Int => { "integer" }
     Str => { "string" }
     => { "other" }
+}
+```
+
+### Union Arms
+
+Combine patterns in one arm with `|` — the arm matches if any atom
+matches. Atoms are the same forms as single arms (types, enum variants,
+literals, `::ns/Type` paths) and mix freely. Bindings work as usual.
+
+```hot
+describe fn match (value: Any): Str {
+    "" | Null => { "blank" }
+    Int | Dec => { "number" }
+    "yes" | "y" | true => { "affirmative" }
+    => { "other" }
+}
+
+classify fn match (s: Shape): Str {
+    Shape.Circle | Shape.Rectangle => { "has area" }
+    Shape.Point => { "no area" }       // exhaustive: unions count variants
+}
+```
+
+### Optional and Any Patterns
+
+`T?` in a match arm is sugar for `T | Null`, exactly as in signatures.
+`Any` is the top type — it matches every value and satisfies
+exhaustiveness like a default arm, but unlike `_` it can carry a
+binding.
+
+```hot
+kind match x {
+    Str? => { "text or null" }         // same as Str | Null
+    Any (v) => { `something else: ${v}` }
 }
 ```
 
@@ -294,7 +330,7 @@ handle fn (event: Event): Action {
 
 Pattern matching where ALL matching arms execute. Returns Map keyed by the arm's pattern.
 
-For type arms, the key is the type string (e.g., `"Int"`, `"Shape.Circle"`). For value arms, the key is the value itself (e.g., `200`, `"hello"`).
+For type arms, the key is the type string (e.g., `"Int"`, `"Shape.Circle"`). For value arms, the key is the value itself (e.g., `200`, `"hello"`). A union arm produces a single key joining its atoms (e.g., `"Int | Dec"`).
 
 ```hot
 Trait enum { Flying, Swimming, Walking }
