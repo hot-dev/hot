@@ -76,6 +76,26 @@ meta ["test"] fn () {
     assert-eq("texty", describe(null), "null hits its union arm, not Any")
 }
 
+test-optional-type-sugar
+meta ["test"] fn () {
+    // `T?` in a match arm desugars to `T | Null`, same as signatures.
+    assert-eq(1, match "s" { Str? => 1 _ => 0 }, "Str? matches a string")
+    assert-eq(1, match null { Str? => 1 _ => 0 }, "Str? matches null")
+    assert-eq(0, match 42 { Str? => 1 _ => 0 }, "Str? misses other types")
+    assert-eq(1, match null { Int | Str? => 1 _ => 0 }, "? inside a union adds Null once")
+    assert-eq("v:s", match "s" { Str? (v) => concat("v:", v) _ => "no" },
+        "binding works with the ? suffix")
+}
+
+test-qualified-type-patterns
+meta ["test"] fn () {
+    assert-eq(1, match "s" { ::hot::type/Str => 1 _ => 0 }, "fully qualified type pattern")
+    assert-eq(1, match null { ::hot::type/Str? => 1 _ => 0 }, "qualified type with ? suffix")
+    assert-eq(1, match "s" { ::hot::type/Str | ::hot::type/Null => 1 _ => 0 },
+        "union of fully qualified types")
+    assert-eq(1, match 5 { ::hot::type/Any => 1 _ => 0 }, "fully qualified Any matches all")
+}
+
 test-match-all-union-keys
 meta ["test"] fn () {
     results match-all 5 { Int | Dec => "num" Str => "str" }

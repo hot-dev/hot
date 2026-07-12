@@ -4047,14 +4047,7 @@ impl Parser {
                 // Default branch - no type or variant
                 (MatchArmPattern::default(), Vec::new())
             } else {
-                let first =
-                    self.parse_match_pattern_atom(start_line, start_column, start_position)?;
-                let alts = self.parse_match_pattern_alternatives(
-                    start_line,
-                    start_column,
-                    start_position,
-                )?;
-                (first, alts)
+                self.parse_match_arm_pattern(start_line, start_column, start_position)?
             };
 
             // Check for optional binding: Variant(binding)
@@ -4271,13 +4264,22 @@ impl Parser {
         })
     }
 
-    /// Parse the `| atom` tail of a union match-arm pattern (zero or more alternatives).
-    fn parse_match_pattern_alternatives(
+    /// Parse a full match-arm pattern: one or more `|`-separated atoms, each
+    /// optionally suffixed with `?` (optional-type sugar, same as signatures:
+    /// `Str?` matches like `Str | Null`). Returns the first atom plus any
+    /// alternatives.
+    fn parse_match_arm_pattern(
         &mut self,
         start_line: usize,
         start_column: usize,
         start_position: usize,
-    ) -> ParseResult<Vec<MatchArmPattern>> {
+    ) -> ParseResult<(MatchArmPattern, Vec<MatchArmPattern>)> {
+        let first = self.parse_match_pattern_atom(start_line, start_column, start_position)?;
+        let mut saw_optional = false;
+        if self.check(&TokenType::QuestionMark) {
+            self.next(); // consume "?"
+            saw_optional = true;
+        }
         let mut alternatives = Vec::new();
         while self.check(&TokenType::Pipe) {
             self.next(); // consume "|"
@@ -4290,8 +4292,21 @@ impl Parser {
                 start_column,
                 start_position,
             )?);
+            if self.check(&TokenType::QuestionMark) {
+                self.next(); // consume "?"
+                saw_optional = true;
+            }
         }
-        Ok(alternatives)
+        if saw_optional {
+            // Desugar `T?` to `T | Null` (added once, however many atoms
+            // carry the suffix).
+            alternatives.push(MatchArmPattern {
+                type_name: Some("Null".to_string()),
+                variant: None,
+                value_literal: None,
+            });
+        }
+        Ok((first, alternatives))
     }
 
     /// Parse a single match arm: Type.Variant => body, value_literal => body, or Type => body
@@ -4301,9 +4316,8 @@ impl Parser {
         let start_column = self.peek().map(|t| t.column as usize).unwrap_or(0);
         let start_position = self.peek().map(|t| t.position).unwrap_or(0);
 
-        let pattern = self.parse_match_pattern_atom(start_line, start_column, start_position)?;
-        let alternatives =
-            self.parse_match_pattern_alternatives(start_line, start_column, start_position)?;
+        let (pattern, alternatives) =
+            self.parse_match_arm_pattern(start_line, start_column, start_position)?;
 
         // Check for optional binding: Variant(binding)
         let binding = if self.check(&TokenType::LeftParen) {
