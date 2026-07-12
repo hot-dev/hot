@@ -1760,7 +1760,20 @@ impl Compiler {
                 let result_reg = self.compile_flow(flow)?;
                 Ok(result_reg)
             }
-            Value::Match(match_expr) => self.compile_match_expression(match_expr),
+            Value::Match(match_expr) => {
+                // Like the Flow arm above: compile AND store, or the binding
+                // silently vanishes — top-level `out match x { ... }` bound
+                // nothing, and standalone top-level matches lost their
+                // auto-named $var result (the run result then fell back to
+                // whatever variable preceded them in the namespace).
+                let match_reg = self.compile_match_expression(match_expr)?;
+                tracing::trace!(
+                    "Compiler: About to store variable '{}' (match)",
+                    var.sym.name()
+                );
+                self.store_variable(var.sym.name(), match_reg);
+                Ok(match_reg)
+            }
             Value::MatchArm(_) => {
                 // MatchArm should only appear inside match flow function bodies
                 Err(format!(
