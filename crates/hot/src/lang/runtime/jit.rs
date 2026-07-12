@@ -1850,6 +1850,9 @@ unsafe extern "C" fn hot_jit_truthy_general(kind: i64, raw: i64) -> i64 {
 }
 
 unsafe extern "C" fn hot_jit_clone_owned_val(raw: i64) -> i64 {
+    if owned_trace_enabled() {
+        eprintln!("CLONE {raw:#x} from {:#x}", owned_trace_caller());
+    }
     if raw == 0 {
         return 0;
     }
@@ -1869,6 +1872,9 @@ unsafe extern "C" fn hot_jit_is_err(raw: i64) -> i64 {
 }
 
 unsafe extern "C" fn hot_jit_drop_owned_val(raw: i64) {
+    if owned_trace_enabled() {
+        eprintln!("DROP {raw:#x} from {:#x}", owned_trace_caller());
+    }
     if raw == 0 {
         return;
     }
@@ -3419,11 +3425,36 @@ fn vm_error_to_owned_val(err: impl std::fmt::Display, error_capture_active: bool
     }
 }
 
+/// HOT_OWNED_TRACE=1 logs every OwnedVal handle event with the caller's
+/// return address — the tool that pinpointed the flow-result ownership
+/// theft. Cached: env lookup is far too expensive per handle event.
+#[inline(always)]
+fn owned_trace_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var("HOT_OWNED_TRACE").is_ok())
+}
+
+#[inline(always)]
+fn owned_trace_caller() -> u64 {
+    unsafe {
+        let fp: *const u64;
+        std::arch::asm!("mov {}, x29", out(reg) fp);
+        *fp.add(1)
+    }
+}
+
 fn new_owned_val(val: Val) -> i64 {
-    Arc::into_raw(Arc::new(val)) as i64
+    let r = Arc::into_raw(Arc::new(val)) as i64;
+    if owned_trace_enabled() {
+        eprintln!("NEW {r:#x} from {:#x}", owned_trace_caller());
+    }
+    r
 }
 
 unsafe fn take_owned_val(raw: i64) -> Val {
+    if owned_trace_enabled() {
+        eprintln!("TAKE {raw:#x} from {:#x}", owned_trace_caller());
+    }
     if raw == 0 {
         return Val::Null;
     }
@@ -6540,6 +6571,22 @@ fn build_supported_body(
                     }
                     let result_reg_idx = ctx.remap_reg(result_reg)?;
                     let result_src_idx = ctx.remap_reg(*result)?;
+                    // Ownership handoff: a runtime-owned source register hands
+                    // its refcount to the flow result register (its kind is
+                    // cleared below, so it is never dropped again). But a
+                    // source that RETAINS its OwnedVal marking after the flow
+                    // — a compile-time constant handle, a pre-flow register,
+                    // or a flow header — keeps its count, so the result
+                    // register must take a fresh clone. Without it, the
+                    // return-clone/cleanup/decode sequence consumes one count
+                    // the flow never owned (freeing baked constants after a
+                    // single call).
+                    let src_retains_ownership = ctx.compile_time_owned.contains(&result_src_idx)
+                        || flow.pre_flow_owned.contains(&result_src_idx)
+                        || flow.flow_header_regs.contains(&result_src_idx);
+                    if kind == RawKind::OwnedVal && src_retains_ownership {
+                        raw = clone_owned_raw(builder, &ctx.helper_refs, raw);
+                    }
                     for (idx, existing_kind) in ctx.register_kinds.iter().enumerate() {
                         if *existing_kind == Some(RawKind::OwnedVal)
                             && !ctx.compile_time_owned.contains(&idx)

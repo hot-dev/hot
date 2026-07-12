@@ -233,6 +233,25 @@ through-strict-call(true)"#;
         );
     }
 
+    #[test]
+    fn jit_flow_result_does_not_steal_constant_refcounts() {
+        // A conditional whose branches are constant-backed OwnedVals: the
+        // flow result register must take a fresh clone rather than the baked
+        // constant's refcount, or the return/cleanup/decode sequence frees
+        // the constant after one compiled call (heap corruption on the next).
+        let src = r#"::t ns
+k fn (n: Int): Str { if(gt(n, 1), "t", "f") }
+a k(1)
+b k(2)
+k(7)"#;
+        let out = compile_and_run_with_std_conf(
+            src,
+            Some(crate::val!({"jit": {"threshold": 1}})),
+        )
+        .expect("JIT constant-backed flow result");
+        assert_eq!(out, Val::from("t"), "third call must still see the constant alive");
+    }
+
     /// Helper to compile and execute Hot code with hot-std included and an
     /// explicit conf (e.g. to toggle the `jit.hof.fusion` kill switch).
     pub(super) fn compile_and_run_with_std_conf(
