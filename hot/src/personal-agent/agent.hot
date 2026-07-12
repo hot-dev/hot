@@ -140,16 +140,16 @@ memory-summary fn (identity: Identity): Str {
 forget-personal fn (identity: Identity, arg: Str): Int {
     req ::agent-memory/parse-forget-request(arg)
     mem make-memory(identity)
-    cond {
-        or(eq(req.scope, "session"), eq(req.scope, "all")) => {
+    match req.scope {
+        "session" | "all" => {
             before ::store/length(mem.session-store)
             ::mem/forget-session(mem)
             before
         }
 
-        eq(req.scope, "source") => { if(is-empty(req.selector), 0, ::mem/forget-by-source-id(mem, req.selector)) }
-        eq(req.scope, "user") => { if(is-empty(req.selector), 0, if(::mem/forget-user-key(mem, req.selector), 1, 0)) }
-        => { 0 }
+        "source" => { if(is-empty(req.selector), 0, ::mem/forget-by-source-id(mem, req.selector)) }
+        "user" => { if(is-empty(req.selector), 0, if(::mem/forget-user-key(mem, req.selector), 1, 0)) }
+        _ => { 0 }
     }
 }
 

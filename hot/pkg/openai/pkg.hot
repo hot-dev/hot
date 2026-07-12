@@ -2,8 +2,8 @@
 
 hot.pkg.openai {
   name: "hot.dev/openai",
-  version: "1.2.4",
-  hot-min-version: "2.4.10",
+  version: "1.2.5",
+  hot-min-version: "2.6.1",
   description: "OpenAI API bindings for Hot. Includes Chat Completions, Models, Embeddings, Images (DALL-E), Audio (TTS), and Moderations APIs.",
   author: "Hot Dev",
   email: "support@hot.dev",

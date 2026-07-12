@@ -265,9 +265,9 @@ meta {
     doc: """Sort and URL-encode query parameters for AWS canonical request"""
 }
 fn (query: Str): Str {
-    cond {
-        or(is-null(query), eq(query, "")) => { "" }
-        => { query
+    match query {
+        Null | "" => { "" }
+        _ => { query
             |> split("&")
             |> map(encode-query-param)
             |> sort
@@ -356,9 +356,9 @@ fn (method: Str, url: Str, region: Str, service: Str, credentials: Credentials, 
     base-headers {...headers, "x-amz-date": amz-date, "x-amz-content-sha256": payload-hash}
 
     // Add session token if present (not null and not empty)
-    with-token cond {
-        or(is-null(credentials.session_token), eq(credentials.session_token, "")) => { base-headers }
-        => { {...base-headers, "x-amz-security-token": credentials.session_token} }
+    with-token match credentials.session_token {
+        Null | "" => { base-headers }
+        _ => { {...base-headers, "x-amz-security-token": credentials.session_token} }
     }
 
     // Ensure host header is present
@@ -492,9 +492,9 @@ fn
     ]
 
     // Add session token if present
-    params-with-token cond {
-        or(is-null(credentials.session_token), eq(credentials.session_token, "")) => { base-params }
-        => { concat(base-params, [`X-Amz-Security-Token=${url-encode-value(credentials.session_token)}`]) }
+    params-with-token match credentials.session_token {
+        Null | "" => { base-params }
+        _ => { concat(base-params, [`X-Amz-Security-Token=${url-encode-value(credentials.session_token)}`]) }
     }
 
     // Combine with existing query params
