@@ -3434,12 +3434,26 @@ fn owned_trace_enabled() -> bool {
     *ENABLED.get_or_init(|| std::env::var("HOT_OWNED_TRACE").is_ok())
 }
 
+/// Best-effort caller return address via the frame pointer. Diagnostic
+/// only (HOT_OWNED_TRACE); on both supported arches the saved return
+/// address sits one word above the frame pointer. Other arches get 0.
 #[inline(always)]
 fn owned_trace_caller() -> u64 {
+    #[cfg(target_arch = "aarch64")]
     unsafe {
         let fp: *const u64;
         std::arch::asm!("mov {}, x29", out(reg) fp);
         *fp.add(1)
+    }
+    #[cfg(target_arch = "x86_64")]
+    unsafe {
+        let fp: *const u64;
+        std::arch::asm!("mov {}, rbp", out(reg) fp);
+        *fp.add(1)
+    }
+    #[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
+    {
+        0
     }
 }
 
