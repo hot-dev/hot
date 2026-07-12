@@ -1045,6 +1045,17 @@ fn match_arm_references_alias(
             .as_ref()
             .map(|value| value_references_alias(value, alias_name, current_namespace))
             .unwrap_or(false)
+        || arm.alternatives.iter().any(|alt| {
+            alt.type_name
+                .as_deref()
+                .map(|typ| type_text_references_alias(typ, alias_name))
+                .unwrap_or(false)
+                || alt
+                    .value_literal
+                    .as_ref()
+                    .map(|value| value_references_alias(value, alias_name, current_namespace))
+                    .unwrap_or(false)
+        })
         || value_references_alias(&arm.body, alias_name, current_namespace)
 }
 

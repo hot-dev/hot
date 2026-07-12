@@ -1,0 +1,93 @@
+// Union match-arm patterns (`A | B => ...`) and `Any` as a match-all
+// pattern. Union arms reuse the type grammar users already write in
+// signatures: each `|`-separated atom is a value literal, Type, or
+// Type.Variant, and the arm matches if any atom matches. `Any` is the
+// top type — it matches every value (previously it parsed but silently
+// never matched).
+::hot::test::match-union-patterns ns
+meta ["test"]
+
+Shape enum { Circle, Square, Triangle }
+
+classify fn match (s: Shape): Str {
+    Shape.Circle | Shape.Square => "round-ish"
+    Shape.Triangle => "pointy"
+}
+
+describe fn (x: Any): Str {
+    match x {
+        Str | Null => "texty"
+        Int | Dec => "numeric"
+        Any => "other"
+    }
+}
+
+test-union-type-patterns
+meta ["test"] fn () {
+    assert-eq(1, match "s" { Str | Null => 1 _ => 0 }, "first atom matches")
+    assert-eq(1, match null { Str | Null => 1 _ => 0 }, "second atom matches")
+    assert-eq(0, match 42 { Str | Null => 1 _ => 0 }, "no atom matches -> default")
+    assert-eq("num", match 1.5 { Int | Dec => "num" Str => "str" _ => "other" },
+        "three-way match with a union arm")
+}
+
+test-union-value-literals
+meta ["test"] fn () {
+    assert-eq("small", match 2 { 1 | 2 | 3 => "small" _ => "big" }, "literal union hit")
+    assert-eq("big", match 9 { 1 | 2 | 3 => "small" _ => "big" }, "literal union miss")
+    assert-eq("yes", match "b" { "a" | "b" => "yes" _ => "no" }, "string literal union")
+    assert-eq("mixed", match null { 0 | null | false => "mixed" _ => "no" },
+        "mixed literal union with null")
+}
+
+test-union-binding
+meta ["test"] fn () {
+    assert-eq("got:s", match "s" { Str | Null (v) => concat("got:", v) _ => "" },
+        "binding receives the matched value in a union arm")
+}
+
+test-union-result-variants
+meta ["test"] fn () {
+    // When EVERY atom is Result.Ok/Result.Err the arm unwraps the payload,
+    // same as a single Result-variant arm.
+    assert-eq("boom", match err("boom") { Result.Ok | Result.Err (v) => v },
+        "all-Result union arm unwraps the payload")
+    assert-eq("fine", match ok("fine") { Result.Ok | Result.Err (v) => v },
+        "Ok side of an all-Result union arm")
+}
+
+test-union-enum-variants-fn-match
+meta ["test"] fn () {
+    assert-eq("round-ish", classify(Shape.Circle), "fn match union arm, first atom")
+    assert-eq("round-ish", classify(Shape.Square), "fn match union arm, second atom")
+    assert-eq("pointy", classify(Shape.Triangle), "fn match non-union arm")
+}
+
+test-any-matches-everything
+meta ["test"] fn () {
+    assert-eq(1, match "s" { Any => 1 _ => 0 }, "Any matches a string")
+    assert-eq(1, match 42 { Any => 1 _ => 0 }, "Any matches an int")
+    assert-eq(1, match null { Any => 1 _ => 0 }, "Any matches null")
+    assert-eq(1, match [1, 2] { Any => 1 _ => 0 }, "Any matches a vec")
+    assert-eq(43, match 42 { Any (x) => add(x, 1) }, "Any arm binding receives the value")
+    assert-eq("texty", describe("hi"), "earlier arms still win over Any")
+    assert-eq("numeric", describe(3), "earlier arms still win over Any (2)")
+    assert-eq("other", describe(true), "Any catches what earlier arms miss")
+    assert-eq("texty", describe(null), "null hits its union arm, not Any")
+}
+
+test-match-all-union-keys
+meta ["test"] fn () {
+    results match-all 5 { Int | Dec => "num" Str => "str" }
+    assert-eq("num", get(results, "Int | Dec"), "match-all keys join union atoms with ' | '")
+}
+
+// Top-level standalone union match (exercises the entry-point path)
+top-level-union match "x" { Str | Null => "tl" _ => "no" }
+top-level-any match 7 { Any => "any" }
+
+test-top-level-union-match
+meta ["test"] fn () {
+    assert-eq("tl", top-level-union, "union arms work in top-level statement position")
+    assert-eq("any", top-level-any, "Any works in top-level statement position")
+}

@@ -2,9 +2,9 @@
 
 use crate::lang::ast::{
     AstNode, BuiltinType, DeepPath, DeepPathPart, Flow, FlowType, FnArg, FnArgs, FnCall, FnCallArg,
-    FnDef, Lambda, LiteralType, MatchArm, MatchExpr, Meta, Namespace, NamespaceAliases, NsPath,
-    NsPathPart, NsRef, Program, Ref, ResultModifier, Scope, Source, Sym, TemplateLiteral,
-    TemplatePart, TypeDef, TypeExpr, TypeImplementation, Value, Var, VarRef,
+    FnDef, Lambda, LiteralType, MatchArm, MatchArmPattern, MatchExpr, Meta, Namespace,
+    NamespaceAliases, NsPath, NsPathPart, NsRef, Program, Ref, ResultModifier, Scope, Source, Sym,
+    TemplateLiteral, TemplatePart, TypeDef, TypeExpr, TypeImplementation, Value, Var, VarRef,
 };
 use crate::lang::lexer::{KeywordKind, Lexer, Token, TokenType};
 use crate::val::Val;
@@ -2308,6 +2308,7 @@ impl Parser {
                         type_name: None,
                         variant: None,
                         value_literal: None,
+                        alternatives: Vec::new(),
                         binding: None,
                         body,
                         src: Some(Source::new(
@@ -4033,182 +4034,27 @@ impl Parser {
             }
 
             // Check for default branch: => { result } or _ => { result } (no type/variant, just arrow)
-            let mut value_literal_for_arm: Option<Box<Value>> = None;
             let is_default_arm = self.check(&TokenType::Arrow)
                 || (self.check(&TokenType::Underscore)
                     && matches!(
                         self.peek_n(1).map(|t| &t.token_type),
                         Some(TokenType::Arrow)
                     ));
-            let (type_name, variant): (Option<String>, Option<String>) = if is_default_arm {
+            let (pattern, alternatives) = if is_default_arm {
                 if self.check(&TokenType::Underscore) {
                     self.next(); // consume "_"
                 }
                 // Default branch - no type or variant
-                (None, None)
+                (MatchArmPattern::default(), Vec::new())
             } else {
-                // Check if this arm starts with a value literal (Int, Dec, Str, Bool, Null, Vec, Map)
-                let is_value_literal = matches!(
-                    self.peek().map(|t| &t.token_type),
-                    Some(TokenType::Int(_))
-                        | Some(TokenType::Dec(_))
-                        | Some(TokenType::String(_))
-                        | Some(TokenType::Bool(_))
-                        | Some(TokenType::Null)
-                        | Some(TokenType::LeftBracket)
-                        | Some(TokenType::LeftBrace)
-                );
-
-                if is_value_literal {
-                    // Value equality arm: parse the literal value
-                    let literal = self.parse_value()?;
-                    value_literal_for_arm = Some(Box::new(literal));
-                    (None, None)
-                } else {
-                    // Parse variant pattern: "Type" (type-level) or "Type.Variant" (variant-level)
-                    match self.peek() {
-                        Some(token) => {
-                            match &token.token_type {
-                                TokenType::Identifier(name) => {
-                                    let first_name = name.clone();
-                                    self.next();
-
-                                    // Check for "." indicating Type.Variant syntax
-                                    if self.check(&TokenType::Dot) {
-                                        self.next(); // consume "."
-
-                                        // Parse the variant name
-                                        let variant_name = match self.peek() {
-                                            Some(token) => match &token.token_type {
-                                                TokenType::Identifier(name) => {
-                                                    let name = name.clone();
-                                                    self.next();
-                                                    name
-                                                }
-                                                _ => {
-                                                    return Err(ParseError {
-                                                message:
-                                                    "Expected variant name after '.' in match arm"
-                                                        .to_string(),
-                                                location: ErrorLocation {
-                                                    line: token.line as usize,
-                                                    column: token.column as usize,
-                                                    position: token.position,
-                                                    length: 1,
-                                                    file: self.file_path.clone(),
-                                                },
-                                                source_context: None,
-                                            });
-                                                }
-                                            },
-                                            None => {
-                                                return Err(ParseError {
-                                            message:
-                                                "Unexpected end of file after '.' in match arm"
-                                                    .to_string(),
-                                            location: ErrorLocation {
-                                                line: start_line,
-                                                column: start_column,
-                                                position: start_position,
-                                                length: 1,
-                                                file: self.file_path.clone(),
-                                            },
-                                            source_context: None,
-                                        });
-                                            }
-                                        };
-                                        // Type.Variant syntax: type_name is Some, variant is Some
-                                        (Some(first_name), Some(variant_name))
-                                    } else {
-                                        // Just a type name - type-level matching (any variant)
-                                        // type_name is Some, variant is None
-                                        (Some(first_name), None)
-                                    }
-                                }
-                                TokenType::DoubleColon => {
-                                    // Parse fully qualified type like ::postmark::api/HttpError
-                                    let qualified_name = self.parse_namespaced_type_name()?;
-
-                                    // Check for "." indicating Type.Variant syntax
-                                    if self.check(&TokenType::Dot) {
-                                        self.next(); // consume "."
-
-                                        // Parse the variant name
-                                        let variant_name = match self.peek() {
-                                            Some(token) => match &token.token_type {
-                                                TokenType::Identifier(name) => {
-                                                    let name = name.clone();
-                                                    self.next();
-                                                    name
-                                                }
-                                                _ => {
-                                                    return Err(ParseError {
-                                                message:
-                                                    "Expected variant name after '.' in match arm"
-                                                        .to_string(),
-                                                location: ErrorLocation {
-                                                    line: token.line as usize,
-                                                    column: token.column as usize,
-                                                    position: token.position,
-                                                    length: 1,
-                                                    file: self.file_path.clone(),
-                                                },
-                                                source_context: None,
-                                            });
-                                                }
-                                            },
-                                            None => {
-                                                return Err(ParseError {
-                                            message:
-                                                "Unexpected end of file after '.' in match arm"
-                                                    .to_string(),
-                                            location: ErrorLocation {
-                                                line: start_line,
-                                                column: start_column,
-                                                position: start_position,
-                                                length: 1,
-                                                file: self.file_path.clone(),
-                                            },
-                                            source_context: None,
-                                        });
-                                            }
-                                        };
-                                        (Some(qualified_name), Some(variant_name))
-                                    } else {
-                                        // Just a qualified type name - type-level matching
-                                        (Some(qualified_name), None)
-                                    }
-                                }
-                                _ => {
-                                    return Err(ParseError {
-                                message: "Expected type, variant name, or value literal in match arm".to_string(),
-                                location: ErrorLocation {
-                                    line: token.line as usize,
-                                    column: token.column as usize,
-                                    position: token.position,
-                                    length: 1,
-                                    file: self.file_path.clone(),
-                                },
-                                source_context: None,
-                            });
-                                }
-                            }
-                        }
-                        None => {
-                            return Err(ParseError {
-                                message: "Unexpected end of file in match expression".to_string(),
-                                location: ErrorLocation {
-                                    line: start_line,
-                                    column: start_column,
-                                    position: start_position,
-                                    length: 1,
-                                    file: self.file_path.clone(),
-                                },
-                                source_context: None,
-                            });
-                        }
-                    }
-                }
+                let first =
+                    self.parse_match_pattern_atom(start_line, start_column, start_position)?;
+                let alts = self.parse_match_pattern_alternatives(
+                    start_line,
+                    start_column,
+                    start_position,
+                )?;
+                (first, alts)
             };
 
             // Check for optional binding: Variant(binding)
@@ -4262,9 +4108,10 @@ impl Parser {
             let body = self.parse_value()?;
 
             arms.push(MatchArm {
-                type_name,
-                variant,
-                value_literal: value_literal_for_arm,
+                type_name: pattern.type_name,
+                variant: pattern.variant,
+                value_literal: pattern.value_literal,
+                alternatives,
                 binding,
                 body,
                 src: None,
@@ -4303,14 +4150,17 @@ impl Parser {
         }))
     }
 
-    /// Parse a single match arm: Type.Variant => body, value_literal => body, or Type => body
-    /// Used for match flow function bodies
-    fn parse_match_arm(&mut self) -> ParseResult<MatchArm> {
-        let start_line = self.peek().map(|t| t.line as usize).unwrap_or(0);
-        let start_column = self.peek().map(|t| t.column as usize).unwrap_or(0);
-        let start_position = self.peek().map(|t| t.position).unwrap_or(0);
-
-        // Check if this arm starts with a value literal
+    /// Parse a single pattern atom in a match arm: a value literal
+    /// (Int/Dec/Str/Bool/Null/Vec/Map), `Type` (type-level), `Type.Variant`,
+    /// or a `::ns/Type`-qualified form. Union arms (`A | B => ...`) parse one
+    /// atom per `|`-separated alternative.
+    fn parse_match_pattern_atom(
+        &mut self,
+        start_line: usize,
+        start_column: usize,
+        start_position: usize,
+    ) -> ParseResult<MatchArmPattern> {
+        // Check if this atom starts with a value literal
         let is_value_literal = matches!(
             self.peek().map(|t| &t.token_type),
             Some(TokenType::Int(_))
@@ -4321,124 +4171,70 @@ impl Parser {
                 | Some(TokenType::LeftBracket)
                 | Some(TokenType::LeftBrace)
         );
-
-        let mut value_literal_for_arm: Option<Box<Value>> = None;
-        let (type_name, variant): (Option<String>, Option<String>) = if is_value_literal {
+        if is_value_literal {
             let literal = self.parse_value()?;
-            value_literal_for_arm = Some(Box::new(literal));
-            (None, None)
-        } else {
-            // Parse variant pattern: "Type" (type-level) or "Type.Variant" (variant-level)
+            return Ok(MatchArmPattern {
+                type_name: None,
+                variant: None,
+                value_literal: Some(Box::new(literal)),
+            });
+        }
+
+        // Parse variant pattern: "Type" (type-level) or "Type.Variant" (variant-level)
+        let type_name = match self.peek() {
+            Some(token) => match &token.token_type {
+                TokenType::Identifier(name) => {
+                    let name = name.clone();
+                    self.next();
+                    name
+                }
+                TokenType::DoubleColon => {
+                    // Parse fully qualified type like ::postmark::api/HttpError
+                    self.parse_namespaced_type_name()?
+                }
+                _ => {
+                    return Err(ParseError {
+                        message: "Expected type, variant name, or value literal in match arm"
+                            .to_string(),
+                        location: ErrorLocation {
+                            line: token.line as usize,
+                            column: token.column as usize,
+                            position: token.position,
+                            length: 1,
+                            file: self.file_path.clone(),
+                        },
+                        source_context: None,
+                    });
+                }
+            },
+            None => {
+                return Err(ParseError {
+                    message: "Unexpected end of file in match arm".to_string(),
+                    location: ErrorLocation {
+                        line: start_line,
+                        column: start_column,
+                        position: start_position,
+                        length: 1,
+                        file: self.file_path.clone(),
+                    },
+                    source_context: None,
+                });
+            }
+        };
+
+        // Check for "." indicating Type.Variant syntax
+        let variant = if self.check(&TokenType::Dot) {
+            self.next(); // consume "."
             match self.peek() {
                 Some(token) => match &token.token_type {
                     TokenType::Identifier(name) => {
-                        let first_name = name.clone();
+                        let name = name.clone();
                         self.next();
-
-                        // Check for "." indicating Type.Variant syntax
-                        if self.check(&TokenType::Dot) {
-                            self.next(); // consume "."
-
-                            // Parse the variant name
-                            let variant_name = match self.peek() {
-                                Some(token) => match &token.token_type {
-                                    TokenType::Identifier(name) => {
-                                        let name = name.clone();
-                                        self.next();
-                                        name
-                                    }
-                                    _ => {
-                                        return Err(ParseError {
-                                            message: "Expected variant name after '.' in match arm"
-                                                .to_string(),
-                                            location: ErrorLocation {
-                                                line: token.line as usize,
-                                                column: token.column as usize,
-                                                position: token.position,
-                                                length: 1,
-                                                file: self.file_path.clone(),
-                                            },
-                                            source_context: None,
-                                        });
-                                    }
-                                },
-                                None => {
-                                    return Err(ParseError {
-                                        message: "Unexpected end of file after '.' in match arm"
-                                            .to_string(),
-                                        location: ErrorLocation {
-                                            line: start_line,
-                                            column: start_column,
-                                            position: start_position,
-                                            length: 1,
-                                            file: self.file_path.clone(),
-                                        },
-                                        source_context: None,
-                                    });
-                                }
-                            };
-                            (Some(first_name), Some(variant_name))
-                        } else {
-                            // Just a type name - type-level matching
-                            (Some(first_name), None)
-                        }
-                    }
-                    TokenType::DoubleColon => {
-                        // Parse fully qualified type like ::postmark::api/HttpError
-                        let qualified_name = self.parse_namespaced_type_name()?;
-
-                        // Check for "." indicating Type.Variant syntax
-                        if self.check(&TokenType::Dot) {
-                            self.next(); // consume "."
-
-                            // Parse the variant name
-                            let variant_name = match self.peek() {
-                                Some(token) => match &token.token_type {
-                                    TokenType::Identifier(name) => {
-                                        let name = name.clone();
-                                        self.next();
-                                        name
-                                    }
-                                    _ => {
-                                        return Err(ParseError {
-                                            message: "Expected variant name after '.' in match arm"
-                                                .to_string(),
-                                            location: ErrorLocation {
-                                                line: token.line as usize,
-                                                column: token.column as usize,
-                                                position: token.position,
-                                                length: 1,
-                                                file: self.file_path.clone(),
-                                            },
-                                            source_context: None,
-                                        });
-                                    }
-                                },
-                                None => {
-                                    return Err(ParseError {
-                                        message: "Unexpected end of file after '.' in match arm"
-                                            .to_string(),
-                                        location: ErrorLocation {
-                                            line: start_line,
-                                            column: start_column,
-                                            position: start_position,
-                                            length: 1,
-                                            file: self.file_path.clone(),
-                                        },
-                                        source_context: None,
-                                    });
-                                }
-                            };
-                            (Some(qualified_name), Some(variant_name))
-                        } else {
-                            // Just a qualified type name - type-level matching
-                            (Some(qualified_name), None)
-                        }
+                        Some(name)
                     }
                     _ => {
                         return Err(ParseError {
-                            message: "Expected type, variant name, or value literal in match arm"
-                                .to_string(),
+                            message: "Expected variant name after '.' in match arm".to_string(),
                             location: ErrorLocation {
                                 line: token.line as usize,
                                 column: token.column as usize,
@@ -4452,7 +4248,7 @@ impl Parser {
                 },
                 None => {
                     return Err(ParseError {
-                        message: "Unexpected end of file in match arm".to_string(),
+                        message: "Unexpected end of file after '.' in match arm".to_string(),
                         location: ErrorLocation {
                             line: start_line,
                             column: start_column,
@@ -4464,7 +4260,50 @@ impl Parser {
                     });
                 }
             }
+        } else {
+            None
         };
+
+        Ok(MatchArmPattern {
+            type_name: Some(type_name),
+            variant,
+            value_literal: None,
+        })
+    }
+
+    /// Parse the `| atom` tail of a union match-arm pattern (zero or more alternatives).
+    fn parse_match_pattern_alternatives(
+        &mut self,
+        start_line: usize,
+        start_column: usize,
+        start_position: usize,
+    ) -> ParseResult<Vec<MatchArmPattern>> {
+        let mut alternatives = Vec::new();
+        while self.check(&TokenType::Pipe) {
+            self.next(); // consume "|"
+            // Allow the next alternative to start on a new line
+            while self.check(&TokenType::Newline) {
+                self.next();
+            }
+            alternatives.push(self.parse_match_pattern_atom(
+                start_line,
+                start_column,
+                start_position,
+            )?);
+        }
+        Ok(alternatives)
+    }
+
+    /// Parse a single match arm: Type.Variant => body, value_literal => body, or Type => body
+    /// Used for match flow function bodies
+    fn parse_match_arm(&mut self) -> ParseResult<MatchArm> {
+        let start_line = self.peek().map(|t| t.line as usize).unwrap_or(0);
+        let start_column = self.peek().map(|t| t.column as usize).unwrap_or(0);
+        let start_position = self.peek().map(|t| t.position).unwrap_or(0);
+
+        let pattern = self.parse_match_pattern_atom(start_line, start_column, start_position)?;
+        let alternatives =
+            self.parse_match_pattern_alternatives(start_line, start_column, start_position)?;
 
         // Check for optional binding: Variant(binding)
         let binding = if self.check(&TokenType::LeftParen) {
@@ -4517,9 +4356,10 @@ impl Parser {
         let body = self.parse_value()?;
 
         Ok(MatchArm {
-            type_name,
-            variant,
-            value_literal: value_literal_for_arm,
+            type_name: pattern.type_name,
+            variant: pattern.variant,
+            value_literal: pattern.value_literal,
+            alternatives,
             binding,
             body,
             src: Some(Source::new(
