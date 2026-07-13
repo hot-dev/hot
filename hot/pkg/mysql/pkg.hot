@@ -1,0 +1,15 @@
+::hot::pkg ns
+
+hot.pkg.mysql {
+  name: "hot.dev/mysql",
+  version: "0.1.0",
+  hot-min-version: "2.6.1",
+  description: "Pure-Hot MySQL client: the MySQL client/server protocol over tcp/tls with caching_sha2_password and mysql_native_password auth, text-protocol queries, and binary prepared statements for parameter binding.",
+  author: "Hot Dev",
+  email: "support@hot.dev",
+  license: "Apache-2.0",
+  tags: ["database", "mysql", "sql"],
+  deps: {},
+  src-paths: ["src/"],
+  test-paths: ["test/"]
+}

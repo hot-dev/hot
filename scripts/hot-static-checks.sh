@@ -2,7 +2,8 @@
 # hot-static-checks.sh - Run Hot static checks and documentation snippet validation
 #
 # Usage:
-#   ./scripts/hot-static-checks.sh check     # Run Hot checks and verify doc snippets
+#   ./scripts/hot-static-checks.sh check     # Run Hot checks, fmt verify, and doc snippets
+#   ./scripts/hot-static-checks.sh fmt       # Verify all Hot source is formatted
 #   ./scripts/hot-static-checks.sh test      # Run tests in doc example files
 #   ./scripts/hot-static-checks.sh extract   # Show all available snippets
 #   ./scripts/hot-static-checks.sh inject    # Generate markdown with injected snippets (stdout)
@@ -143,9 +144,20 @@ cmd_check() {
         errors=$((errors + 1))
     fi
 
-    # 3. Check that all referenced snippets exist
+    # 3. Verify all Hot source is formatted.
     echo ""
-    echo -e "${YELLOW}Step 3: Verify snippet references${NC}"
+    echo -e "${YELLOW}Step 3: Hot formatting${NC}"
+    if cmd_fmt > /dev/null 2>&1; then
+        echo -e "${GREEN}✓ All Hot source is formatted${NC}"
+    else
+        echo -e "${RED}✗ Hot source has formatting drift${NC}"
+        cmd_fmt
+        errors=$((errors + 1))
+    fi
+
+    # 4. Check that all referenced snippets exist
+    echo ""
+    echo -e "${YELLOW}Step 4: Verify snippet references${NC}"
 
     local missing=0
     while IFS= read -r ref; do
@@ -178,6 +190,37 @@ cmd_check() {
         return 0
     else
         echo -e "${RED}$errors check(s) failed${NC}"
+        return 1
+    fi
+}
+
+# Command: fmt - verify all Hot source is formatted (no writes)
+# `hot fmt --check` takes one path per invocation, so loop the source roots.
+cmd_fmt() {
+    local roots=("hot/pkg" "hot/src" "hot/test")
+    local errors=0
+
+    echo "Checking Hot formatting..."
+    echo "=========================="
+    for root in "${roots[@]}"; do
+        local dir="$PROJECT_ROOT/$root"
+        [[ -d "$dir" ]] || continue
+        if cargo run --quiet -- fmt --check "$dir" > /dev/null 2>&1; then
+            echo -e "${GREEN}✓ $root${NC}"
+        else
+            echo -e "${RED}✗ $root has unformatted files:${NC}"
+            cargo run --quiet -- fmt --check "$dir" 2>&1 | grep -v "properly formatted" || true
+            errors=$((errors + 1))
+        fi
+    done
+
+    echo ""
+    if [[ $errors -eq 0 ]]; then
+        echo -e "${GREEN}All Hot source is formatted.${NC}"
+        echo "(run 'cargo run -- fmt <dir>' to fix)"
+        return 0
+    else
+        echo -e "${RED}$errors source root(s) have formatting drift — run 'cargo run -- fmt <dir>'${NC}"
         return 1
     fi
 }
@@ -291,6 +334,9 @@ case "${1:-help}" in
     check)
         cmd_check
         ;;
+    fmt)
+        cmd_fmt
+        ;;
     test)
         cmd_test
         ;;
@@ -315,7 +361,8 @@ case "${1:-help}" in
         echo "Usage: $0 <command>"
         echo ""
         echo "Commands:"
-        echo "  check    - Verify all snippets compile and references exist"
+        echo "  check    - Run all static checks (project + package + fmt + snippets)"
+        echo "  fmt      - Verify all Hot source is formatted (hot fmt --check)"
         echo "  test     - Run tests in doc example files"
         echo "  extract  - Show all available snippets"
         echo "  eval     - Evaluate a snippet and show result"

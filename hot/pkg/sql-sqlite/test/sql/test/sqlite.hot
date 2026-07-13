@@ -1,0 +1,178 @@
+::sql::test::sqlite ns
+meta ["test"]
+
+// End-to-end driver tests against real SQLite databases. Under `hot test`
+// file.mode is `service` backed by local file storage, so these exercise
+// the checkout/commit path: open checks the file out, close commits it.
+// Paths get a per-run uuid so state never leaks between runs.
+
+::sqlite ::sql::sqlite
+
+db-path fn (name: Str): Str {
+  `test-sqlite/${Str(::hot::uuid/Uuid())}-${name}.db`
+}
+
+test-end-to-end-roundtrip
+meta ["test"] fn () {
+    db ::sqlite/open(db-path("roundtrip"))
+    assert(is-ok(db), "open should succeed")
+
+    created ::sql/execute(db, "CREATE TABLE t (id INTEGER PRIMARY KEY, name TEXT, score REAL, blob BLOB, flag INTEGER)", [])
+    assert(is-ok(created), "create table should succeed")
+    assert-eq("CREATE", created.command)
+
+    inserted ::sql/execute(db,
+      "INSERT INTO t (name, score, blob, flag) VALUES (?, ?, ?, ?)",
+      ["Ada", 99.5, Bytes([1, 2, 3]), true])
+    assert-eq(1, inserted.rows-affected)
+    assert-eq(1, inserted.last-insert-id)
+    assert-eq("INSERT", inserted.command)
+
+    rows ::sql/query(db, "SELECT * FROM t WHERE name = :name", {name: "Ada"})
+    assert-eq(1, length(rows))
+    row first(rows)
+    assert-eq(1, row.id)
+    assert-eq("Ada", row.name)
+    assert-eq(99.5, row.score)
+    assert-eq(Bytes([1, 2, 3]), row.blob)
+    assert-eq(1, row.flag, "booleans store as integers")
+
+    missing ::sql/query(db, "SELECT * FROM t WHERE name = ?", ["nobody"])
+    assert(is-empty(missing))
+
+    assert(is-ok(::sql/close(db)))
+}
+
+test-persistence-across-connections
+meta ["test"] fn () {
+    // Service mode: close commits the bytes; a fresh open checks them
+    // back out. This is the whole checkout/commit contract in one test.
+    path db-path("persist")
+
+    db1 ::sqlite/open(path)
+    ::sql/execute(db1, "CREATE TABLE kv (k TEXT PRIMARY KEY, v TEXT)", [])
+    ::sql/execute(db1, "INSERT INTO kv (k, v) VALUES (?, ?)", ["greeting", "hello"])
+    assert(is-ok(::sql/close(db1)), "first close commits")
+
+    db2 ::sqlite/open(path)
+    rows ::sql/query(db2, "SELECT v FROM kv WHERE k = ?", ["greeting"])
+    assert-eq("hello", first(rows).v, "data survives close/reopen")
+    assert(is-ok(::sql/close(db2)))
+}
+
+test-concurrent-commit-conflict
+meta ["test"] fn () {
+    // Two checkouts of the same path: the second commit must refuse to
+    // clobber what the first one wrote.
+    path db-path("conflict")
+
+    conn1 ::hot::sqlite/open(path)
+    conn2 ::hot::sqlite/open(path)
+    ::hot::sqlite/execute(conn1, "CREATE TABLE a (x INTEGER)", [])
+    ::hot::sqlite/execute(conn2, "CREATE TABLE b (y INTEGER)", [])
+
+    assert(is-ok(::hot::sqlite/close(conn1)), "first commit wins")
+    second ::hot::sqlite/close(conn2)
+    assert(is-err(second), "second commit conflicts instead of clobbering")
+}
+
+test-sql-errors-are-err-values
+meta ["test"] fn () {
+    db ::sqlite/open(db-path("errors"))
+
+    bad-table ::sql/query(db, "SELECT * FROM no_such_table", [])
+    assert(is-err(bad-table), "missing table is an Err")
+
+    trailing ::sql/execute(db, "SELECT 1; DROP TABLE sqlite_master", [])
+    assert(is-err(trailing), "multi-statement sql is rejected")
+
+    arity ::sql/execute(db, "SELECT ?", [])
+    assert(is-err(arity), "parameter count mismatch is an Err")
+
+    assert(is-ok(::sql/close(db)))
+}
+
+test-read-only-missing-file
+meta ["test"] fn () {
+    out ::hot::sqlite/open({path: db-path("never-created"), read-only: true})
+    assert(is-err(out), "read-only open of a missing file is an Err")
+}
+
+test-quote-ident-through-driver
+meta ["test"] fn () {
+    db ::sqlite/open(db-path("idents"))
+    quoted ::sql/quote-ident(db, `weird "column"`)
+    created ::sql/execute(db, `CREATE TABLE q (${quoted} TEXT)`, [])
+    assert(is-ok(created), "ANSI-quoted identifier works in sqlite")
+    inserted ::sql/execute(db, `INSERT INTO q (${quoted}) VALUES (?)`, ["v"])
+    assert-eq(1, inserted.rows-affected)
+    assert(is-ok(::sql/close(db)))
+}
+
+test-command-tag
+meta ["test"] fn () {
+    assert-eq("INSERT", ::sqlite/command-tag("insert into t values (1)"))
+    assert-eq("SELECT", ::sqlite/command-tag("  SELECT 1"))
+}
+
+test-sync-refuses-open-transaction
+meta ["test"] fn () {
+    // A raw-bytes snapshot mid-transaction would be inconsistent; sync and
+    // close must refuse until the transaction finishes.
+    conn ::hot::sqlite/open(db-path("txn-guard"))
+    ::hot::sqlite/execute(conn, "CREATE TABLE t (x INTEGER)", [])
+    ::hot::sqlite/execute(conn, "BEGIN", [])
+    ::hot::sqlite/execute(conn, "INSERT INTO t (x) VALUES (1)", [])
+
+    blocked ::hot::sqlite/sync(conn)
+    assert(is-err(blocked), "sync inside an open transaction is an Err")
+    blocked-close ::hot::sqlite/close(conn)
+    assert(is-err(blocked-close), "close inside an open transaction is an Err")
+
+    ::hot::sqlite/execute(conn, "COMMIT", [])
+    assert(is-ok(::hot::sqlite/sync(conn)), "sync succeeds after COMMIT")
+    assert(is-ok(::hot::sqlite/close(conn)))
+}
+
+test-wal-mode-commits-survive
+meta ["test"] fn () {
+    // A user may enable WAL; the checkpoint before commit must fold the
+    // WAL frames into the snapshot so nothing is lost across reopen.
+    path db-path("wal")
+    conn ::hot::sqlite/open(path)
+    ::hot::sqlite/query(conn, "PRAGMA journal_mode=WAL", [])
+    ::hot::sqlite/execute(conn, "CREATE TABLE t (x INTEGER)", [])
+    ::hot::sqlite/execute(conn, "INSERT INTO t (x) VALUES (7)", [])
+    assert(is-ok(::hot::sqlite/close(conn)))
+
+    conn2 ::hot::sqlite/open(path)
+    rows ::hot::sqlite/query(conn2, "SELECT x FROM t", [])
+    assert-eq(7, first(rows).x, "WAL-mode write survives commit and reopen")
+    assert(is-ok(::hot::sqlite/close(conn2)))
+}
+
+test-transaction-on-real-driver
+meta ["test"] fn () {
+    // ::sql/transaction issues BEGIN/COMMIT through the driver; the body
+    // result comes back, a failing body rolls back, and the sqlite
+    // service-mode txn guard never fires because close happens after COMMIT.
+    db ::sqlite/open(db-path("txn"))
+    ::sql/execute(db, "CREATE TABLE t (x INTEGER)", [])
+
+    out ::sql/transaction(db, (tx) {
+        ::sql/execute(tx, "INSERT INTO t (x) VALUES (?)", [1])
+        ::sql/execute(tx, "INSERT INTO t (x) VALUES (?)", [2])
+        "done"
+    })
+    assert-eq("done", out)
+    assert-eq(2, ::sql/scalar(db, "SELECT COUNT(*) FROM t"))
+
+    rolled ::sql/transaction(db, (tx) {
+        ::sql/execute(tx, "INSERT INTO t (x) VALUES (?)", [3])
+        err("abort")
+    })
+    assert(is-err(rolled), "body error propagates")
+    assert-eq(2, ::sql/scalar(db, "SELECT COUNT(*) FROM t"), "rolled back")
+
+    assert(is-ok(::sql/close(db)))
+}

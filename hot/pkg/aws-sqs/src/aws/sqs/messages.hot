@@ -132,14 +132,14 @@ fn
 
     response http-request("POST", url, signed-headers, body)
 
-    if(is-ok-response(response),
-        SendMessageResponse({
+    cond {
+        is-ok-response(response) => { SendMessageResponse({
             message_id: response.body.MessageId,
             md5_of_message_body: response.body.MD5OfMessageBody,
             sequence_number: response.body.SequenceNumber
-        }),
-        err(AwsError(response))
-    )
+        }) }
+        => { err(AwsError(response)) }
+    }
 },
 (queue_url: Str, message_body: Str, delay_seconds: Int): SendMessageResponse | AwsError {
     send-message(queue_url, message_body, delay_seconds, {})
@@ -195,19 +195,22 @@ fn
 
     response http-request("POST", url, signed-headers, body)
 
-    if(is-ok-response(response),
-        ReceiveMessageResponse({
-            messages: if(is-null(response.body.Messages), [], map(response.body.Messages, Message({
+    cond {
+        is-ok-response(response) => { ReceiveMessageResponse({
+            messages: cond {
+                is-null(response.body.Messages) => { [] }
+                => { map(response.body.Messages, Message({
                 message_id: %.MessageId,
                 receipt_handle: %.ReceiptHandle,
                 body: %.Body,
                 md5_of_body: %.MD5OfBody,
                 attributes: %.Attributes,
                 message_attributes: %.MessageAttributes
-            })))
-        }),
-        err(AwsError(response))
-    )
+            })) }
+            }
+        }) }
+        => { err(AwsError(response)) }
+    }
 },
 (queue_url: Str, max_messages: Int, wait_time_seconds: Int): ReceiveMessageResponse | AwsError {
     receive-messages(queue_url, max_messages, wait_time_seconds, 30)
@@ -260,10 +263,10 @@ fn (queue_url: Str, receipt_handle: Str): DeleteMessageResponse | AwsError {
 
     response http-request("POST", url, signed-headers, body)
 
-    if(is-ok-response(response),
-        DeleteMessageResponse({ success: true }),
-        err(AwsError(response))
-    )
+    cond {
+        is-ok-response(response) => { DeleteMessageResponse({ success: true }) }
+        => { err(AwsError(response)) }
+    }
 }
 
 // Change message visibility timeout
@@ -304,10 +307,10 @@ fn (queue_url: Str, receipt_handle: Str, visibility_timeout: Int): DeleteMessage
 
     response http-request("POST", url, signed-headers, body)
 
-    if(is-ok-response(response),
-        DeleteMessageResponse({ success: true }),
-        err(AwsError(response))
-    )
+    cond {
+        is-ok-response(response) => { DeleteMessageResponse({ success: true }) }
+        => { err(AwsError(response)) }
+    }
 }
 
 // Purge all messages from a queue
@@ -345,10 +348,10 @@ fn (queue_url: Str): DeleteMessageResponse | AwsError {
 
     response http-request("POST", url, signed-headers, body)
 
-    if(is-ok-response(response),
-        DeleteMessageResponse({ success: true }),
-        err(AwsError(response))
-    )
+    cond {
+        is-ok-response(response) => { DeleteMessageResponse({ success: true }) }
+        => { err(AwsError(response)) }
+    }
 }
 
 // Send messages in batch
@@ -393,22 +396,28 @@ fn (queue_url: Str, entries: Vec<Map>): SendMessageBatchResponse | AwsError {
 
     response http-request("POST", url, signed-headers, body)
 
-    if(is-ok-response(response),
-        SendMessageBatchResponse({
-            successful: if(is-null(response.body.Successful), [], map(response.body.Successful, BatchResultEntry({
+    cond {
+        is-ok-response(response) => { SendMessageBatchResponse({
+            successful: cond {
+                is-null(response.body.Successful) => { [] }
+                => { map(response.body.Successful, BatchResultEntry({
                 id: %.Id,
                 message_id: %.MessageId,
                 md5_of_message_body: %.MD5OfMessageBody
-            }))),
-            failed: if(is-null(response.body.Failed), [], map(response.body.Failed, BatchErrorEntry({
+            })) }
+            },
+            failed: cond {
+                is-null(response.body.Failed) => { [] }
+                => { map(response.body.Failed, BatchErrorEntry({
                 id: %.Id,
                 sender_fault: %.SenderFault,
                 code: %.Code,
                 message: %.Message
-            })))
-        }),
-        err(AwsError(response))
-    )
+            })) }
+            }
+        }) }
+        => { err(AwsError(response)) }
+    }
 }
 
 // Delete messages in batch
@@ -451,20 +460,26 @@ fn (queue_url: Str, entries: Vec<Map>): DeleteMessageBatchResponse | AwsError {
 
     response http-request("POST", url, signed-headers, body)
 
-    if(is-ok-response(response),
-        DeleteMessageBatchResponse({
-            successful: if(is-null(response.body.Successful), [], map(response.body.Successful, BatchResultEntry({
+    cond {
+        is-ok-response(response) => { DeleteMessageBatchResponse({
+            successful: cond {
+                is-null(response.body.Successful) => { [] }
+                => { map(response.body.Successful, BatchResultEntry({
                 id: %.Id,
                 message_id: %.MessageId,
                 md5_of_message_body: %.MD5OfMessageBody
-            }))),
-            failed: if(is-null(response.body.Failed), [], map(response.body.Failed, BatchErrorEntry({
+            })) }
+            },
+            failed: cond {
+                is-null(response.body.Failed) => { [] }
+                => { map(response.body.Failed, BatchErrorEntry({
                 id: %.Id,
                 sender_fault: %.SenderFault,
                 code: %.Code,
                 message: %.Message
-            })))
-        }),
-        err(AwsError(response))
-    )
+            })) }
+            }
+        }) }
+        => { err(AwsError(response)) }
+    }
 }

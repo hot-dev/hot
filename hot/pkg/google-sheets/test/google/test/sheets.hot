@@ -1,0 +1,22 @@
+::google::test::sheets ns
+meta ["test"]
+
+// Hermetic wiring tests: with no google.* context configured, every call
+// must surface google-core's no-credentials Err — proving the cross-
+// namespace call path (sheets -> api -> auth) resolves end to end.
+
+test-calls-surface-no-credentials-err
+meta ["test"] fn () {
+    read ::google::sheets/get-values("sheet-id", "Sheet1!A1:B2")
+    assert(is-err(read), "get-values without credentials errs")
+    assert(contains(err-message(read), "no credentials"), "the auth error reaches the caller")
+
+    write ::google::sheets/update-values("sheet-id", "Sheet1!A1", [["x"]])
+    assert(is-err(write), "update-values without credentials errs")
+
+    created ::google::sheets/create-spreadsheet("t")
+    assert(is-err(created), "create-spreadsheet without credentials errs")
+
+    batch ::google::sheets/batch-get-values("sheet-id", ["A1", "B2:B9"])
+    assert(is-err(batch), "batch-get-values without credentials errs")
+}

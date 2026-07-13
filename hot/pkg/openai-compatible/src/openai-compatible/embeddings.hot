@@ -1,0 +1,36 @@
+::openai-compatible::embeddings ns
+
+api-request ::openai-compatible::api/request
+HttpError ::openai-compatible::api/HttpError
+is-ok-response ::hot::http/is-ok-response
+
+EmbeddingsRequest type {
+    model: Str,
+    input: Any,
+    dimensions: Int?,
+    encoding_format: Str?,
+    user: Str?
+}
+
+create-embeddings
+meta {
+    doc: """
+    POST /embeddings - Create embeddings for a string or Vec of strings.
+
+    **Example**
+
+    ```hot
+    ::embeddings ::openai-compatible::embeddings
+
+    out ::embeddings/create-embeddings(::embeddings/EmbeddingsRequest({
+      model: "openai/text-embedding-3-small",
+      input: ["first text", "second text"]
+    }))
+    out.data[0].embedding  // => [0.0123, ...]
+    ```
+    """
+}
+fn (request: EmbeddingsRequest): Map {
+  response api-request("POST", "/embeddings", {}, request)
+  if(is-ok-response(response), response.body, err(HttpError(response)))
+}

@@ -66,21 +66,25 @@ fn
     // Build query parameters
     params []
 
-    params-with-provider if(is-null(by_provider), params,
-        concat(params, [`byProvider=${by_provider}`])
-    )
+    params-with-provider cond {
+        is-null(by_provider) => { params }
+        => { concat(params, [`byProvider=${by_provider}`]) }
+    }
 
-    params-with-custom if(is-null(by_customization_type), params-with-provider,
-        concat(params-with-provider, [`byCustomizationType=${by_customization_type}`])
-    )
+    params-with-custom cond {
+        is-null(by_customization_type) => { params-with-provider }
+        => { concat(params-with-provider, [`byCustomizationType=${by_customization_type}`]) }
+    }
 
-    params-with-output if(is-null(by_output_modality), params-with-custom,
-        concat(params-with-custom, [`byOutputModality=${by_output_modality}`])
-    )
+    params-with-output cond {
+        is-null(by_output_modality) => { params-with-custom }
+        => { concat(params-with-custom, [`byOutputModality=${by_output_modality}`]) }
+    }
 
-    params-with-inference if(is-null(by_inference_type), params-with-output,
-        concat(params-with-output, [`byInferenceType=${by_inference_type}`])
-    )
+    params-with-inference cond {
+        is-null(by_inference_type) => { params-with-output }
+        => { concat(params-with-output, [`byInferenceType=${by_inference_type}`]) }
+    }
 
     query-string if(eq(length(params-with-inference), 0), "", `?${join(params-with-inference, "&")}`)
 
@@ -94,9 +98,11 @@ fn
 
     response http-request("GET", url, signed-headers, "")
 
-    if(is-ok-response(response),
-        ListFoundationModelsResponse({
-            models: if(is-null(response.body.modelSummaries), [], map(response.body.modelSummaries, FoundationModel({
+    cond {
+        is-ok-response(response) => { ListFoundationModelsResponse({
+            models: cond {
+                is-null(response.body.modelSummaries) => { [] }
+                => { map(response.body.modelSummaries, FoundationModel({
                 model_arn: %.modelArn,
                 model_id: %.modelId,
                 model_name: %.modelName,
@@ -107,10 +113,11 @@ fn
                 customizations_supported: %.customizationsSupported,
                 inference_types_supported: %.inferenceTypesSupported,
                 model_lifecycle: %.modelLifecycle
-            })))
-        }),
-        err(AwsError(response))
-    )
+            })) }
+            }
+        }) }
+        => { err(AwsError(response)) }
+    }
 },
 (by_provider: Str): ListFoundationModelsResponse | AwsError {
     list-foundation-models(by_provider, null, null, null)
@@ -148,9 +155,11 @@ fn (model_identifier: Str): GetFoundationModelResponse | AwsError {
 
     response http-request("GET", url, signed-headers, "")
 
-    if(is-ok-response(response),
-        GetFoundationModelResponse({
-            model: if(is-null(response.body.modelDetails), null, FoundationModel({
+    cond {
+        is-ok-response(response) => { GetFoundationModelResponse({
+            model: cond {
+                is-null(response.body.modelDetails) => { null }
+                => { FoundationModel({
                 model_arn: response.body.modelDetails.modelArn,
                 model_id: response.body.modelDetails.modelId,
                 model_name: response.body.modelDetails.modelName,
@@ -161,10 +170,11 @@ fn (model_identifier: Str): GetFoundationModelResponse | AwsError {
                 customizations_supported: response.body.modelDetails.customizationsSupported,
                 inference_types_supported: response.body.modelDetails.inferenceTypesSupported,
                 model_lifecycle: response.body.modelDetails.modelLifecycle
-            }))
-        }),
-        err(AwsError(response))
-    )
+            }) }
+            }
+        }) }
+        => { err(AwsError(response)) }
+    }
 }
 
 // Common model IDs for convenience

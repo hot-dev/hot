@@ -1,0 +1,30 @@
+::attio ns
+meta {
+    doc: """
+    Attio CRM bindings.
+
+    Attio models everything as objects (`people`, `companies`, `deals`,
+    custom objects) holding records; `::attio::records` covers them
+    uniformly, `::attio::notes` logs activity, and `::attio::lists`
+    manages list entries.
+
+    **Setup** — context variable `attio.api.key`: an API key from
+    Workspace settings → Developers.
+
+    **Quick start**
+
+    ```hot
+    ::records ::attio::records
+    ::notes ::attio::notes
+
+    person ::records/assert-record("people", "email_addresses", {
+      email_addresses: [{email_address: "ada@example.com"}],
+      name: [{first_name: "Ada", last_name: "Lovelace", full_name: "Ada Lovelace"}]
+    })
+
+    ::notes/create-note("people", person.id.record_id, "Intro call", "Wants the enterprise tier.")
+    ```
+    """
+}
+
+BASE_URL "https://api.attio.com/v2"

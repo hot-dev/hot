@@ -1236,22 +1236,39 @@ impl TypeChecker {
         let mut has_type_level_cover = false;
         let mut covered: AHashSet<String> = AHashSet::new();
         for arm in arms {
-            let is_default =
-                arm.type_name.is_none() && arm.variant.is_none() && arm.value_literal.is_none();
+            let is_default = arm.type_name.is_none()
+                && arm.variant.is_none()
+                && arm.value_literal.is_none()
+                && arm.alternatives.is_empty();
             if is_default {
                 has_default = true;
                 continue;
             }
-            if arm.variant.is_none()
-                && arm.value_literal.is_none()
-                && let Some(type_name) = &arm.type_name
-                && Self::short_type_name(type_name) == short_name
-            {
-                has_type_level_cover = true;
-                continue;
-            }
-            if let Some(variant) = &arm.variant {
-                covered.insert(variant.clone());
+            // Each atom of a union arm (`A | B =>`) contributes coverage
+            // independently.
+            let atoms = std::iter::once((&arm.type_name, &arm.variant, &arm.value_literal)).chain(
+                arm.alternatives
+                    .iter()
+                    .map(|alt| (&alt.type_name, &alt.variant, &alt.value_literal)),
+            );
+            for (type_name, variant, value_literal) in atoms {
+                if variant.is_none()
+                    && value_literal.is_none()
+                    && let Some(type_name) = type_name
+                {
+                    let short = Self::short_type_name(type_name);
+                    if short == "Any" {
+                        // `Any` matches every value — as good as a default arm
+                        // for both open and closed enums.
+                        has_default = true;
+                    } else if short == short_name {
+                        has_type_level_cover = true;
+                    }
+                    continue;
+                }
+                if let Some(variant) = variant {
+                    covered.insert(variant.clone());
+                }
             }
         }
 

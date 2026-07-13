@@ -172,9 +172,10 @@ fn (session: ::mcp-types/Session, remote: ::mcp-types/Tool): ::ai-tool/Tool {
         output-schema: null,
         fn: (input: Map) {
             result ::mcp-tools/call(session, tool-name, input)
-            if(or(result.is-error, false),
-                err(result),
-                or(result.structured-content, result.content))
+            cond {
+                or(result.is-error, false) => { err(result) }
+                => { or(result.structured-content, result.content) }
+            }
         },
         pass-input: true
     })
@@ -224,16 +225,17 @@ meta {
     """
 }
 fn (specs: Vec<Any>): Vec<::ai-tool/Tool> {
-    if(or(is-null(specs), is-empty(specs)),
-        [],
-        reduce(specs, (acc, spec) {
+    cond {
+        or(is-null(specs), is-empty(specs)) => { [] }
+        => { reduce(specs, (acc, spec) {
             resolved resolve-spec(spec)
             validated validate-config(resolved)
             session ::client/initialize(validated.url, CLIENT-INFO, null)
             remote-tools ::mcp-tools/list-all(session)
             wrapped map(remote-tools, (rt) { wrap-remote-tool(session, rt) })
             concat(acc, wrapped)
-        }, []))
+        }, []) }
+    }
 }
 
 // ============================================================================
@@ -277,13 +279,14 @@ meta {
     """
 }
 fn (opts: ::ai-chat/ChatOptions, mcp-servers: Vec<Any>?): ::ai-chat/ChatOptions {
-    if(or(is-null(mcp-servers), is-empty(mcp-servers)),
-        opts,
-        {
+    cond {
+        or(is-null(mcp-servers), is-empty(mcp-servers)) => { opts }
+        => {
             local or(opts.tools, [])
             local-names map(local, %.name)
             remote for-agent(mcp-servers)
             deduped filter(remote, not(in(%.name, local-names)))
             ::ai-chat/ChatOptions({...untype(opts), tools: concat(local, deduped)})
-        })
+        }
+    }
 }

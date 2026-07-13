@@ -232,7 +232,7 @@ pub(crate) async fn run_eval(
             if !matches!(result, hot::val::Val::Null) {
                 // Apply CLI value_format option if provided, otherwise use conf
                 let display_conf = if let Some(fmt) = value_format {
-                    conf.set_str("hot.value.format", Some(fmt.to_string()), "hot")
+                    conf.set_str("value.format", Some(fmt.to_string()), "hot")
                 } else {
                     conf.clone()
                 };

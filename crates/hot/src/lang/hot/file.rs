@@ -15,7 +15,7 @@ use std::sync::Arc;
 
 /// Get the file mode from VM configuration
 /// Returns "direct" (default) or "service"
-fn get_file_mode(vm: &VirtualMachine) -> String {
+pub(crate) fn get_file_mode(vm: &VirtualMachine) -> String {
     if let Some(val) = vm.get_conf().get("file.mode") {
         match val {
             Val::Str(s) => {
@@ -47,7 +47,7 @@ where
 }
 
 /// Helper to get file storage context from VM (for service mode)
-fn get_file_context(vm: &VirtualMachine) -> Result<FileStorageContext, String> {
+pub(crate) fn get_file_context(vm: &VirtualMachine) -> Result<FileStorageContext, String> {
     let db = vm
         .get_database_pool()
         .ok_or("Database pool not available for file operations")?;

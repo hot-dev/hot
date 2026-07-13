@@ -172,7 +172,8 @@ verify-server-signature fn (salted: Bytes, auth-message: Str, server-final: Str)
     attrs parse-scram-attrs(server-final)
     server-key ::hmac/hmac-sha256-bytes(salted, "Server Key")
     expected ::b64/encode(::hmac/hmac-sha256-bytes(server-key, auth-message))
-    if(eq(get(attrs, "v"), expected),
-        true,
-        err("pg auth: SCRAM server signature verification failed"))
+    cond {
+        eq(get(attrs, "v"), expected) => { true }
+        => { err("pg auth: SCRAM server signature verification failed") }
+    }
 }

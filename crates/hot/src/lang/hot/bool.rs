@@ -11,39 +11,87 @@ pub fn fast_not_bool(b: bool) -> Val {
     Val::Bool(!b)
 }
 
-/// Negate truthiness of a value.
-pub fn not(args: &[Val]) -> HotResult<Val> {
-    validate_args!("::hot::bool/not", args, 1);
-
-    let is_truthy = match &args[0] {
-        Val::Null => false,
-        Val::Bool(b) => *b,
-        Val::Int(i) => *i != 0,
-        Val::Dec(d) => !d.is_zero(),
-        Val::Str(s) => !s.is_empty(),
-        Val::Vec(v) => !v.is_empty(),
-        Val::Map(m) => !m.is_empty(),
-        _ => true,
-    };
-
-    HotResult::Ok(Val::Bool(!is_truthy))
+/// Force a lazy-parameter thunk so its value (including an Err — Err is
+/// falsy) reaches the truthiness check. Mirrors ::hot::type/is-err:
+/// zero-arg LambdaInfo boxes evaluate under suppressed result checking;
+/// a thunk whose evaluation halts counts as an Err (falsy).
+fn force_for_truthiness(
+    vm: &mut crate::lang::runtime::vm::VirtualMachine,
+    val: &Val,
+) -> Option<Val> {
+    if let Val::Box(b) = val
+        && let Some(lambda_info) = b
+            .as_any()
+            .downcast_ref::<crate::lang::bytecode::LambdaInfo>()
+        && lambda_info.parameters.is_empty()
+    {
+        let saved = vm.get_suppress_result_checking();
+        vm.set_suppress_result_checking(true);
+        let result = vm.execute_lambda(val, &[]);
+        vm.set_suppress_result_checking(saved);
+        // A halted thunk evaluation counts like an Err value (falsy).
+        return result.ok();
+    }
+    Some(val.clone())
 }
 
-/// Check if a value is truthy (non-null, non-false, non-empty)
-pub fn is_truthy(args: &[Val]) -> HotResult<Val> {
+/// Negate truthiness of a value. One truthiness for the whole language:
+/// Val::is_truthy — only false, null, and Err are falsy. 0, "", [], and
+/// {} are values, not falseness.
+pub fn not(vm: &mut crate::lang::runtime::vm::VirtualMachine, args: &[Val]) -> HotResult<Val> {
+    validate_args!("::hot::bool/not", args, 1);
+    let truthy = force_for_truthiness(vm, &args[0]).is_some_and(|v| v.is_truthy());
+    HotResult::Ok(Val::Bool(!truthy))
+}
+
+/// Check if a value is truthy: Val::is_truthy — only false, null, and Err
+/// are falsy (matching if/cond/assert branch semantics).
+pub fn is_truthy(
+    vm: &mut crate::lang::runtime::vm::VirtualMachine,
+    args: &[Val],
+) -> HotResult<Val> {
     validate_args!("::hot::bool/is-truthy", args, 1);
+    let truthy = force_for_truthiness(vm, &args[0]).is_some_and(|v| v.is_truthy());
+    HotResult::Ok(Val::Bool(truthy))
+}
 
-    let value = &args[0];
-    let is_truthy = match value {
-        Val::Null => false,
-        Val::Bool(b) => *b,
-        Val::Int(i) => *i != 0,
-        Val::Dec(d) => !d.is_zero(),
-        Val::Str(s) => !s.is_empty(),
-        Val::Vec(v) => !v.is_empty(),
-        Val::Map(m) => !m.is_empty(),
-        _ => true, // Other types are considered truthy
-    };
+/// or: return the first truthy argument, or the last argument when none
+/// is. Arguments are already evaluated (or is eager); the first may be a
+/// lazy thunk from the wrapper's lazy parameter.
+pub fn or(vm: &mut crate::lang::runtime::vm::VirtualMachine, args: &[Val]) -> HotResult<Val> {
+    if args.is_empty() {
+        return HotResult::Err(Val::from("::hot::bool/or expects at least 1 argument"));
+    }
+    let mut last = Val::Null;
+    for arg in args {
+        let forced = match force_for_truthiness(vm, arg) {
+            Some(v) => v,
+            None => continue, // halted thunk: falsy, keep scanning
+        };
+        if forced.is_truthy() {
+            return HotResult::Ok(forced);
+        }
+        last = forced;
+    }
+    HotResult::Ok(last)
+}
 
-    HotResult::Ok(Val::Bool(is_truthy))
+/// and: return the first falsy argument, or the last argument when all
+/// are truthy.
+pub fn and(vm: &mut crate::lang::runtime::vm::VirtualMachine, args: &[Val]) -> HotResult<Val> {
+    if args.is_empty() {
+        return HotResult::Err(Val::from("::hot::bool/and expects at least 1 argument"));
+    }
+    let mut last = Val::Null;
+    for arg in args {
+        let forced = match force_for_truthiness(vm, arg) {
+            Some(v) => v,
+            None => return HotResult::Ok(Val::Null), // halted thunk: falsy
+        };
+        if !forced.is_truthy() {
+            return HotResult::Ok(forced);
+        }
+        last = forced;
+    }
+    HotResult::Ok(last)
 }

@@ -1,0 +1,21 @@
+::hot::pkg ns
+
+hot.pkg.google-calendar {
+  name: "hot.dev/google-calendar",
+  version: "0.1.0",
+  hot-min-version: "2.6.1",
+  description: "Google Calendar API bindings for Hot: list calendars and create, read, update, and delete events.",
+  author: "Hot Dev",
+  email: "support@hot.dev",
+  license: "Apache-2.0",
+  tags: ["google"],
+  deps: {
+    "hot.dev/google-core": {
+      local: "../google-core",
+      git: "https://github.com/hot-dev/hot",
+      path: "hot/pkg/google-core"
+    }
+  },
+  src-paths: ["src/"],
+  test-paths: ["test/"]
+}

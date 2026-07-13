@@ -74,25 +74,13 @@ fn
     }
 
     // Add optional fields
-    with-subject if(is-null(options.subject), with-target,
-        merge(with-target, { Subject: options.subject })
-    )
-
-    with-structure if(is-null(options.message_structure), with-subject,
-        merge(with-subject, { MessageStructure: options.message_structure })
-    )
-
-    with-attributes if(is-null(options.message_attributes), with-structure,
-        merge(with-structure, { MessageAttributes: options.message_attributes })
-    )
-
-    with-dedup-id if(is-null(options.message_deduplication_id), with-attributes,
-        merge(with-attributes, { MessageDeduplicationId: options.message_deduplication_id })
-    )
-
-    with-group-id if(is-null(options.message_group_id), with-dedup-id,
-        merge(with-dedup-id, { MessageGroupId: options.message_group_id })
-    )
+    with-group-id merge(with-target, filter-vals({
+        Subject: options.subject,
+        MessageStructure: options.message_structure,
+        MessageAttributes: options.message_attributes,
+        MessageDeduplicationId: options.message_deduplication_id,
+        MessageGroupId: options.message_group_id
+    }, is-some))
 
     body to-json(with-group-id)
 
@@ -108,13 +96,13 @@ fn
 
     response http-request("POST", url, signed-headers, body)
 
-    if(is-ok-response(response),
-        PublishResponse({
+    cond {
+        is-ok-response(response) => { PublishResponse({
             message_id: response.body.MessageId,
             sequence_number: response.body.SequenceNumber
-        }),
-        err(AwsError(response))
-    )
+        }) }
+        => { err(AwsError(response)) }
+    }
 },
 (topic_arn: Str, message: Str): PublishResponse | AwsError {
     publish(topic_arn, message, {})
@@ -150,25 +138,17 @@ fn (topic_arn: Str, entries: Vec<Map>): PublishBatchResponse | AwsError {
     api-entries map(entries, (e) {
         entry { Id: e.id, Message: e.message }
 
-        with-subject if(is-null(e.subject), entry,
-            merge(entry, { Subject: e.subject })
-        )
+        with-dedup-id merge(entry, filter-vals({
+            Subject: e.subject,
+            MessageStructure: e.message_structure,
+            MessageAttributes: e.message_attributes,
+            MessageDeduplicationId: e.message_deduplication_id
+        }, is-some))
 
-        with-structure if(is-null(e.message_structure), with-subject,
-            merge(with-subject, { MessageStructure: e.message_structure })
-        )
-
-        with-attributes if(is-null(e.message_attributes), with-structure,
-            merge(with-structure, { MessageAttributes: e.message_attributes })
-        )
-
-        with-dedup-id if(is-null(e.message_deduplication_id), with-attributes,
-            merge(with-attributes, { MessageDeduplicationId: e.message_deduplication_id })
-        )
-
-        if(is-null(e.message_group_id), with-dedup-id,
-            merge(with-dedup-id, { MessageGroupId: e.message_group_id })
-        )
+        cond {
+            is-null(e.message_group_id) => { with-dedup-id }
+            => { merge(with-dedup-id, { MessageGroupId: e.message_group_id }) }
+        }
     })
 
     body to-json({
@@ -188,22 +168,28 @@ fn (topic_arn: Str, entries: Vec<Map>): PublishBatchResponse | AwsError {
 
     response http-request("POST", url, signed-headers, body)
 
-    if(is-ok-response(response),
-        PublishBatchResponse({
-            successful: if(is-null(response.body.Successful), [], map(response.body.Successful, PublishBatchResultEntry({
+    cond {
+        is-ok-response(response) => { PublishBatchResponse({
+            successful: cond {
+                is-null(response.body.Successful) => { [] }
+                => { map(response.body.Successful, PublishBatchResultEntry({
                 id: %.Id,
                 message_id: %.MessageId,
                 sequence_number: %.SequenceNumber
-            }))),
-            failed: if(is-null(response.body.Failed), [], map(response.body.Failed, PublishBatchFailureEntry({
+            })) }
+            },
+            failed: cond {
+                is-null(response.body.Failed) => { [] }
+                => { map(response.body.Failed, PublishBatchFailureEntry({
                 id: %.Id,
                 code: %.Code,
                 message: %.Message,
                 sender_fault: %.SenderFault
-            })))
-        }),
-        err(AwsError(response))
-    )
+            })) }
+            }
+        }) }
+        => { err(AwsError(response)) }
+    }
 }
 
 // Helper to publish with message attributes
@@ -286,27 +272,30 @@ fn
     // Add message attributes for SMS options
     sms-attrs {}
 
-    with-sender-id if(is-null(options.sender_id), sms-attrs,
-        merge(sms-attrs, {
+    with-sender-id cond {
+        is-null(options.sender_id) => { sms-attrs }
+        => { merge(sms-attrs, {
             "AWS.SNS.SMS.SenderID": {
                 DataType: "String",
                 StringValue: options.sender_id
             }
-        })
-    )
+        }) }
+    }
 
-    with-type if(is-null(options.message_type), with-sender-id,
-        merge(with-sender-id, {
+    with-type cond {
+        is-null(options.message_type) => { with-sender-id }
+        => { merge(with-sender-id, {
             "AWS.SNS.SMS.SMSType": {
                 DataType: "String",
                 StringValue: options.message_type
             }
-        })
-    )
+        }) }
+    }
 
-    with-attributes if(is-empty(with-type), request-body,
-        merge(request-body, { MessageAttributes: with-type })
-    )
+    with-attributes cond {
+        is-empty(with-type) => { request-body }
+        => { merge(request-body, { MessageAttributes: with-type }) }
+    }
 
     body to-json(with-attributes)
 
@@ -322,13 +311,13 @@ fn
 
     response http-request("POST", url, signed-headers, body)
 
-    if(is-ok-response(response),
-        PublishResponse({
+    cond {
+        is-ok-response(response) => { PublishResponse({
             message_id: response.body.MessageId,
             sequence_number: response.body.SequenceNumber
-        }),
-        err(AwsError(response))
-    )
+        }) }
+        => { err(AwsError(response)) }
+    }
 },
 (phone_number: Str, message: Str): PublishResponse | AwsError {
     send-sms(phone_number, message, {})

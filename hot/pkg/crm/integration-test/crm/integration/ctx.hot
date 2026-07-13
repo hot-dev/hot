@@ -1,0 +1,17 @@
+::crm::integration::ctx ns
+
+::env ::hot::env
+
+// Placeholder credentials for the crm integration suite. Unset
+// environment variables are skipped entirely, so absent credentials
+// behave exactly as if never configured.
+::hot::ctx/set(filter-vals({
+    "hubspot.token": ::env/get("HUBSPOT_TOKEN", ""),
+    "attio.api.key": ::env/get("ATTIO_API_KEY", ""),
+    "salesforce.client-id": ::env/get("SALESFORCE_CLIENT_ID", ""),
+    "salesforce.client-secret": ::env/get("SALESFORCE_CLIENT_SECRET", ""),
+    "salesforce.private.key": ::env/get("SALESFORCE_PRIVATE_KEY", ""),
+    "salesforce.username": ::env/get("SALESFORCE_USERNAME", ""),
+    "salesforce.access.token": ::env/get("SALESFORCE_ACCESS_TOKEN", ""),
+    "salesforce.instance.url": ::env/get("SALESFORCE_INSTANCE_URL", ""),
+}, (v) { not(is-empty(v)) }))

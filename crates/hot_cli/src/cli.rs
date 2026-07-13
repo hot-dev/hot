@@ -90,7 +90,7 @@ pub(crate) struct GlobalOptions {
     pub(crate) engine_threads: Option<usize>,
 
     #[arg(
-        long = "jit",
+        long = "jit.mode",
         value_name = "MODE",
         help = "JIT compilation: enabled, disabled (default: enabled on supported platforms)",
         global = true
@@ -172,21 +172,20 @@ pub(crate) struct GlobalOptions {
 
     #[arg(
         long = "deploy.auto",
-        help = "Automatically deploy live builds when running CLI commands",
+        help = "Automatically deploy live builds when running CLI commands [default: true]",
         value_name = "ENABLED",
         value_parser = BoolishValueParser::new(),
         action = clap::ArgAction::Set,
-        default_value = "true",
         global = true,
     )]
-    pub(crate) deploy_auto: bool,
+    pub(crate) deploy_auto: Option<bool>,
 
     #[command(flatten)]
     pub(crate) emitter: EmitterOptions,
 
     #[arg(
         long = "with-tests",
-        help = "Include test files in compile/check/watch [default: false]",
+        help = "Include test files in compile/check/watch (conf: check.with-tests [default: true], watch.with-tests [default: false])",
         value_name = "ENABLED",
         value_parser = BoolishValueParser::new(),
         action = clap::ArgAction::Set,
@@ -260,7 +259,7 @@ pub(crate) struct QueueOptions {
     pub(crate) redis_uri: Option<String>,
 
     #[arg(
-        long = "serialization",
+        long = "serialization.type",
         value_name = "FORMAT",
         help = "Serialization format: json, zstdjson"
     )]
@@ -273,7 +272,7 @@ pub(crate) struct WorkerOptions {
     #[arg(
         long = "worker.threads",
         value_name = "COUNT",
-        help = "Worker thread count (default: 8)"
+        help = "Worker thread count (default: 2)"
     )]
     pub(crate) worker_threads: Option<usize>,
 }

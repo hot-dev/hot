@@ -77,14 +77,14 @@ fn (model_id: Str, body: Map, content_type: Str, accept: Str): InvokeModelRespon
 
     response http-request("POST", url, signed-headers, body-str)
 
-    if(is-ok-response(response),
-        InvokeModelResponse({
+    cond {
+        is-ok-response(response) => { InvokeModelResponse({
             body: response.body,
             content_type: response.headers.content_type,
             status_code: response.status
-        }),
-        err(AwsError(response))
-    )
+        }) }
+        => { err(AwsError(response)) }
+    }
 }
 
 // Invoke Claude models via Bedrock
@@ -124,21 +124,12 @@ fn
         max_tokens: max_tokens
     }
 
-    with-system if(is-null(system), request-body,
-        merge(request-body, { system: system })
-    )
-
-    with-temp if(is-null(temperature), with-system,
-        merge(with-system, { temperature: temperature })
-    )
-
-    with-top-p if(is-null(top_p), with-temp,
-        merge(with-temp, { top_p: top_p })
-    )
-
-    with-stop if(is-null(stop_sequences), with-top-p,
-        merge(with-top-p, { stop_sequences: stop_sequences })
-    )
+    with-stop merge(request-body, filter-vals({
+        system: system,
+        temperature: temperature,
+        top_p: top_p,
+        stop_sequences: stop_sequences
+    }, is-some))
 
     body-str to-json(with-stop)
 
@@ -152,8 +143,8 @@ fn
 
     response http-request("POST", url, signed-headers, body-str)
 
-    if(is-ok-response(response),
-        ClaudeResponse({
+    cond {
+        is-ok-response(response) => { ClaudeResponse({
             id: response.body.id,
             type: response.body.type,
             role: response.body.role,
@@ -162,9 +153,9 @@ fn
             stop_reason: response.body.stop_reason,
             stop_sequence: response.body.stop_sequence,
             usage: response.body.usage
-        }),
-        err(AwsError(response))
-    )
+        }) }
+        => { err(AwsError(response)) }
+    }
 },
 (model_id: Str, messages: Vec<Map>, max_tokens: Int, system: Str): ClaudeResponse | AwsError {
     invoke-claude(model_id, messages, max_tokens, system, null, null, null)
@@ -220,9 +211,9 @@ fn
         topP: if(is-null(top_p), 0.9, top_p)
     }
 
-    with-stop if(is-null(stop_sequences), text-gen-config,
-        merge(text-gen-config, { stopSequences: stop_sequences })
-    )
+    with-stop merge(text-gen-config, filter-vals({
+        stopSequences: stop_sequences
+    }, is-some))
 
     request-body {
         inputText: input_text,
@@ -241,13 +232,13 @@ fn
 
     response http-request("POST", url, signed-headers, body-str)
 
-    if(is-ok-response(response),
-        TitanResponse({
+    cond {
+        is-ok-response(response) => { TitanResponse({
             input_text_token_count: response.body.inputTextTokenCount,
             results: response.body.results
-        }),
-        err(AwsError(response))
-    )
+        }) }
+        => { err(AwsError(response)) }
+    }
 },
 (model_id: Str, input_text: Str, max_token_count: Int): TitanResponse | AwsError {
     invoke-titan(model_id, input_text, max_token_count, null, null, null)
@@ -302,14 +293,14 @@ fn
 
     response http-request("POST", url, signed-headers, body-str)
 
-    if(is-ok-response(response),
-        InvokeModelResponse({
+    cond {
+        is-ok-response(response) => { InvokeModelResponse({
             body: response.body,
             content_type: response.headers.content_type,
             status_code: response.status
-        }),
-        err(AwsError(response))
-    )
+        }) }
+        => { err(AwsError(response)) }
+    }
 },
 (model_id: Str, prompt: Str, max_gen_len: Int): InvokeModelResponse | AwsError {
     invoke-llama(model_id, prompt, max_gen_len, null, null)
@@ -352,9 +343,9 @@ fn
         top_p: if(is-null(top_p), 0.9, top_p)
     }
 
-    with-stop if(is-null(stop), request-body,
-        merge(request-body, { stop: stop })
-    )
+    with-stop merge(request-body, filter-vals({
+        stop: stop
+    }, is-some))
 
     body-str to-json(with-stop)
 
@@ -368,14 +359,14 @@ fn
 
     response http-request("POST", url, signed-headers, body-str)
 
-    if(is-ok-response(response),
-        InvokeModelResponse({
+    cond {
+        is-ok-response(response) => { InvokeModelResponse({
             body: response.body,
             content_type: response.headers.content_type,
             status_code: response.status
-        }),
-        err(AwsError(response))
-    )
+        }) }
+        => { err(AwsError(response)) }
+    }
 },
 (model_id: Str, prompt: Str, max_tokens: Int): InvokeModelResponse | AwsError {
     invoke-mistral(model_id, prompt, max_tokens, null, null, null)

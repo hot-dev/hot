@@ -1,0 +1,74 @@
+::web-search::test ns
+meta ["test"]
+
+::tavily ::web-search::tavily
+::brave ::web-search::brave
+::exa ::web-search::exa
+
+// ============================================================================
+// Provider selection
+// ============================================================================
+
+test-no-provider-errors
+meta ["test"] fn () {
+    out ::web-search/search("anything")
+    assert(is-err(out), "no configured provider should be a clear error")
+    payload if-err(out, (e) { e })
+    assert(contains(Str(payload), "no provider configured"))
+}
+
+// ============================================================================
+// Normalizers (shapes from each provider's documented responses)
+// ============================================================================
+
+test-tavily-normalize
+meta ["test"] fn () {
+    body {
+        query: "q",
+        results: [
+            {title: "First", url: "https://a.example", content: "snippet a", score: 0.98},
+            {title: "Second", url: "https://b.example", content: "snippet b", score: 0.72}
+        ]
+    }
+
+    out ::tavily/normalize(body)
+    assert-eq(2, length(out))
+    assert-eq("First", first(out).title)
+    assert-eq(0.98, first(out).score)
+    assert-eq("https://b.example", last(out).url)
+}
+
+test-brave-normalize
+meta ["test"] fn () {
+    body {
+        web: {
+            results: [
+                {title: "Hit", url: "https://c.example", description: "desc text"}
+            ]
+        }
+    }
+
+    out ::brave/normalize(body)
+    assert-eq(1, length(out))
+    assert-eq("desc text", first(out).content)
+    assert(is-null(first(out).score), "brave has no score")
+}
+
+test-brave-normalize-empty-body
+meta ["test"] fn () {
+    assert-eq([], ::brave/normalize({}), "missing web section yields no results, not an error")
+}
+
+test-exa-normalize
+meta ["test"] fn () {
+    body {
+        results: [
+            {title: "Neural hit", url: "https://d.example", score: 0.41, text: "page text"},
+            {title: null, url: "https://e.example"}
+        ]
+    }
+
+    out ::exa/normalize(body)
+    assert-eq("page text", first(out).content)
+    assert-eq("", last(out).title, "null titles normalize to empty string")
+}

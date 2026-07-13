@@ -1,0 +1,92 @@
+::salesforce::auth ns
+meta {
+    doc: """Salesforce session acquisition. Usually used indirectly through `::salesforce::api`."""
+}
+
+::ctx ::hot::ctx
+::jwt ::jwt
+::oauth2 ::oauth2
+
+login-url fn (): Str {
+  or(::ctx/get("salesforce.login.url"), ::salesforce/DEFAULT_LOGIN_URL)
+}
+
+build-jwt-claims
+meta {
+    doc: """Build the connected-app JWT-bearer claims: `iss` = consumer key, `sub` = username, `aud` = the login URL, 3-minute expiry. Exposed for testing."""
+}
+fn (client-id: Str, username: Str, audience: Str): Map {
+  {
+    iss: client-id,
+    sub: username,
+    aud: audience,
+    exp: add(::jwt/now-seconds(), 180)
+  }
+}
+
+session
+meta {
+    ctx: {
+        "salesforce.access.token": {required: false},
+        "salesforce.instance.url": {required: false},
+        "salesforce.client-id": {required: false},
+        "salesforce.client-secret": {required: false},
+        "salesforce.username": {required: false},
+        "salesforce.private.key": {required: false},
+        "salesforce.login.url": {required: false}
+    },
+    doc: """
+    Resolve a Salesforce session: `{token, instance-url}`. Checks, in
+    order: an explicit `salesforce.access.token` (+ `instance.url`), the
+    client-credentials flow, then the JWT-bearer flow. Returns an Err
+    when nothing is configured or the token exchange fails.
+    """
+}
+fn (): Map {
+  explicit or(::ctx/get("salesforce.access.token"), "")
+  client-secret or(::ctx/get("salesforce.client-secret"), "")
+  private-key or(::ctx/get("salesforce.private.key"), "")
+  token-url `${login-url()}/services/oauth2/token`
+
+  cond {
+    not(is-empty(explicit)) => {
+      instance or(::ctx/get("salesforce.instance.url"), "")
+      cond {
+        is-empty(instance) => { err("salesforce: salesforce.access.token is set but salesforce.instance.url is missing") }
+        => { {token: explicit, instance-url: instance} }
+      }
+    }
+
+    not(is-empty(client-secret)) => {
+      tokens ::oauth2/client-credentials(token-url, {
+        client-id: ::ctx/get("salesforce.client-id"),
+        client-secret: client-secret
+      })
+      match tokens {
+        Result.Err => { err(tokens) }
+
+        _ => { {token: tokens.access_token, instance-url: tokens.instance_url} }
+      }
+    }
+
+    not(is-empty(private-key)) => {
+      claims build-jwt-claims(::ctx/get("salesforce.client-id"), ::ctx/get("salesforce.username"), login-url())
+      assertion ::jwt/sign(claims, private-key, "RS256")
+      match assertion {
+        Result.Err => { err(assertion) }
+
+        _ => {
+          tokens ::oauth2/jwt-bearer(token-url, assertion)
+          match tokens {
+            Result.Err => { err(tokens) }
+
+            _ => { {token: tokens.access_token, instance-url: tokens.instance_url} }
+          }
+        }
+      }
+    }
+    => {
+      err("salesforce: no credentials configured. Set salesforce.access.token + instance.url, the client-credentials pair, or the JWT-bearer trio in Context Variables.")
+    }
+  }
+}

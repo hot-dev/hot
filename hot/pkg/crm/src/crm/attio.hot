@@ -1,0 +1,96 @@
+::crm::attio ns
+
+::records ::attio::records
+::notes ::attio::notes
+
+// Attio value entries can be plain or {value/email_address/...} shaped;
+// pull the useful scalar out of the first entry.
+first-value fn (values: Map, attribute: Str, key: Str): Any {
+  entries get(values, attribute, [])
+  cond {
+    is-empty(entries) => { null }
+    => { get(first(entries), key) }
+  }
+}
+
+normalize-contact
+meta {
+    doc: """Normalize an Attio person record into `::crm/Contact`. Exposed for testing."""
+}
+fn (record: Map): ::crm/Contact {
+  values or(get(record, "values"), {})
+  ::crm/Contact({
+    id: record.id.record_id,
+    email: first-value(values, "email_addresses", "email_address"),
+    first-name: first-value(values, "name", "first_name"),
+    last-name: first-value(values, "name", "last_name"),
+    provider: "attio",
+    raw: untype(record)
+  })
+}
+
+normalize-company fn (record: Map): ::crm/Company {
+  values or(get(record, "values"), {})
+  ::crm/Company({
+    id: record.id.record_id,
+    name: first-value(values, "name", "value"),
+    domain: first-value(values, "domains", "domain"),
+    provider: "attio",
+    raw: untype(record)
+  })
+}
+
+build-person-values
+meta {
+    doc: """Build Attio person values from normalized fields. Exposed for testing."""
+}
+fn (fields: Map): Map {
+  first-name get(fields, "first-name")
+  last-name get(fields, "last-name")
+  base {email_addresses: [{email_address: fields.email}]}
+  cond {
+    and(is-null(first-name), is-null(last-name)) => { base }
+    => {
+      full trim(`${or(first-name, "")} ${or(last-name, "")}`)
+      {...base, name: [{first_name: or(first-name, ""), last_name: or(last-name, ""), full_name: full}]}
+    }
+  }
+}
+
+upsert-contact fn (fields: Map): ::crm/Contact {
+  asserted ::records/assert-record("people", "email_addresses", build-person-values(fields))
+  match asserted {
+    Result.Err => { err(asserted) }
+
+    _ => { normalize-contact(asserted) }
+  }
+}
+
+find-contact fn (email: Str): Any {
+  out ::records/query-records("people", {
+    filter: {email_addresses: {email_address: {"$eq": email}}},
+    limit: 1
+  })
+  cond {
+    is-err(out) => { out }
+    is-empty(out.data) => { null }
+    => { normalize-contact(first(out.data)) }
+  }
+}
+
+log-activity fn (contact-id: Str, body: Str): Any {
+  ::notes/create-note("people", contact-id, "Note", body)
+}
+
+upsert-company fn (fields: Map): ::crm/Company {
+  values filter-vals({
+    domains: [{domain: get(fields, "domain")}],
+    name: if(is-null(get(fields, "name")), null, [{value: get(fields, "name")}])
+  }, is-some)
+  asserted ::records/assert-record("companies", "domains", values)
+  match asserted {
+    Result.Err => { err(asserted) }
+
+    _ => { normalize-company(asserted) }
+  }
+}

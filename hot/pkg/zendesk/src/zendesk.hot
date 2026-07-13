@@ -1,0 +1,165 @@
+::zendesk ns
+meta {
+    doc: """
+    Zendesk Support bindings: tickets, comments, search, and users.
+
+    **Setup** — context variables:
+    - `zendesk.subdomain` — the `acme` in `acme.zendesk.com`
+    - `zendesk.email` — the agent/admin email the token belongs to
+    - `zendesk.api.token` — an API token (Admin Center → Apps and
+      integrations → APIs)
+
+    **Quick start**
+
+    ```hot
+    ::zd ::zendesk
+
+    urgent ::zd/search("type:ticket status:open priority:urgent")
+
+    ticket ::zd/create-ticket("Login page down", "Customers report 500s on /login.", {priority: "urgent"})
+    ::zd/add-comment(ticket.ticket.id, "Deployed a rollback; monitoring.", false)
+    ```
+    """
+}
+
+::ctx ::hot::ctx
+::b64 ::hot::base64
+::uri ::hot::uri
+
+base-url fn (subdomain: Str): Str {
+  `https://${subdomain}.zendesk.com/api/v2`
+}
+
+auth-header
+meta {
+    doc: """Zendesk token auth: `Basic base64("{email}/token:{api-token}")`. Exposed for testing."""
+}
+fn (email: Str, token: Str): Str {
+  credentials `${email}/token:${token}`
+  `Basic ${::b64/encode(Bytes(credentials))}`
+}
+
+request fn
+(method: Str, path: Str, body: Any): Any {
+  request(method, path, body, ::ctx/get("zendesk.subdomain"), ::ctx/get("zendesk.email"), ::ctx/get("zendesk.api.token"))
+},
+// 6-arity: explicit subdomain + credential override
+(method: Str, path: Str, body: Any, subdomain: Str, email: Str, api-token: Str): Any {
+  base-headers {
+    Authorization: auth-header(email, api-token),
+    Accept: "application/json"
+  }
+
+  headers cond {
+    eq(body, "") => { base-headers }
+    => { {...base-headers, Content-Type: "application/json"} }
+  }
+
+  encoded if(eq(body, ""), "", to-json(untype(body)))
+  response ::hot::http/request(::hot::http/HttpRequest({
+    method,
+    url: `${base-url(subdomain)}${path}`,
+    headers: headers,
+    body: encoded
+  }))
+  cond {
+    is-err(response) => { response }
+    ::hot::http/is-ok-response(response) => { response.body }
+    => { err({status: response.status, body: response.body}) }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Tickets
+// ---------------------------------------------------------------------------
+
+list-tickets
+meta {
+    ctx: {"zendesk.subdomain": {required: true}, "zendesk.email": {required: true}, "zendesk.api.token": {required: true}},
+    doc: """GET /tickets.json - Recent tickets (paged)."""
+}
+fn (): Map {
+  request("GET", "/tickets.json", "")
+}
+
+get-ticket
+meta {
+    doc: """GET /tickets/{id}.json - One ticket."""
+}
+fn (id: Any): Map {
+  request("GET", `/tickets/${id}.json`, "")
+}
+
+create-ticket
+meta {
+    doc: """POST /tickets.json - Open a ticket. `options`: `priority` ("low"/"normal"/"high"/"urgent"), `type`, `tags` (Vec), `requester` (`{name, email}`), `assignee_id`."""
+}
+fn
+(subject: Str, body: Str): Map {
+  create-ticket(subject, body, {})
+},
+(subject: Str, body: Str, options: Map): Map {
+  request("POST", "/tickets.json", {
+    ticket: {subject: subject, comment: {body: body}, ...options}
+  })
+}
+
+update-ticket
+meta {
+    doc: """PUT /tickets/{id}.json - Update ticket fields (`status`, `priority`, `assignee_id`, `tags`, ...)."""
+}
+fn (id: Any, changes: Map): Map {
+  request("PUT", `/tickets/${id}.json`, {ticket: changes})
+}
+
+add-comment
+meta {
+    doc: """PUT /tickets/{id}.json with a comment - Add a reply (`public: true`) or internal note (`public: false`)."""
+}
+fn (id: Any, body: Str, public: Bool): Map {
+  request("PUT", `/tickets/${id}.json`, {ticket: {comment: {body: body, public: public}}})
+}
+
+list-comments
+meta {
+    doc: """GET /tickets/{id}/comments.json - A ticket's conversation."""
+}
+fn (id: Any): Map {
+  request("GET", `/tickets/${id}/comments.json`, "")
+}
+
+// ---------------------------------------------------------------------------
+// Search & users
+// ---------------------------------------------------------------------------
+
+search
+meta {
+    doc: """
+    GET /search.json - Zendesk search syntax across tickets/users/orgs,
+    e.g. `"type:ticket status:open priority:urgent"`.
+    """
+}
+fn (query: Str): Map {
+  request("GET", `/search.json?query=${::uri/encode(query)}`, "")
+}
+
+get-user
+meta {
+    doc: """GET /users/{id}.json - One user."""
+}
+fn (id: Any): Map {
+  request("GET", `/users/${id}.json`, "")
+}
+
+find-user-by-email
+meta {
+    doc: """GET /users/search.json?query= - Find a user by email. Returns the user or null."""
+}
+fn (email: Str): Any {
+  out request("GET", `/users/search.json?query=${::uri/encode(email)}`, "")
+  cond {
+    is-err(out) => { out }
+    is-empty(out.users) => { null }
+    => { first(out.users) }
+  }
+}

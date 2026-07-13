@@ -523,6 +523,9 @@ impl Compiler {
                                 let has_result_arms = flow.expressions.iter().any(|expr| {
                                     if let Value::MatchArm(arm) = expr {
                                         arm.type_name.as_deref() == Some("Result")
+                                            || arm.alternatives.iter().any(|alt| {
+                                                alt.type_name.as_deref() == Some("Result")
+                                            })
                                     } else {
                                         false
                                     }
@@ -1760,7 +1763,20 @@ impl Compiler {
                 let result_reg = self.compile_flow(flow)?;
                 Ok(result_reg)
             }
-            Value::Match(match_expr) => self.compile_match_expression(match_expr),
+            Value::Match(match_expr) => {
+                // Like the Flow arm above: compile AND store, or the binding
+                // silently vanishes — top-level `out match x { ... }` bound
+                // nothing, and standalone top-level matches lost their
+                // auto-named $var result (the run result then fell back to
+                // whatever variable preceded them in the namespace).
+                let match_reg = self.compile_match_expression(match_expr)?;
+                tracing::trace!(
+                    "Compiler: About to store variable '{}' (match)",
+                    var.sym.name()
+                );
+                self.store_variable(var.sym.name(), match_reg);
+                Ok(match_reg)
+            }
             Value::MatchArm(_) => {
                 // MatchArm should only appear inside match flow function bodies
                 Err(format!(
@@ -1895,12 +1911,17 @@ impl Compiler {
         {
             let has_result_arms = flow.expressions.iter().any(|expr| {
                 if let crate::lang::ast::Value::MatchArm(arm) = expr {
-                    if let Some(type_name) = &arm.type_name {
-                        let (resolved, _) = self.resolve_type_path(type_name);
-                        resolved == "::hot::type/Result"
-                    } else {
-                        false
-                    }
+                    let atom_is_result = |type_name: &Option<String>| {
+                        type_name.as_ref().is_some_and(|type_name| {
+                            let (resolved, _) = self.resolve_type_path(type_name);
+                            resolved == "::hot::type/Result"
+                        })
+                    };
+                    atom_is_result(&arm.type_name)
+                        || arm
+                            .alternatives
+                            .iter()
+                            .any(|alt| atom_is_result(&alt.type_name))
                 } else {
                     false
                 }
@@ -2025,12 +2046,17 @@ impl Compiler {
         {
             let has_result_arms = flow.expressions.iter().any(|expr| {
                 if let crate::lang::ast::Value::MatchArm(arm) = expr {
-                    if let Some(type_name) = &arm.type_name {
-                        let (resolved, _) = self.resolve_type_path(type_name);
-                        resolved == "::hot::type/Result"
-                    } else {
-                        false
-                    }
+                    let atom_is_result = |type_name: &Option<String>| {
+                        type_name.as_ref().is_some_and(|type_name| {
+                            let (resolved, _) = self.resolve_type_path(type_name);
+                            resolved == "::hot::type/Result"
+                        })
+                    };
+                    atom_is_result(&arm.type_name)
+                        || arm
+                            .alternatives
+                            .iter()
+                            .any(|alt| atom_is_result(&alt.type_name))
                 } else {
                     false
                 }
@@ -7296,17 +7322,188 @@ impl Compiler {
     /// Uses the flow infrastructure (BeginFlow/EndFlow) for proper result modifier support
     /// Check if match arms contain Result.Ok or Result.Err patterns
     fn match_has_result_patterns(&self, arms: &[crate::lang::ast::MatchArm]) -> bool {
+        let atom_is_result = |type_name: &Option<String>| {
+            type_name.as_ref().is_some_and(|type_name| {
+                let (resolved, _) = self.resolve_type_path(type_name);
+                resolved == "::hot::type/Result"
+            })
+        };
         arms.iter().any(|arm| {
-            if let (Some(type_name), Some(_variant)) = (&arm.type_name, &arm.variant) {
-                let (resolved, _) = self.resolve_type_path(type_name);
-                resolved == "::hot::type/Result"
-            } else if let (Some(type_name), None) = (&arm.type_name, &arm.variant) {
-                let (resolved, _) = self.resolve_type_path(type_name);
-                resolved == "::hot::type/Result"
-            } else {
-                false
-            }
+            atom_is_result(&arm.type_name)
+                || arm
+                    .alternatives
+                    .iter()
+                    .any(|alt| atom_is_result(&alt.type_name))
         })
+    }
+
+    /// True if the pattern atom is a `Result.Ok` / `Result.Err` variant match.
+    fn is_result_ok_err_atom(&self, type_name: &Option<String>, variant: &Option<String>) -> bool {
+        matches!((type_name, variant), (Some(type_name), Some(variant))
+        if {
+            let (resolved, _) = self.resolve_type_path(type_name);
+            resolved == "::hot::type/Result" && (variant == "Ok" || variant == "Err")
+        })
+    }
+
+    /// Human-readable name for one match-arm pattern atom, used for match-all
+    /// result keys and branch names (union arms join their atoms with " | ").
+    fn match_atom_branch_name(
+        type_name: &Option<String>,
+        variant: &Option<String>,
+        value_literal: &Option<Box<Value>>,
+    ) -> String {
+        if let Some(value_literal) = value_literal {
+            // For value arms, use a string representation of the literal as the key
+            match value_literal.as_ref() {
+                Value::Val(val, _) => val.format(crate::val::ValFormat::Hot),
+                _ => "_value".to_string(),
+            }
+        } else {
+            match (type_name, variant) {
+                (Some(type_name), Some(variant)) => format!("{}.{}", type_name, variant),
+                (Some(type_name), None) => type_name.clone(),
+                (None, Some(variant)) => variant.clone(),
+                (None, None) => "_".to_string(),
+            }
+        }
+    }
+
+    /// Emit the comparison for one match-arm pattern atom into `dest`.
+    fn emit_match_atom_comparison(
+        &mut self,
+        dest: RegisterId,
+        value_reg: RegisterId,
+        type_field_reg: RegisterId,
+        type_name: &Option<String>,
+        variant: &Option<String>,
+        value_literal: &Option<Box<Value>>,
+    ) -> Result<(), String> {
+        if let Some(value_literal) = value_literal {
+            // Value equality arm: compare subject value directly against the literal
+            let literal_reg = self.compile_value(value_literal)?;
+            self.emit_instruction(Instruction::Eq {
+                dest,
+                left: value_reg,
+                right: literal_reg,
+            });
+            return Ok(());
+        }
+        match (type_name, variant) {
+            (Some(type_name), Some(variant)) => {
+                // Qualified variant (Type.Variant) - resolve type and do exact match
+                let (full_type_path, was_found) = self.resolve_type_path(type_name);
+
+                if !was_found {
+                    return Err(format!(
+                        "Type '{}' in match pattern could not be resolved. \
+                     Type aliases used in match patterns must be defined at namespace level, \
+                     not inside function bodies.",
+                        type_name
+                    ));
+                }
+
+                let full_variant_path = format!("{}.{}", full_type_path, variant);
+
+                // Load the expected full type path
+                let expected_type_reg = self.allocate_register();
+                let expected_type_constant = self
+                    .program
+                    .add_constant(Constant::Val(Val::from(full_variant_path)));
+                self.emit_instruction(Instruction::LoadConst {
+                    dest: expected_type_reg,
+                    constant: expected_type_constant,
+                });
+
+                // Compare: $type == expected full path (exact match)
+                self.emit_instruction(Instruction::Eq {
+                    dest,
+                    left: type_field_reg,
+                    right: expected_type_reg,
+                });
+            }
+            (Some(type_name), None) => {
+                // Type-level matching (any variant of Type)
+                // For primitives like Int: exact match on "::hot::type/Int"
+                // For enums like Result.Ok: prefix match on "::hot::type/Result."
+                //
+                // Use the IsType instruction which handles both cases correctly
+                // without going through function call (avoids Result auto-unwrapping)
+                let (full_type_path, was_found) = self.resolve_type_path(type_name);
+
+                if !was_found {
+                    return Err(format!(
+                        "Type '{}' in match pattern could not be resolved. \
+                     Type aliases used in match patterns must be defined at namespace level, \
+                     not inside function bodies.",
+                        type_name
+                    ));
+                }
+
+                // `Any` is the top type: it matches every value, so compile the
+                // check to a constant `true`. The IsType paths compare concrete
+                // type paths/tokens and would never match it (the `is-type`
+                // native special-cases Any the same way).
+                if full_type_path == "::hot::type/Any" {
+                    let true_constant = self.program.add_constant(Constant::Val(Val::Bool(true)));
+                    self.emit_instruction(Instruction::LoadConst {
+                        dest,
+                        constant: true_constant,
+                    });
+                    return Ok(());
+                }
+
+                // Load the expected type path as a string
+                let expected_type_reg = self.allocate_register();
+                let expected_type_constant = self
+                    .program
+                    .add_constant(Constant::Val(Val::from(full_type_path.clone())));
+                self.emit_instruction(Instruction::LoadConst {
+                    dest: expected_type_reg,
+                    constant: expected_type_constant,
+                });
+
+                // Use IsType instruction for unified type checking
+                // This handles: exact match (primitives) OR prefix match (enum variants)
+                self.emit_instruction(Instruction::IsType {
+                    dest,
+                    value: value_reg,
+                    type_path: expected_type_reg,
+                });
+            }
+            (None, Some(variant)) => {
+                // Bare variant name (deprecated) - use suffix matching
+                let arm_suffix_reg = self.allocate_register();
+                let suffix = format!(".{}", variant);
+                let arm_suffix_constant =
+                    self.program.add_constant(Constant::Val(Val::from(suffix)));
+                self.emit_instruction(Instruction::LoadConst {
+                    dest: arm_suffix_reg,
+                    constant: arm_suffix_constant,
+                });
+
+                // Compare: $type ends with ".Variant"
+                self.emit_instruction(Instruction::StrEndsWith {
+                    dest,
+                    string: type_field_reg,
+                    suffix: arm_suffix_reg,
+                });
+            }
+            (None, None) => {
+                // Default arm - always matches
+                let true_reg = self.allocate_register();
+                let true_constant = self.program.add_constant(Constant::Val(Val::Bool(true)));
+                self.emit_instruction(Instruction::LoadConst {
+                    dest: true_reg,
+                    constant: true_constant,
+                });
+                self.emit_instruction(Instruction::Move {
+                    dest,
+                    src: true_reg,
+                });
+            }
+        }
+        Ok(())
     }
 
     fn compile_match_expression(
@@ -7402,134 +7599,83 @@ impl Compiler {
             // Construct the branch name for result collection (match-all keys).
             // Suffix with cond_id so branch names don't collide across sibling/
             // nested match expressions after string interning.
-            let base_branch_name = if let Some(value_literal) = &arm.value_literal {
-                // For value arms, use a string representation of the literal as the key
-                match value_literal.as_ref() {
-                    Value::Val(val, _) => val.format(crate::val::ValFormat::Hot),
-                    _ => "_value".to_string(),
-                }
-            } else {
-                match (&arm.type_name, &arm.variant) {
-                    (Some(type_name), Some(variant)) => format!("{}.{}", type_name, variant),
-                    (Some(type_name), None) => type_name.clone(),
-                    (None, Some(variant)) => variant.clone(),
-                    (None, None) => "_".to_string(),
-                }
-            };
+            let mut base_branch_name =
+                Self::match_atom_branch_name(&arm.type_name, &arm.variant, &arm.value_literal);
+            for alt in &arm.alternatives {
+                base_branch_name.push_str(" | ");
+                base_branch_name.push_str(&Self::match_atom_branch_name(
+                    &alt.type_name,
+                    &alt.variant,
+                    &alt.value_literal,
+                ));
+            }
             let branch_name = format!("{}\0c{}", base_branch_name, cond_id);
 
-            // Emit comparison instruction
-            if let Some(value_literal) = &arm.value_literal {
-                // Value equality arm: compare subject value directly against the literal
-                let literal_reg = self.compile_value(value_literal)?;
-                self.emit_instruction(Instruction::Eq {
-                    dest: cmp_result_reg,
-                    left: value_reg,
-                    right: literal_reg,
-                });
+            // Emit comparison instruction(s)
+            if arm.alternatives.is_empty() {
+                self.emit_match_atom_comparison(
+                    cmp_result_reg,
+                    value_reg,
+                    type_field_reg,
+                    &arm.type_name,
+                    &arm.variant,
+                    &arm.value_literal,
+                )?;
             } else {
-                match (&arm.type_name, &arm.variant) {
-                    (Some(type_name), Some(variant)) => {
-                        // Qualified variant (Type.Variant) - resolve type and do exact match
-                        let (full_type_path, was_found) = self.resolve_type_path(type_name);
+                // Union arm (`A | B => ...`): compute each atom's comparison,
+                // then fold them with `::hot::bool/or`. There is no Or
+                // instruction and the compiler never emits jumps (JumpIf
+                // offsets are absolute), so the fold goes through
+                // CallLibBuiltin — `or` is exempt from strict-argument
+                // preparation and its result is the first truthy value.
+                let atom_count = 1 + arm.alternatives.len();
 
-                        if !was_found {
-                            return Err(format!(
-                                "Type '{}' in match pattern could not be resolved. \
-                             Type aliases used in match patterns must be defined at namespace level, \
-                             not inside function bodies.",
-                                type_name
-                            ));
-                        }
-
-                        let full_variant_path = format!("{}.{}", full_type_path, variant);
-
-                        // Load the expected full type path
-                        let expected_type_reg = self.allocate_register();
-                        let expected_type_constant = self
-                            .program
-                            .add_constant(Constant::Val(Val::from(full_variant_path)));
-                        self.emit_instruction(Instruction::LoadConst {
-                            dest: expected_type_reg,
-                            constant: expected_type_constant,
-                        });
-
-                        // Compare: $type == expected full path (exact match)
-                        self.emit_instruction(Instruction::Eq {
-                            dest: cmp_result_reg,
-                            left: type_field_reg,
-                            right: expected_type_reg,
-                        });
-                    }
-                    (Some(type_name), None) => {
-                        // Type-level matching (any variant of Type)
-                        // For primitives like Int: exact match on "::hot::type/Int"
-                        // For enums like Result.Ok: prefix match on "::hot::type/Result."
-                        //
-                        // Use the IsType instruction which handles both cases correctly
-                        // without going through function call (avoids Result auto-unwrapping)
-                        let (full_type_path, was_found) = self.resolve_type_path(type_name);
-
-                        if !was_found {
-                            return Err(format!(
-                                "Type '{}' in match pattern could not be resolved. \
-                             Type aliases used in match patterns must be defined at namespace level, \
-                             not inside function bodies.",
-                                type_name
-                            ));
-                        }
-
-                        // Load the expected type path as a string
-                        let expected_type_reg = self.allocate_register();
-                        let expected_type_constant = self
-                            .program
-                            .add_constant(Constant::Val(Val::from(full_type_path.clone())));
-                        self.emit_instruction(Instruction::LoadConst {
-                            dest: expected_type_reg,
-                            constant: expected_type_constant,
-                        });
-
-                        // Use IsType instruction for unified type checking
-                        // This handles: exact match (primitives) OR prefix match (enum variants)
-                        self.emit_instruction(Instruction::IsType {
-                            dest: cmp_result_reg,
-                            value: value_reg,
-                            type_path: expected_type_reg,
-                        });
-                    }
-                    (None, Some(variant)) => {
-                        // Bare variant name (deprecated) - use suffix matching
-                        let arm_suffix_reg = self.allocate_register();
-                        let suffix = format!(".{}", variant);
-                        let arm_suffix_constant =
-                            self.program.add_constant(Constant::Val(Val::from(suffix)));
-                        self.emit_instruction(Instruction::LoadConst {
-                            dest: arm_suffix_reg,
-                            constant: arm_suffix_constant,
-                        });
-
-                        // Compare: $type ends with ".Variant"
-                        self.emit_instruction(Instruction::StrEndsWith {
-                            dest: cmp_result_reg,
-                            string: type_field_reg,
-                            suffix: arm_suffix_reg,
-                        });
-                    }
-                    (None, None) => {
-                        // Default arm - always matches
-                        let true_reg = self.allocate_register();
-                        let true_constant =
-                            self.program.add_constant(Constant::Val(Val::Bool(true)));
-                        self.emit_instruction(Instruction::LoadConst {
-                            dest: true_reg,
-                            constant: true_constant,
-                        });
-                        self.emit_instruction(Instruction::Move {
-                            dest: cmp_result_reg,
-                            src: true_reg,
-                        });
-                    }
+                // MakeVec reads consecutive registers, so reserve all atom
+                // destinations up front (the comparisons allocate scratch
+                // registers of their own).
+                let atoms_start_reg = self.allocate_register();
+                for _ in 1..atom_count {
+                    self.allocate_register();
                 }
+
+                self.emit_match_atom_comparison(
+                    atoms_start_reg,
+                    value_reg,
+                    type_field_reg,
+                    &arm.type_name,
+                    &arm.variant,
+                    &arm.value_literal,
+                )?;
+                for (i, alt) in arm.alternatives.iter().enumerate() {
+                    self.emit_match_atom_comparison(
+                        atoms_start_reg + 1 + i as RegisterId,
+                        value_reg,
+                        type_field_reg,
+                        &alt.type_name,
+                        &alt.variant,
+                        &alt.value_literal,
+                    )?;
+                }
+
+                let args_reg = self.allocate_register();
+                self.emit_instruction(Instruction::MakeVec {
+                    dest: args_reg,
+                    elements_start: atoms_start_reg,
+                    count: atom_count as u16,
+                });
+                let or_fn_reg = self.allocate_register();
+                let or_fn_constant = self
+                    .program
+                    .add_constant(Constant::Val(Val::from("::hot::bool/or")));
+                self.emit_instruction(Instruction::LoadConst {
+                    dest: or_fn_reg,
+                    constant: or_fn_constant,
+                });
+                self.emit_instruction(Instruction::CallLibBuiltin {
+                    dest: cmp_result_reg,
+                    function: or_fn_reg,
+                    args: args_reg,
+                });
             }
 
             // Emit conditional branch start
@@ -7549,15 +7695,14 @@ impl Compiler {
             // refers to the payload, not the Result wrapper. This prevents
             // TemplateInterpolate from throwing on Result.Err values inside match
             // arms where the user explicitly handles the error case.
-            let is_result_variant = matches!(
-                (&arm.type_name, &arm.variant),
-                (Some(type_name), Some(variant))
-                if {
-                    let (resolved, _) = self.resolve_type_path(type_name);
-                    resolved == "::hot::type/Result"
-                        && (variant == "Ok" || variant == "Err")
-                }
-            );
+            // Union arms unwrap only when EVERY atom is a Result.Ok/Err
+            // variant (e.g. `Result.Ok | Result.Err =>`); mixing a Result
+            // variant with a non-Result atom keeps the full value.
+            let is_result_variant = self.is_result_ok_err_atom(&arm.type_name, &arm.variant)
+                && arm
+                    .alternatives
+                    .iter()
+                    .all(|alt| self.is_result_ok_err_atom(&alt.type_name, &alt.variant));
 
             if is_result_variant {
                 let unwrapped_reg = self.allocate_register();
@@ -7875,6 +8020,7 @@ impl Compiler {
                     type_name: arm.type_name.clone(),
                     variant: arm.variant.clone(),
                     value_literal: arm.value_literal.clone(),
+                    alternatives: arm.alternatives.clone(),
                     // Use the first parameter name as an implicit binding for each arm
                     // so that inside the branch body, the parameter refers to the match
                     // subject value (after EnsureResult wrapping/thunk evaluation).

@@ -1,0 +1,38 @@
+::github::search ns
+
+::api ::github::api
+::uri ::hot::uri
+
+search-repos
+meta {
+    doc: """GET /search/repositories - Search repositories with GitHub's query syntax, e.g. `"language:rust stars:>1000 topic:runtime"`."""
+}
+fn (query: Str): Map {
+  ::api/json("GET", `/search/repositories?q=${::uri/encode(query)}`)
+}
+
+search-issues
+meta {
+    doc: """
+    GET /search/issues - Search issues and PRs, e.g.
+    `"repo:hot-dev/hot is:issue is:open label:bug"`.
+
+    **Example**
+
+    ```hot
+    hits ::github::search/search-issues("repo:hot-dev/hot is:pr is:open review:required")
+    hits.total_count
+    ```
+    """
+}
+fn (query: Str): Map {
+  ::api/json("GET", `/search/issues?q=${::uri/encode(query)}`)
+}
+
+search-code
+meta {
+    doc: """GET /search/code - Search code, e.g. `"repo:hot-dev/hot ed25519 in:file language:rust"`."""
+}
+fn (query: Str): Map {
+  ::api/json("GET", `/search/code?q=${::uri/encode(query)}`)
+}

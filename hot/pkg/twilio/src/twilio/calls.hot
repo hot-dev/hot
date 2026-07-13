@@ -197,7 +197,16 @@ meta {
     doc: """GET /Accounts/{AccountSid}/Calls.json - List calls. Filter by `To`, `From`, `Status`, or date range. Supports pagination."""
 }
 fn (request: ListCallsRequest): ListCallsResponse {
-  response api-request("GET", `${account-url()}/Calls.json?To=${or(request.To, "")}&From=${or(request.From, "")}&Status=${or(request.Status, "")}&StartTime=${or(request.StartTime, "")}&EndTime=${or(request.EndTime, "")}&PageSize=${or(request.PageSize, "")}&Page=${or(request.Page, "")}`)
+  query ::twilio::api/query-string({
+    To: request.To,
+    From: request.From,
+    Status: request.Status,
+    StartTime: request.StartTime,
+    EndTime: request.EndTime,
+    PageSize: request.PageSize,
+    Page: request.Page
+  })
+  response api-request("GET", `${account-url()}/Calls.json${query}`)
   if(is-ok-response(response), ListCallsResponse(response.body), err(HttpError(response)))
 }
 

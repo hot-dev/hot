@@ -1,0 +1,20 @@
+::google::test::auth ns
+meta ["test"]
+
+::auth ::google::auth
+
+test-service-account-claims
+meta ["test"] fn () {
+    claims ::auth/build-service-account-claims("svc@proj.iam.gserviceaccount.com", "https://www.googleapis.com/auth/drive", null)
+    assert-eq("svc@proj.iam.gserviceaccount.com", claims.iss)
+    assert-eq("https://oauth2.googleapis.com/token", claims.aud)
+    assert-eq("https://www.googleapis.com/auth/drive", claims.scope)
+    assert-eq(3600, sub(claims.exp, claims.iat))
+    assert(not(in("sub", keys(claims))), "no sub without impersonation")
+}
+
+test-service-account-claims-with-impersonation
+meta ["test"] fn () {
+    claims ::auth/build-service-account-claims("svc@p.iam", "scope", "user@example.com")
+    assert-eq("user@example.com", claims.sub)
+}

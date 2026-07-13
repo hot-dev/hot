@@ -115,7 +115,7 @@ Flows are standalone constructs. The `fn` keyword makes them function definition
 - `serial` - Sequential execution (default)
 - `cond` - First matching branch wins
 - `cond-all` - ALL matching branches execute, returns Map
-- `match` - Pattern match on types/values, first match wins
+- `match` - Pattern match on types/values, first match wins; arms support unions (`A | B`), `T?` sugar for `T | Null`, and `Any` (matches everything)
 - `match-all` - Pattern match, ALL matches execute
 - `parallel` - Concurrent execution, returns Map
 

@@ -1,0 +1,35 @@
+::hubspot ns
+meta {
+    doc: """
+    HubSpot CRM bindings.
+
+    HubSpot's CRM v3 API is uniform across object types, so
+    `::hubspot::objects` covers contacts, companies, deals, tickets, and
+    custom objects with one surface; `::hubspot::contacts` /
+    `::hubspot::companies` / `::hubspot::deals` are thin conveniences on
+    top, and `::hubspot::notes` logs activity to records.
+
+    **Setup** — context variable `hubspot.token`: a private-app access
+    token (`pat-...`) from Settings → Integrations → Private Apps.
+    Webhook verification additionally uses `hubspot.client.secret`.
+
+    **Quick start**
+
+    ```hot
+    ::contacts ::hubspot::contacts
+    ::notes ::hubspot::notes
+
+    contact ::contacts/create-contact({
+      email: "ada@example.com",
+      firstname: "Ada",
+      lastname: "Lovelace"
+    })
+
+    ::notes/log-note("contacts", contact.id, "Talked at the conference; wants a demo.")
+
+    found ::contacts/find-by-email("ada@example.com")
+    ```
+    """
+}
+
+BASE_URL "https://api.hubapi.com"

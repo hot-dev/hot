@@ -1,0 +1,11 @@
+::github::integration::ctx ns
+
+::env ::hot::env
+
+// Placeholder credentials for the github integration suite. Unset
+// environment variables are skipped entirely, so absent credentials
+// behave exactly as if never configured.
+::hot::ctx/set(filter-vals({
+    "github.token": ::env/get("GITHUB_TOKEN", ""),
+    "github.webhook.secret": ::env/get("GITHUB_WEBHOOK_SECRET", ""),
+}, (v) { not(is-empty(v)) }))

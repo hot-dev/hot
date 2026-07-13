@@ -1,0 +1,60 @@
+::pinecone::indexes ns
+
+::api ::pinecone::api
+
+list-indexes
+meta {
+    doc: """GET /indexes - Your indexes (`{indexes: [{name, host, dimension, metric, ...}]}`)."""
+}
+fn (): Map {
+  ::api/json("GET", `${::pinecone/CONTROL_URL}/indexes`, "")
+}
+
+describe-index
+meta {
+    doc: """GET /indexes/{name} - One index, including the `host` the data-plane functions need."""
+}
+fn (name: Str): Map {
+  ::api/json("GET", `${::pinecone/CONTROL_URL}/indexes/${name}`, "")
+}
+
+create-index
+meta {
+    doc: """
+    POST /indexes - Create a serverless index. `options`: `cloud`
+    ("aws"/"gcp"/"azure", default "aws"), `region` (default "us-east-1"),
+    `metric` ("cosine" default, "euclidean", "dotproduct").
+
+    **Example**
+
+    ```hot
+    index ::pinecone::indexes/create-index("docs", 1536, {metric: "cosine"})
+    index.host
+    ```
+    """
+}
+fn
+(name: Str, dimension: Int): Map {
+  create-index(name, dimension, {})
+},
+(name: Str, dimension: Int, options: Map): Map {
+  ::api/json("POST", `${::pinecone/CONTROL_URL}/indexes`, {
+    name: name,
+    dimension: dimension,
+    metric: or(get(options, "metric"), "cosine"),
+    spec: {
+      serverless: {
+        cloud: or(get(options, "cloud"), "aws"),
+        region: or(get(options, "region"), "us-east-1")
+      }
+    }
+  })
+}
+
+delete-index
+meta {
+    doc: """DELETE /indexes/{name} - Delete an index and all its data."""
+}
+fn (name: Str): Any {
+  ::api/json("DELETE", `${::pinecone/CONTROL_URL}/indexes/${name}`, "")
+}

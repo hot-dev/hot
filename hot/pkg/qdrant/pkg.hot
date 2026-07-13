@@ -1,0 +1,15 @@
+::hot::pkg ns
+
+hot.pkg.qdrant {
+  name: "hot.dev/qdrant",
+  version: "0.1.0",
+  hot-min-version: "2.6.0",
+  description: "Qdrant vector database bindings for Hot. Collections and points (upsert/search/retrieve/delete) for self-hosted or cloud RAG.",
+  author: "Hot Dev",
+  email: "support@hot.dev",
+  license: "Apache-2.0",
+  tags: ["ai", "vector-database", "rag"],
+  deps: {},
+  src-paths: ["src/"],
+  test-paths: ["test/"]
+}

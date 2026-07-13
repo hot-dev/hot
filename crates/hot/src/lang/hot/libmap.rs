@@ -348,6 +348,10 @@ pub fn get_hotlib_map() -> &'static HotLibMap {
             HotLibFn::vm_callback(coll::find_first),
         );
         map.insert(
+            "::hot::iter/for-each".to_string(),
+            HotLibFn::vm_callback(coll::for_each),
+        );
+        map.insert(
             "::hot::coll/remove".to_string(),
             HotLibFn::vm_callback(coll::remove),
         );
@@ -857,6 +861,10 @@ pub fn get_hotlib_map() -> &'static HotLibMap {
         );
         map.insert("::hot::hash/sha1".to_string(), HotLibFn::LibFn(hash::sha1));
         map.insert("::hot::hash/md5".to_string(), HotLibFn::LibFn(hash::md5));
+        map.insert(
+            "::hot::hash/ed25519-verify".to_string(),
+            HotLibFn::LibFn(hash::ed25519_verify),
+        );
 
         // HMAC functions
         map.insert(
@@ -948,6 +956,16 @@ pub fn get_hotlib_map() -> &'static HotLibMap {
         map.insert(
             "::hot::crypto/pbkdf2-hmac-sha256".to_string(),
             HotLibFn::LibFn(crypto::pbkdf2_hmac_sha256),
+        );
+
+        // RSA signatures (JWT RS256, GitHub Apps, Google service accounts)
+        map.insert(
+            "::hot::crypto/rsa-sha256-sign".to_string(),
+            HotLibFn::LibFn(crypto::rsa_sha256_sign),
+        );
+        map.insert(
+            "::hot::crypto/rsa-sha256-verify".to_string(),
+            HotLibFn::LibFn(crypto::rsa_sha256_verify),
         );
 
         // Secure random functions
@@ -1341,9 +1359,20 @@ pub fn get_hotlib_map() -> &'static HotLibMap {
         // Bool functions
         map.insert(
             "::hot::bool/is-truthy".to_string(),
-            HotLibFn::LibFn(bool::is_truthy),
+            HotLibFn::vm_callback(bool::is_truthy),
         );
-        map.insert("::hot::bool/not".to_string(), HotLibFn::LibFn(bool::not));
+        map.insert(
+            "::hot::bool/not".to_string(),
+            HotLibFn::vm_callback(bool::not),
+        );
+        map.insert(
+            "::hot::bool/or".to_string(),
+            HotLibFn::vm_callback(bool::or),
+        );
+        map.insert(
+            "::hot::bool/and".to_string(),
+            HotLibFn::vm_callback(bool::and),
+        );
 
         // Additional string functions
         map.insert(
@@ -1639,6 +1668,27 @@ pub fn get_hotlib_map() -> &'static HotLibMap {
         );
 
         // File functions
+        // ::hot::sqlite — SQLite over libsqlite3-sys (file.mode aware)
+        map.insert(
+            "::hot::sqlite/open".to_string(),
+            HotLibFn::VmAwareFn(sqlite::open),
+        );
+        map.insert(
+            "::hot::sqlite/execute".to_string(),
+            HotLibFn::LibFn(sqlite::execute),
+        );
+        map.insert(
+            "::hot::sqlite/query".to_string(),
+            HotLibFn::LibFn(sqlite::query),
+        );
+        map.insert(
+            "::hot::sqlite/sync".to_string(),
+            HotLibFn::VmAwareFn(sqlite::sync),
+        );
+        map.insert(
+            "::hot::sqlite/close".to_string(),
+            HotLibFn::VmAwareFn(sqlite::close),
+        );
         map.insert(
             "::hot::file/read-file".to_string(),
             HotLibFn::VmAwareFn(file::read_file),

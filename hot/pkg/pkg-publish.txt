@@ -14,6 +14,7 @@ hot-ai
 hot-ai-agent
 mcp
 openai
+#qwen
 xai
 
 # AWS Services
@@ -40,30 +41,66 @@ resend
 
 # Payments
 #stripe
-#stripe-billing
-#stripe-checkout
-#stripe-climate
-#stripe-connect
-#stripe-core
-#stripe-customers
-#stripe-entitlements
-#stripe-files
-#stripe-identity
-#stripe-issuing
-#stripe-misc
-#stripe-payments
-#stripe-products
-#stripe-radar
-#stripe-reporting
-#stripe-subscriptions
-#stripe-tax
-#stripe-terminal
-#stripe-treasury
-#stripe-webhooks
 
 # Backend-as-a-Service
 supabase
 supabase-admin
+
+# Data
+#mysql
+#pg
+#redis
+#sql
+#sql-mysql
+#sql-pg
+#sql-sqlite
+
+# Auth & Webhook Primitives
+#jwt
+#oauth2
+
+# Developer Workflow
+#github
+#linear
+
+# CRM
+#attio
+#crm
+#hubspot
+#intercom
+#salesforce
+#zendesk
+
+# Knowledge & Retrieval
+#airtable
+#firecrawl
+#notion
+#pinecone
+#qdrant
+#web-search
+
+# Voice AI
+#deepgram
+#elevenlabs
+
+# Business & Fintech
+#cal-com
+#plaid
+#shopify
+
+# Infrastructure & Platform
+#cloudflare
+#sentry
+
+# Model Routers
+#openai-compatible
+
+# Google Workspace
+#google-core
+#google-gmail
+#google-drive
+#google-sheets
+#google-calendar
 
 # Communication (SMS/Voice)
 #twilio

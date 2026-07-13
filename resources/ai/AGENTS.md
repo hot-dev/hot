@@ -142,6 +142,16 @@ classify fn cond (x: Int): Str {
 }
 ```
 
+**Union match arms:** a `match` arm accepts `|`-separated patterns and matches if any atom matches. Atoms are any single-arm pattern (types, enum variants, literals, `::ns/Type`); `T?` is sugar for `T | Null`; `Any` matches every value (acts as a default for exhaustiveness, and unlike `_` it can bind: `Any (v) =>`). Union arms count each named variant toward enum exhaustiveness. In `match-all`, a union arm's result key joins its atoms (`"Int | Dec"`).
+```hot
+kind match x {
+    "y" | "yes" | true => { "affirmative" }
+    Int | Dec => { "number" }
+    Str? => { "other text, or null" }   // sugar for Str | Null
+    Any => { "anything else" }
+}
+```
+
 **Flow result shape** controls what a flow returns. Prefer annotations:
 - plain/no annotation — return the winning/last value (default for `serial`, `cond`, `match`)
 - `All<Vec>` — collect all results into a Vec

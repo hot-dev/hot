@@ -210,6 +210,14 @@ pub(crate) fn create_default_conf() -> Val {
         },
         "emitter": emitter_conf,
         "engine": engine_conf,
+        // Mirrors JitConfig::default(); platform gating still applies at runtime
+        "jit": {
+            "mode": "enabled",
+            "threshold": 100i64,
+            "hof": {
+                "fusion": true
+            }
+        },
         "log": log_conf,
         "queue": queue_conf,
         "redis": redis_conf,
@@ -217,6 +225,10 @@ pub(crate) fn create_default_conf() -> Val {
         "schedule": schedule_conf,
         "serialization": serialization_conf,
         "domain": domain_conf,
+        // Output format for values printed by run/eval/repl: "hot" or "json"
+        "value": {
+            "format": "hot"
+        },
         "worker": worker_conf,
         "daemon": false
     })
@@ -615,7 +627,7 @@ pub(crate) fn extract_options_from_command(command: &Command) -> ExtractedOption
                 log_rotation: None,
                 log_retention: None,
                 log_format: None,
-                deploy_auto: false,
+                deploy_auto: None,
                 emitter: EmitterOptions { emitter_type: None },
                 with_tests: None,
             },
@@ -683,7 +695,7 @@ pub(crate) fn extract_options_from_command(command: &Command) -> ExtractedOption
                 log_rotation: None,
                 log_retention: None,
                 log_format: None,
-                deploy_auto: false,
+                deploy_auto: None,
                 emitter: EmitterOptions { emitter_type: None },
                 with_tests: None,
             },
@@ -748,8 +760,11 @@ pub(crate) fn apply_configuration_options(
         conf = conf.set_str("log.format", Some(format.clone()), "");
     }
 
-    // Apply global deploy options
-    conf = conf.set_bool("deploy.auto", Some(global.deploy_auto), true);
+    // Apply global deploy options (only when explicitly passed, so hot.hot /
+    // env-var values are not stomped by a CLI default)
+    if let Some(deploy_auto) = global.deploy_auto {
+        conf = conf.set_bool("deploy.auto", Some(deploy_auto), true);
+    }
 
     // Apply emitter options
     if let Some(ref emitter_type) = global.emitter.emitter_type {
@@ -1002,8 +1017,10 @@ fn preserve_runtime_overrides_after_init(mut conf: Val, base_conf: &Val) -> Val 
             _ => None,
         })
     {
-        // Check if it's a custom DB URI (not just the default)
-        let default_db_uri = "postgres://localhost:5432/hot";
+        // Check if it's a custom DB URI (not just the default). Compare against
+        // the same resolved default used by create_default_conf so a plain
+        // default doesn't masquerade as a CLI override.
+        let default_db_uri = hot::db::get_resolved_conf(Val::map_empty()).get_str("uri");
         if db_uri != default_db_uri {
             // Use "db.uri" as the path, not "db" with "uri" as default!
             conf = conf.set_str("db.uri", Some(db_uri), "");
@@ -1188,8 +1205,9 @@ pub(crate) fn show_command_config(command: &Option<Command>, conf: &Val) {
                 "app.host",
                 "app.port",
                 "worker.threads",
-                "worker.queue.type",
-                "worker.serialization",
+                "queue.type",
+                "redis.uri",
+                "serialization.type",
                 "scheduler.backfill",
                 "scheduler.sync-interval-seconds",
                 "scheduler.retry-interval-seconds",
@@ -1366,7 +1384,7 @@ fn filter_config(conf: &Val, keys: &[&str]) -> Val {
     filtered
 }
 
-fn redact_sensitive_config(conf: &Val) -> Val {
+pub(crate) fn redact_sensitive_config(conf: &Val) -> Val {
     redact_sensitive_config_at_path(conf, "")
 }
 
@@ -1747,6 +1765,51 @@ mod tests {
         assert_eq!(
             conf.get_int_or_default("scheduler.at-interval-seconds", -1),
             3
+        );
+    }
+
+    #[test]
+    fn test_deploy_auto_cli_flag_only_overrides_when_passed() {
+        // A conf-file value must survive when the flag is not passed…
+        let base = create_default_conf().set_bool("deploy.auto", Some(false), true);
+        let unchanged = apply_configuration_options(
+            base.clone(),
+            &GlobalOptions::default(),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        );
+        assert!(!unchanged.get_bool_or_default("deploy.auto", true));
+
+        // …and an explicit flag must still win.
+        let opts = GlobalOptions {
+            deploy_auto: Some(true),
+            ..GlobalOptions::default()
+        };
+        let overridden =
+            apply_configuration_options(base, &opts, None, None, None, None, None, None);
+        assert!(overridden.get_bool_or_default("deploy.auto", false));
+    }
+
+    #[test]
+    fn test_reload_does_not_treat_default_db_uri_as_override() {
+        // A base conf still carrying the default db.uri must not clobber the
+        // uri loaded from the newly created hot.hot.
+        let reloaded_from_hot_file = val!({
+            "db": {
+                "uri": "postgres://hot:hot@localhost/from-hot-hot",
+            },
+        });
+        let base_conf = create_default_conf();
+
+        let conf = preserve_runtime_overrides_after_init(reloaded_from_hot_file, &base_conf);
+
+        assert_eq!(
+            conf.get_str("db.uri"),
+            "postgres://hot:hot@localhost/from-hot-hot"
         );
     }
 

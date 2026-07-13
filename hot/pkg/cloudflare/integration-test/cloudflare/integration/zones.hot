@@ -1,0 +1,9 @@
+::cloudflare::integration ns
+meta ["test"]
+
+// Requires ctx: cloudflare.token
+test-list-zones
+meta ["test"] fn () {
+    out ::cloudflare/list-zones()
+    assert(is-some(out.result), "token should list zones")
+}

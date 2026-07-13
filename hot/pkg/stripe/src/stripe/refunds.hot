@@ -1,0 +1,92 @@
+::stripe::refunds ns
+
+api-request ::stripe::api/request
+query-string ::stripe::api/query-string
+HttpError ::stripe::api/HttpError
+is-ok-response ::hot::http/is-ok-response
+
+// ============================================================================
+// Refunds
+// ============================================================================
+
+CreateRefundRequest type {
+  payment_intent: Str?,
+  charge: Str?,
+  amount: Int?,
+  reason: Str?,
+  metadata: Map?,
+  refund_application_fee: Bool?,
+  reverse_transfer: Bool?
+}
+
+create-refund
+meta {
+    doc: """
+POST /v1/refunds - Refund a charge or PaymentIntent, in full (omit `amount`) or partially. `reason` can be "duplicate", "fraudulent", or "requested_by_customer".
+
+**Example**
+
+```hot
+::refunds ::stripe::refunds
+
+refund ::refunds/create-refund(::refunds/CreateRefundRequest({
+  payment_intent: "pi_...",
+  amount: 500
+}))
+refund.status  // => "succeeded"
+```
+"""
+}
+fn (request: CreateRefundRequest): Map {
+  response api-request("POST", `${::stripe/BASE_URL}/v1/refunds`, {}, request)
+  if(is-ok-response(response), response.body, err(HttpError(response)))
+}
+
+get-refund
+meta {
+    doc: """GET /v1/refunds/{refund} - Retrieve a refund by ID."""
+}
+fn (refund: Str): Map {
+  response api-request("GET", `${::stripe/BASE_URL}/v1/refunds/${refund}`)
+  if(is-ok-response(response), response.body, err(HttpError(response)))
+}
+
+update-refund
+meta {
+    doc: """POST /v1/refunds/{refund} - Update a refund's metadata."""
+}
+fn (refund: Str, metadata: Map): Map {
+  response api-request("POST", `${::stripe/BASE_URL}/v1/refunds/${refund}`, {}, {metadata: metadata})
+  if(is-ok-response(response), response.body, err(HttpError(response)))
+}
+
+cancel-refund
+meta {
+    doc: """POST /v1/refunds/{refund}/cancel - Cancel a refund. Only refunds with status "requires_action" can be canceled."""
+}
+fn (refund: Str): Map {
+  response api-request("POST", `${::stripe/BASE_URL}/v1/refunds/${refund}/cancel`, {}, {})
+  if(is-ok-response(response), response.body, err(HttpError(response)))
+}
+
+ListRefundsRequest type {
+  payment_intent: Str?,
+  charge: Str?,
+  created: Any?,
+  limit: Int?,
+  starting_after: Str?,
+  ending_before: Str?
+}
+
+list-refunds
+meta {
+    doc: """GET /v1/refunds - List refunds, most recent first. Filter by `payment_intent` or `charge`."""
+}
+fn
+(): Map {
+  list-refunds(ListRefundsRequest({}))
+},
+(request: ListRefundsRequest): Map {
+  response api-request("GET", `${::stripe/BASE_URL}/v1/refunds${query-string(request)}`)
+  if(is-ok-response(response), response.body, err(HttpError(response)))
+}

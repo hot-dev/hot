@@ -1,0 +1,11 @@
+::hubspot::integration::ctx ns
+
+::env ::hot::env
+
+// Placeholder credentials for the hubspot integration suite. Unset
+// environment variables are skipped entirely, so absent credentials
+// behave exactly as if never configured.
+::hot::ctx/set(filter-vals({
+    "hubspot.token": ::env/get("HUBSPOT_TOKEN", ""),
+    "hubspot.client.secret": ::env/get("HUBSPOT_CLIENT_SECRET", ""),
+}, (v) { not(is-empty(v)) }))

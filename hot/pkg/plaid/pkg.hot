@@ -1,0 +1,15 @@
+::hot::pkg ns
+
+hot.pkg.plaid {
+  name: "hot.dev/plaid",
+  version: "0.1.0",
+  hot-min-version: "2.6.0",
+  description: "Plaid bindings for Hot. Link tokens, account balances, identity, and incremental transaction sync.",
+  author: "Hot Dev",
+  email: "support@hot.dev",
+  license: "Apache-2.0",
+  tags: ["fintech", "plaid"],
+  deps: {},
+  src-paths: ["src/"],
+  test-paths: ["test/"]
+}

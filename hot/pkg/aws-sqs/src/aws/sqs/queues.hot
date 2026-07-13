@@ -87,12 +87,12 @@ fn
 
     response http-request("POST", url, signed-headers, body)
 
-    if(is-ok-response(response),
-        CreateQueueResponse({
+    cond {
+        is-ok-response(response) => { CreateQueueResponse({
             queue_url: response.body.QueueUrl
-        }),
-        err(AwsError(response))
-    )
+        }) }
+        => { err(AwsError(response)) }
+    }
 },
 (queue_name: Str): CreateQueueResponse | AwsError {
     create-queue(queue_name, {})
@@ -131,10 +131,10 @@ fn (queue_url: Str): Map | AwsError {
 
     response http-request("POST", url, signed-headers, body)
 
-    if(is-ok-response(response),
-        { success: true },
-        AwsError(response)
-    )
+    cond {
+        is-ok-response(response) => { { success: true } }
+        => { AwsError(response) }
+    }
 }
 
 // Get queue URL by name
@@ -171,12 +171,12 @@ fn (queue_name: Str): GetQueueUrlResponse | AwsError {
 
     response http-request("POST", url, signed-headers, body)
 
-    if(is-ok-response(response),
-        GetQueueUrlResponse({
+    cond {
+        is-ok-response(response) => { GetQueueUrlResponse({
             queue_url: response.body.QueueUrl
-        }),
-        err(AwsError(response))
-    )
+        }) }
+        => { err(AwsError(response)) }
+    }
 }
 
 // List all queues
@@ -219,12 +219,12 @@ fn
 
     response http-request("POST", url, signed-headers, body)
 
-    if(is-ok-response(response),
-        ListQueuesResponse({
+    cond {
+        is-ok-response(response) => { ListQueuesResponse({
             queue_urls: if(is-null(response.body.QueueUrls), [], response.body.QueueUrls)
-        }),
-        err(AwsError(response))
-    )
+        }) }
+        => { err(AwsError(response)) }
+    }
 },
 (): ListQueuesResponse | AwsError {
     list-queues("")
@@ -267,12 +267,12 @@ fn (queue_url: Str, attribute_names: Vec<Str>): GetQueueAttributesResponse | Aws
 
     response http-request("POST", url, signed-headers, body)
 
-    if(is-ok-response(response),
-        GetQueueAttributesResponse({
+    cond {
+        is-ok-response(response) => { GetQueueAttributesResponse({
             attributes: if(is-null(response.body.Attributes), {}, response.body.Attributes)
-        }),
-        err(AwsError(response))
-    )
+        }) }
+        => { err(AwsError(response)) }
+    }
 }
 
 // Set queue attributes
@@ -312,8 +312,8 @@ fn (queue_url: Str, attributes: Map): Map | AwsError {
 
     response http-request("POST", url, signed-headers, body)
 
-    if(is-ok-response(response),
-        { success: true },
-        AwsError(response)
-    )
+    cond {
+        is-ok-response(response) => { { success: true } }
+        => { AwsError(response) }
+    }
 }

@@ -1,0 +1,50 @@
+::notion::databases ns
+
+::api ::notion::api
+
+get-database
+meta {
+    doc: """GET /databases/{id} - The database schema: property names, types, and options."""
+}
+fn (database-id: Str): Map {
+  ::api/json("GET", `/databases/${database-id}`)
+}
+
+query-database
+meta {
+    doc: """
+    POST /databases/{id}/query - Query rows. `options` supports `filter`
+    (https://developers.notion.com/reference/post-database-query-filter),
+    `sorts`, `page_size`, `start_cursor`. Returns
+    `{results, has_more, next_cursor}`.
+
+    **Example**
+
+    ```hot
+    open ::notion::databases/query-database(db-id, {
+      filter: {property: "Status", status: {does_not_equal: "Done"}},
+      sorts: [{property: "Priority", direction: "ascending"}]
+    })
+    length(open.results)
+    ```
+    """
+}
+fn
+(database-id: Str): Map {
+  query-database(database-id, {})
+},
+(database-id: Str, options: Map): Map {
+  ::api/json("POST", `/databases/${database-id}/query`, {}, options)
+}
+
+create-database
+meta {
+    doc: """POST /databases - Create a database under a parent page. `properties` is the schema, e.g. `{Name: {title: {}}, Status: {select: {options: [{name: "Todo"}]}}}`."""
+}
+fn (parent-page-id: Str, title: Str, properties: Map): Map {
+  ::api/json("POST", "/databases", {}, {
+    parent: {type: "page_id", page_id: parent-page-id},
+    title: ::notion/rich-text(title),
+    properties: properties
+  })
+}

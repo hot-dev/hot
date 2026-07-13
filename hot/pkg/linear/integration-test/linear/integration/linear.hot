@@ -1,0 +1,26 @@
+::linear::integration ns
+meta ["test"]
+
+// =============================================================================
+// Integration Tests (live Linear; read-only)
+// =============================================================================
+// Requires ctx: linear.api.key
+// Run with: hot test --project pkg-integration-linear
+
+::teams ::linear::teams
+::issues ::linear::issues
+
+test-viewer
+meta ["test"] fn () {
+    me ::teams/viewer()
+    assert(is-some(me.id), "key should resolve to a user")
+}
+
+test-list-teams-and-issues
+meta ["test"] fn () {
+    teams ::teams/list-teams()
+    assert(gt(length(teams.nodes), 0), "workspace should have a team")
+
+    page ::issues/list-issues({first: 5})
+    assert(lte(length(page.nodes), 5))
+}

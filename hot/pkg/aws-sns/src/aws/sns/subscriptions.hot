@@ -73,9 +73,10 @@ fn
         Endpoint: endpoint
     }
 
-    with-attributes if(is-empty(attributes), request-body,
-        {...request-body, Attributes: attributes}
-    )
+    with-attributes cond {
+        is-empty(attributes) => { request-body }
+        => { {...request-body, Attributes: attributes} }
+    }
 
     body to-json(with-attributes)
 
@@ -91,12 +92,12 @@ fn
 
     response http-request("POST", url, signed-headers, body)
 
-    if(is-ok-response(response),
-        SubscribeResponse({
+    cond {
+        is-ok-response(response) => { SubscribeResponse({
             subscription_arn: response.body.SubscriptionArn
-        }),
-        err(AwsError(response))
-    )
+        }) }
+        => { err(AwsError(response)) }
+    }
 },
 (topic_arn: Str, protocol: Str, endpoint: Str): SubscribeResponse | AwsError {
     subscribe(topic_arn, protocol, endpoint, {})
@@ -135,10 +136,10 @@ fn (subscription_arn: Str): Map | AwsError {
 
     response http-request("POST", url, signed-headers, body)
 
-    if(is-ok-response(response),
-        { success: true },
-        AwsError(response)
-    )
+    cond {
+        is-ok-response(response) => { { success: true } }
+        => { AwsError(response) }
+    }
 }
 
 // Confirm a subscription (for HTTP/HTTPS endpoints)
@@ -178,12 +179,12 @@ fn (topic_arn: Str, token: Str): SubscribeResponse | AwsError {
 
     response http-request("POST", url, signed-headers, body)
 
-    if(is-ok-response(response),
-        SubscribeResponse({
+    cond {
+        is-ok-response(response) => { SubscribeResponse({
             subscription_arn: response.body.SubscriptionArn
-        }),
-        err(AwsError(response))
-    )
+        }) }
+        => { err(AwsError(response)) }
+    }
 }
 
 // List all subscriptions
@@ -208,9 +209,9 @@ fn
 
     request-body {}
 
-    with-token if(is-null(next_token), request-body,
-        {...request-body, NextToken: next_token}
-    )
+    with-token merge(request-body, filter-vals({
+        NextToken: next_token
+    }, is-some))
 
     body to-json(with-token)
 
@@ -226,19 +227,22 @@ fn
 
     response http-request("POST", url, signed-headers, body)
 
-    if(is-ok-response(response),
-        ListSubscriptionsResponse({
-            subscriptions: if(is-null(response.body.Subscriptions), [], map(response.body.Subscriptions, Subscription({
+    cond {
+        is-ok-response(response) => { ListSubscriptionsResponse({
+            subscriptions: cond {
+                is-null(response.body.Subscriptions) => { [] }
+                => { map(response.body.Subscriptions, Subscription({
                 subscription_arn: %.SubscriptionArn,
                 owner: %.Owner,
                 protocol: %.Protocol,
                 endpoint: %.Endpoint,
                 topic_arn: %.TopicArn
-            }))),
+            })) }
+            },
             next_token: response.body.NextToken
-        }),
-        err(AwsError(response))
-    )
+        }) }
+        => { err(AwsError(response)) }
+    }
 },
 (): ListSubscriptionsResponse | AwsError {
     list-subscriptions(null)
@@ -267,9 +271,9 @@ fn
         TopicArn: topic_arn
     }
 
-    with-token if(is-null(next_token), request-body,
-        {...request-body, NextToken: next_token}
-    )
+    with-token merge(request-body, filter-vals({
+        NextToken: next_token
+    }, is-some))
 
     body to-json(with-token)
 
@@ -285,19 +289,22 @@ fn
 
     response http-request("POST", url, signed-headers, body)
 
-    if(is-ok-response(response),
-        ListSubscriptionsResponse({
-            subscriptions: if(is-null(response.body.Subscriptions), [], map(response.body.Subscriptions, Subscription({
+    cond {
+        is-ok-response(response) => { ListSubscriptionsResponse({
+            subscriptions: cond {
+                is-null(response.body.Subscriptions) => { [] }
+                => { map(response.body.Subscriptions, Subscription({
                 subscription_arn: %.SubscriptionArn,
                 owner: %.Owner,
                 protocol: %.Protocol,
                 endpoint: %.Endpoint,
                 topic_arn: %.TopicArn
-            }))),
+            })) }
+            },
             next_token: response.body.NextToken
-        }),
-        err(AwsError(response))
-    )
+        }) }
+        => { err(AwsError(response)) }
+    }
 },
 (topic_arn: Str): ListSubscriptionsResponse | AwsError {
     list-subscriptions-by-topic(topic_arn, null)
@@ -337,12 +344,12 @@ fn (subscription_arn: Str): GetSubscriptionAttributesResponse | AwsError {
 
     response http-request("POST", url, signed-headers, body)
 
-    if(is-ok-response(response),
-        GetSubscriptionAttributesResponse({
+    cond {
+        is-ok-response(response) => { GetSubscriptionAttributesResponse({
             attributes: if(is-null(response.body.Attributes), {}, response.body.Attributes)
-        }),
-        err(AwsError(response))
-    )
+        }) }
+        => { err(AwsError(response)) }
+    }
 }
 
 // Set subscription attributes
@@ -390,8 +397,8 @@ fn (subscription_arn: Str, attribute_name: Str, attribute_value: Str): Map | Aws
 
     response http-request("POST", url, signed-headers, body)
 
-    if(is-ok-response(response),
-        { success: true },
-        AwsError(response)
-    )
+    cond {
+        is-ok-response(response) => { { success: true } }
+        => { AwsError(response) }
+    }
 }

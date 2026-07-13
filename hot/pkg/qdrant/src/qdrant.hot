@@ -1,0 +1,159 @@
+::qdrant ns
+meta {
+    doc: """
+    Qdrant vector database bindings — the self-hosted/open-source RAG
+    store (Qdrant Cloud works identically). Same shape as the `pinecone`
+    package: collections + points.
+
+    **Setup** — context variables:
+    - `qdrant.url` — e.g. `http://localhost:6333` or your cloud cluster URL
+    - `qdrant.api.key` — optional for local, required for cloud
+
+    **Quick start**
+
+    ```hot
+    ::qd ::qdrant
+
+    ::qd/create-collection("docs", 1536)
+    ::qd/upsert-points("docs", [
+      {id: 1, vector: embedding, payload: {source: "guide.md"}}
+    ])
+    hits ::qd/search("docs", {vector: question-embedding, limit: 5, with_payload: true})
+    map(hits, (h) { h.payload.source })
+    ```
+    """
+}
+
+::ctx ::hot::ctx
+
+base-url fn
+(): Str {
+  base-url(or(::ctx/get("qdrant.url"), "http://localhost:6333"))
+},
+(url: Str): Str {
+  if(ends-with(url, "/"), slice(url, 0, sub(length(url), 1)), url)
+}
+
+request fn
+(method: Str, path: Str, body: Any): Any {
+  request(method, path, body, base-url(), or(::ctx/get("qdrant.api.key"), ""))
+},
+// 5-arity: explicit instance URL + API key override ("" sends no auth header)
+(method: Str, path: Str, body: Any, url: Str, api-key: Str): Any {
+  base-headers cond {
+    is-empty(api-key) => { {} }
+    => { {api-key: api-key} }
+  }
+
+  headers cond {
+    eq(body, "") => { base-headers }
+    => { {...base-headers, Content-Type: "application/json"} }
+  }
+
+  encoded if(eq(body, ""), "", to-json(untype(body)))
+  response ::hot::http/request(::hot::http/HttpRequest({
+    method,
+    url: `${base-url(url)}${path}`,
+    headers: headers,
+    body: encoded
+  }))
+  cond {
+    is-err(response) => { response }
+    ::hot::http/is-ok-response(response) => { get(response.body, "result", response.body) }
+    => { err({status: response.status, body: response.body}) }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Collections
+// ---------------------------------------------------------------------------
+
+list-collections
+meta {
+    ctx: {"qdrant.url": {required: false}, "qdrant.api.key": {required: false}},
+    doc: """GET /collections - The instance's collections."""
+}
+fn (): Map {
+  request("GET", "/collections", "")
+}
+
+create-collection
+meta {
+    doc: """PUT /collections/{name} - Create a collection. The 3-arity form sets the distance metric ("Cosine" default, "Euclid", "Dot")."""
+}
+fn
+(name: Str, dimension: Int): Any {
+  create-collection(name, dimension, "Cosine")
+},
+(name: Str, dimension: Int, distance: Str): Any {
+  request("PUT", `/collections/${name}`, {vectors: {size: dimension, distance: distance}})
+}
+
+get-collection
+meta {
+    doc: """GET /collections/{name} - Collection info: vector config, point count, status."""
+}
+fn (name: Str): Map {
+  request("GET", `/collections/${name}`, "")
+}
+
+delete-collection
+meta {
+    doc: """DELETE /collections/{name} - Drop a collection and its points."""
+}
+fn (name: Str): Any {
+  request("DELETE", `/collections/${name}`, "")
+}
+
+// ---------------------------------------------------------------------------
+// Points
+// ---------------------------------------------------------------------------
+
+upsert-points
+meta {
+    doc: """PUT /collections/{name}/points - Upsert points: `[{id, vector, payload?}]` (ids are ints or UUIDs)."""
+}
+fn (collection: Str, points: Vec): Any {
+  request("PUT", `/collections/${collection}/points?wait=true`, {points: points})
+}
+
+search
+meta {
+    doc: """
+    POST /collections/{name}/points/search - Nearest-neighbor search.
+    `options`: `vector` (required), `limit` (default 10), `filter`
+    (Qdrant filter DSL), `with_payload`, `with_vector`,
+    `score_threshold`. Returns the hits (`[{id, score, payload?}]`).
+    """
+}
+fn (collection: Str, options: Map): Vec {
+  request("POST", `/collections/${collection}/points/search`, {limit: 10, ...options})
+}
+
+get-points
+meta {
+    doc: """POST /collections/{name}/points - Retrieve points by ids (payloads included)."""
+}
+fn (collection: Str, ids: Vec): Vec {
+  request("POST", `/collections/${collection}/points`, {ids: ids, with_payload: true})
+}
+
+delete-points
+meta {
+    doc: """POST /collections/{name}/points/delete - Delete by ids (`{points: [...]}`) or by filter (`{filter: {...}}`)."""
+}
+fn (collection: Str, selector: Map): Any {
+  request("POST", `/collections/${collection}/points/delete?wait=true`, selector)
+}
+
+count-points
+meta {
+    doc: """POST /collections/{name}/points/count - Count points, optionally under a filter."""
+}
+fn
+(collection: Str): Map {
+  request("POST", `/collections/${collection}/points/count`, {})
+},
+(collection: Str, filter: Map): Map {
+  request("POST", `/collections/${collection}/points/count`, {filter: filter})
+}

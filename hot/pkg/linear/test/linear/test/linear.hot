@@ -1,0 +1,57 @@
+::linear::test ns
+meta ["test"]
+
+::api ::linear::api
+::issues ::linear::issues
+
+// ============================================================================
+// Auth header forms
+// ============================================================================
+
+test-auth-header-personal-key-is-raw
+meta ["test"] fn () {
+    assert-eq("lin_api_abc123", ::api/auth-header("lin_api_abc123"))
+}
+
+test-auth-header-oauth-gets-bearer
+meta ["test"] fn () {
+    assert-eq("Bearer lin_oauth_xyz", ::api/auth-header("lin_oauth_xyz"))
+}
+
+// ============================================================================
+// GraphQL response unwrapping
+// ============================================================================
+
+test-parse-response-returns-data
+meta ["test"] fn () {
+    out ::api/parse-graphql-response({data: {viewer: {name: "Ada"}}})
+    assert-eq("Ada", out.viewer.name)
+}
+
+test-parse-response-errors-become-err
+meta ["test"] fn () {
+    out ::api/parse-graphql-response({errors: [{message: "Field 'nope' not found"}], data: null})
+    assert(is-err(out), "GraphQL errors should be an Err")
+    payload if-err(out, (e) { e })
+    assert(contains(first(payload.errors).message, "not found"))
+}
+
+test-parse-response-partial-data-with-errors-is-err
+meta ["test"] fn () {
+    out ::api/parse-graphql-response({errors: [{message: "partial"}], data: {issues: []}})
+    assert(is-err(out), "partial data with errors still errs (data preserved in payload)")
+}
+
+// ============================================================================
+// Issue create input
+// ============================================================================
+
+test-build-create-input
+meta ["test"] fn () {
+    input ::issues/build-create-input("team-1", "Fix it", {priority: 2, labelIds: ["l1"]})
+    assert-eq("team-1", input.teamId)
+    assert-eq("Fix it", input.title)
+    assert-eq(2, input.priority)
+    assert-eq(["l1"], input.labelIds)
+    assert(not(in("description", keys(input))), "unset options are omitted, not null")
+}

@@ -1,0 +1,98 @@
+::twilio::test::webhooks ns
+meta ["test"]
+
+::webhooks ::twilio::webhooks
+
+// Known vector generated independently (Python hmac/hashlib/base64):
+//   token: test_auth_token_12345
+//   url:   https://myapp.hot.dev/twilio/webhook
+//   body:  Body=Hello&From=+14155551234&To=+15558675310
+//   base string: url + params concatenated sorted by key
+TEST_TOKEN "test_auth_token_12345"
+TEST_URL "https://myapp.hot.dev/twilio/webhook"
+TEST_BODY "Body=Hello&From=%2B14155551234&To=%2B15558675310"
+TEST_SIGNATURE "Q24Dn4nfdugmTGryCsccz+WelHM="
+
+make-request fn (signature: Str): Map {
+  {
+    original-url: TEST_URL,
+    headers: {x-twilio-signature: signature},
+    body-raw: TEST_BODY
+  }
+}
+
+test-verify-accepts-known-vector
+meta ["test"]
+fn () {
+    assert(::webhooks/verify-request(make-request(TEST_SIGNATURE), TEST_TOKEN), "known Twilio signature vector should verify")
+}
+
+test-verify-rejects-wrong-signature
+meta ["test"]
+fn () {
+    assert(not(::webhooks/verify-request(make-request("bm90IGEgcmVhbCBzaWduYXR1cmU="), TEST_TOKEN)), "wrong signature should fail")
+}
+
+test-verify-rejects-wrong-token
+meta ["test"]
+fn () {
+    assert(not(::webhooks/verify-request(make-request(TEST_SIGNATURE), "different_token")), "wrong auth token should fail")
+}
+
+test-verify-rejects-missing-signature-header
+meta ["test"]
+fn () {
+    request {original-url: TEST_URL, headers: {}, body-raw: TEST_BODY}
+    assert(not(::webhooks/verify-request(request, TEST_TOKEN)), "missing signature header should fail")
+}
+
+test-verify-fails-closed-without-original-url
+meta ["test"]
+fn () {
+    request {headers: {x-twilio-signature: TEST_SIGNATURE}, body-raw: TEST_BODY}
+    assert(not(::webhooks/verify-request(request, TEST_TOKEN)), "no original-url means no verifiable URL — fail closed")
+}
+
+test-verify-explicit-url-arity
+meta ["test"]
+fn () {
+    // No original-url on the request; the exact configured URL is passed explicitly.
+    request {headers: {x-twilio-signature: TEST_SIGNATURE}, body-raw: TEST_BODY}
+    assert(::webhooks/verify-request(request, TEST_TOKEN, TEST_URL), "explicit URL override should verify")
+    assert(not(::webhooks/verify-request(request, TEST_TOKEN, "https://other.example.com/hook")), "wrong explicit URL should fail")
+}
+
+// JSON-mode vector generated independently (Python hmac/hashlib/base64):
+//   Twilio signs the URL alone; bodySHA256 in the query covers the body.
+JSON_BODY """{"MessageSid":"SM123","Body":"Hello"}"""
+JSON_BODY_SHA "972d0218a105636332baf183d45833612ccb724b05a07965fa219704c1aea76e"
+JSON_URL `https://myapp.hot.dev/twilio/webhook?bodySHA256=${JSON_BODY_SHA}`
+JSON_SIGNATURE "HUvvla5PZq6l0WXs2W09iXhupsY="
+
+make-json-request fn (signature: Str, body: Str): Map {
+  {
+    original-url: JSON_URL,
+    headers: {x-twilio-signature: signature},
+    query: {bodySHA256: JSON_BODY_SHA},
+    body-raw: body
+  }
+}
+
+test-verify-json-mode-accepts-known-vector
+meta ["test"]
+fn () {
+    assert(::webhooks/verify-request(make-json-request(JSON_SIGNATURE, JSON_BODY), TEST_TOKEN), "JSON-mode vector should verify")
+}
+
+test-verify-json-mode-rejects-tampered-body
+meta ["test"]
+fn () {
+    tampered """{"MessageSid":"SM999","Body":"Hello"}"""
+    assert(not(::webhooks/verify-request(make-json-request(JSON_SIGNATURE, tampered), TEST_TOKEN)), "body not matching bodySHA256 should fail")
+}
+
+test-verify-json-mode-rejects-wrong-signature
+meta ["test"]
+fn () {
+    assert(not(::webhooks/verify-request(make-json-request("bm90IGEgcmVhbCBzaWduYXR1cmU=", JSON_BODY), TEST_TOKEN)), "wrong URL signature should fail even when bodySHA256 matches")
+}

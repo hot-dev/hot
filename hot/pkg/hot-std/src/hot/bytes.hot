@@ -229,3 +229,40 @@ fn
 (value: Dec | Int, size: Int, endian: Str): Bytes {
     call-lib(::hot::bytes/from-float, [value, size, endian])
 }
+
+
+to-float
+meta {
+    doc: """
+    Decode IEEE-754 bytes to a float. 4 bytes (single) or 8 bytes
+    (double); endian is `"be"` (default) or `"le"`.
+
+    **Example**
+
+    ```hot
+    to-float(Bytes([64, 9, 33, 251, 84, 68, 45, 24]))  // 3.141592653589793
+    ```
+    """
+}
+fn
+(bytes: Bytes): Dec {
+    call-lib(::hot::bytes/to-float, [bytes])
+},
+(bytes: Bytes, endian: Str): Dec {
+    call-lib(::hot::bytes/to-float, [bytes, endian])
+}
+
+from-float
+meta {
+    doc: """
+    Encode a number as IEEE-754 bytes: `size` 4 (single) or 8 (double);
+    endian is `"be"` (default) or `"le"`.
+    """
+}
+fn
+(value: Int | Dec, size: Int): Bytes {
+    call-lib(::hot::bytes/from-float, [value, size])
+},
+(value: Int | Dec, size: Int, endian: Str): Bytes {
+    call-lib(::hot::bytes/from-float, [value, size, endian])
+}

@@ -269,14 +269,13 @@ meta {
 }
 fn (tools: Vec<Tool>, call: ToolCall): ToolResult {
     tool find-by-name(tools, call.name)
-    if(
-        is-null(tool),
-        ToolResult({
+    cond {
+        is-null(tool) => { ToolResult({
             id: call.id,
             output: `Unknown tool: ${call.name}`,
             is-error: true
-        }),
-        {
+        }) }
+        => {
             // Supervision boundary: a tool is arbitrary user code invoked
             // on the model's behalf, so this is one of the sanctioned
             // halt-containment points — a tool that fail()s (or returns
@@ -284,11 +283,11 @@ fn (tools: Vec<Tool>, call: ToolCall): ToolResult {
             // instead of bringing down the agent run-loop. Application
             // code should not copy this pattern; expected failures are
             // Result.Err values.
-            attempt if(
-                or(get(tool, "pass-input"), false),
-                ::hot::internal::exec/contain(tool.fn, [call.input]),
-                ::hot::internal::exec/contain(::hot::internal::mcp/invoke-with-input, [tool.fn, call.input])
-            )
+            attempt cond {
+                or(get(tool, "pass-input"), false) => { ::hot::internal::exec/contain(tool.fn, [call.input]) }
+                => { ::hot::internal::exec/contain(::hot::internal::mcp/invoke-with-input, [tool.fn, call.input]) }
+            }
+
             match attempt {
                 Result.Err => {
                     ToolResult({
@@ -307,5 +306,5 @@ fn (tools: Vec<Tool>, call: ToolCall): ToolResult {
                 }
             }
         }
-    )
+    }
 }

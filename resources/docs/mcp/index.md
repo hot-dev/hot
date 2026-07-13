@@ -473,7 +473,7 @@ Most MCP-compatible AI clients can connect directly to your Hot MCP endpoint. Co
 
 When an MCP tool is invoked, Hot automatically populates the `hot.request` context variable with an `::hot::http/HttpRequest` containing HTTP request details and caller identity. Access it via `::hot::ctx/get("hot.request")`.
 
-This is the same `HttpRequest` type used by [webhooks](/docs/webhooks#httprequest-and-httpresponse). For MCP, `body` and `body-raw` are `null` (the tool arguments come from the MCP protocol, not the HTTP body).
+This is the same `HttpRequest` type used by [webhooks](/docs/webhooks#httprequest-and-httpresponse). For MCP, the body fields (`body`, `body-raw`, `body-bytes`) and `original-url` are `null` — the tool arguments come from the MCP protocol, not the HTTP body, and URL reconstruction is a webhook-delivery concern.
 
 ### Structure
 

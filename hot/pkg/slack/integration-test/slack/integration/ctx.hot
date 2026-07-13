@@ -1,0 +1,11 @@
+::slack::integration::ctx ns
+
+::env ::hot::env
+
+// Placeholder credentials for the slack integration suite. Unset
+// environment variables are skipped entirely, so absent credentials
+// behave exactly as if never configured.
+::hot::ctx/set(filter-vals({
+    "slack.api.key": ::env/get("SLACK_API_KEY", ""),
+    "slack.signing.secret": ::env/get("SLACK_SIGNING_SECRET", ""),
+}, (v) { not(is-empty(v)) }))

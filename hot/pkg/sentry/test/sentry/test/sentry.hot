@@ -1,0 +1,7 @@
+::sentry::test ns
+meta ["test"]
+
+test-base-url-default
+meta ["test"] fn () {
+    assert-eq("https://sentry.io/api/0", ::sentry/base-url())
+}

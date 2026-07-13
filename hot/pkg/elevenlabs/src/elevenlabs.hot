@@ -1,0 +1,32 @@
+::elevenlabs ns
+meta {
+    doc: """
+    ElevenLabs API bindings: text-to-speech, voices, and models.
+
+    Pairs naturally with `whisper` (speech-to-text) and the messaging
+    packages for voice agents — Telegram voice replies, phone agents,
+    narrated summaries.
+
+    **Setup** — context variable `elevenlabs.api.key` (from
+    https://elevenlabs.io/app/settings/api-keys).
+
+    **Quick start**
+
+    ```hot
+    ::tts ::elevenlabs::tts
+
+    audio ::tts/text-to-speech("JBFqnCBsd6RMkjVDRZzb", ::tts/TextToSpeechRequest({
+      text: "Hello from Hot!",
+      model_id: "eleven_multilingual_v2"
+    }))
+    // audio is Bytes (mp3 by default) — write it, send it, play it
+    ::hot::file/write("hot://out/hello.mp3", audio)
+    ```
+    """
+}
+
+BASE_URL "https://api.elevenlabs.io"
+
+// Well-known premade voice IDs, so examples work out of the box.
+GEORGE_VOICE_ID "JBFqnCBsd6RMkjVDRZzb"
+RACHEL_VOICE_ID "21m00Tcm4TlvDq8ikWAM"

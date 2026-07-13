@@ -1,0 +1,22 @@
+::google::test::calendar ns
+meta ["test"]
+
+// Hermetic wiring tests: with no google.* context configured, every call
+// must surface google-core's no-credentials Err — proving the cross-
+// namespace call path (calendar -> api -> auth) resolves end to end.
+
+test-calls-surface-no-credentials-err
+meta ["test"] fn () {
+    calendars ::google::calendar/list-calendars()
+    assert(is-err(calendars), "list-calendars without credentials errs")
+    assert(contains(err-message(calendars), "no credentials"), "the auth error reaches the caller")
+
+    events ::google::calendar/list-events("primary")
+    assert(is-err(events), "list-events without credentials errs")
+
+    created ::google::calendar/create-event("primary", {summary: "x", start: {date: "2030-01-01"}, end: {date: "2030-01-02"}})
+    assert(is-err(created), "create-event without credentials errs")
+
+    quick ::google::calendar/quick-add("primary", "lunch tomorrow at noon")
+    assert(is-err(quick), "quick-add without credentials errs")
+}

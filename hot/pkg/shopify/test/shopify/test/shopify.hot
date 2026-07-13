@@ -1,0 +1,39 @@
+::shopify::test ns
+meta ["test"]
+
+test-parse-graphql-response
+meta ["test"] fn () {
+    ok ::shopify/parse-graphql-response({data: {shop: {name: "Acme"}}})
+    assert-eq("Acme", ok.shop.name)
+    bad ::shopify/parse-graphql-response({errors: [{message: "syntax"}], data: null})
+    assert(is-err(bad))
+}
+
+test-webhook-vector
+meta ["test"] fn () {
+    // base64 HMAC-SHA256 of the body with "shpss_test_secret", generated independently
+    request {
+        headers: {x-shopify-hmac-sha256: "AU5n5C4JV1EbE8g4yEzV+ZHbqkXpM29HXkzNAa5zicA="},
+        body-raw: """{"id":820982911946154508}"""
+    }
+
+    assert(::shopify/verify-request(request, "shpss_test_secret"))
+    assert(not(::shopify/verify-request({headers: {x-shopify-hmac-sha256: "AU5n5C4JV1EbE8g4yEzV+ZHbqkXpM29HXkzNAa5zicA="}, body-raw: "tampered"}, "shpss_test_secret")))
+}
+
+test-quote-search-term
+meta ["test"] fn () {
+    assert-eq("\"ada@example.com\"", ::shopify/quote-search-term("ada@example.com"))
+    assert-eq("\"a OR email:*\"", ::shopify/quote-search-term("a OR email:*"), "operators stay inside the quoted term")
+    assert-eq("\"say \\\"hi\\\"\"", ::shopify/quote-search-term("say \"hi\""), "embedded quotes escaped")
+}
+
+test-webhook-empty-secret-fails-closed
+meta ["test"] fn () {
+    // Even a signature correctly computed with an empty key must not
+    // verify: an empty secret means "not configured", not "no security".
+    body """{"id":820982911946154508}"""
+    sig ::hot::base64/encode(::hot::hex/decode(::hot::hmac/hmac-sha256("", body)))
+    request {headers: {x-shopify-hmac-sha256: sig}, body-raw: body}
+    assert(not(::shopify/verify-request(request, "")), "empty secret fails closed")
+}

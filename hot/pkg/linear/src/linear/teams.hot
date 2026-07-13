@@ -1,0 +1,65 @@
+::linear::teams ns
+
+::api ::linear::api
+
+viewer
+meta {
+    doc: """The authenticated user (`{id, name, email}`) — the cheapest way to smoke-test a key."""
+}
+fn (): Map {
+  data ::api/graphql("query { viewer { id name email } }")
+  match data {
+    Result.Err => { err(data) }
+
+    _ => { data.viewer }
+  }
+}
+
+list-teams
+meta {
+    doc: """List teams (`{nodes: [{id, key, name}], ...}`). Team ids are what `create-issue` needs."""
+}
+fn (): Map {
+  data ::api/graphql("query { teams { nodes { id key name } } }")
+  match data {
+    Result.Err => { err(data) }
+
+    _ => { data.teams }
+  }
+}
+
+get-team-by-key
+meta {
+    doc: """Find a team by its key (the "ENG" in "ENG-123"). Returns the team or null."""
+}
+fn (key: Str): Any {
+  teams list-teams()
+  match teams {
+    Result.Err => { err(teams) }
+
+    _ => {
+      matches filter(teams.nodes, (t) { eq(t.key, key) })
+      if(is-empty(matches), null, first(matches))
+    }
+  }
+}
+
+list-states
+meta {
+    doc: """A team's workflow states (`{id, name, type}` — types: triage/backlog/unstarted/started/completed/canceled). State ids drive `update-issue({stateId: ...})`."""
+}
+fn (team-id: Str): Map {
+  query """
+  query States($teamId: String!) {
+    team(id: $teamId) {
+      states { nodes { id name type } }
+    }
+  }
+  """
+  data ::api/graphql(query, {teamId: team-id})
+  match data {
+    Result.Err => { err(data) }
+
+    _ => { data.team.states }
+  }
+}

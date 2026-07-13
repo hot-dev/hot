@@ -1,0 +1,81 @@
+::sql::sqlite ns
+meta {
+    doc: """
+    SQLite driver for `::sql`, backed by the `::hot::sqlite` runtime
+    natives — an embedded database, no server. Respects `file.mode`:
+    host paths in `direct` mode; managed-storage checkout/commit in
+    `service` mode (see `::hot::sqlite` for the durability and
+    concurrency model). Best for small, session-shaped workloads;
+    high-frequency concurrent writers belong on `::sql::pg`.
+    """
+}
+
+::str ::hot::str
+
+command-tag
+meta {
+    doc: """SQLite reports no command tag, so derive one from the statement's first word (`"INSERT"`, `"UPDATE"`, ...). Exposed for testing."""
+}
+fn (sql: Str): Str {
+  ::str/uppercase(first(split(::str/trim(sql), " ")))
+}
+
+sqlite-execute fn (conn: Any, sql: Str, params: Vec): Map {
+  out ::hot::sqlite/execute(conn, sql, params)
+  match out {
+    Result.Err => { err(out) }
+
+    _ => {
+      {
+        command: command-tag(sql),
+        rows-affected: out.rows-affected,
+        last-insert-id: out.last-insert-id
+      }
+    }
+  }
+}
+
+driver
+meta {
+    doc: """The SQLite `::sql/Driver`. Usually used through `::sql::sqlite/open`."""
+}
+
+::sql/Driver({
+  name: "sqlite",
+  placeholder: "question",
+  connect: ::hot::sqlite/open,
+  query: ::hot::sqlite/query,
+  execute: sqlite-execute,
+  close: ::hot::sqlite/close,
+  quote-ident: ::sql/ansi-quote-ident
+})
+
+open
+meta {
+    doc: """
+    Open a SQLite-backed `::sql/Db`. Pass a path string or an options
+    map (`path`, `read-only`) — see `::hot::sqlite/open`.
+
+    **Example**
+
+    ```hot
+    db ::sql::sqlite/open("data/app.db")
+    ::sql/execute(db, "CREATE TABLE IF NOT EXISTS t (id INTEGER PRIMARY KEY, name TEXT)", [])
+    ::sql/execute(db, "INSERT INTO t (name) VALUES (?)", ["Ada"])
+    rows ::sql/query(db, "SELECT * FROM t WHERE name = :name", {name: "Ada"})
+    ::sql/close(db)
+    ```
+    """
+}
+fn (path-or-options: Str | Map): ::sql/Db {
+  options if(is-str(path-or-options), {path: path-or-options}, path-or-options)
+  ::sql/open(driver, options)
+}
+
+sync
+meta {
+    doc: """Commit a service-mode checkout back to managed storage without closing (see `::hot::sqlite/sync`). No-op in `direct` mode."""
+}
+fn (db: ::sql/Db): Bool {
+  ::hot::sqlite/sync(db.conn)
+}

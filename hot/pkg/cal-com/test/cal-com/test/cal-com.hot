@@ -1,0 +1,16 @@
+::cal-com::test ns
+meta ["test"]
+
+test-api-versions-pinned-per-family
+meta ["test"] fn () {
+    // Cal.com v2 versions each endpoint family independently; these must
+    // match the documented cal-api-version for each family.
+    assert-eq("2024-06-14", ::cal-com/VERSION_EVENT_TYPES)
+    assert-eq("2024-09-04", ::cal-com/VERSION_SLOTS)
+    assert-eq("2024-08-13", ::cal-com/VERSION_BOOKINGS)
+}
+
+test-base-url-default
+meta ["test"] fn () {
+    assert-eq("https://api.cal.com/v2", ::cal-com/base-url())
+}

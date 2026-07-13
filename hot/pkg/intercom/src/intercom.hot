@@ -1,0 +1,182 @@
+::intercom ns
+meta {
+    doc: """
+    Intercom bindings: contacts and conversations — the surface a support
+    agent works. Reply to conversations as comments or internal notes,
+    search both sides.
+
+    **Setup** — context variables:
+    - `intercom.token` — an access token from the Developer Hub
+    - `intercom.admin.id` — the admin to reply as (for `reply` / `add-note`)
+
+    **Quick start**
+
+    ```hot
+    ::ic ::intercom
+
+    open ::ic/search-conversations({field: "open", operator: "=", value: true})
+
+    ::ic/add-note(conversation-id, "Customer is on the enterprise plan — escalate to tier 2.")
+    ::ic/reply(conversation-id, "Thanks for the report! A fix ships this week.")
+    ```
+    """
+}
+
+::ctx ::hot::ctx
+
+BASE_URL "https://api.intercom.io"
+API_VERSION "2.13"
+
+request fn
+(method: Str, path: Str, body: Any): Any {
+  request(method, path, body, ::ctx/get("intercom.token"))
+},
+// 4-arity: explicit access token override
+(method: Str, path: Str, body: Any, token: Str): Any {
+  base-headers {
+    Authorization: `Bearer ${token}`,
+    Intercom-Version: API_VERSION,
+    Accept: "application/json"
+  }
+
+  headers cond {
+    eq(body, "") => { base-headers }
+    => { {...base-headers, Content-Type: "application/json"} }
+  }
+
+  encoded if(eq(body, ""), "", to-json(untype(body)))
+  response ::hot::http/request(::hot::http/HttpRequest({
+    method,
+    url: `${BASE_URL}${path}`,
+    headers: headers,
+    body: encoded
+  }))
+  cond {
+    is-err(response) => { response }
+    ::hot::http/is-ok-response(response) => { response.body }
+    => { err({status: response.status, body: response.body}) }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Contacts
+// ---------------------------------------------------------------------------
+
+create-contact
+meta {
+    ctx: {"intercom.token": {required: true}},
+    doc: """POST /contacts - Create a contact (`{email, name?, phone?, custom_attributes?}`)."""
+}
+fn (fields: Map): Map {
+  request("POST", "/contacts", {role: "user", ...fields})
+}
+
+get-contact
+meta {
+    doc: """GET /contacts/{id} - One contact."""
+}
+fn (id: Str): Map {
+  request("GET", `/contacts/${id}`, "")
+}
+
+find-contact-by-email
+meta {
+    doc: """POST /contacts/search by exact email. Returns the contact or null."""
+}
+fn (email: Str): Any {
+  out request("POST", "/contacts/search", {
+    query: {field: "email", operator: "=", value: email}
+  })
+  cond {
+    is-err(out) => { out }
+    is-empty(out.data) => { null }
+    => { first(out.data) }
+  }
+}
+
+update-contact
+meta {
+    doc: """PUT /contacts/{id} - Update a contact's fields."""
+}
+fn (id: Str, fields: Map): Map {
+  request("PUT", `/contacts/${id}`, fields)
+}
+
+// ---------------------------------------------------------------------------
+// Conversations
+// ---------------------------------------------------------------------------
+
+list-conversations
+meta {
+    doc: """GET /conversations - Recent conversations (paged)."""
+}
+fn (): Map {
+  request("GET", "/conversations", "")
+}
+
+get-conversation
+meta {
+    doc: """GET /conversations/{id} - A conversation with its parts (messages and notes)."""
+}
+fn (id: Str): Map {
+  request("GET", `/conversations/${id}`, "")
+}
+
+search-conversations
+meta {
+    doc: """
+    POST /conversations/search - Search with Intercom's query DSL: a
+    single `{field, operator, value}` or `{operator: "AND"/"OR", value:
+    [...]}` combinator.
+
+    **Example**
+
+    ```hot
+    open ::intercom/search-conversations({field: "open", operator: "=", value: true})
+    ```
+    """
+}
+fn (query: Map): Map {
+  request("POST", "/conversations/search", {query: query})
+}
+
+reply
+meta {
+    ctx: {"intercom.token": {required: true}, "intercom.admin.id": {required: true}},
+    doc: """POST /conversations/{id}/reply - Reply to the customer as the configured admin (visible to them)."""
+}
+fn (conversation-id: Str, body: Str): Map {
+  request("POST", `/conversations/${conversation-id}/reply`, {
+    message_type: "comment",
+    type: "admin",
+    admin_id: ::ctx/get("intercom.admin.id"),
+    body: body
+  })
+}
+
+add-note
+meta {
+    ctx: {"intercom.token": {required: true}, "intercom.admin.id": {required: true}},
+    doc: """POST /conversations/{id}/reply with `message_type: note` - An internal note teammates see but the customer doesn't."""
+}
+fn (conversation-id: Str, body: Str): Map {
+  request("POST", `/conversations/${conversation-id}/reply`, {
+    message_type: "note",
+    type: "admin",
+    admin_id: ::ctx/get("intercom.admin.id"),
+    body: body
+  })
+}
+
+close-conversation
+meta {
+    ctx: {"intercom.token": {required: true}, "intercom.admin.id": {required: true}},
+    doc: """POST /conversations/{id}/parts with `message_type: close` - Close a conversation."""
+}
+fn (conversation-id: Str): Map {
+  request("POST", `/conversations/${conversation-id}/parts`, {
+    message_type: "close",
+    type: "admin",
+    admin_id: ::ctx/get("intercom.admin.id")
+  })
+}

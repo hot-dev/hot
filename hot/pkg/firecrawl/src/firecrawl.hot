@@ -1,0 +1,127 @@
+::firecrawl ns
+meta {
+    doc: """
+    Firecrawl bindings — turn any website into clean, LLM-ready content.
+    Completes the browsing loop with `web-search`: search finds URLs,
+    Firecrawl reads them (single pages, whole sites, or structured
+    extraction).
+
+    **Setup** — context variable `firecrawl.api.key` (`fc-...`).
+
+    **Quick start**
+
+    ```hot
+    ::fc ::firecrawl
+
+    page ::fc/scrape("https://hot.dev/docs", {formats: ["markdown"]})
+    page.markdown
+
+    site ::fc/crawl("https://hot.dev/docs", {limit: 50})
+    status ::fc/get-crawl(site.id)   // poll until status == "completed"
+    ```
+    """
+}
+
+::ctx ::hot::ctx
+
+BASE_URL "https://api.firecrawl.dev/v2"
+
+request fn
+(method: Str, path: Str, body: Any): Any {
+  request(method, path, body, ::ctx/get("firecrawl.api.key"))
+},
+// 4-arity: explicit API key override
+(method: Str, path: Str, body: Any, api-key: Str): Any {
+  headers cond {
+    eq(body, "") => { {Authorization: `Bearer ${api-key}`} }
+    => { {Authorization: `Bearer ${api-key}`, Content-Type: "application/json"} }
+  }
+
+  encoded if(eq(body, ""), "", to-json(untype(body)))
+  response ::hot::http/request(::hot::http/HttpRequest({
+    method,
+    url: `${BASE_URL}${path}`,
+    headers: headers,
+    body: encoded
+  }))
+  cond {
+    is-err(response) => { response }
+    ::hot::http/is-ok-response(response) => { response.body }
+    => { err({status: response.status, body: response.body}) }
+  }
+}
+
+scrape
+meta {
+    ctx: {"firecrawl.api.key": {required: true}},
+    doc: """
+    POST /scrape - Fetch one URL as clean content. `options`: `formats`
+    (Vec of "markdown"/"html"/"links"/"screenshot", default markdown),
+    `onlyMainContent` (default true), `waitFor` (ms for JS-heavy pages).
+    Returns the data object (`markdown`, `metadata`, ...).
+    """
+}
+fn
+(url: Str): Map {
+  scrape(url, {})
+},
+(url: Str, options: Map): Map {
+  out request("POST", "/scrape", {url: url, ...options})
+  match out {
+    Result.Err => { err(out) }
+
+    _ => { out.data }
+  }
+}
+
+map-site
+meta {
+    ctx: {"firecrawl.api.key": {required: true}},
+    doc: """POST /map - Discover a site's URLs fast (sitemap + crawl heuristics). Returns `{links: [...]}` — feed the interesting ones to `scrape`."""
+}
+fn (url: Str): Map {
+  request("POST", "/map", {url: url})
+}
+
+crawl
+meta {
+    ctx: {"firecrawl.api.key": {required: true}},
+    doc: """POST /crawl - Start crawling a site. `options`: `limit` (page cap), `includePaths`/`excludePaths`, `scrapeOptions` (per-page scrape options). Returns `{id}` — poll with `get-crawl`."""
+}
+fn
+(url: Str): Map {
+  crawl(url, {})
+},
+(url: Str, options: Map): Map {
+  request("POST", "/crawl", {url: url, ...options})
+}
+
+get-crawl
+meta {
+    ctx: {"firecrawl.api.key": {required: true}},
+    doc: """GET /crawl/{id} - Crawl status and results: `{status, completed, total, data: [pages...]}`."""
+}
+fn (id: Str): Map {
+  request("GET", `/crawl/${id}`, "")
+}
+
+extract
+meta {
+    ctx: {"firecrawl.api.key": {required: true}},
+    doc: """
+    POST /extract - LLM-structured extraction across URLs. Provide a
+    `prompt` and/or JSON `schema`; wildcard URLs (`https://site.com/*`)
+    extract from a whole site.
+
+    **Example**
+
+    ```hot
+    out ::firecrawl/extract(["https://hot.dev/pricing"], {
+      prompt: "Extract the plan names and monthly prices"
+    })
+    ```
+    """
+}
+fn (urls: Vec, options: Map): Map {
+  request("POST", "/extract", {urls: urls, ...options})
+}

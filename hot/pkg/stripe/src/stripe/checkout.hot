@@ -1,0 +1,109 @@
+::stripe::checkout ns
+
+api-request ::stripe::api/request
+query-string ::stripe::api/query-string
+HttpError ::stripe::api/HttpError
+is-ok-response ::hot::http/is-ok-response
+
+// ============================================================================
+// Checkout Sessions
+// ============================================================================
+// Checkout Sessions power Stripe-hosted payment pages. Create a session,
+// redirect the customer to `session.url`, and listen for the
+// `checkout.session.completed` webhook.
+
+CreateCheckoutSessionRequest type {
+  mode: Str,
+  line_items: Vec<Map>?,
+  success_url: Str?,
+  cancel_url: Str?,
+  customer: Str?,
+  customer_email: Str?,
+  client_reference_id: Str?,
+  currency: Str?,
+  metadata: Map?,
+  payment_method_types: Vec<Str>?,
+  subscription_data: Map?,
+  payment_intent_data: Map?,
+  allow_promotion_codes: Bool?,
+  automatic_tax: Map?,
+  expires_at: Int?,
+  ui_mode: Str?,
+  return_url: Str?
+}
+
+create-checkout-session
+meta {
+    doc: """
+POST /v1/checkout/sessions - Create a Checkout Session. `mode` is "payment", "subscription", or "setup". Redirect the customer to the returned `url`.
+
+**Example**
+
+```hot
+::checkout ::stripe::checkout
+
+session ::checkout/create-checkout-session(::checkout/CreateCheckoutSessionRequest({
+  mode: "payment",
+  line_items: [{price: "price_...", quantity: 1}],
+  success_url: "https://example.com/success?session_id={CHECKOUT_SESSION_ID}",
+  cancel_url: "https://example.com/cancel"
+}))
+session.url  // => "https://checkout.stripe.com/c/pay/cs_..."
+```
+"""
+}
+fn (request: CreateCheckoutSessionRequest): Map {
+  response api-request("POST", `${::stripe/BASE_URL}/v1/checkout/sessions`, {}, request)
+  if(is-ok-response(response), response.body, err(HttpError(response)))
+}
+
+get-checkout-session
+meta {
+    doc: """GET /v1/checkout/sessions/{session} - Retrieve a Checkout Session by ID. Check `payment_status` ("paid", "unpaid", "no_payment_required") after redirect."""
+}
+fn (session: Str): Map {
+  response api-request("GET", `${::stripe/BASE_URL}/v1/checkout/sessions/${session}`)
+  if(is-ok-response(response), response.body, err(HttpError(response)))
+}
+
+expire-checkout-session
+meta {
+    doc: """POST /v1/checkout/sessions/{session}/expire - Expire an open Checkout Session so it can no longer be used."""
+}
+fn (session: Str): Map {
+  response api-request("POST", `${::stripe/BASE_URL}/v1/checkout/sessions/${session}/expire`, {}, {})
+  if(is-ok-response(response), response.body, err(HttpError(response)))
+}
+
+ListCheckoutSessionsRequest type {
+  customer: Str?,
+  payment_intent: Str?,
+  subscription: Str?,
+  status: Str?,
+  created: Any?,
+  limit: Int?,
+  starting_after: Str?,
+  ending_before: Str?
+}
+
+list-checkout-sessions
+meta {
+    doc: """GET /v1/checkout/sessions - List Checkout Sessions. Filter by `customer`, `payment_intent`, `subscription`, or `status` ("open", "complete", "expired")."""
+}
+fn
+(): Map {
+  list-checkout-sessions(ListCheckoutSessionsRequest({}))
+},
+(request: ListCheckoutSessionsRequest): Map {
+  response api-request("GET", `${::stripe/BASE_URL}/v1/checkout/sessions${query-string(request)}`)
+  if(is-ok-response(response), response.body, err(HttpError(response)))
+}
+
+list-checkout-session-line-items
+meta {
+    doc: """GET /v1/checkout/sessions/{session}/line_items - List the line items of a Checkout Session."""
+}
+fn (session: Str): Map {
+  response api-request("GET", `${::stripe/BASE_URL}/v1/checkout/sessions/${session}/line_items`)
+  if(is-ok-response(response), response.body, err(HttpError(response)))
+}

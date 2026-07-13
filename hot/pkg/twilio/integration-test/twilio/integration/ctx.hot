@@ -1,0 +1,11 @@
+::twilio::integration::ctx ns
+
+::env ::hot::env
+
+// Placeholder credentials for the twilio integration suite. Unset
+// environment variables are skipped entirely, so absent credentials
+// behave exactly as if never configured.
+::hot::ctx/set(filter-vals({
+    "twilio.account.sid": ::env/get("TWILIO_ACCOUNT_SID", ""),
+    "twilio.auth.token": ::env/get("TWILIO_AUTH_TOKEN", ""),
+}, (v) { not(is-empty(v)) }))

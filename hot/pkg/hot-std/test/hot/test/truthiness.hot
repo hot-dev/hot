@@ -1,0 +1,60 @@
+::hot::test::truthiness ns
+meta ["test"]
+
+// One truthiness for the whole language: falsy is false, null, and Err;
+// everything else — including 0, "", [], and {} — is truthy. if/cond,
+// assert, or/and/not, is-truthy, and HOF predicates all agree.
+
+test-only-false-null-err-are-falsy
+meta ["test"] fn () {
+    assert(is-truthy(0), "0 is truthy")
+    assert(is-truthy(""), "empty string is truthy")
+    assert(is-truthy([]), "empty vec is truthy")
+    assert(is-truthy({}), "empty map is truthy")
+    assert(is-truthy(0.0), "zero decimal is truthy")
+    assert(not(is-truthy(false)), "false is falsy")
+    assert(not(is-truthy(null)), "null is falsy")
+    r err("e")
+    assert(not(is-truthy(r)), "Err is falsy")
+}
+
+test-or-and-agree-with-if
+meta ["test"] fn () {
+    assert-eq("", or("", "x"), "or passes empty strings through")
+    assert-eq(0, or(0, "x"), "or passes zero through")
+    assert-eq([], or([], "x"), "or passes empty vecs through")
+    assert-eq("x", or(null, "x"), "or coalesces null")
+    assert-eq("x", or(false, "x"), "or coalesces false")
+    assert-eq(0, or(null, 0, 42), "0 is the first truthy value")
+
+    assert-eq("y", and("", "y"), "and continues past empty strings")
+    assert-eq(0, and(1, 0), "and returns the last value when all truthy")
+    assert-eq(null, and(1, null, 3), "and stops at null")
+
+    assert-eq(if("", "t", "f"), if(is-truthy(""), "t", "f"), "if and is-truthy agree on empty strings")
+    assert-eq("t", if(0, "t", "f"), "if takes the truthy branch on 0")
+}
+
+test-or-coalesces-err-values
+meta ["test"] fn () {
+    r err("boom")
+    assert-eq("recovered", or(r, "recovered"), "Err is falsy so or() recovers")
+}
+
+test-not-negates-is-truthy
+meta ["test"] fn () {
+    assert-eq(false, not(0), "0 is truthy")
+    assert-eq(false, not(""), "empty string is truthy")
+    assert-eq(false, not([]), "empty vec is truthy")
+    assert-eq(true, not(null))
+    assert-eq(true, not(false))
+}
+
+test-hof-predicates-use-language-truthiness
+meta ["test"] fn () {
+    // A predicate returning "" or 0 counts as truthy, same as if().
+    kept filter([1, 2, 3], (n) { "" })
+    assert-eq(3, length(kept), "empty-string predicate results are truthy")
+    found find-first([1, 2, 3], (n) { 0 })
+    assert-eq(1, found, "zero predicate result is truthy")
+}

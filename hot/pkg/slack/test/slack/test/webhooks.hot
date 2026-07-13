@@ -1,0 +1,43 @@
+::slack::test::webhooks ns
+meta ["test"]
+
+::webhooks ::slack::webhooks
+
+// Signature vector generated independently with Python hmac/hashlib.
+SLACK_BODY "token=xyz&team_id=T123&command=%2Fdeploy"
+SLACK_TS "1700000000"
+SLACK_SIG "90a8c5585a4aca7b3b2a63131cd768fadca1c8947ca766293a81ad47f551ea76"
+SECRET "slack_test_secret"
+
+slack-request fn (sig: Str, ts: Str): Map {
+  {
+    headers: {x-slack-signature: `v0=${sig}`, x-slack-request-timestamp: ts},
+    body-raw: SLACK_BODY
+  }
+}
+
+test-verify-accepts-vector-with-tolerance-disabled
+meta ["test"] fn () {
+    // The vector's timestamp is fixed in the past; tolerance 0 checks the
+    // pure signature path against the independent vector.
+    assert(::webhooks/verify-request(slack-request(SLACK_SIG, SLACK_TS), SECRET, 0))
+}
+
+test-verify-rejects-stale-timestamp
+meta ["test"] fn () {
+    assert(not(::webhooks/verify-request(slack-request(SLACK_SIG, SLACK_TS), SECRET)), "default 300s window rejects a 2023 timestamp")
+}
+
+test-verify-accepts-fresh-signature
+meta ["test"] fn () {
+    ts Str(::hot::time/epoch-seconds())
+    base `v0:${ts}:${SLACK_BODY}`
+    sig ::hot::hmac/hmac-sha256(SECRET, base)
+    assert(::webhooks/verify-request(slack-request(sig, ts), SECRET))
+}
+
+test-verify-rejects-wrong-secret-and-missing-headers
+meta ["test"] fn () {
+    assert(not(::webhooks/verify-request(slack-request(SLACK_SIG, SLACK_TS), "other", 0)))
+    assert(not(::webhooks/verify-request({headers: {}, body-raw: SLACK_BODY}, SECRET, 0)), "missing headers fail")
+}

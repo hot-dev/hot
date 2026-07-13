@@ -104,7 +104,7 @@ pub(crate) async fn run_dev(
         log_rotation: None,
         log_retention: None,
         log_format: None,
-        deploy_auto: true,
+        deploy_auto: Some(true),
         emitter: EmitterOptions { emitter_type: None },
         with_tests: None,
     };

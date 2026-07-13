@@ -817,6 +817,24 @@ mod tests {
             Ok(mock_metadata(path, size))
         }
 
+        async fn write_file_if(
+            &self,
+            path: &str,
+            content: &[u8],
+            _content_type: Option<&str>,
+            expected_etag: Option<&str>,
+            _ctx: &hot::file_storage::FileStorageContext,
+        ) -> Result<Option<hot::file_storage::FileMetadata>, String> {
+            let mut files = self.files.lock().await;
+            let current = files.get(path).map(|b| hot::file_storage::compute_md5(b));
+            if current.as_deref() != expected_etag {
+                return Ok(None);
+            }
+            let size = content.len() as i64;
+            files.insert(path.to_string(), content.to_vec());
+            Ok(Some(mock_metadata(path, size)))
+        }
+
         async fn read_file(
             &self,
             path: &str,

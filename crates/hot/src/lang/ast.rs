@@ -924,12 +924,29 @@ pub struct MatchArm {
     /// The subject is compared directly against this value using equality.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub value_literal: Option<Box<Value>>,
+    /// Additional `|`-separated patterns for union arms (e.g. `Str | Null =>`).
+    /// The first pattern lives in the arm's own type_name/variant/value_literal
+    /// fields; each extra alternative lands here. The arm matches if any
+    /// pattern matches.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub alternatives: Vec<MatchArmPattern>,
     /// Optional binding name for the matched value (future: for destructuring)
     pub binding: Option<String>,
     /// The body expression to execute when matched
     pub body: Value,
     /// Source location
     pub src: Option<Source>,
+}
+
+/// One pattern atom in a match arm: a value literal, `Type`, `Type.Variant`,
+/// or a bare variant. Mirrors the pattern-describing fields of `MatchArm`
+/// (which holds the first atom of a union arm inline).
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct MatchArmPattern {
+    pub type_name: Option<String>,
+    pub variant: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub value_literal: Option<Box<Value>>,
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -1542,19 +1559,33 @@ impl Display for Lambda {
     }
 }
 
+fn fmt_match_pattern_atom(
+    f: &mut Formatter<'_>,
+    type_name: &Option<String>,
+    variant: &Option<String>,
+    value_literal: &Option<Box<Value>>,
+) -> std::fmt::Result {
+    if let Some(value_literal) = value_literal {
+        write!(f, "{}", value_literal)
+    } else if let Some(type_name) = type_name {
+        write!(f, "{}", type_name)?;
+        if let Some(variant) = variant {
+            write!(f, ".{}", variant)?;
+        }
+        Ok(())
+    } else if let Some(variant) = variant {
+        write!(f, "{}", variant)
+    } else {
+        write!(f, "_")
+    }
+}
+
 impl Display for MatchArm {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        if let Some(value_literal) = &self.value_literal {
-            write!(f, "{}", value_literal)?;
-        } else if let Some(type_name) = &self.type_name {
-            write!(f, "{}", type_name)?;
-            if let Some(variant) = &self.variant {
-                write!(f, ".{}", variant)?;
-            }
-        } else if let Some(variant) = &self.variant {
-            write!(f, "{}", variant)?;
-        } else {
-            write!(f, "_")?;
+        fmt_match_pattern_atom(f, &self.type_name, &self.variant, &self.value_literal)?;
+        for alt in &self.alternatives {
+            write!(f, " | ")?;
+            fmt_match_pattern_atom(f, &alt.type_name, &alt.variant, &alt.value_literal)?;
         }
 
         if let Some(binding) = &self.binding {

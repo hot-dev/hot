@@ -27,6 +27,7 @@ meta {
     """
 }
 type
+
 fn
 (coll: Vec<Any> | Map<Any, Any> | Str): Iter {
     call-lib(::hot::iter/Iter, [coll])
@@ -148,10 +149,13 @@ for-each
 meta {
     core: true,
     doc: """
-    Apply a function to each value from an iterable.
+    Apply a function to each value from an iterable, for its side
+    effects. Accepts Vec, Map, Str, or Iter (iterators are pulled
+    lazily). Returns null.
 
-    Accepts Vec, Map, Str, or Iter. Auto-converts to Iter if needed.
-    Uses tail-call optimization for efficient iteration.
+    A callback that returns an Err halts the run, like `map`'s default —
+    handle expected failures inside the callback (`if-err`) when a side
+    effect may legitimately fail.
 
     **Example**
 
@@ -161,15 +165,7 @@ meta {
     """
 }
 fn (coll: Any, f: Fn): Null {
-    iter Iter(coll)
-    result next(iter)
-    cond {
-        result.done => { null }
-        => {
-            f(result.value)
-            for-each(iter, f)
-        }
-    }
+    call-lib(::hot::iter/for-each, [coll, f])
 }
 
 take

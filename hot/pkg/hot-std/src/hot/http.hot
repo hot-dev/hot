@@ -25,10 +25,18 @@ meta {
     **Fields**
     - `method` - HTTP method (GET, POST, PUT, etc.)
     - `url` - Request URL (full URL for outbound, path for inbound webhooks)
+    - `original-url` - The URL as the caller originally requested it, before any
+      platform rewriting: scheme, host, full path, and query intact (inbound
+      webhooks only). Providers that sign the URL they call (Twilio, HubSpot)
+      are verified against this field, never `url`. Contains the webhook token —
+      do not log it.
     - `headers` - Request headers (keys are lowercase for inbound)
     - `query` - Query string parameters as a Map (inbound only)
     - `body` - Parsed body (JSON auto-parsed to Map/Vec for inbound, or the body to send for outbound)
     - `body-raw` - Original request body as a raw string (inbound only, useful for signature verification)
+    - `body-bytes` - The verbatim body bytes, present only when the body is
+      not valid UTF-8 (inbound only). `body-raw` is lossy in that case;
+      signature verification should prefer `body-bytes` when present.
     - `ip` - Client IP address from proxy headers (inbound only)
     - `auth` - Caller identity when a webhook or MCP endpoint uses required authentication
 
@@ -52,12 +60,34 @@ meta {
 type {
     method: Str,
     url: Str,
+    original-url: Str?,
     headers: Map<Str, Str>?,
     query: Map?,
     body: Any?,
     body-raw: Str?,
+    body-bytes: Bytes?,
     ip: Str?,
     auth: Map?
+}
+
+raw-body
+meta {
+    doc: """
+    The verbatim body of an inbound request for signature verification:
+    `body-bytes` when present (the body was not valid UTF-8 and `body-raw`
+    is lossy), otherwise `body-raw` (`""` when absent). Webhook verifiers
+    should hash this value rather than reading `body-raw` directly.
+
+    **Example**
+
+    ```hot
+    ::hmac/hmac-verify-hex(secret, ::http/raw-body(request), signature, "sha256")
+    ```
+    """
+}
+fn (request: Map): Str | Bytes {
+    // `get` here is this namespace's HTTP GET; use the qualified map accessor.
+    or(::hot::coll/get(request, "body-bytes", null), or(::hot::coll/get(request, "body-raw", ""), ""))
 }
 
 HttpResponse

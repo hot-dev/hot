@@ -1,0 +1,312 @@
+::mysql::decode ns
+meta {
+    doc: """
+    MySQL response decoding: OK/ERR/EOF packets, column definitions,
+    and text- and binary-protocol result rows. Internal to the `mysql`
+    package.
+    """
+}
+
+::wire ::mysql::wire
+::bytes ::hot::bytes
+
+first-byte fn (payload: Bytes): Int {
+    ::bytes/to-uint(slice(payload, 0, 1))
+}
+
+is-eof
+meta {doc: """A classic EOF packet: 0xFE header with a short payload."""}
+fn (payload: Bytes): Bool {
+    and(eq(first-byte(payload), 254), lt(length(payload), 9))
+}
+
+parse-ok
+meta {doc: """Parse an OK packet (0x00 header): `{rows-affected, last-insert-id}`."""}
+fn (payload: Bytes): Map {
+    affected-out ::wire/read-lenenc-int(payload, 1)
+    insert-out ::wire/read-lenenc-int(payload, affected-out[1])
+    {rows-affected: affected-out[0], last-insert-id: insert-out[0]}
+}
+
+parse-err
+meta {
+    doc: """Parse an ERR packet (0xFF header) into an Err carrying `{code, sqlstate, message}`."""
+}
+fn (payload: Bytes): Any {
+    code-out ::wire/read-int2(payload, 1)
+    // '#' marker + 5-byte sqlstate (protocol 4.1)
+    marker Str(slice(payload, 3, 4))
+    cond {
+        eq(marker, "#") => {
+            err({
+                code: code-out[0],
+                sqlstate: Str(slice(payload, 4, 9)),
+                message: Str(::wire/read-rest(payload, 9))
+            })
+        }
+        => {
+            err({
+                code: code-out[0],
+                sqlstate: "",
+                message: Str(::wire/read-rest(payload, 3))
+            })
+        }
+    }
+}
+
+parse-column
+meta {
+    doc: """
+    Parse a ColumnDefinition41 packet: `{name, type, charset, flags,
+    decimals}`. Charset 63 marks binary data. Exposed for testing.
+    """
+}
+fn (payload: Bytes): Map {
+    catalog-out ::wire/read-lenenc-str(payload, 0)
+    schema-out ::wire/read-lenenc-str(payload, catalog-out[1])
+    table-out ::wire/read-lenenc-str(payload, schema-out[1])
+    org-table-out ::wire/read-lenenc-str(payload, table-out[1])
+    name-out ::wire/read-lenenc-str(payload, org-table-out[1])
+    org-name-out ::wire/read-lenenc-str(payload, name-out[1])
+    // lenenc filler (0x0c), then the fixed fields.
+    fixed-out ::wire/read-lenenc-int(payload, org-name-out[1])
+    p fixed-out[1]
+    charset-out ::wire/read-int2(payload, p)
+    len-out ::wire/read-int4(payload, charset-out[1])
+    type-out ::wire/read-int1(payload, len-out[1])
+    flags-out ::wire/read-int2(payload, type-out[1])
+    decimals-out ::wire/read-int1(payload, flags-out[1])
+    {
+        name: name-out[0],
+        type: type-out[0],
+        charset: charset-out[0],
+        flags: flags-out[0],
+        decimals: decimals-out[0]
+    }
+}
+
+// MySQL column type ids used below.
+TYPE-TINY 1
+TYPE-SHORT 2
+TYPE-LONG 3
+TYPE-FLOAT 4
+TYPE-DOUBLE 5
+TYPE-TIMESTAMP 7
+TYPE-LONGLONG 8
+TYPE-INT24 9
+TYPE-DATE 10
+TYPE-TIME 11
+TYPE-DATETIME 12
+TYPE-YEAR 13
+TYPE-NEWDECIMAL 246
+
+// ColumnDefinition41 flag bit: the column is UNSIGNED.
+FLAG-UNSIGNED 32
+
+UINT64-WRAP Dec("18446744073709551616")
+
+is-unsigned fn (col: Map): Bool {
+    gt(::hot::bit/and(col.flags, FLAG-UNSIGNED), 0)
+}
+
+// Undo an unsigned little-endian read for a signed column: values at or
+// above 2^(bits-1) are two's-complement negatives. Used for 8/16/32-bit
+// reads; 64-bit values are read signed and reinterpreted the other way.
+to-signed fn (v: Int, bits: Int): Int {
+    half ::hot::bit/shift-left(1, sub(bits, 1))
+    if(gte(v, half), sub(v, ::hot::bit/shift-left(1, bits)), v)
+}
+
+// Reinterpret a signed 64-bit read as unsigned; values that wrapped
+// negative gain 2^64 back, promoting to Dec (exact at 256 bits).
+to-unsigned-64 fn (v: Int): Any {
+    if(lt(v, 0), add(Dec(v), UINT64-WRAP), v)
+}
+
+int-type fn (t: Int): Bool {
+    in(t, [TYPE-TINY, TYPE-SHORT, TYPE-LONG, TYPE-LONGLONG, TYPE-INT24, TYPE-YEAR])
+}
+
+dec-type fn (t: Int): Bool {
+    in(t, [TYPE-FLOAT, TYPE-DOUBLE, TYPE-NEWDECIMAL])
+}
+
+coerce-text
+meta {
+    doc: """Coerce a text-protocol value by column type: integer types to Int (falling back to Dec above Int range, e.g. unsigned BIGINT), float/decimal to Dec, binary charset to Bytes, everything else Str."""
+}
+fn (col: Map, raw: Bytes): Any {
+    cond {
+        int-type(col.type) => {
+            parsed Int(Str(raw))
+            // Unsigned BIGINT above Int range still decodes as a number:
+            // exact as Dec (256-bit).
+            if-err(parsed, (e) {
+                dec-parsed Dec(Str(raw))
+                if-err(dec-parsed, (e2) { Str(raw) })
+            })
+        }
+
+        dec-type(col.type) => {
+            parsed Dec(Str(raw))
+            if-err(parsed, (e) { Str(raw) })
+        }
+
+        and(eq(col.charset, 63), not(in(col.type, [TYPE-DATE, TYPE-TIME, TYPE-DATETIME, TYPE-TIMESTAMP]))) => { raw }
+        => { Str(raw) }
+    }
+}
+
+decode-text-row
+meta {
+    doc: """Decode one text-protocol row against the column list: lenenc values, 0xFB = NULL. Returns a row Map."""
+}
+fn (cols: Vec, payload: Bytes): Map {
+    out reduce(cols, (acc, col) {
+        pos acc[1]
+        marker ::bytes/to-uint(slice(payload, pos, add(pos, 1)))
+        cond {
+            eq(marker, ::wire/NULL-MARKER) => {
+                [assoc(acc[0], col.name, null), add(pos, 1)]
+            }
+            => {
+                value-out ::wire/read-lenenc-bytes(payload, pos)
+                [assoc(acc[0], col.name, coerce-text(col, value-out[0])), value-out[1]]
+            }
+        }
+    }, [{}, 0])
+    out[0]
+}
+
+pad2 fn (n: Int): Str {
+    if(lt(n, 10), `0${n}`, Str(n))
+}
+
+read-binary-datetime fn (payload: Bytes, pos: Int): Vec {
+    len-out ::wire/read-int1(payload, pos)
+    len len-out[0]
+    p len-out[1]
+    cond {
+        eq(len, 0) => { ["0000-00-00", p] }
+        => {
+            year-out ::wire/read-int2(payload, p)
+            month ::bytes/to-uint(slice(payload, add(p, 2), add(p, 3)))
+            day ::bytes/to-uint(slice(payload, add(p, 3), add(p, 4)))
+            date `${year-out[0]}-${pad2(month)}-${pad2(day)}`
+            cond {
+                lt(len, 7) => { [date, add(p, len)] }
+                => {
+                    hour ::bytes/to-uint(slice(payload, add(p, 4), add(p, 5)))
+                    minute ::bytes/to-uint(slice(payload, add(p, 5), add(p, 6)))
+                    second ::bytes/to-uint(slice(payload, add(p, 6), add(p, 7)))
+                    [`${date} ${pad2(hour)}:${pad2(minute)}:${pad2(second)}`, add(p, len)]
+                }
+            }
+        }
+    }
+}
+
+read-binary-time fn (payload: Bytes, pos: Int): Vec {
+    len-out ::wire/read-int1(payload, pos)
+    len len-out[0]
+    p len-out[1]
+    cond {
+        eq(len, 0) => { ["00:00:00", p] }
+        => {
+            negative eq(::bytes/to-uint(slice(payload, p, add(p, 1))), 1)
+            days-out ::wire/read-int4(payload, add(p, 1))
+            hour ::bytes/to-uint(slice(payload, add(p, 5), add(p, 6)))
+            minute ::bytes/to-uint(slice(payload, add(p, 6), add(p, 7)))
+            second ::bytes/to-uint(slice(payload, add(p, 7), add(p, 8)))
+            total-hours add(mul(days-out[0], 24), hour)
+            sign if(negative, "-", "")
+            [`${sign}${pad2(total-hours)}:${pad2(minute)}:${pad2(second)}`, add(p, len)]
+        }
+    }
+}
+
+read-binary-value
+meta {
+    doc: """Read one binary-protocol value at `pos` for a column. -> [value, next-pos]."""
+}
+fn (col: Map, payload: Bytes, pos: Int): Vec {
+    t col.type
+    cond {
+        // Integer reads are unsigned little-endian off the wire (except the
+        // 8-byte read, which is signed); the column's UNSIGNED flag decides
+        // the reinterpretation.
+        eq(t, TYPE-TINY) => {
+            out ::wire/read-int1(payload, pos)
+            [if(is-unsigned(col), out[0], to-signed(out[0], 8)), out[1]]
+        }
+
+        in(t, [TYPE-SHORT, TYPE-YEAR]) => {
+            out ::wire/read-int2(payload, pos)
+            [if(is-unsigned(col), out[0], to-signed(out[0], 16)), out[1]]
+        }
+
+        in(t, [TYPE-LONG, TYPE-INT24]) => {
+            out ::wire/read-int4(payload, pos)
+            [if(is-unsigned(col), out[0], to-signed(out[0], 32)), out[1]]
+        }
+
+        eq(t, TYPE-LONGLONG) => {
+            out ::wire/read-int8(payload, pos)
+            [if(is-unsigned(col), to-unsigned-64(out[0]), out[0]), out[1]]
+        }
+
+        eq(t, TYPE-FLOAT) => {
+            [::bytes/to-float(slice(payload, pos, add(pos, 4)), "le"), add(pos, 4)]
+        }
+
+        eq(t, TYPE-DOUBLE) => {
+            [::bytes/to-float(slice(payload, pos, add(pos, 8)), "le"), add(pos, 8)]
+        }
+
+        in(t, [TYPE-DATE, TYPE-DATETIME, TYPE-TIMESTAMP]) => { read-binary-datetime(payload, pos) }
+        eq(t, TYPE-TIME) => { read-binary-time(payload, pos) }
+        eq(t, TYPE-NEWDECIMAL) => {
+            out ::wire/read-lenenc-bytes(payload, pos)
+            parsed Dec(Str(out[0]))
+            [if-err(parsed, (e) { Str(out[0]) }), out[1]]
+        }
+        => {
+            out ::wire/read-lenenc-bytes(payload, pos)
+            value if(eq(col.charset, 63), out[0], Str(out[0]))
+            [value, out[1]]
+        }
+    }
+}
+
+decode-binary-row
+meta {
+    doc: """
+    Decode one binary-protocol row (0x00 header, NULL bitmap with a
+    2-bit offset, then typed values). Returns a row Map.
+    """
+}
+fn (cols: Vec, payload: Bytes): Map {
+    n length(cols)
+    bitmap-len div-int(add(n, 9), 8)
+    bitmap slice(payload, 1, add(1, bitmap-len))
+    start add(1, bitmap-len)
+    out reduce(::hot::iter/range(0, n), (acc, i) {
+        col cols[i]
+        bit add(i, 2)
+        byte-idx div-int(bit, 8)
+        bit-mask ::hot::bit/shift-left(1, mod(bit, 8))
+        is-null gt(::hot::bit/and(::bytes/to-uint(slice(bitmap, byte-idx, add(byte-idx, 1))), bit-mask), 0)
+        cond {
+            is-null => { [assoc(acc[0], col.name, null), acc[1]] }
+            => {
+                value-out read-binary-value(col, payload, acc[1])
+                [assoc(acc[0], col.name, value-out[0]), value-out[1]]
+            }
+        }
+    }, [{}, start])
+    out[0]
+}
+
+div-int fn (a: Int, b: Int): Int {
+    Int(floor(div(a, b)))
+}

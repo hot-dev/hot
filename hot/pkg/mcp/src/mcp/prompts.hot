@@ -91,9 +91,7 @@ collect-pages fn cond (session: ::types/Session, cursor: Str?, acc: Vec): Vec {
     items map(get(result, "prompts", []), ::types/Prompt(%))
     combined concat(acc, items)
     next-cursor get(result, "nextCursor", null)
-    if(is-null(next-cursor),
-      combined,
-      collect-pages(session, next-cursor, combined))
+    if(is-null(next-cursor), combined, collect-pages(session, next-cursor, combined))
   }
 }
 

@@ -1,0 +1,576 @@
+::sql ns
+meta {
+    doc: """
+    Typed SQL runtime for Hot.
+
+    Write portable SQL with `?` (positional) or `:name` (named)
+    placeholders; drivers compile them to their native style (`$1` for
+    PostgreSQL; `?` passes through for MySQL and SQLite). `??` escapes a
+    literal `?` (PostgreSQL JSONB operators: `??`, `??|`, `??&`), and
+    strings, quoted identifiers, comments, casts, and dollar-quoted
+    bodies are never rewritten (see `::sql::compile/compile`). Results
+    and errors have one shape across drivers.
+
+    **Error contract:** every function returns a `Result.Err` carrying a
+    `SqlError` on failure — branch with `is-err` / `if-err`. An unhandled
+    error halts at first use with the same message.
+
+    **Quick start**
+
+    ```hot
+    ::sql ::sql
+    // drivers install separately: hot.dev/sql-pg, sql-mysql, sql-sqlite
+    db ::sql::pg/open({user: "postgres", database: "app"})
+    // or: ::sql::mysql/open({user: "root", database: "app"})
+    // or: ::sql::sqlite/open("data/app.db")   — embedded, no server
+
+    rows ::sql/query(db, "SELECT id, email FROM users WHERE active = ?", [true])
+    user ::sql/query-one(db, "SELECT * FROM users WHERE id = ?", [42])
+    n ::sql/scalar(db, "SELECT count(*) FROM users")
+
+    ::sql/transaction(db, (tx) {
+      ::sql/execute(tx, "UPDATE accounts SET balance = balance - ? WHERE id = ?", [100, 1])
+      ::sql/execute(tx, "UPDATE accounts SET balance = balance + ? WHERE id = ?", [100, 2])
+    })
+
+    ::sql/close(db)
+    ```
+
+    **Typed queries**
+
+    ```hot
+    User type { id: Int, email: Str, name: Str? }
+
+    get-user ::sql/Query({
+      sql: "SELECT id, email, name FROM users WHERE id = :id",
+      returns: User,
+      mode: "one"
+    })
+
+    user ::sql/run(db, get-user, {id: 42})
+    ```
+    """
+}
+
+::compile ::sql::compile
+
+// ---------------------------------------------------------------------------
+// Types
+// ---------------------------------------------------------------------------
+
+Driver
+meta {
+    doc: """
+    The driver contract. A driver supplies its native placeholder style and
+    the four connection primitives; everything else (placeholder
+    compilation, typed queries, transactions, error normalization) is
+    shared runtime.
+
+    **Fields**
+    - `name` — driver label used in `SqlError.driver`; also selects the
+      placeholder compiler's dialect lexing (`"pg"`, `"mysql"`,
+      `"sqlite"` — other names get the placeholder style's defaults)
+    - `placeholder` — `"dollar"` (`$1, $2, ...`) or `"question"` (`?`)
+    - `connect` — `fn (options: Map)` returning a connection or Err
+    - `query` — `fn (conn, sql: Str, params: Vec)` returning `Vec<Map>` or Err
+    - `execute` — `fn (conn, sql: Str, params: Vec)` returning `{command, rows-affected}` or Err
+    - `close` — `fn (conn)` returning Bool
+    - `quote-ident` — optional `fn (name: Str)` quoting an identifier in
+      the driver's dialect; when absent the runtime uses ANSI
+      double-quoting (correct for PostgreSQL and SQLite; a MySQL driver
+      supplies backtick quoting here)
+    """
+}
+type {
+  name: Str,
+  placeholder: Str,
+  connect: Any,
+  query: Any,
+  execute: Any,
+  close: Any,
+  quote-ident: Any?
+}
+
+Db
+meta {
+    doc: """An open database handle: the driver plus its live connection. Pass it to `query`/`execute`/`run`/`transaction`."""
+}
+type {
+  driver: Driver,
+  conn: Any
+}
+
+SqlError
+meta {
+    doc: """
+    Normalized SQL error shape shared by all drivers.
+
+    **Fields**
+    - `driver` — which driver produced the error (e.g. `"pg"`)
+    - `code` — driver/native error code when available (PostgreSQL SQLSTATE)
+    - `message` — human-readable message
+    - `detail` — additional detail when the driver provides it
+    - `cause` — the raw driver error payload
+    """
+}
+type {
+  driver: Str,
+  code: Str?,
+  message: Str,
+  detail: Str?,
+  cause: Any?
+}
+
+Query
+meta {
+    doc: """
+    A typed, reusable query value (inspired by Rust's sqlx).
+
+    **Fields**
+    - `sql` — SQL with `?` or `:name` placeholders
+    - `returns` — optional row type; rows are coerced through it
+    - `mode` — `"many"` (default, Vec of rows), `"one"` (first row or
+      null), `"scalar"` (first column of first row), or `"execute"`
+      (`{command, rows-affected}`)
+
+    **Example**
+
+    ```hot
+    ActiveUsers ::sql/Query({
+      sql: "SELECT id, email FROM users WHERE active = :active",
+      returns: User,
+      mode: "many"
+    })
+    users ::sql/run(db, ActiveUsers, {active: true})
+    ```
+    """
+}
+type {
+  sql: Str,
+  returns: Any?,
+  mode: Str?
+}
+
+// ---------------------------------------------------------------------------
+// Error normalization
+// ---------------------------------------------------------------------------
+
+wrap-error fn (driver-name: Str, payload: Any): SqlError {
+  cond {
+    is-map(payload) => {
+      SqlError({
+        driver: driver-name,
+        code: get(payload, "code"),
+        message: or(get(payload, "message"), Str(payload)),
+        detail: get(payload, "detail"),
+        cause: untype(payload)
+      })
+    }
+    => {
+      SqlError({driver: driver-name, code: null, message: Str(payload), detail: null, cause: payload})
+    }
+  }
+}
+
+// NOTE: an Err value may be bound and returned, but never passed as an
+// argument to a regular function (the VM halts on it). Error paths branch
+// with `match`: inside a Result.Err arm the matched variable reads the
+// error PAYLOAD, which can be handed to wrap-error directly and re-wrapped
+// with err() for propagation.
+
+// ---------------------------------------------------------------------------
+// Identifier quoting
+// ---------------------------------------------------------------------------
+
+ansi-quote-ident
+meta {
+    doc: """
+    Quote an identifier ANSI-style: wrapped in double quotes with embedded
+    double quotes doubled (`weird"name` → `"weird""name"`). Correct for
+    PostgreSQL and SQLite. Rejects empty identifiers and identifiers
+    containing NUL.
+    """
+}
+fn (name: Str): Str {
+  dq "\""
+  cond {
+    is-empty(name) => { err("sql: cannot quote an empty identifier") }
+    contains(name, "\u{0}") => { err("sql: identifier contains a NUL byte") }
+    => {
+      doubled join(split(name, dq), concat(dq, dq))
+      concat(dq, doubled, dq)
+    }
+  }
+}
+
+quote-ident
+meta {
+    doc: """
+    Quote an identifier (table or column name) in the database's dialect,
+    via the driver's `quote-ident` or the ANSI default. **Values must use
+    placeholders — this is only for the identifiers that placeholders
+    cannot parameterize.** Quote each part of a qualified name separately.
+
+    **Example**
+
+    ```hot
+    table ::sql/quote-ident(db, user-chosen-table)
+    rows ::sql/query(db, `SELECT * FROM ${table} WHERE id = ?`, [id])
+
+    // Qualified names: quote each part
+    target `${::sql/quote-ident(db, schema)}.${::sql/quote-ident(db, table)}`
+    ```
+    """
+}
+fn (db: Db, name: Str): Str {
+  quoter db.driver.quote-ident
+  cond {
+    is-null(quoter) => { ansi-quote-ident(name) }
+    => { quoter(name) }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Open / close
+// ---------------------------------------------------------------------------
+
+open
+meta {
+    doc: """
+    Open a database using a driver, e.g.
+    `::sql/open(::sql::pg/driver, {user: "postgres", database: "app"})`.
+    Driver packages usually provide a shortcut (`::sql::pg/open(options)`).
+    Returns a `Db`, or an Err carrying a `SqlError`.
+    """
+}
+fn (driver: Driver, options: Map): Db {
+  connect driver.connect
+  conn connect(options)
+  match conn {
+    Result.Err => {
+      payload conn
+      err(wrap-error(driver.name, payload))
+    }
+
+    _ => { Db({driver: driver, conn: conn}) }
+  }
+}
+
+close
+meta {
+    doc: """Close the database connection. Safe to call more than once."""
+}
+fn (db: Db): Bool {
+  do-close db.driver.close
+  do-close(db.conn)
+}
+
+// ---------------------------------------------------------------------------
+// Parameter binding
+// ---------------------------------------------------------------------------
+
+// Bind user params against compiled placeholder names.
+// - all-null names (positional ?): params must be a Vec of the same length
+// - named placeholders: params must be a Map (or typed value); each name
+//   is looked up by key, and repeated names are repeated per occurrence
+bind-params fn (compiled: Map, params: Any): Vec {
+  named gt(length(filter(compiled.names, is-some)), 0)
+  cond {
+    eq(compiled.count, 0) => {
+      cond {
+        or(is-null(params), and(is-vec(params), is-empty(params))) => { [] }
+        => { err("sql: statement has no placeholders but parameters were provided") }
+      }
+    }
+
+    named => {
+      cond {
+        not(is-map(untype(params))) => {
+          err("sql: statement uses :name placeholders; pass a Map of parameters")
+        }
+        => {
+          pmap untype(params)
+          missing filter(compiled.names, (n) { not(in(n, keys(pmap))) })
+          cond {
+            not(is-empty(missing)) => {
+              err(`sql: missing named parameters: ${join(missing, ", ")}`)
+            }
+            => { map(compiled.names, (n) { get(pmap, n) }) }
+          }
+        }
+      }
+    }
+    => {
+      cond {
+        not(is-vec(params)) => {
+          err("sql: statement uses ? placeholders; pass a Vec of parameters")
+        }
+
+        ne(length(params), compiled.count) => {
+          err(`sql: expected ${compiled.count} parameters, got ${length(params)}`)
+        }
+        => { params }
+      }
+    }
+  }
+}
+
+// Compile + bind + dispatch through the driver's query fn.
+run-query fn (db: Db, sql: Str, params: Any): Vec {
+  compiled ::compile/compile(sql, db.driver.placeholder, db.driver.name)
+  match compiled {
+    Result.Err => { err(wrap-error(db.driver.name, compiled)) }
+
+    _ => {
+      bound bind-params(compiled, params)
+      match bound {
+        Result.Err => { err(wrap-error(db.driver.name, bound)) }
+
+        _ => {
+          do-query db.driver.query
+          result do-query(db.conn, compiled.sql, bound)
+          match result {
+            Result.Err => { err(wrap-error(db.driver.name, result)) }
+
+            _ => { result }
+          }
+        }
+      }
+    }
+  }
+}
+
+run-execute fn (db: Db, sql: Str, params: Any): Map {
+  compiled ::compile/compile(sql, db.driver.placeholder, db.driver.name)
+  match compiled {
+    Result.Err => { err(wrap-error(db.driver.name, compiled)) }
+
+    _ => {
+      bound bind-params(compiled, params)
+      match bound {
+        Result.Err => { err(wrap-error(db.driver.name, bound)) }
+
+        _ => {
+          do-execute db.driver.execute
+          result do-execute(db.conn, compiled.sql, bound)
+          match result {
+            Result.Err => { err(wrap-error(db.driver.name, result)) }
+
+            _ => { result }
+          }
+        }
+      }
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Query API
+// ---------------------------------------------------------------------------
+
+query
+meta {
+    doc: """
+    Run a query and return rows as `Vec<Map>` (column name -> value).
+    Placeholders are `?` (bind a Vec) or `:name` (bind a Map).
+
+    **Example**
+
+    ```hot
+    ::sql/query(db, "SELECT * FROM users WHERE active = ?", [true])
+    ::sql/query(db, "SELECT * FROM users WHERE email = :email", {email: "a@b.com"})
+    ```
+    """
+}
+fn
+(db: Db, sql: Str): Vec {
+  run-query(db, sql, null)
+},
+(db: Db, sql: Str, params: Any): Vec {
+  run-query(db, sql, params)
+}
+
+query-one
+meta {
+    doc: """Run a query and return the first row as a Map, or `null` when there are no rows."""
+}
+fn
+(db: Db, sql: Str): Any {
+  query-one(db, sql, null)
+},
+(db: Db, sql: Str, params: Any): Any {
+  rows run-query(db, sql, params)
+  cond {
+    is-err(rows) => { rows }
+    is-empty(rows) => { null }
+    => { first(rows) }
+  }
+}
+
+scalar
+meta {
+    doc: """
+    Run a query and return the first column of the first row, or `null`
+    when there are no rows.
+
+    **Example**
+
+    ```hot
+    n ::sql/scalar(db, "SELECT count(*) FROM users")
+    ```
+    """
+}
+fn
+(db: Db, sql: Str): Any {
+  scalar(db, sql, null)
+},
+(db: Db, sql: Str, params: Any): Any {
+  row query-one(db, sql, params)
+  cond {
+    is-err(row) => { row }
+    is-null(row) => { null }
+    => { first(vals(row)) }
+  }
+}
+
+execute
+meta {
+    doc: """
+    Run a statement for its effect. Returns
+    `{command: Str, rows-affected: Int}`.
+
+    **Example**
+
+    ```hot
+    ::sql/execute(db, "DELETE FROM sessions WHERE expires_at < ?", [now])
+    ```
+    """
+}
+fn
+(db: Db, sql: Str): Map {
+  run-execute(db, sql, null)
+},
+(db: Db, sql: Str, params: Any): Map {
+  run-execute(db, sql, params)
+}
+
+// ---------------------------------------------------------------------------
+// Typed queries
+// ---------------------------------------------------------------------------
+
+coerce-row fn (q: Query, row: Map): Any {
+  cond {
+    is-null(q.returns) => { row }
+    => {
+      to-type q.returns
+      to-type(row)
+    }
+  }
+}
+
+run
+meta {
+    doc: """
+    Run a typed `Query` value. Parameters bind like `query` (`Vec` for
+    `?`, `Map` for `:name`). Rows are coerced through `returns` when set,
+    and the result shape follows `mode`:
+
+    - `"many"` (default) — `Vec` of rows
+    - `"one"` — first row or `null`
+    - `"scalar"` — first column of the first row, or `null`
+    - `"execute"` — `{command, rows-affected}`
+
+    **Example**
+
+    ```hot
+    get-user ::sql/Query({
+      sql: "SELECT id, email, name FROM users WHERE id = :id",
+      returns: User,
+      mode: "one"
+    })
+    user ::sql/run(db, get-user, {id: 42})
+    ```
+    """
+}
+fn
+(db: Db, q: Query): Any {
+  run(db, q, null)
+},
+(db: Db, q: Query, params: Any): Any {
+  mode or(q.mode, "many")
+  cond {
+    eq(mode, "execute") => { run-execute(db, q.sql, params) }
+    => {
+      rows run-query(db, q.sql, params)
+      cond {
+        is-err(rows) => { rows }
+        eq(mode, "one") => {
+          cond {
+            is-empty(rows) => { null }
+            => { coerce-row(q, first(rows)) }
+          }
+        }
+
+        eq(mode, "scalar") => {
+          cond {
+            is-empty(rows) => { null }
+            => { first(vals(first(rows))) }
+          }
+        }
+        => { map(rows, (row) { coerce-row(q, row) }) }
+      }
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Transactions
+// ---------------------------------------------------------------------------
+
+transaction
+meta {
+    doc: """
+    Run `body` (a fn taking the `Db`) inside BEGIN/COMMIT. If `body`
+    returns an Err, the transaction rolls back and that Err is returned;
+    otherwise it commits and returns the body's result.
+
+    A halt (`fail()`) inside `body` ends the run; the server discards the
+    uncommitted transaction when the connection closes.
+
+    **Example**
+
+    ```hot
+    ::sql/transaction(db, (tx) {
+      if-ok(::sql/execute(tx, "UPDATE accounts SET balance = balance - ? WHERE id = ?", [100, 1]), (debited) {
+        ::sql/execute(tx, "UPDATE accounts SET balance = balance + ? WHERE id = ?", [100, 2])
+      })
+    })
+    ```
+    """
+}
+fn (db: Db, body: Any): Any {
+  begun execute(db, "BEGIN")
+  match begun {
+    Result.Err => { err(begun) }
+
+    _ => {
+      result body(db)
+      match result {
+        Result.Err => {
+          // Best-effort rollback; the body's error is what the caller sees.
+          execute(db, "ROLLBACK")
+          err(result)
+        }
+
+        _ => {
+          committed execute(db, "COMMIT")
+          match committed {
+            Result.Err => { err(committed) }
+
+            _ => { result }
+          }
+        }
+      }
+    }
+  }
+}

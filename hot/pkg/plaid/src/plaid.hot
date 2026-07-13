@@ -1,0 +1,145 @@
+::plaid ns
+meta {
+    doc: """
+    Plaid bindings — bank account data for fintech builders: Link token
+    flow, accounts, balances, identity, and transaction sync.
+
+    **Setup** — context variables:
+    - `plaid.client-id` and `plaid.secret`
+    - `plaid.env` — "sandbox" (default) or "production"
+
+    Plaid authenticates with the client id/secret in the request body;
+    this package injects them.
+
+    **Quick start**
+
+    ```hot
+    ::plaid ::plaid
+
+    // 1. Create a Link token; your frontend runs Plaid Link with it
+    link ::plaid/create-link-token("user-42", "My App")
+
+    // 2. Exchange the public token Link returns for an access token
+    tokens ::plaid/exchange-public-token(public-token)
+
+    // 3. Use the access token
+    accounts ::plaid/get-accounts(tokens.access_token)
+    sync ::plaid/sync-transactions(tokens.access_token, null)
+    ```
+    """
+}
+
+::ctx ::hot::ctx
+
+env-base-url
+meta {
+    doc: """The base URL for a Plaid environment name. Exposed for testing."""
+}
+fn (env: Str): Str {
+  cond {
+    eq(env, "production") => { "https://production.plaid.com" }
+    => { "https://sandbox.plaid.com" }
+  }
+}
+
+base-url fn (): Str {
+  env-base-url(or(::ctx/get("plaid.env"), "sandbox"))
+}
+
+post
+meta {
+    ctx: {"plaid.client-id": {required: true}, "plaid.secret": {required: true}},
+    doc: """POST a Plaid endpoint with credentials injected into the body. The escape hatch for endpoints not wrapped below."""
+}
+fn
+(path: Str, body: Map): Any {
+  post(path, body, ::ctx/get("plaid.client-id"), ::ctx/get("plaid.secret"))
+},
+// 4-arity: explicit credential override (environment still from `plaid.env`)
+(path: Str, body: Map, client-id: Str, secret: Str): Any {
+  post(path, body, client-id, secret, or(::ctx/get("plaid.env"), "sandbox"))
+},
+// 5-arity: explicit credentials + environment ("sandbox" or "production")
+(path: Str, body: Map, client-id: Str, secret: Str, env: Str): Any {
+  full-body {
+    client_id: client-id,
+    secret: secret,
+    ...body
+  }
+
+  response ::hot::http/request(::hot::http/HttpRequest({
+    method: "POST",
+    url: `${env-base-url(env)}${path}`,
+    headers: {Content-Type: "application/json"},
+    body: to-json(untype(full-body))
+  }))
+  cond {
+    is-err(response) => { response }
+    ::hot::http/is-ok-response(response) => { response.body }
+    => { err({status: response.status, body: response.body}) }
+  }
+}
+
+create-link-token
+meta {
+    doc: """POST /link/token/create - Start the Link flow for a user. Defaults to transactions in US English; use `post` directly for custom products/countries."""
+}
+fn (user-id: Str, client-name: Str): Any {
+  post("/link/token/create", {
+    user: {client_user_id: user-id},
+    client_name: client-name,
+    products: ["transactions"],
+    country_codes: ["US"],
+    language: "en"
+  })
+}
+
+exchange-public-token
+meta {
+    doc: """POST /item/public_token/exchange - Trade Link's public token for the long-lived `access_token`."""
+}
+fn (public-token: Str): Any {
+  post("/item/public_token/exchange", {public_token: public-token})
+}
+
+get-accounts
+meta {
+    doc: """POST /accounts/get - The item's accounts with balances."""
+}
+fn (access-token: Str): Any {
+  post("/accounts/get", {access_token: access-token})
+}
+
+get-balances
+meta {
+    doc: """POST /accounts/balance/get - Real-time balances (slower; hits the institution)."""
+}
+fn (access-token: Str): Any {
+  post("/accounts/balance/get", {access_token: access-token})
+}
+
+sync-transactions
+meta {
+    doc: """
+    POST /transactions/sync - Incremental transaction sync. Pass null as
+    the cursor on the first call; persist `next_cursor` from each
+    response and pass it back. Returns `{added, modified, removed,
+    next_cursor, has_more}`.
+    """
+}
+fn (access-token: Str, cursor: Any): Any {
+  body cond {
+    is-null(cursor) => { {access_token: access-token} }
+    => { {access_token: access-token, cursor: cursor} }
+  }
+
+  post("/transactions/sync", body)
+}
+
+get-identity
+meta {
+    doc: """POST /identity/get - Account-holder names, emails, and addresses."""
+}
+fn (access-token: Str): Any {
+  post("/identity/get", {access_token: access-token})
+}

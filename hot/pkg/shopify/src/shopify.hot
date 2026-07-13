@@ -1,0 +1,208 @@
+::shopify ns
+meta {
+    doc: """
+    Shopify Admin bindings over the GraphQL Admin API (Shopify's current
+    surface — the REST Admin API is legacy for new apps), with curated
+    product/order/customer queries and webhook verification.
+
+    **Setup** — context variables:
+    - `shopify.shop` — the `acme` in `acme.myshopify.com`
+    - `shopify.access.token` — an Admin API access token (`shpat_...`)
+    - `shopify.webhook.secret` — for webhook verification
+
+    **Quick start**
+
+    ```hot
+    ::sh ::shopify
+
+    recent ::sh/list-orders(10)
+    products ::sh/search-products("title:*sticker*", 20)
+
+    // Anything else via raw GraphQL
+    out ::sh/graphql("{ shop { name currencyCode } }", {})
+    ```
+    """
+}
+
+::ctx ::hot::ctx
+
+API_VERSION "2025-01"
+
+graphql-url fn (shop: Str): Str {
+  `https://${shop}.myshopify.com/admin/api/${API_VERSION}/graphql.json`
+}
+
+parse-graphql-response
+meta {
+    doc: """Unwrap a GraphQL response: `data` when clean, Err `{errors, data}` otherwise. Exposed for testing."""
+}
+fn (body: Map): Any {
+  errors get(body, "errors", [])
+  cond {
+    is-empty(errors) => { get(body, "data") }
+    => { err({errors: errors, data: get(body, "data")}) }
+  }
+}
+
+graphql
+meta {
+    ctx: {"shopify.shop": {required: true}, "shopify.access.token": {required: true}},
+    doc: """Execute a GraphQL query/mutation against the Admin API. Returns `data`, or an Err (`{errors, data}` for GraphQL errors, `{status, body}` for transport)."""
+}
+fn
+(query: Str): Any {
+  graphql(query, {})
+},
+(query: Str, variables: Map): Any {
+  graphql(query, variables, ::ctx/get("shopify.shop"), ::ctx/get("shopify.access.token"))
+},
+// 4-arity: explicit shop + access token override
+(query: Str, variables: Map, shop: Str, access-token: Str): Any {
+  response ::hot::http/request(::hot::http/HttpRequest({
+    method: "POST",
+    url: graphql-url(shop),
+    headers: {
+      X-Shopify-Access-Token: access-token,
+      Content-Type: "application/json"
+    },
+    body: to-json({query: query, variables: untype(variables)})
+  }))
+  cond {
+    is-err(response) => { response }
+    not(::hot::http/is-ok-response(response)) => { err({status: response.status, body: response.body}) }
+    => { parse-graphql-response(response.body) }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Curated queries
+// ---------------------------------------------------------------------------
+
+list-orders
+meta {
+    doc: """Recent orders, newest first: id, name, total, financial/fulfillment status, customer email."""
+}
+fn (limit: Int): Any {
+  query """
+  query Orders($first: Int!) {
+    orders(first: $first, reverse: true) {
+      nodes {
+        id name createdAt displayFinancialStatus displayFulfillmentStatus
+        totalPriceSet { shopMoney { amount currencyCode } }
+        customer { email }
+      }
+    }
+  }
+  """
+  data graphql(query, {first: limit})
+  match data {
+    Result.Err => { err(data) }
+
+    _ => { data.orders.nodes }
+  }
+}
+
+get-order
+meta {
+    doc: """One order by GraphQL id (`gid://shopify/Order/...`), with line items."""
+}
+fn (id: Str): Any {
+  query """
+  query Order($id: ID!) {
+    order(id: $id) {
+      id name createdAt displayFinancialStatus displayFulfillmentStatus
+      totalPriceSet { shopMoney { amount currencyCode } }
+      customer { email displayName }
+      lineItems(first: 50) { nodes { title quantity sku } }
+    }
+  }
+  """
+  data graphql(query, {id: id})
+  match data {
+    Result.Err => { err(data) }
+
+    _ => { data.order }
+  }
+}
+
+search-products
+meta {
+    doc: """Search products with Shopify's query syntax (e.g. `"title:*sticker* status:active"`)."""
+}
+fn (search-query: Str, limit: Int): Any {
+  query """
+  query Products($query: String!, $first: Int!) {
+    products(first: $first, query: $query) {
+      nodes {
+        id title handle status totalInventory
+        priceRangeV2 { minVariantPrice { amount currencyCode } }
+      }
+    }
+  }
+  """
+  data graphql(query, {query: search-query, first: limit})
+  match data {
+    Result.Err => { err(data) }
+
+    _ => { data.products.nodes }
+  }
+}
+
+quote-search-term
+meta {
+    doc: """Quote a value as an exact term for Shopify's search syntax (backslashes and quotes escaped, wrapped in double quotes) so operators or spaces in the value can't broaden the search. Exposed for testing."""
+}
+fn (value: Str): Str {
+  no-backslash join(split(value, "\\"), "\\\\")
+  escaped join(split(no-backslash, "\""), "\\\"")
+  `"${escaped}"`
+}
+
+find-customer-by-email
+meta {
+    doc: """Find a customer by exact email. Returns the customer or null."""
+}
+fn (email: Str): Any {
+  query """
+  query Customers($query: String!) {
+    customers(first: 1, query: $query) {
+      nodes { id email displayName numberOfOrders amountSpent { amount currencyCode } }
+    }
+  }
+  """
+  data graphql(query, {query: `email:${quote-search-term(email)}`})
+  cond {
+    is-err(data) => { data }
+    is-empty(data.customers.nodes) => { null }
+    => { first(data.customers.nodes) }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Webhooks
+// ---------------------------------------------------------------------------
+
+verify-request
+meta {
+    ctx: {"shopify.webhook.secret": {required: false}},
+    doc: """Verify a Shopify webhook: base64 HMAC-SHA256 of the raw body in `X-Shopify-Hmac-Sha256`, using your app's webhook secret (from the `shopify.webhook.secret` context variable, or passed explicitly — an empty explicit secret never verifies)."""
+}
+fn
+(request: Map): Bool {
+  secret or(::ctx/get("shopify.webhook.secret"), "")
+  if(is-empty(secret),
+    fail("shopify.webhook.secret is not set. Add it in Context Variables to verify webhook requests.")
+  )
+  verify-request(request, secret)
+},
+(request: Map, secret: Str): Bool {
+  signature get(request.headers, "x-shopify-hmac-sha256", "")
+  cond {
+    // An empty key would make every signature forgeable: fail closed.
+    is-empty(secret) => { false }
+    => {
+      raw-body ::hot::http/raw-body(request)
+      ::hot::hmac/hmac-verify-base64(secret, raw-body, signature, "sha256")
+    }
+  }
+}

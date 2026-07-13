@@ -1,0 +1,253 @@
+::sql::test::runtime ns
+meta ["test"]
+
+// Fake drivers: `echo` returns the compiled SQL and bound params as its
+// single "row", so tests can assert exactly what reached the driver.
+
+echo-driver ::sql/Driver({
+  name: "echo",
+  placeholder: "dollar",
+  connect: (options) { {opened: options} },
+  query: (conn, sql, params) { [{sql: sql, params: params}] },
+  execute: (conn, sql, params) { {command: `OK ${length(params)}`, rows-affected: length(params)} },
+  close: (conn) { true }
+})
+
+question-driver ::sql/Driver({
+  name: "q",
+  placeholder: "question",
+  connect: (options) { {} },
+  query: (conn, sql, params) { [{sql: sql, params: params}] },
+  execute: (conn, sql, params) { {command: "OK", rows-affected: 0} },
+  close: (conn) { true }
+})
+
+failing-driver ::sql/Driver({
+  name: "boom",
+  placeholder: "dollar",
+  connect: (options) { {} },
+  query: (conn, sql, params) { err({code: "42P01", message: "relation \"nope\" does not exist", detail: "d"}) },
+  execute: (conn, sql, params) { err({code: "23505", message: "duplicate key"}) },
+  close: (conn) { true }
+})
+
+rows-driver fn (rows: Vec): ::sql/Driver {
+  ::sql/Driver({
+    name: "rows",
+    placeholder: "dollar",
+    connect: (options) { {} },
+    query: (conn, sql, params) { rows },
+    execute: (conn, sql, params) { {command: "OK", rows-affected: length(rows)} },
+    close: (conn) { true }
+  })
+}
+
+open-echo fn (): ::sql/Db { ::sql/open(echo-driver, {}) }
+
+// ============================================================================
+// open / close
+// ============================================================================
+
+test-open-and-close
+meta ["test"] fn () {
+    db ::sql/open(echo-driver, {host: "x"})
+    assert-eq("echo", db.driver.name)
+    assert(::sql/close(db), "close returns true")
+}
+
+// ============================================================================
+// query: compilation + binding reach the driver
+// ============================================================================
+
+test-query-compiles-positional
+meta ["test"] fn () {
+    rows ::sql/query(open-echo(), "SELECT * FROM t WHERE a = ? AND b = ?", [1, "x"])
+    row first(rows)
+    assert-eq("SELECT * FROM t WHERE a = $1 AND b = $2", row.sql)
+    assert-eq([1, "x"], row.params)
+}
+
+test-query-binds-named-from-map
+meta ["test"] fn () {
+    rows ::sql/query(open-echo(), "SELECT * FROM t WHERE a = :a AND b = :b", {b: 2, a: 1})
+    row first(rows)
+    assert-eq("SELECT * FROM t WHERE a = $1 AND b = $2", row.sql)
+    assert-eq([1, 2], row.params, "params bound by name, not map order")
+}
+
+test-query-named-repeats-for-question-driver
+meta ["test"] fn () {
+    db ::sql/open(question-driver, {})
+    rows ::sql/query(db, "SELECT * FROM t WHERE a = :x OR b = :x", {x: 7})
+    row first(rows)
+    assert-eq("SELECT * FROM t WHERE a = ? OR b = ?", row.sql)
+    assert-eq([7, 7], row.params, "question drivers repeat the value per occurrence")
+}
+
+test-query-wrong-param-count-errors
+meta ["test"] fn () {
+    out ::sql/query(open-echo(), "SELECT * FROM t WHERE a = ?", [1, 2])
+    assert(is-err(out), "wrong arity should error")
+}
+
+test-query-missing-named-param-errors
+meta ["test"] fn () {
+    out ::sql/query(open-echo(), "SELECT * FROM t WHERE a = :a", {b: 1})
+    assert(is-err(out), "missing named param should error")
+}
+
+test-query-params-without-placeholders-errors
+meta ["test"] fn () {
+    out ::sql/query(open-echo(), "SELECT 1", [1])
+    assert(is-err(out), "params without placeholders should error")
+}
+
+// ============================================================================
+// query-one / scalar / execute
+// ============================================================================
+
+test-query-one-first-row-and-null
+meta ["test"] fn () {
+    db ::sql/open(rows-driver([{id: 1}, {id: 2}]), {})
+    assert-eq(1, ::sql/query-one(db, "SELECT 1").id)
+    empty-db ::sql/open(rows-driver([]), {})
+    assert(is-null(::sql/query-one(empty-db, "SELECT 1")), "no rows -> null")
+}
+
+test-scalar-returns-first-column
+meta ["test"] fn () {
+    db ::sql/open(rows-driver([{count: 42, extra: "x"}]), {})
+    assert-eq(42, ::sql/scalar(db, "SELECT count(*) FROM t"))
+}
+
+test-execute-returns-command-shape
+meta ["test"] fn () {
+    out ::sql/execute(open-echo(), "DELETE FROM t WHERE id = ?", [9])
+    assert-eq("OK 1", out.command)
+    assert-eq(1, out.rows-affected)
+}
+
+// ============================================================================
+// SqlError normalization
+// ============================================================================
+
+test-driver-error-becomes-sql-error
+meta ["test"] fn () {
+    db ::sql/open(failing-driver, {})
+    out ::sql/query(db, "SELECT 1")
+    assert(is-err(out))
+    e if-err(out, (e) { e })
+    assert-eq("boom", e.driver)
+    assert-eq("42P01", e.code)
+    assert(contains(e.message, "does not exist"))
+    assert-eq("d", e.detail)
+}
+
+// ============================================================================
+// Typed queries via run()
+// ============================================================================
+
+User type {
+  id: Int,
+  email: Str,
+  name: Str?
+}
+
+test-run-many-coerces-rows
+meta ["test"] fn () {
+    db ::sql/open(rows-driver([{id: 1, email: "a@b.c"}, {id: 2, email: "d@e.f", name: "Dee"}]), {})
+    q ::sql/Query({sql: "SELECT * FROM users", returns: User, mode: "many"})
+    users ::sql/run(db, q)
+    assert-eq(2, length(users))
+    assert-eq("a@b.c", first(users).email)
+    assert-eq("Dee", last(users).name)
+}
+
+test-run-one-returns-typed-row-or-null
+meta ["test"] fn () {
+    db ::sql/open(rows-driver([{id: 7, email: "x@y.z"}]), {})
+    q ::sql/Query({sql: "SELECT * FROM users WHERE id = :id", returns: User, mode: "one"})
+    user ::sql/run(db, q, {id: 7})
+    assert-eq(7, user.id)
+
+    empty-db ::sql/open(rows-driver([]), {})
+    assert(is-null(::sql/run(empty-db, q, {id: 8})), "no rows -> null")
+}
+
+test-run-scalar
+meta ["test"] fn () {
+    db ::sql/open(rows-driver([{n: 5}]), {})
+    q ::sql/Query({sql: "SELECT count(*) AS n FROM users", mode: "scalar"})
+    assert-eq(5, ::sql/run(db, q))
+}
+
+test-run-execute-mode
+meta ["test"] fn () {
+    q ::sql/Query({sql: "DELETE FROM users WHERE id = ?", mode: "execute"})
+    out ::sql/run(open-echo(), q, [3])
+    assert-eq(1, out.rows-affected)
+}
+
+// ============================================================================
+// Transactions
+// ============================================================================
+
+test-transaction-commits-and-returns-body-result
+meta ["test"] fn () {
+    out ::sql/transaction(open-echo(), (tx) { "done" })
+    assert-eq("done", out)
+}
+
+test-transaction-propagates-body-error
+meta ["test"] fn () {
+    out ::sql/transaction(open-echo(), (tx) { err("business rule violated") })
+    assert(is-err(out), "body error should propagate")
+}
+
+test-transaction-queries-run-inside-body
+meta ["test"] fn () {
+    out ::sql/transaction(open-echo(), (tx) {
+        rows ::sql/query(tx, "SELECT * FROM t WHERE id = ?", [1])
+        first(rows).sql
+    })
+    assert-eq("SELECT * FROM t WHERE id = $1", out)
+}
+
+// ============================================================================
+// Identifier quoting
+// ============================================================================
+
+test-ansi-quote-ident
+meta ["test"] fn () {
+    assert-eq("\"users\"", ::sql/ansi-quote-ident("users"))
+    assert-eq("\"weird\"\"name\"", ::sql/ansi-quote-ident("weird\"name"), "embedded quotes doubled")
+    assert(is-err(::sql/ansi-quote-ident("")), "empty identifier rejected")
+}
+
+test-quote-ident-uses-driver-dialect
+meta ["test"] fn () {
+    // Drivers without quote-ident get the ANSI default
+    db ::sql/open(echo-driver, {})
+    assert-eq("\"t\"", ::sql/quote-ident(db, "t"))
+
+    // A MySQL-style driver supplies its own
+    backtick-driver ::sql/Driver({
+        name: "my",
+        placeholder: "question",
+        connect: (options) { {} },
+        query: (conn, sql, params) { [] },
+        execute: (conn, sql, params) { {command: "OK", rows-affected: 0} },
+        close: (conn) { true },
+        quote-ident: (name) { concat("`", name, "`") }
+    })
+    my-db ::sql/open(backtick-driver, {})
+    assert-eq("`t`", ::sql/quote-ident(my-db, "t"))
+}
+
+test-quoted-ident-in-query-reaches-driver
+meta ["test"] fn () {
+    db ::sql/open(echo-driver, {})
+    table ::sql/quote-ident(db, "user\"s")
+    rows ::sql/query(db, `SELECT * FROM ${table} WHERE id = ?`, [1])
+    assert-eq("SELECT * FROM \"user\"\"s\" WHERE id = $1", first(rows).sql)
+}

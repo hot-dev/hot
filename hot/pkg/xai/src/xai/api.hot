@@ -68,8 +68,8 @@ fn
     Authorization: `Bearer ${api-key}`
   }
 
-  cond {
-    or(eq(body, ""), is-null(body)) => {
+  match body {
+    "" | Null => {
       final-headers {...default-headers, ...additional-headers}
       ::hot::http/request(HttpRequest({
         method,
@@ -77,7 +77,8 @@ fn
         headers: final-headers
       }))
     }
-    => {
+
+    _ => {
       headers {...default-headers, Content-Type: "application/json"}
       final-headers {...headers, ...additional-headers}
       ::hot::http/request(HttpRequest({

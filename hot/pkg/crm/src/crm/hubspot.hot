@@ -1,0 +1,102 @@
+::crm::hubspot ns
+
+::contacts ::hubspot::contacts
+::companies ::hubspot::companies
+::notes ::hubspot::notes
+
+normalize-contact
+meta {
+    doc: """Normalize a HubSpot contact resource into `::crm/Contact`. Exposed for testing."""
+}
+fn (resource: Map): ::crm/Contact {
+  props or(get(resource, "properties"), {})
+  ::crm/Contact({
+    id: Str(resource.id),
+    email: get(props, "email"),
+    first-name: get(props, "firstname"),
+    last-name: get(props, "lastname"),
+    provider: "hubspot",
+    raw: untype(resource)
+  })
+}
+
+normalize-company fn (resource: Map): ::crm/Company {
+  props or(get(resource, "properties"), {})
+  ::crm/Company({
+    id: Str(resource.id),
+    name: get(props, "name"),
+    domain: get(props, "domain"),
+    provider: "hubspot",
+    raw: untype(resource)
+  })
+}
+
+to-properties fn (fields: Map): Map {
+  filter-vals({
+    email: get(fields, "email"),
+    firstname: get(fields, "first-name"),
+    lastname: get(fields, "last-name"),
+    phone: get(fields, "phone"),
+    company: get(fields, "company")
+  }, is-some)
+}
+
+upsert-contact fn (fields: Map): ::crm/Contact {
+  existing ::contacts/find-by-email(fields.email)
+  cond {
+    is-err(existing) => { existing }
+    is-null(existing) => {
+      created ::contacts/create-contact(to-properties(fields))
+      match created {
+        Result.Err => { err(created) }
+
+        _ => { normalize-contact(created) }
+      }
+    }
+    => {
+      updated ::contacts/update-contact(Str(existing.id), to-properties(fields))
+      match updated {
+        Result.Err => { err(updated) }
+
+        _ => { normalize-contact(updated) }
+      }
+    }
+  }
+}
+
+find-contact fn (email: Str): Any {
+  found ::contacts/find-by-email(email)
+  cond {
+    is-err(found) => { found }
+    is-null(found) => { null }
+    => { normalize-contact(found) }
+  }
+}
+
+log-activity fn (contact-id: Str, body: Str): Any {
+  ::notes/log-note("contacts", contact-id, body)
+}
+
+upsert-company fn (fields: Map): ::crm/Company {
+  existing ::companies/find-by-domain(fields.domain)
+  props filter-vals({domain: get(fields, "domain"), name: get(fields, "name")}, is-some)
+  cond {
+    is-err(existing) => { existing }
+    is-null(existing) => {
+      created ::companies/create-company(props)
+      match created {
+        Result.Err => { err(created) }
+
+        _ => { normalize-company(created) }
+      }
+    }
+    => {
+      updated ::companies/update-company(Str(existing.id), props)
+      match updated {
+        Result.Err => { err(updated) }
+
+        _ => { normalize-company(updated) }
+      }
+    }
+  }
+}

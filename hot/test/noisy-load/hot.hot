@@ -17,7 +17,7 @@
 //   cargo run --manifest-path ../../../Cargo.toml -- dev \
 //     --db.uri postgres://hot:hot@127.0.0.1:55432/hot \
 //     --redis.uri redis://127.0.0.1:56379 \
-//     --queue.type redis --serialization json
+//     --queue.type redis --serialization.type json
 
 hot.set.profile "noisy"
 hot.set.project "noisy-load"

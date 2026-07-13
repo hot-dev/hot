@@ -797,25 +797,26 @@ handle-forget-command fn (session: Session, sender: Identity, arg: Str, reply-to
   req ::agent-memory/parse-forget-request(arg)
   mem make-memory(session, sender)
   ::agent-stream/emit-memory-start(AGENT_NAME, "forget", {session-id: session.id, scope: req.scope})
-  deleted cond {
-    or(eq(req.scope, "session"), eq(req.scope, "all")) => {
+  deleted match req.scope {
+    "session" | "all" => {
       before ::store/length(mem.session-store)
       ::mem/forget-session(mem)
       before
     }
 
-    eq(req.scope, "source") => {
+    "source" => {
       if(is-empty(req.selector), 0, ::mem/forget-by-source-id(mem, req.selector))
     }
 
-    eq(req.scope, "user") => {
+    "user" => {
       if(is-empty(req.selector), 0, if(::mem/forget-user-key(mem, req.selector), 1, 0))
     }
 
-    eq(req.scope, "kb") => {
+    "kb" => {
       if(is-empty(req.selector), 0, if(::mem/forget-kb-key(mem, req.selector), 1, 0))
     }
-    => { 0 }
+
+    _ => { 0 }
   }
 
   ::agent-stream/emit-memory-end(AGENT_NAME, "forget", {

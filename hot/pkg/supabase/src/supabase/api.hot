@@ -145,8 +145,11 @@ fn
   do-request(method, path, additional-headers, body, service-key, service-key)
 }
 
-do-request fn (method: Str, path: Str, additional-headers: Map, body: Any, apikey: Str, bearer-token: Str): HttpResponse {
-  base-url ::core/project-url()
+do-request fn
+(method: Str, path: Str, additional-headers: Map, body: Any, apikey: Str, bearer-token: Str): HttpResponse {
+  do-request(method, path, additional-headers, body, apikey, bearer-token, ::core/project-url())
+},
+(method: Str, path: Str, additional-headers: Map, body: Any, apikey: Str, bearer-token: Str, base-url: Str): HttpResponse {
   url `${base-url}${path}`
 
   default-headers {
@@ -170,16 +173,26 @@ request-with-keys
 meta {
     doc: """Make a Supabase request with explicit API and bearer keys. Useful for tests and scripts that do not use context."""
 }
-fn (method: Str, path: Str, additional-headers: Map, body: Any, apikey: Str, bearer-token: Str): Any {
+fn
+(method: Str, path: Str, additional-headers: Map, body: Any, apikey: Str, bearer-token: Str): Any {
   body-or-error(do-request(method, path, additional-headers, body, apikey, bearer-token))
+},
+// 7-arity: explicit project URL too — target a different Supabase project than the ctx one
+(method: Str, path: Str, additional-headers: Map, body: Any, apikey: Str, bearer-token: Str, project-url: Str): Any {
+  body-or-error(do-request(method, path, additional-headers, body, apikey, bearer-token, project-url))
 }
 
 request-raw-with-keys
 meta {
     doc: """Make a Supabase request with explicit API and bearer keys and return the full `HttpResponse`."""
 }
-fn (method: Str, path: Str, additional-headers: Map, body: Any, apikey: Str, bearer-token: Str): HttpResponse {
+fn
+(method: Str, path: Str, additional-headers: Map, body: Any, apikey: Str, bearer-token: Str): HttpResponse {
   do-request(method, path, additional-headers, body, apikey, bearer-token)
+},
+// 7-arity: explicit project URL too
+(method: Str, path: Str, additional-headers: Map, body: Any, apikey: Str, bearer-token: Str, project-url: Str): HttpResponse {
+  do-request(method, path, additional-headers, body, apikey, bearer-token, project-url)
 }
 
 request-raw-body

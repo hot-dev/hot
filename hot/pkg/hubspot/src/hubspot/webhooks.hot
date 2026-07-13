@@ -1,0 +1,78 @@
+::hubspot::webhooks ns
+meta {
+    doc: """HubSpot v3 webhook signature verification: base64 HMAC-SHA256 of `method + uri + body + timestamp` with your app's client secret, delivered as `X-HubSpot-Signature-v3` + `X-HubSpot-Request-Timestamp` (millisecond timestamp, 5-minute window)."""
+}
+
+::ctx ::hot::ctx
+::hmac ::hot::hmac
+::time ::hot::time
+
+build-base-string
+meta {
+    doc: """The v3 signed message: `method + uri + rawBody + timestamp`. Exposed for testing."""
+}
+fn (method: Str, uri: Str, raw-body: Str, timestamp: Str): Str {
+  `${method}${uri}${raw-body}${timestamp}`
+}
+
+verify-request
+meta {
+    ctx: {"hubspot.client.secret": {required: false}},
+    doc: """
+    Verify a HubSpot v3 webhook request. `request` needs `method`,
+    `original-url` (the URL HubSpot called, as delivered by the platform),
+    `headers`, and `body-raw`. Returns true when the signature matches and
+    the millisecond timestamp is within 5 minutes. Uses the
+    `hubspot.client.secret` context variable by default, or accepts an
+    explicit secret — an empty explicit secret never verifies.
+
+    HubSpot signs the exact URL configured in your app. The 3-arity form
+    takes that URL explicitly for when the platform-reconstructed
+    `original-url` differs from it — e.g. a rewriting proxy in front, or
+    a plain `http://` endpoint behind an edge that doesn't set
+    `x-forwarded-proto` (reconstruction defaults to `https`). The
+    platform also withholds `original-url` on redelivery paths it cannot
+    corroborate (it is never persisted with the webhook token intact), so
+    re-verifying a replayed event needs the explicit-URL form too.
+    """
+}
+fn
+(request: Map): Bool {
+  secret or(::ctx/get("hubspot.client.secret"), "")
+  if(is-empty(secret),
+    fail("hubspot.client.secret is not set. Add it in Context Variables to verify webhook requests.")
+  )
+  verify-request(request, secret)
+},
+(request: Map, client-secret: Str): Bool {
+  verify-request(request, client-secret, or(get(request, "original-url", ""), ""))
+},
+// 3-arity: explicit URL override — must be the exact URL configured at HubSpot
+(request: Map, client-secret: Str, url: Str): Bool {
+  signature get(request.headers, "x-hubspot-signature-v3", "")
+  timestamp get(request.headers, "x-hubspot-request-timestamp", "")
+  raw-body or(get(request, "body-raw", ""), "")
+  method or(get(request, "method", "POST"), "POST")
+
+  cond {
+    // An empty key would make every signature forgeable: fail closed.
+    is-empty(client-secret) => { false }
+    or(is-empty(signature), is-empty(timestamp)) => { false }
+    is-empty(url) => { false }
+    => {
+      base build-base-string(method, url, raw-body, timestamp)
+      cond {
+        not(::hmac/hmac-verify-base64(client-secret, base, signature, "sha256")) => { false }
+        => {
+          // Header is milliseconds; the shared tolerance check is seconds.
+          parsed Int(timestamp)
+          match parsed {
+            Result.Err => { false }
+
+            _ => { ::time/within-seconds-of-now(Int(floor(div(parsed, 1000))), 300) }
+          }
+        }
+      }
+    }
+  }
+}

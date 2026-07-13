@@ -360,7 +360,7 @@ run_hot_dev() {
             --db.uri "$DB_URI"
             --redis.uri "$VALKEY_URI"
             --queue.type redis
-            --serialization json
+            --serialization.type json
         )
     fi
 

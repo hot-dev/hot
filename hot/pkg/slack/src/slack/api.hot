@@ -30,10 +30,11 @@ meta {
 fn (url: Str): Str {
   // Slack bearer auth is sent in Authorization header. Some endpoints still
   // include token= in query builders; strip it to avoid invalid_auth responses.
-  removed-middle ::regex/replace-all(url, "([?&])token=[^&]*&", "$1")
-  removed-tail ::regex/replace-all(removed-middle, "[?&]token=[^&]*$", "")
-  fixed-empty-param ::regex/replace-all(removed-tail, "\\?&", "?")
-  ::regex/replace-all(fixed-empty-param, "[?&]$", "")
+  url
+      |> ::regex/replace-all("([?&])token=[^&]*&", "$1")
+      |> ::regex/replace-all("[?&]token=[^&]*$", "")
+      |> ::regex/replace-all("\\?&", "?")
+      |> ::regex/replace-all("[?&]$", "")
 }
 
 request

@@ -1,0 +1,237 @@
+::oauth2 ns
+meta {
+    doc: """
+    OAuth 2.0 client flows.
+
+    Covers the grants that real integrations need: authorization-code
+    (with PKCE), refresh-token, client-credentials, and JWT-bearer
+    (RFC 7523 — Google service accounts and similar).
+
+    **Authorization-code + PKCE**
+
+    ```hot
+    ::oauth2 ::oauth2
+
+    verifier ::oauth2/pkce-verifier()
+    url ::oauth2/authorize-url({
+      authorize-url: "https://accounts.google.com/o/oauth2/v2/auth",
+      client-id: client-id,
+      redirect-uri: "https://myapp.hot.dev/oauth/callback",
+      scope: "openid email",
+      state: state,
+      code-challenge: ::oauth2/pkce-challenge(verifier)
+    })
+    // redirect the user to `url`; in the callback:
+    tokens ::oauth2/exchange-code("https://oauth2.googleapis.com/token", {
+      client-id: client-id,
+      client-secret: client-secret,
+      code: request.query.code,
+      redirect-uri: "https://myapp.hot.dev/oauth/callback",
+      code-verifier: verifier
+    })
+    tokens.access_token
+    ```
+
+    Token calls return the provider's decoded JSON body on success, or an
+    Err carrying `{status, body}` on failure.
+    """
+}
+
+::uri ::hot::uri
+::hash ::hot::hash
+::hex ::hot::hex
+::b64 ::hot::base64
+::random ::hot::random
+::http ::hot::http
+
+// ---------------------------------------------------------------------------
+// PKCE (RFC 7636)
+// ---------------------------------------------------------------------------
+
+pkce-verifier
+meta {
+    doc: """Generate a high-entropy PKCE code verifier (43 characters, base64url of 32 random bytes). Store it for the token exchange."""
+}
+fn (): Str {
+  ::b64/encode-url(::random/random-bytes(32))
+}
+
+pkce-challenge
+meta {
+    doc: """
+    Compute the S256 code challenge for a PKCE verifier:
+    `BASE64URL(SHA256(verifier))`.
+
+    **Example (RFC 7636 appendix B vector)**
+
+    ```hot
+    ::oauth2/pkce-challenge("dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk")
+    // => "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM"
+    ```
+    """
+}
+fn (verifier: Str): Str {
+  ::b64/encode-url(::hex/decode(::hash/sha256(verifier)))
+}
+
+// ---------------------------------------------------------------------------
+// Authorization URL
+// ---------------------------------------------------------------------------
+
+authorize-url
+meta {
+    doc: """
+    Build the authorization redirect URL. Config fields:
+    `authorize-url` (required), `client-id` (required), `redirect-uri`
+    (required), `scope`, `state`, `code-challenge` (S256 assumed),
+    `extra` (Map of provider-specific params, e.g.
+    `{access_type: "offline", prompt: "consent"}`).
+    """
+}
+fn (config: Map): Str {
+  params filter-vals({
+    response_type: "code",
+    client_id: config.client-id,
+    redirect_uri: config.redirect-uri,
+    scope: get(config, "scope"),
+    state: get(config, "state"),
+    code_challenge: get(config, "code-challenge"),
+    code_challenge_method: if(is-some(get(config, "code-challenge")), "S256", null),
+    ...or(get(config, "extra"), {})
+  }, is-some)
+  `${config.authorize-url}?${::uri/encode-query(params)}`
+}
+
+// ---------------------------------------------------------------------------
+// Token request bodies (pure builders, shared by the request fns)
+// ---------------------------------------------------------------------------
+
+build-exchange-body
+meta {
+    doc: """Build the `authorization_code` grant body. Fields: `client-id`, `code`, `redirect-uri` (required); `client-secret`, `code-verifier` (optional — PKCE public clients omit the secret)."""
+}
+fn (options: Map): Map {
+  filter-vals({
+    grant_type: "authorization_code",
+    code: options.code,
+    client_id: options.client-id,
+    client_secret: get(options, "client-secret"),
+    redirect_uri: options.redirect-uri,
+    code_verifier: get(options, "code-verifier")
+  }, is-some)
+}
+
+build-refresh-body
+meta {
+    doc: """Build the `refresh_token` grant body. Fields: `client-id`, `refresh-token` (required); `client-secret`, `scope` (optional)."""
+}
+fn (options: Map): Map {
+  filter-vals({
+    grant_type: "refresh_token",
+    refresh_token: options.refresh-token,
+    client_id: options.client-id,
+    client_secret: get(options, "client-secret"),
+    scope: get(options, "scope")
+  }, is-some)
+}
+
+build-client-credentials-body
+meta {
+    doc: """Build the `client_credentials` grant body. Fields: `client-id`, `client-secret` (required); `scope`, `audience` (optional)."""
+}
+fn (options: Map): Map {
+  filter-vals({
+    grant_type: "client_credentials",
+    client_id: options.client-id,
+    client_secret: options.client-secret,
+    scope: get(options, "scope"),
+    audience: get(options, "audience")
+  }, is-some)
+}
+
+build-jwt-bearer-body
+meta {
+    doc: """Build the RFC 7523 JWT-bearer grant body from a signed assertion (e.g. a Google service-account JWT)."""
+}
+fn (assertion: Str): Map {
+  {
+    grant_type: "urn:ietf:params:oauth:grant-type:jwt-bearer",
+    assertion: assertion
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Token endpoint requests
+// ---------------------------------------------------------------------------
+
+token-request
+meta {
+    doc: """
+    POST a form-encoded grant body to a token endpoint and decode the JSON
+    response. Returns the token response Map (`access_token`,
+    `expires_in`, ...) or an Err `{status, body}` for a non-2xx reply.
+    The grant-specific helpers below are usually more convenient.
+    """
+}
+fn (token-url: Str, body: Map): Map {
+  response ::http/request(::http/HttpRequest({
+    method: "POST",
+    url: token-url,
+    headers: {Content-Type: "application/x-www-form-urlencoded", Accept: "application/json"},
+    body: ::uri/encode-query(body)
+  }))
+  cond {
+    is-err(response) => { response }
+    ::http/is-ok-response(response) => { response.body }
+    => { err({status: response.status, body: response.body}) }
+  }
+}
+
+exchange-code
+meta {
+    doc: """Exchange an authorization code for tokens. See `build-exchange-body` for the options."""
+}
+fn (token-url: Str, options: Map): Map {
+  token-request(token-url, build-exchange-body(options))
+}
+
+refresh
+meta {
+    doc: """Refresh an access token. See `build-refresh-body` for the options."""
+}
+fn (token-url: Str, options: Map): Map {
+  token-request(token-url, build-refresh-body(options))
+}
+
+client-credentials
+meta {
+    doc: """Machine-to-machine tokens via the `client_credentials` grant. See `build-client-credentials-body` for the options."""
+}
+fn (token-url: Str, options: Map): Map {
+  token-request(token-url, build-client-credentials-body(options))
+}
+
+jwt-bearer
+meta {
+    doc: """
+    RFC 7523 JWT-bearer grant: exchange a signed assertion for an access
+    token. This is how Google service accounts authenticate.
+
+    **Example**
+
+    ```hot
+    assertion ::jwt/sign({
+      iss: sa.client_email,
+      scope: "https://www.googleapis.com/auth/spreadsheets",
+      aud: "https://oauth2.googleapis.com/token",
+      iat: ::jwt/now-seconds(),
+      exp: add(::jwt/now-seconds(), 3600)
+    }, sa.private_key, "RS256")
+
+    tokens ::oauth2/jwt-bearer("https://oauth2.googleapis.com/token", assertion)
+    ```
+    """
+}
+fn (token-url: Str, assertion: Str): Map {
+  token-request(token-url, build-jwt-bearer-body(assertion))
+}

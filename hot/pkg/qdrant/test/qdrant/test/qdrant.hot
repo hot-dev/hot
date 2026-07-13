@@ -1,0 +1,8 @@
+::qdrant::test ns
+meta ["test"]
+
+test-base-url-default-and-trailing-slash
+meta ["test"] fn () {
+    // No qdrant.url in test ctx -> local default
+    assert-eq("http://localhost:6333", ::qdrant/base-url())
+}

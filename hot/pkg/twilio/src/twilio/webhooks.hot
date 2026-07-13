@@ -2,7 +2,8 @@
 
 ::ctx ::hot::ctx
 ::hmac ::hot::hmac
-::base64 ::hot::base64
+::hash ::hot::hash
+::str ::hot::str
 ::uri ::hot::uri
 
 // ============================================================================
@@ -24,7 +25,18 @@ meta {
 
   Uses the `twilio.auth.token` context variable by default, or accepts an explicit auth token as a second argument.
 
-  Twilio computes the signature over the full request URL plus all POST body parameters sorted by key. This function handles that automatically.
+  For form-encoded callbacks Twilio signs the full request URL plus all
+  POST body parameters sorted by key. For JSON callbacks (configured with
+  a `bodySHA256` query parameter) it signs the URL alone, and the body is
+  checked against the SHA-256 in the query. Both modes are handled
+  automatically, keyed on the presence of `bodySHA256`.
+
+  The URL is taken from `request.original-url` (the URL as Twilio
+  requested it, delivered by the platform). The 3-arity form takes the
+  URL explicitly for when the reconstructed value differs from what is
+  configured at Twilio — e.g. a rewriting proxy in front, or a plain
+  `http://` endpoint behind an edge that doesn't set
+  `x-forwarded-proto` (reconstruction defaults to `https`).
 
   **Example**
 
@@ -34,6 +46,9 @@ meta {
 
   // With explicit auth token (2-arity)
   is-valid ::twilio::webhooks/verify-request(request, "your-auth-token")
+
+  // With the exact configured URL (3-arity)
+  is-valid ::twilio::webhooks/verify-request(request, "your-auth-token", "https://example.com/hooks/sms")
   ```
   """
 }
@@ -46,25 +61,42 @@ fn
   verify-request(request, auth-token)
 },
 (request: Map, auth-token: Str): Bool {
+  verify-request(request, auth-token, or(get(request, "original-url", ""), ""))
+},
+// 3-arity: explicit URL override — must be the exact URL configured at Twilio
+(request: Map, auth-token: Str, url: Str): Bool {
   signature get(request.headers, "x-twilio-signature", "")
 
   cond {
     is-empty(auth-token) => { false }
     is-empty(signature) => { false }
+    is-empty(url) => { false }
     => {
-      // Build the validation string: URL + sorted POST param key-value pairs
-      params if(is-some(request.body-raw),
-        ::uri/decode-query(request.body-raw),
-        {}
-      )
-      sorted-keys sort(keys(params))
-      param-string reduce(sorted-keys, (acc, k) { concat(acc, k, get(params, k)) }, "")
+      body-sha or(get(or(get(request, "query", {}), {}), "bodySHA256", ""), "")
+      cond {
+        not(is-empty(body-sha)) => {
+          // JSON mode: the bodySHA256 query param is part of the signed URL,
+          // so the signature covers the URL alone; body integrity comes from
+          // comparing its SHA-256 against the query param.
+          cond {
+            not(::hmac/hmac-verify-base64(auth-token, url, signature, "sha1")) => { false }
+            => {
+              raw-body ::hot::http/raw-body(request)
+              eq(::str/lowercase(::hash/sha256(raw-body)), ::str/lowercase(body-sha))
+            }
+          }
+        }
+        => {
+          // Form mode: URL + sorted POST param key-value pairs
+          params if(is-some(request.body-raw), ::uri/decode-query(request.body-raw), {})
+          param-string keys(params)
+              |> sort()
+              |> reduce((acc, k) { concat(acc, k, get(params, k)) }, "")
 
-      url or(get(request, "url", ""), "")
-      base-string `${url}${param-string}`
-
-      expected ::base64/encode(::hmac/hmac-sha1(auth-token, base-string))
-      secure-compare(expected, signature)
+          // Twilio signatures are base64 of the raw HMAC-SHA1 digest
+          ::hmac/hmac-verify-base64(auth-token, `${url}${param-string}`, signature, "sha1")
+        }
+      }
     }
   }
 }

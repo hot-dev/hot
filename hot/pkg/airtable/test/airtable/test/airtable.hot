@@ -1,0 +1,18 @@
+::airtable::test ns
+meta ["test"]
+
+test-table-path-encodes-names
+meta ["test"] fn () {
+    assert-eq("/appXYZ/Leads", ::airtable/table-path("appXYZ", "Leads"))
+    assert-eq("/appXYZ/Deal%20Flow", ::airtable/table-path("appXYZ", "Deal Flow"))
+}
+
+
+test-escape-formula-value
+meta ["test"] fn () {
+    assert-eq("'plain'", ::airtable/escape-formula-value("plain"))
+    assert-eq("'it\\'s'", ::airtable/escape-formula-value("it's"), "quotes escaped")
+    assert-eq("'a\\\\b'", ::airtable/escape-formula-value("a\\b"), "backslashes escaped first")
+    injected ::airtable/escape-formula-value("x' = '1', {Secret} != '")
+    assert-eq("'x\\' = \\'1\\', {Secret} != \\''", injected, "every quote in the payload is escaped")
+}

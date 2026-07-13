@@ -183,8 +183,7 @@ meta {
 fn (headers: Map?, name: Str): Str? {
     src or(headers, {})
     target lowercase(name)
-    keys-list keys(src)
-    hit find-first(keys-list, (k) { eq(lowercase(k), target) })
+    hit keys(src) |> find-first((k) { eq(lowercase(k), target) })
     cond {
         is-null(hit) => { null }
         => {
@@ -252,9 +251,7 @@ fn (headers: Map?, body: Str, opts: HmacOptions): AuthResult {
                                     ts Int(ts-str)
                                     now div(::time/epoch-millis(::time/now()), 1000)
                                     delta ::math/abs(sub(now, ts))
-                                    if(gt(delta, skew),
-                                        fail-result("timestamp-stale"),
-                                        ok-result())
+                                    if(gt(delta, skew), fail-result("timestamp-stale"), ok-result())
                                 }
                             }
                         }
@@ -303,9 +300,10 @@ fn (headers: Map?, opts: BearerOptions): AuthResult {
                 is-null(raw) => { fail-result("token-missing") }
                 => {
                     presented strip-prefix(raw, "Bearer ")
-                    if(secure-compare(presented, expected),
-                        ok-result(),
-                        fail-result("token-mismatch"))
+                    cond {
+                        secure-compare(presented, expected) => { ok-result() }
+                        => { fail-result("token-mismatch") }
+                    }
                 }
             }
         }
@@ -351,9 +349,10 @@ fn (request: Any, opts: PlatformOptions): AuthResult {
                 and(eq(kind, "service-key"), not(is-null(opts.require-service-key-id))) => {
                     sk get(auth-ctx, "service-key", {})
                     id Str(or(get(sk, "id"), ""))
-                    if(eq(id, opts.require-service-key-id),
-                        ok-result(),
-                        fail-result("platform-auth-service-key-id-mismatch"))
+                    cond {
+                        eq(id, opts.require-service-key-id) => { ok-result() }
+                        => { fail-result("platform-auth-service-key-id-mismatch") }
+                    }
                 }
                 => { ok-result() }
             }

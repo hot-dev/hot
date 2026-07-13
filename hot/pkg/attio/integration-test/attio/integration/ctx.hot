@@ -1,0 +1,10 @@
+::attio::integration::ctx ns
+
+::env ::hot::env
+
+// Placeholder credentials for the attio integration suite. Unset
+// environment variables are skipped entirely, so absent credentials
+// behave exactly as if never configured.
+::hot::ctx/set(filter-vals({
+    "attio.api.key": ::env/get("ATTIO_API_KEY", ""),
+}, (v) { not(is-empty(v)) }))

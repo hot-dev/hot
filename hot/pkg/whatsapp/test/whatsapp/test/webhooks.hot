@@ -1,0 +1,69 @@
+::whatsapp::test::webhooks ns
+meta ["test"]
+
+::webhooks ::whatsapp::webhooks
+
+// Known vector generated independently (Python hmac/hashlib):
+//   secret: test_app_secret
+//   body:   {"object":"whatsapp_business_account"}
+TEST_SECRET "test_app_secret"
+TEST_BODY """{"object":"whatsapp_business_account"}"""
+TEST_SIGNATURE "62dd87e2fca9df61d2bb074ef802490563f3f47ab32fc81b2267f074ab32ad96"
+
+make-request fn (header: Str): Map {
+  {headers: {x-hub-signature-256: header}, body-raw: TEST_BODY}
+}
+
+// ============================================================================
+// verify-request
+// ============================================================================
+
+test-verify-accepts-known-vector
+meta ["test"]
+fn () {
+    assert(::webhooks/verify-request(make-request(`sha256=${TEST_SIGNATURE}`), TEST_SECRET), "known Meta signature vector should verify")
+}
+
+test-verify-accepts-uppercase-signature
+meta ["test"]
+fn () {
+    assert(::webhooks/verify-request(make-request(`sha256=${uppercase(TEST_SIGNATURE)}`), TEST_SECRET), "signature comparison should be case-insensitive")
+}
+
+test-verify-rejects-wrong-secret
+meta ["test"]
+fn () {
+    assert(not(::webhooks/verify-request(make-request(`sha256=${TEST_SIGNATURE}`), "other_secret")), "wrong app secret should fail")
+}
+
+test-verify-rejects-missing-prefix
+meta ["test"]
+fn () {
+    assert(not(::webhooks/verify-request(make-request(TEST_SIGNATURE), TEST_SECRET)), "header without sha256= prefix should fail")
+}
+
+test-verify-rejects-missing-header
+meta ["test"]
+fn () {
+    request {headers: {}, body-raw: TEST_BODY}
+    assert(not(::webhooks/verify-request(request, TEST_SECRET)), "missing header should fail")
+}
+
+// ============================================================================
+// verify-challenge
+// ============================================================================
+
+test-verify-challenge-accepts-valid-token
+meta ["test"]
+fn () {
+    query {"hub.mode": "subscribe", "hub.verify_token": "my-token", "hub.challenge": "challenge-123"}
+    assert-eq("challenge-123", ::webhooks/verify-challenge(query, "my-token"))
+}
+
+test-verify-challenge-rejects-wrong-token
+meta ["test"]
+fn () {
+    query {"hub.mode": "subscribe", "hub.verify_token": "wrong", "hub.challenge": "challenge-123"}
+    result ::webhooks/verify-challenge(query, "my-token")
+    assert(is-err(result), "wrong verify token should return an error")
+}

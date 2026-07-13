@@ -43,3 +43,53 @@ fn
 (password: Str | Bytes, salt: Str | Bytes, iterations: Int, length: Int): Bytes {
     call-lib(::hot::crypto/pbkdf2-hmac-sha256, [password, salt, iterations, length])
 }
+
+
+rsa-sha256-sign
+meta {
+    doc: """
+    Sign a message with RSASSA-PKCS1-v1_5 / SHA-256 (the JWT `RS256`
+    algorithm). Returns the raw signature Bytes — base64url-encode them for
+    a JWT. Accepts PKCS#8 (`BEGIN PRIVATE KEY`, e.g. Google service
+    accounts) and PKCS#1 (`BEGIN RSA PRIVATE KEY`, e.g. GitHub Apps) PEM
+    private keys.
+
+    **Example**
+
+    ```hot
+    ::crypto ::hot::crypto
+    ::b64 ::hot::base64
+
+    signature ::crypto/rsa-sha256-sign(private-key-pem, `${header}.${payload}`)
+    jwt `${header}.${payload}.${::b64/encode-url(signature)}`
+    ```
+    """
+}
+fn (private-key-pem: Str, message: Str | Bytes): Bytes {
+    call-lib(::hot::crypto/rsa-sha256-sign, [private-key-pem, message])
+}
+
+
+rsa-sha256-verify
+meta {
+    doc: """
+    Verify an RSASSA-PKCS1-v1_5 / SHA-256 (`RS256`) signature against RSA
+    public key components. `n` (modulus) and `e` (exponent) are big-endian
+    Bytes — exactly the JWKS `n`/`e` fields after base64url decoding.
+    Returns false for a bad signature.
+
+    **Example**
+
+    ```hot
+    ::crypto ::hot::crypto
+    ::b64 ::hot::base64
+
+    n ::b64/decode-url(jwk.n)
+    e ::b64/decode-url(jwk.e)
+    valid ::crypto/rsa-sha256-verify(n, e, `${header}.${payload}`, signature)
+    ```
+    """
+}
+fn (n: Bytes, e: Bytes, message: Str | Bytes, signature: Bytes): Bool {
+    call-lib(::hot::crypto/rsa-sha256-verify, [n, e, message, signature])
+}

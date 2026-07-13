@@ -1,0 +1,90 @@
+::notion ns
+meta {
+    doc: """
+    Notion API bindings.
+
+    **Setup** — set `notion.token` in context: an internal integration
+    secret (`ntn_...` / `secret_...`) from notion.so/my-integrations, with
+    the target pages/databases shared with the integration.
+
+    **Quick start**
+
+    ```hot
+    ::pages ::notion::pages
+    ::databases ::notion::databases
+
+    page ::pages/create-page(parent-page-id, "Meeting notes 2026-07-09", [
+      ::notion/paragraph("Attendees: Curt, Ada."),
+      ::notion/heading(2, "Decisions"),
+      ::notion/bullet("Ship the sql package")
+    ])
+
+    rows ::databases/query-database(db-id, {
+      filter: {property: "Status", status: {equals: "In progress"}}
+    })
+    ```
+    """
+}
+
+BASE_URL "https://api.notion.com/v1"
+NOTION_VERSION "2022-06-28"
+
+// ---------------------------------------------------------------------------
+// Rich text / block builders (pure)
+// ---------------------------------------------------------------------------
+
+rich-text
+meta {
+    doc: """Wrap plain text as a Notion rich-text array (the shape every text-bearing property and block wants)."""
+}
+fn (text: Str): Vec {
+  [{type: "text", text: {content: text}}]
+}
+
+paragraph
+meta {
+    doc: """A paragraph block from plain text."""
+}
+fn (text: Str): Map {
+  {object: "block", type: "paragraph", paragraph: {rich_text: rich-text(text)}}
+}
+
+heading
+meta {
+    doc: """A heading block: level 1, 2, or 3."""
+}
+fn (level: Int, text: Str): Map {
+  cond {
+    eq(level, 1) => { {object: "block", type: "heading_1", heading_1: {rich_text: rich-text(text)}} }
+    eq(level, 2) => { {object: "block", type: "heading_2", heading_2: {rich_text: rich-text(text)}} }
+    => { {object: "block", type: "heading_3", heading_3: {rich_text: rich-text(text)}} }
+  }
+}
+
+bullet
+meta {
+    doc: """A bulleted list item block from plain text."""
+}
+fn (text: Str): Map {
+  {object: "block", type: "bulleted_list_item", bulleted_list_item: {rich_text: rich-text(text)}}
+}
+
+to-do
+meta {
+    doc: """A to-do block from plain text (unchecked by default)."""
+}
+fn
+(text: Str): Map {
+  to-do(text, false)
+},
+(text: Str, checked: Bool): Map {
+  {object: "block", type: "to_do", to_do: {rich_text: rich-text(text), checked: checked}}
+}
+
+plain-text
+meta {
+    doc: """Extract the plain text from a rich-text array (the inverse of `rich-text`) — handy when reading pages and blocks."""
+}
+fn (rich: Vec): Str {
+  join(map(rich, (r) { or(get(r, "plain_text"), get(or(get(r, "text"), {}), "content", "")) }), "")
+}

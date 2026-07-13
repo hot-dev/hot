@@ -1,0 +1,39 @@
+::salesforce ns
+meta {
+    doc: """
+    Salesforce bindings: SObject CRUD and SOQL over the REST API.
+
+    **Setup** — set ONE auth mode in context, checked in order:
+
+    1. `salesforce.access.token` + `salesforce.instance.url` — a token
+       you manage
+    2. `salesforce.client-id` + `salesforce.client-secret` — connected
+       app client-credentials flow
+    3. `salesforce.client-id` + `salesforce.username` +
+       `salesforce.private.key` — connected app JWT-bearer flow (RS256
+       with the app's certificate key; built on hot.dev/jwt)
+
+    Optional `salesforce.login.url` overrides the default
+    `https://login.salesforce.com` (use your My Domain URL, or
+    `https://test.salesforce.com` for sandboxes).
+
+    **Quick start**
+
+    ```hot
+    ::sobjects ::salesforce::sobjects
+    ::query ::salesforce::query
+
+    lead ::sobjects/create-record("Lead", {
+      LastName: "Lovelace",
+      Company: "Analytical Engines",
+      Email: "ada@example.com"
+    })
+
+    hot-leads ::query/soql("SELECT Id, Name, Email FROM Lead WHERE Rating = 'Hot' LIMIT 20")
+    map(hot-leads.records, (r) { r.Name })
+    ```
+    """
+}
+
+DEFAULT_LOGIN_URL "https://login.salesforce.com"
+API_VERSION "v62.0"

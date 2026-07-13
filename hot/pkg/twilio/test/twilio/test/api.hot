@@ -1,0 +1,64 @@
+::twilio::test::api ns
+meta ["test"]
+
+::api ::twilio::api
+
+// ============================================================================
+// form-encode
+// ============================================================================
+
+test-form-encode-basic
+meta ["test"]
+fn () {
+    assert-eq("To=%2B15558675310&Body=hi%20there", ::api/form-encode({To: "+15558675310", Body: "hi there"}))
+}
+
+test-form-encode-omits-nulls
+meta ["test"]
+fn () {
+    assert-eq("To=%2B15558675310", ::api/form-encode({To: "+15558675310", From: null, Body: null}))
+}
+
+test-form-encode-repeats-vec-params
+meta ["test"]
+fn () {
+    // Twilio expects repeated parameters for list values (e.g. MMS MediaUrl)
+    encoded ::api/form-encode({MediaUrl: ["https://a.com/1.jpg", "https://a.com/2.jpg"]})
+    assert-eq("MediaUrl=https%3A%2F%2Fa.com%2F1.jpg&MediaUrl=https%3A%2F%2Fa.com%2F2.jpg", encoded)
+}
+
+test-form-encode-numeric-values
+meta ["test"]
+fn () {
+    assert-eq("PageSize=20", ::api/form-encode({PageSize: 20}))
+}
+
+// ============================================================================
+// query-string
+// ============================================================================
+
+test-query-string-basic
+meta ["test"]
+fn () {
+    assert-eq("?PageSize=20&Page=2", ::api/query-string({PageSize: 20, Page: 2}))
+}
+
+test-query-string-omits-nulls
+meta ["test"]
+fn () {
+    assert-eq("?PageSize=20", ::api/query-string({To: null, PageSize: 20}))
+}
+
+test-query-string-empty-when-all-null
+meta ["test"]
+fn () {
+    assert-eq("", ::api/query-string({To: null, From: null}))
+    assert-eq("", ::api/query-string({}))
+}
+
+test-query-string-encodes-phone-numbers
+meta ["test"]
+fn () {
+    // "+" must be percent-encoded or Twilio decodes it as a space
+    assert-eq("?To=%2B15558675310", ::api/query-string({To: "+15558675310"}))
+}

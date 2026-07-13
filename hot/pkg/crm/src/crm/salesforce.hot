@@ -1,0 +1,132 @@
+::crm::salesforce ns
+
+::sobjects ::salesforce::sobjects
+::query ::salesforce::query
+
+escape-soql
+meta {
+    doc: """Escape a string for interpolation into a SOQL literal (quotes and backslashes). Exposed for testing."""
+}
+fn (value: Str): Str {
+  no-backslash join(split(value, "\\"), "\\\\")
+  join(split(no-backslash, "'"), "\\'")
+}
+
+normalize-contact
+meta {
+    doc: """Normalize a Salesforce Contact record into `::crm/Contact`. Exposed for testing."""
+}
+fn (record: Map): ::crm/Contact {
+  ::crm/Contact({
+    id: record.Id,
+    email: get(record, "Email"),
+    first-name: get(record, "FirstName"),
+    last-name: get(record, "LastName"),
+    provider: "salesforce",
+    raw: untype(record)
+  })
+}
+
+normalize-company fn (record: Map): ::crm/Company {
+  ::crm/Company({
+    id: record.Id,
+    name: get(record, "Name"),
+    domain: get(record, "Website"),
+    provider: "salesforce",
+    raw: untype(record)
+  })
+}
+
+to-fields fn (fields: Map): Map {
+  filter-vals({
+    Email: get(fields, "email"),
+    FirstName: get(fields, "first-name"),
+    // Salesforce requires LastName on Contact; default when absent.
+    LastName: or(get(fields, "last-name"), "Unknown"),
+    Phone: get(fields, "phone")
+  }, is-some)
+}
+
+find-contact fn (email: Str): Any {
+  out ::query/soql(`SELECT Id, Email, FirstName, LastName FROM Contact WHERE Email = '${escape-soql(email)}' LIMIT 1`)
+  cond {
+    is-err(out) => { out }
+    is-empty(out.records) => { null }
+    => { normalize-contact(first(out.records)) }
+  }
+}
+
+upsert-contact fn (fields: Map): ::crm/Contact {
+  existing find-contact(fields.email)
+  cond {
+    is-err(existing) => { existing }
+    is-null(existing) => {
+      created ::sobjects/create-record("Contact", to-fields(fields))
+      match created {
+        Result.Err => { err(created) }
+
+        _ => {
+          fetched ::sobjects/get-record("Contact", created.id, ["Id", "Email", "FirstName", "LastName"])
+          match fetched {
+            Result.Err => { err(fetched) }
+
+            _ => { normalize-contact(fetched) }
+          }
+        }
+      }
+    }
+    => {
+      updated ::sobjects/update-record("Contact", existing.id, to-fields(fields))
+      match updated {
+        Result.Err => { err(updated) }
+
+        _ => { find-contact(fields.email) }
+      }
+    }
+  }
+}
+
+log-activity fn (contact-id: Str, body: Str): Any {
+  ::sobjects/create-record("Task", {
+    Subject: "Note",
+    Description: body,
+    Status: "Completed",
+    WhoId: contact-id
+  })
+}
+
+find-company fn (domain: Str): Any {
+  out ::query/soql(`SELECT Id, Name, Website FROM Account WHERE Website = '${escape-soql(domain)}' LIMIT 1`)
+  cond {
+    is-err(out) => { out }
+    is-empty(out.records) => { null }
+    => { normalize-company(first(out.records)) }
+  }
+}
+
+upsert-company fn (fields: Map): ::crm/Company {
+  existing find-company(fields.domain)
+  account-fields filter-vals({
+    Name: or(get(fields, "name"), get(fields, "domain")),
+    Website: get(fields, "domain")
+  }, is-some)
+  cond {
+    is-err(existing) => { existing }
+    is-null(existing) => {
+      created ::sobjects/create-record("Account", account-fields)
+      match created {
+        Result.Err => { err(created) }
+
+        _ => { find-company(fields.domain) }
+      }
+    }
+    => {
+      updated ::sobjects/update-record("Account", existing.id, account-fields)
+      match updated {
+        Result.Err => { err(updated) }
+
+        _ => { find-company(fields.domain) }
+      }
+    }
+  }
+}

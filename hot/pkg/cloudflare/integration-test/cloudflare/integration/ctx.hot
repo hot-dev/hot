@@ -1,0 +1,11 @@
+::cloudflare::integration::ctx ns
+
+::env ::hot::env
+
+// Placeholder credentials for the cloudflare integration suite. Unset
+// environment variables are skipped entirely, so absent credentials
+// behave exactly as if never configured.
+::hot::ctx/set(filter-vals({
+    "cloudflare.token": ::env/get("CLOUDFLARE_TOKEN", ""),
+    "cloudflare.account.id": ::env/get("CLOUDFLARE_ACCOUNT_ID", ""),
+}, (v) { not(is-empty(v)) }))

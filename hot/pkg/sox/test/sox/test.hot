@@ -102,14 +102,14 @@ meta ["test"] fn () {
 
 test-normalize-args-default-level
 meta ["test"] fn () {
-    args build-normalize-args("/tmp/in.wav", "/tmp/out.wav", null)
+    args build-normalize-args("/tmp/in.wav", "/tmp/out.wav", null, null)
     assert(in("gain", args), "should use gain effect")
     assert(in("-n", args), "should normalize")
 }
 
 test-normalize-args-with-headroom
 meta ["test"] fn () {
-    args build-normalize-args("/tmp/in.wav", "/tmp/out.wav", "-3")
+    args build-normalize-args("/tmp/in.wav", "/tmp/out.wav", "-3", null)
     assert(in("gain", args), "should use gain effect")
     assert(in("-n", args), "should normalize")
     assert(in("-3", args), "should pass level")

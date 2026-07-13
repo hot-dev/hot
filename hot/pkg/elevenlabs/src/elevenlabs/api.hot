@@ -1,0 +1,91 @@
+::elevenlabs::api ns
+meta {ctx: {"elevenlabs.api.key": {required: true}}}
+
+::ctx ::hot::ctx
+
+http-request ::hot::http/request
+http-request-stream ::hot::http/request-stream
+is-ok-response ::hot::http/is-ok-response
+HttpRequest ::hot::http/HttpRequest
+HttpResponse ::hot::http/HttpResponse
+StreamingHttpResponse ::hot::http/StreamingHttpResponse
+
+HttpError type {
+    status: Int,
+    headers: Map,
+    body: Any
+}
+
+HttpResponse -> HttpError fn (response: HttpResponse): HttpError {
+  HttpError({
+    status: response.status,
+    headers: response.headers,
+    body: response.body
+  })
+}
+
+request
+meta {
+    doc: """
+    Make an authenticated request to the ElevenLabs API. `path` is
+    relative to the API root (e.g. `/v1/voices`). ElevenLabs
+    authenticates with an `xi-api-key` header (not a Bearer token).
+
+    **Example**
+
+    ```hot
+    response ::elevenlabs::api/request("GET", "/v1/voices")
+    response.body.voices
+    ```
+    """
+}
+fn
+(method: Str, path: Str): HttpResponse {
+  request(method, path, {}, "")
+},
+(method: Str, path: Str, additional-headers: Map): HttpResponse {
+  request(method, path, additional-headers, "")
+},
+(method: Str, path: Str, additional-headers: Map, body: Any): HttpResponse {
+  request(method, path, additional-headers, body, ::ctx/get("elevenlabs.api.key"))
+},
+(method: Str, path: Str, additional-headers: Map, body: Any, api-key: Str): HttpResponse {
+  default-headers {
+    xi-api-key: api-key
+  }
+
+  headers if(eq(body, ""), default-headers, {...default-headers, Content-Type: "application/json"})
+  final-headers {...headers, ...additional-headers}
+
+  encoded-body if(eq(body, ""), "", to-json(untype(body)))
+  ::hot::http/request(HttpRequest({
+    method,
+    url: `${::elevenlabs/BASE_URL}${path}`,
+    headers: final-headers,
+    body: encoded-body
+  }))
+}
+
+request-stream
+meta {
+    doc: """Make an authenticated streaming request with raw (binary chunk) framing — used for streaming audio endpoints."""
+}
+fn
+(method: Str, path: Str, additional-headers: Map, body: Any): StreamingHttpResponse {
+  request-stream(method, path, additional-headers, body, ::ctx/get("elevenlabs.api.key"))
+},
+(method: Str, path: Str, additional-headers: Map, body: Any, api-key: Str): StreamingHttpResponse {
+  default-headers {
+    xi-api-key: api-key,
+    Content-Type: "application/json"
+  }
+
+  final-headers {...default-headers, ...additional-headers}
+
+  ::hot::http/request-stream(HttpRequest({
+    method,
+    url: `${::elevenlabs/BASE_URL}${path}`,
+    headers: final-headers,
+    body: to-json(untype(body))
+  }), "raw")
+}

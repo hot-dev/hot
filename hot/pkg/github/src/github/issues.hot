@@ -1,0 +1,94 @@
+::github::issues ns
+
+::api ::github::api
+query-string ::hot::uri/query-string
+
+list-issues
+meta {
+    doc: """
+    GET /repos/{owner}/{repo}/issues - List issues (GitHub includes PRs;
+    filter on the `pull_request` key if you need issues only). `params`
+    supports `state` ("open"/"closed"/"all"), `labels` (comma-separated),
+    `assignee`, `since`, `per_page`, `page`.
+    """
+}
+fn
+(owner: Str, repo: Str): Vec {
+  ::api/json("GET", `/repos/${owner}/${repo}/issues`)
+},
+(owner: Str, repo: Str, params: Map): Vec {
+  ::api/json("GET", `/repos/${owner}/${repo}/issues${query-string(params)}`)
+}
+
+get-issue
+meta {
+    doc: """GET /repos/{owner}/{repo}/issues/{number} - One issue."""
+}
+fn (owner: Str, repo: Str, number: Int): Map {
+  ::api/json("GET", `/repos/${owner}/${repo}/issues/${number}`)
+}
+
+create-issue
+meta {
+    doc: """
+    POST /repos/{owner}/{repo}/issues - Open an issue. `options`: `body`,
+    `labels` (Vec), `assignees` (Vec), `milestone`.
+
+    **Example**
+
+    ```hot
+    issue ::github::issues/create-issue("acme", "api", "Timeout on /v1/users", {
+      body: "Repro steps ...",
+      labels: ["bug"]
+    })
+    issue.number
+    ```
+    """
+}
+fn
+(owner: Str, repo: Str, title: Str): Map {
+  create-issue(owner, repo, title, {})
+},
+(owner: Str, repo: Str, title: Str, options: Map): Map {
+  ::api/json("POST", `/repos/${owner}/${repo}/issues`, {}, {title: title, ...options})
+}
+
+update-issue
+meta {
+    doc: """PATCH /repos/{owner}/{repo}/issues/{number} - Update fields: `title`, `body`, `state` ("open"/"closed"), `state_reason`, `labels`, `assignees`."""
+}
+fn (owner: Str, repo: Str, number: Int, changes: Map): Map {
+  ::api/json("PATCH", `/repos/${owner}/${repo}/issues/${number}`, {}, changes)
+}
+
+close-issue
+meta {
+    doc: """Close an issue (`state: "closed"`, reason "completed")."""
+}
+fn (owner: Str, repo: Str, number: Int): Map {
+  update-issue(owner, repo, number, {state: "closed", state_reason: "completed"})
+}
+
+create-comment
+meta {
+    doc: """POST /repos/{owner}/{repo}/issues/{number}/comments - Comment on an issue or pull request."""
+}
+fn (owner: Str, repo: Str, number: Int, body: Str): Map {
+  ::api/json("POST", `/repos/${owner}/${repo}/issues/${number}/comments`, {}, {body: body})
+}
+
+list-comments
+meta {
+    doc: """GET /repos/{owner}/{repo}/issues/{number}/comments - The comments on an issue or pull request."""
+}
+fn (owner: Str, repo: Str, number: Int): Vec {
+  ::api/json("GET", `/repos/${owner}/${repo}/issues/${number}/comments`)
+}
+
+add-labels
+meta {
+    doc: """POST /repos/{owner}/{repo}/issues/{number}/labels - Add labels to an issue."""
+}
+fn (owner: Str, repo: Str, number: Int, labels: Vec): Vec {
+  ::api/json("POST", `/repos/${owner}/${repo}/issues/${number}/labels`, {}, {labels: labels})
+}

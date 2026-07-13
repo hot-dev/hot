@@ -1,0 +1,84 @@
+::web-search::brave ns
+meta {
+    doc: """Brave Search API (https://api-dashboard.search.brave.com). Context variable: `brave.api.key` (the X-Subscription-Token)."""
+}
+
+::ctx ::hot::ctx
+::uri ::hot::uri
+
+http-request ::hot::http/request
+is-ok-response ::hot::http/is-ok-response
+HttpRequest ::hot::http/HttpRequest
+
+BASE_URL "https://api.search.brave.com/res/v1"
+
+get-json fn
+(path: Str): Any {
+  get-json(path, ::ctx/get("brave.api.key"))
+},
+// 2-arity: explicit API key override
+(path: Str, api-key: Str): Any {
+  response ::hot::http/request(HttpRequest({
+    method: "GET",
+    url: `${BASE_URL}${path}`,
+    headers: {
+      X-Subscription-Token: api-key,
+      Accept: "application/json"
+    }
+  }))
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { response.body }
+    => { err({status: response.status, body: response.body}) }
+  }
+}
+
+search
+meta {
+    ctx: {"brave.api.key": {required: true}},
+    doc: """
+    GET /web/search - Brave web search. `options` supports `count`
+    (max 20), `offset`, `country`, `search_lang`, `freshness`
+    ("pd"/"pw"/"pm"/"py").
+
+    **Example**
+
+    ```hot
+    out ::web-search::brave/search("rust jit compiler", {count: 5, freshness: "pm"})
+    map(out.web.results, (r) { r.url })
+    ```
+    """
+}
+fn
+(query: Str): Map {
+  search(query, {})
+},
+(query: Str, options: Map): Map {
+  params filter-vals({q: query, ...options}, is-some)
+  get-json(`/web/search?${::uri/encode-query(params)}`)
+}
+
+normalize
+meta {
+    doc: """Normalize a Brave web-search response into `Vec<::web-search/SearchResult>`. Brave has no relevance score; results keep rank order. Exposed for testing."""
+}
+fn (body: Map): Vec {
+  results get(or(get(body, "web"), {}), "results", [])
+  map(results, (r) {
+    ::web-search/SearchResult({
+      title: get(r, "title", ""),
+      url: get(r, "url", ""),
+      content: get(r, "description"),
+      score: null
+    })
+  })
+}
+
+search-normalized fn (query: Str, max-results: Int): Vec {
+  out search(query, {count: max-results})
+  match out {
+    Result.Err => { err(out) }
+
+    _ => { normalize(out) }
+  }
+}

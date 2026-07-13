@@ -1,0 +1,122 @@
+::mysql::integration ns
+meta ["test"]
+
+// Live-server integration tests. Run with a local MySQL 8:
+//   docker run --rm -d --name hot-mysql -p 3306:3306 \
+//     -e MYSQL_ROOT_PASSWORD=hot_test -e MYSQL_DATABASE=hot_test mysql:8
+//   hot test --project pkg-integration-mysql
+// Ctx/env: defaults match the docker line above; override host/port/user/
+// password via the options map below if needed.
+
+options fn (): Map {
+    // ssl + insecure mode: the docker container's certs are self-signed,
+    // and TLS is what lets caching_sha2_password complete full auth.
+    {host: "127.0.0.1", port: 3306, user: "root", password: "hot_test", database: "hot_test",
+     ssl: true, tls: {mode: "insecure"}}
+}
+
+test-connect-roundtrip
+meta ["test"] fn () {
+    conn ::mysql/connect(options())
+    assert(is-ok(conn), `connect should succeed: ${if-err(conn, (e) { Str(e) })}`)
+
+    created ::mysql/execute(conn, "CREATE TABLE IF NOT EXISTS hot_it (id BIGINT AUTO_INCREMENT PRIMARY KEY, name VARCHAR(64), score DOUBLE, data BLOB, at DATETIME)")
+    assert(is-ok(created), `create: ${if-err(created, (e) { Str(e) })}`)
+    cleaned ::mysql/execute(conn, "DELETE FROM hot_it")
+
+    inserted ::mysql/execute(conn, "INSERT INTO hot_it (name, score, data, at) VALUES (?, ?, ?, ?)",
+        ["Ada", 99.5, Bytes([1, 2, 3]), "2026-07-09 08:30:05"])
+    assert(is-ok(inserted), `insert: ${if-err(inserted, (e) { Str(e) })}`)
+    assert-eq(1, inserted.rows-affected)
+    assert(gt(inserted.last-insert-id, 0))
+
+    // Binary protocol (prepared) read-back
+    rows ::mysql/query(conn, "SELECT id, name, score, data, at FROM hot_it WHERE name = ?", ["Ada"])
+    assert(is-ok(rows), `prepared query: ${if-err(rows, (e) { Str(e) })}`)
+    row first(rows)
+    assert-eq("Ada", row.name)
+    assert-eq(99.5, row.score)
+    assert-eq(Bytes([1, 2, 3]), row.data)
+    assert-eq("2026-07-09 08:30:05", row.at)
+
+    // Text protocol read-back
+    text-rows ::mysql/query(conn, "SELECT COUNT(*) AS n FROM hot_it")
+    assert-eq(1, first(text-rows).n)
+
+    // Errors are Err values with server details
+    bad ::mysql/query(conn, "SELECT * FROM hot_it_missing")
+    assert(is-err(bad))
+    e if-err(bad, (v) { v })
+    assert-eq(1146, e.code)
+
+    assert(::mysql/close(conn))
+}
+
+test-sql-facade-end-to-end
+meta ["test"] fn () {
+    db ::sql::mysql/open(options())
+    assert(is-ok(db), "sql facade open")
+    rows ::sql/query(db, "SELECT :a + :b AS total", {a: 2, b: 3})
+    assert-eq(5.0, first(rows).total, "named params compile to ? and bind (string params coerce to DOUBLE)")
+    assert(is-ok(::sql/close(db)))
+}
+
+test-integer-signedness-live
+meta ["test"] fn () {
+    conn ::mysql/connect(options())
+    created ::mysql/execute(conn, "CREATE TABLE IF NOT EXISTS hot_it_ints (t TINYINT, s SMALLINT, m MEDIUMINT, i INT, b BIGINT, ut TINYINT UNSIGNED, ub BIGINT UNSIGNED)")
+    assert(is-ok(created), `create: ${if-err(created, (e) { Str(e) })}`)
+    cleaned ::mysql/execute(conn, "DELETE FROM hot_it_ints")
+
+    inserted ::mysql/execute(conn,
+        "INSERT INTO hot_it_ints VALUES (?, ?, ?, ?, ?, ?, ?)",
+        [-1, -2, -5, -3, -4, 255, "18446744073709551615"])
+    assert(is-ok(inserted), `insert: ${if-err(inserted, (e) { Str(e) })}`)
+
+    // Binary protocol (prepared): the UNSIGNED column flag drives decode.
+    rows ::mysql/query(conn, "SELECT * FROM hot_it_ints WHERE t = ?", [-1])
+    row first(rows)
+    assert-eq(-1, row.t, "signed TINYINT")
+    assert-eq(-2, row.s, "signed SMALLINT")
+    assert-eq(-5, row.m, "signed MEDIUMINT")
+    assert-eq(-3, row.i, "signed INT")
+    assert-eq(-4, row.b, "signed BIGINT")
+    assert-eq(255, row.ut, "unsigned TINYINT")
+    assert-eq(Dec("18446744073709551615"), row.ub, "unsigned BIGINT max promotes to Dec")
+
+    // Text protocol takes the string-parse path instead of the flag.
+    text-rows ::mysql/query(conn, "SELECT * FROM hot_it_ints")
+    text-row first(text-rows)
+    assert-eq(-1, text-row.t)
+    assert-eq(-4, text-row.b)
+    assert-eq(Dec("18446744073709551615"), text-row.ub)
+
+    dropped ::mysql/execute(conn, "DROP TABLE hot_it_ints")
+    assert(::mysql/close(conn))
+}
+
+test-failed-prepared-calls-do-not-leak-statements
+meta ["test"] fn () {
+    conn ::mysql/connect(options())
+
+    prepared-stmt-count fn (c) {
+        rows ::mysql/query(c, "SHOW GLOBAL STATUS LIKE 'Prepared_stmt_count'")
+        Int(first(rows).Value)
+    }
+
+    before prepared-stmt-count(conn)
+
+    // Param-count mismatch errs AFTER the server prepared the statement;
+    // without close-on-error each attempt leaks one server-side statement.
+    bad1 ::mysql/query(conn, "SELECT ? + ?", [1])
+    assert(is-err(bad1), "param-count mismatch errs")
+    bad2 ::mysql/query(conn, "SELECT ? + ?", [1])
+    assert(is-err(bad2))
+    bad3 ::mysql/execute(conn, "SELECT ? + ?", [1, 2, 3])
+    assert(is-err(bad3))
+
+    after prepared-stmt-count(conn)
+    assert-eq(before, after, "failed prepared calls must release their statements")
+
+    assert(::mysql/close(conn))
+}

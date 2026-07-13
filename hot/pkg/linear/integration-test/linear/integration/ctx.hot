@@ -1,0 +1,10 @@
+::linear::integration::ctx ns
+
+::env ::hot::env
+
+// Placeholder credentials for the linear integration suite. Unset
+// environment variables are skipped entirely, so absent credentials
+// behave exactly as if never configured.
+::hot::ctx/set(filter-vals({
+    "linear.api.key": ::env/get("LINEAR_API_KEY", ""),
+}, (v) { not(is-empty(v)) }))

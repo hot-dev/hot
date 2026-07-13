@@ -1,0 +1,102 @@
+::oauth2::test ns
+meta ["test"]
+
+::oauth2 ::oauth2
+
+// ============================================================================
+// PKCE
+// ============================================================================
+
+test-pkce-challenge-rfc7636-vector
+meta ["test"] fn () {
+    // RFC 7636 appendix B
+    challenge ::oauth2/pkce-challenge("dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk")
+    assert-eq("E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM", challenge)
+}
+
+test-pkce-verifier-shape
+meta ["test"] fn () {
+    v ::oauth2/pkce-verifier()
+    assert-eq(43, length(v), "base64url of 32 bytes is 43 chars unpadded")
+    assert(ne(v, ::oauth2/pkce-verifier()), "verifiers are random")
+}
+
+// ============================================================================
+// authorize-url
+// ============================================================================
+
+test-authorize-url-basic
+meta ["test"] fn () {
+    url ::oauth2/authorize-url({
+        authorize-url: "https://auth.example.com/authorize",
+        client-id: "abc",
+        redirect-uri: "https://app.example.com/cb",
+        scope: "openid email",
+        state: "xyzzy"
+    })
+    assert(starts-with(url, "https://auth.example.com/authorize?"))
+    assert(contains(url, "response_type=code"))
+    assert(contains(url, "client_id=abc"))
+    assert(contains(url, "redirect_uri=https%3A%2F%2Fapp.example.com%2Fcb"), "redirect uri is percent-encoded")
+    assert(contains(url, "state=xyzzy"))
+    assert(not(contains(url, "code_challenge")), "no challenge params without PKCE")
+}
+
+test-authorize-url-with-pkce-and-extra
+meta ["test"] fn () {
+    url ::oauth2/authorize-url({
+        authorize-url: "https://a.example/o",
+        client-id: "abc",
+        redirect-uri: "https://cb.example/",
+        code-challenge: "CHAL",
+        extra: {access_type: "offline"}
+    })
+    assert(contains(url, "code_challenge=CHAL"))
+    assert(contains(url, "code_challenge_method=S256"))
+    assert(contains(url, "access_type=offline"))
+}
+
+// ============================================================================
+// Grant bodies
+// ============================================================================
+
+test-exchange-body
+meta ["test"] fn () {
+    body ::oauth2/build-exchange-body({
+        client-id: "id",
+        client-secret: "sec",
+        code: "CODE",
+        redirect-uri: "https://cb/",
+        code-verifier: "VER"
+    })
+    assert-eq("authorization_code", body.grant_type)
+    assert-eq("CODE", body.code)
+    assert-eq("VER", body.code_verifier)
+}
+
+test-exchange-body-public-client-omits-secret
+meta ["test"] fn () {
+    body ::oauth2/build-exchange-body({client-id: "id", code: "C", redirect-uri: "https://cb/"})
+    assert(not(in("client_secret", keys(body))), "no client_secret key for public clients")
+}
+
+test-refresh-body
+meta ["test"] fn () {
+    body ::oauth2/build-refresh-body({client-id: "id", refresh-token: "RT"})
+    assert-eq("refresh_token", body.grant_type)
+    assert-eq("RT", body.refresh_token)
+}
+
+test-client-credentials-body
+meta ["test"] fn () {
+    body ::oauth2/build-client-credentials-body({client-id: "id", client-secret: "s", scope: "api"})
+    assert-eq("client_credentials", body.grant_type)
+    assert-eq("api", body.scope)
+}
+
+test-jwt-bearer-body
+meta ["test"] fn () {
+    body ::oauth2/build-jwt-bearer-body("signed.jwt.here")
+    assert-eq("urn:ietf:params:oauth:grant-type:jwt-bearer", body.grant_type)
+    assert-eq("signed.jwt.here", body.assertion)
+}

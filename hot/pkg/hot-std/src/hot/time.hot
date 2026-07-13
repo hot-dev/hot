@@ -981,3 +981,51 @@ meta {
 fn (start: PlainDateTime, end: PlainDateTime): Duration {
     call-lib(::hot::time/since, [start, end])
 }
+
+
+epoch-seconds
+meta {
+    doc: """
+    Current Unix time in whole seconds. The convenient form of
+    `now().epochNanoseconds` for expiry claims, replay windows, and
+    timestamped signatures.
+
+    **Example**
+
+    ```hot
+    expires add(::hot::time/epoch-seconds(), 3600)
+    ```
+    """
+}
+fn (): Int {
+    Int(floor(div(now().epochNanoseconds, 1000000000)))
+}
+
+
+within-seconds-of-now
+meta {
+    doc: """
+    True when `timestamp` (Unix seconds as Int or numeric Str) is within
+    `tolerance-seconds` of the current time, in either direction. Returns
+    false for non-numeric input — safe to feed attacker-controlled header
+    values. The replay-window check for webhook and request-signature
+    verification.
+
+    **Example**
+
+    ```hot
+    ::hot::time/within-seconds-of-now(request.headers.x-timestamp, 300)
+    ```
+    """
+}
+fn (timestamp: Any, tolerance-seconds: Int): Bool {
+    parsed if(is-int(timestamp), timestamp, Int(Str(timestamp)))
+    match parsed {
+        Result.Err => { false }
+
+        _ => {
+            age sub(epoch-seconds(), parsed)
+            and(gte(age, sub(0, tolerance-seconds)), lte(age, tolerance-seconds))
+        }
+    }
+}

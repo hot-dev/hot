@@ -23,13 +23,36 @@ HttpResponse -> HttpError fn (response: HttpResponse): HttpError {
   })
 }
 
+encode-pair fn (key: Str, value: Any): Str {
+  value-str `${value}`
+  `${::uri/encode(key)}=${::uri/encode(value-str)}`
+}
+
 form-encode
 meta {
-    doc: """Encode a Map as application/x-www-form-urlencoded. Null values are omitted."""
+    doc: """Encode a Map as application/x-www-form-urlencoded. Null values are omitted. Vec values are encoded as repeated parameters (`MediaUrl=a&MediaUrl=b`) per Twilio's convention."""
 }
 fn (data: Map): Str {
   filtered filter-vals(data, is-some)
-  ::uri/encode-query(filtered)
+  parts reduce(keys(filtered), (acc, key) {
+    value get(filtered, key)
+    pairs cond {
+        is-vec(value) => { map(value, (item) { encode-pair(key, item) }) }
+        => { [encode-pair(key, value)] }
+    }
+
+    concat(acc, pairs)
+  }, [])
+  join(parts, "&")
+}
+
+query-string
+meta {
+    doc: """Build a query string (`?a=1&b=2`) from a Map. Null values are omitted; returns an empty string when no parameters remain. Values are percent-encoded, so `+` in phone numbers is preserved."""
+}
+fn (params: Map): Str {
+  filtered filter-vals(params, is-some)
+  if(is-empty(filtered), "", `?${form-encode(filtered)}`)
 }
 
 request

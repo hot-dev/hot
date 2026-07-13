@@ -14,8 +14,8 @@ use ahash::{AHashMap, AHashSet};
 use axum::{
     Extension, Json,
     body::Bytes,
-    extract::{Path, Query, State},
-    http::{HeaderMap, Method, StatusCode},
+    extract::{OriginalUri, Path, Query, State},
+    http::{HeaderMap, Method, StatusCode, Uri},
     response::IntoResponse,
 };
 use hot::db::{build::Build, org::Org, project::Project, webhook::Webhook as DbWebhook};
@@ -176,15 +176,18 @@ async fn resolve_webhook_path_from_domain(
 /// - Custom domain routes: `/webhook/{service}/{endpoint_path}/{token}` (2+ segments, requires ResolvedDomain)
 ///
 /// This avoids Axum route conflicts between the two patterns (both use catch-all wildcards).
+#[allow(clippy::too_many_arguments)]
 pub async fn webhook_catch_all_handler(
     State((db, _storage, conf, stream_pubsub)): State<ApiStateData>,
     method: Method,
     resolved_domain: Option<Extension<ResolvedDomain>>,
+    OriginalUri(original_uri): OriginalUri,
     Path(full_path): Path<String>,
     headers: HeaderMap,
     query: Query<std::collections::HashMap<String, String>>,
     body: Bytes,
 ) -> Result<axum::response::Response, (StatusCode, Json<ApiErrorResponse>)> {
+    let original_url = build_original_url(&headers, &original_uri);
     let segments: Vec<&str> = full_path.trim_matches('/').splitn(4, '/').collect();
 
     let (source, path) = if let Some(Extension(resolved)) = resolved_domain {
@@ -226,12 +229,52 @@ pub async fn webhook_catch_all_handler(
         &stream_pubsub,
         method,
         path,
+        original_url,
         headers,
         query,
         body,
         source,
     )
     .await
+}
+
+/// Reconstruct the URL the caller originally requested: scheme and host from
+/// the forwarding headers set by Hot's edge (falling back to the Host header),
+/// plus the original path and query verbatim — token segment included, no
+/// re-encoding. Providers that sign the URL they call (Twilio, HubSpot) hash
+/// this exact string, so any normalization here breaks their signatures.
+/// Returns None when no host can be determined.
+fn build_original_url(headers: &HeaderMap, original_uri: &Uri) -> Option<String> {
+    use super::request::first_forwarded_value;
+
+    let scheme = first_forwarded_value(headers, "x-forwarded-proto")
+        .or_else(|| original_uri.scheme_str().map(|s| s.to_string()))
+        .unwrap_or_else(|| "https".to_string());
+
+    let host = first_forwarded_value(headers, "x-forwarded-host")
+        .or_else(|| first_forwarded_value(headers, "host"))
+        .or_else(|| original_uri.authority().map(|a| a.to_string()))?;
+
+    // Providers sign the URL as configured, which omits the default port —
+    // but proxies sometimes inject it into Host/X-Forwarded-Host. Strip it
+    // so the reconstruction matches the signed string; non-default ports are
+    // kept (a URL configured with one carries it).
+    let default_port = match scheme.as_str() {
+        "https" => Some(":443"),
+        "http" => Some(":80"),
+        _ => None,
+    };
+    let host = match default_port {
+        Some(suffix) => host.strip_suffix(suffix).unwrap_or(&host).to_string(),
+        None => host,
+    };
+
+    let path_and_query = original_uri
+        .path_and_query()
+        .map(|pq| pq.as_str())
+        .unwrap_or("/");
+
+    Some(format!("{}://{}{}", scheme, host, path_and_query))
 }
 
 enum WebhookRouteSource {
@@ -295,6 +338,7 @@ async fn webhook_handler_inner(
     stream_pubsub: &Option<Arc<hot::stream::StreamPubSub>>,
     method: Method,
     path: String,
+    original_url: Option<String>,
     headers: HeaderMap,
     query: Query<std::collections::HashMap<String, String>>,
     body: Bytes,
@@ -462,17 +506,29 @@ async fn webhook_handler_inner(
 
     // Build the unified HttpRequest value using the shared builder.
     // Includes method, url, headers, query, body, body-raw, ip, and auth (when authenticated).
-    let raw_body_str = String::from_utf8_lossy(&body).to_string();
-    let body_val: Val = serde_json::from_slice(&body).unwrap_or(Val::from(raw_body_str.clone()));
+    // One UTF-8 validation: valid bodies use the borrowed str directly; for
+    // non-UTF-8 payloads body-raw is lossy, so carry the verbatim bytes too
+    // so body-signing webhook verifiers hash what the provider actually sent.
+    let (raw_body_str, body_bytes) = match std::str::from_utf8(&body) {
+        Ok(s) => (s.to_string(), None),
+        Err(_) => (
+            String::from_utf8_lossy(&body).to_string(),
+            Some(body.to_vec()),
+        ),
+    };
+    let body_val: Val =
+        serde_json::from_slice(&body).unwrap_or_else(|_| Val::from(raw_body_str.clone()));
 
     let http_request = build_request_val(
         &method_str,
         &url_path,
+        original_url.as_deref(),
         &headers,
         &query.0,
         Some(RequestBody {
             body: body_val,
             body_raw: raw_body_str,
+            body_bytes,
         }),
         auth_result.as_ref(),
         &ctx.org.org_id,
@@ -540,8 +596,13 @@ async fn webhook_handler_inner(
     // as the `hot.request` context variable.
     let args_val = Val::Vec(vec![http_request.clone()]);
     let event_data_val = build_call_event_data(&function_name, args_val, Some(http_request));
-    let event_data_json =
-        serde_json::to_value(event_data_val.to_hot_data_repr()).unwrap_or(serde_json::Value::Null);
+    // The persisted copy must not retain the webhook capability token that
+    // original-url carries: store it token-redacted. The raw value rides only
+    // in the queue message below and is re-attached by the worker at
+    // delivery (hot::webhook_url::restore_event_data_original_urls).
+    let persisted_event_data = hot::webhook_url::redact_event_data_original_urls(&event_data_val);
+    let event_data_json = serde_json::to_value(persisted_event_data.to_hot_data_repr())
+        .unwrap_or(serde_json::Value::Null);
 
     // Create call event for the worker queue
     let call_event = hot::lang::event::Event {
@@ -1096,6 +1157,110 @@ mod tests {
         assert_eq!(result, None);
     }
 
+    // ========================================================================
+    // build_original_url tests
+    // ========================================================================
+
+    fn uri(s: &str) -> Uri {
+        s.parse().unwrap()
+    }
+
+    #[test]
+    fn test_original_url_from_forwarded_headers() {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-forwarded-proto", "https".parse().unwrap());
+        headers.insert("x-forwarded-host", "api.hot.dev".parse().unwrap());
+        headers.insert("host", "internal:8080".parse().unwrap());
+        let url = build_original_url(
+            &headers,
+            &uri("/webhook/acme/prod/twilio/sms/abcdef123456?bodySHA256=aa"),
+        );
+        assert_eq!(
+            url.as_deref(),
+            Some("https://api.hot.dev/webhook/acme/prod/twilio/sms/abcdef123456?bodySHA256=aa")
+        );
+    }
+
+    #[test]
+    fn test_original_url_falls_back_to_host_header() {
+        let mut headers = HeaderMap::new();
+        headers.insert("host", "hooks.example.com".parse().unwrap());
+        let url = build_original_url(&headers, &uri("/webhook/svc/abcdef123456"));
+        assert_eq!(
+            url.as_deref(),
+            Some("https://hooks.example.com/webhook/svc/abcdef123456")
+        );
+    }
+
+    #[test]
+    fn test_original_url_none_without_host() {
+        let headers = HeaderMap::new();
+        let url = build_original_url(&headers, &uri("/webhook/svc/abcdef123456"));
+        assert_eq!(url, None);
+    }
+
+    #[test]
+    fn test_original_url_takes_first_forwarded_value() {
+        // Multiple proxies append comma-separated values; the first is the client-facing one.
+        let mut headers = HeaderMap::new();
+        headers.insert("x-forwarded-proto", "https, http".parse().unwrap());
+        headers.insert("x-forwarded-host", "api.hot.dev, edge-2".parse().unwrap());
+        let url = build_original_url(&headers, &uri("/webhook/svc/abcdef123456"));
+        assert_eq!(
+            url.as_deref(),
+            Some("https://api.hot.dev/webhook/svc/abcdef123456")
+        );
+    }
+
+    #[test]
+    fn test_original_url_strips_default_port() {
+        // Proxies sometimes inject the default port; providers sign without it.
+        let mut headers = HeaderMap::new();
+        headers.insert("x-forwarded-proto", "https".parse().unwrap());
+        headers.insert("x-forwarded-host", "api.hot.dev:443".parse().unwrap());
+        let url = build_original_url(&headers, &uri("/webhook/svc/abcdef123456"));
+        assert_eq!(
+            url.as_deref(),
+            Some("https://api.hot.dev/webhook/svc/abcdef123456")
+        );
+
+        let mut headers = HeaderMap::new();
+        headers.insert("x-forwarded-proto", "http".parse().unwrap());
+        headers.insert("host", "localhost:80".parse().unwrap());
+        let url = build_original_url(&headers, &uri("/webhook/svc/abcdef123456"));
+        assert_eq!(
+            url.as_deref(),
+            Some("http://localhost/webhook/svc/abcdef123456")
+        );
+    }
+
+    #[test]
+    fn test_original_url_keeps_non_default_port() {
+        // A URL configured with an explicit non-default port carries it in
+        // the signed string, so reconstruction must keep it.
+        let mut headers = HeaderMap::new();
+        headers.insert("x-forwarded-proto", "http".parse().unwrap());
+        headers.insert("host", "localhost:8080".parse().unwrap());
+        let url = build_original_url(&headers, &uri("/webhook/svc/abcdef123456"));
+        assert_eq!(
+            url.as_deref(),
+            Some("http://localhost:8080/webhook/svc/abcdef123456")
+        );
+    }
+
+    #[test]
+    fn test_original_url_preserves_query_verbatim() {
+        // Percent-encoding and parameter order must survive untouched — the
+        // provider signed this exact string.
+        let mut headers = HeaderMap::new();
+        headers.insert("host", "api.hot.dev".parse().unwrap());
+        let url = build_original_url(&headers, &uri("/webhook/svc/abcdef123456?b=2&a=%2Fx%20y"));
+        assert_eq!(
+            url.as_deref(),
+            Some("https://api.hot.dev/webhook/svc/abcdef123456?b=2&a=%2Fx%20y")
+        );
+    }
+
     #[test]
     fn test_split_path_long_token_returns_none() {
         // Token too long (13 chars)
@@ -1124,6 +1289,7 @@ mod tests {
             State(state),
             Method::POST,
             None,
+            OriginalUri(uri("/webhook/svc/abcdef123456")),
             Path("svc/abcdef123456".to_string()),
             HeaderMap::new(),
             Query(std::collections::HashMap::new()),
@@ -1156,6 +1322,7 @@ mod tests {
             State(state),
             Method::POST,
             Some(Extension(resolved)),
+            OriginalUri(uri("/webhook/svc/hook/abcdef123456")),
             Path("svc/hook/abcdef123456".to_string()),
             HeaderMap::new(),
             Query(std::collections::HashMap::new()),

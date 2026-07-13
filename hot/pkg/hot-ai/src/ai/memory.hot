@@ -493,11 +493,13 @@ fn (t: Thread, role: Role, content: Str): Any {
     // Prune if over turn-limit (each turn = 2 messages: user + assistant)
     max-messages mul(t.turn-limit, 2)
     count ::store/length(t.store)
-    if(gt(count, max-messages), {
+    cond {
+        gt(count, max-messages) => {
         excess sub(count, max-messages)
         to-remove ::store/slice(t.store, 0, excess)
         map(to-remove, (entry) { ::store/delete(t.store, entry.key) })
-    })
+    }
+    }
 }
 
 thread-history

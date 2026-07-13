@@ -14,6 +14,7 @@ ok-body fn (lazy response: Any, label: Str): Any {
     is-err(resolved) => {
       fail(`${label} transport failed: ${err-value(resolved)}`)
     }
+
     gte(resolved.status, 400) => {
       fail(`${label} failed with status ${resolved.status}: ${to-json(resolved.body)}`)
     }

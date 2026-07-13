@@ -36,7 +36,7 @@ use crate::conf::{
     create_default_conf, extract_options_from_command, get_blob_resolved_conf,
     get_emitter_resolved_conf, get_file_resolved_conf, get_log_format_for_command,
     get_merged_src_paths, get_merged_test_paths, load_conf, load_ctx, load_dotenv_files,
-    show_command_config,
+    redact_sensitive_config, show_command_config,
 };
 
 // Log a structured OOM line to stderr before the inevitable abort. The
@@ -914,8 +914,12 @@ async fn async_main(providers: CliProviders) {
             }
         }
         Some(Command::Test { test, pattern, .. }) => {
-            // Use the capture setting with proper precedence: CLI option > project config > default
+            // Use the capture setting with proper precedence:
+            // CLI option > hot.test.capture > project.<name>.test.capture > default (true)
             let capture_output = test.capture.unwrap_or_else(|| {
+                if let Some(hot::val::Val::Bool(capture)) = conf.get("test.capture") {
+                    return capture;
+                }
                 let project_name = hot::project::get_default_project_name(&conf);
                 hot::project::get_project_test_capture(&conf, &project_name)
             });
@@ -991,18 +995,28 @@ async fn async_main(providers: CliProviders) {
                         "api",
                         "app",
                         "billing",
+                        "blob",
+                        "box",
                         "build",
                         "cache",
                         "check",
-                        "emitter",
+                        "dev",
+                        "domain",
                         "email",
+                        "emitter",
                         "engine",
                         "file",
+                        "jit",
                         "lsp",
                         "product",
                         "queue",
+                        "remote",
+                        "schedule",
                         "scheduler",
                         "serialization",
+                        "task",
+                        "test",
+                        "value",
                         "watch",
                         "worker",
                     ];
@@ -1029,6 +1043,10 @@ async fn async_main(providers: CliProviders) {
                     if let Some(v) = conf.get("deploy") {
                         display_conf = display_conf.set("deploy", v);
                     }
+
+                    // Redact secrets (remote keys, session secrets, URI
+                    // passwords) just like --show-conf does.
+                    let display_conf = redact_sensitive_config(&display_conf);
 
                     println!(
                         "::hot::conf ns\n\n// Hot Configuration\n{}\n",

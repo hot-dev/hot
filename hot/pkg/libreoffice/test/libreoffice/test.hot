@@ -43,7 +43,7 @@ meta ["test"] fn () {
 
 test-build-convert-args-basic
 meta ["test"] fn () {
-    args build-convert-args("/tmp/input.docx", "/tmp/out", "pdf", null)
+    args build-convert-args("/tmp/input.docx", "/tmp/out", "pdf", null, null)
     assert-eq(
         ["--headless", "--convert-to", "pdf", "--outdir", "/tmp/out", "/tmp/input.docx"],
         args,
@@ -52,7 +52,7 @@ meta ["test"] fn () {
 
 test-build-convert-args-with-filter
 meta ["test"] fn () {
-    args build-convert-args("/tmp/input.odt", "/tmp/out", "pdf", "writer_pdf_Export")
+    args build-convert-args("/tmp/input.odt", "/tmp/out", "pdf", "writer_pdf_Export", null)
     assert-eq(
         [
             "--headless",
@@ -68,7 +68,7 @@ meta ["test"] fn () {
 
 test-build-convert-args-html
 meta ["test"] fn () {
-    args build-convert-args("/tmp/input.xlsx", "/tmp/lo-out", "html", null)
+    args build-convert-args("/tmp/input.xlsx", "/tmp/lo-out", "html", null, null)
     assert(in("html", args), "convert-to should be html")
     assert-eq("/tmp/lo-out", get(args, 4))
 }

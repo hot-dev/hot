@@ -1,0 +1,9 @@
+::shopify::integration ns
+meta ["test"]
+
+// Requires ctx: shopify.shop + shopify.access.token
+test-shop-query
+meta ["test"] fn () {
+    out ::shopify/graphql("{ shop { name } }")
+    assert(is-some(out.shop.name), "should resolve the shop")
+}

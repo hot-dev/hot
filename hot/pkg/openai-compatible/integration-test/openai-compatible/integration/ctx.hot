@@ -1,0 +1,11 @@
+::openai-compatible::integration::ctx ns
+
+::env ::hot::env
+
+// Placeholder credentials for the openai-compatible integration suite. Unset
+// environment variables are skipped entirely, so absent credentials
+// behave exactly as if never configured.
+::hot::ctx/set(filter-vals({
+    "openai-compatible.url": ::env/get("OPENAI_COMPATIBLE_URL", ""),
+    "openai-compatible.api.key": ::env/get("OPENAI_COMPATIBLE_API_KEY", ""),
+}, (v) { not(is-empty(v)) }))

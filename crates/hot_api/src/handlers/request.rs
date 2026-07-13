@@ -44,6 +44,13 @@ pub fn hash_sensitive_request_fields(
         hash_secret_value_recursive(auth_val, &mut hashes);
     }
 
+    // The original-url carries the webhook capability token verbatim
+    // (URL-signing providers hash the exact configured URL); mask it in
+    // run logs like any other secret.
+    if let Some(original_url) = request_map.get(&Val::from(hot::webhook_url::ORIGINAL_URL_KEY)) {
+        hash_secret_value_recursive(original_url, &mut hashes);
+    }
+
     // Hash only sensitive header values
     if let Some(Val::Map(headers_map)) = request_map.get(&Val::from("headers")) {
         for (key, value) in headers_map.iter() {
@@ -82,11 +89,26 @@ pub fn build_call_event_data(function_name: &str, args: Val, caller: Option<Val>
     event_data
 }
 
+/// Read a proxy/forwarding header and return the first comma-separated value,
+/// trimmed, or None when the header is absent or empty. Multi-proxy chains
+/// append values; the first is the client-facing one.
+pub fn first_forwarded_value(headers: &HeaderMap, name: &str) -> Option<String> {
+    headers
+        .get(name)
+        .and_then(|v| v.to_str().ok())
+        .map(|v| v.split(',').next().unwrap_or("").trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
 /// Optional body content for the request builder.
 /// Webhooks provide body/body-raw; MCP does not.
+/// `body_bytes` carries the verbatim wire bytes only when they are not valid
+/// UTF-8 — in that case `body_raw` is lossy and signature verification needs
+/// the real bytes.
 pub struct RequestBody {
     pub body: Val,
     pub body_raw: String,
+    pub body_bytes: Option<Vec<u8>>,
 }
 
 /// Build an `::hot::http/HttpRequest` typed Val from HTTP request components.
@@ -101,10 +123,13 @@ pub struct RequestBody {
 ///   $type: "::hot::http/HttpRequest",
 ///   method: "POST",
 ///   url: "/mcp/org/env/service",
+///   original-url: "https://...", // webhooks only: the URL as the caller requested it,
+///                                // pre-rewrite, token and query intact (signature verification)
 ///   headers: { "content-type": "application/json", ... },
 ///   query: { ... },
 ///   body: { ... },            // webhooks only
 ///   body-raw: "...",          // webhooks only
+///   body-bytes: Bytes,        // webhooks only, and only when the body is not valid UTF-8
 ///   ip: "1.2.3.4",           // from proxy headers
 ///   auth: {                   // present only if authenticated
 ///     type: "service-key" | "api-key" | "session",
@@ -112,9 +137,11 @@ pub struct RequestBody {
 ///   }
 /// }
 /// ```
+#[allow(clippy::too_many_arguments)]
 pub fn build_request_val(
     method: &str,
     url_path: &str,
+    original_url: Option<&str>,
     headers: &HeaderMap,
     query_params: &HashMap<String, String>,
     body: Option<RequestBody>,
@@ -130,6 +157,15 @@ pub fn build_request_val(
     let Val::Map(ref mut request_map) = request_val else {
         return request_val;
     };
+
+    // Providers like Twilio and HubSpot sign the exact URL they were configured
+    // with; `url` is a rewritten internal path, so verifiers need this instead.
+    if let Some(original_url) = original_url {
+        request_map.insert(
+            Val::from("original-url"),
+            Val::from(original_url.to_string()),
+        );
+    }
 
     // Headers (keys are already lowercase in axum's HeaderMap)
     let mut headers_val = hot::val!({});
@@ -158,15 +194,14 @@ pub fn build_request_val(
     if let Some(request_body) = body {
         request_map.insert(Val::from("body"), request_body.body);
         request_map.insert(Val::from("body-raw"), Val::from(request_body.body_raw));
+        if let Some(bytes) = request_body.body_bytes {
+            request_map.insert(Val::from("body-bytes"), Val::Bytes(bytes));
+        }
     }
 
     // Client IP from proxy headers
-    let ip = headers
-        .get("x-forwarded-for")
-        .or_else(|| headers.get("x-real-ip"))
-        .and_then(|v| v.to_str().ok())
-        .map(|v| v.split(',').next().unwrap_or("").trim().to_string())
-        .filter(|s| !s.is_empty());
+    let ip = first_forwarded_value(headers, "x-forwarded-for")
+        .or_else(|| first_forwarded_value(headers, "x-real-ip"));
     if let Some(ip) = ip {
         request_map.insert(Val::from("ip"), Val::from(ip));
     }
@@ -225,6 +260,7 @@ mod tests {
         build_request_val(
             "POST",
             url,
+            None,
             headers,
             &HashMap::new(),
             None,
@@ -248,15 +284,92 @@ mod tests {
     }
 
     #[test]
+    fn test_build_request_val_body_bytes() {
+        let raw = vec![0xFF, 0x00, 0xFE];
+        let body = RequestBody {
+            body: Val::from(String::from_utf8_lossy(&raw).to_string()),
+            body_raw: String::from_utf8_lossy(&raw).to_string(),
+            body_bytes: Some(raw.clone()),
+        };
+        let val = build_request_val(
+            "POST",
+            "/test",
+            None,
+            &HeaderMap::new(),
+            &HashMap::new(),
+            Some(body),
+            None,
+            &Uuid::nil(),
+        );
+        if let Val::Map(ref map) = val {
+            assert_eq!(map.get(&Val::from("body-bytes")), Some(&Val::Bytes(raw)));
+        } else {
+            panic!("Expected Map");
+        }
+
+        // Absent for valid UTF-8 bodies
+        let body = RequestBody {
+            body: Val::from("hello"),
+            body_raw: "hello".to_string(),
+            body_bytes: None,
+        };
+        let val = build_request_val(
+            "POST",
+            "/test",
+            None,
+            &HeaderMap::new(),
+            &HashMap::new(),
+            Some(body),
+            None,
+            &Uuid::nil(),
+        );
+        if let Val::Map(ref map) = val {
+            assert_eq!(map.get(&Val::from("body-bytes")), None);
+        } else {
+            panic!("Expected Map");
+        }
+    }
+
+    #[test]
+    fn test_build_request_val_original_url() {
+        let full = "https://api.hot.dev/webhook/org/env/svc/path/abcdef123456?x=1";
+        let val = build_request_val(
+            "POST",
+            "/webhook/org/env/svc/path",
+            Some(full),
+            &HeaderMap::new(),
+            &HashMap::new(),
+            None,
+            None,
+            &Uuid::nil(),
+        );
+        if let Val::Map(ref map) = val {
+            assert_eq!(map.get(&Val::from("original-url")), Some(&Val::from(full)));
+        } else {
+            panic!("Expected Map");
+        }
+
+        // Absent when the ingress couldn't reconstruct it (never an empty string)
+        let val = simple_request(&HeaderMap::new(), "/test");
+        if let Val::Map(ref map) = val {
+            assert_eq!(map.get(&Val::from("original-url")), None);
+        } else {
+            panic!("Expected Map");
+        }
+    }
+
+    #[test]
     fn test_build_request_val_with_body() {
         let headers = HeaderMap::new();
         let body = RequestBody {
             body: Val::from("hello"),
             body_raw: "hello".to_string(),
+            body_bytes: None,
         };
         let val = build_request_val(
             "POST",
             "/webhook/org/env/svc/path",
+            None,
             &headers,
             &HashMap::new(),
             Some(body),
@@ -297,6 +410,7 @@ mod tests {
         let val = build_request_val(
             "GET",
             "/webhook/org/env/svc/path",
+            None,
             &HeaderMap::new(),
             &query,
             None,
@@ -367,10 +481,12 @@ mod tests {
         let body = RequestBody {
             body: Val::from("secret-body-content"),
             body_raw: "secret-body-content".to_string(),
+            body_bytes: None,
         };
         let val = build_request_val(
             "POST",
             "/test",
+            None,
             &headers,
             &HashMap::new(),
             Some(body),

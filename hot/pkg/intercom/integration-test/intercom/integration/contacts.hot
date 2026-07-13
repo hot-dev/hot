@@ -1,0 +1,9 @@
+::intercom::integration ns
+meta ["test"]
+
+// Requires ctx: intercom.token
+test-search-contacts
+meta ["test"] fn () {
+    out ::intercom/find-contact-by-email("definitely-not-real@hot-dev-itest.example")
+    assert(is-null(out), "unknown email resolves to null")
+}

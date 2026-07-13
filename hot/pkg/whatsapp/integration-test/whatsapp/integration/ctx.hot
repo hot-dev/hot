@@ -1,0 +1,12 @@
+::whatsapp::integration::ctx ns
+
+::env ::hot::env
+
+// Placeholder credentials for the whatsapp integration suite. Unset
+// environment variables are skipped entirely, so absent credentials
+// behave exactly as if never configured.
+::hot::ctx/set(filter-vals({
+    "whatsapp.access.token": ::env/get("WHATSAPP_ACCESS_TOKEN", ""),
+    "whatsapp.app.secret": ::env/get("WHATSAPP_APP_SECRET", ""),
+    "whatsapp.verify.token": ::env/get("WHATSAPP_VERIFY_TOKEN", ""),
+}, (v) { not(is-empty(v)) }))

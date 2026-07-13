@@ -1,0 +1,39 @@
+::google::integration::calendar ns
+meta ["test"]
+
+// Live Calendar against a Workspace user via domain-wide delegation.
+// Requires GOOGLE_SERVICE_ACCOUNT and GOOGLE_IMPERSONATE. Self-cleaning:
+// the created all-day event is deleted at the end.
+
+IMPERSONATE ::hot::env/get("GOOGLE_IMPERSONATE", "")
+
+test-list-calendars
+meta ["test"] fn () {
+    if(is-empty(IMPERSONATE),
+        fail("Set GOOGLE_IMPERSONATE to a Workspace user for domain-wide delegation")
+    )
+    calendars ::google::calendar/list-calendars()
+    assert(not(is-err(calendars)), `list-calendars: ${if-err(calendars, (e) { Str(e) })}`)
+    assert(gt(length(calendars.items), 0), "impersonated user has at least one calendar")
+}
+
+test-event-roundtrip
+meta ["test"] fn () {
+    if(is-empty(IMPERSONATE),
+        fail("Set GOOGLE_IMPERSONATE to a Workspace user for domain-wide delegation")
+    )
+    summary `hot-it-${Uuid()}`
+    created ::google::calendar/create-event("primary", {
+        summary: summary,
+        description: "hot google-calendar integration suite; deleted immediately",
+        start: {date: "2030-01-01"},
+        end: {date: "2030-01-02"}
+    })
+    assert(not(is-err(created)), `create-event: ${if-err(created, (e) { Str(e) })}`)
+
+    fetched ::google::calendar/get-event("primary", created.id)
+    assert-eq(summary, fetched.summary, "event reads back")
+
+    deleted ::google::calendar/delete-event("primary", created.id)
+    assert(not(is-err(deleted)), "cleanup should succeed")
+}

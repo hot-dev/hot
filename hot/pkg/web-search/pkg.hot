@@ -1,0 +1,15 @@
+::hot::pkg ns
+
+hot.pkg.web-search {
+  name: "hot.dev/web-search",
+  version: "0.1.0",
+  hot-min-version: "2.6.0",
+  description: "Web search for Hot agents: Tavily, Brave, and Exa behind one normalized search() plus full access to each provider's API.",
+  author: "Hot Dev",
+  email: "support@hot.dev",
+  license: "Apache-2.0",
+  tags: ["ai", "search", "agents"],
+  deps: {},
+  src-paths: ["src/"],
+  test-paths: ["test/"]
+}

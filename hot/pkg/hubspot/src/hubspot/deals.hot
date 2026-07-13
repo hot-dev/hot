@@ -1,0 +1,53 @@
+::hubspot::deals ns
+
+::objects ::hubspot::objects
+
+create-deal
+meta {
+    doc: """
+    Create a deal from a properties Map (`dealname`, `amount`,
+    `dealstage`, `pipeline`, `closedate`, ...).
+
+    **Example**
+
+    ```hot
+    deal ::hubspot::deals/create-deal({
+      dealname: "Acme expansion",
+      amount: "24000",
+      dealstage: "qualifiedtobuy"
+    })
+    ::hubspot::objects/associate("deals", deal.id, "companies", company.id)
+    ```
+    """
+}
+fn (properties: Map): Map {
+  ::objects/create-object("deals", properties)
+}
+
+get-deal
+meta {
+    doc: """Fetch a deal by id; the 2-arity form selects `properties`."""
+}
+fn
+(id: Str): Map {
+  ::objects/get-object("deals", id)
+},
+(id: Str, properties: Vec): Map {
+  ::objects/get-object("deals", id, properties)
+}
+
+update-deal
+meta {
+    doc: """Update a deal's properties (e.g. `{dealstage: "closedwon"}`)."""
+}
+fn (id: Str, properties: Map): Map {
+  ::objects/update-object("deals", id, properties)
+}
+
+search-deals
+meta {
+    doc: """Search deals — see `::hubspot::objects/build-search-body` for the options."""
+}
+fn (options: Map): Map {
+  ::objects/search-objects("deals", options)
+}

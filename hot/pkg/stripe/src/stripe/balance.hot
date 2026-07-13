@@ -1,0 +1,61 @@
+::stripe::balance ns
+
+api-request ::stripe::api/request
+query-string ::stripe::api/query-string
+HttpError ::stripe::api/HttpError
+is-ok-response ::hot::http/is-ok-response
+
+// ============================================================================
+// Balance
+// ============================================================================
+
+get-balance
+meta {
+    doc: """
+GET /v1/balance - Retrieve the current account balance.
+
+**Example**
+
+```hot
+balance ::stripe::balance/get-balance()
+balance.available  // => [{amount: 12300, currency: "usd", ...}]
+balance.pending    // => [{amount: 4500, currency: "usd", ...}]
+```
+"""
+}
+fn (): Map {
+  response api-request("GET", `${::stripe/BASE_URL}/v1/balance`)
+  if(is-ok-response(response), response.body, err(HttpError(response)))
+}
+
+get-balance-transaction
+meta {
+    doc: """GET /v1/balance_transactions/{transaction} - Retrieve a balance transaction (charge, refund, payout, fee, ...) by ID."""
+}
+fn (transaction: Str): Map {
+  response api-request("GET", `${::stripe/BASE_URL}/v1/balance_transactions/${transaction}`)
+  if(is-ok-response(response), response.body, err(HttpError(response)))
+}
+
+ListBalanceTransactionsRequest type {
+  type: Str?,
+  payout: Str?,
+  currency: Str?,
+  created: Any?,
+  limit: Int?,
+  starting_after: Str?,
+  ending_before: Str?
+}
+
+list-balance-transactions
+meta {
+    doc: """GET /v1/balance_transactions - List balance transactions, most recent first. Filter by `type` (e.g. "charge", "refund", "payout") or `payout`."""
+}
+fn
+(): Map {
+  list-balance-transactions(ListBalanceTransactionsRequest({}))
+},
+(request: ListBalanceTransactionsRequest): Map {
+  response api-request("GET", `${::stripe/BASE_URL}/v1/balance_transactions${query-string(request)}`)
+  if(is-ok-response(response), response.body, err(HttpError(response)))
+}

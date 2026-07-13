@@ -1,0 +1,8 @@
+::intercom::test ns
+meta ["test"]
+
+test-constants
+meta ["test"] fn () {
+    assert-eq("https://api.intercom.io", ::intercom/BASE_URL)
+    assert-eq("2.13", ::intercom/API_VERSION)
+}

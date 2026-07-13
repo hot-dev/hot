@@ -71,25 +71,13 @@ fn
         ScanIndexForward: scan_index_forward
     }
 
-    with-names if(is-null(expression_attribute_names), request-body,
-        {...request-body, ExpressionAttributeNames: expression_attribute_names}
-    )
-
-    with-filter if(is-null(filter_expression), with-names,
-        {...with-names, FilterExpression: filter_expression}
-    )
-
-    with-limit if(is-null(limit), with-filter,
-        {...with-filter, Limit: limit}
-    )
-
-    with-start-key if(is-null(exclusive_start_key), with-limit,
-        {...with-limit, ExclusiveStartKey: exclusive_start_key}
-    )
-
-    with-index if(is-null(index_name), with-start-key,
-        {...with-start-key, IndexName: index_name}
-    )
+    with-index merge(request-body, filter-vals({
+        ExpressionAttributeNames: expression_attribute_names,
+        FilterExpression: filter_expression,
+        Limit: limit,
+        ExclusiveStartKey: exclusive_start_key,
+        IndexName: index_name
+    }, is-some))
 
     body to-json(with-index)
 
@@ -103,16 +91,16 @@ fn
 
     response http-request("POST", url, signed-headers, body)
 
-    if(is-ok-response(response),
-        QueryResponse({
+    cond {
+        is-ok-response(response) => { QueryResponse({
             items: if(is-null(response.body.Items), [], response.body.Items),
             count: response.body.Count,
             scanned_count: response.body.ScannedCount,
             last_evaluated_key: response.body.LastEvaluatedKey,
             consumed_capacity: response.body.ConsumedCapacity
-        }),
-        err(AwsError(response))
-    )
+        }) }
+        => { err(AwsError(response)) }
+    }
 },
 (table_name: Str, key_condition_expression: Str, expression_attribute_values: Map): QueryResponse | AwsError {
     query(table_name, key_condition_expression, expression_attribute_values, null, null, null, null, true, null)
@@ -184,23 +172,18 @@ fn
         TableName: table_name
     }
 
-    with-filter if(is-null(filter_expression), request-body,
-        {...request-body,
+    with-filter cond {
+        is-null(filter_expression) => { request-body }
+        => { {...request-body,
             FilterExpression: filter_expression,
-            ExpressionAttributeValues: expression_attribute_values}
-    )
+            ExpressionAttributeValues: expression_attribute_values} }
+    }
 
-    with-names if(is-null(expression_attribute_names), with-filter,
-        {...with-filter, ExpressionAttributeNames: expression_attribute_names}
-    )
-
-    with-limit if(is-null(limit), with-names,
-        {...with-names, Limit: limit}
-    )
-
-    with-start-key if(is-null(exclusive_start_key), with-limit,
-        {...with-limit, ExclusiveStartKey: exclusive_start_key}
-    )
+    with-start-key merge(with-filter, filter-vals({
+        ExpressionAttributeNames: expression_attribute_names,
+        Limit: limit,
+        ExclusiveStartKey: exclusive_start_key
+    }, is-some))
 
     body to-json(with-start-key)
 
@@ -214,16 +197,16 @@ fn
 
     response http-request("POST", url, signed-headers, body)
 
-    if(is-ok-response(response),
-        ScanResponse({
+    cond {
+        is-ok-response(response) => { ScanResponse({
             items: if(is-null(response.body.Items), [], response.body.Items),
             count: response.body.Count,
             scanned_count: response.body.ScannedCount,
             last_evaluated_key: response.body.LastEvaluatedKey,
             consumed_capacity: response.body.ConsumedCapacity
-        }),
-        err(AwsError(response))
-    )
+        }) }
+        => { err(AwsError(response)) }
+    }
 },
 (table_name: Str, filter_expression: Str, expression_attribute_values: Map): ScanResponse | AwsError {
     scan(table_name, filter_expression, expression_attribute_values, null, null, null)

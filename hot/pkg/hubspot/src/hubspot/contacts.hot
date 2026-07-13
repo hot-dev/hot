@@ -1,0 +1,68 @@
+::hubspot::contacts ns
+
+::objects ::hubspot::objects
+
+create-contact
+meta {
+    doc: """
+    Create a contact from a properties Map (`email`, `firstname`,
+    `lastname`, `phone`, `company`, plus any custom properties).
+
+    **Example**
+
+    ```hot
+    contact ::hubspot::contacts/create-contact({
+      email: "ada@example.com",
+      firstname: "Ada"
+    })
+    contact.id
+    ```
+    """
+}
+fn (properties: Map): Map {
+  ::objects/create-object("contacts", properties)
+}
+
+get-contact
+meta {
+    doc: """Fetch a contact by id; the 2-arity form selects `properties` to return."""
+}
+fn
+(id: Str): Map {
+  ::objects/get-object("contacts", id)
+},
+(id: Str, properties: Vec): Map {
+  ::objects/get-object("contacts", id, properties)
+}
+
+update-contact
+meta {
+    doc: """Update a contact's properties."""
+}
+fn (id: Str, properties: Map): Map {
+  ::objects/update-object("contacts", id, properties)
+}
+
+find-by-email
+meta {
+    doc: """Search for a contact by exact email. Returns the contact or null."""
+}
+fn (email: Str): Any {
+  out ::objects/search-objects("contacts", {
+    filters: [{propertyName: "email", operator: "EQ", value: email}],
+    limit: 1
+  })
+  cond {
+    is-err(out) => { out }
+    is-empty(out.results) => { null }
+    => { first(out.results) }
+  }
+}
+
+search-contacts
+meta {
+    doc: """Search contacts — see `::hubspot::objects/build-search-body` for the options."""
+}
+fn (options: Map): Map {
+  ::objects/search-objects("contacts", options)
+}

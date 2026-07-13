@@ -118,7 +118,13 @@ numbers response.incoming_phone_numbers
 """
 }
 fn (request: GetIncomingPhoneNumbersRequest): GetIncomingPhoneNumbersResponse {
-  response api-request("GET", `${account-url()}/IncomingPhoneNumbers.json?PhoneNumber=${or(request.PhoneNumber, "")}&FriendlyName=${or(request.FriendlyName, "")}&PageSize=${or(request.PageSize, "")}&Page=${or(request.Page, "")}`)
+  query ::twilio::api/query-string({
+    PhoneNumber: request.PhoneNumber,
+    FriendlyName: request.FriendlyName,
+    PageSize: request.PageSize,
+    Page: request.Page
+  })
+  response api-request("GET", `${account-url()}/IncomingPhoneNumbers.json${query}`)
   if(is-ok-response(response), GetIncomingPhoneNumbersResponse(response.body), err(HttpError(response)))
 }
 

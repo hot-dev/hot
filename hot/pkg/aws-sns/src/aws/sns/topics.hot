@@ -62,13 +62,14 @@ fn
         Name: name
     }
 
-    with-attributes if(is-empty(attributes), request-body,
-        merge(request-body, { Attributes: attributes })
-    )
+    with-attributes cond {
+        is-empty(attributes) => { request-body }
+        => { merge(request-body, { Attributes: attributes }) }
+    }
 
-    with-tags if(is-null(tags), with-attributes,
-        merge(with-attributes, { Tags: tags })
-    )
+    with-tags merge(with-attributes, filter-vals({
+        Tags: tags
+    }, is-some))
 
     body to-json(with-tags)
 
@@ -84,12 +85,12 @@ fn
 
     response http-request("POST", url, signed-headers, body)
 
-    if(is-ok-response(response),
-        CreateTopicResponse({
+    cond {
+        is-ok-response(response) => { CreateTopicResponse({
             topic_arn: response.body.TopicArn
-        }),
-        err(AwsError(response))
-    )
+        }) }
+        => { err(AwsError(response)) }
+    }
 },
 (name: Str, attributes: Map): CreateTopicResponse | AwsError {
     create-topic(name, attributes, null)
@@ -131,10 +132,10 @@ fn (topic_arn: Str): Map | AwsError {
 
     response http-request("POST", url, signed-headers, body)
 
-    if(is-ok-response(response),
-        { success: true },
-        AwsError(response)
-    )
+    cond {
+        is-ok-response(response) => { { success: true } }
+        => { AwsError(response) }
+    }
 }
 
 // List all SNS topics
@@ -159,9 +160,9 @@ fn
 
     request-body {}
 
-    with-token if(is-null(next_token), request-body,
-        merge(request-body, { NextToken: next_token })
-    )
+    with-token merge(request-body, filter-vals({
+        NextToken: next_token
+    }, is-some))
 
     body to-json(with-token)
 
@@ -177,13 +178,13 @@ fn
 
     response http-request("POST", url, signed-headers, body)
 
-    if(is-ok-response(response),
-        ListTopicsResponse({
+    cond {
+        is-ok-response(response) => { ListTopicsResponse({
             topics: if(is-null(response.body.Topics), [], map(response.body.Topics, Topic({ topic_arn: %.TopicArn }))),
             next_token: response.body.NextToken
-        }),
-        err(AwsError(response))
-    )
+        }) }
+        => { err(AwsError(response)) }
+    }
 },
 (): ListTopicsResponse | AwsError {
     list-topics(null)
@@ -224,12 +225,12 @@ fn (topic_arn: Str): GetTopicAttributesResponse | AwsError {
 
     response http-request("POST", url, signed-headers, body)
 
-    if(is-ok-response(response),
-        GetTopicAttributesResponse({
+    cond {
+        is-ok-response(response) => { GetTopicAttributesResponse({
             attributes: if(is-null(response.body.Attributes), {}, response.body.Attributes)
-        }),
-        err(AwsError(response))
-    )
+        }) }
+        => { err(AwsError(response)) }
+    }
 }
 
 // Set topic attributes
@@ -269,10 +270,10 @@ fn (topic_arn: Str, attribute_name: Str, attribute_value: Str): Map | AwsError {
 
     response http-request("POST", url, signed-headers, body)
 
-    if(is-ok-response(response),
-        { success: true },
-        AwsError(response)
-    )
+    cond {
+        is-ok-response(response) => { { success: true } }
+        => { AwsError(response) }
+    }
 }
 
 // Tag a topic
@@ -312,10 +313,10 @@ fn (resource_arn: Str, tags: Vec<Map>): Map | AwsError {
 
     response http-request("POST", url, signed-headers, body)
 
-    if(is-ok-response(response),
-        { success: true },
-        AwsError(response)
-    )
+    cond {
+        is-ok-response(response) => { { success: true } }
+        => { AwsError(response) }
+    }
 }
 
 // Untag a topic
@@ -352,10 +353,10 @@ fn (resource_arn: Str, tag_keys: Vec<Str>): Map | AwsError {
 
     response http-request("POST", url, signed-headers, body)
 
-    if(is-ok-response(response),
-        { success: true },
-        AwsError(response)
-    )
+    cond {
+        is-ok-response(response) => { { success: true } }
+        => { AwsError(response) }
+    }
 }
 
 // List tags for a topic
@@ -393,8 +394,8 @@ fn (resource_arn: Str): Map | AwsError {
 
     response http-request("POST", url, signed-headers, body)
 
-    if(is-ok-response(response),
-        { tags: if(is-null(response.body.Tags), [], response.body.Tags) },
-        AwsError(response)
-    )
+    cond {
+        is-ok-response(response) => { { tags: if(is-null(response.body.Tags), [], response.body.Tags) } }
+        => { AwsError(response) }
+    }
 }

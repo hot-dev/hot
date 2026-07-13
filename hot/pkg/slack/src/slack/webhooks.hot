@@ -17,7 +17,7 @@ verify-request
 meta {
     ctx: {"slack.signing.secret": {required: false}},
     doc: """
-  Verify a Slack webhook request signature using HMAC-SHA256. Returns true if the request is authentic. Uses the `slack.signing.secret` context variable by default, or accepts an explicit signing secret as a second argument for multi-app scenarios.
+  Verify a Slack webhook request signature using HMAC-SHA256. Returns true if the request is authentic and its timestamp is within the replay window (default 300 seconds, per Slack's guidance; pass 0 as the third argument to disable). Uses the `slack.signing.secret` context variable by default, or accepts an explicit signing secret as a second argument for multi-app scenarios.
 
   The function checks the `x-slack-request-timestamp` and `x-slack-signature` headers against the computed HMAC using constant-time comparison to prevent timing attacks.
 
@@ -43,6 +43,10 @@ fn
 },
 // 2-arity: explicit signing secret (override for multi-app)
 (request: HttpRequest, signing-secret: Str): Bool {
+  verify-request(request, signing-secret, 300)
+},
+// 3-arity: explicit replay tolerance in seconds (0 disables the check)
+(request: HttpRequest, signing-secret: Str, tolerance-seconds: Int): Bool {
   // Extract the timestamp and signature from headers
   timestamp get(request.headers, "x-slack-request-timestamp", "")
   signature get(request.headers, "x-slack-signature", "")
@@ -59,8 +63,13 @@ fn
       // Compute the expected signature
       expected `v0=${::hmac/hmac-sha256(signing-secret, base-string)}`
 
-      // Constant-time comparison to prevent timing attacks
-      secure-compare(expected, signature)
+      // Constant-time comparison to prevent timing attacks, then the
+      // replay window Slack's docs require.
+      cond {
+        not(secure-compare(expected, signature)) => { false }
+        eq(tolerance-seconds, 0) => { true }
+        => { ::time/within-seconds-of-now(timestamp, tolerance-seconds) }
+      }
     }
   }
 }

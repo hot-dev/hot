@@ -1,0 +1,64 @@
+::notion::blocks ns
+
+::api ::notion::api
+
+get-children
+meta {
+    doc: """GET /blocks/{id}/children - A page's (or block's) content blocks. Returns `{results, has_more, next_cursor}`."""
+}
+fn (block-id: Str): Map {
+  ::api/json("GET", `/blocks/${block-id}/children`)
+}
+
+append-children
+meta {
+    doc: """
+    PATCH /blocks/{id}/children - Append blocks to a page or block (build
+    them with the `::notion` helpers).
+
+    **Example**
+
+    ```hot
+    ::notion::blocks/append-children(page-id, [
+      ::notion/to-do("Review the pinecone package"),
+      ::notion/paragraph("Added by the standup agent.")
+    ])
+    ```
+    """
+}
+fn (block-id: Str, children: Vec): Map {
+  ::api/json("PATCH", `/blocks/${block-id}/children`, {}, {children: children})
+}
+
+delete-block
+meta {
+    doc: """DELETE /blocks/{id} - Move a block to the trash."""
+}
+fn (block-id: Str): Map {
+  ::api/json("DELETE", `/blocks/${block-id}`)
+}
+
+search
+meta {
+    doc: """
+    POST /search - Search everything shared with the integration. The
+    2-arity form filters to `"page"` or `"database"` objects.
+
+    **Example**
+
+    ```hot
+    hits ::notion::blocks/search("quarterly roadmap", "page")
+    first(hits.results).url
+    ```
+    """
+}
+fn
+(query: Str): Map {
+  ::api/json("POST", "/search", {}, {query: query})
+},
+(query: Str, object-type: Str): Map {
+  ::api/json("POST", "/search", {}, {
+    query: query,
+    filter: {property: "object", value: object-type}
+  })
+}

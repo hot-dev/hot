@@ -1,0 +1,9 @@
+::airtable::integration ns
+meta ["test"]
+
+// Requires ctx: airtable.token
+test-list-bases
+meta ["test"] fn () {
+    out ::airtable/list-bases()
+    assert(is-some(out.bases), "token should see bases")
+}

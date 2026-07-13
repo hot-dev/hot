@@ -226,11 +226,25 @@ fn (mem: AgentMemory, query: Str, opts: Map?): Str {
     min-score get(or(opts, {}), "min-score", 0.5)
     search-opts {limit: limit, min-score: min-score}
 
+    // Guard both searches: an unconfigured embedding provider (or store)
+    // errs here, and that Err must propagate as a value — handing it to
+    // the format fns would iterate the Err's internals instead.
     session-results ::ai::memory/recall(mem, query, search-opts)
-    kb-results ::ai::memory/search-kb(mem, query, {limit: limit})
+    match session-results {
+        Result.Err => { err(session-results) }
 
-    all-lines concat(format-session-results(session-results), format-kb-results(kb-results))
-    if(is-empty(all-lines), "", join(all-lines, "\n"))
+        _ => {
+            kb-results ::ai::memory/search-kb(mem, query, {limit: limit})
+            match kb-results {
+                Result.Err => { err(kb-results) }
+
+                _ => {
+                    all-lines concat(format-session-results(session-results), format-kb-results(kb-results))
+                    if(is-empty(all-lines), "", join(all-lines, "\n"))
+                }
+            }
+        }
+    }
 }
 
 build-context-safe
@@ -255,6 +269,14 @@ meta {
 }
 fn (mem: AgentMemory, question: Str, chat-opts: ChatOptions, opts: Map?): Map {
     context build-context(mem, question, opts)
+    match context {
+        Result.Err => { err(context) }
+
+        _ => { ask-with-context(mem, question, chat-opts, opts, context) }
+    }
+}
+
+ask-with-context fn (mem: AgentMemory, question: Str, chat-opts: ChatOptions, opts: Map?, context: Str): Map {
     prompt build-rag-prompt("", context, question)
     system or(chat-opts.system, DEFAULT_SYSTEM)
     answer chat-opts.chat-fn(chat-opts.model, prompt, system)
@@ -318,26 +340,30 @@ fn (mem: AgentMemory, chat-opts: ChatOptions, opts: Map?): MemoryCapsule {
     capsule-id get(o, "id", `capsule:${Uuid()}`)
     emit-stream-on get(o, "emit-stream", false)
 
-    if(emit-stream-on, {
+    cond {
+        emit-stream-on => {
         if-err(::hot::stream/data(::ai::stream-labels/RAG_COMPACTION_START, {
             agent-name: mem.agent-name,
             capsule-id: capsule-id,
             opts: o,
         }), null)
-    })
+    }
+    }
 
     messages ::ai::memory/recent(mem, o)
     summary summarize(mem, chat-opts, o)
     capsule ::ai::memory/capsule-from-window(capsule-id, summary, messages, o)
     ::ai::memory/store-capsule(mem, capsule)
 
-    if(emit-stream-on, {
+    cond {
+        emit-stream-on => {
         if-err(::hot::stream/data(::ai::stream-labels/RAG_COMPACTION_END, {
             agent-name: mem.agent-name,
             capsule-id: capsule-id,
             source-count: length(messages),
         }), null)
-    })
+    }
+    }
 
     capsule
 }
@@ -349,12 +375,14 @@ meta {
 fn (mem: AgentMemory, chat-opts: ChatOptions, opts: Map?): Map {
     res if-err(compact-window(mem, chat-opts, opts), (err) {
         o or(opts, {})
-        if(get(o, "emit-stream", false), {
+        cond {
+            get(o, "emit-stream", false) => {
             if-err(::hot::stream/data(::ai::stream-labels/RAG_COMPACTION_ERROR, {
                 agent-name: mem.agent-name,
                 error: Str(err),
             }), null)
-        })
+        }
+        }
         {
             ok: false,
             capsule: null,

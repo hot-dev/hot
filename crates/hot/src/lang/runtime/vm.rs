@@ -3362,14 +3362,14 @@ impl VirtualMachine {
                 }
 
                 // Regular hotlib function call (not call-lib)
-                let args_slice = match &args_val {
+                let args_owned = match &args_val {
                     Val::Vec(vec) => {
                         tracing::trace!(
                             "VM: CallLibBuiltin - args is Vec with {} elements: {:?}",
                             vec.len(),
                             vec
                         );
-                        vec.as_slice()
+                        vec.to_vec()
                     }
                     _ => {
                         tracing::trace!(
@@ -3377,11 +3377,14 @@ impl VirtualMachine {
                             args_val
                         );
                         // Single argument, wrap in slice
-                        std::slice::from_ref(&args_val)
+                        vec![args_val.clone()]
                     }
                 };
+                // Strict-argument law: same preparation as ordinary calls
+                // (Ok auto-unwraps, Err halts, thunks pass through).
+                let args_prepared = self.prepare_lib_call_args(&function_name, args_owned)?;
 
-                let result = match self.execute_call_lib(&function_name, args_slice) {
+                let result = match self.execute_call_lib(&function_name, &args_prepared) {
                     Ok(v) => v,
                     Err(e) => {
                         if self.error_capture_active {
@@ -5909,7 +5912,7 @@ impl VirtualMachine {
                 1 => match function_name {
                     "not" => match &args[0] {
                         Val::Bool(b) => fast_return!(bool::fast_not_bool(*b)),
-                        _ => fast_return_hr!(bool::not(args)),
+                        _ => fast_return_hr!(bool::not(self, args)),
                     },
                     "is-zero" => match &args[0] {
                         Val::Int(a) => fast_return!(math::fast_is_zero_int(*a)),
@@ -7069,8 +7072,76 @@ impl VirtualMachine {
             args_vec
         );
 
+        // Strict-argument law: this is a compiled call boundary, so args get
+        // the same preparation as ordinary calls (Result.Ok auto-unwraps,
+        // Result.Err halts). Lazy thunks pass through untouched, which keeps
+        // Result-aware natives with lazy params (is-err, if-err, ...) working.
+        let args_vec = self.prepare_lib_call_args(&function_name, args_vec)?;
+
         // Call the hotlib function
         self.execute_call_lib(&function_name, &args_vec)
+    }
+
+    /// Prepare arguments crossing a compiled hotlib call boundary: strict
+    /// Result values auto-unwrap `Ok` and halt on `Err`, exactly like
+    /// ordinary call arguments (`unwrap_result_if_ok`). Lazy thunks pass
+    /// through untouched, and the Result-aware inspection natives are
+    /// exempt entirely — their parameters take Result values by contract,
+    /// and they can receive raw (non-thunk) Errs when Rust-side HOF loops
+    /// invoke their hot-std wrappers with Err elements. Rust-side internals
+    /// that call `execute_call_lib` directly also bypass this preparation.
+    pub(crate) fn prepare_lib_call_args(
+        &mut self,
+        function_name: &str,
+        mut args: Vec<Val>,
+    ) -> VmResult<Vec<Val>> {
+        if Self::is_result_aware_native(function_name) {
+            return Ok(args);
+        }
+        for arg in args.iter_mut() {
+            // Fast path: only Result-shaped values need preparation; leave
+            // everything else (including thunks) untouched without cloning.
+            if Self::is_result_shaped(arg) {
+                *arg = self.unwrap_result_if_ok(arg)?;
+            }
+        }
+        Ok(args)
+    }
+
+    /// The `::hot::type` Result natives take Result values as arguments by
+    /// contract (the sanctioned inspection points of the error model), and
+    /// the `::hot::bool` truthiness natives do too: Err is falsy in the
+    /// unified truthiness (matching `if`/`cond`, whose lazy conditions
+    /// already receive Errs), so or/and/not/is-truthy must see the value.
+    fn is_result_aware_native(function_name: &str) -> bool {
+        let name = function_name
+            .strip_prefix("::hot::type/")
+            .or_else(|| function_name.strip_prefix("::hot::bool/"))
+            .unwrap_or(function_name);
+        matches!(
+            name,
+            "is-ok"
+                | "is-err"
+                | "if-ok"
+                | "if-err"
+                | "is-result"
+                | "ok-value"
+                | "err-value"
+                | "is-truthy"
+                | "not"
+                | "or"
+                | "and"
+        )
+    }
+
+    fn is_result_shaped(val: &Val) -> bool {
+        if let Val::Map(map) = val
+            && let Some(Val::Str(type_str)) = map.get(&Val::from("$type"))
+        {
+            return &**type_str == "::hot::type/Result.Err"
+                || &**type_str == "::hot::type/Result.Ok";
+        }
+        false
     }
 
     /// Look up core function name by unqualified name
@@ -8314,16 +8385,20 @@ impl VirtualMachine {
                                         }
                                     }
                                 }
-                                if let Some(result) = self
-                                    .jit
-                                    .try_call_compiled(function_id, &new_args)
-                                    .map_err(|msg| {
-                                        VmError::RuntimeError(
-                                            RuntimeError::new(msg)
-                                                .with_instruction_pointer(self.instruction_pointer),
-                                        )
-                                    })?
-                                {
+                                // Compiled code calls helpers that resolve the VM
+                                // through the thread-local pointer; bracket the
+                                // call like try_jit_call does or a mid-loop
+                                // switch to compiled code sees no VM.
+                                let prev = super::jit::set_jit_vm_ptr(self as *mut VirtualMachine);
+                                let call_result =
+                                    self.jit.try_call_compiled(function_id, &new_args);
+                                super::jit::set_jit_vm_ptr(prev);
+                                if let Some(result) = call_result.map_err(|msg| {
+                                    VmError::RuntimeError(
+                                        RuntimeError::new(msg)
+                                            .with_instruction_pointer(self.instruction_pointer),
+                                    )
+                                })? {
                                     break result;
                                 }
                             }
@@ -9659,10 +9734,12 @@ impl VirtualMachine {
             // NOTE: no Result auto-unwrap here. This is a runtime dispatch
             // layer also reached by Rust-side HOF loops (filter/map/...)
             // that legitimately hand raw Err elements to Result-aware
-            // natives (is-err, err-value, ...). Only compiled call sites
-            // know which parameters are lazy, so arg auto-unwrap lives in
-            // the interpreter Call handlers (main + lambda loops), where
-            // lazy arguments arrive as thunks and are skipped.
+            // natives (is-err, err-value, ...). Compiled call sites prepare
+            // their arguments before reaching this layer: the interpreter
+            // Call handlers (main + lambda loops), the CallLibBuiltin
+            // handler, and execute_call_lib_builtin all run
+            // prepare_lib_call_args / unwrap_result_if_ok, where lazy
+            // arguments arrive as thunks and are skipped.
             // Dispatch based on function type encoded in the enum
             let result = match lib_fn {
                 crate::lang::hot::HotLibFn::LibFn(func) => {

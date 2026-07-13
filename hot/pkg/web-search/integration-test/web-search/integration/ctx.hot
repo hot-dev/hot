@@ -1,0 +1,12 @@
+::web-search::integration::ctx ns
+
+::env ::hot::env
+
+// Placeholder credentials for the web-search integration suite. Unset
+// environment variables are skipped entirely, so absent credentials
+// behave exactly as if never configured.
+::hot::ctx/set(filter-vals({
+    "tavily.api.key": ::env/get("TAVILY_API_KEY", ""),
+    "brave.api.key": ::env/get("BRAVE_API_KEY", ""),
+    "exa.api.key": ::env/get("EXA_API_KEY", ""),
+}, (v) { not(is-empty(v)) }))

@@ -94,13 +94,16 @@ fn (request: SendEmailRequest): SendEmailResponse | AwsError {
     bcc-addrs if(is-null(request.destination.bcc_addresses), [], request.destination.bcc_addresses)
 
     // Build simple content if present
-    simple-content if(is-null(request.content.simple), null, {
+    simple-content cond {
+        is-null(request.content.simple) => { null }
+        => {
         Subject: { Data: request.content.simple.subject },
         Body: {
             Text: if(is-null(request.content.simple.body.text), null, { Data: request.content.simple.body.text }),
             Html: if(is-null(request.content.simple.body.html), null, { Data: request.content.simple.body.html })
         }
-    })
+    }
+    }
 
     reply-to if(is-null(request.reply_to_addresses), [], request.reply_to_addresses)
 
@@ -127,12 +130,12 @@ fn (request: SendEmailRequest): SendEmailResponse | AwsError {
 
     response http-request("POST", url, signed-headers, body)
 
-    if(is-ok-response(response),
-        SendEmailResponse({
+    cond {
+        is-ok-response(response) => { SendEmailResponse({
             message_id: response.body.MessageId
-        }),
-        err(AwsError(response))
-    )
+        }) }
+        => { err(AwsError(response)) }
+    }
 }
 
 // Convenience function to send a simple email
@@ -229,12 +232,12 @@ fn (raw_message: Str): SendEmailResponse | AwsError {
 
     response http-request("POST", url, signed-headers, body)
 
-    if(is-ok-response(response),
-        SendEmailResponse({
+    cond {
+        is-ok-response(response) => { SendEmailResponse({
             message_id: response.body.MessageId
-        }),
-        err(AwsError(response))
-    )
+        }) }
+        => { err(AwsError(response)) }
+    }
 }
 
 // Send a templated email
@@ -283,10 +286,10 @@ fn (from: Str, to: Vec<Str>, template_name: Str, template_data: Map): SendEmailR
 
     response http-request("POST", url, signed-headers, body)
 
-    if(is-ok-response(response),
-        SendEmailResponse({
+    cond {
+        is-ok-response(response) => { SendEmailResponse({
             message_id: response.body.MessageId
-        }),
-        err(AwsError(response))
-    )
+        }) }
+        => { err(AwsError(response)) }
+    }
 }

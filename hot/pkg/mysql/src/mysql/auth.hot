@@ -1,0 +1,166 @@
+::mysql::auth ns
+meta {
+    doc: """
+    MySQL authentication: initial-handshake parsing and the password
+    scrambles for `mysql_native_password` and `caching_sha2_password`.
+    Internal to the `mysql` package.
+    """
+}
+
+::wire ::mysql::wire
+::hash ::hot::hash
+::hex ::hot::hex
+::bytes ::hot::bytes
+
+sha1-bytes fn (data: Str | Bytes): Bytes { ::hex/decode(::hash/sha1(data)) }
+sha256-bytes fn (data: Str | Bytes): Bytes { ::hex/decode(::hash/sha256(data)) }
+
+native-password-scramble
+meta {
+    doc: """
+    `mysql_native_password` response:
+    `SHA1(password) XOR SHA1(nonce ++ SHA1(SHA1(password)))` over the
+    20-byte nonce. Exposed for testing.
+    """
+}
+fn (password: Str, nonce: Bytes): Bytes {
+    stage1 sha1-bytes(password)
+    stage2 sha1-bytes(stage1)
+    ::bytes/xor(stage1, sha1-bytes(concat(nonce, stage2)))
+}
+
+caching-sha2-scramble
+meta {
+    doc: """
+    `caching_sha2_password` fast-path response:
+    `SHA256(password) XOR SHA256(SHA256(SHA256(password)) ++ nonce)`
+    over the 20-byte nonce. Exposed for testing.
+    """
+}
+fn (password: Str, nonce: Bytes): Bytes {
+    stage1 sha256-bytes(password)
+    stage2 sha256-bytes(stage1)
+    ::bytes/xor(stage1, sha256-bytes(concat(stage2, nonce)))
+}
+
+scramble
+meta {
+    doc: """Compute the auth response for a plugin name. Empty password sends an empty response. Errs on unknown plugins."""
+}
+fn (plugin: Str, password: Str, nonce: Bytes): Bytes {
+    cond {
+        is-empty(password) => { Bytes([]) }
+        eq(plugin, "mysql_native_password") => { native-password-scramble(password, nonce) }
+        eq(plugin, "caching_sha2_password") => { caching-sha2-scramble(password, nonce) }
+        => { err(`mysql: unsupported auth plugin '${plugin}'`) }
+    }
+}
+
+parse-handshake
+meta {
+    doc: """
+    Parse the server's initial Handshake V10 payload. Returns
+    `{protocol, server-version, thread-id, nonce (20 bytes),
+    capabilities, auth-plugin}` or an Err. Exposed for testing.
+    """
+}
+fn (payload: Bytes): Map {
+    protocol-out ::wire/read-int1(payload, 0)
+    protocol protocol-out[0]
+    cond {
+        ne(protocol, 10) => { err(`mysql: unsupported handshake protocol ${protocol}`) }
+        => {
+            version-out ::wire/read-cstring(payload, protocol-out[1])
+            thread-out ::wire/read-int4(payload, version-out[1])
+            // auth-plugin-data-part-1: 8 bytes, then a 0x00 filler.
+            nonce1 slice(payload, thread-out[1], add(thread-out[1], 8))
+            p add(thread-out[1], 9)
+            cap-low-out ::wire/read-int2(payload, p)
+            charset-out ::wire/read-int1(payload, cap-low-out[1])
+            status-out ::wire/read-int2(payload, charset-out[1])
+            cap-high-out ::wire/read-int2(payload, status-out[1])
+            auth-len-out ::wire/read-int1(payload, cap-high-out[1])
+            // 10 reserved zero bytes.
+            p2 add(auth-len-out[1], 10)
+            // auth-plugin-data-part-2: max(13, auth-len - 8) bytes; the
+            // nonce is the first 12 (part 2 carries a trailing NUL).
+            part2-len ::hot::math/max(13, sub(auth-len-out[0], 8))
+            nonce2 slice(payload, p2, add(p2, 12))
+            plugin-out ::wire/read-cstring(payload, add(p2, part2-len))
+            {
+                protocol: protocol,
+                server-version: version-out[0],
+                thread-id: thread-out[0],
+                nonce: concat(nonce1, nonce2),
+                capabilities: add(cap-low-out[0], mul(cap-high-out[0], 65536)),
+                auth-plugin: plugin-out[0]
+            }
+        }
+    }
+}
+
+// Capability flags the client sets (see mysql.hot for the composition).
+CLIENT-LONG-PASSWORD 1
+CLIENT-PROTOCOL-41 512
+CLIENT-SSL 2048
+CLIENT-TRANSACTIONS 8192
+CLIENT-SECURE-CONNECTION 32768
+CLIENT-PLUGIN-AUTH 524288
+CLIENT-CONNECT-WITH-DB 8
+CLIENT-PLUGIN-AUTH-LENENC 2097152
+
+client-capabilities
+meta {
+    doc: """The capability flags this client sends: protocol 4.1, secure auth, plugin auth with lenenc responses, transactions; plus connect-with-db and/or SSL when requested."""
+}
+fn (with-db: Bool, with-ssl: Bool): Int {
+    base add(add(add(add(add(
+        CLIENT-LONG-PASSWORD,
+        CLIENT-PROTOCOL-41),
+        CLIENT-TRANSACTIONS),
+        CLIENT-SECURE-CONNECTION),
+        CLIENT-PLUGIN-AUTH),
+        CLIENT-PLUGIN-AUTH-LENENC)
+    with-db-caps if(with-db, add(base, CLIENT-CONNECT-WITH-DB), base)
+    if(with-ssl, add(with-db-caps, CLIENT-SSL), with-db-caps)
+}
+
+handshake-response
+meta {
+    doc: """
+    Build the HandshakeResponse41 payload: capabilities, max packet
+    size, charset (utf8mb4), 23 zero bytes, user, lenenc auth response,
+    database (when set), and the auth plugin name.
+    """
+}
+fn (user: Str, database: Str, auth-response: Bytes, plugin: Str, with-ssl: Bool): Bytes {
+    with-db not(is-empty(database))
+    caps client-capabilities(with-db, with-ssl)
+    head concat(
+        ::wire/int4(caps),
+        ::wire/int4(16777215),
+        ::wire/int1(45),
+        Bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]))
+    body concat(
+        head,
+        ::wire/cstring(user),
+        ::wire/lenenc-bytes(auth-response))
+    with-db-body if(with-db, concat(body, ::wire/cstring(database)), body)
+    concat(with-db-body, ::wire/cstring(plugin))
+}
+
+ssl-request
+meta {
+    doc: """
+    The truncated handshake response sent before upgrading to TLS:
+    capabilities (with CLIENT_SSL), max packet size, charset, and the
+    23 zero bytes — no user or auth data yet.
+    """
+}
+fn (with-db: Bool): Bytes {
+    concat(
+        ::wire/int4(client-capabilities(with-db, true)),
+        ::wire/int4(16777215),
+        ::wire/int1(45),
+        Bytes([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]))
+}

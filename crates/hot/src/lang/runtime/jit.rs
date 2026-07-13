@@ -2,7 +2,7 @@ use crate::lang::bytecode::{
     BytecodeProgram, Constant, FlowResultModifier, FlowType, FunctionId, FunctionInfo, Instruction,
     LambdaInfo,
 };
-use crate::lang::runtime::vm::VirtualMachine;
+use crate::lang::runtime::vm::{VirtualMachine, VmResult};
 use crate::val::Val;
 use ahash::AHashMap;
 use cranelift_codegen::ir::{
@@ -87,7 +87,7 @@ pub enum JitMode {
 ///
 /// All settings flow through the standard conf system:
 ///   - `hot.hot` template (with `::env/get` for env var support)
-///   - CLI flags (`--jit`, `--jit.threshold`)
+///   - CLI flags (`--jit.mode`, `--jit.threshold`)
 ///   - `apply_env_vars` auto-mapping (`HOT_JIT_MODE`, `HOT_JIT_THRESHOLD`)
 ///
 /// The JIT code itself never reads environment variables directly.
@@ -96,7 +96,7 @@ pub struct JitConfig {
     pub mode: JitMode,
     pub threshold: u32,
     /// Kill switch for higher-order-function pipeline fusion. Defaults on; can
-    /// be disabled via conf `jit.hof.fusion`, CLI `--jit-hof-fusion`, or env
+    /// be disabled via conf `jit.hof.fusion`, CLI `--jit.hof.fusion`, or env
     /// `HOT_JIT_HOF_FUSION`. Disabling falls back to the per-element lambda-JIT
     /// / interpreter path with no behavior change.
     pub hof_fusion: bool,
@@ -1850,6 +1850,9 @@ unsafe extern "C" fn hot_jit_truthy_general(kind: i64, raw: i64) -> i64 {
 }
 
 unsafe extern "C" fn hot_jit_clone_owned_val(raw: i64) -> i64 {
+    if owned_trace_enabled() {
+        eprintln!("CLONE {raw:#x} from {:#x}", owned_trace_caller());
+    }
     if raw == 0 {
         return 0;
     }
@@ -1869,6 +1872,9 @@ unsafe extern "C" fn hot_jit_is_err(raw: i64) -> i64 {
 }
 
 unsafe extern "C" fn hot_jit_drop_owned_val(raw: i64) {
+    if owned_trace_enabled() {
+        eprintln!("DROP {raw:#x} from {:#x}", owned_trace_caller());
+    }
     if raw == 0 {
         return;
     }
@@ -1979,10 +1985,25 @@ unsafe extern "C" fn hot_jit_call_vm(
     }
 
     let error_capture = vm.error_capture_active;
+    let args = match prepare_jit_call_args(vm, args) {
+        Ok(args) => args,
+        Err(err) => return vm_error_to_owned_val(err, error_capture),
+    };
     match vm.execute_compiled_user_function(function_id as u32, &args) {
         Ok(result) => new_owned_val(result),
         Err(err) => vm_error_to_owned_val(err, error_capture),
     }
+}
+
+/// Apply the same strict-argument preparation as interpreter `Call*`
+/// instructions before a JIT trampoline dispatches a callee. Lazy arguments
+/// arrive as `LambdaInfo` thunks and are intentionally preserved by
+/// `unwrap_result_if_ok`.
+fn prepare_jit_call_args(vm: &mut VirtualMachine, mut args: Vec<Val>) -> VmResult<Vec<Val>> {
+    for arg in &mut args {
+        *arg = vm.unwrap_result_if_ok(arg)?;
+    }
+    Ok(args)
 }
 
 /// JIT helper: promote a typed value to an OwnedVal.
@@ -2053,12 +2074,21 @@ unsafe extern "C" fn hot_jit_call_lib(fn_name_ptr: i64, args_ptr: i64) -> i64 {
         }
     } else {
         let function_name = vm.value_to_string(fn_val);
-        let args_slice: &[Val] = match args_val {
-            Val::Vec(vec) => vec.as_slice(),
-            other => std::slice::from_ref(other),
+        let args_owned: Vec<Val> = match args_val {
+            Val::Vec(vec) => vec.to_vec(),
+            other => vec![other.clone()],
+        };
+        // Strict-argument law: same preparation as the interpreter's
+        // CallLibBuiltin handler (Ok auto-unwraps, Err halts).
+        let args_prepared = match vm.prepare_lib_call_args(&function_name, args_owned) {
+            Ok(args) => args,
+            Err(err) => {
+                tracing::trace!("[JIT] call_lib arg preparation halted: {}", err);
+                return vm_error_to_owned_val(err, error_capture);
+            }
         };
 
-        match vm.execute_call_lib(&function_name, args_slice) {
+        match vm.execute_call_lib(&function_name, &args_prepared) {
             Ok(result) => {
                 tracing::trace!("[JIT] call_lib result: {:?}", result);
                 new_owned_val(result)
@@ -2725,6 +2755,10 @@ unsafe extern "C" fn hot_jit_call_vm_by_name(
     }
 
     let error_capture = vm.error_capture_active;
+    let args = match prepare_jit_call_args(vm, args) {
+        Ok(args) => args,
+        Err(err) => return vm_error_to_owned_val(err, error_capture),
+    };
 
     match name_val {
         Val::Str(s) => match vm.execute_function_call_by_name(s.as_ref(), &args) {
@@ -2738,6 +2772,18 @@ unsafe extern "C" fn hot_jit_call_vm_by_name(
             {
                 let lambda_val = Val::Box(Box::new(lambda.clone()));
                 match vm.execute_lambda(&lambda_val, &args) {
+                    Ok(result) => new_owned_val(result),
+                    Err(err) => vm_error_to_owned_val(err, error_capture),
+                }
+            } else if let Some(function_ref) =
+                b.as_any()
+                    .downcast_ref::<crate::lang::runtime::function_ref::FunctionRef>()
+            {
+                // Enum-variant constructors (e.g. ::hot::type/Result.Err from
+                // the err() wrapper) and other by-name targets reach compiled
+                // code as FunctionRef boxes; dispatch by name exactly like the
+                // interpreter does.
+                match vm.execute_function_call_by_name(&function_ref.name, &args) {
                     Ok(result) => new_owned_val(result),
                     Err(err) => vm_error_to_owned_val(err, error_capture),
                 }
@@ -2773,11 +2819,16 @@ unsafe extern "C" fn hot_jit_call_with_spread(
     let count = args_count as usize;
     let mask = spread_mask as u64;
 
+    let error_capture = vm.error_capture_active;
     let mut expanded_args = Vec::new();
     for i in 0..count {
         let kind = unsafe { *args_ptr.add(i * 2) };
         let raw = unsafe { *args_ptr.add(i * 2 + 1) };
         let val = unsafe { decode_helper_val(kind, raw) };
+        let val = match vm.unwrap_result_if_ok(&val) {
+            Ok(val) => val,
+            Err(err) => return vm_error_to_owned_val(err, error_capture),
+        };
         if (mask >> i) & 1 == 1 {
             if let Val::Vec(elements) = &val {
                 for elem in elements {
@@ -2791,7 +2842,6 @@ unsafe extern "C" fn hot_jit_call_with_spread(
         }
     }
 
-    let error_capture = vm.error_capture_active;
     let name_val_ptr = name_ptr as *const Val;
     let name_val = unsafe { &*name_val_ptr };
 
@@ -3375,11 +3425,50 @@ fn vm_error_to_owned_val(err: impl std::fmt::Display, error_capture_active: bool
     }
 }
 
+/// HOT_OWNED_TRACE=1 logs every OwnedVal handle event with the caller's
+/// return address — the tool that pinpointed the flow-result ownership
+/// theft. Cached: env lookup is far too expensive per handle event.
+#[inline(always)]
+fn owned_trace_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var("HOT_OWNED_TRACE").is_ok())
+}
+
+/// Best-effort caller return address via the frame pointer. Diagnostic
+/// only (HOT_OWNED_TRACE); on both supported arches the saved return
+/// address sits one word above the frame pointer. Other arches get 0.
+#[inline(always)]
+fn owned_trace_caller() -> u64 {
+    #[cfg(target_arch = "aarch64")]
+    unsafe {
+        let fp: *const u64;
+        std::arch::asm!("mov {}, x29", out(reg) fp);
+        *fp.add(1)
+    }
+    #[cfg(target_arch = "x86_64")]
+    unsafe {
+        let fp: *const u64;
+        std::arch::asm!("mov {}, rbp", out(reg) fp);
+        *fp.add(1)
+    }
+    #[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
+    {
+        0
+    }
+}
+
 fn new_owned_val(val: Val) -> i64 {
-    Arc::into_raw(Arc::new(val)) as i64
+    let r = Arc::into_raw(Arc::new(val)) as i64;
+    if owned_trace_enabled() {
+        eprintln!("NEW {r:#x} from {:#x}", owned_trace_caller());
+    }
+    r
 }
 
 unsafe fn take_owned_val(raw: i64) -> Val {
+    if owned_trace_enabled() {
+        eprintln!("TAKE {raw:#x} from {:#x}", owned_trace_caller());
+    }
     if raw == 0 {
         return Val::Null;
     }
@@ -6496,6 +6585,22 @@ fn build_supported_body(
                     }
                     let result_reg_idx = ctx.remap_reg(result_reg)?;
                     let result_src_idx = ctx.remap_reg(*result)?;
+                    // Ownership handoff: a runtime-owned source register hands
+                    // its refcount to the flow result register (its kind is
+                    // cleared below, so it is never dropped again). But a
+                    // source that RETAINS its OwnedVal marking after the flow
+                    // — a compile-time constant handle, a pre-flow register,
+                    // or a flow header — keeps its count, so the result
+                    // register must take a fresh clone. Without it, the
+                    // return-clone/cleanup/decode sequence consumes one count
+                    // the flow never owned (freeing baked constants after a
+                    // single call).
+                    let src_retains_ownership = ctx.compile_time_owned.contains(&result_src_idx)
+                        || flow.pre_flow_owned.contains(&result_src_idx)
+                        || flow.flow_header_regs.contains(&result_src_idx);
+                    if kind == RawKind::OwnedVal && src_retains_ownership {
+                        raw = clone_owned_raw(builder, &ctx.helper_refs, raw);
+                    }
                     for (idx, existing_kind) in ctx.register_kinds.iter().enumerate() {
                         if *existing_kind == Some(RawKind::OwnedVal)
                             && !ctx.compile_time_owned.contains(&idx)
@@ -8009,9 +8114,20 @@ fn truthy_value(
 ) -> Result<cranelift_codegen::ir::Value, String> {
     let raw = builder.use_var(registers[remap_reg(remap, reg)?]);
     match register_kind(remap, register_kinds, reg)? {
-        RawKind::Bool | RawKind::Int | RawKind::TypeTag | RawKind::StringConst => Ok(builder
-            .ins()
-            .icmp_imm(cranelift_codegen::ir::condcodes::IntCC::NotEqual, raw, 0)),
+        RawKind::Bool => {
+            Ok(builder
+                .ins()
+                .icmp_imm(cranelift_codegen::ir::condcodes::IntCC::NotEqual, raw, 0))
+        }
+        // Ints, type tags, and interned strings are never falsy
+        // (Val::is_truthy: only false, null, and Err are) — including 0
+        // and "". Mirrors the constant-true Dec arm below.
+        RawKind::Int | RawKind::TypeTag | RawKind::StringConst => {
+            let one = builder.ins().iconst(types::I64, 1);
+            Ok(builder
+                .ins()
+                .icmp_imm(cranelift_codegen::ir::condcodes::IntCC::NotEqual, one, 0))
+        }
         RawKind::Dec => {
             let one = builder.ins().iconst(types::I64, 1);
             Ok(builder

@@ -1,0 +1,65 @@
+::attio::notes ns
+
+::api ::attio::api
+
+build-note-payload
+meta {
+    doc: """Build the create-note payload (plaintext format). Exposed for testing; `create-note` uses it."""
+}
+fn (parent-object: Str, parent-record-id: Str, title: Str, content: Str): Map {
+  {
+    data: {
+      parent_object: parent-object,
+      parent_record_id: parent-record-id,
+      title: title,
+      format: "plaintext",
+      content: content
+    }
+  }
+}
+
+create-note
+meta {
+    doc: """
+    POST /notes - Attach a note to a record.
+
+    **Example**
+
+    ```hot
+    ::attio::notes/create-note("people", person.id.record_id, "Demo call", "Positive; follow up Friday.")
+    ```
+    """
+}
+fn (parent-object: Str, parent-record-id: Str, title: Str, content: Str): Map {
+  out ::api/json("POST", "/notes", build-note-payload(parent-object, parent-record-id, title, content))
+  match out {
+    Result.Err => { err(out) }
+
+    _ => { out.data }
+  }
+}
+
+list-notes
+meta {
+    doc: """GET /notes?parent_object=&parent_record_id= - The notes on a record."""
+}
+fn (parent-object: Str, parent-record-id: Str): Map {
+  ::api/json("GET", `/notes?parent_object=${parent-object}&parent_record_id=${parent-record-id}`)
+}
+
+create-task
+meta {
+    doc: """POST /tasks - Create a task. `options`: `deadline_at` (RFC3339), `linked_records` (Vec of `{target_object, target_record_id}`), `assignees`."""
+}
+fn
+(content: Str): Map {
+  create-task(content, {})
+},
+(content: Str, options: Map): Map {
+  out ::api/json("POST", "/tasks", {data: {content: content, format: "plaintext", is_completed: false, ...options}})
+  match out {
+    Result.Err => { err(out) }
+
+    _ => { out.data }
+  }
+}

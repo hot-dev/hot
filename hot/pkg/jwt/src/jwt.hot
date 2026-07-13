@@ -1,0 +1,292 @@
+::jwt ns
+meta {
+    doc: """
+    JSON Web Tokens (RFC 7519) for Hot.
+
+    Supports `HS256` (HMAC-SHA256, shared secret) and `RS256`
+    (RSASSA-PKCS1-v1_5, RSA key pair) — the two algorithms that cover
+    almost every real integration: session tokens, OIDC providers, GitHub
+    App tokens, and Google service accounts.
+
+    **Quick start**
+
+    ```hot
+    ::jwt ::jwt
+
+    // Sign (HS256)
+    token ::jwt/sign({sub: "user-42", exp: add(::jwt/now-seconds(), 3600)}, secret)
+
+    // Verify + validate claims
+    claims ::jwt/verify(token, secret)
+    claims.sub  // => "user-42"
+
+    // RS256 with a PEM private key (Google service accounts, GitHub Apps)
+    token ::jwt/sign(claims, private-key-pem, "RS256")
+
+    // RS256 verification from JWKS components
+    claims ::jwt/verify-rs256(token, jwk.n, jwk.e)
+    ```
+
+    Verification returns the payload claims on success and an Err
+    describing the failure (bad signature, expired, wrong issuer, ...)
+    otherwise — branch with `is-err` / `if-err`.
+    """
+}
+
+::b64 ::hot::base64
+::hmac ::hot::hmac
+::crypto ::hot::crypto
+::time ::hot::time
+
+DEFAULT_LEEWAY_SECONDS 60
+
+now-seconds
+meta {
+    doc: """Current Unix time in whole seconds — convenient for building `exp` / `iat` / `nbf` claims."""
+}
+fn (): Int {
+  ::time/epoch-seconds()
+}
+
+encode-segment fn (value: Map): Str {
+  ::b64/encode-url(to-json(untype(value)))
+}
+
+// ---------------------------------------------------------------------------
+// Signing
+// ---------------------------------------------------------------------------
+
+sign
+meta {
+    doc: """
+    Sign claims into a compact JWT. The 2-arity form signs with `HS256`
+    and a shared secret; pass `"RS256"` and a PEM private key (PKCS#8
+    `BEGIN PRIVATE KEY` or PKCS#1 `BEGIN RSA PRIVATE KEY`) for RSA.
+
+    **Example**
+
+    ```hot
+    token ::jwt/sign({sub: "user-42", exp: add(::jwt/now-seconds(), 3600)}, secret)
+
+    // Google service-account assertion
+    assertion ::jwt/sign({
+      iss: sa.client_email,
+      scope: "https://www.googleapis.com/auth/gmail.send",
+      aud: "https://oauth2.googleapis.com/token",
+      iat: ::jwt/now-seconds(),
+      exp: add(::jwt/now-seconds(), 3600)
+    }, sa.private_key, "RS256")
+    ```
+    """
+}
+fn
+(claims: Map, key: Str): Str {
+  sign(claims, key, "HS256")
+},
+(claims: Map, key: Str, algorithm: Str): Str {
+  header encode-segment({alg: algorithm, typ: "JWT"})
+  payload encode-segment(claims)
+  signing-input `${header}.${payload}`
+  cond {
+    eq(algorithm, "HS256") => {
+      signature ::b64/encode-url(::hmac/hmac-sha256-bytes(key, signing-input))
+      `${signing-input}.${signature}`
+    }
+
+    eq(algorithm, "RS256") => {
+      raw ::crypto/rsa-sha256-sign(key, signing-input)
+      match raw {
+        Result.Err => { err(raw) }
+
+        _ => { `${signing-input}.${::b64/encode-url(raw)}` }
+      }
+    }
+    => { err(`jwt: unsupported algorithm '${algorithm}' (use HS256 or RS256)`) }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Decoding (no verification)
+// ---------------------------------------------------------------------------
+
+decode
+meta {
+    doc: """
+    Split and decode a JWT **without verifying it**. Returns
+    `{header, payload, signing-input, signature}` where `signature` is the
+    raw base64url segment. Use this to inspect an untrusted token (e.g. to
+    pick a JWKS key by `kid`); never trust its payload without `verify`.
+    """
+}
+fn (token: Str): Map {
+  parts split(token, ".")
+  cond {
+    ne(length(parts), 3) => { err("jwt: token must have three dot-separated segments") }
+    => {
+      header-json ::b64/decode-url(parts[0])
+      payload-json ::b64/decode-url(parts[1])
+      cond {
+        is-err(header-json) => { err("jwt: header is not valid base64url") }
+        is-err(payload-json) => { err("jwt: payload is not valid base64url") }
+        => {
+          header from-json(Str(header-json))
+          payload from-json(Str(payload-json))
+          cond {
+            is-err(header) => { err("jwt: header is not valid JSON") }
+            is-err(payload) => { err("jwt: payload is not valid JSON") }
+            => {
+              {
+                header: header,
+                payload: payload,
+                signing-input: `${parts[0]}.${parts[1]}`,
+                signature: parts[2]
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Claims validation (shared by both verifiers)
+// ---------------------------------------------------------------------------
+
+validate-claims fn (payload: Map, options: Map): Any {
+  leeway or(get(options, "leeway"), DEFAULT_LEEWAY_SECONDS)
+  now or(get(options, "now"), now-seconds())
+  exp get(payload, "exp")
+  nbf get(payload, "nbf")
+  expected-iss get(options, "issuer")
+  expected-aud get(options, "audience")
+
+  // Each check is guarded before arithmetic: absent claims skip the check.
+  expired cond {
+    is-null(exp) => { false }
+    => { gt(now, add(exp, leeway)) }
+  }
+
+  premature cond {
+    is-null(nbf) => { false }
+    => { lt(now, sub(nbf, leeway)) }
+  }
+
+  wrong-iss cond {
+    is-null(expected-iss) => { false }
+    => { ne(get(payload, "iss"), expected-iss) }
+  }
+  // RFC 7519: aud may be a single string or an array of strings (common in
+  // OIDC); the expected audience must equal it or be a member of it.
+  aud get(payload, "aud")
+  wrong-aud cond {
+    is-null(expected-aud) => { false }
+    is-vec(aud) => { not(in(expected-aud, aud)) }
+    => { ne(aud, expected-aud) }
+  }
+
+  cond {
+    expired => { err("jwt: token is expired") }
+    premature => { err("jwt: token is not yet valid (nbf)") }
+    wrong-iss => {
+      err(`jwt: issuer mismatch: expected '${expected-iss}', got '${get(payload, "iss")}'`)
+    }
+
+    wrong-aud => {
+      err(`jwt: audience mismatch: expected '${expected-aud}', got '${aud}'`)
+    }
+    => { payload }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Verification
+// ---------------------------------------------------------------------------
+
+verify
+meta {
+    doc: """
+    Verify an `HS256` token and validate its claims. Returns the payload
+    claims, or an Err describing the failure.
+
+    Options (3-arity): `leeway` (seconds of clock skew tolerance, default
+    60), `issuer` (expected `iss`), `audience` (expected `aud`), `now`
+    (override the clock, mainly for tests).
+
+    **Example**
+
+    ```hot
+    claims ::jwt/verify(token, secret, {issuer: "https://auth.example.com"})
+    if-err(claims, (e) { ... reject the request ... })
+    ```
+    """
+}
+fn
+(token: Str, secret: Str): Any {
+  verify(token, secret, {})
+},
+(token: Str, secret: Str, options: Map): Any {
+  decoded decode(token)
+  cond {
+    is-err(decoded) => { decoded }
+    ne(get(decoded.header, "alg"), "HS256") => {
+      err(`jwt: expected alg HS256, got '${get(decoded.header, "alg")}'`)
+    }
+    => {
+      expected ::b64/encode-url(::hmac/hmac-sha256-bytes(secret, decoded.signing-input))
+      cond {
+        not(secure-compare(expected, decoded.signature)) => { err("jwt: invalid signature") }
+        => { validate-claims(decoded.payload, options) }
+      }
+    }
+  }
+}
+
+verify-rs256
+meta {
+    doc: """
+    Verify an `RS256` token against RSA public key components and validate
+    its claims. `n` and `e` are the base64url-encoded JWKS fields (strings)
+    or raw Bytes. Options as in `verify`.
+
+    **Example**
+
+    ```hot
+    // jwks fetched from the provider's jwks_uri; pick the key by kid
+    decoded ::jwt/decode(token)
+    key first(filter(jwks.keys, (k) { eq(k.kid, get(decoded.header, "kid")) }))
+    claims ::jwt/verify-rs256(token, key.n, key.e, {issuer: "https://accounts.google.com"})
+    ```
+    """
+}
+fn
+(token: Str, n: Any, e: Any): Any {
+  verify-rs256(token, n, e, {})
+},
+(token: Str, n: Any, e: Any, options: Map): Any {
+  decoded decode(token)
+  cond {
+    is-err(decoded) => { decoded }
+    ne(get(decoded.header, "alg"), "RS256") => {
+      err(`jwt: expected alg RS256, got '${get(decoded.header, "alg")}'`)
+    }
+    => {
+      n-bytes if(is-bytes(n), n, ::b64/decode-url(n))
+      e-bytes if(is-bytes(e), e, ::b64/decode-url(e))
+      signature ::b64/decode-url(decoded.signature)
+      cond {
+        is-err(n-bytes) => { err("jwt: RSA modulus (n) is not valid base64url") }
+        is-err(e-bytes) => { err("jwt: RSA exponent (e) is not valid base64url") }
+        is-err(signature) => { err("jwt: signature is not valid base64url") }
+        => {
+          valid ::crypto/rsa-sha256-verify(n-bytes, e-bytes, decoded.signing-input, signature)
+          cond {
+            is-err(valid) => { valid }
+            not(valid) => { err("jwt: invalid signature") }
+            => { validate-claims(decoded.payload, options) }
+          }
+        }
+      }
+    }
+  }
+}

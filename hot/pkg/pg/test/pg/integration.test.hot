@@ -131,6 +131,7 @@ meta ["test"] fn () {
             println("  (skipped: no Postgres reachable)")
             assert(true, "skipped without a database")
         }
+
         and(is-err(conn), contains(err-message(conn), "does not exist")) => {
             println("  (skipped: scramtest fixture role not provisioned)")
             assert(true, "skipped without the scram fixture role")

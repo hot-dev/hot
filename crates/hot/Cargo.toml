@@ -38,6 +38,8 @@ chrono = { workspace = true, features = ["serde"] }
 async-channel = { workspace = true }
 zstd = { workspace = true }
 sqlx = { workspace = true, features = ["runtime-tokio", "postgres", "sqlite", "uuid", "json", "migrate", "macros", "time"] }
+# Same node as sqlx-sqlite's transitive pin — the ::hot::sqlite natives use the raw C API directly.
+libsqlite3-sys = { version = "0.37", features = ["bundled"] }
 thiserror = { workspace = true }
 indexmap = { workspace = true, features = ["serde"] }
 regex = { workspace = true }

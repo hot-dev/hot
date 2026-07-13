@@ -1,0 +1,28 @@
+::openai-compatible::integration::chat ns
+meta ["test"]
+
+// =============================================================================
+// Integration Tests (live OpenRouter or any OpenAI-compatible endpoint)
+// =============================================================================
+// Requires ctx: openai-compatible.url + openai-compatible.api.key
+// Run with: hot test --project pkg-integration-openai-compatible
+
+::chat ::openai-compatible::chat
+::models ::openai-compatible::models
+
+test-list-models
+meta ["test"] fn () {
+    page ::models/list-models()
+    assert(gt(length(page.data), 0), "provider should expose at least one model")
+}
+
+test-chat-completion
+meta ["test"] fn () {
+    response ::chat/chat-completion(::chat/ChatCompletionRequest({
+        model: "anthropic/claude-haiku-4.5",
+        messages: [{role: "user", content: "Reply with exactly the word: hot"}],
+        max_tokens: 10
+    }))
+    content response.choices[0].message.content
+    assert(contains(lowercase(content), "hot"), "model should echo the word")
+}

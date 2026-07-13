@@ -1,0 +1,11 @@
+::stripe::integration::ctx ns
+
+::env ::hot::env
+
+// Placeholder credentials for the stripe integration suite. Unset
+// environment variables are skipped entirely, so absent credentials
+// behave exactly as if never configured.
+::hot::ctx/set(filter-vals({
+    "stripe.api.key": ::env/get("STRIPE_API_KEY", ""),
+    "stripe.webhook.secret": ::env/get("STRIPE_WEBHOOK_SECRET", ""),
+}, (v) { not(is-empty(v)) }))

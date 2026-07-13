@@ -1,0 +1,161 @@
+::stripe::invoices ns
+
+api-request ::stripe::api/request
+query-string ::stripe::api/query-string
+HttpError ::stripe::api/HttpError
+is-ok-response ::hot::http/is-ok-response
+
+// ============================================================================
+// Invoices
+// ============================================================================
+
+CreateInvoiceRequest type {
+  customer: Str?,
+  subscription: Str?,
+  auto_advance: Bool?,
+  collection_method: Str?,
+  days_until_due: Int?,
+  description: Str?,
+  metadata: Map?,
+  currency: Str?,
+  automatic_tax: Map?,
+  footer: Str?
+}
+
+create-invoice
+meta {
+    doc: """
+POST /v1/invoices - Create a draft invoice. Pending invoice items for the customer are pulled in automatically. Set `auto_advance: true` to let Stripe finalize and collect it automatically.
+
+**Example**
+
+```hot
+::invoices ::stripe::invoices
+
+::invoices/create-invoice-item("cus_...", 2500, "usd", "Consulting")
+invoice ::invoices/create-invoice(::invoices/CreateInvoiceRequest({
+  customer: "cus_...",
+  collection_method: "send_invoice",
+  days_until_due: 30
+}))
+::invoices/send-invoice(invoice.id)
+```
+"""
+}
+fn (request: CreateInvoiceRequest): Map {
+  response api-request("POST", `${::stripe/BASE_URL}/v1/invoices`, {}, request)
+  if(is-ok-response(response), response.body, err(HttpError(response)))
+}
+
+get-invoice
+meta {
+    doc: """GET /v1/invoices/{invoice} - Retrieve an invoice by ID."""
+}
+fn (invoice: Str): Map {
+  response api-request("GET", `${::stripe/BASE_URL}/v1/invoices/${invoice}`)
+  if(is-ok-response(response), response.body, err(HttpError(response)))
+}
+
+UpdateInvoiceRequest type {
+  description: Str?,
+  metadata: Map?,
+  auto_advance: Bool?,
+  collection_method: Str?,
+  days_until_due: Int?,
+  footer: Str?
+}
+
+update-invoice
+meta {
+    doc: """POST /v1/invoices/{invoice} - Update a draft invoice."""
+}
+fn (invoice: Str, request: UpdateInvoiceRequest): Map {
+  response api-request("POST", `${::stripe/BASE_URL}/v1/invoices/${invoice}`, {}, request)
+  if(is-ok-response(response), response.body, err(HttpError(response)))
+}
+
+delete-invoice
+meta {
+    doc: """DELETE /v1/invoices/{invoice} - Delete a draft invoice. Finalized invoices must be voided instead."""
+}
+fn (invoice: Str): Map {
+  response api-request("DELETE", `${::stripe/BASE_URL}/v1/invoices/${invoice}`)
+  if(is-ok-response(response), response.body, err(HttpError(response)))
+}
+
+finalize-invoice
+meta {
+    doc: """POST /v1/invoices/{invoice}/finalize - Finalize a draft invoice so it can be paid."""
+}
+fn (invoice: Str): Map {
+  response api-request("POST", `${::stripe/BASE_URL}/v1/invoices/${invoice}/finalize`, {}, {})
+  if(is-ok-response(response), response.body, err(HttpError(response)))
+}
+
+pay-invoice
+meta {
+    doc: """POST /v1/invoices/{invoice}/pay - Attempt payment on an invoice outside the normal collection schedule."""
+}
+fn (invoice: Str): Map {
+  response api-request("POST", `${::stripe/BASE_URL}/v1/invoices/${invoice}/pay`, {}, {})
+  if(is-ok-response(response), response.body, err(HttpError(response)))
+}
+
+send-invoice
+meta {
+    doc: """POST /v1/invoices/{invoice}/send - Email an invoice to the customer for manual payment. The invoice must use `collection_method: "send_invoice"`."""
+}
+fn (invoice: Str): Map {
+  response api-request("POST", `${::stripe/BASE_URL}/v1/invoices/${invoice}/send`, {}, {})
+  if(is-ok-response(response), response.body, err(HttpError(response)))
+}
+
+void-invoice
+meta {
+    doc: """POST /v1/invoices/{invoice}/void - Void a finalized invoice. Voiding is irreversible and similar to deletion for accounting purposes."""
+}
+fn (invoice: Str): Map {
+  response api-request("POST", `${::stripe/BASE_URL}/v1/invoices/${invoice}/void`, {}, {})
+  if(is-ok-response(response), response.body, err(HttpError(response)))
+}
+
+ListInvoicesRequest type {
+  customer: Str?,
+  subscription: Str?,
+  status: Str?,
+  created: Any?,
+  limit: Int?,
+  starting_after: Str?,
+  ending_before: Str?
+}
+
+list-invoices
+meta {
+    doc: """GET /v1/invoices - List invoices, most recent first. Filter by `customer`, `subscription`, or `status` ("draft", "open", "paid", "uncollectible", "void")."""
+}
+fn
+(): Map {
+  list-invoices(ListInvoicesRequest({}))
+},
+(request: ListInvoicesRequest): Map {
+  response api-request("GET", `${::stripe/BASE_URL}/v1/invoices${query-string(request)}`)
+  if(is-ok-response(response), response.body, err(HttpError(response)))
+}
+
+// ============================================================================
+// Invoice Items
+// ============================================================================
+
+create-invoice-item
+meta {
+    doc: """POST /v1/invoiceitems - Add a one-off charge to the customer's next invoice (or a specific draft invoice via the 5-arity form). `amount` is in the smallest currency unit."""
+}
+fn
+(customer: Str, amount: Int, currency: Str, description: Str): Map {
+  response api-request("POST", `${::stripe/BASE_URL}/v1/invoiceitems`, {}, {customer: customer, amount: amount, currency: currency, description: description})
+  if(is-ok-response(response), response.body, err(HttpError(response)))
+},
+(customer: Str, amount: Int, currency: Str, description: Str, invoice: Str): Map {
+  response api-request("POST", `${::stripe/BASE_URL}/v1/invoiceitems`, {}, {customer: customer, amount: amount, currency: currency, description: description, invoice: invoice})
+  if(is-ok-response(response), response.body, err(HttpError(response)))
+}

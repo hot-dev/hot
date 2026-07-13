@@ -332,14 +332,18 @@ fn (cfg: TurnConfig, input: TurnInput): Map {
     }
 
     // 2. Persist the user turn (after RAG, before LLM).
-    if(bool-default(input.persist-user, true), {
+    cond {
+        bool-default(input.persist-user, true) => {
         persist-user-turn(cfg, input)
-    })
+    }
+    }
 
     // 3. Bind per-request session/identity so tools can recover the caller.
-    if(bool-default(input.bind-tool-ctx, true), {
+    cond {
+        bool-default(input.bind-tool-ctx, true) => {
         ::request/bind(input.session, input.sender, input.ctx-extras)
-    })
+    }
+    }
 
     // 4. LLM call (or fallback).
     final-text cond {
@@ -354,9 +358,11 @@ fn (cfg: TurnConfig, input: TurnInput): Map {
     }
 
     // 5. Persist the assistant turn.
-    if(bool-default(input.persist-assistant, true), {
+    cond {
+        bool-default(input.persist-assistant, true) => {
         persist-assistant-turn(cfg, input, final-text)
-    })
+    }
+    }
 
     ::stream/emit-reply-end(cfg.stream-label, {...payload, text: final-text})
     {ok: true, text: final-text}

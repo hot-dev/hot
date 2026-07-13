@@ -1,0 +1,83 @@
+::notion::pages ns
+
+::api ::notion::api
+
+get-page
+meta {
+    doc: """GET /pages/{id} - A page's properties (not its content — use `::notion::blocks/get-children` for that)."""
+}
+fn (page-id: Str): Map {
+  ::api/json("GET", `/pages/${page-id}`)
+}
+
+create-page
+meta {
+    doc: """
+    POST /pages - Create a page under a parent page, with a title and
+    optional content blocks (build them with the `::notion` block
+    helpers). For database rows use `create-database-page`.
+
+    **Example**
+
+    ```hot
+    page ::notion::pages/create-page(parent-id, "Retro notes", [
+      ::notion/heading(2, "What went well"),
+      ::notion/bullet("The webhook primitives held up")
+    ])
+    page.url
+    ```
+    """
+}
+fn
+(parent-page-id: Str, title: Str): Map {
+  create-page(parent-page-id, title, [])
+},
+(parent-page-id: Str, title: Str, children: Vec): Map {
+  ::api/json("POST", "/pages", {}, {
+    parent: {page_id: parent-page-id},
+    properties: {
+      title: {title: ::notion/rich-text(title)}
+    },
+    children: children
+  })
+}
+
+create-database-page
+meta {
+    doc: """
+    POST /pages with a database parent - Add a row to a database.
+    `properties` uses the database's property shapes.
+
+    **Example**
+
+    ```hot
+    ::notion::pages/create-database-page(db-id, {
+      Name: {title: ::notion/rich-text("Ship web-search")},
+      Status: {status: {name: "In progress"}},
+      Priority: {number: 2}
+    })
+    ```
+    """
+}
+fn (database-id: Str, properties: Map): Map {
+  ::api/json("POST", "/pages", {}, {
+    parent: {database_id: database-id},
+    properties: properties
+  })
+}
+
+update-page
+meta {
+    doc: """PATCH /pages/{id} - Update page properties (same shapes as `create-database-page`); `{archived: true}` moves a page to the trash via `archive-page`."""
+}
+fn (page-id: Str, properties: Map): Map {
+  ::api/json("PATCH", `/pages/${page-id}`, {}, {properties: properties})
+}
+
+archive-page
+meta {
+    doc: """PATCH /pages/{id} with `archived: true` - Move a page to the trash."""
+}
+fn (page-id: Str): Map {
+  ::api/json("PATCH", `/pages/${page-id}`, {}, {archived: true})
+}

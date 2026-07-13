@@ -1,0 +1,578 @@
+::mysql ns
+meta {
+    doc: """
+    Pure-Hot MySQL client. Speaks the MySQL client/server protocol
+    directly over `::hot::tcp` (with optional `::hot::tls`), so no
+    native driver is required. Supports `caching_sha2_password` (the
+    MySQL 8 default) and `mysql_native_password` authentication.
+
+    Parameterized statements always use the binary prepared-statement
+    protocol (`?` placeholders) — MySQL's text protocol has no safe
+    parameter binding. Use the `::sql` package's mysql driver for
+    placeholder compilation, typed queries, and transactions.
+
+    Over plaintext TCP, `caching_sha2_password` can only complete when
+    the server has the account's credentials cached (fast auth). When
+    the server demands full authentication, connect errs with guidance:
+    enable `ssl: true`, or use a `mysql_native_password` account.
+
+    A connection is a single TCP socket with no request pipelining and
+    is NOT safe for concurrent use. Hot runs independent expressions in
+    parallel — do not share one connection across parallel branches or
+    spawned tasks; open a connection per branch instead.
+
+    **Example**
+
+    ```hot
+    conn ::mysql/connect({host: "localhost", user: "root", password: "secret", database: "app"})
+    rows ::mysql/query(conn, "SELECT id, name FROM users WHERE active = ?", [true])
+    ::mysql/close(conn)
+    ```
+    """
+}
+
+::tcp ::hot::tcp
+::tls ::hot::tls
+::wire ::mysql::wire
+::auth ::mysql::auth
+::decode ::mysql::decode
+::bytes ::hot::bytes
+
+COM-QUIT 1
+COM-QUERY 3
+COM-STMT-PREPARE 22
+COM-STMT-EXECUTE 23
+COM-STMT-CLOSE 25
+
+MySqlOptions
+meta {
+    doc: """
+    Connection options:
+    - `host` (default "localhost"), `port` (default 3306)
+    - `user` (required), `password` (default "")
+    - `database` — initial schema (optional)
+    - `ssl` — upgrade to TLS before authenticating (default false)
+    - `tls` — options passed to `::hot::tls/upgrade` (e.g. `ca-pem`)
+    """
+}
+type {
+    host: Str?,
+    port: Int?,
+    user: Str,
+    password: Str?,
+    database: Str?,
+    ssl: Bool?,
+    tls: Map?
+}
+
+// ---------------------------------------------------------------------------
+// Connect / auth
+// ---------------------------------------------------------------------------
+
+write-packet fn (socket, seq: Int, payload: Bytes): Any {
+    framed ::wire/frame(seq, payload)
+    match framed {
+        Result.Err => { err(framed) }
+
+        _ => { ::tcp/write(socket, framed) }
+    }
+}
+
+// The post-handshake-response auth conversation. Recursive: the server
+// may send AuthSwitchRequest (0xFE) or AuthMoreData (0x01) before OK.
+auth-loop fn (socket, password: Str, over-tls: Bool, seq: Int): Any {
+    packet ::wire/read-packet(socket)
+    match packet {
+        Result.Err => { err(packet) }
+
+        _ => {
+            header ::decode/first-byte(packet.payload)
+            cond {
+                eq(header, 0) => { true }
+                eq(header, 255) => { ::decode/parse-err(packet.payload) }
+                // AuthSwitchRequest: plugin name + fresh nonce.
+                eq(header, 254) => {
+                    plugin-out ::wire/read-cstring(packet.payload, 1)
+                    nonce slice(::wire/read-rest(packet.payload, plugin-out[1]), 0, 20)
+                    response ::auth/scramble(plugin-out[0], password, nonce)
+                    match response {
+                        Result.Err => { err(response) }
+
+                        _ => {
+                            written write-packet(socket, add(packet.seq, 1), response)
+                            match written {
+                                Result.Err => { err(written) }
+
+                                _ => { auth-loop(socket, password, over-tls, add(packet.seq, 2)) }
+                            }
+                        }
+                    }
+                }
+                // AuthMoreData (caching_sha2): 0x03 = fast-auth success
+                // (an OK packet follows); 0x04 = full auth required.
+                eq(header, 1) => {
+                    marker ::decode/first-byte(::wire/read-rest(packet.payload, 1))
+                    cond {
+                        eq(marker, 3) => { auth-loop(socket, password, over-tls, add(packet.seq, 1)) }
+                        eq(marker, 4) => {
+                            cond {
+                                over-tls => {
+                                    // Full auth over TLS: the cleartext
+                                    // password, null-terminated.
+                                    written write-packet(socket, add(packet.seq, 1), ::wire/cstring(password))
+                                    match written {
+                                        Result.Err => { err(written) }
+
+                                        _ => { auth-loop(socket, password, over-tls, add(packet.seq, 2)) }
+                                    }
+                                }
+                                => {
+                                    err("mysql: caching_sha2_password requires full authentication, which needs TLS. Set ssl: true (or use a mysql_native_password account).")
+                                }
+                            }
+                        }
+                        => { err(`mysql: unexpected auth continuation ${marker}`) }
+                    }
+                }
+                => { err(`mysql: unexpected auth packet header ${header}`) }
+            }
+        }
+    }
+}
+
+connect
+meta {
+    ctx: {},
+    doc: """
+    Connect and authenticate. Returns a connection (pass it to
+    `query`/`execute`/`close`), or an Err carrying
+    `{code, sqlstate, message}` for server-reported failures.
+    """
+}
+fn (options: MySqlOptions | Map): Any {
+    host or(get(options, "host"), "localhost")
+    port or(get(options, "port"), 3306)
+    user get(options, "user")
+    password or(get(options, "password"), "")
+    database or(get(options, "database"), "")
+    use-ssl eq(get(options, "ssl"), true)
+
+    cond {
+        or(is-null(user), is-empty(or(user, ""))) => { err("mysql: options must include `user`") }
+        => {
+            socket ::tcp/connect(host, port)
+            match socket {
+                Result.Err => { err(socket) }
+
+                _ => {
+                    greeting ::wire/read-packet(socket)
+                    cond {
+                        is-err(greeting) => { greeting }
+                        eq(::decode/first-byte(greeting.payload), 255) => { ::decode/parse-err(greeting.payload) }
+                        => {
+                            handshake ::auth/parse-handshake(greeting.payload)
+                            match handshake {
+                                Result.Err => { err(handshake) }
+
+                                _ => { finish-connect(socket, handshake, user, password, database, use-ssl, get(options, "tls")) }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+finish-connect fn (socket, handshake: Map, user: Str, password: Str, database: Str, use-ssl: Bool, tls-options: Any): Any {
+    upgraded cond {
+        use-ssl => {
+            sent write-packet(socket, 1, ::auth/ssl-request(not(is-empty(database))))
+            match sent {
+                Result.Err => { err(sent) }
+
+                _ => { ::tls/upgrade(socket, {...or(tls-options, {}), host: null}) }
+            }
+        }
+        => { socket }
+    }
+
+    match upgraded {
+        Result.Err => { err(upgraded) }
+
+        _ => {
+            response-seq if(use-ssl, 2, 1)
+            scrambled ::auth/scramble(handshake.auth-plugin, password, handshake.nonce)
+            match scrambled {
+                Result.Err => { err(scrambled) }
+
+                _ => {
+                    payload ::auth/handshake-response(user, database, scrambled, handshake.auth-plugin, use-ssl)
+                    written write-packet(upgraded, response-seq, payload)
+                    match written {
+                        Result.Err => { err(written) }
+
+                        _ => {
+                            authed auth-loop(upgraded, password, use-ssl, add(response-seq, 1))
+                            match authed {
+                                Result.Err => { err(authed) }
+
+                                _ => { {socket: upgraded, server-version: handshake.server-version} }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Result sets
+// ---------------------------------------------------------------------------
+
+read-columns fn (socket, remaining: Int, acc: Vec): Any {
+    cond {
+        eq(remaining, 0) => {
+            // The EOF packet that terminates the column definitions.
+            eof ::wire/read-packet(socket)
+            match eof {
+                Result.Err => { err(eof) }
+
+                _ => { acc }
+            }
+        }
+        => {
+            packet ::wire/read-packet(socket)
+            match packet {
+                Result.Err => { err(packet) }
+
+                _ => { read-columns(socket, sub(remaining, 1), concat(acc, [::decode/parse-column(packet.payload)])) }
+            }
+        }
+    }
+}
+
+read-rows fn (socket, cols: Vec, binary: Bool, acc: Vec): Any {
+    packet ::wire/read-packet(socket)
+    cond {
+        is-err(packet) => { packet }
+        ::decode/is-eof(packet.payload) => { acc }
+        eq(::decode/first-byte(packet.payload), 255) => { ::decode/parse-err(packet.payload) }
+        => {
+            row cond {
+                binary => { ::decode/decode-binary-row(cols, packet.payload) }
+                => { ::decode/decode-text-row(cols, packet.payload) }
+            }
+
+            read-rows(socket, cols, binary, concat(acc, [row]))
+        }
+    }
+}
+
+read-result-set fn (socket, binary: Bool): Any {
+    packet ::wire/read-packet(socket)
+    cond {
+        is-err(packet) => { packet }
+        eq(::decode/first-byte(packet.payload), 255) => { ::decode/parse-err(packet.payload) }
+        eq(::decode/first-byte(packet.payload), 0) => {
+            // OK packet: statement produced no result set.
+            ok ::decode/parse-ok(packet.payload)
+            {rows: [], ok: ok}
+        }
+        => {
+            count-out ::wire/read-lenenc-int(packet.payload, 0)
+            cols read-columns(socket, count-out[0], [])
+            match cols {
+                Result.Err => { err(cols) }
+
+                _ => {
+                    rows read-rows(socket, cols, binary, [])
+                    match rows {
+                        Result.Err => { err(rows) }
+
+                        _ => { {rows: rows, ok: null} }
+                    }
+                }
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Prepared statements (the only safe parameter path in MySQL)
+// ---------------------------------------------------------------------------
+
+TYPE-VAR-STRING 253
+TYPE-BLOB 252
+
+encode-param-type fn (value: Any): Bytes {
+    cond {
+        is-bytes(value) => { Bytes([TYPE-BLOB, 0]) }
+        => { Bytes([TYPE-VAR-STRING, 0]) }
+    }
+}
+
+encode-param-value fn (value: Any): Bytes {
+    cond {
+        is-null(value) => { Bytes([]) }
+        is-bytes(value) => { ::wire/lenenc-bytes(value) }
+        eq(value, true) => { ::wire/lenenc-bytes("1") }
+        eq(value, false) => { ::wire/lenenc-bytes("0") }
+        => { ::wire/lenenc-bytes(Str(value)) }
+    }
+}
+
+null-bitmap fn (params: Vec): Bytes {
+    n length(params)
+    len Int(floor(div(add(n, 7), 8)))
+    reduce(::hot::iter/range(0, len), (acc, byte-idx) {
+        byte reduce(::hot::iter/range(0, 8), (b, bit) {
+            i add(mul(byte-idx, 8), bit)
+            cond {
+                and(lt(i, n), is-null(params[i])) => { add(b, ::hot::bit/shift-left(1, bit)) }
+                => { b }
+            }
+        }, 0)
+        concat(acc, ::wire/int1(byte))
+    }, Bytes([]))
+}
+
+stmt-execute-payload
+meta {
+    doc: """Build the COM_STMT_EXECUTE payload for a statement id and params. Exposed for testing."""
+}
+fn (stmt-id: Int, params: Vec): Bytes {
+    head concat(
+        ::wire/int1(COM-STMT-EXECUTE),
+        ::wire/int4(stmt-id),
+        ::wire/int1(0),
+        ::wire/int4(1))
+    cond {
+        is-empty(params) => { head }
+        => {
+            types reduce(params, (acc, p) { concat(acc, encode-param-type(p)) }, Bytes([]))
+            values reduce(params, (acc, p) { concat(acc, encode-param-value(p)) }, Bytes([]))
+            concat(head, null-bitmap(params), ::wire/int1(1), types, values)
+        }
+    }
+}
+
+// Prepare, execute, close — one round trip per call. Statement caching
+// can come later; correctness first.
+run-prepared fn (conn: Map, sql: Str, params: Vec): Any {
+    socket conn.socket
+    sent write-packet(socket, 0, concat(::wire/int1(COM-STMT-PREPARE), Bytes(sql)))
+    match sent {
+        Result.Err => { err(sent) }
+
+        _ => {
+            packet ::wire/read-packet(socket)
+            cond {
+                is-err(packet) => { packet }
+                eq(::decode/first-byte(packet.payload), 255) => { ::decode/parse-err(packet.payload) }
+                => {
+                    stmt-id-out ::wire/read-int4(packet.payload, 1)
+                    num-cols-out ::wire/read-int2(packet.payload, stmt-id-out[1])
+                    num-params-out ::wire/read-int2(packet.payload, num-cols-out[1])
+                    stmt-id stmt-id-out[0]
+
+                    result execute-prepared(socket, stmt-id, num-params-out[0], num-cols-out[0], params)
+                    // Always release the server-side statement (fire and
+                    // forget, no response) — error paths included, or every
+                    // failed call leaks a statement that survives until the
+                    // connection closes and counts against
+                    // max_prepared_stmt_count.
+                    close-payload concat(::wire/int1(COM-STMT-CLOSE), ::wire/int4(stmt-id))
+                    closed write-packet(socket, 0, close-payload)
+                    cond {
+                        is-err(result) => { result }
+                        is-err(closed) => { closed }
+                        => { result }
+                    }
+                }
+            }
+        }
+    }
+}
+
+// Everything between a successful COM_STMT_PREPARE and the COM_STMT_CLOSE
+// that run-prepared always sends: drain metadata, check arity, execute,
+// read the result set.
+execute-prepared fn (socket, stmt-id: Int, num-params: Int, num-cols: Int, params: Vec): Any {
+    params-drained drain-defs(socket, num-params)
+    match params-drained {
+        Result.Err => { err(params-drained) }
+
+        _ => {
+            cols-drained drain-defs(socket, num-cols)
+            cond {
+                is-err(cols-drained) => { cols-drained }
+                ne(length(params), num-params) => {
+                    err(`mysql: statement expects ${num-params} parameters, got ${length(params)}`)
+                }
+                => {
+                    sent write-packet(socket, 0, stmt-execute-payload(stmt-id, params))
+                    match sent {
+                        Result.Err => { err(sent) }
+
+                        _ => { read-result-set(socket, true) }
+                    }
+                }
+            }
+        }
+    }
+}
+
+drain-defs fn (socket, remaining: Int): Any {
+    cond {
+        eq(remaining, 0) => { true }
+        => {
+            drained drain-packets(socket, remaining)
+            match drained {
+                Result.Err => { err(drained) }
+
+                _ => {
+                    eof ::wire/read-packet(socket)
+                    match eof {
+                        Result.Err => { err(eof) }
+
+                        _ => { true }
+                    }
+                }
+            }
+        }
+    }
+}
+
+drain-packets fn (socket, remaining: Int): Any {
+    cond {
+        eq(remaining, 0) => { true }
+        => {
+            packet ::wire/read-packet(socket)
+            match packet {
+                Result.Err => { err(packet) }
+
+                _ => { drain-packets(socket, sub(remaining, 1)) }
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Public surface
+// ---------------------------------------------------------------------------
+
+query
+meta {
+    doc: """
+    Run a query. Without params, uses the text protocol (`COM_QUERY`);
+    with params, the binary prepared-statement protocol (`?`
+    placeholders only). Returns rows as `Vec<Map>` or an Err.
+
+    Bindable params: Int, Dec, Str, Bool (as 1/0), Bytes, and null —
+    sent as VAR_STRING/BLOB and coerced by MySQL to the column type.
+
+    Column values decode by type and signedness: integers to Int
+    (unsigned BIGINT above Int range promotes to an exact Dec),
+    FLOAT/DOUBLE/DECIMAL to Dec, binary-charset columns to Bytes,
+    DATE/TIME/DATETIME to strings, everything else to Str.
+    """
+}
+fn
+(conn: Map, sql: Str): Any {
+    sent write-packet(conn.socket, 0, concat(::wire/int1(COM-QUERY), Bytes(sql)))
+    match sent {
+        Result.Err => { err(sent) }
+
+        _ => {
+            result read-result-set(conn.socket, false)
+            match result {
+                Result.Err => { err(result) }
+
+                _ => { result.rows }
+            }
+        }
+    }
+},
+(conn: Map, sql: Str, params: Vec): Any {
+    cond {
+        is-empty(params) => { query(conn, sql) }
+        => {
+            result run-prepared(conn, sql, params)
+            match result {
+                Result.Err => { err(result) }
+
+                _ => { result.rows }
+            }
+        }
+    }
+}
+
+execute
+meta {
+    doc: """
+    Run a statement (INSERT/UPDATE/DELETE/DDL). Returns
+    `{command, rows-affected, last-insert-id}` or an Err. With params,
+    uses the binary prepared-statement protocol.
+    """
+}
+fn
+(conn: Map, sql: Str): Any {
+    sent write-packet(conn.socket, 0, concat(::wire/int1(COM-QUERY), Bytes(sql)))
+    match sent {
+        Result.Err => { err(sent) }
+
+        _ => {
+            // Bind first: an Err argument to a regular fn halts the run,
+            // so the error must be surfaced before execute-result runs.
+            result read-result-set(conn.socket, false)
+            match result {
+                Result.Err => { err(result) }
+
+                _ => { execute-result(result, sql) }
+            }
+        }
+    }
+},
+(conn: Map, sql: Str, params: Vec): Any {
+    cond {
+        is-empty(params) => { execute(conn, sql) }
+        => {
+            // Bind first: an Err argument to a regular fn halts the run,
+            // so the error must be surfaced before execute-result runs.
+            result run-prepared(conn, sql, params)
+            match result {
+                Result.Err => { err(result) }
+
+                _ => { execute-result(result, sql) }
+            }
+        }
+    }
+}
+
+// Callers must guard: an Err argument would halt before the body runs.
+execute-result fn (result: Any, sql: Str): Any {
+    cond {
+        is-null(result.ok) => { {command: command-word(sql), rows-affected: 0, last-insert-id: 0} }
+        => {
+            {
+                command: command-word(sql),
+                rows-affected: result.ok.rows-affected,
+                last-insert-id: result.ok.last-insert-id
+            }
+        }
+    }
+}
+
+command-word fn (sql: Str): Str {
+    ::hot::str/uppercase(first(split(::hot::str/trim(sql), " ")))
+}
+
+close
+meta {doc: """Send COM_QUIT and close the socket. Safe to call more than once."""}
+fn (conn: Map): Bool {
+    written write-packet(conn.socket, 0, ::wire/int1(COM-QUIT))
+    closed ::tcp/close(conn.socket)
+    true
+}

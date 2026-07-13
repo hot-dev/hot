@@ -1,0 +1,171 @@
+::crm ns
+meta {
+    doc: """
+    CRM-agnostic operations for agents: upsert a contact, find them, log
+    an activity — against whichever CRM the workspace has configured.
+
+    Provider selection (checked in order): `hubspot.token` → HubSpot,
+    any `salesforce.*` credential → Salesforce, `attio.api.key` → Attio.
+    The provider-native packages remain available for anything beyond
+    this normalized surface; every normalized value carries the provider
+    name and the raw payload.
+
+    **Quick start**
+
+    ```hot
+    ::crm ::crm
+
+    contact ::crm/upsert-contact({
+      email: "ada@example.com",
+      first-name: "Ada",
+      last-name: "Lovelace"
+    })
+
+    ::crm/log-activity(contact, "Demo call went well; wants pricing for 50 seats.")
+
+    existing ::crm/find-contact("ada@example.com")
+    ```
+    """
+}
+
+::ctx ::hot::ctx
+
+Contact
+meta {
+    doc: """A normalized CRM contact: `id` (provider record id), `email`, `first-name`, `last-name`, `provider` ("hubspot"/"salesforce"/"attio"), and `raw` (the provider payload)."""
+}
+type {
+  id: Str,
+  email: Str?,
+  first-name: Str?,
+  last-name: Str?,
+  provider: Str,
+  raw: Any?
+}
+
+Company
+meta {
+    doc: """A normalized CRM company: `id`, `name`, `domain`, `provider`, `raw`."""
+}
+type {
+  id: Str,
+  name: Str?,
+  domain: Str?,
+  provider: Str,
+  raw: Any?
+}
+
+configured-provider
+meta {
+    ctx: {
+        "hubspot.token": {required: false},
+        "salesforce.access.token": {required: false},
+        "salesforce.client-secret": {required: false},
+        "salesforce.private.key": {required: false},
+        "attio.api.key": {required: false}
+    },
+    doc: """Which CRM the context is configured for: "hubspot", "salesforce", or "attio" (checked in that order), or null when none is. Salesforce is selected only when a credential that can actually mint a session is present (an access token, a client secret, or a private key) — a bare `salesforce.client-id` is not enough to authenticate."""
+}
+fn (): Any {
+  select-provider(
+    or(::ctx/get("hubspot.token"), ""),
+    or(::ctx/get("salesforce.access.token"), ""),
+    or(::ctx/get("salesforce.client-secret"), ""),
+    or(::ctx/get("salesforce.private.key"), ""),
+    or(::ctx/get("attio.api.key"), "")
+  )
+}
+
+select-provider
+meta {
+    doc: """The provider-selection rule behind `configured-provider`, as a pure function of the credential values. Salesforce requires a credential that can mint a session (mirroring `::salesforce::auth/session`'s three flows: explicit token, client-credentials, JWT-bearer) — a bare client-id cannot authenticate. Exposed for testing."""
+}
+fn (hubspot-token: Str, sf-access-token: Str, sf-client-secret: Str, sf-private-key: Str, attio-key: Str): Any {
+  cond {
+    not(is-empty(hubspot-token)) => { "hubspot" }
+    not(is-empty(sf-access-token)) => { "salesforce" }
+    not(is-empty(sf-client-secret)) => { "salesforce" }
+    not(is-empty(sf-private-key)) => { "salesforce" }
+    not(is-empty(attio-key)) => { "attio" }
+    => { null }
+  }
+}
+
+no-provider fn (): Any {
+  err("crm: no CRM configured. Set hubspot.token, salesforce.* credentials, or attio.api.key in Context Variables.")
+}
+
+upsert-contact
+meta {
+    doc: """
+    Create-or-update a contact by email. `fields`: `email` (required),
+    `first-name`, `last-name`, `phone`, `company` (name). Returns a
+    normalized `Contact`.
+    """
+}
+fn (fields: Map): Contact {
+  provider configured-provider()
+  cond {
+    eq(provider, "hubspot") => { ::crm::hubspot/upsert-contact(fields) }
+    eq(provider, "salesforce") => { ::crm::salesforce/upsert-contact(fields) }
+    eq(provider, "attio") => { ::crm::attio/upsert-contact(fields) }
+    => { no-provider() }
+  }
+}
+
+find-contact
+meta {
+    doc: """Find a contact by exact email. Returns a normalized `Contact` or null."""
+}
+fn (email: Str): Any {
+  provider configured-provider()
+  cond {
+    eq(provider, "hubspot") => { ::crm::hubspot/find-contact(email) }
+    eq(provider, "salesforce") => { ::crm::salesforce/find-contact(email) }
+    eq(provider, "attio") => { ::crm::attio/find-contact(email) }
+    => { no-provider() }
+  }
+}
+
+log-activity
+meta {
+    doc: """
+    Log an activity note on a contact — a HubSpot note, a Salesforce
+    completed Task, or an Attio note, depending on the provider. Accepts
+    a `Contact` (from `upsert-contact`/`find-contact`) or an email
+    string.
+    """
+}
+fn (contact: Any, body: Str): Any {
+  resolved cond {
+    is-str(contact) => { find-contact(contact) }
+    => { contact }
+  }
+
+  cond {
+    is-err(resolved) => { resolved }
+    is-null(resolved) => { err(`crm: no contact found for '${contact}'`) }
+    => {
+      cond {
+        eq(resolved.provider, "hubspot") => { ::crm::hubspot/log-activity(resolved.id, body) }
+        eq(resolved.provider, "salesforce") => { ::crm::salesforce/log-activity(resolved.id, body) }
+        eq(resolved.provider, "attio") => { ::crm::attio/log-activity(resolved.id, body) }
+        => { no-provider() }
+      }
+    }
+  }
+}
+
+upsert-company
+meta {
+    doc: """Create-or-update a company by domain. `fields`: `domain` (required), `name`. Returns a normalized `Company`."""
+}
+fn (fields: Map): Company {
+  provider configured-provider()
+  cond {
+    eq(provider, "hubspot") => { ::crm::hubspot/upsert-company(fields) }
+    eq(provider, "salesforce") => { ::crm::salesforce/upsert-company(fields) }
+    eq(provider, "attio") => { ::crm::attio/upsert-company(fields) }
+    => { no-provider() }
+  }
+}

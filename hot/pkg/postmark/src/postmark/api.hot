@@ -32,8 +32,12 @@ meta {
 }
 fn
 (method: Str, url: Str, additional-headers: Map, body: Any): HttpResponse {
+  request(method, url, additional-headers, body, ::ctx/get("postmark.server.token"))
+},
+// 5-arity: explicit server token override
+(method: Str, url: Str, additional-headers: Map, body: Any, server-token: Str): HttpResponse {
   default-headers {
-    "X-Postmark-Server-Token": ::ctx/get("postmark.server.token"),
+    "X-Postmark-Server-Token": server-token,
     Accept: "application/json"
   }
 

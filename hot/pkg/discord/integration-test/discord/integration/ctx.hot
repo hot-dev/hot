@@ -1,0 +1,11 @@
+::discord::integration::ctx ns
+
+::env ::hot::env
+
+// Placeholder credentials for the discord integration suite. Unset
+// environment variables are skipped entirely, so absent credentials
+// behave exactly as if never configured.
+::hot::ctx/set(filter-vals({
+    "discord.bot.token": ::env/get("DISCORD_BOT_TOKEN", ""),
+    "discord.public.key": ::env/get("DISCORD_PUBLIC_KEY", ""),
+}, (v) { not(is-empty(v)) }))

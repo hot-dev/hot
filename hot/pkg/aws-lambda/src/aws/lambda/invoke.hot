@@ -61,16 +61,16 @@ fn
 
     response http-request("POST", url, signed-headers, body)
 
-    if(is-ok-response(response),
-        InvokeResponse({
+    cond {
+        is-ok-response(response) => { InvokeResponse({
             status_code: response.status,
             function_error: response.headers.X-Amz-Function-Error,
             log_result: response.headers.X-Amz-Log-Result,
             payload: response.body,
             executed_version: response.headers.X-Amz-Executed-Version
-        }),
-        err(AwsError(response))
-    )
+        }) }
+        => { err(AwsError(response)) }
+    }
 },
 (function_name: Str, payload: Any, invocation_type: Str): InvokeResponse | AwsError {
     invoke(function_name, payload, invocation_type, "None")

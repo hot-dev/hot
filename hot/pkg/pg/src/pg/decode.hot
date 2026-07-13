@@ -74,9 +74,7 @@ OID-JSONB 3802
 
 decode-bytea fn (text: Str): Bytes {
     // bytea text format is "\xHEXDIGITS"
-    if(starts-with(text, "\\x"),
-        ::hex/decode(slice(text, 2)),
-        Bytes(text))
+    if(starts-with(text, "\\x"), ::hex/decode(slice(text, 2)), Bytes(text))
 }
 
 decode-value

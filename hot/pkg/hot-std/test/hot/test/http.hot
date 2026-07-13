@@ -13,3 +13,20 @@ patch ::hot::http/patch
 // meta ["test"] fn () {
 //     println(get("https://hot.dev"))
 // }
+
+// --- raw-body (signature-verification body accessor) ---
+
+test-raw-body-prefers-bytes
+meta ["test"]
+fn () {
+    request {body-raw: "lossy", body-bytes: ::hot::hex/decode("ff00fe")}
+    assert-eq(::hot::hex/decode("ff00fe"), ::hot::http/raw-body(request), "body-bytes wins when present")
+}
+
+test-raw-body-falls-back-to-raw-string
+meta ["test"]
+fn () {
+    assert-eq("{}", ::hot::http/raw-body({body-raw: "{}"}), "body-raw when no bytes")
+    assert-eq("", ::hot::http/raw-body({}), "empty string when neither present")
+    assert-eq("", ::hot::http/raw-body({body-raw: null}), "null body-raw treated as absent")
+}

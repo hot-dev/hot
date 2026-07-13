@@ -1,0 +1,11 @@
+::intercom::integration::ctx ns
+
+::env ::hot::env
+
+// Placeholder credentials for the intercom integration suite. Unset
+// environment variables are skipped entirely, so absent credentials
+// behave exactly as if never configured.
+::hot::ctx/set(filter-vals({
+    "intercom.token": ::env/get("INTERCOM_TOKEN", ""),
+    "intercom.admin.id": ::env/get("INTERCOM_ADMIN_ID", ""),
+}, (v) { not(is-empty(v)) }))

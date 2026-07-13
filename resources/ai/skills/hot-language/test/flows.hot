@@ -451,3 +451,48 @@ meta ["test"] fn () {
     down move-point(Direction.Down, origin)
     assert-eq(1, down.y, "move down increases y")
 }
+
+// =============================================================================
+// Union arms, optional sugar, and Any (references/flows.md "Union Arms")
+// =============================================================================
+
+// @doc: match-union-arms
+describe-value fn match (value: Any): Str {
+    "" | Null => { "blank" }
+    Int | Dec => { "number" }
+    "yes" | "y" | true => { "affirmative" }
+    => { "other" }
+}
+// @end: match-union-arms
+
+// @doc: match-union-variants
+classify-shape fn match (s: Shape): Str {
+    Shape.Circle | Shape.Rectangle => { "has area" }
+    Shape.Point => { "no area" }       // exhaustive: unions count variants
+}
+// @end: match-union-variants
+
+// @doc: match-optional-any
+value-kind fn (x: Any): Str {
+    match x {
+        Str? => { "text or null" }         // same as Str | Null
+        Any (v) => { `something else: ${v}` }
+    }
+}
+// @end: match-optional-any
+
+test-union-arms
+meta ["test"] fn () {
+    assert-eq("blank", describe-value(""), "empty string is blank")
+    assert-eq("blank", describe-value(null), "null is blank")
+    assert-eq("number", describe-value(1.5), "dec is number")
+    assert-eq("affirmative", describe-value(true), "true is affirmative")
+    assert-eq("other", describe-value([1]), "vec falls through")
+
+    assert-eq("has area", classify-shape(Shape.Circle({radius: 1.0})), "circle in union")
+    assert-eq("no area", classify-shape(Shape.Point), "point arm")
+
+    assert-eq("text or null", value-kind("hi"), "Str? matches text")
+    assert-eq("text or null", value-kind(null), "Str? matches null")
+    assert-eq("something else: 7", value-kind(7), "Any binds the value")
+}

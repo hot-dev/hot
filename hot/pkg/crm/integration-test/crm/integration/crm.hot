@@ -1,0 +1,11 @@
+::crm::integration ns
+meta ["test"]
+
+// Requires ctx for ONE provider (hubspot.token / salesforce.* / attio.api.key)
+// Run with: hot test --project pkg-integration-crm
+
+test-find-nonexistent-contact
+meta ["test"] fn () {
+    out ::crm/find-contact("definitely-not-a-real-contact@hot-dev-itest.example")
+    assert(is-null(out), "unknown email resolves to null across providers")
+}

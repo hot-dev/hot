@@ -201,3 +201,24 @@ fn () {
     result `${Str(uri)}/api`
     assert-eq("https://example.com/api", result, "Uri Str coercion should work in template strings without double slash")
 }
+
+// --- query-string (optional-params suffix) ---
+
+test-query-string-drops-nulls-and-prefixes
+meta ["test"]
+fn () {
+    assert-eq("?page=2", ::hot::uri/query-string({page: 2, status: null}), "null params dropped, ? prefixed")
+}
+
+test-query-string-empty-map
+meta ["test"]
+fn () {
+    assert-eq("", ::hot::uri/query-string({}), "no params yields empty string")
+    assert-eq("", ::hot::uri/query-string({a: null}), "all-null params yields empty string")
+}
+
+test-query-string-encodes-values
+meta ["test"]
+fn () {
+    assert-eq("?q=a+b", ::hot::uri/query-string({q: "a b"}), "values are form-encoded")
+}

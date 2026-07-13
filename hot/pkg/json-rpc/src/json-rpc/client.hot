@@ -109,9 +109,7 @@ is-err(result) // => true
 }
 fn (data: Map): ::types/Response {
   response ::types/Response(data)
-  if(is-some(response.error),
-    err(response.error),
-    response)
+  if(is-some(response.error), err(response.error), response)
 }
 
 // ============================================================================
@@ -157,13 +155,14 @@ fn (url: Str, headers: Map, req: ::types/Request): ::types/Response {
     }, headers),
     body: body
   }))
-  if(is-ok-response(response),
-    parse-response(response.body),
-    err(::types/Error({
+  cond {
+      is-ok-response(response) => { parse-response(response.body) }
+      => { err(::types/Error({
       code: ::types/INTERNAL_ERROR,
       message: `HTTP ${response.status}`,
       data: response.body
-    })))
+    })) }
+  }
 }
 
 // Send a JSON-RPC request expecting an SSE stream back.

@@ -1,0 +1,49 @@
+::github::actions ns
+
+::api ::github::api
+query-string ::hot::uri/query-string
+
+list-workflow-runs
+meta {
+    doc: """GET /repos/{owner}/{repo}/actions/runs - Recent workflow runs. `params` supports `branch`, `status` ("queued"/"in_progress"/"completed"), `event`, `per_page`."""
+}
+fn
+(owner: Str, repo: Str): Map {
+  ::api/json("GET", `/repos/${owner}/${repo}/actions/runs`)
+},
+(owner: Str, repo: Str, params: Map): Map {
+  ::api/json("GET", `/repos/${owner}/${repo}/actions/runs${query-string(params)}`)
+}
+
+get-workflow-run
+meta {
+    doc: """GET /repos/{owner}/{repo}/actions/runs/{run_id} - One run's status and conclusion — poll this to watch CI."""
+}
+fn (owner: Str, repo: Str, run-id: Any): Map {
+  ::api/json("GET", `/repos/${owner}/${repo}/actions/runs/${run-id}`)
+}
+
+dispatch-workflow
+meta {
+    doc: """
+    POST /repos/{owner}/{repo}/actions/workflows/{workflow}/dispatches -
+    Trigger a `workflow_dispatch` workflow on a ref. `workflow` is the
+    file name (e.g. "deploy.yml") or numeric id; `inputs` (4-arity) is the
+    inputs Map. Returns null on success (GitHub replies 204).
+    """
+}
+fn
+(owner: Str, repo: Str, workflow: Str, ref: Str): Any {
+  ::api/json("POST", `/repos/${owner}/${repo}/actions/workflows/${workflow}/dispatches`, {}, {ref: ref})
+},
+(owner: Str, repo: Str, workflow: Str, ref: Str, inputs: Map): Any {
+  ::api/json("POST", `/repos/${owner}/${repo}/actions/workflows/${workflow}/dispatches`, {}, {ref: ref, inputs: inputs})
+}
+
+rerun-workflow
+meta {
+    doc: """POST /repos/{owner}/{repo}/actions/runs/{run_id}/rerun - Re-run a workflow run."""
+}
+fn (owner: Str, repo: Str, run-id: Any): Any {
+  ::api/json("POST", `/repos/${owner}/${repo}/actions/runs/${run-id}/rerun`, {}, {})
+}

@@ -1,0 +1,25 @@
+::google::gmail::test ns
+meta ["test"]
+
+::gmail ::google::gmail
+
+test-build-mime-basic
+meta ["test"] fn () {
+    mime ::gmail/build-mime("alice@example.com", "Hi there", "Hello!")
+    assert(starts-with(mime, "To: alice@example.com\r\n"))
+    assert(contains(mime, "Subject: Hi there\r\n"))
+    assert(contains(mime, "Content-Type: text/plain"))
+    assert(ends-with(mime, "\r\n\r\nHello!"), "blank line separates headers from body")
+}
+
+test-build-mime-extra-headers
+meta ["test"] fn () {
+    mime ::gmail/build-mime("a@b.c", "S", "body", {From: "me@example.com", Cc: "x@y.z"})
+    assert(contains(mime, "From: me@example.com\r\n"))
+    assert(contains(mime, "Cc: x@y.z\r\n"))
+}
+
+test-scopes
+meta ["test"] fn () {
+    assert-eq("https://www.googleapis.com/auth/gmail.send", ::gmail/SEND_SCOPE)
+}

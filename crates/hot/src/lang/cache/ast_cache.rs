@@ -443,9 +443,50 @@ pub struct CacheableMatchArm {
     pub variant: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub value_literal: Option<Box<CacheableValue>>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub alternatives: Vec<CacheableMatchArmPattern>,
     pub binding: Option<String>,
     pub body: Box<CacheableValue>,
     pub src: Option<CacheableSource>,
+}
+
+/// Cacheable version of MatchArmPattern (union-arm alternatives)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CacheableMatchArmPattern {
+    pub type_name: Option<String>,
+    pub variant: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub value_literal: Option<Box<CacheableValue>>,
+}
+
+impl From<&crate::lang::ast::MatchArmPattern> for CacheableMatchArmPattern {
+    fn from(pattern: &crate::lang::ast::MatchArmPattern) -> Self {
+        CacheableMatchArmPattern {
+            type_name: pattern.type_name.clone(),
+            variant: pattern.variant.clone(),
+            value_literal: pattern
+                .value_literal
+                .as_ref()
+                .map(|v| Box::new(CacheableValue::from(v.as_ref()))),
+        }
+    }
+}
+
+impl TryFrom<CacheableMatchArmPattern> for crate::lang::ast::MatchArmPattern {
+    type Error = String;
+
+    fn try_from(pattern: CacheableMatchArmPattern) -> Result<Self, String> {
+        Ok(crate::lang::ast::MatchArmPattern {
+            type_name: pattern.type_name,
+            variant: pattern.variant,
+            value_literal: pattern
+                .value_literal
+                .map(|v| -> Result<Box<crate::lang::ast::Value>, String> {
+                    Ok(Box::new(crate::lang::ast::Value::try_from(*v)?))
+                })
+                .transpose()?,
+        })
+    }
 }
 
 // =============================================================================
@@ -751,6 +792,11 @@ impl From<&crate::lang::ast::Value> for CacheableValue {
                                 .value_literal
                                 .as_ref()
                                 .map(|v| Box::new(CacheableValue::from(v.as_ref()))),
+                            alternatives: arm
+                                .alternatives
+                                .iter()
+                                .map(CacheableMatchArmPattern::from)
+                                .collect(),
                             binding: arm.binding.clone(),
                             body: Box::new(CacheableValue::from(&arm.body)),
                             src: arm.src.as_ref().map(CacheableSource::from),
@@ -773,6 +819,11 @@ impl From<&crate::lang::ast::Value> for CacheableValue {
                         .value_literal
                         .as_ref()
                         .map(|v| Box::new(CacheableValue::from(v.as_ref()))),
+                    alternatives: arm
+                        .alternatives
+                        .iter()
+                        .map(CacheableMatchArmPattern::from)
+                        .collect(),
                     binding: arm.binding.clone(),
                     body: Box::new(CacheableValue::from(&arm.body)),
                     src: arm.src.as_ref().map(CacheableSource::from),
@@ -1209,6 +1260,11 @@ impl TryFrom<CacheableValue> for crate::lang::ast::Value {
                                     Ok(Box::new(Value::try_from(*v)?))
                                 })
                                 .transpose()?,
+                            alternatives: arm
+                                .alternatives
+                                .into_iter()
+                                .map(crate::lang::ast::MatchArmPattern::try_from)
+                                .collect::<Result<Vec<_>, String>>()?,
                             binding: arm.binding,
                             body: Value::try_from(*arm.body)?,
                             src: arm.src.map(Source::try_from).transpose()?,
@@ -1238,6 +1294,11 @@ impl TryFrom<CacheableValue> for crate::lang::ast::Value {
                             Ok(Box::new(Value::try_from(*v)?))
                         })
                         .transpose()?,
+                    alternatives: arm
+                        .alternatives
+                        .into_iter()
+                        .map(crate::lang::ast::MatchArmPattern::try_from)
+                        .collect::<Result<Vec<_>, String>>()?,
                     binding: arm.binding,
                     body: Value::try_from(*arm.body)?,
                     src: arm.src.map(Source::try_from).transpose()?,
@@ -1388,7 +1449,7 @@ pub struct CacheEntry {
 }
 
 /// Current cache format version
-pub const CACHE_VERSION: u32 = 4; // Bumped for required TypeField::type_expr
+pub const CACHE_VERSION: u32 = 5; // Bumped for MatchArm union-pattern alternatives
 
 /// Serialize namespaces to cacheable JSON
 pub fn serialize_namespaces(

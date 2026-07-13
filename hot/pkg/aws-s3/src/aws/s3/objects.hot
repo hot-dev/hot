@@ -173,13 +173,13 @@ fn
 
     response http-request("PUT", url, signed-headers, body-wire)
 
-    if(is-ok-response(response),
-        PutObjectResponse({
+    cond {
+        is-ok-response(response) => { PutObjectResponse({
             etag: response.headers.ETag,
             version_id: null
-        }),
-        err(AwsError(response))
-    )
+        }) }
+        => { err(AwsError(response)) }
+    }
 },
 (bucket: Str, key: Str, body: Any): PutObjectResponse | AwsError {
     put-object(bucket, key, body, "application/octet-stream")
@@ -213,17 +213,17 @@ fn (bucket: Str, key: Str): GetObjectResponse | AwsError {
 
     response http-request("GET", url, signed-headers, "")
 
-    if(is-ok-response(response),
-        GetObjectResponse({
+    cond {
+        is-ok-response(response) => { GetObjectResponse({
             body: response.body,
             body-bytes: response.body-bytes,
             content_type: response.headers.content_type,
             content_length: null,
             etag: response.headers.ETag,
             last_modified: null
-        }),
-        err(AwsError(response))
-    )
+        }) }
+        => { err(AwsError(response)) }
+    }
 }
 
 // Delete an object from S3
@@ -253,13 +253,13 @@ fn (bucket: Str, key: Str): DeleteObjectResponse | AwsError {
 
     response http-request("DELETE", url, signed-headers, "")
 
-    if(is-ok-response(response),
-        DeleteObjectResponse({
+    cond {
+        is-ok-response(response) => { DeleteObjectResponse({
             delete_marker: null,
             version_id: null
-        }),
-        err(AwsError(response))
-    )
+        }) }
+        => { err(AwsError(response)) }
+    }
 }
 
 // List objects in an S3 bucket (uses ListObjectsV2 API)
@@ -292,10 +292,10 @@ fn
 
     // Build URL with optional continuation token
     base-url `${endpoint}?list-type=2&prefix=${prefix}&max-keys=${max_keys}`
-    url if(ne(continuation_token, null),
-        `${base-url}&continuation-token=${continuation_token}`,
-        base-url
-    )
+    url cond {
+        ne(continuation_token, null) => { `${base-url}&continuation-token=${continuation_token}` }
+        => { base-url }
+    }
 
     headers {
         "Host": `${bucket}.s3.${region}.amazonaws.com`
@@ -305,10 +305,10 @@ fn
 
     response http-request("GET", url, signed-headers, "")
 
-    if(is-ok-response(response),
-        parse-list-objects-response(response.body),
-        err(AwsError(response))
-    )
+    cond {
+        is-ok-response(response) => { parse-list-objects-response(response.body) }
+        => { err(AwsError(response)) }
+    }
 },
 (bucket: Str, prefix: Str, max_keys: Int): ListObjectsResponse | AwsError {
     list-objects(bucket, prefix, max_keys, null)
@@ -361,31 +361,25 @@ fn (source_bucket: Str, source_key: Str, dest_bucket: Str, dest_key: Str): CopyO
 
     response http-request("PUT", url, signed-headers, "")
 
-    if(is-ok-response(response),
-        cond {
-            is-str(response.body) => {
-                // Parse XML response
-                xml ::xml/from-xml(response.body)
-                CopyObjectResponse({
-                    etag: cond {
-                        ne(::xml/child(xml, "ETag"), null) => { ::xml/text(::xml/child(xml, "ETag")) }
-                        => { null }
-                    },
-                    last_modified: cond {
-                        ne(::xml/child(xml, "LastModified"), null) => { ::xml/text(::xml/child(xml, "LastModified")) }
-                        => { null }
-                    }
-                })
-            }
-            => {
-                CopyObjectResponse({
-                    etag: null,
-                    last_modified: null
-                })
-            }
-        },
-        err(AwsError(response))
-    )
+    cond {
+        and(is-ok-response(response), is-str(response.body)) => {
+            // Parse XML response
+            xml ::xml/from-xml(response.body)
+            CopyObjectResponse({
+                etag: cond {
+                    ne(::xml/child(xml, "ETag"), null) => { ::xml/text(::xml/child(xml, "ETag")) }
+                    => { null }
+                },
+                last_modified: cond {
+                    ne(::xml/child(xml, "LastModified"), null) => { ::xml/text(::xml/child(xml, "LastModified")) }
+                    => { null }
+                }
+            })
+        }
+        // OK but no XML body (e.g. empty 200)
+        is-ok-response(response) => { CopyObjectResponse({etag: null, last_modified: null}) }
+        => { err(AwsError(response)) }
+    }
 }
 
 // Head an object (get metadata without body)
@@ -417,13 +411,13 @@ fn (bucket: Str, key: Str): HeadObjectResponse | AwsError {
 
     response http-request("HEAD", url, signed-headers, "")
 
-    if(is-ok-response(response),
-        HeadObjectResponse({
+    cond {
+        is-ok-response(response) => { HeadObjectResponse({
             content_type: response.headers.content_type,
             content_length: null,
             etag: response.headers.ETag,
             last_modified: null
-        }),
-        err(AwsError(response))
-    )
+        }) }
+        => { err(AwsError(response)) }
+    }
 }

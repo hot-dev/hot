@@ -1,0 +1,111 @@
+::openai-compatible::api ns
+meta {
+    ctx: {"openai-compatible.url": {required: true}, "openai-compatible.api.key": {required: true}}
+}
+
+::ctx ::hot::ctx
+
+http-request ::hot::http/request
+http-request-stream ::hot::http/request-stream
+is-ok-response ::hot::http/is-ok-response
+HttpRequest ::hot::http/HttpRequest
+HttpResponse ::hot::http/HttpResponse
+StreamingHttpResponse ::hot::http/StreamingHttpResponse
+
+HttpError type {
+    status: Int,
+    headers: Map,
+    body: Any
+}
+
+HttpResponse -> HttpError fn (response: HttpResponse): HttpError {
+  HttpError({
+    status: response.status,
+    headers: response.headers,
+    body: response.body
+  })
+}
+
+url
+meta {
+    doc: """Join an API path (e.g. `/chat/completions`) onto the configured base URL, normalizing slashes so `base/` + `/path` doesn't double up."""
+}
+fn
+(path: Str): Str {
+  url(path, ::ctx/get("openai-compatible.url"))
+},
+(path: Str, base-url: Str): Str {
+  base if(ends-with(base-url, "/"), slice(base-url, 0, sub(length(base-url), 1)), base-url)
+  suffix if(starts-with(path, "/"), path, `/${path}`)
+  `${base}${suffix}`
+}
+
+request
+meta {
+    doc: """
+    Make an authenticated request to the configured OpenAI-compatible API.
+    `path` is relative to `openai-compatible.url` (e.g.
+    `/chat/completions`). Additional headers merge over the defaults —
+    useful for OpenRouter's optional `HTTP-Referer` / `X-Title`
+    attribution headers.
+
+    **Example**
+
+    ```hot
+    response ::openai-compatible::api/request("POST", "/chat/completions", {}, {
+      model: "anthropic/claude-sonnet-4.5",
+      messages: [{role: "user", content: "Hello"}]
+    })
+    ```
+    """
+}
+fn
+(method: Str, path: Str): HttpResponse {
+  request(method, path, {}, "")
+},
+(method: Str, path: Str, additional-headers: Map): HttpResponse {
+  request(method, path, additional-headers, "")
+},
+(method: Str, path: Str, additional-headers: Map, body: Any): HttpResponse {
+  request(method, path, additional-headers, body, ::ctx/get("openai-compatible.api.key"))
+},
+(method: Str, path: Str, additional-headers: Map, body: Any, api-key: Str): HttpResponse {
+  default-headers {
+    Authorization: `Bearer ${api-key}`
+  }
+
+  headers if(eq(body, ""), default-headers, {...default-headers, Content-Type: "application/json"})
+  final-headers {...headers, ...additional-headers}
+
+  encoded-body if(eq(body, ""), "", to-json(untype(body)))
+  ::hot::http/request(HttpRequest({
+    method,
+    url: url(path),
+    headers: final-headers,
+    body: encoded-body
+  }))
+}
+
+request-stream
+meta {
+    doc: """Make an authenticated streaming (SSE) request. Returns a `StreamingHttpResponse` whose body iterates SSE events — used by `chat-completion-stream`."""
+}
+fn
+(method: Str, path: Str, additional-headers: Map, body: Any): StreamingHttpResponse {
+  request-stream(method, path, additional-headers, body, ::ctx/get("openai-compatible.api.key"))
+},
+(method: Str, path: Str, additional-headers: Map, body: Any, api-key: Str): StreamingHttpResponse {
+  default-headers {
+    Authorization: `Bearer ${api-key}`,
+    Content-Type: "application/json"
+  }
+
+  final-headers {...default-headers, ...additional-headers}
+
+  ::hot::http/request-stream(HttpRequest({
+    method,
+    url: url(path),
+    headers: final-headers,
+    body: to-json(untype(body))
+  }), "sse")
+}

@@ -1,0 +1,262 @@
+::hot::test::result-boundary ns
+meta ["test"]
+
+// The strict-argument law at hotlib call boundaries: a Result.Err passed
+// in any strict argument position halts ("Result error: ..."), Result.Ok
+// auto-unwraps, lazy arguments and the Result-aware inspection natives
+// (is-err, if-err, ok-value, err-value, ...) are exempt, and OnErr
+// annotations govern callback results only — never the collection
+// argument.
+
+::exec ::hot::internal::exec
+
+make-err fn (): Any {
+    err("boundary-payload")
+}
+
+// ----------------------------------------------------------------------------
+// Err in the collection position halts — every HOF, both map arities
+// ----------------------------------------------------------------------------
+
+test-map-over-err-halts
+meta ["test"] fn () {
+    out ::exec/contain(() {
+        r make-err()
+        map(r, (e) { e })
+    })
+    assert(is-err(out), "map over an Err must halt, not iterate its internals")
+    assert(contains(err-message(out), "boundary-payload"), "halt carries the payload")
+}
+
+test-map-preserve-arity-over-err-still-halts
+meta ["test"] fn () {
+    // OnErr.Preserve governs per-element callback results; a collection-level
+    // Err has no slots to preserve and must still halt.
+    out ::exec/contain(() {
+        r make-err()
+        map(r, (e) { e }, OnErr.Preserve)
+    })
+    assert(is-err(out), "OnErr.Preserve does not exempt the collection argument")
+}
+
+test-filter-over-err-halts
+meta ["test"] fn () {
+    out ::exec/contain(() {
+        r make-err()
+        filter(r, (e) { true })
+    })
+    assert(is-err(out), "filter over an Err must halt")
+}
+
+test-reduce-over-err-halts
+meta ["test"] fn () {
+    out ::exec/contain(() {
+        r make-err()
+        reduce(r, (acc, e) { acc }, [])
+    })
+    assert(is-err(out), "reduce over an Err must halt")
+}
+
+// ----------------------------------------------------------------------------
+// Err in other strict positions halts too
+// ----------------------------------------------------------------------------
+
+test-err-in-second-strict-position-halts
+meta ["test"] fn () {
+    out ::exec/contain(() {
+        r make-err()
+        join(["a", "b"], r)
+    })
+    assert(is-err(out), "join separator must not accept an Err")
+}
+
+test-err-interpolation-halts
+meta ["test"] fn () {
+    out ::exec/contain(() {
+        r make-err()
+        concat("prefix: ", r)
+    })
+    assert(is-err(out), "concat must not stringify an Err")
+}
+
+// ----------------------------------------------------------------------------
+// Ok auto-unwraps at the boundary
+// ----------------------------------------------------------------------------
+
+test-ok-collection-auto-unwraps
+meta ["test"] fn () {
+    wrapped ok([1, 2, 3])
+    assert-eq([2, 3, 4], map(wrapped, add(%, 1)), "Ok-wrapped collection unwraps at the boundary")
+}
+
+// ----------------------------------------------------------------------------
+// The sanctioned inspection points stay exempt
+// ----------------------------------------------------------------------------
+
+test-result-aware-natives-receive-errs
+meta ["test"] fn () {
+    r make-err()
+    assert(is-err(r), "is-err receives the Err")
+    assert(not(is-ok(r)), "is-ok receives the Err")
+    assert-eq("boundary-payload", if-err(r, (e) { e }), "if-err handler sees the payload")
+    assert-eq("boundary-payload", err-value(r), "err-value extracts the payload")
+    assert-eq("boundary-payload", err-message(r), "err-message reads the payload")
+}
+
+test-onerr-preserve-callback-errs-survive
+meta ["test"] fn () {
+    // The complementary contract: with a REAL collection, per-element
+    // callback Errs stay in their slots under OnErr.Preserve — including
+    // when handed to the Result-aware natives by filter.
+    load fn cond (n: Int): Any {
+        eq(n, 0) => { err("missing") }
+        => { mul(n, 10) }
+    }
+
+    scores map([1, 0, 3], (n) { load(n) }, OnErr.Preserve)
+    assert-eq(3, length(scores), "every slot kept")
+    assert(is-err(scores[1]), "the failing slot stays an Err value")
+    assert-eq(1, length(filter(scores, is-err)), "filter + is-err over Err slots works")
+}
+
+// ----------------------------------------------------------------------------
+// JIT parity: the law must hold identically once the function compiles
+// ----------------------------------------------------------------------------
+
+test-jit-warm-map-over-err-halts
+meta ["test"] fn () {
+    // Warm the mapping fn well past the JIT threshold with valid input,
+    // then hit it with an Err collection: the compiled path must halt
+    // exactly like the interpreter did on call one.
+    double-all fn (coll: Any): Any {
+        map(coll, mul(%, 2))
+    }
+
+    warmed reduce(range(0, 200), (acc, i) {
+        add(acc, first(double-all([i])))
+    }, 0)
+    assert(gt(warmed, 0), "warm loop ran")
+
+    out ::exec/contain(() {
+        r make-err()
+        double-all(r)
+    })
+    assert(is-err(out), "JIT-compiled map over an Err must halt like the interpreter")
+    assert(contains(err-message(out), "boundary-payload"), "halt carries the payload through the JIT boundary")
+}
+
+// ----------------------------------------------------------------------------
+// Callback Err results: default halt everywhere (Curt's ruling 2026-07-11).
+// OnErr stays map-family only — predicates and folds have no slots.
+// ----------------------------------------------------------------------------
+
+erring-on fn (target: Int): Fn {
+    (n) { if(eq(n, target), err("callback-err"), false) }
+}
+
+test-filter-callback-err-halts
+meta ["test"] fn () {
+    out ::exec/contain(() { filter([1, 2, 3], (n) { if(eq(n, 2), err("callback-err"), true) }) })
+    assert(is-err(out), "a filter predicate Err must halt, not read as falsy")
+    assert(contains(err-message(out), "callback-err"))
+}
+
+test-find-first-callback-err-halts
+meta ["test"] fn () {
+    out ::exec/contain(() { find-first([1, 2, 3], erring-on(2)) })
+    assert(is-err(out), "a find-first predicate Err must halt, not read as truthy")
+}
+
+test-reduce-callback-err-halts
+meta ["test"] fn () {
+    out ::exec/contain(() { reduce([1, 2, 3], (acc, n) { if(eq(n, 2), err("callback-err"), acc) }, 0) })
+    assert(is-err(out), "a reduce callback Err must halt, not be overwritten")
+}
+
+test-for-each-callback-err-halts
+meta ["test"] fn () {
+    out ::exec/contain(() { for-each([1, 2, 3], (n) { if(eq(n, 2), err("callback-err"), n) }) })
+    assert(is-err(out), "a for-each callback Err must halt, not be swallowed")
+}
+
+test-for-each-iterator-callback-err-halts
+meta ["test"] fn () {
+    out ::exec/contain(() { for-each(Iter([1, 2, 3]), (n) { if(eq(n, 2), err("callback-err"), n) }) })
+    assert(is-err(out), "iterator-driven for-each halts the same way")
+}
+
+test-for-each-ok-path
+meta ["test"] fn () {
+    seen []
+    assert(is-null(for-each([1, 2, 3], (n) { n })), "for-each returns null on success")
+}
+
+test-some-all-remove-sort-by-callback-err-halts
+meta ["test"] fn () {
+    assert(is-err(::exec/contain(() { some([1, 2, 3], erring-on(2)) })), "some halts")
+    assert(is-err(::exec/contain(() { all([1, 2, 3], (n) { if(eq(n, 2), err("callback-err"), true) }) })), "all halts")
+    assert(is-err(::exec/contain(() { remove([1, 2, 3], erring-on(2)) })), "remove halts")
+    assert(is-err(::exec/contain(() { sort-by([1, 2, 3], (n) { if(eq(n, 2), err("callback-err"), n) }) })), "sort-by key fn halts")
+}
+
+test-predicate-fan-out-idiom-still-works
+meta ["test"] fn () {
+    // The sanctioned tolerant pattern: isolate with OnErr.Preserve first,
+    // then predicates over the slots (is-err is exempt by contract).
+    risky fn cond (n: Int): Any {
+        eq(n, 2) => { err("slot") }
+        => { n }
+    }
+
+    slots map([1, 2, 3], (n) { risky(n) }, OnErr.Preserve)
+    assert-eq(1, length(filter(slots, is-err)), "Preserve then filter is-err")
+    assert-eq(2, length(filter(slots, (v) { not(is-err(v)) })), "negated form too")
+}
+
+test-jit-warm-filter-callback-err-halts
+meta ["test"] fn () {
+    keep-big fn (coll: Any): Any {
+        filter(coll, (n) { if(eq(n, -1), err("callback-err"), gt(n, 10)) })
+    }
+
+    warmed reduce(range(0, 200), (acc, i) {
+        add(acc, length(keep-big([i, 100])))
+    }, 0)
+    assert(gt(warmed, 0))
+    out ::exec/contain(() { keep-big([1, -1, 100]) })
+    assert(is-err(out), "JIT-warm filter halts on predicate Err like the interpreter")
+}
+
+test-walk-family-callback-errs-halt
+meta ["test"] fn () {
+    fail-on-two fn (value: Any): Any {
+        if(eq(value, 2), err("walk-callback-err"), value)
+    }
+
+    walk-out ::exec/contain(() { walk(fail-on-two, (value) { value }, [1, 2, 3]) })
+    prewalk-out ::exec/contain(() { prewalk(fail-on-two, [1, 2, 3]) })
+    postwalk-out ::exec/contain(() { postwalk(fail-on-two, [1, 2, 3]) })
+
+    assert(is-err(walk-out), "walk inner callback Err halts")
+    assert(is-err(prewalk-out), "prewalk callback Err halts")
+    assert(is-err(postwalk-out), "postwalk callback Err halts")
+}
+
+test-walk-applies-inner-then-outer
+meta ["test"] fn () {
+    result walk(add(%, 1), (values) { concat(values, [99]) }, [1, 2, 3])
+    assert-eq([2, 3, 4, 99], result)
+}
+
+test-update-in-callback-err-halts
+meta ["test"] fn () {
+    nested ::exec/contain(() {
+        update-in({a: {b: 1}}, ["a", "b"], (value) { err(`update-in-callback-err-${value}`) })
+    })
+    root ::exec/contain(() {
+        update-in({a: 1}, [], (value) { err(`update-in-root-callback-err-${value.a}`) })
+    })
+
+    assert(is-err(nested), "update-in nested callback Err halts")
+    assert(is-err(root), "update-in root callback Err halts")
+}

@@ -1,0 +1,20 @@
+::deepgram::test ns
+meta ["test"]
+
+test-transcript-extraction
+meta ["test"] fn () {
+    response {
+        results: {
+            channels: [{alternatives: [{transcript: "hello hot", confidence: 0.99}]}]
+        }
+    }
+
+    assert-eq("hello hot", ::deepgram/transcript(response))
+}
+
+test-transcript-empty-shapes
+meta ["test"] fn () {
+    assert-eq("", ::deepgram/transcript({}))
+    assert-eq("", ::deepgram/transcript({results: {channels: []}}))
+    assert-eq("", ::deepgram/transcript({results: {channels: [{alternatives: []}]}}))
+}

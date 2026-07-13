@@ -1,0 +1,32 @@
+::github ns
+meta {
+    doc: """
+    GitHub API bindings.
+
+    **Setup** — set `github.token` in context: a fine-grained or classic
+    personal access token, or an App installation token (mint those with
+    `::github::app` and set for the run via
+    `::hot::ctx/set-secret("github.token", ...)` — they expire hourly).
+
+    **Quick start**
+
+    ```hot
+    ::issues ::github::issues
+    ::pulls ::github::pulls
+
+    issue ::issues/create-issue("hot-dev", "hot", "Flaky test in coll", {
+      body: "Seen in CI on #68.",
+      labels: ["bug", "ci"]
+    })
+
+    open-prs ::pulls/list-pulls("hot-dev", "hot", {state: "open"})
+    ```
+
+    Webhook verification lives at `::github::webhooks/verify-request`
+    (X-Hub-Signature-256 with the `github.webhook.secret` context
+    variable).
+    """
+}
+
+BASE_URL "https://api.github.com"
+API_VERSION "2022-11-28"

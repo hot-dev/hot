@@ -1,0 +1,19 @@
+::github::users ns
+
+::api ::github::api
+
+get-authenticated
+meta {
+    doc: """GET /user - The authenticated user (login, id, plan). The cheapest way to smoke-test a token."""
+}
+fn (): Map {
+  ::api/json("GET", "/user")
+}
+
+get-user
+meta {
+    doc: """GET /users/{username} - A user's public profile."""
+}
+fn (username: Str): Map {
+  ::api/json("GET", `/users/${username}`)
+}

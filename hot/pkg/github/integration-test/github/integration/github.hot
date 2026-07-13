@@ -1,0 +1,31 @@
+::github::integration ns
+meta ["test"]
+
+// =============================================================================
+// Integration Tests (live GitHub; read-only)
+// =============================================================================
+// Requires ctx: github.token (a PAT with public repo read access)
+// Run with: hot test --project pkg-integration-github
+
+::users ::github::users
+::repos ::github::repos
+::search ::github::search
+
+test-authenticated-user
+meta ["test"] fn () {
+    me ::users/get-authenticated()
+    assert(is-some(me.login), "token should resolve to a user")
+}
+
+test-get-public-repo
+meta ["test"] fn () {
+    repo ::repos/get-repo("torvalds", "linux")
+    assert-eq("linux", repo.name)
+    assert(is-some(repo.default_branch))
+}
+
+test-search-issues
+meta ["test"] fn () {
+    hits ::search/search-issues("repo:rust-lang/rust is:issue is:open label:C-bug")
+    assert(gt(hits.total_count, 0))
+}

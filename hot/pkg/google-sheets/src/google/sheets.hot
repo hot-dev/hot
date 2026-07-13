@@ -1,0 +1,104 @@
+::google::sheets ns
+meta {
+    doc: """
+    Google Sheets API bindings. Authentication is configured once via the
+    `google.*` context variables — see the `google-core` package.
+
+    **Quick start**
+
+    ```hot
+    ::sheets ::google::sheets
+
+    rows ::sheets/get-values(spreadsheet-id, "Sheet1!A1:C10")
+    ::sheets/append-values(spreadsheet-id, "Sheet1!A:C", [["2026-07-09", "signup", 42]])
+    ```
+    """
+}
+
+::api ::google::api
+::uri ::hot::uri
+
+BASE_URL "https://sheets.googleapis.com/v4/spreadsheets"
+
+SCOPE "https://www.googleapis.com/auth/spreadsheets"
+READ_SCOPE "https://www.googleapis.com/auth/spreadsheets.readonly"
+
+get-values
+meta {
+    doc: """GET /{id}/values/{range} - Read a range in A1 notation. Returns `{range, majorDimension, values: [[...], ...]}` (values absent when the range is empty)."""
+}
+fn (spreadsheet-id: Str, range: Str): Map {
+  ::api/json(READ_SCOPE, "GET", `${BASE_URL}/${spreadsheet-id}/values/${::uri/encode(range)}`)
+}
+
+batch-get-values
+meta {
+    doc: """GET /{id}/values:batchGet - Read several ranges in one call. Returns `{valueRanges: [...]}` in request order."""
+}
+fn (spreadsheet-id: Str, ranges: Vec): Map {
+  params join(map(ranges, (r) { `ranges=${::uri/encode(r)}` }), "&")
+  ::api/json(READ_SCOPE, "GET", `${BASE_URL}/${spreadsheet-id}/values:batchGet?${params}`)
+}
+
+update-values
+meta {
+    doc: """
+    PUT /{id}/values/{range} - Overwrite a range with a 2D Vec of rows.
+    Values are parsed as if typed by a user (`USER_ENTERED`) — numbers,
+    dates, and formulas work as expected.
+    """
+}
+fn (spreadsheet-id: Str, range: Str, values: Vec): Map {
+  ::api/json(SCOPE, "PUT", `${BASE_URL}/${spreadsheet-id}/values/${::uri/encode(range)}?valueInputOption=USER_ENTERED`, {}, {
+    range: range,
+    majorDimension: "ROWS",
+    values: values
+  })
+}
+
+append-values
+meta {
+    doc: """
+    POST /{id}/values/{range}:append - Append rows after the last row of
+    the table that starts at `range`.
+
+    **Example**
+
+    ```hot
+    ::google::sheets/append-values(id, "Log!A:C", [["2026-07-09", "deploy", "ok"]])
+    ```
+    """
+}
+fn (spreadsheet-id: Str, range: Str, values: Vec): Map {
+  ::api/json(SCOPE, "POST", `${BASE_URL}/${spreadsheet-id}/values/${::uri/encode(range)}:append?valueInputOption=USER_ENTERED`, {}, {
+    range: range,
+    majorDimension: "ROWS",
+    values: values
+  })
+}
+
+clear-values
+meta {
+    doc: """POST /{id}/values/{range}:clear - Clear a range's values (formatting is kept)."""
+}
+fn (spreadsheet-id: Str, range: Str): Map {
+  ::api/json(SCOPE, "POST", `${BASE_URL}/${spreadsheet-id}/values/${::uri/encode(range)}:clear`, {}, {})
+}
+
+get-spreadsheet
+meta {
+    doc: """GET /{id} - Spreadsheet metadata: title, sheets, named ranges."""
+}
+fn (spreadsheet-id: Str): Map {
+  ::api/json(READ_SCOPE, "GET", `${BASE_URL}/${spreadsheet-id}`)
+}
+
+create-spreadsheet
+meta {
+    doc: """POST / - Create a spreadsheet with the given title. Returns the resource including `spreadsheetId` and `spreadsheetUrl`."""
+}
+fn (title: Str): Map {
+  ::api/json(SCOPE, "POST", BASE_URL, {}, {
+    properties: {title: title}
+  })
+}

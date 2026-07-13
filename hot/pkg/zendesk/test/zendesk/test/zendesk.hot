@@ -1,0 +1,8 @@
+::zendesk::test ns
+meta ["test"]
+
+test-auth-header-vector
+meta ["test"] fn () {
+    // base64("agent@acme.com/token:abc123") generated independently
+    assert-eq("Basic YWdlbnRAYWNtZS5jb20vdG9rZW46YWJjMTIz", ::zendesk/auth-header("agent@acme.com", "abc123"))
+}

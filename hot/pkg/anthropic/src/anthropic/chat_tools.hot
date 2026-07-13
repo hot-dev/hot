@@ -67,16 +67,8 @@ fn cond (m: ::ai-chat/Message): Map {
 
     eq(m.role, "assistant") => {
         text ::ai-chat/message-text(m)
-        text-block if(
-            not(is-empty(text)),
-            [{type: "text", text: text}],
-            []
-        )
-        tool-blocks if(
-            is-null(m.tool-calls),
-            [],
-            map(m.tool-calls, to-tool-use-block)
-        )
+        text-block if(not(is-empty(text)), [{type: "text", text: text}], [])
+        tool-blocks if(is-null(m.tool-calls), [], map(m.tool-calls, to-tool-use-block))
         {role: "assistant", content: concat(text-block, tool-blocks)}
     }
     => {
@@ -111,11 +103,10 @@ meta {
     doc: """Convert a `tool_use` content block into a `::ai::tool/ToolCall`, or null otherwise."""
 }
 fn (b: Map): ::ai-tool/ToolCall? {
-    if(
-        eq(b.type, "tool_use"),
-        ::ai-tool/ToolCall({id: b.id, name: b.name, input: or(b.input, {})}),
-        null
-    )
+    cond {
+        eq(b.type, "tool_use") => { ::ai-tool/ToolCall({id: b.id, name: b.name, input: or(b.input, {})}) }
+        => { null }
+    }
 }
 
 response-text
@@ -140,14 +131,13 @@ meta {
     doc: """Normalize Anthropic's usage shape into `{input-tokens, output-tokens}`."""
 }
 fn (u: Any): Map? {
-    if(
-        is-null(u),
-        null,
-        {
+    cond {
+        is-null(u) => { null }
+        => {
             input-tokens: or(get(u, "input_tokens"), 0),
             output-tokens: or(get(u, "output_tokens"), 0)
         }
-    )
+    }
 }
 
 // ============================================================================
@@ -426,9 +416,9 @@ meta {
     """
 }
 fn (state: Map): ::ai-chat/ChatReply {
-    text-block-keys sort(keys(or(state.text-blocks, {})))
-    text-parts map(text-block-keys, (k) { or(get-in(state, ["text-blocks", k]), "") })
-    text join(text-parts, "")
+    text sort(keys(or(state.text-blocks, {})))
+        |> map((k) { or(get-in(state, ["text-blocks", k]), "") })
+        |> join("")
 
     tool-indices or(state.block-order, [])
     calls map(tool-indices, (idx) {

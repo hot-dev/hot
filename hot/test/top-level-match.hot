@@ -1,0 +1,46 @@
+// Regression: match flows in top-level statement position (namespace /
+// eval / run wrapper). The compiler's variable-declaration path compiled
+// Value::Match without storing the binding, so `out match x { ... }`
+// bound nothing and standalone top-level matches lost their auto-named
+// result — the run result silently fell back to the preceding variable
+// (the subject, or even the namespace ref). All shapes must behave
+// exactly like their fn-body equivalents.
+::hot::test::top-level-match ns
+meta ["test"]
+
+subject ""
+
+// Shape 1: standalone match with identifier subject (auto-named binding)
+match subject { "" => 1 _ => 0 }
+
+// Shape 2: standalone match with literal subject
+match "" { "" => 2 _ => 0 }
+
+// Shape 3: named binding
+bound match subject { "" => 3 _ => 0 }
+
+// Type-pattern arms at top level
+typed match subject { Str => "is-str" _ => "other" }
+
+// Result-pattern arms at top level (EnsureResult path)
+failure err("nope")
+outcome match failure {
+    Result.Err => { `payload: ${failure}` }
+    _ => { "ok" }
+}
+
+test-top-level-match-bindings
+meta ["test"] fn () {
+    assert-eq(3, bound, "named top-level match binding stores its result")
+    assert-eq("is-str", typed, "type-pattern arms work at top level")
+    assert-eq("payload: nope", outcome, "Result arms + subject payload read work at top level")
+}
+
+test-fn-body-equivalents-still-work
+meta ["test"] fn () {
+    f fn (s: Any): Int { match s { "" => 1 _ => 0 } }
+    assert-eq(1, f(""), "value arm in fn body")
+    assert-eq(0, f("x"), "default arm in fn body")
+    g fn (s: Any): Str { match s { Str => "is-str" _ => "other" } }
+    assert-eq("is-str", g(""), "type arm in fn body")
+}

@@ -1,0 +1,133 @@
+::stripe::customers ns
+
+api-request ::stripe::api/request
+query-string ::stripe::api/query-string
+HttpError ::stripe::api/HttpError
+is-ok-response ::hot::http/is-ok-response
+
+// ============================================================================
+// Customers
+// ============================================================================
+
+CreateCustomerRequest type {
+  name: Str?,
+  email: Str?,
+  phone: Str?,
+  description: Str?,
+  address: Map?,
+  shipping: Map?,
+  metadata: Map?,
+  payment_method: Str?,
+  invoice_settings: Map?,
+  tax_exempt: Str?,
+  preferred_locales: Vec<Str>?
+}
+
+create-customer
+meta {
+    doc: """
+POST /v1/customers - Create a customer.
+
+**Example**
+
+```hot
+::customers ::stripe::customers
+
+customer ::customers/create-customer(::customers/CreateCustomerRequest({
+  name: "Alice Smith",
+  email: "alice@example.com",
+  metadata: {user_id: "42"}
+}))
+customer.id  // => "cus_..."
+```
+"""
+}
+fn (request: CreateCustomerRequest): Map {
+  response api-request("POST", `${::stripe/BASE_URL}/v1/customers`, {}, request)
+  if(is-ok-response(response), response.body, err(HttpError(response)))
+}
+
+get-customer
+meta {
+    doc: """GET /v1/customers/{customer} - Retrieve a customer by ID."""
+}
+fn (customer: Str): Map {
+  response api-request("GET", `${::stripe/BASE_URL}/v1/customers/${customer}`)
+  if(is-ok-response(response), response.body, err(HttpError(response)))
+}
+
+UpdateCustomerRequest type {
+  name: Str?,
+  email: Str?,
+  phone: Str?,
+  description: Str?,
+  address: Map?,
+  shipping: Map?,
+  metadata: Map?,
+  default_source: Str?,
+  invoice_settings: Map?,
+  tax_exempt: Str?
+}
+
+update-customer
+meta {
+    doc: """POST /v1/customers/{customer} - Update a customer. Only the fields you provide are changed."""
+}
+fn (customer: Str, request: UpdateCustomerRequest): Map {
+  response api-request("POST", `${::stripe/BASE_URL}/v1/customers/${customer}`, {}, request)
+  if(is-ok-response(response), response.body, err(HttpError(response)))
+}
+
+delete-customer
+meta {
+    doc: """DELETE /v1/customers/{customer} - Permanently delete a customer. Cancels any active subscriptions. Returns `{id, object: "customer", deleted: true}`."""
+}
+fn (customer: Str): Map {
+  response api-request("DELETE", `${::stripe/BASE_URL}/v1/customers/${customer}`)
+  if(is-ok-response(response), response.body, err(HttpError(response)))
+}
+
+ListCustomersRequest type {
+  email: Str?,
+  created: Any?,
+  limit: Int?,
+  starting_after: Str?,
+  ending_before: Str?,
+  test_clock: Str?
+}
+
+list-customers
+meta {
+    doc: """
+GET /v1/customers - List customers, most recent first. Filter by `email` (exact match) or `created`. Paginate with `limit` (1-100) and `starting_after`.
+
+**Example**
+
+```hot
+::customers ::stripe::customers
+
+page ::customers/list-customers(::customers/ListCustomersRequest({limit: 10}))
+page.data      // => [{id: "cus_...", ...}, ...]
+page.has_more  // => true
+```
+"""
+}
+fn
+(): Map {
+  list-customers(ListCustomersRequest({}))
+},
+(request: ListCustomersRequest): Map {
+  response api-request("GET", `${::stripe/BASE_URL}/v1/customers${query-string(request)}`)
+  if(is-ok-response(response), response.body, err(HttpError(response)))
+}
+
+search-customers
+meta {
+    doc: """
+GET /v1/customers/search - Search customers with Stripe's search query language, e.g. `email:"alice@example.com"` or `metadata["user_id"]:"42"`. See https://docs.stripe.com/search#query-fields-for-customers.
+"""
+}
+fn (query: Str): Map {
+  response api-request("GET", `${::stripe/BASE_URL}/v1/customers/search${query-string({query: query})}`)
+  if(is-ok-response(response), response.body, err(HttpError(response)))
+}

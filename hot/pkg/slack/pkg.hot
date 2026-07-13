@@ -3,7 +3,7 @@
 hot.pkg.slack {
   name: "hot.dev/slack",
   version: "1.1.0",
-  hot-min-version: "1.2.0",
+  hot-min-version: "2.6.1",
   description: "Slack API bindings for Hot. Includes Chat, Channels, Users, Files, Apps, Calls, Auth, Team, OAuth, Emoji, and Views APIs.",
   author: "Hot Dev",
   email: "support@hot.dev",

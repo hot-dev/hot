@@ -1,0 +1,15 @@
+::hot::pkg ns
+
+hot.pkg.elevenlabs {
+  name: "hot.dev/elevenlabs",
+  version: "0.1.0",
+  hot-min-version: "2.6.0",
+  description: "ElevenLabs API bindings for Hot. Text-to-speech (including streaming), voice management, models, and account info.",
+  author: "Hot Dev",
+  email: "support@hot.dev",
+  license: "Apache-2.0",
+  tags: ["ai", "voice", "audio"],
+  deps: {},
+  src-paths: ["src/"],
+  test-paths: ["test/"]
+}

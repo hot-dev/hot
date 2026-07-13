@@ -1,0 +1,85 @@
+::github::pulls ns
+
+::api ::github::api
+query-string ::hot::uri/query-string
+
+list-pulls
+meta {
+    doc: """GET /repos/{owner}/{repo}/pulls - List pull requests. `params` supports `state`, `head`, `base`, `sort`, `per_page`, `page`."""
+}
+fn
+(owner: Str, repo: Str): Vec {
+  ::api/json("GET", `/repos/${owner}/${repo}/pulls`)
+},
+(owner: Str, repo: Str, params: Map): Vec {
+  ::api/json("GET", `/repos/${owner}/${repo}/pulls${query-string(params)}`)
+}
+
+get-pull
+meta {
+    doc: """GET /repos/{owner}/{repo}/pulls/{number} - One pull request (mergeability, head/base, diff stats)."""
+}
+fn (owner: Str, repo: Str, number: Int): Map {
+  ::api/json("GET", `/repos/${owner}/${repo}/pulls/${number}`)
+}
+
+create-pull
+meta {
+    doc: """
+    POST /repos/{owner}/{repo}/pulls - Open a pull request. `options`:
+    `body`, `draft`, `maintainer_can_modify`.
+
+    **Example**
+
+    ```hot
+    pr ::github::pulls/create-pull("acme", "api", "Add rate limiting", "feature/rate-limit", "main", {
+      body: "Implements token-bucket limiting.",
+      draft: true
+    })
+    pr.number
+    ```
+    """
+}
+fn
+(owner: Str, repo: Str, title: Str, head: Str, base: Str): Map {
+  create-pull(owner, repo, title, head, base, {})
+},
+(owner: Str, repo: Str, title: Str, head: Str, base: Str, options: Map): Map {
+  ::api/json("POST", `/repos/${owner}/${repo}/pulls`, {}, {title: title, head: head, base: base, ...options})
+}
+
+list-files
+meta {
+    doc: """GET /repos/{owner}/{repo}/pulls/{number}/files - The files changed by a pull request (filename, status, additions/deletions, patch)."""
+}
+fn (owner: Str, repo: Str, number: Int): Vec {
+  ::api/json("GET", `/repos/${owner}/${repo}/pulls/${number}/files`)
+}
+
+create-review
+meta {
+    doc: """POST /repos/{owner}/{repo}/pulls/{number}/reviews - Review a PR. `event` is "APPROVE", "REQUEST_CHANGES", or "COMMENT"; `body` is the review summary."""
+}
+fn (owner: Str, repo: Str, number: Int, event: Str, body: Str): Map {
+  ::api/json("POST", `/repos/${owner}/${repo}/pulls/${number}/reviews`, {}, {event: event, body: body})
+}
+
+request-reviewers
+meta {
+    doc: """POST /repos/{owner}/{repo}/pulls/{number}/requested_reviewers - Request reviews from users."""
+}
+fn (owner: Str, repo: Str, number: Int, reviewers: Vec): Map {
+  ::api/json("POST", `/repos/${owner}/${repo}/pulls/${number}/requested_reviewers`, {}, {reviewers: reviewers})
+}
+
+merge-pull
+meta {
+    doc: """PUT /repos/{owner}/{repo}/pulls/{number}/merge - Merge a PR. `options`: `merge_method` ("merge"/"squash"/"rebase"), `commit_title`, `commit_message`."""
+}
+fn
+(owner: Str, repo: Str, number: Int): Map {
+  ::api/json("PUT", `/repos/${owner}/${repo}/pulls/${number}/merge`, {}, {})
+},
+(owner: Str, repo: Str, number: Int, options: Map): Map {
+  ::api/json("PUT", `/repos/${owner}/${repo}/pulls/${number}/merge`, {}, options)
+}

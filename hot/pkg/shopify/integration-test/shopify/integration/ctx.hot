@@ -1,0 +1,12 @@
+::shopify::integration::ctx ns
+
+::env ::hot::env
+
+// Placeholder credentials for the shopify integration suite. Unset
+// environment variables are skipped entirely, so absent credentials
+// behave exactly as if never configured.
+::hot::ctx/set(filter-vals({
+    "shopify.shop": ::env/get("SHOPIFY_SHOP", ""),
+    "shopify.access.token": ::env/get("SHOPIFY_ACCESS_TOKEN", ""),
+    "shopify.webhook.secret": ::env/get("SHOPIFY_WEBHOOK_SECRET", ""),
+}, (v) { not(is-empty(v)) }))
