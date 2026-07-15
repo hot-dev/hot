@@ -5,7 +5,7 @@ query-string ::hot::uri/query-string
 
 list-workflow-runs
 meta {
-    doc: """GET /repos/{owner}/{repo}/actions/runs - Recent workflow runs. `params` supports `branch`, `status` ("queued"/"in_progress"/"completed"), `event`, `per_page`."""
+    doc: """GET /repos/{owner}/{repo}/actions/runs - Recent workflow runs. `params` supports `branch`, `status` ("queued"/"in_progress"/"completed"), `event`, `per_page`, `page`. Returns a single page (GitHub default 30, max 100); pass `page` to paginate."""
 }
 fn
 (owner: Str, repo: Str): Map {

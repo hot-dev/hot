@@ -922,11 +922,21 @@ hot.project.pkg-integration-pinecone.test.paths ["./hot/pkg/pinecone/integration
 hot.project.pkg-integration-pinecone.test.capture true
 hot.project.pkg-integration-pinecone.deps {}
 
-// GitHub integration tests (requires github.token; read-only)
+// GitHub integration tests (requires github.token; read-only — any PAT works)
 hot.project.pkg-integration-github.src.paths ["./hot/pkg/github/src"]
 hot.project.pkg-integration-github.test.paths ["./hot/pkg/github/integration-test"]
 hot.project.pkg-integration-github.test.capture true
 hot.project.pkg-integration-github.deps {
+    "hot.dev/jwt": { "local": "./hot/pkg/jwt" },
+}
+
+// GitHub sandbox integration tests (writes to the dedicated fixture repo;
+// requires github.token with read/write on Issues, Pull requests, Contents,
+// and Actions for hot-dev/hot-github-integration-test)
+hot.project.pkg-integration-github-sandbox.src.paths ["./hot/pkg/github/src"]
+hot.project.pkg-integration-github-sandbox.test.paths ["./hot/pkg/github/sandbox-test"]
+hot.project.pkg-integration-github-sandbox.test.capture true
+hot.project.pkg-integration-github-sandbox.deps {
     "hot.dev/jwt": { "local": "./hot/pkg/jwt" },
 }
 

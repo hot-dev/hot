@@ -9,7 +9,8 @@ meta {
     GET /repos/{owner}/{repo}/issues - List issues (GitHub includes PRs;
     filter on the `pull_request` key if you need issues only). `params`
     supports `state` ("open"/"closed"/"all"), `labels` (comma-separated),
-    `assignee`, `since`, `per_page`, `page`.
+    `assignee`, `since`, `per_page`, `page`. Returns a single page (GitHub
+    default 30, max 100); pass `page` to paginate.
     """
 }
 fn
@@ -79,10 +80,14 @@ fn (owner: Str, repo: Str, number: Int, body: Str): Map {
 
 list-comments
 meta {
-    doc: """GET /repos/{owner}/{repo}/issues/{number}/comments - The comments on an issue or pull request."""
+    doc: """GET /repos/{owner}/{repo}/issues/{number}/comments - The comments on an issue or pull request. `params` supports `since`, `per_page`, `page`. Returns a single page (GitHub default 30, max 100); pass `page` to paginate."""
 }
-fn (owner: Str, repo: Str, number: Int): Vec {
+fn
+(owner: Str, repo: Str, number: Int): Vec {
   ::api/json("GET", `/repos/${owner}/${repo}/issues/${number}/comments`)
+},
+(owner: Str, repo: Str, number: Int, params: Map): Vec {
+  ::api/json("GET", `/repos/${owner}/${repo}/issues/${number}/comments${query-string(params)}`)
 }
 
 add-labels

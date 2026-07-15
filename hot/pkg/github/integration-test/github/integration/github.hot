@@ -29,3 +29,19 @@ meta ["test"] fn () {
     hits ::search/search-issues("repo:rust-lang/rust is:issue is:open label:C-bug")
     assert(gt(hits.total_count, 0))
 }
+
+test-list-org-repos
+meta ["test"] fn () {
+    repos ::repos/list-org-repos("hot-dev", {per_page: 100})
+    assert(gt(length(repos), 0), "org listing should return repos")
+    assert-eq(1, length(filter(repos, (r) { eq(r.name, "hot-github-integration-test") })),
+        "fixture repo should be visible in the org listing")
+}
+
+test-get-content-on-directory-errs
+meta ["test"] fn () {
+    // The contents endpoint returns a Vec for directories; get-content
+    // must surface that as a clear Err, not a halt on .path/.sha.
+    out ::repos/get-content("hot-dev", "hot-github-integration-test", "fixtures")
+    assert(is-err(out), "directory path should err")
+}
