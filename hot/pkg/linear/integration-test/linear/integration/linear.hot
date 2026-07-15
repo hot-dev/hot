@@ -2,13 +2,26 @@
 meta ["test"]
 
 // =============================================================================
-// Integration Tests (live Linear; read-only)
+// Integration Tests (live Linear)
 // =============================================================================
-// Requires ctx: linear.api.key
+// Requires ctx: linear.api.key. The lifecycle test writes to the workspace:
+// it creates one clearly-marked issue, exercises update/comment/state moves,
+// and deletes it (Linear trash, recoverable) before finishing. It targets
+// the team named by LINEAR_TEST_TEAM_KEY, or the workspace's first team
+// when unset.
 // Run with: hot test --project pkg-integration-linear
 
+::env ::hot::env
 ::teams ::linear::teams
 ::issues ::linear::issues
+
+test-team fn (): Map {
+    key ::env/get("LINEAR_TEST_TEAM_KEY", "")
+    cond {
+        not(is-empty(key)) => { ::teams/get-team-by-key(key) }
+        => { first(::teams/list-teams().nodes) }
+    }
+}
 
 test-viewer
 meta ["test"] fn () {
@@ -23,4 +36,57 @@ meta ["test"] fn () {
 
     page ::issues/list-issues({first: 5})
     assert(lte(length(page.nodes), 5))
+}
+
+test-team-states-and-labels
+meta ["test"] fn () {
+    team test-team()
+    assert(is-some(team.id), "test team should resolve")
+
+    states ::teams/list-states(team.id)
+    assert(gt(length(states.nodes), 0), "team should have workflow states")
+    types map(states.nodes, (s) { s.type })
+    assert(in("backlog", types), "default workflow includes a backlog state")
+
+    labels ::teams/list-labels(team.id)
+    assert(not(is-err(labels)), `list-labels: ${if-err(labels, (e) { Str(e) })}`)
+}
+
+test-issue-lifecycle
+meta ["test"] fn () {
+    m `itest-${Uuid()}`
+    team test-team()
+
+    issue ::issues/create-issue(team.id, `Integration test ${m}`, {
+        description: "Opened by pkg-integration-linear; deleted automatically.",
+        priority: 4
+    })
+    assert(not(is-err(issue)), `create-issue: ${if-err(issue, (e) { Str(e) })}`)
+    assert(is-some(issue.identifier), "created issue has an identifier")
+
+    fetched ::issues/get-issue(issue.identifier)
+    assert-eq(issue.id, fetched.id, "get-issue resolves the human identifier")
+
+    updated ::issues/update-issue(issue.id, {title: `Integration test ${m} (updated)`, priority: 3})
+    assert-eq(`Integration test ${m} (updated)`, updated.title)
+    assert-eq(3, updated.priority)
+
+    comment ::issues/create-comment(issue.id, `Comment from the integration suite (${m}).`)
+    assert(is-some(comment.id), "comment created")
+
+    comments ::issues/list-comments(issue.id)
+    assert-eq(1, length(filter(comments.nodes, (c) { eq(c.id, comment.id) })),
+        "new comment appears in the issue's comments")
+
+    // Move to a different workflow state than the one it was created in.
+    states ::teams/list-states(team.id)
+    others filter(states.nodes, (s) { ne(s.id, updated.state.id) })
+    assert(gt(length(others), 0), "team has another state to move to")
+    target first(others)
+    moved ::issues/update-issue(issue.id, {stateId: target.id})
+    assert-eq(target.id, moved.state.id, "issue moved to the target state")
+
+    // Self-clean: to the trash (recoverable in Linear).
+    deleted ::issues/delete-issue(issue.id)
+    assert(deleted, "issue deleted")
 }

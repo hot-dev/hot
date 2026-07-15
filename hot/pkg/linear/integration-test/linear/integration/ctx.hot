@@ -7,4 +7,5 @@
 // behave exactly as if never configured.
 ::hot::ctx/set(filter-vals({
     "linear.api.key": ::env/get("LINEAR_API_KEY", ""),
+    "linear.webhook.secret": ::env/get("LINEAR_WEBHOOK_SECRET", ""),
 }, (v) { not(is-empty(v)) }))

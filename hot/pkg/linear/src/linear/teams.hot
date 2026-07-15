@@ -44,6 +44,26 @@ fn (key: Str): Any {
   }
 }
 
+list-labels
+meta {
+    doc: """A team's issue labels (`{nodes: [{id, name, color}], ...}`). Label ids feed `create-issue({labelIds: [...]})`."""
+}
+fn (team-id: Str): Map {
+  query """
+  query Labels($teamId: String!) {
+    team(id: $teamId) {
+      labels { nodes { id name color } }
+    }
+  }
+  """
+  data ::api/graphql(query, {teamId: team-id})
+  match data {
+    Result.Err => { err(data) }
+
+    _ => { data.team.labels }
+  }
+}
+
 list-states
 meta {
     doc: """A team's workflow states (`{id, name, type}` — types: triage/backlog/unstarted/started/completed/canceled). State ids drive `update-issue({stateId: ...})`."""

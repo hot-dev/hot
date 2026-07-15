@@ -1,0 +1,49 @@
+::linear::webhooks ns
+meta {
+    doc: """Linear webhook verification: HMAC-SHA256 over the raw body, delivered as a hex digest in the `linear-signature` header. See https://developers.linear.app/docs/graphql/webhooks."""
+}
+
+::ctx ::hot::ctx
+::hmac ::hot::hmac
+
+verify-request
+meta {
+    ctx: {"linear.webhook.secret": {required: false}},
+    doc: """
+    Verify a Linear webhook request. Returns true if the request is
+    authentic. Uses the `linear.webhook.secret` context variable by
+    default (failing when it is unset), or accepts an explicit secret —
+    an empty explicit secret never verifies.
+
+    **Example**
+
+    ```hot
+    linear-webhook
+    meta {webhook: {service: "linear", path: "/linear/webhook"}}
+    fn (request) {
+      if(not(::linear::webhooks/verify-request(request)),
+        ::hot::http/HttpResponse({status: 401, body: "invalid signature"}),
+        handle-event(request.body))
+    }
+    ```
+    """
+}
+fn
+(request: Map): Bool {
+  secret or(::ctx/get("linear.webhook.secret"), "")
+  if(is-empty(secret),
+    fail("linear.webhook.secret is not set. Add it in Context Variables to verify webhook requests.")
+  )
+  verify-request(request, secret)
+},
+(request: Map, secret: Str): Bool {
+  signature get(request.headers, "linear-signature", "")
+  cond {
+    // An empty key would make every signature forgeable: fail closed.
+    is-empty(secret) => { false }
+    => {
+      raw-body ::hot::http/raw-body(request)
+      ::hmac/hmac-verify-hex(secret, raw-body, signature, "sha256")
+    }
+  }
+}

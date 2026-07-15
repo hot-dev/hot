@@ -173,6 +173,62 @@ fn (issue-id: Str, body: Str): Map {
   }
 }
 
+list-comments
+meta {
+    doc: """The comments on an issue, oldest first (`{nodes: [{id, body, createdAt, user}], ...}`)."""
+}
+fn (issue-id: Str): Map {
+  query """
+  query Comments($id: String!) {
+    issue(id: $id) {
+      comments { nodes { id body createdAt user { id name } } }
+    }
+  }
+  """
+  data ::api/graphql(query, {id: issue-id})
+  match data {
+    Result.Err => { err(data) }
+
+    _ => { data.issue.comments }
+  }
+}
+
+archive-issue
+meta {
+    doc: """Archive an issue (it stays queryable but leaves active views). Returns true on success."""
+}
+fn (id: Str): Bool {
+  query """
+  mutation ArchiveIssue($id: String!) {
+    issueArchive(id: $id) { success }
+  }
+  """
+  data ::api/graphql(query, {id: id})
+  match data {
+    Result.Err => { err(data) }
+
+    _ => { data.issueArchive.success }
+  }
+}
+
+delete-issue
+meta {
+    doc: """Move an issue to the trash (recoverable in Linear for a grace period). Returns true on success."""
+}
+fn (id: Str): Bool {
+  query """
+  mutation DeleteIssue($id: String!) {
+    issueDelete(id: $id) { success }
+  }
+  """
+  data ::api/graphql(query, {id: id})
+  match data {
+    Result.Err => { err(data) }
+
+    _ => { data.issueDelete.success }
+  }
+}
+
 search-issues
 meta {
     doc: """Full-text issue search. Returns `{nodes, pageInfo}`."""

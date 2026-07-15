@@ -43,6 +43,40 @@ meta ["test"] fn () {
 }
 
 // ============================================================================
+// Webhook verification (vectors generated independently with Python)
+// ============================================================================
+
+test-webhook-verify-accepts-vector
+meta ["test"] fn () {
+    request {
+        headers: {linear-signature: "f94173456225cddb0497ce1f384bd4b3498257e64ab2c50019730e6b7c678325"},
+        body-raw: """{"action":"create","type":"Issue"}"""
+    }
+
+    assert(::linear::webhooks/verify-request(request, "lin_wh_test_secret"))
+}
+
+test-webhook-verify-rejects
+meta ["test"] fn () {
+    // Signature for a Comment payload must not verify an Issue payload.
+    tampered {
+        headers: {linear-signature: "244a4f05be84071b099c284b3cfcb08eb0f9e947cf763f52fb2bca0818f0c402"},
+        body-raw: """{"action":"create","type":"Issue"}"""
+    }
+
+    assert(not(::linear::webhooks/verify-request(tampered, "lin_wh_test_secret")), "wrong-body signature fails")
+    assert(not(::linear::webhooks/verify-request({headers: {}, body-raw: "{}"}, "lin_wh_test_secret")), "missing header fails")
+}
+
+test-webhook-empty-secret-fails-closed
+meta ["test"] fn () {
+    body """{"action":"create"}"""
+    sig ::hot::hmac/hmac-sha256("", body)
+    request {headers: {linear-signature: sig}, body-raw: body}
+    assert(not(::linear::webhooks/verify-request(request, "")), "empty secret fails closed")
+}
+
+// ============================================================================
 // Issue create input
 // ============================================================================
 
