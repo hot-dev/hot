@@ -963,7 +963,8 @@ hot.project.pkg-integration-google.deps {
     "hot.dev/oauth2": { "local": "./hot/pkg/oauth2" }
 }
 
-// Linear integration tests (requires linear.api.key; read-only)
+// Linear integration tests (requires linear.api.key; the lifecycle test
+// writes one clearly-marked issue and deletes it to trash)
 hot.project.pkg-integration-linear.src.paths ["./hot/pkg/linear/src"]
 hot.project.pkg-integration-linear.test.paths ["./hot/pkg/linear/integration-test"]
 hot.project.pkg-integration-linear.test.capture true

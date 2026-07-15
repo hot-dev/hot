@@ -46,6 +46,10 @@ meta ["test"] fn () {
 // Webhook verification (vectors generated independently with Python)
 // ============================================================================
 
+// The fixed vectors carry no webhookTimestamp, so they exercise the HMAC
+// with the replay check disabled (max-age-ms 0); the replay tests below
+// sign fresh bodies in-test.
+
 test-webhook-verify-accepts-vector
 meta ["test"] fn () {
     request {
@@ -53,7 +57,7 @@ meta ["test"] fn () {
         body-raw: """{"action":"create","type":"Issue"}"""
     }
 
-    assert(::linear::webhooks/verify-request(request, "lin_wh_test_secret"))
+    assert(::linear::webhooks/verify-request(request, "lin_wh_test_secret", 0))
 }
 
 test-webhook-verify-rejects
@@ -64,8 +68,8 @@ meta ["test"] fn () {
         body-raw: """{"action":"create","type":"Issue"}"""
     }
 
-    assert(not(::linear::webhooks/verify-request(tampered, "lin_wh_test_secret")), "wrong-body signature fails")
-    assert(not(::linear::webhooks/verify-request({headers: {}, body-raw: "{}"}, "lin_wh_test_secret")), "missing header fails")
+    assert(not(::linear::webhooks/verify-request(tampered, "lin_wh_test_secret", 0)), "wrong-body signature fails")
+    assert(not(::linear::webhooks/verify-request({headers: {}, body-raw: "{}"}, "lin_wh_test_secret", 0)), "missing header fails")
 }
 
 test-webhook-empty-secret-fails-closed
@@ -74,6 +78,26 @@ meta ["test"] fn () {
     sig ::hot::hmac/hmac-sha256("", body)
     request {headers: {linear-signature: sig}, body-raw: body}
     assert(not(::linear::webhooks/verify-request(request, "")), "empty secret fails closed")
+}
+
+signed-request fn (body: Str): Map {
+    {headers: {linear-signature: ::hot::hmac/hmac-sha256("lin_wh_test_secret", body)}, body-raw: body}
+}
+
+test-webhook-replay-protection
+meta ["test"] fn () {
+    now ::hot::time/epoch-millis(::hot::time/now())
+
+    fresh signed-request(`{"action":"create","webhookTimestamp":${now}}`)
+    assert(::linear::webhooks/verify-request(fresh, "lin_wh_test_secret"), "fresh timestamp verifies")
+
+    stale signed-request(`{"action":"create","webhookTimestamp":${sub(now, 120000)}}`)
+    assert(not(::linear::webhooks/verify-request(stale, "lin_wh_test_secret")), "2-minute-old timestamp is rejected")
+    assert(::linear::webhooks/verify-request(stale, "lin_wh_test_secret", 300000), "wider explicit tolerance accepts it")
+
+    missing signed-request("""{"action":"create"}""")
+    assert(not(::linear::webhooks/verify-request(missing, "lin_wh_test_secret")), "missing timestamp fails closed")
+    assert(::linear::webhooks/verify-request(missing, "lin_wh_test_secret", 0), "replay check can be disabled explicitly")
 }
 
 // ============================================================================

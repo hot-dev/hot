@@ -6,9 +6,13 @@ meta ["test"]
 // =============================================================================
 // Requires ctx: linear.api.key. The lifecycle test writes to the workspace:
 // it creates one clearly-marked issue, exercises update/comment/state moves,
-// and deletes it (Linear trash, recoverable) before finishing. It targets
-// the team named by LINEAR_TEST_TEAM_KEY, or the workspace's first team
-// when unset.
+// and deletes it (Linear trash, recoverable) before finishing. Cleanup is
+// self-healing rather than guaranteed-on-exit: a run that dies mid-test
+// leaves its issue behind, and the next run's entry sweep deletes any
+// stale "Integration test itest-" issues before starting. (Assumes the
+// runner executes tests sequentially — a concurrent lifecycle test's
+// fresh issue would look stale to the sweep.) Targets the team named by
+// LINEAR_TEST_TEAM_KEY, or the workspace's first team when unset.
 // Run with: hot test --project pkg-integration-linear
 
 ::env ::hot::env
@@ -45,17 +49,34 @@ meta ["test"] fn () {
 
     states ::teams/list-states(team.id)
     assert(gt(length(states.nodes), 0), "team should have workflow states")
-    types map(states.nodes, (s) { s.type })
-    assert(in("backlog", types), "default workflow includes a backlog state")
+    // Validate shape without assuming any particular workflow (or even
+    // Linear's current type enum — this suite met a "duplicate" type in
+    // the wild): every state carries an id, a name, and a type.
+    malformed filter(states.nodes, (s) {
+        or(is-empty(or(s.id, "")), is-empty(or(s.name, "")), is-empty(or(s.type, "")))
+    })
+    assert(is-empty(malformed), "every state has id, name, and type")
 
     labels ::teams/list-labels(team.id)
     assert(not(is-err(labels)), `list-labels: ${if-err(labels, (e) { Str(e) })}`)
+}
+
+// Delete any issue a previous crashed run left behind in the test team.
+// Trashed issues are excluded from list-issues, so this only ever sees
+// genuine leaks.
+sweep-stale-issues fn (team-id: Str) {
+    stale ::issues/list-issues({
+        filter: {team: {id: {eq: team-id}}, title: {startsWith: "Integration test itest-"}},
+        first: 50
+    })
+    map(stale.nodes, (i) { ::issues/delete-issue(i.id) })
 }
 
 test-issue-lifecycle
 meta ["test"] fn () {
     m `itest-${Uuid()}`
     team test-team()
+    sweep-stale-issues(team.id)
 
     issue ::issues/create-issue(team.id, `Integration test ${m}`, {
         description: "Opened by pkg-integration-linear; deleted automatically.",
@@ -86,7 +107,8 @@ meta ["test"] fn () {
     moved ::issues/update-issue(issue.id, {stateId: target.id})
     assert-eq(target.id, moved.state.id, "issue moved to the target state")
 
-    // Self-clean: to the trash (recoverable in Linear).
+    // Self-clean: to the trash (recoverable in Linear). If anything above
+    // halted, this is skipped and the next run's sweep handles it.
     deleted ::issues/delete-issue(issue.id)
     assert(deleted, "issue deleted")
 }

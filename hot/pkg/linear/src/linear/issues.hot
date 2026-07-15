@@ -175,17 +175,30 @@ fn (issue-id: Str, body: Str): Map {
 
 list-comments
 meta {
-    doc: """The comments on an issue, oldest first (`{nodes: [{id, body, createdAt, user}], ...}`)."""
+    doc: """The comments on an issue. `options` (2-arity) supports `first` (page size, default 50) and `after` (cursor). Returns `{nodes: [{id, body, createdAt, user}], pageInfo: {hasNextPage, endCursor}}`."""
 }
-fn (issue-id: Str): Map {
+fn
+(issue-id: Str): Map {
+  list-comments(issue-id, {})
+},
+(issue-id: Str, options: Map): Map {
   query """
-  query Comments($id: String!) {
+  query Comments($id: String!, $first: Int, $after: String) {
     issue(id: $id) {
-      comments { nodes { id body createdAt user { id name } } }
+      comments(first: $first, after: $after) {
+        nodes { id body createdAt user { id name } }
+        pageInfo { hasNextPage endCursor }
+      }
     }
   }
   """
-  data ::api/graphql(query, {id: issue-id})
+  variables {
+    id: issue-id,
+    first: or(get(options, "first"), 50),
+    after: get(options, "after")
+  }
+
+  data ::api/graphql(query, filter-vals(variables, is-some))
   match data {
     Result.Err => { err(data) }
 
