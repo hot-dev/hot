@@ -1,0 +1,85 @@
+::attio::tasks ns
+
+::api ::attio::api
+
+build-task-payload
+meta {
+    doc: """Build the create-task payload. Attio requires `deadline_at`, `linked_records`, and `assignees` to be present (nullable/empty is fine); `options` overrides any of them. Exposed for testing; `create-task` uses it."""
+}
+fn (content: Str, options: Map): Map {
+  {
+    data: {
+      content: content,
+      format: "plaintext",
+      is_completed: false,
+      deadline_at: null,
+      linked_records: [],
+      assignees: [],
+      ...options
+    }
+  }
+}
+
+list-tasks
+meta {
+    doc: """GET /tasks - The workspace's tasks (`limit`/`offset` via the 1-arity options map)."""
+}
+fn
+(): Map {
+  ::api/json("GET", "/tasks")
+},
+(options: Map): Map {
+  ::api/json("GET", `/tasks${::hot::uri/query-string(options)}`)
+}
+
+create-task
+meta {
+    doc: """
+    POST /tasks - Create a task. `options`: `deadline_at` (RFC3339 or
+    null), `linked_records` (Vec of `{target_object, target_record_id}`),
+    `assignees` (Vec of `{referenced_actor_type: "workspace-member",
+    referenced_actor_id}`).
+
+    **Example**
+
+    ```hot
+    ::attio::tasks/create-task("Send the proposal", {
+      deadline_at: "2026-08-01T12:00:00Z",
+      linked_records: [{target_object: "companies", target_record_id: company.id.record_id}]
+    })
+    ```
+    """
+}
+fn
+(content: Str): Map {
+  create-task(content, {})
+},
+(content: Str, options: Map): Map {
+  out ::api/json("POST", "/tasks", build-task-payload(content, options))
+  match out {
+    Result.Err => { err(out) }
+
+    _ => { out.data }
+  }
+}
+
+update-task
+meta {
+    doc: """PATCH /tasks/{id} - Update a task (`is_completed`, `deadline_at`, `assignees`, `linked_records`)."""
+}
+fn (task-id: Str, changes: Map): Map {
+  out ::api/json("PATCH", `/tasks/${task-id}`, {data: changes})
+  match out {
+    Result.Err => { err(out) }
+
+    _ => { out.data }
+  }
+}
+
+delete-task
+meta {
+    doc: """DELETE /tasks/{id} - Delete a task."""
+}
+fn (task-id: Str): Any {
+  ::api/json("DELETE", `/tasks/${task-id}`)
+}

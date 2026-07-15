@@ -5,8 +5,10 @@ meta {
 
     Attio models everything as objects (`people`, `companies`, `deals`,
     custom objects) holding records; `::attio::records` covers them
-    uniformly, `::attio::notes` logs activity, and `::attio::lists`
-    manages list entries.
+    uniformly (including object/attribute configuration), `::attio::notes`
+    logs activity, `::attio::tasks` manages tasks, `::attio::comments`
+    handles record threads, `::attio::lists` manages list entries, and
+    `::attio::workspace` exposes the token's workspace and members.
 
     **Setup** — context variable `attio.api.key`: an API key from
     Workspace settings → Developers.

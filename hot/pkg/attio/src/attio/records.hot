@@ -10,6 +10,27 @@ fn (): Map {
   ::api/json("GET", "/objects")
 }
 
+get-object
+meta {
+    doc: """GET /objects/{object} - One object's configuration (`api_slug`, singular/plural nouns). Requires the Object Configuration scope."""
+}
+fn (object: Str): Map {
+  out ::api/json("GET", `/objects/${object}`)
+  match out {
+    Result.Err => { err(out) }
+
+    _ => { out.data }
+  }
+}
+
+list-attributes
+meta {
+    doc: """GET /objects/{object}/attributes - An object's attributes (`api_slug`, `type`, `is_required`, ...). Attribute slugs are the keys `create-record` values use. Requires the Object Configuration scope."""
+}
+fn (object: Str): Map {
+  ::api/json("GET", `/objects/${object}/attributes`)
+}
+
 query-records
 meta {
     doc: """

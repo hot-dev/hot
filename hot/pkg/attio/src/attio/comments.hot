@@ -1,0 +1,56 @@
+::attio::comments ns
+
+::api ::attio::api
+
+build-comment-payload
+meta {
+    doc: """Build the create-comment payload. `target` is `{object, record_id}` to start a new thread on a record, or `{thread_id}` to reply to an existing thread. Exposed for testing; `create-comment` uses it."""
+}
+fn (target: Map, content: Str, author-member-id: Str): Map {
+  base {
+    format: "plaintext",
+    content: content,
+    author: {type: "workspace-member", id: author-member-id}
+  }
+
+  data cond {
+    is-some(get(target, "thread_id")) => { {...base, thread_id: target.thread_id} }
+    => { {...base, record: {object: target.object, record_id: target.record_id}} }
+  }
+  {data: data}
+}
+
+create-comment
+meta {
+    doc: """
+    POST /comments - Comment on a record (new thread) or reply to a
+    thread. Comments require an author: a workspace member id from
+    `::attio::workspace/list-members`. Requires the Comments scope.
+
+    **Example**
+
+    ```hot
+    me first(::attio::workspace/list-members().data)
+    ::attio::comments/create-comment(
+      {object: "people", record_id: person.id.record_id},
+      "Followed up by email.",
+      me.id.workspace_member_id)
+    ```
+    """
+}
+fn (target: Map, content: Str, author-member-id: Str): Map {
+  out ::api/json("POST", "/comments", build-comment-payload(target, content, author-member-id))
+  match out {
+    Result.Err => { err(out) }
+
+    _ => { out.data }
+  }
+}
+
+list-threads
+meta {
+    doc: """GET /threads?record_id=&object= - The comment threads on a record (each thread carries its comments)."""
+}
+fn (object: Str, record-id: Str): Map {
+  ::api/json("GET", `/threads?record_id=${record-id}&object=${object}`)
+}
