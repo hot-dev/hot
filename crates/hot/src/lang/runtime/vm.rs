@@ -5050,6 +5050,16 @@ impl VirtualMachine {
     /// Extract a human-readable message from a Result.Err payload so the
     /// escalation halt carries the underlying failure (a connect error,
     /// an HTTP status, ...) instead of an opaque placeholder.
+    /// The user-facing message for a hotlib error payload. Val's Display
+    /// renders strings Hot-literal-style (quoted), so extract Str content
+    /// directly to avoid quote-wrapped messages.
+    fn hotlib_err_message(err_val: &Val) -> String {
+        match err_val {
+            Val::Str(msg) => (**msg).to_owned(),
+            other => other.to_string(),
+        }
+    }
+
     fn result_err_message(err_val: &Val) -> String {
         match err_val {
             Val::Str(s) => (**s).to_owned(),
@@ -5392,7 +5402,7 @@ impl VirtualMachine {
                     crate::lang::hot::libmap::HotLibFn::LibFn(f) => match f(args) {
                         crate::lang::hot::r#type::HotResult::Ok(val) => Ok(val),
                         crate::lang::hot::r#type::HotResult::Err(err_val) => {
-                            Err(VmError::runtime(err_val.to_string()))
+                            Err(VmError::runtime(Self::hotlib_err_message(&err_val)))
                         }
                     },
                     crate::lang::hot::libmap::HotLibFn::VmAwareFn(f)
@@ -5400,7 +5410,7 @@ impl VirtualMachine {
                     {
                         crate::lang::hot::r#type::HotResult::Ok(val) => Ok(val),
                         crate::lang::hot::r#type::HotResult::Err(err_val) => {
-                            Err(VmError::runtime(err_val.to_string()))
+                            Err(VmError::runtime(Self::hotlib_err_message(&err_val)))
                         }
                     },
                 };
@@ -5565,7 +5575,7 @@ impl VirtualMachine {
                     crate::lang::hot::libmap::HotLibFn::LibFn(f) => match f(args) {
                         crate::lang::hot::r#type::HotResult::Ok(val) => Ok(val),
                         crate::lang::hot::r#type::HotResult::Err(err_val) => {
-                            Err(VmError::runtime(err_val.to_string()))
+                            Err(VmError::runtime(Self::hotlib_err_message(&err_val)))
                         }
                     },
                     crate::lang::hot::libmap::HotLibFn::VmAwareFn(f)
@@ -5573,7 +5583,7 @@ impl VirtualMachine {
                     {
                         crate::lang::hot::r#type::HotResult::Ok(val) => Ok(val),
                         crate::lang::hot::r#type::HotResult::Err(err_val) => {
-                            Err(VmError::runtime(err_val.to_string()))
+                            Err(VmError::runtime(Self::hotlib_err_message(&err_val)))
                         }
                     },
                 };

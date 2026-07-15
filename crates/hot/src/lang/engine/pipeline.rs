@@ -1249,7 +1249,9 @@ impl Engine {
                             Err(e) => {
                                 // Fallback: if the Hot runner already set ::hot::test/test-run-success,
                                 // use that value instead of failing the whole run.
-                                tracing::error!(" Test execution failed: {}", e);
+                                // Debug-level only: the returned Err surfaces
+                                // to the user via the CLI.
+                                tracing::debug!(" Test execution failed: {}", e);
                                 if let Ok(val) = vm.lookup_variable("::hot::test/test-run-success")
                                 {
                                     // Accept Bool or Result.Ok variant ({$type: "::hot::type/Result.Ok", $val: ...})
@@ -1276,7 +1278,9 @@ impl Engine {
                                     };
                                     return Ok(crate::val::Val::Bool(success));
                                 }
-                                Err(format!("Test execution failed: {}", e))
+                                // The message already says the test runner
+                                // failed; don't stack another prefix on it.
+                                Err(e)
                             }
                         }
                     }
@@ -1719,8 +1723,10 @@ impl Engine {
                 }
             }
             Err(e) => {
-                tracing::debug!("Test execution failed with error: {:?}", e);
-                tracing::error!(" Failed to call test runner: {:?}", e);
+                // Debug-level only: the returned Err surfaces to the user via
+                // the CLI, so an error-level log here would print the same
+                // failure twice (once as a raw Debug struct).
+                tracing::debug!(" Failed to call test runner: {:?}", e);
 
                 // Use the enhanced RuntimeError formatting
                 if let crate::lang::runtime::vm::VmError::RuntimeError(runtime_error) = &e {
@@ -1775,7 +1781,10 @@ impl Engine {
                 }
             }
             Err(e) => {
-                tracing::error!(" Failed to call test runner with pattern: {:?}", e);
+                // Debug-level only: the returned Err surfaces to the user via
+                // the CLI, so an error-level log here would print the same
+                // failure twice (once as a raw Debug struct).
+                tracing::debug!(" Failed to call test runner with pattern: {:?}", e);
 
                 // If the error is about tests-failed variable not found, fall back to direct test discovery
                 if e.to_string().contains("tests-failed") {
@@ -1784,7 +1793,7 @@ impl Engine {
                     );
                     Err(format!("Hot test runner scoping issue: {}", e))
                 } else {
-                    Err(format!("Failed to call test runner with pattern: {}", e))
+                    Err(format!("Failed to call test runner: {}", e))
                 }
             }
         }
