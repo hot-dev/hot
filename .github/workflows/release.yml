@@ -283,7 +283,10 @@ jobs:
     # Compilation cache. Use a local disk cache restored/saved by actions/cache
     # so transient cache service errors do not happen inside rustc/clippy.
     - name: Setup sccache
-      uses: mozilla-actions/sccache-action@v0.0.6
+      uses: mozilla-actions/sccache-action@v0.0.10
+      with:
+        version: "v0.16.0"
+        token: ${{ github.token }}
 
     - name: Configure sccache (local disk cache)
       shell: bash
