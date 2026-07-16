@@ -211,6 +211,9 @@ make-error(3)"#;
 
     #[test]
     fn jit_user_call_halts_on_strict_err_argument() {
+        // The halt now propagates out of the JIT frame as a run failure
+        // (matching the interpreter), rather than surfacing as an Err value
+        // with the failure state set — this test used to assert the latter.
         let src = r#"::t ns
 ignore fn (_value: Any): Str { "callee-ran" }
 through-strict-call fn (bad: Bool): Str {
@@ -220,16 +223,18 @@ through-strict-call fn (bad: Bool): Str {
 through-strict-call(false)
 through-strict-call(false)
 through-strict-call(true)"#;
-        let out = compile_and_run_with_std_conf(
-            src,
-            Some(crate::val!({"jit": {"threshold": 1}})),
-        )
-        .expect("JIT strict-argument run");
-        assert!(out.is_err(), "expected strict-argument Err, got {out:?}");
+        let out = compile_and_run_with_std_conf(src, Some(crate::val!({"jit": {"threshold": 1}})));
+        let text = match &out {
+            Ok(v) => format!("OK:{v:?}"),
+            Err(e) => e.clone(),
+        };
         assert!(
-            out.unwrap_err()
-                .is_some_and(|value| value.to_string().contains("jit-strict-argument")),
-            "unexpected strict-argument error: {out:?}"
+            text.contains("jit-strict-argument"),
+            "halt must carry the Err payload, got {text}"
+        );
+        assert!(
+            !text.contains("callee-ran"),
+            "the callee ran despite the strict-argument halt: {text}"
         );
     }
 
@@ -317,29 +322,33 @@ run()"#;
 
     /// The strict-argument law under JIT-lowered arithmetic: an Err flowing
     /// into `add` must halt with the Err's own payload — never reach the
-    /// native (whose "add requires numbers" would mean the law was skipped).
-    /// The two modes surface the halt differently by design (the
-    /// interpreter aborts the run; a JIT frame returns the Err value with
-    /// the VM failure state set — the documented Ok-but-failed pattern),
-    /// so this asserts the law, not the wrapper shape.
+    /// native (whose "add requires numbers" would mean the law was skipped)
+    /// — and the halt must abort BOTH the halting frame and its caller.
+    /// The completion markers make any leak visible in the outcome: if the
+    /// frame or caller kept executing past the halt, the run would succeed
+    /// with the marker string instead of failing with the payload.
     #[test]
     fn jit_pipe_strict_target_halts_with_payload() {
         let src = r#"::t ns
-f fn (flag: Bool): Any {
+f fn (flag: Bool): Str {
     v if(flag, err("pipe-strict"), 1)
-    v |> add(1)
+    x v |> add(1)
+    "f-completed"
 }
-f(false)
-f(false)
-f(true)"#;
+caller fn (flag: Bool): Str {
+    r f(flag)
+    `${r}-observed`
+}
+caller(false)
+caller(false)
+caller(true)"#;
         let describe = |outcome: &Result<Val, String>| -> String {
             match outcome {
-                Ok(v) => format!("{v:?}"),
+                Ok(v) => format!("OK:{v:?}"),
                 Err(e) => e.clone(),
             }
         };
-        let jit =
-            compile_and_run_with_std_conf(src, Some(crate::val!({"jit": {"threshold": 1}})));
+        let jit = compile_and_run_with_std_conf(src, Some(crate::val!({"jit": {"threshold": 1}})));
         let interp =
             compile_and_run_with_std_conf(src, Some(crate::val!({"jit": {"mode": "off"}})));
         for (mode, outcome) in [("jit", &jit), ("interpreter", &interp)] {
@@ -352,36 +361,56 @@ f(true)"#;
                 !text.contains("add requires numbers"),
                 "{mode}: the Err reached the native — strict-argument law skipped: {text}"
             );
+            assert!(
+                !text.contains("f-completed"),
+                "{mode}: execution continued past the halt: {text}"
+            );
         }
     }
 
     /// The strict-argument law under JIT-lowered comparisons: bare-bool
     /// helpers can't carry a halt in-band, so the emitted sentinel check
     /// must abort the frame with the Err payload instead of letting the
-    /// comparison read as false.
+    /// comparison read as false — and the halt must propagate through the
+    /// caller boundary rather than dying at the frame edge. Completion
+    /// markers turn any leak (frame or caller continuing) into a visible
+    /// success that the assertions reject.
     #[test]
     fn jit_cmp_strict_operand_halts_with_payload() {
         for op in ["gt(v, 0)", "lt(v, 9)", "eq(v, 1)", "gte(v, 0)"] {
             let src = format!(
                 r#"::t ns
-f fn (flag: Bool): Any {{
+f fn (flag: Bool): Str {{
     v if(flag, err("cmp-strict"), 1)
-    {op}
+    x {op}
+    "f-completed"
 }}
-f(false)
-f(false)
-f(true)"#
+caller fn (flag: Bool): Str {{
+    r f(flag)
+    `${{r}}-observed`
+}}
+caller(false)
+caller(false)
+caller(true)"#
             );
-            let out =
-                compile_and_run_with_std_conf(&src, Some(crate::val!({"jit": {"threshold": 1}})));
-            let text = match &out {
-                Ok(v) => format!("{v:?}"),
-                Err(e) => e.clone(),
-            };
-            assert!(
-                text.contains("cmp-strict"),
-                "{op}: halt must carry the Err payload, got {text}"
-            );
+            for (mode, conf) in [
+                ("jit", crate::val!({"jit": {"threshold": 1}})),
+                ("interpreter", crate::val!({"jit": {"mode": "off"}})),
+            ] {
+                let out = compile_and_run_with_std_conf(&src, Some(conf));
+                let text = match &out {
+                    Ok(v) => format!("OK:{v:?}"),
+                    Err(e) => e.clone(),
+                };
+                assert!(
+                    text.contains("cmp-strict"),
+                    "{op} ({mode}): halt must carry the Err payload, got {text}"
+                );
+                assert!(
+                    !text.contains("f-completed"),
+                    "{op} ({mode}): execution continued past the halt: {text}"
+                );
+            }
         }
     }
 

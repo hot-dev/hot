@@ -7863,6 +7863,7 @@ impl VirtualMachine {
         let program = Arc::clone(&self.program);
         let saved_namespace = self.current_namespace.clone();
         self.current_namespace = lambda_info.defining_namespace.clone();
+        let was_halted = self.has_failed() || self.has_cancelled();
         let prev = crate::lang::runtime::jit::set_jit_vm_ptr(self as *mut VirtualMachine);
         let result =
             self.jit
@@ -7870,7 +7871,9 @@ impl VirtualMachine {
         crate::lang::runtime::jit::set_jit_vm_ptr(prev);
         self.current_namespace = saved_namespace;
 
-        result.map_err(|msg| VmError::RuntimeError(RuntimeError::new(msg)))
+        let result = result.map_err(|msg| VmError::RuntimeError(RuntimeError::new(msg)))?;
+        self.propagate_jit_halt(was_halted)?;
+        Ok(result)
     }
 
     /// Depth- and stack-guarded entry point for user-function execution.
@@ -7965,11 +7968,13 @@ impl VirtualMachine {
         if self.jit.config.is_enabled() {
             self.jit.record_call(function_id, args);
 
+            let was_halted = self.has_failed() || self.has_cancelled();
             if let Some(result) = self.try_jit_call(function_id, args).map_err(|msg| {
                 VmError::RuntimeError(
                     RuntimeError::new(msg).with_instruction_pointer(self.instruction_pointer),
                 )
             })? {
+                self.propagate_jit_halt(was_halted)?;
                 return Ok(result);
             }
 
@@ -7996,6 +8001,7 @@ impl VirtualMachine {
                                 )
                             })?
                         {
+                            self.propagate_jit_halt(was_halted)?;
                             return Ok(result);
                         }
                     }
@@ -8399,6 +8405,7 @@ impl VirtualMachine {
                                 // through the thread-local pointer; bracket the
                                 // call like try_jit_call does or a mid-loop
                                 // switch to compiled code sees no VM.
+                                let was_halted = self.has_failed() || self.has_cancelled();
                                 let prev = super::jit::set_jit_vm_ptr(self as *mut VirtualMachine);
                                 let call_result =
                                     self.jit.try_call_compiled(function_id, &new_args);
@@ -8409,6 +8416,7 @@ impl VirtualMachine {
                                             .with_instruction_pointer(self.instruction_pointer),
                                     )
                                 })? {
+                                    self.propagate_jit_halt(was_halted)?;
                                     break result;
                                 }
                             }
@@ -9317,6 +9325,37 @@ impl VirtualMachine {
     /// Check if the VM has failed
     pub fn has_failed(&self) -> bool {
         self.failure_state.failed.load(Ordering::SeqCst)
+    }
+
+    /// After a JIT-compiled frame returns, surface a halt it raised. JIT
+    /// helpers cannot unwind; they report halts by setting the failure (or
+    /// cancellation) state and aborting the frame with an Err value. The
+    /// interpreter would have propagated Err(VmError) through every caller,
+    /// so callers of JIT entry points invoke this right after a compiled
+    /// call returns: a halt that appeared during the call converts into the
+    /// same VmError the interpreter raises, unwinding the calling frame too.
+    fn propagate_jit_halt(&self, was_halted_before: bool) -> VmResult<()> {
+        if was_halted_before {
+            return Ok(());
+        }
+        if self.has_failed() {
+            let msg = self
+                .get_failure()
+                .map(|f| f.msg)
+                .unwrap_or_else(|| "halted".to_string());
+            return Err(VmError::runtime_with_ip(
+                format!("Result error: {}", msg),
+                self.instruction_pointer,
+            ));
+        }
+        if self.has_cancelled() {
+            let msg = self
+                .get_cancellation()
+                .map(|c| c.msg)
+                .unwrap_or_else(|| "cancelled".to_string());
+            return Err(VmError::runtime_with_ip(msg, self.instruction_pointer));
+        }
+        Ok(())
     }
 
     /// Get the failure state if failed
