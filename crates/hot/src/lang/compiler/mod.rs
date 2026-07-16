@@ -2947,9 +2947,185 @@ impl Compiler {
         self.compile_value(value)
     }
 
+    /// Inline direct `and(...)` / `or(...)` calls as short-circuiting
+    /// conditional flows, mirroring `try_compile_inline_if`. The value
+    /// semantics of the eager `::hot::bool` natives are preserved — `and`
+    /// returns the first falsy argument's value (or the last value), `or`
+    /// the first truthy argument's value (or the last value), with Err
+    /// counting as falsy — but arguments after the deciding one are never
+    /// evaluated. Desugars right-associatively:
+    ///   and(a, ...rest) => if(a, and(...rest), a)
+    ///   or(a, ...rest)  => if(a, a, or(...rest))
+    ///
+    /// Returns Ok(None) when the call doesn't match (shadowed name, spread
+    /// or explicitly-lazy args, result path, fewer than 2 args) so the
+    /// caller falls back to the normal call path — dynamic/higher-order and
+    /// spread calls keep the eager natives.
+    fn try_compile_inline_and_or(
+        &mut self,
+        fn_call: &FnCall,
+    ) -> Result<Option<RegisterId>, String> {
+        if fn_call.args.len() < 2
+            || fn_call.result_path.is_some()
+            || fn_call.args.iter().any(|a| a.spread || a.lazy)
+        {
+            return Ok(None);
+        }
+
+        // The callee must statically resolve to the core `and`/`or` (same
+        // shadowing rules as inline `if`). On success this holds the
+        // qualified name, used as the traced call name so call-trace search
+        // still finds these calls after inlining.
+        let core_name: Option<String> = match fn_call.function.as_ref() {
+            Value::Ref(Ref::Var(var_ref)) => {
+                let name = var_ref.var.sym.name();
+                if (name == "and" || name == "or")
+                    && var_ref.var.deep_path.is_none()
+                    && self
+                        .core_lazy_function_names
+                        .get(name)
+                        .is_some_and(|q| q.ends_with(&format!("::bool/{}", name)))
+                    && !self
+                        .function_mapping
+                        .contains_key(&format!("{}/{}", self.current_namespace, name))
+                    && !self.function_mapping.contains_key(&format!(
+                        "{}/{}/{}",
+                        self.current_namespace,
+                        name,
+                        fn_call.args.len()
+                    ))
+                    && !self
+                        .symbol_table
+                        .contains_key(&format!("{}/{}", self.current_namespace, name))
+                {
+                    self.core_lazy_function_names.get(name).cloned()
+                } else {
+                    None
+                }
+            }
+            Value::Ref(Ref::Ns(ns_ref)) => {
+                let resolved = self.resolve_ns_ref_alias(ns_ref);
+                match resolved.function_name.as_deref() {
+                    Some(name @ ("and" | "or"))
+                        if self
+                            .core_lazy_function_names
+                            .get(name)
+                            .is_some_and(|q| *q == format!("{}/{}", resolved.ns, name)) =>
+                    {
+                        self.core_lazy_function_names.get(name).cloned()
+                    }
+                    _ => None,
+                }
+            }
+            _ => None,
+        };
+        let Some(core_name) = core_name else {
+            return Ok(None);
+        };
+        let is_and = core_name.ends_with("/and");
+
+        // The whole chain compiles as nested value-producing flows; nothing
+        // in it is a tail call.
+        let saved_tail_position = self.in_tail_position;
+        self.in_tail_position = false;
+        let result = self.emit_short_circuit_chain(&fn_call.args, is_and, &core_name, &fn_call.src);
+        self.in_tail_position = saved_tail_position;
+        result.map(Some)
+    }
+
+    /// Emit one level of the and/or short-circuit chain (see
+    /// `try_compile_inline_and_or`): evaluate the head argument, then branch
+    /// on its truthiness — one arm reuses the head's register as the flow
+    /// result, the other recurses into the remaining arguments. The VM's
+    /// cond machinery skips the untaken arm entirely, so the recursion's
+    /// argument evaluation never runs when the head decides.
+    fn emit_short_circuit_chain(
+        &mut self,
+        args: &[crate::lang::ast::FnCallArg],
+        is_and: bool,
+        origin_name: &str,
+        src: &Option<crate::lang::ast::Source>,
+    ) -> Result<RegisterId, String> {
+        let head_reg = self.compile_value(&args[0].value)?;
+        if args.len() == 1 {
+            return Ok(head_reg);
+        }
+
+        let op = if is_and { "and" } else { "or" };
+        let result_reg = self.allocate_register();
+        let cond_id = self.next_cond_id;
+        self.next_cond_id += 1;
+
+        let origin_name_id = self.program.add_string_ref(origin_name.to_string());
+        self.emit_instruction(Instruction::BeginFlow {
+            flow_type: crate::lang::bytecode::FlowType::Cond,
+            result_modifier: crate::lang::bytecode::FlowResultModifier::One,
+            source: self.source_to_location(src).map(Box::new),
+            origin_name: Some(origin_name_id),
+        });
+
+        // then-branch (head truthy): `and` continues down the chain, `or`
+        // yields the head value itself.
+        let then_name = format!("{}_then\0c{}", op, cond_id);
+        let then_name_id = self.program.add_string_ref(then_name);
+        self.emit_instruction(Instruction::CondBranchStart {
+            branch_name: then_name_id,
+            condition: head_reg,
+            skip_target: 0,
+        });
+        self.emit_instruction(Instruction::EnterScope {
+            scope_type: crate::lang::bytecode::ScopeType::Flow,
+        });
+        let then_reg = if is_and {
+            self.emit_short_circuit_chain(&args[1..], is_and, origin_name, src)?
+        } else {
+            head_reg
+        };
+        self.emit_instruction(Instruction::ExitScope);
+        self.emit_instruction(Instruction::CondBranchEnd {
+            branch_name: then_name_id,
+            result: then_reg,
+        });
+
+        // else-branch (head falsy, always-true arm): `and` yields the head
+        // value (first falsy wins), `or` continues down the chain.
+        let else_name = format!("{}_else\0c{}", op, cond_id);
+        let else_name_id = self.program.add_string_ref(else_name);
+        let true_const = self.program.add_constant(Constant::Val(Val::Bool(true)));
+        let true_reg = self.allocate_register();
+        self.emit_instruction(Instruction::LoadConst {
+            dest: true_reg,
+            constant: true_const,
+        });
+        self.emit_instruction(Instruction::CondBranchStart {
+            branch_name: else_name_id,
+            condition: true_reg,
+            skip_target: 0,
+        });
+        self.emit_instruction(Instruction::EnterScope {
+            scope_type: crate::lang::bytecode::ScopeType::Flow,
+        });
+        let else_reg = if is_and {
+            head_reg
+        } else {
+            self.emit_short_circuit_chain(&args[1..], is_and, origin_name, src)?
+        };
+        self.emit_instruction(Instruction::ExitScope);
+        self.emit_instruction(Instruction::CondBranchEnd {
+            branch_name: else_name_id,
+            result: else_reg,
+        });
+
+        self.emit_instruction(Instruction::EndFlow { dest: result_reg });
+        Ok(result_reg)
+    }
+
     /// Compile a function call
     fn compile_function_call(&mut self, fn_call: &FnCall) -> Result<RegisterId, String> {
         if let Some(result_reg) = self.try_compile_inline_if(fn_call)? {
+            return Ok(result_reg);
+        }
+        if let Some(result_reg) = self.try_compile_inline_and_or(fn_call)? {
             return Ok(result_reg);
         }
         let dest_reg = self.allocate_register();

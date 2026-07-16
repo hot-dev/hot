@@ -100,3 +100,43 @@ meta ["test"] fn () {
     })
     assert-eq(50, result4, "if with false should evaluate else block with multiple statements")
 }
+
+// ============================================================================
+// and/or short-circuit (direct calls compile to conditional flows)
+// ============================================================================
+
+test-and-short-circuits
+meta ["test"] fn () {
+    // A later argument that would halt must never evaluate once an
+    // earlier one decides the result.
+    assert-eq(false, and(false, fail("and must not evaluate past a falsy arg")))
+    assert-eq(null, and(1, null, fail("and must stop at the first falsy value")))
+
+    // The guard idiom: probe then use, safely.
+    x "not a map"
+    assert-eq(false, and(is-map(x), get(x, "k")), "guard prevents the halting get")
+
+    // Value semantics preserved from the eager native.
+    assert-eq(3, and(1, 2, 3), "all truthy returns last value")
+    assert-eq("x", and("", "x"), "empty string is truthy")
+    assert(is-err(and(err("halt-free"), true)), "Err is falsy and is returned")
+}
+
+test-or-short-circuits
+meta ["test"] fn () {
+    assert-eq(true, or(true, fail("or must not evaluate past a truthy arg")))
+    assert-eq(0, or(null, 0, fail("or must stop at the first truthy value")))
+
+    // Value semantics preserved from the eager native.
+    assert-eq(false, or(null, false), "all falsy returns last value")
+    assert-eq("", or("", "x"), "empty string is truthy")
+    assert-eq("x", or(err("e"), "x"), "Err is falsy, or() recovers")
+}
+
+test-and-or-nested-short-circuit
+meta ["test"] fn () {
+    // Chains inside chains: each level guards the next. or(false, null)
+    // yields null (last value, all falsy), which stops the outer and.
+    assert-eq(null, and(or(false, null), fail("outer and must stop")))
+    assert-eq(42, or(and(true, null), 42), "inner and yields falsy, outer or falls through")
+}
