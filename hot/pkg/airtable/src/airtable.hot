@@ -2,8 +2,8 @@
 meta {
     doc: """
     Airtable bindings — the lightweight database half the world runs ops
-    on. Records CRUD with formula filtering, plus the metadata API for
-    base schemas.
+    on. Records CRUD with formula filtering, batch upsert/delete, record
+    comments, plus the metadata API for base schemas and token identity.
 
     **Setup** — context variable `airtable.token`: a personal access
     token (`pat...`) with the scopes and bases it needs.
@@ -130,6 +130,104 @@ meta {
 }
 fn (base-id: Str, table: Str, record-id: Str): Map {
   request("DELETE", `${table-path(base-id, table)}/${record-id}`, "")
+}
+
+upsert-records
+meta {
+    doc: """
+    PATCH /{base}/{table} with performUpsert - Create-or-update up to 10
+    records keyed on `merge-fields` (field names that uniquely identify a
+    record). Records are `[{fields: {...}}]` — no ids. Returns
+    `{records, createdRecords, updatedRecords}`.
+
+    **Example**
+
+    ```hot
+    ::airtable/upsert-records(base-id, "Leads", ["Email"], [
+      {fields: {Email: "ada@example.com", Status: "Customer"}}
+    ])
+    ```
+    """
+}
+fn (base-id: Str, table: Str, merge-fields: Vec, records: Vec): Map {
+  request("PATCH", table-path(base-id, table), {
+    performUpsert: {fieldsToMergeOn: merge-fields},
+    records: records,
+    typecast: true
+  })
+}
+
+records-query
+meta {
+    doc: """Build the repeated `records[]=` query string batch deletion needs (query-string can't express repeated keys). Exposed for testing; `delete-records` uses it."""
+}
+fn (record-ids: Vec): Str {
+  parts map(record-ids, (id) { `records[]=${::uri/encode(id)}` })
+  `?${join(parts, "&")}`
+}
+
+delete-records
+meta {
+    doc: """DELETE /{base}/{table}?records[]= - Delete up to 10 records in one call. Returns `{records: [{id, deleted}]}`."""
+}
+fn (base-id: Str, table: Str, record-ids: Vec): Map {
+  request("DELETE", `${table-path(base-id, table)}${records-query(record-ids)}`, "")
+}
+
+// ---------------------------------------------------------------------------
+// Record comments (require the data.recordComments scopes)
+// ---------------------------------------------------------------------------
+
+comments-path fn (base-id: Str, table: Str, record-id: Str): Str {
+  `${table-path(base-id, table)}/${record-id}/comments`
+}
+
+list-comments
+meta {
+    doc: """GET /{base}/{table}/{record}/comments - A record's comments (`{comments, offset?}`). `params` (4-arity): `pageSize` (max 100), `offset`."""
+}
+fn
+(base-id: Str, table: Str, record-id: Str): Map {
+  request("GET", comments-path(base-id, table, record-id), "")
+},
+(base-id: Str, table: Str, record-id: Str, params: Map): Map {
+  request("GET", `${comments-path(base-id, table, record-id)}${::uri/query-string(params)}`, "")
+}
+
+create-comment
+meta {
+    doc: """POST /{base}/{table}/{record}/comments - Comment on a record. `@[userId]` mentions work inside `text`."""
+}
+fn (base-id: Str, table: Str, record-id: Str, text: Str): Map {
+  request("POST", comments-path(base-id, table, record-id), {text: text})
+}
+
+update-comment
+meta {
+    doc: """PATCH /{base}/{table}/{record}/comments/{comment} - Edit a comment's text (author-owned comments only)."""
+}
+fn (base-id: Str, table: Str, record-id: Str, comment-id: Str, text: Str): Map {
+  request("PATCH", `${comments-path(base-id, table, record-id)}/${comment-id}`, {text: text})
+}
+
+delete-comment
+meta {
+    doc: """DELETE /{base}/{table}/{record}/comments/{comment} - Delete a comment (author-owned comments only)."""
+}
+fn (base-id: Str, table: Str, record-id: Str, comment-id: Str): Map {
+  request("DELETE", `${comments-path(base-id, table, record-id)}/${comment-id}`, "")
+}
+
+// ---------------------------------------------------------------------------
+// Metadata
+// ---------------------------------------------------------------------------
+
+whoami
+meta {
+    doc: """GET /meta/whoami - The token's own user id and granted scopes. The cheapest way to smoke-test a token."""
+}
+fn (): Map {
+  request("GET", "/meta/whoami", "")
 }
 
 list-bases
