@@ -1,0 +1,45 @@
+::notion::comments ns
+
+::api ::notion::api
+
+build-comment-payload
+meta {
+    doc: """Build the create-comment payload. `target` is `{page_id}` to start a new discussion on a page, or `{discussion_id}` to reply to an existing one. Exposed for testing; `create-comment` uses it."""
+}
+fn (target: Map, text: Str): Map {
+  base {rich_text: ::notion/rich-text(text)}
+  cond {
+    is-some(get(target, "discussion_id")) => { {...base, discussion_id: target.discussion_id} }
+    => { {...base, parent: {page_id: target.page_id}} }
+  }
+}
+
+create-comment
+meta {
+    doc: """
+    POST /comments - Comment on a page (new discussion) or reply to an
+    existing discussion. Requires the integration's Insert comments
+    capability. Notion's API cannot delete or resolve comments.
+
+    **Example**
+
+    ```hot
+    ::notion::comments/create-comment({page_id: page.id}, "Looks ready to ship.")
+    ```
+    """
+}
+fn (target: Map, text: Str): Map {
+  ::api/json("POST", "/comments", {}, build-comment-payload(target, text))
+}
+
+list-comments
+meta {
+    doc: """GET /comments?block_id= - The unresolved comments on a page or block. `options` (2-arity) supports `page_size` (max 100) and `start_cursor`; returns `{results, has_more, next_cursor}`. Requires the Read comments capability."""
+}
+fn
+(block-id: Str): Map {
+  list-comments(block-id, {})
+},
+(block-id: Str, options: Map): Map {
+  ::api/json("GET", `/comments${::hot::uri/query-string({block_id: block-id, ...options})}`)
+}

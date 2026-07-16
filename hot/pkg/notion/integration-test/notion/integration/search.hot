@@ -1,11 +1,72 @@
 ::notion::integration ns
 meta ["test"]
 
-// Requires ctx: notion.token (integration with at least one shared page)
+// =============================================================================
+// Integration Tests (live Notion)
+// =============================================================================
+// Requires ctx: notion.token — an internal integration with at least one
+// page shared with it, content capabilities, comment capabilities
+// (read + insert), and a user-information capability.
+//
+// The comment test writes: it adds one clearly-marked comment to the first
+// shared page it finds. Notion's API cannot delete or resolve comments, so
+// they accumulate on that page — share a dedicated throwaway page with the
+// integration.
 // Run with: hot test --project pkg-integration-notion
+
+::blocks ::notion::blocks
+::comments ::notion::comments
+::users ::notion::users
+
+// The first page shared with the integration (search also returns
+// databases; filter to pages).
+test-page fn (): Map {
+    hits ::blocks/search("")
+    pages filter(hits.results, (r) { eq(r.object, "page") })
+    cond {
+        is-empty(pages) => { err("no page is shared with the integration") }
+        => { first(pages) }
+    }
+}
 
 test-search
 meta ["test"] fn () {
-    hits ::notion::blocks/search("")
+    hits ::blocks/search("")
     assert(is-some(hits.results), "search should return a results array")
+}
+
+test-users
+meta ["test"] fn () {
+    bot ::users/me()
+    assert(not(is-err(bot)), `users/me: ${if-err(bot, (e) { Str(e) })}`)
+    assert-eq("bot", bot.type, "the token's own user is a bot")
+
+    everyone ::users/list-users({page_size: 10})
+    assert(not(is-err(everyone)), `list-users: ${if-err(everyone, (e) { Str(e) })}`)
+    assert(gt(length(everyone.results), 0), "workspace should have users")
+
+    someone first(everyone.results)
+    fetched ::users/get-user(someone.id)
+    assert-eq(someone.id, fetched.id, "get-user round-trips an id from the listing")
+}
+
+test-comment-roundtrip
+meta ["test"] fn () {
+    m `itest-${Uuid()}`
+    page test-page()
+    assert(not(is-err(page)), `test-page: ${if-err(page, (e) { Str(e) })}`)
+
+    comment ::comments/create-comment({page_id: page.id}, `Integration comment ${m} (safe to resolve).`)
+    assert(not(is-err(comment)), `create-comment: ${if-err(comment, (e) { Str(e) })}`)
+    assert(is-some(comment.discussion_id), "created comment carries its discussion id")
+
+    listed ::comments/list-comments(page.id, {page_size: 100})
+    assert(not(is-err(listed)), `list-comments: ${if-err(listed, (e) { Str(e) })}`)
+    mine filter(listed.results, (c) { eq(c.id, comment.id) })
+    assert-eq(1, length(mine), "new comment appears on the page")
+
+    // Reply into the same discussion.
+    reply ::comments/create-comment({discussion_id: comment.discussion_id}, `Reply ${m}.`)
+    assert(not(is-err(reply)), `reply: ${if-err(reply, (e) { Str(e) })}`)
+    assert-eq(comment.discussion_id, reply.discussion_id, "reply lands in the same discussion")
 }
