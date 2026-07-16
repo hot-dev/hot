@@ -6724,25 +6724,20 @@ impl Compiler {
                     current_reg = self.compile_piped_lambda_call(lambda, current_reg)?;
                 }
                 _ => {
-                    // For other expressions, try to call them as functions with the piped value
-                    let function_reg = self.compile_value(func_expr)?;
-                    let dest_reg = self.allocate_register();
-
-                    // Set up arguments: piped value as first argument
-                    let args_start = self.allocate_register();
-                    self.emit_instruction(Instruction::Move {
-                        dest: args_start,
-                        src: current_reg,
-                    });
-
-                    self.emit_instruction(Instruction::Call {
-                        dest: dest_reg,
-                        function: function_reg,
-                        args_start,
-                        args_count: 1,
-                    });
-
-                    current_reg = dest_reg;
+                    // Bare references (`|> is-err`) and other function-valued
+                    // expressions must prepare the piped argument exactly like
+                    // the call form (`|> is-err()`) — including the lazy-thunk
+                    // wrap when the target's first parameter is lazy, so
+                    // Result values reach result-aware targets instead of
+                    // halting at the pipe boundary. Synthesize a zero-arg
+                    // call and reuse the piped-call path.
+                    let synthesized = crate::lang::ast::FnCall {
+                        function: Box::new(func_expr.clone()),
+                        args: vec![],
+                        result_path: None,
+                        src: flow.src.clone(),
+                    };
+                    current_reg = self.compile_piped_function_call(&synthesized, current_reg)?;
                 }
             }
 
@@ -7133,26 +7128,22 @@ impl Compiler {
                             current_reg = self.compile_piped_lambda_call(lambda, current_reg)?;
                         }
                         _ => {
-                            // For other expressions, try to call them as functions with the piped value
-                            let function_reg = self.compile_value(func_expr)?;
-                            let dest_reg = self.allocate_register();
-
-                            // Set up arguments: piped value as first argument
-                            let args_start = self.allocate_register();
-                            self.emit_instruction(Instruction::Move {
-                                dest: args_start,
-                                src: current_reg,
-                            });
-
-                            // Call the function
-                            self.emit_instruction(Instruction::Call {
-                                dest: dest_reg,
-                                function: function_reg,
-                                args_start,
-                                args_count: 1,
-                            });
-
-                            current_reg = dest_reg;
+                            // Bare references (`|> is-err`) and other
+                            // function-valued expressions must prepare the
+                            // piped argument exactly like the call form
+                            // (`|> is-err()`) — including the lazy-thunk wrap
+                            // when the target's first parameter is lazy, so
+                            // Result values reach result-aware targets instead
+                            // of halting at the pipe boundary. Synthesize a
+                            // zero-arg call and reuse the piped-call path.
+                            let synthesized = crate::lang::ast::FnCall {
+                                function: Box::new(func_expr.clone()),
+                                args: vec![],
+                                result_path: None,
+                                src: flow.src.clone(),
+                            };
+                            current_reg =
+                                self.compile_piped_function_call(&synthesized, current_reg)?;
                         }
                     }
                 }

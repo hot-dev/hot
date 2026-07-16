@@ -252,6 +252,139 @@ k(7)"#;
         assert_eq!(out, Val::from("t"), "third call must still see the constant alive");
     }
 
+    /// and/or compile to nested cond flows (try_compile_inline_and_or); under
+    /// the JIT the skipped side must never evaluate — its fail() would halt
+    /// the run — and the value semantics (first falsy / first truthy / last
+    /// value, Err falsy) must match the interpreter exactly.
+    #[test]
+    fn jit_and_or_short_circuit_semantics() {
+        let src = r#"::t ns
+guard fn (x: Any): Any {
+    and(is-map(x), get(x, "k"))
+}
+chain fn (): Vec {
+    a and(false, fail("and must not reach arg 2"))
+    b or(true, fail("or must not reach arg 2"))
+    c and(1, 2, 3)
+    d or(null, 0, fail("or must stop at 0"))
+    e guard("not-a-map")
+    g or(null, 42)
+    h if-err(and(err("efirst"), true), (err-val) { `err:${err-val}` })
+    [a, b, c, d, e, g, h]
+}
+chain()
+chain()
+chain()"#;
+        let jit = compile_and_run_with_std_conf(src, Some(crate::val!({"jit": {"threshold": 1}})))
+            .expect("JIT and/or run");
+        let interp =
+            compile_and_run_with_std_conf(src, Some(crate::val!({"jit": {"mode": "off"}})))
+                .expect("interpreter and/or run");
+        assert_eq!(jit, interp, "JIT/interpreter parity for and/or");
+        let expected = crate::val!([false, true, 3, 0, false, 42, "err:efirst"]);
+        assert_eq!(jit, expected, "and/or value semantics under JIT");
+    }
+
+    /// Bare-reference pipe stages synthesize a zero-arg call and must wrap
+    /// the piped value in a lazy thunk when the target's first parameter is
+    /// lazy, so Result values reach the Result-aware inspectors — under the
+    /// JIT exactly as in the interpreter.
+    #[test]
+    fn jit_pipe_bare_ref_honors_lazy_first_param() {
+        let src = r#"::t ns
+probe fn (flag: Bool): Vec {
+    v if(flag, err("piped"), ok(7))
+    e v |> is-err
+    o v |> is-ok
+    q v |> ::hot::type/is-err
+    [e, o, q]
+}
+run fn (): Vec {
+    [probe(true), probe(false), probe(true)]
+}
+run()
+run()
+run()"#;
+        let jit = compile_and_run_with_std_conf(src, Some(crate::val!({"jit": {"threshold": 1}})))
+            .expect("JIT piped lazy-param run");
+        let interp =
+            compile_and_run_with_std_conf(src, Some(crate::val!({"jit": {"mode": "off"}})))
+                .expect("interpreter piped lazy-param run");
+        assert_eq!(jit, interp, "JIT/interpreter parity for piped lazy params");
+        let expected = crate::val!([[true, false, true], [false, true, false], [true, false, true]]);
+        assert_eq!(jit, expected, "piped Result values reach the inspectors under JIT");
+    }
+
+    /// The strict-argument law under JIT-lowered arithmetic: an Err flowing
+    /// into `add` must halt with the Err's own payload — never reach the
+    /// native (whose "add requires numbers" would mean the law was skipped).
+    /// The two modes surface the halt differently by design (the
+    /// interpreter aborts the run; a JIT frame returns the Err value with
+    /// the VM failure state set — the documented Ok-but-failed pattern),
+    /// so this asserts the law, not the wrapper shape.
+    #[test]
+    fn jit_pipe_strict_target_halts_with_payload() {
+        let src = r#"::t ns
+f fn (flag: Bool): Any {
+    v if(flag, err("pipe-strict"), 1)
+    v |> add(1)
+}
+f(false)
+f(false)
+f(true)"#;
+        let describe = |outcome: &Result<Val, String>| -> String {
+            match outcome {
+                Ok(v) => format!("{v:?}"),
+                Err(e) => e.clone(),
+            }
+        };
+        let jit =
+            compile_and_run_with_std_conf(src, Some(crate::val!({"jit": {"threshold": 1}})));
+        let interp =
+            compile_and_run_with_std_conf(src, Some(crate::val!({"jit": {"mode": "off"}})));
+        for (mode, outcome) in [("jit", &jit), ("interpreter", &interp)] {
+            let text = describe(outcome);
+            assert!(
+                text.contains("pipe-strict"),
+                "{mode}: halt must carry the Err payload, got {text}"
+            );
+            assert!(
+                !text.contains("add requires numbers"),
+                "{mode}: the Err reached the native — strict-argument law skipped: {text}"
+            );
+        }
+    }
+
+    /// The strict-argument law under JIT-lowered comparisons: bare-bool
+    /// helpers can't carry a halt in-band, so the emitted sentinel check
+    /// must abort the frame with the Err payload instead of letting the
+    /// comparison read as false.
+    #[test]
+    fn jit_cmp_strict_operand_halts_with_payload() {
+        for op in ["gt(v, 0)", "lt(v, 9)", "eq(v, 1)", "gte(v, 0)"] {
+            let src = format!(
+                r#"::t ns
+f fn (flag: Bool): Any {{
+    v if(flag, err("cmp-strict"), 1)
+    {op}
+}}
+f(false)
+f(false)
+f(true)"#
+            );
+            let out =
+                compile_and_run_with_std_conf(&src, Some(crate::val!({"jit": {"threshold": 1}})));
+            let text = match &out {
+                Ok(v) => format!("{v:?}"),
+                Err(e) => e.clone(),
+            };
+            assert!(
+                text.contains("cmp-strict"),
+                "{op}: halt must carry the Err payload, got {text}"
+            );
+        }
+    }
+
     /// Helper to compile and execute Hot code with hot-std included and an
     /// explicit conf (e.g. to toggle the `jit.hof.fusion` kill switch).
     pub(super) fn compile_and_run_with_std_conf(
