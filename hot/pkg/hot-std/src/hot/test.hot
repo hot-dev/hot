@@ -343,15 +343,10 @@ fn (f, capture-output) {
     did-pass cond {
         test-had-execution-error => {
         // For actual execution errors, print the error details. Contained
-        // halts carry a structured payload; show its msg, not the raw map.
-        // The arms stay sequential: and() evaluates eagerly, so get() on a
-        // non-map payload would halt the runner itself.
-        detail err-value(result)
-        message cond {
-            not(is-map(detail)) => { Str(detail) }
-            is-some(get(detail, "msg")) => { detail.msg }
-            => { Str(detail) }
-        }
+        // halts carry a structured payload (a map with msg, or a typed
+        // Failure); err-message understands both and falls back to the
+        // string form.
+        message ::hot::type/err-message(err-value(result))
 
         println(`    ${::hot::term/bright-red("✗")} Test execution error: ${message}`)
         false

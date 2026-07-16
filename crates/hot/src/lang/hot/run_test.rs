@@ -336,8 +336,8 @@ f fn (flag: Bool): Str {
     "f-completed"
 }
 caller fn (flag: Bool): Str {
-    r f(flag)
-    `${r}-observed`
+    f(flag)
+    "caller-completed"
 }
 caller(false)
 caller(false)
@@ -363,7 +363,11 @@ caller(true)"#;
             );
             assert!(
                 !text.contains("f-completed"),
-                "{mode}: execution continued past the halt: {text}"
+                "{mode}: the halting frame continued executing: {text}"
+            );
+            assert!(
+                !text.contains("caller-completed"),
+                "{mode}: the caller continued past the halt: {text}"
             );
         }
     }
@@ -386,8 +390,8 @@ f fn (flag: Bool): Str {{
     "f-completed"
 }}
 caller fn (flag: Bool): Str {{
-    r f(flag)
-    `${{r}}-observed`
+    f(flag)
+    "caller-completed"
 }}
 caller(false)
 caller(false)
@@ -408,9 +412,54 @@ caller(true)"#
                 );
                 assert!(
                     !text.contains("f-completed"),
-                    "{op} ({mode}): execution continued past the halt: {text}"
+                    "{op} ({mode}): the halting frame continued executing: {text}"
+                );
+                assert!(
+                    !text.contains("caller-completed"),
+                    "{op} ({mode}): the caller continued past the halt: {text}"
                 );
             }
+        }
+    }
+
+    /// A strict halt inside a deferred parallel binding must abort the frame
+    /// via the sentinel check in emit_deferred_var_expr — before the fix the
+    /// sentinel (2) flowed into set_element as a pointer and crashed the
+    /// process. The constant markers catch both the crash (test dies) and
+    /// any continuation leak.
+    #[test]
+    fn jit_deferred_parallel_binding_halt() {
+        let src = r#"::t ns
+f fn (flag: Bool): Map {
+    parallel {
+        a add(if(flag, err("deferred-boom"), 1), 1)
+        b 2
+    }
+}
+caller fn (flag: Bool): Str {
+    f(flag)
+    "caller-completed"
+}
+caller(false)
+caller(false)
+caller(true)"#;
+        for (mode, conf) in [
+            ("jit", crate::val!({"jit": {"threshold": 1}})),
+            ("interpreter", crate::val!({"jit": {"mode": "off"}})),
+        ] {
+            let out = compile_and_run_with_std_conf(src, Some(conf));
+            let text = match &out {
+                Ok(v) => format!("OK:{v:?}"),
+                Err(e) => e.clone(),
+            };
+            assert!(
+                text.contains("deferred-boom"),
+                "{mode}: halt must carry the Err payload, got {text}"
+            );
+            assert!(
+                !text.contains("caller-completed"),
+                "{mode}: the caller continued past the halt: {text}"
+            );
         }
     }
 

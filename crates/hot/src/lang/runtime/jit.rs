@@ -6380,6 +6380,10 @@ impl<'a> EmitCtx<'a> {
             &[thunk_ptr, zero_a, zero_b],
         );
         let result = builder.inst_results(call)[0];
+        // A strict-argument halt inside the deferred expression comes back
+        // as HALT_SENTINEL — never a pointer; feeding it to set_element
+        // would crash. Route the frame to its error return instead.
+        let halt_block = emit_halt_check(builder, result);
         self.drop_owned_temps(builder, &[thunk_temp]);
 
         if let Some(acc_var) = accumulator_var {
@@ -6397,6 +6401,7 @@ impl<'a> EmitCtx<'a> {
         }
 
         self.jump_to_next(builder, ip)?;
+        self.emit_halt_return(builder, halt_block);
         Ok(EmitResult::Handled)
     }
 }
