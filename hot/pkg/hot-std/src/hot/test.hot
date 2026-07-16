@@ -344,9 +344,12 @@ fn (f, capture-output) {
         test-had-execution-error => {
         // For actual execution errors, print the error details. Contained
         // halts carry a structured payload; show its msg, not the raw map.
+        // The arms stay sequential: and() evaluates eagerly, so get() on a
+        // non-map payload would halt the runner itself.
         detail err-value(result)
         message cond {
-            and(is-map(detail), is-some(get(detail, "msg"))) => { detail.msg }
+            not(is-map(detail)) => { Str(detail) }
+            is-some(get(detail, "msg")) => { detail.msg }
             => { Str(detail) }
         }
 
@@ -516,9 +519,19 @@ fn (capture-output) {
 
     print-test-summary()
 
-    // Return the final result - use a simple expression
-    final-counters get-test-counters()
-    is-zero(final-counters.tests.failed)
+    // A failure in the runner machinery itself (not inside a test) must
+    // fail the run loudly — a silent early exit here would report green
+    // for tests that never ran.
+    cond {
+        is-err(test-results) => {
+            println(`${::hot::term/bright-red("✗")} Test runner failed: ${err-value(test-results)}`)
+            false
+        }
+        => {
+            final-counters get-test-counters()
+            is-zero(final-counters.tests.failed)
+        }
+    }
 }
 
 run-matching-tests
@@ -549,7 +562,17 @@ fn (pattern, capture-output) {
 
     print-test-summary()
 
-    // Return the final result - use a simple expression
-    final-counters get-test-counters()
-    is-zero(final-counters.tests.failed)
+    // A failure in the runner machinery itself (not inside a test) must
+    // fail the run loudly — a silent early exit here would report green
+    // for tests that never ran.
+    cond {
+        is-err(test-results) => {
+            println(`${::hot::term/bright-red("✗")} Test runner failed: ${err-value(test-results)}`)
+            false
+        }
+        => {
+            final-counters get-test-counters()
+            is-zero(final-counters.tests.failed)
+        }
+    }
 }

@@ -111,7 +111,17 @@ fn (name: Str): Any {
 
 upsert-points
 meta {
-    doc: """PUT /collections/{name}/points - Upsert points: `[{id, vector, payload?}]` (ids are ints or UUIDs)."""
+    doc: """
+    PUT /collections/{name}/points - Upsert points: `[{id, vector, payload?}]` (ids are ints or UUIDs).
+
+    **Example**
+
+    ```hot
+    ::qdrant/upsert-points("docs", [
+      {id: 1, vector: embedding, payload: {title: "Q3 roadmap", lang: "en"}}
+    ])
+    ```
+    """
 }
 fn (collection: Str, points: Vec): Any {
   request("PUT", `/collections/${collection}/points?wait=true`, {points: points})
@@ -124,6 +134,18 @@ meta {
     `options`: `vector` (required), `limit` (default 10), `filter`
     (Qdrant filter DSL), `with_payload`, `with_vector`,
     `score_threshold`. Returns the hits (`[{id, score, payload?}]`).
+
+    **Example**
+
+    ```hot
+    hits ::qdrant/search("docs", {
+      vector: embedding,
+      limit: 5,
+      filter: {must: [{key: "lang", match: {value: "en"}}]},
+      with_payload: true
+    })
+    first(hits).payload
+    ```
     """
 }
 fn (collection: Str, options: Map): Vec {
