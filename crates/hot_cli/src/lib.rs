@@ -6,7 +6,9 @@ mod profile;
 mod remote;
 mod update;
 
-use crate::cli::{CacheAction, Cli, Command, ConfAction, DbAction, HIDDEN_COMMANDS_HELP};
+use crate::cli::{
+    CacheAction, Cli, Command, ConfAction, DbAction, HIDDEN_COMMANDS_HELP, KeyAction,
+};
 use crate::command::ai::run_ai;
 use crate::command::api::run_api;
 use crate::command::app::run_app;
@@ -24,6 +26,7 @@ use crate::command::eval::run_eval;
 use crate::command::extract::run_extract;
 use crate::command::fmt::run_fmt;
 use crate::command::init::run_init;
+use crate::command::key::run_key_create;
 use crate::command::project::{run_project_action, run_projects};
 use crate::command::queue::run_queue;
 use crate::command::repl::run_repl;
@@ -1067,6 +1070,14 @@ async fn async_main(providers: CliProviders) {
                 std::process::exit(1);
             }
         }
+        Some(Command::Key { action, .. }) => match action {
+            KeyAction::Create { description } => {
+                if let Err(e) = run_key_create(&description, &conf, &providers).await {
+                    error!("Key command failed: {}", e);
+                    std::process::exit(1);
+                }
+            }
+        },
         Some(Command::Cache { action, .. }) => {
             // Get the cache directory (project-local .hot/ or system cache)
             let cache_base = cache_paths::get_cache_base_dir();
