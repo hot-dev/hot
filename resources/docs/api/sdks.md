@@ -325,6 +325,7 @@ All five SDKs follow the same conventions:
 - **Escape hatches.** A `request(...)` method (plus a raw-response variant)
   covers endpoints that do not yet have a resource helper.
 
-Agent, webhook, and proxy helpers (Layer 2) currently live in the JavaScript
-SDK's subpath exports (`@hot-dev/sdk/agent`, `/webhook`, `/proxy`); the other
-SDKs intentionally cover the core API.
+Building chat or agent frontends? The JavaScript SDK additionally ships
+agent, webhook, and BFF proxy helpers as subpath exports
+(`@hot-dev/sdk/agent`, `/webhook`, `/proxy`); the other SDKs intentionally
+cover the core API.
