@@ -485,21 +485,44 @@ pub async fn run_with_stream_pubsub(conf: Val, shared_stream_pubsub: Option<Arc<
         public_concurrency_limit
     );
 
-    let addr = format!("{}:{}", host, port);
-    let listener = tokio::net::TcpListener::bind(&addr).await.unwrap();
-    info!("hot.dev: API listening on http://{}", addr);
+    // Bind every address the configured host resolves to: "localhost" can
+    // resolve to 127.0.0.1 and ::1, and single-address clients (the JDK,
+    // .NET) fail when only one loopback family is bound.
+    let listeners = hot::net::bind_all(&host, port).await.unwrap();
+    for listener in &listeners {
+        info!(
+            "hot.dev: API listening on http://{}",
+            listener.local_addr().unwrap()
+        );
+    }
 
-    // Graceful shutdown handler
-    axum::serve(
-        listener,
-        app.into_make_service_with_connect_info::<SocketAddr>(),
-    )
-    .with_graceful_shutdown(async {
+    // Graceful shutdown handler shared across listeners
+    let (shutdown_tx, shutdown_watch) = tokio::sync::watch::channel(false);
+    tokio::spawn(async move {
         hot::signal::shutdown_signal().await;
         info!("hot.dev: API received shutdown signal");
-    })
-    .await
-    .unwrap();
+        let _ = shutdown_tx.send(true);
+    });
+
+    let mut serve_tasks = Vec::new();
+    for listener in listeners {
+        let app = app.clone();
+        let mut shutdown_watch = shutdown_watch.clone();
+        serve_tasks.push(tokio::spawn(async move {
+            axum::serve(
+                listener,
+                app.into_make_service_with_connect_info::<SocketAddr>(),
+            )
+            .with_graceful_shutdown(async move {
+                let _ = shutdown_watch.wait_for(|shutdown| *shutdown).await;
+            })
+            .await
+            .unwrap();
+        }));
+    }
+    for task in serve_tasks {
+        task.await.unwrap();
+    }
 
     info!("hot.dev: API shutdown complete");
 }

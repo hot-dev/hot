@@ -270,19 +270,42 @@ pub async fn run_with_stream_pubsub(conf: Val, shared_stream_pubsub: Option<Arc<
                 .on_response(trace::DefaultOnResponse::new().level(tracing::Level::DEBUG)),
         );
 
-    let addr = format!("{}:{}", host, port);
-    let listener = tokio::net::TcpListener::bind(&addr).await.unwrap();
-    info!("hot.dev: APP listening on http://{}", addr);
+    // Bind every address the configured host resolves to: "localhost" can
+    // resolve to 127.0.0.1 and ::1, and single-address clients (the JDK,
+    // .NET) fail when only one loopback family is bound.
+    let listeners = hot::net::bind_all(&host, port).await.unwrap();
+    for listener in &listeners {
+        info!(
+            "hot.dev: APP listening on http://{}",
+            listener.local_addr().unwrap()
+        );
+    }
 
-    // Graceful shutdown handler
-    axum::serve(listener, app)
-        .with_graceful_shutdown(async move {
-            hot::signal::shutdown_signal().await;
-            info!("hot.dev: APP received shutdown signal");
-            let _ = shutdown_tx.send(true);
-        })
-        .await
-        .unwrap();
+    // Graceful shutdown handler shared across listeners
+    let (signal_tx, signal_watch) = tokio::sync::watch::channel(false);
+    tokio::spawn(async move {
+        hot::signal::shutdown_signal().await;
+        info!("hot.dev: APP received shutdown signal");
+        let _ = shutdown_tx.send(true);
+        let _ = signal_tx.send(true);
+    });
+
+    let mut serve_tasks = Vec::new();
+    for listener in listeners {
+        let app = app.clone();
+        let mut signal_watch = signal_watch.clone();
+        serve_tasks.push(tokio::spawn(async move {
+            axum::serve(listener, app)
+                .with_graceful_shutdown(async move {
+                    let _ = signal_watch.wait_for(|shutdown| *shutdown).await;
+                })
+                .await
+                .unwrap();
+        }));
+    }
+    for task in serve_tasks {
+        task.await.unwrap();
+    }
 
     info!("hot.dev: APP shutdown complete");
 }
