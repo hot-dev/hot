@@ -5,7 +5,9 @@ meta {
 
     **Setup** — set `notion.token` in context: an internal integration
     secret (`ntn_...` / `secret_...`) from notion.so/my-integrations, with
-    the target pages/databases shared with the integration.
+    the target pages/databases shared with the integration. Comments need
+    the integration's comment capabilities; `::notion::users` needs a
+    user-information capability (`users/me` works with any level).
 
     **Quick start**
 

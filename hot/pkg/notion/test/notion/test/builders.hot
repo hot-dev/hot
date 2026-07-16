@@ -46,3 +46,18 @@ meta ["test"] fn () {
     ]
     assert-eq("Hello world", ::notion/plain-text(rich))
 }
+
+test-comment-payload-page-discussion
+meta ["test"] fn () {
+    payload ::notion::comments/build-comment-payload({page_id: "page-1"}, "Nice page.")
+    assert-eq("page-1", payload.parent.page_id)
+    assert-eq("Nice page.", first(payload.rich_text).text.content)
+    assert(not(in("discussion_id", keys(payload))), "page comments carry no discussion_id")
+}
+
+test-comment-payload-discussion-reply
+meta ["test"] fn () {
+    payload ::notion::comments/build-comment-payload({discussion_id: "disc-7"}, "Agreed.")
+    assert-eq("disc-7", payload.discussion_id)
+    assert(not(in("parent", keys(payload))), "discussion replies carry no parent")
+}

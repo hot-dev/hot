@@ -138,10 +138,25 @@ fn configured_known_hosts() -> Vec<String> {
         .collect()
 }
 
+/// Strip an optional port from a Host header value, handling bracketed IPv6
+/// literals ("[::1]:4681" → "::1") that a naive split-on-colon mangles.
+fn strip_port(host: &str) -> &str {
+    if let Some(rest) = host.strip_prefix('[')
+        && let Some(end) = rest.find(']')
+    {
+        return &rest[..end];
+    }
+    // A bare IPv6 literal is all colons and has no port to strip.
+    if host.parse::<std::net::IpAddr>().is_ok() {
+        return host;
+    }
+    host.split(':').next().unwrap_or(host)
+}
+
 /// Check if a host is a known API host (should skip domain resolution).
 fn is_known_host(host: &str) -> bool {
     // Strip port if present
-    let hostname = host.split(':').next().unwrap_or(host).to_lowercase();
+    let hostname = strip_port(host).to_lowercase();
     if KNOWN_HOSTS.contains(&hostname.as_str()) {
         return true;
     }
@@ -182,7 +197,7 @@ pub async fn domain_resolution_middleware(
         .headers()
         .get("host")
         .and_then(|h| h.to_str().ok())
-        .map(|h| h.split(':').next().unwrap_or(h).to_lowercase());
+        .map(|h| strip_port(h).to_lowercase());
 
     let host = match host {
         Some(h) => h,
@@ -282,8 +297,24 @@ mod tests {
         assert!(is_known_host("192.168.1.1"));
         assert!(is_known_host("54.200.1.1"));
 
+        // Bracketed IPv6 literals ("localhost" can resolve to ::1)
+        assert!(is_known_host("[::1]"));
+        assert!(is_known_host("[::1]:4681"));
+        assert!(is_known_host("::1"));
+        assert!(is_known_host("[fe80::1]:4681"));
+
         assert!(!is_known_host("mcp.example.com"));
         assert!(!is_known_host("webhook.example.io"));
+    }
+
+    #[test]
+    fn test_strip_port() {
+        assert_eq!(strip_port("localhost:4681"), "localhost");
+        assert_eq!(strip_port("localhost"), "localhost");
+        assert_eq!(strip_port("[::1]:4681"), "::1");
+        assert_eq!(strip_port("[::1]"), "::1");
+        assert_eq!(strip_port("::1"), "::1");
+        assert_eq!(strip_port("127.0.0.1:4681"), "127.0.0.1");
     }
 
     #[test]

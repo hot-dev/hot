@@ -713,6 +713,17 @@ pub(crate) enum Command {
         local: bool,
     },
 
+    /// Manage API keys in the local environment database
+    #[command(display_order = 46, hide = true)]
+    Key {
+        #[command(flatten)]
+        global: GlobalOptions,
+        #[command(flatten)]
+        show_conf: ShowConfOptions,
+        #[command(subcommand)]
+        action: KeyAction,
+    },
+
     // ==================== Database & Infrastructure (50-59) ====================
     /// Manage database
     #[command(display_order = 50, hide = true)]
@@ -841,6 +852,21 @@ pub(crate) enum QueueAction {
 }
 
 // CacheAction enum removed - will be reimplemented with  bytecode caching
+
+#[derive(Subcommand, Debug)]
+pub(crate) enum KeyAction {
+    /// Create a full-access API key in the local environment database.
+    ///
+    /// API keys cannot be created through the Hot API; hot-cloud keys are
+    /// created in the dashboard (https://app.hot.dev/keys). This writes
+    /// directly to the database configured for the current project (hot.db.uri)
+    /// and prints the key once to stdout.
+    Create {
+        /// Key description shown in the dashboard
+        #[arg(long, default_value = "cli")]
+        description: String,
+    },
+}
 
 #[derive(Subcommand, Debug)]
 pub(crate) enum DbAction {
@@ -1022,6 +1048,7 @@ Commands:
     projects     List projects in the current environment
     deps         Manage project dependencies
     context      Manage project context variables (encrypted key-value storage)
+    key          Create API keys in the local environment database
     conf         Show configuration
 
   Tooling:

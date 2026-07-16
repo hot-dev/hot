@@ -37,24 +37,17 @@ impl std::fmt::Display for RuntimeError {
                 file_prefix, location.line, location.column, self.message
             )
         } else {
-            // Enhanced format for runtime errors without location
+            // Enhanced format for runtime errors without location. The
+            // instruction pointer is deliberately omitted: it is VM-internal
+            // context that means nothing to users (it stays visible in the
+            // Debug format).
             let function_context = if let Some(ref func_name) = self.function_name {
                 format!(" in function '{}'", func_name)
             } else {
                 String::new()
             };
 
-            let ip_context = if let Some(ip) = self.instruction_pointer {
-                format!(" at instruction {}", ip)
-            } else {
-                String::new()
-            };
-
-            write!(
-                f,
-                "Runtime error{}{}: {}",
-                function_context, ip_context, self.message
-            )
+            write!(f, "Runtime error{}: {}", function_context, self.message)
         }
     }
 }
@@ -130,11 +123,6 @@ impl RuntimeError {
         // Add function context if available
         if let Some(ref func_name) = self.function_name {
             report_builder = report_builder.with_note(format!("In function: {}", func_name));
-        }
-
-        // Add instruction pointer context if available
-        if let Some(ip) = self.instruction_pointer {
-            report_builder = report_builder.with_note(format!("At instruction: {}", ip));
         }
 
         let report = report_builder.with_label(

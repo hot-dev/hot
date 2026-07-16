@@ -1,11 +1,149 @@
 ::attio::integration ns
 meta ["test"]
 
-// Requires ctx: attio.api.key
+// =============================================================================
+// Integration Tests (live Attio)
+// =============================================================================
+// Requires ctx: attio.api.key with scopes: Records RW, Object Configuration R,
+// List Configuration R, Notes RW, Tasks RW, Comments RW, User Management R.
+// The lifecycle tests write to the workspace: each creates one clearly-marked
+// person record (itest-<uuid>@example.com), exercises the write surface
+// against it, and deletes everything it created before finishing. Cleanup is
+// self-healing rather than guaranteed-on-exit: a run that dies mid-test
+// leaves its fixtures behind, and the next run's entry sweep deletes stale
+// itest-* people and tasks before starting. (Assumes the runner executes
+// tests sequentially — a concurrent lifecycle test's fresh fixtures would
+// look stale to the sweep.)
 // Run with: hot test --project pkg-integration-attio
+
+::records ::attio::records
+::notes ::attio::notes
+::tasks ::attio::tasks
+::comments ::attio::comments
+::lists ::attio::lists
+::workspace ::attio::workspace
+
+make-person fn (m: Str): Map {
+    ::records/create-record("people", {
+        email_addresses: [{email_address: `${m}@example.com`}],
+        name: [{first_name: "Integration", last_name: `Test ${m}`, full_name: `Integration Test ${m}`}]
+    })
+}
+
+// Delete fixtures a previous crashed run left behind: people whose email
+// carries the itest- marker, and tasks created against them (tasks are
+// workspace-level, so record deletion alone never cleans them).
+sweep-stale-fixtures fn () {
+    stale ::records/query-records("people", {
+        filter: {email_addresses: {email_address: {"$contains": "itest-"}}},
+        limit: 50
+    })
+    map(stale.data, (r) { ::records/delete-record("people", r.id.record_id) })
+
+    tasks ::tasks/list-tasks()
+    stale-tasks filter(tasks.data, (t) {
+        contains(or(get(t, "content_plaintext"), or(get(t, "content"), "")), "Integration task itest-")
+    })
+    map(stale-tasks, (t) { ::tasks/delete-task(t.id.task_id) })
+}
+
+test-self-and-members
+meta ["test"] fn () {
+    self ::workspace/get-self()
+    assert(not(is-err(self)), `get-self: ${if-err(self, (e) { Str(e) })}`)
+    assert(self.active, "token should be active")
+
+    members ::workspace/list-members()
+    assert(gt(length(members.data), 0), "workspace should have members")
+}
 
 test-list-objects
 meta ["test"] fn () {
-    out ::attio::records/list-objects()
+    out ::records/list-objects()
     assert(is-some(out.data), "workspace should expose objects")
+}
+
+test-object-configuration
+meta ["test"] fn () {
+    people ::records/get-object("people")
+    assert-eq("people", people.api_slug)
+
+    attrs ::records/list-attributes("people")
+    slugs map(attrs.data, (a) { a.api_slug })
+    assert(in("email_addresses", slugs), "people should expose email_addresses")
+    assert(in("name", slugs), "people should expose name")
+}
+
+test-lists-read
+meta ["test"] fn () {
+    out ::lists/list-lists()
+    assert(not(is-err(out)), `list-lists: ${if-err(out, (e) { Str(e) })}`)
+}
+
+test-record-lifecycle
+meta ["test"] fn () {
+    sweep-stale-fixtures()
+    m `itest-${Uuid()}`
+    person make-person(m)
+    assert(not(is-err(person)), `create-record: ${if-err(person, (e) { Str(e) })}`)
+    record-id person.id.record_id
+
+    fetched ::records/get-record("people", record-id)
+    assert-eq(record-id, fetched.id.record_id)
+
+    updated ::records/update-record("people", record-id, {
+        name: [{first_name: "Integration", last_name: `Test ${m} updated`, full_name: `Integration Test ${m} updated`}]
+    })
+    assert(not(is-err(updated)), `update-record: ${if-err(updated, (e) { Str(e) })}`)
+
+    hits ::records/query-records("people", {
+        filter: {email_addresses: {email_address: {"$eq": `${m}@example.com`}}},
+        limit: 5
+    })
+    assert-eq(1, length(hits.data), "query should find exactly the created record")
+
+    // Self-clean; a halt above skips this and the next run's sweep handles it.
+    deleted ::records/delete-record("people", record-id)
+    assert(not(is-err(deleted)), `delete-record: ${if-err(deleted, (e) { Str(e) })}`)
+}
+
+test-activity-lifecycle
+meta ["test"] fn () {
+    sweep-stale-fixtures()
+    m `itest-${Uuid()}`
+    person make-person(m)
+    record-id person.id.record_id
+
+    // Notes: create, list, delete.
+    note ::notes/create-note("people", record-id, `Integration note ${m}`, "Created by pkg-integration-attio.")
+    assert(not(is-err(note)), `create-note: ${if-err(note, (e) { Str(e) })}`)
+    notes ::notes/list-notes("people", record-id)
+    assert-eq(1, length(notes.data), "note appears on the record")
+    note-deleted ::notes/delete-note(note.id.note_id)
+    assert(not(is-err(note-deleted)), `delete-note: ${if-err(note-deleted, (e) { Str(e) })}`)
+
+    // Tasks: create linked to the record, complete, delete.
+    task ::tasks/create-task(`Integration task ${m}`, {
+        linked_records: [{target_object: "people", target_record_id: record-id}]
+    })
+    assert(not(is-err(task)), `create-task: ${if-err(task, (e) { Str(e) })}`)
+    completed ::tasks/update-task(task.id.task_id, {is_completed: true})
+    assert(completed.is_completed, "task marked complete")
+    task-deleted ::tasks/delete-task(task.id.task_id)
+    assert(not(is-err(task-deleted)), `delete-task: ${if-err(task-deleted, (e) { Str(e) })}`)
+
+    // Comments: new thread on the record, authored by the first member.
+    me first(::workspace/list-members().data)
+    comment ::comments/create-comment(
+        {object: "people", record_id: record-id},
+        `Integration comment ${m}.`,
+        me.id.workspace_member_id)
+    assert(not(is-err(comment)), `create-comment: ${if-err(comment, (e) { Str(e) })}`)
+    threads ::comments/list-threads("people", record-id)
+    assert-eq(1, length(threads.data), "comment thread appears on the record")
+
+    // Deleting the record cleans up its notes and threads. A halt above
+    // skips this and the next run's sweep handles the leftovers.
+    deleted ::records/delete-record("people", record-id)
+    assert(not(is-err(deleted)), `delete-record: ${if-err(deleted, (e) { Str(e) })}`)
 }

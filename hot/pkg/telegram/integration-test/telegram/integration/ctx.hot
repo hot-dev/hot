@@ -1,0 +1,11 @@
+::telegram::integration::ctx ns
+
+::env ::hot::env
+
+// Placeholder credentials for the telegram integration suite. Unset
+// environment variables are skipped entirely, so absent credentials
+// behave exactly as if never configured.
+::hot::ctx/set(filter-vals({
+    "telegram.bot.token": ::env/get("TELEGRAM_BOT_TOKEN", ""),
+    "telegram.webhook.secret": ::env/get("TELEGRAM_WEBHOOK_SECRET", ""),
+}, (v) { not(is-empty(v)) }))

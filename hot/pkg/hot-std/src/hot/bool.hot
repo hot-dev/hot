@@ -60,14 +60,20 @@ meta {
     Falsy is `false`, `null`, and Err — everything else (including `0`,
     `""`, `[]`, and `{}`) is truthy, exactly as in `if`/`cond`.
 
+    Direct calls short-circuit left to right: arguments after the first
+    falsy one are never evaluated, so `and(is-map(x), get(x, "k"))` is a
+    safe guard. Only dynamic uses — spread arguments, or `and` passed as
+    a function value — evaluate every argument eagerly.
+
     **Example**
 
     ```hot
     and(true, true)       // true
     and(true, false)      // false
     and(1, 2, 3)          // 3 (all truthy, returns last)
-    and(1, null, 3)       // null (first falsy)
+    and(1, null, 3)       // null (first falsy; 3 never evaluated)
     and("", "x")          // "x" — "" is a value, not falseness
+    and(false, fail("x")) // false — short-circuit skips the fail
     ```
     """
 }
@@ -89,14 +95,21 @@ meta {
     yields the default only when the value is absent, never because it
     is empty or zero. Test emptiness explicitly with `is-empty`.
 
+    Direct calls short-circuit left to right: arguments after the first
+    truthy one are never evaluated, so an expensive fallback in
+    `or(cached, recompute())` only runs when needed. Only dynamic uses —
+    spread arguments, or `or` passed as a function value — evaluate every
+    argument eagerly.
+
     **Example**
 
     ```hot
     or(true, false)   // true
-    or(null, 0, 42)   // 0 (0 is truthy)
+    or(null, 0, 42)   // 0 (0 is truthy; 42 never evaluated)
     or(null, false)   // false (all falsy, returns last)
     or("", "x")       // "" — "" is a value, not falseness
     or(err("e"), "x") // "x" — Err is falsy, so or() recovers
+    or(true, fail("x")) // true — short-circuit skips the fail
     ```
     """
 }

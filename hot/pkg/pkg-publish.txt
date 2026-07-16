@@ -47,24 +47,24 @@ supabase
 supabase-admin
 
 # Data
-#mysql
-#pg
-#redis
-#sql
-#sql-mysql
-#sql-pg
-#sql-sqlite
+mysql
+pg
+redis
+sql
+sql-mysql
+sql-pg
+sql-sqlite
 
 # Auth & Webhook Primitives
-#jwt
-#oauth2
+jwt
+oauth2
 
 # Developer Workflow
-#github
-#linear
+github
+linear
 
 # CRM
-#attio
+attio
 #crm
 #hubspot
 #intercom
@@ -72,11 +72,11 @@ supabase-admin
 #zendesk
 
 # Knowledge & Retrieval
-#airtable
+airtable
 #firecrawl
-#notion
+notion
 #pinecone
-#qdrant
+qdrant
 #web-search
 
 # Voice AI

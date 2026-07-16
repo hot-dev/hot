@@ -1,0 +1,19 @@
+::attio::workspace ns
+
+::api ::attio::api
+
+get-self
+meta {
+    doc: """GET /self - The token's own metadata (`active`, `scope`, workspace id/name/slug). The cheapest way to smoke-test a key."""
+}
+fn (): Map {
+  ::api/json("GET", "/self")
+}
+
+list-members
+meta {
+    doc: """GET /workspace_members - The workspace's members (`{data: [{id: {workspace_member_id}, first_name, email_address, access_level}]}`). Member ids are what comment authorship and task assignment need. Requires the User Management scope."""
+}
+fn (): Map {
+  ::api/json("GET", "/workspace_members")
+}

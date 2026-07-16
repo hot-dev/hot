@@ -1,0 +1,13 @@
+::qwen::integration::ctx ns
+
+::env ::hot::env
+
+// Placeholder credentials for the qwen integration suite. Unset
+// environment variables are skipped entirely, so absent credentials
+// behave exactly as if never configured. DashScope calls the API key
+// DASHSCOPE_API_KEY; qwen.base.url is optional and selects the
+// mainland-China (Beijing) endpoint instead of the default Singapore one.
+::hot::ctx/set(filter-vals({
+    "qwen.api.key": ::env/get("DASHSCOPE_API_KEY", ""),
+    "qwen.base.url": ::env/get("QWEN_BASE_URL", ""),
+}, (v) { not(is-empty(v)) }))

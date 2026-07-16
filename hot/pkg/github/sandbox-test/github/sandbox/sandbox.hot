@@ -1,0 +1,153 @@
+::github::sandbox ns
+meta ["test"]
+
+// =============================================================================
+// Sandbox Integration Tests (live GitHub; writes to the fixture repo)
+// =============================================================================
+// Exercises the package's write surface against a dedicated sandbox repo
+// (default hot-dev/hot-github-integration-test — its README documents the
+// fixture layout these tests rely on: fixtures/stable.txt is immutable,
+// fixtures/scratch.txt is mutable, the pr-fixture branch is a permanent
+// PR head, and integration-dispatch.yml has a workflow_dispatch trigger).
+//
+// Requires ctx: github.token with read/write access to the sandbox repo
+// (Issues, Pull requests, Contents, Actions) — unlike the read-only
+// pkg-integration-github suite, which runs with any PAT. Override the
+// target repo via GITHUB_TEST_OWNER / GITHUB_TEST_REPO. Tests are
+// self-cleaning: issues and pull requests they open are closed before
+// the test ends, though concurrent runs against the same sandbox repo
+// can still race over fixtures/scratch.txt and the pr-fixture branch —
+// serialize runs (one at a time) if that ever matters.
+// Run with: hot test --project pkg-integration-github-sandbox
+
+::env ::hot::env
+::issues ::github::issues
+::pulls ::github::pulls
+::repos ::github::repos
+::actions ::github::actions
+
+owner fn (): Str { ::env/get("GITHUB_TEST_OWNER", "hot-dev") }
+repo fn (): Str { ::env/get("GITHUB_TEST_REPO", "hot-github-integration-test") }
+marker fn (): Str { `itest-${Uuid()}` }
+
+test-contents-stable-read
+meta ["test"] fn () {
+    stable ::repos/get-content(owner(), repo(), "fixtures/stable.txt")
+    assert(not(is-err(stable)), `get-content: ${if-err(stable, (e) { Str(e) })}`)
+    assert-eq("hot-github-integration-test stable fixture v1", trim(stable.content))
+    assert(is-some(stable.sha))
+}
+
+test-contents-put-roundtrip
+meta ["test"] fn () {
+    m marker()
+    existing ::repos/get-content(owner(), repo(), "fixtures/scratch.txt")
+    fresh `scratch ${m}`
+    put ::repos/put-content(owner(), repo(), "fixtures/scratch.txt", {
+        message: `integration: update scratch (${m})`,
+        content: fresh,
+        sha: existing.sha
+    })
+    assert(not(is-err(put)), `put-content: ${if-err(put, (e) { Str(e) })}`)
+
+    // Read back pinned to the commit the PUT created: a "latest" read can
+    // race GitHub's caching, but an immutable ref is always consistent.
+    updated ::repos/get-content(owner(), repo(), "fixtures/scratch.txt", put.commit.sha)
+    assert-eq(fresh, trim(updated.content))
+}
+
+test-contents-encoded-path-roundtrip
+meta ["test"] fn () {
+    // A path needing percent-encoding end to end: created on first run,
+    // updated (with sha) on every run after.
+    m marker()
+    tricky "fixtures/needs encoding #1.txt"
+    existing ::repos/get-content(owner(), repo(), tricky)
+    base cond {
+        is-err(existing) => { {} }
+        => { {sha: existing.sha} }
+    }
+
+    put ::repos/put-content(owner(), repo(), tricky, {
+        message: `integration: encoded path (${m})`,
+        content: `encoded ${m}`,
+        ...base
+    })
+    assert(not(is-err(put)), `put-content encoded path: ${if-err(put, (e) { Str(e) })}`)
+
+    // Ref-pinned read: consistent, and exercises ref encoding too.
+    updated ::repos/get-content(owner(), repo(), tricky, put.commit.sha)
+    assert-eq(`encoded ${m}`, trim(updated.content))
+}
+
+test-issue-lifecycle
+meta ["test"] fn () {
+    m marker()
+    issue ::issues/create-issue(owner(), repo(), `Integration test issue ${m}`, {
+        body: "Opened by pkg-integration-github. Safe to close."
+    })
+    assert(not(is-err(issue)), `create-issue: ${if-err(issue, (e) { Str(e) })}`)
+    assert(gt(issue.number, 0))
+
+    updated ::issues/update-issue(owner(), repo(), issue.number, {
+        title: `Integration test issue ${m} (updated)`
+    })
+    assert-eq(`Integration test issue ${m} (updated)`, updated.title)
+
+    comment ::issues/create-comment(owner(), repo(), issue.number, "Comment from the integration suite.")
+    assert(is-some(comment.id))
+
+    labeled ::issues/add-labels(owner(), repo(), issue.number, ["integration-test"])
+    assert(not(is-err(labeled)), `add-labels: ${if-err(labeled, (e) { Str(e) })}`)
+
+    fetched ::issues/get-issue(owner(), repo(), issue.number)
+    assert-eq(1, length(filter(fetched.labels, (l) { eq(l.name, "integration-test") })))
+
+    closed ::issues/close-issue(owner(), repo(), issue.number)
+    assert-eq("closed", closed.state)
+}
+
+test-pull-lifecycle
+meta ["test"] fn () {
+    m marker()
+
+    // Close anything a previous failed run left open from the fixture branch.
+    stale ::pulls/list-pulls(owner(), repo(), {state: "open", head: `${owner()}:pr-fixture`})
+    map(stale, (pr) { ::issues/update-issue(owner(), repo(), pr.number, {state: "closed"}) })
+
+    // Freshen the permanent head branch so it always differs from main.
+    head-file ::repos/get-content(owner(), repo(), "fixtures/pr-fixture.txt", "pr-fixture")
+    freshened ::repos/put-content(owner(), repo(), "fixtures/pr-fixture.txt", {
+        message: `integration: freshen pr-fixture (${m})`,
+        content: `pr fixture ${m}`,
+        sha: head-file.sha,
+        branch: "pr-fixture"
+    })
+    assert(not(is-err(freshened)), `freshen pr-fixture: ${if-err(freshened, (e) { Str(e) })}`)
+
+    pr ::pulls/create-pull(owner(), repo(), `Integration test PR ${m}`, "pr-fixture", "main", {
+        body: "Opened by pkg-integration-github. Closed automatically."
+    })
+    assert(not(is-err(pr)), `create-pull: ${if-err(pr, (e) { Str(e) })}`)
+
+    files ::pulls/list-files(owner(), repo(), pr.number)
+    assert-eq(1, length(filter(files, (f) { eq(f.filename, "fixtures/pr-fixture.txt") })))
+
+    review ::pulls/create-review(owner(), repo(), pr.number, "COMMENT", "Reviewed by the integration suite.")
+    assert(is-some(review.id))
+
+    closed ::issues/update-issue(owner(), repo(), pr.number, {state: "closed"})
+    assert-eq("closed", closed.state)
+}
+
+test-workflow-dispatch
+meta ["test"] fn () {
+    dispatched ::actions/dispatch-workflow(owner(), repo(), "integration-dispatch.yml", "main", {
+        marker: marker()
+    })
+    assert(not(is-err(dispatched)), `dispatch-workflow: ${if-err(dispatched, (e) { Str(e) })}`)
+
+    runs ::actions/list-workflow-runs(owner(), repo(), {per_page: 5})
+    assert(not(is-err(runs)), `list-workflow-runs: ${if-err(runs, (e) { Str(e) })}`)
+    assert(is-some(runs.total_count))
+}

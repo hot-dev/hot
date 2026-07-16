@@ -211,6 +211,9 @@ make-error(3)"#;
 
     #[test]
     fn jit_user_call_halts_on_strict_err_argument() {
+        // The halt now propagates out of the JIT frame as a run failure
+        // (matching the interpreter), rather than surfacing as an Err value
+        // with the failure state set — this test used to assert the latter.
         let src = r#"::t ns
 ignore fn (_value: Any): Str { "callee-ran" }
 through-strict-call fn (bad: Bool): Str {
@@ -220,16 +223,18 @@ through-strict-call fn (bad: Bool): Str {
 through-strict-call(false)
 through-strict-call(false)
 through-strict-call(true)"#;
-        let out = compile_and_run_with_std_conf(
-            src,
-            Some(crate::val!({"jit": {"threshold": 1}})),
-        )
-        .expect("JIT strict-argument run");
-        assert!(out.is_err(), "expected strict-argument Err, got {out:?}");
+        let out = compile_and_run_with_std_conf(src, Some(crate::val!({"jit": {"threshold": 1}})));
+        let text = match &out {
+            Ok(v) => format!("OK:{v:?}"),
+            Err(e) => e.clone(),
+        };
         assert!(
-            out.unwrap_err()
-                .is_some_and(|value| value.to_string().contains("jit-strict-argument")),
-            "unexpected strict-argument error: {out:?}"
+            text.contains("jit-strict-argument"),
+            "halt must carry the Err payload, got {text}"
+        );
+        assert!(
+            !text.contains("callee-ran"),
+            "the callee ran despite the strict-argument halt: {text}"
         );
     }
 
@@ -250,6 +255,212 @@ k(7)"#;
         )
         .expect("JIT constant-backed flow result");
         assert_eq!(out, Val::from("t"), "third call must still see the constant alive");
+    }
+
+    /// and/or compile to nested cond flows (try_compile_inline_and_or); under
+    /// the JIT the skipped side must never evaluate — its fail() would halt
+    /// the run — and the value semantics (first falsy / first truthy / last
+    /// value, Err falsy) must match the interpreter exactly.
+    #[test]
+    fn jit_and_or_short_circuit_semantics() {
+        let src = r#"::t ns
+guard fn (x: Any): Any {
+    and(is-map(x), get(x, "k"))
+}
+chain fn (): Vec {
+    a and(false, fail("and must not reach arg 2"))
+    b or(true, fail("or must not reach arg 2"))
+    c and(1, 2, 3)
+    d or(null, 0, fail("or must stop at 0"))
+    e guard("not-a-map")
+    g or(null, 42)
+    h if-err(and(err("efirst"), true), (err-val) { `err:${err-val}` })
+    [a, b, c, d, e, g, h]
+}
+chain()
+chain()
+chain()"#;
+        let jit = compile_and_run_with_std_conf(src, Some(crate::val!({"jit": {"threshold": 1}})))
+            .expect("JIT and/or run");
+        let interp =
+            compile_and_run_with_std_conf(src, Some(crate::val!({"jit": {"mode": "off"}})))
+                .expect("interpreter and/or run");
+        assert_eq!(jit, interp, "JIT/interpreter parity for and/or");
+        let expected = crate::val!([false, true, 3, 0, false, 42, "err:efirst"]);
+        assert_eq!(jit, expected, "and/or value semantics under JIT");
+    }
+
+    /// Bare-reference pipe stages synthesize a zero-arg call and must wrap
+    /// the piped value in a lazy thunk when the target's first parameter is
+    /// lazy, so Result values reach the Result-aware inspectors — under the
+    /// JIT exactly as in the interpreter.
+    #[test]
+    fn jit_pipe_bare_ref_honors_lazy_first_param() {
+        let src = r#"::t ns
+probe fn (flag: Bool): Vec {
+    v if(flag, err("piped"), ok(7))
+    e v |> is-err
+    o v |> is-ok
+    q v |> ::hot::type/is-err
+    [e, o, q]
+}
+run fn (): Vec {
+    [probe(true), probe(false), probe(true)]
+}
+run()
+run()
+run()"#;
+        let jit = compile_and_run_with_std_conf(src, Some(crate::val!({"jit": {"threshold": 1}})))
+            .expect("JIT piped lazy-param run");
+        let interp =
+            compile_and_run_with_std_conf(src, Some(crate::val!({"jit": {"mode": "off"}})))
+                .expect("interpreter piped lazy-param run");
+        assert_eq!(jit, interp, "JIT/interpreter parity for piped lazy params");
+        let expected = crate::val!([[true, false, true], [false, true, false], [true, false, true]]);
+        assert_eq!(jit, expected, "piped Result values reach the inspectors under JIT");
+    }
+
+    /// The strict-argument law under JIT-lowered arithmetic: an Err flowing
+    /// into `add` must halt with the Err's own payload — never reach the
+    /// native (whose "add requires numbers" would mean the law was skipped)
+    /// — and the halt must abort BOTH the halting frame and its caller.
+    /// The completion markers make any leak visible in the outcome: if the
+    /// frame or caller kept executing past the halt, the run would succeed
+    /// with the marker string instead of failing with the payload.
+    #[test]
+    fn jit_pipe_strict_target_halts_with_payload() {
+        let src = r#"::t ns
+f fn (flag: Bool): Str {
+    v if(flag, err("pipe-strict"), 1)
+    x v |> add(1)
+    "f-completed"
+}
+caller fn (flag: Bool): Str {
+    f(flag)
+    "caller-completed"
+}
+caller(false)
+caller(false)
+caller(true)"#;
+        let describe = |outcome: &Result<Val, String>| -> String {
+            match outcome {
+                Ok(v) => format!("OK:{v:?}"),
+                Err(e) => e.clone(),
+            }
+        };
+        let jit = compile_and_run_with_std_conf(src, Some(crate::val!({"jit": {"threshold": 1}})));
+        let interp =
+            compile_and_run_with_std_conf(src, Some(crate::val!({"jit": {"mode": "off"}})));
+        for (mode, outcome) in [("jit", &jit), ("interpreter", &interp)] {
+            let text = describe(outcome);
+            assert!(
+                text.contains("pipe-strict"),
+                "{mode}: halt must carry the Err payload, got {text}"
+            );
+            assert!(
+                !text.contains("add requires numbers"),
+                "{mode}: the Err reached the native — strict-argument law skipped: {text}"
+            );
+            assert!(
+                !text.contains("f-completed"),
+                "{mode}: the halting frame continued executing: {text}"
+            );
+            assert!(
+                !text.contains("caller-completed"),
+                "{mode}: the caller continued past the halt: {text}"
+            );
+        }
+    }
+
+    /// The strict-argument law under JIT-lowered comparisons: bare-bool
+    /// helpers can't carry a halt in-band, so the emitted sentinel check
+    /// must abort the frame with the Err payload instead of letting the
+    /// comparison read as false — and the halt must propagate through the
+    /// caller boundary rather than dying at the frame edge. Completion
+    /// markers turn any leak (frame or caller continuing) into a visible
+    /// success that the assertions reject.
+    #[test]
+    fn jit_cmp_strict_operand_halts_with_payload() {
+        for op in ["gt(v, 0)", "lt(v, 9)", "eq(v, 1)", "gte(v, 0)"] {
+            let src = format!(
+                r#"::t ns
+f fn (flag: Bool): Str {{
+    v if(flag, err("cmp-strict"), 1)
+    x {op}
+    "f-completed"
+}}
+caller fn (flag: Bool): Str {{
+    f(flag)
+    "caller-completed"
+}}
+caller(false)
+caller(false)
+caller(true)"#
+            );
+            for (mode, conf) in [
+                ("jit", crate::val!({"jit": {"threshold": 1}})),
+                ("interpreter", crate::val!({"jit": {"mode": "off"}})),
+            ] {
+                let out = compile_and_run_with_std_conf(&src, Some(conf));
+                let text = match &out {
+                    Ok(v) => format!("OK:{v:?}"),
+                    Err(e) => e.clone(),
+                };
+                assert!(
+                    text.contains("cmp-strict"),
+                    "{op} ({mode}): halt must carry the Err payload, got {text}"
+                );
+                assert!(
+                    !text.contains("f-completed"),
+                    "{op} ({mode}): the halting frame continued executing: {text}"
+                );
+                assert!(
+                    !text.contains("caller-completed"),
+                    "{op} ({mode}): the caller continued past the halt: {text}"
+                );
+            }
+        }
+    }
+
+    /// A strict halt inside a deferred parallel binding must abort the frame
+    /// via the sentinel check in emit_deferred_var_expr — before the fix the
+    /// sentinel (2) flowed into set_element as a pointer and crashed the
+    /// process. The constant markers catch both the crash (test dies) and
+    /// any continuation leak.
+    #[test]
+    fn jit_deferred_parallel_binding_halt() {
+        let src = r#"::t ns
+f fn (flag: Bool): Map {
+    parallel {
+        a add(if(flag, err("deferred-boom"), 1), 1)
+        b 2
+    }
+}
+caller fn (flag: Bool): Str {
+    f(flag)
+    "caller-completed"
+}
+caller(false)
+caller(false)
+caller(true)"#;
+        for (mode, conf) in [
+            ("jit", crate::val!({"jit": {"threshold": 1}})),
+            ("interpreter", crate::val!({"jit": {"mode": "off"}})),
+        ] {
+            let out = compile_and_run_with_std_conf(src, Some(conf));
+            let text = match &out {
+                Ok(v) => format!("OK:{v:?}"),
+                Err(e) => e.clone(),
+            };
+            assert!(
+                text.contains("deferred-boom"),
+                "{mode}: halt must carry the Err payload, got {text}"
+            );
+            assert!(
+                !text.contains("caller-completed"),
+                "{mode}: the caller continued past the halt: {text}"
+            );
+        }
     }
 
     /// Helper to compile and execute Hot code with hot-std included and an

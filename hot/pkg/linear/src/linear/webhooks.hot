@@ -1,0 +1,87 @@
+::linear::webhooks ns
+meta {
+    doc: """Linear webhook verification: HMAC-SHA256 over the raw body, delivered as a hex digest in the `linear-signature` header, plus replay protection via the signed `webhookTimestamp` payload field. See https://developers.linear.app/docs/graphql/webhooks."""
+}
+
+::ctx ::hot::ctx
+::hmac ::hot::hmac
+::json ::hot::json
+::time ::hot::time
+
+// Linear's recommended replay tolerance: reject payloads whose signed
+// webhookTimestamp is more than a minute from now.
+DEFAULT_MAX_AGE_MS 60000
+
+verify-request
+meta {
+    ctx: {"linear.webhook.secret": {required: false}},
+    doc: """
+    Verify a Linear webhook request: checks the `linear-signature`
+    HMAC, then rejects replays whose signed `webhookTimestamp` is more
+    than `max-age-ms` from now (default 60s, per Linear's docs). Pass a
+    `max-age-ms` of 0 or less to skip the replay check. Uses the
+    `linear.webhook.secret` context variable by default (failing when it
+    is unset), or accepts an explicit secret — an empty explicit secret
+    never verifies.
+
+    **Example**
+
+    ```hot
+    linear-webhook
+    meta {webhook: {service: "linear", path: "/linear/webhook"}}
+    fn (request) {
+      if(not(::linear::webhooks/verify-request(request)),
+        ::hot::http/HttpResponse({status: 401, body: "invalid signature"}),
+        handle-event(request.body))
+    }
+    ```
+    """
+}
+fn
+(request: Map): Bool {
+  secret or(::ctx/get("linear.webhook.secret"), "")
+  if(is-empty(secret),
+    fail("linear.webhook.secret is not set. Add it in Context Variables to verify webhook requests.")
+  )
+  verify-request(request, secret)
+},
+(request: Map, secret: Str): Bool {
+  verify-request(request, secret, DEFAULT_MAX_AGE_MS)
+},
+(request: Map, secret: Str, max-age-ms: Int): Bool {
+  signature get(request.headers, "linear-signature", "")
+  cond {
+    // An empty key would make every signature forgeable: fail closed.
+    is-empty(secret) => { false }
+    => {
+      raw-body ::hot::http/raw-body(request)
+      cond {
+        not(::hmac/hmac-verify-hex(secret, raw-body, signature, "sha256")) => { false }
+        // The signature is what makes the timestamp trustworthy, so the
+        // replay check runs only after verification succeeds.
+        lte(max-age-ms, 0) => { true }
+        => { timestamp-fresh(raw-body, max-age-ms) }
+      }
+    }
+  }
+}
+
+// True when the payload's webhookTimestamp (epoch millis) is within
+// max-age-ms of now, in either direction. Missing or malformed
+// timestamps fail closed.
+timestamp-fresh fn (raw-body: Str, max-age-ms: Int): Bool {
+  payload ::json/from-json(raw-body)
+  cond {
+    is-err(payload) => { false }
+    => {
+      timestamp get(payload, "webhookTimestamp")
+      cond {
+        not(is-some(timestamp)) => { false }
+        => {
+          now-ms ::time/epoch-millis(::time/now())
+          lte(abs(sub(now-ms, Int(timestamp))), max-age-ms)
+        }
+      }
+    }
+  }
+}

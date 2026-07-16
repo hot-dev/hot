@@ -24,6 +24,7 @@ pub(crate) mod eval;
 pub(crate) mod extract;
 pub(crate) mod fmt;
 pub(crate) mod init;
+pub(crate) mod key;
 pub(crate) mod project;
 pub(crate) mod queue;
 pub(crate) mod repl;

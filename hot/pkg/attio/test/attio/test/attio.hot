@@ -16,3 +16,45 @@ test-base-url
 meta ["test"] fn () {
     assert-eq("https://api.attio.com/v2", ::attio/BASE_URL)
 }
+
+test-task-payload-defaults
+meta ["test"] fn () {
+    payload ::attio::tasks/build-task-payload("Send proposal", {})
+    assert-eq("Send proposal", payload.data.content)
+    assert-eq("plaintext", payload.data.format)
+    assert-eq(false, payload.data.is_completed)
+    // Attio requires these keys to be present even when empty/null.
+    assert(in("deadline_at", keys(payload.data)), "deadline_at present (null)")
+    assert-eq([], payload.data.linked_records)
+    assert-eq([], payload.data.assignees)
+}
+
+test-task-payload-options-override
+meta ["test"] fn () {
+    payload ::attio::tasks/build-task-payload("Call Ada", {
+        deadline_at: "2026-08-01T12:00:00Z",
+        linked_records: [{target_object: "people", target_record_id: "rec-1"}]
+    })
+    assert-eq("2026-08-01T12:00:00Z", payload.data.deadline_at)
+    assert-eq(1, length(payload.data.linked_records))
+}
+
+test-comment-payload-record-thread
+meta ["test"] fn () {
+    payload ::attio::comments/build-comment-payload(
+        {object: "people", record_id: "rec-9"}, "Nice call.", "member-1")
+    assert-eq("plaintext", payload.data.format)
+    assert-eq("Nice call.", payload.data.content)
+    assert-eq("workspace-member", payload.data.author.type)
+    assert-eq("member-1", payload.data.author.id)
+    assert-eq("people", payload.data.record.object)
+    assert-eq("rec-9", payload.data.record.record_id)
+    assert(not(in("thread_id", keys(payload.data))), "record comments carry no thread_id")
+}
+
+test-comment-payload-thread-reply
+meta ["test"] fn () {
+    payload ::attio::comments/build-comment-payload({thread_id: "th-7"}, "Agreed.", "member-1")
+    assert-eq("th-7", payload.data.thread_id)
+    assert(not(in("record", keys(payload.data))), "thread replies carry no record")
+}

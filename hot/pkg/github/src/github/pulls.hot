@@ -5,7 +5,7 @@ query-string ::hot::uri/query-string
 
 list-pulls
 meta {
-    doc: """GET /repos/{owner}/{repo}/pulls - List pull requests. `params` supports `state`, `head`, `base`, `sort`, `per_page`, `page`."""
+    doc: """GET /repos/{owner}/{repo}/pulls - List pull requests. `params` supports `state`, `head`, `base`, `sort`, `per_page`, `page`. Returns a single page (GitHub default 30, max 100); pass `page` to paginate."""
 }
 fn
 (owner: Str, repo: Str): Vec {
@@ -50,10 +50,14 @@ fn
 
 list-files
 meta {
-    doc: """GET /repos/{owner}/{repo}/pulls/{number}/files - The files changed by a pull request (filename, status, additions/deletions, patch)."""
+    doc: """GET /repos/{owner}/{repo}/pulls/{number}/files - The files changed by a pull request (filename, status, additions/deletions, patch). `params` supports `per_page`, `page`. Returns a single page (GitHub default 30, max 100); pass `page` to paginate."""
 }
-fn (owner: Str, repo: Str, number: Int): Vec {
+fn
+(owner: Str, repo: Str, number: Int): Vec {
   ::api/json("GET", `/repos/${owner}/${repo}/pulls/${number}/files`)
+},
+(owner: Str, repo: Str, number: Int, params: Map): Vec {
+  ::api/json("GET", `/repos/${owner}/${repo}/pulls/${number}/files${query-string(params)}`)
 }
 
 create-review

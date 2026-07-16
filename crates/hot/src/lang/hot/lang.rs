@@ -63,6 +63,20 @@ fn call_args_value(args: &[Val]) -> Option<&Val> {
     }
 }
 
+/// The user-facing message of a VmError for embedding in Err payloads and
+/// failure state. Display prepends "Runtime error: ", and callers up the
+/// stack wrap the string into another RuntimeError whose Display prepends
+/// it again — producing "Runtime error: Runtime error: ..." chains. Errors
+/// with a source location keep Display so the file:line context survives.
+fn vm_error_message(err: &crate::lang::runtime::vm::VmError) -> String {
+    match err {
+        crate::lang::runtime::vm::VmError::RuntimeError(re) if re.location.is_none() => {
+            re.message.clone()
+        }
+        other => other.to_string(),
+    }
+}
+
 fn execute_lambda_for_call(
     vm: &mut crate::lang::runtime::vm::VirtualMachine,
     function_val: &Val,
@@ -86,7 +100,7 @@ fn execute_lambda_for_call(
     match exec {
         Ok(value) => apply_onerr_disposition(vm, value, disposition)
             .map(|value| wrap_preserved_call_result(value, disposition)),
-        Err(err) => handle_call_execution_error(vm, err.to_string(), disposition),
+        Err(err) => handle_call_execution_error(vm, vm_error_message(&err), disposition),
     }
 }
 
@@ -113,7 +127,7 @@ fn execute_user_function_for_call(
     match exec {
         Ok(value) => apply_onerr_disposition(vm, value, disposition)
             .map(|value| wrap_preserved_call_result(value, disposition)),
-        Err(err) => handle_call_execution_error(vm, err.to_string(), disposition),
+        Err(err) => handle_call_execution_error(vm, vm_error_message(&err), disposition),
     }
 }
 
@@ -306,7 +320,7 @@ pub fn call(vm: &mut crate::lang::runtime::vm::VirtualMachine, args: &[Val]) -> 
 
     // Check for call function recursion to prevent infinite loops
     if let Err(err) = vm.increment_call_depth() {
-        return HotResult::Err(Val::from(err.to_string()));
+        return HotResult::Err(Val::from(vm_error_message(&err)));
     }
 
     let function_val = &args[0];
@@ -345,7 +359,7 @@ pub fn call(vm: &mut crate::lang::runtime::vm::VirtualMachine, args: &[Val]) -> 
                 vm.decrement_call_depth();
                 return match exec {
                     Ok(v) => HotResult::Ok(v),
-                    Err(e) => HotResult::Err(Val::from(e.to_string())),
+                    Err(e) => HotResult::Err(Val::from(e)),
                 };
             }
             if let Some(_fr) = b
@@ -422,7 +436,7 @@ pub fn call(vm: &mut crate::lang::runtime::vm::VirtualMachine, args: &[Val]) -> 
                 vm.decrement_call_depth();
                 return match exec {
                     Ok(v) => HotResult::Ok(v),
-                    Err(e) => HotResult::Err(Val::from(e.to_string())),
+                    Err(e) => HotResult::Err(Val::from(e)),
                 };
             }
 
@@ -502,7 +516,7 @@ pub fn call(vm: &mut crate::lang::runtime::vm::VirtualMachine, args: &[Val]) -> 
     if hotlib_map.contains_key(&resolved_function_name) {
         let exec = vm
             .execute_call_lib(&resolved_function_name, &arg_vals)
-            .map_err(|err| err.to_string())
+            .map_err(|err| vm_error_message(&err))
             .and_then(|value| apply_onerr_disposition(vm, value, disposition))
             .map(|value| wrap_preserved_call_result(value, disposition));
         vm.decrement_call_depth();

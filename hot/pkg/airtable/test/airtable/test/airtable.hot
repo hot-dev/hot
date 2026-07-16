@@ -16,3 +16,9 @@ meta ["test"] fn () {
     injected ::airtable/escape-formula-value("x' = '1', {Secret} != '")
     assert-eq("'x\\' = \\'1\\', {Secret} != \\''", injected, "every quote in the payload is escaped")
 }
+
+test-records-query-encodes-ids
+meta ["test"] fn () {
+    assert-eq("?records[]=rec1&records[]=rec2", ::airtable/records-query(["rec1", "rec2"]))
+    assert-eq("?records[]=rec%2Fodd", ::airtable/records-query(["rec/odd"]), "ids are component-encoded")
+}

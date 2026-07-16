@@ -2,7 +2,14 @@
 
 ::api ::github::api
 ::b64 ::hot::base64
+::uri ::hot::uri
 query-string ::hot::uri/query-string
+
+// Percent-encode a repository content path per segment: each segment is a
+// URI component, but the / separators must survive as path structure.
+encode-path fn (path: Str): Str {
+  join(map(split(path, "/"), (segment) { ::uri/encode(segment) }), "/")
+}
 
 get-repo
 meta {
@@ -14,7 +21,13 @@ fn (owner: Str, repo: Str): Map {
 
 list-repos
 meta {
-    doc: """GET /users/{owner}/repos or /orgs/{owner}/repos - List an owner's repositories. `params` supports `type`, `sort`, `per_page`, `page`. The 1-arity form lists a user's repos."""
+    doc: """
+    GET /users/{owner}/repos - List a user's repositories. `params`
+    supports `type`, `sort`, `per_page`, `page`. Returns a single page
+    (GitHub default 30, max 100); pass `page` to paginate. For an
+    organization's repositories (including private-repo visibility and
+    org `type` filters) use `list-org-repos`.
+    """
 }
 fn
 (owner: Str): Vec {
@@ -24,17 +37,38 @@ fn
   ::api/json("GET", `/users/${owner}/repos${query-string(params)}`)
 }
 
+list-org-repos
+meta {
+    doc: """
+    GET /orgs/{org}/repos - List an organization's repositories. `params`
+    supports `type` ("all"/"public"/"private"/"forks"/"sources"/"member"),
+    `sort`, `per_page`, `page`. Returns a single page (GitHub default 30,
+    max 100); pass `page` to paginate.
+    """
+}
+fn
+(org: Str): Vec {
+  ::api/json("GET", `/orgs/${org}/repos`)
+},
+(org: Str, params: Map): Vec {
+  ::api/json("GET", `/orgs/${org}/repos${query-string(params)}`)
+}
+
 list-branches
 meta {
-    doc: """GET /repos/{owner}/{repo}/branches - List branches."""
+    doc: """GET /repos/{owner}/{repo}/branches - List branches. `params` supports `per_page`, `page`. Returns a single page (GitHub default 30, max 100); pass `page` to paginate."""
 }
-fn (owner: Str, repo: Str): Vec {
+fn
+(owner: Str, repo: Str): Vec {
   ::api/json("GET", `/repos/${owner}/${repo}/branches`)
+},
+(owner: Str, repo: Str, params: Map): Vec {
+  ::api/json("GET", `/repos/${owner}/${repo}/branches${query-string(params)}`)
 }
 
 list-commits
 meta {
-    doc: """GET /repos/{owner}/{repo}/commits - List commits, newest first. `params` supports `sha` (branch), `path`, `author`, `since`, `until`, `per_page`, `page`."""
+    doc: """GET /repos/{owner}/{repo}/commits - List commits, newest first. `params` supports `sha` (branch), `path`, `author`, `since`, `until`, `per_page`, `page`. Returns a single page (GitHub default 30, max 100); pass `page` to paginate."""
 }
 fn
 (owner: Str, repo: Str): Vec {
@@ -57,31 +91,37 @@ fn (resource: Map): Str {
   }
 }
 
+// Shared body of get-content: `query` is "" or an encoded "?ref=..." suffix.
+fetch-content fn (owner: Str, repo: Str, path: Str, query: Str): Map {
+  resource ::api/json("GET", `/repos/${owner}/${repo}/contents/${encode-path(path)}${query}`)
+  cond {
+    // Already an Err from the transport — pass it through as-is (feeding
+    // an Err back into err() would trip the strict-argument halt).
+    is-err(resource) => { resource }
+    // The contents endpoint returns a Vec when the path is a directory.
+    is-vec(resource) => {
+      err(`'${path}' is a directory, not a file; get-content only fetches files`)
+    }
+    => { {path: resource.path, sha: resource.sha, content: decode-content(resource)} }
+  }
+}
+
 get-content
 meta {
     doc: """
     GET /repos/{owner}/{repo}/contents/{path} - Fetch a file and decode
     its content. Returns `{path, sha, content}` where `content` is the
     decoded text — the `sha` is what `put-content` needs to update it.
-    Pass a `ref` (branch/tag/sha) with the 4-arity form.
+    Pass a `ref` (branch/tag/sha) with the 4-arity form. Errs when `path`
+    is a directory.
     """
 }
 fn
 (owner: Str, repo: Str, path: Str): Map {
-  resource ::api/json("GET", `/repos/${owner}/${repo}/contents/${path}`)
-  match resource {
-    Result.Err => { err(resource) }
-
-    _ => { {path: resource.path, sha: resource.sha, content: decode-content(resource)} }
-  }
+  fetch-content(owner, repo, path, "")
 },
 (owner: Str, repo: Str, path: Str, ref: Str): Map {
-  resource ::api/json("GET", `/repos/${owner}/${repo}/contents/${path}?ref=${ref}`)
-  match resource {
-    Result.Err => { err(resource) }
-
-    _ => { {path: resource.path, sha: resource.sha, content: decode-content(resource)} }
-  }
+  fetch-content(owner, repo, path, `?ref=${::uri/encode(ref)}`)
 }
 
 put-content
@@ -112,5 +152,5 @@ fn (owner: Str, repo: Str, path: Str, options: Map): Map {
     sha: get(options, "sha"),
     branch: get(options, "branch")
   }, is-some)
-  ::api/json("PUT", `/repos/${owner}/${repo}/contents/${path}`, {}, body)
+  ::api/json("PUT", `/repos/${owner}/${repo}/contents/${encode-path(path)}`, {}, body)
 }

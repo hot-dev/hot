@@ -1,0 +1,10 @@
+::github::sandbox::ctx ns
+
+::env ::hot::env
+
+// Placeholder credentials for the github sandbox suite. Unset
+// environment variables are skipped entirely, so absent credentials
+// behave exactly as if never configured.
+::hot::ctx/set(filter-vals({
+    "github.token": ::env/get("GITHUB_TOKEN", ""),
+}, (v) { not(is-empty(v)) }))

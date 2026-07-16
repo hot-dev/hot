@@ -450,6 +450,18 @@ pub(crate) fn extract_options_from_command(command: &Command) -> ExtractedOption
             None,
             Some(show_conf.clone()),
         ),
+        Command::Key {
+            global, show_conf, ..
+        } => (
+            global.clone(),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(show_conf.clone()),
+        ),
         Command::Cache { global, .. } => (global.clone(), None, None, None, None, None, None, None),
         Command::Init {
             global, show_conf, ..
@@ -1287,6 +1299,11 @@ pub(crate) fn show_command_config(command: &Option<Command>, conf: &Val) {
         }
         Some(Command::Db { .. }) => {
             // DB command uses: db config
+            let config_keys = vec!["db.uri", "db.schema"];
+            filter_config(conf, &config_keys)
+        }
+        Some(Command::Key { .. }) => {
+            // Key command writes the local environment database directly
             let config_keys = vec!["db.uri", "db.schema"];
             filter_config(conf, &config_keys)
         }

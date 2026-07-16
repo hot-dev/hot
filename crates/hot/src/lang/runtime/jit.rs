@@ -453,6 +453,7 @@ struct JitHelperRefs {
     binop_general: FuncRef,
     cmp_general: FuncRef,
     is_err: FuncRef,
+    failure_err: FuncRef,
     call_vm_by_name: FuncRef,
     promote_to_owned: FuncRef,
     make_vec: FuncRef,
@@ -1306,6 +1307,7 @@ fn compile_supported_function(
     builder.symbol("hot_jit_binop_general", hot_jit_binop_general as *const u8);
     builder.symbol("hot_jit_cmp_general", hot_jit_cmp_general as *const u8);
     builder.symbol("hot_jit_is_err", hot_jit_is_err as *const u8);
+    builder.symbol("hot_jit_failure_err", hot_jit_failure_err as *const u8);
     builder.symbol(
         "hot_jit_call_vm_by_name",
         hot_jit_call_vm_by_name as *const u8,
@@ -1656,6 +1658,13 @@ fn hotlib_jit_policy_bails_out(name: &str) -> bool {
     )
 }
 
+/// Intrinsic helpers return this sentinel when a Result.Err operand
+/// triggered the strict-argument halt (failure state already set); emitted
+/// code branches to an error return instead of using it as a result. Safe
+/// on every helper ABI: success is 0 or an aligned pointer, booleans are
+/// 0/1 — never 2.
+const HALT_SENTINEL: i64 = 2;
+
 const NUMERIC_KIND_INT: i64 = 1;
 const NUMERIC_KIND_DEC: i64 = 2;
 const NUMERIC_KIND_OWNED: i64 = 3;
@@ -1680,10 +1689,11 @@ unsafe extern "C" fn hot_jit_add_numeric(
     right_kind: i64,
     right_raw: i64,
 ) -> i64 {
-    let result = crate::lang::hot::math::add(&[
-        unsafe { decode_numeric_val(left_kind, left_raw) },
-        unsafe { decode_numeric_val(right_kind, right_raw) },
-    ]);
+    let args = match unsafe { decode_strict_operands(left_kind, left_raw, right_kind, right_raw) } {
+        Ok(args) => args,
+        Err(msg) => return new_owned_val(Val::err(Val::Str(msg.into()))),
+    };
+    let result = crate::lang::hot::math::add(&args);
     write_numeric_result(out, result)
 }
 
@@ -1694,10 +1704,11 @@ unsafe extern "C" fn hot_jit_sub_numeric(
     right_kind: i64,
     right_raw: i64,
 ) -> i64 {
-    let result = crate::lang::hot::math::sub(&[
-        unsafe { decode_numeric_val(left_kind, left_raw) },
-        unsafe { decode_numeric_val(right_kind, right_raw) },
-    ]);
+    let args = match unsafe { decode_strict_operands(left_kind, left_raw, right_kind, right_raw) } {
+        Ok(args) => args,
+        Err(msg) => return new_owned_val(Val::err(Val::Str(msg.into()))),
+    };
+    let result = crate::lang::hot::math::sub(&args);
     write_numeric_result(out, result)
 }
 
@@ -1708,10 +1719,11 @@ unsafe extern "C" fn hot_jit_mul_numeric(
     right_kind: i64,
     right_raw: i64,
 ) -> i64 {
-    let result = crate::lang::hot::math::mul(&[
-        unsafe { decode_numeric_val(left_kind, left_raw) },
-        unsafe { decode_numeric_val(right_kind, right_raw) },
-    ]);
+    let args = match unsafe { decode_strict_operands(left_kind, left_raw, right_kind, right_raw) } {
+        Ok(args) => args,
+        Err(msg) => return new_owned_val(Val::err(Val::Str(msg.into()))),
+    };
+    let result = crate::lang::hot::math::mul(&args);
     write_numeric_result(out, result)
 }
 
@@ -1722,10 +1734,11 @@ unsafe extern "C" fn hot_jit_div_numeric(
     right_kind: i64,
     right_raw: i64,
 ) -> i64 {
-    let result = crate::lang::hot::math::div(&[
-        unsafe { decode_numeric_val(left_kind, left_raw) },
-        unsafe { decode_numeric_val(right_kind, right_raw) },
-    ]);
+    let args = match unsafe { decode_strict_operands(left_kind, left_raw, right_kind, right_raw) } {
+        Ok(args) => args,
+        Err(msg) => return new_owned_val(Val::err(Val::Str(msg.into()))),
+    };
+    let result = crate::lang::hot::math::div(&args);
     write_numeric_result(out, result)
 }
 
@@ -1736,10 +1749,11 @@ unsafe extern "C" fn hot_jit_mod_numeric(
     right_kind: i64,
     right_raw: i64,
 ) -> i64 {
-    let result = crate::lang::hot::math::modulo(&[
-        unsafe { decode_numeric_val(left_kind, left_raw) },
-        unsafe { decode_numeric_val(right_kind, right_raw) },
-    ]);
+    let args = match unsafe { decode_strict_operands(left_kind, left_raw, right_kind, right_raw) } {
+        Ok(args) => args,
+        Err(msg) => return new_owned_val(Val::err(Val::Str(msg.into()))),
+    };
+    let result = crate::lang::hot::math::modulo(&args);
     write_numeric_result(out, result)
 }
 
@@ -1839,8 +1853,17 @@ unsafe extern "C" fn hot_jit_eq_general(
     right_kind: i64,
     right_raw: i64,
 ) -> i64 {
-    let left = unsafe { decode_helper_val(left_kind, left_raw) };
-    let right = unsafe { decode_helper_val(right_kind, right_raw) };
+    // Strict-argument law: Result operands unwrap (Ok) or halt (Err) as at
+    // interpreter call boundaries. On halt the failure state is set and 0
+    // is the only in-band value for the bare-bool ABI.
+    let left = match strict_prepare_operand(unsafe { decode_helper_val(left_kind, left_raw) }) {
+        Ok(v) => v,
+        Err(_) => return HALT_SENTINEL,
+    };
+    let right = match strict_prepare_operand(unsafe { decode_helper_val(right_kind, right_raw) }) {
+        Ok(v) => v,
+        Err(_) => return HALT_SENTINEL,
+    };
     if left == right { 1 } else { 0 }
 }
 
@@ -1859,6 +1882,23 @@ unsafe extern "C" fn hot_jit_clone_owned_val(raw: i64) -> i64 {
     let ptr = raw as *const Val;
     unsafe { Arc::increment_strong_count(ptr) };
     raw
+}
+
+/// Build the Err value for a strict-argument halt raised inside a
+/// bare-bool JIT helper: the failure state was already set by
+/// `strict_prepare_operand`; this materializes it as an OwnedVal Err for
+/// the frame's error return (the Ok-but-failed JIT-frame pattern).
+unsafe extern "C" fn hot_jit_failure_err() -> i64 {
+    let vm_ptr = get_jit_vm_ptr();
+    if vm_ptr.is_null() {
+        return new_owned_val(Val::err(Val::Str("halted".into())));
+    }
+    let vm = unsafe { &*vm_ptr };
+    let msg = vm
+        .get_failure()
+        .map(|f| f.msg)
+        .unwrap_or_else(|| "halted".to_string());
+    new_owned_val(Val::err(Val::Str(msg.into())))
 }
 
 /// Check whether an OwnedVal (Arc<Val> pointer) is a Result.Err variant.
@@ -1897,8 +1937,17 @@ unsafe extern "C" fn hot_jit_binop_general(
     right_kind: i64,
     right_raw: i64,
 ) -> i64 {
-    let left = unsafe { decode_helper_val(left_kind, left_raw) };
-    let right = unsafe { decode_helper_val(right_kind, right_raw) };
+    // Strict-argument law: Result operands unwrap (Ok) or halt (Err) as at
+    // interpreter call boundaries; on halt the failure state is set and the
+    // Err reports through the OwnedVal error channel.
+    let left = match strict_prepare_operand(unsafe { decode_helper_val(left_kind, left_raw) }) {
+        Ok(v) => v,
+        Err(_) => return HALT_SENTINEL,
+    };
+    let right = match strict_prepare_operand(unsafe { decode_helper_val(right_kind, right_raw) }) {
+        Ok(v) => v,
+        Err(_) => return HALT_SENTINEL,
+    };
     let args = [left, right];
     use crate::lang::hot::r#type::HotResult;
     let result = match op {
@@ -1928,8 +1977,18 @@ unsafe extern "C" fn hot_jit_cmp_general(
     right_kind: i64,
     right_raw: i64,
 ) -> i64 {
-    let left = unsafe { decode_helper_val(left_kind, left_raw) };
-    let right = unsafe { decode_helper_val(right_kind, right_raw) };
+    // Strict-argument law: Result operands unwrap (Ok) or halt (Err) as at
+    // interpreter call boundaries. On halt the failure state is set and 0
+    // is the only in-band value for the bare-bool ABI; the enclosing
+    // frame's boundary observes the halt.
+    let left = match strict_prepare_operand(unsafe { decode_helper_val(left_kind, left_raw) }) {
+        Ok(v) => v,
+        Err(_) => return HALT_SENTINEL,
+    };
+    let right = match strict_prepare_operand(unsafe { decode_helper_val(right_kind, right_raw) }) {
+        Ok(v) => v,
+        Err(_) => return HALT_SENTINEL,
+    };
     let args = [left, right];
     use crate::lang::hot::r#type::HotResult;
     let result = match op {
@@ -2642,8 +2701,7 @@ unsafe extern "C" fn hot_jit_call_native(
         let unwrapped = match vm.unwrap_result_if_ok(&val) {
             Ok(v) => v,
             Err(e) => {
-                let msg: Arc<str> = e.to_string().into();
-                return new_owned_val(Val::err(Val::Str(msg)));
+                return vm_error_to_owned_val(e, vm.error_capture_active);
             }
         };
         args.push(unwrapped);
@@ -2658,16 +2716,7 @@ unsafe extern "C" fn hot_jit_call_native(
     let function_name = format!("{}/{}", func_info.namespace, func_info.name);
     match vm.call_hotlib_function(&function_name, &args) {
         Ok(v) => new_owned_val(v),
-        Err(e) => {
-            if vm.error_capture_active {
-                let mut m = indexmap::IndexMap::new();
-                m.insert(Val::from("error"), Val::from(e.to_string()));
-                new_owned_val(Val::Map(Box::new(m)))
-            } else {
-                let msg: Arc<str> = e.to_string().into();
-                new_owned_val(Val::err(Val::Str(msg)))
-            }
-        }
+        Err(e) => vm_error_to_owned_val(e, vm.error_capture_active),
     }
 }
 
@@ -3039,6 +3088,14 @@ fn declare_jit_helpers(
             &[types::I64],
             &[types::I64],
         )?,
+        failure_err: declare_helper_func(
+            module,
+            func,
+            ptr_ty,
+            "hot_jit_failure_err",
+            &[],
+            &[types::I64],
+        )?,
         call_vm_by_name: declare_helper_func(
             module,
             func,
@@ -3336,6 +3393,39 @@ unsafe fn decode_numeric_val(kind: i64, raw: i64) -> Val {
     }
 }
 
+/// Apply the strict-argument law to a JIT-lowered intrinsic operand, exactly
+/// as the interpreter does at call boundaries: Result.Ok auto-unwraps to its
+/// inner value; Result.Err sets the VM failure state (the halt) and errs
+/// with the message. The caller reports through its own error channel; the
+/// failure state makes the enclosing frame's boundary observe the halt
+/// (the documented Ok-but-failed JIT-frame pattern). Non-Result values pass
+/// through untouched, keeping the pure-numeric fast path unchanged.
+fn strict_prepare_operand(val: Val) -> Result<Val, String> {
+    if !val.is_ok() && !val.is_err() {
+        return Ok(val);
+    }
+    let vm_ptr = get_jit_vm_ptr();
+    if vm_ptr.is_null() {
+        return Ok(val);
+    }
+    let vm = unsafe { &mut *vm_ptr };
+    vm.unwrap_result_if_ok(&val).map_err(|e| e.to_string())
+}
+
+/// Decode a lowered binary intrinsic's operands with `strict_prepare_operand`
+/// applied to each.
+unsafe fn decode_strict_operands(
+    left_kind: i64,
+    left_raw: i64,
+    right_kind: i64,
+    right_raw: i64,
+) -> Result<[Val; 2], String> {
+    Ok([
+        strict_prepare_operand(unsafe { decode_numeric_val(left_kind, left_raw) })?,
+        strict_prepare_operand(unsafe { decode_numeric_val(right_kind, right_raw) })?,
+    ])
+}
+
 /// Write the result of a numeric operation to the output pointer.
 /// Returns 0 on success, or a non-zero OwnedVal error pointer on failure.
 fn write_numeric_result(
@@ -3365,11 +3455,11 @@ fn eval_numeric_cmp(
     right_kind: i64,
     right_raw: i64,
 ) -> i64 {
-    let args = unsafe {
-        [
-            decode_numeric_val(left_kind, left_raw),
-            decode_numeric_val(right_kind, right_raw),
-        ]
+    let args = match unsafe { decode_strict_operands(left_kind, left_raw, right_kind, right_raw) } {
+        Ok(args) => args,
+        // Failure state is set; the emitted sentinel check routes the
+        // frame to its error return.
+        Err(_) => return HALT_SENTINEL,
     };
     match cmp(&args) {
         crate::lang::hot::r#type::HotResult::Ok(Val::Bool(result)) => {
@@ -3414,8 +3504,20 @@ fn raw_type_token(kind: RawKind) -> Result<i64, String> {
 
 /// Convert a VM error to an OwnedVal, matching the VM's error_capture_active behavior.
 /// When error capture is active, wraps as {error: "msg"} map (like the VM does).
-/// Otherwise wraps as Val::err for ReturnIfErr to catch.
+/// Otherwise: a halt (failure or cancellation state on the VM) becomes
+/// HALT_SENTINEL so emitted code aborts the frame — the interpreter would
+/// have unwound the caller with Err(VmError) — while ordinary errors keep
+/// the Val::err channel for ReturnIfErr to catch.
 fn vm_error_to_owned_val(err: impl std::fmt::Display, error_capture_active: bool) -> i64 {
+    if !error_capture_active {
+        let vm_ptr = get_jit_vm_ptr();
+        if !vm_ptr.is_null() {
+            let vm = unsafe { &*vm_ptr };
+            if vm.has_failed() || vm.has_cancelled() {
+                return HALT_SENTINEL;
+            }
+        }
+    }
     if error_capture_active {
         let mut m = indexmap::IndexMap::new();
         m.insert(Val::from("error"), Val::from(err.to_string()));
@@ -4510,7 +4612,7 @@ impl<'a> EmitCtx<'a> {
         args_start: u32,
         args_count: u8,
         instructions: &[Instruction],
-    ) -> Result<(), String> {
+    ) -> Result<Option<cranelift_codegen::ir::Block>, String> {
         let count = usize::from(args_count);
         let pairs_slot = builder.create_sized_stack_slot(StackSlotData::new(
             StackSlotKind::ExplicitSlot,
@@ -4547,7 +4649,9 @@ impl<'a> EmitCtx<'a> {
             &[name_ptr, args_buf_ptr, count_val],
         );
         let result_handle = builder.inst_results(call)[0];
-        self.define_register(builder, dest, RawKind::OwnedVal, result_handle)
+        let halt_block = emit_halt_check(builder, result_handle);
+        self.define_register(builder, dest, RawKind::OwnedVal, result_handle)?;
+        Ok(Some(halt_block))
     }
 
     /// Like emit_vm_callback_by_name but takes a runtime OwnedVal pointer for the function name.
@@ -4559,7 +4663,7 @@ impl<'a> EmitCtx<'a> {
         args_start: u32,
         args_count: u8,
         instructions: &[Instruction],
-    ) -> Result<(), String> {
+    ) -> Result<Option<cranelift_codegen::ir::Block>, String> {
         let count = usize::from(args_count);
         let pairs_slot = builder.create_sized_stack_slot(StackSlotData::new(
             StackSlotKind::ExplicitSlot,
@@ -4592,7 +4696,9 @@ impl<'a> EmitCtx<'a> {
             &[fn_name_ptr, args_buf_ptr, count_val],
         );
         let result_handle = builder.inst_results(call)[0];
-        self.define_register(builder, dest, RawKind::OwnedVal, result_handle)
+        let halt_block = emit_halt_check(builder, result_handle);
+        self.define_register(builder, dest, RawKind::OwnedVal, result_handle)?;
+        Ok(Some(halt_block))
     }
 
     /// Build arg pairs buffer and emit a call_vm trampoline invocation.
@@ -4604,7 +4710,7 @@ impl<'a> EmitCtx<'a> {
         args_start: u32,
         args_count: u8,
         instructions: &[Instruction],
-    ) -> Result<(), String> {
+    ) -> Result<Option<cranelift_codegen::ir::Block>, String> {
         let count = usize::from(args_count);
         let pairs_slot = builder.create_sized_stack_slot(StackSlotData::new(
             StackSlotKind::ExplicitSlot,
@@ -4638,7 +4744,9 @@ impl<'a> EmitCtx<'a> {
             &[fn_id_val, args_buf_ptr, count_val],
         );
         let result_handle = builder.inst_results(call)[0];
-        self.define_register(builder, dest, RawKind::OwnedVal, result_handle)
+        let halt_block = emit_halt_check(builder, result_handle);
+        self.define_register(builder, dest, RawKind::OwnedVal, result_handle)?;
+        Ok(Some(halt_block))
     }
 
     /// Try all call resolution strategies for a named function call (Call instruction).
@@ -4658,7 +4766,7 @@ impl<'a> EmitCtx<'a> {
             Some(name) => name,
             None => {
                 let (fn_owned, fn_temp) = self.owned_operand(builder, fn_reg)?;
-                self.emit_vm_callback_by_name_raw(
+                let halt_block = self.emit_vm_callback_by_name_raw(
                     builder,
                     dest,
                     fn_owned,
@@ -4668,11 +4776,14 @@ impl<'a> EmitCtx<'a> {
                 )?;
                 self.drop_owned_temps(builder, &[fn_temp]);
                 self.jump_to_next(builder, ip)?;
+                if let Some(halt_block) = halt_block {
+                    self.emit_halt_return(builder, halt_block);
+                }
                 return Ok(true);
             }
         };
         // 1. Try core intrinsic (explicit allowlist — deterministic)
-        if let Some((result_kind, raw)) = try_lower_known_core_call(
+        if let Some((result_kind, raw, cmp_halt_block)) = try_lower_known_core_call(
             builder,
             self.ptr_ty,
             self.helper_refs,
@@ -4686,6 +4797,9 @@ impl<'a> EmitCtx<'a> {
         )? {
             self.define_register(builder, dest, result_kind, raw)?;
             self.jump_to_next(builder, ip)?;
+            if let Some(halt_block) = cmp_halt_block {
+                self.emit_halt_return(builder, halt_block);
+            }
             return Ok(true);
         }
         // For qualified names (e.g. "::hot::core/do"), resolve deterministically
@@ -4750,7 +4864,7 @@ impl<'a> EmitCtx<'a> {
             return Ok(true);
         }
         // 4. VM callback — deterministic resolution by the VM's unified_function_lookup
-        if let Some(called_fid) = resolved_fid {
+        let halt_block = if let Some(called_fid) = resolved_fid {
             self.emit_vm_callback(
                 builder,
                 dest,
@@ -4758,7 +4872,7 @@ impl<'a> EmitCtx<'a> {
                 args_start,
                 args_count,
                 instructions,
-            )?;
+            )?
         } else {
             self.emit_vm_callback_by_name(
                 builder,
@@ -4767,9 +4881,12 @@ impl<'a> EmitCtx<'a> {
                 args_start,
                 args_count,
                 instructions,
-            )?;
-        }
+            )?
+        };
         self.jump_to_next(builder, ip)?;
+        if let Some(halt_block) = halt_block {
+            self.emit_halt_return(builder, halt_block);
+        }
         Ok(true)
     }
 
@@ -4821,7 +4938,7 @@ impl<'a> EmitCtx<'a> {
             .get(called_function_id as usize)
             .map(|f| f.name.as_str())
             .unwrap_or("");
-        if let Some((result_kind, raw)) = try_lower_known_core_call(
+        if let Some((result_kind, raw, cmp_halt_block)) = try_lower_known_core_call(
             builder,
             self.ptr_ty,
             self.helper_refs,
@@ -4835,10 +4952,13 @@ impl<'a> EmitCtx<'a> {
         )? {
             self.define_register(builder, dest, result_kind, raw)?;
             self.jump_to_next(builder, ip)?;
+            if let Some(halt_block) = cmp_halt_block {
+                self.emit_halt_return(builder, halt_block);
+            }
             return Ok(true);
         }
         // Fall back to VM callback
-        self.emit_vm_callback(
+        let halt_block = self.emit_vm_callback(
             builder,
             dest,
             called_function_id,
@@ -4847,6 +4967,9 @@ impl<'a> EmitCtx<'a> {
             instructions,
         )?;
         self.jump_to_next(builder, ip)?;
+        if let Some(halt_block) = halt_block {
+            self.emit_halt_return(builder, halt_block);
+        }
         Ok(true)
     }
 
@@ -4896,6 +5019,23 @@ impl<'a> EmitCtx<'a> {
         builder.seal_block(error_block);
         self.emit_cleanup_owned(builder);
         builder.ins().return_(&[error_val]);
+    }
+
+    /// Fill a comparison halt block (see `emit_halt_check`): a Result.Err
+    /// operand tripped the strict-argument law inside a bare-bool helper.
+    /// Materialize the failure as an Err value and return it from the frame,
+    /// mirroring the interpreter's halt.
+    fn emit_halt_return(
+        &self,
+        builder: &mut FunctionBuilder<'_>,
+        halt_block: cranelift_codegen::ir::Block,
+    ) {
+        builder.switch_to_block(halt_block);
+        builder.seal_block(halt_block);
+        let call = builder.ins().call(self.helper_refs.failure_err, &[]);
+        let err_val = builder.inst_results(call)[0];
+        self.emit_cleanup_owned(builder);
+        builder.ins().return_(&[err_val]);
     }
 
     /// Emit an error check for ReturnIfErr. If the source register is not OwnedVal,
@@ -5198,7 +5338,7 @@ impl<'a> EmitCtx<'a> {
                 Ok(EmitResult::Handled)
             }
             Instruction::Add { dest, left, right } => {
-                let (kind, value) = numeric_binop(
+                let (kind, value, halt_block) = numeric_binop(
                     builder,
                     self.ptr_ty,
                     self.helper_refs.add_numeric,
@@ -5213,10 +5353,13 @@ impl<'a> EmitCtx<'a> {
                 )?;
                 self.define_register(builder, *dest, kind, value)?;
                 self.jump_to_next(builder, ip)?;
+                if let Some(halt_block) = halt_block {
+                    self.emit_halt_return(builder, halt_block);
+                }
                 Ok(EmitResult::Handled)
             }
             Instruction::Sub { dest, left, right } => {
-                let (kind, value) = numeric_binop(
+                let (kind, value, halt_block) = numeric_binop(
                     builder,
                     self.ptr_ty,
                     self.helper_refs.sub_numeric,
@@ -5231,10 +5374,13 @@ impl<'a> EmitCtx<'a> {
                 )?;
                 self.define_register(builder, *dest, kind, value)?;
                 self.jump_to_next(builder, ip)?;
+                if let Some(halt_block) = halt_block {
+                    self.emit_halt_return(builder, halt_block);
+                }
                 Ok(EmitResult::Handled)
             }
             Instruction::Mul { dest, left, right } => {
-                let (kind, value) = numeric_binop(
+                let (kind, value, halt_block) = numeric_binop(
                     builder,
                     self.ptr_ty,
                     self.helper_refs.mul_numeric,
@@ -5249,10 +5395,13 @@ impl<'a> EmitCtx<'a> {
                 )?;
                 self.define_register(builder, *dest, kind, value)?;
                 self.jump_to_next(builder, ip)?;
+                if let Some(halt_block) = halt_block {
+                    self.emit_halt_return(builder, halt_block);
+                }
                 Ok(EmitResult::Handled)
             }
             Instruction::Eq { dest, left, right } => {
-                let value = numeric_eq(
+                let (value, halt_block) = numeric_eq(
                     builder,
                     self.helper_refs.eq_numeric,
                     self.helper_refs.eq_general,
@@ -5264,10 +5413,13 @@ impl<'a> EmitCtx<'a> {
                 )?;
                 self.define_register(builder, *dest, RawKind::Bool, value)?;
                 self.jump_to_next(builder, ip)?;
+                if let Some(halt_block) = halt_block {
+                    self.emit_halt_return(builder, halt_block);
+                }
                 Ok(EmitResult::Handled)
             }
             Instruction::Gt { dest, left, right } => {
-                let value = numeric_compare(
+                let (value, halt_block) = numeric_compare(
                     builder,
                     self.helper_refs.gt_numeric,
                     &self.helper_refs,
@@ -5281,10 +5433,13 @@ impl<'a> EmitCtx<'a> {
                 )?;
                 self.define_register(builder, *dest, RawKind::Bool, value)?;
                 self.jump_to_next(builder, ip)?;
+                if let Some(halt_block) = halt_block {
+                    self.emit_halt_return(builder, halt_block);
+                }
                 Ok(EmitResult::Handled)
             }
             Instruction::Lt { dest, left, right } => {
-                let value = numeric_compare(
+                let (value, halt_block) = numeric_compare(
                     builder,
                     self.helper_refs.lt_numeric,
                     &self.helper_refs,
@@ -5298,6 +5453,9 @@ impl<'a> EmitCtx<'a> {
                 )?;
                 self.define_register(builder, *dest, RawKind::Bool, value)?;
                 self.jump_to_next(builder, ip)?;
+                if let Some(halt_block) = halt_block {
+                    self.emit_halt_return(builder, halt_block);
+                }
                 Ok(EmitResult::Handled)
             }
             Instruction::GetTypePath { dest, value } => {
@@ -5579,9 +5737,11 @@ impl<'a> EmitCtx<'a> {
                     .ins()
                     .call(self.helper_refs.call_lib, &[fn_val, args_raw]);
                 let result = builder.inst_results(call)[0];
+                let halt_block = emit_halt_check(builder, result);
                 self.drop_owned_temps(builder, &[fn_temp]);
                 self.define_register(builder, *dest, RawKind::OwnedVal, result)?;
                 self.jump_to_next(builder, ip)?;
+                self.emit_halt_return(builder, halt_block);
                 Ok(EmitResult::Handled)
             }
             Instruction::DotAccess {
@@ -5924,9 +6084,11 @@ impl<'a> EmitCtx<'a> {
                     &[fn_ptr, args_buf, count_val, mask_val],
                 );
                 let result = builder.inst_results(call)[0];
+                let halt_block = emit_halt_check(builder, result);
                 self.drop_owned_temps(builder, &[fn_temp]);
                 self.define_register(builder, *dest, RawKind::OwnedVal, result)?;
                 self.jump_to_next(builder, ip)?;
+                self.emit_halt_return(builder, halt_block);
                 Ok(EmitResult::Handled)
             }
             Instruction::StrStartsWith {
@@ -6143,8 +6305,10 @@ impl<'a> EmitCtx<'a> {
                     &[func_id_val, args_buf, count_val],
                 );
                 let result = builder.inst_results(call)[0];
+                let halt_block = emit_halt_check(builder, result);
                 self.define_register(builder, *dest, RawKind::OwnedVal, result)?;
                 self.jump_to_next(builder, ip)?;
+                self.emit_halt_return(builder, halt_block);
                 Ok(EmitResult::Handled)
             }
             Instruction::DefineFunction { dest, function_id } => {
@@ -6216,6 +6380,10 @@ impl<'a> EmitCtx<'a> {
             &[thunk_ptr, zero_a, zero_b],
         );
         let result = builder.inst_results(call)[0];
+        // A strict-argument halt inside the deferred expression comes back
+        // as HALT_SENTINEL — never a pointer; feeding it to set_element
+        // would crash. Route the frame to its error return instead.
+        let halt_block = emit_halt_check(builder, result);
         self.drop_owned_temps(builder, &[thunk_temp]);
 
         if let Some(acc_var) = accumulator_var {
@@ -6233,6 +6401,7 @@ impl<'a> EmitCtx<'a> {
         }
 
         self.jump_to_next(builder, ip)?;
+        self.emit_halt_return(builder, halt_block);
         Ok(EmitResult::Handled)
     }
 }
@@ -6700,7 +6869,7 @@ fn build_supported_body(
                         .result_reg
                         .ok_or_else(|| "JIT flow result register not set".to_string())?;
                     let end_ip = flow.end_ip;
-                    ctx.emit_vm_callback(
+                    let halt_block = ctx.emit_vm_callback(
                         builder,
                         result_reg,
                         function_id,
@@ -6710,6 +6879,9 @@ fn build_supported_body(
                     )?;
                     let end_target = ctx.blocks[end_ip];
                     builder.ins().jump(end_target, &[]);
+                    if let Some(halt_block) = halt_block {
+                        ctx.emit_halt_return(builder, halt_block);
+                    }
                     continue;
                 }
                 let mut new_values = Vec::with_capacity(param_locals.len());
@@ -7227,10 +7399,20 @@ fn try_lower_known_core_call(
     callee_name: &str,
     args_start: u32,
     args_count: u8,
-) -> Result<Option<(RawKind, cranelift_codegen::ir::Value)>, String> {
+) -> Result<
+    Option<(
+        RawKind,
+        cranelift_codegen::ir::Value,
+        Option<cranelift_codegen::ir::Block>,
+    )>,
+    String,
+> {
     let Some(core_call) = known_core_call(callee_name) else {
         return Ok(None);
     };
+    // Set by the comparison lowerings: a halt block the caller must finish
+    // with emit_halt_return (strict-argument halt on a Result operand).
+    let mut cmp_halt_block: Option<cranelift_codegen::ir::Block> = None;
 
     let arg = |idx: usize| args_start + idx as u32;
     let lowered = match core_call {
@@ -7238,63 +7420,74 @@ fn try_lower_known_core_call(
             if args_count != 2 {
                 return Err(format!("JIT intrinsic '{}' expects 2 args", callee_name));
             }
-            numeric_binop(
-                builder,
-                ptr_ty,
-                helper_refs.add_numeric,
-                &helper_refs,
-                BINOP_ADD,
-                remap,
-                registers,
-                register_kinds,
-                arg(0),
-                arg(1),
-                |b, l, r| b.ins().iadd(l, r),
-            )?
+            {
+                let (kind, value, halt_block) = numeric_binop(
+                    builder,
+                    ptr_ty,
+                    helper_refs.add_numeric,
+                    &helper_refs,
+                    BINOP_ADD,
+                    remap,
+                    registers,
+                    register_kinds,
+                    arg(0),
+                    arg(1),
+                    |b, l, r| b.ins().iadd(l, r),
+                )?;
+                cmp_halt_block = halt_block;
+                (kind, value)
+            }
         }
         KnownCoreCall::Sub => {
             if args_count != 2 {
                 return Err(format!("JIT intrinsic '{}' expects 2 args", callee_name));
             }
-            numeric_binop(
-                builder,
-                ptr_ty,
-                helper_refs.sub_numeric,
-                &helper_refs,
-                BINOP_SUB,
-                remap,
-                registers,
-                register_kinds,
-                arg(0),
-                arg(1),
-                |b, l, r| b.ins().isub(l, r),
-            )?
+            {
+                let (kind, value, halt_block) = numeric_binop(
+                    builder,
+                    ptr_ty,
+                    helper_refs.sub_numeric,
+                    &helper_refs,
+                    BINOP_SUB,
+                    remap,
+                    registers,
+                    register_kinds,
+                    arg(0),
+                    arg(1),
+                    |b, l, r| b.ins().isub(l, r),
+                )?;
+                cmp_halt_block = halt_block;
+                (kind, value)
+            }
         }
         KnownCoreCall::Mul => {
             if args_count != 2 {
                 return Err(format!("JIT intrinsic '{}' expects 2 args", callee_name));
             }
-            numeric_binop(
-                builder,
-                ptr_ty,
-                helper_refs.mul_numeric,
-                &helper_refs,
-                BINOP_MUL,
-                remap,
-                registers,
-                register_kinds,
-                arg(0),
-                arg(1),
-                |b, l, r| b.ins().imul(l, r),
-            )?
+            {
+                let (kind, value, halt_block) = numeric_binop(
+                    builder,
+                    ptr_ty,
+                    helper_refs.mul_numeric,
+                    &helper_refs,
+                    BINOP_MUL,
+                    remap,
+                    registers,
+                    register_kinds,
+                    arg(0),
+                    arg(1),
+                    |b, l, r| b.ins().imul(l, r),
+                )?;
+                cmp_halt_block = halt_block;
+                (kind, value)
+            }
         }
         KnownCoreCall::Eq => {
             if args_count != 2 {
                 return Err(format!("JIT intrinsic '{}' expects 2 args", callee_name));
             }
-            (
-                RawKind::Bool,
-                numeric_eq(
+            {
+                let (value, halt_block) = numeric_eq(
                     builder,
                     helper_refs.eq_numeric,
                     helper_refs.eq_general,
@@ -7303,12 +7496,13 @@ fn try_lower_known_core_call(
                     register_kinds,
                     arg(0),
                     arg(1),
-                )?,
-            )
+                )?;
+                cmp_halt_block = halt_block;
+                (RawKind::Bool, value)
+            }
         }
-        KnownCoreCall::Gt => (
-            RawKind::Bool,
-            numeric_compare(
+        KnownCoreCall::Gt => {
+            let (value, halt_block) = numeric_compare(
                 builder,
                 helper_refs.gt_numeric,
                 &helper_refs,
@@ -7319,11 +7513,12 @@ fn try_lower_known_core_call(
                 arg(0),
                 arg(1),
                 cranelift_codegen::ir::condcodes::IntCC::SignedGreaterThan,
-            )?,
-        ),
-        KnownCoreCall::Gte => (
-            RawKind::Bool,
-            numeric_compare(
+            )?;
+            cmp_halt_block = halt_block;
+            (RawKind::Bool, value)
+        }
+        KnownCoreCall::Gte => {
+            let (value, halt_block) = numeric_compare(
                 builder,
                 helper_refs.gte_numeric,
                 &helper_refs,
@@ -7334,11 +7529,12 @@ fn try_lower_known_core_call(
                 arg(0),
                 arg(1),
                 cranelift_codegen::ir::condcodes::IntCC::SignedGreaterThanOrEqual,
-            )?,
-        ),
-        KnownCoreCall::Lt => (
-            RawKind::Bool,
-            numeric_compare(
+            )?;
+            cmp_halt_block = halt_block;
+            (RawKind::Bool, value)
+        }
+        KnownCoreCall::Lt => {
+            let (value, halt_block) = numeric_compare(
                 builder,
                 helper_refs.lt_numeric,
                 &helper_refs,
@@ -7349,11 +7545,12 @@ fn try_lower_known_core_call(
                 arg(0),
                 arg(1),
                 cranelift_codegen::ir::condcodes::IntCC::SignedLessThan,
-            )?,
-        ),
-        KnownCoreCall::Lte => (
-            RawKind::Bool,
-            numeric_compare(
+            )?;
+            cmp_halt_block = halt_block;
+            (RawKind::Bool, value)
+        }
+        KnownCoreCall::Lte => {
+            let (value, halt_block) = numeric_compare(
                 builder,
                 helper_refs.lte_numeric,
                 &helper_refs,
@@ -7364,8 +7561,10 @@ fn try_lower_known_core_call(
                 arg(0),
                 arg(1),
                 cranelift_codegen::ir::condcodes::IntCC::SignedLessThanOrEqual,
-            )?,
-        ),
+            )?;
+            cmp_halt_block = halt_block;
+            (RawKind::Bool, value)
+        }
         KnownCoreCall::Div => {
             if args_count != 2 {
                 return Err(format!("JIT intrinsic '{}' expects 2 args", callee_name));
@@ -7373,18 +7572,22 @@ fn try_lower_known_core_call(
             // Division always goes through the Dec trampoline because:
             // 1. Int / Int can produce Dec (e.g. 3/2 = 1.5)
             // 2. Division by zero must return an error, not trap
-            numeric_binop_dec_only(
-                builder,
-                ptr_ty,
-                helper_refs.div_numeric,
-                &helper_refs,
-                BINOP_DIV,
-                remap,
-                registers,
-                register_kinds,
-                arg(0),
-                arg(1),
-            )?
+            {
+                let (kind, value, halt_block) = numeric_binop_dec_only(
+                    builder,
+                    ptr_ty,
+                    helper_refs.div_numeric,
+                    &helper_refs,
+                    BINOP_DIV,
+                    remap,
+                    registers,
+                    register_kinds,
+                    arg(0),
+                    arg(1),
+                )?;
+                cmp_halt_block = halt_block;
+                (kind, value)
+            }
         }
         KnownCoreCall::Mod => {
             if args_count != 2 {
@@ -7393,23 +7596,26 @@ fn try_lower_known_core_call(
             // Mod uses a zero-guarded Int path so Int%Int returns Int
             // (not Dec). The guard branches to the trampoline on zero
             // to produce a proper error instead of trapping.
-            numeric_binop_int_guarded(
-                builder,
-                ptr_ty,
-                helper_refs.mod_numeric,
-                &helper_refs,
-                BINOP_MOD,
-                remap,
-                registers,
-                register_kinds,
-                arg(0),
-                arg(1),
-                |builder, l, r| builder.ins().srem(l, r),
-            )?
+            {
+                let (kind, value, halt_block) = numeric_binop_int_guarded(
+                    builder,
+                    ptr_ty,
+                    helper_refs.mod_numeric,
+                    &helper_refs,
+                    BINOP_MOD,
+                    remap,
+                    registers,
+                    register_kinds,
+                    arg(0),
+                    arg(1),
+                    |builder, l, r| builder.ins().srem(l, r),
+                )?;
+                cmp_halt_block = halt_block;
+                (kind, value)
+            }
         }
-        KnownCoreCall::Ne => (
-            RawKind::Bool,
-            numeric_compare(
+        KnownCoreCall::Ne => {
+            let (value, halt_block) = numeric_compare(
                 builder,
                 helper_refs.ne_numeric,
                 &helper_refs,
@@ -7420,8 +7626,10 @@ fn try_lower_known_core_call(
                 arg(0),
                 arg(1),
                 cranelift_codegen::ir::condcodes::IntCC::NotEqual,
-            )?,
-        ),
+            )?;
+            cmp_halt_block = halt_block;
+            (RawKind::Bool, value)
+        }
         KnownCoreCall::Not => {
             if args_count != 1 {
                 return Err(format!("JIT intrinsic '{}' expects 1 arg", callee_name));
@@ -7595,7 +7803,7 @@ fn try_lower_known_core_call(
         }
     };
 
-    Ok(Some(lowered))
+    Ok(Some((lowered.0, lowered.1, cmp_halt_block)))
 }
 
 fn known_core_call(name: &str) -> Option<KnownCoreCall> {
@@ -7666,7 +7874,14 @@ fn numeric_binop(
         cranelift_codegen::ir::Value,
         cranelift_codegen::ir::Value,
     ) -> cranelift_codegen::ir::Value,
-) -> Result<(RawKind, cranelift_codegen::ir::Value), String> {
+) -> Result<
+    (
+        RawKind,
+        cranelift_codegen::ir::Value,
+        Option<cranelift_codegen::ir::Block>,
+    ),
+    String,
+> {
     let left_kind = register_kind(remap, register_kinds, left)?;
     let right_kind = register_kind(remap, register_kinds, right)?;
     if left_kind == RawKind::Int && right_kind == RawKind::Int {
@@ -7681,6 +7896,7 @@ fn numeric_binop(
                 right,
                 int_op,
             )?,
+            None,
         ));
     }
     if !matches!(left_kind, RawKind::Int | RawKind::Dec | RawKind::OwnedVal)
@@ -7701,7 +7917,12 @@ fn numeric_binop(
             &[op_val, left_tag, left_raw, right_tag, right_raw],
         );
         let result_handle = builder.inst_results(call)[0];
-        return Ok((RawKind::OwnedVal, result_handle));
+        // A strict-argument halt cannot ride the OwnedVal result channel
+        // (that channel legitimately carries native error VALUES like
+        // div-by-zero, which must keep flowing); the sentinel routes the
+        // frame to its error return instead.
+        let halt_block = emit_halt_check(builder, result_handle);
+        return Ok((RawKind::OwnedVal, result_handle, Some(halt_block)));
     }
 
     let slot = builder.create_sized_stack_slot(StackSlotData::new(
@@ -7735,7 +7956,7 @@ fn numeric_binop(
 
     builder.switch_to_block(ok_block);
     builder.seal_block(ok_block);
-    Ok((RawKind::Dec, out_ptr))
+    Ok((RawKind::Dec, out_ptr, None))
 }
 
 /// Like `numeric_binop` but for Int/Int, guards against a zero right operand
@@ -7760,7 +7981,14 @@ fn numeric_binop_int_guarded(
         cranelift_codegen::ir::Value,
         cranelift_codegen::ir::Value,
     ) -> cranelift_codegen::ir::Value,
-) -> Result<(RawKind, cranelift_codegen::ir::Value), String> {
+) -> Result<
+    (
+        RawKind,
+        cranelift_codegen::ir::Value,
+        Option<cranelift_codegen::ir::Block>,
+    ),
+    String,
+> {
     let left_kind = register_kind(remap, register_kinds, left)?;
     let right_kind = register_kind(remap, register_kinds, right)?;
 
@@ -7795,7 +8023,7 @@ fn numeric_binop_int_guarded(
         builder.switch_to_block(safe_block);
         builder.seal_block(safe_block);
         let result = int_op(builder, left_val, right_val);
-        return Ok((RawKind::Int, result));
+        return Ok((RawKind::Int, result, None));
     }
 
     // Non Int/Int: delegate to the Dec trampoline path (same as numeric_binop)
@@ -7815,7 +8043,12 @@ fn numeric_binop_int_guarded(
             &[op_val, left_tag, left_raw, right_tag, right_raw],
         );
         let result_handle = builder.inst_results(call)[0];
-        return Ok((RawKind::OwnedVal, result_handle));
+        // A strict-argument halt cannot ride the OwnedVal result channel
+        // (that channel legitimately carries native error VALUES like
+        // div-by-zero, which must keep flowing); the sentinel routes the
+        // frame to its error return instead.
+        let halt_block = emit_halt_check(builder, result_handle);
+        return Ok((RawKind::OwnedVal, result_handle, Some(halt_block)));
     }
     let slot = builder.create_sized_stack_slot(StackSlotData::new(
         StackSlotKind::ExplicitSlot,
@@ -7847,7 +8080,7 @@ fn numeric_binop_int_guarded(
     builder.ins().return_(&[err_code]);
     builder.switch_to_block(ok_block);
     builder.seal_block(ok_block);
-    Ok((RawKind::Dec, out_ptr))
+    Ok((RawKind::Dec, out_ptr, None))
 }
 
 /// Like `numeric_binop` but always routes through the Dec trampoline,
@@ -7865,7 +8098,14 @@ fn numeric_binop_dec_only(
     register_kinds: &[Option<RawKind>],
     left: u32,
     right: u32,
-) -> Result<(RawKind, cranelift_codegen::ir::Value), String> {
+) -> Result<
+    (
+        RawKind,
+        cranelift_codegen::ir::Value,
+        Option<cranelift_codegen::ir::Block>,
+    ),
+    String,
+> {
     let left_kind = register_kind(remap, register_kinds, left)?;
     let right_kind = register_kind(remap, register_kinds, right)?;
     if !matches!(left_kind, RawKind::Int | RawKind::Dec | RawKind::OwnedVal)
@@ -7885,7 +8125,12 @@ fn numeric_binop_dec_only(
             &[op_val, left_tag, left_raw, right_tag, right_raw],
         );
         let result_handle = builder.inst_results(call)[0];
-        return Ok((RawKind::OwnedVal, result_handle));
+        // A strict-argument halt cannot ride the OwnedVal result channel
+        // (that channel legitimately carries native error VALUES like
+        // div-by-zero, which must keep flowing); the sentinel routes the
+        // frame to its error return instead.
+        let halt_block = emit_halt_check(builder, result_handle);
+        return Ok((RawKind::OwnedVal, result_handle, Some(halt_block)));
     }
 
     let slot = builder.create_sized_stack_slot(StackSlotData::new(
@@ -7919,7 +8164,7 @@ fn numeric_binop_dec_only(
 
     builder.switch_to_block(ok_block);
     builder.seal_block(ok_block);
-    Ok((RawKind::Dec, out_ptr))
+    Ok((RawKind::Dec, out_ptr, None))
 }
 
 fn int_compare(
@@ -7956,11 +8201,20 @@ fn numeric_compare(
     left: u32,
     right: u32,
     cc: cranelift_codegen::ir::condcodes::IntCC,
-) -> Result<cranelift_codegen::ir::Value, String> {
+) -> Result<
+    (
+        cranelift_codegen::ir::Value,
+        Option<cranelift_codegen::ir::Block>,
+    ),
+    String,
+> {
     let left_kind = register_kind(remap, register_kinds, left)?;
     let right_kind = register_kind(remap, register_kinds, right)?;
     if left_kind == RawKind::Int && right_kind == RawKind::Int {
-        return int_compare(builder, remap, registers, register_kinds, left, right, cc);
+        return Ok((
+            int_compare(builder, remap, registers, register_kinds, left, right, cc)?,
+            None,
+        ));
     }
     if !matches!(left_kind, RawKind::Int | RawKind::Dec | RawKind::OwnedVal)
         || !matches!(right_kind, RawKind::Int | RawKind::Dec | RawKind::OwnedVal)
@@ -7978,7 +8232,9 @@ fn numeric_compare(
             helper_refs.cmp_general,
             &[op_val, left_tag, left_raw, right_tag, right_raw],
         );
-        return Ok(builder.inst_results(call)[0]);
+        let result = builder.inst_results(call)[0];
+        let halt_block = emit_halt_check(builder, result);
+        return Ok((result, Some(halt_block)));
     }
 
     let (left_tag, left_raw) =
@@ -7988,7 +8244,34 @@ fn numeric_compare(
     let call = builder
         .ins()
         .call(helper, &[left_tag, left_raw, right_tag, right_raw]);
-    Ok(builder.inst_results(call)[0])
+    let result = builder.inst_results(call)[0];
+    let halt_block = emit_halt_check(builder, result);
+    Ok((result, Some(halt_block)))
+}
+
+/// After a bare-bool comparison helper call, branch to a (caller-filled)
+/// halt block when the helper returned `HALT_SENTINEL` — a Result.Err
+/// operand tripped the strict-argument law. Emission continues in a fresh
+/// continuation block; the returned block must be finished with
+/// `emit_halt_return` by a method context that can clean up owned
+/// registers.
+fn emit_halt_check(
+    builder: &mut FunctionBuilder<'_>,
+    result: cranelift_codegen::ir::Value,
+) -> cranelift_codegen::ir::Block {
+    let halt_block = builder.create_block();
+    let cont_block = builder.create_block();
+    let is_halt = builder.ins().icmp_imm(
+        cranelift_codegen::ir::condcodes::IntCC::Equal,
+        result,
+        HALT_SENTINEL,
+    );
+    builder
+        .ins()
+        .brif(is_halt, halt_block, &[], cont_block, &[]);
+    builder.switch_to_block(cont_block);
+    builder.seal_block(cont_block);
+    halt_block
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -8001,7 +8284,13 @@ fn numeric_eq(
     register_kinds: &[Option<RawKind>],
     left: u32,
     right: u32,
-) -> Result<cranelift_codegen::ir::Value, String> {
+) -> Result<
+    (
+        cranelift_codegen::ir::Value,
+        Option<cranelift_codegen::ir::Block>,
+    ),
+    String,
+> {
     let left_kind = register_kind(remap, register_kinds, left)?;
     let right_kind = register_kind(remap, register_kinds, right)?;
     if (left_kind == right_kind && !matches!(left_kind, RawKind::Dec | RawKind::OwnedVal))
@@ -8019,7 +8308,7 @@ fn numeric_eq(
         );
         let one = builder.ins().iconst(types::I64, 1);
         let zero = builder.ins().iconst(types::I64, 0);
-        return Ok(builder.ins().select(cmp, one, zero));
+        return Ok((builder.ins().select(cmp, one, zero), None));
     }
     if !matches!(left_kind, RawKind::Int | RawKind::Dec)
         || !matches!(right_kind, RawKind::Int | RawKind::Dec)
@@ -8041,7 +8330,9 @@ fn numeric_eq(
         let call = builder
             .ins()
             .call(general_helper, &[left_tag, left_raw, right_tag, right_raw]);
-        return Ok(builder.inst_results(call)[0]);
+        let result = builder.inst_results(call)[0];
+        let halt_block = emit_halt_check(builder, result);
+        return Ok((result, Some(halt_block)));
     }
     let (left_tag, left_raw) =
         encode_numeric_operand(builder, remap, registers, register_kinds, left)?;
@@ -8050,7 +8341,9 @@ fn numeric_eq(
     let call = builder
         .ins()
         .call(helper, &[left_tag, left_raw, right_tag, right_raw]);
-    Ok(builder.inst_results(call)[0])
+    let result = builder.inst_results(call)[0];
+    let halt_block = emit_halt_check(builder, result);
+    Ok((result, Some(halt_block)))
 }
 
 /// Promote a typed JIT value to an OwnedVal via the promote_to_owned trampoline.

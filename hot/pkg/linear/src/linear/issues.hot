@@ -173,6 +173,75 @@ fn (issue-id: Str, body: Str): Map {
   }
 }
 
+list-comments
+meta {
+    doc: """The comments on an issue. `options` (2-arity) supports `first` (page size, default 50) and `after` (cursor). Returns `{nodes: [{id, body, createdAt, user}], pageInfo: {hasNextPage, endCursor}}`."""
+}
+fn
+(issue-id: Str): Map {
+  list-comments(issue-id, {})
+},
+(issue-id: Str, options: Map): Map {
+  query """
+  query Comments($id: String!, $first: Int, $after: String) {
+    issue(id: $id) {
+      comments(first: $first, after: $after) {
+        nodes { id body createdAt user { id name } }
+        pageInfo { hasNextPage endCursor }
+      }
+    }
+  }
+  """
+  variables {
+    id: issue-id,
+    first: or(get(options, "first"), 50),
+    after: get(options, "after")
+  }
+
+  data ::api/graphql(query, filter-vals(variables, is-some))
+  match data {
+    Result.Err => { err(data) }
+
+    _ => { data.issue.comments }
+  }
+}
+
+archive-issue
+meta {
+    doc: """Archive an issue (it stays queryable but leaves active views). Returns true on success."""
+}
+fn (id: Str): Bool {
+  query """
+  mutation ArchiveIssue($id: String!) {
+    issueArchive(id: $id) { success }
+  }
+  """
+  data ::api/graphql(query, {id: id})
+  match data {
+    Result.Err => { err(data) }
+
+    _ => { data.issueArchive.success }
+  }
+}
+
+delete-issue
+meta {
+    doc: """Move an issue to the trash (recoverable in Linear for a grace period). Returns true on success."""
+}
+fn (id: Str): Bool {
+  query """
+  mutation DeleteIssue($id: String!) {
+    issueDelete(id: $id) { success }
+  }
+  """
+  data ::api/graphql(query, {id: id})
+  match data {
+    Result.Err => { err(data) }
+
+    _ => { data.issueDelete.success }
+  }
+}
+
 search-issues
 meta {
     doc: """Full-text issue search. Returns `{nodes, pageInfo}`."""

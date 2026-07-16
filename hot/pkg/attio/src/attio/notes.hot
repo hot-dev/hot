@@ -47,19 +47,12 @@ fn (parent-object: Str, parent-record-id: Str): Map {
   ::api/json("GET", `/notes?parent_object=${parent-object}&parent_record_id=${parent-record-id}`)
 }
 
-create-task
+delete-note
 meta {
-    doc: """POST /tasks - Create a task. `options`: `deadline_at` (RFC3339), `linked_records` (Vec of `{target_object, target_record_id}`), `assignees`."""
+    doc: """DELETE /notes/{id} - Delete a note."""
 }
-fn
-(content: Str): Map {
-  create-task(content, {})
-},
-(content: Str, options: Map): Map {
-  out ::api/json("POST", "/tasks", {data: {content: content, format: "plaintext", is_completed: false, ...options}})
-  match out {
-    Result.Err => { err(out) }
+fn (note-id: Str): Any {
+  ::api/json("DELETE", `/notes/${note-id}`)
+}
 
-    _ => { out.data }
-  }
-}
+// Tasks moved to ::attio::tasks (create/list/update/delete).

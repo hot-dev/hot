@@ -19,6 +19,7 @@ pub mod hasher;
 pub mod lang;
 pub mod log;
 pub mod lsp;
+pub mod net;
 pub mod notification_queue;
 pub mod permission;
 pub mod pkg;

@@ -56,3 +56,11 @@ fn
 (list: Str, options: Map): Map {
   ::api/json("POST", `/lists/${list}/entries/query`, options)
 }
+
+delete-entry
+meta {
+    doc: """DELETE /lists/{list}/entries/{id} - Remove an entry from a list (the parent record is untouched)."""
+}
+fn (list: Str, entry-id: Str): Any {
+  ::api/json("DELETE", `/lists/${list}/entries/${entry-id}`)
+}

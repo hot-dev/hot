@@ -289,10 +289,12 @@ fn (tests) {
 }
 
 call-with-capture
-meta {doc: """Call function `f` with stdout capture, discarding captured output."""}
+meta {
+    doc: """Call function `f` with stdout capture, discarding captured output. Halts (fail()/runtime errors) are contained and returned as an Err so one test cannot abort the run."""
+}
 fn (f) {
     stdout ::hot::io/capture-stdout()
-    result call(f)
+    result ::hot::internal::exec/contain(f)
 
     // Discard captured content instead of releasing it
     // This prevents the output from being displayed while maintaining stream redirection
@@ -328,17 +330,25 @@ fn (f, capture-output) {
         => { println(`${pad-end(f-str, 58)} ...`) }
     }
 
+    // Contain halts at the per-test boundary: a fail() or hard runtime
+    // error inside one test surfaces as that test's Err result instead of
+    // aborting the whole run.
     result cond {
         capture-output => { call-with-capture(f-str) }
-        => { call(f-str, []) }
+        => { ::hot::internal::exec/contain(f-str, []) }
     }
 
     // Check if test had any execution errors (real engine/compiler errors)
     test-had-execution-error is-err(result)
     did-pass cond {
         test-had-execution-error => {
-        // For actual execution errors, print the error details
-        println(`    ${::hot::term/bright-red("✗")} Test execution error: ${err-value(result)}`)
+        // For actual execution errors, print the error details. Contained
+        // halts carry a structured payload (a map with msg, or a typed
+        // Failure); err-message understands both and falls back to the
+        // string form.
+        message ::hot::type/err-message(err-value(result))
+
+        println(`    ${::hot::term/bright-red("✗")} Test execution error: ${message}`)
         false
     }
         => {
@@ -504,9 +514,19 @@ fn (capture-output) {
 
     print-test-summary()
 
-    // Return the final result - use a simple expression
-    final-counters get-test-counters()
-    is-zero(final-counters.tests.failed)
+    // A failure in the runner machinery itself (not inside a test) must
+    // fail the run loudly — a silent early exit here would report green
+    // for tests that never ran.
+    cond {
+        is-err(test-results) => {
+            println(`${::hot::term/bright-red("✗")} Test runner failed: ${err-value(test-results)}`)
+            false
+        }
+        => {
+            final-counters get-test-counters()
+            is-zero(final-counters.tests.failed)
+        }
+    }
 }
 
 run-matching-tests
@@ -537,7 +557,17 @@ fn (pattern, capture-output) {
 
     print-test-summary()
 
-    // Return the final result - use a simple expression
-    final-counters get-test-counters()
-    is-zero(final-counters.tests.failed)
+    // A failure in the runner machinery itself (not inside a test) must
+    // fail the run loudly — a silent early exit here would report green
+    // for tests that never ran.
+    cond {
+        is-err(test-results) => {
+            println(`${::hot::term/bright-red("✗")} Test runner failed: ${err-value(test-results)}`)
+            false
+        }
+        => {
+            final-counters get-test-counters()
+            is-zero(final-counters.tests.failed)
+        }
+    }
 }

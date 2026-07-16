@@ -1,0 +1,31 @@
+::notion::users ns
+
+::api ::notion::api
+
+me
+meta {
+    doc: """GET /users/me - The integration's own bot user. The cheapest way to smoke-test a token. Works with any user-capability level."""
+}
+fn (): Map {
+  ::api/json("GET", "/users/me")
+}
+
+get-user
+meta {
+    doc: """GET /users/{id} - One user (person or bot). Requires a user-information capability; emails appear only with the include-email level."""
+}
+fn (user-id: Str): Map {
+  ::api/json("GET", `/users/${user-id}`)
+}
+
+list-users
+meta {
+    doc: """GET /users - The workspace's users, paginated. `options` (1-arity) supports `page_size` (max 100) and `start_cursor`; returns `{results, has_more, next_cursor}`. Requires a user-information capability."""
+}
+fn
+(): Map {
+  ::api/json("GET", "/users")
+},
+(options: Map): Map {
+  ::api/json("GET", `/users${::hot::uri/query-string(options)}`)
+}

@@ -477,6 +477,13 @@ meta {
     (unsigned BIGINT above Int range promotes to an exact Dec),
     FLOAT/DOUBLE/DECIMAL to Dec, binary-charset columns to Bytes,
     DATE/TIME/DATETIME to strings, everything else to Str.
+
+    **Example**
+
+    ```hot
+    rows ::mysql/query(conn, "SELECT id, name FROM users WHERE active = ?", [true])
+    first(rows).name
+    ```
     """
 }
 fn

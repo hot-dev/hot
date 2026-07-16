@@ -4,7 +4,7 @@ hot.pkg.attio {
   name: "hot.dev/attio",
   version: "0.1.0",
   hot-min-version: "2.6.0",
-  description: "Attio CRM bindings for Hot. Records (query/create/upsert), notes, tasks, and lists on Attio's v2 API.",
+  description: "Attio CRM bindings for Hot. Records (query/create/upsert/delete), object configuration, notes, tasks, comments, lists, and workspace members on Attio's v2 API.",
   author: "Hot Dev",
   email: "support@hot.dev",
   license: "Apache-2.0",

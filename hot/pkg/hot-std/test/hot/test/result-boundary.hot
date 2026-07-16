@@ -260,3 +260,24 @@ meta ["test"] fn () {
     assert(is-err(nested), "update-in nested callback Err halts")
     assert(is-err(root), "update-in root callback Err halts")
 }
+
+// ----------------------------------------------------------------------------
+// Pipes prepare their argument like the equivalent direct call: bare-ref
+// stages honor the target's lazy first parameter (Result-aware targets
+// receive the Err), while strict targets still halt.
+// ----------------------------------------------------------------------------
+
+test-pipe-bare-ref-honors-lazy-first-param
+meta ["test"] fn () {
+    assert(err("p") |> is-err, "bare-ref stage reaches is-err without halting")
+    assert(err("p") |> ::hot::type/is-err, "ns-qualified bare-ref stage too")
+    assert-eq(false, ok(1) |> is-err)
+    assert(ok(1) |> is-ok)
+    assert-eq("handled p", err("p") |> if-err((e) { `handled ${e}` }))
+}
+
+test-pipe-strict-target-still-halts
+meta ["test"] fn () {
+    out ::exec/contain(() { err("p") |> add(1) })
+    assert(is-err(out), "Err piped into a strict argument still halts")
+}

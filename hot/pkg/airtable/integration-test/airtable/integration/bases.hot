@@ -1,9 +1,140 @@
 ::airtable::integration ns
 meta ["test"]
 
-// Requires ctx: airtable.token
+// =============================================================================
+// Integration Tests (live Airtable)
+// =============================================================================
+// Requires ctx: airtable.token with scopes data.records:read,
+// data.records:write, data.recordComments:read, data.recordComments:write,
+// and schema.bases:read, granted on a dedicated junk base (any table shape
+// works — the suite reads the schema and uses the primary field).
+//
+// The lifecycle test writes to that base: records whose primary field is
+// marked itest-<uuid>, plus one comment it deletes itself. Cleanup is
+// self-healing: an entry sweep deletes stale itest-* records a crashed
+// run left behind. Target the base/table explicitly with
+// AIRTABLE_TEST_BASE_ID / AIRTABLE_TEST_TABLE; defaults are the token's
+// first base and its first table.
+// Run with: hot test --project pkg-integration-airtable
+
+::env ::hot::env
+::at ::airtable
+
+test-base-id fn (): Str {
+    override ::env/get("AIRTABLE_TEST_BASE_ID", "")
+    bases ::at/list-bases().bases
+    cond {
+        not(is-empty(override)) => { override }
+        is-empty(bases) => {
+            err("the token has no base access — add a base in the token's Access section")
+        }
+        => { first(bases).id }
+    }
+}
+
+// The target table and its primary field name, from the base schema:
+// {table: Str, primary: Str}
+test-table fn (base-id: Str): Map {
+    schema ::at/get-base-schema(base-id)
+    override ::env/get("AIRTABLE_TEST_TABLE", "")
+    tables cond {
+        is-empty(override) => { schema.tables }
+        => { filter(schema.tables, (t) { or(eq(t.name, override), eq(t.id, override)) }) }
+    }
+
+    table first(tables)
+    primary first(filter(table.fields, (f) { eq(f.id, table.primaryFieldId) }))
+    {table: table.name, primary: primary.name}
+}
+
+// Delete records a previous crashed run left behind (first 10 per run;
+// deeper residue drains across runs).
+sweep-stale-records fn (base-id: Str, table: Str, primary: Str) {
+    stale ::at/list-records(base-id, table, {
+        filterByFormula: `FIND('itest-', {${primary}})`
+    })
+    ids map(stale.records, (r) { r.id })
+    cond {
+        is-empty(ids) => { null }
+        => { ::at/delete-records(base-id, table, slice(ids, 0, 10)) }
+    }
+}
+
+test-whoami
+meta ["test"] fn () {
+    me ::at/whoami()
+    assert(not(is-err(me)), `whoami: ${if-err(me, (e) { Str(e) })}`)
+    assert(is-some(me.id), "token should resolve to a user id")
+}
+
 test-list-bases
 meta ["test"] fn () {
-    out ::airtable/list-bases()
+    out ::at/list-bases()
     assert(is-some(out.bases), "token should see bases")
+}
+
+test-base-schema
+meta ["test"] fn () {
+    target test-table(test-base-id())
+    assert(not(is-empty(target.table)), "base should have a table")
+    assert(not(is-empty(target.primary)), "table should have a primary field")
+}
+
+test-record-lifecycle
+meta ["test"] fn () {
+    m `itest-${Uuid()}`
+    base test-base-id()
+    target test-table(base)
+    sweep-stale-records(base, target.table, target.primary)
+
+    // Batch create.
+    created ::at/create-records(base, target.table, [
+        {fields: assoc({}, target.primary, `${m}-a`)},
+        {fields: assoc({}, target.primary, `${m}-b`)}
+    ])
+    assert(not(is-err(created)), `create-records: ${if-err(created, (e) { Str(e) })}`)
+    assert-eq(2, length(created.records), "both records created")
+    rec-a first(created.records)
+
+    // Point read + formula-filtered list.
+    fetched ::at/get-record(base, target.table, rec-a.id)
+    assert-eq(rec-a.id, fetched.id)
+    hits ::at/list-records(base, target.table, {
+        filterByFormula: `FIND(${::at/escape-formula-value(m)}, {${target.primary}})`
+    })
+    assert-eq(2, length(hits.records), "filter finds exactly this run's records")
+
+    // Partial update.
+    updated ::at/update-records(base, target.table, [
+        {id: rec-a.id, fields: assoc({}, target.primary, `${m}-a-updated`)}
+    ])
+    assert(not(is-err(updated)), `update-records: ${if-err(updated, (e) { Str(e) })}`)
+
+    // Upsert keyed on the primary field: one match updates, one new creates.
+    upserted ::at/upsert-records(base, target.table, [target.primary], [
+        {fields: assoc({}, target.primary, `${m}-a-updated`)},
+        {fields: assoc({}, target.primary, `${m}-c`)}
+    ])
+    assert(not(is-err(upserted)), `upsert-records: ${if-err(upserted, (e) { Str(e) })}`)
+    assert-eq(1, length(upserted.createdRecords), "upsert created the new key")
+    assert-eq(1, length(upserted.updatedRecords), "upsert matched the existing key")
+
+    // Comments: create, edit, list, delete.
+    comment ::at/create-comment(base, target.table, rec-a.id, `Integration comment ${m}.`)
+    assert(not(is-err(comment)), `create-comment: ${if-err(comment, (e) { Str(e) })}`)
+    edited ::at/update-comment(base, target.table, rec-a.id, comment.id, `Integration comment ${m} (edited).`)
+    assert(not(is-err(edited)), `update-comment: ${if-err(edited, (e) { Str(e) })}`)
+    listed ::at/list-comments(base, target.table, rec-a.id)
+    assert-eq(1, length(filter(listed.comments, (c) { eq(c.id, comment.id) })), "comment appears on the record")
+    removed ::at/delete-comment(base, target.table, rec-a.id, comment.id)
+    assert(not(is-err(removed)), `delete-comment: ${if-err(removed, (e) { Str(e) })}`)
+
+    // Self-clean via batch delete; a halt above leaves records for the
+    // next run's sweep.
+    remaining ::at/list-records(base, target.table, {
+        filterByFormula: `FIND(${::at/escape-formula-value(m)}, {${target.primary}})`
+    })
+    deleted ::at/delete-records(base, target.table, map(remaining.records, (r) { r.id }))
+    assert(not(is-err(deleted)), `delete-records: ${if-err(deleted, (e) { Str(e) })}`)
+    assert-eq(3, length(deleted.records), "all three run records deleted")
 }
