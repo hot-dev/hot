@@ -37,6 +37,7 @@ migrations, editor reference).
   - [Containers](box)
     - [Container Billing](box/billing)
 - [Hot API](api)
+  - [SDKs](api/sdks)
   - [MCP Services](mcp)
   - [Webhooks](webhooks)
   - [Custom Domains](domains)

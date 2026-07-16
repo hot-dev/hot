@@ -6,6 +6,10 @@ description: "REST API reference for Hot projects, builds, runs, events, streams
 
 The Hot API provides programmatic access to manage projects, builds, runs, events, and more.
 
+> **Official SDKs** are available for JavaScript/TypeScript, Python, Go, Rust,
+> and Java — see [SDKs](api/sdks). The examples on this page show the raw
+> HTTP API; the SDKs wrap every endpoint below.
+
 ## Base URL
 
 ```
@@ -1766,6 +1770,9 @@ Removes a custom domain. The domain must belong to the authenticated environment
 
 ## Code Examples
 
+The [official SDKs](api/sdks) cover every endpoint on this page. Listing
+projects and publishing an event in each:
+
 <!-- tabs:start -->
 #### **curl**
 
@@ -1784,54 +1791,99 @@ curl -X POST https://api.hot.dev/v1/events \
 #### **JavaScript**
 
 ```javascript
-const HOT_API_KEY = process.env.HOT_API_KEY;
-const BASE_URL = 'https://api.hot.dev/v1';
+import { HotClient } from "@hot-dev/sdk";
+
+const hot = new HotClient({ token: process.env.HOT_API_KEY });
 
 // List projects
-const response = await fetch(`${BASE_URL}/projects`, {
-  headers: { 'Authorization': `Bearer ${HOT_API_KEY}` }
-});
-const { data: projects } = await response.json();
+const { data: projects } = await hot.projects.list();
 
 // Publish an event
-await fetch(`${BASE_URL}/events`, {
-  method: 'POST',
-  headers: {
-    'Authorization': `Bearer ${HOT_API_KEY}`,
-    'Content-Type': 'application/json'
-  },
-  body: JSON.stringify({
-    event_type: 'user:signup',
-    event_data: { user_id: '123', email: 'alice@example.com' }
-  })
+const event = await hot.events.publish({
+  event_type: "user:signup",
+  event_data: { user_id: "123", email: "alice@example.com" },
 });
+console.log(event.stream_id);
 ```
 
 #### **Python**
 
 ```python
 import os
-import requests
+from hot import HotClient
 
-HOT_API_KEY = os.environ['HOT_API_KEY']
-BASE_URL = 'https://api.hot.dev/v1'
-headers = {
-    'Authorization': f'Bearer {HOT_API_KEY}',
-    'Content-Type': 'application/json'
-}
+hot = HotClient(token=os.environ["HOT_API_KEY"])
 
 # List projects
-response = requests.get(f'{BASE_URL}/projects', headers=headers)
-projects = response.json()['data']
+projects = hot.projects.list()["data"]
 
 # Publish an event
-requests.post(
-    f'{BASE_URL}/events',
-    headers=headers,
-    json={
-        'event_type': 'user:signup',
-        'event_data': {'user_id': '123', 'email': 'alice@example.com'}
+event = hot.events.publish(
+    {
+        "event_type": "user:signup",
+        "event_data": {"user_id": "123", "email": "alice@example.com"},
     }
 )
+print(event["stream_id"])
+```
+
+#### **Go**
+
+```go
+client, err := hot.NewClient(hot.Config{Token: os.Getenv("HOT_API_KEY")})
+if err != nil {
+	log.Fatal(err)
+}
+ctx := context.Background()
+
+// List projects
+projects, err := client.Projects.List(ctx, nil)
+
+// Publish an event
+event, err := client.Events.Publish(ctx, map[string]any{
+	"event_type": "user:signup",
+	"event_data": map[string]any{"user_id": "123", "email": "alice@example.com"},
+})
+fmt.Println(event["stream_id"])
+```
+
+#### **Rust**
+
+```rust
+use hot_dev::HotClient;
+use serde_json::json;
+
+let client = HotClient::builder(std::env::var("HOT_API_KEY").unwrap()).build();
+
+// List projects
+let projects = client.projects().list(&[]).await?;
+
+// Publish an event
+let event = client
+    .events()
+    .publish(json!({
+        "event_type": "user:signup",
+        "event_data": { "user_id": "123", "email": "alice@example.com" },
+    }))
+    .await?;
+println!("{}", event["stream_id"]);
+```
+
+#### **Java**
+
+```java
+HotClient client = HotClient.builder(System.getenv("HOT_API_KEY")).build();
+
+// List projects
+Map<String, Object> projects = client.projects().list();
+
+// Publish an event
+Map<String, Object> event = client.events().publish(Map.of(
+    "event_type", "user:signup",
+    "event_data", Map.of("user_id", "123", "email", "alice@example.com")));
+System.out.println(event.get("stream_id"));
 ```
 <!-- tabs:end -->
+
+See [SDKs](api/sdks) for installation, streaming, error handling, and the
+full behavior shared across all five libraries.
