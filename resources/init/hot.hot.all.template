@@ -147,6 +147,11 @@ hot.redis.cluster Bool(::env/get("HOT_REDIS_CLUSTER", "false"))
 hot.api.host Str(::env/get("HOT_API_HOST", "localhost"))
 hot.api.port Int(::env/get("HOT_API_PORT", "4681"))
 
+// Trusted proxy client IP resolution (disabled for compatibility by default)
+hot.network.client-ip.trusted-proxy Bool(::env/get("HOT_CLIENT_IP_TRUSTED_PROXY", "false"))
+hot.network.client-ip.header ::env/get("HOT_CLIENT_IP_HEADER", "x-forwarded-for")
+hot.network.client-ip.trusted-proxies ::env/get("HOT_CLIENT_IP_TRUSTED_PROXIES", "")
+
 // App Server Configuration
 hot.app.host Str(::env/get("HOT_APP_HOST", "localhost"))
 hot.app.port Int(::env/get("HOT_APP_PORT", "4680"))

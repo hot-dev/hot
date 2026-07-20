@@ -29,6 +29,7 @@ use uuid::Uuid;
 
 use crate::ApiStateData;
 use crate::auth::{AuthContext, authenticate_token};
+use crate::client_ip::ClientIp;
 use crate::domain_resolver::ResolvedDomain;
 use crate::models::ApiErrorResponse;
 use crate::rate_limit::{self, PublicRateLimitMode};
@@ -193,6 +194,7 @@ async fn resolve_webhook_path_from_domain(
 pub async fn webhook_catch_all_handler(
     State((db, _storage, conf, stream_pubsub)): State<ApiStateData>,
     method: Method,
+    client_ip: Option<Extension<ClientIp>>,
     resolved_domain: Option<Extension<ResolvedDomain>>,
     OriginalUri(original_uri): OriginalUri,
     Path(full_path): Path<String>,
@@ -243,6 +245,7 @@ pub async fn webhook_catch_all_handler(
         method,
         path,
         original_url,
+        client_ip.map(|extension| extension.0),
         headers,
         query,
         body,
@@ -352,6 +355,7 @@ async fn webhook_handler_inner(
     method: Method,
     path: String,
     original_url: Option<String>,
+    client_ip: Option<ClientIp>,
     headers: HeaderMap,
     query: Query<std::collections::HashMap<String, String>>,
     body: Bytes,
@@ -541,6 +545,7 @@ async fn webhook_handler_inner(
         &url_path,
         original_url.as_deref(),
         &headers,
+        client_ip.as_ref(),
         &query.0,
         Some(RequestBody {
             body: body_val,
@@ -1307,6 +1312,7 @@ mod tests {
             State(state),
             Method::POST,
             None,
+            None,
             OriginalUri(uri("/webhook/svc/abcdef123456")),
             Path("svc/abcdef123456".to_string()),
             HeaderMap::new(),
@@ -1339,6 +1345,7 @@ mod tests {
         let result = webhook_catch_all_handler(
             State(state),
             Method::POST,
+            None,
             Some(Extension(resolved)),
             OriginalUri(uri("/webhook/svc/hook/abcdef123456")),
             Path("svc/hook/abcdef123456".to_string()),

@@ -31,6 +31,7 @@ use hot::val::Val;
 
 use crate::access_log::OptionalAccessId;
 use crate::auth::{AuthContext, authenticate_token};
+use crate::client_ip::ClientIp;
 use crate::domain_resolver::ResolvedDomain;
 use crate::rate_limit::{self, PublicRateLimitMode};
 use axum::http::HeaderMap;
@@ -560,6 +561,7 @@ async fn resolve_mcp_context_from_domain(
 pub async fn mcp_handler(
     State((db, _storage, conf, stream_pubsub)): State<ApiStateData>,
     OptionalAccessId(access_id): OptionalAccessId,
+    client_ip: Option<Extension<ClientIp>>,
     Path((org_slug, env_name, service)): Path<(String, String, String)>,
     headers: HeaderMap,
     Json(request): Json<JsonRpcRequest>,
@@ -574,6 +576,7 @@ pub async fn mcp_handler(
         &conf,
         &stream_pubsub,
         access_id,
+        client_ip.map(|extension| extension.0),
         &headers,
         request,
         source,
@@ -588,6 +591,7 @@ pub async fn mcp_handler(
 pub async fn mcp_handler_domain(
     State((db, _storage, conf, stream_pubsub)): State<ApiStateData>,
     OptionalAccessId(access_id): OptionalAccessId,
+    client_ip: Option<Extension<ClientIp>>,
     resolved: Option<Extension<ResolvedDomain>>,
     Path(service): Path<String>,
     headers: HeaderMap,
@@ -609,6 +613,7 @@ pub async fn mcp_handler_domain(
         &conf,
         &stream_pubsub,
         access_id,
+        client_ip.map(|extension| extension.0),
         &headers,
         request,
         source,
@@ -749,6 +754,7 @@ async fn mcp_handler_inner(
     conf: &Arc<Val>,
     stream_pubsub: &Option<Arc<hot::stream::StreamPubSub>>,
     access_id: Option<Uuid>,
+    client_ip: Option<ClientIp>,
     headers: &HeaderMap,
     request: JsonRpcRequest,
     source: McpRouteSource,
@@ -854,6 +860,7 @@ async fn mcp_handler_inner(
                 request.params,
                 mcp_timeout,
                 access_id,
+                client_ip.as_ref(),
                 headers,
             )
             .await
@@ -962,6 +969,7 @@ async fn handle_tools_call_streaming(
     params: Option<JsonValue>,
     timeout_seconds: u64,
     access_id: Option<Uuid>,
+    client_ip: Option<&ClientIp>,
     headers: &HeaderMap,
 ) -> Result<axum::response::Response, (StatusCode, Json<ApiErrorResponse>)> {
     // Parse params
@@ -1136,6 +1144,7 @@ async fn handle_tools_call_streaming(
         &url_path,
         None,
         headers,
+        client_ip,
         &empty_query,
         None,
         ctx.auth.as_ref(),
@@ -1800,6 +1809,7 @@ async fn mcp_sse_handler_core(
 pub async fn mcp_http_sse_messages_handler(
     State(state): State<ApiStateData>,
     OptionalAccessId(access_id): OptionalAccessId,
+    client_ip: Option<Extension<ClientIp>>,
     Path((org_slug, env_name, service)): Path<(String, String, String)>,
     query: Query<HttpSseMessageQuery>,
     headers: HeaderMap,
@@ -1810,13 +1820,24 @@ pub async fn mcp_http_sse_messages_handler(
         env_name,
         service,
     };
-    mcp_http_sse_messages_inner(state, access_id, query, headers, request, source).await
+    mcp_http_sse_messages_inner(
+        state,
+        access_id,
+        client_ip.map(|extension| extension.0),
+        query,
+        headers,
+        request,
+        source,
+    )
+    .await
 }
 
 /// HTTP+SSE messages handler for custom domain routes (`POST /mcp/{service}/messages`).
+#[allow(clippy::too_many_arguments)]
 pub async fn mcp_http_sse_messages_handler_domain(
     State(state): State<ApiStateData>,
     OptionalAccessId(access_id): OptionalAccessId,
+    client_ip: Option<Extension<ClientIp>>,
     resolved: Option<Extension<ResolvedDomain>>,
     Path(service): Path<String>,
     query: Query<HttpSseMessageQuery>,
@@ -1834,12 +1855,22 @@ pub async fn mcp_http_sse_messages_handler_domain(
         })?
         .0;
     let source = McpRouteSource::Domain { resolved, service };
-    mcp_http_sse_messages_inner(state, access_id, query, headers, request, source).await
+    mcp_http_sse_messages_inner(
+        state,
+        access_id,
+        client_ip.map(|extension| extension.0),
+        query,
+        headers,
+        request,
+        source,
+    )
+    .await
 }
 
 async fn mcp_http_sse_messages_inner(
     state: ApiStateData,
     access_id: Option<Uuid>,
+    client_ip: Option<ClientIp>,
     query: Query<HttpSseMessageQuery>,
     headers: HeaderMap,
     request: JsonRpcRequest,
@@ -1907,6 +1938,7 @@ async fn mcp_http_sse_messages_inner(
             state_clone,
             headers,
             access_id,
+            client_ip,
             source,
             request,
             transport_session_id,
@@ -1924,6 +1956,7 @@ async fn process_mcp_http_sse_message_request(
     state: ApiStateData,
     headers: HeaderMap,
     access_id: Option<Uuid>,
+    client_ip: Option<ClientIp>,
     source: McpRouteSource,
     request: JsonRpcRequest,
     transport_session_id: Uuid,
@@ -1937,6 +1970,7 @@ async fn process_mcp_http_sse_message_request(
         conf,
         stream_pubsub,
         access_id,
+        client_ip,
         &headers,
         request,
         source,
@@ -2273,6 +2307,7 @@ mod tests {
         let response = mcp_handler(
             State(state),
             OptionalAccessId(None),
+            None,
             Path((
                 "local".to_string(),
                 "development".to_string(),
@@ -2314,6 +2349,7 @@ mod tests {
         process_mcp_http_sse_message_request(
             state,
             HeaderMap::new(),
+            None,
             None,
             McpRouteSource::Path {
                 org_slug: "local".to_string(),
@@ -2367,6 +2403,7 @@ mod tests {
         process_mcp_http_sse_message_request(
             state,
             HeaderMap::new(),
+            None,
             None,
             McpRouteSource::Path {
                 org_slug: "local".to_string(),
@@ -2424,6 +2461,7 @@ mod tests {
         process_mcp_http_sse_message_request(
             state,
             HeaderMap::new(),
+            None,
             None,
             McpRouteSource::Path {
                 org_slug: "local".to_string(),
@@ -2489,6 +2527,7 @@ mod tests {
         let status = mcp_http_sse_messages_handler(
             State(ctx.state.clone()),
             OptionalAccessId(None),
+            None,
             Path((
                 ctx.org_slug.clone(),
                 ctx.env_name.clone(),
@@ -2531,6 +2570,7 @@ mod tests {
         let result = mcp_http_sse_messages_handler(
             State(ctx.state.clone()),
             OptionalAccessId(None),
+            None,
             Path((ctx.org_slug, ctx.env_name, ctx.service)),
             Query(HttpSseMessageQuery {
                 transport_session_id: transport_session_id.to_string(),
@@ -2580,6 +2620,7 @@ mod tests {
         let result = mcp_http_sse_messages_handler(
             State(ctx.state.clone()),
             OptionalAccessId(None),
+            None,
             Path((ctx.org_slug, ctx.env_name, ctx.service)),
             Query(HttpSseMessageQuery {
                 transport_session_id: transport_session_id.to_string(),
@@ -3395,6 +3436,7 @@ mod tests {
         mcp_handler(
             State(ctx.state.clone()),
             OptionalAccessId(None),
+            None,
             Path((
                 ctx.org_slug.clone(),
                 ctx.env_name.clone(),
@@ -3482,6 +3524,7 @@ mod tests {
         let result = mcp_handler(
             State(ctx.state.clone()),
             OptionalAccessId(None),
+            None,
             Path((
                 ctx.org_slug.clone(),
                 ctx.env_name.clone(),
@@ -3525,6 +3568,7 @@ mod tests {
         let result = mcp_handler(
             State(ctx.state.clone()),
             OptionalAccessId(None),
+            None,
             Path((
                 ctx.org_slug.clone(),
                 ctx.env_name.clone(),
@@ -3554,6 +3598,7 @@ mod tests {
         let result = mcp_handler(
             State(ctx.state.clone()),
             OptionalAccessId(None),
+            None,
             Path((
                 ctx.org_slug.clone(),
                 ctx.env_name.clone(),
@@ -3582,6 +3627,7 @@ mod tests {
         let result = mcp_handler(
             State(ctx.state.clone()),
             OptionalAccessId(None),
+            None,
             Path((
                 ctx.org_slug.clone(),
                 ctx.env_name.clone(),
@@ -3624,6 +3670,7 @@ mod tests {
         let result = mcp_handler(
             State(ctx.state.clone()),
             OptionalAccessId(None),
+            None,
             Path((ctx.org_slug.clone(), ctx.env_name.clone(), ctx.service.clone())),
             bearer_header("hot_00000000000000000000000000000000_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
             Json(make_jsonrpc("tools/list", None)),
@@ -3641,6 +3688,7 @@ mod tests {
         let result = mcp_handler(
             State(ctx.state.clone()),
             OptionalAccessId(None),
+            None,
             Path((
                 ctx.org_slug.clone(),
                 ctx.env_name.clone(),
@@ -3686,6 +3734,7 @@ mod tests {
         let result = mcp_handler(
             State(ctx.state.clone()),
             OptionalAccessId(None),
+            None,
             Path((
                 "nonexistent-org".to_string(),
                 ctx.env_name.clone(),
@@ -3727,6 +3776,7 @@ mod tests {
         let result = mcp_handler(
             State(ctx.state.clone()),
             OptionalAccessId(None),
+            None,
             Path((
                 "other-org".to_string(),
                 "development".to_string(),
@@ -3798,6 +3848,7 @@ mod tests {
             url,
             None,
             headers,
+            None,
             &std::collections::HashMap::new(),
             None,
             auth,
@@ -4342,6 +4393,7 @@ mod tests {
             State(state),
             OptionalAccessId(None),
             None,
+            None,
             Path("svc".to_string()),
             HeaderMap::new(),
             Json(JsonRpcRequest {
@@ -4372,6 +4424,7 @@ mod tests {
         let response = mcp_handler_domain(
             State(state),
             OptionalAccessId(None),
+            None,
             Some(Extension(resolved)),
             Path("svc".to_string()),
             HeaderMap::new(),

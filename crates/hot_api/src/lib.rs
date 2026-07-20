@@ -1,6 +1,7 @@
 pub mod access_log;
 pub mod auth;
 pub mod build_info;
+pub mod client_ip;
 pub mod domain_resolver;
 pub mod handlers;
 pub mod models;

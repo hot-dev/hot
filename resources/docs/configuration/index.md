@@ -123,6 +123,29 @@ This is useful for:
 
 When `log.target` is set to `file`, logs are written to the configured directory with automatic rotation and cleanup based on the retention setting.
 
+## Trusted Proxy Client IPs
+
+Client IP forwarding stays in compatibility mode by default: the API uses the
+first `X-Forwarded-For` value, then `X-Real-IP`, as before. When either header
+is present in compatibility mode, the API logs a warning because clients can
+spoof these values when the service is directly reachable.
+
+Self-hosted deployments can opt into validated proxy identity:
+
+```hot
+hot.network.client-ip.trusted-proxy true
+hot.network.client-ip.header "x-forwarded-for"
+hot.network.client-ip.trusted-proxies ["10.0.0.0/8", "2001:db8:1234::/48"]
+```
+
+List every proxy CIDR that may connect directly to the API or appear at the
+trusted end of the forwarding chain. When enabled, startup fails if the list is
+empty or invalid. Forwarding headers from untrusted peers, or malformed header
+values, are ignored in favor of the direct peer address.
+
+`trusted-proxies` also accepts a comma-delimited string, which is useful for an
+environment-backed deployment setting.
+
 ## Configuration Format
 
 Hot configuration uses a dotted notation where each setting is a separate assignment:
