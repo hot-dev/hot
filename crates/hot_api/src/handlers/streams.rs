@@ -37,6 +37,7 @@ use crate::ApiStateData;
 use crate::access_log::OptionalAccessId;
 use crate::auth::AuthContext;
 use crate::models::*;
+use crate::rate_limit;
 
 fn stream_not_found() -> (StatusCode, Json<ApiErrorResponse>) {
     (
@@ -136,7 +137,7 @@ pub enum StreamEvent {
 /// - `run:fail` - A run failed
 /// - `stream:complete` - The stream has completed (no more updates expected)
 pub async fn subscribe_to_stream(
-    State((db, _storage, _conf, stream_pubsub)): State<ApiStateData>,
+    State((db, _storage, conf, stream_pubsub)): State<ApiStateData>,
     Extension(auth): Extension<AuthContext>,
     Extension(api_key): Extension<ApiKey>,
     blob_store: Option<Extension<Option<Arc<BlobStore>>>>,
@@ -169,6 +170,15 @@ pub async fn subscribe_to_stream(
     };
     let db_clone = db.clone();
     let blob_store_clone = blob_store.clone();
+    let connection_guard =
+        rate_limit::acquire_sse_connection(&db, &conf, &auth, "stream-subscribe")
+            .await
+            .map_err(|exceeded| {
+                (
+                    StatusCode::TOO_MANY_REQUESTS,
+                    Json(rate_limit::rate_limit_error_body(exceeded)),
+                )
+            })?;
 
     // Try to subscribe to pub/sub for real-time updates
     let subscriber: Option<Box<dyn StreamSubscriber>> = if let Some(ref pubsub) = stream_pubsub {
@@ -196,6 +206,7 @@ pub async fn subscribe_to_stream(
 
     // Create the SSE stream with push from Redis Streams + poll fallback for run status
     let stream = async_stream::stream! {
+        let _connection_guard = connection_guard;
         let mut seen_run_ids: ahash::AHashSet<Uuid> = ahash::AHashSet::new();
         let mut completed_run_ids: ahash::AHashSet<Uuid> = ahash::AHashSet::new();
 
@@ -591,6 +602,15 @@ pub async fn subscribe_with_event(
         actions::CREATE,
         "Credential does not have create permission for events",
     )?;
+    let connection_guard =
+        rate_limit::acquire_sse_connection(&db, &conf, &auth, "stream-subscribe-with-event")
+            .await
+            .map_err(|exceeded| {
+                (
+                    StatusCode::TOO_MANY_REQUESTS,
+                    Json(rate_limit::rate_limit_error_body(exceeded)),
+                )
+            })?;
 
     // Step 3: Create the stream record in the database BEFORE subscribing
     // This ensures the stream exists for the subscription and avoids race conditions
@@ -667,6 +687,7 @@ pub async fn subscribe_with_event(
 
     // Step 6: Create the SSE stream
     let stream = async_stream::stream! {
+        let _connection_guard = connection_guard;
         // First event: confirm the event was published
         let published_event = EventPublishedEvent {
             event_id,

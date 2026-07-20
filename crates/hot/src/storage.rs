@@ -4,7 +4,7 @@
 //! Builds can be stored locally on the filesystem, in AWS S3, or using other backends.
 
 use async_trait::async_trait;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use uuid::Uuid;
 
 /// Get resolved configuration for AWS settings for build storage
@@ -44,6 +44,23 @@ pub trait BuildStorage: Send + Sync {
         env_id: &Uuid,
         data: Vec<u8>,
     ) -> Result<String, String>;
+
+    /// Store a build from a bounded temporary file.
+    ///
+    /// Backends should override this to stream or copy directly. The default
+    /// preserves compatibility for third-party and test implementations.
+    async fn store_build_from_path(
+        &self,
+        build_id: &Uuid,
+        org_id: &Uuid,
+        env_id: &Uuid,
+        path: &Path,
+    ) -> Result<String, String> {
+        let data = tokio::fs::read(path)
+            .await
+            .map_err(|e| format!("Failed to read staged build file: {}", e))?;
+        self.store_build(build_id, org_id, env_id, data).await
+    }
 
     /// Retrieve a build zip file as bytes
     async fn retrieve_build(
@@ -124,6 +141,29 @@ impl BuildStorage for LocalBuildStorage {
         if let Err(e) = std::fs::write(&path, data) {
             return Err(format!("Failed to write build file: {}", e));
         }
+
+        tracing::info!("Stored build {} to {}", build_id, path.display());
+        Ok(path.to_string_lossy().to_string())
+    }
+
+    async fn store_build_from_path(
+        &self,
+        build_id: &Uuid,
+        org_id: &Uuid,
+        env_id: &Uuid,
+        source_path: &Path,
+    ) -> Result<String, String> {
+        let env_dir = self
+            .build_dir
+            .join(org_id.simple().to_string())
+            .join(env_id.simple().to_string());
+        tokio::fs::create_dir_all(&env_dir)
+            .await
+            .map_err(|e| format!("Failed to create build directory: {}", e))?;
+        let path = env_dir.join(build_zip_filename(build_id));
+        tokio::fs::copy(source_path, &path)
+            .await
+            .map_err(|e| format!("Failed to copy staged build file: {}", e))?;
 
         tracing::info!("Stored build {} to {}", build_id, path.display());
         Ok(path.to_string_lossy().to_string())
@@ -364,6 +404,42 @@ pub mod s3 {
             }
         }
 
+        async fn store_build_from_path(
+            &self,
+            build_id: &Uuid,
+            org_id: &Uuid,
+            env_id: &Uuid,
+            path: &Path,
+        ) -> Result<String, String> {
+            let key = self.s3_key(build_id, org_id, env_id);
+            let byte_stream = ByteStream::from_path(path)
+                .await
+                .map_err(|e| format!("Failed to open staged build for S3 upload: {}", e))?;
+
+            self.client
+                .put_object()
+                .bucket(&self.bucket)
+                .key(&key)
+                .body(byte_stream)
+                .content_type("application/zip")
+                .send()
+                .await
+                .map_err(|e| {
+                    format!(
+                        "Failed to upload build to S3 (bucket: {}, key: {}): {}",
+                        self.bucket, key, e
+                    )
+                })?;
+
+            tracing::info!(
+                "Stored build {} to S3: s3://{}/{}",
+                build_id,
+                self.bucket,
+                key
+            );
+            Ok(format!("s3://{}/{}", self.bucket, key))
+        }
+
         async fn retrieve_build(
             &self,
             build_id: &Uuid,
@@ -586,5 +662,31 @@ mod tests {
             .unwrap();
         let exists_after = storage.exists(&build_id, &org_id, &env_id).await.unwrap();
         assert!(!exists_after);
+    }
+
+    #[tokio::test]
+    async fn test_local_storage_streams_from_staged_path() {
+        let storage_dir = tempfile::tempdir().unwrap();
+        let staging_dir = tempfile::tempdir().unwrap();
+        let staged_path = staging_dir.path().join("upload.hot.zip");
+        let data = b"streamed build data";
+        tokio::fs::write(&staged_path, data).await.unwrap();
+        let storage = LocalBuildStorage::new(storage_dir.path().to_path_buf());
+        let build_id = Uuid::now_v7();
+        let org_id = Uuid::now_v7();
+        let env_id = Uuid::now_v7();
+
+        storage
+            .store_build_from_path(&build_id, &org_id, &env_id, &staged_path)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            storage
+                .retrieve_build(&build_id, &org_id, &env_id)
+                .await
+                .unwrap(),
+            data
+        );
     }
 }

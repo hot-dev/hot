@@ -1522,6 +1522,54 @@ impl BuildFetcher for LocalBuildFetcher {
 
 /// Load event handlers and schedules from a build's manifest and insert them into the database
 /// This should be called when uploading a build to ensure the scheduler and workers have the handlers
+pub async fn load_build_manifest_data_from_path(
+    db: &DatabasePool,
+    build_id: &Uuid,
+    env_id: &Uuid,
+    build_path: &std::path::Path,
+) -> Result<(), String> {
+    use std::io::{Read, Write};
+    use zip::write::FileOptions;
+    use zip::{ZipArchive, ZipWriter};
+
+    // Manifest parsing is intentionally bounded even when the uploaded bundle
+    // is much larger. `load_build_manifest_data` only consumes manifest.hot,
+    // so pass it a tiny in-memory zip instead of re-buffering the full bundle.
+    const MAX_STAGED_MANIFEST_BYTES: u64 = 8 * 1024 * 1024;
+    let file = std::fs::File::open(build_path)
+        .map_err(|e| format!("Failed to open staged build zip: {}", e))?;
+    let mut archive =
+        ZipArchive::new(file).map_err(|e| format!("Failed to read staged build zip: {}", e))?;
+    let manifest_file = archive
+        .by_name("manifest.hot")
+        .map_err(|_| "Build does not contain manifest.hot".to_string())?;
+    let mut manifest = Vec::new();
+    manifest_file
+        .take(MAX_STAGED_MANIFEST_BYTES + 1)
+        .read_to_end(&mut manifest)
+        .map_err(|e| format!("Failed to read manifest.hot: {}", e))?;
+    if manifest.len() as u64 > MAX_STAGED_MANIFEST_BYTES {
+        return Err(format!(
+            "Manifest exceeds the {} byte limit",
+            MAX_STAGED_MANIFEST_BYTES
+        ));
+    }
+
+    let cursor = std::io::Cursor::new(Vec::with_capacity(manifest.len() + 256));
+    let mut zip = ZipWriter::new(cursor);
+    zip.start_file("manifest.hot", FileOptions::<()>::default())
+        .map_err(|e| format!("Failed to stage manifest: {}", e))?;
+    zip.write_all(&manifest)
+        .map_err(|e| format!("Failed to stage manifest: {}", e))?;
+    let manifest_zip = zip
+        .finish()
+        .map_err(|e| format!("Failed to finish staged manifest: {}", e))?
+        .into_inner();
+
+    load_build_manifest_data(db, build_id, env_id, &manifest_zip).await
+}
+
+/// Load event handlers and schedules from an in-memory build zip.
 pub async fn load_build_manifest_data(
     db: &DatabasePool,
     build_id: &Uuid,

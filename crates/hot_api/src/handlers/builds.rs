@@ -9,13 +9,58 @@ use axum::{
 use hot::db::{api_key::ApiKey, build::Build, project::Project};
 use hot::storage::build_zip_filename;
 use hot::val::Val;
+use once_cell::sync::Lazy;
 use std::str::FromStr;
+use std::sync::{Arc, Mutex, Weak};
+use tokio::io::AsyncWriteExt;
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use uuid::Uuid;
 
 use super::{ListQueryParams, get_and_ensure_active_project, get_and_verify_project};
 use crate::ApiStateData;
 use crate::auth::AuthContext;
 use crate::models::*;
+
+const DEFAULT_BUILD_UPLOAD_CONCURRENCY: i64 = 16;
+static BUILD_UPLOAD_SEMAPHORES: Lazy<Mutex<ahash::AHashMap<usize, Weak<Semaphore>>>> =
+    Lazy::new(|| Mutex::new(ahash::AHashMap::new()));
+
+fn acquire_build_upload_slot(
+    conf: &Val,
+) -> Result<Option<OwnedSemaphorePermit>, (StatusCode, Json<ApiErrorResponse>)> {
+    let limit = conf.get_int_or_default(
+        "api.build-upload-concurrency-limit",
+        DEFAULT_BUILD_UPLOAD_CONCURRENCY,
+    );
+    if limit <= 0 {
+        return Ok(None);
+    }
+    let limit = limit as usize;
+    let semaphore = {
+        let mut semaphores = BUILD_UPLOAD_SEMAPHORES
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        if let Some(semaphore) = semaphores.get(&limit).and_then(Weak::upgrade) {
+            semaphore
+        } else {
+            let semaphore = Arc::new(Semaphore::new(limit));
+            semaphores.insert(limit, Arc::downgrade(&semaphore));
+            semaphore
+        }
+    };
+    semaphore.try_acquire_owned().map(Some).map_err(|_| {
+        (
+            StatusCode::TOO_MANY_REQUESTS,
+            Json(
+                ApiErrorResponse::new(
+                    "rate_limit_exceeded",
+                    "Too many build uploads are currently running. Retry after 1 second.",
+                )
+                .with_retry_after(1),
+            ),
+        )
+    })
+}
 
 fn build_runtime_warning_response(build: &Build) -> Option<BuildRuntimeWarningResponse> {
     build
@@ -493,24 +538,64 @@ pub async fn upload_build(
     super::require_api_key(&auth, "Only API keys can upload builds.")?;
 
     let project = get_and_ensure_active_project(&db, &api_key, &project_id_or_slug).await?;
+    let _upload_permit = acquire_build_upload_slot(&conf)?;
 
-    let mut build_file_data: Option<Vec<u8>> = None;
+    // The multipart body is streamed to a request-scoped temporary directory.
+    // Memory use stays bounded to one multipart chunk rather than the bundle.
+    let staging_dir = tempfile::tempdir().map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ApiErrorResponse::internal_error(&format!(
+                "Failed to create build upload staging directory: {}",
+                e
+            ))),
+        )
+    })?;
+    let build_path = staging_dir.path().join("build.hot.zip");
+    let mut build_file_size: Option<usize> = None;
     let mut provided_hash: Option<String> = None;
     let mut provided_build_id: Option<String> = None;
 
+    // The default matches the CLI preflight ceiling.
+    let max_build_size = conf
+        .get("build")
+        .and_then(|b| b.get("file"))
+        .and_then(|f| f.get("max-bytes"))
+        .and_then(|v| match v {
+            Val::Int(i) => Some(i.max(0) as usize),
+            _ => None,
+        })
+        .unwrap_or(hot::build::DEFAULT_REMOTE_BUILD_MAX_BYTES as usize);
+
     // Parse multipart form data
-    while let Ok(Some(field)) = multipart.next_field().await {
+    loop {
+        let Some(mut field) = multipart.next_field().await.map_err(|e| {
+            (
+                StatusCode::BAD_REQUEST,
+                Json(ApiErrorResponse::bad_request(&format!(
+                    "Failed to read multipart form: {}",
+                    e
+                ))),
+            )
+        })?
+        else {
+            break;
+        };
         let name = field.name().unwrap_or("").to_string();
 
         match name.as_str() {
             "file" => {
-                let data = field.bytes().await.map_err(|e| {
-                    tracing::error!(
-                        "Build upload failed: could not read file field for project {} by user {}: {}",
-                        project.name,
-                        api_key.created_by_user_id,
-                        e
-                    );
+                let mut staged = tokio::fs::File::create(&build_path).await.map_err(|e| {
+                    (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(ApiErrorResponse::internal_error(&format!(
+                            "Failed to stage build upload: {}",
+                            e
+                        ))),
+                    )
+                })?;
+                let mut size = 0usize;
+                while let Some(chunk) = field.chunk().await.map_err(|e| {
                     (
                         StatusCode::BAD_REQUEST,
                         Json(ApiErrorResponse::bad_request(&format!(
@@ -518,8 +603,48 @@ pub async fn upload_build(
                             e
                         ))),
                     )
+                })? {
+                    size = size.checked_add(chunk.len()).ok_or_else(|| {
+                        (
+                            StatusCode::PAYLOAD_TOO_LARGE,
+                            Json(ApiErrorResponse::bad_request("Build file too large")),
+                        )
+                    })?;
+                    if size > max_build_size {
+                        tracing::warn!(
+                            size,
+                            max_build_size,
+                            project = %project.name,
+                            "Build upload rejected while streaming oversized file"
+                        );
+                        return Err((
+                            StatusCode::PAYLOAD_TOO_LARGE,
+                            Json(ApiErrorResponse::bad_request(&format!(
+                                "Build file too large (max {} bytes)",
+                                max_build_size
+                            ))),
+                        ));
+                    }
+                    staged.write_all(&chunk).await.map_err(|e| {
+                        (
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            Json(ApiErrorResponse::internal_error(&format!(
+                                "Failed to stage build upload: {}",
+                                e
+                            ))),
+                        )
+                    })?;
+                }
+                staged.flush().await.map_err(|e| {
+                    (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(ApiErrorResponse::internal_error(&format!(
+                            "Failed to finish staging build upload: {}",
+                            e
+                        ))),
+                    )
                 })?;
-                build_file_data = Some(data.to_vec());
+                build_file_size = Some(size);
             }
             "hash" => {
                 let text = field.text().await.map_err(|e| {
@@ -564,7 +689,7 @@ pub async fn upload_build(
     }
 
     // Validate we have required fields
-    let build_data = build_file_data.ok_or_else(|| {
+    let file_size = build_file_size.ok_or_else(|| {
         tracing::error!(
             "Build upload failed: missing file field for project {} by user {}",
             project.name,
@@ -592,38 +717,14 @@ pub async fn upload_build(
         )
     })?;
 
-    // Validate file size
-    let file_size = build_data.len() as i32;
-
-    // Get max build size from config. The default must match
-    // `hot::build::DEFAULT_REMOTE_BUILD_MAX_BYTES` so the CLI can
-    // pre-flight against the same ceiling without having to query us.
-    let max_build_size = conf
-        .get("build")
-        .and_then(|b| b.get("file"))
-        .and_then(|f| f.get("max-bytes"))
-        .and_then(|v| match v {
-            Val::Int(i) => Some(i as usize),
-            _ => None,
-        })
-        .unwrap_or(hot::build::DEFAULT_REMOTE_BUILD_MAX_BYTES as usize);
-
-    if build_data.len() > max_build_size {
-        tracing::error!(
-            "Build upload rejected: file too large ({} bytes, max {} bytes) for project {} by user {}",
-            build_data.len(),
-            max_build_size,
-            project.name,
-            api_key.created_by_user_id
-        );
-        return Err((
+    let file_size = i32::try_from(file_size).map_err(|_| {
+        (
             StatusCode::PAYLOAD_TOO_LARGE,
-            Json(ApiErrorResponse::bad_request(&format!(
-                "Build file too large (max {} bytes)",
-                max_build_size
-            ))),
-        ));
-    }
+            Json(ApiErrorResponse::bad_request(
+                "Build file is too large to record",
+            )),
+        )
+    })?;
 
     // Use provided build ID if available, otherwise generate new one
     let build_id = if let Some(provided_id_str) = provided_build_id {
@@ -709,7 +810,7 @@ pub async fn upload_build(
                 );
 
                 let storage_path = storage
-                    .store_build(&build_id, &env.org_id, &api_key.env_id, build_data.clone())
+                    .store_build_from_path(&build_id, &env.org_id, &api_key.env_id, &build_path)
                     .await
                     .map_err(|e| {
                         tracing::error!(
@@ -797,7 +898,7 @@ pub async fn upload_build(
 
     // Store the build file with org/env context
     let storage_path = storage
-        .store_build(&build_id, &env.org_id, &api_key.env_id, build_data.clone())
+        .store_build_from_path(&build_id, &env.org_id, &api_key.env_id, &build_path)
         .await
         .map_err(|e| {
             tracing::error!(
@@ -852,7 +953,8 @@ pub async fn upload_build(
         build_id
     );
     if let Err(e) =
-        hot::build::load_build_manifest_data(&db, &build_id, &api_key.env_id, &build_data).await
+        hot::build::load_build_manifest_data_from_path(&db, &build_id, &api_key.env_id, &build_path)
+            .await
     {
         tracing::error!(
             "Failed to load handlers/schedules for build {}: {}",
@@ -973,4 +1075,40 @@ pub async fn download_build(
         build_data,
     )
         .into_response())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn build_upload_concurrency_limit_releases_on_drop() {
+        let conf = hot::val!({
+            "api": {
+                "build-upload-concurrency-limit": 1,
+            },
+        });
+
+        let permit = acquire_build_upload_slot(&conf)
+            .expect("first upload should be admitted")
+            .expect("enabled limit should return a permit");
+        assert!(acquire_build_upload_slot(&conf).is_err());
+        drop(permit);
+        assert!(acquire_build_upload_slot(&conf).is_ok());
+    }
+
+    #[test]
+    fn build_upload_concurrency_can_be_disabled() {
+        let conf = hot::val!({
+            "api": {
+                "build-upload-concurrency-limit": 0,
+            },
+        });
+
+        assert!(
+            acquire_build_upload_slot(&conf)
+                .expect("disabled limit should admit uploads")
+                .is_none()
+        );
+    }
 }

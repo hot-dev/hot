@@ -89,6 +89,17 @@ pub fn build_call_event_data(function_name: &str, args: Val, caller: Option<Val>
     event_data
 }
 
+/// Persist the endpoint-selected build alongside call data so workers can
+/// authenticate exact-build routing against the database copy of the event.
+pub fn bind_call_event_to_build(event_data: &mut Val, build_id: Uuid) {
+    if let Val::Map(map) = event_data {
+        map.insert(
+            Val::from("_hot_target_build_id"),
+            Val::from(build_id.to_string()),
+        );
+    }
+}
+
 /// Read a proxy/forwarding header and return the first comma-separated value,
 /// trimmed, or None when the header is absent or empty. Multi-proxy chains
 /// append values; the first is the client-facing one.
@@ -473,6 +484,21 @@ mod tests {
                 "No caller key when None"
             );
         }
+    }
+
+    #[test]
+    fn test_bind_call_event_to_exact_build() {
+        let build_id = Uuid::now_v7();
+        let mut event_data = build_call_event_data("::ns/fn", Val::Vec(vec![]), None);
+        bind_call_event_to_build(&mut event_data, build_id);
+
+        let Val::Map(map) = event_data else {
+            panic!("Expected Map");
+        };
+        assert_eq!(
+            map.get(&Val::from("_hot_target_build_id")),
+            Some(&Val::from(build_id.to_string()))
+        );
     }
 
     #[test]

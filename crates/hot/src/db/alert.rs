@@ -2340,6 +2340,7 @@ impl DeliveryInfo {
 pub async fn process_single_alert_delivery(
     db: &crate::db::DatabasePool,
     http_client: &reqwest::Client,
+    destination_policy: crate::outbound::DestinationPolicy,
     email_sender: Option<&dyn AlertEmailSender>,
     email_config: &crate::email::EmailConfig,
     alert_delivery_id: &Uuid,
@@ -2351,7 +2352,15 @@ pub async fn process_single_alert_delivery(
     let info = DeliveryInfo::fetch(db, delivery).await?;
 
     // Process the delivery
-    let result = process_delivery(&info, http_client, email_sender, email_config, db).await;
+    let result = process_delivery(
+        &info,
+        http_client,
+        destination_policy,
+        email_sender,
+        email_config,
+        db,
+    )
+    .await;
 
     // Update delivery status
     match result {
@@ -2382,6 +2391,7 @@ pub async fn process_single_alert_delivery(
 pub async fn process_pending_deliveries(
     db: &crate::db::DatabasePool,
     http_client: &reqwest::Client,
+    destination_policy: crate::outbound::DestinationPolicy,
     email_sender: Option<&dyn AlertEmailSender>,
     email_config: &crate::email::EmailConfig,
     batch_size: i64,
@@ -2412,7 +2422,15 @@ pub async fn process_pending_deliveries(
         };
 
         // Process the delivery
-        let result = process_delivery(&info, http_client, email_sender, email_config, db).await;
+        let result = process_delivery(
+            &info,
+            http_client,
+            destination_policy,
+            email_sender,
+            email_config,
+            db,
+        )
+        .await;
 
         // Update delivery status
         match result {
@@ -2465,6 +2483,7 @@ pub trait AlertEmailSender: Send + Sync {
 async fn process_delivery(
     info: &DeliveryInfo,
     http_client: &reqwest::Client,
+    destination_policy: crate::outbound::DestinationPolicy,
     email_sender: Option<&dyn AlertEmailSender>,
     email_config: &crate::email::EmailConfig,
     db: &crate::db::DatabasePool,
@@ -2483,9 +2502,13 @@ async fn process_delivery(
         DestinationType::Email => {
             process_email_delivery(info, email_sender, email_config, db).await
         }
-        DestinationType::Slack => process_slack_delivery(info, http_client).await,
+        DestinationType::Slack => {
+            process_slack_delivery(info, http_client, destination_policy).await
+        }
         DestinationType::PagerDuty => process_pagerduty_delivery(info, http_client).await,
-        DestinationType::Webhook => process_webhook_delivery(info, http_client).await,
+        DestinationType::Webhook => {
+            process_webhook_delivery(info, http_client, destination_policy).await
+        }
     }
 }
 
@@ -2561,7 +2584,8 @@ async fn process_email_delivery(
 /// Process Slack webhook delivery
 async fn process_slack_delivery(
     info: &DeliveryInfo,
-    http_client: &reqwest::Client,
+    _http_client: &reqwest::Client,
+    destination_policy: crate::outbound::DestinationPolicy,
 ) -> DeliveryResult {
     let config: SlackDestinationConfig =
         match serde_json::from_value(info.destination.config.clone()) {
@@ -2599,12 +2623,27 @@ async fn process_slack_delivery(
         payload["channel"] = serde_json::json!(channel);
     }
 
-    match http_client
-        .post(&config.webhook_url)
-        .json(&payload)
-        .send()
+    let url = match url::Url::parse(&config.webhook_url) {
+        Ok(url) => url,
+        Err(e) => {
+            return DeliveryResult::PermanentFailure(format!("Invalid Slack webhook URL: {e}"));
+        }
+    };
+    let client = match destination_policy
+        .pinned_http_client(
+            &url,
+            std::time::Duration::from_secs(10),
+            std::time::Duration::from_secs(5),
+        )
         .await
     {
+        Ok(client) => client,
+        Err(e) => {
+            return DeliveryResult::PermanentFailure(format!("Slack destination blocked: {e}"));
+        }
+    };
+
+    match client.post(&config.webhook_url).json(&payload).send().await {
         Ok(resp) => {
             if resp.status().is_success() {
                 DeliveryResult::Success
@@ -2675,7 +2714,8 @@ async fn process_pagerduty_delivery(
 /// Process generic webhook delivery
 async fn process_webhook_delivery(
     info: &DeliveryInfo,
-    http_client: &reqwest::Client,
+    _http_client: &reqwest::Client,
+    destination_policy: crate::outbound::DestinationPolicy,
 ) -> DeliveryResult {
     let config: WebhookDestinationConfig =
         match serde_json::from_value(info.destination.config.clone()) {
@@ -2693,7 +2733,27 @@ async fn process_webhook_delivery(
         "timestamp": info.alert.created_at.to_rfc3339(),
     });
 
-    let mut request = http_client.post(&config.url).json(&payload);
+    let url = match url::Url::parse(&config.url) {
+        Ok(url) => url,
+        Err(e) => {
+            return DeliveryResult::PermanentFailure(format!("Invalid webhook URL: {e}"));
+        }
+    };
+    let client = match destination_policy
+        .pinned_http_client(
+            &url,
+            std::time::Duration::from_secs(10),
+            std::time::Duration::from_secs(5),
+        )
+        .await
+    {
+        Ok(client) => client,
+        Err(e) => {
+            return DeliveryResult::PermanentFailure(format!("Webhook destination blocked: {e}"));
+        }
+    };
+
+    let mut request = client.post(&config.url).json(&payload);
 
     // Add custom headers if specified
     if let Some(headers) = &config.headers {

@@ -995,6 +995,59 @@ async fn hydrate_event_message_from_db(
         };
 
     let claimed_context = &event_message.body.execution_context;
+    let persisted_target_build_id = stored_event
+        .event_data
+        .get("_hot_target_build_id")
+        .and_then(|value| value.as_str())
+        .map(|value| {
+            value.parse::<Uuid>().map_err(|e| {
+                worker_error(format!(
+                    "Persisted target build for event {} is invalid: {}",
+                    event_id, e
+                ))
+            })
+        })
+        .transpose()?;
+    if let (Some(persisted), Some(claimed)) = (persisted_target_build_id, claimed_context.build_id)
+        && persisted != claimed
+    {
+        return Err(worker_error(format!(
+            "Queued target build does not match persisted event {}",
+            event_id
+        )));
+    }
+    let target_build_id = persisted_target_build_id.or(claimed_context.build_id);
+    let authoritative_build = if let Some(build_id) = target_build_id {
+        let build = Build::get_build(db, &build_id).await.map_err(|e| {
+            worker_error(format!(
+                "Target build {} for event {} is invalid: {}",
+                build_id, event_id, e
+            ))
+        })?;
+        let project = Project::get_project(db, &build.project_id)
+            .await
+            .map_err(|e| {
+                worker_error(format!(
+                    "Project {} for target build {} is invalid: {}",
+                    build.project_id, build_id, e
+                ))
+            })?;
+        if project.env_id != stored_event.env_id {
+            return Err(worker_error(format!(
+                "Target build {} does not belong to event environment {}",
+                build_id, stored_event.env_id
+            )));
+        }
+        if target_project_id.is_some_and(|project_id| project_id != build.project_id) {
+            return Err(worker_error(format!(
+                "Target build {} does not belong to target project",
+                build_id
+            )));
+        }
+        Some((build, project))
+    } else {
+        None
+    };
     if !(0..=100).contains(&claimed_context.retry_attempt) {
         return Err(worker_error(format!(
             "Invalid retry attempt {} for event {}",
@@ -1084,12 +1137,27 @@ async fn hydrate_event_message_from_db(
         Some(stored_event.env_id),
         Some(stored_event.created_by_user_id),
         Some(stored_env.org_id),
-        None,
+        authoritative_build
+            .as_ref()
+            .map(|(build, _)| build.build_id),
         Some(stored_event.event_id),
         claimed_context.origin_run_id,
     )
     .with_env_name(Some(stored_env.name))
     .with_org_slug(org_slug)
+    .with_project(
+        authoritative_build
+            .as_ref()
+            .map(|(build, _)| build.project_id),
+        authoritative_build
+            .as_ref()
+            .map(|(_, project)| project.name.clone()),
+    )
+    .with_build_hash(
+        authoritative_build
+            .as_ref()
+            .map(|(build, _)| build.hash.clone()),
+    )
     .with_retry_attempt(claimed_context.retry_attempt)
     .with_access_id(stored_event.access_id);
 
@@ -1205,6 +1273,7 @@ async fn process_alert_delivery_message(
     match hot::db::alert::process_single_alert_delivery(
         &db,
         &http_client,
+        hot::outbound::DestinationPolicy::for_alert_delivery(&worker_conf),
         email_sender_ref,
         &alert_email_config,
         &alert_msg.body.alert_delivery_id,
@@ -2387,6 +2456,10 @@ struct RoutingResult {
     matched_project_names: Vec<String>,
 }
 
+fn build_matches_exact_target(candidate: Uuid, target: Option<Uuid>) -> bool {
+    target.is_none_or(|target| candidate == target)
+}
+
 /// Get the extracted path for a bundle build.
 /// Returns None if the bundle is not yet extracted or extraction failed.
 async fn get_bundle_extracted_path(
@@ -2473,16 +2546,18 @@ async fn get_bundle_extracted_path(
 }
 /// Find the build that contains a specific function (for hot:call routing)
 /// Returns routing result with the selected build and whether tie-breaker was used.
-/// Uses target_project_id as tie-breaker when multiple builds have the same function.
+/// An exact target build takes precedence; target_project_id remains the
+/// compatibility tie-breaker for events that predate exact build routing.
 async fn find_build_for_function(
     db: &DatabasePool,
     env_id: &Uuid,
     function_name: &str,
     cache: &hot::lang::cache::bytecode_cache::BytecodeCache,
     worker_conf: &Val,
-    target_project_id: Option<Uuid>,
+    target: (Option<Uuid>, Option<Uuid>),
     build_path_cache: &Arc<BuildPathCache>,
 ) -> Result<Option<RoutingResult>, String> {
+    let (target_build_id, target_project_id) = target;
     let deployed_builds = find_all_deployed_builds_for_env(db, env_id).await?;
 
     // Clean up memory cache: remove entries for builds that are no longer deployed
@@ -2494,6 +2569,9 @@ async fn find_build_for_function(
     let mut matching_builds: Vec<(Build, String)> = Vec::new();
 
     for build in deployed_builds {
+        if !build_matches_exact_target(build.build_id, target_build_id) {
+            continue;
+        }
         // Get project for this build to generate cache key
         let project = Project::get_project(db, &build.project_id)
             .await
@@ -5865,10 +5943,11 @@ pub async fn run_with_components_shared_context(
                                                                         worker_id, event_message.body.event.event_type, target_fn);
 
                                                                     // Get target_project_id from event for tie-breaking
+                                                                    let target_build_id = event_message.body.execution_context.build_id;
                                                                     let target_project_id = event_message.body.event.target_project_id;
 
                                                                     // Find the handler whose build contains the target function
-                                                                    match find_build_for_function(db, &env_id, &target_fn, &cache_ref, &worker_conf_ref, target_project_id, &build_path_cache_ref).await {
+                                                                    match find_build_for_function(db, &env_id, &target_fn, &cache_ref, &worker_conf_ref, (target_build_id, target_project_id), &build_path_cache_ref).await {
                                                                         Ok(Some(routing_result)) => {
                                                                             // Find the once handler from that build
                                                                             if let Some(handler) = once_handlers.iter().find(|h| h.build_id == routing_result.build.build_id) {
@@ -7036,6 +7115,16 @@ mod tests {
     use super::*;
     use hot::val;
 
+    #[test]
+    fn duplicate_function_routing_honors_exact_endpoint_build() {
+        let first = Uuid::now_v7();
+        let second = Uuid::now_v7();
+
+        assert!(!build_matches_exact_target(first, Some(second)));
+        assert!(build_matches_exact_target(second, Some(second)));
+        assert!(build_matches_exact_target(first, None));
+    }
+
     async fn migrated_sqlite_file_db() -> (DatabasePool, PathBuf) {
         let db_path =
             std::env::temp_dir().join(format!("hot-worker-test-{}.sqlite", Uuid::new_v4()));
@@ -7298,7 +7387,7 @@ mod tests {
                     Some(test_data.env_id),
                     Some(Uuid::now_v7()),
                     Some(Uuid::now_v7()),
-                    Some(Uuid::now_v7()),
+                    None,
                 ),
             },
         };

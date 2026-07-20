@@ -283,7 +283,10 @@ fn convert_named_args_to_positional(
 const MCP_EVENT_QUEUE_NAME: &str = "hot:event";
 
 /// The event data key for the function name.
-use super::request::{build_call_event_data, build_request_val, hash_sensitive_request_fields};
+use super::request::{
+    bind_call_event_to_build, build_call_event_data, build_request_val,
+    hash_sensitive_request_fields,
+};
 
 // ============================================================================
 // Shared Event Queue (initialized once, reused across requests)
@@ -1097,7 +1100,7 @@ async fn handle_tools_call_streaming(
         build_id: Some(tool.build_id),
         build_hash,
         project_id,
-        project_name,
+        project_name: project_name.clone(),
         event_id: Some(event_id),
         origin_run_id: None,
         retry_attempt: 0,
@@ -1151,7 +1154,8 @@ async fn handle_tools_call_streaming(
     }
 
     // Build the event data Val (used for both the event and the DB insert)
-    let event_data_val = build_call_event_data(&function_name, args_val, Some(caller_val));
+    let mut event_data_val = build_call_event_data(&function_name, args_val, Some(caller_val));
+    bind_call_event_to_build(&mut event_data_val, tool.build_id);
 
     // Insert event into database BEFORE enqueueing.
     // The worker verifies that events exist in the database for security
@@ -1167,8 +1171,8 @@ async fn handle_tools_call_streaming(
         event_type: "hot:call".to_string(),
         event_data: event_data_val,
         event_time: chrono::Utc::now(),
-        target_project_id: None,
-        target_project_name: None,
+        target_project_id: project_id,
+        target_project_name: project_name.clone(),
     };
 
     let event_message = hot::lang::event::EventMessage {

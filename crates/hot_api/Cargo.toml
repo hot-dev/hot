@@ -24,6 +24,7 @@ chrono = { workspace = true }
 once_cell = { workspace = true }
 futures = { workspace = true }
 async-stream = { workspace = true }
+tempfile = { workspace = true }
 tower = { workspace = true, features = ["limit"] }
 utoipa = { workspace = true }
 utoipa-swagger-ui = { workspace = true }
@@ -33,4 +34,3 @@ hot = { workspace = true, features = ["s3-storage", "test-utils"] }
 tower = { workspace = true, features = ["util"] }
 sqlx = { workspace = true }
 async-trait = { workspace = true }
-tempfile = { workspace = true }

@@ -8,6 +8,8 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use indexmap::IndexMap;
 use std::path::{Path, PathBuf};
+use std::pin::Pin;
+use tokio::io::AsyncRead;
 use uuid::Uuid;
 
 use crate::db::DatabasePool;
@@ -34,6 +36,12 @@ pub struct FileMetadata {
     pub updated_at: DateTime<Utc>,
     pub created_by_user_id: Uuid,
     pub updated_by_user_id: Option<Uuid>,
+}
+
+/// An authorized file body that can be forwarded without materializing it.
+pub struct FileReadStream {
+    pub metadata: FileMetadata,
+    pub reader: Pin<Box<dyn AsyncRead + Send>>,
 }
 
 impl FileMetadata {
@@ -256,6 +264,19 @@ pub trait FileStorage: Send + Sync {
 
     async fn read_file(&self, path: &str, ctx: &FileStorageContext) -> Result<Vec<u8>, String>;
 
+    /// Open an authorized file for streaming.
+    ///
+    /// Backends that can expose an async reader should override this. The
+    /// default keeps compatibility for external storage implementations while
+    /// allowing callers to reject non-streaming reads before materialization.
+    async fn open_file_stream(
+        &self,
+        _path: &str,
+        _ctx: &FileStorageContext,
+    ) -> Result<Option<FileReadStream>, String> {
+        Ok(None)
+    }
+
     /// Delete file from storage and mark inactive in database
     /// Returns true if the file existed and was deleted, false if it didn't exist
     async fn delete_file(&self, path: &str, ctx: &FileStorageContext) -> Result<bool, String>;
@@ -276,6 +297,19 @@ pub trait FileStorage: Send + Sync {
         prefix: &str,
         ctx: &FileStorageContext,
     ) -> Result<Vec<FileMetadata>, String>;
+
+    /// List at most `limit` files. Backends should override this to apply the
+    /// bound in their metadata store instead of materializing the full list.
+    async fn list_files_bounded(
+        &self,
+        prefix: &str,
+        limit: usize,
+        ctx: &FileStorageContext,
+    ) -> Result<Vec<FileMetadata>, String> {
+        let mut files = self.list_files(prefix, ctx).await?;
+        files.truncate(limit);
+        Ok(files)
+    }
 
     /// Get storage backend type
     fn storage_type(&self) -> &str;
@@ -882,6 +916,31 @@ impl FileStorage for LocalFileStorage {
             .map_err(|e| format!("Failed to read file: {}", e))
     }
 
+    async fn open_file_stream(
+        &self,
+        path: &str,
+        ctx: &FileStorageContext,
+    ) -> Result<Option<FileReadStream>, String> {
+        let normalized_path = normalize_path(path)?;
+        validate_path_security(&normalized_path)?;
+
+        let record = get_file_by_path(&ctx.db, &normalized_path, ctx.org_id, ctx.env_id).await?;
+        let recorded_path = (record.storage_backend == "local" && !record.storage_path.is_empty())
+            .then(|| PathBuf::from(&record.storage_path));
+        let full_path = match recorded_path {
+            Some(path) if path.exists() => path,
+            _ => self.full_path(&normalized_path, ctx),
+        };
+        let file = tokio::fs::File::open(&full_path)
+            .await
+            .map_err(|e| format!("Failed to open file for streaming: {}", e))?;
+
+        Ok(Some(FileReadStream {
+            metadata: FileMetadata::from_file_record(record),
+            reader: Box::pin(file),
+        }))
+    }
+
     async fn delete_file(&self, path: &str, ctx: &FileStorageContext) -> Result<bool, String> {
         // Normalize and validate path
         let normalized_path = normalize_path(path)?;
@@ -961,6 +1020,29 @@ impl FileStorage for LocalFileStorage {
 
         let records =
             list_files_by_prefix(&ctx.db, &normalized_prefix, ctx.org_id, ctx.env_id).await?;
+        Ok(records
+            .into_iter()
+            .map(FileMetadata::from_file_record)
+            .collect())
+    }
+
+    async fn list_files_bounded(
+        &self,
+        prefix: &str,
+        limit: usize,
+        ctx: &FileStorageContext,
+    ) -> Result<Vec<FileMetadata>, String> {
+        use crate::db::file::list_files_by_prefix_bounded;
+
+        let normalized_prefix = normalize_path(prefix).unwrap_or_else(|_| prefix.to_string());
+        let records = list_files_by_prefix_bounded(
+            &ctx.db,
+            &normalized_prefix,
+            ctx.org_id,
+            ctx.env_id,
+            limit,
+        )
+        .await?;
         Ok(records
             .into_iter()
             .map(FileMetadata::from_file_record)
@@ -1651,6 +1733,42 @@ pub mod s3 {
             Ok(data)
         }
 
+        async fn open_file_stream(
+            &self,
+            path: &str,
+            ctx: &FileStorageContext,
+        ) -> Result<Option<FileReadStream>, String> {
+            let normalized_path = normalize_path(path)?;
+            validate_path_security(&normalized_path)?;
+
+            let record =
+                get_file_by_path(&ctx.db, &normalized_path, ctx.org_id, ctx.env_id).await?;
+            let (bucket, key) = if record.storage_backend == "s3" {
+                self.parse_storage_path(&record.storage_path)
+                    .unwrap_or_else(|| (self.bucket.clone(), self.s3_key(&normalized_path, ctx)))
+            } else {
+                (self.bucket.clone(), self.s3_key(&normalized_path, ctx))
+            };
+            let response = self
+                .client
+                .get_object()
+                .bucket(&bucket)
+                .key(&key)
+                .send()
+                .await
+                .map_err(|e| {
+                    format!(
+                        "Failed to retrieve file from S3 (bucket: {}, key: {}, path: {}): {}",
+                        bucket, key, normalized_path, e
+                    )
+                })?;
+
+            Ok(Some(FileReadStream {
+                metadata: FileMetadata::from_file_record(record),
+                reader: Box::pin(response.body.into_async_read()),
+            }))
+        }
+
         async fn delete_file(&self, path: &str, ctx: &FileStorageContext) -> Result<bool, String> {
             // Normalize and validate path
             let normalized_path = normalize_path(path)?;
@@ -1754,6 +1872,29 @@ pub mod s3 {
 
             let records =
                 list_files_by_prefix(&ctx.db, &normalized_prefix, ctx.org_id, ctx.env_id).await?;
+            Ok(records
+                .into_iter()
+                .map(FileMetadata::from_file_record)
+                .collect())
+        }
+
+        async fn list_files_bounded(
+            &self,
+            prefix: &str,
+            limit: usize,
+            ctx: &FileStorageContext,
+        ) -> Result<Vec<FileMetadata>, String> {
+            use crate::db::file::list_files_by_prefix_bounded;
+
+            let normalized_prefix = normalize_path(prefix).unwrap_or_else(|_| prefix.to_string());
+            let records = list_files_by_prefix_bounded(
+                &ctx.db,
+                &normalized_prefix,
+                ctx.org_id,
+                ctx.env_id,
+                limit,
+            )
+            .await?;
             Ok(records
                 .into_iter()
                 .map(FileMetadata::from_file_record)

@@ -1025,6 +1025,12 @@ pub(crate) fn retry_container_id(base: &str, attempt: u32) -> String {
     format!("{}r{:x}", &base[..base.len() - 2], attempt)
 }
 
+#[cfg(feature = "kata")]
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn kata_root_readonly(writable_rootfs: bool) -> bool {
+    !writable_rootfs
+}
+
 /// Compute the OCI chain ID from a list of diff IDs.
 /// For a single layer, chain ID = diff ID.
 /// For multiple layers: chain_id(L0..Ln) = sha256(chain_id(L0..Ln-1) + " " + diff_id(Ln))
@@ -2182,7 +2188,7 @@ mod kata {
                 },
                 "root": {
                     "path": "rootfs",
-                    "readonly": false
+                    "readonly": kata_root_readonly(writable)
                 },
                 "linux": {
                     "resources": {
@@ -2536,6 +2542,12 @@ mod kata_tests {
             super::retry_container_id(base, 2),
             super::retry_container_id(base, 3)
         );
+    }
+
+    #[test]
+    fn test_kata_rootfs_follows_explicit_writable_setting() {
+        assert!(super::kata_root_readonly(false));
+        assert!(!super::kata_root_readonly(true));
     }
 
     #[test]

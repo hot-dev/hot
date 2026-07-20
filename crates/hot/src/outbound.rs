@@ -1,6 +1,7 @@
 //! Shared outbound destination validation for user-controlled network clients.
 
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
+use std::time::Duration;
 use url::Url;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -56,6 +57,45 @@ impl DestinationPolicy {
             .port_or_known_default()
             .ok_or_else(|| "outbound URL has no known port".to_string())?;
         self.resolve_host(host, port).await
+    }
+
+    /// Alert destinations are server-side configuration, not VM calls. Hosted
+    /// runtimes always require public destinations; local/self-hosted operators
+    /// must explicitly opt in before private destinations are reachable.
+    pub fn for_alert_delivery(conf: &crate::val::Val) -> Self {
+        if !conf.get_bool_or_default("engine.isolation", false)
+            && conf.get_bool_or_default("network.allow-private", false)
+        {
+            Self::AllowPrivate
+        } else {
+            Self::PublicOnly
+        }
+    }
+
+    /// Resolve and validate immediately before delivery, then pin the validated
+    /// addresses into a no-redirect client. This closes DNS rebinding and
+    /// redirect-to-private-address gaps.
+    pub async fn pinned_http_client(
+        self,
+        url: &Url,
+        timeout: Duration,
+        connect_timeout: Duration,
+    ) -> Result<reqwest::Client, String> {
+        if !matches!(url.scheme(), "http" | "https") {
+            return Err("outbound URL scheme must be http or https".to_string());
+        }
+        let host = url
+            .host_str()
+            .ok_or_else(|| "outbound URL must include a host".to_string())?;
+        let addrs = self.resolve_url(url).await?;
+
+        reqwest::Client::builder()
+            .timeout(timeout)
+            .connect_timeout(connect_timeout)
+            .redirect(reqwest::redirect::Policy::none())
+            .resolve_to_addrs(host, &addrs)
+            .build()
+            .map_err(|e| format!("failed to build pinned HTTP client: {e}"))
     }
 }
 
@@ -170,5 +210,26 @@ mod tests {
         assert!(is_public_destination(
             "2001:4860:4860::8888".parse().unwrap()
         ));
+    }
+
+    #[test]
+    fn alert_private_destinations_require_explicit_self_hosted_opt_in() {
+        assert_eq!(
+            DestinationPolicy::for_alert_delivery(&crate::val!({})),
+            DestinationPolicy::PublicOnly
+        );
+        assert_eq!(
+            DestinationPolicy::for_alert_delivery(&crate::val!({
+                "network": {"allow-private": true},
+            })),
+            DestinationPolicy::AllowPrivate
+        );
+        assert_eq!(
+            DestinationPolicy::for_alert_delivery(&crate::val!({
+                "engine": {"isolation": true},
+                "network": {"allow-private": true},
+            })),
+            DestinationPolicy::PublicOnly
+        );
     }
 }

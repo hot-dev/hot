@@ -32,10 +32,35 @@ const MAX_REQUEST_LINE_BYTES: usize = 8 * 1024;
 const MAX_HEADER_COUNT: usize = 64;
 const MAX_HEADER_BYTES: usize = 32 * 1024;
 const MAX_BODY_SIZE: usize = 16 * 1024 * 1024;
+// Match the product's maximum file size. Streaming and transfer semaphores
+// bound worker memory/concurrency without silently reducing the storage plan.
+const HARD_MAX_READ_SIZE: usize = 50 * 1024 * 1024 * 1024;
+const MAX_BUFFERED_READ_SIZE: usize = MAX_BODY_SIZE;
+const HARD_MAX_LIST_FILES: usize = 1_000;
+const MAX_LIST_RESPONSE_BYTES: usize = 4 * 1024 * 1024;
+const GLOBAL_TRANSFER_LIMIT: usize = 4;
+const PER_TASK_TRANSFER_LIMIT: usize = 2;
 const READ_IDLE_TIMEOUT: Duration = Duration::from_secs(5);
+const TRANSFER_QUEUE_TIMEOUT: Duration = Duration::from_secs(1);
 const REQUEST_DEADLINE: Duration = Duration::from_secs(30);
 static GLOBAL_CONNECTIONS: LazyLock<Arc<Semaphore>> =
     LazyLock::new(|| Arc::new(Semaphore::new(GLOBAL_CONNECTION_LIMIT)));
+static GLOBAL_TRANSFERS: LazyLock<Arc<Semaphore>> =
+    LazyLock::new(|| Arc::new(Semaphore::new(GLOBAL_TRANSFER_LIMIT)));
+static MAX_READ_SIZE: LazyLock<usize> = LazyLock::new(|| {
+    configured_limit(
+        "HOT_TASK_FILE_MAX_TRANSFER_BYTES",
+        HARD_MAX_READ_SIZE,
+        HARD_MAX_READ_SIZE,
+    )
+});
+static MAX_LIST_FILES: LazyLock<usize> = LazyLock::new(|| {
+    configured_limit(
+        "HOT_TASK_FILE_LIST_LIMIT",
+        HARD_MAX_LIST_FILES,
+        HARD_MAX_LIST_FILES,
+    )
+});
 
 /// Context for the file server — identifies the task's org/env/user scope.
 #[derive(Clone)]
@@ -298,6 +323,7 @@ async fn serve_vsock_af(
     mut shutdown_rx: oneshot::Receiver<()>,
 ) {
     let task_connections = Arc::new(Semaphore::new(PER_TASK_CONNECTION_LIMIT));
+    let task_transfers = Arc::new(Semaphore::new(PER_TASK_TRANSFER_LIMIT));
     loop {
         tokio::select! {
             _ = &mut shutdown_rx => break,
@@ -311,11 +337,12 @@ async fn serve_vsock_af(
                             continue;
                         };
                         let ctx = ctx.clone();
+                        let task_transfers = Arc::clone(&task_transfers);
                         tokio::spawn(async move {
                             let _permits = (global_permit, task_permit);
                             if let Err(e) = tokio::time::timeout(
                                 REQUEST_DEADLINE,
-                                handle_vsock_af_connection(stream, ctx),
+                                handle_vsock_af_connection(stream, ctx, task_transfers),
                             )
                             .await
                             .map_err(|_| "request deadline exceeded".to_string())
@@ -339,10 +366,11 @@ async fn serve_vsock_af(
 async fn handle_vsock_af_connection(
     stream: tokio_vsock::VsockStream,
     ctx: FileServerContext,
+    task_transfers: Arc<Semaphore>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let (read_half, write_half) = tokio::io::split(stream);
     let reader = BufReader::new(read_half);
-    handle_request(reader, write_half, ctx).await
+    handle_request(reader, write_half, ctx, task_transfers).await
 }
 
 /// Start a per-task file server on a Firecracker hybrid vsock UDS path.
@@ -399,6 +427,7 @@ async fn serve_unix(
     mut shutdown_rx: oneshot::Receiver<()>,
 ) {
     let task_connections = Arc::new(Semaphore::new(PER_TASK_CONNECTION_LIMIT));
+    let task_transfers = Arc::new(Semaphore::new(PER_TASK_TRANSFER_LIMIT));
     loop {
         tokio::select! {
             _ = &mut shutdown_rx => break,
@@ -412,11 +441,12 @@ async fn serve_unix(
                             continue;
                         };
                         let ctx = ctx.clone();
+                        let task_transfers = Arc::clone(&task_transfers);
                         tokio::spawn(async move {
                             let _permits = (global_permit, task_permit);
                             if let Err(e) = tokio::time::timeout(
                                 REQUEST_DEADLINE,
-                                handle_connection(stream, ctx),
+                                handle_connection(stream, ctx, task_transfers),
                             )
                             .await
                             .map_err(|_| "request deadline exceeded".to_string())
@@ -466,6 +496,7 @@ async fn serve_tcp(
     mut shutdown_rx: oneshot::Receiver<()>,
 ) {
     let task_connections = Arc::new(Semaphore::new(PER_TASK_CONNECTION_LIMIT));
+    let task_transfers = Arc::new(Semaphore::new(PER_TASK_TRANSFER_LIMIT));
     loop {
         tokio::select! {
             _ = &mut shutdown_rx => break,
@@ -479,11 +510,12 @@ async fn serve_tcp(
                             continue;
                         };
                         let ctx = ctx.clone();
+                        let task_transfers = Arc::clone(&task_transfers);
                         tokio::spawn(async move {
                             let _permits = (global_permit, task_permit);
                             if let Err(e) = tokio::time::timeout(
                                 REQUEST_DEADLINE,
-                                handle_tcp_connection(stream, ctx),
+                                handle_tcp_connection(stream, ctx, task_transfers),
                             )
                             .await
                             .map_err(|_| "request deadline exceeded".to_string())
@@ -505,20 +537,22 @@ async fn serve_tcp(
 async fn handle_tcp_connection(
     stream: tokio::net::TcpStream,
     ctx: FileServerContext,
+    task_transfers: Arc<Semaphore>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let (read_half, write_half) = stream.into_split();
     let reader = BufReader::new(read_half);
-    handle_request(reader, write_half, ctx).await
+    handle_request(reader, write_half, ctx, task_transfers).await
 }
 
 #[cfg(unix)]
 async fn handle_connection(
     stream: tokio::net::UnixStream,
     ctx: FileServerContext,
+    task_transfers: Arc<Semaphore>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let (read_half, write_half) = stream.into_split();
     let reader = BufReader::new(read_half);
-    handle_request(reader, write_half, ctx).await
+    handle_request(reader, write_half, ctx, task_transfers).await
 }
 
 /// Handle a single HTTP/1.1 request. Generic over transport (Unix socket, TCP, vsock).
@@ -526,6 +560,7 @@ async fn handle_request<R, W>(
     mut reader: BufReader<R>,
     mut write_half: W,
     ctx: FileServerContext,
+    task_transfers: Arc<Semaphore>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>>
 where
     R: tokio::io::AsyncRead + Unpin,
@@ -616,6 +651,30 @@ where
         write_http_response(&mut write_half, 400, "text/plain", b"Bad request").await?;
         return Ok(());
     }
+
+    // Authenticated file operations are more memory- and I/O-intensive than
+    // health checks. Keep their concurrency low even when many connections
+    // have passed authentication.
+    let _transfer_permits = if uri.starts_with("/files") {
+        let Ok(Ok(global_permit)) = tokio::time::timeout(
+            TRANSFER_QUEUE_TIMEOUT,
+            Arc::clone(&GLOBAL_TRANSFERS).acquire_owned(),
+        )
+        .await
+        else {
+            write_http_response(&mut write_half, 503, "text/plain", b"File server busy").await?;
+            return Ok(());
+        };
+        let Ok(Ok(task_permit)) =
+            tokio::time::timeout(TRANSFER_QUEUE_TIMEOUT, task_transfers.acquire_owned()).await
+        else {
+            write_http_response(&mut write_half, 503, "text/plain", b"File server busy").await?;
+            return Ok(());
+        };
+        Some((global_permit, task_permit))
+    } else {
+        None
+    };
 
     // The storage API currently requires one byte slice, so stream into a
     // strictly bounded buffer instead of allocating Content-Length up front.
@@ -743,8 +802,48 @@ async fn handle_read<W: tokio::io::AsyncWrite + Unpin>(
     ctx: &hot::file_storage::FileStorageContext,
     path: &str,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    match storage.read_file(path, ctx).await {
-        Ok(data) => {
+    match storage.open_file_stream(path, ctx).await {
+        Ok(Some(mut stream)) => {
+            let size = match checked_read_size(stream.metadata.size) {
+                Ok(size) => size,
+                Err(()) => {
+                    write_http_response(writer, 413, "text/plain", b"File too large").await?;
+                    return Ok(());
+                }
+            };
+            write_streaming_response(
+                writer,
+                "application/octet-stream",
+                size,
+                stream.reader.as_mut(),
+            )
+            .await?;
+        }
+        Ok(None) => {
+            let metadata = match storage.get_file_metadata(path, ctx).await {
+                Ok(metadata) => metadata,
+                Err(e) => {
+                    let msg = format!("File read error: {}", e);
+                    write_http_response(writer, 404, "text/plain", msg.as_bytes()).await?;
+                    return Ok(());
+                }
+            };
+            let size = match checked_read_size(metadata.size) {
+                Ok(size) => size,
+                Err(()) => {
+                    write_http_response(writer, 413, "text/plain", b"File too large").await?;
+                    return Ok(());
+                }
+            };
+            if size > MAX_BUFFERED_READ_SIZE {
+                write_http_response(writer, 413, "text/plain", b"File too large").await?;
+                return Ok(());
+            }
+            let data = storage.read_file(path, ctx).await?;
+            if data.len() > size {
+                write_http_response(writer, 500, "text/plain", b"File size changed").await?;
+                return Ok(());
+            }
             write_http_response(writer, 200, "application/octet-stream", &data).await?;
         }
         Err(e) => {
@@ -831,8 +930,19 @@ async fn handle_list<W: tokio::io::AsyncWrite + Unpin>(
     ctx: &hot::file_storage::FileStorageContext,
     prefix: &str,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    match storage.list_files(prefix, ctx).await {
+    let query_limit = MAX_LIST_FILES.saturating_add(1);
+    match storage.list_files_bounded(prefix, query_limit, ctx).await {
         Ok(files) => {
+            if files.len() > *MAX_LIST_FILES {
+                write_http_response(
+                    writer,
+                    413,
+                    "text/plain",
+                    b"File listing exceeds the configured limit",
+                )
+                .await?;
+                return Ok(());
+            }
             let json_files: Vec<serde_json::Value> = files
                 .into_iter()
                 .map(|meta| {
@@ -845,7 +955,11 @@ async fn handle_list<W: tokio::io::AsyncWrite + Unpin>(
                 })
                 .collect();
             let body = serde_json::to_vec(&json_files).unwrap_or_default();
-            write_http_response(writer, 200, "application/json", &body).await?;
+            if body.len() > MAX_LIST_RESPONSE_BYTES {
+                write_http_response(writer, 413, "text/plain", b"File listing too large").await?;
+            } else {
+                write_http_response(writer, 200, "application/json", &body).await?;
+            }
         }
         Err(e) => {
             let msg = format!("List error: {}", e);
@@ -861,6 +975,16 @@ async fn write_http_response<W: tokio::io::AsyncWrite + Unpin>(
     content_type: &str,
     body: &[u8],
 ) -> Result<(), std::io::Error> {
+    write_http_response_with_headers(writer, status, content_type, &[], body).await
+}
+
+async fn write_http_response_with_headers<W: tokio::io::AsyncWrite + Unpin>(
+    writer: &mut W,
+    status: u16,
+    content_type: &str,
+    extra_headers: &[(&str, &str)],
+    body: &[u8],
+) -> Result<(), std::io::Error> {
     let status_text = match status {
         200 => "OK",
         400 => "Bad Request",
@@ -870,19 +994,76 @@ async fn write_http_response<W: tokio::io::AsyncWrite + Unpin>(
         413 => "Payload Too Large",
         431 => "Request Header Fields Too Large",
         500 => "Internal Server Error",
+        503 => "Service Unavailable",
         _ => "Unknown",
     };
 
-    let header = format!(
-        "HTTP/1.1 {} {}\r\nContent-Type: {}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+    let mut header = format!(
+        "HTTP/1.1 {} {}\r\nContent-Type: {}\r\nContent-Length: {}\r\n",
         status,
         status_text,
         content_type,
         body.len()
     );
+    for (name, value) in extra_headers {
+        header.push_str(name);
+        header.push_str(": ");
+        header.push_str(value);
+        header.push_str("\r\n");
+    }
+    header.push_str("Connection: close\r\n\r\n");
     writer.write_all(header.as_bytes()).await?;
     writer.write_all(body).await?;
     Ok(())
+}
+
+async fn write_streaming_response<W: tokio::io::AsyncWrite + Unpin>(
+    writer: &mut W,
+    content_type: &str,
+    size: usize,
+    mut reader: std::pin::Pin<&mut (dyn tokio::io::AsyncRead + Send)>,
+) -> Result<(), std::io::Error> {
+    let header = format!(
+        "HTTP/1.1 200 OK\r\nContent-Type: {}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        content_type, size
+    );
+    writer.write_all(header.as_bytes()).await?;
+
+    let mut remaining = size;
+    let mut buffer = [0u8; 64 * 1024];
+    while remaining > 0 {
+        let count = remaining.min(buffer.len());
+        let read = reader.as_mut().read(&mut buffer[..count]).await?;
+        if read == 0 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                "file ended before recorded size",
+            ));
+        }
+        writer.write_all(&buffer[..read]).await?;
+        remaining -= read;
+    }
+    Ok(())
+}
+
+fn checked_read_size(size: i64) -> Result<usize, ()> {
+    let size = usize::try_from(size).map_err(|_| ())?;
+    if size > *MAX_READ_SIZE {
+        return Err(());
+    }
+    Ok(size)
+}
+
+fn configured_limit(name: &str, default: usize, hard_max: usize) -> usize {
+    parse_configured_limit(std::env::var(name).ok().as_deref(), default, hard_max)
+}
+
+fn parse_configured_limit(value: Option<&str>, default: usize, hard_max: usize) -> usize {
+    value
+        .and_then(|value| value.parse::<usize>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(default)
+        .min(hard_max)
 }
 
 /// Minimal percent-decoding for URL paths.
@@ -918,6 +1099,7 @@ mod tests {
     use super::*;
     use hot::file_storage::FileMetadata;
     use std::collections::HashMap;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use tokio::sync::Mutex;
 
     #[test]
@@ -964,12 +1146,16 @@ mod tests {
 
     struct MockFileStorage {
         files: Mutex<HashMap<String, Vec<u8>>>,
+        buffered_reads: AtomicUsize,
+        streamed_reads: AtomicUsize,
     }
 
     impl MockFileStorage {
         fn new() -> Self {
             Self {
                 files: Mutex::new(HashMap::new()),
+                buffered_reads: AtomicUsize::new(0),
+                streamed_reads: AtomicUsize::new(0),
             }
         }
     }
@@ -1035,12 +1221,32 @@ mod tests {
             path: &str,
             _ctx: &hot::file_storage::FileStorageContext,
         ) -> Result<Vec<u8>, String> {
+            self.buffered_reads.fetch_add(1, Ordering::Relaxed);
             self.files
                 .lock()
                 .await
                 .get(path)
                 .cloned()
                 .ok_or_else(|| format!("Not found: {}", path))
+        }
+
+        async fn open_file_stream(
+            &self,
+            path: &str,
+            _ctx: &hot::file_storage::FileStorageContext,
+        ) -> Result<Option<hot::file_storage::FileReadStream>, String> {
+            let data = self
+                .files
+                .lock()
+                .await
+                .get(path)
+                .cloned()
+                .ok_or_else(|| format!("Not found: {}", path))?;
+            self.streamed_reads.fetch_add(1, Ordering::Relaxed);
+            Ok(Some(hot::file_storage::FileReadStream {
+                metadata: mock_metadata(path, data.len() as i64),
+                reader: Box::pin(std::io::Cursor::new(data)),
+            }))
         }
 
         async fn delete_file(
@@ -1085,6 +1291,21 @@ mod tests {
             Ok(results)
         }
 
+        async fn list_files_bounded(
+            &self,
+            prefix: &str,
+            limit: usize,
+            _ctx: &hot::file_storage::FileStorageContext,
+        ) -> Result<Vec<hot::file_storage::FileMetadata>, String> {
+            let files = self.files.lock().await;
+            Ok(files
+                .iter()
+                .filter(|(path, _)| path.starts_with(prefix))
+                .take(limit)
+                .map(|(path, data)| mock_metadata(path, data.len() as i64))
+                .collect())
+        }
+
         fn storage_type(&self) -> &str {
             "mock"
         }
@@ -1092,12 +1313,16 @@ mod tests {
 
     /// Helper: start a file server with MockFileStorage, return (handle, socket_path).
     async fn start_test_server() -> (FileServerHandle, PathBuf) {
+        start_test_server_with_storage(Arc::new(MockFileStorage::new())).await
+    }
+
+    async fn start_test_server_with_storage(
+        storage: Arc<dyn FileStorage>,
+    ) -> (FileServerHandle, PathBuf) {
         // Use a short task ID to keep socket path under SUN_LEN (104 bytes on macOS)
         let task_id = Uuid::new_v4();
         let socket_dir = PathBuf::from("/tmp/hbx");
         let _ = std::fs::create_dir_all(&socket_dir);
-        let storage = Arc::new(MockFileStorage::new());
-
         // MockFileStorage ignores the DB, but FileServerContext requires one.
         let pool = sqlx::SqlitePool::connect("sqlite::memory:")
             .await
@@ -1191,7 +1416,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_write_and_read_file() {
-        let (handle, socket) = start_test_server().await;
+        let storage = Arc::new(MockFileStorage::new());
+        let (handle, socket) = start_test_server_with_storage(storage.clone()).await;
         let content = b"hello, hot storage!";
 
         let (status, _, _) = http_request(&socket, "PUT", "/files/test.txt", Some(content)).await;
@@ -1200,6 +1426,8 @@ mod tests {
         let (status, _, body) = http_request(&socket, "GET", "/files/test.txt", None).await;
         assert_eq!(status, 200);
         assert_eq!(body, content);
+        assert_eq!(storage.streamed_reads.load(Ordering::Relaxed), 1);
+        assert_eq!(storage.buffered_reads.load(Ordering::Relaxed), 0);
 
         handle.shutdown().await;
     }
@@ -1290,6 +1518,42 @@ mod tests {
         assert_eq!(files.len(), 1);
 
         handle.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn test_oversized_file_listing_fails_instead_of_returning_partial_results() {
+        let storage = Arc::new(MockFileStorage::new());
+        {
+            let mut files = storage.files.lock().await;
+            for index in 0..=*MAX_LIST_FILES {
+                files.insert(format!("docs/{index:04}.txt"), vec![b'x']);
+            }
+        }
+        let (handle, socket) = start_test_server_with_storage(storage).await;
+
+        let (status, headers, body) =
+            http_request(&socket, "GET", "/files?prefix=docs/", None).await;
+        assert_eq!(status, 413);
+        assert!(!headers.contains_key("x-hotbox-list-truncated"));
+        assert_eq!(body, b"File listing exceeds the configured limit");
+
+        handle.shutdown().await;
+    }
+
+    #[test]
+    fn test_transfer_configuration_cannot_exceed_hard_caps() {
+        assert_eq!(parse_configured_limit(Some("1024"), 100, 500), 500);
+        assert_eq!(parse_configured_limit(Some("25"), 100, 500), 25);
+        assert_eq!(parse_configured_limit(Some("0"), 100, 500), 100);
+        assert_eq!(parse_configured_limit(Some("invalid"), 100, 500), 100);
+        assert_eq!(parse_configured_limit(None, 100, 500), 100);
+    }
+
+    #[test]
+    fn test_read_size_is_bounded() {
+        assert_eq!(checked_read_size(*MAX_READ_SIZE as i64), Ok(*MAX_READ_SIZE));
+        assert_eq!(checked_read_size(*MAX_READ_SIZE as i64 + 1), Err(()));
+        assert_eq!(checked_read_size(-1), Err(()));
     }
 
     #[tokio::test]

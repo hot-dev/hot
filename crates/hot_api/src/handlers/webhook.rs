@@ -24,6 +24,7 @@ use hot::val::Val;
 use once_cell::sync::OnceCell;
 use std::str::FromStr;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use uuid::Uuid;
 
 use crate::ApiStateData;
@@ -33,12 +34,24 @@ use crate::models::ApiErrorResponse;
 use crate::rate_limit::{self, PublicRateLimitMode};
 
 use super::request::{
-    RequestBody, build_call_event_data, build_request_val, hash_sensitive_request_fields,
+    RequestBody, bind_call_event_to_build, build_call_event_data, build_request_val,
+    hash_sensitive_request_fields,
 };
 
 /// The queue name that webhooks publish events to.
 /// This MUST match the worker's event queue name ("hot:event").
 const WEBHOOK_EVENT_QUEUE_NAME: &str = "hot:event";
+static INVALID_WEBHOOK_TOKEN_TOTAL: AtomicU64 = AtomicU64::new(0);
+
+fn record_invalid_webhook_token(reason: &'static str) {
+    let total = INVALID_WEBHOOK_TOKEN_TOTAL.fetch_add(1, Ordering::Relaxed) + 1;
+    tracing::warn!(
+        metric = "webhook_invalid_token_total",
+        reason,
+        total,
+        "Rejected invalid webhook capability token"
+    );
+}
 
 // ============================================================================
 // Shared Event Queue (initialized once, reused across requests)
@@ -356,6 +369,7 @@ async fn webhook_handler_inner(
             };
             (ep, last.to_string())
         } else {
+            record_invalid_webhook_token("malformed");
             return Err((
                 StatusCode::NOT_FOUND,
                 Json(ApiErrorResponse::not_found("Webhook endpoint")),
@@ -364,6 +378,7 @@ async fn webhook_handler_inner(
     } else if normalized.len() == 12 && normalized.chars().all(|c| c.is_ascii_hexdigit()) {
         ("/".to_string(), normalized.to_string())
     } else {
+        record_invalid_webhook_token("malformed");
         return Err((
             StatusCode::NOT_FOUND,
             Json(ApiErrorResponse::not_found("Webhook endpoint")),
@@ -382,6 +397,19 @@ async fn webhook_handler_inner(
     let url_path = source.url_path(&endpoint_path);
     let ctx = source.resolve(db, endpoint_path.clone()).await?;
 
+    // Apply the org RPS limit before the endpoint query so random paths and
+    // invalid tokens cannot turn the webhook table into an unbounded oracle.
+    if let Err(exceeded) = rate_limit::check_org_rate_limit(
+        db,
+        &ctx.org.org_id,
+        PublicRateLimitMode::from_conf(conf),
+        "webhook",
+    )
+    .await
+    {
+        return Ok(rate_limit::rate_limit_response(exceeded));
+    }
+
     // Look up the webhook
     let endpoint = match DbWebhook::get_by_env_service_path_method(
         db,
@@ -389,11 +417,19 @@ async fn webhook_handler_inner(
         &ctx.service,
         &ctx.endpoint_path,
         &method_str,
+        &token,
     )
     .await
     {
         Ok(e) => e,
         Err(hot::db::webhook::WebhookError::NotFound) => {
+            return Err((
+                StatusCode::NOT_FOUND,
+                Json(ApiErrorResponse::not_found("Webhook endpoint")),
+            ));
+        }
+        Err(hot::db::webhook::WebhookError::InvalidToken) => {
+            record_invalid_webhook_token("mismatch");
             return Err((
                 StatusCode::NOT_FOUND,
                 Json(ApiErrorResponse::not_found("Webhook endpoint")),
@@ -410,14 +446,6 @@ async fn webhook_handler_inner(
             ));
         }
     };
-
-    // Validate the URL token matches this webhook's short ID
-    if !hot::db::webhook::validate_token(&endpoint.webhook_id, &token) {
-        return Err((
-            StatusCode::NOT_FOUND,
-            Json(ApiErrorResponse::not_found("Webhook endpoint")),
-        ));
-    }
 
     // If auth_mode is "required", validate the Authorization header.
     // Uses the shared authenticate_token() path for all credential types
@@ -486,17 +514,6 @@ async fn webhook_handler_inner(
     } else {
         None
     };
-
-    if let Err(exceeded) = rate_limit::check_org_rate_limit(
-        db,
-        &ctx.org.org_id,
-        PublicRateLimitMode::from_conf(conf),
-        "webhook",
-    )
-    .await
-    {
-        return Ok(rate_limit::rate_limit_response(exceeded));
-    }
 
     let _inflight_guard =
         match rate_limit::check_public_org_inflight(db, conf, &ctx.org.org_id, "webhook").await {
@@ -571,7 +588,7 @@ async fn webhook_handler_inner(
         build_id: Some(endpoint.build_id),
         build_hash,
         project_id,
-        project_name,
+        project_name: project_name.clone(),
         event_id: Some(event_id),
         origin_run_id: None,
         retry_attempt: 0,
@@ -595,7 +612,8 @@ async fn webhook_handler_inner(
     // The same HttpRequest is also passed as `caller` so the worker injects it
     // as the `hot.request` context variable.
     let args_val = Val::Vec(vec![http_request.clone()]);
-    let event_data_val = build_call_event_data(&function_name, args_val, Some(http_request));
+    let mut event_data_val = build_call_event_data(&function_name, args_val, Some(http_request));
+    bind_call_event_to_build(&mut event_data_val, endpoint.build_id);
     // The persisted copy must not retain the webhook capability token that
     // original-url carries: store it token-redacted. The raw value rides only
     // in the queue message below and is re-attached by the worker at
@@ -612,8 +630,8 @@ async fn webhook_handler_inner(
         event_type: "hot:call".to_string(),
         event_data: event_data_val,
         event_time: chrono::Utc::now(),
-        target_project_id: None,
-        target_project_name: None,
+        target_project_id: project_id,
+        target_project_name: project_name.clone(),
     };
 
     let event_message = hot::lang::event::EventMessage {

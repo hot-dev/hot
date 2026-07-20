@@ -12,6 +12,41 @@ use crate::Env;
 use crate::build_info;
 use crate::conf::{create_emitter, create_event_publisher};
 
+fn resolve_task_worker_backend(
+    raw: &str,
+    hot_env: &str,
+) -> Result<hot_task_worker::Backend, String> {
+    let hosted = matches!(
+        hot_env.trim().to_ascii_lowercase().as_str(),
+        "hosted" | "staging" | "production"
+    );
+
+    if hosted && raw.trim().is_empty() {
+        return Err(format!(
+            "HOT_BOX_BACKEND must be set to a non-Docker backend when HOT_ENV={hot_env}"
+        ));
+    }
+
+    let backend = match raw.parse::<hot_task_worker::Backend>() {
+        Ok(backend) => backend,
+        Err(e) if hosted => return Err(e),
+        Err(e) => {
+            tracing::warn!(
+                backend = %raw,
+                "Invalid HOT_BOX_BACKEND in local development; using Docker: {e}"
+            );
+            hot_task_worker::Backend::Docker
+        }
+    };
+    if hosted && backend == hot_task_worker::Backend::Docker {
+        return Err(format!(
+            "Docker task execution is not allowed when HOT_ENV={hot_env}; configure HOT_BOX_BACKEND=kata"
+        ));
+    }
+
+    Ok(backend)
+}
+
 pub(crate) async fn run_task_worker(conf: Val) {
     info!(
         "hot.dev: TASK_WORKER starting, version: {} ({})",
@@ -43,21 +78,24 @@ pub(crate) async fn run_task_worker(conf: Val) {
 
     let box_conf = conf.get("box");
 
-    let container_backend = {
-        let raw = box_conf
-            .as_ref()
-            .and_then(|b| b.get("backend"))
-            .map(|v| match v {
-                Val::Str(s) => s.to_string(),
-                other => other.to_string().trim_matches('"').to_string(),
-            })
-            .unwrap_or_default();
-        match raw.parse::<hot_task_worker::Backend>() {
-            Ok(b) => b,
-            Err(e) => {
-                tracing::error!(backend = %raw, "Invalid HOT_BOX_BACKEND, falling back to docker: {}", e);
-                hot_task_worker::Backend::default()
-            }
+    let raw_backend = box_conf
+        .as_ref()
+        .and_then(|b| b.get("backend"))
+        .map(|v| match v {
+            Val::Str(s) => s.to_string(),
+            other => other.to_string().trim_matches('"').to_string(),
+        })
+        .unwrap_or_default();
+    let hot_env = std::env::var("HOT_ENV").unwrap_or_else(|_| "development".to_string());
+    let container_backend = match resolve_task_worker_backend(&raw_backend, &hot_env) {
+        Ok(backend) => backend,
+        Err(e) => {
+            tracing::error!(
+                backend = %raw_backend,
+                hot_env = %hot_env,
+                "Task worker startup refused: {e}"
+            );
+            return;
         }
     };
 
@@ -281,3 +319,42 @@ pub(crate) async fn run_worker_with_stream_pubsub_shared_context(
 // Function to evaluate a Hot code string directly
 
 // Function to run a single Hot source file
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn local_task_worker_defaults_to_docker() {
+        assert_eq!(
+            resolve_task_worker_backend("", "development").unwrap(),
+            hot_task_worker::Backend::Docker
+        );
+        assert_eq!(
+            resolve_task_worker_backend("docker", "").unwrap(),
+            hot_task_worker::Backend::Docker
+        );
+        assert_eq!(
+            resolve_task_worker_backend("invalid", "development").unwrap(),
+            hot_task_worker::Backend::Docker
+        );
+    }
+
+    #[test]
+    fn hosted_task_worker_rejects_missing_docker_and_invalid_backends() {
+        for environment in ["hosted", "staging", "production", "PRODUCTION"] {
+            assert!(resolve_task_worker_backend("", environment).is_err());
+            assert!(resolve_task_worker_backend("docker", environment).is_err());
+            assert!(resolve_task_worker_backend("invalid", environment).is_err());
+        }
+    }
+
+    #[cfg(all(target_os = "linux", feature = "kata"))]
+    #[test]
+    fn hosted_task_worker_accepts_kata() {
+        assert_eq!(
+            resolve_task_worker_backend("kata", "production").unwrap(),
+            hot_task_worker::Backend::Kata
+        );
+    }
+}
