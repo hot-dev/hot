@@ -340,13 +340,8 @@ async fn serve_vsock_af(
                         let task_transfers = Arc::clone(&task_transfers);
                         tokio::spawn(async move {
                             let _permits = (global_permit, task_permit);
-                            if let Err(e) = tokio::time::timeout(
-                                REQUEST_DEADLINE,
-                                handle_vsock_af_connection(stream, ctx, task_transfers),
-                            )
-                            .await
-                            .map_err(|_| "request deadline exceeded".to_string())
-                            .and_then(|result| result.map_err(|e| e.to_string()))
+                            if let Err(e) =
+                                handle_vsock_af_connection(stream, ctx, task_transfers).await
                             {
                                 tracing::debug!("File server AF_VSOCK connection error: {}", e);
                             }
@@ -444,14 +439,7 @@ async fn serve_unix(
                         let task_transfers = Arc::clone(&task_transfers);
                         tokio::spawn(async move {
                             let _permits = (global_permit, task_permit);
-                            if let Err(e) = tokio::time::timeout(
-                                REQUEST_DEADLINE,
-                                handle_connection(stream, ctx, task_transfers),
-                            )
-                            .await
-                            .map_err(|_| "request deadline exceeded".to_string())
-                            .and_then(|result| result.map_err(|e| e.to_string()))
-                            {
+                            if let Err(e) = handle_connection(stream, ctx, task_transfers).await {
                                 tracing::debug!("File server connection error: {}", e);
                             }
                         });
@@ -513,13 +501,8 @@ async fn serve_tcp(
                         let task_transfers = Arc::clone(&task_transfers);
                         tokio::spawn(async move {
                             let _permits = (global_permit, task_permit);
-                            if let Err(e) = tokio::time::timeout(
-                                REQUEST_DEADLINE,
-                                handle_tcp_connection(stream, ctx, task_transfers),
-                            )
-                            .await
-                            .map_err(|_| "request deadline exceeded".to_string())
-                            .and_then(|result| result.map_err(|e| e.to_string()))
+                            if let Err(e) =
+                                handle_tcp_connection(stream, ctx, task_transfers).await
                             {
                                 tracing::debug!("File server TCP connection error: {}", e);
                             }
@@ -566,11 +549,18 @@ where
     R: tokio::io::AsyncRead + Unpin,
     W: tokio::io::AsyncWrite + Unpin,
 {
+    let request_deadline = tokio::time::Instant::now() + REQUEST_DEADLINE;
+
     // Read request line
-    let request_line = match read_bounded_line(&mut reader, MAX_REQUEST_LINE_BYTES).await {
-        Ok(Some(line)) => line,
-        Ok(None) => return Ok(()),
-        Err(_) => {
+    let request_line = match tokio::time::timeout_at(
+        request_deadline,
+        read_bounded_line(&mut reader, MAX_REQUEST_LINE_BYTES),
+    )
+    .await
+    {
+        Ok(Ok(Some(line))) => line,
+        Ok(Ok(None)) => return Ok(()),
+        _ => {
             write_http_response(&mut write_half, 400, "text/plain", b"Bad request").await?;
             return Ok(());
         }
@@ -590,8 +580,13 @@ where
     let mut header_bytes = 0usize;
     let mut headers = HashMap::new();
     loop {
-        let line = match read_bounded_line(&mut reader, MAX_HEADER_BYTES).await {
-            Ok(Some(line)) => line,
+        let line = match tokio::time::timeout_at(
+            request_deadline,
+            read_bounded_line(&mut reader, MAX_HEADER_BYTES),
+        )
+        .await
+        {
+            Ok(Ok(Some(line))) => line,
             _ => {
                 write_http_response(&mut write_half, 400, "text/plain", b"Bad request").await?;
                 return Ok(());
@@ -717,14 +712,84 @@ where
         // GET /files?prefix=<prefix> — list files
         let prefix = uri.strip_prefix("/files?prefix=").unwrap_or("");
         let prefix = urlencoding_decode(prefix);
-        handle_list(&mut write_half, &ctx.storage, &file_ctx, &prefix).await?;
+        match tokio::time::timeout(
+            REQUEST_DEADLINE,
+            handle_list(&mut write_half, &ctx.storage, &file_ctx, &prefix),
+        )
+        .await
+        {
+            Ok(result) => result?,
+            Err(_) => {
+                write_http_response(
+                    &mut write_half,
+                    504,
+                    "text/plain",
+                    b"File operation timed out",
+                )
+                .await?;
+            }
+        }
     } else if let Some(path) = uri.strip_prefix("/files/") {
         let path = urlencoding_decode(path);
         match method {
             "GET" => handle_read(&mut write_half, &ctx.storage, &file_ctx, &path).await?,
-            "PUT" => handle_write(&mut write_half, &ctx.storage, &file_ctx, &path, body).await?,
-            "HEAD" => handle_head(&mut write_half, &ctx.storage, &file_ctx, &path).await?,
-            "DELETE" => handle_delete(&mut write_half, &ctx.storage, &file_ctx, &path).await?,
+            "PUT" => {
+                match tokio::time::timeout(
+                    REQUEST_DEADLINE,
+                    handle_write(&mut write_half, &ctx.storage, &file_ctx, &path, body),
+                )
+                .await
+                {
+                    Ok(result) => result?,
+                    Err(_) => {
+                        write_http_response(
+                            &mut write_half,
+                            504,
+                            "text/plain",
+                            b"File operation timed out",
+                        )
+                        .await?;
+                    }
+                }
+            }
+            "HEAD" => {
+                match tokio::time::timeout(
+                    REQUEST_DEADLINE,
+                    handle_head(&mut write_half, &ctx.storage, &file_ctx, &path),
+                )
+                .await
+                {
+                    Ok(result) => result?,
+                    Err(_) => {
+                        write_http_response(
+                            &mut write_half,
+                            504,
+                            "text/plain",
+                            b"File operation timed out",
+                        )
+                        .await?;
+                    }
+                }
+            }
+            "DELETE" => {
+                match tokio::time::timeout(
+                    REQUEST_DEADLINE,
+                    handle_delete(&mut write_half, &ctx.storage, &file_ctx, &path),
+                )
+                .await
+                {
+                    Ok(result) => result?,
+                    Err(_) => {
+                        write_http_response(
+                            &mut write_half,
+                            504,
+                            "text/plain",
+                            b"File operation timed out",
+                        )
+                        .await?;
+                    }
+                }
+            }
             _ => {
                 write_http_response(&mut write_half, 405, "text/plain", b"Method not allowed")
                     .await?;
@@ -802,7 +867,16 @@ async fn handle_read<W: tokio::io::AsyncWrite + Unpin>(
     ctx: &hot::file_storage::FileStorageContext,
     path: &str,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    match storage.open_file_stream(path, ctx).await {
+    let stream_result =
+        match tokio::time::timeout(REQUEST_DEADLINE, storage.open_file_stream(path, ctx)).await {
+            Ok(result) => result,
+            Err(_) => {
+                write_http_response(writer, 504, "text/plain", b"File operation timed out").await?;
+                return Ok(());
+            }
+        };
+
+    match stream_result {
         Ok(Some(mut stream)) => {
             let size = match checked_read_size(stream.metadata.size) {
                 Ok(size) => size,
@@ -820,14 +894,22 @@ async fn handle_read<W: tokio::io::AsyncWrite + Unpin>(
             .await?;
         }
         Ok(None) => {
-            let metadata = match storage.get_file_metadata(path, ctx).await {
-                Ok(metadata) => metadata,
-                Err(e) => {
-                    let msg = format!("File read error: {}", e);
-                    write_http_response(writer, 404, "text/plain", msg.as_bytes()).await?;
-                    return Ok(());
-                }
-            };
+            let metadata =
+                match tokio::time::timeout(REQUEST_DEADLINE, storage.get_file_metadata(path, ctx))
+                    .await
+                {
+                    Ok(Ok(metadata)) => metadata,
+                    Ok(Err(e)) => {
+                        let msg = format!("File read error: {}", e);
+                        write_http_response(writer, 404, "text/plain", msg.as_bytes()).await?;
+                        return Ok(());
+                    }
+                    Err(_) => {
+                        write_http_response(writer, 504, "text/plain", b"File operation timed out")
+                            .await?;
+                        return Ok(());
+                    }
+                };
             let size = match checked_read_size(metadata.size) {
                 Ok(size) => size,
                 Err(()) => {
@@ -839,7 +921,15 @@ async fn handle_read<W: tokio::io::AsyncWrite + Unpin>(
                 write_http_response(writer, 413, "text/plain", b"File too large").await?;
                 return Ok(());
             }
-            let data = storage.read_file(path, ctx).await?;
+            let data =
+                match tokio::time::timeout(REQUEST_DEADLINE, storage.read_file(path, ctx)).await {
+                    Ok(result) => result?,
+                    Err(_) => {
+                        write_http_response(writer, 504, "text/plain", b"File operation timed out")
+                            .await?;
+                        return Ok(());
+                    }
+                };
             if data.len() > size {
                 write_http_response(writer, 500, "text/plain", b"File size changed").await?;
                 return Ok(());
@@ -995,6 +1085,7 @@ async fn write_http_response_with_headers<W: tokio::io::AsyncWrite + Unpin>(
         431 => "Request Header Fields Too Large",
         500 => "Internal Server Error",
         503 => "Service Unavailable",
+        504 => "Gateway Timeout",
         _ => "Unknown",
     };
 
@@ -1012,8 +1103,8 @@ async fn write_http_response_with_headers<W: tokio::io::AsyncWrite + Unpin>(
         header.push_str("\r\n");
     }
     header.push_str("Connection: close\r\n\r\n");
-    writer.write_all(header.as_bytes()).await?;
-    writer.write_all(body).await?;
+    write_all_with_idle_timeout(writer, header.as_bytes()).await?;
+    write_all_with_idle_timeout(writer, body).await?;
     Ok(())
 }
 
@@ -1021,29 +1112,67 @@ async fn write_streaming_response<W: tokio::io::AsyncWrite + Unpin>(
     writer: &mut W,
     content_type: &str,
     size: usize,
+    reader: std::pin::Pin<&mut (dyn tokio::io::AsyncRead + Send)>,
+) -> Result<(), std::io::Error> {
+    write_streaming_response_with_idle_timeout(
+        writer,
+        content_type,
+        size,
+        reader,
+        READ_IDLE_TIMEOUT,
+    )
+    .await
+}
+
+async fn write_streaming_response_with_idle_timeout<W: tokio::io::AsyncWrite + Unpin>(
+    writer: &mut W,
+    content_type: &str,
+    size: usize,
     mut reader: std::pin::Pin<&mut (dyn tokio::io::AsyncRead + Send)>,
+    idle_timeout: Duration,
 ) -> Result<(), std::io::Error> {
     let header = format!(
         "HTTP/1.1 200 OK\r\nContent-Type: {}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
         content_type, size
     );
-    writer.write_all(header.as_bytes()).await?;
+    write_all_with_timeout(writer, header.as_bytes(), idle_timeout).await?;
 
     let mut remaining = size;
     let mut buffer = [0u8; 64 * 1024];
     while remaining > 0 {
         let count = remaining.min(buffer.len());
-        let read = reader.as_mut().read(&mut buffer[..count]).await?;
+        let read = tokio::time::timeout(idle_timeout, reader.as_mut().read(&mut buffer[..count]))
+            .await
+            .map_err(|_| {
+                std::io::Error::new(std::io::ErrorKind::TimedOut, "file stream read idle")
+            })??;
         if read == 0 {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::UnexpectedEof,
                 "file ended before recorded size",
             ));
         }
-        writer.write_all(&buffer[..read]).await?;
+        write_all_with_timeout(writer, &buffer[..read], idle_timeout).await?;
         remaining -= read;
     }
     Ok(())
+}
+
+async fn write_all_with_idle_timeout<W: tokio::io::AsyncWrite + Unpin>(
+    writer: &mut W,
+    bytes: &[u8],
+) -> Result<(), std::io::Error> {
+    write_all_with_timeout(writer, bytes, READ_IDLE_TIMEOUT).await
+}
+
+async fn write_all_with_timeout<W: tokio::io::AsyncWrite + Unpin>(
+    writer: &mut W,
+    bytes: &[u8],
+    idle_timeout: Duration,
+) -> Result<(), std::io::Error> {
+    tokio::time::timeout(idle_timeout, writer.write_all(bytes))
+        .await
+        .map_err(|_| std::io::Error::new(std::io::ErrorKind::TimedOut, "file stream write idle"))?
 }
 
 fn checked_read_size(size: i64) -> Result<usize, ()> {
@@ -1140,6 +1269,31 @@ mod tests {
         let mut reader = tokio::io::BufReader::new(b"GET / HTTP/1.1".as_slice());
         let result = read_bounded_line(&mut reader, MAX_REQUEST_LINE_BYTES).await;
         assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn streaming_progress_resets_the_idle_timeout() {
+        let idle_timeout = Duration::from_secs(1);
+        let (mut source_writer, mut source_reader) = tokio::io::duplex(1);
+        let producer = tokio::spawn(async move {
+            for byte in [b'a', b'b'] {
+                tokio::time::sleep(Duration::from_millis(600)).await;
+                source_writer.write_all(&[byte]).await.unwrap();
+            }
+        });
+        let mut output = tokio::io::sink();
+        let reader = std::pin::Pin::new(&mut source_reader);
+
+        write_streaming_response_with_idle_timeout(
+            &mut output,
+            "application/octet-stream",
+            2,
+            reader,
+            idle_timeout,
+        )
+        .await
+        .expect("steady streaming progress should not hit an absolute request deadline");
+        producer.await.unwrap();
     }
 
     // -- Integration tests with MockFileStorage --
