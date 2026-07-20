@@ -1020,22 +1020,18 @@ async fn handle_tools_call_streaming(
     if !tool.is_public() {
         match &ctx.auth {
             Some((auth_ctx, _)) => {
-                // Permission check for scoped credentials (sessions and service keys).
-                // For API keys, the service-level check in resolve_mcp_context is sufficient.
-                if !auth_ctx.is_api_key() {
-                    let tool_resource = format!("mcp:{}/{}", ctx.service, call_params.name);
-                    if !auth_ctx.has_permission(&tool_resource, actions::EXECUTE) {
-                        return Ok(Json(JsonRpcResponse::error(
-                            id,
-                            INVALID_PARAMS,
-                            format!(
-                                "Credential does not have execute permission for tool '{}'",
-                                call_params.name
-                            ),
-                            None,
-                        ))
-                        .into_response());
-                    }
+                let tool_resource = format!("mcp:{}/{}", ctx.service, call_params.name);
+                if !auth_ctx.has_permission(&tool_resource, actions::EXECUTE) {
+                    return Ok(Json(JsonRpcResponse::error(
+                        id,
+                        INVALID_PARAMS,
+                        format!(
+                            "Credential does not have execute permission for tool '{}'",
+                            call_params.name
+                        ),
+                        None,
+                    ))
+                    .into_response());
                 }
             }
             None => {

@@ -1910,7 +1910,7 @@ async fn process_container_task(
 
     // -- Acquire resource budget --
     let resource_mem = limits.memory_mb + limits.tmp_size_mb;
-    let resource_disk = limits.disk_size_mb;
+    let resource_disk = resource_budget::disk_admission_mb(limits.disk_size_mb);
     let infra_retry_backoff_ms = worker_conf
         .get_int_or_default("queue.infra-retry-backoff-ms", 1_000)
         .max(0) as u64;
@@ -1965,8 +1965,26 @@ async fn process_container_task(
     {
         Ok(vol) => Some(vol),
         Err(e) => {
-            tracing::warn!(task_id = %task_id, "Data volume creation failed, continuing without /data/: {}", e);
-            None
+            tracing::error!(task_id = %task_id, "Data volume creation failed: {}", e);
+            let error = task_failure_json(
+                &format!("Requested /data volume could not be provisioned: {e}"),
+                None,
+            );
+            complete_task_with_event(
+                &db,
+                &stream_publisher,
+                &task_id,
+                env_id,
+                stream_id,
+                &function_name,
+                &request.task_type,
+                TaskStatus::Failed,
+                Some(&error),
+            )
+            .await;
+            publish_task_alert(&db, org_id, env_id, &task_id, "task:failed", &error).await;
+            drop(resource_guard);
+            return Ok(());
         }
     };
 
@@ -4388,7 +4406,7 @@ async fn cleanup_stale_data_volumes(data_vol_base: &std::path::Path) {
                 #[cfg(target_os = "linux")]
                 {
                     let _ = std::process::Command::new("umount")
-                        .arg(path.to_string_lossy().to_string())
+                        .arg(path.join("mnt"))
                         .output();
                 }
                 if let Err(e) = std::fs::remove_dir_all(&path) {

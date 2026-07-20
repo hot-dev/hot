@@ -621,24 +621,89 @@ fn render_check_email_full(
     Html(template.render().unwrap())
 }
 
-/// Email verification handler - verifies the token and creates the user
+#[derive(Deserialize)]
+pub struct VerifyEmailForm {
+    token: String,
+    form_token: Option<String>,
+}
+
+/// Render a non-mutating confirmation page. Mail scanners may safely GET this
+/// URL without consuming the token or creating an authenticated session.
 pub async fn verify_email_handler(
     State(db): State<Arc<DatabasePool>>,
-    Extension(conf): Extension<Val>,
     cookies: CookieJar,
     Query(params): Query<AHashMap<String, String>>,
-) -> Result<(CookieJar, Redirect), Html<String>> {
+) -> (CookieJar, Html<String>) {
+    let form_token = crate::auth::generate_csrf_token();
+    let cookies = cookies.add(crate::auth::build_csrf_cookie(form_token.clone()));
     let token = params.get("token").cloned().unwrap_or_default();
 
     if token.is_empty() {
+        return (
+            cookies,
+            render_verification_error(
+                "Invalid verification link",
+                "The verification link is missing required information.",
+            ),
+        );
+    }
+
+    let verification = match EmailVerification::get_by_token(&db, &token).await {
+        Ok(verification) => verification,
+        Err(_) => {
+            return (
+                cookies,
+                render_verification_error(
+                    "Invalid verification link",
+                    "This verification link is invalid or has already been used.",
+                ),
+            );
+        }
+    };
+
+    if let Err(e) = verification.is_valid() {
+        let error = match e {
+            hot::db::EmailVerificationError::Expired => render_verification_error(
+                "Verification link expired",
+                "This verification link has expired. Please sign up again to receive a new link.",
+            ),
+            hot::db::EmailVerificationError::AlreadyVerified => render_verification_error(
+                "Already verified",
+                "This email has already been verified. Please sign in.",
+            ),
+            _ => render_verification_error(
+                "Verification failed",
+                "Unable to verify your email. Please try again.",
+            ),
+        };
+        return (cookies, error);
+    }
+
+    let template = templates::VerifyEmail {
+        title: "Confirm Your Email",
+        page_context: templates::PublicPageContext::new("signup"),
+        token: &token,
+        form_token: &form_token,
+    };
+    (cookies, Html(template.render().unwrap()))
+}
+
+/// Atomically consumes the token, creates the user, and authenticates the
+/// browser only after an explicit POST.
+pub async fn confirm_email_handler(
+    State(db): State<Arc<DatabasePool>>,
+    Extension(conf): Extension<Val>,
+    cookies: CookieJar,
+    Form(form): Form<VerifyEmailForm>,
+) -> Result<(CookieJar, Redirect), Html<String>> {
+    if !crate::auth::validate_csrf(&cookies, form.form_token.as_deref()) {
         return Err(render_verification_error(
-            "Invalid verification link",
-            "The verification link is missing required information.",
+            "Invalid confirmation",
+            "Please open the verification link again and confirm from that page.",
         ));
     }
 
-    // Get the verification record
-    let verification = EmailVerification::get_by_token(&db, &token)
+    let verification = EmailVerification::get_by_token(&db, &form.token)
         .await
         .map_err(|_| {
             render_verification_error(
@@ -646,52 +711,56 @@ pub async fn verify_email_handler(
                 "This verification link is invalid or has already been used.",
             )
         })?;
-
-    // Check if verification is valid
-    if let Err(e) = verification.is_valid() {
-        match e {
-            hot::db::EmailVerificationError::Expired => {
-                return Err(render_verification_error(
-                    "Verification link expired",
-                    "This verification link has expired. Please sign up again to receive a new link.",
-                ));
-            }
-            hot::db::EmailVerificationError::AlreadyVerified => {
-                // Idempotent re-run. The link may have been pre-fetched by a
-                // mail scanner (Microsoft Safe Links, Proofpoint, …) or the
-                // user may have clicked it in a second browser. Either way,
-                // we log the real clicker in and forward them to the same
-                // "next step" the original verify would have produced.
-                return handle_already_verified(&db, &conf, cookies, &verification).await;
-            }
-            _ => {
-                return Err(render_verification_error(
-                    "Verification failed",
-                    "Unable to verify your email. Please try again.",
-                ));
-            }
-        }
-    }
+    verification.is_valid().map_err(|_| {
+        render_verification_error(
+            "Verification unavailable",
+            "This verification link is expired or has already been used. Please sign in or sign up again.",
+        )
+    })?;
+    EmailVerification::confirm_once(&db, &verification.verification_id)
+        .await
+        .map_err(|_| {
+            render_verification_error(
+                "Verification unavailable",
+                "This verification link has already been used. Please sign in.",
+            )
+        })?;
 
     // If a user record already exists for this email, reuse it: either a
     // prior verify attempt partially completed, or someone signed up with
     // the same email between checks (truly rare).
     let user_id = match User::get_user_by_email(&db, &verification.email).await {
         Ok(existing) => existing.user_id,
-        Err(_) => create_user_with_password(
-            &db,
-            &verification.email,
-            Some(verification.name.as_deref().unwrap_or("User")),
-            &verification.password_hash,
-        )
-        .await
-        .map_err(|e| {
-            tracing::error!("Failed to create user during verification: {}", e);
-            render_verification_error(
-                "Account creation failed",
-                "Failed to create your account. Please try again.",
+        Err(_) => {
+            match create_user_with_password(
+                &db,
+                &verification.email,
+                Some(verification.name.as_deref().unwrap_or("User")),
+                &verification.password_hash,
             )
-        })?,
+            .await
+            {
+                Ok(user_id) => user_id,
+                Err(e) => {
+                    tracing::error!("Failed to create user during verification: {}", e);
+                    // No account exists yet, so "try again" must work: return
+                    // the consumed token to pending.
+                    if let Err(restore_error) =
+                        EmailVerification::restore_pending(&db, &verification.verification_id).await
+                    {
+                        tracing::error!(
+                            "Failed to restore verification {} after user creation failure: {}",
+                            verification.verification_id,
+                            restore_error
+                        );
+                    }
+                    return Err(render_verification_error(
+                        "Account creation failed",
+                        "Failed to create your account. Please try again.",
+                    ));
+                }
+            }
+        }
     };
 
     // Process invite code if provided. Failures (expired invite, email
@@ -707,7 +776,6 @@ pub async fn verify_email_handler(
                     verification.email,
                     e
                 );
-                let _ = EmailVerification::mark_verified(&db, &verification.verification_id).await;
                 return Err(render_verification_error(
                     "Invite could not be applied",
                     &format!(
@@ -719,8 +787,6 @@ pub async fn verify_email_handler(
             }
         }
     }
-
-    let _ = EmailVerification::mark_verified(&db, &verification.verification_id).await;
 
     let final_cookies = sign_in_cookies(&db, &conf, cookies, &user_id)
         .await
@@ -749,97 +815,6 @@ pub async fn verify_email_handler(
             None => "/claim-handle".to_string(),
         }
     };
-    Ok((final_cookies, Redirect::to(&target)))
-}
-
-/// Handles a verify-email click on an already-verified token.
-///
-/// This is triggered by:
-/// - Mail scanner pre-fetches (Microsoft Safe Links, Proofpoint, Mimecast, etc.)
-///   that "click" every URL in an email before it reaches the user.
-/// - The user clicking the link in a different browser than the one where
-///   they started signup, then reopening the email later.
-/// - The user clicking the verify link twice.
-///
-/// Behavior: find the real user, log them in (set JWT + org cookies), and
-/// redirect them to whichever "next step" a first-time verify would have
-/// produced (claim-handle / billing / dashboard). This makes the whole
-/// verify flow idempotent and browser-agnostic.
-async fn handle_already_verified(
-    db: &DatabasePool,
-    conf: &Val,
-    cookies: CookieJar,
-    verification: &EmailVerification,
-) -> Result<(CookieJar, Redirect), Html<String>> {
-    // Time-bound the idempotent re-login: scanner/second-browser tolerance is
-    // only intended within the original verification window. Without this
-    // check, every verification email would remain a permanent no-password
-    // login link for anyone who obtains it later.
-    if verification.expires_at < Utc::now() {
-        return Err(render_verification_error(
-            "Already verified",
-            "This email has already been verified. Please sign in.",
-        ));
-    }
-
-    let Ok(user) = User::get_user_by_email(db, &verification.email).await else {
-        // Verification is marked verified but no user exists — very unusual
-        // (would require a partial signup failure). Don't strand the user.
-        tracing::warn!(
-            "AlreadyVerified but no user for {} — falling back to sign-in page",
-            verification.email
-        );
-        return Err(render_verification_error(
-            "Already verified",
-            "This email has already been verified. Please sign in.",
-        ));
-    };
-
-    tracing::info!(
-        "User {} re-presented verification token — logging in idempotently",
-        verification.email
-    );
-
-    let user_orgs = hot::db::org::Org::get_orgs_by_user(db, &user.user_id)
-        .await
-        .unwrap_or_default();
-    let chosen_org = user_orgs.first().cloned();
-
-    let final_cookies = sign_in_cookies(db, conf, cookies, &user.user_id)
-        .await
-        .map_err(|_| {
-            render_verification_error(
-                "Session error",
-                "Your account is verified, but we couldn't sign you in. Please sign in.",
-            )
-        })?;
-
-    // Decide where to send them next. Mirrors the first-time verify logic:
-    //  - no org yet → /claim-handle (carrying plan params)
-    //  - org + plan + no subscription yet → billing checkout (slug-scoped)
-    //  - otherwise → dashboard
-    let plan = verification.plan.as_deref().unwrap_or("");
-    let billing = verification.billing.as_deref().unwrap_or("monthly");
-
-    let target = match chosen_org.as_ref() {
-        None if !plan.is_empty() => format!("/claim-handle?plan={}&billing={}", plan, billing),
-        None => "/claim-handle".to_string(),
-        Some(org) if !plan.is_empty() => {
-            let has_subscription = hot::db::OrgPlan::get_by_org_id(db, &org.org_id)
-                .await
-                .is_ok();
-            if has_subscription {
-                "/".to_string()
-            } else {
-                format!(
-                    "/@{}/billing/checkout?plan={}&billing={}",
-                    org.slug, plan, billing
-                )
-            }
-        }
-        Some(_) => "/".to_string(),
-    };
-
     Ok((final_cookies, Redirect::to(&target)))
 }
 

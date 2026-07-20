@@ -48,12 +48,23 @@ pub async fn insert_upload(
     backend_upload_id: Option<&str>,
     storage_backend: &str,
     expires_at: DateTime<Utc>,
+    max_pending_uploads: i64,
+    max_pending_bytes: i64,
 ) -> Result<FileUploadRecord, String> {
     let upload_id = Uuid::now_v7();
     let now = Utc::now();
 
     match db {
         DatabasePool::Postgres(pool) => {
+            let mut tx = pool
+                .begin()
+                .await
+                .map_err(|e| format!("Failed to begin upload reservation: {e}"))?;
+            sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+                .bind(org_id.to_string())
+                .execute(&mut *tx)
+                .await
+                .map_err(|e| format!("Failed to lock upload reservation: {e}"))?;
             let row = sqlx::query(
                 r#"
                 INSERT INTO file_upload (
@@ -61,7 +72,15 @@ pub async fn insert_upload(
                     expected_size, content_type, part_size, parts_expected,
                     parts_received, bytes_received, backend_upload_id,
                     parts_manifest, storage_backend, created_at, expires_at
-                ) VALUES ($1, $2, $3, $4, $5, 'pending', $6, $7, $8, $9, 0, 0, $10, '[]'::jsonb, $11, $12, $13)
+                ) SELECT $1, $2, $3, $4, $5, 'pending', $6, $7, $8, $9, 0, 0, $10, '[]'::jsonb, $11, $12, $13
+                  WHERE (
+                      SELECT COUNT(*) FROM file_upload
+                      WHERE org_id = $3 AND env_id = $4 AND status = 'pending'
+                  ) < $14
+                  AND COALESCE((
+                      SELECT SUM(expected_size) FROM file_upload
+                      WHERE org_id = $3 AND status = 'pending'
+                  ), 0) + $6 <= $15
                 RETURNING upload_id, path, org_id, env_id, created_by_user_id, status,
                           expected_size, content_type, part_size, parts_expected,
                           parts_received, bytes_received, backend_upload_id,
@@ -81,21 +100,45 @@ pub async fn insert_upload(
             .bind(storage_backend)
             .bind(now)
             .bind(expires_at)
-            .fetch_one(pool)
+            .bind(max_pending_uploads)
+            .bind(max_pending_bytes)
+            .fetch_one(&mut *tx)
             .await
             .map_err(|e| format!("Failed to insert upload: {}", e))?;
-
-            row_to_upload_pg(&row)
+            let record = row_to_upload_pg(&row)?;
+            tx.commit()
+                .await
+                .map_err(|e| format!("Failed to commit upload reservation: {e}"))?;
+            Ok(record)
         }
         DatabasePool::Sqlite(pool) => {
-            sqlx::query(
+            let env_id =
+                env_id.ok_or_else(|| "Multipart uploads require an environment".to_string())?;
+            let mut tx = pool
+                .begin()
+                .await
+                .map_err(|e| format!("Failed to begin upload reservation: {e}"))?;
+            sqlx::query("UPDATE org SET updated_at = updated_at WHERE org_id = ?")
+                .bind(org_id)
+                .execute(&mut *tx)
+                .await
+                .map_err(|e| format!("Failed to lock upload reservation: {e}"))?;
+            let rows_affected = sqlx::query(
                 r#"
                 INSERT INTO file_upload (
                     upload_id, path, org_id, env_id, created_by_user_id, status,
                     expected_size, content_type, part_size, parts_expected,
                     parts_received, bytes_received, backend_upload_id,
                     parts_manifest, storage_backend, created_at, expires_at
-                ) VALUES (?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, 0, 0, ?, '[]', ?, ?, ?)
+                ) SELECT ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, 0, 0, ?, '[]', ?, ?, ?
+                  WHERE (
+                      SELECT COUNT(*) FROM file_upload
+                      WHERE org_id = ? AND env_id = ? AND status = 'pending'
+                  ) < ?
+                  AND COALESCE((
+                      SELECT SUM(expected_size) FROM file_upload
+                      WHERE org_id = ? AND status = 'pending'
+                  ), 0) + ? <= ?
                 "#,
             )
             .bind(upload_id)
@@ -111,11 +154,40 @@ pub async fn insert_upload(
             .bind(storage_backend)
             .bind(now)
             .bind(expires_at)
-            .execute(pool)
+            .bind(org_id)
+            .bind(env_id)
+            .bind(max_pending_uploads)
+            .bind(org_id)
+            .bind(expected_size)
+            .bind(max_pending_bytes)
+            .execute(&mut *tx)
             .await
-            .map_err(|e| format!("Failed to insert upload: {}", e))?;
-
-            get_upload_internal_sqlite(pool, upload_id).await
+            .map_err(|e| format!("Failed to insert upload: {}", e))?
+            .rows_affected();
+            if rows_affected == 0 {
+                return Err("Pending upload count or byte reservation limit exceeded".to_string());
+            }
+            let row = sqlx::query(
+                r#"
+                SELECT upload_id, path, org_id, env_id, created_by_user_id, status,
+                       expected_size, content_type, part_size, parts_expected,
+                       parts_received, bytes_received, backend_upload_id,
+                       parts_manifest, storage_backend, created_at, expires_at
+                FROM file_upload
+                WHERE upload_id = ? AND org_id = ? AND env_id = ?
+                "#,
+            )
+            .bind(upload_id)
+            .bind(org_id)
+            .bind(env_id)
+            .fetch_one(&mut *tx)
+            .await
+            .map_err(|e| format!("Upload not found after reservation: {e}"))?;
+            let record = row_to_upload_sqlite(&row)?;
+            tx.commit()
+                .await
+                .map_err(|e| format!("Failed to commit upload reservation: {e}"))?;
+            Ok(record)
         }
     }
 }
@@ -124,6 +196,7 @@ pub async fn get_upload(
     db: &DatabasePool,
     upload_id: Uuid,
     org_id: Uuid,
+    env_id: Uuid,
 ) -> Result<FileUploadRecord, String> {
     match db {
         DatabasePool::Postgres(pool) => {
@@ -134,11 +207,12 @@ pub async fn get_upload(
                        parts_received, bytes_received, backend_upload_id,
                        parts_manifest, storage_backend, created_at, expires_at
                 FROM file_upload
-                WHERE upload_id = $1 AND org_id = $2
+                WHERE upload_id = $1 AND org_id = $2 AND env_id = $3
                 "#,
             )
             .bind(upload_id)
             .bind(org_id)
+            .bind(env_id)
             .fetch_one(pool)
             .await
             .map_err(|e| format!("Upload not found: {}", e))?;
@@ -153,11 +227,12 @@ pub async fn get_upload(
                        parts_received, bytes_received, backend_upload_id,
                        parts_manifest, storage_backend, created_at, expires_at
                 FROM file_upload
-                WHERE upload_id = ? AND org_id = ?
+                WHERE upload_id = ? AND org_id = ? AND env_id = ?
                 "#,
             )
             .bind(upload_id)
             .bind(org_id)
+            .bind(env_id)
             .fetch_one(pool)
             .await
             .map_err(|e| format!("Upload not found: {}", e))?;
@@ -171,6 +246,7 @@ pub async fn record_part(
     db: &DatabasePool,
     upload_id: Uuid,
     org_id: Uuid,
+    env_id: Uuid,
     part_info: &PartInfo,
 ) -> Result<FileUploadRecord, String> {
     let part_json = serde_json::to_value(part_info)
@@ -184,7 +260,11 @@ pub async fn record_part(
                     parts_manifest = parts_manifest || jsonb_build_array($3),
                     parts_received = parts_received + 1,
                     bytes_received = bytes_received + $4
-                WHERE upload_id = $1 AND org_id = $2 AND status = 'pending'
+                WHERE upload_id = $1 AND org_id = $2 AND env_id = $5
+                  AND status = 'pending'
+                  AND NOT parts_manifest @> jsonb_build_array(jsonb_build_object('part_number', $6))
+                  AND (parts_expected IS NULL OR $6 <= parts_expected)
+                  AND (expected_size IS NULL OR bytes_received + $4 <= expected_size)
                 RETURNING upload_id, path, org_id, env_id, created_by_user_id, status,
                           expected_size, content_type, part_size, parts_expected,
                           parts_received, bytes_received, backend_upload_id,
@@ -195,6 +275,8 @@ pub async fn record_part(
             .bind(org_id)
             .bind(&part_json)
             .bind(part_info.size)
+            .bind(env_id)
+            .bind(part_info.part_number)
             .fetch_one(pool)
             .await
             .map_err(|e| format!("Failed to record part: {}", e))?;
@@ -211,13 +293,24 @@ pub async fn record_part(
                     parts_manifest = json_insert(parts_manifest, '$[#]', json(?)),
                     parts_received = parts_received + 1,
                     bytes_received = bytes_received + ?
-                WHERE upload_id = ? AND org_id = ? AND status = 'pending'
+                WHERE upload_id = ? AND org_id = ? AND env_id = ?
+                  AND status = 'pending'
+                  AND NOT EXISTS (
+                      SELECT 1 FROM json_each(parts_manifest)
+                      WHERE json_extract(value, '$.part_number') = ?
+                  )
+                  AND (parts_expected IS NULL OR ? <= parts_expected)
+                  AND (expected_size IS NULL OR bytes_received + ? <= expected_size)
                 "#,
             )
             .bind(&part_json_str)
             .bind(part_info.size)
             .bind(upload_id)
             .bind(org_id)
+            .bind(env_id)
+            .bind(part_info.part_number)
+            .bind(part_info.part_number)
+            .bind(part_info.size)
             .execute(pool)
             .await
             .map_err(|e| format!("Failed to record part: {}", e))?
@@ -227,7 +320,7 @@ pub async fn record_part(
                 return Err("Upload not found or not in pending status".to_string());
             }
 
-            get_upload_internal_sqlite(pool, upload_id).await
+            get_upload_internal_sqlite(pool, upload_id, org_id, env_id).await
         }
     }
 }
@@ -236,13 +329,14 @@ pub async fn complete_upload(
     db: &DatabasePool,
     upload_id: Uuid,
     org_id: Uuid,
+    env_id: Uuid,
 ) -> Result<(), String> {
     let query = match db {
         DatabasePool::Postgres(_) => {
-            "UPDATE file_upload SET status = 'completed' WHERE upload_id = $1 AND org_id = $2 AND status = 'pending'"
+            "UPDATE file_upload SET status = 'completed' WHERE upload_id = $1 AND org_id = $2 AND env_id = $3 AND status = 'pending' AND (parts_expected IS NULL OR parts_received = parts_expected) AND (parts_expected IS NULL OR bytes_received = expected_size)"
         }
         DatabasePool::Sqlite(_) => {
-            "UPDATE file_upload SET status = 'completed' WHERE upload_id = ? AND org_id = ? AND status = 'pending'"
+            "UPDATE file_upload SET status = 'completed' WHERE upload_id = ? AND org_id = ? AND env_id = ? AND status = 'pending' AND (parts_expected IS NULL OR parts_received = parts_expected) AND (parts_expected IS NULL OR bytes_received = expected_size)"
         }
     };
 
@@ -250,6 +344,7 @@ pub async fn complete_upload(
         DatabasePool::Postgres(pool) => sqlx::query(query)
             .bind(upload_id)
             .bind(org_id)
+            .bind(env_id)
             .execute(pool)
             .await
             .map_err(|e| format!("Failed to complete upload: {}", e))?
@@ -257,6 +352,7 @@ pub async fn complete_upload(
         DatabasePool::Sqlite(pool) => sqlx::query(query)
             .bind(upload_id)
             .bind(org_id)
+            .bind(env_id)
             .execute(pool)
             .await
             .map_err(|e| format!("Failed to complete upload: {}", e))?
@@ -270,13 +366,18 @@ pub async fn complete_upload(
     Ok(())
 }
 
-pub async fn abort_upload(db: &DatabasePool, upload_id: Uuid, org_id: Uuid) -> Result<(), String> {
+pub async fn abort_upload(
+    db: &DatabasePool,
+    upload_id: Uuid,
+    org_id: Uuid,
+    env_id: Uuid,
+) -> Result<(), String> {
     let query = match db {
         DatabasePool::Postgres(_) => {
-            "UPDATE file_upload SET status = 'aborted' WHERE upload_id = $1 AND org_id = $2 AND status = 'pending'"
+            "UPDATE file_upload SET status = 'aborted' WHERE upload_id = $1 AND org_id = $2 AND env_id = $3 AND status IN ('pending', 'aborting')"
         }
         DatabasePool::Sqlite(_) => {
-            "UPDATE file_upload SET status = 'aborted' WHERE upload_id = ? AND org_id = ? AND status = 'pending'"
+            "UPDATE file_upload SET status = 'aborted' WHERE upload_id = ? AND org_id = ? AND env_id = ? AND status IN ('pending', 'aborting')"
         }
     };
 
@@ -284,6 +385,7 @@ pub async fn abort_upload(db: &DatabasePool, upload_id: Uuid, org_id: Uuid) -> R
         DatabasePool::Postgres(pool) => sqlx::query(query)
             .bind(upload_id)
             .bind(org_id)
+            .bind(env_id)
             .execute(pool)
             .await
             .map_err(|e| format!("Failed to abort upload: {}", e))?
@@ -291,6 +393,7 @@ pub async fn abort_upload(db: &DatabasePool, upload_id: Uuid, org_id: Uuid) -> R
         DatabasePool::Sqlite(pool) => sqlx::query(query)
             .bind(upload_id)
             .bind(org_id)
+            .bind(env_id)
             .execute(pool)
             .await
             .map_err(|e| format!("Failed to abort upload: {}", e))?
@@ -311,12 +414,13 @@ pub async fn cleanup_expired_uploads(db: &DatabasePool) -> Result<Vec<FileUpload
         DatabasePool::Postgres(pool) => {
             let rows = sqlx::query(
                 r#"
-                SELECT upload_id, path, org_id, env_id, created_by_user_id, status,
-                       expected_size, content_type, part_size, parts_expected,
-                       parts_received, bytes_received, backend_upload_id,
-                       parts_manifest, storage_backend, created_at, expires_at
-                FROM file_upload
-                WHERE status = 'pending' AND expires_at < $1
+                UPDATE file_upload
+                SET status = 'aborting'
+                WHERE status = 'pending' AND expires_at < $1 AND env_id IS NOT NULL
+                RETURNING upload_id, path, org_id, env_id, created_by_user_id, status,
+                          expected_size, content_type, part_size, parts_expected,
+                          parts_received, bytes_received, backend_upload_id,
+                          parts_manifest, storage_backend, created_at, expires_at
                 "#,
             )
             .bind(now)
@@ -329,12 +433,13 @@ pub async fn cleanup_expired_uploads(db: &DatabasePool) -> Result<Vec<FileUpload
         DatabasePool::Sqlite(pool) => {
             let rows = sqlx::query(
                 r#"
-                SELECT upload_id, path, org_id, env_id, created_by_user_id, status,
-                       expected_size, content_type, part_size, parts_expected,
-                       parts_received, bytes_received, backend_upload_id,
-                       parts_manifest, storage_backend, created_at, expires_at
-                FROM file_upload
-                WHERE status = 'pending' AND expires_at < ?
+                UPDATE file_upload
+                SET status = 'aborting'
+                WHERE status = 'pending' AND expires_at < ? AND env_id IS NOT NULL
+                RETURNING upload_id, path, org_id, env_id, created_by_user_id, status,
+                          expected_size, content_type, part_size, parts_expected,
+                          parts_received, bytes_received, backend_upload_id,
+                          parts_manifest, storage_backend, created_at, expires_at
                 "#,
             )
             .bind(now)
@@ -345,6 +450,40 @@ pub async fn cleanup_expired_uploads(db: &DatabasePool) -> Result<Vec<FileUpload
             rows.iter().map(row_to_upload_sqlite).collect()
         }
     }
+}
+
+pub async fn release_cleanup_claim(
+    db: &DatabasePool,
+    upload_id: Uuid,
+    org_id: Uuid,
+    env_id: Uuid,
+) -> Result<(), String> {
+    let rows_affected = match db {
+        DatabasePool::Postgres(pool) => sqlx::query(
+            "UPDATE file_upload SET status = 'pending' WHERE upload_id = $1 AND org_id = $2 AND env_id = $3 AND status = 'aborting'",
+        )
+        .bind(upload_id)
+        .bind(org_id)
+        .bind(env_id)
+        .execute(pool)
+        .await
+        .map_err(|e| format!("Failed to release upload cleanup claim: {e}"))?
+        .rows_affected(),
+        DatabasePool::Sqlite(pool) => sqlx::query(
+            "UPDATE file_upload SET status = 'pending' WHERE upload_id = ? AND org_id = ? AND env_id = ? AND status = 'aborting'",
+        )
+        .bind(upload_id)
+        .bind(org_id)
+        .bind(env_id)
+        .execute(pool)
+        .await
+        .map_err(|e| format!("Failed to release upload cleanup claim: {e}"))?
+        .rows_affected(),
+    };
+    if rows_affected == 0 {
+        return Err("Upload cleanup claim was not held".to_string());
+    }
+    Ok(())
 }
 
 fn row_to_upload_pg(row: &sqlx::postgres::PgRow) -> Result<FileUploadRecord, String> {
@@ -412,6 +551,8 @@ fn row_to_upload_sqlite(row: &sqlx::sqlite::SqliteRow) -> Result<FileUploadRecor
 async fn get_upload_internal_sqlite(
     pool: &sqlx::Pool<sqlx::Sqlite>,
     upload_id: Uuid,
+    org_id: Uuid,
+    env_id: Uuid,
 ) -> Result<FileUploadRecord, String> {
     let row = sqlx::query(
         r#"
@@ -420,10 +561,12 @@ async fn get_upload_internal_sqlite(
                parts_received, bytes_received, backend_upload_id,
                parts_manifest, storage_backend, created_at, expires_at
         FROM file_upload
-        WHERE upload_id = ?
+        WHERE upload_id = ? AND org_id = ? AND env_id = ?
         "#,
     )
     .bind(upload_id)
+    .bind(org_id)
+    .bind(env_id)
     .fetch_one(pool)
     .await
     .map_err(|e| format!("Upload not found: {}", e))?;

@@ -98,6 +98,25 @@ pub fn require_api_key(
     ))
 }
 
+/// Require a permission for any scoped credential, including scoped API keys.
+///
+/// Full-access API keys continue to pass through their `*:*` / `*` grant.
+pub fn require_permission(
+    auth: &AuthContext,
+    resource: &str,
+    action: &str,
+    message: &'static str,
+) -> Result<(), (StatusCode, Json<ApiErrorResponse>)> {
+    if auth.has_permission(resource, action) {
+        return Ok(());
+    }
+
+    Err((
+        StatusCode::FORBIDDEN,
+        Json(ApiErrorResponse::new("forbidden", message)),
+    ))
+}
+
 fn project_error_response(
     error: hot::db::project::ProjectError,
 ) -> (StatusCode, Json<ApiErrorResponse>) {
@@ -263,6 +282,30 @@ mod tests {
             active_toggle_by_user_id: None,
             permissions: serde_json::json!({"*:*": ["*"]}),
         }
+    }
+
+    #[test]
+    fn scoped_api_key_permissions_are_enforced() {
+        let mut api_key = test_api_key(Uuid::now_v7(), Uuid::now_v7());
+        api_key.permissions = serde_json::json!({"event:order:*": ["create"]});
+        let auth = AuthContext::ApiKey(api_key);
+
+        assert!(
+            require_permission(&auth, "event:order:placed", "create", "permission denied",).is_ok()
+        );
+        assert!(
+            require_permission(&auth, "event:invoice:paid", "create", "permission denied",)
+                .is_err()
+        );
+        assert!(require_api_key(&auth, "API key required").is_ok());
+    }
+
+    #[test]
+    fn full_access_api_key_permissions_remain_unrestricted() {
+        let auth = AuthContext::ApiKey(test_api_key(Uuid::now_v7(), Uuid::now_v7()));
+
+        assert!(require_permission(&auth, "mcp:any/tool", "execute", "permission denied").is_ok());
+        assert!(require_permission(&auth, "stream:any", "read", "permission denied").is_ok());
     }
 
     #[tokio::test]

@@ -298,6 +298,85 @@ impl EmailVerification {
         Ok(())
     }
 
+    /// Compensating action for [`Self::confirm_once`]: return a consumed,
+    /// unexpired verification to pending so the same link can be retried
+    /// after a post-confirmation failure (e.g. account creation failed).
+    pub async fn restore_pending(
+        db: &crate::db::DatabasePool,
+        verification_id: &Uuid,
+    ) -> Result<(), EmailVerificationError> {
+        let now = Utc::now();
+        match db {
+            crate::db::DatabasePool::Sqlite(pool) => {
+                sqlx::query(
+                    "UPDATE email_verification SET status_id = ?, verified_at = NULL \
+                     WHERE verification_id = ? AND status_id = ? AND expires_at > ?",
+                )
+                .bind(VerificationStatus::Pending.as_id())
+                .bind(verification_id)
+                .bind(VerificationStatus::Verified.as_id())
+                .bind(now)
+                .execute(pool)
+                .await?;
+            }
+            crate::db::DatabasePool::Postgres(pool) => {
+                sqlx::query(
+                    "UPDATE email_verification SET status_id = $1, verified_at = NULL \
+                     WHERE verification_id = $2 AND status_id = $3 AND expires_at > $4",
+                )
+                .bind(VerificationStatus::Pending.as_id())
+                .bind(verification_id)
+                .bind(VerificationStatus::Verified.as_id())
+                .bind(now)
+                .execute(pool)
+                .await?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Atomically consume a pending, unexpired verification.
+    ///
+    /// Exactly one concurrent confirmation can transition the row.
+    pub async fn confirm_once(
+        db: &crate::db::DatabasePool,
+        verification_id: &Uuid,
+    ) -> Result<(), EmailVerificationError> {
+        let now = Utc::now();
+        let rows_affected = match db {
+            crate::db::DatabasePool::Sqlite(pool) => sqlx::query(
+                "UPDATE email_verification SET status_id = ?, verified_at = ? \
+                 WHERE verification_id = ? AND status_id = ? AND expires_at > ?",
+            )
+            .bind(VerificationStatus::Verified.as_id())
+            .bind(now)
+            .bind(verification_id)
+            .bind(VerificationStatus::Pending.as_id())
+            .bind(now)
+            .execute(pool)
+            .await?
+            .rows_affected(),
+            crate::db::DatabasePool::Postgres(pool) => sqlx::query(
+                "UPDATE email_verification SET status_id = $1, verified_at = $2 \
+                 WHERE verification_id = $3 AND status_id = $4 AND expires_at > $5",
+            )
+            .bind(VerificationStatus::Verified.as_id())
+            .bind(now)
+            .bind(verification_id)
+            .bind(VerificationStatus::Pending.as_id())
+            .bind(now)
+            .execute(pool)
+            .await?
+            .rows_affected(),
+        };
+
+        if rows_affected == 1 {
+            Ok(())
+        } else {
+            Err(EmailVerificationError::AlreadyVerified)
+        }
+    }
+
     /// Mark verification as expired
     pub async fn mark_expired(
         db: &crate::db::DatabasePool,

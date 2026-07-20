@@ -265,7 +265,35 @@ pub async fn run_with_stream_pubsub(conf: Val, shared_stream_pubsub: Option<Arc<
         .nest_service(ASSETS_URL_PREFIX, cached_assets)
         .layer(
             TraceLayer::new_for_http()
-                .make_span_with(trace::DefaultMakeSpan::new().level(log_level))
+                .make_span_with(move |request: &axum::http::Request<axum::body::Body>| {
+                    match log_level {
+                        tracing::Level::ERROR => tracing::error_span!(
+                            "http_request",
+                            method = %request.method(),
+                            path = %request.uri().path(),
+                        ),
+                        tracing::Level::WARN => tracing::warn_span!(
+                            "http_request",
+                            method = %request.method(),
+                            path = %request.uri().path(),
+                        ),
+                        tracing::Level::INFO => tracing::info_span!(
+                            "http_request",
+                            method = %request.method(),
+                            path = %request.uri().path(),
+                        ),
+                        tracing::Level::DEBUG => tracing::debug_span!(
+                            "http_request",
+                            method = %request.method(),
+                            path = %request.uri().path(),
+                        ),
+                        tracing::Level::TRACE => tracing::trace_span!(
+                            "http_request",
+                            method = %request.method(),
+                            path = %request.uri().path(),
+                        ),
+                    }
+                })
                 .on_request(trace::DefaultOnRequest::new().level(tracing::Level::DEBUG))
                 .on_response(trace::DefaultOnResponse::new().level(tracing::Level::DEBUG)),
         );

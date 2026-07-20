@@ -230,14 +230,7 @@ pub async fn events_detail_handler(
                 )
                 .await;
 
-                let graph_data_json = serde_json::to_string(&graph_data).unwrap_or_else(|e| {
-                    tracing::error!(
-                        "Failed to serialize graph data for stream {}: {}",
-                        stream_id,
-                        e
-                    );
-                    "{}".to_string()
-                });
+                let graph_data_json = templates::script_safe_json(&graph_data, "{}");
 
                 stream_graphs.push(templates::StreamGraphData {
                     stream_id,

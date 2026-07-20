@@ -76,6 +76,36 @@ impl Team {
         }
     }
 
+    /// Get a team by ID within an organization.
+    pub async fn get_team_by_org(
+        db: &crate::db::DatabasePool,
+        team_id: &Uuid,
+        org_id: &Uuid,
+    ) -> Result<Team, TeamError> {
+        let team = match db {
+            crate::db::DatabasePool::Postgres(pg_pool) => {
+                sqlx::query_as::<_, Team>(
+                    "SELECT team_id, org_id, name, active, created_at, created_by_user_id, updated_at, updated_by_user_id, active_toggle_at, active_toggle_by_user_id FROM team WHERE team_id = $1 AND org_id = $2",
+                )
+                .bind(team_id)
+                .bind(org_id)
+                .fetch_optional(pg_pool)
+                .await?
+            }
+            crate::db::DatabasePool::Sqlite(sqlite_pool) => {
+                sqlx::query_as::<_, Team>(
+                    "SELECT team_id, org_id, name, active, created_at, created_by_user_id, updated_at, updated_by_user_id, active_toggle_at, active_toggle_by_user_id FROM team WHERE team_id = ? AND org_id = ?",
+                )
+                .bind(team_id)
+                .bind(org_id)
+                .fetch_optional(sqlite_pool)
+                .await?
+            }
+        };
+
+        team.ok_or(TeamError::NotFound)
+    }
+
     /// Get count of teams
     pub async fn get_count(db: &crate::db::DatabasePool) -> Result<i64, TeamError> {
         match db {
@@ -512,5 +542,33 @@ impl TeamUser {
                 Ok(count > 0)
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn get_team_by_org_hides_cross_org_team() {
+        let db = crate::db::test_db().await;
+        let owner_org_id = Uuid::now_v7();
+        let foreign_org_id = Uuid::now_v7();
+        let team_id = Uuid::now_v7();
+        let user_id = Uuid::now_v7();
+
+        Team::insert_team(&db, &team_id, &owner_org_id, "Private Team", &user_id)
+            .await
+            .unwrap();
+
+        let team = Team::get_team_by_org(&db, &team_id, &owner_org_id)
+            .await
+            .unwrap();
+        assert_eq!(team.team_id, team_id);
+
+        assert!(matches!(
+            Team::get_team_by_org(&db, &team_id, &foreign_org_id).await,
+            Err(TeamError::NotFound)
+        ));
     }
 }

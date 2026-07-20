@@ -169,10 +169,7 @@ pub async fn task_detail_handler(
         stream_graph::FocusElement::Task(task_uuid),
     )
     .await;
-    let graph_data_json = serde_json::to_string(&graph_data).unwrap_or_else(|e| {
-        tracing::error!("Failed to serialize graph data: {}", e);
-        "{}".to_string()
-    });
+    let graph_data_json = templates::script_safe_json(&graph_data, "{}");
 
     let mut breadcrumbs = templates::build_base_breadcrumbs_with_env(&session);
     breadcrumbs.push(templates::BreadcrumbItem::clickable(

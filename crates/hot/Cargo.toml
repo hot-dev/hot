@@ -108,6 +108,7 @@ cranelift-frontend = { workspace = true }
 cranelift-module = { workspace = true }
 cranelift-jit = { workspace = true }
 cranelift-native = { workspace = true }
+ammonia = "4.1.3"
 
 # Direct write(2) syscall in the OOM logger so we don't allocate during an
 # allocation-failure path.

@@ -486,6 +486,60 @@ async fn fetch_users_for_dropdown(
         .collect()
 }
 
+async fn destination_target_belongs_to_org(
+    db: &DatabasePool,
+    org_id: &Uuid,
+    config: &serde_json::Value,
+) -> bool {
+    match EmailDestinationConfig::from_config(config)
+        .ok()
+        .map(|config| config.target)
+    {
+        Some(EmailTarget::Team { team_id }) => hot::db::Team::get_team_by_org(db, &team_id, org_id)
+            .await
+            .is_ok(),
+        Some(EmailTarget::User { user_id }) => hot::db::OrgUser::get_org_user(db, org_id, &user_id)
+            .await
+            .is_ok(),
+        _ => true,
+    }
+}
+
+fn parse_selected_ids(ids: &str) -> Option<Vec<Uuid>> {
+    let parsed: Result<Vec<_>, _> = ids
+        .split(',')
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+        .map(Uuid::parse_str)
+        .collect();
+    parsed.ok().filter(|ids| !ids.is_empty())
+}
+
+async fn subscription_resources_belong_to_org(
+    db: &DatabasePool,
+    org_id: &Uuid,
+    channel_ids: &[Uuid],
+    destination_ids: &[Uuid],
+) -> bool {
+    for channel_id in channel_ids {
+        if AlertChannel::get_by_id_for_org(db, channel_id, org_id)
+            .await
+            .is_err()
+        {
+            return false;
+        }
+    }
+    for destination_id in destination_ids {
+        if AlertDestination::get_by_id_for_org(db, destination_id, org_id)
+            .await
+            .is_err()
+        {
+            return false;
+        }
+    }
+    true
+}
+
 /// Create a new destination
 pub async fn destinations_create_handler(
     State(db): State<Arc<DatabasePool>>,
@@ -528,6 +582,10 @@ pub async fn destinations_create_handler(
                 .into_response();
         }
     };
+    if !destination_target_belongs_to_org(&db, &org_id, &config).await {
+        return Redirect::to("/settings/alerts/destinations/new?error=invalid_config")
+            .into_response();
+    }
 
     // Determine if this is a specific-address email destination that needs verification
     let needs_verification = dest_type == DestinationType::Email
@@ -653,17 +711,13 @@ pub async fn destinations_edit_handler(
         None => return Redirect::to("/").into_response(),
     };
 
-    let destination = match AlertDestination::get_by_id(&db, &destination_id).await {
+    let destination = match AlertDestination::get_by_id_for_org(&db, &destination_id, &org_id).await
+    {
         Ok(d) => d,
         Err(_) => {
             return Redirect::to("/settings/alerts/destinations").into_response();
         }
     };
-
-    // Verify destination belongs to current org
-    if destination.org_id != org_id {
-        return Redirect::to("/settings/alerts/destinations?error=unauthorized").into_response();
-    }
 
     // Parse config into form fields
     let config_fields = templates::DestinationConfigFields::from_config(
@@ -706,13 +760,14 @@ pub async fn destinations_update_handler(
     };
 
     // Fetch existing destination and verify it belongs to current org
-    let existing_dest = match AlertDestination::get_by_id(&db, &destination_id).await {
-        Ok(d) if d.org_id == org_id => d,
-        _ => {
-            return Redirect::to("/settings/alerts/destinations?error=unauthorized")
-                .into_response();
-        }
-    };
+    let existing_dest =
+        match AlertDestination::get_by_id_for_org(&db, &destination_id, &org_id).await {
+            Ok(d) => d,
+            _ => {
+                return Redirect::to("/settings/alerts/destinations?error=unauthorized")
+                    .into_response();
+            }
+        };
 
     // Build config from form fields
     let config = match form.build_config() {
@@ -726,6 +781,13 @@ pub async fn destinations_update_handler(
             .into_response();
         }
     };
+    if !destination_target_belongs_to_org(&db, &org_id, &config).await {
+        return Redirect::to(&format!(
+            "/settings/alerts/destinations/{}/edit?error=invalid_config",
+            destination_id
+        ))
+        .into_response();
+    }
 
     let enabled = form.enabled.is_some();
 
@@ -827,8 +889,8 @@ pub async fn destinations_delete_handler(
     };
 
     // Verify destination belongs to current org
-    match AlertDestination::get_by_id(&db, &destination_id).await {
-        Ok(d) if d.org_id == org_id => {}
+    match AlertDestination::get_by_id_for_org(&db, &destination_id, &org_id).await {
+        Ok(_) => {}
         _ => {
             return Redirect::to("/settings/alerts/destinations?error=unauthorized")
                 .into_response();
@@ -993,21 +1055,16 @@ pub async fn subscriptions_create_handler(
     };
 
     // Parse channel IDs
-    let channel_ids: Vec<Uuid> = form
-        .channel_ids
-        .split(',')
-        .filter_map(|s| Uuid::parse_str(s.trim()).ok())
-        .collect();
-
-    // Parse destination IDs
-    let destination_ids: Vec<Uuid> = form
-        .destination_ids
-        .split(',')
-        .filter_map(|s| Uuid::parse_str(s.trim()).ok())
-        .collect();
-
-    if channel_ids.is_empty() || destination_ids.is_empty() {
+    let Some(channel_ids) = parse_selected_ids(&form.channel_ids) else {
         return Redirect::to("/settings/alerts/subscriptions/new?error=missing_selection")
+            .into_response();
+    };
+    let Some(destination_ids) = parse_selected_ids(&form.destination_ids) else {
+        return Redirect::to("/settings/alerts/subscriptions/new?error=missing_selection")
+            .into_response();
+    };
+    if !subscription_resources_belong_to_org(&db, &org_id, &channel_ids, &destination_ids).await {
+        return Redirect::to("/settings/alerts/subscriptions/new?error=invalid_selection")
             .into_response();
     }
 
@@ -1056,17 +1113,14 @@ pub async fn subscriptions_edit_handler(
         }
     };
 
-    let subscription = match AlertSubscription::get_by_id(&db, &alert_subscription_id).await {
-        Ok(s) => s,
-        Err(_) => {
-            return Redirect::to("/settings/alerts/subscriptions?error=not_found").into_response();
-        }
-    };
-
-    // Verify subscription belongs to current org
-    if subscription.org_id != org_id {
-        return Redirect::to("/settings/alerts/subscriptions?error=unauthorized").into_response();
-    }
+    let subscription =
+        match AlertSubscription::get_by_id_for_org(&db, &alert_subscription_id, &org_id).await {
+            Ok(s) => s,
+            Err(_) => {
+                return Redirect::to("/settings/alerts/subscriptions?error=not_found")
+                    .into_response();
+            }
+        };
 
     let channels = AlertChannel::get_by_org(&db, &org_id)
         .await
@@ -1115,8 +1169,8 @@ pub async fn subscriptions_update_handler(
         Some(org) => org.org_id,
         None => return Redirect::to("/").into_response(),
     };
-    match AlertSubscription::get_by_id(&db, &alert_subscription_id).await {
-        Ok(s) if s.org_id == org_id => {}
+    match AlertSubscription::get_by_id_for_org(&db, &alert_subscription_id, &org_id).await {
+        Ok(_) => {}
         _ => {
             return Redirect::to("/settings/alerts/subscriptions?error=unauthorized")
                 .into_response();
@@ -1124,22 +1178,23 @@ pub async fn subscriptions_update_handler(
     }
 
     // Parse channel IDs
-    let channel_ids: Vec<Uuid> = form
-        .channel_ids
-        .split(',')
-        .filter_map(|s| Uuid::parse_str(s.trim()).ok())
-        .collect();
-
-    // Parse destination IDs
-    let destination_ids: Vec<Uuid> = form
-        .destination_ids
-        .split(',')
-        .filter_map(|s| Uuid::parse_str(s.trim()).ok())
-        .collect();
-
-    if channel_ids.is_empty() || destination_ids.is_empty() {
+    let Some(channel_ids) = parse_selected_ids(&form.channel_ids) else {
         return Redirect::to(&format!(
             "/settings/alerts/subscriptions/{}/edit?error=missing_selection",
+            alert_subscription_id
+        ))
+        .into_response();
+    };
+    let Some(destination_ids) = parse_selected_ids(&form.destination_ids) else {
+        return Redirect::to(&format!(
+            "/settings/alerts/subscriptions/{}/edit?error=missing_selection",
+            alert_subscription_id
+        ))
+        .into_response();
+    };
+    if !subscription_resources_belong_to_org(&db, &org_id, &channel_ids, &destination_ids).await {
+        return Redirect::to(&format!(
+            "/settings/alerts/subscriptions/{}/edit?error=invalid_selection",
             alert_subscription_id
         ))
         .into_response();
@@ -1193,8 +1248,8 @@ pub async fn subscriptions_delete_handler(
         Some(org) => org.org_id,
         None => return Redirect::to("/").into_response(),
     };
-    match AlertSubscription::get_by_id(&db, &alert_subscription_id).await {
-        Ok(s) if s.org_id == org_id => {}
+    match AlertSubscription::get_by_id_for_org(&db, &alert_subscription_id, &org_id).await {
+        Ok(_) => {}
         _ => {
             return Redirect::to("/settings/alerts/subscriptions?error=unauthorized")
                 .into_response();
@@ -1354,7 +1409,7 @@ pub async fn channels_edit_handler(
         None => return Redirect::to("/").into_response(),
     };
 
-    let channel = match AlertChannel::get_by_id(&db, &channel_id).await {
+    let channel = match AlertChannel::get_by_id_for_org(&db, &channel_id, &org_id).await {
         Ok(c) => c,
         Err(_) => {
             return Redirect::to("/settings/alerts/channels?error=not_found").into_response();
@@ -1366,8 +1421,8 @@ pub async fn channels_edit_handler(
         return Redirect::to("/settings/alerts/channels?error=system_channel").into_response();
     }
 
-    // Verify channel belongs to current org
-    if channel.org_id.as_ref() != Some(&org_id) {
+    // System channels are available to the org but remain read-only.
+    if channel.org_id.is_none() {
         return Redirect::to("/settings/alerts/channels?error=unauthorized").into_response();
     }
 
@@ -1406,7 +1461,7 @@ pub async fn channels_update_handler(
         None => return Redirect::to("/").into_response(),
     };
 
-    let channel = match AlertChannel::get_by_id(&db, &channel_id).await {
+    let channel = match AlertChannel::get_by_id_for_org(&db, &channel_id, &org_id).await {
         Ok(c) => c,
         Err(_) => {
             return Redirect::to("/settings/alerts/channels?error=not_found").into_response();
@@ -1416,11 +1471,6 @@ pub async fn channels_update_handler(
     // Can't update system channels
     if channel.is_system() {
         return Redirect::to("/settings/alerts/channels?error=system_channel").into_response();
-    }
-
-    // Verify channel belongs to current org
-    if channel.org_id.as_ref() != Some(&org_id) {
-        return Redirect::to("/settings/alerts/channels?error=unauthorized").into_response();
     }
 
     let user_id = session.user.user_id;
@@ -1477,7 +1527,7 @@ pub async fn channels_delete_handler(
         None => return Redirect::to("/").into_response(),
     };
 
-    let channel = match AlertChannel::get_by_id(&db, &channel_id).await {
+    let channel = match AlertChannel::get_by_id_for_org(&db, &channel_id, &org_id).await {
         Ok(c) => c,
         Err(_) => {
             return Redirect::to("/settings/alerts/channels?error=not_found").into_response();
@@ -1487,11 +1537,6 @@ pub async fn channels_delete_handler(
     // Can't delete system channels
     if channel.is_system() {
         return Redirect::to("/settings/alerts/channels?error=system_channel").into_response();
-    }
-
-    // Verify channel belongs to current org
-    if channel.org_id.as_ref() != Some(&org_id) {
-        return Redirect::to("/settings/alerts/channels?error=unauthorized").into_response();
     }
 
     match AlertChannel::delete(&db, &channel_id).await {
@@ -1627,16 +1672,24 @@ pub async fn history_detail_handler(
     // Get destination info and resolved user email for each delivery
     let mut delivery_details = Vec::new();
     for delivery in deliveries {
-        let destination = AlertDestination::get_by_id(&db, &delivery.destination_id)
-            .await
-            .ok();
+        let destination =
+            AlertDestination::get_by_id_for_org(&db, &delivery.destination_id, &org_id)
+                .await
+                .ok();
 
         // If this delivery has a resolved_user_id, look up their email
         let resolved_user_email = if let Some(user_id) = &delivery.resolved_user_id {
-            hot::db::user::User::get_user(&db, user_id)
+            if hot::db::OrgUser::get_org_user(&db, &org_id, user_id)
                 .await
-                .ok()
-                .map(|u| u.email)
+                .is_ok()
+            {
+                hot::db::user::User::get_user(&db, user_id)
+                    .await
+                    .ok()
+                    .map(|u| u.email)
+            } else {
+                None
+            }
         } else {
             None
         };
@@ -1748,15 +1801,10 @@ pub async fn resend_destination_verification_handler(
     };
 
     // Get the destination
-    let dest = match AlertDestination::get_by_id(&db, &destination_id).await {
+    let dest = match AlertDestination::get_by_id_for_org(&db, &destination_id, &org_id).await {
         Ok(d) => d,
         Err(_) => return Redirect::to("/settings/alerts/destinations?error=not_found"),
     };
-
-    // Verify it belongs to this org
-    if dest.org_id != org_id {
-        return Redirect::to("/settings/alerts/destinations?error=unauthorized");
-    }
 
     // Must be unverified
     if dest.verified {
@@ -1814,4 +1862,103 @@ pub async fn resend_destination_verification_handler(
     }
 
     Redirect::to("/settings/alerts/destinations?info=verification_resent")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn selected_ids_reject_malformed_values() {
+        let valid = Uuid::now_v7();
+        assert_eq!(parse_selected_ids(&valid.to_string()), Some(vec![valid]));
+        assert!(parse_selected_ids(&format!("{},not-a-uuid", valid)).is_none());
+        assert!(parse_selected_ids("").is_none());
+    }
+
+    #[tokio::test]
+    async fn destination_targets_must_belong_to_current_org() {
+        let db = hot::db::test_db().await;
+        let owner_org_id = Uuid::now_v7();
+        let foreign_org_id = Uuid::now_v7();
+        let team_id = Uuid::now_v7();
+        let user_id = Uuid::now_v7();
+        hot::db::Team::insert_team(&db, &team_id, &owner_org_id, "Owner Team", &user_id)
+            .await
+            .unwrap();
+        hot::db::OrgUser::insert_org_user(
+            &db,
+            &Uuid::now_v7(),
+            &owner_org_id,
+            &user_id,
+            None,
+            &user_id,
+        )
+        .await
+        .unwrap();
+
+        let team_config = serde_json::json!({
+            "target": "team",
+            "team_id": team_id,
+        });
+        let user_config = serde_json::json!({
+            "target": "user",
+            "user_id": user_id,
+        });
+
+        assert!(destination_target_belongs_to_org(&db, &owner_org_id, &team_config).await);
+        assert!(!destination_target_belongs_to_org(&db, &foreign_org_id, &team_config).await);
+        assert!(destination_target_belongs_to_org(&db, &owner_org_id, &user_config).await);
+        assert!(!destination_target_belongs_to_org(&db, &foreign_org_id, &user_config).await);
+    }
+
+    #[tokio::test]
+    async fn subscription_resources_must_belong_to_current_org() {
+        let db = hot::db::test_db().await;
+        let org_id = Uuid::now_v7();
+        let foreign_org_id = Uuid::now_v7();
+        let user_id = Uuid::now_v7();
+        let channel = AlertChannel::create(&db, &org_id, None, "Owner", "^run:", &user_id)
+            .await
+            .unwrap();
+        let destination = AlertDestination::create(
+            &db,
+            &org_id,
+            "Owner",
+            DestinationType::Webhook,
+            &serde_json::json!({"url": "https://example.test/hook"}),
+            &user_id,
+        )
+        .await
+        .unwrap();
+        let foreign_destination = AlertDestination::create(
+            &db,
+            &foreign_org_id,
+            "Foreign",
+            DestinationType::Webhook,
+            &serde_json::json!({"url": "https://example.test/hook"}),
+            &user_id,
+        )
+        .await
+        .unwrap();
+
+        assert!(
+            subscription_resources_belong_to_org(
+                &db,
+                &org_id,
+                &[channel.alert_channel_id],
+                &[destination.alert_destination_id],
+            )
+            .await
+        );
+        assert!(
+            !subscription_resources_belong_to_org(
+                &db,
+                &org_id,
+                &[channel.alert_channel_id],
+                &[foreign_destination.alert_destination_id],
+            )
+            .await
+        );
+    }
 }

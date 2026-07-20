@@ -961,6 +961,62 @@ async fn hydrate_event_message_from_db(
             ));
         }
     };
+    let stored_env = Env::get_env(db, &stored_event.env_id).await.map_err(|e| {
+        worker_infrastructure_retry_error(
+            format!(
+                "Failed to load authoritative environment {} for event {}: {}",
+                stored_event.env_id, event_id, e
+            ),
+            infra_retry_backoff_ms,
+        )
+    })?;
+    let org_slug = hot::db::org::Org::get_org(db, &stored_env.org_id)
+        .await
+        .ok()
+        .map(|org| org.slug);
+
+    let (target_project_id, target_project_name) =
+        if let Some(project_id) = event_message.body.event.target_project_id {
+            let project = Project::get_project(db, &project_id).await.map_err(|e| {
+                worker_error(format!(
+                    "Target project {} for event {} is invalid: {}",
+                    project_id, event_id, e
+                ))
+            })?;
+            if project.env_id != stored_event.env_id {
+                return Err(worker_error(format!(
+                    "Target project {} does not belong to event environment {}",
+                    project_id, stored_event.env_id
+                )));
+            }
+            (Some(project.project_id), Some(project.name))
+        } else {
+            (None, None)
+        };
+
+    let claimed_context = &event_message.body.execution_context;
+    if !(0..=100).contains(&claimed_context.retry_attempt) {
+        return Err(worker_error(format!(
+            "Invalid retry attempt {} for event {}",
+            claimed_context.retry_attempt, event_id
+        )));
+    }
+    if let Some(origin_run_id) = claimed_context.origin_run_id {
+        let origin = hot::db::run::Run::get_run(db, &origin_run_id)
+            .await
+            .map_err(|e| {
+                worker_error(format!(
+                    "Origin run {} for event {} is invalid: {}",
+                    origin_run_id, event_id, e
+                ))
+            })?;
+        if origin.env_id != stored_event.env_id {
+            return Err(worker_error(format!(
+                "Origin run {} does not belong to event environment {}",
+                origin_run_id, stored_event.env_id
+            )));
+        }
+    }
 
     let event_data: Val = serde_json::from_value(stored_event.event_data).map_err(|e| {
         let err_msg = format!(
@@ -984,16 +1040,8 @@ async fn hydrate_event_message_from_db(
             error!("hot.dev: WORKER {} {}", worker_id, err_msg);
             return Err(worker_error(err_msg));
         };
-        let Some(org_id) = event_message.body.execution_context.org_id else {
-            let err_msg = format!(
-                "Event {} contains blob references but execution context has no org_id - cannot hydrate",
-                event_id
-            );
-            error!("hot.dev: WORKER {} {}", worker_id, err_msg);
-            return Err(worker_error(err_msg));
-        };
         let scope = hot::blob::BlobScope {
-            org_id,
+            org_id: stored_env.org_id,
             env_id: Some(stored_event.env_id),
             run_id: None,
         };
@@ -1024,6 +1072,27 @@ async fn hydrate_event_message_from_db(
         &event_message.body.event.event_data,
     );
 
+    let run_type_id = match stored_event.event_type.as_str() {
+        "hot:call" => hot::db::run::RunType::Call.as_id(),
+        "hot:schedule" => hot::db::run::RunType::Schedule.as_id(),
+        _ => hot::db::run::RunType::Event.as_id(),
+    };
+    let execution_context = ExecutionContext::new_with_event_and_origin(
+        claimed_context.run_id,
+        stored_event.stream_id,
+        run_type_id,
+        Some(stored_event.env_id),
+        Some(stored_event.created_by_user_id),
+        Some(stored_env.org_id),
+        None,
+        Some(stored_event.event_id),
+        claimed_context.origin_run_id,
+    )
+    .with_env_name(Some(stored_env.name))
+    .with_org_slug(org_slug)
+    .with_retry_attempt(claimed_context.retry_attempt)
+    .with_access_id(stored_event.access_id);
+
     Ok(EventMessage {
         body: hot::lang::event::queue::EventMessageBody {
             event: hot::lang::event::Event {
@@ -1033,10 +1102,10 @@ async fn hydrate_event_message_from_db(
                 event_type: stored_event.event_type,
                 event_data,
                 event_time: stored_event.event_time,
-                target_project_id: event_message.body.event.target_project_id,
-                target_project_name: event_message.body.event.target_project_name,
+                target_project_id,
+                target_project_name,
             },
-            execution_context: event_message.body.execution_context,
+            execution_context,
         },
         ..event_message
     })
@@ -1248,6 +1317,8 @@ fn extract_ids_from_orphaned_data(raw_bytes: &[u8]) -> Option<OrphanedMessageIds
     use serde::Deserialize;
     use std::io::Read;
 
+    const MAX_ORPHANED_MESSAGE_BYTES: u64 = 8 * 1024 * 1024;
+
     // RetryWrapper structure (matches the one in queue/redis.rs)
     #[derive(Deserialize)]
     struct RetryWrapper<T> {
@@ -1295,12 +1366,17 @@ fn extract_ids_from_orphaned_data(raw_bytes: &[u8]) -> Option<OrphanedMessageIds
     // Zstd magic number: 0x28, 0xB5, 0x2F, 0xFD
     let data = if raw_bytes.len() >= 4 && raw_bytes[0..4] == [0x28, 0xb5, 0x2f, 0xfd] {
         // Zstd compressed - decompress first
-        let mut decoder = match zstd::Decoder::new(raw_bytes) {
+        let decoder = match zstd::Decoder::new(raw_bytes) {
             Ok(d) => d,
             Err(_) => return None,
         };
         let mut buf = Vec::new();
-        if decoder.read_to_end(&mut buf).is_err() {
+        if decoder
+            .take(MAX_ORPHANED_MESSAGE_BYTES + 1)
+            .read_to_end(&mut buf)
+            .is_err()
+            || buf.len() as u64 > MAX_ORPHANED_MESSAGE_BYTES
+        {
             return None;
         }
         buf
@@ -2796,6 +2872,12 @@ async fn execute_single_event_handler(
     let project = Project::get_project(db, &build.project_id)
         .await
         .map_err(|e| format!("Failed to get project for build: {}", e))?;
+    if project.env_id != event_message.body.event.env_id {
+        return Err(format!(
+            "Build {} belongs to environment {}, not event environment {}",
+            build.build_id, project.env_id, event_message.body.event.env_id
+        ));
+    }
 
     let timing_after_project = timing_start.elapsed();
     debug!(
@@ -6517,8 +6599,35 @@ pub async fn run_with_components_shared_context(
                                                                 Ok(expired) => {
                                                                     if !expired.is_empty() {
                                                                         info!("hot.dev: WORKER {} upload_cleanup: aborting {} expired uploads", worker_id, expired.len());
+                                                                        let cleanup_storage = hot::file_storage::file_storage_from_config(&worker_conf_ref).await;
                                                                         for upload in &expired {
-                                                                            if let Err(e) = hot::db::file_upload::abort_upload(db, upload.upload_id, upload.org_id).await {
+                                                                            let Some(env_id) = upload.env_id else {
+                                                                                error!("hot.dev: WORKER {} upload_cleanup: upload {} has no environment; refusing unscoped cleanup", worker_id, upload.upload_id);
+                                                                                continue;
+                                                                            };
+                                                                            let Ok(storage) = &cleanup_storage else {
+                                                                                error!("hot.dev: WORKER {} upload_cleanup: storage unavailable for upload {}", worker_id, upload.upload_id);
+                                                                                if let Err(e) = hot::db::file_upload::release_cleanup_claim(db, upload.upload_id, upload.org_id, env_id).await {
+                                                                                    error!("hot.dev: WORKER {} upload_cleanup: failed to release claim for upload {}: {}", worker_id, upload.upload_id, e);
+                                                                                }
+                                                                                continue;
+                                                                            };
+                                                                            if let Some(backend_upload_id) = upload.backend_upload_id.as_deref() {
+                                                                                let ctx = hot::file_storage::FileStorageContext::minimal(
+                                                                                    db.clone(),
+                                                                                    upload.org_id,
+                                                                                    Some(env_id),
+                                                                                    upload.created_by_user_id,
+                                                                                );
+                                                                                if let Err(e) = storage.abort_multipart_upload(backend_upload_id, &upload.path, &ctx).await {
+                                                                                    error!("hot.dev: WORKER {} upload_cleanup: backend abort failed for upload {}: {}", worker_id, upload.upload_id, e);
+                                                                                    if let Err(release_error) = hot::db::file_upload::release_cleanup_claim(db, upload.upload_id, upload.org_id, env_id).await {
+                                                                                        error!("hot.dev: WORKER {} upload_cleanup: failed to release claim for upload {}: {}", worker_id, upload.upload_id, release_error);
+                                                                                    }
+                                                                                    continue;
+                                                                                }
+                                                                            }
+                                                                            if let Err(e) = hot::db::file_upload::abort_upload(db, upload.upload_id, upload.org_id, env_id).await {
                                                                                 error!("hot.dev: WORKER {} upload_cleanup: failed to abort upload {}: {}", worker_id, upload.upload_id, e);
                                                                             }
                                                                         }
@@ -6961,6 +7070,13 @@ mod tests {
     }
 
     #[test]
+    fn orphaned_message_decompression_is_bounded() {
+        let oversized = vec![b'x'; 8 * 1024 * 1024 + 1];
+        let compressed = zstd::encode_all(std::io::Cursor::new(oversized), 1).unwrap();
+        assert!(extract_ids_from_orphaned_data(&compressed).is_none());
+    }
+
+    #[test]
     fn agent_type_from_meta_uses_namespace_for_short_agent_names() {
         let meta = serde_json::json!({"agent": "TeamAgent"});
         assert_eq!(
@@ -7180,9 +7296,9 @@ mod tests {
                     stream_id,
                     hot::db::run::RunType::Call.as_id(),
                     Some(test_data.env_id),
-                    Some(test_data.user_id),
-                    Some(test_data.org_id),
-                    None,
+                    Some(Uuid::now_v7()),
+                    Some(Uuid::now_v7()),
+                    Some(Uuid::now_v7()),
                 ),
             },
         };
@@ -7196,6 +7312,15 @@ mod tests {
             extract_target_function_from_event(&hydrated.body.event.event_data).as_deref(),
             Some(target_fn)
         );
+        assert_eq!(
+            hydrated.body.execution_context.user_id,
+            Some(test_data.user_id)
+        );
+        assert_eq!(
+            hydrated.body.execution_context.org_id,
+            Some(test_data.org_id)
+        );
+        assert_eq!(hydrated.body.execution_context.build_id, None);
 
         if let DatabasePool::Sqlite(pool) = &db {
             pool.close().await;

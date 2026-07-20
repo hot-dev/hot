@@ -18,12 +18,24 @@ use hot::db::DatabasePool;
 use hot::file_storage::FileStorage;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
-use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+use std::sync::{Arc, LazyLock};
+use std::time::Duration;
+use tokio::io::{AsyncBufRead, AsyncReadExt, AsyncWriteExt, BufReader};
 #[cfg(unix)]
 use tokio::net::UnixListener;
-use tokio::sync::oneshot;
+use tokio::sync::{Semaphore, oneshot};
 use uuid::Uuid;
+
+const GLOBAL_CONNECTION_LIMIT: usize = 256;
+const PER_TASK_CONNECTION_LIMIT: usize = 32;
+const MAX_REQUEST_LINE_BYTES: usize = 8 * 1024;
+const MAX_HEADER_COUNT: usize = 64;
+const MAX_HEADER_BYTES: usize = 32 * 1024;
+const MAX_BODY_SIZE: usize = 16 * 1024 * 1024;
+const READ_IDLE_TIMEOUT: Duration = Duration::from_secs(5);
+const REQUEST_DEADLINE: Duration = Duration::from_secs(30);
+static GLOBAL_CONNECTIONS: LazyLock<Arc<Semaphore>> =
+    LazyLock::new(|| Arc::new(Semaphore::new(GLOBAL_CONNECTION_LIMIT)));
 
 /// Context for the file server — identifies the task's org/env/user scope.
 #[derive(Clone)]
@@ -285,15 +297,30 @@ async fn serve_vsock_af(
     ctx: FileServerContext,
     mut shutdown_rx: oneshot::Receiver<()>,
 ) {
+    let task_connections = Arc::new(Semaphore::new(PER_TASK_CONNECTION_LIMIT));
     loop {
         tokio::select! {
             _ = &mut shutdown_rx => break,
             accept = listener.accept() => {
                 match accept {
                     Ok((stream, _addr)) => {
+                        let Ok(global_permit) = Arc::clone(&GLOBAL_CONNECTIONS).try_acquire_owned() else {
+                            continue;
+                        };
+                        let Ok(task_permit) = Arc::clone(&task_connections).try_acquire_owned() else {
+                            continue;
+                        };
                         let ctx = ctx.clone();
                         tokio::spawn(async move {
-                            if let Err(e) = handle_vsock_af_connection(stream, ctx).await {
+                            let _permits = (global_permit, task_permit);
+                            if let Err(e) = tokio::time::timeout(
+                                REQUEST_DEADLINE,
+                                handle_vsock_af_connection(stream, ctx),
+                            )
+                            .await
+                            .map_err(|_| "request deadline exceeded".to_string())
+                            .and_then(|result| result.map_err(|e| e.to_string()))
+                            {
                                 tracing::debug!("File server AF_VSOCK connection error: {}", e);
                             }
                         });
@@ -371,15 +398,30 @@ async fn serve_unix(
     ctx: FileServerContext,
     mut shutdown_rx: oneshot::Receiver<()>,
 ) {
+    let task_connections = Arc::new(Semaphore::new(PER_TASK_CONNECTION_LIMIT));
     loop {
         tokio::select! {
             _ = &mut shutdown_rx => break,
             accept = listener.accept() => {
                 match accept {
                     Ok((stream, _)) => {
+                        let Ok(global_permit) = Arc::clone(&GLOBAL_CONNECTIONS).try_acquire_owned() else {
+                            continue;
+                        };
+                        let Ok(task_permit) = Arc::clone(&task_connections).try_acquire_owned() else {
+                            continue;
+                        };
                         let ctx = ctx.clone();
                         tokio::spawn(async move {
-                            if let Err(e) = handle_connection(stream, ctx).await {
+                            let _permits = (global_permit, task_permit);
+                            if let Err(e) = tokio::time::timeout(
+                                REQUEST_DEADLINE,
+                                handle_connection(stream, ctx),
+                            )
+                            .await
+                            .map_err(|_| "request deadline exceeded".to_string())
+                            .and_then(|result| result.map_err(|e| e.to_string()))
+                            {
                                 tracing::debug!("File server connection error: {}", e);
                             }
                         });
@@ -423,15 +465,30 @@ async fn serve_tcp(
     ctx: FileServerContext,
     mut shutdown_rx: oneshot::Receiver<()>,
 ) {
+    let task_connections = Arc::new(Semaphore::new(PER_TASK_CONNECTION_LIMIT));
     loop {
         tokio::select! {
             _ = &mut shutdown_rx => break,
             accept = listener.accept() => {
                 match accept {
                     Ok((stream, _)) => {
+                        let Ok(global_permit) = Arc::clone(&GLOBAL_CONNECTIONS).try_acquire_owned() else {
+                            continue;
+                        };
+                        let Ok(task_permit) = Arc::clone(&task_connections).try_acquire_owned() else {
+                            continue;
+                        };
                         let ctx = ctx.clone();
                         tokio::spawn(async move {
-                            if let Err(e) = handle_tcp_connection(stream, ctx).await {
+                            let _permits = (global_permit, task_permit);
+                            if let Err(e) = tokio::time::timeout(
+                                REQUEST_DEADLINE,
+                                handle_tcp_connection(stream, ctx),
+                            )
+                            .await
+                            .map_err(|_| "request deadline exceeded".to_string())
+                            .and_then(|result| result.map_err(|e| e.to_string()))
+                            {
                                 tracing::debug!("File server TCP connection error: {}", e);
                             }
                         });
@@ -475,10 +532,16 @@ where
     W: tokio::io::AsyncWrite + Unpin,
 {
     // Read request line
-    let mut request_line = String::new();
-    reader.read_line(&mut request_line).await?;
+    let request_line = match read_bounded_line(&mut reader, MAX_REQUEST_LINE_BYTES).await {
+        Ok(Some(line)) => line,
+        Ok(None) => return Ok(()),
+        Err(_) => {
+            write_http_response(&mut write_half, 400, "text/plain", b"Bad request").await?;
+            return Ok(());
+        }
+    };
     let parts: Vec<&str> = request_line.split_whitespace().collect();
-    if parts.len() < 2 {
+    if parts.len() != 3 || !matches!(parts[2], "HTTP/1.0" | "HTTP/1.1") {
         write_http_response(&mut write_half, 400, "text/plain", b"Bad request").await?;
         return Ok(());
     }
@@ -487,37 +550,92 @@ where
 
     // Read headers
     let mut content_length: usize = 0;
+    let mut saw_content_length = false;
+    let mut header_count = 0usize;
+    let mut header_bytes = 0usize;
     let mut headers = HashMap::new();
     loop {
-        let mut line = String::new();
-        reader.read_line(&mut line).await?;
-        if line.trim().is_empty() {
+        let line = match read_bounded_line(&mut reader, MAX_HEADER_BYTES).await {
+            Ok(Some(line)) => line,
+            _ => {
+                write_http_response(&mut write_half, 400, "text/plain", b"Bad request").await?;
+                return Ok(());
+            }
+        };
+        header_bytes = header_bytes.saturating_add(line.len());
+        if line == "\r\n" || line == "\n" {
             break;
         }
-        if let Some(val) = line
-            .strip_prefix("Content-Length: ")
-            .or_else(|| line.strip_prefix("content-length: "))
-        {
-            content_length = val.trim().parse().unwrap_or(0);
+        header_count += 1;
+        if header_count > MAX_HEADER_COUNT || header_bytes > MAX_HEADER_BYTES {
+            write_http_response(
+                &mut write_half,
+                431,
+                "text/plain",
+                b"Request headers too large",
+            )
+            .await?;
+            return Ok(());
         }
-        if let Some((key, value)) = line.split_once(':') {
-            headers.insert(key.trim().to_ascii_lowercase(), value.trim().to_string());
+        let Some((key, value)) = line.split_once(':') else {
+            write_http_response(&mut write_half, 400, "text/plain", b"Bad request").await?;
+            return Ok(());
+        };
+        let key = key.trim().to_ascii_lowercase();
+        let value = value.trim().to_string();
+        if key.is_empty() || key == "transfer-encoding" {
+            write_http_response(&mut write_half, 400, "text/plain", b"Bad request").await?;
+            return Ok(());
         }
+        if key == "content-length" {
+            if saw_content_length {
+                write_http_response(&mut write_half, 400, "text/plain", b"Bad request").await?;
+                return Ok(());
+            }
+            saw_content_length = true;
+            content_length = match value.parse() {
+                Ok(value) => value,
+                Err(_) => {
+                    write_http_response(&mut write_half, 400, "text/plain", b"Bad request").await?;
+                    return Ok(());
+                }
+            };
+        }
+        headers.insert(key, value);
     }
 
     if !is_authorized(&headers, &ctx.auth_token) {
         write_http_response(&mut write_half, 401, "text/plain", b"Unauthorized").await?;
         return Ok(());
     }
+    if !matches!(method, "GET" | "PUT" | "HEAD" | "DELETE") {
+        write_http_response(&mut write_half, 405, "text/plain", b"Method not allowed").await?;
+        return Ok(());
+    }
+    if method != "PUT" && content_length != 0 {
+        write_http_response(&mut write_half, 400, "text/plain", b"Bad request").await?;
+        return Ok(());
+    }
 
-    // Read body if present (capped to prevent memory exhaustion from malicious Content-Length)
-    const MAX_BODY_SIZE: usize = 512 * 1024 * 1024; // 512 MB
+    // The storage API currently requires one byte slice, so stream into a
+    // strictly bounded buffer instead of allocating Content-Length up front.
     let body = if content_length > MAX_BODY_SIZE {
         write_http_response(&mut write_half, 413, "text/plain", b"Payload too large").await?;
         return Ok(());
     } else if content_length > 0 {
-        let mut buf = vec![0u8; content_length];
-        reader.read_exact(&mut buf).await?;
+        let mut buf = Vec::with_capacity(content_length.min(64 * 1024));
+        let mut remaining = content_length;
+        let mut chunk = [0u8; 64 * 1024];
+        while remaining > 0 {
+            let count = remaining.min(chunk.len());
+            tokio::time::timeout(READ_IDLE_TIMEOUT, reader.read_exact(&mut chunk[..count]))
+                .await
+                .map_err(|_| {
+                    std::io::Error::new(std::io::ErrorKind::TimedOut, "body read idle")
+                })??;
+            buf.extend_from_slice(&chunk[..count]);
+            remaining -= count;
+        }
         buf
     } else {
         vec![]
@@ -564,7 +682,59 @@ fn is_authorized(headers: &HashMap<String, String>, expected_token: &str) -> boo
     headers
         .get("authorization")
         .and_then(|value| value.strip_prefix("Bearer "))
-        .is_some_and(|token| token == expected_token)
+        .is_some_and(|token| constant_time_eq(token.as_bytes(), expected_token.as_bytes()))
+}
+
+fn constant_time_eq(actual: &[u8], expected: &[u8]) -> bool {
+    let mut difference = actual.len() ^ expected.len();
+    let max_len = actual.len().max(expected.len());
+    for index in 0..max_len {
+        difference |= usize::from(
+            actual.get(index).copied().unwrap_or(0) ^ expected.get(index).copied().unwrap_or(0),
+        );
+    }
+    difference == 0
+}
+
+async fn read_bounded_line<R: AsyncBufRead + Unpin>(
+    reader: &mut R,
+    limit: usize,
+) -> Result<Option<String>, std::io::Error> {
+    use tokio::io::AsyncBufReadExt;
+
+    let mut bytes = Vec::with_capacity(256);
+    loop {
+        let available = tokio::time::timeout(READ_IDLE_TIMEOUT, reader.fill_buf())
+            .await
+            .map_err(|_| std::io::Error::new(std::io::ErrorKind::TimedOut, "header read idle"))??;
+        if available.is_empty() {
+            return if bytes.is_empty() {
+                Ok(None)
+            } else {
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::UnexpectedEof,
+                    "unterminated HTTP line",
+                ))
+            };
+        }
+        let consumed = available
+            .iter()
+            .position(|byte| *byte == b'\n')
+            .map_or(available.len(), |index| index + 1);
+        if bytes.len().saturating_add(consumed) > limit {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "HTTP line too large",
+            ));
+        }
+        bytes.extend_from_slice(&available[..consumed]);
+        reader.consume(consumed);
+        if bytes.last() == Some(&b'\n') {
+            return String::from_utf8(bytes).map(Some).map_err(|_| {
+                std::io::Error::new(std::io::ErrorKind::InvalidData, "HTTP line is not UTF-8")
+            });
+        }
+    }
 }
 
 async fn handle_read<W: tokio::io::AsyncWrite + Unpin>(
@@ -694,8 +864,11 @@ async fn write_http_response<W: tokio::io::AsyncWrite + Unpin>(
     let status_text = match status {
         200 => "OK",
         400 => "Bad Request",
+        401 => "Unauthorized",
         404 => "Not Found",
         405 => "Method Not Allowed",
+        413 => "Payload Too Large",
+        431 => "Request Header Fields Too Large",
         500 => "Internal Server Error",
         _ => "Unknown",
     };
@@ -763,6 +936,28 @@ mod tests {
         assert_eq!(hex_digit(b'f'), 15);
         assert_eq!(hex_digit(b'A'), 10);
         assert_eq!(hex_digit(b'F'), 15);
+    }
+
+    #[test]
+    fn test_constant_time_token_comparison() {
+        assert!(constant_time_eq(b"task-secret", b"task-secret"));
+        assert!(!constant_time_eq(b"task-secret", b"other-secret"));
+        assert!(!constant_time_eq(b"task-secret", b"task-secret-longer"));
+    }
+
+    #[tokio::test]
+    async fn test_bounded_line_rejects_oversized_input() {
+        let input = vec![b'a'; MAX_REQUEST_LINE_BYTES + 1];
+        let mut reader = tokio::io::BufReader::new(input.as_slice());
+        let result = read_bounded_line(&mut reader, MAX_REQUEST_LINE_BYTES).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_bounded_line_requires_terminator() {
+        let mut reader = tokio::io::BufReader::new(b"GET / HTTP/1.1".as_slice());
+        let result = read_bounded_line(&mut reader, MAX_REQUEST_LINE_BYTES).await;
+        assert!(result.is_err());
     }
 
     // -- Integration tests with MockFileStorage --

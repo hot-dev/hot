@@ -1372,7 +1372,7 @@ pub fn markdown_to_html(markdown: &str) -> String {
                     };
                     html_output.push_str(&format!(
                         "<pre><code class=\"{}\">{}</code></pre>\n",
-                        lang_class,
+                        html_escape(&lang_class),
                         html_escape(&code_content)
                     ));
                 }
@@ -1390,7 +1390,20 @@ pub fn markdown_to_html(markdown: &str) -> String {
         }
     }
 
-    html_output
+    let mut sanitizer = ammonia::Builder::default();
+    sanitizer
+        .add_tag_attributes("a", &["class", "target"])
+        .add_tag_attributes("code", &["class"])
+        .add_tag_attributes("div", &["class"])
+        .add_tag_attributes("pre", &["class"])
+        .add_tag_attributes("span", &["class"])
+        .add_tag_attributes("h1", &["id"])
+        .add_tag_attributes("h2", &["id"])
+        .add_tag_attributes("h3", &["id"])
+        .add_tag_attributes("h4", &["id"])
+        .add_tag_attributes("h5", &["id"])
+        .add_tag_attributes("h6", &["id"]);
+    sanitizer.clean(&html_output).to_string()
 }
 
 fn looks_like_hot_code_block(code: &str) -> bool {
@@ -1571,6 +1584,26 @@ chat-with-tools(
 
         assert!(html.contains(r#"class="language-plaintext""#));
         assert!(!html.contains(r#"class="language-hot""#));
+    }
+
+    #[test]
+    fn markdown_sanitizer_removes_active_content_and_unsafe_links() {
+        let html = markdown_to_html(
+            r#"
+<script>alert(1)</script>
+<img src=x onerror=alert(2)>
+[unsafe](javascript:alert(3))
+
+| A | B |
+|---|---|
+| 1 | 2 |
+"#,
+        );
+
+        assert!(!html.contains("<script"));
+        assert!(!html.contains("onerror"));
+        assert!(!html.contains("href=\"javascript:"));
+        assert!(html.contains("<table>"));
     }
 
     #[test]

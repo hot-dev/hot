@@ -152,21 +152,13 @@ pub async fn subscribe_to_stream(
     // Verify the stream exists and belongs to this environment
     let _stream = get_stream_for_env(&db, &stream_id, env_id).await?;
 
-    // Permission check for scoped credentials (sessions and service keys)
-    if !auth.is_api_key() {
-        let resource = format!("stream:{}", stream_id);
-        if !auth.has_permission(&resource, actions::READ)
-            && !auth.has_permission("stream:*", actions::READ)
-        {
-            return Err((
-                StatusCode::FORBIDDEN,
-                Json(ApiErrorResponse::new(
-                    "forbidden",
-                    "Credential does not have read access to this stream",
-                )),
-            ));
-        }
-    }
+    let resource = format!("stream:{}", stream_id);
+    super::require_permission(
+        &auth,
+        &resource,
+        actions::READ,
+        "Credential does not have read access to this stream",
+    )?;
 
     // Optional: resolve project filter to project_id
     let project_filter: Option<Uuid> = if let Some(ref project_name_or_id) = params.project {
@@ -569,6 +561,7 @@ pub async fn subscribe_with_event(
 > {
     let blob_store = blob_store_from_ext(blob_store);
     let env_id = auth.env_id();
+    super::events::require_external_event_type(&req.event_type)?;
 
     // Step 1: Determine stream_id - use provided or create new
     let stream_id = req.stream_id.unwrap_or_else(Uuid::now_v7);
@@ -584,33 +577,20 @@ pub async fn subscribe_with_event(
         }
     }
 
-    // Permission check for scoped credentials (sessions and service keys)
-    if !auth.is_api_key() {
-        let stream_resource = format!("stream:{}", stream_id);
-        if !auth.has_permission(&stream_resource, actions::READ)
-            && !auth.has_permission("stream:*", actions::READ)
-        {
-            return Err((
-                StatusCode::FORBIDDEN,
-                Json(ApiErrorResponse::new(
-                    "forbidden",
-                    "Credential does not have read access to this stream",
-                )),
-            ));
-        }
-        // Also check event create permission since this endpoint publishes an event
-        if !auth.has_permission("event:*", actions::CREATE)
-            && !auth.has_permission(&format!("event:{}", req.event_type), actions::CREATE)
-        {
-            return Err((
-                StatusCode::FORBIDDEN,
-                Json(ApiErrorResponse::new(
-                    "forbidden",
-                    "Credential does not have create permission for events",
-                )),
-            ));
-        }
-    }
+    let stream_resource = format!("stream:{}", stream_id);
+    super::require_permission(
+        &auth,
+        &stream_resource,
+        actions::READ,
+        "Credential does not have read access to this stream",
+    )?;
+    let event_resource = format!("event:{}", req.event_type);
+    super::require_permission(
+        &auth,
+        &event_resource,
+        actions::CREATE,
+        "Credential does not have create permission for events",
+    )?;
 
     // Step 3: Create the stream record in the database BEFORE subscribing
     // This ensures the stream exists for the subscription and avoids race conditions

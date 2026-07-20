@@ -527,18 +527,27 @@ pub fn get_hotlib_map() -> &'static HotLibMap {
         // HTTP functions
         map.insert(
             "::hot::http/request".to_string(),
-            HotLibFn::LibFn(http::request),
+            HotLibFn::VmAwareFn(http::request_vm),
         );
-        map.insert("::hot::http/get".to_string(), HotLibFn::LibFn(http::get));
-        map.insert("::hot::http/post".to_string(), HotLibFn::LibFn(http::post));
-        map.insert("::hot::http/put".to_string(), HotLibFn::LibFn(http::put));
+        map.insert(
+            "::hot::http/get".to_string(),
+            HotLibFn::VmAwareFn(http::get_vm),
+        );
+        map.insert(
+            "::hot::http/post".to_string(),
+            HotLibFn::VmAwareFn(http::post_vm),
+        );
+        map.insert(
+            "::hot::http/put".to_string(),
+            HotLibFn::VmAwareFn(http::put_vm),
+        );
         map.insert(
             "::hot::http/delete".to_string(),
-            HotLibFn::LibFn(http::delete),
+            HotLibFn::VmAwareFn(http::delete_vm),
         );
         map.insert(
             "::hot::http/request-stream".to_string(),
-            HotLibFn::LibFn(http::request_stream),
+            HotLibFn::VmAwareFn(http::request_stream_vm),
         );
 
         // Iterator functions
@@ -1771,12 +1780,15 @@ pub fn get_hotlib_map() -> &'static HotLibMap {
         // TCP client functions
         map.insert(
             "::hot::tcp/connect".to_string(),
-            HotLibFn::LibFn(tcp::connect),
+            HotLibFn::VmAwareFn(tcp::connect_vm),
         );
-        map.insert("::hot::tcp/read".to_string(), HotLibFn::LibFn(tcp::read));
+        map.insert(
+            "::hot::tcp/read".to_string(),
+            HotLibFn::VmAwareFn(tcp::read_vm),
+        );
         map.insert(
             "::hot::tcp/read-exact".to_string(),
-            HotLibFn::LibFn(tcp::read_exact),
+            HotLibFn::VmAwareFn(tcp::read_exact_vm),
         );
         map.insert("::hot::tcp/write".to_string(), HotLibFn::LibFn(tcp::write));
         map.insert("::hot::tcp/close".to_string(), HotLibFn::LibFn(tcp::close));

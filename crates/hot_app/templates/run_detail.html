@@ -977,7 +977,11 @@ async function fetchAndShowFullValue(varId, type) {
         // Pass the formatted_value to the display function
         showInValuePanel(value, type, data, data.formatted_value);
     } catch (error) {
-        content.innerHTML = `<div class="text-red-500 dark:text-red-500">Error loading data: ${error.message}</div>`;
+        content.replaceChildren();
+        const errorMessage = document.createElement('div');
+        errorMessage.className = 'text-red-500 dark:text-red-500';
+        errorMessage.textContent = `Error loading data: ${error.message}`;
+        content.appendChild(errorMessage);
         typeIndicator.textContent = 'Error';
         typeIndicator.title = `Error: ${error.message}`;
     }
@@ -1167,7 +1171,11 @@ function showInValuePanel(data, type, varData = null, formattedValue = null) {
         displayText = String(data);
     }
 
-    content.innerHTML = `<pre class="whitespace-pre-wrap text-gray-900 dark:text-gray-100">${displayText}</pre>`;
+    content.replaceChildren();
+    const pre = document.createElement('pre');
+    pre.className = 'whitespace-pre-wrap text-gray-900 dark:text-gray-100';
+    pre.textContent = displayText;
+    content.appendChild(pre);
 
     typeIndicator.textContent = variableInfo;
     typeIndicator.title = variableInfo; // For truncated text tooltip

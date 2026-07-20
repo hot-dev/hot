@@ -214,6 +214,43 @@ impl ApiKey {
         Ok(rows)
     }
 
+    /// Get the most recently created active API key for an environment.
+    pub async fn get_active_api_key_by_env(
+        db: &crate::db::DatabasePool,
+        env_id: &Uuid,
+    ) -> Result<Option<ApiKey>, ApiKeyError> {
+        match db {
+            crate::db::DatabasePool::Sqlite(db) => Ok(sqlx::query_as::<_, ApiKey>(
+                r#"
+                SELECT api_key_id, env_id, description, key_data, active,
+                       created_by_user_id, created_at, updated_at, updated_by_user_id,
+                       active_toggle_at, active_toggle_by_user_id, permissions
+                FROM api_key
+                WHERE env_id = ? AND active = 1
+                ORDER BY created_at DESC
+                LIMIT 1
+                "#,
+            )
+            .bind(env_id)
+            .fetch_optional(db)
+            .await?),
+            crate::db::DatabasePool::Postgres(db) => Ok(sqlx::query_as::<_, ApiKey>(
+                r#"
+                SELECT api_key_id, env_id, description, key_data, active,
+                       created_by_user_id, created_at, updated_at, updated_by_user_id,
+                       active_toggle_at, active_toggle_by_user_id, permissions
+                FROM api_key
+                WHERE env_id = $1 AND active = TRUE
+                ORDER BY created_at DESC
+                LIMIT 1
+                "#,
+            )
+            .bind(env_id)
+            .fetch_optional(db)
+            .await?),
+        }
+    }
+
     /// Get API keys by organization (via environments)
     pub async fn get_api_keys_by_org(
         db: &crate::db::DatabasePool,
