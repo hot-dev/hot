@@ -3843,12 +3843,21 @@ mod tests {
         url: &str,
         auth: Option<&(AuthContext, ApiKey)>,
     ) -> Val {
+        test_request_val_with_client_ip(headers, url, None, auth)
+    }
+
+    fn test_request_val_with_client_ip(
+        headers: &HeaderMap,
+        url: &str,
+        client_ip: Option<&ClientIp>,
+        auth: Option<&(AuthContext, ApiKey)>,
+    ) -> Val {
         build_request_val(
             "POST",
             url,
             None,
             headers,
-            None,
+            client_ip,
             &std::collections::HashMap::new(),
             None,
             auth,
@@ -3899,10 +3908,15 @@ mod tests {
         let auth = (auth_ctx, api_key);
 
         let mut headers = HeaderMap::new();
-        headers.insert("x-forwarded-for", "1.2.3.4".parse().unwrap());
         headers.insert("content-type", "application/json".parse().unwrap());
+        let client_ip = ClientIp("1.2.3.4".to_string());
 
-        let val = test_request_val(&headers, "/mcp/myorg/svc", Some(&auth));
+        let val = test_request_val_with_client_ip(
+            &headers,
+            "/mcp/myorg/svc",
+            Some(&client_ip),
+            Some(&auth),
+        );
         if let Val::Map(ref map) = val {
             assert_eq!(map.get(&Val::from("method")), Some(&Val::from("POST")));
             assert_eq!(
@@ -3936,27 +3950,25 @@ mod tests {
     }
 
     #[test]
-    fn test_build_request_val_ip_from_x_real_ip() {
-        let mut headers = HeaderMap::new();
-        headers.insert("x-real-ip", "10.0.0.1".parse().unwrap());
-
-        let val = test_request_val(&headers, "/mcp/o/s", None);
+    fn test_build_request_val_uses_resolved_client_ip() {
+        let headers = HeaderMap::new();
+        let client_ip = ClientIp("10.0.0.1".to_string());
+        let val = test_request_val_with_client_ip(&headers, "/mcp/o/s", Some(&client_ip), None);
         if let Val::Map(ref map) = val {
             assert_eq!(map.get(&Val::from("ip")), Some(&Val::from("10.0.0.1")));
         }
     }
 
     #[test]
-    fn test_build_request_val_ip_first_from_forwarded_for_chain() {
+    fn test_build_request_val_does_not_trust_raw_forwarding_headers() {
         let mut headers = HeaderMap::new();
         headers.insert("x-forwarded-for", "9.8.7.6, 10.0.0.1".parse().unwrap());
 
         let val = test_request_val(&headers, "/mcp/o/s", None);
         if let Val::Map(ref map) = val {
-            assert_eq!(
-                map.get(&Val::from("ip")),
-                Some(&Val::from("9.8.7.6")),
-                "Should use first IP from x-forwarded-for chain"
+            assert!(
+                map.get(&Val::from("ip")).is_none(),
+                "Raw forwarding headers must be resolved by client IP middleware"
             );
         }
     }
