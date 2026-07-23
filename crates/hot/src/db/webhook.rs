@@ -9,6 +9,8 @@ pub enum WebhookError {
     Database(#[from] sqlx::Error),
     #[error("Webhook not found")]
     NotFound,
+    #[error("Invalid webhook token")]
+    InvalidToken,
     #[error("Serialization error: {0}")]
     SerializationError(String),
 }
@@ -151,8 +153,9 @@ impl Webhook {
         service: &str,
         path: &str,
         method: &str,
+        token: &str,
     ) -> Result<Webhook, WebhookError> {
-        match db {
+        let endpoints = match db {
             crate::db::DatabasePool::Postgres(pg_pool) => {
                 Self::get_by_env_service_path_method_postgres(
                     pg_pool, env_id, service, path, method,
@@ -169,7 +172,11 @@ impl Webhook {
                 )
                 .await
             }
+        }?;
+        if endpoints.is_empty() {
+            return Err(WebhookError::NotFound);
         }
+        select_webhook_by_token(endpoints, token).ok_or(WebhookError::InvalidToken)
     }
 
     async fn get_by_env_service_path_method_sqlite(
@@ -178,8 +185,8 @@ impl Webhook {
         service: &str,
         path: &str,
         method: &str,
-    ) -> Result<Webhook, WebhookError> {
-        let endpoint = sqlx::query_as::<_, Webhook>(
+    ) -> Result<Vec<Webhook>, WebhookError> {
+        let endpoints = sqlx::query_as::<_, Webhook>(
             r#"
             SELECT we.webhook_id, we.build_id, we.service, we.path, we.method,
                    we.ns, we.var, we.name, we.description, we.meta,
@@ -194,17 +201,15 @@ impl Webhook {
               AND we.service = ?
               AND we.path = ?
               AND we.method = ?
-            LIMIT 1
             "#,
         )
         .bind(env_id)
         .bind(service)
         .bind(path)
         .bind(method)
-        .fetch_optional(db)
-        .await?
-        .ok_or(WebhookError::NotFound)?;
-        Ok(endpoint)
+        .fetch_all(db)
+        .await?;
+        Ok(endpoints)
     }
 
     async fn get_by_env_service_path_method_postgres(
@@ -213,8 +218,8 @@ impl Webhook {
         service: &str,
         path: &str,
         method: &str,
-    ) -> Result<Webhook, WebhookError> {
-        let endpoint = sqlx::query_as::<_, Webhook>(
+    ) -> Result<Vec<Webhook>, WebhookError> {
+        let endpoints = sqlx::query_as::<_, Webhook>(
             r#"
             SELECT we.webhook_id, we.build_id, we.service, we.path, we.method,
                    we.ns, we.var, we.name, we.description, we.meta,
@@ -229,17 +234,15 @@ impl Webhook {
               AND we.service = $2
               AND we.path = $3
               AND we.method = $4
-            LIMIT 1
             "#,
         )
         .bind(env_id)
         .bind(service)
         .bind(path)
         .bind(method)
-        .fetch_optional(db)
-        .await?
-        .ok_or(WebhookError::NotFound)?;
-        Ok(endpoint)
+        .fetch_all(db)
+        .await?;
+        Ok(endpoints)
     }
 
     /// Get webhooks by environment and service
@@ -961,7 +964,17 @@ pub fn uuid_short(uuid: &Uuid) -> String {
 
 /// Validate that a token string matches a webhook's short ID.
 pub fn validate_token(webhook_id: &Uuid, token: &str) -> bool {
-    uuid_short(webhook_id) == token
+    aws_lc_rs::constant_time::verify_slices_are_equal(
+        uuid_short(webhook_id).as_bytes(),
+        token.as_bytes(),
+    )
+    .is_ok()
+}
+
+fn select_webhook_by_token(endpoints: Vec<Webhook>, token: &str) -> Option<Webhook> {
+    endpoints
+        .into_iter()
+        .find(|endpoint| validate_token(&endpoint.webhook_id, token))
 }
 
 #[cfg(test)]
@@ -1034,5 +1047,21 @@ mod tests {
             "webhook": {"service": "test", "path": "/test", "auth": "required"}
         })));
         assert_eq!(wh.auth_mode(), "required");
+    }
+
+    #[test]
+    fn duplicate_functions_select_token_bound_build() {
+        let mut first = make_webhook(None);
+        first.webhook_id = Uuid::now_v7();
+        first.build_id = Uuid::now_v7();
+        let mut second = make_webhook(None);
+        second.webhook_id = Uuid::now_v7();
+        second.build_id = Uuid::now_v7();
+        let expected_build = second.build_id;
+        let token = uuid_short(&second.webhook_id);
+
+        let selected =
+            select_webhook_by_token(vec![first, second], &token).expect("matching endpoint");
+        assert_eq!(selected.build_id, expected_build);
     }
 }

@@ -1522,13 +1522,61 @@ impl BuildFetcher for LocalBuildFetcher {
 
 /// Load event handlers and schedules from a build's manifest and insert them into the database
 /// This should be called when uploading a build to ensure the scheduler and workers have the handlers
+pub async fn load_build_manifest_data_from_path(
+    db: &DatabasePool,
+    build_id: &Uuid,
+    env_id: &Uuid,
+    build_path: &std::path::Path,
+) -> Result<(), String> {
+    use std::io::{Read, Write};
+    use zip::write::FileOptions;
+    use zip::{ZipArchive, ZipWriter};
+
+    // Manifest parsing is intentionally bounded even when the uploaded bundle
+    // is much larger. `load_build_manifest_data` only consumes manifest.hot,
+    // so pass it a tiny in-memory zip instead of re-buffering the full bundle.
+    const MAX_STAGED_MANIFEST_BYTES: u64 = 8 * 1024 * 1024;
+    let file = std::fs::File::open(build_path)
+        .map_err(|e| format!("Failed to open staged build zip: {}", e))?;
+    let mut archive =
+        ZipArchive::new(file).map_err(|e| format!("Failed to read staged build zip: {}", e))?;
+    let manifest_file = archive
+        .by_name("manifest.hot")
+        .map_err(|_| "Build does not contain manifest.hot".to_string())?;
+    let mut manifest = Vec::new();
+    manifest_file
+        .take(MAX_STAGED_MANIFEST_BYTES + 1)
+        .read_to_end(&mut manifest)
+        .map_err(|e| format!("Failed to read manifest.hot: {}", e))?;
+    if manifest.len() as u64 > MAX_STAGED_MANIFEST_BYTES {
+        return Err(format!(
+            "Manifest exceeds the {} byte limit",
+            MAX_STAGED_MANIFEST_BYTES
+        ));
+    }
+
+    let cursor = std::io::Cursor::new(Vec::with_capacity(manifest.len() + 256));
+    let mut zip = ZipWriter::new(cursor);
+    zip.start_file("manifest.hot", FileOptions::<()>::default())
+        .map_err(|e| format!("Failed to stage manifest: {}", e))?;
+    zip.write_all(&manifest)
+        .map_err(|e| format!("Failed to stage manifest: {}", e))?;
+    let manifest_zip = zip
+        .finish()
+        .map_err(|e| format!("Failed to finish staged manifest: {}", e))?
+        .into_inner();
+
+    load_build_manifest_data(db, build_id, env_id, &manifest_zip).await
+}
+
+/// Load event handlers and schedules from an in-memory build zip.
 pub async fn load_build_manifest_data(
     db: &DatabasePool,
     build_id: &Uuid,
     env_id: &Uuid,
     build_data: &[u8],
 ) -> Result<(), String> {
-    use std::io::{Cursor, Read};
+    use std::io::Cursor;
     use zip::ZipArchive;
 
     tracing::info!(
@@ -1596,25 +1644,11 @@ pub async fn load_build_manifest_data(
         ZipArchive::new(cursor).map_err(|e| format!("Failed to read build zip: {}", e))?;
 
     // Read the manifest.hot file
-    let mut manifest_file = archive
+    let manifest_file = archive
         .by_name("manifest.hot")
         .map_err(|_| "Build does not contain manifest.hot".to_string())?;
 
-    let mut manifest_content = String::new();
-    manifest_file
-        .read_to_string(&mut manifest_content)
-        .map_err(|e| format!("Failed to read manifest.hot: {}", e))?;
-
-    // Parse the manifest directly as a Val expression
-    // The manifest is Hot code that evaluates to a map
-    let manifest_result = crate::lang::engine::Engine::eval_code_pipeline_with_deps(
-        &manifest_content,
-        &[],  // No source paths needed for manifest
-        &[],  // No test paths
-        None, // No config needed
-        None, // No project name
-    )
-    .map_err(|e| format!("Failed to evaluate manifest: {}", e))?;
+    let manifest_result = crate::bundle::read_manifest_data(manifest_file)?;
 
     let mut total_handlers = 0;
     let mut total_schedules = 0;
@@ -2009,30 +2043,18 @@ pub struct CtxRequirementEntry {
 pub fn extract_ctx_requirements_detailed_from_build(
     build_data: &[u8],
 ) -> Result<Vec<CtxRequirementEntry>, String> {
-    use std::io::{Cursor, Read};
+    use std::io::Cursor;
     use zip::ZipArchive;
 
     let cursor = Cursor::new(build_data);
     let mut archive =
         ZipArchive::new(cursor).map_err(|e| format!("Failed to read build zip: {}", e))?;
 
-    let mut manifest_file = archive
+    let manifest_file = archive
         .by_name("manifest.hot")
         .map_err(|_| "Build does not contain manifest.hot".to_string())?;
 
-    let mut manifest_content = String::new();
-    manifest_file
-        .read_to_string(&mut manifest_content)
-        .map_err(|e| format!("Failed to read manifest.hot: {}", e))?;
-
-    let manifest_result = crate::lang::engine::Engine::eval_code_pipeline_with_deps(
-        &manifest_content,
-        &[],
-        &[],
-        None,
-        None,
-    )
-    .map_err(|e| format!("Failed to evaluate manifest: {}", e))?;
+    let manifest_result = crate::bundle::read_manifest_data(manifest_file)?;
 
     let mut entries: Vec<CtxRequirementEntry> = Vec::new();
     let mut seen_keys: AHashSet<String> = AHashSet::new();
@@ -2103,30 +2125,18 @@ pub fn extract_ctx_requirements_detailed_from_build(
 pub fn extract_box_requirements_from_build(
     build_data: &[u8],
 ) -> Result<Option<(Option<String>, bool)>, String> {
-    use std::io::{Cursor, Read};
+    use std::io::Cursor;
     use zip::ZipArchive;
 
     let cursor = Cursor::new(build_data);
     let mut archive =
         ZipArchive::new(cursor).map_err(|e| format!("Failed to read build zip: {}", e))?;
 
-    let mut manifest_file = archive
+    let manifest_file = archive
         .by_name("manifest.hot")
         .map_err(|_| "Build does not contain manifest.hot".to_string())?;
 
-    let mut manifest_content = String::new();
-    manifest_file
-        .read_to_string(&mut manifest_content)
-        .map_err(|e| format!("Failed to read manifest.hot: {}", e))?;
-
-    let manifest_result = crate::lang::engine::Engine::eval_code_pipeline_with_deps(
-        &manifest_content,
-        &[],
-        &[],
-        None,
-        None,
-    )
-    .map_err(|e| format!("Failed to evaluate manifest: {}", e))?;
+    let manifest_result = crate::bundle::read_manifest_data(manifest_file)?;
 
     // Structure: { "hot.bundle.{name}": { "box_requirements": { min_size: "...", network: true } } }
     if let crate::val::Val::Map(map) = manifest_result {
@@ -2174,28 +2184,17 @@ pub fn extract_box_requirements_from_build(
 fn extract_scheduled_functions_from_build(
     build_data: &[u8],
 ) -> Result<crate::lang::compiler::ScheduledFunctions, String> {
-    use std::io::{Cursor, Read};
+    use std::io::Cursor;
     use zip::ZipArchive;
 
     let cursor = Cursor::new(build_data);
     let mut archive =
         ZipArchive::new(cursor).map_err(|e| format!("Failed to read build zip: {}", e))?;
-    let mut manifest_file = archive
+    let manifest_file = archive
         .by_name("manifest.hot")
         .map_err(|_| "Build does not contain manifest.hot".to_string())?;
-    let mut manifest_content = String::new();
-    manifest_file
-        .read_to_string(&mut manifest_content)
-        .map_err(|e| format!("Failed to read manifest.hot: {}", e))?;
 
-    let manifest_result = crate::lang::engine::Engine::eval_code_pipeline_with_deps(
-        &manifest_content,
-        &[],
-        &[],
-        None,
-        None,
-    )
-    .map_err(|e| format!("Failed to evaluate manifest: {}", e))?;
+    let manifest_result = crate::bundle::read_manifest_data(manifest_file)?;
 
     let mut scheduled_functions = crate::lang::compiler::ScheduledFunctions::new();
     if let crate::val::Val::Map(map) = manifest_result {

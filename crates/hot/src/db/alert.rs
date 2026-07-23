@@ -231,6 +231,19 @@ impl AlertDestination {
         }
     }
 
+    /// Get a destination by ID within an organization.
+    pub async fn get_by_id_for_org(
+        db: &crate::db::DatabasePool,
+        destination_id: &Uuid,
+        org_id: &Uuid,
+    ) -> Result<AlertDestination, AlertError> {
+        let destination = Self::get_by_id(db, destination_id).await?;
+        if destination.org_id != *org_id {
+            return Err(AlertError::NotFound);
+        }
+        Ok(destination)
+    }
+
     /// Create a new destination
     pub async fn create(
         db: &crate::db::DatabasePool,
@@ -637,6 +650,19 @@ impl AlertChannel {
         }
     }
 
+    /// Get a channel available to an organization (system-wide or org-owned).
+    pub async fn get_by_id_for_org(
+        db: &crate::db::DatabasePool,
+        channel_id: &Uuid,
+        org_id: &Uuid,
+    ) -> Result<AlertChannel, AlertError> {
+        let channel = Self::get_by_id(db, channel_id).await?;
+        if channel.org_id.is_some_and(|owner| owner != *org_id) {
+            return Err(AlertError::NotFound);
+        }
+        Ok(channel)
+    }
+
     /// Validate a regex pattern
     pub fn validate_pattern(pattern: &str) -> Result<(), AlertError> {
         regex::Regex::new(pattern)
@@ -865,6 +891,19 @@ impl AlertSubscription {
             .await?
             .ok_or(AlertError::NotFound),
         }
+    }
+
+    /// Get a subscription by ID within an organization.
+    pub async fn get_by_id_for_org(
+        db: &crate::db::DatabasePool,
+        alert_subscription_id: &Uuid,
+        org_id: &Uuid,
+    ) -> Result<AlertSubscription, AlertError> {
+        let subscription = Self::get_by_id(db, alert_subscription_id).await?;
+        if subscription.org_id != *org_id {
+            return Err(AlertError::NotFound);
+        }
+        Ok(subscription)
     }
 
     /// Create a new subscription with channels and destinations
@@ -1380,6 +1419,52 @@ pub struct AlertDelivery {
     pub created_at: DateTime<Utc>,
 }
 
+const MAX_PERSISTED_DELIVERY_ERROR_CHARS: usize = 512;
+
+/// Remove request/response secrets before a delivery error reaches alert history.
+fn sanitize_delivery_error(error: &str) -> String {
+    static HEADER_RE: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+        regex::Regex::new(
+            r"(?im)^(authorization|proxy-authorization|cookie|set-cookie|x-api-key)\s*:\s*.*$",
+        )
+        .expect("valid alert header redaction regex")
+    });
+    static URL_RE: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+        regex::Regex::new(r#"(?i)\bhttps?://[^\s"'<>]+"#).expect("valid alert URL redaction regex")
+    });
+    static QUERY_SECRET_RE: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+        regex::Regex::new(
+            r"(?i)\b(token|api[_-]?key|secret|password|authorization|auth)=([^&\s,;]+)",
+        )
+        .expect("valid alert query redaction regex")
+    });
+    static JSON_SECRET_RE: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+        regex::Regex::new(
+            r#"(?i)("(?:token|api[_-]?key|secret|password|authorization|auth)"\s*:\s*)"[^"]*""#,
+        )
+        .expect("valid alert JSON redaction regex")
+    });
+    static RESPONSE_RE: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+        regex::Regex::new(r"(?is)(response(?:\s+body)?\s*[:=]).*$")
+            .expect("valid alert response redaction regex")
+    });
+
+    let sanitized = HEADER_RE.replace_all(error, "$1: [REDACTED]");
+    let sanitized = URL_RE.replace_all(&sanitized, "[REDACTED URL]");
+    let sanitized = QUERY_SECRET_RE.replace_all(&sanitized, "$1=[REDACTED]");
+    let sanitized = JSON_SECRET_RE.replace_all(&sanitized, "$1\"[REDACTED]\"");
+    let sanitized = RESPONSE_RE.replace_all(&sanitized, "$1 [REDACTED]");
+
+    let mut result: String = sanitized
+        .chars()
+        .take(MAX_PERSISTED_DELIVERY_ERROR_CHARS)
+        .collect();
+    if sanitized.chars().count() > MAX_PERSISTED_DELIVERY_ERROR_CHARS {
+        result.push('…');
+    }
+    result
+}
+
 impl AlertDelivery {
     /// Get delivery status enum
     pub fn status(&self) -> Option<DeliveryStatus> {
@@ -1488,6 +1573,7 @@ impl AlertDelivery {
         } else {
             DeliveryStatus::Failed
         };
+        let error = sanitize_delivery_error(error);
 
         match db {
             crate::db::DatabasePool::Postgres(pool) => {
@@ -1495,7 +1581,7 @@ impl AlertDelivery {
                     "UPDATE alert_delivery SET status_id = $1, last_error = $2, next_retry_at = $3, attempts = attempts + 1 WHERE alert_delivery_id = $4",
                 )
                 .bind(status.as_i16())
-                .bind(error)
+                .bind(&error)
                 .bind(next_retry_at)
                 .bind(delivery_id)
                 .execute(pool)
@@ -1506,7 +1592,7 @@ impl AlertDelivery {
                     "UPDATE alert_delivery SET status_id = ?, last_error = ?, next_retry_at = ?, attempts = attempts + 1 WHERE alert_delivery_id = ?",
                 )
                 .bind(status.as_i16())
-                .bind(error)
+                .bind(&error)
                 .bind(next_retry_at)
                 .bind(delivery_id)
                 .execute(pool)
@@ -1577,21 +1663,31 @@ impl AlertDelivery {
     ) -> Result<Vec<AlertDelivery>, AlertError> {
         match db {
             crate::db::DatabasePool::Postgres(pool) => {
-                let deliveries = sqlx::query_as::<_, AlertDelivery>(
+                let mut deliveries = sqlx::query_as::<_, AlertDelivery>(
                     "SELECT * FROM alert_delivery WHERE alert_id = $1 ORDER BY created_at ASC",
                 )
                 .bind(alert_id)
                 .fetch_all(pool)
                 .await?;
+                for delivery in &mut deliveries {
+                    if let Some(error) = delivery.last_error.take() {
+                        delivery.last_error = Some(sanitize_delivery_error(&error));
+                    }
+                }
                 Ok(deliveries)
             }
             crate::db::DatabasePool::Sqlite(pool) => {
-                let deliveries = sqlx::query_as::<_, AlertDelivery>(
+                let mut deliveries = sqlx::query_as::<_, AlertDelivery>(
                     "SELECT * FROM alert_delivery WHERE alert_id = ? ORDER BY created_at ASC",
                 )
                 .bind(alert_id)
                 .fetch_all(pool)
                 .await?;
+                for delivery in &mut deliveries {
+                    if let Some(error) = delivery.last_error.take() {
+                        delivery.last_error = Some(sanitize_delivery_error(&error));
+                    }
+                }
                 Ok(deliveries)
             }
         }
@@ -1785,6 +1881,7 @@ async fn create_deliveries_for_alert(
             let query = "SELECT DISTINCT s.alert_subscription_id, sd.destination_id, d.destination_type_id, d.config
                  FROM alert_subscription s
                  JOIN alert_subscription_channel sc ON s.alert_subscription_id = sc.subscription_id
+                 JOIN alert_channel c ON sc.channel_id = c.alert_channel_id
                  JOIN alert_subscription_destination sd ON s.alert_subscription_id = sd.subscription_id
                  JOIN alert_destination d ON sd.destination_id = d.alert_destination_id
                  WHERE s.enabled = true
@@ -1793,6 +1890,8 @@ async fn create_deliveries_for_alert(
                  AND d.enabled = true
                  AND d.verified = true
                  AND s.org_id = $1
+                 AND d.org_id = s.org_id
+                 AND (c.org_id IS NULL OR c.org_id = s.org_id)
                  AND (s.env_id IS NULL OR s.env_id = $2)
                  AND sc.channel_id = ANY($3)".to_string();
             sqlx::query_as(sqlx::AssertSqlSafe(query.as_str()))
@@ -1809,6 +1908,7 @@ async fn create_deliveries_for_alert(
                 "SELECT DISTINCT s.alert_subscription_id, sd.destination_id, d.destination_type_id, d.config
                  FROM alert_subscription s
                  JOIN alert_subscription_channel sc ON s.alert_subscription_id = sc.subscription_id
+                 JOIN alert_channel c ON sc.channel_id = c.alert_channel_id
                  JOIN alert_subscription_destination sd ON s.alert_subscription_id = sd.subscription_id
                  JOIN alert_destination d ON sd.destination_id = d.alert_destination_id
                  WHERE s.enabled = 1
@@ -1817,6 +1917,8 @@ async fn create_deliveries_for_alert(
                  AND d.enabled = 1
                  AND d.verified = 1
                  AND s.org_id = ?
+                 AND d.org_id = s.org_id
+                 AND (c.org_id IS NULL OR c.org_id = s.org_id)
                  AND (s.env_id IS NULL OR s.env_id = ?)
                  AND sc.channel_id IN ({})",
                 placeholders.join(", ")
@@ -1943,6 +2045,17 @@ async fn create_deliveries_for_alert(
                     }
                 }
                 EmailTarget::Team { team_id } => {
+                    if crate::db::team::Team::get_team_by_org(db, team_id, org_id)
+                        .await
+                        .is_err()
+                    {
+                        tracing::warn!(
+                            "Skipping foreign team {} in alert destination {}",
+                            team_id,
+                            destination_id
+                        );
+                        continue;
+                    }
                     // Resolve all active team members who haven't opted out
                     match crate::db::user::User::get_alert_recipients_by_team(db, team_id).await {
                         Ok(recipients) => {
@@ -1999,6 +2112,17 @@ async fn create_deliveries_for_alert(
                     }
                 }
                 EmailTarget::User { user_id } => {
+                    if crate::db::org::OrgUser::get_org_user(db, org_id, user_id)
+                        .await
+                        .is_err()
+                    {
+                        tracing::warn!(
+                            "Skipping foreign user {} in alert destination {}",
+                            user_id,
+                            destination_id
+                        );
+                        continue;
+                    }
                     // Check if user has opted out
                     match crate::db::user::User::get_user(db, user_id).await {
                         Ok(user) if user.active && user.alerts_enabled() => {
@@ -2191,7 +2315,15 @@ impl DeliveryInfo {
         delivery: AlertDelivery,
     ) -> Result<Self, AlertError> {
         let alert = Alert::get_by_id(db, &delivery.alert_id).await?;
-        let destination = AlertDestination::get_by_id(db, &delivery.destination_id).await?;
+        let destination =
+            AlertDestination::get_by_id_for_org(db, &delivery.destination_id, &alert.org_id)
+                .await?;
+        AlertSubscription::get_by_id_for_org(db, &delivery.subscription_id, &alert.org_id).await?;
+        if let Some(user_id) = delivery.resolved_user_id {
+            crate::db::org::OrgUser::get_org_user(db, &alert.org_id, &user_id)
+                .await
+                .map_err(|_| AlertError::NotFound)?;
+        }
 
         Ok(Self {
             delivery,
@@ -2208,6 +2340,7 @@ impl DeliveryInfo {
 pub async fn process_single_alert_delivery(
     db: &crate::db::DatabasePool,
     http_client: &reqwest::Client,
+    destination_policy: crate::outbound::DestinationPolicy,
     email_sender: Option<&dyn AlertEmailSender>,
     email_config: &crate::email::EmailConfig,
     alert_delivery_id: &Uuid,
@@ -2219,7 +2352,15 @@ pub async fn process_single_alert_delivery(
     let info = DeliveryInfo::fetch(db, delivery).await?;
 
     // Process the delivery
-    let result = process_delivery(&info, http_client, email_sender, email_config, db).await;
+    let result = process_delivery(
+        &info,
+        http_client,
+        destination_policy,
+        email_sender,
+        email_config,
+        db,
+    )
+    .await;
 
     // Update delivery status
     match result {
@@ -2250,6 +2391,7 @@ pub async fn process_single_alert_delivery(
 pub async fn process_pending_deliveries(
     db: &crate::db::DatabasePool,
     http_client: &reqwest::Client,
+    destination_policy: crate::outbound::DestinationPolicy,
     email_sender: Option<&dyn AlertEmailSender>,
     email_config: &crate::email::EmailConfig,
     batch_size: i64,
@@ -2280,7 +2422,15 @@ pub async fn process_pending_deliveries(
         };
 
         // Process the delivery
-        let result = process_delivery(&info, http_client, email_sender, email_config, db).await;
+        let result = process_delivery(
+            &info,
+            http_client,
+            destination_policy,
+            email_sender,
+            email_config,
+            db,
+        )
+        .await;
 
         // Update delivery status
         match result {
@@ -2333,6 +2483,7 @@ pub trait AlertEmailSender: Send + Sync {
 async fn process_delivery(
     info: &DeliveryInfo,
     http_client: &reqwest::Client,
+    destination_policy: crate::outbound::DestinationPolicy,
     email_sender: Option<&dyn AlertEmailSender>,
     email_config: &crate::email::EmailConfig,
     db: &crate::db::DatabasePool,
@@ -2351,9 +2502,13 @@ async fn process_delivery(
         DestinationType::Email => {
             process_email_delivery(info, email_sender, email_config, db).await
         }
-        DestinationType::Slack => process_slack_delivery(info, http_client).await,
+        DestinationType::Slack => {
+            process_slack_delivery(info, http_client, destination_policy).await
+        }
         DestinationType::PagerDuty => process_pagerduty_delivery(info, http_client).await,
-        DestinationType::Webhook => process_webhook_delivery(info, http_client).await,
+        DestinationType::Webhook => {
+            process_webhook_delivery(info, http_client, destination_policy).await
+        }
     }
 }
 
@@ -2429,7 +2584,8 @@ async fn process_email_delivery(
 /// Process Slack webhook delivery
 async fn process_slack_delivery(
     info: &DeliveryInfo,
-    http_client: &reqwest::Client,
+    _http_client: &reqwest::Client,
+    destination_policy: crate::outbound::DestinationPolicy,
 ) -> DeliveryResult {
     let config: SlackDestinationConfig =
         match serde_json::from_value(info.destination.config.clone()) {
@@ -2467,19 +2623,33 @@ async fn process_slack_delivery(
         payload["channel"] = serde_json::json!(channel);
     }
 
-    match http_client
-        .post(&config.webhook_url)
-        .json(&payload)
-        .send()
+    let url = match url::Url::parse(&config.webhook_url) {
+        Ok(url) => url,
+        Err(e) => {
+            return DeliveryResult::PermanentFailure(format!("Invalid Slack webhook URL: {e}"));
+        }
+    };
+    let client = match destination_policy
+        .pinned_http_client(
+            &url,
+            std::time::Duration::from_secs(10),
+            std::time::Duration::from_secs(5),
+        )
         .await
     {
+        Ok(client) => client,
+        Err(e) => {
+            return DeliveryResult::PermanentFailure(format!("Slack destination blocked: {e}"));
+        }
+    };
+
+    match client.post(&config.webhook_url).json(&payload).send().await {
         Ok(resp) => {
             if resp.status().is_success() {
                 DeliveryResult::Success
             } else {
                 let status = resp.status();
-                let body = resp.text().await.unwrap_or_default();
-                DeliveryResult::Retry(format!("Slack returned {}: {}", status, body))
+                DeliveryResult::Retry(format!("Slack returned {}", status))
             }
         }
         Err(e) => DeliveryResult::Retry(format!("Slack request failed: {}", e)),
@@ -2528,16 +2698,12 @@ async fn process_pagerduty_delivery(
                 DeliveryResult::Success
             } else {
                 let status = resp.status();
-                let body = resp.text().await.unwrap_or_default();
                 if status.as_u16() == 429 {
-                    DeliveryResult::Retry(format!("PagerDuty rate limited: {}", body))
+                    DeliveryResult::Retry(format!("PagerDuty rate limited ({})", status))
                 } else if status.is_client_error() {
-                    DeliveryResult::PermanentFailure(format!(
-                        "PagerDuty returned {}: {}",
-                        status, body
-                    ))
+                    DeliveryResult::PermanentFailure(format!("PagerDuty returned {}", status))
                 } else {
-                    DeliveryResult::Retry(format!("PagerDuty returned {}: {}", status, body))
+                    DeliveryResult::Retry(format!("PagerDuty returned {}", status))
                 }
             }
         }
@@ -2548,7 +2714,8 @@ async fn process_pagerduty_delivery(
 /// Process generic webhook delivery
 async fn process_webhook_delivery(
     info: &DeliveryInfo,
-    http_client: &reqwest::Client,
+    _http_client: &reqwest::Client,
+    destination_policy: crate::outbound::DestinationPolicy,
 ) -> DeliveryResult {
     let config: WebhookDestinationConfig =
         match serde_json::from_value(info.destination.config.clone()) {
@@ -2566,7 +2733,27 @@ async fn process_webhook_delivery(
         "timestamp": info.alert.created_at.to_rfc3339(),
     });
 
-    let mut request = http_client.post(&config.url).json(&payload);
+    let url = match url::Url::parse(&config.url) {
+        Ok(url) => url,
+        Err(e) => {
+            return DeliveryResult::PermanentFailure(format!("Invalid webhook URL: {e}"));
+        }
+    };
+    let client = match destination_policy
+        .pinned_http_client(
+            &url,
+            std::time::Duration::from_secs(10),
+            std::time::Duration::from_secs(5),
+        )
+        .await
+    {
+        Ok(client) => client,
+        Err(e) => {
+            return DeliveryResult::PermanentFailure(format!("Webhook destination blocked: {e}"));
+        }
+    };
+
+    let mut request = client.post(&config.url).json(&payload);
 
     // Add custom headers if specified
     if let Some(headers) = &config.headers {
@@ -2581,14 +2768,10 @@ async fn process_webhook_delivery(
                 DeliveryResult::Success
             } else {
                 let status = resp.status();
-                let body = resp.text().await.unwrap_or_default();
                 if status.is_client_error() && status.as_u16() != 429 {
-                    DeliveryResult::PermanentFailure(format!(
-                        "Webhook returned {}: {}",
-                        status, body
-                    ))
+                    DeliveryResult::PermanentFailure(format!("Webhook returned {}", status))
                 } else {
-                    DeliveryResult::Retry(format!("Webhook returned {}: {}", status, body))
+                    DeliveryResult::Retry(format!("Webhook returned {}", status))
                 }
             }
         }
@@ -3193,5 +3376,162 @@ mod tests {
         // Tokens should be unique
         let token2 = AlertDestination::generate_verification_token();
         assert_ne!(token, token2);
+    }
+
+    #[tokio::test]
+    async fn scoped_alert_lookups_hide_foreign_resources() {
+        let db = setup_test_db().await;
+        let owner_org_id = Uuid::now_v7();
+        let foreign_org_id = Uuid::now_v7();
+        let user_id = Uuid::now_v7();
+        let channel = AlertChannel::create(
+            &db,
+            &owner_org_id,
+            None,
+            "Owner Channel",
+            "^run:failed$",
+            &user_id,
+        )
+        .await
+        .unwrap();
+        let destination = AlertDestination::create(
+            &db,
+            &owner_org_id,
+            "Owner Webhook",
+            DestinationType::Webhook,
+            &serde_json::json!({"url": "https://example.test/hook"}),
+            &user_id,
+        )
+        .await
+        .unwrap();
+        let subscription = AlertSubscription::create(
+            &db,
+            &owner_org_id,
+            None,
+            &[channel.alert_channel_id],
+            &[destination.alert_destination_id],
+            &user_id,
+        )
+        .await
+        .unwrap();
+
+        assert!(matches!(
+            AlertChannel::get_by_id_for_org(&db, &channel.alert_channel_id, &foreign_org_id).await,
+            Err(AlertError::NotFound)
+        ));
+        assert!(matches!(
+            AlertDestination::get_by_id_for_org(
+                &db,
+                &destination.alert_destination_id,
+                &foreign_org_id
+            )
+            .await,
+            Err(AlertError::NotFound)
+        ));
+        assert!(matches!(
+            AlertSubscription::get_by_id_for_org(
+                &db,
+                &subscription.alert_subscription_id,
+                &foreign_org_id
+            )
+            .await,
+            Err(AlertError::NotFound)
+        ));
+    }
+
+    #[tokio::test]
+    async fn delivery_join_rejects_foreign_destination() {
+        let db = setup_test_db().await;
+        let org_id = Uuid::now_v7();
+        let foreign_org_id = Uuid::now_v7();
+        let user_id = Uuid::now_v7();
+        let env_id = Uuid::now_v7();
+        let channel =
+            AlertChannel::create(&db, &org_id, None, "Failures", "^run:failed$", &user_id)
+                .await
+                .unwrap();
+        let foreign_destination = AlertDestination::create(
+            &db,
+            &foreign_org_id,
+            "Foreign Webhook",
+            DestinationType::Webhook,
+            &serde_json::json!({"url": "https://example.test/hook"}),
+            &user_id,
+        )
+        .await
+        .unwrap();
+        AlertSubscription::create(
+            &db,
+            &org_id,
+            None,
+            &[channel.alert_channel_id],
+            &[foreign_destination.alert_destination_id],
+            &user_id,
+        )
+        .await
+        .unwrap();
+
+        let alert = publish_alert(
+            &db,
+            &org_id,
+            &env_id,
+            "run:failed",
+            &serde_json::json!({"code": "E_TEST"}),
+        )
+        .await
+        .unwrap();
+        let deliveries = AlertDelivery::get_by_alert_id(&db, &alert.alert_id)
+            .await
+            .unwrap();
+
+        assert!(deliveries.is_empty());
+    }
+
+    #[tokio::test]
+    async fn persisted_delivery_errors_are_redacted_and_truncated() {
+        let db = setup_test_db().await;
+        let alert = Alert::create(
+            &db,
+            &test_org_id(),
+            &Uuid::now_v7(),
+            "run:failed",
+            &serde_json::json!({}),
+        )
+        .await
+        .unwrap();
+        let delivery =
+            AlertDelivery::create(&db, &alert.alert_id, &Uuid::now_v7(), &Uuid::now_v7(), None)
+                .await
+                .unwrap();
+        let error = format!(
+            "HTTP 502 from https://admin:pw@example.test/hook?token=query-secret\nAuthorization: Bearer header-secret\nresponse body: {{\"secret\":\"body-secret\"}} {}",
+            "x".repeat(800)
+        );
+
+        AlertDelivery::mark_failed(&db, &delivery.alert_delivery_id, &error, None)
+            .await
+            .unwrap();
+        let persisted = AlertDelivery::get_by_id(&db, &delivery.alert_delivery_id)
+            .await
+            .unwrap()
+            .last_error
+            .unwrap();
+
+        assert!(persisted.contains("HTTP 502"));
+        assert!(persisted.contains("[REDACTED URL]"));
+        assert!(persisted.contains("Authorization: [REDACTED]"));
+        assert!(persisted.contains("response body: [REDACTED]"));
+        assert!(!persisted.contains("admin"));
+        assert!(!persisted.contains("query-secret"));
+        assert!(!persisted.contains("header-secret"));
+        assert!(!persisted.contains("body-secret"));
+        assert!(persisted.chars().count() <= MAX_PERSISTED_DELIVERY_ERROR_CHARS + 1);
+
+        let truncated = sanitize_delivery_error(&"x".repeat(800));
+        assert_eq!(
+            truncated.chars().count(),
+            MAX_PERSISTED_DELIVERY_ERROR_CHARS + 1
+        );
+        assert!(truncated.ends_with('…'));
     }
 }

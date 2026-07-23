@@ -117,12 +117,11 @@ impl DataVolume {
                 backing_file.to_string_lossy().as_ref(),
             ])
             .output()
-            .await
-            .map_err(|e| DataVolumeError::Io(format!("fallocate: {}", e)))?;
+            .await;
 
-        if !output.status.success() {
+        if !output.as_ref().is_ok_and(|output| output.status.success()) {
             // Fallback: truncate for systems without fallocate
-            let output = tokio::process::Command::new("truncate")
+            let output = match tokio::process::Command::new("truncate")
                 .args([
                     "-s",
                     &size_bytes.to_string(),
@@ -130,9 +129,16 @@ impl DataVolume {
                 ])
                 .output()
                 .await
-                .map_err(|e| DataVolumeError::Io(format!("truncate: {}", e)))?;
+            {
+                Ok(output) => output,
+                Err(e) => {
+                    let _ = tokio::fs::remove_dir_all(&vol_dir).await;
+                    return Err(DataVolumeError::Io(format!("truncate: {e}")));
+                }
+            };
 
             if !output.status.success() {
+                let _ = tokio::fs::remove_dir_all(&vol_dir).await;
                 return Err(DataVolumeError::Io(format!(
                     "failed to create backing file: {}",
                     String::from_utf8_lossy(&output.stderr)
@@ -141,7 +147,7 @@ impl DataVolume {
         }
 
         // Format as ext4 (quiet, no journaling for perf)
-        let output = tokio::process::Command::new("mkfs.ext4")
+        let output = match tokio::process::Command::new("mkfs.ext4")
             .args([
                 "-q",
                 "-O",
@@ -151,16 +157,23 @@ impl DataVolume {
             ])
             .output()
             .await
-            .map_err(|e| DataVolumeError::Format(e.to_string()))?;
+        {
+            Ok(output) => output,
+            Err(e) => {
+                let _ = tokio::fs::remove_dir_all(&vol_dir).await;
+                return Err(DataVolumeError::Format(e.to_string()));
+            }
+        };
 
         if !output.status.success() {
+            let _ = tokio::fs::remove_dir_all(&vol_dir).await;
             return Err(DataVolumeError::Format(
                 String::from_utf8_lossy(&output.stderr).to_string(),
             ));
         }
 
         // Mount via loop device
-        let output = tokio::process::Command::new("mount")
+        let output = match tokio::process::Command::new("mount")
             .args([
                 "-o",
                 "loop,nosuid,nodev,noexec",
@@ -169,28 +182,48 @@ impl DataVolume {
             ])
             .output()
             .await
-            .map_err(|e| DataVolumeError::Mount(e.to_string()))?;
+        {
+            Ok(output) => output,
+            Err(e) => {
+                let _ = tokio::fs::remove_dir_all(&vol_dir).await;
+                return Err(DataVolumeError::Mount(e.to_string()));
+            }
+        };
 
         if !output.status.success() {
+            let _ = tokio::fs::remove_dir_all(&vol_dir).await;
             return Err(DataVolumeError::Mount(
                 String::from_utf8_lossy(&output.stderr).to_string(),
             ));
         }
 
         // Make writable by container user (nobody = 65534)
-        let output = tokio::process::Command::new("chown")
+        let output = match tokio::process::Command::new("chown")
             .args(["65534:65534", mount_point.to_string_lossy().as_ref()])
             .output()
             .await
-            .ok();
-
-        if let Some(out) = output
-            && !out.status.success()
         {
-            tracing::warn!(
-                "chown on data volume mount point failed: {}",
-                String::from_utf8_lossy(&out.stderr)
-            );
+            Ok(output) => output,
+            Err(e) => {
+                let _ = tokio::process::Command::new("umount")
+                    .arg(&mount_point)
+                    .output()
+                    .await;
+                let _ = tokio::fs::remove_dir_all(&vol_dir).await;
+                return Err(DataVolumeError::Io(format!("chown data volume: {e}")));
+            }
+        };
+
+        if !output.status.success() {
+            let _ = tokio::process::Command::new("umount")
+                .arg(&mount_point)
+                .output()
+                .await;
+            let _ = tokio::fs::remove_dir_all(&vol_dir).await;
+            return Err(DataVolumeError::Io(format!(
+                "chown data volume failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            )));
         }
 
         Ok(Self {
@@ -208,10 +241,17 @@ impl DataVolume {
     /// Explicitly clean up the volume.
     pub async fn cleanup(&self) {
         if self.is_loop_mount {
-            let _ = tokio::process::Command::new("umount")
+            let unmounted = tokio::process::Command::new("umount")
                 .arg(self.mount_point.to_string_lossy().to_string())
                 .output()
-                .await;
+                .await
+                .is_ok_and(|output| output.status.success());
+            if !unmounted {
+                let _ = tokio::process::Command::new("umount")
+                    .args(["-l", self.mount_point.to_string_lossy().as_ref()])
+                    .output()
+                    .await;
+            }
             let _ = tokio::fs::remove_file(&self.backing_file).await;
             if let Some(parent) = self.backing_file.parent() {
                 let _ = tokio::fs::remove_dir_all(parent).await;
@@ -226,9 +266,15 @@ impl Drop for DataVolume {
     fn drop(&mut self) {
         if self.is_loop_mount {
             let mount_str = self.mount_point.to_string_lossy().to_string();
-            let _ = std::process::Command::new("umount")
+            let unmounted = std::process::Command::new("umount")
                 .arg(&mount_str)
-                .output();
+                .output()
+                .is_ok_and(|output| output.status.success());
+            if !unmounted {
+                let _ = std::process::Command::new("umount")
+                    .args(["-l", &mount_str])
+                    .output();
+            }
             let _ = std::fs::remove_file(&self.backing_file);
             if let Some(parent) = self.backing_file.parent() {
                 let _ = std::fs::remove_dir_all(parent);

@@ -436,6 +436,14 @@ fn render_docs_error_with_back(
     back_url: &str,
     back_text: &str,
 ) -> String {
+    let escape = |value: &str| {
+        value
+            .replace('&', "&amp;")
+            .replace('<', "&lt;")
+            .replace('>', "&gt;")
+            .replace('"', "&quot;")
+            .replace('\'', "&#39;")
+    };
     format!(
         r#"<!DOCTYPE html>
 <html>
@@ -453,7 +461,11 @@ fn render_docs_error_with_back(
     <p><a href="{}">← {}</a></p>
 </body>
 </html>"#,
-        title, title, message, back_url, back_text
+        escape(title),
+        escape(title),
+        escape(message),
+        escape(back_url),
+        escape(back_text),
     )
 }
 

@@ -280,6 +280,9 @@ fn validate_task_orphan_idle_ms(
     Ok(())
 }
 
+const CONTAINER_SCRIPT_PRELUDE: &str = "#!/bin/sh\nset -e\nmkdir -p /data\n";
+const CONTAINER_SHELL_FLAGS: &str = "-ec";
+
 /// Run the task worker.
 pub async fn run(config: TaskWorkerConfig) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     validate_task_fairness_conf(&config.worker_conf)?;
@@ -1720,11 +1723,10 @@ async fn process_container_task(
             .map(String::from);
 
         if let Some(script_body) = script {
-            // `script` field: write to /tmp/hot-run.sh, execute with sh -ex.
-            // `set -ex` is prepended so every command is traced to stderr and
-            // execution stops on the first non-zero exit.
+            // `script` field: write to /tmp/hot-run.sh and execute with `set -e`.
+            // Do not enable xtrace: expanded command arguments may contain secrets.
             // `mkdir -p /data` ensures the disk-backed working directory exists.
-            let full_script = format!("#!/bin/sh\nset -ex\nmkdir -p /data\n{}", script_body.trim());
+            let full_script = format!("{CONTAINER_SCRIPT_PRELUDE}{}", script_body.trim());
             // Standard base64 (not URL-safe) — `base64 -d` in busybox/Alpine
             // expects this encoding.  The output is placed inside single quotes
             // in the shell command, so +/= are not interpreted by the shell.
@@ -1738,8 +1740,9 @@ async fn process_container_task(
                 ),
             ])
         } else {
-            // `cmd` field: pass through as-is but inject -ex when the user is
-            // already using `sh -c "..."` so they also get tracing for free.
+            // `cmd` field: pass through as-is but inject `-e` when the user is
+            // already using `sh -c "..."`. Never inject xtrace because expanded
+            // command arguments may contain secrets.
             // Prepend `mkdir -p /data` so the disk-backed working directory exists.
             args.get("cmd").and_then(|v| {
                 v.as_array().map(|arr| {
@@ -1750,7 +1753,7 @@ async fn process_container_task(
                     if items.len() == 3 && items[0] == "sh" && items[1] == "-c" {
                         vec![
                             "sh".to_string(),
-                            "-exc".to_string(),
+                            CONTAINER_SHELL_FLAGS.to_string(),
                             format!("mkdir -p /data && {}", items[2]),
                         ]
                     } else {
@@ -1910,7 +1913,7 @@ async fn process_container_task(
 
     // -- Acquire resource budget --
     let resource_mem = limits.memory_mb + limits.tmp_size_mb;
-    let resource_disk = limits.disk_size_mb;
+    let resource_disk = resource_budget::disk_admission_mb(limits.disk_size_mb);
     let infra_retry_backoff_ms = worker_conf
         .get_int_or_default("queue.infra-retry-backoff-ms", 1_000)
         .max(0) as u64;
@@ -1965,8 +1968,26 @@ async fn process_container_task(
     {
         Ok(vol) => Some(vol),
         Err(e) => {
-            tracing::warn!(task_id = %task_id, "Data volume creation failed, continuing without /data/: {}", e);
-            None
+            tracing::error!(task_id = %task_id, "Data volume creation failed: {}", e);
+            let error = task_failure_json(
+                &format!("Requested /data volume could not be provisioned: {e}"),
+                None,
+            );
+            complete_task_with_event(
+                &db,
+                &stream_publisher,
+                &task_id,
+                env_id,
+                stream_id,
+                &function_name,
+                &request.task_type,
+                TaskStatus::Failed,
+                Some(&error),
+            )
+            .await;
+            publish_task_alert(&db, org_id, env_id, &task_id, "task:failed", &error).await;
+            drop(resource_guard);
+            return Ok(());
         }
     };
 
@@ -2422,9 +2443,17 @@ async fn process_container_task(
     #[cfg(not(all(target_os = "linux", feature = "kata")))]
     let pre_start_hook: Option<executor::PreStartHook> = None;
 
+    let command_kind = if args.get("script").is_some() {
+        "script"
+    } else if args.get("cmd").is_some() {
+        "cmd"
+    } else {
+        "image-default"
+    };
     tracing::debug!(
         task_id = %task_id,
         image = %image,
+        command_kind,
         size = %limits.size,
         timeout_secs = limits.timeout_secs,
         memory_mb = limits.memory_mb,
@@ -2433,7 +2462,7 @@ async fn process_container_task(
         has_file_server = file_server_handle.is_some() || is_kata,
         network = limits.network,
         backend = %executor.backend(),
-        "Running container task"
+        "Starting container command"
     );
 
     let total_timeout = std::time::Duration::from_millis(timeout_ms);
@@ -4388,7 +4417,7 @@ async fn cleanup_stale_data_volumes(data_vol_base: &std::path::Path) {
                 #[cfg(target_os = "linux")]
                 {
                     let _ = std::process::Command::new("umount")
-                        .arg(path.to_string_lossy().to_string())
+                        .arg(path.join("mnt"))
                         .output();
                 }
                 if let Err(e) = std::fs::remove_dir_all(&path) {
@@ -4800,6 +4829,15 @@ mod tests {
         let lease_ttl_ms = task_lease::DEFAULT_LEASE_TTL.as_millis() as u64;
 
         assert!(validate_task_orphan_idle_ms(QueueType::Redis, lease_ttl_ms).is_ok());
+    }
+
+    #[test]
+    fn container_shell_defaults_stop_on_error_without_xtrace() {
+        assert!(CONTAINER_SCRIPT_PRELUDE.contains("set -e"));
+        assert!(!CONTAINER_SCRIPT_PRELUDE.contains("set -x"));
+        assert!(!CONTAINER_SCRIPT_PRELUDE.contains("set -ex"));
+        assert_eq!(CONTAINER_SHELL_FLAGS, "-ec");
+        assert!(!CONTAINER_SHELL_FLAGS.contains('x'));
     }
 
     #[test]

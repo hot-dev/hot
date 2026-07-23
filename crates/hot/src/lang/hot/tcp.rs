@@ -10,6 +10,7 @@
 //! STARTTLS negotiation happens on the already-open socket.
 
 use crate::lang::hot::r#type::HotResult;
+use crate::outbound::DestinationPolicy;
 use crate::val::Val;
 use indexmap::IndexMap;
 use std::any::Any;
@@ -115,7 +116,11 @@ impl crate::val::ValBox for TcpConnectionHandle {
 // Option parsing helpers
 // ----------------------------------------------------------------------------
 
-fn opt_timeout(fn_name: &str, opts: Option<&Val>) -> Result<Option<Duration>, Val> {
+fn opt_timeout(
+    fn_name: &str,
+    opts: Option<&Val>,
+    allow_infinite: bool,
+) -> Result<Option<Duration>, Val> {
     let ms = match opts {
         Some(Val::Map(m)) => match m.get(&Val::from("timeout")) {
             Some(Val::Int(i)) if *i >= 0 => *i as u64,
@@ -139,26 +144,50 @@ fn opt_timeout(fn_name: &str, opts: Option<&Val>) -> Result<Option<Duration>, Va
         }
     };
     Ok(if ms == 0 {
+        if !allow_infinite {
+            return Err(err_val(format!(
+                "{}: timeout 0 (infinite) is not allowed in isolation mode",
+                fn_name
+            )));
+        }
         None
     } else {
         Some(Duration::from_millis(ms))
     })
 }
 
-async fn with_timeout<F, T>(fn_name: &str, timeout: Option<Duration>, fut: F) -> Result<T, Val>
+async fn with_timeout<F, T>(
+    fn_name: &str,
+    timeout: Option<Duration>,
+    cancellation: Option<Arc<AtomicBool>>,
+    fut: F,
+) -> Result<T, Val>
 where
     F: std::future::Future<Output = Result<T, Val>>,
 {
-    match timeout {
-        Some(t) => match tokio::time::timeout(t, fut).await {
-            Ok(result) => result,
-            Err(_) => Err(err_val(format!(
-                "{}: timed out after {} ms",
-                fn_name,
-                t.as_millis()
-            ))),
-        },
-        None => fut.await,
+    tokio::pin!(fut);
+    let deadline = timeout.map(|duration| tokio::time::Instant::now() + duration);
+    loop {
+        if cancellation
+            .as_ref()
+            .is_some_and(|flag| flag.load(Ordering::Relaxed))
+        {
+            return Err(err_val(format!("{fn_name}: operation cancelled")));
+        }
+        let sleep_until =
+            deadline.unwrap_or_else(|| tokio::time::Instant::now() + Duration::from_millis(50));
+        tokio::select! {
+            result = &mut fut => return result,
+            _ = tokio::time::sleep_until(sleep_until) => {
+                if deadline.is_some_and(|deadline| tokio::time::Instant::now() >= deadline) {
+                    return Err(err_val(format!(
+                        "{}: timed out after {} ms",
+                        fn_name,
+                        timeout.expect("deadline requires timeout").as_millis()
+                    )));
+                }
+            }
+        }
     }
 }
 
@@ -214,6 +243,27 @@ pub(crate) fn build_conn_map(inner: &Arc<TcpConnInner>, port: i64, tls: bool) ->
 /// # Returns
 /// A Map `{id: Str, host: Str, port: Int, tls: Bool, $tcp: TcpConnectionHandle}`
 pub fn connect(args: &[Val]) -> HotResult<Val> {
+    connect_with_policy(args, DestinationPolicy::AllowPrivate, true, None)
+}
+
+pub fn connect_vm(
+    vm: &mut crate::lang::runtime::vm::VirtualMachine,
+    args: &[Val],
+) -> HotResult<Val> {
+    connect_with_policy(
+        args,
+        DestinationPolicy::from_vm(vm),
+        !vm.is_isolation_enabled(),
+        vm.external_cancel_token(),
+    )
+}
+
+fn connect_with_policy(
+    args: &[Val],
+    policy: DestinationPolicy,
+    allow_infinite: bool,
+    cancellation: Option<Arc<AtomicBool>>,
+) -> HotResult<Val> {
     const FN: &str = "::hot::tcp/connect";
 
     if args.len() < 2 || args.len() > 3 {
@@ -236,7 +286,7 @@ pub fn connect(args: &[Val]) -> HotResult<Val> {
         _ => return HotResult::Err(err_val(format!("{}: port must be an Int", FN))),
     };
 
-    let timeout = match opt_timeout(FN, args.get(2)) {
+    let timeout = match opt_timeout(FN, args.get(2), allow_infinite) {
         Ok(t) => t,
         Err(e) => return HotResult::Err(e),
     };
@@ -250,15 +300,17 @@ pub fn connect(args: &[Val]) -> HotResult<Val> {
     };
 
     let result = tokio::runtime::Handle::current().block_on(async {
-        let stream = with_timeout(FN, timeout, async {
-            TcpStream::connect((host.as_str(), port as u16))
-                .await
-                .map_err(|e| {
-                    err_val(format!(
-                        "{}: connection to {}:{} failed: {}",
-                        FN, host, port, e
-                    ))
-                })
+        let addrs = policy
+            .resolve_host(&host, port as u16)
+            .await
+            .map_err(|e| err_val(format!("{FN}: {e}")))?;
+        let stream = with_timeout(FN, timeout, cancellation, async {
+            TcpStream::connect(addrs.as_slice()).await.map_err(|e| {
+                err_val(format!(
+                    "{}: connection to {}:{} failed: {}",
+                    FN, host, port, e
+                ))
+            })
         })
         .await?;
 
@@ -295,7 +347,17 @@ pub fn connect(args: &[Val]) -> HotResult<Val> {
 /// * 3 args: connection, max (Int), options (Map: `timeout` ms, 0 = no timeout)
 pub fn read(args: &[Val]) -> HotResult<Val> {
     const FN: &str = "::hot::tcp/read";
-    read_impl(FN, args, false)
+    read_impl(FN, args, false, true, None)
+}
+
+pub fn read_vm(vm: &mut crate::lang::runtime::vm::VirtualMachine, args: &[Val]) -> HotResult<Val> {
+    read_impl(
+        "::hot::tcp/read",
+        args,
+        false,
+        !vm.is_isolation_enabled(),
+        vm.external_cancel_token(),
+    )
 }
 
 /// Read exactly `n` bytes from the connection.
@@ -304,10 +366,29 @@ pub fn read(args: &[Val]) -> HotResult<Val> {
 /// peer closes the connection first or the timeout expires.
 pub fn read_exact(args: &[Val]) -> HotResult<Val> {
     const FN: &str = "::hot::tcp/read-exact";
-    read_impl(FN, args, true)
+    read_impl(FN, args, true, true, None)
 }
 
-fn read_impl(fn_name: &str, args: &[Val], exact: bool) -> HotResult<Val> {
+pub fn read_exact_vm(
+    vm: &mut crate::lang::runtime::vm::VirtualMachine,
+    args: &[Val],
+) -> HotResult<Val> {
+    read_impl(
+        "::hot::tcp/read-exact",
+        args,
+        true,
+        !vm.is_isolation_enabled(),
+        vm.external_cancel_token(),
+    )
+}
+
+fn read_impl(
+    fn_name: &str,
+    args: &[Val],
+    exact: bool,
+    allow_infinite: bool,
+    cancellation: Option<Arc<AtomicBool>>,
+) -> HotResult<Val> {
     if args.len() < 2 || args.len() > 3 {
         return HotResult::Err(err_val(format!(
             "{}: expected 2-3 args (connection, size [, options])",
@@ -337,14 +418,14 @@ fn read_impl(fn_name: &str, args: &[Val], exact: bool) -> HotResult<Val> {
         }
     };
 
-    let timeout = match opt_timeout(fn_name, args.get(2)) {
+    let timeout = match opt_timeout(fn_name, args.get(2), allow_infinite) {
         Ok(t) => t,
         Err(e) => return HotResult::Err(e),
     };
 
     let inner = Arc::clone(&handle.inner);
     let result = tokio::runtime::Handle::current().block_on(async {
-        with_timeout(fn_name, timeout, async {
+        with_timeout(fn_name, timeout, cancellation, async {
             let mut guard = inner.stream.lock().await;
             let mut buf = vec![0u8; size];
 
@@ -657,5 +738,13 @@ mod tests {
         })
         .await
         .unwrap();
+    }
+
+    #[test]
+    fn isolation_rejects_infinite_timeout() {
+        let mut opts = IndexMap::new();
+        opts.insert(Val::from("timeout"), Val::Int(0));
+        let result = opt_timeout("::hot::tcp/read", Some(&Val::Map(Box::new(opts))), false);
+        assert!(result.is_err());
     }
 }

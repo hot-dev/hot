@@ -8,6 +8,21 @@ use std::fs;
 use std::sync::RwLock;
 use uuid::Uuid;
 
+/// Serialize data for embedding in an HTML `<script>` element.
+///
+/// JSON escaping alone does not prevent a string containing `</script>` from
+/// ending the element, so escape HTML-significant characters and JS line
+/// separators without changing the parsed JSON value.
+pub(crate) fn script_safe_json<T: serde::Serialize>(value: &T, fallback: &str) -> String {
+    serde_json::to_string(value)
+        .unwrap_or_else(|_| fallback.to_string())
+        .replace('&', "\\u0026")
+        .replace('<', "\\u003c")
+        .replace('>', "\\u003e")
+        .replace('\u{2028}', "\\u2028")
+        .replace('\u{2029}', "\\u2029")
+}
+
 /// Human-readable size for blob summaries (e.g. "5.2 MB").
 fn format_blob_size(size: i64) -> String {
     const UNITS: [&str; 5] = ["B", "KB", "MB", "GB", "TB"];
@@ -1742,6 +1757,15 @@ pub struct VerificationError<'a> {
     pub page_context: PublicPageContext,
     pub error_title: &'a str,
     pub error_message: &'a str,
+}
+
+#[derive(Template)]
+#[template(path = "verify_email.html")]
+pub struct VerifyEmail<'a> {
+    pub title: &'a str,
+    pub page_context: PublicPageContext,
+    pub token: &'a str,
+    pub form_token: &'a str,
 }
 
 #[derive(Template)]
@@ -3828,6 +3852,19 @@ pub struct AgentHealthCard {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn script_safe_json_cannot_close_script_element() {
+        let json = script_safe_json(
+            &serde_json::json!({"name": "</script><script>alert(1)</script>"}),
+            "{}",
+        );
+        assert!(!json.contains('<'));
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&json).unwrap()["name"],
+            "</script><script>alert(1)</script>"
+        );
+    }
 
     /// Slugify a heading the same way package docs routes do.
     /// Non-alphanumeric chars become hyphens; consecutive hyphens collapse; leading/trailing stripped.

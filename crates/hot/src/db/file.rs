@@ -886,6 +886,28 @@ pub async fn list_files_by_prefix(
     org_id: Uuid,
     env_id: Option<Uuid>,
 ) -> Result<Vec<FileRecord>, String> {
+    list_files_by_prefix_limit(db, prefix, org_id, env_id, i64::MAX).await
+}
+
+/// List files by prefix with a database-enforced result bound.
+pub async fn list_files_by_prefix_bounded(
+    db: &DatabasePool,
+    prefix: &str,
+    org_id: Uuid,
+    env_id: Option<Uuid>,
+    limit: usize,
+) -> Result<Vec<FileRecord>, String> {
+    let limit = i64::try_from(limit).unwrap_or(i64::MAX);
+    list_files_by_prefix_limit(db, prefix, org_id, env_id, limit).await
+}
+
+async fn list_files_by_prefix_limit(
+    db: &DatabasePool,
+    prefix: &str,
+    org_id: Uuid,
+    env_id: Option<Uuid>,
+    limit: i64,
+) -> Result<Vec<FileRecord>, String> {
     let query = match db {
         DatabasePool::Postgres(_) => {
             r#"
@@ -899,6 +921,7 @@ pub async fn list_files_by_prefix(
               AND path LIKE $3
               AND active = true
             ORDER BY path
+            LIMIT $4
             "#
         }
         DatabasePool::Sqlite(_) => {
@@ -913,6 +936,7 @@ pub async fn list_files_by_prefix(
               AND path LIKE ?
               AND active = 1
             ORDER BY path
+            LIMIT ?
             "#
         }
     };
@@ -925,6 +949,7 @@ pub async fn list_files_by_prefix(
                 .bind(org_id)
                 .bind(env_id)
                 .bind(&pattern)
+                .bind(limit)
                 .fetch_all(pool)
                 .await
                 .map_err(|e| format!("Failed to list files: {}", e))?;
@@ -967,6 +992,7 @@ pub async fn list_files_by_prefix(
                 .bind(env_id)
                 .bind(env_id)
                 .bind(&pattern)
+                .bind(limit)
                 .fetch_all(pool)
                 .await
                 .map_err(|e| format!("Failed to list files: {}", e))?;

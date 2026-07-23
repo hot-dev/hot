@@ -11,6 +11,7 @@ use std::collections::HashMap;
 use uuid::Uuid;
 
 use crate::auth::AuthContext;
+use crate::client_ip::ClientIp;
 
 /// Headers whose values are always treated as secrets and masked in logs.
 /// Lowercased to match axum's HeaderMap key normalization.
@@ -89,6 +90,17 @@ pub fn build_call_event_data(function_name: &str, args: Val, caller: Option<Val>
     event_data
 }
 
+/// Persist the endpoint-selected build alongside call data so workers can
+/// authenticate exact-build routing against the database copy of the event.
+pub fn bind_call_event_to_build(event_data: &mut Val, build_id: Uuid) {
+    if let Val::Map(map) = event_data {
+        map.insert(
+            Val::from("_hot_target_build_id"),
+            Val::from(build_id.to_string()),
+        );
+    }
+}
+
 /// Read a proxy/forwarding header and return the first comma-separated value,
 /// trimmed, or None when the header is absent or empty. Multi-proxy chains
 /// append values; the first is the client-facing one.
@@ -143,6 +155,7 @@ pub fn build_request_val(
     url_path: &str,
     original_url: Option<&str>,
     headers: &HeaderMap,
+    client_ip: Option<&ClientIp>,
     query_params: &HashMap<String, String>,
     body: Option<RequestBody>,
     auth: Option<&(AuthContext, hot::db::api_key::ApiKey)>,
@@ -199,11 +212,8 @@ pub fn build_request_val(
         }
     }
 
-    // Client IP from proxy headers
-    let ip = first_forwarded_value(headers, "x-forwarded-for")
-        .or_else(|| first_forwarded_value(headers, "x-real-ip"));
-    if let Some(ip) = ip {
-        request_map.insert(Val::from("ip"), Val::from(ip));
+    if let Some(client_ip) = client_ip {
+        request_map.insert(Val::from("ip"), Val::from(client_ip.0.clone()));
     }
 
     // Auth context (only if authenticated)
@@ -262,6 +272,7 @@ mod tests {
             url,
             None,
             headers,
+            None,
             &HashMap::new(),
             None,
             None,
@@ -296,6 +307,7 @@ mod tests {
             "/test",
             None,
             &HeaderMap::new(),
+            None,
             &HashMap::new(),
             Some(body),
             None,
@@ -318,6 +330,7 @@ mod tests {
             "/test",
             None,
             &HeaderMap::new(),
+            None,
             &HashMap::new(),
             Some(body),
             None,
@@ -338,6 +351,7 @@ mod tests {
             "/webhook/org/env/svc/path",
             Some(full),
             &HeaderMap::new(),
+            None,
             &HashMap::new(),
             None,
             None,
@@ -371,6 +385,7 @@ mod tests {
             "/webhook/org/env/svc/path",
             None,
             &headers,
+            None,
             &HashMap::new(),
             Some(body),
             None,
@@ -412,6 +427,7 @@ mod tests {
             "/webhook/org/env/svc/path",
             None,
             &HeaderMap::new(),
+            None,
             &query,
             None,
             None,
@@ -429,16 +445,24 @@ mod tests {
     }
 
     #[test]
-    fn test_build_request_val_ip_extraction() {
-        let mut headers = HeaderMap::new();
-        headers.insert("x-forwarded-for", "1.2.3.4, 5.6.7.8".parse().unwrap());
-
-        let val = simple_request(&headers, "/test");
+    fn test_build_request_val_uses_resolved_client_ip() {
+        let client_ip = ClientIp("1.2.3.4".to_string());
+        let val = build_request_val(
+            "POST",
+            "/test",
+            None,
+            &HeaderMap::new(),
+            Some(&client_ip),
+            &HashMap::new(),
+            None,
+            None,
+            &Uuid::nil(),
+        );
         if let Val::Map(ref map) = val {
             assert_eq!(
                 map.get(&Val::from("ip")),
                 Some(&Val::from("1.2.3.4")),
-                "Should use first IP from x-forwarded-for"
+                "Should use the centrally resolved client IP"
             );
         }
     }
@@ -476,6 +500,21 @@ mod tests {
     }
 
     #[test]
+    fn test_bind_call_event_to_exact_build() {
+        let build_id = Uuid::now_v7();
+        let mut event_data = build_call_event_data("::ns/fn", Val::Vec(vec![]), None);
+        bind_call_event_to_build(&mut event_data, build_id);
+
+        let Val::Map(map) = event_data else {
+            panic!("Expected Map");
+        };
+        assert_eq!(
+            map.get(&Val::from("_hot_target_build_id")),
+            Some(&Val::from(build_id.to_string()))
+        );
+    }
+
+    #[test]
     fn test_hash_sensitive_body_not_hashed() {
         let headers = HeaderMap::new();
         let body = RequestBody {
@@ -488,6 +527,7 @@ mod tests {
             "/test",
             None,
             &headers,
+            None,
             &HashMap::new(),
             Some(body),
             None,

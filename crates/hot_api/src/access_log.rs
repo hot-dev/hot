@@ -9,7 +9,7 @@
 
 use axum::{
     extract::{FromRequestParts, Request, State},
-    http::{HeaderMap, request::Parts},
+    http::request::Parts,
     middleware::Next,
     response::Response,
 };
@@ -20,6 +20,7 @@ use tracing::debug;
 use uuid::Uuid;
 
 use crate::auth::AuthContext;
+use crate::client_ip::ClientIp;
 use crate::domain_resolver::ResolvedDomain;
 
 // ============================================================================
@@ -54,29 +55,6 @@ where
 }
 
 // ============================================================================
-// IP extraction
-// ============================================================================
-
-/// Extract the client IP address from request headers.
-/// Checks X-Forwarded-For first (for ALB/proxy setups), then falls back
-/// to the direct connection address.
-pub fn extract_client_ip(headers: &HeaderMap) -> Option<String> {
-    // X-Forwarded-For: client, proxy1, proxy2
-    // Take the first (leftmost) address — the original client.
-    if let Some(xff) = headers.get("x-forwarded-for")
-        && let Ok(xff_str) = xff.to_str()
-        && let Some(first_ip) = xff_str.split(',').next()
-    {
-        let ip = first_ip.trim();
-        if !ip.is_empty() {
-            return Some(ip.to_string());
-        }
-    }
-
-    None
-}
-
-// ============================================================================
 // Middleware
 // ============================================================================
 
@@ -104,7 +82,10 @@ pub async fn access_log_middleware(
     };
 
     // Extract request metadata
-    let ip_address = extract_client_ip(request.headers());
+    let ip_address = request
+        .extensions()
+        .get::<ClientIp>()
+        .map(|client_ip| client_ip.0.clone());
     let user_agent = request
         .headers()
         .get("user-agent")
@@ -173,42 +154,4 @@ pub async fn access_log_middleware(
     }
 
     next.run(request).await
-}
-
-// ============================================================================
-// Tests
-// ============================================================================
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_extract_client_ip_xff() {
-        let mut headers = HeaderMap::new();
-        headers.insert(
-            "x-forwarded-for",
-            "1.2.3.4, 10.0.0.1, 10.0.0.2".parse().unwrap(),
-        );
-
-        let ip = extract_client_ip(&headers);
-        assert_eq!(ip.as_deref(), Some("1.2.3.4"));
-    }
-
-    #[test]
-    fn test_extract_client_ip_xff_single() {
-        let mut headers = HeaderMap::new();
-        headers.insert("x-forwarded-for", "203.0.113.42".parse().unwrap());
-
-        let ip = extract_client_ip(&headers);
-        assert_eq!(ip.as_deref(), Some("203.0.113.42"));
-    }
-
-    #[test]
-    fn test_extract_client_ip_no_xff() {
-        let headers = HeaderMap::new();
-
-        let ip = extract_client_ip(&headers);
-        assert_eq!(ip, None);
-    }
 }

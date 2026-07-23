@@ -24,9 +24,18 @@ const MIN_AGE_SECS: u64 = 60;
 /// we don't want a wedged kernel to block worker startup.
 const REAPER_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// Process names we are willing to SIGKILL when found orphaned (PPid=1).
-fn is_target_comm(comm: &str) -> bool {
-    matches!(comm, "containerd-shim" | "containerd-shim-kata-v2") || comm.starts_with("qemu-system")
+/// Confirm both the kernel-truncated comm and command line identify Kata.
+///
+/// Linux truncates `comm` to 15 bytes, so `containerd-shim-kata-v2` commonly
+/// appears as the generic `containerd-shim`. The command line check prevents
+/// us from treating an unrelated runc shim as a Kata process.
+fn is_target_process(comm: &str, cmdline: &str) -> bool {
+    let is_kata_shim = matches!(comm, "containerd-shim" | "containerd-shim-kata-v2")
+        && cmdline.contains("containerd-shim-kata-v2");
+    let is_kata_qemu = comm.starts_with("qemu-system")
+        && cmdline.contains("sandbox-")
+        && (cmdline.contains("/run/vc/") || cmdline.contains("kata"));
+    is_kata_shim || is_kata_qemu
 }
 
 /// Walks /proc and SIGKILLs any orphaned Kata shim or QEMU VM. Best-effort,
@@ -81,11 +90,15 @@ async fn reap_inner() {
             Ok(s) => s.trim().to_string(),
             Err(_) => continue,
         };
-        if !is_target_comm(&comm) {
+        let cmdline = match read_cmdline(pid).await {
+            Some(cmdline) => cmdline,
+            None => continue,
+        };
+        if !is_target_process(&comm, &cmdline) {
             continue;
         }
 
-        let (ppid, age_secs) = match read_ppid_and_age(pid).await {
+        let (ppid, starttime_ticks, age_secs) = match read_process_identity(pid).await {
             Some(t) => t,
             None => continue,
         };
@@ -96,6 +109,23 @@ async fn reap_inner() {
         }
         if age_secs < MIN_AGE_SECS {
             skipped_young += 1;
+            continue;
+        }
+
+        // Re-read immediately before SIGKILL. This closes PID-reuse and
+        // reparenting races: only the same old Kata process, still detached
+        // from an owner, may be killed.
+        let identity_unchanged =
+            read_process_identity(pid)
+                .await
+                .is_some_and(|(current_ppid, current_starttime, _)| {
+                    current_ppid == 1 && current_starttime == starttime_ticks
+                });
+        let target_unchanged = read_cmdline(pid)
+            .await
+            .is_some_and(|current_cmdline| is_target_process(&comm, &current_cmdline));
+        if !identity_unchanged || !target_unchanged {
+            skipped_attached += 1;
             continue;
         }
 
@@ -139,7 +169,22 @@ async fn collect_pids(mut entries: tokio::fs::ReadDir) -> Vec<u32> {
     out
 }
 
-async fn read_ppid_and_age(pid: u32) -> Option<(u32, u64)> {
+async fn read_cmdline(pid: u32) -> Option<String> {
+    let bytes = tokio::fs::read(format!("/proc/{}/cmdline", pid))
+        .await
+        .ok()?;
+    if bytes.is_empty() {
+        return None;
+    }
+    Some(
+        String::from_utf8_lossy(&bytes)
+            .replace('\0', " ")
+            .trim()
+            .to_string(),
+    )
+}
+
+async fn read_process_identity(pid: u32) -> Option<(u32, u64, u64)> {
     let status = tokio::fs::read_to_string(format!("/proc/{}/status", pid))
         .await
         .ok()?;
@@ -171,7 +216,7 @@ async fn read_ppid_and_age(pid: u32) -> Option<(u32, u64)> {
     let starttime_secs = starttime_ticks as f64 / ticks_per_sec as f64;
     let age_secs = (uptime_secs - starttime_secs).max(0.0) as u64;
 
-    Some((ppid, age_secs))
+    Some((ppid, starttime_ticks, age_secs))
 }
 
 std::cfg_select! {
@@ -211,14 +256,28 @@ mod tests {
     use super::*;
 
     #[test]
-    fn target_comm_matches_expected_binaries() {
-        assert!(is_target_comm("containerd-shim-kata-v2"));
-        assert!(is_target_comm("containerd-shim"));
-        assert!(is_target_comm("qemu-system-x86_64"));
-        assert!(is_target_comm("qemu-system-aarch64"));
-        assert!(!is_target_comm("hot"));
-        assert!(!is_target_comm("dockerd"));
-        assert!(!is_target_comm(""));
+    fn target_process_requires_kata_command_identity() {
+        assert!(is_target_process(
+            "containerd-shim",
+            "/usr/bin/containerd-shim-kata-v2 -namespace hot-box"
+        ));
+        assert!(is_target_process(
+            "containerd-shim-kata-v2",
+            "/usr/bin/containerd-shim-kata-v2 -namespace hot-box"
+        ));
+        assert!(is_target_process(
+            "qemu-system-x86_64",
+            "/usr/bin/qemu-system-x86_64 -name sandbox-abcd -chardev socket,path=/run/vc/abcd"
+        ));
+        assert!(!is_target_process(
+            "containerd-shim",
+            "/usr/bin/containerd-shim-runc-v2 -namespace moby"
+        ));
+        assert!(!is_target_process(
+            "qemu-system-x86_64",
+            "/usr/bin/qemu-system-x86_64 -name production-vm"
+        ));
+        assert!(!is_target_process("hot", "/usr/bin/hot task-worker"));
     }
 
     #[test]

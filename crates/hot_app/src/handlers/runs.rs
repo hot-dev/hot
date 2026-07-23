@@ -232,8 +232,7 @@ pub async fn run_detail_handler(
                 graph_data.nodes.len(),
                 graph_data.edges.len()
             );
-            let graph_data_json =
-                serde_json::to_string(&graph_data).unwrap_or_else(|_| "{}".to_string());
+            let graph_data_json = templates::script_safe_json(&graph_data, "{}");
             tracing::debug!("Graph data JSON length: {}", graph_data_json.len());
 
             // Rehydrate spilled result, then convert run to display format

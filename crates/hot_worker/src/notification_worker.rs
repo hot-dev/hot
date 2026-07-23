@@ -138,6 +138,7 @@ async fn run_one_alert(
                 match hot::db::alert::process_single_alert_delivery(
                     &db,
                     &http_client,
+                    hot::outbound::DestinationPolicy::for_alert_delivery(&conf),
                     email_sender_ref,
                     &alert_email_config,
                     &alert_msg.body.alert_delivery_id,

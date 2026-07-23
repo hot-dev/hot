@@ -96,6 +96,7 @@ pub fn spawn_alert_worker(
             let process_future = process_pending_deliveries(
                 &db,
                 &http_client,
+                hot::outbound::DestinationPolicy::for_alert_delivery(&conf),
                 email_sender_ref,
                 &email_config,
                 config.batch_size,

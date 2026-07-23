@@ -48,6 +48,19 @@ async fn can_manage_team_users(db: &DatabasePool, session: &Session, team_id: &U
         .unwrap_or(false)
 }
 
+async fn get_current_org_team(
+    db: &DatabasePool,
+    session: &Session,
+    team_id: &Uuid,
+) -> Result<hot::db::Team, hot::db::team::TeamError> {
+    let org_id = session
+        .current_org
+        .as_ref()
+        .map(|org| org.org_id)
+        .ok_or(hot::db::team::TeamError::NotFound)?;
+    hot::db::Team::get_team_by_org(db, team_id, &org_id).await
+}
+
 pub async fn teams_list_handler(
     Path(org_slug): Path<String>,
     State(db): State<Arc<DatabasePool>>,
@@ -140,8 +153,8 @@ pub async fn teams_detail_handler(
     State(db): State<Arc<DatabasePool>>,
     axum::extract::Extension(session): axum::extract::Extension<Session>,
 ) -> impl IntoResponse {
-    // Get team details
-    match hot::db::Team::get_team(&db, &team_id).await {
+    // Get team details within the current organization.
+    match get_current_org_team(&db, &session, &team_id).await {
         Ok(team) => {
             // Build breadcrumbs: <org> / Teams / <team_name>
             let mut breadcrumbs = templates::build_base_breadcrumbs_without_env(&session);
@@ -163,28 +176,7 @@ pub async fn teams_detail_handler(
 
             Html(template.render().unwrap()).into_response()
         }
-        Err(_) => {
-            // Team not found
-            let mut breadcrumbs = templates::build_base_breadcrumbs_without_env(&session);
-            breadcrumbs.push(templates::BreadcrumbItem::clickable(
-                "Teams".to_string(),
-                format!("/@{}/teams", org_slug),
-            ));
-            breadcrumbs.push(templates::BreadcrumbItem::current("Not Found".to_string()));
-
-            let template = templates::TeamsNotFound {
-                title: "Team Not Found",
-                page_context: templates::PrivatePageContext::for_org_page(
-                    "teams",
-                    &session,
-                    breadcrumbs,
-                ),
-                team_id: team_id.to_string(),
-                is_admin: session.is_current_org_admin,
-            };
-
-            Html(template.render().unwrap()).into_response()
-        }
+        Err(_) => render_team_not_found(&session, &org_slug, &team_id).into_response(),
     }
 }
 
@@ -193,8 +185,8 @@ pub async fn teams_edit_handler(
     State(db): State<Arc<DatabasePool>>,
     axum::extract::Extension(session): axum::extract::Extension<Session>,
 ) -> impl IntoResponse {
-    // Get team details
-    match hot::db::Team::get_team(&db, &team_id).await {
+    // Get team details within the current organization.
+    match get_current_org_team(&db, &session, &team_id).await {
         Ok(team) => {
             // Build breadcrumbs: <org> / Teams / <team_name> / Edit
             let mut breadcrumbs = templates::build_base_breadcrumbs_without_env(&session);
@@ -221,10 +213,7 @@ pub async fn teams_edit_handler(
 
             Html(template.render().unwrap()).into_response()
         }
-        Err(_) => {
-            // Team not found, redirect to teams list
-            Redirect::to(&format!("/@{}/teams", org_slug)).into_response()
-        }
+        Err(_) => render_team_not_found(&session, &org_slug, &team_id).into_response(),
     }
 }
 
@@ -240,8 +229,8 @@ pub async fn team_users_list_handler(
     let current_page_num = page.current_page_num;
     let offset = page.offset;
 
-    // Get team details
-    match hot::db::Team::get_team(&db, &team_id).await {
+    // Get team details within the current organization.
+    match get_current_org_team(&db, &session, &team_id).await {
         Ok(team) => {
             // Get team users with roles
             let all_team_users = hot::db::TeamUser::get_users_with_roles_by_team(&db, &team_id)
@@ -303,10 +292,7 @@ pub async fn team_users_list_handler(
 
             Html(template.render().unwrap()).into_response()
         }
-        Err(_) => {
-            // Team not found, redirect to teams list
-            Redirect::to(&format!("/@{}/teams", org_slug)).into_response()
-        }
+        Err(_) => render_team_not_found(&session, &org_slug, &team_id).into_response(),
     }
 }
 
@@ -315,8 +301,8 @@ pub async fn team_users_add_handler(
     State(db): State<Arc<DatabasePool>>,
     axum::extract::Extension(session): axum::extract::Extension<Session>,
 ) -> impl IntoResponse {
-    // Get team details
-    match hot::db::Team::get_team(&db, &team_id).await {
+    // Get team details within the current organization.
+    match get_current_org_team(&db, &session, &team_id).await {
         Ok(team) => {
             // Get available users from the organization
             let available_users = if let Some(org) = &session.current_org {
@@ -359,10 +345,7 @@ pub async fn team_users_add_handler(
 
             Html(template.render().unwrap()).into_response()
         }
-        Err(_) => {
-            // Team not found, redirect to teams list
-            Redirect::to(&format!("/@{}/teams", org_slug)).into_response()
-        }
+        Err(_) => render_team_not_found(&session, &org_slug, &team_id).into_response(),
     }
 }
 
@@ -371,8 +354,8 @@ pub async fn team_users_edit_handler(
     State(db): State<Arc<DatabasePool>>,
     axum::extract::Extension(session): axum::extract::Extension<Session>,
 ) -> impl IntoResponse {
-    // Get team details
-    match hot::db::Team::get_team(&db, &team_id).await {
+    // Get team details within the current organization.
+    match get_current_org_team(&db, &session, &team_id).await {
         Ok(team) => {
             // Get team user details
             match hot::db::TeamUser::get_team_user(&db, &team_id, &user_id).await {
@@ -443,10 +426,7 @@ pub async fn team_users_edit_handler(
                 }
             }
         }
-        Err(_) => {
-            // Team not found, redirect to teams list
-            Redirect::to(&format!("/@{}/teams", org_slug)).into_response()
-        }
+        Err(_) => render_team_not_found(&session, &org_slug, &team_id).into_response(),
     }
 }
 
@@ -883,6 +863,25 @@ pub async fn team_users_remove_post_handler(
 
     // Redirect back to team users list
     Redirect::to(&format!("/@{}/teams/{}/users", org_slug, team_id))
+}
+
+// Helper function to render a uniform team-not-found page
+fn render_team_not_found(session: &Session, org_slug: &str, team_id: &Uuid) -> Html<String> {
+    let mut breadcrumbs = templates::build_base_breadcrumbs_without_env(session);
+    breadcrumbs.push(templates::BreadcrumbItem::clickable(
+        "Teams".to_string(),
+        format!("/@{}/teams", org_slug),
+    ));
+    breadcrumbs.push(templates::BreadcrumbItem::current("Not Found".to_string()));
+
+    let template = templates::TeamsNotFound {
+        title: "Team Not Found",
+        page_context: templates::PrivatePageContext::for_org_page("teams", session, breadcrumbs),
+        team_id: team_id.to_string(),
+        is_admin: session.is_current_org_admin,
+    };
+
+    Html(template.render().unwrap())
 }
 
 // Helper function to render teams new page with error

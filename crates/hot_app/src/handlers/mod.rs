@@ -67,9 +67,10 @@ pub use alerts::{
     subscriptions_new_handler, subscriptions_update_handler, verify_alert_destination_handler,
 };
 pub use auth::{
-    claim_handle_handler, claim_handle_post_handler, resend_verification_handler, signin_handler,
-    signin_post_handler, signout_handler, signout_page_handler, signup_handler,
-    signup_plans_handler, signup_post_handler, verify_email_handler,
+    claim_handle_handler, claim_handle_post_handler, confirm_email_handler,
+    resend_verification_handler, signin_handler, signin_post_handler, signout_handler,
+    signout_page_handler, signup_handler, signup_plans_handler, signup_post_handler,
+    verify_email_handler,
 };
 pub use billing::{
     account_billing_handler, billing_webhook_handler, cancel_subscription_handler,

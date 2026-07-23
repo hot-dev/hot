@@ -47,7 +47,7 @@ pub async fn dashboard_handler(
         .filter(|p| p.active)
         .collect();
 
-    let projects_json = serde_json::to_string(
+    let projects_json = templates::script_safe_json(
         &projects
             .iter()
             .map(|p| {
@@ -57,8 +57,8 @@ pub async fn dashboard_handler(
                 })
             })
             .collect::<Vec<_>>(),
-    )
-    .unwrap_or_else(|_| "[]".to_string());
+        "[]",
+    );
 
     let template = templates::Dashboard {
         title: "Dashboard",

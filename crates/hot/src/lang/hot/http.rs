@@ -1,8 +1,13 @@
 use crate::lang::hot::r#type::{HotResult, untype_recursive};
+use crate::outbound::DestinationPolicy;
 use crate::val::Val;
 use crate::{validate_args, validate_args_range};
 use indexmap::IndexMap;
 use serde_json::Value as JsonValue;
+use url::Url;
+
+const DEFAULT_MAX_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
+const MAX_REDIRECTS: usize = 10;
 
 fn err_val(msg: String) -> Val {
     Val::err(Val::from(msg))
@@ -14,6 +19,31 @@ fn err_val(msg: String) -> Val {
 /// - 1 arg: a Map/HttpRequest with `method`, `url`, and optionally `headers`, `body`
 /// - 4 args: positional (method, url, headers, body)
 pub fn request(args: &[Val]) -> HotResult<Val> {
+    request_with_policy(
+        args,
+        DestinationPolicy::AllowPrivate,
+        DEFAULT_MAX_RESPONSE_BYTES,
+    )
+}
+
+pub fn request_vm(
+    vm: &mut crate::lang::runtime::vm::VirtualMachine,
+    args: &[Val],
+) -> HotResult<Val> {
+    request_with_policy(
+        args,
+        DestinationPolicy::from_vm(vm),
+        vm.get_conf()
+            .get_int_or_default("http.max-response-bytes", DEFAULT_MAX_RESPONSE_BYTES as i64)
+            .max(1) as usize,
+    )
+}
+
+fn request_with_policy(
+    args: &[Val],
+    policy: DestinationPolicy,
+    max_response_bytes: usize,
+) -> HotResult<Val> {
     let (method, url, headers, body);
 
     if args.len() == 1 {
@@ -103,8 +133,9 @@ pub fn request(args: &[Val]) -> HotResult<Val> {
 
     // Bridge sync→async. Since VM execution runs in spawn_blocking context,
     // we use Handle::block_on directly (block_in_place panics from spawn_blocking).
-    tokio::runtime::Handle::current()
-        .block_on(async { make_http_request(&method, &url, &headers, &body).await })
+    tokio::runtime::Handle::current().block_on(async {
+        make_http_request(&method, &url, &headers, &body, policy, max_response_bytes).await
+    })
 }
 
 /// Build the User-Agent string, appending hot version to any user-provided value
@@ -167,73 +198,138 @@ fn response_body_val(bytes: Vec<u8>, content_type: Option<&str>) -> Val {
     }
 }
 
+async fn send_with_redirect_validation(
+    method: &str,
+    url: &str,
+    headers: &IndexMap<Val, Val>,
+    body: &Val,
+    policy: DestinationPolicy,
+    timeout_secs: u64,
+) -> Result<reqwest::Response, Val> {
+    let mut method = reqwest::Method::from_bytes(method.to_uppercase().as_bytes())
+        .map_err(|_| err_val(format!("::hot::http/request: unsupported method: {method}")))?;
+    if !matches!(
+        method,
+        reqwest::Method::GET
+            | reqwest::Method::POST
+            | reqwest::Method::PUT
+            | reqwest::Method::DELETE
+            | reqwest::Method::PATCH
+            | reqwest::Method::HEAD
+    ) {
+        return Err(err_val(format!(
+            "::hot::http/request: unsupported method: {method}"
+        )));
+    }
+    let mut current_url =
+        Url::parse(url).map_err(|e| err_val(format!("::hot::http/request: invalid URL: {e}")))?;
+    if current_url.scheme() != "http" && current_url.scheme() != "https" {
+        return Err(err_val(
+            "::hot::http/request: URL scheme must be http or https".to_string(),
+        ));
+    }
+
+    let (mut body_bytes, body_is_json) = match body {
+        Val::Str(s) if !s.is_empty() => (Some(s.as_bytes().to_vec()), false),
+        Val::Bytes(bytes) if !bytes.is_empty() => (Some(bytes.clone()), false),
+        Val::Map(_) | Val::Vec(_) => {
+            let json_value: JsonValue = body.into();
+            (Some(json_value.to_string().into_bytes()), true)
+        }
+        _ => (None, false),
+    };
+    let original_origin = current_url.origin();
+
+    for redirect_count in 0..=MAX_REDIRECTS {
+        let addrs = policy
+            .resolve_url(&current_url)
+            .await
+            .map_err(|e| err_val(format!("::hot::http/request: {e}")))?;
+        let host = current_url.host_str().expect("validated URL has host");
+        let client = reqwest::Client::builder()
+            .user_agent(build_user_agent(headers))
+            .connect_timeout(std::time::Duration::from_secs(30))
+            .timeout(std::time::Duration::from_secs(timeout_secs))
+            .redirect(reqwest::redirect::Policy::none())
+            .resolve_to_addrs(host, &addrs)
+            .build()
+            .map_err(|e| err_val(format!("::hot::http/request: client setup failed: {e}")))?;
+        let mut request = client.request(method.clone(), current_url.clone());
+        let same_origin = current_url.origin() == original_origin;
+        for (key, value) in headers {
+            if let (Val::Str(key), Val::Str(value)) = (key, value)
+                && !key.eq_ignore_ascii_case("user-agent")
+                && !key.eq_ignore_ascii_case("host")
+                && (same_origin
+                    || !matches!(
+                        key.to_ascii_lowercase().as_str(),
+                        "authorization" | "cookie" | "proxy-authorization"
+                    ))
+            {
+                request = request.header(&**key, &**value);
+            }
+        }
+        if body_is_json && body_bytes.is_some() {
+            request = request.header(reqwest::header::CONTENT_TYPE, "application/json");
+        }
+        if let Some(bytes) = &body_bytes {
+            request = request.body(bytes.clone());
+        }
+
+        let response = request
+            .send()
+            .await
+            .map_err(|e| err_val(format!("::hot::http/request: request failed: {e}")))?;
+        if !response.status().is_redirection() {
+            return Ok(response);
+        }
+        if redirect_count == MAX_REDIRECTS {
+            return Err(err_val(format!(
+                "::hot::http/request: exceeded {MAX_REDIRECTS} redirects"
+            )));
+        }
+        let location = response
+            .headers()
+            .get(reqwest::header::LOCATION)
+            .and_then(|value| value.to_str().ok())
+            .ok_or_else(|| {
+                err_val("::hot::http/request: redirect missing valid Location".to_string())
+            })?;
+        current_url = current_url.join(location).map_err(|e| {
+            err_val(format!(
+                "::hot::http/request: invalid redirect Location: {e}"
+            ))
+        })?;
+        match response.status() {
+            reqwest::StatusCode::SEE_OTHER => {
+                method = reqwest::Method::GET;
+                body_bytes = None;
+            }
+            reqwest::StatusCode::MOVED_PERMANENTLY | reqwest::StatusCode::FOUND
+                if method == reqwest::Method::POST =>
+            {
+                method = reqwest::Method::GET;
+                body_bytes = None;
+            }
+            _ => {}
+        }
+    }
+    unreachable!()
+}
+
 async fn make_http_request(
     method: &str,
     url: &str,
     headers: &IndexMap<Val, Val>,
     body: &Val,
+    policy: DestinationPolicy,
+    max_response_bytes: usize,
 ) -> HotResult<Val> {
-    let user_agent = build_user_agent(headers);
-    let client = reqwest::Client::builder()
-        .user_agent(&user_agent)
-        .connect_timeout(std::time::Duration::from_secs(30))
-        .timeout(std::time::Duration::from_secs(120)) // 2 minute timeout for regular requests
-        .build()
-        .unwrap_or_else(|_| reqwest::Client::new());
-
-    let mut request_builder = match method.to_uppercase().as_str() {
-        "GET" => client.get(url),
-        "POST" => client.post(url),
-        "PUT" => client.put(url),
-        "DELETE" => client.delete(url),
-        "PATCH" => client.patch(url),
-        "HEAD" => client.head(url),
-        _ => {
-            return HotResult::Err(err_val(format!(
-                "::hot::http/request: unsupported method: {}",
-                method
-            )));
-        }
-    };
-
-    // Add headers (skip User-Agent since it's set on the client)
-    for (key, value) in headers.iter() {
-        if let (Val::Str(k), Val::Str(v)) = (key, value)
-            && !k.eq_ignore_ascii_case("user-agent")
-        {
-            request_builder = request_builder.header(&**k, &**v);
-        }
-    }
-
-    // Add body if not empty
-    match body {
-        Val::Str(s) if !s.is_empty() => {
-            request_builder = request_builder.body(s.to_string());
-        }
-        Val::Bytes(bytes) if !bytes.is_empty() => {
-            request_builder = request_builder.body(bytes.clone());
-        }
-        Val::Map(_) | Val::Vec(_) => {
-            // Serialize Val to JsonValue then to string
-            let json_value: JsonValue = body.into();
-            let json_str = json_value.to_string();
-            request_builder = request_builder
-                .header("Content-Type", "application/json")
-                .body(json_str);
-        }
-        _ => {}
-    }
-
-    // Send the request
-    let response = match request_builder.send().await {
-        Ok(resp) => resp,
-        Err(e) => {
-            return HotResult::Err(err_val(format!(
-                "::hot::http/request: request failed: {}",
-                e
-            )));
-        }
-    };
+    let response =
+        match send_with_redirect_validation(method, url, headers, body, policy, 120).await {
+            Ok(response) => response,
+            Err(error) => return HotResult::Err(error),
+        };
 
     // Build response object
     let status = response.status().as_u16() as i64;
@@ -251,16 +347,39 @@ async fn make_http_request(
         }
     }
 
-    // Get body as raw bytes first so binary responses are not lossy.
-    let body_bytes = match response.bytes().await {
-        Ok(bytes) => bytes.to_vec(),
-        Err(e) => {
+    if response
+        .content_length()
+        .is_some_and(|length| length > max_response_bytes as u64)
+    {
+        return HotResult::Err(err_val(format!(
+            "::hot::http/request: response Content-Length exceeds {} bytes",
+            max_response_bytes
+        )));
+    }
+    let mut body_bytes = Vec::new();
+    let mut stream = response.bytes_stream();
+    while let Some(chunk) = stream.next().await {
+        let chunk = match chunk {
+            Ok(chunk) => chunk,
+            Err(e) => {
+                return HotResult::Err(err_val(format!(
+                    "::hot::http/request: failed to read body: {e}"
+                )));
+            }
+        };
+        let Some(new_len) = body_bytes.len().checked_add(chunk.len()) else {
+            return HotResult::Err(err_val(
+                "::hot::http/request: response body length overflow".to_string(),
+            ));
+        };
+        if new_len > max_response_bytes {
             return HotResult::Err(err_val(format!(
-                "::hot::http/request: failed to read body: {}",
-                e
+                "::hot::http/request: response body exceeds {} bytes",
+                max_response_bytes
             )));
         }
-    };
+        body_bytes.extend_from_slice(&chunk);
+    }
 
     let body_bytes_val = Val::Bytes(body_bytes.clone());
     let body_val = response_body_val(body_bytes, content_type.as_deref());
@@ -292,6 +411,34 @@ pub fn get(args: &[Val]) -> HotResult<Val> {
     ])
 }
 
+fn request_method_vm(
+    vm: &mut crate::lang::runtime::vm::VirtualMachine,
+    fn_name: &str,
+    method: &str,
+    args: &[Val],
+    body_optional: bool,
+) -> HotResult<Val> {
+    if (body_optional && !(1..=2).contains(&args.len())) || (!body_optional && args.len() != 1) {
+        return HotResult::Err(err_val(format!("{fn_name}: invalid argument count")));
+    }
+    let url = match &args[0] {
+        Val::Str(url) => url.clone(),
+        _ => return HotResult::Err(err_val(format!("{fn_name}: url must be a string"))),
+    };
+    let body = args.get(1).cloned().unwrap_or_else(|| Val::from(""));
+    request_with_policy(
+        &[Val::from(method), Val::from(url), Val::map_empty(), body],
+        DestinationPolicy::from_vm(vm),
+        vm.get_conf()
+            .get_int_or_default("http.max-response-bytes", DEFAULT_MAX_RESPONSE_BYTES as i64)
+            .max(1) as usize,
+    )
+}
+
+pub fn get_vm(vm: &mut crate::lang::runtime::vm::VirtualMachine, args: &[Val]) -> HotResult<Val> {
+    request_method_vm(vm, "::hot::http/get", "GET", args, false)
+}
+
 /// Make an HTTP POST request
 pub fn post(args: &[Val]) -> HotResult<Val> {
     validate_args_range!("::hot::http/post", args, 1, 2);
@@ -314,6 +461,10 @@ pub fn post(args: &[Val]) -> HotResult<Val> {
     request(&[Val::from("POST"), Val::from(url), Val::map_empty(), body])
 }
 
+pub fn post_vm(vm: &mut crate::lang::runtime::vm::VirtualMachine, args: &[Val]) -> HotResult<Val> {
+    request_method_vm(vm, "::hot::http/post", "POST", args, true)
+}
+
 /// Make an HTTP PUT request
 pub fn put(args: &[Val]) -> HotResult<Val> {
     validate_args_range!("::hot::http/put", args, 1, 2);
@@ -330,6 +481,10 @@ pub fn put(args: &[Val]) -> HotResult<Val> {
     };
 
     request(&[Val::from("PUT"), Val::from(url), Val::map_empty(), body])
+}
+
+pub fn put_vm(vm: &mut crate::lang::runtime::vm::VirtualMachine, args: &[Val]) -> HotResult<Val> {
+    request_method_vm(vm, "::hot::http/put", "PUT", args, true)
 }
 
 /// Make an HTTP DELETE request
@@ -351,6 +506,13 @@ pub fn delete(args: &[Val]) -> HotResult<Val> {
         Val::map_empty(),
         Val::from(""),
     ])
+}
+
+pub fn delete_vm(
+    vm: &mut crate::lang::runtime::vm::VirtualMachine,
+    args: &[Val],
+) -> HotResult<Val> {
+    request_method_vm(vm, "::hot::http/delete", "DELETE", args, false)
 }
 
 // ============================================================================
@@ -573,6 +735,34 @@ impl HttpStreamIterator {
 /// - 4 args: positional (method, url, headers, body) — format defaults to "raw"
 /// - 5 args: positional (method, url, headers, body, format)
 pub fn request_stream(args: &[Val]) -> HotResult<Val> {
+    request_stream_with_policy(
+        args,
+        DestinationPolicy::AllowPrivate,
+        DEFAULT_MAX_RESPONSE_BYTES,
+    )
+}
+
+pub fn request_stream_vm(
+    vm: &mut crate::lang::runtime::vm::VirtualMachine,
+    args: &[Val],
+) -> HotResult<Val> {
+    request_stream_with_policy(
+        args,
+        DestinationPolicy::from_vm(vm),
+        vm.get_conf()
+            .get_int_or_default(
+                "http.max-stream-response-bytes",
+                DEFAULT_MAX_RESPONSE_BYTES as i64,
+            )
+            .max(1) as usize,
+    )
+}
+
+fn request_stream_with_policy(
+    args: &[Val],
+    policy: DestinationPolicy,
+    max_response_bytes: usize,
+) -> HotResult<Val> {
     let (method, url, headers, body, format);
 
     if args.len() <= 2 {
@@ -686,8 +876,18 @@ pub fn request_stream(args: &[Val]) -> HotResult<Val> {
 
     // Bridge sync→async. Since VM execution runs in spawn_blocking context,
     // we use Handle::block_on directly (block_in_place panics from spawn_blocking).
-    tokio::runtime::Handle::current()
-        .block_on(async { make_streaming_request(&method, &url, &headers, &body, &format).await })
+    tokio::runtime::Handle::current().block_on(async {
+        make_streaming_request(
+            &method,
+            &url,
+            &headers,
+            &body,
+            &format,
+            policy,
+            max_response_bytes,
+        )
+        .await
+    })
 }
 
 async fn make_streaming_request(
@@ -696,64 +896,23 @@ async fn make_streaming_request(
     headers: &IndexMap<Val, Val>,
     body: &Val,
     format: &str,
+    policy: DestinationPolicy,
+    max_response_bytes: usize,
 ) -> HotResult<Val> {
-    let user_agent = build_user_agent(headers);
-    let client = reqwest::Client::builder()
-        .user_agent(&user_agent)
-        .connect_timeout(std::time::Duration::from_secs(30))
-        .timeout(std::time::Duration::from_secs(300)) // 5 minute timeout for large requests
-        .build()
-        .unwrap_or_else(|_| reqwest::Client::new());
-
-    let mut request_builder = match method.to_uppercase().as_str() {
-        "GET" => client.get(url),
-        "POST" => client.post(url),
-        "PUT" => client.put(url),
-        "DELETE" => client.delete(url),
-        "PATCH" => client.patch(url),
-        "HEAD" => client.head(url),
-        _ => {
-            return HotResult::Err(err_val(format!(
-                "::hot::http/request-stream: unsupported method: {}",
-                method
-            )));
-        }
-    };
-
-    // Add headers (skip User-Agent since it's set on the client)
-    for (key, value) in headers.iter() {
-        if let (Val::Str(k), Val::Str(v)) = (key, value)
-            && !k.eq_ignore_ascii_case("user-agent")
-        {
-            request_builder = request_builder.header(&**k, &**v);
-        }
+    let response =
+        match send_with_redirect_validation(method, url, headers, body, policy, 300).await {
+            Ok(response) => response,
+            Err(error) => return HotResult::Err(error),
+        };
+    if response
+        .content_length()
+        .is_some_and(|length| length > max_response_bytes as u64)
+    {
+        return HotResult::Err(err_val(format!(
+            "::hot::http/request-stream: response Content-Length exceeds {} bytes",
+            max_response_bytes
+        )));
     }
-
-    // Add body if not empty
-    match body {
-        Val::Str(s) if !s.is_empty() => {
-            request_builder = request_builder.body(s.to_string());
-        }
-        Val::Map(_) | Val::Vec(_) => {
-            let json_value: JsonValue = body.into();
-            let json_str = json_value.to_string();
-            request_builder = request_builder
-                .header("Content-Type", "application/json")
-                .body(json_str);
-        }
-        _ => {}
-    }
-
-    // Send the request
-    let response = match request_builder.send().await {
-        Ok(resp) => resp,
-        Err(e) => {
-            return HotResult::Err(err_val(format!(
-                "::hot::http/request-stream: request failed: {}",
-                e
-            )));
-        }
-    };
 
     let status = response.status().as_u16() as i64;
 
@@ -771,10 +930,25 @@ async fn make_streaming_request(
     // Spawn a task to stream the response body
     let mut byte_stream = response.bytes_stream();
     tokio::spawn(async move {
+        let mut total_bytes = 0usize;
         while let Some(chunk_result) = byte_stream.next().await {
             let send_result: Result<(), mpsc::error::SendError<Result<Bytes, String>>> =
                 match chunk_result {
-                    Ok(bytes) => tx.send(Ok(bytes)).await,
+                    Ok(bytes) => {
+                        total_bytes = match total_bytes.checked_add(bytes.len()) {
+                            Some(total) if total <= max_response_bytes => total,
+                            _ => {
+                                let _ = tx
+                                    .send(Err(format!(
+                                        "response body exceeds {} bytes",
+                                        max_response_bytes
+                                    )))
+                                    .await;
+                                break;
+                            }
+                        };
+                        tx.send(Ok(bytes)).await
+                    }
                     Err(e) => tx.send(Err(e.to_string())).await,
                 };
             if send_result.is_err() {
@@ -926,6 +1100,41 @@ mod tests {
         } else {
             panic!("Expected response to be a map");
         }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn regular_response_rejects_oversized_content_length() {
+        let app = Router::new().route(
+            "/large",
+            axum::routing::get(|| async { "response larger than cap" }),
+        );
+        let url = format!("{}/large", start_mock_server(app).await);
+        let result = make_http_request(
+            "GET",
+            &url,
+            &IndexMap::new(),
+            &Val::Null,
+            DestinationPolicy::AllowPrivate,
+            4,
+        )
+        .await;
+        assert!(matches!(result, HotResult::Err(_)));
+    }
+
+    #[tokio::test]
+    async fn public_only_policy_rejects_local_http_destination() {
+        let app = Router::new().route("/", axum::routing::get(|| async { "nope" }));
+        let url = start_mock_server(app).await;
+        let result = make_http_request(
+            "GET",
+            &url,
+            &IndexMap::new(),
+            &Val::Null,
+            DestinationPolicy::PublicOnly,
+            DEFAULT_MAX_RESPONSE_BYTES,
+        )
+        .await;
+        assert!(matches!(result, HotResult::Err(_)));
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

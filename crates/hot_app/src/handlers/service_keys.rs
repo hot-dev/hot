@@ -13,6 +13,17 @@ use hot::db::service_key::ServiceKey;
 use std::sync::Arc;
 use uuid::Uuid;
 
+fn require_current_org_admin(session: &Session) -> Result<(), (StatusCode, String)> {
+    if session.is_current_org_admin {
+        Ok(())
+    } else {
+        Err((
+            StatusCode::FORBIDDEN,
+            "Only organization admins can manage service keys.".to_string(),
+        ))
+    }
+}
+
 fn service_keys_list_breadcrumbs(session: &Session) -> crate::templates::Breadcrumbs {
     let mut bc = crate::templates::build_base_breadcrumbs_with_env(session);
     bc.push(crate::templates::BreadcrumbItem::current(
@@ -51,6 +62,8 @@ pub async fn service_keys_list_handler(
     State(db): State<Arc<DatabasePool>>,
     axum::extract::Extension(session): axum::extract::Extension<Session>,
 ) -> Result<Html<String>, (StatusCode, String)> {
+    require_current_org_admin(&session)?;
+
     let env = session.current_env.as_ref().ok_or((
         StatusCode::BAD_REQUEST,
         "No environment selected".to_string(),
@@ -82,6 +95,8 @@ pub async fn service_keys_new_handler(
     State(db): State<Arc<DatabasePool>>,
     axum::extract::Extension(session): axum::extract::Extension<Session>,
 ) -> Result<Html<String>, (StatusCode, String)> {
+    require_current_org_admin(&session)?;
+
     let env = session.current_env.as_ref().ok_or((
         StatusCode::BAD_REQUEST,
         "No environment selected".to_string(),
@@ -117,6 +132,8 @@ pub async fn service_keys_create_handler(
     axum::extract::Extension(session): axum::extract::Extension<Session>,
     axum::extract::Form(form): axum::extract::Form<CreateServiceKeyForm>,
 ) -> Result<Html<String>, (StatusCode, String)> {
+    require_current_org_admin(&session)?;
+
     // Feature gate: service keys require Pro+ plan
     if !session.current_org_features.has_service_keys() {
         return Err((
@@ -131,24 +148,24 @@ pub async fn service_keys_create_handler(
     ))?;
 
     // For dashboard-created service keys, we need an API key to associate with.
-    // Use the first active API key for this environment.
-    let api_keys = hot::db::api_key::ApiKey::get_api_keys_by_env(&db, &env.env_id, Some(1), None)
+    // Use the most recent active API key for this environment.
+    let api_key = hot::db::api_key::ApiKey::get_active_api_key_by_env(&db, &env.env_id)
         .await
         .map_err(|e| {
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 format!("Failed to get API keys: {}", e),
             )
-        })?;
-
-    let api_key = api_keys.first().ok_or((
-        StatusCode::BAD_REQUEST,
-        "No API key found for this environment. Create an API key first.".to_string(),
-    ))?;
+        })?
+        .ok_or((
+            StatusCode::BAD_REQUEST,
+            "No active API key found for this environment. Create or enable an API key first."
+                .to_string(),
+        ))?;
 
     // Parse and validate permissions from form (default to empty)
-    let permissions: serde_json::Value = if form.permissions.is_empty() {
-        serde_json::json!({})
+    let permissions = if form.permissions.is_empty() {
+        hot::permission::Permissions::new()
     } else {
         let parsed: serde_json::Value = serde_json::from_str(&form.permissions).map_err(|e| {
             (
@@ -157,26 +174,31 @@ pub async fn service_keys_create_handler(
             )
         })?;
         // Validate the permissions structure
-        if parsed.as_object().is_some_and(|m| !m.is_empty()) {
-            let perms =
-                hot::permission::Permissions::from_json_validated(&parsed).map_err(|e| {
-                    (
-                        StatusCode::BAD_REQUEST,
-                        format!("Invalid permissions: {}", e),
-                    )
-                })?;
-            // Service keys may only use customer-facing resource types
-            perms
-                .validate_resource_types(hot::permission::resource_types::SERVICE_KEY_ALLOWED)
-                .map_err(|e| {
-                    (
-                        StatusCode::BAD_REQUEST,
-                        format!("Invalid permissions: {}", e),
-                    )
-                })?;
-        }
-        parsed
+        hot::permission::Permissions::from_json_validated(&parsed).map_err(|e| {
+            (
+                StatusCode::BAD_REQUEST,
+                format!("Invalid permissions: {}", e),
+            )
+        })?
     };
+    permissions
+        .validate_resource_types(hot::permission::resource_types::SERVICE_KEY_ALLOWED)
+        .map_err(|e| {
+            (
+                StatusCode::BAD_REQUEST,
+                format!("Invalid permissions: {}", e),
+            )
+        })?;
+    let parent_permissions = api_key.get_permissions().map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Invalid parent API key permissions: {}", e),
+        )
+    })?;
+    permissions
+        .validate_subset_of(&parent_permissions)
+        .map_err(|e| (StatusCode::FORBIDDEN, e.to_string()))?;
+    let permissions = permissions.to_json();
 
     // Parse expiration
     let expires_at = if form.expires_in_days > 0 {
@@ -276,6 +298,8 @@ pub async fn service_keys_detail_handler(
     State(db): State<Arc<DatabasePool>>,
     axum::extract::Extension(session): axum::extract::Extension<Session>,
 ) -> Result<Html<String>, (StatusCode, String)> {
+    require_current_org_admin(&session)?;
+
     let env = session.current_env.as_ref().ok_or((
         StatusCode::BAD_REQUEST,
         "No environment selected".to_string(),
@@ -336,6 +360,8 @@ pub async fn service_keys_revoke_handler(
     State(db): State<Arc<DatabasePool>>,
     axum::extract::Extension(session): axum::extract::Extension<Session>,
 ) -> Result<Redirect, (StatusCode, String)> {
+    require_current_org_admin(&session)?;
+
     let env = session.current_env.as_ref().ok_or((
         StatusCode::BAD_REQUEST,
         "No environment selected".to_string(),

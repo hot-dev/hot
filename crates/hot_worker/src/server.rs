@@ -961,6 +961,115 @@ async fn hydrate_event_message_from_db(
             ));
         }
     };
+    let stored_env = Env::get_env(db, &stored_event.env_id).await.map_err(|e| {
+        worker_infrastructure_retry_error(
+            format!(
+                "Failed to load authoritative environment {} for event {}: {}",
+                stored_event.env_id, event_id, e
+            ),
+            infra_retry_backoff_ms,
+        )
+    })?;
+    let org_slug = hot::db::org::Org::get_org(db, &stored_env.org_id)
+        .await
+        .ok()
+        .map(|org| org.slug);
+
+    let (target_project_id, target_project_name) =
+        if let Some(project_id) = event_message.body.event.target_project_id {
+            let project = Project::get_project(db, &project_id).await.map_err(|e| {
+                worker_error(format!(
+                    "Target project {} for event {} is invalid: {}",
+                    project_id, event_id, e
+                ))
+            })?;
+            if project.env_id != stored_event.env_id {
+                return Err(worker_error(format!(
+                    "Target project {} does not belong to event environment {}",
+                    project_id, stored_event.env_id
+                )));
+            }
+            (Some(project.project_id), Some(project.name))
+        } else {
+            (None, None)
+        };
+
+    let claimed_context = &event_message.body.execution_context;
+    let persisted_target_build_id = stored_event
+        .event_data
+        .get("_hot_target_build_id")
+        .and_then(|value| value.as_str())
+        .map(|value| {
+            value.parse::<Uuid>().map_err(|e| {
+                worker_error(format!(
+                    "Persisted target build for event {} is invalid: {}",
+                    event_id, e
+                ))
+            })
+        })
+        .transpose()?;
+    if let (Some(persisted), Some(claimed)) = (persisted_target_build_id, claimed_context.build_id)
+        && persisted != claimed
+    {
+        return Err(worker_error(format!(
+            "Queued target build does not match persisted event {}",
+            event_id
+        )));
+    }
+    let target_build_id = persisted_target_build_id.or(claimed_context.build_id);
+    let authoritative_build = if let Some(build_id) = target_build_id {
+        let build = Build::get_build(db, &build_id).await.map_err(|e| {
+            worker_error(format!(
+                "Target build {} for event {} is invalid: {}",
+                build_id, event_id, e
+            ))
+        })?;
+        let project = Project::get_project(db, &build.project_id)
+            .await
+            .map_err(|e| {
+                worker_error(format!(
+                    "Project {} for target build {} is invalid: {}",
+                    build.project_id, build_id, e
+                ))
+            })?;
+        if project.env_id != stored_event.env_id {
+            return Err(worker_error(format!(
+                "Target build {} does not belong to event environment {}",
+                build_id, stored_event.env_id
+            )));
+        }
+        if target_project_id.is_some_and(|project_id| project_id != build.project_id) {
+            return Err(worker_error(format!(
+                "Target build {} does not belong to target project",
+                build_id
+            )));
+        }
+        Some((build, project))
+    } else {
+        None
+    };
+    if !(0..=100).contains(&claimed_context.retry_attempt) {
+        return Err(worker_error(format!(
+            "Invalid retry attempt {} for event {}",
+            claimed_context.retry_attempt, event_id
+        )));
+    }
+    if let Some(origin_run_id) = claimed_context.origin_run_id {
+        let origin = hot::db::run::Run::get_run(db, &origin_run_id)
+            .await
+            .map_err(|e| {
+                worker_error(format!(
+                    "Origin run {} for event {} is invalid: {}",
+                    origin_run_id, event_id, e
+                ))
+            })?;
+        if origin.env_id != stored_event.env_id {
+            return Err(worker_error(format!(
+                "Origin run {} does not belong to event environment {}",
+                origin_run_id, stored_event.env_id
+            )));
+        }
+    }
 
     let event_data: Val = serde_json::from_value(stored_event.event_data).map_err(|e| {
         let err_msg = format!(
@@ -984,16 +1093,8 @@ async fn hydrate_event_message_from_db(
             error!("hot.dev: WORKER {} {}", worker_id, err_msg);
             return Err(worker_error(err_msg));
         };
-        let Some(org_id) = event_message.body.execution_context.org_id else {
-            let err_msg = format!(
-                "Event {} contains blob references but execution context has no org_id - cannot hydrate",
-                event_id
-            );
-            error!("hot.dev: WORKER {} {}", worker_id, err_msg);
-            return Err(worker_error(err_msg));
-        };
         let scope = hot::blob::BlobScope {
-            org_id,
+            org_id: stored_env.org_id,
             env_id: Some(stored_event.env_id),
             run_id: None,
         };
@@ -1024,6 +1125,42 @@ async fn hydrate_event_message_from_db(
         &event_message.body.event.event_data,
     );
 
+    let run_type_id = match stored_event.event_type.as_str() {
+        "hot:call" => hot::db::run::RunType::Call.as_id(),
+        "hot:schedule" => hot::db::run::RunType::Schedule.as_id(),
+        _ => hot::db::run::RunType::Event.as_id(),
+    };
+    let execution_context = ExecutionContext::new_with_event_and_origin(
+        claimed_context.run_id,
+        stored_event.stream_id,
+        run_type_id,
+        Some(stored_event.env_id),
+        Some(stored_event.created_by_user_id),
+        Some(stored_env.org_id),
+        authoritative_build
+            .as_ref()
+            .map(|(build, _)| build.build_id),
+        Some(stored_event.event_id),
+        claimed_context.origin_run_id,
+    )
+    .with_env_name(Some(stored_env.name))
+    .with_org_slug(org_slug)
+    .with_project(
+        authoritative_build
+            .as_ref()
+            .map(|(build, _)| build.project_id),
+        authoritative_build
+            .as_ref()
+            .map(|(_, project)| project.name.clone()),
+    )
+    .with_build_hash(
+        authoritative_build
+            .as_ref()
+            .map(|(build, _)| build.hash.clone()),
+    )
+    .with_retry_attempt(claimed_context.retry_attempt)
+    .with_access_id(stored_event.access_id);
+
     Ok(EventMessage {
         body: hot::lang::event::queue::EventMessageBody {
             event: hot::lang::event::Event {
@@ -1033,10 +1170,10 @@ async fn hydrate_event_message_from_db(
                 event_type: stored_event.event_type,
                 event_data,
                 event_time: stored_event.event_time,
-                target_project_id: event_message.body.event.target_project_id,
-                target_project_name: event_message.body.event.target_project_name,
+                target_project_id,
+                target_project_name,
             },
-            execution_context: event_message.body.execution_context,
+            execution_context,
         },
         ..event_message
     })
@@ -1136,6 +1273,7 @@ async fn process_alert_delivery_message(
     match hot::db::alert::process_single_alert_delivery(
         &db,
         &http_client,
+        hot::outbound::DestinationPolicy::for_alert_delivery(&worker_conf),
         email_sender_ref,
         &alert_email_config,
         &alert_msg.body.alert_delivery_id,
@@ -1248,6 +1386,8 @@ fn extract_ids_from_orphaned_data(raw_bytes: &[u8]) -> Option<OrphanedMessageIds
     use serde::Deserialize;
     use std::io::Read;
 
+    const MAX_ORPHANED_MESSAGE_BYTES: u64 = 8 * 1024 * 1024;
+
     // RetryWrapper structure (matches the one in queue/redis.rs)
     #[derive(Deserialize)]
     struct RetryWrapper<T> {
@@ -1295,12 +1435,17 @@ fn extract_ids_from_orphaned_data(raw_bytes: &[u8]) -> Option<OrphanedMessageIds
     // Zstd magic number: 0x28, 0xB5, 0x2F, 0xFD
     let data = if raw_bytes.len() >= 4 && raw_bytes[0..4] == [0x28, 0xb5, 0x2f, 0xfd] {
         // Zstd compressed - decompress first
-        let mut decoder = match zstd::Decoder::new(raw_bytes) {
+        let decoder = match zstd::Decoder::new(raw_bytes) {
             Ok(d) => d,
             Err(_) => return None,
         };
         let mut buf = Vec::new();
-        if decoder.read_to_end(&mut buf).is_err() {
+        if decoder
+            .take(MAX_ORPHANED_MESSAGE_BYTES + 1)
+            .read_to_end(&mut buf)
+            .is_err()
+            || buf.len() as u64 > MAX_ORPHANED_MESSAGE_BYTES
+        {
             return None;
         }
         buf
@@ -2311,6 +2456,10 @@ struct RoutingResult {
     matched_project_names: Vec<String>,
 }
 
+fn build_matches_exact_target(candidate: Uuid, target: Option<Uuid>) -> bool {
+    target.is_none_or(|target| candidate == target)
+}
+
 /// Get the extracted path for a bundle build.
 /// Returns None if the bundle is not yet extracted or extraction failed.
 async fn get_bundle_extracted_path(
@@ -2397,16 +2546,18 @@ async fn get_bundle_extracted_path(
 }
 /// Find the build that contains a specific function (for hot:call routing)
 /// Returns routing result with the selected build and whether tie-breaker was used.
-/// Uses target_project_id as tie-breaker when multiple builds have the same function.
+/// An exact target build takes precedence; target_project_id remains the
+/// compatibility tie-breaker for events that predate exact build routing.
 async fn find_build_for_function(
     db: &DatabasePool,
     env_id: &Uuid,
     function_name: &str,
     cache: &hot::lang::cache::bytecode_cache::BytecodeCache,
     worker_conf: &Val,
-    target_project_id: Option<Uuid>,
+    target: (Option<Uuid>, Option<Uuid>),
     build_path_cache: &Arc<BuildPathCache>,
 ) -> Result<Option<RoutingResult>, String> {
+    let (target_build_id, target_project_id) = target;
     let deployed_builds = find_all_deployed_builds_for_env(db, env_id).await?;
 
     // Clean up memory cache: remove entries for builds that are no longer deployed
@@ -2418,6 +2569,9 @@ async fn find_build_for_function(
     let mut matching_builds: Vec<(Build, String)> = Vec::new();
 
     for build in deployed_builds {
+        if !build_matches_exact_target(build.build_id, target_build_id) {
+            continue;
+        }
         // Get project for this build to generate cache key
         let project = Project::get_project(db, &build.project_id)
             .await
@@ -2796,6 +2950,12 @@ async fn execute_single_event_handler(
     let project = Project::get_project(db, &build.project_id)
         .await
         .map_err(|e| format!("Failed to get project for build: {}", e))?;
+    if project.env_id != event_message.body.event.env_id {
+        return Err(format!(
+            "Build {} belongs to environment {}, not event environment {}",
+            build.build_id, project.env_id, event_message.body.event.env_id
+        ));
+    }
 
     let timing_after_project = timing_start.elapsed();
     debug!(
@@ -5783,10 +5943,11 @@ pub async fn run_with_components_shared_context(
                                                                         worker_id, event_message.body.event.event_type, target_fn);
 
                                                                     // Get target_project_id from event for tie-breaking
+                                                                    let target_build_id = event_message.body.execution_context.build_id;
                                                                     let target_project_id = event_message.body.event.target_project_id;
 
                                                                     // Find the handler whose build contains the target function
-                                                                    match find_build_for_function(db, &env_id, &target_fn, &cache_ref, &worker_conf_ref, target_project_id, &build_path_cache_ref).await {
+                                                                    match find_build_for_function(db, &env_id, &target_fn, &cache_ref, &worker_conf_ref, (target_build_id, target_project_id), &build_path_cache_ref).await {
                                                                         Ok(Some(routing_result)) => {
                                                                             // Find the once handler from that build
                                                                             if let Some(handler) = once_handlers.iter().find(|h| h.build_id == routing_result.build.build_id) {
@@ -6517,8 +6678,35 @@ pub async fn run_with_components_shared_context(
                                                                 Ok(expired) => {
                                                                     if !expired.is_empty() {
                                                                         info!("hot.dev: WORKER {} upload_cleanup: aborting {} expired uploads", worker_id, expired.len());
+                                                                        let cleanup_storage = hot::file_storage::file_storage_from_config(&worker_conf_ref).await;
                                                                         for upload in &expired {
-                                                                            if let Err(e) = hot::db::file_upload::abort_upload(db, upload.upload_id, upload.org_id).await {
+                                                                            let Some(env_id) = upload.env_id else {
+                                                                                error!("hot.dev: WORKER {} upload_cleanup: upload {} has no environment; refusing unscoped cleanup", worker_id, upload.upload_id);
+                                                                                continue;
+                                                                            };
+                                                                            let Ok(storage) = &cleanup_storage else {
+                                                                                error!("hot.dev: WORKER {} upload_cleanup: storage unavailable for upload {}", worker_id, upload.upload_id);
+                                                                                if let Err(e) = hot::db::file_upload::release_cleanup_claim(db, upload.upload_id, upload.org_id, env_id).await {
+                                                                                    error!("hot.dev: WORKER {} upload_cleanup: failed to release claim for upload {}: {}", worker_id, upload.upload_id, e);
+                                                                                }
+                                                                                continue;
+                                                                            };
+                                                                            if let Some(backend_upload_id) = upload.backend_upload_id.as_deref() {
+                                                                                let ctx = hot::file_storage::FileStorageContext::minimal(
+                                                                                    db.clone(),
+                                                                                    upload.org_id,
+                                                                                    Some(env_id),
+                                                                                    upload.created_by_user_id,
+                                                                                );
+                                                                                if let Err(e) = storage.abort_multipart_upload(backend_upload_id, &upload.path, &ctx).await {
+                                                                                    error!("hot.dev: WORKER {} upload_cleanup: backend abort failed for upload {}: {}", worker_id, upload.upload_id, e);
+                                                                                    if let Err(release_error) = hot::db::file_upload::release_cleanup_claim(db, upload.upload_id, upload.org_id, env_id).await {
+                                                                                        error!("hot.dev: WORKER {} upload_cleanup: failed to release claim for upload {}: {}", worker_id, upload.upload_id, release_error);
+                                                                                    }
+                                                                                    continue;
+                                                                                }
+                                                                            }
+                                                                            if let Err(e) = hot::db::file_upload::abort_upload(db, upload.upload_id, upload.org_id, env_id).await {
                                                                                 error!("hot.dev: WORKER {} upload_cleanup: failed to abort upload {}: {}", worker_id, upload.upload_id, e);
                                                                             }
                                                                         }
@@ -6927,6 +7115,16 @@ mod tests {
     use super::*;
     use hot::val;
 
+    #[test]
+    fn duplicate_function_routing_honors_exact_endpoint_build() {
+        let first = Uuid::now_v7();
+        let second = Uuid::now_v7();
+
+        assert!(!build_matches_exact_target(first, Some(second)));
+        assert!(build_matches_exact_target(second, Some(second)));
+        assert!(build_matches_exact_target(first, None));
+    }
+
     async fn migrated_sqlite_file_db() -> (DatabasePool, PathBuf) {
         let db_path =
             std::env::temp_dir().join(format!("hot-worker-test-{}.sqlite", Uuid::new_v4()));
@@ -6958,6 +7156,13 @@ mod tests {
                 "ok": true,
             }),
         }
+    }
+
+    #[test]
+    fn orphaned_message_decompression_is_bounded() {
+        let oversized = vec![b'x'; 8 * 1024 * 1024 + 1];
+        let compressed = zstd::encode_all(std::io::Cursor::new(oversized), 1).unwrap();
+        assert!(extract_ids_from_orphaned_data(&compressed).is_none());
     }
 
     #[test]
@@ -7180,8 +7385,8 @@ mod tests {
                     stream_id,
                     hot::db::run::RunType::Call.as_id(),
                     Some(test_data.env_id),
-                    Some(test_data.user_id),
-                    Some(test_data.org_id),
+                    Some(Uuid::now_v7()),
+                    Some(Uuid::now_v7()),
                     None,
                 ),
             },
@@ -7196,6 +7401,15 @@ mod tests {
             extract_target_function_from_event(&hydrated.body.event.event_data).as_deref(),
             Some(target_fn)
         );
+        assert_eq!(
+            hydrated.body.execution_context.user_id,
+            Some(test_data.user_id)
+        );
+        assert_eq!(
+            hydrated.body.execution_context.org_id,
+            Some(test_data.org_id)
+        );
+        assert_eq!(hydrated.body.execution_context.build_id, None);
 
         if let DatabasePool::Sqlite(pool) = &db {
             pool.close().await;

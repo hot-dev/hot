@@ -130,6 +130,9 @@ const SWEEP_INTERVAL: Duration = Duration::from_secs(60);
 const STALE_THRESHOLD: Duration = Duration::from_secs(300); // 5 minutes
 
 const DEFAULT_PUBLIC_ORG_INFLIGHT_LIMIT: i64 = 50;
+const DEFAULT_SSE_PER_CREDENTIAL_LIMIT: i64 = 128;
+const DEFAULT_SSE_PER_ORG_LIMIT: i64 = 1_024;
+const DEFAULT_SSE_GLOBAL_LIMIT: i64 = 10_000;
 
 impl SlidingWindowLimiter {
     fn new() -> Self {
@@ -191,6 +194,7 @@ struct RateLimitState {
     features: FeaturesCache,
     limiter: SlidingWindowLimiter,
     inflight: InFlightLimiter,
+    sse_connections: SseConnectionLimiter,
 }
 
 static STATE: once_cell::sync::Lazy<RateLimitState> =
@@ -199,6 +203,7 @@ static STATE: once_cell::sync::Lazy<RateLimitState> =
         features: FeaturesCache::new(Duration::from_secs(60)),
         limiter: SlidingWindowLimiter::new(),
         inflight: InFlightLimiter::new(),
+        sse_connections: SseConnectionLimiter::new(),
     });
 
 // ============================================================================
@@ -252,6 +257,144 @@ impl Drop for InFlightGuard {
     }
 }
 
+// ============================================================================
+// Active SSE connection limiter
+// ============================================================================
+
+#[derive(Debug, Clone, Copy)]
+struct SseConnectionLimits {
+    per_credential: usize,
+    per_org: usize,
+    global: usize,
+}
+
+impl SseConnectionLimits {
+    fn from_conf(conf: &Val) -> Self {
+        fn configured_limit(conf: &Val, key: &str, default: i64) -> usize {
+            conf.get_int_or_default(key, default).max(0) as usize
+        }
+
+        Self {
+            per_credential: configured_limit(
+                conf,
+                "api.sse-per-credential-connection-limit",
+                DEFAULT_SSE_PER_CREDENTIAL_LIMIT,
+            ),
+            per_org: configured_limit(
+                conf,
+                "api.sse-per-org-connection-limit",
+                DEFAULT_SSE_PER_ORG_LIMIT,
+            ),
+            global: configured_limit(
+                conf,
+                "api.sse-global-connection-limit",
+                DEFAULT_SSE_GLOBAL_LIMIT,
+            ),
+        }
+    }
+}
+
+#[derive(Default)]
+struct SseConnectionCounts {
+    per_credential: AHashMap<Uuid, usize>,
+    per_org: AHashMap<Uuid, usize>,
+    global: usize,
+}
+
+struct SseConnectionLimiter {
+    counts: Mutex<SseConnectionCounts>,
+}
+
+impl SseConnectionLimiter {
+    fn new() -> Self {
+        Self {
+            counts: Mutex::new(SseConnectionCounts::default()),
+        }
+    }
+
+    fn acquire(
+        &'static self,
+        credential_id: Uuid,
+        org_id: Uuid,
+        limits: SseConnectionLimits,
+        mode: PublicRateLimitMode,
+        context: &'static str,
+    ) -> Result<SseConnectionGuard, RateLimitExceeded> {
+        let mut counts = self.counts.lock().unwrap_or_else(|e| e.into_inner());
+        let credential_count = counts
+            .per_credential
+            .get(&credential_id)
+            .copied()
+            .unwrap_or_default();
+        let org_count = counts.per_org.get(&org_id).copied().unwrap_or_default();
+        let exceeded = [
+            (limits.per_credential, credential_count, "credential"),
+            (limits.per_org, org_count, "organization"),
+            (limits.global, counts.global, "global"),
+        ]
+        .into_iter()
+        .find(|(limit, current, _)| *limit > 0 && *current >= *limit);
+
+        if let Some((limit, current, scope)) = exceeded {
+            tracing::warn!(
+                context,
+                credential_id = %credential_id,
+                org_id = %org_id,
+                scope,
+                current,
+                limit,
+                enforced = mode == PublicRateLimitMode::Enforce,
+                "Active SSE connection limit hit"
+            );
+            if mode == PublicRateLimitMode::Enforce {
+                return Err(RateLimitExceeded {
+                    retry_after_secs: 1,
+                    message: format!("Too many active SSE connections for this {}", scope),
+                });
+            }
+        }
+
+        *counts.per_credential.entry(credential_id).or_default() += 1;
+        *counts.per_org.entry(org_id).or_default() += 1;
+        counts.global += 1;
+        Ok(SseConnectionGuard {
+            credential_id,
+            org_id,
+            limiter: self,
+        })
+    }
+
+    fn release(&self, credential_id: &Uuid, org_id: &Uuid) {
+        let mut counts = self.counts.lock().unwrap_or_else(|e| e.into_inner());
+        decrement_and_remove(&mut counts.per_credential, credential_id);
+        decrement_and_remove(&mut counts.per_org, org_id);
+        counts.global = counts.global.saturating_sub(1);
+    }
+}
+
+fn decrement_and_remove(counts: &mut AHashMap<Uuid, usize>, id: &Uuid) {
+    if let Some(count) = counts.get_mut(id) {
+        *count = count.saturating_sub(1);
+        if *count == 0 {
+            counts.remove(id);
+        }
+    }
+}
+
+/// RAII guard held by the response body, so disconnects and cancellation
+/// release all active-connection counters.
+pub struct SseConnectionGuard {
+    credential_id: Uuid,
+    org_id: Uuid,
+    limiter: &'static SseConnectionLimiter,
+}
+
+impl Drop for SseConnectionGuard {
+    fn drop(&mut self) {
+        self.limiter.release(&self.credential_id, &self.org_id);
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PublicRateLimitMode {
     Observe,
@@ -262,6 +405,18 @@ impl PublicRateLimitMode {
     pub fn from_conf(conf: &Val) -> Self {
         match conf
             .get_str_or_default("api.public-org-rate-limit-mode", "observe")
+            .trim()
+            .to_ascii_lowercase()
+            .as_str()
+        {
+            "enforce" => Self::Enforce,
+            _ => Self::Observe,
+        }
+    }
+
+    fn sse_from_conf(conf: &Val) -> Self {
+        match conf
+            .get_str_or_default("api.sse-connection-limit-mode", "observe")
             .trim()
             .to_ascii_lowercase()
             .as_str()
@@ -379,6 +534,52 @@ pub async fn check_public_org_inflight(
             })
         }
     }
+}
+
+pub async fn acquire_sse_connection(
+    db: &hot::db::DatabasePool,
+    conf: &Val,
+    auth: &AuthContext,
+    context: &'static str,
+) -> Result<SseConnectionGuard, RateLimitExceeded> {
+    let env_id = auth.env_id();
+    let mode = PublicRateLimitMode::sse_from_conf(conf);
+    let org_id = if let Some(org_id) = STATE.env_to_org.get(&env_id) {
+        org_id
+    } else {
+        match Env::get_env(db, &env_id).await {
+            Ok(env) => {
+                STATE.env_to_org.insert(env_id, env.org_id);
+                env.org_id
+            }
+            Err(e) => {
+                tracing::warn!(
+                    context,
+                    %env_id,
+                    error = %e,
+                    enforced = mode == PublicRateLimitMode::Enforce,
+                    "Could not resolve organization for SSE connection accounting"
+                );
+                if mode == PublicRateLimitMode::Enforce {
+                    return Err(RateLimitExceeded {
+                        retry_after_secs: 1,
+                        message: "Unable to account for this SSE connection".to_string(),
+                    });
+                }
+                // Observe mode must preserve successful SSE behavior. The nil
+                // scope still accounts global and per-credential connections.
+                Uuid::nil()
+            }
+        }
+    };
+
+    STATE.sse_connections.acquire(
+        auth.credential_id(),
+        org_id,
+        SseConnectionLimits::from_conf(conf),
+        mode,
+        context,
+    )
 }
 
 // ============================================================================
@@ -554,6 +755,126 @@ mod tests {
         assert!(limiter.try_acquire(org_id, 1).is_err());
         drop(guard);
         assert!(limiter.try_acquire(org_id, 1).is_ok());
+    }
+
+    #[test]
+    fn sse_limits_default_to_observe_with_high_caps() {
+        let conf = Val::map_empty();
+        let limits = SseConnectionLimits::from_conf(&conf);
+
+        assert_eq!(
+            PublicRateLimitMode::sse_from_conf(&conf),
+            PublicRateLimitMode::Observe
+        );
+        assert_eq!(limits.per_credential, 128);
+        assert_eq!(limits.per_org, 1_024);
+        assert_eq!(limits.global, 10_000);
+    }
+
+    #[test]
+    fn sse_enforcement_accounts_scopes_and_releases_on_drop() {
+        let limiter = Box::leak(Box::new(SseConnectionLimiter::new()));
+        let credential_id = Uuid::new_v4();
+        let other_credential_id = Uuid::new_v4();
+        let org_id = Uuid::new_v4();
+        let limits = SseConnectionLimits {
+            per_credential: 1,
+            per_org: 2,
+            global: 3,
+        };
+
+        let first = limiter
+            .acquire(
+                credential_id,
+                org_id,
+                limits,
+                PublicRateLimitMode::Enforce,
+                "test",
+            )
+            .unwrap();
+        assert!(
+            limiter
+                .acquire(
+                    credential_id,
+                    org_id,
+                    limits,
+                    PublicRateLimitMode::Enforce,
+                    "test",
+                )
+                .is_err()
+        );
+        let second = limiter
+            .acquire(
+                other_credential_id,
+                org_id,
+                limits,
+                PublicRateLimitMode::Enforce,
+                "test",
+            )
+            .unwrap();
+        assert!(
+            limiter
+                .acquire(
+                    Uuid::new_v4(),
+                    org_id,
+                    limits,
+                    PublicRateLimitMode::Enforce,
+                    "test",
+                )
+                .is_err()
+        );
+
+        drop(first);
+        assert!(
+            limiter
+                .acquire(
+                    credential_id,
+                    Uuid::new_v4(),
+                    limits,
+                    PublicRateLimitMode::Enforce,
+                    "test",
+                )
+                .is_ok()
+        );
+        drop(second);
+    }
+
+    #[test]
+    fn sse_observe_mode_accounts_connections_above_limit() {
+        let limiter = Box::leak(Box::new(SseConnectionLimiter::new()));
+        let credential_id = Uuid::new_v4();
+        let org_id = Uuid::new_v4();
+        let limits = SseConnectionLimits {
+            per_credential: 1,
+            per_org: 1,
+            global: 1,
+        };
+
+        let first = limiter
+            .acquire(
+                credential_id,
+                org_id,
+                limits,
+                PublicRateLimitMode::Observe,
+                "test",
+            )
+            .unwrap();
+        let second = limiter
+            .acquire(
+                credential_id,
+                org_id,
+                limits,
+                PublicRateLimitMode::Observe,
+                "test",
+            )
+            .expect("observe mode must preserve successful SSE responses");
+
+        let counts = limiter.counts.lock().unwrap();
+        assert_eq!(counts.global, 2);
+        assert_eq!(counts.per_credential.get(&credential_id), Some(&2));
+        drop(counts);
+        drop((first, second));
+        assert_eq!(limiter.counts.lock().unwrap().global, 0);
     }
 
     #[tokio::test]

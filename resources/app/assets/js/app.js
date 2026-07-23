@@ -1663,16 +1663,20 @@
             var downloadName = file.fileName || (fileType.toLowerCase().replace(/ /g, '-') + '.' + getExtensionFromMimeType(file.mimeType));
             // Display name: use fileName if available, otherwise show file type
             var displayName = file.fileName || fileType;
+            var safeDataUrl = escapeHtml(file.dataUrl);
+            var safeDisplayName = escapeHtml(displayName);
+            var safeDownloadName = escapeHtml(downloadName);
+            var safePathInfo = escapeHtml(pathInfo);
 
             if (isImage) {
                 return '<div class="file-attachment" data-file-index="' + index + '">' +
-                    '<img src="' + file.dataUrl + '" alt="' + displayName + '" class="file-attachment-thumbnail" onclick="openLightbox(\'' + file.dataUrl + '\')" title="Click to preview" />' +
+                    '<img src="' + safeDataUrl + '" alt="' + safeDisplayName + '" class="file-attachment-thumbnail" data-file-url="' + safeDataUrl + '" onclick="openLightbox(this.dataset.fileUrl)" title="Click to preview" />' +
                     '<div class="file-attachment-info">' +
-                        '<span class="file-attachment-type" title="' + escapeHtml(displayName) + '">' + escapeHtml(truncateFileName(displayName, 24)) + '</span>' +
-                        '<span class="file-attachment-size">' + fileSize + pathInfo + '</span>' +
+                        '<span class="file-attachment-type" title="' + safeDisplayName + '">' + escapeHtml(truncateFileName(displayName, 24)) + '</span>' +
+                        '<span class="file-attachment-size">' + fileSize + safePathInfo + '</span>' +
                     '</div>' +
                     '<div class="file-attachment-actions">' +
-                        '<button class="file-attachment-btn" onclick="downloadDataUrl(\'' + file.dataUrl + '\', \'' + escapeHtml(downloadName) + '\')" title="Download">' +
+                        '<button class="file-attachment-btn" data-file-url="' + safeDataUrl + '" data-download-name="' + safeDownloadName + '" onclick="downloadDataUrl(this.dataset.fileUrl, this.dataset.downloadName)" title="Download">' +
                             '<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"></path></svg>' +
                         '</button>' +
                     '</div>' +
@@ -1683,11 +1687,11 @@
                         '<svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"></path></svg>' +
                     '</div>' +
                     '<div class="file-attachment-info">' +
-                        '<span class="file-attachment-type" title="' + escapeHtml(displayName) + '">' + escapeHtml(truncateFileName(displayName, 24)) + '</span>' +
-                        '<span class="file-attachment-size">' + fileSize + pathInfo + '</span>' +
+                        '<span class="file-attachment-type" title="' + safeDisplayName + '">' + escapeHtml(truncateFileName(displayName, 24)) + '</span>' +
+                        '<span class="file-attachment-size">' + fileSize + safePathInfo + '</span>' +
                     '</div>' +
                     '<div class="file-attachment-actions">' +
-                        '<button class="file-attachment-btn" onclick="downloadDataUrl(\'' + file.dataUrl + '\', \'' + escapeHtml(downloadName) + '\')" title="Download">' +
+                        '<button class="file-attachment-btn" data-file-url="' + safeDataUrl + '" data-download-name="' + safeDownloadName + '" onclick="downloadDataUrl(this.dataset.fileUrl, this.dataset.downloadName)" title="Download">' +
                             '<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"></path></svg>' +
                         '</button>' +
                     '</div>' +

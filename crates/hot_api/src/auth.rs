@@ -60,6 +60,18 @@ impl AuthContext {
         }
     }
 
+    /// Get the ID of the credential presented on this request.
+    ///
+    /// Unlike [`Self::api_key_id`], this distinguishes child sessions and
+    /// service keys from their parent API key for per-credential accounting.
+    pub fn credential_id(&self) -> Uuid {
+        match self {
+            AuthContext::ApiKey(key) => key.api_key_id,
+            AuthContext::Session { session, .. } => session.session_id,
+            AuthContext::ServiceKey { service_key, .. } => service_key.service_key_id,
+        }
+    }
+
     /// Check if this is an API key (not a session or service key).
     pub fn is_api_key(&self) -> bool {
         matches!(self, AuthContext::ApiKey(_))

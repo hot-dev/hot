@@ -13,6 +13,7 @@ use utoipa_swagger_ui::SwaggerUi;
 
 use crate::access_log::access_log_middleware;
 use crate::auth::api_key_auth_middleware;
+use crate::client_ip::{ClientIpPolicy, client_ip_middleware};
 use crate::domain_resolver::{DomainCache, domain_resolution_middleware};
 use crate::handlers::{
     // File handlers
@@ -126,6 +127,10 @@ pub async fn run(conf: Val) {
 pub async fn run_with_stream_pubsub(conf: Val, shared_stream_pubsub: Option<Arc<StreamPubSub>>) {
     // Get resolved config with API defaults merged in
     let resolved_conf = get_resolved_conf(conf.clone());
+    let client_ip_policy = Arc::new(
+        ClientIpPolicy::from_conf(&conf)
+            .unwrap_or_else(|error| panic!("Invalid client IP configuration: {error}")),
+    );
 
     // Extract values from resolved config
     let host = resolved_conf.get_str_or_default("host", DEFAULT_API_HOST);
@@ -449,6 +454,10 @@ pub async fn run_with_stream_pubsub(conf: Val, shared_stream_pubsub: Option<Arc<
     let app = Router::new()
         .merge(public_routes)
         .merge(api_v1_routes)
+        .layer(middleware::from_fn_with_state(
+            client_ip_policy,
+            client_ip_middleware,
+        ))
         .layer(middleware::from_fn_with_state(
             (db.clone(), domain_cache),
             domain_resolution_middleware,

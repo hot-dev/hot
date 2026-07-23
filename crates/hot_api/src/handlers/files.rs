@@ -374,8 +374,21 @@ pub async fn initiate_upload(
 
     let features = Features::resolve_for_org(&db, &org_id).await;
 
+    let max_file_bytes = effective_file_max_bytes(&conf, features.file_upload_max_bytes());
+    if req.expected_size.is_some_and(|size| size <= 0) {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(ApiErrorResponse::bad_request(
+                "expected_size must be greater than zero",
+            )),
+        ));
+    }
+    let conservative_default = 256_i64 * 1024 * 1024;
+    let effective_expected_size = req
+        .expected_size
+        .unwrap_or_else(|| max_file_bytes.min(conservative_default));
+
     if let Some(expected_size) = req.expected_size {
-        let max_file_bytes = effective_file_max_bytes(&conf, features.file_upload_max_bytes());
         if expected_size > max_file_bytes {
             return Err((
                 StatusCode::PAYLOAD_TOO_LARGE,
@@ -409,10 +422,7 @@ pub async fn initiate_upload(
         }
     }
 
-    let part_size = req
-        .expected_size
-        .map(|s| compute_part_size(s as u64))
-        .unwrap_or(file_storage::DEFAULT_PART_SIZE);
+    let part_size = compute_part_size(effective_expected_size as u64);
 
     let parts_expected = req
         .expected_size
@@ -439,31 +449,51 @@ pub async fn initiate_upload(
         })?;
 
     let expires_at = Utc::now() + Duration::hours(24);
+    let max_pending_uploads = conf
+        .get_int_or_default("file.multipart.max-pending-uploads", 16)
+        .max(1);
+    let current_usage = file::get_storage_usage_by_org(&db, org_id)
+        .await
+        .unwrap_or(0);
+    let storage_limit = features.storage_bytes();
+    let max_pending_bytes = if storage_limit >= 0 {
+        storage_limit.saturating_sub(current_usage)
+    } else {
+        max_file_bytes.saturating_mul(max_pending_uploads)
+    };
 
-    let upload_record = file_upload::insert_upload(
+    let upload_record_result = file_upload::insert_upload(
         &db,
         &normalized_path,
         org_id,
         Some(api_key.env_id),
         api_key.created_by_user_id,
-        req.expected_size,
+        Some(effective_expected_size),
         req.content_type.as_deref(),
         part_size as i64,
         parts_expected,
         Some(&backend_upload_id),
         file_storage.storage_type(),
         expires_at,
+        max_pending_uploads,
+        max_pending_bytes,
     )
-    .await
-    .map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ApiErrorResponse::internal_error(&format!(
-                "Failed to create upload record: {}",
-                e
-            ))),
-        )
-    })?;
+    .await;
+    let upload_record = match upload_record_result {
+        Ok(record) => record,
+        Err(e) => {
+            let _ = file_storage
+                .abort_multipart_upload(&backend_upload_id, &normalized_path, &ctx)
+                .await;
+            return Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ApiErrorResponse::internal_error(&format!(
+                    "Failed to create upload record: {}",
+                    e
+                ))),
+            ));
+        }
+    };
 
     Ok((
         StatusCode::CREATED,
@@ -522,7 +552,7 @@ pub async fn upload_part_handler(
             )
         })?;
 
-    let record = file_upload::get_upload(&db, upload_id, org_id)
+    let record = file_upload::get_upload(&db, upload_id, org_id, api_key.env_id)
         .await
         .map_err(|e| {
             (
@@ -559,6 +589,30 @@ pub async fn upload_part_handler(
             )),
         ));
     }
+    if record
+        .parts_expected
+        .is_some_and(|total| part_number > total)
+    {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(ApiErrorResponse::bad_request(
+                "part number exceeds the expected part count",
+            )),
+        ));
+    }
+    if body.len() as i64 > record.part_size
+        && record
+            .parts_expected
+            .is_none_or(|total| part_number < total)
+    {
+        return Err((
+            StatusCode::PAYLOAD_TOO_LARGE,
+            Json(ApiErrorResponse::new(
+                "part_too_large",
+                format!("Part exceeds negotiated size of {} bytes", record.part_size),
+            )),
+        ));
+    }
 
     let backend_upload_id = record.backend_upload_id.as_deref().ok_or_else(|| {
         (
@@ -591,26 +645,31 @@ pub async fn upload_part_handler(
 
     let part_size = body.len() as i64;
 
-    file_upload::record_part(
+    let record_result = file_upload::record_part(
         &db,
         upload_id,
         org_id,
+        api_key.env_id,
         &PartInfo {
             part_number,
             size: part_size,
             etag: etag.clone(),
         },
     )
-    .await
-    .map_err(|e| {
-        (
+    .await;
+    if let Err(e) = record_result {
+        let _ = file_storage
+            .abort_multipart_upload(backend_upload_id, &record.path, &ctx)
+            .await;
+        let _ = file_upload::abort_upload(&db, upload_id, org_id, api_key.env_id).await;
+        return Err((
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(ApiErrorResponse::internal_error(&format!(
-                "Failed to record part: {}",
+                "Failed to record part; upload was aborted: {}",
                 e
             ))),
-        )
-    })?;
+        ));
+    }
 
     Ok(Json(ApiResponse::new(UploadPartResponse {
         part_number,
@@ -638,7 +697,7 @@ pub async fn complete_upload(
             )
         })?;
 
-    let record = file_upload::get_upload(&db, upload_id, org_id)
+    let record = file_upload::get_upload(&db, upload_id, org_id, api_key.env_id)
         .await
         .map_err(|e| {
             (
@@ -653,6 +712,24 @@ pub async fn complete_upload(
             Json(ApiErrorResponse::new(
                 "upload_not_pending",
                 format!("Upload is in '{}' status, not 'pending'", record.status),
+            )),
+        ));
+    }
+    if let Some(parts_expected) = record.parts_expected
+        && (record.parts_received != parts_expected
+            || record.expected_size != Some(record.bytes_received))
+    {
+        return Err((
+            StatusCode::CONFLICT,
+            Json(ApiErrorResponse::new(
+                "upload_incomplete",
+                format!(
+                    "Upload has {}/{} parts and {}/{} bytes",
+                    record.parts_received,
+                    parts_expected,
+                    record.bytes_received,
+                    record.expected_size.unwrap_or_default()
+                ),
             )),
         ));
     }
@@ -731,7 +808,7 @@ pub async fn complete_upload(
             )
         })?;
 
-    file_upload::complete_upload(&db, upload_id, org_id)
+    file_upload::complete_upload(&db, upload_id, org_id, api_key.env_id)
         .await
         .map_err(|e| {
             (
@@ -779,7 +856,7 @@ pub async fn abort_upload(
             )
         })?;
 
-    let record = file_upload::get_upload(&db, upload_id, org_id)
+    let record = file_upload::get_upload(&db, upload_id, org_id, api_key.env_id)
         .await
         .map_err(|e| {
             (
@@ -820,7 +897,7 @@ pub async fn abort_upload(
             })?;
     }
 
-    file_upload::abort_upload(&db, upload_id, org_id)
+    file_upload::abort_upload(&db, upload_id, org_id, api_key.env_id)
         .await
         .map_err(|e| {
             (

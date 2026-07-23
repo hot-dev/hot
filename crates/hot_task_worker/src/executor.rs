@@ -1025,6 +1025,12 @@ pub(crate) fn retry_container_id(base: &str, attempt: u32) -> String {
     format!("{}r{:x}", &base[..base.len() - 2], attempt)
 }
 
+#[cfg(feature = "kata")]
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn kata_root_readonly(writable_rootfs: bool) -> bool {
+    !writable_rootfs
+}
+
 /// Compute the OCI chain ID from a list of diff IDs.
 /// For a single layer, chain ID = diff ID.
 /// For multiple layers: chain_id(L0..Ln) = sha256(chain_id(L0..Ln-1) + " " + diff_id(Ln))
@@ -1069,6 +1075,7 @@ mod kata {
     const SNAPSHOTTER: &str = "devmapper";
     const KATA_IO_DIR: &str = "/tmp/hot-box-io";
     const KATA_VC_DIR: &str = "/run/vc/firecracker";
+    const DEVMAPPER_MIN_FREE_RESERVE_MB: u64 = 2_048;
 
     /// Retry the full setup (snapshot → container → task) with a fresh
     /// container ID on each attempt. The Kata Go shim has a known cgroup
@@ -1134,11 +1141,15 @@ mod kata {
             crate::cni::cleanup_stale().await;
 
             // Ensure iptables MASQUERADE + FORWARD rules exist for the kata bridge.
-            crate::cni::ensure_iptables().await;
+            crate::cni::ensure_iptables()
+                .await
+                .map_err(|e| ExecutorError::Connection(format!("CNI policy setup failed: {e}")))?;
 
             // Write a resolv.conf derived from the host's DNS config so Kata VMs
             // get correct DNS (the rootfs may have stale DNS from the build env).
-            crate::cni::write_resolv_conf().await;
+            crate::cni::write_resolv_conf()
+                .await
+                .map_err(|e| ExecutorError::Connection(format!("guest DNS setup failed: {e}")))?;
 
             tracing::debug!(vmm = %vmm, "kata.executor.initialized");
 
@@ -1211,6 +1222,7 @@ mod kata {
                 Some((&stdout_fifo, &stderr_fifo)),
             )
             .await;
+            crate::cni::teardown(container_id).await;
         }
 
         /// Best-effort cleanup after the caller's wall-clock timeout
@@ -1322,6 +1334,12 @@ mod kata {
 
             let pull_start = Instant::now();
             tracing::debug!(trace_id = trace_id, image = %image, "kata.image.pulling");
+            let requested_disk_mb = limits
+                .map_or(crate::box_limits::BoxLimits::DEFAULT_DISK_SIZE_MB, |l| {
+                    l.disk_size_mb
+                });
+            ensure_devmapper_capacity(crate::resource_budget::disk_admission_mb(requested_disk_mb))
+                .await?;
             self.ensure_image(&mut images, image).await?;
             timings.image_pull_ms = pull_start.elapsed().as_millis() as i64;
 
@@ -1362,13 +1380,23 @@ mod kata {
                         Some(path)
                     }
                     Err(e) => {
-                        tracing::warn!(
+                        tracing::error!(
                             trace_id = trace_id,
                             container_id = %container_id,
                             error = %e,
-                            "kata.cni.setup.failed — continuing without network"
+                            "kata.cni.setup.failed"
                         );
-                        None
+                        self.cleanup(
+                            &mut tasks,
+                            &mut containers,
+                            &mut snapshots,
+                            &container_id,
+                            None,
+                        )
+                        .await;
+                        return Err(ExecutorError::Start(format!(
+                            "public-only network setup failed: {e}"
+                        )));
                     }
                 }
             } else {
@@ -1473,12 +1501,14 @@ mod kata {
                                         netns_path = Some(path);
                                     }
                                     Err(e2) => {
-                                        tracing::warn!(
+                                        tracing::error!(
                                             container_id = %container_id,
                                             error = %e2,
                                             "kata.cni.retry_setup.failed"
                                         );
-                                        netns_path = None;
+                                        return Err(ExecutorError::Start(format!(
+                                            "public-only network retry setup failed: {e2}"
+                                        )));
                                     }
                                 }
                             }
@@ -1506,14 +1536,15 @@ mod kata {
             let (container_id, stdout_fifo, stderr_fifo) = match setup_result {
                 Ok(result) => result,
                 Err(e) => {
-                    self.cleanup(
-                        &mut tasks,
-                        &mut containers,
-                        &mut snapshots,
-                        &container_id,
-                        None,
-                    )
-                    .await;
+                    for attempt in 1..=MAX_SETUP_ATTEMPTS {
+                        let cid = if attempt == 1 {
+                            container_id.clone()
+                        } else {
+                            retry_container_id(&container_id, attempt)
+                        };
+                        self.cleanup(&mut tasks, &mut containers, &mut snapshots, &cid, None)
+                            .await;
+                    }
                     if needs_network {
                         crate::cni::teardown(&cni_container_id).await;
                     }
@@ -1530,21 +1561,43 @@ mod kata {
                             KATA_VC_DIR, container_id
                         ));
                         if let Some(parent) = vsock_path.parent() {
-                            tokio::fs::create_dir_all(parent).await.map_err(|e| {
-                                ExecutorError::Other(format!(
+                            if let Err(e) = tokio::fs::create_dir_all(parent).await {
+                                self.cleanup(
+                                    &mut tasks,
+                                    &mut containers,
+                                    &mut snapshots,
+                                    &container_id,
+                                    Some((stdout_fifo.as_str(), stderr_fifo.as_str())),
+                                )
+                                .await;
+                                if needs_network {
+                                    crate::cni::teardown(&cni_container_id).await;
+                                }
+                                return Err(ExecutorError::Other(format!(
                                     "failed to create vsock dir {}: {}",
                                     parent.display(),
                                     e
-                                ))
-                            })?;
+                                )));
+                            }
                         }
                         VsockSetup::HybridUds { path: vsock_path }
                     }
                 };
 
-                hook(vsock_setup)
-                    .await
-                    .map_err(|e| ExecutorError::Other(format!("pre-start hook failed: {}", e)))?;
+                if let Err(e) = hook(vsock_setup).await {
+                    self.cleanup(
+                        &mut tasks,
+                        &mut containers,
+                        &mut snapshots,
+                        &container_id,
+                        Some((stdout_fifo.as_str(), stderr_fifo.as_str())),
+                    )
+                    .await;
+                    if needs_network {
+                        crate::cni::teardown(&cni_container_id).await;
+                    }
+                    return Err(ExecutorError::Other(format!("pre-start hook failed: {e}")));
+                }
 
                 if self.vmm == KataVmm::Firecracker {
                     let vsock_path = std::path::PathBuf::from(format!(
@@ -1556,6 +1609,17 @@ mod kata {
                             break;
                         }
                         if attempt == 50 {
+                            self.cleanup(
+                                &mut tasks,
+                                &mut containers,
+                                &mut snapshots,
+                                &container_id,
+                                Some((stdout_fifo.as_str(), stderr_fifo.as_str())),
+                            )
+                            .await;
+                            if needs_network {
+                                crate::cni::teardown(&cni_container_id).await;
+                            }
                             return Err(ExecutorError::Other(format!(
                                 "VM vsock {} did not appear after 5s — VM may have failed to boot",
                                 vsock_path.display()
@@ -1575,7 +1639,20 @@ mod kata {
             // without a reader).
             let accumulator = LogAccumulator::from_fifos(stdout_fifo.clone(), stderr_fifo.clone());
 
-            self.start_task(&mut tasks, &container_id).await?;
+            if let Err(e) = self.start_task(&mut tasks, &container_id).await {
+                self.cleanup(
+                    &mut tasks,
+                    &mut containers,
+                    &mut snapshots,
+                    &container_id,
+                    Some((stdout_fifo.as_str(), stderr_fifo.as_str())),
+                )
+                .await;
+                if needs_network {
+                    crate::cni::teardown(&cni_container_id).await;
+                }
+                return Err(e);
+            }
 
             let exec_start = Instant::now();
 
@@ -1849,10 +1926,20 @@ mod kata {
                 },
                 NAMESPACE
             );
-            let resp = snapshots
-                .prepare(req)
-                .await
-                .map_err(|e| ExecutorError::Create(format!("prepare snapshot: {e}")))?;
+            let resp = match snapshots.prepare(req).await {
+                Ok(response) => response,
+                Err(e) => {
+                    let cleanup_req = with_namespace!(
+                        RemoveSnapshotRequest {
+                            snapshotter: SNAPSHOTTER.to_string(),
+                            key: container_id.to_string(),
+                        },
+                        NAMESPACE
+                    );
+                    snapshots.remove(cleanup_req).await.ok();
+                    return Err(ExecutorError::Create(format!("prepare snapshot: {e}")));
+                }
+            };
             Ok(resp.into_inner().mounts)
         }
 
@@ -2101,7 +2188,7 @@ mod kata {
                 },
                 "root": {
                     "path": "rootfs",
-                    "readonly": false
+                    "readonly": kata_root_readonly(writable)
                 },
                 "linux": {
                     "resources": {
@@ -2252,15 +2339,25 @@ mod kata {
             for path in [&stdout_fifo, &stderr_fifo] {
                 let _ = tokio::fs::remove_file(path).await;
 
-                let status = tokio::process::Command::new("mkfifo")
+                let status = match tokio::process::Command::new("mkfifo")
                     .arg(path)
                     .status()
                     .await
-                    .map_err(|e| {
-                        ExecutorError::Create(format!("failed to run mkfifo for {}: {}", path, e))
-                    })?;
+                {
+                    Ok(status) => status,
+                    Err(e) => {
+                        let _ = tokio::fs::remove_file(&stdout_fifo).await;
+                        let _ = tokio::fs::remove_file(&stderr_fifo).await;
+                        return Err(ExecutorError::Create(format!(
+                            "failed to run mkfifo for {}: {}",
+                            path, e
+                        )));
+                    }
+                };
 
                 if !status.success() {
+                    let _ = tokio::fs::remove_file(&stdout_fifo).await;
+                    let _ = tokio::fs::remove_file(&stderr_fifo).await;
                     return Err(ExecutorError::Create(format!(
                         "mkfifo failed for {} with status {}",
                         path, status
@@ -2270,6 +2367,58 @@ mod kata {
 
             Ok((stdout_fifo, stderr_fifo))
         }
+    }
+
+    pub(super) fn parse_thin_pool_sectors(status: &str) -> Option<(u64, u64)> {
+        status
+            .split_whitespace()
+            .filter_map(|field| {
+                let field = field.trim_matches(|c: char| !c.is_ascii_digit() && c != '/');
+                let (used, total) = field.split_once('/')?;
+                let used = used.parse().ok()?;
+                let total = total.parse().ok()?;
+                (total >= used).then_some((used, total))
+            })
+            .max_by_key(|(_, total)| *total)
+    }
+
+    async fn ensure_devmapper_capacity(required_mb: u64) -> ExecutorResult<()> {
+        let output = tokio::process::Command::new("nsenter")
+            .args([
+                "-t",
+                "1",
+                "-m",
+                "--",
+                "dmsetup",
+                "status",
+                "--target",
+                "thin-pool",
+            ])
+            .output()
+            .await
+            .map_err(|e| {
+                ExecutorError::Create(format!("devmapper capacity check failed to start: {e}"))
+            })?;
+        if !output.status.success() {
+            return Err(ExecutorError::Create(format!(
+                "devmapper capacity check failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            )));
+        }
+        let status = String::from_utf8_lossy(&output.stdout);
+        let (used_sectors, total_sectors) = parse_thin_pool_sectors(&status).ok_or_else(|| {
+            ExecutorError::Create("could not parse devmapper thin-pool capacity".to_string())
+        })?;
+        let available_mb = total_sectors.saturating_sub(used_sectors) / 2_048;
+        let total_mb = total_sectors / 2_048;
+        let reserve_mb = DEVMAPPER_MIN_FREE_RESERVE_MB.max(total_mb / 10);
+        if available_mb < required_mb.saturating_add(reserve_mb) {
+            return Err(ExecutorError::Create(format!(
+                "insufficient devmapper space: {available_mb}MB free, \
+                 {required_mb}MB requested plus {reserve_mb}MB reserve"
+            )));
+        }
+        Ok(())
     }
 }
 
@@ -2319,7 +2468,7 @@ mod tests {
     }
 }
 
-#[cfg(all(test, feature = "kata"))]
+#[cfg(all(test, target_os = "linux", feature = "kata"))]
 mod kata_tests {
     use super::normalize_image_ref;
 
@@ -2396,6 +2545,12 @@ mod kata_tests {
     }
 
     #[test]
+    fn test_kata_rootfs_follows_explicit_writable_setting() {
+        assert!(super::kata_root_readonly(false));
+        assert!(!super::kata_root_readonly(true));
+    }
+
+    #[test]
     fn test_compute_chain_id_single_layer() {
         let diff_ids = vec!["sha256:aaa".to_string()];
         assert_eq!(super::compute_chain_id(&diff_ids), "sha256:aaa");
@@ -2407,5 +2562,14 @@ mod kata_tests {
         let result = super::compute_chain_id(&diff_ids);
         assert!(result.starts_with("sha256:"));
         assert_ne!(result, "sha256:aaa");
+    }
+
+    #[test]
+    fn test_parse_thin_pool_sectors() {
+        let status = "0 20971520 thin-pool 0 0/0 1024/20971520 - rw";
+        assert_eq!(
+            super::kata::parse_thin_pool_sectors(status),
+            Some((1_024, 20_971_520))
+        );
     }
 }

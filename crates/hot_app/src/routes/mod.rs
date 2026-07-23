@@ -13,12 +13,18 @@ use crate::handlers::projects::{
     projects_list_handler, projects_toggle_active_handler,
 };
 use crate::handlers::*;
-use axum::{Router, middleware, routing::get};
+use axum::{
+    Router,
+    http::{HeaderValue, header},
+    middleware,
+    routing::get,
+};
 use hot::db::DatabasePool;
 use hot::stream::StreamPubSub;
 use hot::val::Val;
 use std::sync::Arc;
 use tokio::sync::watch;
+use tower_http::set_header::SetResponseHeaderLayer;
 
 pub fn routes(
     db: Arc<DatabasePool>,
@@ -504,7 +510,19 @@ pub fn routes(
             get(invite_accept_handler).post(invite_accept_post_handler),
         )
         .route("/status", get(status_handler))
-        .route("/verify-email", get(verify_email_handler))
+        .route(
+            "/verify-email",
+            get(verify_email_handler)
+                .post(confirm_email_handler)
+                .layer::<_, std::convert::Infallible>(SetResponseHeaderLayer::overriding(
+                    header::CACHE_CONTROL,
+                    HeaderValue::from_static("no-store"),
+                ))
+                .layer::<_, std::convert::Infallible>(SetResponseHeaderLayer::overriding(
+                    header::REFERRER_POLICY,
+                    HeaderValue::from_static("no-referrer"),
+                )),
+        )
         .route(
             "/verify-alert-destination",
             get(verify_alert_destination_handler),

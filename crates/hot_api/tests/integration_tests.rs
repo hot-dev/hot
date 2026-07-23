@@ -2763,6 +2763,7 @@ async fn build_file_app() -> (axum::Router, String, tempfile::TempDir) {
             state.clone(),
             hot_api::auth::api_key_auth_middleware,
         ))
+        .layer(axum::extract::DefaultBodyLimit::max(300 * 1024 * 1024))
         .layer(Extension(file_storage))
         .with_state(state);
 
@@ -2957,6 +2958,9 @@ async fn test_file_not_found() {
 #[tokio::test]
 async fn test_multipart_full_lifecycle() {
     let (app, api_key, _temp_dir) = build_file_app().await;
+    const PART_SIZE: usize = 64 * 1024 * 1024;
+    const FINAL_PART_SIZE: usize = 1_000;
+    const EXPECTED_SIZE: usize = PART_SIZE + FINAL_PART_SIZE;
 
     let (status, json) = make_request(
         &app,
@@ -2965,7 +2969,7 @@ async fn test_multipart_full_lifecycle() {
         &api_key,
         Some(json!({
             "path": "video/test.mp4",
-            "expected_size": 3000,
+            "expected_size": EXPECTED_SIZE,
             "content_type": "video/mp4"
         })),
     )
@@ -2975,18 +2979,19 @@ async fn test_multipart_full_lifecycle() {
     assert!(!upload_id.is_empty());
 
     let mut etags = Vec::new();
-    for i in 1..=3 {
-        let data = vec![i as u8; 1000];
+    for (index, size) in [PART_SIZE, FINAL_PART_SIZE].into_iter().enumerate() {
+        let part_number = index + 1;
+        let data = vec![part_number as u8; size];
         let (status, body) = make_raw_request(
             &app,
             Method::PUT,
-            &format!("/v1/files/uploads/{}/{}", upload_id, i),
+            &format!("/v1/files/uploads/{}/{}", upload_id, part_number),
             &api_key,
             "application/octet-stream",
             data,
         )
         .await;
-        assert_eq!(status, StatusCode::OK, "Part {} upload failed", i);
+        assert_eq!(status, StatusCode::OK, "Part {} upload failed", part_number);
         let part_json: Value = serde_json::from_slice(&body).unwrap();
         etags.push(part_json["data"]["etag"].as_str().unwrap().to_string());
     }
@@ -3001,7 +3006,7 @@ async fn test_multipart_full_lifecycle() {
     .await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(json["data"]["path"], "video/test.mp4");
-    assert_eq!(json["data"]["size"], 3000);
+    assert_eq!(json["data"]["size"], EXPECTED_SIZE);
 }
 
 #[tokio::test]

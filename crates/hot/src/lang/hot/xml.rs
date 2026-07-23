@@ -7,6 +7,9 @@ use quick_xml::reader::Reader;
 use quick_xml::writer::Writer;
 use std::io::Cursor;
 
+const MAX_XML_ATTRIBUTES_PER_ELEMENT: usize = 1024;
+const MAX_XML_ATTRIBUTE_BYTES_PER_ELEMENT: usize = 1024 * 1024;
+
 /// Parse XML string to Hot Xml structure
 /// Returns: {tag: Str, attrs: Map, content: Vec}
 pub fn from_xml(args: &[Val]) -> HotResult<Val> {
@@ -284,12 +287,27 @@ fn parse_xml(xml_str: &str) -> Result<Val, String> {
 
 fn parse_attributes(e: &BytesStart) -> Result<IndexMap<Val, Val>, String> {
     let mut attrs = IndexMap::new();
+    let mut total_bytes = 0usize;
 
     for attr_result in e.attributes() {
         let attr = attr_result.map_err(|e| e.to_string())?;
+        if attrs.len() >= MAX_XML_ATTRIBUTES_PER_ELEMENT {
+            return Err(format!(
+                "XML element exceeds attribute count limit ({MAX_XML_ATTRIBUTES_PER_ELEMENT})"
+            ));
+        }
+        total_bytes = total_bytes
+            .checked_add(attr.key.as_ref().len())
+            .and_then(|n| n.checked_add(attr.value.as_ref().len()))
+            .ok_or_else(|| "XML attribute size overflow".to_string())?;
+        if total_bytes > MAX_XML_ATTRIBUTE_BYTES_PER_ELEMENT {
+            return Err(format!(
+                "XML element exceeds attribute size limit ({MAX_XML_ATTRIBUTE_BYTES_PER_ELEMENT} bytes)"
+            ));
+        }
         let key = String::from_utf8_lossy(attr.key.as_ref()).to_string();
         let value = attr
-            .unescape_value()
+            .normalized_value(quick_xml::XmlVersion::Implicit1_0)
             .map_err(|e| e.to_string())?
             .to_string();
         attrs.insert(Val::from(key), Val::from(value));
@@ -391,4 +409,40 @@ fn serialize_element<W: std::io::Write>(writer: &mut Writer<W>, val: &Val) -> Re
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn xml_attribute_parsing_remains_compatible() {
+        let parsed =
+            parse_xml(r#"<root plain="value" escaped="a &amp; b"><child>text</child></root>"#)
+                .expect("parse XML");
+        let attrs = get_attrs(&parsed).expect("root attrs");
+        assert_eq!(attrs.get(&Val::from("plain")), Some(&Val::from("value")));
+        assert_eq!(attrs.get(&Val::from("escaped")), Some(&Val::from("a & b")));
+        assert_eq!(get_tag(&parsed).as_deref(), Some("root"));
+        assert_eq!(
+            get_tag(&get_content(&parsed).unwrap()[0]).as_deref(),
+            Some("child")
+        );
+    }
+
+    #[test]
+    fn xml_rejects_excessive_attribute_count() {
+        let attributes = (0..=MAX_XML_ATTRIBUTES_PER_ELEMENT)
+            .map(|i| format!(" a{i}=\"x\""))
+            .collect::<String>();
+        let error = parse_xml(&format!("<root{attributes}/>")).expect_err("must reject");
+        assert!(error.contains("attribute count limit"), "{error}");
+    }
+
+    #[test]
+    fn xml_rejects_excessive_attribute_bytes() {
+        let value = "x".repeat(MAX_XML_ATTRIBUTE_BYTES_PER_ELEMENT + 1);
+        let error = parse_xml(&format!("<root a=\"{value}\"/>")).expect_err("must reject");
+        assert!(error.contains("attribute size limit"), "{error}");
+    }
 }

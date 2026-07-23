@@ -9,6 +9,16 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::sync::Notify;
 
+/// Account for writable snapshot/rootfs metadata and image unpacking in
+/// addition to the user-visible `/data` allocation. The proportional term
+/// avoids admitting very large writable roots against a data-only budget.
+pub fn disk_admission_mb(data_mb: u64) -> u64 {
+    const BASE_IMAGE_AND_SNAPSHOT_OVERHEAD_MB: u64 = 2_048;
+    data_mb
+        .saturating_add(BASE_IMAGE_AND_SNAPSHOT_OVERHEAD_MB)
+        .saturating_add(data_mb / 4)
+}
+
 #[derive(Debug)]
 pub struct ResourceBudget {
     total_memory_mb: u64,
@@ -275,5 +285,12 @@ mod tests {
 
         let result = handle.await.unwrap();
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn disk_admission_includes_rootfs_overhead() {
+        assert_eq!(disk_admission_mb(0), 2_048);
+        assert_eq!(disk_admission_mb(4_096), 7_168);
+        assert!(disk_admission_mb(u64::MAX).eq(&u64::MAX));
     }
 }

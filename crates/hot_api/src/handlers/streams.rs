@@ -37,6 +37,7 @@ use crate::ApiStateData;
 use crate::access_log::OptionalAccessId;
 use crate::auth::AuthContext;
 use crate::models::*;
+use crate::rate_limit;
 
 fn stream_not_found() -> (StatusCode, Json<ApiErrorResponse>) {
     (
@@ -136,7 +137,7 @@ pub enum StreamEvent {
 /// - `run:fail` - A run failed
 /// - `stream:complete` - The stream has completed (no more updates expected)
 pub async fn subscribe_to_stream(
-    State((db, _storage, _conf, stream_pubsub)): State<ApiStateData>,
+    State((db, _storage, conf, stream_pubsub)): State<ApiStateData>,
     Extension(auth): Extension<AuthContext>,
     Extension(api_key): Extension<ApiKey>,
     blob_store: Option<Extension<Option<Arc<BlobStore>>>>,
@@ -152,21 +153,13 @@ pub async fn subscribe_to_stream(
     // Verify the stream exists and belongs to this environment
     let _stream = get_stream_for_env(&db, &stream_id, env_id).await?;
 
-    // Permission check for scoped credentials (sessions and service keys)
-    if !auth.is_api_key() {
-        let resource = format!("stream:{}", stream_id);
-        if !auth.has_permission(&resource, actions::READ)
-            && !auth.has_permission("stream:*", actions::READ)
-        {
-            return Err((
-                StatusCode::FORBIDDEN,
-                Json(ApiErrorResponse::new(
-                    "forbidden",
-                    "Credential does not have read access to this stream",
-                )),
-            ));
-        }
-    }
+    let resource = format!("stream:{}", stream_id);
+    super::require_permission(
+        &auth,
+        &resource,
+        actions::READ,
+        "Credential does not have read access to this stream",
+    )?;
 
     // Optional: resolve project filter to project_id
     let project_filter: Option<Uuid> = if let Some(ref project_name_or_id) = params.project {
@@ -177,6 +170,15 @@ pub async fn subscribe_to_stream(
     };
     let db_clone = db.clone();
     let blob_store_clone = blob_store.clone();
+    let connection_guard =
+        rate_limit::acquire_sse_connection(&db, &conf, &auth, "stream-subscribe")
+            .await
+            .map_err(|exceeded| {
+                (
+                    StatusCode::TOO_MANY_REQUESTS,
+                    Json(rate_limit::rate_limit_error_body(exceeded)),
+                )
+            })?;
 
     // Try to subscribe to pub/sub for real-time updates
     let subscriber: Option<Box<dyn StreamSubscriber>> = if let Some(ref pubsub) = stream_pubsub {
@@ -204,6 +206,7 @@ pub async fn subscribe_to_stream(
 
     // Create the SSE stream with push from Redis Streams + poll fallback for run status
     let stream = async_stream::stream! {
+        let _connection_guard = connection_guard;
         let mut seen_run_ids: ahash::AHashSet<Uuid> = ahash::AHashSet::new();
         let mut completed_run_ids: ahash::AHashSet<Uuid> = ahash::AHashSet::new();
 
@@ -569,6 +572,7 @@ pub async fn subscribe_with_event(
 > {
     let blob_store = blob_store_from_ext(blob_store);
     let env_id = auth.env_id();
+    super::events::require_external_event_type(&req.event_type)?;
 
     // Step 1: Determine stream_id - use provided or create new
     let stream_id = req.stream_id.unwrap_or_else(Uuid::now_v7);
@@ -584,33 +588,29 @@ pub async fn subscribe_with_event(
         }
     }
 
-    // Permission check for scoped credentials (sessions and service keys)
-    if !auth.is_api_key() {
-        let stream_resource = format!("stream:{}", stream_id);
-        if !auth.has_permission(&stream_resource, actions::READ)
-            && !auth.has_permission("stream:*", actions::READ)
-        {
-            return Err((
-                StatusCode::FORBIDDEN,
-                Json(ApiErrorResponse::new(
-                    "forbidden",
-                    "Credential does not have read access to this stream",
-                )),
-            ));
-        }
-        // Also check event create permission since this endpoint publishes an event
-        if !auth.has_permission("event:*", actions::CREATE)
-            && !auth.has_permission(&format!("event:{}", req.event_type), actions::CREATE)
-        {
-            return Err((
-                StatusCode::FORBIDDEN,
-                Json(ApiErrorResponse::new(
-                    "forbidden",
-                    "Credential does not have create permission for events",
-                )),
-            ));
-        }
-    }
+    let stream_resource = format!("stream:{}", stream_id);
+    super::require_permission(
+        &auth,
+        &stream_resource,
+        actions::READ,
+        "Credential does not have read access to this stream",
+    )?;
+    let event_resource = format!("event:{}", req.event_type);
+    super::require_permission(
+        &auth,
+        &event_resource,
+        actions::CREATE,
+        "Credential does not have create permission for events",
+    )?;
+    let connection_guard =
+        rate_limit::acquire_sse_connection(&db, &conf, &auth, "stream-subscribe-with-event")
+            .await
+            .map_err(|exceeded| {
+                (
+                    StatusCode::TOO_MANY_REQUESTS,
+                    Json(rate_limit::rate_limit_error_body(exceeded)),
+                )
+            })?;
 
     // Step 3: Create the stream record in the database BEFORE subscribing
     // This ensures the stream exists for the subscription and avoids race conditions
@@ -687,6 +687,7 @@ pub async fn subscribe_with_event(
 
     // Step 6: Create the SSE stream
     let stream = async_stream::stream! {
+        let _connection_guard = connection_guard;
         // First event: confirm the event was published
         let published_event = EventPublishedEvent {
             event_id,

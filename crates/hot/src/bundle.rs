@@ -2,13 +2,26 @@ use crate::discovery::{DiscoveryOpts, discover};
 use crate::hasher::HotHasher;
 use crate::val::{Val, val};
 use ahash::{AHashMap, AHashSet};
+use fastnum::D256;
+use fastnum::decimal::Context;
+use indexmap::IndexMap;
 use std::fs;
-use std::io::{Read, Write};
-use std::path::{Path, PathBuf};
+use std::io::{Read, Seek, Write};
+use std::path::{Component, Path, PathBuf};
 use uuid::Uuid;
 use walkdir::WalkDir;
 use zip::write::FileOptions;
 use zip::{CompressionMethod, ZipArchive, ZipWriter};
+
+const MAX_MANIFEST_BYTES: usize = 8 * 1024 * 1024;
+const MAX_MANIFEST_DEPTH: usize = 64;
+const MAX_MANIFEST_VALUES: usize = 250_000;
+const MAX_BUNDLE_ENTRIES: usize = 10_000;
+const MAX_BUNDLE_FILE_BYTES: u64 = 100 * 1024 * 1024;
+const MAX_BUNDLE_TOTAL_BYTES: u64 = 100 * 1024 * 1024;
+const MAX_BUNDLE_COMPRESSION_RATIO: u64 = 1_000;
+const MAX_BUNDLE_PATH_BYTES: usize = 1_024;
+const MAX_BUNDLE_PATH_DEPTH: usize = 32;
 
 /// A file in a bundle, either source code or cache
 #[derive(Debug, Clone)]
@@ -38,6 +51,346 @@ pub struct BundleResource {
 
 /// Standard prefix used for resource files inside the bundle zip.
 pub const RESOURCE_BUNDLE_PREFIX: &str = "resources";
+
+/// Parse a bundle manifest as data only.
+///
+/// This intentionally does not use the Hot evaluator. The accepted grammar is
+/// limited to the literals emitted by [`Val::pretty_print`]: maps, vectors,
+/// strings, integers, decimals, booleans, null, and the Byte/Bytes data
+/// constructors.
+pub(crate) fn parse_manifest_data(source: &str) -> Result<Val, String> {
+    if source.len() > MAX_MANIFEST_BYTES {
+        return Err(format!(
+            "Manifest exceeds the {} byte limit",
+            MAX_MANIFEST_BYTES
+        ));
+    }
+
+    ManifestDataParser::new(source).parse()
+}
+
+pub(crate) fn read_manifest_data(reader: impl Read) -> Result<Val, String> {
+    let mut manifest_content = String::new();
+    reader
+        .take((MAX_MANIFEST_BYTES + 1) as u64)
+        .read_to_string(&mut manifest_content)
+        .map_err(|e| format!("Failed to read manifest.hot: {e}"))?;
+    parse_manifest_data(&manifest_content)
+}
+
+struct ManifestDataParser<'a> {
+    source: &'a str,
+    position: usize,
+    values: usize,
+}
+
+impl<'a> ManifestDataParser<'a> {
+    fn new(source: &'a str) -> Self {
+        Self {
+            source,
+            position: 0,
+            values: 0,
+        }
+    }
+
+    fn parse(mut self) -> Result<Val, String> {
+        let value = self.parse_value(0)?;
+        self.skip_whitespace();
+        if self.position != self.source.len() {
+            return Err(self.error("unexpected syntax after manifest data"));
+        }
+        Ok(value)
+    }
+
+    fn parse_value(&mut self, depth: usize) -> Result<Val, String> {
+        if depth > MAX_MANIFEST_DEPTH {
+            return Err(self.error("manifest nesting limit exceeded"));
+        }
+        self.values += 1;
+        if self.values > MAX_MANIFEST_VALUES {
+            return Err(self.error("manifest value count limit exceeded"));
+        }
+
+        self.skip_whitespace();
+        match self.peek_char() {
+            Some('{') => self.parse_map(depth + 1),
+            Some('[') => self.parse_vec(depth + 1),
+            Some('"') => self.parse_string().map(Val::from),
+            Some('`') => Err(self.error("template strings and interpolation are not allowed")),
+            Some('-' | '0'..='9') => self.parse_number(),
+            Some(c) if is_manifest_identifier_start(c) => {
+                let identifier = self.parse_identifier();
+                match identifier.as_str() {
+                    "true" => Ok(Val::Bool(true)),
+                    "false" => Ok(Val::Bool(false)),
+                    "null" => Ok(Val::Null),
+                    // Data constructors emitted by `Val::pretty_print`.
+                    "Byte" => self.parse_byte_constructor(),
+                    "Bytes" => self.parse_bytes_constructor(depth + 1),
+                    _ => Err(self
+                        .error("variables, calls, lambdas, imports, and effects are not allowed")),
+                }
+            }
+            Some(_) => Err(self.error("expected a data literal")),
+            None => Err(self.error("unexpected end of manifest")),
+        }
+    }
+
+    fn parse_map(&mut self, depth: usize) -> Result<Val, String> {
+        self.expect_char('{')?;
+        self.skip_whitespace();
+        let mut map = IndexMap::new();
+        if self.consume_char('}') {
+            return Ok(Val::Map(Box::new(map)));
+        }
+
+        loop {
+            self.skip_whitespace();
+            let key = match self.peek_char() {
+                Some('"') => self.parse_string()?,
+                Some(c) if is_manifest_identifier_start(c) => self.parse_identifier(),
+                _ => return Err(self.error("map keys must be strings or identifiers")),
+            };
+            self.skip_whitespace();
+            self.expect_char(':')?;
+            let value = self.parse_value(depth)?;
+            map.insert(Val::from(key), value);
+            self.skip_whitespace();
+
+            if self.consume_char('}') {
+                break;
+            }
+            self.expect_char(',')?;
+            self.skip_whitespace();
+            if self.consume_char('}') {
+                break;
+            }
+        }
+
+        Ok(Val::Map(Box::new(map)))
+    }
+
+    fn parse_vec(&mut self, depth: usize) -> Result<Val, String> {
+        self.expect_char('[')?;
+        self.skip_whitespace();
+        let mut values = Vec::new();
+        if self.consume_char(']') {
+            return Ok(Val::Vec(values));
+        }
+
+        loop {
+            values.push(self.parse_value(depth)?);
+            self.skip_whitespace();
+            if self.consume_char(']') {
+                break;
+            }
+            self.expect_char(',')?;
+            self.skip_whitespace();
+            if self.consume_char(']') {
+                break;
+            }
+        }
+
+        Ok(Val::Vec(values))
+    }
+
+    /// Decode exactly the string form `Val::format_hot` emits: only `\n`,
+    /// `\r`, `\t`, `\"`, and `\\` are ever escaped; every other character —
+    /// including other control characters — appears verbatim.
+    fn parse_string(&mut self) -> Result<String, String> {
+        self.expect_char('"')?;
+        let mut value = String::new();
+        loop {
+            let Some(c) = self.next_char() else {
+                return Err(self.error("unterminated string literal"));
+            };
+            match c {
+                '"' => return Ok(value),
+                '\\' => {
+                    let Some(escape) = self.next_char() else {
+                        return Err(self.error("unterminated string escape"));
+                    };
+                    value.push(match escape {
+                        '"' => '"',
+                        '\\' => '\\',
+                        'n' => '\n',
+                        'r' => '\r',
+                        't' => '\t',
+                        _ => return Err(self.error("unsupported string escape")),
+                    });
+                }
+                _ => value.push(c),
+            }
+        }
+    }
+
+    fn parse_byte_constructor(&mut self) -> Result<Val, String> {
+        self.skip_whitespace();
+        self.expect_char('(')?;
+        let byte = self.parse_constructor_byte()?;
+        self.skip_whitespace();
+        self.expect_char(')')?;
+        Ok(Val::Byte(byte))
+    }
+
+    fn parse_bytes_constructor(&mut self, depth: usize) -> Result<Val, String> {
+        self.skip_whitespace();
+        self.expect_char('(')?;
+        self.skip_whitespace();
+        self.expect_char('[')?;
+        self.skip_whitespace();
+        let mut bytes = Vec::new();
+        if !self.consume_char(']') {
+            if depth > MAX_MANIFEST_DEPTH {
+                return Err(self.error("manifest nesting limit exceeded"));
+            }
+            loop {
+                self.values += 1;
+                if self.values > MAX_MANIFEST_VALUES {
+                    return Err(self.error("manifest value count limit exceeded"));
+                }
+                bytes.push(self.parse_constructor_byte()?);
+                self.skip_whitespace();
+                if self.consume_char(']') {
+                    break;
+                }
+                self.expect_char(',')?;
+                self.skip_whitespace();
+                if self.consume_char(']') {
+                    break;
+                }
+            }
+        }
+        self.skip_whitespace();
+        self.expect_char(')')?;
+        Ok(Val::Bytes(bytes))
+    }
+
+    fn parse_constructor_byte(&mut self) -> Result<u8, String> {
+        self.skip_whitespace();
+        match self.parse_number()? {
+            Val::Int(value) if (0..=255).contains(&value) => Ok(value as u8),
+            _ => Err(self.error("byte values must be integers between 0 and 255")),
+        }
+    }
+
+    fn parse_number(&mut self) -> Result<Val, String> {
+        let start = self.position;
+        self.consume_char('-');
+        let integer_start = self.position;
+        self.consume_digits();
+        if self.position == integer_start {
+            return Err(self.error("invalid number"));
+        }
+
+        let mut decimal = false;
+        if self.consume_char('.') {
+            decimal = true;
+            let fraction_start = self.position;
+            self.consume_digits();
+            if self.position == fraction_start {
+                return Err(self.error("invalid decimal"));
+            }
+        }
+        if matches!(self.peek_char(), Some('e' | 'E')) {
+            decimal = true;
+            self.next_char();
+            if matches!(self.peek_char(), Some('+' | '-')) {
+                self.next_char();
+            }
+            let exponent_start = self.position;
+            self.consume_digits();
+            if self.position == exponent_start {
+                return Err(self.error("invalid decimal exponent"));
+            }
+        }
+
+        if self
+            .peek_char()
+            .is_some_and(|c| is_manifest_identifier_start(c) || c == '.' || c == '(' || c == '[')
+        {
+            return Err(self.error("invalid number syntax"));
+        }
+
+        let number = &self.source[start..self.position];
+        if decimal {
+            D256::from_str(number, Context::default())
+                .map(Val::Dec)
+                .map_err(|e| self.error(&format!("invalid decimal: {e}")))
+        } else {
+            number
+                .parse::<i64>()
+                .map(Val::Int)
+                .map_err(|e| self.error(&format!("invalid integer: {e}")))
+        }
+    }
+
+    fn parse_identifier(&mut self) -> String {
+        let start = self.position;
+        self.next_char();
+        while self
+            .peek_char()
+            .is_some_and(is_manifest_identifier_continue)
+        {
+            self.next_char();
+        }
+        self.source[start..self.position].to_string()
+    }
+
+    fn consume_digits(&mut self) {
+        while self.peek_char().is_some_and(|c| c.is_ascii_digit()) {
+            self.next_char();
+        }
+    }
+
+    fn skip_whitespace(&mut self) {
+        while self.peek_char().is_some_and(char::is_whitespace) {
+            self.next_char();
+        }
+    }
+
+    fn expect_char(&mut self, expected: char) -> Result<(), String> {
+        if self.consume_char(expected) {
+            Ok(())
+        } else {
+            Err(self.error(&format!("expected '{expected}'")))
+        }
+    }
+
+    fn consume_char(&mut self, expected: char) -> bool {
+        if self.peek_char() == Some(expected) {
+            self.next_char();
+            true
+        } else {
+            false
+        }
+    }
+
+    fn peek_char(&self) -> Option<char> {
+        self.source[self.position..].chars().next()
+    }
+
+    fn next_char(&mut self) -> Option<char> {
+        let c = self.peek_char()?;
+        self.position += c.len_utf8();
+        Some(c)
+    }
+
+    fn error(&self, message: &str) -> String {
+        format!(
+            "Invalid data-only manifest at byte {}: {message}",
+            self.position
+        )
+    }
+}
+
+fn is_manifest_identifier_start(c: char) -> bool {
+    c.is_alphabetic() || matches!(c, '_' | '$')
+}
+
+fn is_manifest_identifier_continue(c: char) -> bool {
+    c.is_alphanumeric() || matches!(c, '_' | '$' | '-')
+}
 
 /// A Hot bundle containing source files, cache files, resources, and metadata
 #[derive(Debug, Clone)]
@@ -888,15 +1241,10 @@ pub fn get_bundle_metadata(zip_path: &Path) -> Result<(String, String), String> 
         Err(e) => return Err(format!("Failed to read zip archive: {}", e)),
     };
 
-    // Read the manifest.hot file
-    let mut manifest_file = match archive.by_name("manifest.hot") {
-        Ok(file) => file,
+    // Confirm the manifest exists. Metadata is encoded in the bundle filename.
+    match archive.by_name("manifest.hot") {
+        Ok(_) => {}
         Err(_) => return Err("Bundle does not contain manifest.hot".to_string()),
-    };
-
-    let mut manifest_content = String::new();
-    if let Err(e) = manifest_file.read_to_string(&mut manifest_content) {
-        return Err(format!("Failed to read manifest.hot: {}", e));
     }
 
     // Try to extract bundle name and hash from the zip filename as fallback
@@ -927,64 +1275,233 @@ pub fn get_bundle_metadata(zip_path: &Path) -> Result<(String, String), String> 
 
 /// Extract a bundle from bytes to the specified directory
 pub fn extract_bundle_from_bytes(zip_data: &[u8], extract_dir: &Path) -> Result<(), String> {
-    // Ensure the extract directory exists
-    if let Err(e) = fs::create_dir_all(extract_dir) {
-        return Err(format!("Failed to create extract directory: {}", e));
-    }
-
     let cursor = std::io::Cursor::new(zip_data);
-    let mut archive = match ZipArchive::new(cursor) {
+    let archive = match ZipArchive::new(cursor) {
         Ok(archive) => archive,
         Err(e) => return Err(format!("Failed to read zip archive: {}", e)),
     };
+    extract_bundle_archive(archive, extract_dir)?;
 
-    // Extract all files
-    for i in 0..archive.len() {
-        let mut file = match archive.by_index(i) {
-            Ok(file) => file,
-            Err(e) => return Err(format!("Failed to read file at index {}: {}", i, e)),
-        };
+    tracing::debug!("Bundle extracted to: {}", extract_dir.display());
+    Ok(())
+}
 
-        let file_path = extract_dir.join(file.name());
+fn extract_bundle_archive<R: Read + Seek>(
+    mut archive: ZipArchive<R>,
+    extract_dir: &Path,
+) -> Result<(), String> {
+    let entries = validate_bundle_archive(&mut archive)?;
+    ensure_safe_extract_root(extract_dir)?;
+    fs::create_dir_all(extract_dir)
+        .map_err(|e| format!("Failed to create extract directory: {e}"))?;
 
-        // Skip directories (they're created when we create parent directories for files)
-        if file.name().ends_with('/') {
+    for (index, relative_path, is_dir) in entries {
+        let output_path = extract_dir.join(&relative_path);
+        ensure_no_symlink_components(extract_dir, &relative_path)?;
+        if is_dir {
+            fs::create_dir_all(&output_path).map_err(|e| {
+                format!("Failed to create directory {}: {e}", output_path.display())
+            })?;
             continue;
         }
 
-        // Create parent directories if needed
-        if let Some(parent) = file_path.parent()
-            && let Err(e) = fs::create_dir_all(parent)
-        {
-            return Err(format!(
-                "Failed to create directory {}: {}",
-                parent.display(),
-                e
-            ));
+        if let Some(parent) = output_path.parent() {
+            fs::create_dir_all(parent)
+                .map_err(|e| format!("Failed to create directory {}: {e}", parent.display()))?;
+            ensure_no_symlink_components(extract_dir, &relative_path)?;
         }
 
-        // Extract the file
-        let mut output_file = match fs::File::create(&file_path) {
-            Ok(file) => file,
-            Err(e) => {
-                return Err(format!(
-                    "Failed to create file {}: {}",
-                    file_path.display(),
-                    e
-                ));
-            }
-        };
-
-        if let Err(e) = std::io::copy(&mut file, &mut output_file) {
+        let mut entry = archive
+            .by_index(index)
+            .map_err(|e| format!("Failed to read file at index {index}: {e}"))?;
+        let expected_size = entry.size();
+        let mut output = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&output_path)
+            .map_err(|e| format!("Failed to create file {}: {e}", output_path.display()))?;
+        let copied = std::io::copy(&mut entry.by_ref().take(expected_size + 1), &mut output)
+            .map_err(|e| format!("Failed to extract file {}: {e}", output_path.display()))?;
+        if copied != expected_size {
             return Err(format!(
-                "Failed to extract file {}: {}",
-                file_path.display(),
-                e
+                "Bundle entry {} size changed during extraction",
+                relative_path.display()
             ));
         }
     }
 
-    tracing::debug!("Bundle extracted to: {}", extract_dir.display());
+    Ok(())
+}
+
+fn validate_bundle_archive<R: Read + Seek>(
+    archive: &mut ZipArchive<R>,
+) -> Result<Vec<(usize, PathBuf, bool)>, String> {
+    if archive.len() > MAX_BUNDLE_ENTRIES {
+        return Err(format!(
+            "Bundle contains {} entries, exceeding the {} entry limit",
+            archive.len(),
+            MAX_BUNDLE_ENTRIES
+        ));
+    }
+
+    let mut total_size = 0u64;
+    let mut seen_paths = AHashSet::new();
+    let mut entries = Vec::with_capacity(archive.len());
+    for index in 0..archive.len() {
+        let entry = archive
+            .by_index(index)
+            .map_err(|e| format!("Failed to read file at index {index}: {e}"))?;
+        let relative_path = validate_bundle_entry_path(entry.name())?;
+        let is_dir = entry.is_dir();
+        validate_bundle_entry_type(entry.name(), entry.unix_mode(), is_dir)?;
+        if !seen_paths.insert(relative_path.clone()) {
+            return Err(format!(
+                "Bundle contains duplicate path: {}",
+                relative_path.display()
+            ));
+        }
+
+        let size = entry.size();
+        if size > MAX_BUNDLE_FILE_BYTES {
+            return Err(format!(
+                "Bundle entry {} exceeds the {} byte per-file limit",
+                entry.name(),
+                MAX_BUNDLE_FILE_BYTES
+            ));
+        }
+        total_size = total_size
+            .checked_add(size)
+            .ok_or_else(|| "Bundle uncompressed size overflow".to_string())?;
+        if total_size > MAX_BUNDLE_TOTAL_BYTES {
+            return Err(format!(
+                "Bundle exceeds the {} byte aggregate uncompressed limit",
+                MAX_BUNDLE_TOTAL_BYTES
+            ));
+        }
+
+        let compressed_size = entry.compressed_size();
+        if size > 0
+            && (compressed_size == 0
+                || size / compressed_size.max(1) > MAX_BUNDLE_COMPRESSION_RATIO)
+        {
+            return Err(format!(
+                "Bundle entry {} exceeds the {}:1 compression ratio limit",
+                entry.name(),
+                MAX_BUNDLE_COMPRESSION_RATIO
+            ));
+        }
+        entries.push((index, relative_path, is_dir));
+    }
+
+    Ok(entries)
+}
+
+fn validate_bundle_entry_path(name: &str) -> Result<PathBuf, String> {
+    let has_windows_drive_prefix = name.as_bytes().get(1) == Some(&b':')
+        && name.as_bytes().first().is_some_and(u8::is_ascii_alphabetic);
+    if name.is_empty()
+        || name.len() > MAX_BUNDLE_PATH_BYTES
+        || name.contains('\\')
+        || name.contains('\0')
+        || has_windows_drive_prefix
+    {
+        return Err(format!("Bundle contains invalid entry path: {name:?}"));
+    }
+
+    let path = Path::new(name);
+    if path.is_absolute() {
+        return Err(format!("Bundle entry path must be relative: {name}"));
+    }
+
+    let mut depth = 0usize;
+    for component in path.components() {
+        match component {
+            Component::Normal(_) => depth += 1,
+            Component::CurDir
+            | Component::ParentDir
+            | Component::RootDir
+            | Component::Prefix(_) => {
+                return Err(format!("Bundle entry path is not enclosed: {name}"));
+            }
+        }
+    }
+    if depth == 0 || depth > MAX_BUNDLE_PATH_DEPTH {
+        return Err(format!(
+            "Bundle entry path depth must be between 1 and {}: {}",
+            MAX_BUNDLE_PATH_DEPTH, name
+        ));
+    }
+
+    path.to_path_buf()
+        .components()
+        .all(|component| matches!(component, Component::Normal(_)))
+        .then(|| path.to_path_buf())
+        .ok_or_else(|| format!("Bundle entry path is not enclosed: {name}"))
+}
+
+fn validate_bundle_entry_type(
+    name: &str,
+    unix_mode: Option<u32>,
+    is_dir: bool,
+) -> Result<(), String> {
+    let Some(mode) = unix_mode else {
+        return Ok(());
+    };
+    let file_type = mode & 0o170000;
+    if file_type == 0 || (is_dir && file_type == 0o040000) || (!is_dir && file_type == 0o100000) {
+        Ok(())
+    } else {
+        Err(format!(
+            "Bundle entry {name} has an unsupported or symlink file type"
+        ))
+    }
+}
+
+fn ensure_safe_extract_root(extract_dir: &Path) -> Result<(), String> {
+    if let Ok(metadata) = fs::symlink_metadata(extract_dir) {
+        if metadata.file_type().is_symlink() {
+            return Err(format!(
+                "Extract directory may not be a symlink: {}",
+                extract_dir.display()
+            ));
+        }
+        if !metadata.is_dir() {
+            return Err(format!(
+                "Extract path is not a directory: {}",
+                extract_dir.display()
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn ensure_no_symlink_components(root: &Path, relative_path: &Path) -> Result<(), String> {
+    let mut current = root.to_path_buf();
+    for component in relative_path.components() {
+        let Component::Normal(part) = component else {
+            return Err(format!(
+                "Bundle entry path is not enclosed: {}",
+                relative_path.display()
+            ));
+        };
+        current.push(part);
+        match fs::symlink_metadata(&current) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                return Err(format!(
+                    "Bundle extraction would traverse symlink: {}",
+                    current.display()
+                ));
+            }
+            Ok(_) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => {
+                return Err(format!(
+                    "Failed to inspect extraction path {}: {e}",
+                    current.display()
+                ));
+            }
+        }
+    }
     Ok(())
 }
 
@@ -1044,20 +1561,9 @@ pub fn read_bundle_manifest(extract_dir: &Path) -> Result<BundleManifest, String
         ));
     }
 
-    // Read the manifest file
-    let manifest_content = fs::read_to_string(&manifest_path)
-        .map_err(|e| format!("Failed to read manifest: {}", e))?;
-
-    // Eval the manifest as Hot code to get a Val
-    // The manifest is a simple data literal (a map), so we can eval it directly
-    let manifest_val = crate::lang::engine::Engine::eval_code_pipeline_with_deps(
-        &manifest_content,
-        &[],  // No source paths needed for data literal
-        &[],  // No test paths
-        None, // No config
-        None, // No project name
-    )
-    .map_err(|e| format!("Failed to eval manifest: {}", e))?;
+    let manifest_file =
+        fs::File::open(&manifest_path).map_err(|e| format!("Failed to read manifest: {e}"))?;
+    let manifest_val = read_manifest_data(manifest_file)?;
 
     // The manifest has structure: { "hot.bundle.{name}": { bundle_id, bundle_hash, ... } }
     // We need to extract the bundle info from the first key
@@ -1180,17 +1686,9 @@ pub fn read_bundle_resources(extract_dir: &Path) -> Result<Val, String> {
         return Ok(Val::Null);
     }
 
-    let manifest_content = fs::read_to_string(&manifest_path)
-        .map_err(|e| format!("Failed to read manifest: {}", e))?;
-
-    let manifest_val = crate::lang::engine::Engine::eval_code_pipeline_with_deps(
-        &manifest_content,
-        &[],
-        &[],
-        None,
-        None,
-    )
-    .map_err(|e| format!("Failed to eval manifest: {}", e))?;
+    let manifest_file =
+        fs::File::open(&manifest_path).map_err(|e| format!("Failed to read manifest: {e}"))?;
+    let manifest_val = read_manifest_data(manifest_file)?;
 
     let Val::Map(manifest_map) = manifest_val else {
         return Ok(Val::Null);
@@ -1218,88 +1716,18 @@ pub fn read_bundle_resources(extract_dir: &Path) -> Result<Val, String> {
 
 /// Extract a bundle to the specified directory
 pub fn extract_bundle_to_dir(zip_path: &Path, extract_dir: &Path) -> Result<(), String> {
-    // Ensure the extract directory exists
-    if let Err(e) = fs::create_dir_all(extract_dir) {
-        return Err(format!("Failed to create extract directory: {}", e));
-    }
-
     let file = match fs::File::open(zip_path) {
         Ok(file) => file,
         Err(e) => return Err(format!("Failed to open zip file: {}", e)),
     };
 
-    let mut archive = match ZipArchive::new(file) {
+    let archive = match ZipArchive::new(file) {
         Ok(archive) => archive,
         Err(e) => return Err(format!("Failed to read zip archive: {}", e)),
     };
-
-    // Count different types of files for feedback
-    let mut source_files = 0;
-    let mut cache_files = 0;
-    let mut other_files = 0;
-
-    // Extract all files
-    for i in 0..archive.len() {
-        let mut file = match archive.by_index(i) {
-            Ok(file) => file,
-            Err(e) => return Err(format!("Failed to read file at index {}: {}", i, e)),
-        };
-
-        let file_path = extract_dir.join(file.name());
-
-        // Count file types
-        if file.name().starts_with(".hot/cache/") {
-            cache_files += 1;
-        } else if file.name().ends_with(".hot") && file.name() != "manifest.hot" {
-            source_files += 1;
-        } else {
-            other_files += 1;
-        }
-
-        // Create parent directories if needed
-        if let Some(parent) = file_path.parent()
-            && let Err(e) = fs::create_dir_all(parent)
-        {
-            return Err(format!(
-                "Failed to create directory {}: {}",
-                parent.display(),
-                e
-            ));
-        }
-
-        // Extract the file
-        let mut output_file = match fs::File::create(&file_path) {
-            Ok(file) => file,
-            Err(e) => {
-                return Err(format!(
-                    "Failed to create file {}: {}",
-                    file_path.display(),
-                    e
-                ));
-            }
-        };
-
-        if let Err(e) = std::io::copy(&mut file, &mut output_file) {
-            return Err(format!(
-                "Failed to extract file {}: {}",
-                file_path.display(),
-                e
-            ));
-        }
-    }
+    extract_bundle_archive(archive, extract_dir)?;
 
     println!("📂 Bundle extracted to: {}", extract_dir.display());
-    println!("   {} source files", source_files);
-    if cache_files > 0 {
-        println!(
-            "   {} cache files (pre-compiled for faster execution)",
-            cache_files
-        );
-    }
-    if other_files > 0 {
-        println!("   {} other files", other_files);
-    }
-
     Ok(())
 }
 
@@ -1373,6 +1801,168 @@ fn count_files_in_dir(dir: &Path) -> Result<usize, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tempfile::TempDir;
+
+    fn zip_with_entry(name: &str, content: &[u8], method: CompressionMethod) -> Vec<u8> {
+        let cursor = std::io::Cursor::new(Vec::new());
+        let mut zip = ZipWriter::new(cursor);
+        let options = FileOptions::<()>::default().compression_method(method);
+        zip.start_file(name, options).unwrap();
+        zip.write_all(content).unwrap();
+        zip.finish().unwrap().into_inner()
+    }
+
+    #[test]
+    fn test_data_only_manifest_parser_accepts_pretty_printed_manifest() {
+        let manifest = val!({
+            "hot.bundle.compat": {
+                "bundle_id": "bundle-id",
+                "files": [
+                    {
+                        "path": "hot/src/main.hot",
+                        "hash": "abc",
+                        "size": 12,
+                    },
+                ],
+                "enabled": true,
+                "ratio": 1.25,
+                "optional": null,
+            },
+        });
+        let parsed = parse_manifest_data(&manifest.pretty_print()).unwrap();
+        assert_eq!(parsed, manifest);
+    }
+
+    #[test]
+    fn test_data_only_manifest_parser_accepts_every_writer_output_form() {
+        // `format_hot` escapes only \n, \r, \t, ", and \\; every other
+        // character (including other control characters) is emitted raw, and
+        // Byte/Bytes print as data constructors. Stored manifests may contain
+        // any of these, so the parser must round-trip them all.
+        let mut inner = IndexMap::new();
+        inner.insert(
+            Val::from("escapes"),
+            Val::from("line\nreturn\rtab\tquote\"backslash\\"),
+        );
+        inner.insert(Val::from("raw-control"), Val::from("bell\u{7}escape\u{1b}"));
+        inner.insert(Val::from("byte"), Val::Byte(7));
+        inner.insert(Val::from("bytes"), Val::Bytes(vec![0, 128, 255]));
+        inner.insert(Val::from("empty-bytes"), Val::Bytes(Vec::new()));
+        let mut manifest_map = IndexMap::new();
+        manifest_map.insert(
+            Val::from("hot.bundle.writer-forms"),
+            Val::Map(Box::new(inner)),
+        );
+        let manifest = Val::Map(Box::new(manifest_map));
+
+        let parsed = parse_manifest_data(&manifest.pretty_print()).unwrap();
+        assert_eq!(parsed, manifest);
+    }
+
+    #[test]
+    fn test_data_only_manifest_parser_rejects_executable_syntax() {
+        let unsafe_manifests = [
+            r#"{"hot.bundle.bad": tap("executed")}"#,
+            r#"{"hot.bundle.bad": secret}"#,
+            r#"{"hot.bundle.bad": fn () { "executed" }}"#,
+            r#"{"hot.bundle.bad": (x) { x }}"#,
+            r#"{"hot.bundle.bad": ::hot::fs/read-file}"#,
+            r#"{"hot.bundle.bad": `interpolate ${secret}`}"#,
+            r#"{"hot.bundle.bad": Byte(evil())}"#,
+            r#"{"hot.bundle.bad": Bytes(read-secrets)}"#,
+            r#"{"hot.bundle.bad": Bytes([300])}"#,
+            // \u escapes are JSON syntax; the manifest writer never emits them.
+            r##"{"hot.bundle.bad": "\u0041"}"##,
+        ];
+
+        for manifest in unsafe_manifests {
+            assert!(
+                parse_manifest_data(manifest).is_err(),
+                "unsafe manifest was accepted: {manifest}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_manifest_reader_bounds_input_before_parsing() {
+        let oversized = std::io::repeat(b' ').take((MAX_MANIFEST_BYTES + 1) as u64);
+        let error = read_manifest_data(oversized).unwrap_err();
+        assert!(error.contains("byte limit"));
+    }
+
+    #[test]
+    fn test_extract_bundle_rejects_traversal_before_writing() {
+        let temp = TempDir::new().unwrap();
+        let extract_dir = temp.path().join("extract");
+        let zip = zip_with_entry("../escaped.txt", b"escape", CompressionMethod::Stored);
+
+        let error = extract_bundle_from_bytes(&zip, &extract_dir).unwrap_err();
+        assert!(error.contains("not enclosed"));
+        assert!(!temp.path().join("escaped.txt").exists());
+        assert!(!extract_dir.exists());
+    }
+
+    #[test]
+    fn test_extract_bundle_rejects_absolute_and_platform_prefix_paths() {
+        for name in ["/tmp/escaped.txt", "C:/escaped.txt", r"C:\escaped.txt"] {
+            let temp = TempDir::new().unwrap();
+            let extract_dir = temp.path().join("extract");
+            let zip = zip_with_entry(name, b"escape", CompressionMethod::Stored);
+
+            assert!(
+                extract_bundle_from_bytes(&zip, &extract_dir).is_err(),
+                "unsafe path was accepted: {name}"
+            );
+            assert!(!extract_dir.exists());
+        }
+    }
+
+    #[test]
+    fn test_extract_bundle_accepts_enclosed_paths() {
+        let temp = TempDir::new().unwrap();
+        let extract_dir = temp.path().join("extract");
+        let zip = zip_with_entry(
+            "hot/src/main.hot",
+            b"::demo ns\n",
+            CompressionMethod::Stored,
+        );
+
+        extract_bundle_from_bytes(&zip, &extract_dir).unwrap();
+        assert_eq!(
+            fs::read(extract_dir.join("hot/src/main.hot")).unwrap(),
+            b"::demo ns\n"
+        );
+    }
+
+    #[test]
+    fn test_extract_bundle_rejects_excessive_compression_ratio() {
+        let temp = TempDir::new().unwrap();
+        let extract_dir = temp.path().join("extract");
+        let content = vec![0u8; 4 * 1024 * 1024];
+        let zip = zip_with_entry("bomb.bin", &content, CompressionMethod::Deflated);
+
+        let error = extract_bundle_from_bytes(&zip, &extract_dir).unwrap_err();
+        assert!(error.contains("compression ratio limit"));
+        assert!(!extract_dir.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_extract_bundle_rejects_existing_symlink_escape() {
+        use std::os::unix::fs::symlink;
+
+        let temp = TempDir::new().unwrap();
+        let extract_dir = temp.path().join("extract");
+        let outside_dir = temp.path().join("outside");
+        fs::create_dir_all(&extract_dir).unwrap();
+        fs::create_dir_all(&outside_dir).unwrap();
+        symlink(&outside_dir, extract_dir.join("link")).unwrap();
+        let zip = zip_with_entry("link/escaped.txt", b"escape", CompressionMethod::Stored);
+
+        let error = extract_bundle_from_bytes(&zip, &extract_dir).unwrap_err();
+        assert!(error.contains("traverse symlink"));
+        assert!(!outside_dir.join("escaped.txt").exists());
+    }
 
     #[test]
     fn test_calculate_bundle_hash() {

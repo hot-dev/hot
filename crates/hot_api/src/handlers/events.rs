@@ -27,6 +27,7 @@ use hot::blob::BlobStore;
 /// The queue name that API-published events are sent to.
 /// This MUST match the worker's event queue name ("hot:event").
 const API_EVENT_QUEUE_NAME: &str = "hot:event";
+const RESERVED_EVENT_PREFIX: &str = "hot:";
 
 static API_EVENT_QUEUE: OnceCell<Arc<hot::queue::ProcessingQueue<hot::data::msg::Message>>> =
     OnceCell::new();
@@ -75,6 +76,21 @@ pub struct PublishedEvent {
     pub stream_id: Uuid,
     pub event_type: String,
     pub event_time: chrono::DateTime<chrono::Utc>,
+}
+
+pub(super) fn require_external_event_type(
+    event_type: &str,
+) -> Result<(), (StatusCode, Json<ApiErrorResponse>)> {
+    if event_type.starts_with(RESERVED_EVENT_PREFIX) {
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(ApiErrorResponse::new(
+                "forbidden",
+                "Event types beginning with 'hot:' are reserved for internal control flows",
+            )),
+        ));
+    }
+    Ok(())
 }
 
 /// Internal function to publish an event - reused by both publish_event and subscribe_with_event
@@ -223,21 +239,14 @@ pub async fn publish_event(
     OptionalAccessId(access_id): OptionalAccessId,
     Json(req): Json<PublishEventRequest>,
 ) -> Result<(StatusCode, Json<ApiResponse<EventResponse>>), (StatusCode, Json<ApiErrorResponse>)> {
-    // Permission check for scoped credentials (sessions and service keys)
-    if !auth.is_api_key() {
-        let event_resource = format!("event:{}", req.event_type);
-        if !auth.has_permission(&event_resource, actions::CREATE)
-            && !auth.has_permission("event:*", actions::CREATE)
-        {
-            return Err((
-                StatusCode::FORBIDDEN,
-                Json(ApiErrorResponse::new(
-                    "forbidden",
-                    "Credential does not have create permission for this event type",
-                )),
-            ));
-        }
-    }
+    require_external_event_type(&req.event_type)?;
+    let event_resource = format!("event:{}", req.event_type);
+    super::require_permission(
+        &auth,
+        &event_resource,
+        actions::CREATE,
+        "Credential does not have create permission for this event type",
+    )?;
 
     // Use provided stream_id or create a new one, then bind it to the caller env.
     let stream_id = req.stream_id.unwrap_or_else(Uuid::now_v7);
@@ -311,16 +320,12 @@ pub async fn list_events(
     Query(params): Query<ListQueryParams>,
 ) -> Result<Json<ApiListResponse<EventResponse>>, (StatusCode, Json<ApiErrorResponse>)> {
     let blob_store = blob_store_from_ext(blob_store);
-    // Permission check for scoped credentials (sessions and service keys)
-    if !auth.is_api_key() && !auth.has_permission("event:*", actions::READ) {
-        return Err((
-            StatusCode::FORBIDDEN,
-            Json(ApiErrorResponse::new(
-                "forbidden",
-                "Credential does not have read access to events",
-            )),
-        ));
-    }
+    super::require_permission(
+        &auth,
+        "event:*",
+        actions::READ,
+        "Credential does not have read access to events",
+    )?;
 
     let events = Event::get_events_by_env(
         &db,
@@ -378,16 +383,12 @@ pub async fn get_event(
     Path(event_id): Path<Uuid>,
 ) -> Result<Json<ApiResponse<EventResponse>>, (StatusCode, Json<ApiErrorResponse>)> {
     let blob_store = blob_store_from_ext(blob_store);
-    // Permission check for scoped credentials (sessions and service keys)
-    if !auth.is_api_key() && !auth.has_permission("event:*", actions::READ) {
-        return Err((
-            StatusCode::FORBIDDEN,
-            Json(ApiErrorResponse::new(
-                "forbidden",
-                "Credential does not have read access to events",
-            )),
-        ));
-    }
+    super::require_permission(
+        &auth,
+        "event:*",
+        actions::READ,
+        "Credential does not have read access to events",
+    )?;
 
     let event = Event::get_event(&db, &event_id)
         .await
@@ -439,16 +440,12 @@ pub async fn get_event_runs(
     Query(params): Query<ListQueryParams>,
 ) -> Result<Json<ApiListResponse<RunResponse>>, (StatusCode, Json<ApiErrorResponse>)> {
     let blob_store = blob_store_from_ext(blob_store);
-    // Permission check for scoped credentials (sessions and service keys)
-    if !auth.is_api_key() && !auth.has_permission("event:*", actions::READ) {
-        return Err((
-            StatusCode::FORBIDDEN,
-            Json(ApiErrorResponse::new(
-                "forbidden",
-                "Credential does not have read access to events",
-            )),
-        ));
-    }
+    super::require_permission(
+        &auth,
+        "event:*",
+        actions::READ,
+        "Credential does not have read access to events",
+    )?;
 
     // First verify the event exists and belongs to this environment
     let event = Event::get_event(&db, &event_id)
@@ -542,5 +539,12 @@ mod tests {
             Arc::ptr_eq(first, second),
             "API event publishing should reuse the shared event queue"
         );
+    }
+
+    #[test]
+    fn external_event_types_reject_reserved_control_namespace() {
+        assert!(require_external_event_type("hot:rerun").is_err());
+        assert!(require_external_event_type("hot:mcp:call").is_err());
+        assert!(require_external_event_type("user:created").is_ok());
     }
 }

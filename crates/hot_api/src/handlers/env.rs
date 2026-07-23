@@ -153,7 +153,7 @@ pub enum EnvSseEvent {
 /// - `task:started` - Emitted when a task starts running
 /// - `task:complete` - Emitted when a task completes
 pub async fn subscribe_to_env(
-    State((_db, _storage, _conf, stream_pubsub)): State<ApiStateData>,
+    State((db, _storage, conf, stream_pubsub)): State<ApiStateData>,
     Extension(auth): Extension<AuthContext>,
     Extension(api_key): Extension<ApiKey>,
 ) -> Result<
@@ -163,6 +163,15 @@ pub async fn subscribe_to_env(
     super::require_api_key(&auth, "Only API keys can subscribe to environment events.")?;
 
     let env_id = api_key.env_id;
+    let connection_guard =
+        crate::rate_limit::acquire_sse_connection(&db, &conf, &auth, "env-subscribe")
+            .await
+            .map_err(|exceeded| {
+                (
+                    StatusCode::TOO_MANY_REQUESTS,
+                    Json(crate::rate_limit::rate_limit_error_body(exceeded)),
+                )
+            })?;
 
     // Try to subscribe to pub/sub for real-time updates
     let subscriber: Option<Box<dyn EnvSubscriber>> = if let Some(ref pubsub) = stream_pubsub {
@@ -200,6 +209,7 @@ pub async fn subscribe_to_env(
 
     // Create the SSE stream with push from pub/sub
     let stream = async_stream::stream! {
+        let _connection_guard = connection_guard;
         let mut subscriber = subscriber;
         let stream_timeout = tokio::time::Duration::from_secs(300); // 5 minute timeout
         let start_time = tokio::time::Instant::now();

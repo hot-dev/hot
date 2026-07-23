@@ -22,6 +22,19 @@ async fn read_pending_token(db: &DatabasePool, email: &str) -> String {
     verification.verification_token
 }
 
+async fn confirm_email(
+    client: &mut TestClient,
+    token: &str,
+) -> hot_app::test_support::TestResponse {
+    let form_token = client.prime_csrf();
+    client
+        .post_form(
+            "/verify-email",
+            &[("token", token), ("form_token", &form_token)],
+        )
+        .await
+}
+
 /// Build a signup form. `form_token` must come from `client.prime_csrf()`
 /// (CSRF double-submit: the cookie and the field have to match).
 fn submit_signup(email: &str, form_token: String) -> Vec<(&'static str, String)> {
@@ -558,9 +571,13 @@ async fn verify_happy_path_logs_in_and_redirects_to_claim_handle() {
 
     let token = read_pending_token(client.db(), "alice@example.com").await;
 
-    // Click the verification link: log in and forward to claim-handle with
-    // the plan params preserved.
-    let verify_resp = client.get(&format!("/verify-email?token={}", token)).await;
+    // GET is scanner-safe and does not authenticate.
+    let preview = client.get(&format!("/verify-email?token={}", token)).await;
+    preview.assert_status(axum::http::StatusCode::OK);
+    assert!(client.cookies().get("hot_auth_token").is_none());
+
+    // Explicit confirmation logs in and preserves the plan params.
+    let verify_resp = confirm_email(&mut client, &token).await;
     verify_resp.assert_redirect_to("/claim-handle?plan=hot-free&billing=monthly");
 
     // JWT cookie should now be set so the user is logged in on the next hop.
@@ -597,7 +614,7 @@ async fn claim_handle_post_creates_org_and_redirects_to_billing() {
         .await;
 
     let token = read_pending_token(client.db(), "alice@example.com").await;
-    client.get(&format!("/verify-email?token={}", token)).await;
+    confirm_email(&mut client, &token).await;
 
     // Alice claims her handle.
     let claim_form = vec![
@@ -651,7 +668,7 @@ async fn claim_handle_suggests_alternative_when_slug_taken() {
         )
         .await;
     let token = read_pending_token(client.db(), "alice@example.com").await;
-    client.get(&format!("/verify-email?token={}", token)).await;
+    confirm_email(&mut client, &token).await;
 
     let claim_form = vec![
         ("account_type", "individual".to_string()),
@@ -676,11 +693,11 @@ async fn claim_handle_suggests_alternative_when_slug_taken() {
 }
 
 // ---------------------------------------------------------------------------
-// Idempotent verify: re-clicking a verified link (mail scanner pre-fetch)
+// One-time verify: scanners can GET, only one POST authenticates
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-async fn verify_link_is_idempotent_across_multiple_clicks() {
+async fn verify_link_requires_post_and_is_consumed_once() {
     let mut client = TestClient::new().await;
 
     let form = submit_signup("alice@example.com", client.prime_csrf());
@@ -693,26 +710,27 @@ async fn verify_link_is_idempotent_across_multiple_clicks() {
 
     let token = read_pending_token(client.db(), "alice@example.com").await;
 
-    // First click: creates the user, logs in, forwards to claim-handle.
-    let first = client.get(&format!("/verify-email?token={}", token)).await;
+    let scanner_get = client.get(&format!("/verify-email?token={}", token)).await;
+    scanner_get.assert_status(axum::http::StatusCode::OK);
+    assert!(client.cookies().get("hot_auth_token").is_none());
+
+    // A cross-site form cannot turn a stolen email token into a login CSRF.
+    let csrf_attempt = client
+        .post_form("/verify-email", &[("token", &token)])
+        .await;
+    csrf_attempt.assert_status(axum::http::StatusCode::OK);
+    assert!(csrf_attempt.body.contains("Invalid confirmation"));
+    assert!(client.cookies().get("hot_auth_token").is_none());
+
+    // First explicit confirmation creates the user and logs in.
+    let first = confirm_email(&mut client, &token).await;
     first.assert_redirect_to("/claim-handle?plan=hot-free&billing=monthly");
 
-    // Second click on the same token (e.g. mail scanner pre-fetch, or user
-    // reopening the email). Must NOT error out — `handle_already_verified`
-    // logs the user back in and forwards to the same destination.
-    let second = client.get(&format!("/verify-email?token={}", token)).await;
-    assert!(
-        second.status.is_redirection(),
-        "re-clicking verify should redirect, got {}: {}",
-        second.status,
-        second.body.chars().take(200).collect::<String>()
-    );
-    let loc = second.location().unwrap_or("");
-    assert!(
-        loc.starts_with("/claim-handle") || loc == "/" || loc.starts_with("/@"),
-        "re-click Location should be claim-handle/dashboard/org page, got `{}`",
-        loc
-    );
+    client.clear_cookies();
+    let second = confirm_email(&mut client, &token).await;
+    second.assert_status(axum::http::StatusCode::OK);
+    assert!(second.body.contains("already been used"));
+    assert!(client.cookies().get("hot_auth_token").is_none());
 }
 
 /// A verified token whose verification window has passed must NOT act as a
@@ -731,8 +749,7 @@ async fn expired_verified_token_no_longer_logs_in() {
         .await;
 
     let token = read_pending_token(client.db(), "alice@example.com").await;
-    client
-        .get(&format!("/verify-email?token={}", token))
+    confirm_email(&mut client, &token)
         .await
         .assert_redirect_to("/claim-handle?plan=hot-free&billing=monthly");
 
