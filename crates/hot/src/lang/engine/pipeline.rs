@@ -868,6 +868,19 @@ impl Engine {
                 .join(", ")
         );
 
+        // NOTE(std-artifact): a fast path that extends the precompiled
+        // hot-std artifact (lang::cache::std_artifact) with ad hoc eval code
+        // was prototyped here and measured SLOWER than the classic path:
+        // eagerly decoding the full payload (program + AST namespaces +
+        // HotAst + var_index, ~60ms) costs more than the postcard AST cache
+        // hit plus compile (~46ms). It also surfaced that
+        // eval_code_with_cached_bytecode's registry-only mini-compile cannot
+        // resolve unqualified names (no resolver pass over the cached
+        // namespaces). Wiring the artifact in requires (a) per-section lazy
+        // decoding so the eval path only pays for program + registries, and
+        // (b) a resolver-aware eval extension. See the std_artifact module
+        // docs.
+
         // Phase 2: Parse units with per-package caching
         tracing::debug!(" Unified Pipeline: Phase 2 - Parsing with per-package cache...");
         let (namespaces, parsed_files) = parse_units_with_cache(&units, color)?;

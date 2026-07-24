@@ -191,6 +191,163 @@ struct CacheFilePayload {
     secret_keys: Vec<String>,
 }
 
+/// Decode a decompressed cache payload into a runtime-ready
+/// [`CachedBytecode`]. Shared by the on-disk cache and the hot-std
+/// release artifact. Performs no metadata validation — callers decide
+/// what "valid" means for their context.
+pub(crate) fn decode_cache_payload(decompressed: &[u8]) -> Result<Arc<CachedBytecode>, String> {
+    let payload: CacheFilePayload = postcard::from_bytes(decompressed)
+        .map_err(|e| format!("Failed to decode cache payload: {}", e))?;
+
+    let CacheFilePayload {
+        metadata,
+        program_data,
+        ast_program_namespaces,
+        hot_ast_namespaces,
+        var_index,
+        function_mapping,
+        core_functions,
+        type_implementations,
+        tool_specs,
+        skill_specs,
+        ctx_defaults,
+        secret_keys,
+    } = payload;
+
+    let program = BytecodeProgram::deserialize(&program_data)?;
+
+    let ast_program_namespaces =
+        crate::lang::cache::ast_cache::deserialize_namespaces(&ast_program_namespaces)
+            .map_err(|e| format!("Failed to deserialize AST program namespaces: {}", e))?;
+
+    let ast_program = crate::lang::ast::Program {
+        namespaces: ast_program_namespaces,
+        current_namespace: crate::lang::ast::NsPath::new(),
+    };
+
+    let hot_ast_namespaces =
+        crate::lang::cache::ast_cache::deserialize_namespaces(&hot_ast_namespaces)
+            .map_err(|e| format!("Failed to deserialize HotAst namespaces: {}", e))?;
+
+    // Reconstruct HotAst
+    let var_index = crate::lang::cache::ast_cache::deserialize_var_index(&var_index)?;
+    let hot_ast = crate::lang::ast::HotAst {
+        program: ast_program.clone(),
+        namespaces: crate::lang::ast::Namespaces {
+            namespaces: hot_ast_namespaces,
+        },
+        var_index,
+    };
+
+    let function_mapping: indexmap::IndexMap<String, u32> = function_mapping.into_iter().collect();
+    let core_functions: indexmap::IndexMap<String, u32> = core_functions.into_iter().collect();
+    let type_implementations: indexmap::IndexMap<(String, String), String> =
+        type_implementations.into_iter().collect();
+
+    tracing::debug!(
+        "✓ Cache loaded from disk (project: {}, created: {}, {} functions, {} core, {} namespaces)",
+        metadata.project_name,
+        metadata.created_at,
+        function_mapping.len(),
+        core_functions.len(),
+        ast_program.namespaces.len()
+    );
+
+    let cached_bytecode = Arc::new(CachedBytecode::with_derived(
+        metadata,
+        CachedBytecodeArtifacts {
+            program,
+            function_mapping,
+            core_functions,
+            type_implementations,
+            ast_program,
+            hot_ast,
+            tool_specs,
+            skill_specs,
+        },
+        ctx_defaults,
+        secret_keys.into_iter().collect(),
+    ));
+
+    Ok(cached_bytecode)
+}
+
+/// Encode compilation artifacts into the compressed on-disk payload plus the
+/// runtime-ready [`CachedBytecode`]. Shared by the on-disk cache and the
+/// hot-std release artifact.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn encode_cache_payload(
+    metadata: CacheMetadata,
+    program: &BytecodeProgram,
+    function_mapping: &indexmap::IndexMap<String, u32>,
+    core_functions: &indexmap::IndexMap<String, u32>,
+    type_implementations: &indexmap::IndexMap<(String, String), String>,
+    ast_program: &crate::lang::ast::Program,
+    hot_ast: &crate::lang::ast::HotAst,
+    tool_specs: &crate::lang::hot::internal_mcp::ToolSchemaRegistry,
+    skill_specs: &crate::lang::hot::internal_skill::SkillSpecRegistry,
+) -> Result<(Vec<u8>, Arc<CachedBytecode>), String> {
+    // Build the in-memory entry first; its derived ctx data is persisted
+    // in the payload so loads skip the call-graph rebuild.
+    let cached_bytecode = Arc::new(CachedBytecode::new(
+        metadata.clone(),
+        CachedBytecodeArtifacts {
+            program: program.clone(),
+            function_mapping: function_mapping.clone(),
+            core_functions: core_functions.clone(),
+            type_implementations: type_implementations.clone(),
+            ast_program: ast_program.clone(),
+            hot_ast: hot_ast.clone(),
+            tool_specs: tool_specs.clone(),
+            skill_specs: skill_specs.clone(),
+        },
+    ));
+    let mut secret_keys: Vec<String> = cached_bytecode
+        .runtime_secret_keys
+        .iter()
+        .cloned()
+        .collect();
+    secret_keys.sort();
+
+    let payload = CacheFilePayload {
+        metadata,
+        program_data: program.serialize()?,
+        ast_program_namespaces: crate::lang::cache::ast_cache::serialize_namespaces(
+            &ast_program.namespaces,
+        )?,
+        hot_ast_namespaces: crate::lang::cache::ast_cache::serialize_namespaces(
+            &hot_ast.namespaces.namespaces,
+        )?,
+        var_index: crate::lang::cache::ast_cache::serialize_var_index(&hot_ast.var_index)?,
+        function_mapping: function_mapping
+            .iter()
+            .map(|(k, v)| (k.clone(), *v))
+            .collect(),
+        core_functions: core_functions
+            .iter()
+            .map(|(k, v)| (k.clone(), *v))
+            .collect(),
+        type_implementations: type_implementations
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect(),
+        tool_specs: tool_specs.clone(),
+        skill_specs: skill_specs.clone(),
+        ctx_defaults: (*cached_bytecode.runtime_ctx_defaults).clone(),
+        secret_keys,
+    };
+
+    let encoded = postcard::to_allocvec(&payload)
+        .map_err(|e| format!("Failed to encode cache payload: {}", e))?;
+
+    // Compress with zstd (level 1: the payload is already compact binary,
+    // favor speed)
+    let compressed = zstd::encode_all(encoded.as_slice(), 1)
+        .map_err(|e| format!("Failed to compress cache: {}", e))?;
+
+    Ok((compressed, cached_bytecode))
+}
+
 /// In-memory cache entry with access tracking for LRU
 /// Uses Arc to avoid cloning the entire bytecode structure on each access
 struct MemoryCacheEntry {
@@ -364,83 +521,8 @@ impl BytecodeCache {
         let decompressed = zstd::decode_all(compressed_data.as_slice())
             .map_err(|e| format!("Failed to decompress cache: {}", e))?;
 
-        // Decode the postcard payload
-        let payload: CacheFilePayload = postcard::from_bytes(&decompressed)
-            .map_err(|e| format!("Failed to decode cache payload: {}", e))?;
-
-        // Validate cache metadata
-        self.validate_metadata(&payload.metadata)?;
-
-        let CacheFilePayload {
-            metadata,
-            program_data,
-            ast_program_namespaces,
-            hot_ast_namespaces,
-            var_index,
-            function_mapping,
-            core_functions,
-            type_implementations,
-            tool_specs,
-            skill_specs,
-            ctx_defaults,
-            secret_keys,
-        } = payload;
-
-        let program = BytecodeProgram::deserialize(&program_data)?;
-
-        let ast_program_namespaces =
-            crate::lang::cache::ast_cache::deserialize_namespaces(&ast_program_namespaces)
-                .map_err(|e| format!("Failed to deserialize AST program namespaces: {}", e))?;
-
-        let ast_program = crate::lang::ast::Program {
-            namespaces: ast_program_namespaces,
-            current_namespace: crate::lang::ast::NsPath::new(),
-        };
-
-        let hot_ast_namespaces =
-            crate::lang::cache::ast_cache::deserialize_namespaces(&hot_ast_namespaces)
-                .map_err(|e| format!("Failed to deserialize HotAst namespaces: {}", e))?;
-
-        // Reconstruct HotAst
-        let var_index = crate::lang::cache::ast_cache::deserialize_var_index(&var_index)?;
-        let hot_ast = crate::lang::ast::HotAst {
-            program: ast_program.clone(),
-            namespaces: crate::lang::ast::Namespaces {
-                namespaces: hot_ast_namespaces,
-            },
-            var_index,
-        };
-
-        let function_mapping: indexmap::IndexMap<String, u32> =
-            function_mapping.into_iter().collect();
-        let core_functions: indexmap::IndexMap<String, u32> = core_functions.into_iter().collect();
-        let type_implementations: indexmap::IndexMap<(String, String), String> =
-            type_implementations.into_iter().collect();
-
-        tracing::debug!(
-            "✓ Cache loaded from disk (project: {}, created: {}, {} functions, {} core, {} namespaces)",
-            metadata.project_name,
-            metadata.created_at,
-            function_mapping.len(),
-            core_functions.len(),
-            ast_program.namespaces.len()
-        );
-
-        let cached_bytecode = Arc::new(CachedBytecode::with_derived(
-            metadata,
-            CachedBytecodeArtifacts {
-                program,
-                function_mapping,
-                core_functions,
-                type_implementations,
-                ast_program,
-                hot_ast,
-                tool_specs,
-                skill_specs,
-            },
-            ctx_defaults,
-            secret_keys.into_iter().collect(),
-        ));
+        let cached_bytecode = decode_cache_payload(&decompressed)?;
+        self.validate_metadata(&cached_bytecode.metadata)?;
 
         // Store in memory cache for next time
         self.store_in_memory(cache_key, Arc::clone(&cached_bytecode));
@@ -474,66 +556,19 @@ impl BytecodeCache {
         // deployment: a worker that only loads bytecode (no recompile) would
         // otherwise have an empty global tool-schema registry and
         // `::ai::tool/from-fn` would fail at module-init time.
-        // Build the in-memory entry first; its derived ctx data is persisted
-        // in the payload so loads skip the call-graph rebuild.
-        let cached_bytecode = Arc::new(CachedBytecode::new(
-            metadata.clone(),
-            CachedBytecodeArtifacts {
-                program: program.clone(),
-                function_mapping: function_mapping.clone(),
-                core_functions: core_functions.clone(),
-                type_implementations: type_implementations.clone(),
-                ast_program: ast_program.clone(),
-                hot_ast: hot_ast.clone(),
-                tool_specs: tool_specs.clone(),
-                skill_specs: skill_specs.clone(),
-            },
-        ));
-        let mut secret_keys: Vec<String> = cached_bytecode
-            .runtime_secret_keys
-            .iter()
-            .cloned()
-            .collect();
-        secret_keys.sort();
-
-        let payload = CacheFilePayload {
-            metadata: metadata.clone(),
-            program_data: program.serialize()?,
-            ast_program_namespaces: crate::lang::cache::ast_cache::serialize_namespaces(
-                &ast_program.namespaces,
-            )?,
-            hot_ast_namespaces: crate::lang::cache::ast_cache::serialize_namespaces(
-                &hot_ast.namespaces.namespaces,
-            )?,
-            var_index: crate::lang::cache::ast_cache::serialize_var_index(&hot_ast.var_index)?,
-            function_mapping: function_mapping
-                .iter()
-                .map(|(k, v)| (k.clone(), *v))
-                .collect(),
-            core_functions: core_functions
-                .iter()
-                .map(|(k, v)| (k.clone(), *v))
-                .collect(),
-            type_implementations: type_implementations
-                .iter()
-                .map(|(k, v)| (k.clone(), v.clone()))
-                .collect(),
-            tool_specs: tool_specs.clone(),
-            skill_specs: skill_specs.clone(),
-            ctx_defaults: (*cached_bytecode.runtime_ctx_defaults).clone(),
-            secret_keys,
-        };
-
-        let encoded = postcard::to_allocvec(&payload)
-            .map_err(|e| format!("Failed to encode cache payload: {}", e))?;
-
-        // Compress with zstd (level 1: the payload is already compact binary,
-        // favor speed)
-        let compressed = zstd::encode_all(encoded.as_slice(), 1)
-            .map_err(|e| format!("Failed to compress cache: {}", e))?;
+        let (compressed, cached_bytecode) = encode_cache_payload(
+            metadata,
+            program,
+            function_mapping,
+            core_functions,
+            type_implementations,
+            ast_program,
+            hot_ast,
+            tool_specs,
+            skill_specs,
+        )?;
 
         let compressed_size = compressed.len();
-        let encoded_size = encoded.len();
 
         // Write to disk using atomic write pattern (write to .tmp, then rename).
         // Use a per-writer-unique temp path (PID + thread id + nanos) to
@@ -579,9 +614,8 @@ impl BytecodeCache {
         super::prune_stale_cache_files(&self.cache_dir, &cache_path);
 
         tracing::debug!(
-            "Cache saved successfully ({} bytes compressed from {} bytes encoded)",
-            compressed_size,
-            encoded_size
+            "Cache saved successfully ({} bytes compressed)",
+            compressed_size
         );
 
         // Also store in memory cache (built above, before the payload)

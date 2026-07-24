@@ -300,6 +300,30 @@ async fn async_main(providers: CliProviders) {
         return;
     }
 
+    // Handle build-std-artifact early (before conf processing) — it only
+    // needs the resolved hot-std location, not project configuration.
+    if let Some(Command::BuildStdArtifact { out }) = &cli.command {
+        let hot_std = hot::lang::project::DependencyResolver::default().get_hot_std_dependency();
+        let out_path = out.as_ref().map(std::path::PathBuf::from);
+        match hot::lang::cache::std_artifact::build_artifact(
+            &hot_std.resolved_path,
+            out_path.as_deref(),
+        ) {
+            Ok((path, size)) => {
+                println!(
+                    "hot-std artifact written to {} ({} KB)",
+                    path.display(),
+                    size / 1024
+                );
+            }
+            Err(e) => {
+                eprintln!("Failed to build hot-std artifact: {}", e);
+                std::process::exit(1);
+            }
+        }
+        return;
+    }
+
     // Handle help command early (before conf processing)
     if let Some(Command::Help { command }) = &cli.command {
         let mut cmd = Cli::command();
@@ -1535,7 +1559,10 @@ async fn async_main(providers: CliProviders) {
                 std::process::exit(1);
             }
         }
-        Some(Command::Version) | Some(Command::Update { .. }) | Some(Command::Help { .. }) => {
+        Some(Command::Version)
+        | Some(Command::Update { .. })
+        | Some(Command::Help { .. })
+        | Some(Command::BuildStdArtifact { .. }) => {
             // Handled early, before config processing
         }
         None => {

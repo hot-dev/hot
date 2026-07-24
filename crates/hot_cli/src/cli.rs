@@ -615,6 +615,14 @@ pub(crate) enum Command {
         #[arg(long = "strict")]
         strict: bool,
     },
+    /// Build the precompiled hot-std artifact (internal command, used at
+    /// release/packaging time)
+    #[command(display_order = 33, hide = true, name = "build-std-artifact")]
+    BuildStdArtifact {
+        /// Output path (defaults to <hot-std-root>/hot-std.hsc)
+        #[arg(long = "out")]
+        out: Option<String>,
+    },
     /// Upload a local build to remote environment (internal command)
     #[command(display_order = 34, hide = true)]
     Upload {
@@ -1068,6 +1076,7 @@ Options:
 // Hidden commands section shown when HOT_FIRE env var is set
 pub(crate) const HIDDEN_COMMANDS_HELP: &str = "
   Internal Commands (HOT_FIRE):
+    build-std-artifact  Build the precompiled hot-std artifact (hot-std.hsc)
     upload       Upload a local build to remote environment
     extract      Extract a build to a directory
     docs         Generate documentation JSON for packages

@@ -687,7 +687,10 @@ pub(crate) fn extract_options_from_command(command: &Command) -> ExtractedOption
             None,
             None,
         ),
-        Command::Version | Command::Update { .. } | Command::Help { .. } => (
+        Command::Version
+        | Command::Update { .. }
+        | Command::Help { .. }
+        | Command::BuildStdArtifact { .. } => (
             GlobalOptions {
                 conf_files: vec![],
                 ctx_files: vec![],
