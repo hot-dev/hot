@@ -230,6 +230,9 @@ fn persist(path: &Path, file_bytes: &[u8]) -> Result<(), String> {
 }
 
 fn try_load(path: &Path, expected_key: &str) -> Result<Arc<CachedBytecode>, String> {
+    // Mark as recently used so the stale-entry pruner never collects a
+    // live image.
+    super::touch_cache_entry(path);
     let bytes = std::fs::read(path).map_err(|e| format!("read failed: {}", e))?;
     let rest = bytes
         .strip_prefix(MAGIC.as_slice())

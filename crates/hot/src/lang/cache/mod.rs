@@ -21,6 +21,16 @@ const CACHE_PRUNE_AFTER: std::time::Duration = std::time::Duration::from_secs(30
 /// prune them on a much shorter fuse.
 const CACHE_TMP_PRUNE_AFTER: std::time::Duration = std::time::Duration::from_secs(24 * 60 * 60);
 
+/// Mark a cache entry as recently used (best-effort mtime bump). Reads
+/// don't update mtime, so without this an entry hit daily would still look
+/// "untouched" to the pruner after 30 days and get deleted, forcing a
+/// periodic rebuild.
+pub(crate) fn touch_cache_entry(path: &std::path::Path) {
+    if let Ok(file) = std::fs::OpenOptions::new().write(true).open(path) {
+        let _ = file.set_modified(std::time::SystemTime::now());
+    }
+}
+
 /// Best-effort sweep of stale files in a cache directory, called
 /// opportunistically after a successful cache save (off any hot path).
 ///
@@ -40,6 +50,13 @@ pub(crate) fn prune_stale_cache_files(dir: &std::path::Path, keep: &std::path::P
         }
         let name = entry.file_name();
         let name = name.to_string_lossy();
+        // Never prune lock files: they are opened once and their mtime is
+        // never refreshed, so an actively used lock would look stale — and
+        // deleting one while a process holds its fd splits later lockers
+        // onto a fresh inode, silently breaking mutual exclusion.
+        if name.ends_with(".lock") {
+            continue;
+        }
         let is_tmp = name.contains(".tmp");
         let max_age = if is_tmp {
             CACHE_TMP_PRUNE_AFTER

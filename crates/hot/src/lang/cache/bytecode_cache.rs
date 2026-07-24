@@ -572,7 +572,9 @@ impl BytecodeCache {
 
         tracing::debug!("Loading bytecode cache from: {}", cache_path.display());
 
-        // Read compressed cache file
+        // Mark as recently used so the stale-entry pruner never collects a
+        // live entry, then read the compressed cache file
+        crate::lang::cache::touch_cache_entry(&cache_path);
         let compressed_data =
             std::fs::read(&cache_path).map_err(|e| format!("Failed to read cache file: {}", e))?;
 

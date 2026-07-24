@@ -187,7 +187,9 @@ impl UnitCache {
             return Ok(None);
         }
 
-        // Read and decompress
+        // Mark as recently used so the stale-entry pruner never collects a
+        // live entry, then read and decompress
+        super::touch_cache_entry(&cache_path);
         let compressed = std::fs::read(&cache_path).map_err(|e| e.to_string())?;
         let data = zstd::decode_all(compressed.as_slice()).map_err(|e| e.to_string())?;
 
