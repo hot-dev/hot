@@ -868,20 +868,15 @@ impl Engine {
                 .join(", ")
         );
 
-        // Opt-in fast path (HOT_STD_IMAGE=1): ad hoc eval against a pristine
-        // hot-std. When the only compilation unit is the hot-std package (no
-        // project sources, no target file), extend the system-level compiled
-        // hot-std image with just the eval snippet — the worker's cached-
-        // build eval mechanism. The first run compiles hot-std and persists
-        // the image; later runs load it (parallel section decode).
-        //
-        // Disabled by default: measured 78ms vs 72ms for the classic path on
-        // an M-series laptop — the full-image decode still exceeds the
-        // (postcard AST cache + compile) it replaces, and eval compile errors
-        // lose their rich ariadne rendering. Re-evaluate when hot-std grows
-        // or after a slim decode path exists; the env flag keeps it testable.
-        if std::env::var_os("HOT_STD_IMAGE").is_some_and(|v| v == "1")
-            && matches!(mode, PipelineMode::Execute)
+        // Fast path: ad hoc eval against a pristine hot-std. When the only
+        // compilation unit is the hot-std package (no project sources, no
+        // target file), extend the system-level compiled hot-std image with
+        // just the eval snippet — the worker's cached-build eval mechanism.
+        // The first run compiles hot-std and persists the image; later runs
+        // load it (parallel section decode). Error rendering and ctx
+        // pre-flight mirror the classic path; any image problem (unbuildable
+        // hot-std, corrupt file) falls back to the classic combined compile.
+        if matches!(mode, PipelineMode::Execute)
             && target_file.is_none()
             && let Some(code) = eval_code
             && let [only_unit] = units.as_slice()

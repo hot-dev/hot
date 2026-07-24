@@ -379,8 +379,11 @@ impl Engine {
         };
 
         let eval_code_with_ns = format!("{} ns\n{}", eval_ns, code);
-        let mut eval_ast = crate::lang::parser::parse_hot(&eval_code_with_ns)
-            .map_err(|e| format!("Failed to parse eval code: {}", e))?;
+        let mut eval_ast = crate::lang::parser::parse_hot_file(&eval_code_with_ns, "<eval>")
+            .map_err(|e| match e.format_error(&eval_code_with_ns, false) {
+                Some(formatted) => format!("Parse errors:\n{}", formatted),
+                None => format!("Parse errors:\nParse error in eval code: {}", e),
+            })?;
 
         // Compile just the eval code with the cached registries pre-loaded
         // This ensures the eval code can reference project functions and core functions
@@ -407,9 +410,38 @@ impl Engine {
             );
         }
 
+        eval_compiler.add_source_file(
+            std::path::PathBuf::from("<eval>"),
+            eval_code_with_ns.clone(),
+        );
         eval_compiler
             .compile_program(&mut eval_ast)
-            .map_err(|e| format!("Failed to compile eval code: {}", e.format_error(false)))?;
+            .map_err(|e| format!("Compile-time errors found:\n{}", e.format_error(false)))?;
+
+        // Pre-flight ctx validation, mirroring Execute-mode validation in the
+        // classic pipeline: requirements declared by the eval program itself
+        // (e.g. an inline fn with meta {ctx: ...}) must be satisfiable before
+        // any user code executes. Keys covered by the cached build's defaults
+        // count as available.
+        {
+            let call_graph = crate::lang::compiler::call_graph::CallGraph::build(&eval_ast);
+            let ctx_requirements = call_graph.resolve_user_ctx_requirements(&eval_ast);
+            if ctx_requirements.has_requirements() {
+                let mut available_keys: ahash::AHashSet<String> = context_storage
+                    .as_ref()
+                    .map(|cs| cs.keys().cloned().collect())
+                    .unwrap_or_default();
+                available_keys.extend(cached.runtime_ctx_defaults.keys().cloned());
+
+                let ctx_result = crate::lang::compiler::ctx_checker::check_ctx_requirements(
+                    &ctx_requirements,
+                    &available_keys,
+                );
+                if !ctx_result.is_ok() {
+                    return Err(ctx_result.format_errors());
+                }
+            }
+        }
 
         // Merge eval program into cached program
         let mut eval_program = eval_compiler.get_program().clone();
