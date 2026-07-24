@@ -337,9 +337,15 @@ pub fn compile_project_for_cache(
                 }
             })?;
 
-        // Merge namespaces
+        // Member-merge namespaces; duplicate definitions across files are
+        // compile errors.
         for (ns_path, namespace) in file_program.namespaces {
-            combined_program.namespaces.insert(ns_path, namespace);
+            crate::lang::engine::discover::merge_namespace(
+                &mut combined_program.namespaces,
+                ns_path,
+                namespace,
+                crate::lang::engine::discover::NsMergePolicy::Strict,
+            )?;
         }
     }
 

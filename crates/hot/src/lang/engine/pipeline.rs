@@ -17,7 +17,8 @@
 //!     `::hot::test::run-tests` entry point.
 
 use super::discover::{
-    DiscoveredUnit, discover_compilation_units, parse_files_parallel, parse_units_with_cache,
+    DiscoveredUnit, NsMergePolicy, discover_compilation_units, merge_namespace,
+    parse_files_parallel, parse_units_with_cache,
 };
 use super::{
     CompilationArtifacts, Engine, ExecutionWithArtifacts, ExtractedHandlers, PipelineMode,
@@ -122,9 +123,15 @@ impl Engine {
                     }
                 })?;
 
-            // Merge namespaces
+            // Member-merge namespaces; duplicate definitions across files
+            // are compile errors.
             for (ns_path, namespace) in parsed_program.namespaces {
-                program.namespaces.insert(ns_path, namespace);
+                merge_namespace(
+                    &mut program.namespaces,
+                    ns_path,
+                    namespace,
+                    NsMergePolicy::Strict,
+                )?;
             }
         }
 
@@ -888,7 +895,10 @@ impl Engine {
             current_namespace: crate::lang::ast::NsPath::hot_main(),
         };
 
-        // Add namespaces from target file
+        // Add namespaces from target file. Member-merged: the target file is
+        // usually also discovered as part of its source unit (run pushes the
+        // file's directory onto src paths), and the same-file bindings are
+        // deduplicated by merge_namespace.
         for parsed in &extra_parsed_files {
             for (ns_path, namespace) in &parsed.namespaces {
                 tracing::debug!(
@@ -896,9 +906,12 @@ impl Engine {
                     ns_path,
                     namespace.scope.vars.len()
                 );
-                combined_program
-                    .namespaces
-                    .insert(ns_path.clone(), namespace.clone());
+                merge_namespace(
+                    &mut combined_program.namespaces,
+                    ns_path.clone(),
+                    namespace.clone(),
+                    NsMergePolicy::Strict,
+                )?;
             }
         }
 
@@ -945,7 +958,12 @@ impl Engine {
                         "Eval program has {} namespaces",
                         eval_program.namespaces.len()
                     );
-                    // Merge namespaces from eval code
+                    // Merge namespaces from eval code. Shadow policy: eval
+                    // input may re-declare an existing name (REPL-style
+                    // redefinition) and the newest binding wins, but other
+                    // members of an existing namespace are preserved —
+                    // previously an eval `::ns ns` declaration replaced the
+                    // project's entire namespace.
                     for (ns_path, namespace) in eval_program.namespaces {
                         tracing::debug!(
                             "Merging eval namespace '{}' with {} variables",
@@ -955,7 +973,12 @@ impl Engine {
                         for (var, _value) in &namespace.scope.vars {
                             tracing::debug!("Eval variable: '{}'", var.sym.name());
                         }
-                        combined_program.namespaces.insert(ns_path, namespace);
+                        merge_namespace(
+                            &mut combined_program.namespaces,
+                            ns_path,
+                            namespace,
+                            NsMergePolicy::Shadow,
+                        )?;
                     }
                 }
                 Err(e) => {
@@ -1638,9 +1661,15 @@ impl Engine {
                 extended_program.entry_point.len()
             );
 
-            // Merge eval AST into combined program for HotAst
+            // Merge eval AST into combined program for HotAst (Shadow:
+            // eval re-declarations win, existing members are preserved)
             for (ns_path, namespace) in eval_ast.namespaces {
-                combined_program.namespaces.insert(ns_path, namespace);
+                merge_namespace(
+                    &mut combined_program.namespaces,
+                    ns_path,
+                    namespace,
+                    NsMergePolicy::Shadow,
+                )?;
             }
 
             (Arc::new(extended_program), combined_program)

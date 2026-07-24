@@ -15,6 +15,169 @@ use ahash::{AHashMap, AHashSet};
 use indexmap::IndexMap;
 use rayon::prelude::*;
 
+/// Policy for resolving a same-name binding when merging a namespace that
+/// already exists in the target map.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum NsMergePolicy {
+    /// Static source files: a name may be declared only once per namespace
+    /// across files. A second declaration from a different file is an error —
+    /// this keeps the merged program independent of file, unit, and
+    /// cache-hit/miss ordering (a conflict errors no matter which side was
+    /// merged first).
+    Strict,
+    /// Eval / REPL input: a later declaration shadows earlier ones. The
+    /// binding is appended, so name resolution and execution order pick the
+    /// newest definition — the same rule that lets accumulated REPL source
+    /// redefine a function within one file.
+    Shadow,
+}
+
+/// Source file a binding came from, for conflict diagnostics and same-file
+/// detection. Falls back to the namespace's file when the var has no span.
+fn binding_file(
+    var: &crate::lang::ast::Var,
+    ns_source_file: &Option<std::path::PathBuf>,
+) -> Option<String> {
+    var.src
+        .as_ref()
+        .and_then(|s| s.file.clone())
+        .or_else(|| ns_source_file.as_ref().map(|p| p.display().to_string()))
+}
+
+fn file_label(file: &Option<String>) -> &str {
+    file.as_deref().unwrap_or("<unknown file>")
+}
+
+/// Merge `incoming` into `target[ns_path]`, combining members instead of
+/// replacing the whole namespace. All namespace-merge sites (unit files,
+/// cross-unit, target file, eval/REPL code) go through here so duplicate
+/// handling is uniform and deterministic.
+///
+/// Bindings whose name already exists in the target namespace:
+///   * same source file — skipped (idempotent re-merge; e.g. `hot run x.hot`
+///     parses `x.hot` both as part of its source unit and as the target file)
+///   * different file + `Strict` — error naming both files
+///   * different file + `Shadow` — appended, newest wins
+pub(crate) fn merge_namespace(
+    target: &mut IndexMap<crate::lang::ast::NsPath, crate::lang::ast::Namespace>,
+    ns_path: crate::lang::ast::NsPath,
+    incoming: crate::lang::ast::Namespace,
+    policy: NsMergePolicy,
+) -> Result<(), String> {
+    use indexmap::map::Entry;
+
+    let slot = match target.entry(ns_path) {
+        Entry::Vacant(slot) => {
+            slot.insert(incoming);
+            return Ok(());
+        }
+        Entry::Occupied(slot) => slot,
+    };
+    let ns_path = slot.key().clone();
+    let existing = slot.into_mut();
+    let incoming_source_file = incoming.source_file.clone();
+
+    // Namespace metadata: adopt when the existing declaration has none;
+    // conflicting redeclaration is an error for static code, newest-wins
+    // for eval input.
+    if let Some(incoming_meta) = incoming.meta {
+        match &existing.meta {
+            None => existing.meta = Some(incoming_meta),
+            Some(existing_meta) if *existing_meta != incoming_meta => {
+                if policy == NsMergePolicy::Strict {
+                    return Err(format!(
+                        "Namespace '{}' declares conflicting metadata in {} and {}",
+                        ns_path,
+                        existing
+                            .source_file
+                            .as_ref()
+                            .map(|p| p.display().to_string())
+                            .as_deref()
+                            .unwrap_or("<unknown file>"),
+                        incoming_source_file
+                            .as_ref()
+                            .map(|p| p.display().to_string())
+                            .as_deref()
+                            .unwrap_or("<unknown file>"),
+                    ));
+                }
+                existing.meta = Some(incoming_meta);
+            }
+            Some(_) => {}
+        }
+    }
+
+    // Aliases: union; the same alias name pointing at two different targets
+    // is a conflict under Strict, newest-wins under Shadow.
+    for (alias, alias_target) in incoming.aliases {
+        match existing.aliases.get(&alias) {
+            Some(current) if *current != alias_target => {
+                if policy == NsMergePolicy::Strict {
+                    return Err(format!(
+                        "Namespace '{}' declares alias '{}' with conflicting targets '{}' and '{}'",
+                        ns_path, alias, current, alias_target
+                    ));
+                }
+                existing.aliases.insert(alias, alias_target);
+            }
+            Some(_) => {}
+            None => {
+                existing.aliases.insert(alias, alias_target);
+            }
+        }
+    }
+
+    // Bindings: compare by symbol name (Var identity includes source spans,
+    // so map-key equality can't detect same-name redeclarations).
+    for (var, value) in incoming.scope.vars {
+        let name = var.sym.name();
+        let existing_same_name = existing
+            .scope
+            .vars
+            .keys()
+            .rev()
+            .find(|v| v.sym.name() == name)
+            .cloned();
+
+        // Every file's `::path ns` declaration parses to a `ns` binding, so a
+        // namespace assembled from several files legitimately sees one per
+        // file — keep the first and skip the rest.
+        if name == "ns" && existing_same_name.is_some() {
+            continue;
+        }
+
+        match existing_same_name {
+            None => {
+                existing.scope.vars.insert(var, value);
+            }
+            Some(prior) => {
+                let prior_file = binding_file(&prior, &existing.source_file);
+                let incoming_file = binding_file(&var, &incoming_source_file);
+                if prior_file.is_some() && prior_file == incoming_file {
+                    // Same file merged twice — keep the existing binding.
+                    continue;
+                }
+                match policy {
+                    NsMergePolicy::Strict => {
+                        return Err(format!(
+                            "Duplicate definition of '{}' in namespace '{}': defined in {} and {}",
+                            name,
+                            ns_path,
+                            file_label(&prior_file),
+                            file_label(&incoming_file),
+                        ));
+                    }
+                    NsMergePolicy::Shadow => {
+                        existing.scope.vars.insert(var, value);
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
 /// Result of parsing a single file
 pub(super) struct ParsedFile {
     /// File path
@@ -282,20 +445,11 @@ pub(super) fn parse_units_with_cache(
         })
         .collect();
 
-    // Separate hits from misses
-    let mut cached_namespaces: Vec<
-        IndexMap<crate::lang::ast::NsPath, crate::lang::ast::Namespace>,
-    > = Vec::new();
+    // Separate hits from misses (unit order is preserved in cache_results)
     let mut units_to_parse: Vec<&DiscoveredUnit> = Vec::new();
-
     for (discovered, result) in &cache_results {
-        match result {
-            Some(namespaces) => {
-                cached_namespaces.push(namespaces.clone());
-            }
-            None => {
-                units_to_parse.push(discovered);
-            }
+        if result.is_none() {
+            units_to_parse.push(discovered);
         }
     }
 
@@ -313,11 +467,19 @@ pub(super) fn parse_units_with_cache(
                 ));
             }
 
-            // Collect namespaces from this unit
+            // Collect namespaces from this unit, merging members when several
+            // files contribute to the same namespace. Duplicate definitions
+            // across files are compile errors (previously the last file
+            // silently replaced the whole namespace).
             let mut unit_namespaces = IndexMap::new();
             for parsed in &parsed_files {
                 for (ns_path, namespace) in &parsed.namespaces {
-                    unit_namespaces.insert(ns_path.clone(), namespace.clone());
+                    merge_namespace(
+                        &mut unit_namespaces,
+                        ns_path.clone(),
+                        namespace.clone(),
+                        NsMergePolicy::Strict,
+                    )?;
                 }
             }
 
@@ -353,23 +515,35 @@ pub(super) fn parse_units_with_cache(
         }
     });
 
-    // Merge all namespaces (cached + parsed)
+    // Merge all namespaces in discovery order — the same order whether a unit
+    // came from cache or was freshly parsed, so the merged program is
+    // independent of cache state. (Previously cached units merged before
+    // parsed ones, so the winner of a namespace collision depended on which
+    // unit happened to be cached.) Cross-unit duplicate definitions are
+    // strict errors, which also makes the outcome order-independent.
     let mut all_namespaces = IndexMap::new();
-
-    // Add cached namespaces
-    for namespaces in cached_namespaces {
-        for (ns_path, namespace) in namespaces {
-            all_namespaces.insert(ns_path, namespace);
-        }
-    }
-
-    // Add parsed namespaces
     let mut all_parsed_files = Vec::new();
-    for (_, namespaces, parsed_files) in parsed_units {
+    let mut parsed_iter = parsed_units.into_iter();
+    for (discovered, cached) in cache_results {
+        let namespaces = match cached {
+            Some(namespaces) => namespaces,
+            None => {
+                let (unit, namespaces, parsed_files) = parsed_iter.next().ok_or_else(|| {
+                    "internal error: fewer parsed units than cache misses".to_string()
+                })?;
+                debug_assert_eq!(unit.id(), discovered.unit.id());
+                all_parsed_files.extend(parsed_files);
+                namespaces
+            }
+        };
         for (ns_path, namespace) in namespaces {
-            all_namespaces.insert(ns_path, namespace);
+            merge_namespace(
+                &mut all_namespaces,
+                ns_path,
+                namespace,
+                NsMergePolicy::Strict,
+            )?;
         }
-        all_parsed_files.extend(parsed_files);
     }
 
     // Report cache stats
@@ -747,5 +921,207 @@ impl Engine {
             .map(|p| pkg_root.join(&p).to_string_lossy().to_string())
             .filter(|p| std::path::Path::new(p).exists())
             .collect())
+    }
+}
+
+#[cfg(test)]
+mod ns_merge_tests {
+    use super::*;
+    use crate::lang::ast::{Namespace, NsPath};
+
+    /// Parse `source` as if it came from `file` and return its namespaces.
+    fn parse(source: &str, file: &str) -> IndexMap<NsPath, Namespace> {
+        crate::lang::parser::parse_hot_file(source, file)
+            .expect("test source should parse")
+            .namespaces
+    }
+
+    fn merge_all(
+        target: &mut IndexMap<NsPath, Namespace>,
+        namespaces: IndexMap<NsPath, Namespace>,
+        policy: NsMergePolicy,
+    ) -> Result<(), String> {
+        for (ns_path, namespace) in namespaces {
+            merge_namespace(target, ns_path, namespace, policy)?;
+        }
+        Ok(())
+    }
+
+    fn ns<'a>(target: &'a IndexMap<NsPath, Namespace>, path: &str) -> &'a Namespace {
+        target
+            .iter()
+            .find(|(p, _)| p.to_string() == path)
+            .map(|(_, ns)| ns)
+            .unwrap_or_else(|| panic!("namespace {} missing", path))
+    }
+
+    fn var_names(namespace: &Namespace) -> Vec<String> {
+        namespace
+            .scope
+            .vars
+            .keys()
+            .map(|v| v.sym.name().to_string())
+            .collect()
+    }
+
+    #[test]
+    fn two_files_same_namespace_members_combine() {
+        let mut target = IndexMap::new();
+        merge_all(
+            &mut target,
+            parse("::myapp ns\n\nalpha fn (): Str { \"A\" }\n", "a.hot"),
+            NsMergePolicy::Strict,
+        )
+        .unwrap();
+        merge_all(
+            &mut target,
+            parse("::myapp ns\n\nbeta fn (): Str { \"B\" }\n", "b.hot"),
+            NsMergePolicy::Strict,
+        )
+        .unwrap();
+
+        let merged = ns(&target, "::myapp");
+        let names = var_names(merged);
+        assert!(
+            names.contains(&"alpha".to_string()),
+            "alpha kept: {names:?}"
+        );
+        assert!(names.contains(&"beta".to_string()), "beta added: {names:?}");
+    }
+
+    #[test]
+    fn duplicate_definition_across_files_is_error_in_both_orders() {
+        let a = parse("::myapp ns\n\nthing fn (): Str { \"A\" }\n", "a.hot");
+        let b = parse("::myapp ns\n\nthing fn (): Str { \"B\" }\n", "b.hot");
+
+        // Strict merging must fail regardless of merge order — this is what
+        // makes the pipeline result independent of cache-hit/miss ordering.
+        for (first, second) in [(a.clone(), b.clone()), (b, a)] {
+            let mut target = IndexMap::new();
+            merge_all(&mut target, first, NsMergePolicy::Strict).unwrap();
+            let err = merge_all(&mut target, second, NsMergePolicy::Strict)
+                .expect_err("duplicate definition must error");
+            assert!(err.contains("Duplicate definition of 'thing'"), "{err}");
+            assert!(err.contains("a.hot") && err.contains("b.hot"), "{err}");
+        }
+    }
+
+    #[test]
+    fn same_file_merged_twice_is_idempotent() {
+        // `hot run x.hot` parses the target file both as part of its source
+        // unit and as the target file — the second merge must be a no-op.
+        let mut target = IndexMap::new();
+        let first = parse("::myapp ns\n\nalpha fn (): Str { \"A\" }\n", "x.hot");
+        merge_all(&mut target, first.clone(), NsMergePolicy::Strict).unwrap();
+        merge_all(&mut target, first, NsMergePolicy::Strict).unwrap();
+
+        let names = var_names(ns(&target, "::myapp"));
+        let alpha_count = names.iter().filter(|n| n.as_str() == "alpha").count();
+        assert_eq!(alpha_count, 1, "no duplicated binding: {names:?}");
+    }
+
+    #[test]
+    fn shadow_policy_appends_newest_binding_and_keeps_others() {
+        // Eval/REPL: declaring into an existing namespace must preserve its
+        // other members (previously the whole namespace was replaced) and a
+        // re-declared name must shadow the old binding (appended last).
+        let mut target = IndexMap::new();
+        merge_all(
+            &mut target,
+            parse(
+                "::myapp ns\n\nalpha fn (): Str { \"A\" }\nbeta fn (): Str { \"B\" }\n",
+                "src.hot",
+            ),
+            NsMergePolicy::Strict,
+        )
+        .unwrap();
+        merge_all(
+            &mut target,
+            parse("::myapp ns\n\nbeta fn (): Str { \"B2\" }\n", "<eval>"),
+            NsMergePolicy::Shadow,
+        )
+        .unwrap();
+
+        let names = var_names(ns(&target, "::myapp"));
+        assert!(
+            names.contains(&"alpha".to_string()),
+            "alpha kept: {names:?}"
+        );
+        assert_eq!(
+            names.last().map(String::as_str),
+            Some("beta"),
+            "newest beta appended last so it wins resolution: {names:?}"
+        );
+        assert_eq!(
+            names.iter().filter(|n| n.as_str() == "beta").count(),
+            2,
+            "shadowed binding coexists like REPL redefinition: {names:?}"
+        );
+    }
+
+    #[test]
+    fn project_declaring_hot_std_namespace_collides_deterministically() {
+        // Simulates a project src file declaring a hot-std namespace path.
+        // Adding a NEW name merges member-wise; redefining an EXISTING name
+        // errors — in both merge orders.
+        let std_ns = parse(
+            "::hot::str ns\n\ntrim fn (s: Str): Str { s }\n",
+            "/usr/local/share/hot/pkg/hot-std/src/hot/str.hot",
+        );
+        let addition = parse(
+            "::hot::str ns\n\nshout fn (s: Str): Str { s }\n",
+            "src/ext.hot",
+        );
+        let redefinition = parse(
+            "::hot::str ns\n\ntrim fn (s: Str): Str { s }\n",
+            "src/ext.hot",
+        );
+
+        let mut target = IndexMap::new();
+        merge_all(&mut target, std_ns.clone(), NsMergePolicy::Strict).unwrap();
+        merge_all(&mut target, addition, NsMergePolicy::Strict).unwrap();
+        let names = var_names(ns(&target, "::hot::str"));
+        assert!(
+            names.contains(&"trim".to_string()),
+            "std member kept: {names:?}"
+        );
+        assert!(
+            names.contains(&"shout".to_string()),
+            "addition merged: {names:?}"
+        );
+
+        for (first, second) in [
+            (std_ns.clone(), redefinition.clone()),
+            (redefinition, std_ns),
+        ] {
+            let mut target = IndexMap::new();
+            merge_all(&mut target, first, NsMergePolicy::Strict).unwrap();
+            let err = merge_all(&mut target, second, NsMergePolicy::Strict)
+                .expect_err("redefining a std binding must error");
+            assert!(err.contains("Duplicate definition of 'trim'"), "{err}");
+        }
+    }
+
+    #[test]
+    fn alias_conflicts_error_under_strict_and_win_under_shadow() {
+        let a = parse("::myapp ns\n::h ::hot::http\n", "a.hot");
+        let b = parse("::myapp ns\n::h ::hot::html\n", "b.hot");
+
+        let mut target = IndexMap::new();
+        merge_all(&mut target, a.clone(), NsMergePolicy::Strict).unwrap();
+        let err = merge_all(&mut target, b.clone(), NsMergePolicy::Strict)
+            .expect_err("conflicting alias must error");
+        assert!(err.contains("alias"), "{err}");
+
+        let mut target = IndexMap::new();
+        merge_all(&mut target, a, NsMergePolicy::Strict).unwrap();
+        merge_all(&mut target, b, NsMergePolicy::Shadow).unwrap();
+        let merged = ns(&target, "::myapp");
+        let aliased = merged
+            .aliases
+            .iter()
+            .find(|(alias, _)| alias.to_string() == "::h")
+            .map(|(_, t)| t.to_string());
+        assert_eq!(aliased.as_deref(), Some("::hot::html"), "shadow alias wins");
     }
 }

@@ -15,7 +15,9 @@
 //!   * `get_var_from_*` / `get_namespace_vars_from_vm` / `get_all_vars_from_vm`
 //!     — convenience accessors over a running [`crate::lang::runtime::vm::VirtualMachine`].
 
-use super::discover::{discover_compilation_units, parse_units_with_cache};
+use super::discover::{
+    NsMergePolicy, discover_compilation_units, merge_namespace, parse_units_with_cache,
+};
 use super::{Engine, ExecutedEngine, IncrementalExecutionResult};
 use ahash::AHashMap;
 use std::sync::Arc;
@@ -92,9 +94,17 @@ impl Engine {
             current_namespace: crate::lang::ast::NsPath::hot_main(),
         };
 
-        // Merge eval program namespaces (REPL code)
+        // Merge eval program namespaces (REPL code). Shadow policy: REPL
+        // input may re-declare an existing name and the newest binding wins,
+        // but declaring into an existing (e.g. project) namespace no longer
+        // replaces that namespace's other members.
         for (ns_path, namespace) in eval_program.namespaces {
-            combined_program.namespaces.insert(ns_path, namespace);
+            merge_namespace(
+                &mut combined_program.namespaces,
+                ns_path,
+                namespace,
+                NsMergePolicy::Shadow,
+            )?;
         }
 
         // Resolve variable references
@@ -260,9 +270,15 @@ impl Engine {
                 Ok(content) => {
                     match crate::lang::parser::parse_hot_file(&content, file_path) {
                         Ok(program) => {
-                            // Merge namespaces
+                            // Member-merge namespaces; duplicate definitions
+                            // across files are compile errors.
                             for (ns_path, namespace) in program.namespaces {
-                                combined_program.namespaces.insert(ns_path, namespace);
+                                merge_namespace(
+                                    &mut combined_program.namespaces,
+                                    ns_path,
+                                    namespace,
+                                    NsMergePolicy::Strict,
+                                )?;
                             }
                         }
                         Err(e) => {
@@ -284,9 +300,15 @@ impl Engine {
         if let Some(code) = eval_code {
             match crate::lang::parser::parse_hot(code) {
                 Ok(eval_program) => {
-                    // Merge eval program namespaces
+                    // Merge eval program namespaces (Shadow: newest binding
+                    // wins, existing namespace members are preserved)
                     for (ns_path, namespace) in eval_program.namespaces {
-                        combined_program.namespaces.insert(ns_path, namespace);
+                        merge_namespace(
+                            &mut combined_program.namespaces,
+                            ns_path,
+                            namespace,
+                            NsMergePolicy::Shadow,
+                        )?;
                     }
                 }
                 Err(e) => {
