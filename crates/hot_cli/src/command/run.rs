@@ -51,15 +51,10 @@ pub(crate) async fn run_run(
         .clone()
         .unwrap_or_else(|| hot::project::get_default_project_name(conf));
 
-    // Check context requirements before running
-    hot::lang::engine::Engine::check_sources_pipeline_with_context(
-        &src_paths,
-        &_test_paths,
-        Some(conf),
-        Some(&project_name),
-        context_storage.as_ref(),
-        hot::env::is_local_dev(),
-    )?;
+    // No separate pre-flight check pass here: the Execute pipeline runs the
+    // same post-compile validations (ctx/box/handler/schedule) itself before
+    // executing any user code, so a check_sources_pipeline_with_context call
+    // would just compile hot-std and the project sources a second time.
 
     // Create or update live build for development
     setup_live_build_for_dev(conf, global_options, &src_paths, &_test_paths).await?;

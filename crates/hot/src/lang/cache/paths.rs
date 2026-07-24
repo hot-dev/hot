@@ -81,9 +81,17 @@ pub fn get_system_cache_dir() -> PathBuf {
         return home.join(".hot");
     }
 
-    // Last resort: use current directory (shouldn't happen in practice)
-    tracing::warn!("Could not determine system cache directory, using .hot");
-    PathBuf::from(".hot")
+    // Last resort: use a per-user temp directory rather than the current
+    // working directory. Environments without HOME (cron, launchd, CI
+    // runners, profilers) would otherwise scatter `.hot/` directories into
+    // whatever cwd the process happened to run from — and once `.hot/`
+    // exists, has_project_config() treats that directory as a project.
+    let fallback = std::env::temp_dir().join("hot-cache");
+    tracing::warn!(
+        "Could not determine system cache directory, using {}",
+        fallback.display()
+    );
+    fallback
 }
 
 /// Get the platform-specific cache directory

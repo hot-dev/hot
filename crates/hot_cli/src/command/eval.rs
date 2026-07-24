@@ -34,33 +34,39 @@ pub(crate) async fn run_eval(
         .clone()
         .unwrap_or_else(|| hot::project::get_default_project_name(conf));
 
-    // Check context requirements before evaluating
-    hot::lang::engine::Engine::check_sources_pipeline_with_context(
-        &src_paths,
-        &test_paths,
-        Some(conf),
-        Some(&project_name),
-        context_storage.as_ref(),
-        hot::env::is_local_dev(),
-    )?;
+    // No separate pre-flight check pass here: the Execute pipeline runs the
+    // same post-compile validations (ctx/box/handler/schedule) itself before
+    // executing any user code, so a check_sources_pipeline_with_context call
+    // would just compile hot-std and the project sources a second time.
 
     // Create or update live build for development (consistent with run/repl/check)
     setup_live_build_for_dev(conf, global_options, &src_paths, &test_paths).await?;
-
-    // Create database pool first if needed for emitter/event publisher
-    let db_pool = match hot::db::create_db_pool(conf).await {
-        Ok(pool) => Some(std::sync::Arc::new(pool)),
-        Err(e) => {
-            tracing::warn!("Failed to create database pool for eval: {}", e);
-            None
-        }
-    };
 
     // Create emitter and event publisher for eval commands (like run and test)
     // Check for emitter configuration (hot.emitter.type in config becomes emitter.type in resolved conf)
     let emitter_type_str = conf.get_str("emitter.type");
     let has_emitter_config =
         !emitter_type_str.is_empty() && emitter_type_str != "null" && emitter_type_str != "none";
+
+    // Check for queue configuration (hot.queue.type in config becomes queue.type in resolved conf)
+    let queue_type_str = conf.get_str("queue.type");
+    let has_queue_config =
+        !queue_type_str.is_empty() && queue_type_str != "null" && queue_type_str != "none";
+
+    // Only build a database pool when an emitter or event publisher will
+    // actually use it. Ad hoc out-of-project evals default both to "none",
+    // so a pool would just be a doomed connection attempt.
+    let db_pool = if has_emitter_config || has_queue_config {
+        match hot::db::create_db_pool(conf).await {
+            Ok(pool) => Some(std::sync::Arc::new(pool)),
+            Err(e) => {
+                tracing::warn!("Failed to create database pool for eval: {}", e);
+                None
+            }
+        }
+    } else {
+        None
+    };
 
     let emitter = if has_emitter_config {
         if let Some(ref pool) = db_pool {
@@ -79,11 +85,6 @@ pub(crate) async fn run_eval(
     } else {
         None
     };
-
-    // Check for queue configuration (hot.queue.type in config becomes queue.type in resolved conf)
-    let queue_type_str = conf.get_str("queue.type");
-    let has_queue_config =
-        !queue_type_str.is_empty() && queue_type_str != "null" && queue_type_str != "none";
 
     let event_publisher = if has_queue_config {
         if let Some(ref pool) = db_pool {
@@ -107,8 +108,7 @@ pub(crate) async fn run_eval(
     let execution_context = if emitter.is_some() || event_publisher.is_some() {
         let run_id = uuid::Uuid::now_v7();
 
-        // Set up live build first
-        setup_live_build_for_dev(conf, global_options, &src_paths, &test_paths).await?;
+        // The live build was already set up unconditionally above.
 
         // Create execution context manually with proper profile resolution
         let db_uri = conf.get_str("db.uri");

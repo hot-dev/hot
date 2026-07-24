@@ -723,6 +723,100 @@ impl Engine {
         .map(|_| ())
     }
 
+    /// Post-compile validations shared by Check and Execute modes: event
+    /// handler and scheduled-function signature checks, schedule policy,
+    /// and call-graph-scoped ctx/box requirement checks.
+    ///
+    /// These are cheap passes over the already-compiled program. Running them
+    /// in Execute mode as well gives `run`/`eval` the same pre-flight failures
+    /// `check` reports — before any user code executes — without paying for
+    /// the separate check pipeline's second full compile.
+    fn validate_compiled_program(
+        compiler: &mut crate::lang::Compiler,
+        combined_program: &crate::lang::ast::Program,
+        conf: Option<&crate::val::Val>,
+        context_storage: Option<&AHashMap<String, crate::val::Val>>,
+        color: bool,
+    ) -> Result<(), String> {
+        // Validate event handlers (event parameter requirement)
+        if let Err(e) = compiler.extract_event_handlers(combined_program) {
+            let formatted = e.format_error(color);
+            return Err(String::from("Event handler validation errors:\n") + &formatted);
+        }
+
+        // Validate scheduled functions (event parameter requirement)
+        if let Err(e) = compiler.extract_scheduled_functions(combined_program) {
+            let formatted = e.format_error(color);
+            return Err(String::from("Scheduled function validation errors:\n") + &formatted);
+        }
+        if let Some(conf) = conf {
+            let policy = crate::db::SchedulePolicy::from_conf(conf);
+            for cron_expression in compiler.get_scheduled_functions().keys() {
+                crate::db::validate_recurring_schedule_interval(
+                    cron_expression,
+                    policy.min_interval_secs,
+                )
+                .map_err(|e| format!("Schedule policy error: {}", e.message()))?;
+            }
+        }
+
+        // Build call graph once for both ctx and box requirement resolution
+        let call_graph = crate::lang::compiler::call_graph::CallGraph::build(combined_program);
+
+        // Check context requirements using call graph resolution
+        // This only includes ctx requirements reachable from user code.
+        let ctx_requirements = call_graph.resolve_user_ctx_requirements(combined_program);
+
+        if ctx_requirements.has_requirements() {
+            let available_keys: AHashSet<String> = context_storage
+                .map(|cs| cs.keys().cloned().collect())
+                .unwrap_or_default();
+
+            let ctx_result = crate::lang::compiler::ctx_checker::check_ctx_requirements(
+                &ctx_requirements,
+                &available_keys,
+            );
+
+            if !ctx_result.is_ok() {
+                return Err(ctx_result.format_errors());
+            }
+
+            tracing::debug!(
+                " Context requirements satisfied: {} required keys found",
+                ctx_result.found_keys.len()
+            );
+        }
+
+        // Check box requirements: validate size names and report
+        let box_requirements = call_graph.resolve_user_box_requirements(combined_program);
+
+        if box_requirements.has_requirements() {
+            // Validate all declared size names are recognized
+            for req in &box_requirements.requirements {
+                if let Some(ref size) = req.requirement.min_size
+                    && crate::lang::compiler::box_checker::size_memory_mb(size).is_none()
+                {
+                    return Err(format!(
+                        "Invalid box size '{}' in meta {{box: {{min-size: \"{}\"}}}} on {}\n\
+                         Valid sizes: nano, micro, small, medium, large, xlarge, 2xlarge, 4xlarge",
+                        size, size, req.fqn
+                    ));
+                }
+            }
+
+            if let Some(min_size) = box_requirements.effective_min_size() {
+                tracing::debug!(
+                    " Box requirements: min-size={}, network={}, from {} function(s)",
+                    min_size,
+                    box_requirements.requires_network(),
+                    box_requirements.requirements.len()
+                );
+            }
+        }
+
+        Ok(())
+    }
+
     /// Unified pipeline for all operations (run, eval, test, repl)
     #[allow(clippy::too_many_arguments)]
     pub fn run_unified_pipeline(
@@ -989,90 +1083,30 @@ impl Engine {
                 // Check mode: validate only, no VM execution
                 tracing::debug!(" Unified Pipeline: Check mode - validating...");
 
-                // Validate event handlers (event parameter requirement)
-                if let Err(e) = compiler.extract_event_handlers(&combined_program) {
-                    let formatted = e.format_error(color);
-                    return Err(String::from("Event handler validation errors:\n") + &formatted);
-                }
-
-                // Validate scheduled functions (event parameter requirement)
-                if let Err(e) = compiler.extract_scheduled_functions(&combined_program) {
-                    let formatted = e.format_error(color);
-                    return Err(
-                        String::from("Scheduled function validation errors:\n") + &formatted
-                    );
-                }
-                if let Some(conf) = conf {
-                    let policy = crate::db::SchedulePolicy::from_conf(conf);
-                    for cron_expression in compiler.get_scheduled_functions().keys() {
-                        crate::db::validate_recurring_schedule_interval(
-                            cron_expression,
-                            policy.min_interval_secs,
-                        )
-                        .map_err(|e| format!("Schedule policy error: {}", e.message()))?;
-                    }
-                }
-
-                // Build call graph once for both ctx and box requirement resolution
-                let call_graph =
-                    crate::lang::compiler::call_graph::CallGraph::build(&combined_program);
-
-                // Check context requirements using call graph resolution
-                // This only includes ctx requirements reachable from user code.
-                let ctx_requirements = call_graph.resolve_user_ctx_requirements(&combined_program);
-
-                if ctx_requirements.has_requirements() {
-                    let available_keys: AHashSet<String> = context_storage
-                        .as_ref()
-                        .map(|cs| cs.keys().cloned().collect())
-                        .unwrap_or_default();
-
-                    let ctx_result = crate::lang::compiler::ctx_checker::check_ctx_requirements(
-                        &ctx_requirements,
-                        &available_keys,
-                    );
-
-                    if !ctx_result.is_ok() {
-                        return Err(ctx_result.format_errors());
-                    }
-
-                    tracing::debug!(
-                        " Context requirements satisfied: {} required keys found",
-                        ctx_result.found_keys.len()
-                    );
-                }
-
-                // Check box requirements: validate size names and report
-                let box_requirements = call_graph.resolve_user_box_requirements(&combined_program);
-
-                if box_requirements.has_requirements() {
-                    // Validate all declared size names are recognized
-                    for req in &box_requirements.requirements {
-                        if let Some(ref size) = req.requirement.min_size
-                            && crate::lang::compiler::box_checker::size_memory_mb(size).is_none()
-                        {
-                            return Err(format!(
-                                "Invalid box size '{}' in meta {{box: {{min-size: \"{}\"}}}} on {}\n\
-                                 Valid sizes: nano, micro, small, medium, large, xlarge, 2xlarge, 4xlarge",
-                                size, size, req.fqn
-                            ));
-                        }
-                    }
-
-                    if let Some(min_size) = box_requirements.effective_min_size() {
-                        tracing::debug!(
-                            " Box requirements: min-size={}, network={}, from {} function(s)",
-                            min_size,
-                            box_requirements.requires_network(),
-                            box_requirements.requirements.len()
-                        );
-                    }
-                }
+                Self::validate_compiled_program(
+                    &mut compiler,
+                    &combined_program,
+                    conf,
+                    context_storage.as_ref(),
+                    color,
+                )?;
 
                 tracing::debug!(" Unified Pipeline: Check completed successfully");
                 Ok(crate::val::Val::Null)
             }
             PipelineMode::Execute => {
+                // Run the same post-compile validations as Check mode before
+                // any user code executes. This preserves pre-flight failures
+                // (e.g. missing required ctx keys) for run/eval without a
+                // separate check pipeline pass.
+                Self::validate_compiled_program(
+                    &mut compiler,
+                    &combined_program,
+                    conf,
+                    context_storage.as_ref(),
+                    color,
+                )?;
+
                 // Execute and return final result using Arc for efficient sharing
                 let program = compiler.get_program_arc();
                 let hot_ast = Arc::new(crate::lang::ast::HotAst::from_program(

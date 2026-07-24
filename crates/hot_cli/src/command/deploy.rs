@@ -130,6 +130,16 @@ pub(crate) async fn setup_live_build_for_dev_with_secret_scan_opts(
     test_paths: &[String],
     secret_scan_opts: hot::secret_scan::SecretScanOpts,
 ) -> Result<(), String> {
+    // Ad hoc runs outside a project (no hot.hot / .hot) pointed at the
+    // default project-local sqlite database can never produce a live build —
+    // create_db_pool refuses to create .hot/db and profile resolution has no
+    // rows. Skip the whole setup instead of paying for source scanning and
+    // doomed connection attempts.
+    let db_uri = conf.get_str("db.uri");
+    if !hot::lang::cache::paths::has_project_config() && db_uri.starts_with("sqlite:.hot/") {
+        tracing::debug!("Out-of-project run with default sqlite db, skipping live build setup");
+        return Ok(());
+    }
     // Get project name before any DB work so local preflight checks still run
     // when a live build would otherwise be skipped.
     let project_name = global_options
