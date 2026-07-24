@@ -20,6 +20,7 @@ test-utils = []
 ahash = { workspace = true }
 fastnum = { workspace = true }
 serde_json = { workspace = true, features = ["preserve_order", "arbitrary_precision"] }
+postcard = { workspace = true }
 serde = { workspace = true }
 uuid = { workspace = true, features = ["serde", "v4", "v7"] }
 ariadne.workspace = true

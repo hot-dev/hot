@@ -191,8 +191,8 @@ impl UnitCache {
         let compressed = std::fs::read(&cache_path).map_err(|e| e.to_string())?;
         let data = zstd::decode_all(compressed.as_slice()).map_err(|e| e.to_string())?;
 
-        // Deserialize the cache file wrapper
-        let cache_file: CacheFile = serde_json::from_slice(&data)
+        // Deserialize the cache file wrapper (postcard)
+        let cache_file: CacheFile = postcard::from_bytes(&data)
             .map_err(|e| format!("Failed to deserialize cache file: {}", e))?;
 
         // Deserialize namespaces using ast_cache
@@ -244,8 +244,9 @@ impl UnitCache {
             namespaces_data,
         };
 
-        // Serialize to JSON
-        let data = serde_json::to_vec(&cache_file)
+        // Serialize with postcard (compact binary, much faster to decode
+        // than the previous serde_json encoding)
+        let data = postcard::to_allocvec(&cache_file)
             .map_err(|e| format!("Failed to serialize cache: {}", e))?;
 
         // Compress with zstd level 1 for speed (level 1 is ~3x faster than level 3

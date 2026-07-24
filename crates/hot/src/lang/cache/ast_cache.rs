@@ -10,6 +10,24 @@
 //! - All Val variants use explicit type tags for unambiguous deserialization
 //! - Val::Dec uses string representation to preserve arbitrary precision
 //! - All nested Value types are recursively transformed
+//!
+//! # Postcard wire-format invariants
+//!
+//! The cache payload is encoded with postcard: positional, non-self-
+//! describing binary. That imposes hard rules on every type reachable from
+//! `CacheEntry` (the `Cacheable*` mirrors and anything they embed):
+//!
+//! - never reorder enum variants or insert one anywhere but the end —
+//!   variants decode by index, and a stale cache file read by a same-SHA
+//!   dirty build can silently decode into the WRONG variants
+//! - never add, remove, or reorder struct fields without bumping
+//!   `CACHE_VERSION` here and `CacheType::Ast.format_version()` in hasher.rs
+//! - `#[serde(untagged)]`, `#[serde(tag = ...)]`, `#[serde(flatten)]`, and
+//!   `skip_serializing_if` are forbidden — they require self-describing
+//!   formats
+//!
+//! The `postcard_schema_drift_canary` test pins the wire layout and fails
+//! on any accidental drift.
 
 use crate::val::Val;
 use indexmap::IndexMap;
@@ -21,7 +39,7 @@ use serde::{Deserialize, Serialize};
 
 /// Tagged representation of Val for lossless serialization
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "$v")]
+
 pub enum TaggedVal {
     Int {
         v: i64,
@@ -163,7 +181,7 @@ impl TryFrom<TaggedVal> for Val {
 
 /// Cacheable Ref (VarRef or NsRef)
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "$ref_type")]
+
 pub enum CacheableRef {
     Var { var_ref: CacheableVarRef },
     Ns { ns_ref: CacheableNsRef },
@@ -197,13 +215,13 @@ pub struct CacheableVar {
     pub deep_set: Option<CacheableDeepPath>,
     pub deep_path: Option<CacheableDeepPath>,
     pub meta: Option<CacheableMeta>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub type_annotation: Option<String>,
     pub src: Option<CacheableSource>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "$dp_type")]
+
 pub enum CacheableDeepPath {
     Index {
         i: usize,
@@ -231,7 +249,7 @@ pub struct CacheableMeta {
 pub struct CacheableFnCall {
     pub function: Box<CacheableValue>,
     pub args: Vec<CacheableFnCallArg>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub result_path: Option<CacheableDeepPath>,
     pub src: Option<CacheableSource>,
 }
@@ -251,7 +269,7 @@ pub struct CacheableFlow {
     pub expressions: Vec<CacheableValue>,
     pub result_modifier: Option<String>, // ResultModifier as string
     pub src: Option<CacheableSource>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(default)]
     pub aliases: Vec<(usize, String, String)>,
 }
 
@@ -292,7 +310,7 @@ pub struct CacheableTemplateLiteral {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "$tp_type")]
+
 pub enum CacheableTemplatePart {
     Text { text: String },
     Expression { expr: Box<CacheableValue> },
@@ -350,7 +368,7 @@ pub struct CacheableTypeImplementation {
 
 /// Wrapper for AST Value that uses tagged Val serialization
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "$value_type")]
+
 pub enum CacheableValue {
     Val {
         val: TaggedVal,
@@ -441,9 +459,9 @@ pub enum CacheableResultModifier {
 pub struct CacheableMatchArm {
     pub type_name: Option<String>,
     pub variant: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub value_literal: Option<Box<CacheableValue>>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(default)]
     pub alternatives: Vec<CacheableMatchArmPattern>,
     pub binding: Option<String>,
     pub body: Box<CacheableValue>,
@@ -455,7 +473,7 @@ pub struct CacheableMatchArm {
 pub struct CacheableMatchArmPattern {
     pub type_name: Option<String>,
     pub variant: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default)]
     pub value_literal: Option<Box<CacheableValue>>,
 }
 
@@ -1381,12 +1399,16 @@ pub struct CacheableNamespace {
     scope: CacheableScope,
     meta: Option<CacheableMeta>,
     source_file: Option<String>,
-    aliases: serde_json::Value, // NamespaceAliases as JSON (simple enough)
+    /// Aliases as entry pairs — IndexMap with non-string keys can't be
+    /// serialized as a native map, and self-describing values (the previous
+    /// serde_json::Value representation) don't survive non-self-describing
+    /// codecs like postcard.
+    aliases: Vec<(crate::lang::ast::NsPath, crate::lang::ast::NsPath)>,
 }
 
 impl From<&crate::lang::ast::Namespace> for CacheableNamespace {
     fn from(ns: &crate::lang::ast::Namespace) -> Self {
-        // Convert aliases to Vec<(NsPath, NsPath)> for JSON-safe serialization
+        // Convert aliases to Vec<(NsPath, NsPath)> pairs
         // This matches the custom serializer in ast.rs namespace_aliases_serde
         let aliases_vec: Vec<(crate::lang::ast::NsPath, crate::lang::ast::NsPath)> = ns
             .aliases
@@ -1402,7 +1424,7 @@ impl From<&crate::lang::ast::Namespace> for CacheableNamespace {
                 .source_file
                 .as_ref()
                 .map(|p| p.to_string_lossy().to_string()),
-            aliases: serde_json::to_value(&aliases_vec).unwrap_or(serde_json::json!([])),
+            aliases: aliases_vec,
         }
     }
 }
@@ -1418,16 +1440,8 @@ impl TryFrom<CacheableNamespace> for crate::lang::ast::Namespace {
         let meta = cacheable.meta.map(Meta::try_from).transpose()?;
         let source_file = cacheable.source_file.map(std::path::PathBuf::from);
 
-        // Aliases are serialized as Vec<(NsPath, NsPath)> for JSON compatibility
-        let aliases: NamespaceAliases = if cacheable.aliases.is_null()
-            || cacheable.aliases.as_array().is_some_and(|a| a.is_empty())
-        {
-            NamespaceAliases::new()
-        } else {
-            let vec: Vec<(NsPath, NsPath)> = serde_json::from_value(cacheable.aliases)
-                .map_err(|e| format!("Failed to deserialize NamespaceAliases: {}", e))?;
-            vec.into_iter().collect()
-        };
+        // Aliases are serialized as Vec<(NsPath, NsPath)> entry pairs
+        let aliases: NamespaceAliases = cacheable.aliases.into_iter().collect();
 
         Ok(Namespace {
             path,
@@ -1449,9 +1463,9 @@ pub struct CacheEntry {
 }
 
 /// Current cache format version
-pub const CACHE_VERSION: u32 = 5; // Bumped for MatchArm union-pattern alternatives
+pub const CACHE_VERSION: u32 = 6; // Bumped for postcard encoding (was serde_json)
 
-/// Serialize namespaces to cacheable JSON
+/// Serialize namespaces to cacheable binary (postcard)
 pub fn serialize_namespaces(
     namespaces: &IndexMap<crate::lang::ast::NsPath, crate::lang::ast::Namespace>,
 ) -> Result<Vec<u8>, String> {
@@ -1465,14 +1479,14 @@ pub fn serialize_namespaces(
         namespaces: cacheable_namespaces,
     };
 
-    serde_json::to_vec(&entry).map_err(|e| format!("Failed to serialize cache entry: {}", e))
+    postcard::to_allocvec(&entry).map_err(|e| format!("Failed to serialize cache entry: {}", e))
 }
 
-/// Deserialize namespaces from cached JSON
+/// Deserialize namespaces from cached binary (postcard)
 pub fn deserialize_namespaces(
     data: &[u8],
 ) -> Result<IndexMap<crate::lang::ast::NsPath, crate::lang::ast::Namespace>, String> {
-    let entry: CacheEntry = serde_json::from_slice(data)
+    let entry: CacheEntry = postcard::from_bytes(data)
         .map_err(|e| format!("Failed to deserialize cache entry: {}", e))?;
 
     if entry.version != CACHE_VERSION {
@@ -1682,5 +1696,43 @@ mod tests {
         } else {
             panic!("Expected Val::Map");
         }
+    }
+
+    /// Schema-drift canary for the postcard cache encoding.
+    ///
+    /// Postcard is positional and non-self-describing: reordering enum
+    /// variants or adding/removing/reordering struct fields in the AST or
+    /// the Cacheable* mirror types changes the wire layout, and a binary
+    /// built from a dirty tree (same GIT_SHA, same cache key) can then
+    /// decode stale cache bytes into the WRONG data without any error.
+    ///
+    /// This test serializes a fixed program and compares the byte hash to a
+    /// recorded constant. If it fails, the wire layout changed: bump
+    /// `CACHE_VERSION` (and `CacheType::Ast.format_version()` in hasher.rs),
+    /// then update the constant below.
+    #[test]
+    fn postcard_schema_drift_canary() {
+        let source = r#"::canary ns
+::h ::hot::http
+
+greeting "hello"
+count: Int 42
+shout fn (s: Str): Str {
+    `${s}!`
+}
+"#;
+        let program = crate::lang::parser::parse_hot_file(source, "canary.hot")
+            .expect("canary source must parse");
+        let serialized = serialize_namespaces(&program.namespaces).unwrap();
+        let hash = crate::hasher::HotHasher::hash_content(&serialized);
+
+        let expected = "6189d2e977d64b1b4ea320f91f6dfe65e0cc81273210ccdf9c0b8306685ea394";
+        assert_eq!(
+            hash, expected,
+            "postcard cache wire layout changed (got hash {hash}). If this is \
+             intentional, bump CACHE_VERSION in ast_cache.rs and \
+             CacheType::Ast format_version in hasher.rs, then update this \
+             test's expected hash."
+        );
     }
 }
