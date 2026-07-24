@@ -1,48 +1,39 @@
-//! Precompiled hot-std release artifact.
+//! Precompiled hot-std image, populated on first run.
 //!
 //! hot-std is immutable per install, yet every CLI invocation used to parse
 //! and compile all ~50 of its files before touching user code. This module
-//! defines `hot-std.hsc` — a compiled hot-std image built once (at release
-//! time, or on demand via the hidden `hot build-std-artifact` command) and
-//! shipped next to the hot-std sources.
+//! maintains a compiled hot-std image in the **system-level** cache: the
+//! first run that needs it compiles hot-std once and persists the image;
+//! every later run (from any directory, any project) loads it instead of
+//! recompiling.
 //!
-//! ## File format
+//! ## Location
+//!
+//! Always system-level (`$HOT_HOME/cache/std/` when HOT_HOME is set,
+//! otherwise the platform cache dir, e.g. `~/Library/Caches/hot/cache/std/`)
+//! — never the cwd-dependent project cache. hot-std is per-install: one
+//! image serves every project, and a per-project copy would recompile and
+//! duplicate ~1.5MB per project for nothing.
+//!
+//! ## File format (`std-<key16>.hsc`)
 //!
 //! ```text
 //! [0..8)   magic  b"HOTSTDA1"
 //! [8..]    postcard header { artifact_key }
 //!          followed by the zstd-compressed bytecode-cache payload
-//!          (same encoding as bytecode_cache::CacheFilePayload)
+//!          (bytecode_cache::CacheFilePayload encoding)
 //! ```
 //!
 //! `artifact_key` is a [`CacheKeyBuilder`] hash covering the Hot VERSION,
 //! GIT_SHA, bytecode format version, and the blake3 hashes of every hot-std
-//! source file. The loader recomputes the key from the installed sources and
-//! compares — any mismatch (different runtime build, locally modified
-//! hot-std, dev override) silently falls back to the classic source-compile
-//! path. There is no partial reuse and no migration: the artifact either
-//! matches this exact binary and source tree, or it is ignored.
+//! source file (**root-relative** paths — the image must survive any install
+//! prefix). The key is both the filename discriminator and revalidated from
+//! the header after load. Any mismatch — runtime upgrade, modified hot-std,
+//! dev override — misses and triggers a fresh first-run compile; superseded
+//! images are swept by the stale-cache pruner.
 //!
-//! The same wire-format rules as the caches apply (see ast_cache.rs module
-//! docs); the artifact reuses the bytecode cache payload encoding, so its
-//! layout is covered by `CacheType::Bytecode.format_version()` via the key.
-//!
-//! ## Status: infrastructure only — not yet wired into execution
-//!
-//! A pipeline fast path that extended this artifact with ad hoc eval code
-//! was prototyped and measured SLOWER than the classic path (134ms vs 72ms
-//! for `hot eval 'add(1,1)'`): eagerly decoding the full payload costs
-//! ~60ms, dominated by the AST namespaces / HotAst / var_index sections the
-//! eval path barely uses. Two things are needed before integration:
-//!
-//! 1. **Per-section lazy decoding** — split the payload so the eval path
-//!    decodes only program + registries + derived ctx data (small), and the
-//!    AST sections decode on demand (error enrichment, tooling).
-//! 2. **Resolver-aware eval extension** — `eval_code_with_cached_bytecode`
-//!    compiles the eval snippet against registered function IDs only; it
-//!    never runs `resolve_all_variable_references`, so unqualified calls
-//!    (e.g. `add(1,1)`) fail to resolve. Worker eval snippets use qualified
-//!    names, which is why this gap was invisible until now.
+//! The hidden `hot build-std-artifact` command prewarms the image (Docker
+//! layers, CI runners) using the same code path.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -54,23 +45,37 @@ use super::bytecode_cache::{
     CacheMetadata, CachedBytecode, decode_cache_payload, encode_cache_payload,
 };
 
-/// Artifact file name, resolved relative to the hot-std package root.
-pub const ARTIFACT_FILE_NAME: &str = "hot-std.hsc";
-
 const MAGIC: &[u8; 8] = b"HOTSTDA1";
 
 #[derive(serde::Serialize, serde::Deserialize)]
 struct ArtifactHeader {
     /// CacheKeyBuilder hash over VERSION + GIT_SHA + bytecode format version
-    /// + hot-std source file hashes.
+    /// + root-relative hot-std source file hashes.
     artifact_key: String,
+}
+
+/// System-level directory holding compiled hot-std images.
+pub fn std_cache_dir() -> PathBuf {
+    if let Ok(hot_home) = std::env::var("HOT_HOME") {
+        return PathBuf::from(hot_home).join("cache").join("std");
+    }
+    super::paths::get_system_cache_dir()
+        .join("cache")
+        .join("std")
+}
+
+fn image_path(cache_dir: &Path, artifact_key: &str) -> PathBuf {
+    cache_dir.join(format!(
+        "std-{}.hsc",
+        &artifact_key[..16.min(artifact_key.len())]
+    ))
 }
 
 /// Compute the expected artifact key for the hot-std sources at `std_root`.
 ///
-/// File paths are relativized to `std_root` before hashing: the artifact is
-/// built on a release machine and validated at whatever prefix the user
-/// installed to, so absolute paths must never influence the key.
+/// File paths are relativized to `std_root` before hashing: the image is
+/// validated at whatever prefix hot-std is installed to, so absolute paths
+/// must never influence the key.
 fn compute_artifact_key(std_root: &Path) -> Result<String, String> {
     let root = std_root
         .canonicalize()
@@ -97,10 +102,58 @@ fn compute_artifact_key(std_root: &Path) -> Result<String, String> {
         .finalize())
 }
 
-/// Build the artifact from the hot-std sources at `std_root` and write it to
-/// `out_path` (defaults to `<std_root>/hot-std.hsc`). Returns the written
-/// path and the artifact size in bytes.
-pub fn build_artifact(std_root: &Path, out_path: Option<&Path>) -> Result<(PathBuf, u64), String> {
+/// Per-process image slot: resolved at most once per process.
+static LOADED: OnceLock<Option<Arc<CachedBytecode>>> = OnceLock::new();
+
+/// Get the compiled hot-std image for the hot-std package at `std_root`:
+/// load it from the system cache when present and valid, otherwise compile
+/// hot-std now, persist the image (best-effort), and return the fresh build.
+///
+/// Returns `None` only if hot-std cannot be compiled at all — callers fall
+/// back to the classic combined-compile path, which will report the error
+/// with full diagnostics.
+pub fn get_or_build(std_root: &Path) -> Option<Arc<CachedBytecode>> {
+    LOADED
+        .get_or_init(|| get_or_build_in(std_root, &std_cache_dir()))
+        .clone()
+}
+
+fn get_or_build_in(std_root: &Path, cache_dir: &Path) -> Option<Arc<CachedBytecode>> {
+    let artifact_key = match compute_artifact_key(std_root) {
+        Ok(key) => key,
+        Err(reason) => {
+            tracing::debug!("hot-std image unavailable: {}", reason);
+            return None;
+        }
+    };
+
+    let path = image_path(cache_dir, &artifact_key);
+    if path.exists() {
+        match try_load(&path, &artifact_key) {
+            Ok(cached) => return Some(cached),
+            Err(reason) => {
+                tracing::debug!("hot-std image at {} rejected: {}", path.display(), reason);
+            }
+        }
+    }
+
+    // First run (or stale/corrupt image): compile hot-std now and persist.
+    match build_image(std_root, &artifact_key, &path) {
+        Ok(cached) => Some(cached),
+        Err(reason) => {
+            tracing::debug!("hot-std image build failed: {}", reason);
+            None
+        }
+    }
+}
+
+/// Compile hot-std and persist the image at `path`. Returns the in-memory
+/// build even if persisting fails (the next run just recompiles).
+fn build_image(
+    std_root: &Path,
+    artifact_key: &str,
+    path: &Path,
+) -> Result<Arc<CachedBytecode>, String> {
     let src_dir = std_root.join("src");
     let compile_root = if src_dir.is_dir() {
         src_dir
@@ -120,7 +173,6 @@ pub fn build_artifact(std_root: &Path, out_path: Option<&Path>) -> Result<(PathB
         None,
     )?;
 
-    let artifact_key = compute_artifact_key(std_root)?;
     let metadata = CacheMetadata {
         project_name: "hot-std".to_string(),
         hot_version: crate::build_info::VERSION.to_string(),
@@ -128,10 +180,10 @@ pub fn build_artifact(std_root: &Path, out_path: Option<&Path>) -> Result<(PathB
         cache_format_version: CacheType::Bytecode.format_version(),
         created_at: chrono::Utc::now().timestamp(),
         file_hashes: Vec::new(),
-        cache_key: artifact_key.clone(),
+        cache_key: artifact_key.to_string(),
     };
 
-    let (compressed_payload, _) = encode_cache_payload(
+    let (compressed_payload, cached) = encode_cache_payload(
         metadata,
         &artifacts.program,
         &artifacts.function_mapping,
@@ -143,52 +195,42 @@ pub fn build_artifact(std_root: &Path, out_path: Option<&Path>) -> Result<(PathB
         &Default::default(),
     )?;
 
-    let header = postcard::to_allocvec(&ArtifactHeader { artifact_key })
-        .map_err(|e| format!("Failed to encode artifact header: {}", e))?;
+    let header = postcard::to_allocvec(&ArtifactHeader {
+        artifact_key: artifact_key.to_string(),
+    })
+    .map_err(|e| format!("Failed to encode image header: {}", e))?;
 
     let mut file_bytes = Vec::with_capacity(MAGIC.len() + header.len() + compressed_payload.len());
     file_bytes.extend_from_slice(MAGIC);
     file_bytes.extend_from_slice(&header);
     file_bytes.extend_from_slice(&compressed_payload);
 
-    let out = out_path
-        .map(Path::to_path_buf)
-        .unwrap_or_else(|| std_root.join(ARTIFACT_FILE_NAME));
-    let tmp = out.with_extension("hsc.tmp");
-    std::fs::write(&tmp, &file_bytes)
-        .map_err(|e| format!("Failed to write artifact {}: {}", tmp.display(), e))?;
-    std::fs::rename(&tmp, &out)
-        .map_err(|e| format!("Failed to finalize artifact {}: {}", out.display(), e))?;
-
-    Ok((out, file_bytes.len() as u64))
-}
-
-/// Per-process artifact slot: loaded and validated at most once.
-static LOADED: OnceLock<Option<Arc<CachedBytecode>>> = OnceLock::new();
-
-/// Load the hot-std artifact for the hot-std package at `std_root`, if one
-/// exists and matches this binary and the installed sources exactly.
-/// Returns `None` (with a debug log) on any mismatch or error — callers fall
-/// back to the classic source-compile path.
-pub fn load_for(std_root: &Path) -> Option<Arc<CachedBytecode>> {
-    LOADED
-        .get_or_init(|| match try_load(std_root) {
-            Ok(cached) => Some(cached),
-            Err(reason) => {
-                tracing::debug!("hot-std artifact unavailable: {}", reason);
-                None
-            }
-        })
-        .clone()
-}
-
-fn try_load(std_root: &Path) -> Result<Arc<CachedBytecode>, String> {
-    let path = std_root.join(ARTIFACT_FILE_NAME);
-    if !path.exists() {
-        return Err(format!("{} not present", path.display()));
+    // Persisting is best-effort: a read-only cache dir or a race with
+    // another first-run process must not fail the current run.
+    if let Err(e) = persist(path, &file_bytes) {
+        tracing::debug!("hot-std image not persisted: {}", e);
     }
 
-    let bytes = std::fs::read(&path).map_err(|e| format!("read failed: {}", e))?;
+    Ok(cached)
+}
+
+fn persist(path: &Path, file_bytes: &[u8]) -> Result<(), String> {
+    let dir = path
+        .parent()
+        .ok_or_else(|| "image path has no parent".to_string())?;
+    std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+    let tmp = path.with_extension(format!("hsc.tmp.{}", std::process::id()));
+    std::fs::write(&tmp, file_bytes).map_err(|e| e.to_string())?;
+    std::fs::rename(&tmp, path).map_err(|e| {
+        let _ = std::fs::remove_file(&tmp);
+        e.to_string()
+    })?;
+    super::prune_stale_cache_files(dir, path);
+    Ok(())
+}
+
+fn try_load(path: &Path, expected_key: &str) -> Result<Arc<CachedBytecode>, String> {
+    let bytes = std::fs::read(path).map_err(|e| format!("read failed: {}", e))?;
     let rest = bytes
         .strip_prefix(MAGIC.as_slice())
         .ok_or_else(|| "bad magic".to_string())?;
@@ -196,17 +238,9 @@ fn try_load(std_root: &Path) -> Result<Arc<CachedBytecode>, String> {
     let (header, payload): (ArtifactHeader, &[u8]) =
         postcard::take_from_bytes(rest).map_err(|e| format!("bad header: {}", e))?;
 
-    // The key covers VERSION, GIT_SHA, bytecode format version, and the
-    // hashes of the installed hot-std sources. Recompute and compare: any
-    // difference (upgraded runtime, dirty hot-std, dev override) rejects
-    // the artifact.
-    let expected = compute_artifact_key(std_root)?;
-    if header.artifact_key != expected {
-        return Err(format!(
-            "key mismatch (artifact {}…, sources {}…) — stale or foreign artifact",
-            &header.artifact_key[..12.min(header.artifact_key.len())],
-            &expected[..12.min(expected.len())],
-        ));
+    // The filename only carries a key prefix; the header holds the full key.
+    if header.artifact_key != expected_key {
+        return Err("key mismatch — stale or foreign image".to_string());
     }
 
     let decompressed =
@@ -214,7 +248,7 @@ fn try_load(std_root: &Path) -> Result<Arc<CachedBytecode>, String> {
     let cached = decode_cache_payload(&decompressed)?;
 
     tracing::debug!(
-        "hot-std artifact loaded from {} ({} functions, {} namespaces)",
+        "hot-std image loaded from {} ({} functions, {} namespaces)",
         path.display(),
         cached.function_mapping.len(),
         cached.ast_program.namespaces.len()
@@ -222,47 +256,64 @@ fn try_load(std_root: &Path) -> Result<Arc<CachedBytecode>, String> {
     Ok(cached)
 }
 
+/// Prewarm entry point for the hidden `hot build-std-artifact` command.
+/// Builds (or refreshes) the image for the hot-std at `std_root`; `out`
+/// overrides the destination file.
+pub fn prewarm(std_root: &Path, out: Option<&Path>) -> Result<(PathBuf, u64), String> {
+    let artifact_key = compute_artifact_key(std_root)?;
+    let path = match out {
+        Some(p) => p.to_path_buf(),
+        None => image_path(&std_cache_dir(), &artifact_key),
+    };
+    build_image(std_root, &artifact_key, &path)?;
+    let size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+    Ok((path, size))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// Build + load round-trip against the installed hot-std, exercising the
-    /// key validation both ways. Ignored by default: needs an installed
-    /// hot-std and does a full compile (~100ms release / ~1s debug).
+    /// First-run build + reload round-trip against a relocatable hot-std
+    /// copy, exercising key validation, relocation, and staleness. Ignored
+    /// by default: needs an installed hot-std and does a full compile.
     #[test]
     #[ignore]
-    fn artifact_roundtrip_and_validation() {
+    fn image_roundtrip_relocation_and_staleness() {
         let installed = Path::new("/usr/local/share/hot/pkg/hot-std");
         if !installed.exists() {
             eprintln!("hot-std not installed, skipping");
             return;
         }
 
-        // Copy hot-std into a temp root so the test never writes to the
-        // (root-owned) install prefix.
         let dir = tempfile::tempdir().expect("tempdir");
         let root = dir.path().join("hot-std");
         copy_dir(installed, &root);
+        let cache_dir = dir.path().join("cache-std");
 
-        let (path, size) = build_artifact(&root, None).expect("build must succeed");
-        assert!(path.exists());
-        assert!(size > 0);
+        // First run: no image — compiles and persists.
+        let built = get_or_build_in(&root, &cache_dir).expect("first run must build");
+        assert!(!built.function_mapping.is_empty());
+        let key = compute_artifact_key(&root).unwrap();
+        let path = image_path(&cache_dir, &key);
+        assert!(path.exists(), "image persisted at {}", path.display());
 
-        let loaded = try_load(&root).expect("load must succeed");
-        assert!(!loaded.function_mapping.is_empty());
+        // Second run: loads the persisted image.
+        let loaded = try_load(&path, &key).expect("reload must succeed");
         assert!(!loaded.ast_program.namespaces.is_empty());
 
-        // The artifact is built on a release machine and installed at an
-        // arbitrary prefix: moving the whole tree must not invalidate it
-        // (the key hashes root-relative paths, never absolute ones).
+        // Relocation: moving the hot-std tree must not change the key.
         let moved = dir.path().join("relocated").join("hot-std");
         std::fs::create_dir_all(moved.parent().unwrap()).unwrap();
         std::fs::rename(&root, &moved).unwrap();
-        let reloaded = try_load(&moved).expect("load must survive relocation");
-        assert!(!reloaded.function_mapping.is_empty());
+        assert_eq!(
+            compute_artifact_key(&moved).unwrap(),
+            key,
+            "key must be prefix-independent"
+        );
         std::fs::rename(&moved, &root).unwrap();
 
-        // Modifying a source file must invalidate the artifact.
+        // Staleness: modifying a source changes the key — old image misses.
         let victim = std::fs::read_dir(root.join("src").join("hot"))
             .unwrap()
             .flatten()
@@ -272,9 +323,12 @@ mod tests {
         let mut content = std::fs::read_to_string(&victim).unwrap();
         content.push_str("\n// modified\n");
         std::fs::write(&victim, content).unwrap();
-
-        let err = try_load(&root).expect_err("stale artifact must be rejected");
-        assert!(err.contains("key mismatch"), "{err}");
+        let new_key = compute_artifact_key(&root).unwrap();
+        assert_ne!(new_key, key, "modified sources must change the key");
+        assert!(
+            !image_path(&cache_dir, &new_key).exists(),
+            "no image exists for the new key yet"
+        );
     }
 
     fn copy_dir(from: &Path, to: &Path) {

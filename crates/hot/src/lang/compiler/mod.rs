@@ -1040,6 +1040,15 @@ impl Compiler {
         &self.core_variables
     }
 
+    /// Seed the core-variable registry before compilation. Used when
+    /// compiling a snippet against a precompiled base (cached bytecode /
+    /// hot-std artifact): `compile_program` only extracts core variables
+    /// from the program it is given, and the snippet does not contain the
+    /// base's namespaces.
+    pub fn set_core_variables(&mut self, registry: CoreVariableRegistry) {
+        self.core_variables = registry;
+    }
+
     /// Get the core variables registry as Arc (for efficient sharing)
     pub fn get_core_variables_arc(&self) -> std::sync::Arc<CoreVariableRegistry> {
         std::sync::Arc::new(self.core_variables.clone())

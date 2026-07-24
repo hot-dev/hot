@@ -174,8 +174,10 @@ struct CacheFilePayload {
     program_data: Vec<u8>,
     /// AST program namespaces via `ast_cache::serialize_namespaces`
     ast_program_namespaces: Vec<u8>,
-    /// HotAst namespaces via `ast_cache::serialize_namespaces`
-    hot_ast_namespaces: Vec<u8>,
+    /// HotAst namespaces via `ast_cache::serialize_namespaces`.
+    /// `None` means byte-identical to `ast_program_namespaces` (the common
+    /// case — storing it twice doubled decode time and disk for nothing).
+    hot_ast_namespaces: Option<Vec<u8>>,
     /// AstVarIndex via `ast_cache::serialize_var_index`
     var_index: Vec<u8>,
     function_mapping: Vec<(String, u32)>,
@@ -196,10 +198,14 @@ struct CacheFilePayload {
 /// release artifact. Performs no metadata validation — callers decide
 /// what "valid" means for their context.
 pub(crate) fn decode_cache_payload(decompressed: &[u8]) -> Result<Arc<CachedBytecode>, String> {
-    let payload: CacheFilePayload = postcard::from_bytes(decompressed)
+    // Borrowed view: the byte sections alias `decompressed` directly instead
+    // of being copied out (postcard encodes Vec<u8> and &[u8] identically on
+    // the wire), and the sections then decode in parallel — they are
+    // independent and each costs ~10ms for a hot-std-sized payload.
+    let payload: CacheFilePayloadRef = postcard::from_bytes(decompressed)
         .map_err(|e| format!("Failed to decode cache payload: {}", e))?;
 
-    let CacheFilePayload {
+    let CacheFilePayloadRef {
         metadata,
         program_data,
         ast_program_namespaces,
@@ -214,23 +220,43 @@ pub(crate) fn decode_cache_payload(decompressed: &[u8]) -> Result<Arc<CachedByte
         secret_keys,
     } = payload;
 
-    let program = BytecodeProgram::deserialize(&program_data)?;
+    let (program_res, (ast_res, (hot_res, var_res))) = rayon::join(
+        || BytecodeProgram::deserialize(program_data),
+        || {
+            rayon::join(
+                || crate::lang::cache::ast_cache::deserialize_namespaces(ast_program_namespaces),
+                || {
+                    rayon::join(
+                        || {
+                            hot_ast_namespaces
+                                .map(crate::lang::cache::ast_cache::deserialize_namespaces)
+                                .transpose()
+                        },
+                        || crate::lang::cache::ast_cache::deserialize_var_index(var_index),
+                    )
+                },
+            )
+        },
+    );
 
+    let program = program_res?;
     let ast_program_namespaces =
-        crate::lang::cache::ast_cache::deserialize_namespaces(&ast_program_namespaces)
-            .map_err(|e| format!("Failed to deserialize AST program namespaces: {}", e))?;
+        ast_res.map_err(|e| format!("Failed to deserialize AST program namespaces: {}", e))?;
+    let hot_ast_namespaces =
+        hot_res.map_err(|e| format!("Failed to deserialize HotAst namespaces: {}", e))?;
+    let var_index = var_res?;
 
     let ast_program = crate::lang::ast::Program {
         namespaces: ast_program_namespaces,
         current_namespace: crate::lang::ast::NsPath::new(),
     };
 
-    let hot_ast_namespaces =
-        crate::lang::cache::ast_cache::deserialize_namespaces(&hot_ast_namespaces)
-            .map_err(|e| format!("Failed to deserialize HotAst namespaces: {}", e))?;
-
-    // Reconstruct HotAst
-    let var_index = crate::lang::cache::ast_cache::deserialize_var_index(&var_index)?;
+    // Reconstruct HotAst. A missing hot_ast section means it was
+    // byte-identical to the AST program namespaces at save time.
+    let hot_ast_namespaces = match hot_ast_namespaces {
+        Some(namespaces) => namespaces,
+        None => ast_program.namespaces.clone(),
+    };
     let hot_ast = crate::lang::ast::HotAst {
         program: ast_program.clone(),
         namespaces: crate::lang::ast::Namespaces {
@@ -309,15 +335,22 @@ pub(crate) fn encode_cache_payload(
         .collect();
     secret_keys.sort();
 
+    let mut hot_ast_bytes: Option<Vec<u8>>;
     let payload = CacheFilePayload {
         metadata,
         program_data: program.serialize()?,
-        ast_program_namespaces: crate::lang::cache::ast_cache::serialize_namespaces(
-            &ast_program.namespaces,
-        )?,
-        hot_ast_namespaces: crate::lang::cache::ast_cache::serialize_namespaces(
-            &hot_ast.namespaces.namespaces,
-        )?,
+        ast_program_namespaces: {
+            let bytes =
+                crate::lang::cache::ast_cache::serialize_namespaces(&ast_program.namespaces)?;
+            hot_ast_bytes = Some(crate::lang::cache::ast_cache::serialize_namespaces(
+                &hot_ast.namespaces.namespaces,
+            )?);
+            if hot_ast_bytes.as_deref() == Some(bytes.as_slice()) {
+                hot_ast_bytes = None;
+            }
+            bytes
+        },
+        hot_ast_namespaces: hot_ast_bytes,
         var_index: crate::lang::cache::ast_cache::serialize_var_index(&hot_ast.var_index)?,
         function_mapping: function_mapping
             .iter()
@@ -346,6 +379,32 @@ pub(crate) fn encode_cache_payload(
         .map_err(|e| format!("Failed to compress cache: {}", e))?;
 
     Ok((compressed, cached_bytecode))
+}
+
+/// Borrowed view of [`CacheFilePayload`] for zero-copy decoding.
+///
+/// MUST stay field-for-field in sync with [`CacheFilePayload`]: postcard
+/// encodes `Vec<u8>` and `&[u8]` identically, so this deserializes the same
+/// wire format without copying the (multi-megabyte) byte sections.
+#[derive(Deserialize)]
+struct CacheFilePayloadRef<'a> {
+    metadata: CacheMetadata,
+    #[serde(borrow)]
+    program_data: &'a [u8],
+    #[serde(borrow)]
+    ast_program_namespaces: &'a [u8],
+    #[serde(borrow)]
+    hot_ast_namespaces: Option<&'a [u8]>,
+    #[serde(borrow)]
+    var_index: &'a [u8],
+    function_mapping: Vec<(String, u32)>,
+    core_functions: Vec<(String, u32)>,
+    type_implementations: Vec<((String, String), String)>,
+    tool_specs: crate::lang::hot::internal_mcp::ToolSchemaRegistry,
+    skill_specs: crate::lang::hot::internal_skill::SkillSpecRegistry,
+    #[serde(with = "crate::lang::cache::ast_cache::tagged_val_map_serde")]
+    ctx_defaults: AHashMap<String, crate::val::Val>,
+    secret_keys: Vec<String>,
 }
 
 /// In-memory cache entry with access tracking for LRU

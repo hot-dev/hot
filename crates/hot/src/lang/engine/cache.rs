@@ -334,7 +334,7 @@ impl Engine {
     #[allow(clippy::too_many_arguments)]
     pub fn eval_code_with_cached_bytecode(
         code: &str,
-        cached: crate::lang::cache::bytecode_cache::CachedBytecode,
+        cached: Arc<crate::lang::cache::bytecode_cache::CachedBytecode>,
         conf: Option<&crate::val::Val>,
         emitter: Option<Arc<dyn crate::lang::emitter::EngineEventEmitter>>,
         execution_context: Option<crate::lang::event::ExecutionContext>,
@@ -345,10 +345,11 @@ impl Engine {
     ) -> Result<crate::val::Val, String> {
         tracing::debug!("Using cached bytecode with AST (skipping parsing and compilation)");
 
-        // Clone registries and program for extension
-        let function_mapping = cached.function_mapping.clone();
-        let core_functions = cached.core_functions.clone();
-        let type_implementations = cached.type_implementations.clone();
+        // Clone only the program (it gets extended with eval instructions);
+        // registries are borrowed for registration and Arc-shared into the VM.
+        let function_mapping = &cached.function_mapping;
+        let core_functions = &cached.core_functions;
+        let type_implementations = &cached.type_implementations;
         let mut cached_program = cached.program.clone();
         let cached_instruction_count = cached_program.entry_point.len();
 
@@ -385,14 +386,20 @@ impl Engine {
         // This ensures the eval code can reference project functions and core functions
         let mut eval_compiler = crate::lang::compiler::Compiler::new();
 
+        // Seed core variables from the cached build so unqualified calls to
+        // core functions (`add(1,1)`) resolve — the eval snippet does not
+        // contain hot-std's namespaces, so compile_program's own extraction
+        // pass would find nothing.
+        eval_compiler.set_core_variables((*cached.runtime_core_variables).clone());
+
         // Pre-populate the compiler with cached registries so eval code can reference them
-        for (name, id) in &function_mapping {
+        for (name, id) in function_mapping {
             eval_compiler.register_existing_function(name.clone(), *id);
         }
-        for (name, id) in &core_functions {
+        for (name, id) in core_functions {
             eval_compiler.register_existing_core_function(name.clone(), *id);
         }
-        for ((type_name, method_name), impl_name) in &type_implementations {
+        for ((type_name, method_name), impl_name) in type_implementations {
             eval_compiler.register_existing_type_implementation(
                 type_name.clone(),
                 method_name.clone(),
@@ -426,15 +433,11 @@ impl Engine {
         );
 
         // Use the pre-built HotAst from cache (no expensive indexing needed!)
-        // Just wrap in Arc for VM
-        let hot_ast = Arc::new(cached.hot_ast.clone());
+        let hot_ast = cached.runtime_hot_ast.clone();
 
-        // Extract core variables from the cached AST (critical for resolving types like Null, Vec, etc.)
-        let core_variables = Arc::new(
-            crate::lang::compiler::core_registry::extract_core_variables_from_ast(
-                &cached.ast_program,
-            ),
-        );
+        // Core variables (critical for resolving types like Null, Vec, etc.)
+        // were derived once when the cached build was constructed.
+        let core_variables = cached.runtime_core_variables.clone();
 
         tracing::debug!(
             "✓ Using pre-built HotAst from cache ({} namespaces, {} core vars) - skipped expensive indexing!",
@@ -447,9 +450,9 @@ impl Engine {
         let mut vm = crate::lang::runtime::vm::VirtualMachine::new(
             extended_program_arc,
             Some(hot_ast), // Full AST from cache - rich metadata enrichment!
-            Arc::new(function_mapping),
-            Arc::new(core_functions),
-            Arc::new(type_implementations),
+            cached.runtime_function_mapping.clone(),
+            cached.runtime_core_functions.clone(),
+            cached.runtime_type_implementations.clone(),
             core_variables,
             conf.cloned(),
         );

@@ -305,13 +305,10 @@ async fn async_main(providers: CliProviders) {
     if let Some(Command::BuildStdArtifact { out }) = &cli.command {
         let hot_std = hot::lang::project::DependencyResolver::default().get_hot_std_dependency();
         let out_path = out.as_ref().map(std::path::PathBuf::from);
-        match hot::lang::cache::std_artifact::build_artifact(
-            &hot_std.resolved_path,
-            out_path.as_deref(),
-        ) {
+        match hot::lang::cache::std_artifact::prewarm(&hot_std.resolved_path, out_path.as_deref()) {
             Ok((path, size)) => {
                 println!(
-                    "hot-std artifact written to {} ({} KB)",
+                    "hot-std image written to {} ({} KB)",
                     path.display(),
                     size / 1024
                 );

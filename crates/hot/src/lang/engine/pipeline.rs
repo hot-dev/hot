@@ -868,18 +868,40 @@ impl Engine {
                 .join(", ")
         );
 
-        // NOTE(std-artifact): a fast path that extends the precompiled
-        // hot-std artifact (lang::cache::std_artifact) with ad hoc eval code
-        // was prototyped here and measured SLOWER than the classic path:
-        // eagerly decoding the full payload (program + AST namespaces +
-        // HotAst + var_index, ~60ms) costs more than the postcard AST cache
-        // hit plus compile (~46ms). It also surfaced that
-        // eval_code_with_cached_bytecode's registry-only mini-compile cannot
-        // resolve unqualified names (no resolver pass over the cached
-        // namespaces). Wiring the artifact in requires (a) per-section lazy
-        // decoding so the eval path only pays for program + registries, and
-        // (b) a resolver-aware eval extension. See the std_artifact module
-        // docs.
+        // Opt-in fast path (HOT_STD_IMAGE=1): ad hoc eval against a pristine
+        // hot-std. When the only compilation unit is the hot-std package (no
+        // project sources, no target file), extend the system-level compiled
+        // hot-std image with just the eval snippet — the worker's cached-
+        // build eval mechanism. The first run compiles hot-std and persists
+        // the image; later runs load it (parallel section decode).
+        //
+        // Disabled by default: measured 78ms vs 72ms for the classic path on
+        // an M-series laptop — the full-image decode still exceeds the
+        // (postcard AST cache + compile) it replaces, and eval compile errors
+        // lose their rich ariadne rendering. Re-evaluate when hot-std grows
+        // or after a slim decode path exists; the env flag keeps it testable.
+        if std::env::var_os("HOT_STD_IMAGE").is_some_and(|v| v == "1")
+            && matches!(mode, PipelineMode::Execute)
+            && target_file.is_none()
+            && let Some(code) = eval_code
+            && let [only_unit] = units.as_slice()
+            && only_unit.unit.id() == "pkg-hot-std"
+            && let Some(image) =
+                crate::lang::cache::std_artifact::get_or_build(only_unit.unit.path())
+        {
+            tracing::debug!(" Unified Pipeline: using hot-std image fast path for eval");
+            return Self::eval_code_with_cached_bytecode(
+                code,
+                image,
+                conf,
+                emitter,
+                execution_context,
+                event_publisher,
+                context_storage,
+                database_pool,
+                stream_publisher,
+            );
+        }
 
         // Phase 2: Parse units with per-package caching
         tracing::debug!(" Unified Pipeline: Phase 2 - Parsing with per-package cache...");
