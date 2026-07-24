@@ -176,6 +176,143 @@ impl TryFrom<TaggedVal> for Val {
 }
 
 // =============================================================================
+// Var-index cache encoding
+// =============================================================================
+
+/// Postcard-encodable form of `AstVarIndex`, routed through the `Cacheable*`
+/// mirrors because the raw `Var`/`Value` serde graph embeds `Val` (JSON-only).
+type CacheableVarIndexEntries = Vec<((String, String), Vec<(CacheableVar, CacheableValue)>)>;
+
+#[derive(Serialize, Deserialize)]
+struct CacheableVarIndex {
+    lookup: CacheableVarIndexEntries,
+    scopes: Vec<String>,
+}
+
+/// Serialize an `AstVarIndex` for the bytecode cache payload.
+pub fn serialize_var_index(index: &crate::lang::ast::AstVarIndex) -> Result<Vec<u8>, String> {
+    let (lookup, scopes) = index.to_entries();
+    let cacheable = CacheableVarIndex {
+        lookup: lookup
+            .into_iter()
+            .map(|(key, values)| {
+                let values = values
+                    .iter()
+                    .map(|(var, value)| (CacheableVar::from(var), CacheableValue::from(value)))
+                    .collect();
+                (key, values)
+            })
+            .collect(),
+        scopes,
+    };
+    postcard::to_allocvec(&cacheable).map_err(|e| format!("Failed to serialize var_index: {}", e))
+}
+
+/// Deserialize an `AstVarIndex` from bytes produced by [`serialize_var_index`].
+pub fn deserialize_var_index(data: &[u8]) -> Result<crate::lang::ast::AstVarIndex, String> {
+    let cacheable: CacheableVarIndex = postcard::from_bytes(data)
+        .map_err(|e| format!("Failed to deserialize var_index: {}", e))?;
+    let lookup = cacheable
+        .lookup
+        .into_iter()
+        .map(|(key, values)| {
+            let values = values
+                .into_iter()
+                .map(|(var, value)| {
+                    Ok((
+                        crate::lang::ast::Var::try_from(var)?,
+                        crate::lang::ast::Value::try_from(value)?,
+                    ))
+                })
+                .collect::<Result<Vec<_>, String>>()?;
+            Ok((key, values))
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+    Ok(crate::lang::ast::AstVarIndex::from_entries(
+        lookup,
+        cacheable.scopes,
+    ))
+}
+
+// =============================================================================
+// Serde adapters: route Val fields through TaggedVal
+// =============================================================================
+//
+// Val's own serde impls are JSON-oriented ($type maps, arbitrary-precision
+// serde_json::Number) and cannot round-trip through non-self-describing
+// codecs. Fields annotated with these adapters serialize losslessly via
+// TaggedVal instead. Used by the bytecode cache payload types.
+
+/// `#[serde(with = "tagged_val_serde")]` for `Val` fields.
+pub mod tagged_val_serde {
+    use super::TaggedVal;
+    use crate::val::Val;
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+    pub fn serialize<S: Serializer>(val: &Val, serializer: S) -> Result<S::Ok, S::Error> {
+        TaggedVal::from(val).serialize(serializer)
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Val, D::Error> {
+        let tagged = TaggedVal::deserialize(deserializer)?;
+        Val::try_from(tagged).map_err(serde::de::Error::custom)
+    }
+}
+
+/// `#[serde(with = "tagged_val_opt_serde")]` for `Option<Val>` fields.
+pub mod tagged_val_opt_serde {
+    use super::TaggedVal;
+    use crate::val::Val;
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+    pub fn serialize<S: Serializer>(val: &Option<Val>, serializer: S) -> Result<S::Ok, S::Error> {
+        val.as_ref().map(TaggedVal::from).serialize(serializer)
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<Option<Val>, D::Error> {
+        let tagged = Option::<TaggedVal>::deserialize(deserializer)?;
+        tagged
+            .map(|t| Val::try_from(t).map_err(serde::de::Error::custom))
+            .transpose()
+    }
+}
+
+/// `#[serde(with = "tagged_val_map_serde")]` for `AHashMap<String, Val>` fields.
+pub mod tagged_val_map_serde {
+    use super::TaggedVal;
+    use crate::val::Val;
+    use ahash::AHashMap;
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+    pub fn serialize<S: Serializer>(
+        map: &AHashMap<String, Val>,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        // Entry pairs in sorted order for deterministic bytes
+        let mut entries: Vec<(&String, TaggedVal)> =
+            map.iter().map(|(k, v)| (k, TaggedVal::from(v))).collect();
+        entries.sort_by(|a, b| a.0.cmp(b.0));
+        entries.serialize(serializer)
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<AHashMap<String, Val>, D::Error> {
+        let entries = Vec::<(String, TaggedVal)>::deserialize(deserializer)?;
+        entries
+            .into_iter()
+            .map(|(k, t)| {
+                Val::try_from(t)
+                    .map(|v| (k, v))
+                    .map_err(serde::de::Error::custom)
+            })
+            .collect()
+    }
+}
+
+// =============================================================================
 // Cacheable AST Types - Recursive Value handling
 // =============================================================================
 

@@ -240,7 +240,6 @@ pub(crate) async fn setup_live_build_for_dev_with_secret_scan_opts(
         &db,
         build_context,
         false, // enable_cache - disabled for now
-        None,  // cache_format
         true,  // load_ctx_hot for CLI commands
         hot::env::is_local_dev(),
     )

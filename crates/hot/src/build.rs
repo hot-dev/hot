@@ -974,7 +974,6 @@ pub async fn create_live_build(
     db: &DatabasePool,
     build_context: BuildContext,
     _enable_cache: bool,
-    _cache_format: Option<String>,
     _load_ctx_hot: bool,
     color: bool,
 ) -> Result<
@@ -1078,7 +1077,6 @@ pub async fn setup_live_build_and_compiler(
     db: &DatabasePool,
     build_context: BuildContext,
     enable_cache: bool,
-    cache_format: Option<String>,
     load_ctx_hot: bool,
     color: bool,
 ) -> Result<BuildResult, String> {
@@ -1100,15 +1098,7 @@ pub async fn setup_live_build_and_compiler(
         agents,
         workflows,
         send_targets,
-    ) = create_live_build(
-        db,
-        build_context.clone(),
-        enable_cache,
-        cache_format,
-        load_ctx_hot,
-        color,
-    )
-    .await?;
+    ) = create_live_build(db, build_context.clone(), enable_cache, load_ctx_hot, color).await?;
 
     // Clear existing event handlers for this build (if any)
     let deleted_count =
@@ -1250,7 +1240,6 @@ pub async fn build_compile(
     db: &DatabasePool,
     build_context: BuildContext,
     enable_cache: bool,
-    cache_format: Option<String>,
 ) -> Result<BuildResult, String> {
     let project_name = build_context.project_name.clone();
 
@@ -1259,7 +1248,6 @@ pub async fn build_compile(
         db,
         build_context,
         enable_cache,
-        cache_format,
         false, // load_ctx_hot
         false, // color (non-interactive compile)
     )

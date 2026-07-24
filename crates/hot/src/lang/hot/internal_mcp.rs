@@ -31,8 +31,10 @@ pub struct ToolSchemaEntry {
     pub name: String,
     /// JSON-Schema input schema as a Hot Val, derived from typed
     /// parameters via `args_to_input_schema_with_registry`.
+    #[serde(with = "crate::lang::cache::ast_cache::tagged_val_serde")]
     pub input_schema: Val,
     /// Optional output schema (only when a return type was annotated).
+    #[serde(with = "crate::lang::cache::ast_cache::tagged_val_opt_serde")]
     pub output_schema: Option<Val>,
     /// Description chain: `meta {tool: {description}}` ->
     /// `meta {mcp: {description}}` -> `meta {doc: ...}` -> None.
