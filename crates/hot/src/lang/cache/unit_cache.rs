@@ -261,6 +261,11 @@ impl UnitCache {
         std::fs::write(&temp_path, &compressed).map_err(|e| e.to_string())?;
         std::fs::rename(&temp_path, &cache_path).map_err(|e| e.to_string())?;
 
+        // Opportunistic housekeeping: old-generation entries (superseded
+        // versions/formats) are unreachable via their keys and would
+        // otherwise accumulate forever.
+        super::prune_stale_cache_files(&self.cache_dir, &cache_path);
+
         tracing::debug!(
             "Saved cache for {} ({} namespaces, {} bytes -> {} bytes compressed, {:.1}x)",
             unit.id(),

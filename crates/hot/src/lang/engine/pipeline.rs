@@ -744,7 +744,7 @@ impl Engine {
         conf: Option<&crate::val::Val>,
         context_storage: Option<&AHashMap<String, crate::val::Val>>,
         color: bool,
-    ) -> Result<(), String> {
+    ) -> Result<crate::lang::compiler::ctx_checker::ProgramCtxRequirements, String> {
         // Validate event handlers (event parameter requirement)
         if let Err(e) = compiler.extract_event_handlers(combined_program) {
             let formatted = e.format_error(color);
@@ -821,7 +821,9 @@ impl Engine {
             }
         }
 
-        Ok(())
+        // Hand the resolved ctx requirements back so Execute mode can apply
+        // defaults and secret keys without rebuilding the call graph.
+        Ok(ctx_requirements)
     }
 
     /// Unified pipeline for all operations (run, eval, test, repl)
@@ -1121,8 +1123,9 @@ impl Engine {
                 // Run the same post-compile validations as Check mode before
                 // any user code executes. This preserves pre-flight failures
                 // (e.g. missing required ctx keys) for run/eval without a
-                // separate check pipeline pass.
-                Self::validate_compiled_program(
+                // separate check pipeline pass. The returned ctx
+                // requirements are reused below for defaults/secret keys.
+                let ctx_requirements = Self::validate_compiled_program(
                     &mut compiler,
                     &combined_program,
                     conf,
@@ -1160,11 +1163,8 @@ impl Engine {
                     vm.context_storage = context_storage;
                 }
 
-                // Extract ctx requirements via call graph and apply defaults + secret keys
-                let ctx_requirements =
-                    crate::lang::compiler::ctx_checker::extract_ctx_requirements_via_call_graph(
-                        &combined_program,
-                    );
+                // Apply defaults + secret keys from the ctx requirements
+                // the validation pass already resolved (call graph built once).
                 // Apply default values for keys not already in context_storage
                 for (key, default_val) in ctx_requirements.all_defaults() {
                     vm.context_storage.entry(key).or_insert(default_val);

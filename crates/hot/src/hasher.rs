@@ -31,7 +31,7 @@ impl CacheType {
     /// These are separate because the formats evolve independently
     pub fn format_version(&self) -> u32 {
         match self {
-            CacheType::Bytecode => 7, // Bumped for postcard payload encoding (was serde_json)
+            CacheType::Bytecode => 8, // Bumped for precomputed ctx_defaults/secret_keys in payload
             CacheType::Ast => 3,      // Bumped for postcard encoding (was serde_json)
         }
     }

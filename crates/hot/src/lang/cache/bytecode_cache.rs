@@ -100,8 +100,26 @@ pub struct CachedBytecodeArtifacts {
 }
 
 impl CachedBytecode {
-    /// Build cached bytecode plus runtime-ready shared artifacts.
+    /// Build cached bytecode plus runtime-ready shared artifacts, deriving
+    /// ctx defaults and secret keys from the AST call graph.
     pub fn new(metadata: CacheMetadata, artifacts: CachedBytecodeArtifacts) -> Self {
+        let ctx_requirements =
+            crate::lang::compiler::ctx_checker::extract_ctx_requirements_via_call_graph(
+                &artifacts.ast_program,
+            );
+        let ctx_defaults = ctx_requirements.all_defaults();
+        let secret_keys = ctx_requirements.all_secret_keys();
+        Self::with_derived(metadata, artifacts, ctx_defaults, secret_keys)
+    }
+
+    /// Like [`Self::new`] but with the call-graph-derived ctx data supplied
+    /// (from the cache payload), skipping the call-graph rebuild on load.
+    pub fn with_derived(
+        metadata: CacheMetadata,
+        artifacts: CachedBytecodeArtifacts,
+        ctx_defaults: AHashMap<String, crate::val::Val>,
+        secret_keys: AHashSet<String>,
+    ) -> Self {
         let CachedBytecodeArtifacts {
             program,
             function_mapping,
@@ -116,12 +134,8 @@ impl CachedBytecode {
         let runtime_core_variables = Arc::new(
             crate::lang::compiler::core_registry::extract_core_variables_from_ast(&ast_program),
         );
-        let ctx_requirements =
-            crate::lang::compiler::ctx_checker::extract_ctx_requirements_via_call_graph(
-                &ast_program,
-            );
-        let runtime_ctx_defaults = Arc::new(ctx_requirements.all_defaults());
-        let runtime_secret_keys = Arc::new(ctx_requirements.all_secret_keys());
+        let runtime_ctx_defaults = Arc::new(ctx_defaults);
+        let runtime_secret_keys = Arc::new(secret_keys);
 
         Self {
             runtime_program: Arc::new(program.clone()),
@@ -169,6 +183,12 @@ struct CacheFilePayload {
     type_implementations: Vec<((String, String), String)>,
     tool_specs: crate::lang::hot::internal_mcp::ToolSchemaRegistry,
     skill_specs: crate::lang::hot::internal_skill::SkillSpecRegistry,
+    /// Ctx default values resolved from the call graph at save time, so a
+    /// load skips rebuilding the call graph (~5ms for hot-std).
+    #[serde(with = "crate::lang::cache::ast_cache::tagged_val_map_serde")]
+    ctx_defaults: AHashMap<String, crate::val::Val>,
+    /// Secret ctx keys resolved at save time (sorted for deterministic bytes).
+    secret_keys: Vec<String>,
 }
 
 /// In-memory cache entry with access tracking for LRU
@@ -362,6 +382,8 @@ impl BytecodeCache {
             type_implementations,
             tool_specs,
             skill_specs,
+            ctx_defaults,
+            secret_keys,
         } = payload;
 
         let program = BytecodeProgram::deserialize(&program_data)?;
@@ -404,7 +426,7 @@ impl BytecodeCache {
             ast_program.namespaces.len()
         );
 
-        let cached_bytecode = Arc::new(CachedBytecode::new(
+        let cached_bytecode = Arc::new(CachedBytecode::with_derived(
             metadata,
             CachedBytecodeArtifacts {
                 program,
@@ -416,6 +438,8 @@ impl BytecodeCache {
                 tool_specs,
                 skill_specs,
             },
+            ctx_defaults,
+            secret_keys.into_iter().collect(),
         ));
 
         // Store in memory cache for next time
@@ -450,6 +474,28 @@ impl BytecodeCache {
         // deployment: a worker that only loads bytecode (no recompile) would
         // otherwise have an empty global tool-schema registry and
         // `::ai::tool/from-fn` would fail at module-init time.
+        // Build the in-memory entry first; its derived ctx data is persisted
+        // in the payload so loads skip the call-graph rebuild.
+        let cached_bytecode = Arc::new(CachedBytecode::new(
+            metadata.clone(),
+            CachedBytecodeArtifacts {
+                program: program.clone(),
+                function_mapping: function_mapping.clone(),
+                core_functions: core_functions.clone(),
+                type_implementations: type_implementations.clone(),
+                ast_program: ast_program.clone(),
+                hot_ast: hot_ast.clone(),
+                tool_specs: tool_specs.clone(),
+                skill_specs: skill_specs.clone(),
+            },
+        ));
+        let mut secret_keys: Vec<String> = cached_bytecode
+            .runtime_secret_keys
+            .iter()
+            .cloned()
+            .collect();
+        secret_keys.sort();
+
         let payload = CacheFilePayload {
             metadata: metadata.clone(),
             program_data: program.serialize()?,
@@ -474,6 +520,8 @@ impl BytecodeCache {
                 .collect(),
             tool_specs: tool_specs.clone(),
             skill_specs: skill_specs.clone(),
+            ctx_defaults: (*cached_bytecode.runtime_ctx_defaults).clone(),
+            secret_keys,
         };
 
         let encoded = postcard::to_allocvec(&payload)
@@ -525,26 +573,18 @@ impl BytecodeCache {
             return Err(format!("Failed to rename cache file: {}", e));
         }
 
+        // Opportunistic housekeeping: old-generation entries (superseded
+        // versions/formats) are unreachable via their keys and would
+        // otherwise accumulate forever.
+        super::prune_stale_cache_files(&self.cache_dir, &cache_path);
+
         tracing::debug!(
             "Cache saved successfully ({} bytes compressed from {} bytes encoded)",
             compressed_size,
             encoded_size
         );
 
-        // Also store in memory cache
-        let cached_bytecode = Arc::new(CachedBytecode::new(
-            metadata,
-            CachedBytecodeArtifacts {
-                program: program.clone(),
-                function_mapping: function_mapping.clone(),
-                core_functions: core_functions.clone(),
-                type_implementations: type_implementations.clone(),
-                ast_program: ast_program.clone(),
-                hot_ast: hot_ast.clone(),
-                tool_specs: tool_specs.clone(),
-                skill_specs: skill_specs.clone(),
-            },
-        ));
+        // Also store in memory cache (built above, before the payload)
         self.store_in_memory(cache_key, cached_bytecode);
 
         Ok(())

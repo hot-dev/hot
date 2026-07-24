@@ -2763,6 +2763,7 @@ dependencies = [
  "fastembed",
  "fastnum",
  "fd-lock",
+ "filetime",
  "flate2",
  "futures",
  "hex",
