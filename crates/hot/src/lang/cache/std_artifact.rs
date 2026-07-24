@@ -67,8 +67,24 @@ struct ArtifactHeader {
 }
 
 /// Compute the expected artifact key for the hot-std sources at `std_root`.
+///
+/// File paths are relativized to `std_root` before hashing: the artifact is
+/// built on a release machine and validated at whatever prefix the user
+/// installed to, so absolute paths must never influence the key.
 fn compute_artifact_key(std_root: &Path) -> Result<String, String> {
-    let file_hashes = compute_hot_file_hashes(std_root)?;
+    let root = std_root
+        .canonicalize()
+        .unwrap_or_else(|_| std_root.to_path_buf());
+    let file_hashes: Vec<(String, String)> = compute_hot_file_hashes(std_root)?
+        .into_iter()
+        .map(|(path, hash)| {
+            let rel = Path::new(&path)
+                .strip_prefix(&root)
+                .map(|p| p.to_string_lossy().to_string())
+                .unwrap_or(path);
+            (rel, hash)
+        })
+        .collect();
     if file_hashes.is_empty() {
         return Err(format!(
             "no hot-std sources found at {}",
@@ -235,6 +251,16 @@ mod tests {
         let loaded = try_load(&root).expect("load must succeed");
         assert!(!loaded.function_mapping.is_empty());
         assert!(!loaded.ast_program.namespaces.is_empty());
+
+        // The artifact is built on a release machine and installed at an
+        // arbitrary prefix: moving the whole tree must not invalidate it
+        // (the key hashes root-relative paths, never absolute ones).
+        let moved = dir.path().join("relocated").join("hot-std");
+        std::fs::create_dir_all(moved.parent().unwrap()).unwrap();
+        std::fs::rename(&root, &moved).unwrap();
+        let reloaded = try_load(&moved).expect("load must survive relocation");
+        assert!(!reloaded.function_mapping.is_empty());
+        std::fs::rename(&moved, &root).unwrap();
 
         // Modifying a source file must invalidate the artifact.
         let victim = std::fs::read_dir(root.join("src").join("hot"))
