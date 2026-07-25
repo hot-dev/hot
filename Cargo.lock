@@ -2810,7 +2810,6 @@ dependencies = [
  "uuid",
  "walkdir",
  "webpki-roots 1.0.8",
- "windows-sys 0.61.2",
  "yaml-rust2",
  "zip 4.6.1",
  "zstd",

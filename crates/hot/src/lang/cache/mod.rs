@@ -45,53 +45,6 @@ pub(crate) fn remove_invalid_cache_entry(path: &std::path::Path) {
     }
 }
 
-/// Atomically replace `destination` with `source`.
-///
-/// POSIX `rename` replaces an existing destination, but Windows requires the
-/// explicit replacement flag. Cache metadata uses this helper so a successful
-/// generation update never leaves a stale marker or a remove-then-rename gap.
-#[cfg(not(windows))]
-pub(crate) fn atomic_replace_file(
-    source: &std::path::Path,
-    destination: &std::path::Path,
-) -> std::io::Result<()> {
-    std::fs::rename(source, destination)
-}
-
-#[cfg(windows)]
-pub(crate) fn atomic_replace_file(
-    source: &std::path::Path,
-    destination: &std::path::Path,
-) -> std::io::Result<()> {
-    use std::os::windows::ffi::OsStrExt;
-    use windows_sys::Win32::Storage::FileSystem::{
-        MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH, MoveFileExW,
-    };
-
-    let source: Vec<u16> = source
-        .as_os_str()
-        .encode_wide()
-        .chain(std::iter::once(0))
-        .collect();
-    let destination: Vec<u16> = destination
-        .as_os_str()
-        .encode_wide()
-        .chain(std::iter::once(0))
-        .collect();
-    let result = unsafe {
-        MoveFileExW(
-            source.as_ptr(),
-            destination.as_ptr(),
-            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
-        )
-    };
-    if result == 0 {
-        Err(std::io::Error::last_os_error())
-    } else {
-        Ok(())
-    }
-}
-
 /// A well-formed bytecode cache key: a 64-hex content hash (project builds)
 /// or a build UUID (worker bundle caches). Used to validate anything read
 /// back from disk before it is turned into a path.
@@ -319,7 +272,7 @@ pub(crate) fn prune_stale_cache_files(dir: &std::path::Path, keep: &std::path::P
 
 #[cfg(test)]
 mod prune_tests {
-    use super::{atomic_replace_file, is_managed_cache_file_name, prune_stale_cache_files};
+    use super::{is_managed_cache_file_name, prune_stale_cache_files};
 
     const BYTECODE_KEY: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
@@ -467,19 +420,5 @@ mod prune_tests {
             "bad name-{digest}.current"
         )));
         assert!(!is_managed_cache_file_name(&format!("-{digest}.current")));
-    }
-
-    #[test]
-    fn atomic_replace_file_replaces_an_existing_destination() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let source = dir.path().join("source");
-        let destination = dir.path().join("destination");
-        std::fs::write(&source, b"new").unwrap();
-        std::fs::write(&destination, b"old").unwrap();
-
-        atomic_replace_file(&source, &destination).expect("replace destination");
-
-        assert_eq!(std::fs::read(&destination).unwrap(), b"new");
-        assert!(!source.exists());
     }
 }
