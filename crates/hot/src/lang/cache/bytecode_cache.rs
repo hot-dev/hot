@@ -34,6 +34,48 @@ pub struct CacheMetadata {
     pub cache_key: String,
 }
 
+/// Validate bytecode payload metadata against this runtime and the full key
+/// requested by the caller. Shared by normal cache files and hot-std images.
+pub(crate) fn validate_cache_metadata(
+    metadata: &CacheMetadata,
+    expected_cache_key: &str,
+) -> Result<(), String> {
+    if metadata.cache_key != expected_cache_key {
+        return Err(format!(
+            "Cache key mismatch: cache={}, requested={}",
+            metadata.cache_key, expected_cache_key
+        ));
+    }
+
+    if metadata.hot_version != crate::build_info::VERSION {
+        return Err(format!(
+            "Cache version mismatch: cache={}, current={}",
+            metadata.hot_version,
+            crate::build_info::VERSION
+        ));
+    }
+
+    // Keep accepting legacy metadata without a SHA. The full key still
+    // includes the build fingerprint and is mandatory above.
+    if !metadata.git_sha.is_empty() && metadata.git_sha != crate::build_info::GIT_SHA {
+        return Err(format!(
+            "Cache git SHA mismatch: cache={}, current={}",
+            &metadata.git_sha[..7.min(metadata.git_sha.len())],
+            &crate::build_info::GIT_SHA[..7.min(crate::build_info::GIT_SHA.len())]
+        ));
+    }
+
+    if metadata.cache_format_version != CacheType::Bytecode.format_version() {
+        return Err(format!(
+            "Cache format version mismatch: cache={}, current={}",
+            metadata.cache_format_version,
+            CacheType::Bytecode.format_version()
+        ));
+    }
+
+    Ok(())
+}
+
 /// Hash information for a source file
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FileHash {
@@ -546,16 +588,19 @@ impl BytecodeCache {
         {
             let mut cache = GLOBAL_MEMORY_CACHE.lock();
             if let Some(entry) = cache.get_mut(cache_key) {
-                // Update last accessed time
-                entry.last_accessed = std::time::Instant::now();
-                tracing::debug!(
-                    "✓ Cache loaded from MEMORY (project: {}, {} functions, {} core, {} namespaces)",
-                    entry.bytecode.metadata.project_name,
-                    entry.bytecode.function_mapping.len(),
-                    entry.bytecode.core_functions.len(),
-                    entry.bytecode.ast_program.namespaces.len()
-                );
-                return Ok(Arc::clone(&entry.bytecode));
+                if validate_cache_metadata(&entry.bytecode.metadata, cache_key).is_ok() {
+                    // Update last accessed time
+                    entry.last_accessed = std::time::Instant::now();
+                    tracing::debug!(
+                        "✓ Cache loaded from MEMORY (project: {}, {} functions, {} core, {} namespaces)",
+                        entry.bytecode.metadata.project_name,
+                        entry.bytecode.function_mapping.len(),
+                        entry.bytecode.core_functions.len(),
+                        entry.bytecode.ast_program.namespaces.len()
+                    );
+                    return Ok(Arc::clone(&entry.bytecode));
+                }
+                cache.remove(cache_key);
             }
         }
 
@@ -572,19 +617,28 @@ impl BytecodeCache {
 
         tracing::debug!("Loading bytecode cache from: {}", cache_path.display());
 
-        // Mark as recently used so the stale-entry pruner never collects a
-        // live entry, then read the compressed cache file
-        crate::lang::cache::touch_cache_entry(&cache_path);
+        // A read failure may be transient (permissions, descriptor pressure,
+        // network filesystem). Do not delete or touch until bytes have been
+        // fully decoded and validated.
         let compressed_data =
             std::fs::read(&cache_path).map_err(|e| format!("Failed to read cache file: {}", e))?;
 
-        // Decompress with zstd
-        let decompressed = zstd::decode_all(compressed_data.as_slice())
-            .map_err(|e| format!("Failed to decompress cache: {}", e))?;
+        let decoded = (|| {
+            let decompressed = zstd::decode_all(compressed_data.as_slice())
+                .map_err(|e| format!("Failed to decompress cache: {}", e))?;
+            let cached_bytecode = decode_cache_payload(&decompressed)?;
+            validate_cache_metadata(&cached_bytecode.metadata, cache_key)?;
+            Ok(cached_bytecode)
+        })();
+        let cached_bytecode = match decoded {
+            Ok(cached) => cached,
+            Err(error) => {
+                crate::lang::cache::remove_invalid_cache_entry(&cache_path);
+                return Err(error);
+            }
+        };
 
-        let cached_bytecode = decode_cache_payload(&decompressed)?;
-        self.validate_metadata(&cached_bytecode.metadata)?;
-
+        crate::lang::cache::touch_cache_entry(&cache_path);
         // Store in memory cache for next time
         self.store_in_memory(cache_key, Arc::clone(&cached_bytecode));
 
@@ -607,6 +661,7 @@ impl BytecodeCache {
         skill_specs: &crate::lang::hot::internal_skill::SkillSpecRegistry,
     ) -> Result<(), String> {
         self.ensure_cache_dir()?;
+        validate_cache_metadata(&metadata, cache_key)?;
 
         let cache_path = self.cache_file_path(cache_key);
 
@@ -730,39 +785,6 @@ impl BytecodeCache {
     pub fn memory_stats(&self) -> (usize, usize) {
         let cache = GLOBAL_MEMORY_CACHE.lock();
         (cache.len(), MAX_GLOBAL_MEMORY_ENTRIES)
-    }
-
-    /// Validate cache metadata
-    fn validate_metadata(&self, metadata: &CacheMetadata) -> Result<(), String> {
-        // Check hot version (use build_info::VERSION which comes from resources/version.txt)
-        if metadata.hot_version != crate::build_info::VERSION {
-            return Err(format!(
-                "Cache version mismatch: cache={}, current={}",
-                metadata.hot_version,
-                crate::build_info::VERSION
-            ));
-        }
-
-        // Check git SHA (catches deploys where version wasn't bumped but code changed)
-        // Only check if the cached metadata has a git_sha (backward compatibility)
-        if !metadata.git_sha.is_empty() && metadata.git_sha != crate::build_info::GIT_SHA {
-            return Err(format!(
-                "Cache git SHA mismatch: cache={}, current={}",
-                &metadata.git_sha[..7.min(metadata.git_sha.len())],
-                &crate::build_info::GIT_SHA[..7.min(crate::build_info::GIT_SHA.len())]
-            ));
-        }
-
-        // Check cache format version
-        if metadata.cache_format_version != CacheType::Bytecode.format_version() {
-            return Err(format!(
-                "Cache format version mismatch: cache={}, current={}",
-                metadata.cache_format_version,
-                CacheType::Bytecode.format_version()
-            ));
-        }
-
-        Ok(())
     }
 
     /// Create file hashes for a list of file paths
@@ -956,7 +978,7 @@ mod tests {
     use super::*;
     use crate::lang::bytecode::{
         BytecodeProgram, Constant, FlowResultModifier, FlowType, FunctionInfo, Instruction,
-        SourceLocation, VariableMetadata,
+        LambdaInfo, SourceLocation, VariableMetadata,
     };
     use crate::val::Val;
 
@@ -1113,6 +1135,35 @@ mod tests {
         program
     }
 
+    fn write_test_payload(
+        cache: &BytecodeCache,
+        requested_key: &str,
+        embedded_key: &str,
+    ) -> PathBuf {
+        std::fs::create_dir_all(cache.cache_dir()).expect("create cache dir");
+        let ast_program = crate::lang::ast::Program {
+            namespaces: indexmap::IndexMap::new(),
+            current_namespace: crate::lang::ast::NsPath::new(),
+        };
+        let hot_ast = crate::lang::ast::HotAst::new();
+        let metadata = create_cache_metadata("test", Vec::new(), embedded_key.to_string());
+        let (compressed, _) = encode_cache_payload(
+            metadata,
+            &BytecodeProgram::new(),
+            &indexmap::IndexMap::new(),
+            &indexmap::IndexMap::new(),
+            &indexmap::IndexMap::new(),
+            &ast_program,
+            &hot_ast,
+            &Default::default(),
+            &Default::default(),
+        )
+        .expect("encode payload");
+        let path = cache.cache_file_path(requested_key);
+        std::fs::write(&path, compressed).expect("write payload");
+        path
+    }
+
     #[test]
     fn test_bytecode_program_serialization_roundtrip() {
         let program = create_test_bytecode_program();
@@ -1164,6 +1215,107 @@ mod tests {
 
         // Verify entry_register_count
         assert_eq!(program.entry_register_count, restored.entry_register_count);
+    }
+
+    #[test]
+    fn full_payload_roundtrips_boxed_ctx_default_thunk() {
+        let lambda = LambdaInfo {
+            parameters: Vec::new(),
+            instructions: vec![Instruction::Return { value: 0 }],
+            register_count: 1,
+            capture_vars: vec!["captured".to_string()],
+            closure_env: [("captured".to_string(), Val::Int(42))]
+                .into_iter()
+                .collect(),
+            defining_namespace: "::test".to_string(),
+            is_lazy_param: true,
+            used_registers: vec![0],
+            structural_hash_cache: Default::default(),
+        };
+        let ctx_defaults = [(
+            "test.default".to_string(),
+            Val::Box(Box::new(lambda.clone())),
+        )]
+        .into_iter()
+        .collect();
+        let ast_program = crate::lang::ast::Program {
+            namespaces: indexmap::IndexMap::new(),
+            current_namespace: crate::lang::ast::NsPath::new(),
+        };
+        let hot_ast = crate::lang::ast::HotAst::new();
+        let key = "ctx-default-payload";
+        let payload = CacheFilePayload {
+            metadata: create_cache_metadata("test", Vec::new(), key.to_string()),
+            program_data: BytecodeProgram::new().serialize().unwrap(),
+            ast_program_namespaces: crate::lang::cache::ast_cache::serialize_namespaces(
+                &ast_program.namespaces,
+            )
+            .unwrap(),
+            hot_ast_namespaces: None,
+            var_index: crate::lang::cache::ast_cache::serialize_var_index(&hot_ast.var_index)
+                .unwrap(),
+            function_mapping: Vec::new(),
+            core_functions: Vec::new(),
+            type_implementations: Vec::new(),
+            tool_specs: Default::default(),
+            skill_specs: Default::default(),
+            ctx_defaults,
+            secret_keys: Vec::new(),
+        };
+        let encoded = postcard::to_allocvec(&payload).expect("encode full payload");
+        let compressed = zstd::encode_all(encoded.as_slice(), 1).expect("compress payload");
+        let decompressed = zstd::decode_all(compressed.as_slice()).expect("decompress payload");
+        let restored = decode_cache_payload(&decompressed).expect("decode full payload");
+        validate_cache_metadata(&restored.metadata, key).expect("metadata must validate");
+
+        let restored = restored
+            .runtime_ctx_defaults
+            .get("test.default")
+            .expect("ctx default");
+        let Val::Box(restored) = restored else {
+            panic!("ctx default must remain boxed");
+        };
+        assert_eq!(
+            restored.as_any().downcast_ref::<LambdaInfo>(),
+            Some(&lambda)
+        );
+    }
+
+    #[test]
+    fn load_rejects_key_mismatch_and_deletes_entry() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let cache = BytecodeCache::new(dir.path().to_path_buf());
+        let path = write_test_payload(&cache, "requested-key", "different-embedded-key");
+
+        let error = cache
+            .load("requested-key")
+            .expect_err("key mismatch must fail");
+        assert!(error.contains("Cache key mismatch"));
+        assert!(!path.exists(), "stale payload must be removed");
+    }
+
+    #[test]
+    fn load_deletes_corrupt_entry() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let cache = BytecodeCache::new(dir.path().to_path_buf());
+        std::fs::create_dir_all(cache.cache_dir()).unwrap();
+        let path = cache.cache_file_path("corrupt-key");
+        std::fs::write(&path, b"not-zstd").unwrap();
+
+        assert!(cache.load("corrupt-key").is_err());
+        assert!(!path.exists(), "corrupt payload must be removed");
+    }
+
+    #[test]
+    fn load_does_not_delete_on_read_failure() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let cache = BytecodeCache::new(dir.path().to_path_buf());
+        std::fs::create_dir_all(cache.cache_dir()).unwrap();
+        let path = cache.cache_file_path("unreadable-key");
+        std::fs::create_dir(&path).unwrap();
+
+        assert!(cache.load("unreadable-key").is_err());
+        assert!(path.is_dir(), "read failures must not remove the entry");
     }
 
     #[test]

@@ -162,8 +162,19 @@ impl TryFrom<TaggedVal> for Val {
                 if let Ok(type_ref) = serde_json::from_str::<crate::lang::refs::TypeRef>(&content) {
                     return Ok(Val::Box(Box::new(type_ref)));
                 }
-                // Fallback to null for other boxed types (they're typically not cacheable)
-                Ok(Val::Null)
+                // Lazy/default thunks are compiled into boxed LambdaInfo values.
+                if let Ok(lambda_info) =
+                    serde_json::from_str::<crate::lang::bytecode::LambdaInfo>(&content)
+                {
+                    return Ok(Val::Box(Box::new(lambda_info)));
+                }
+                // Namespace declarations compile to boxed NamespaceRef values.
+                if let Ok(namespace_ref) =
+                    serde_json::from_str::<crate::lang::refs::NamespaceRef>(&content)
+                {
+                    return Ok(Val::Box(Box::new(namespace_ref)));
+                }
+                Err("Unsupported boxed value in cache payload".to_string())
             }
             TaggedVal::AstNode { value } => {
                 // Reconstruct the Value from CacheableValue, then wrap in AstNode
@@ -1647,6 +1658,7 @@ pub fn deserialize_namespaces(
 mod tests {
     use super::*;
     use crate::lang::ast::*;
+    use crate::lang::bytecode::LambdaInfo;
 
     fn assert_val_roundtrip(val: &Val, description: &str) {
         let tagged = TaggedVal::from(val);
@@ -1682,6 +1694,55 @@ mod tests {
         map.insert(Val::Int(1), Val::from("one"));
         map.insert(Val::Int(2), Val::from("two"));
         assert_val_roundtrip(&Val::Map(Box::new(map)), "map with int keys");
+    }
+
+    #[test]
+    fn tagged_val_roundtrips_lambda_and_namespace_boxes() {
+        let lambda = LambdaInfo {
+            parameters: vec!["value".to_string()],
+            instructions: Vec::new(),
+            register_count: 1,
+            capture_vars: Vec::new(),
+            closure_env: ahash::AHashMap::new(),
+            defining_namespace: "::test".to_string(),
+            is_lazy_param: true,
+            used_registers: Vec::new(),
+            structural_hash_cache: Default::default(),
+        };
+        let lambda_val = Val::Box(Box::new(lambda.clone()));
+        let restored = Val::try_from(TaggedVal::from(&lambda_val)).expect("lambda must decode");
+        let Val::Box(restored) = restored else {
+            panic!("expected boxed lambda");
+        };
+        assert_eq!(
+            restored.as_any().downcast_ref::<LambdaInfo>(),
+            Some(&lambda)
+        );
+
+        let namespace = crate::lang::refs::NamespaceRef::with_metadata(
+            "::test::nested".to_string(),
+            "metadata".to_string(),
+        );
+        let namespace_val = Val::Box(Box::new(namespace.clone()));
+        let restored =
+            Val::try_from(TaggedVal::from(&namespace_val)).expect("namespace must decode");
+        let Val::Box(restored) = restored else {
+            panic!("expected boxed namespace");
+        };
+        assert_eq!(
+            restored
+                .as_any()
+                .downcast_ref::<crate::lang::refs::NamespaceRef>(),
+            Some(&namespace)
+        );
+    }
+
+    #[test]
+    fn tagged_val_rejects_unknown_box() {
+        let result = Val::try_from(TaggedVal::Box {
+            content: r#"{"unknown":"boxed-value"}"#.to_string(),
+        });
+        assert!(result.is_err(), "unknown boxes must invalidate the payload");
     }
 
     #[test]

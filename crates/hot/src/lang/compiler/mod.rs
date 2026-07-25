@@ -106,6 +106,10 @@ pub struct Compiler {
     current_function_id: Option<FunctionId>,
     /// TCO: Whether we're currently in tail position (for TailCall optimization)
     in_tail_position: bool,
+    /// Function and lambda bodies temporarily use `program.entry_point` as a
+    /// scratch buffer. Their relative indexes must not overwrite absolute
+    /// entry-point source-map locations.
+    emitting_function_body: bool,
     /// Pre-extracted lazy parameter info for all functions (populated before bytecode compilation)
     /// Maps qualified function name -> (lazy_params, is_variadic)
     lazy_params_registry: IndexMap<String, (Vec<bool>, bool)>,
@@ -127,6 +131,34 @@ pub struct Compiler {
     /// Errors are returned via `Result`; warnings live here so consumers
     /// (`hot check`, LSP) can surface them without failing compilation.
     diagnostics: crate::lang::errors::CompilerErrors,
+}
+
+/// Complete append-only compiler state for compiling code against an already
+/// compiled program. Unlike a bytecode linker, a seed lets the normal emitter
+/// append functions, lambdas, constants, namespace data, source maps, and
+/// variable metadata directly to the original [`BytecodeProgram`].
+#[derive(Clone)]
+pub struct CompilerSeed {
+    program: BytecodeProgram,
+    next_register: RegisterId,
+    function_mapping: IndexMap<String, FunctionId>,
+    type_implementations: IndexMap<(String, String), String>,
+    core_functions: IndexMap<String, FunctionId>,
+    core_variables: CoreVariableRegistry,
+    symbol_table: IndexMap<String, String>,
+    file_contents: AHashMap<std::path::PathBuf, String>,
+    namespace_to_file: AHashMap<String, std::path::PathBuf>,
+    lazy_params_registry: IndexMap<String, (Vec<bool>, bool)>,
+    core_lazy_function_names: IndexMap<String, String>,
+    known_functions: AHashSet<String>,
+    next_cond_id: u64,
+}
+
+impl CompilerSeed {
+    /// The compiled program represented by this seed.
+    pub fn program(&self) -> &BytecodeProgram {
+        &self.program
+    }
 }
 
 impl Compiler {
@@ -202,12 +234,96 @@ impl Compiler {
             current_function_name: None,
             current_function_id: None,
             in_tail_position: false,
+            emitting_function_body: false,
             lazy_params_registry: IndexMap::new(),
             core_lazy_function_names: IndexMap::new(),
             known_functions: AHashSet::new(),
             next_cond_id: 0,
             diagnostics: crate::lang::errors::CompilerErrors::new(),
         }
+    }
+
+    /// Snapshot all state needed to append another compilation unit without
+    /// changing any already-emitted bytecode.
+    pub fn seed(&self) -> CompilerSeed {
+        CompilerSeed {
+            program: self.program.clone(),
+            next_register: self.next_register,
+            function_mapping: self.function_mapping.clone(),
+            type_implementations: self.type_implementations.clone(),
+            core_functions: self.core_functions.clone(),
+            core_variables: self.core_variables.clone(),
+            symbol_table: self.symbol_table.clone(),
+            file_contents: self.file_contents.clone(),
+            namespace_to_file: self.namespace_to_file.clone(),
+            lazy_params_registry: self.lazy_params_registry.clone(),
+            core_lazy_function_names: self.core_lazy_function_names.clone(),
+            known_functions: self.known_functions.clone(),
+            next_cond_id: self.next_cond_id,
+        }
+    }
+
+    /// Restore a compiler from an append-only extension seed.
+    pub fn from_seed(seed: CompilerSeed) -> Self {
+        let mut compiler = Self::new();
+        compiler.program = seed.program;
+        compiler.next_register = seed.next_register;
+        compiler.function_mapping = seed.function_mapping;
+        compiler.type_implementations = seed.type_implementations;
+        compiler.core_functions = seed.core_functions;
+        compiler.core_variables = seed.core_variables;
+        compiler.symbol_table = seed.symbol_table;
+        compiler.file_contents = seed.file_contents;
+        compiler.namespace_to_file = seed.namespace_to_file;
+        compiler.lazy_params_registry = seed.lazy_params_registry;
+        compiler.core_lazy_function_names = seed.core_lazy_function_names;
+        compiler.known_functions = seed.known_functions;
+        compiler.next_cond_id = seed.next_cond_id;
+        compiler
+    }
+
+    /// Build an extension seed from persisted compilation artifacts.
+    ///
+    /// Lazy-call and known-function metadata are reconstructed from the base
+    /// AST because those compiler-only indexes are intentionally not part of
+    /// the bytecode cache format. The conditional-flow counter is recovered
+    /// from the globally unique branch constants already in the program.
+    pub fn seed_from_compiled(
+        program: BytecodeProgram,
+        function_mapping: IndexMap<String, FunctionId>,
+        core_functions: IndexMap<String, FunctionId>,
+        type_implementations: IndexMap<(String, String), String>,
+        core_variables: CoreVariableRegistry,
+        base_program: &Program,
+    ) -> CompilerSeed {
+        let next_register = program.entry_register_count;
+        let next_cond_id = Self::infer_next_cond_id(&program);
+        let mut compiler = Self::new();
+        compiler.program = program;
+        compiler.next_register = next_register;
+        compiler.function_mapping = function_mapping;
+        compiler.core_functions = core_functions;
+        compiler.type_implementations = type_implementations;
+        compiler.core_variables = core_variables;
+        compiler.next_cond_id = next_cond_id;
+        compiler.extract_lazy_params(base_program);
+        compiler.extract_known_functions(base_program);
+        compiler.seed()
+    }
+
+    fn infer_next_cond_id(program: &BytecodeProgram) -> u64 {
+        program
+            .constants
+            .iter()
+            .filter_map(|constant| match constant {
+                Constant::StringRef(value) => Some(value.as_ref()),
+                Constant::Val(Val::Str(value)) => Some(value.as_ref()),
+                _ => None,
+            })
+            .filter_map(|value| value.rsplit_once("\0c").map(|(_, suffix)| suffix))
+            .filter_map(|suffix| suffix.parse::<u64>().ok())
+            .max()
+            .map_or(0, |id| id.saturating_add(1))
     }
 
     /// Non-fatal diagnostics (warnings) collected during the last
@@ -771,6 +887,146 @@ impl Compiler {
         self.register_alias_function_mappings(program);
 
         Ok(())
+    }
+
+    /// Validate and type-check `validation_program`, then append bytecode for
+    /// only the declarations originating in `extension_program`.
+    ///
+    /// `validation_program` must contain the base AST plus the extension AST.
+    /// This gives resolution, placeholder lowering, and type checking complete
+    /// project context while preserving the seeded bytecode as an exact prefix.
+    pub fn compile_extension(
+        &mut self,
+        validation_program: &mut Program,
+        extension_program: &Program,
+    ) -> CompilerResult<()> {
+        tracing::debug!("Compiler: Starting seeded extension compilation");
+
+        // Shadow merges append for execution ordering, but the validation AST
+        // must expose only the newest ordinary binding. Normalize before any
+        // lowering, resolution, or type checking can interpret old and new
+        // signatures as overloads.
+        crate::lang::engine::discover::normalize_shadow_bindings(
+            validation_program,
+            extension_program,
+        );
+
+        // Keep the seeded core registry, adding any new core declarations from
+        // the merged AST before resolution.
+        self.extract_core_variables(validation_program)?;
+
+        crate::lang::compiler::placeholder_lowering::lower_program(validation_program)?;
+
+        let mut resolver =
+            Resolver::with_registries(self.program.namespaces.clone(), self.core_variables.clone());
+        resolver.set_source_info(self.current_file.clone(), self.get_source_content());
+        for (file_path, content) in &self.file_contents {
+            resolver.add_source_file(file_path.clone(), content.clone());
+        }
+        resolver.resolve_program(validation_program)?;
+
+        let mut type_checker = TypeChecker::new();
+        type_checker.set_source_info(self.current_file.clone(), self.get_source_content());
+        for (file_path, content) in &self.file_contents {
+            type_checker.add_source_file(file_path.clone(), content.clone());
+        }
+        let check_result = type_checker.check_program(validation_program);
+        self.diagnostics = type_checker.take_warnings();
+        if let Err(mut errors) = check_result {
+            errors.warnings.clear();
+            return Err(errors);
+        }
+
+        // Select the resolved/lowered copies of extension declarations out of
+        // the merged AST. Exact Var identity includes source spans, so this
+        // selects a shadowing declaration without re-emitting the base one.
+        let mut emission_program = Program {
+            namespaces: IndexMap::new(),
+            current_namespace: extension_program.current_namespace.clone(),
+        };
+        for (ns_path, extension_namespace) in &extension_program.namespaces {
+            let Some(validation_namespace) = validation_program.namespaces.get(ns_path) else {
+                continue;
+            };
+            let mut emission_namespace = extension_namespace.clone();
+            emission_namespace.aliases = validation_namespace.aliases.clone();
+            emission_namespace.scope.vars.clear();
+            for (var, _) in &extension_namespace.scope.vars {
+                if let Some((resolved_var, resolved_value)) =
+                    validation_namespace.scope.vars.get_key_value(var)
+                {
+                    emission_namespace
+                        .scope
+                        .vars
+                        .insert(resolved_var.clone(), resolved_value.clone());
+                }
+            }
+            if !emission_namespace.scope.vars.is_empty() {
+                emission_program
+                    .namespaces
+                    .insert(ns_path.clone(), emission_namespace);
+            }
+        }
+
+        // A shadowing declaration replaces the callable surface of the prior
+        // binding even though its immutable function bytecode stays in the
+        // program. Remove stale overload/laziness indexes before the normal
+        // emitter registers the extension's current shape.
+        for (ns_path, namespace) in &emission_program.namespaces {
+            for (var, _) in &namespace.scope.vars {
+                let qualified_name = format!("{}/{}", ns_path, var.sym.name());
+                let arity_prefix = format!("{}/", qualified_name);
+                self.function_mapping
+                    .retain(|name, _| name != &qualified_name && !name.starts_with(&arity_prefix));
+                self.lazy_params_registry
+                    .retain(|name, _| name != &qualified_name && !name.starts_with(&arity_prefix));
+                self.known_functions
+                    .retain(|name| name != &qualified_name && !name.starts_with(&arity_prefix));
+                self.core_lazy_function_names
+                    .retain(|_, name| name != &qualified_name);
+            }
+        }
+
+        // Alias mapping entries mirror their targets. Rebuild every live alias
+        // after extension emission so target shadowing, arity changes, and
+        // alias retargeting cannot leave stale callable signatures behind.
+        self.clear_alias_function_mappings(validation_program);
+        self.compile_program_two_pass_internal(&emission_program)
+            .map_err(|message| {
+                CompilerErrors::with_error(crate::lang::errors::CompilerError::CallLibError {
+                    func_name: "extension compilation".to_string(),
+                    message,
+                    location: None,
+                })
+            })?;
+        self.register_alias_function_mappings(validation_program);
+
+        self.stats.function_count = self.function_mapping.len();
+        self.stats.constant_count = self.program.constants.len();
+        self.stats.instruction_count = self.program.entry_point.len();
+
+        Ok(())
+    }
+
+    fn clear_alias_function_mappings(&mut self, program: &crate::lang::ast::Program) {
+        use crate::lang::ast::{Ref, Value};
+
+        let alias_prefixes: Vec<String> = program
+            .namespaces
+            .iter()
+            .flat_map(|(ns_path, namespace)| {
+                namespace.scope.vars.iter().filter_map(move |(var, value)| {
+                    if matches!(value, Value::Ref(Ref::Ns(_)) | Value::Ref(Ref::Var(_))) {
+                        Some(format!("{}/{}/", ns_path, var.sym.name()))
+                    } else {
+                        None
+                    }
+                })
+            })
+            .collect();
+
+        self.function_mapping
+            .retain(|name, _| !alias_prefixes.iter().any(|prefix| name.starts_with(prefix)));
     }
 
     /// Internal two-pass compilation method
@@ -2130,30 +2386,24 @@ impl Compiler {
         tracing::trace!("Compiler: compile_function_body called");
         // Save the current instruction context (entry point instructions)
         let saved_instructions = std::mem::take(&mut self.program.entry_point);
-
-        // TCO: The function body is in tail position - the result becomes the function's return value
         let saved_tail_position = self.in_tail_position;
+        let saved_emitting_function_body = self.emitting_function_body;
         self.in_tail_position = true;
+        self.emitting_function_body = true;
 
-        // Compile the function body - instructions will go to entry_point temporarily
-        // Note: We don't create a separate scope here because execute_user_function
-        // already creates a scope with the function parameters
-        let result_reg = self.compile_value(body)?;
+        let result = (|| {
+            // Compile the function body into the scratch entry point. The VM
+            // creates the scope containing function parameters at call time.
+            let result_reg = self.compile_value(body)?;
+            // If a TailCall was emitted this Return is dead code.
+            self.emit_instruction(Instruction::Return { value: result_reg });
+            Ok(std::mem::take(&mut self.program.entry_point))
+        })();
 
-        // TCO: Restore previous tail position state
-        self.in_tail_position = saved_tail_position;
-
-        // Return the result from the function
-        // Note: If a TailCall was emitted, this Return becomes dead code
-        self.emit_instruction(Instruction::Return { value: result_reg });
-
-        // Extract the compiled instructions for this function
-        let function_instructions = std::mem::take(&mut self.program.entry_point);
-
-        // Restore the original entry point instructions
         self.program.entry_point = saved_instructions;
-
-        Ok(function_instructions)
+        self.in_tail_position = saved_tail_position;
+        self.emitting_function_body = saved_emitting_function_body;
+        result
     }
 
     /// Compile a value expression
@@ -4028,31 +4278,25 @@ impl Compiler {
 
         // Save current entry point instructions
         let saved_instructions = std::mem::take(&mut self.program.entry_point);
-
-        // TCO: Save and reset TCO state - lambdas don't support TailCall instructions
-        // because execute_lambda doesn't have a TCO loop. Resetting these prevents
-        // the parent function's TCO context from leaking into the lambda body.
         let saved_function_name = self.current_function_name.take();
         let saved_function_id = self.current_function_id.take();
         let saved_tail_position = self.in_tail_position;
+        let saved_emitting_function_body = self.emitting_function_body;
         self.in_tail_position = false;
+        self.emitting_function_body = true;
 
-        // Compile the lambda body into the entry point temporarily
-        let body_reg = self.compile_value(&lambda.body)?;
+        let lambda_instructions: Result<Vec<Instruction>, String> = (|| {
+            let body_reg = self.compile_value(&lambda.body)?;
+            self.emit_instruction(Instruction::Return { value: body_reg });
+            Ok(std::mem::take(&mut self.program.entry_point))
+        })();
 
-        // TCO: Restore TCO state
+        self.program.entry_point = saved_instructions;
         self.current_function_name = saved_function_name;
         self.current_function_id = saved_function_id;
         self.in_tail_position = saved_tail_position;
-
-        // Add a return instruction for the lambda body result
-        self.emit_instruction(Instruction::Return { value: body_reg });
-
-        // Extract the compiled instructions for the lambda
-        let lambda_instructions = std::mem::take(&mut self.program.entry_point);
-
-        // Restore the original entry point instructions
-        self.program.entry_point = saved_instructions;
+        self.emitting_function_body = saved_emitting_function_body;
+        let lambda_instructions = lambda_instructions?;
 
         // Create closure environment by capturing current variable values
         let mut closure_env = AHashMap::new();
@@ -4146,33 +4390,30 @@ impl Compiler {
 
         // Save current entry point instructions
         let saved_instructions = std::mem::take(&mut self.program.entry_point);
-
-        // Save and reset TCO state
         let saved_function_name = self.current_function_name.take();
         let saved_function_id = self.current_function_id.take();
         let saved_tail_position = self.in_tail_position;
+        let saved_emitting_function_body = self.emitting_function_body;
         self.in_tail_position = false;
+        self.emitting_function_body = true;
 
         // Save register state and reset for thunk compilation
         let saved_next_register = self.next_register;
         self.next_register = 0;
 
-        // Compile the expression into the entry point temporarily
-        let body_reg = self.compile_value(expr)?;
+        let thunk_instructions: Result<Vec<Instruction>, String> = (|| {
+            let body_reg = self.compile_value(expr)?;
+            self.emit_instruction(Instruction::Return { value: body_reg });
+            Ok(std::mem::take(&mut self.program.entry_point))
+        })();
 
-        // Restore TCO state
+        self.program.entry_point = saved_instructions;
         self.current_function_name = saved_function_name;
         self.current_function_id = saved_function_id;
         self.in_tail_position = saved_tail_position;
-
-        // Add a return instruction for the expression result
-        self.emit_instruction(Instruction::Return { value: body_reg });
-
-        // Extract the compiled instructions for the thunk
-        let thunk_instructions = std::mem::take(&mut self.program.entry_point);
-
-        // Restore the original entry point instructions
-        self.program.entry_point = saved_instructions;
+        self.emitting_function_body = saved_emitting_function_body;
+        self.next_register = saved_next_register;
+        let thunk_instructions = thunk_instructions?;
 
         // Calculate register count for the thunk
         let max_reg_in_instructions = thunk_instructions
@@ -4199,9 +4440,6 @@ impl Compiler {
             .unwrap_or(0);
 
         let thunk_register_count = max_reg_in_instructions + 1;
-
-        // Restore parent register counter
-        self.next_register = saved_next_register;
 
         // Create closure environment
         let mut closure_env = AHashMap::new();
@@ -6164,7 +6402,9 @@ impl Compiler {
 
         // Track source location for this instruction
         let instruction_pointer = self.program.entry_point.len();
-        if let Some(ref location) = self.current_source_location {
+        if !self.emitting_function_body
+            && let Some(ref location) = self.current_source_location
+        {
             tracing::trace!(
                 "Adding source location for instruction {}: {}:{}:{}",
                 instruction_pointer,

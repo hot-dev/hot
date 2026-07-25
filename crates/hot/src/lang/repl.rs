@@ -1,7 +1,7 @@
 // Stateful REPL session for Hot.
 //
 // This module provides a stateful REPL session that preserves variables across inputs
-// using incremental execution: compiles all code but executes only new instructions.
+// using append-only compiler extensions and incremental execution.
 
 use crate::lang::engine::Engine;
 use crate::val::Val;
@@ -42,6 +42,9 @@ pub struct ReplSession {
     /// This marks the boundary between previously executed code and new input.
     executed_instruction_count: usize,
 
+    /// Append-only compiler/AST state committed after successful declarations.
+    compilation_state: Option<crate::lang::engine::ReplCompilationState>,
+
     /// Configuration for compilation
     config: ReplConfig,
 
@@ -57,6 +60,7 @@ impl ReplSession {
             current_namespace: "::hot::dev".to_string(),
             preserved_state: IndexMap::new(),
             executed_instruction_count: 0,
+            compilation_state: None,
             config,
             input_counter: 0,
         }
@@ -84,16 +88,27 @@ impl ReplSession {
         let saved_state = self.preserved_state.clone();
         let saved_namespace = self.current_namespace.clone();
         let saved_instruction_count = self.executed_instruction_count;
+        let saved_tool_registry = crate::lang::hot::internal_mcp::get_registry();
+        let saved_skill_registry = crate::lang::hot::internal_skill::get_registry();
+        let is_declaration = self.is_declaration(input);
 
         // Try to execute the input
         match self.try_eval_input(input) {
-            Ok(result) => Ok(result),
+            Ok(result) => {
+                if !is_declaration {
+                    crate::lang::hot::internal_mcp::replace_registry(saved_tool_registry);
+                    crate::lang::hot::internal_skill::replace_registry(saved_skill_registry);
+                }
+                Ok(result)
+            }
             Err(e) => {
                 // Rollback on error to maintain consistent state
                 self.accumulated_source = saved_source;
                 self.preserved_state = saved_state;
                 self.current_namespace = saved_namespace;
                 self.executed_instruction_count = saved_instruction_count;
+                crate::lang::hot::internal_mcp::replace_registry(saved_tool_registry);
+                crate::lang::hot::internal_skill::replace_registry(saved_skill_registry);
                 Err(e)
             }
         }
@@ -106,20 +121,20 @@ impl ReplSession {
         // because they're not valid at namespace level
         let is_declaration = self.is_declaration(input);
 
-        let combined_source = if is_declaration {
+        let extension_body = if is_declaration {
             // This is a declaration - accumulate it
             self.accumulated_source.push(input.to_string());
-            self.build_combined_source()
+            input.to_string()
         } else {
             // This is a standalone expression - create temporary source with dummy variable
             // This allows us to evaluate the expression without polluting the namespace
-            let mut temp_source = self.build_combined_source();
-            temp_source.push_str("// Temporary expression evaluation\n");
+            let mut temp_source = String::from("// Temporary expression evaluation\n");
             temp_source.push_str("__repl_tmp_result ");
             temp_source.push_str(input);
             temp_source.push('\n');
             temp_source
         };
+        let extension_source = format!("{} ns\n{}", self.current_namespace, extension_body);
 
         tracing::debug!(
             "REPL: Executing input meta {}, accumulated {} inputs, executed {} instructions, is_declaration: {}",
@@ -133,27 +148,22 @@ impl ReplSession {
             self.preserved_state.len()
         );
 
-        // Execute incrementally: compile all code but execute only new instructions
-        // This is the key to preventing side-effect re-execution:
-        // 1. Compile all accumulated code (for symbol resolution)
-        // 2. Inject preserved state (provides context for new code)
-        // 3. Restore current_namespace (so VM knows which namespace we're in)
-        // 4. Execute ONLY instructions from executed_instruction_count onward
-        // 5. Previously executed code is skipped to prevent duplicate side effects.
-        let preserved_namespace = if self.executed_instruction_count > 0 {
+        // The compiler seed guarantees the old program remains an exact prefix.
+        // Expressions extend a clone and are discarded; declarations commit it.
+        let preserved_namespace = if self.compilation_state.is_some() {
             Some(self.current_namespace.as_str())
         } else {
             None
         };
 
-        let result = Engine::execute_incremental(
-            &combined_source,
+        let (result, next_compilation_state) = Engine::execute_repl_extension(
+            &extension_source,
+            self.compilation_state.as_ref(),
             &self.config.src_paths,
             &self.config.test_paths,
             self.config.conf.as_ref(),
             self.config.project_name.as_deref(),
             &self.preserved_state,
-            self.executed_instruction_count,
             preserved_namespace,
             self.config.context_storage.clone(),
             true, // REPL is interactive — use color
@@ -171,6 +181,7 @@ impl ReplSession {
             self.preserved_state = result.new_state;
             self.executed_instruction_count = result.total_instruction_count;
             self.current_namespace = result.current_namespace;
+            self.compilation_state = Some(next_compilation_state);
         }
         // For expressions, we don't update state since we used a temporary variable
 
@@ -204,19 +215,6 @@ impl ReplSession {
             // No whitespace - it's a standalone expression
             false
         }
-    }
-
-    /// Build source with all accumulated inputs
-    fn build_combined_source(&self) -> String {
-        let mut source = format!("{} ns\n\n", self.current_namespace);
-
-        for (i, input) in self.accumulated_source.iter().enumerate() {
-            source.push_str(&format!("// REPL input {}\n", i + 1));
-            source.push_str(input);
-            source.push('\n');
-        }
-
-        source
     }
 
     /// Parse namespace directive from input
@@ -266,6 +264,7 @@ impl ReplSession {
         self.accumulated_source.clear();
         self.preserved_state.clear();
         self.executed_instruction_count = 0;
+        self.compilation_state = None;
         self.current_namespace = "::hot::dev".to_string();
         self.input_counter = 0;
     }
@@ -359,5 +358,64 @@ mod tests {
         // (this will fail because x is undefined)
         let result = repl.eval("z x");
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_repl_extensions_preserve_bytecode_prefix_across_namespaces() {
+        let mut repl = ReplSession::new_default();
+        repl.eval("::first ns").unwrap();
+        repl.eval("first-value 1").unwrap();
+
+        let prefix = repl
+            .compilation_state
+            .as_ref()
+            .unwrap()
+            .compiler_seed
+            .program()
+            .entry_point
+            .clone();
+
+        repl.eval("::second ns").unwrap();
+        repl.eval("second-value 2").unwrap();
+        repl.eval("::first ns").unwrap();
+        repl.eval("later-first-value 3").unwrap();
+
+        let extended = &repl
+            .compilation_state
+            .as_ref()
+            .unwrap()
+            .compiler_seed
+            .program()
+            .entry_point;
+        assert!(extended.starts_with(&prefix));
+        assert!(extended.len() > prefix.len());
+    }
+
+    #[test]
+    fn test_repl_function_redefinition_appends_and_takes_effect() {
+        let mut repl = ReplSession::new_default();
+        repl.eval("value fn (): Int { 1 }").unwrap();
+        assert_eq!(repl.eval("value()").unwrap(), Val::Int(1));
+        let original_count = repl.get_executed_instruction_count();
+
+        repl.eval("value fn (): Int { 2 }").unwrap();
+        assert!(repl.get_executed_instruction_count() > original_count);
+        assert_eq!(repl.eval("value()").unwrap(), Val::Int(2));
+    }
+
+    #[test]
+    fn test_repl_function_redefinition_replaces_old_signature() {
+        let mut repl = ReplSession::new_default();
+        repl.eval("value fn (): Int { 1 }").unwrap();
+        repl.eval("value fn (input: Int): Int { input }").unwrap();
+
+        let error = repl
+            .eval("value()")
+            .expect_err("the shadowed zero-arity signature must not validate");
+        assert!(
+            error.contains("argument") || error.contains("arity"),
+            "unexpected validation error: {error}"
+        );
+        assert_eq!(repl.eval("value(2)").unwrap(), Val::Int(2));
     }
 }

@@ -21,6 +21,59 @@ fn test_compiler_creation() {
 }
 
 #[test]
+fn extension_refreshes_alias_mappings_after_target_arity_changes() {
+    use crate::lang::engine::discover::{NsMergePolicy, merge_namespace};
+
+    let mut base = parse_hot(
+        r#"
+            ::test ns
+            target fn (): Int { 1 }
+            alias ::test/target
+        "#,
+    )
+    .expect("base should parse");
+    let mut compiler = Compiler::new();
+    compiler
+        .compile_program(&mut base)
+        .expect("base should compile");
+    assert_eq!(
+        compiler.function_mapping.get("::test/alias/0"),
+        compiler.function_mapping.get("::test/target/0"),
+        "the initial alias should route to the zero-arity target"
+    );
+
+    let extension = parse_hot(
+        r#"
+            ::test ns
+            target fn (input: Int): Int { input }
+        "#,
+    )
+    .expect("extension should parse");
+    for (ns_path, namespace) in extension.namespaces.clone() {
+        merge_namespace(
+            &mut base.namespaces,
+            ns_path,
+            namespace,
+            NsMergePolicy::Shadow,
+        )
+        .expect("shadow merge should succeed");
+    }
+    compiler
+        .compile_extension(&mut base, &extension)
+        .expect("extension should compile");
+
+    assert!(
+        !compiler.function_mapping.contains_key("::test/alias/0"),
+        "the stale alias arity must be removed"
+    );
+    assert_eq!(
+        compiler.function_mapping.get("::test/alias/1"),
+        compiler.function_mapping.get("::test/target/1"),
+        "the alias should mirror the target's new arity"
+    );
+}
+
+#[test]
 fn test_auto_generate_mcp_tool_name_uses_underscores() {
     let name = auto_generate_mcp_tool_name("::myapp::tools", "get-weather");
     assert_eq!(name, "myapp_tools_get_weather");

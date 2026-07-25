@@ -109,6 +109,33 @@ struct CacheFile {
     namespaces_data: Vec<u8>,
 }
 
+fn validate_cache_metadata(
+    metadata: &CacheMetadata,
+    expected_source_hash: &str,
+) -> Result<(), String> {
+    if metadata.source_hash != expected_source_hash {
+        return Err(format!(
+            "Unit cache source hash mismatch: cache={}, requested={}",
+            metadata.source_hash, expected_source_hash
+        ));
+    }
+    if metadata.version != CacheType::Ast.format_version() {
+        return Err(format!(
+            "Unit cache format version mismatch: cache={}, current={}",
+            metadata.version,
+            CacheType::Ast.format_version()
+        ));
+    }
+    if metadata.hot_version != crate::build_info::VERSION {
+        return Err(format!(
+            "Unit cache Hot version mismatch: cache={}, current={}",
+            metadata.hot_version,
+            crate::build_info::VERSION
+        ));
+    }
+    Ok(())
+}
+
 /// Compilation unit cache manager
 /// Caches parsed AST for packages and source paths
 /// Supports cross-process synchronization via file locking
@@ -175,8 +202,8 @@ impl UnitCache {
     }
 
     /// Try to load a cached unit
-    /// The cache key includes Hot version and format version, so if the file exists
-    /// it's guaranteed to be compatible (no post-load validation needed)
+    /// The full computed key and runtime metadata are revalidated from the
+    /// payload before the entry is accepted.
     pub fn load(&self, unit: &CompilationUnit) -> Result<Option<CachedUnit>, String> {
         // Compute cache key (includes version + file hashes)
         let cache_key = self.compute_cache_key(unit)?;
@@ -187,23 +214,30 @@ impl UnitCache {
             return Ok(None);
         }
 
-        // Mark as recently used so the stale-entry pruner never collects a
-        // live entry, then read and decompress
-        super::touch_cache_entry(&cache_path);
+        // Read failures can be transient. Only bytes that were successfully
+        // read but then fail decode/validation establish corruption or staleness.
         let compressed = std::fs::read(&cache_path).map_err(|e| e.to_string())?;
-        let data = zstd::decode_all(compressed.as_slice()).map_err(|e| e.to_string())?;
+        let decoded = (|| {
+            let data = zstd::decode_all(compressed.as_slice()).map_err(|e| e.to_string())?;
+            let cache_file: CacheFile = postcard::from_bytes(&data)
+                .map_err(|e| format!("Failed to deserialize cache file: {}", e))?;
+            validate_cache_metadata(&cache_file.metadata, &cache_key)?;
+            let namespaces = ast_cache::deserialize_namespaces(&cache_file.namespaces_data)?;
+            Ok((cache_file.metadata, namespaces))
+        })();
+        let (metadata, namespaces) = match decoded {
+            Ok(decoded) => decoded,
+            Err(error) => {
+                super::remove_invalid_cache_entry(&cache_path);
+                return Err(error);
+            }
+        };
 
-        // Deserialize the cache file wrapper (postcard)
-        let cache_file: CacheFile = postcard::from_bytes(&data)
-            .map_err(|e| format!("Failed to deserialize cache file: {}", e))?;
-
-        // Deserialize namespaces using ast_cache
-        let namespaces = ast_cache::deserialize_namespaces(&cache_file.namespaces_data)?;
-
+        super::touch_cache_entry(&cache_path);
         Ok(Some(CachedUnit {
-            version: cache_file.metadata.version,
-            hot_version: cache_file.metadata.hot_version,
-            source_hash: cache_file.metadata.source_hash,
+            version: metadata.version,
+            hot_version: metadata.hot_version,
+            source_hash: metadata.source_hash,
             namespaces,
         }))
     }
@@ -428,6 +462,116 @@ mod tests {
         };
 
         (path, ns)
+    }
+
+    fn create_test_unit(root: &Path) -> CompilationUnit {
+        let source = root.join("source");
+        std::fs::create_dir_all(&source).unwrap();
+        std::fs::write(source.join("test.hot"), b"::test ns\nvalue 1\n").unwrap();
+        CompilationUnit::SourcePath {
+            name: "test".to_string(),
+            path: source,
+        }
+    }
+
+    fn write_unit_cache_file(
+        cache: &UnitCache,
+        unit: &CompilationUnit,
+        requested_key: &str,
+        embedded_key: &str,
+        namespaces: &IndexMap<NsPath, Namespace>,
+    ) -> PathBuf {
+        std::fs::create_dir_all(&cache.cache_dir).unwrap();
+        let cache_file = CacheFile {
+            metadata: CacheMetadata {
+                version: CacheType::Ast.format_version(),
+                hot_version: crate::build_info::VERSION.to_string(),
+                source_hash: embedded_key.to_string(),
+            },
+            namespaces_data: ast_cache::serialize_namespaces(namespaces).unwrap(),
+        };
+        let data = postcard::to_allocvec(&cache_file).unwrap();
+        let compressed = zstd::encode_all(data.as_slice(), 1).unwrap();
+        let path = cache.cache_path(unit, requested_key);
+        std::fs::write(&path, compressed).unwrap();
+        path
+    }
+
+    #[test]
+    fn load_rejects_source_hash_mismatch_then_save_repairs() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let unit = create_test_unit(root.path());
+        let cache = UnitCache::new(root.path().join("cache"));
+        let requested_key = cache.compute_cache_key(&unit).unwrap();
+        let (path, namespace) = create_test_namespace("test");
+        let namespaces = [(path, namespace)].into_iter().collect();
+        let cache_path = write_unit_cache_file(
+            &cache,
+            &unit,
+            &requested_key,
+            "different-full-source-hash",
+            &namespaces,
+        );
+
+        let error = cache
+            .load(&unit)
+            .expect_err("source hash mismatch must fail");
+        assert!(error.contains("source hash mismatch"));
+        assert!(!cache_path.exists(), "stale unit cache must be deleted");
+
+        cache.save(&unit, &namespaces).expect("save must repair");
+        assert!(cache.load(&unit).unwrap().is_some());
+    }
+
+    #[test]
+    fn load_deletes_corrupt_unit_entry() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let unit = create_test_unit(root.path());
+        let cache = UnitCache::new(root.path().join("cache"));
+        let key = cache.compute_cache_key(&unit).unwrap();
+        std::fs::create_dir_all(&cache.cache_dir).unwrap();
+        let path = cache.cache_path(&unit, &key);
+        std::fs::write(&path, b"not-zstd").unwrap();
+
+        assert!(cache.load(&unit).is_err());
+        assert!(!path.exists(), "corrupt unit cache must be deleted");
+    }
+
+    #[test]
+    fn load_does_not_delete_unit_entry_on_read_failure() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let unit = create_test_unit(root.path());
+        let cache = UnitCache::new(root.path().join("cache"));
+        let key = cache.compute_cache_key(&unit).unwrap();
+        std::fs::create_dir_all(&cache.cache_dir).unwrap();
+        let path = cache.cache_path(&unit, &key);
+        std::fs::create_dir(&path).unwrap();
+
+        assert!(cache.load(&unit).is_err());
+        assert!(path.is_dir(), "read failures must leave the entry in place");
+    }
+
+    #[test]
+    fn load_touches_only_after_valid_unit_decode() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let unit = create_test_unit(root.path());
+        let cache = UnitCache::new(root.path().join("cache"));
+        let (path, namespace) = create_test_namespace("test");
+        let namespaces = [(path, namespace)].into_iter().collect();
+        cache.save(&unit, &namespaces).unwrap();
+
+        let key = cache.compute_cache_key(&unit).unwrap();
+        let cache_path = cache.cache_path(&unit, &key);
+        let old_system = std::time::SystemTime::now() - std::time::Duration::from_secs(48 * 3600);
+        let old = filetime::FileTime::from_system_time(old_system);
+        filetime::set_file_mtime(&cache_path, old).unwrap();
+
+        assert!(cache.load(&unit).unwrap().is_some());
+        let touched = std::fs::metadata(&cache_path).unwrap().modified().unwrap();
+        assert!(
+            touched > old_system,
+            "valid cache load must refresh modification time"
+        );
     }
 
     #[test]

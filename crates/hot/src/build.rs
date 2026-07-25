@@ -71,6 +71,20 @@ pub struct BuildResult {
     pub zip_path: PathBuf,
 }
 
+/// Metadata validation requested while creating a live build.
+///
+/// Structural callers leave the default in place. Runtime callers must opt in
+/// explicitly, including when the available context-key set is empty.
+#[derive(Debug, Clone, Default)]
+enum LiveBuildValidationPolicy {
+    #[default]
+    Structural,
+    RuntimePreflight {
+        available_context_keys: AHashSet<String>,
+        conf: crate::val::Val,
+    },
+}
+
 /// Parameters for identifying the user, environment, and organization for build creation
 #[derive(Debug, Clone)]
 pub struct BuildContext {
@@ -101,6 +115,8 @@ pub struct BuildContext {
     /// `hot.build.allow-secret-shape` (per-file allowlist) and the
     /// `--allow-secret-shape` CLI flag (kill-switch for the entire scan).
     pub secret_scan_opts: crate::secret_scan::SecretScanOpts,
+
+    live_build_validation: LiveBuildValidationPolicy,
 }
 
 impl BuildContext {
@@ -126,6 +142,7 @@ impl BuildContext {
             respect_gitignore: true,
             resource_excludes: Vec::new(),
             secret_scan_opts: crate::secret_scan::SecretScanOpts::default(),
+            live_build_validation: LiveBuildValidationPolicy::Structural,
         }
     }
 
@@ -145,6 +162,19 @@ impl BuildContext {
     /// Builder-style setter for the secret-shape scanner options.
     pub fn with_secret_scan_opts(mut self, opts: crate::secret_scan::SecretScanOpts) -> Self {
         self.secret_scan_opts = opts;
+        self
+    }
+
+    /// Require runtime metadata to be valid before any live-build DB writes.
+    pub fn with_runtime_preflight(
+        mut self,
+        available_context_keys: AHashSet<String>,
+        conf: crate::val::Val,
+    ) -> Self {
+        self.live_build_validation = LiveBuildValidationPolicy::RuntimePreflight {
+            available_context_keys,
+            conf,
+        };
         self
     }
 }
@@ -453,6 +483,82 @@ fn scan_collected_build_inputs(
         Ok(())
     } else {
         Err(crate::secret_scan::format_findings(&findings))
+    }
+}
+
+/// Validate runtime metadata already collected by a compilation/extraction pass.
+///
+/// This narrow helper is pure so callers can fail before any project, build,
+/// handler, schedule, or run records are mutated.
+pub fn validate_extracted_runtime_metadata(
+    extracted: &crate::lang::engine::ExtractedHandlers,
+    available_context_keys: &AHashSet<String>,
+    conf: &crate::val::Val,
+) -> Result<(), String> {
+    let ctx_result = crate::lang::compiler::ctx_checker::check_ctx_requirements(
+        &extracted.ctx_requirements,
+        available_context_keys,
+    );
+    if !ctx_result.is_ok() {
+        return Err(ctx_result.format_errors());
+    }
+
+    for requirement in &extracted.box_requirements.requirements {
+        if let Some(size) = requirement.requirement.min_size.as_deref()
+            && crate::lang::compiler::box_checker::size_memory_mb(size).is_none()
+        {
+            return Err(format!(
+                "Invalid box size '{}' in meta {{box: {{min-size: \"{}\"}}}} on {}\n\
+                 Valid sizes: nano, micro, small, medium, large, xlarge, 2xlarge, 4xlarge",
+                size, size, requirement.fqn
+            ));
+        }
+    }
+
+    let schedule_policy = crate::db::SchedulePolicy::from_conf(conf);
+    for cron_expression in extracted.scheduled_functions.keys() {
+        crate::db::validate_recurring_schedule_interval(
+            cron_expression,
+            schedule_policy.min_interval_secs,
+        )
+        .map_err(|e| format!("Schedule policy error: {}", e.message()))?;
+    }
+
+    Ok(())
+}
+
+/// Compile/extract source metadata and perform runtime preflight without DB writes.
+///
+/// Used only when a configured live-build path must return before
+/// `create_live_build` can provide the normal single-pass preflight.
+pub fn preflight_runtime_metadata_from_sources(
+    src_paths: &[String],
+    project_name: &str,
+    conf: &crate::val::Val,
+    available_context_keys: &AHashSet<String>,
+    color: bool,
+) -> Result<(), String> {
+    let extracted = crate::lang::engine::Engine::extract_handlers_and_scheduled_functions(
+        src_paths,
+        Some(project_name),
+        Some(conf),
+        color,
+    )
+    .map_err(|e| format!("Compilation failed: {}", e))?;
+
+    validate_extracted_runtime_metadata(&extracted, available_context_keys, conf)
+}
+
+fn validate_live_build_metadata(
+    extracted: &crate::lang::engine::ExtractedHandlers,
+    policy: &LiveBuildValidationPolicy,
+) -> Result<(), String> {
+    match policy {
+        LiveBuildValidationPolicy::Structural => Ok(()),
+        LiveBuildValidationPolicy::RuntimePreflight {
+            available_context_keys,
+            conf,
+        } => validate_extracted_runtime_metadata(extracted, available_context_keys, conf),
     }
 }
 
@@ -1011,6 +1117,10 @@ pub async fn create_live_build(
         color,
     )
     .map_err(|e| format!("Compilation failed: {}", e))?;
+
+    // Runtime callers validate the metadata from the compilation above before
+    // any project/build/handler/schedule records can be written.
+    validate_live_build_metadata(&extracted, &build_context.live_build_validation)?;
 
     // Calculate hash of all files combined
     let build_hash = calculate_bundle_hash(&all_files);
@@ -2583,6 +2693,114 @@ mod tests {
             declared_by: declared_by.map(String::from),
             source_file: None,
         }
+    }
+
+    fn empty_extracted_handlers() -> crate::lang::engine::ExtractedHandlers {
+        crate::lang::engine::ExtractedHandlers {
+            event_handlers: Default::default(),
+            scheduled_functions: Default::default(),
+            mcp_tools: Default::default(),
+            webhooks: Default::default(),
+            agents: Default::default(),
+            workflows: Default::default(),
+            send_targets: Default::default(),
+            ctx_requirements: Default::default(),
+            box_requirements: Default::default(),
+        }
+    }
+
+    fn extracted_handlers_with_required_ctx() -> crate::lang::engine::ExtractedHandlers {
+        let mut extracted = empty_extracted_handlers();
+        extracted.ctx_requirements.namespaces.push(
+            crate::lang::compiler::ctx_checker::NamespaceCtxRequirements {
+                namespace: "::demo/needs-key".to_string(),
+                keys: vec![crate::lang::compiler::ctx_checker::CtxKeyConfig {
+                    key: "api.key".to_string(),
+                    required: true,
+                    default: None,
+                    secret: true,
+                }],
+                source_file: Some("hot/src/demo.hot".to_string()),
+            },
+        );
+        extracted
+    }
+
+    #[test]
+    fn test_live_build_runtime_preflight_requires_explicit_context_keys() {
+        let extracted = extracted_handlers_with_required_ctx();
+        let structural_context = BuildContext::new(
+            None,
+            None,
+            None,
+            None,
+            "demo".to_string(),
+            Vec::new(),
+            Vec::new(),
+        );
+        assert!(
+            validate_live_build_metadata(&extracted, &structural_context.live_build_validation)
+                .is_ok()
+        );
+
+        let runtime_context = structural_context
+            .with_runtime_preflight(AHashSet::new(), crate::val::Val::map_empty());
+        let error =
+            validate_live_build_metadata(&extracted, &runtime_context.live_build_validation)
+                .unwrap_err();
+        assert!(error.contains("Missing required context variable 'api.key'"));
+
+        let runtime_context = BuildContext::new(
+            None,
+            None,
+            None,
+            None,
+            "demo".to_string(),
+            Vec::new(),
+            Vec::new(),
+        )
+        .with_runtime_preflight(
+            AHashSet::from_iter(["api.key".to_string()]),
+            crate::val::Val::map_empty(),
+        );
+        assert!(
+            validate_live_build_metadata(&extracted, &runtime_context.live_build_validation)
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn test_live_build_runtime_preflight_validates_box_sizes_and_schedule_policy() {
+        let mut extracted = empty_extracted_handlers();
+        extracted.box_requirements.requirements.push(
+            crate::lang::compiler::box_checker::FnBoxRequirement {
+                fqn: "::demo/worker".to_string(),
+                source_file: Some("hot/src/demo.hot".to_string()),
+                requirement: crate::lang::compiler::box_checker::BoxRequirement {
+                    min_size: Some("enormous".to_string()),
+                    network: None,
+                },
+            },
+        );
+        let runtime_policy = LiveBuildValidationPolicy::RuntimePreflight {
+            available_context_keys: AHashSet::new(),
+            conf: crate::val::Val::map_empty(),
+        };
+        let error = validate_live_build_metadata(&extracted, &runtime_policy).unwrap_err();
+        assert!(error.contains("Invalid box size 'enormous'"));
+
+        let mut extracted = empty_extracted_handlers();
+        extracted
+            .scheduled_functions
+            .insert("every second".to_string(), Vec::new());
+        let runtime_policy = LiveBuildValidationPolicy::RuntimePreflight {
+            available_context_keys: AHashSet::new(),
+            conf: crate::val::val!({
+                "schedule": {"min-interval-seconds": 300}
+            }),
+        };
+        let error = validate_live_build_metadata(&extracted, &runtime_policy).unwrap_err();
+        assert!(error.contains("Schedule policy error"));
     }
 
     #[test]

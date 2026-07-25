@@ -3,7 +3,7 @@
 use hot::val::Val;
 
 use crate::cli::GlobalOptions;
-use crate::command::deploy::setup_live_build_for_dev;
+use crate::command::deploy::{is_ad_hoc_default_db, setup_live_build_for_dev_with_context};
 use crate::conf::{
     create_emitter, create_event_publisher, get_merged_src_paths, get_merged_test_paths,
 };
@@ -39,8 +39,22 @@ pub(crate) async fn run_eval(
     // executing any user code, so a check_sources_pipeline_with_context call
     // would just compile hot-std and the project sources a second time.
 
-    // Create or update live build for development (consistent with run/repl/check)
-    setup_live_build_for_dev(conf, global_options, &src_paths, &test_paths).await?;
+    // Reuse live-build compilation for runtime metadata preflight before any
+    // live-build records are mutated. None means an explicit empty key set,
+    // not structural-only validation.
+    let ad_hoc_default_db = is_ad_hoc_default_db(conf);
+    let available_context_keys = context_storage
+        .as_ref()
+        .map(|storage| storage.keys().cloned().collect())
+        .unwrap_or_default();
+    setup_live_build_for_dev_with_context(
+        conf,
+        global_options,
+        &src_paths,
+        &test_paths,
+        available_context_keys,
+    )
+    .await?;
 
     // Create emitter and event publisher for eval commands (like run and test)
     // Check for emitter configuration (hot.emitter.type in config becomes emitter.type in resolved conf)
@@ -54,9 +68,11 @@ pub(crate) async fn run_eval(
         !queue_type_str.is_empty() && queue_type_str != "null" && queue_type_str != "none";
 
     // Only build a database pool when an emitter or event publisher will
-    // actually use it. Ad hoc out-of-project evals default both to "none",
-    // so a pool would just be a doomed connection attempt.
-    let db_pool = if has_emitter_config || has_queue_config {
+    // actually use it. Ad-hoc default-DB evals skip live-build compilation,
+    // so keep DB-backed providers absent and let Execute validate first.
+    let db_pool = if ad_hoc_default_db {
+        None
+    } else if has_emitter_config || has_queue_config {
         match hot::db::create_db_pool(conf).await {
             Ok(pool) => Some(std::sync::Arc::new(pool)),
             Err(e) => {

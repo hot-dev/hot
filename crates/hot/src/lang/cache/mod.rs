@@ -31,6 +31,78 @@ pub(crate) fn touch_cache_entry(path: &std::path::Path) {
     }
 }
 
+/// Remove a cache entry known to be stale or corrupt. This is deliberately
+/// separate from read-error handling: permission and other transient read
+/// failures must leave the entry in place.
+pub(crate) fn remove_invalid_cache_entry(path: &std::path::Path) {
+    if let Err(error) = std::fs::remove_file(path)
+        && error.kind() != std::io::ErrorKind::NotFound
+    {
+        tracing::debug!(
+            "Failed to remove invalid cache entry {}: {}",
+            path.display(),
+            error
+        );
+    }
+}
+
+fn is_lower_hex(value: &str, expected_len: usize) -> bool {
+    value.len() == expected_len
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+fn is_unit_cache_stem(stem: &str) -> bool {
+    if !stem.starts_with("pkg-") && !stem.starts_with("src-") {
+        return false;
+    }
+    stem.rsplit_once('-')
+        .is_some_and(|(_, hash)| is_lower_hex(hash, 16))
+}
+
+/// Whether a filename is owned by Hot's cache layer and is therefore safe
+/// for opportunistic deletion.
+pub(crate) fn is_managed_cache_file_name(name: &str) -> bool {
+    if let Some(hash) = name.strip_suffix(".bc.zst")
+        && is_lower_hex(hash, 64)
+    {
+        return true;
+    }
+    if let Some(stem) = name.strip_suffix(".ast.zst")
+        && is_unit_cache_stem(stem)
+    {
+        return true;
+    }
+    if let Some(hash) = name
+        .strip_prefix("std-")
+        .and_then(|name| name.strip_suffix(".hsc"))
+        && (is_lower_hex(hash, 64) || is_lower_hex(hash, 16))
+    {
+        return true;
+    }
+
+    // Atomic-write leftovers normally append `.tmp.<writer>`.
+    if let Some((base, _)) = name.split_once(".tmp")
+        && is_managed_cache_file_name(base)
+    {
+        return true;
+    }
+    // Historical writers replaced the final extension rather than appending.
+    if let Some(hash) = name.split_once(".bc.bytecode.tmp.").map(|(hash, _)| hash)
+        && is_lower_hex(hash, 64)
+    {
+        return true;
+    }
+    if let Some(stem) = name.split_once(".ast.ast.zst.tmp").map(|(stem, _)| stem)
+        && is_unit_cache_stem(stem)
+    {
+        return true;
+    }
+
+    false
+}
+
 /// Best-effort sweep of stale files in a cache directory, called
 /// opportunistically after a successful cache save (off any hot path).
 ///
@@ -57,6 +129,9 @@ pub(crate) fn prune_stale_cache_files(dir: &std::path::Path, keep: &std::path::P
         if name.ends_with(".lock") {
             continue;
         }
+        if !is_managed_cache_file_name(&name) {
+            continue;
+        }
         let is_tmp = name.contains(".tmp");
         let max_age = if is_tmp {
             CACHE_TMP_PRUNE_AFTER
@@ -77,15 +152,17 @@ pub(crate) fn prune_stale_cache_files(dir: &std::path::Path, keep: &std::path::P
 
 #[cfg(test)]
 mod prune_tests {
-    use super::prune_stale_cache_files;
+    use super::{is_managed_cache_file_name, prune_stale_cache_files};
+
+    const BYTECODE_KEY: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
     #[test]
     fn prunes_old_files_keeps_fresh_and_kept() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let old = dir.path().join("pkg-old-abc.ast.zst");
-        let fresh = dir.path().join("pkg-fresh-def.ast.zst");
-        let kept = dir.path().join("pkg-kept-123.ast.zst");
-        let old_tmp = dir.path().join("pkg-x.ast.zst.tmp.999");
+        let old = dir.path().join("pkg-old-0123456789abcdef.ast.zst");
+        let fresh = dir.path().join("pkg-fresh-fedcba9876543210.ast.zst");
+        let kept = dir.path().join("pkg-kept-1111111111111111.ast.zst");
+        let old_tmp = dir.path().join("pkg-x-2222222222222222.ast.zst.tmp.999");
         for f in [&old, &fresh, &kept, &old_tmp] {
             std::fs::write(f, b"x").unwrap();
         }
@@ -110,7 +187,7 @@ mod prune_tests {
     #[test]
     fn keep_file_survives_even_when_old() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let kept = dir.path().join("pkg-kept.bc.zst");
+        let kept = dir.path().join(format!("{}.bc.zst", BYTECODE_KEY));
         std::fs::write(&kept, b"x").unwrap();
         filetime::set_file_mtime(
             &kept,
@@ -122,5 +199,51 @@ mod prune_tests {
 
         prune_stale_cache_files(dir.path(), &kept);
         assert!(kept.exists(), "the file just written is never pruned");
+    }
+
+    #[test]
+    fn pruning_never_deletes_unrelated_or_lock_files() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let keep = dir
+            .path()
+            .join("std-0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef.hsc");
+        let managed = dir.path().join(format!("{}.bc.zst", BYTECODE_KEY));
+        let unrelated = dir.path().join("customer-data.cache");
+        let unrelated_tmp = dir.path().join("notes.tmp");
+        let lock = dir.path().join("pkg-old-0123456789abcdef.lock");
+        for path in [&keep, &managed, &unrelated, &unrelated_tmp, &lock] {
+            std::fs::write(path, b"x").unwrap();
+            filetime::set_file_mtime(
+                path,
+                filetime::FileTime::from_system_time(
+                    std::time::SystemTime::now() - std::time::Duration::from_secs(90 * 24 * 3600),
+                ),
+            )
+            .unwrap();
+        }
+
+        prune_stale_cache_files(dir.path(), &keep);
+
+        assert!(!managed.exists(), "recognized Hot cache entry is pruned");
+        assert!(unrelated.exists(), "unrelated file is preserved");
+        assert!(unrelated_tmp.exists(), "unrelated temp file is preserved");
+        assert!(lock.exists(), "lock file is always preserved");
+    }
+
+    #[test]
+    fn recognizes_only_hot_managed_cache_patterns() {
+        assert!(is_managed_cache_file_name(&format!(
+            "{}.bc.zst",
+            BYTECODE_KEY
+        )));
+        assert!(is_managed_cache_file_name(
+            "pkg-hot-std-0123456789abcdef.ast.zst"
+        ));
+        assert!(is_managed_cache_file_name(
+            "std-0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef.hsc"
+        ));
+        assert!(!is_managed_cache_file_name("foreign.cache"));
+        assert!(!is_managed_cache_file_name("notes.tmp"));
+        assert!(!is_managed_cache_file_name("short.bc.zst"));
     }
 }

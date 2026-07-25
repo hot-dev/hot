@@ -14,10 +14,29 @@
 //!     `artifacts_to_cached_bytecode`. Used by the worker pool when the
 //!     bytecode cache hits.
 
-use super::discover::{discover_compilation_units, parse_units_with_cache};
+use super::discover::{
+    NsMergePolicy, discover_compilation_units, merge_namespace, parse_units_with_cache,
+};
 use super::{CompilationArtifacts, Engine, PipelineMode};
 use ahash::AHashMap;
 use std::sync::Arc;
+
+pub(super) struct EvalRuntimeOptions<'a> {
+    pub(super) conf: Option<&'a crate::val::Val>,
+    pub(super) emitter: Option<Arc<dyn crate::lang::emitter::EngineEventEmitter>>,
+    pub(super) execution_context: Option<crate::lang::event::ExecutionContext>,
+    pub(super) event_publisher: Option<Arc<dyn crate::lang::event::EventPublisher>>,
+    pub(super) context_storage: Option<AHashMap<String, crate::val::Val>>,
+    pub(super) database_pool: Option<Arc<crate::db::DatabasePool>>,
+    pub(super) file_storage: Option<Arc<dyn crate::file_storage::FileStorage>>,
+    pub(super) store: Option<Arc<dyn crate::store::Store>>,
+    pub(super) embedding_provider: Option<Arc<dyn crate::store::embedding::EmbeddingProvider>>,
+    pub(super) task_queue:
+        Option<Arc<crate::queue::ProcessingQueue<crate::lang::hot::task::TaskRequest>>>,
+    pub(super) stream_publisher: Option<Arc<crate::stream::StreamPubSub>>,
+    pub(super) color: bool,
+    pub(super) warnings_out: Option<&'a mut crate::lang::errors::CompilerErrors>,
+}
 
 impl Engine {
     /// Convert VM terminal states into the same value shape as explicit Hot
@@ -329,8 +348,149 @@ impl Engine {
         }
     }
 
-    /// Execute eval code using a cached BytecodeProgram with registries and AST (for worker cache hits)
-    /// Uses cached AST for full metadata enrichment!
+    fn eval_namespace(execution_context: Option<&crate::lang::event::ExecutionContext>) -> String {
+        let id = execution_context
+            .map(|ctx| ctx.run_id.to_string())
+            .unwrap_or_else(|| uuid::Uuid::now_v7().to_string());
+        let compact = id.replace('-', "");
+        let short_id = compact
+            .get(compact.len().saturating_sub(12)..)
+            .unwrap_or(&compact);
+        format!("::hot::$run::run-{}", short_id)
+    }
+
+    /// Compile and execute an eval snippet by extending a complete compiler
+    /// seed. Both cached eval and compile-plus-artifacts eval use this path.
+    pub(super) fn execute_eval_extension(
+        code: &str,
+        seed: crate::lang::compiler::CompilerSeed,
+        base_ast: &crate::lang::ast::Program,
+        mut options: EvalRuntimeOptions<'_>,
+    ) -> Result<crate::val::Val, String> {
+        let eval_ns = Self::eval_namespace(options.execution_context.as_ref());
+        let eval_source = format!("{} ns\n{}", eval_ns, code);
+        let eval_ast =
+            crate::lang::parser::parse_hot_file(&eval_source, "<eval>").map_err(|e| {
+                match e.format_error(&eval_source, options.color) {
+                    Some(formatted) => format!("Parse errors:\n{}", formatted),
+                    None => format!("Parse errors:\nParse error in eval code: {}", e),
+                }
+            })?;
+
+        let mut merged_ast = base_ast.clone();
+        for (ns_path, namespace) in eval_ast.namespaces.clone() {
+            merge_namespace(
+                &mut merged_ast.namespaces,
+                ns_path,
+                namespace,
+                NsMergePolicy::Shadow,
+            )?;
+        }
+
+        let mut compiler = crate::lang::compiler::Compiler::from_seed(seed);
+        compiler.set_current_file(std::path::PathBuf::from("<eval>"), eval_source);
+        compiler
+            .compile_extension(&mut merged_ast, &eval_ast)
+            .map_err(|errors| {
+                format!(
+                    "Compile-time errors found:\n{}",
+                    errors.format_error(options.color)
+                )
+            })?;
+
+        if let Some(out) = options.warnings_out.as_deref_mut() {
+            *out = compiler.take_diagnostics();
+        }
+
+        let call_lib_errors = compiler.get_call_lib_errors();
+        if !call_lib_errors.is_empty() {
+            return Err(format!(
+                "Compile-time errors found:\n{}",
+                call_lib_errors.join("\n")
+            ));
+        }
+
+        // Run the exact same handler/schedule/ctx/box pre-flight as the full
+        // Execute pipeline, but against the merged base + eval AST.
+        let ctx_requirements = Self::validate_compiled_program(
+            &mut compiler,
+            &merged_ast,
+            options.conf,
+            Self::runtime_context_validation_policy(options.context_storage.as_ref()),
+            options.color,
+        )?;
+
+        // Rebuild from the merged AST so eval-defined and shadowed functions
+        // are visible without dropping cached base entries.
+        crate::lang::hot::internal_mcp::set_registry(compiler.build_tool_specs(&merged_ast));
+        crate::lang::hot::internal_skill::set_registry(compiler.build_skill_specs(&merged_ast));
+
+        let mut vm = crate::lang::runtime::vm::VirtualMachine::new(
+            compiler.get_program_arc(),
+            Some(Arc::new(crate::lang::ast::HotAst::from_program(merged_ast))),
+            compiler.get_function_mapping_arc(),
+            compiler.get_core_functions_arc(),
+            compiler.get_type_implementations_arc(),
+            compiler.get_core_variables_arc(),
+            options.conf.cloned(),
+        );
+
+        if let Some(emitter) = options.emitter {
+            vm.set_emitter(emitter);
+        }
+        if let Some(execution_context) = options.execution_context {
+            vm.set_execution_context(execution_context);
+        }
+        if let Some(event_publisher) = options.event_publisher {
+            vm.set_event_publisher(event_publisher);
+        }
+        if let Some(context_storage) = options.context_storage {
+            vm.context_storage = context_storage;
+        }
+        for (key, default_val) in ctx_requirements.all_defaults() {
+            vm.context_storage.entry(key).or_insert(default_val);
+        }
+        vm.secret_keys = ctx_requirements.all_secret_keys();
+        vm.sync_secret_keys_to_execution_context();
+
+        if let Some(database_pool) = options.database_pool {
+            vm.set_database_pool(database_pool);
+        }
+        if let Some(file_storage) = options.file_storage {
+            vm.set_file_storage(file_storage);
+        }
+        if let Some(store) = options.store {
+            vm.set_store(store);
+        }
+        if let Some(embedding_provider) = options.embedding_provider {
+            vm.set_embedding_provider(embedding_provider);
+        }
+        if let Some(task_queue) = options.task_queue {
+            vm.set_task_queue(task_queue);
+        }
+        if let Some(stream_publisher) = options.stream_publisher {
+            vm.set_stream_publisher(stream_publisher);
+        }
+
+        let execute_result = vm
+            .execute()
+            .map_err(|e| format!("Failed to execute extended bytecode: {}", e))?;
+        if let Some(terminal_value) = Self::terminal_value_from_vm_state(&vm) {
+            return Ok(terminal_value);
+        }
+
+        // The eval namespace is known before execution. Looking it up directly
+        // avoids returning a base namespace's value when module initialization
+        // changes the VM's current namespace, and preserves a legitimate Null.
+        Ok(vm
+            .get_namespace_vars(Some(&eval_ns))
+            .and_then(|vars| vars.iter().next_back().map(|(_, value)| value.clone()))
+            .unwrap_or(execute_result))
+    }
+
+    /// Execute eval code using cached bytecode and its compiler registries.
+    /// This compatibility wrapper keeps the original public API; engine paths
+    /// that have additional runtime providers use the shared helper directly.
     #[allow(clippy::too_many_arguments)]
     pub fn eval_code_with_cached_bytecode(
         code: &str,
@@ -343,203 +503,34 @@ impl Engine {
         database_pool: Option<Arc<crate::db::DatabasePool>>,
         stream_publisher: Option<Arc<crate::stream::StreamPubSub>>,
     ) -> Result<crate::val::Val, String> {
-        tracing::debug!("Using cached bytecode with AST (skipping parsing and compilation)");
-
-        // Clone only the program (it gets extended with eval instructions);
-        // registries are borrowed for registration and Arc-shared into the VM.
-        let function_mapping = &cached.function_mapping;
-        let core_functions = &cached.core_functions;
-        let type_implementations = &cached.type_implementations;
-        let mut cached_program = cached.program.clone();
-        let cached_instruction_count = cached_program.entry_point.len();
-
-        // Compile ONLY the eval code with inherited registries
-        tracing::debug!("Compiling eval code with cached context: {}", code);
-
-        // Use a unique namespace to prevent conflicts with user code
-        // Format: ::hot::$run::run-<short-id> where short-id is last 12 chars of UUID without hyphens
-        let eval_ns = if let Some(ctx) = &execution_context {
-            let run_id_str = ctx.run_id.to_string();
-            let run_id_no_hyphens = run_id_str.replace('-', "");
-            let short_id = if run_id_no_hyphens.len() >= 12 {
-                &run_id_no_hyphens[run_id_no_hyphens.len() - 12..]
-            } else {
-                &run_id_no_hyphens
-            };
-            format!("::hot::$run::run-{}", short_id)
-        } else {
-            let temp_uuid = uuid::Uuid::now_v7().to_string();
-            let temp_no_hyphens = temp_uuid.replace('-', "");
-            let short_id = if temp_no_hyphens.len() >= 12 {
-                &temp_no_hyphens[temp_no_hyphens.len() - 12..]
-            } else {
-                &temp_no_hyphens
-            };
-            format!("::hot::$run::run-{}", short_id)
-        };
-
-        let eval_code_with_ns = format!("{} ns\n{}", eval_ns, code);
-        let mut eval_ast = crate::lang::parser::parse_hot_file(&eval_code_with_ns, "<eval>")
-            .map_err(|e| match e.format_error(&eval_code_with_ns, false) {
-                Some(formatted) => format!("Parse errors:\n{}", formatted),
-                None => format!("Parse errors:\nParse error in eval code: {}", e),
-            })?;
-
-        // Compile just the eval code with the cached registries pre-loaded
-        // This ensures the eval code can reference project functions and core functions
-        let mut eval_compiler = crate::lang::compiler::Compiler::new();
-
-        // Seed core variables from the cached build so unqualified calls to
-        // core functions (`add(1,1)`) resolve — the eval snippet does not
-        // contain hot-std's namespaces, so compile_program's own extraction
-        // pass would find nothing.
-        eval_compiler.set_core_variables((*cached.runtime_core_variables).clone());
-
-        // Pre-populate the compiler with cached registries so eval code can reference them
-        for (name, id) in function_mapping {
-            eval_compiler.register_existing_function(name.clone(), *id);
-        }
-        for (name, id) in core_functions {
-            eval_compiler.register_existing_core_function(name.clone(), *id);
-        }
-        for ((type_name, method_name), impl_name) in type_implementations {
-            eval_compiler.register_existing_type_implementation(
-                type_name.clone(),
-                method_name.clone(),
-                impl_name.clone(),
-            );
-        }
-
-        eval_compiler.add_source_file(
-            std::path::PathBuf::from("<eval>"),
-            eval_code_with_ns.clone(),
+        let seed = crate::lang::compiler::Compiler::seed_from_compiled(
+            cached.program.clone(),
+            cached.function_mapping.clone(),
+            cached.core_functions.clone(),
+            cached.type_implementations.clone(),
+            (*cached.runtime_core_variables).clone(),
+            &cached.ast_program,
         );
-        eval_compiler
-            .compile_program(&mut eval_ast)
-            .map_err(|e| format!("Compile-time errors found:\n{}", e.format_error(false)))?;
-
-        // Pre-flight ctx validation, mirroring Execute-mode validation in the
-        // classic pipeline: requirements declared by the eval program itself
-        // (e.g. an inline fn with meta {ctx: ...}) must be satisfiable before
-        // any user code executes. Keys covered by the cached build's defaults
-        // count as available.
-        {
-            let call_graph = crate::lang::compiler::call_graph::CallGraph::build(&eval_ast);
-            let ctx_requirements = call_graph.resolve_user_ctx_requirements(&eval_ast);
-            if ctx_requirements.has_requirements() {
-                let mut available_keys: ahash::AHashSet<String> = context_storage
-                    .as_ref()
-                    .map(|cs| cs.keys().cloned().collect())
-                    .unwrap_or_default();
-                available_keys.extend(cached.runtime_ctx_defaults.keys().cloned());
-
-                let ctx_result = crate::lang::compiler::ctx_checker::check_ctx_requirements(
-                    &ctx_requirements,
-                    &available_keys,
-                );
-                if !ctx_result.is_ok() {
-                    return Err(ctx_result.format_errors());
-                }
-            }
-        }
-
-        // Merge eval program into cached program
-        let mut eval_program = eval_compiler.get_program().clone();
-
-        // Merge constants and remap IDs in eval instructions
-        let id_mapping = cached_program.merge_constants(eval_program.constants.clone());
-        crate::lang::bytecode::BytecodeProgram::remap_constant_ids(
-            &mut eval_program.entry_point,
-            &id_mapping,
-        );
-
-        // Append eval instructions to cached program
-        let _eval_start = cached_program.append_instructions(eval_program.entry_point);
-        let total_instructions = cached_program.entry_point.len();
-
-        tracing::debug!(
-            "✓ Extended bytecode: {} cached + {} eval = {} total instructions",
-            cached_instruction_count,
-            total_instructions - cached_instruction_count,
-            total_instructions
-        );
-
-        // Use the pre-built HotAst from cache (no expensive indexing needed!)
-        let hot_ast = cached.runtime_hot_ast.clone();
-
-        // Core variables (critical for resolving types like Null, Vec, etc.)
-        // were derived once when the cached build was constructed.
-        let core_variables = cached.runtime_core_variables.clone();
-
-        tracing::debug!(
-            "✓ Using pre-built HotAst from cache ({} namespaces, {} core vars) - skipped expensive indexing!",
-            cached.ast_program.namespaces.len(),
-            core_variables.len()
-        );
-
-        // Create VM with the extended program and full AST
-        let extended_program_arc = Arc::new(cached_program);
-        let mut vm = crate::lang::runtime::vm::VirtualMachine::new(
-            extended_program_arc,
-            Some(hot_ast), // Full AST from cache - rich metadata enrichment!
-            cached.runtime_function_mapping.clone(),
-            cached.runtime_core_functions.clone(),
-            cached.runtime_type_implementations.clone(),
-            core_variables,
-            conf.cloned(),
-        );
-
-        // Set emitter, execution context, and event publisher if provided
-        if let Some(emitter) = emitter {
-            vm.set_emitter(emitter);
-        }
-        if let Some(execution_context) = execution_context {
-            vm.set_execution_context(execution_context);
-        }
-        if let Some(event_publisher) = event_publisher {
-            vm.set_event_publisher(event_publisher);
-        }
-        if let Some(context_storage) = context_storage {
-            vm.context_storage = context_storage;
-        }
-
-        // Extract ctx requirements via call graph and apply defaults + secret keys
-        let ctx_requirements =
-            crate::lang::compiler::ctx_checker::extract_ctx_requirements_via_call_graph(
-                &cached.ast_program,
-            );
-        for (key, default_val) in ctx_requirements.all_defaults() {
-            vm.context_storage.entry(key).or_insert(default_val);
-        }
-        vm.secret_keys = ctx_requirements.all_secret_keys();
-        vm.sync_secret_keys_to_execution_context();
-
-        // Set database pool if provided
-        if let Some(db_pool) = database_pool {
-            vm.set_database_pool(db_pool);
-        }
-        // Set stream publisher for real-time SSE updates
-        if let Some(publisher) = stream_publisher {
-            vm.set_stream_publisher(publisher);
-        }
-
-        // Install tool/skill spec registries from cached bytecode
-        // before module-init runs. See `call_function_with_cached_bytecode`
-        // for the full rationale.
-        crate::lang::hot::internal_mcp::set_registry(cached.tool_specs.clone());
-        crate::lang::hot::internal_skill::set_registry(cached.skill_specs.clone());
-
-        // Execute the complete extended program (cached + eval)
-        tracing::debug!(
-            "Executing extended bytecode program ({} total instructions)",
-            total_instructions
-        );
-        let result = vm
-            .execute()
-            .map_err(|e| format!("Failed to execute extended bytecode: {}", e))?;
-
-        tracing::debug!("Cached bytecode + eval execution completed successfully");
-        Ok(result)
+        Self::execute_eval_extension(
+            code,
+            seed,
+            &cached.ast_program,
+            EvalRuntimeOptions {
+                conf,
+                emitter,
+                execution_context,
+                event_publisher,
+                context_storage,
+                database_pool,
+                file_storage: None,
+                store: None,
+                embedding_provider: None,
+                task_queue: None,
+                stream_publisher,
+                color: false,
+                warnings_out: None,
+            },
+        )
     }
 
     /// Call a function directly with Val arguments using cached bytecode (no code parsing!)
@@ -1382,6 +1373,98 @@ mod tests {
             ast_program: ast_program.clone(),
             hot_ast: HotAst::from_program(ast_program),
         })
+    }
+
+    fn eval_cached(source: &str, code: &str) -> Result<Val, String> {
+        Engine::eval_code_with_cached_bytecode(
+            code,
+            cached_bytecode_for(source),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+    }
+
+    #[test]
+    fn seeded_cached_eval_defines_and_calls_function() {
+        let result = eval_cached(
+            r#"
+                ::base ns
+                identity fn (value: Int): Int { value }
+            "#,
+            r#"
+                twice fn (value: Int): Int {
+                    ::base/identity(::base/identity(value))
+                }
+                answer twice(42)
+            "#,
+        )
+        .expect("seeded eval function should compile and execute");
+
+        assert_eq!(result, Val::Int(42));
+    }
+
+    #[test]
+    fn seeded_cached_eval_calls_cached_function() {
+        let result = eval_cached(
+            r#"
+                ::base ns
+                cached-value fn (): Int { 73 }
+            "#,
+            "answer ::base/cached-value()",
+        )
+        .expect("eval should call a function from cached bytecode");
+
+        assert_eq!(result, Val::Int(73));
+    }
+
+    #[test]
+    fn seeded_cached_eval_supports_cond_match_and_lambda() {
+        let result = eval_cached(
+            r#"
+                ::base ns
+                base-choice cond {
+                    false => { 0 }
+                    => { 1 }
+                }
+                apply fn (callback: Fn): Any { callback() }
+            "#,
+            r#"
+                conditional cond {
+                    false => { 10 }
+                    => { ::base/base-choice }
+                }
+                matched match conditional {
+                    1 => { 99 }
+                    => { 0 }
+                }
+                answer ::base/apply(() { matched })
+            "#,
+        )
+        .expect("seeded flows and lambda should compile and execute");
+
+        assert_eq!(result, Val::Int(99));
+    }
+
+    #[test]
+    fn seeded_cached_eval_returns_last_eval_namespace_value() {
+        let result = eval_cached(
+            r#"
+                ::base ns
+                base-result 1000
+            "#,
+            r#"
+                first 1
+                final-result 2
+            "#,
+        )
+        .expect("eval should return its namespace's final binding");
+
+        assert_eq!(result, Val::Int(2));
     }
 
     #[test]

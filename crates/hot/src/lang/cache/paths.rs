@@ -86,12 +86,34 @@ pub fn get_system_cache_dir() -> PathBuf {
     // runners, profilers) would otherwise scatter `.hot/` directories into
     // whatever cwd the process happened to run from — and once `.hot/`
     // exists, has_project_config() treats that directory as a project.
-    let fallback = std::env::temp_dir().join("hot-cache");
+    let fallback = fallback_temp_cache_dir();
     tracing::warn!(
         "Could not determine system cache directory, using {}",
         fallback.display()
     );
     fallback
+}
+
+#[cfg(unix)]
+fn fallback_temp_cache_dir() -> PathBuf {
+    // SAFETY: geteuid has no preconditions and does not mutate process state.
+    let effective_uid = unsafe { libc::geteuid() };
+    std::env::temp_dir().join(format!("hot-cache-uid-{}", effective_uid))
+}
+
+#[cfg(not(unix))]
+fn fallback_temp_cache_dir() -> PathBuf {
+    let user = std::env::var("USERNAME")
+        .ok()
+        .filter(|value| !value.is_empty())
+        .or_else(|| std::env::var("USER").ok().filter(|value| !value.is_empty()));
+    match user {
+        Some(user) => {
+            let user_hash = blake3::hash(user.as_bytes()).to_hex().to_string();
+            std::env::temp_dir().join(format!("hot-cache-user-{}", &user_hash[..16]))
+        }
+        None => std::env::temp_dir().join(format!("hot-cache-pid-{}", std::process::id())),
+    }
 }
 
 /// Get the platform-specific cache directory
@@ -251,6 +273,23 @@ mod tests {
             "Cache dir should contain 'hot': {:?}",
             cache_dir
         );
+    }
+
+    #[test]
+    fn fallback_cache_dir_is_user_scoped() {
+        let fallback = fallback_temp_cache_dir();
+        assert_ne!(fallback, std::env::temp_dir().join("hot-cache"));
+
+        #[cfg(unix)]
+        {
+            // SAFETY: geteuid has no preconditions and does not mutate state.
+            let effective_uid = unsafe { libc::geteuid() };
+            assert!(
+                fallback.ends_with(format!("hot-cache-uid-{}", effective_uid)),
+                "fallback must be scoped to the effective user: {}",
+                fallback.display()
+            );
+        }
     }
 
     #[test]

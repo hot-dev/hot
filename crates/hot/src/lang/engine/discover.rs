@@ -48,6 +48,152 @@ fn file_label(file: &Option<String>) -> &str {
     file.as_deref().unwrap_or("<unknown file>")
 }
 
+fn literal_type_expr(expr: &crate::lang::ast::TypeExpr) -> bool {
+    match expr {
+        crate::lang::ast::TypeExpr::Literal(_) => true,
+        crate::lang::ast::TypeExpr::Union(parts) => parts.iter().all(literal_type_expr),
+        _ => false,
+    }
+}
+
+/// Repeated open literal-union declarations are extensions, not ordinary
+/// redefinitions. Keep both declarations so the type checker can compose
+/// their members (and report the dedicated open/closed mismatch when needed).
+fn is_open_literal_union_pair(
+    prior: &crate::lang::ast::Value,
+    incoming: &crate::lang::ast::Value,
+) -> bool {
+    let (crate::lang::ast::Value::TypeDef(prior), crate::lang::ast::Value::TypeDef(incoming)) =
+        (prior, incoming)
+    else {
+        return false;
+    };
+    let (Some(prior_alias), Some(incoming_alias)) = (&prior.type_alias, &incoming.type_alias)
+    else {
+        return false;
+    };
+
+    (prior.is_open || incoming.is_open)
+        && literal_type_expr(prior_alias)
+        && literal_type_expr(incoming_alias)
+}
+
+fn static_deep_path_parts(path: &crate::lang::ast::DeepPath) -> Option<Vec<String>> {
+    use crate::lang::ast::DeepPath;
+
+    match path {
+        DeepPath::Key(key) => Some(vec![format!("key:{key}")]),
+        DeepPath::Index(index) => Some(vec![format!("index:{index}")]),
+        DeepPath::Chain(left, right) => {
+            let mut parts = static_deep_path_parts(left)?;
+            parts.extend(static_deep_path_parts(right)?);
+            Some(parts)
+        }
+        DeepPath::DynamicIndex(_) | DeepPath::Append => None,
+    }
+}
+
+/// Two static deep-set assignments commute only when their paths diverge.
+/// Prefix-related, dynamic, and append paths may affect the same value and
+/// therefore remain conflicts across static source files.
+fn disjoint_deep_sets(prior: &crate::lang::ast::Var, incoming: &crate::lang::ast::Var) -> bool {
+    let (Some(prior), Some(incoming)) = (&prior.deep_set, &incoming.deep_set) else {
+        return false;
+    };
+    let (Some(prior), Some(incoming)) = (
+        static_deep_path_parts(prior),
+        static_deep_path_parts(incoming),
+    ) else {
+        return false;
+    };
+
+    prior
+        .iter()
+        .zip(&incoming)
+        .any(|(prior, incoming)| prior != incoming)
+}
+
+/// Normalize the merged validation view used by a seeded Shadow extension.
+///
+/// `merge_namespace(Shadow)` appends declarations so the bytecode emitter can
+/// execute the new source in order. Validation, however, must not keep an old
+/// ordinary binding visible after a later REPL/eval declaration replaces it.
+/// Doing so turns old and new function signatures into apparent overloads even
+/// though extension emission removes the old callable surface.
+///
+/// Open literal-union declarations and deep-set updates are additive rather
+/// than ordinary shadows. Keep compatible prior members for those forms:
+///
+/// * literal unions retain prior declarations when either side is open, so
+///   member accumulation and open/closed mismatch diagnostics still work;
+/// * deep sets retain the root declaration and prior disjoint static updates,
+///   while a conflicting prior update is superseded by the new one.
+pub(crate) fn normalize_shadow_bindings(
+    validation_program: &mut crate::lang::ast::Program,
+    extension_program: &crate::lang::ast::Program,
+) {
+    use crate::lang::ast::{Value, Var};
+
+    for (ns_path, extension_namespace) in &extension_program.namespaces {
+        let Some(validation_namespace) = validation_program.namespaces.get_mut(ns_path) else {
+            continue;
+        };
+
+        let mut extension_by_name: AHashMap<String, Vec<(Var, Value)>> = AHashMap::new();
+        for (var, value) in &extension_namespace.scope.vars {
+            if var.sym.name() == "ns" {
+                continue;
+            }
+            extension_by_name
+                .entry(var.sym.name().to_string())
+                .or_default()
+                .push((var.clone(), value.clone()));
+        }
+
+        for (name, extension_entries) in extension_by_name {
+            let extension_vars: AHashSet<Var> = extension_entries
+                .iter()
+                .map(|(var, _)| var.clone())
+                .collect();
+            let all_deep_sets = extension_entries
+                .iter()
+                .all(|(var, _)| var.deep_set.is_some());
+            let all_literal_types = extension_entries.iter().all(|(_, value)| {
+                let Value::TypeDef(type_def) = value else {
+                    return false;
+                };
+                type_def.type_alias.as_ref().is_some_and(literal_type_expr)
+            });
+
+            validation_namespace.scope.vars.retain(|var, value| {
+                if var.sym.name() != name || extension_vars.contains(var) {
+                    return true;
+                }
+
+                if all_deep_sets {
+                    // A root declaration establishes the value that later
+                    // deep updates mutate. Prior deep updates survive only
+                    // when every new path is statically disjoint.
+                    return var.deep_set.is_none()
+                        || extension_entries
+                            .iter()
+                            .all(|(incoming, _)| disjoint_deep_sets(var, incoming));
+                }
+
+                if all_literal_types {
+                    return extension_entries
+                        .iter()
+                        .any(|(_, incoming)| is_open_literal_union_pair(value, incoming));
+                }
+
+                // Ordinary binding: the extension's declarations are the
+                // complete newest surface for this name.
+                false
+            });
+        }
+    }
+}
+
 /// Merge `incoming` into `target[ns_path]`, combining members instead of
 /// replacing the whole namespace. All namespace-merge sites (unit files,
 /// cross-unit, target file, eval/REPL code) go through here so duplicate
@@ -107,18 +253,16 @@ pub(crate) fn merge_namespace(
         }
     }
 
-    // Aliases: union; the same alias name pointing at two different targets
-    // is a conflict under Strict, newest-wins under Shadow.
+    // Aliases are namespace-wide rather than lexical. Retargeting one while
+    // shadowing would retroactively change previously compiled declarations,
+    // so conflicting targets are errors under both policies.
     for (alias, alias_target) in incoming.aliases {
         match existing.aliases.get(&alias) {
             Some(current) if *current != alias_target => {
-                if policy == NsMergePolicy::Strict {
-                    return Err(format!(
-                        "Namespace '{}' declares alias '{}' with conflicting targets '{}' and '{}'",
-                        ns_path, alias, current, alias_target
-                    ));
-                }
-                existing.aliases.insert(alias, alias_target);
+                return Err(format!(
+                    "Namespace '{}' declares alias '{}' with conflicting targets '{}' and '{}'",
+                    ns_path, alias, current, alias_target
+                ));
             }
             Some(_) => {}
             None => {
@@ -131,50 +275,79 @@ pub(crate) fn merge_namespace(
     // so map-key equality can't detect same-name redeclarations).
     for (var, value) in incoming.scope.vars {
         let name = var.sym.name();
-        let existing_same_name = existing
+        let existing_same_name: Vec<_> = existing
             .scope
             .vars
-            .keys()
+            .iter()
             .rev()
-            .find(|v| v.sym.name() == name)
-            .cloned();
+            .filter(|(v, _)| v.sym.name() == name)
+            .map(|(var, value)| (var.clone(), value.clone()))
+            .collect();
 
         // Every file's `::path ns` declaration parses to a `ns` binding, so a
         // namespace assembled from several files legitimately sees one per
         // file — keep the first and skip the rest.
-        if name == "ns" && existing_same_name.is_some() {
+        if name == "ns" && !existing_same_name.is_empty() {
             continue;
         }
 
-        match existing_same_name {
-            None => {
-                existing.scope.vars.insert(var, value);
-            }
-            Some(prior) => {
-                let prior_file = binding_file(&prior, &existing.source_file);
+        if existing_same_name.is_empty() {
+            existing.scope.vars.insert(var, value);
+        } else {
+            let same_file = existing_same_name.iter().any(|(prior, _)| {
+                let prior_file = binding_file(prior, &existing.source_file);
                 let incoming_file = binding_file(&var, &incoming_source_file);
-                if prior_file.is_some() && prior_file == incoming_file {
-                    // Same file merged twice — keep the existing binding.
-                    continue;
-                }
-                match policy {
-                    NsMergePolicy::Strict => {
-                        return Err(format!(
-                            "Duplicate definition of '{}' in namespace '{}': defined in {} and {}",
-                            name,
-                            ns_path,
-                            file_label(&prior_file),
-                            file_label(&incoming_file),
-                        ));
-                    }
-                    NsMergePolicy::Shadow => {
+                prior_file.is_some() && prior_file == incoming_file
+            });
+            if same_file {
+                // Same file merged twice — keep the existing binding.
+                continue;
+            }
+
+            match policy {
+                NsMergePolicy::Strict => {
+                    let legal_open_extension = existing_same_name
+                        .iter()
+                        .all(|(_, prior_value)| is_open_literal_union_pair(prior_value, &value));
+                    let legal_deep_set = existing_same_name
+                        .iter()
+                        .all(|(prior, _)| disjoint_deep_sets(prior, &var));
+                    if legal_open_extension || legal_deep_set {
                         existing.scope.vars.insert(var, value);
+                        continue;
                     }
+
+                    let (prior, _) = &existing_same_name[0];
+                    let prior_file = binding_file(prior, &existing.source_file);
+                    let incoming_file = binding_file(&var, &incoming_source_file);
+                    return Err(format!(
+                        "Duplicate definition of '{}' in namespace '{}': defined in {} and {}",
+                        name,
+                        ns_path,
+                        file_label(&prior_file),
+                        file_label(&incoming_file),
+                    ));
+                }
+                NsMergePolicy::Shadow => {
+                    existing.scope.vars.insert(var, value);
                 }
             }
         }
     }
 
+    Ok(())
+}
+
+/// Merge a complete static-source program using the canonical member-level
+/// policy. This is public so sibling crates such as `hot_lsp` cannot drift
+/// back to whole-namespace replacement.
+pub fn merge_program_namespaces_strict(
+    target: &mut IndexMap<crate::lang::ast::NsPath, crate::lang::ast::Namespace>,
+    incoming: IndexMap<crate::lang::ast::NsPath, crate::lang::ast::Namespace>,
+) -> Result<(), String> {
+    for (ns_path, namespace) in incoming {
+        merge_namespace(target, ns_path, namespace, NsMergePolicy::Strict)?;
+    }
     Ok(())
 }
 
@@ -936,6 +1109,10 @@ mod ns_merge_tests {
             .namespaces
     }
 
+    fn parse_program(source: &str, file: &str) -> crate::lang::ast::Program {
+        crate::lang::parser::parse_hot_file(source, file).expect("test source should parse")
+    }
+
     fn merge_all(
         target: &mut IndexMap<NsPath, Namespace>,
         namespaces: IndexMap<NsPath, Namespace>,
@@ -1060,6 +1237,96 @@ mod ns_merge_tests {
     }
 
     #[test]
+    fn shadow_validation_keeps_only_newest_ordinary_binding() {
+        let mut base = parse_program(
+            "::myapp ns\n\nvalue fn (): Int { 1 }\nother 2\n",
+            "base.hot",
+        );
+        let extension = parse_program(
+            "::myapp ns\n\nvalue fn (input: Int): Int { input }\n",
+            "<repl:1>",
+        );
+        merge_all(
+            &mut base.namespaces,
+            extension.namespaces.clone(),
+            NsMergePolicy::Shadow,
+        )
+        .unwrap();
+
+        normalize_shadow_bindings(&mut base, &extension);
+
+        let merged = ns(&base.namespaces, "::myapp");
+        assert_eq!(
+            merged
+                .scope
+                .vars
+                .keys()
+                .filter(|var| var.sym.name() == "value")
+                .count(),
+            1,
+            "the old callable signature must not remain visible to validation"
+        );
+        assert!(
+            merged
+                .scope
+                .vars
+                .keys()
+                .any(|var| var.sym.name() == "other"),
+            "unrelated bindings must survive"
+        );
+    }
+
+    #[test]
+    fn shadow_validation_preserves_open_unions_and_disjoint_deep_sets() {
+        let mut base = parse_program(
+            r#"
+                ::myapp ns
+                Fruit type open "apple" | "banana"
+                config.db.uri "postgres://localhost"
+            "#,
+            "base.hot",
+        );
+        let extension = parse_program(
+            r#"
+                ::myapp ns
+                Fruit type open | "kiwi"
+                config.db.schema "public"
+            "#,
+            "<repl:1>",
+        );
+        merge_all(
+            &mut base.namespaces,
+            extension.namespaces.clone(),
+            NsMergePolicy::Shadow,
+        )
+        .unwrap();
+
+        normalize_shadow_bindings(&mut base, &extension);
+
+        let merged = ns(&base.namespaces, "::myapp");
+        assert_eq!(
+            merged
+                .scope
+                .vars
+                .keys()
+                .filter(|var| var.sym.name() == "Fruit")
+                .count(),
+            2,
+            "open literal-union members must accumulate"
+        );
+        assert_eq!(
+            merged
+                .scope
+                .vars
+                .keys()
+                .filter(|var| var.sym.name() == "config")
+                .count(),
+            2,
+            "disjoint deep-set updates must accumulate"
+        );
+    }
+
+    #[test]
     fn project_declaring_hot_std_namespace_collides_deterministically() {
         // Simulates a project src file declaring a hot-std namespace path.
         // Adding a NEW name merges member-wise; redefining an EXISTING name
@@ -1103,7 +1370,63 @@ mod ns_merge_tests {
     }
 
     #[test]
-    fn alias_conflicts_error_under_strict_and_win_under_shadow() {
+    fn open_literal_union_extensions_across_files_combine() {
+        let mut target = IndexMap::new();
+        merge_all(
+            &mut target,
+            parse(
+                "::myapp ns\n\nFruit type open \"apple\" | \"banana\"\n",
+                "a.hot",
+            ),
+            NsMergePolicy::Strict,
+        )
+        .unwrap();
+        merge_all(
+            &mut target,
+            parse("::myapp ns\n\nFruit type open | \"kiwi\"\n", "b.hot"),
+            NsMergePolicy::Strict,
+        )
+        .unwrap();
+
+        let fruit_count = ns(&target, "::myapp")
+            .scope
+            .vars
+            .keys()
+            .filter(|var| var.sym.name() == "Fruit")
+            .count();
+        assert_eq!(fruit_count, 2, "both open-union declarations survive");
+    }
+
+    #[test]
+    fn disjoint_deep_sets_combine_but_same_path_conflicts() {
+        let uri = parse(
+            "::myapp ns\n\nconfig.db.uri \"postgres://localhost\"\n",
+            "a.hot",
+        );
+        let schema = parse("::myapp ns\n\nconfig.db.schema \"public\"\n", "b.hot");
+        let duplicate_uri = parse(
+            "::myapp ns\n\nconfig.db.uri \"postgres://other\"\n",
+            "c.hot",
+        );
+
+        let mut target = IndexMap::new();
+        merge_all(&mut target, uri, NsMergePolicy::Strict).unwrap();
+        merge_all(&mut target, schema, NsMergePolicy::Strict).unwrap();
+        let config_count = ns(&target, "::myapp")
+            .scope
+            .vars
+            .keys()
+            .filter(|var| var.sym.name() == "config")
+            .count();
+        assert_eq!(config_count, 2, "disjoint updates are both retained");
+
+        let err = merge_all(&mut target, duplicate_uri, NsMergePolicy::Strict)
+            .expect_err("the same deep-set path must conflict");
+        assert!(err.contains("Duplicate definition of 'config'"), "{err}");
+    }
+
+    #[test]
+    fn alias_conflicts_error_under_both_policies() {
         let a = parse("::myapp ns\n::h ::hot::http\n", "a.hot");
         let b = parse("::myapp ns\n::h ::hot::html\n", "b.hot");
 
@@ -1115,13 +1438,8 @@ mod ns_merge_tests {
 
         let mut target = IndexMap::new();
         merge_all(&mut target, a, NsMergePolicy::Strict).unwrap();
-        merge_all(&mut target, b, NsMergePolicy::Shadow).unwrap();
-        let merged = ns(&target, "::myapp");
-        let aliased = merged
-            .aliases
-            .iter()
-            .find(|(alias, _)| alias.to_string() == "::h")
-            .map(|(_, t)| t.to_string());
-        assert_eq!(aliased.as_deref(), Some("::hot::html"), "shadow alias wins");
+        let err = merge_all(&mut target, b, NsMergePolicy::Shadow)
+            .expect_err("shadowing cannot retarget namespace-wide aliases");
+        assert!(err.contains("alias"), "{err}");
     }
 }

@@ -116,6 +116,9 @@ ammonia = "4.1.3"
 [target.'cfg(unix)'.dependencies]
 libc = { workspace = true }
 
+[build-dependencies]
+blake3 = { workspace = true }
+
 [dev-dependencies]
 filetime = "0.2"
 tempfile = { workspace = true }

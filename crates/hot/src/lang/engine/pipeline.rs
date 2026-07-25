@@ -21,7 +21,8 @@ use super::discover::{
     parse_files_parallel, parse_units_with_cache,
 };
 use super::{
-    CompilationArtifacts, Engine, ExecutionWithArtifacts, ExtractedHandlers, PipelineMode,
+    CompilationArtifacts, ContextValidationPolicy, Engine, ExecutionWithArtifacts,
+    ExtractedHandlers, PipelineMode,
 };
 use ahash::{AHashMap, AHashSet};
 use std::sync::Arc;
@@ -237,7 +238,12 @@ impl Engine {
         })
     }
 
-    /// Run a single file using the pipeline with full dependency loading
+    /// Structurally validate a single file with full dependency loading.
+    ///
+    /// This is the build/compile entry point: it parses and compiles the
+    /// project, validates handlers, schedules, and box metadata, and collects
+    /// context requirements without requiring runtime context values or
+    /// executing module code.
     pub fn run_file_pipeline_with_deps(
         target_file: &str,
         src_paths: &[String],
@@ -254,7 +260,7 @@ impl Engine {
             project_name,
             Some(target_file),
             None,
-            PipelineMode::Execute,
+            PipelineMode::StructuralValidation,
             None,
             None,
             None, // No event publisher
@@ -730,19 +736,28 @@ impl Engine {
         .map(|_| ())
     }
 
-    /// Post-compile validations shared by Check and Execute modes: event
-    /// handler and scheduled-function signature checks, schedule policy,
-    /// and call-graph-scoped ctx/box requirement checks.
+    pub(super) fn runtime_context_validation_policy(
+        context_storage: Option<&AHashMap<String, crate::val::Val>>,
+    ) -> ContextValidationPolicy {
+        ContextValidationPolicy::RequireSatisfied(
+            context_storage
+                .map(|storage| storage.keys().cloned().collect())
+                .unwrap_or_default(),
+        )
+    }
+
+    /// Post-compile structural validations shared by build, check, and execute
+    /// modes, with an explicit policy for runtime context satisfaction.
     ///
     /// These are cheap passes over the already-compiled program. Running them
     /// in Execute mode as well gives `run`/`eval` the same pre-flight failures
     /// `check` reports — before any user code executes — without paying for
     /// the separate check pipeline's second full compile.
-    fn validate_compiled_program(
+    pub(super) fn validate_compiled_program(
         compiler: &mut crate::lang::Compiler,
         combined_program: &crate::lang::ast::Program,
         conf: Option<&crate::val::Val>,
-        context_storage: Option<&AHashMap<String, crate::val::Val>>,
+        context_policy: ContextValidationPolicy,
         color: bool,
     ) -> Result<crate::lang::compiler::ctx_checker::ProgramCtxRequirements, String> {
         // Validate event handlers (event parameter requirement)
@@ -774,11 +789,9 @@ impl Engine {
         // This only includes ctx requirements reachable from user code.
         let ctx_requirements = call_graph.resolve_user_ctx_requirements(combined_program);
 
-        if ctx_requirements.has_requirements() {
-            let available_keys: AHashSet<String> = context_storage
-                .map(|cs| cs.keys().cloned().collect())
-                .unwrap_or_default();
-
+        if ctx_requirements.has_requirements()
+            && let ContextValidationPolicy::RequireSatisfied(available_keys) = context_policy
+        {
             let ctx_result = crate::lang::compiler::ctx_checker::check_ctx_requirements(
                 &ctx_requirements,
                 &available_keys,
@@ -885,16 +898,33 @@ impl Engine {
                 crate::lang::cache::std_artifact::get_or_build(only_unit.unit.path())
         {
             tracing::debug!(" Unified Pipeline: using hot-std image fast path for eval");
-            return Self::eval_code_with_cached_bytecode(
+            let seed = crate::lang::compiler::Compiler::seed_from_compiled(
+                image.program.clone(),
+                image.function_mapping.clone(),
+                image.core_functions.clone(),
+                image.type_implementations.clone(),
+                (*image.runtime_core_variables).clone(),
+                &image.ast_program,
+            );
+            return Self::execute_eval_extension(
                 code,
-                image,
-                conf,
-                emitter,
-                execution_context,
-                event_publisher,
-                context_storage,
-                database_pool,
-                stream_publisher,
+                seed,
+                &image.ast_program,
+                super::cache::EvalRuntimeOptions {
+                    conf,
+                    emitter,
+                    execution_context,
+                    event_publisher,
+                    context_storage,
+                    database_pool,
+                    file_storage,
+                    store,
+                    embedding_provider,
+                    task_queue,
+                    stream_publisher,
+                    color,
+                    warnings_out,
+                },
             );
         }
 
@@ -1134,6 +1164,18 @@ impl Engine {
 
         // Phase 3: Execute based on mode
         match mode {
+            PipelineMode::StructuralValidation => {
+                Self::validate_compiled_program(
+                    &mut compiler,
+                    &combined_program,
+                    conf,
+                    ContextValidationPolicy::CollectOnly,
+                    color,
+                )?;
+
+                tracing::debug!(" Unified Pipeline: structural validation completed successfully");
+                Ok(crate::val::Val::Null)
+            }
             PipelineMode::Check => {
                 // Check mode: validate only, no VM execution
                 tracing::debug!(" Unified Pipeline: Check mode - validating...");
@@ -1142,7 +1184,7 @@ impl Engine {
                     &mut compiler,
                     &combined_program,
                     conf,
-                    context_storage.as_ref(),
+                    Self::runtime_context_validation_policy(context_storage.as_ref()),
                     color,
                 )?;
 
@@ -1159,7 +1201,7 @@ impl Engine {
                     &mut compiler,
                     &combined_program,
                     conf,
-                    context_storage.as_ref(),
+                    Self::runtime_context_validation_policy(context_storage.as_ref()),
                     color,
                 )?;
 
@@ -1549,13 +1591,14 @@ impl Engine {
             return Err(format!("Parse errors:\n{}", parse_errors.join("\n")));
         }
 
-        // Merge parsed namespaces into combined program
+        // Merge parsed namespaces member-by-member using the same strict
+        // policy as the regular pipeline. Whole-namespace replacement here
+        // made worker/std artifacts silently drop declarations.
         for parsed in &parsed_files {
-            for (ns_path, namespace) in &parsed.namespaces {
-                combined_program
-                    .namespaces
-                    .insert(ns_path.clone(), namespace.clone());
-            }
+            super::discover::merge_program_namespaces_strict(
+                &mut combined_program.namespaces,
+                parsed.namespaces.clone(),
+            )?;
         }
 
         // Resolve variable references on the BASE program (before eval code)
@@ -1617,95 +1660,37 @@ impl Engine {
             hot_ast: crate::lang::ast::HotAst::from_program(combined_program.clone()),
         };
 
-        // Now parse and compile eval code if provided (for execution only, not caching)
-        // We need to compile eval code separately and append to the base program
-        let (final_program, final_combined_program) = if let Some(code) = eval_code {
-            // Clone the base program to extend it
-            let mut extended_program = compiler.get_program().clone();
-            let cached_instruction_count = extended_program.entry_point.len();
+        // Eval extends the base through the same seeded compiler path used by
+        // persisted bytecode cache hits. Cacheable artifacts remain base-only.
+        if let Some(code) = eval_code {
+            let result = Self::execute_eval_extension(
+                code,
+                compiler.seed(),
+                &combined_program,
+                super::cache::EvalRuntimeOptions {
+                    conf,
+                    emitter,
+                    execution_context,
+                    event_publisher,
+                    context_storage,
+                    database_pool,
+                    file_storage,
+                    store,
+                    embedding_provider,
+                    task_queue: None,
+                    stream_publisher,
+                    color,
+                    warnings_out: None,
+                },
+            )?;
+            return Ok(ExecutionWithArtifacts {
+                result,
+                artifacts: Some(artifacts),
+            });
+        }
 
-            // Create unique namespace for eval code
-            let eval_ns = if let Some(ref ctx) = execution_context {
-                let run_id_str = ctx.run_id.to_string();
-                let run_id_no_hyphens = run_id_str.replace('-', "");
-                let short_id = if run_id_no_hyphens.len() >= 12 {
-                    &run_id_no_hyphens[run_id_no_hyphens.len() - 12..]
-                } else {
-                    &run_id_no_hyphens
-                };
-                format!("::hot::$run::run-{}", short_id)
-            } else {
-                let temp_uuid = uuid::Uuid::now_v7().to_string();
-                let temp_no_hyphens = temp_uuid.replace('-', "");
-                let short_id = if temp_no_hyphens.len() >= 12 {
-                    &temp_no_hyphens[temp_no_hyphens.len() - 12..]
-                } else {
-                    &temp_no_hyphens
-                };
-                format!("::hot::$run::run-{}", short_id)
-            };
-
-            let eval_code_with_ns = format!("{} ns\n{}", eval_ns, code);
-            let mut eval_ast = crate::lang::parser::parse_hot(&eval_code_with_ns)
-                .map_err(|e| format!("Failed to parse eval code: {}", e))?;
-
-            // Compile just the eval code with the base registries pre-loaded
-            let mut eval_compiler = crate::lang::compiler::Compiler::new();
-
-            // Pre-populate the eval compiler with base registries
-            for (name, id) in compiler.get_function_mapping() {
-                eval_compiler.register_existing_function(name.clone(), *id);
-            }
-            for (name, id) in compiler.get_core_functions() {
-                eval_compiler.register_existing_core_function(name.clone(), *id);
-            }
-            for ((type_name, method_name), impl_name) in compiler.get_type_implementations() {
-                eval_compiler.register_existing_type_implementation(
-                    type_name.clone(),
-                    method_name.clone(),
-                    impl_name.clone(),
-                );
-            }
-
-            eval_compiler
-                .compile_program(&mut eval_ast)
-                .map_err(|e| format!("Failed to compile eval code: {}", e.format_error(color)))?;
-
-            // Merge eval program into extended program
-            let mut eval_program = eval_compiler.get_program().clone();
-
-            // Merge constants and remap IDs in eval instructions
-            let id_mapping = extended_program.merge_constants(eval_program.constants.clone());
-            crate::lang::bytecode::BytecodeProgram::remap_constant_ids(
-                &mut eval_program.entry_point,
-                &id_mapping,
-            );
-
-            // Append eval instructions to extended program
-            let _eval_start = extended_program.append_instructions(eval_program.entry_point);
-
-            tracing::debug!(
-                "✓ Extended bytecode: {} base + {} eval = {} total instructions",
-                cached_instruction_count,
-                extended_program.entry_point.len() - cached_instruction_count,
-                extended_program.entry_point.len()
-            );
-
-            // Merge eval AST into combined program for HotAst (Shadow:
-            // eval re-declarations win, existing members are preserved)
-            for (ns_path, namespace) in eval_ast.namespaces {
-                merge_namespace(
-                    &mut combined_program.namespaces,
-                    ns_path,
-                    namespace,
-                    NsMergePolicy::Shadow,
-                )?;
-            }
-
-            (Arc::new(extended_program), combined_program)
-        } else {
-            (compiler.get_program_arc(), combined_program)
-        };
+        let final_program = compiler.get_program_arc();
+        let final_combined_program = combined_program;
 
         // Extract ctx requirements via call graph before consuming final_combined_program
         let ctx_requirements =
@@ -1890,5 +1875,78 @@ impl Engine {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn structural_compile_allows_required_ctx_but_runtime_execute_rejects_empty_keys() {
+        let temp = tempfile::tempdir().unwrap();
+        let src_dir = temp.path().join("src");
+        std::fs::create_dir_all(&src_dir).unwrap();
+        std::fs::write(
+            src_dir.join("required_ctx.hot"),
+            r#"::required_ctx ns
+
+needs-key
+meta {ctx: {"api.key": {required: true}}}
+fn (): Str { "unused" }
+"#,
+        )
+        .unwrap();
+        let target_file = temp.path().join("validation_target.hot");
+        std::fs::write(
+            &target_file,
+            r#"::validation_target ns
+
+must-not-run fail("structural validation executed module code")
+"#,
+        )
+        .unwrap();
+
+        let src_paths = vec![src_dir.to_string_lossy().to_string()];
+        let target_file = target_file.to_string_lossy().to_string();
+        Engine::run_file_pipeline_with_deps(&target_file, &src_paths, &[], None, None, false)
+            .expect("structural compile should collect, not require, context");
+
+        let empty_context = AHashMap::new();
+        let check_error = Engine::check_sources_pipeline_with_context(
+            &src_paths,
+            &[],
+            None,
+            None,
+            Some(&empty_context),
+            false,
+        )
+        .unwrap_err();
+        assert!(check_error.contains("Missing required context variable 'api.key'"));
+
+        let error = Engine::run_unified_pipeline(
+            &src_paths,
+            &[],
+            None,
+            None,
+            Some(&target_file),
+            None,
+            PipelineMode::Execute,
+            None,
+            None,
+            None,
+            Some(AHashMap::new()),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            false,
+            None,
+        )
+        .unwrap_err();
+        assert!(error.contains("Missing required context variable 'api.key'"));
+        assert!(!error.contains("structural validation executed module code"));
     }
 }
