@@ -192,6 +192,55 @@ fn setup_agents_md() -> Result<(), String> {
 
 /// Install/refresh the `hot-language` skill under `.skills/` (project) or
 /// `~/.skills/` (global).
+/// Read a stamped hash from an installed file.
+///
+/// The marker used to be line 1, but YAML frontmatter is only recognized
+/// when its opening `---` is the very first line (see `stamp_skill_hash`),
+/// so it now follows the frontmatter. Scan a small prefix so files written
+/// by either version are recognized and an upgrade is detected as
+/// unchanged instead of rewritten on every run.
+fn extract_skill_hash(content: &str) -> Option<u64> {
+    content.lines().take(64).find_map(|line| {
+        let line = line.trim();
+        line.strip_prefix("<!-- hot-skill-hash:")
+            .and_then(|rest| rest.strip_suffix("-->"))
+            .or_else(|| line.strip_prefix("// hot-skill-hash:"))
+            .and_then(|hash_str| hash_str.trim().parse::<u64>().ok())
+    })
+}
+
+/// Stamp the content hash into a file without breaking its format.
+///
+/// A YAML frontmatter block must begin on line 1. Prepending the marker
+/// invalidated every skill that has frontmatter — Codex reports
+/// "missing YAML frontmatter delimited by ---" and skips the skill — so
+/// for those files the marker goes immediately after the closing `---`.
+fn stamp_skill_hash(content: &str, hash: u64, is_markdown: bool) -> String {
+    if !is_markdown {
+        return format!("// hot-skill-hash:{}\n{}", hash, content);
+    }
+
+    let marker = format!("<!-- hot-skill-hash:{} -->", hash);
+    if let Some(rest) = content.strip_prefix("---\n")
+        && let Some(close) = rest.find("\n---")
+    {
+        // `close` indexes the newline before the closing delimiter; step
+        // past that delimiter line to land just after the block.
+        let after_delim = close + 1;
+        let tail = &rest[after_delim..];
+        return match tail.find('\n') {
+            Some(offset) => {
+                let split = after_delim + offset + 1;
+                format!("---\n{}{}\n{}", &rest[..split], marker, &rest[split..])
+            }
+            // Frontmatter closes the file with no trailing newline.
+            None => format!("---\n{}\n{}\n", rest, marker),
+        };
+    }
+
+    format!("{}\n{}", marker, content)
+}
+
 fn setup_agent_skills(global: bool) -> Result<(), String> {
     use ahash::AHashSet;
     use std::collections::hash_map::DefaultHasher;
@@ -252,22 +301,13 @@ fn setup_agent_skills(global: bool) -> Result<(), String> {
         is_markdown: bool,
     ) -> Result<bool, String> {
         let hash = content_hash(content);
-        let content_with_hash = if is_markdown {
-            format!("<!-- hot-skill-hash:{} -->\n{}", hash, content)
-        } else {
-            format!("// hot-skill-hash:{}\n{}", hash, content)
-        };
+        let content_with_hash = stamp_skill_hash(content, hash, is_markdown);
 
         if path.exists() {
             let existing = fs::read_to_string(path)
                 .map_err(|e| format!("Failed to read {}: {}", path.display(), e))?;
 
-            let existing_hash = existing.lines().next().and_then(|line| {
-                line.strip_prefix("<!-- hot-skill-hash:")
-                    .and_then(|rest| rest.strip_suffix(" -->"))
-                    .or_else(|| line.strip_prefix("// hot-skill-hash:"))
-                    .and_then(|hash_str| hash_str.trim().parse::<u64>().ok())
-            });
+            let existing_hash = extract_skill_hash(&existing);
 
             if existing_hash == Some(hash) {
                 return Ok(false);
@@ -359,4 +399,61 @@ fn setup_agent_skills(global: bool) -> Result<(), String> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod skill_stamp_tests {
+    use super::{extract_skill_hash, stamp_skill_hash};
+
+    const FRONTMATTER_SKILL: &str =
+        "---\nname: hot-language\ndescription: >\n  Write Hot.\n---\n\n# Body\n";
+
+    /// YAML frontmatter is only recognized when `---` is the very first line.
+    /// Stamping must never displace it — a skill that loses its frontmatter is
+    /// silently skipped by the agent runtimes that load it.
+    #[test]
+    fn stamping_preserves_leading_frontmatter() {
+        let stamped = stamp_skill_hash(FRONTMATTER_SKILL, 42, true);
+        assert!(
+            stamped.starts_with("---\n"),
+            "frontmatter must remain at line 1:\n{stamped}"
+        );
+        assert!(
+            stamped.contains("<!-- hot-skill-hash:42 -->"),
+            "hash marker must still be present:\n{stamped}"
+        );
+        // The marker belongs after the closing delimiter, not inside the block.
+        let close = stamped.find("\n---\n").expect("closing delimiter");
+        let marker = stamped.find("<!-- hot-skill-hash:").expect("marker");
+        assert!(marker > close, "marker must follow the frontmatter block");
+        assert_eq!(extract_skill_hash(&stamped), Some(42));
+    }
+
+    #[test]
+    fn stamping_markdown_without_frontmatter_prepends() {
+        let stamped = stamp_skill_hash("# Reference\n\ntext\n", 7, true);
+        assert!(stamped.starts_with("<!-- hot-skill-hash:7 -->\n"));
+        assert_eq!(extract_skill_hash(&stamped), Some(7));
+    }
+
+    #[test]
+    fn stamping_non_markdown_prepends_line_comment() {
+        let stamped = stamp_skill_hash("::demo ns\n", 9, false);
+        assert!(stamped.starts_with("// hot-skill-hash:9\n"));
+        assert_eq!(extract_skill_hash(&stamped), Some(9));
+    }
+
+    /// Files written by the previous version carry the marker on line 1; they
+    /// must still be recognized so an upgrade rewrites once instead of on
+    /// every run.
+    #[test]
+    fn legacy_leading_marker_is_still_read() {
+        let legacy = format!("<!-- hot-skill-hash:1234 -->\n{}", FRONTMATTER_SKILL);
+        assert_eq!(extract_skill_hash(&legacy), Some(1234));
+    }
+
+    #[test]
+    fn unstamped_content_has_no_hash() {
+        assert_eq!(extract_skill_hash(FRONTMATTER_SKILL), None);
+    }
 }

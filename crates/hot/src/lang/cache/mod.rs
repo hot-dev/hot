@@ -45,6 +45,33 @@ pub(crate) fn remove_invalid_cache_entry(path: &std::path::Path) {
     }
 }
 
+/// A well-formed bytecode cache key: a 64-hex content hash (project builds)
+/// or a build UUID (worker bundle caches). Used to validate anything read
+/// back from disk before it is turned into a path.
+pub(crate) fn is_cache_key(value: &str) -> bool {
+    is_lower_hex(value, 64) || is_uuid(value)
+}
+
+/// A program-scope marker stem: `{name}-{32 hex}` as produced by
+/// `BytecodeCache::scope_id`.
+fn is_scope_marker_stem(stem: &str) -> bool {
+    stem.rsplit_once('-')
+        .is_some_and(|(name, digest)| !name.is_empty() && is_lower_hex(digest, 32))
+}
+
+/// Hyphenated UUID (8-4-4-4-12 lowercase hex), as used for bundle cache keys.
+fn is_uuid(value: &str) -> bool {
+    let mut groups = value.split('-');
+    let lengths = [8, 4, 4, 4, 12];
+    for expected in lengths {
+        match groups.next() {
+            Some(group) if is_lower_hex(group, expected) => {}
+            _ => return false,
+        }
+    }
+    groups.next().is_none()
+}
+
 fn is_lower_hex(value: &str, expected_len: usize) -> bool {
     value.len() == expected_len
         && value
@@ -63,10 +90,20 @@ fn is_unit_cache_stem(stem: &str) -> bool {
 /// Whether a filename is owned by Hot's cache layer and is therefore safe
 /// for opportunistic deletion.
 pub(crate) fn is_managed_cache_file_name(name: &str) -> bool {
-    if let Some(stem) = name.strip_suffix(".bc.zst")
-        && stem
-            .rsplit_once('-')
-            .map_or_else(|| is_lower_hex(stem, 64), |(_, key)| is_lower_hex(key, 64))
+    // Bytecode entries are named by their cache key. Project builds use a
+    // 64-hex content hash; the worker keys bundle caches by build UUID
+    // (`hot_task_worker` passes `build_id.to_string()`), which is equally
+    // Hot-managed and must not be exempt from pruning.
+    if let Some(key) = name.strip_suffix(".bc.zst")
+        && is_cache_key(key)
+    {
+        return true;
+    }
+    // Sidecar naming the live generation for a program scope. Match the
+    // scope shape rather than the extension alone, so an unrelated
+    // `*.current` file is never treated as Hot-managed.
+    if let Some(stem) = name.strip_suffix(".current")
+        && is_scope_marker_stem(stem)
     {
         return true;
     }
@@ -171,31 +208,6 @@ pub(crate) fn prune_legacy_unscoped_entries(dir: &std::path::Path, unit_fs_id: &
         if rest
             .strip_suffix(suffix)
             .is_some_and(|key| is_lower_hex(key, 16))
-        {
-            let _ = std::fs::remove_file(&path);
-        }
-    }
-}
-
-/// Remove bytecode entries written before filenames carried program scope.
-///
-/// A legacy name is exactly `{64 hex key}{suffix}`. Readers still accept those
-/// (see `cache_file_path`), so this only runs once the same program has been
-/// re-saved under a scoped name and the old file is genuinely superseded.
-pub(crate) fn prune_legacy_bare_key_entries(dir: &std::path::Path, suffix: &str) {
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return;
-    };
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if !path.is_file() {
-            continue;
-        }
-        let name = entry.file_name();
-        let name = name.to_string_lossy();
-        if name
-            .strip_suffix(suffix)
-            .is_some_and(|key| is_lower_hex(key, 64))
         {
             let _ = std::fs::remove_file(&path);
         }

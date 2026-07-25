@@ -853,15 +853,32 @@ impl TypeChecker {
         //    adding a key, so a length comparison could stop before the
         //    deepest link in a chain resolved.
         let mut deferred = self.collect_qualified_variables(program);
-        for _ in 0..4 {
-            if deferred.is_empty() {
-                break;
-            }
 
+        // Alias maps are per-namespace and constant across rounds; building
+        // them once keeps re-inference linear in the number of deferred
+        // entries rather than rescanning every namespace for each one.
+        let alias_maps: AHashMap<String, AHashMap<String, String>> = program
+            .namespaces
+            .iter()
+            .map(|(ns_path, namespace)| {
+                let aliases = namespace
+                    .aliases
+                    .iter()
+                    .map(|(alias, target)| (alias.to_string(), target.to_string()))
+                    .collect();
+                (ns_path.to_string(), aliases)
+            })
+            .collect();
+
+        // No round cap: each round either resolves at least one variable or
+        // stops. An arbitrary bound would silently leave long chains typed
+        // `Any` — the very failure this loop exists to prevent — and the
+        // worklist shrinks monotonically, so termination does not need one.
+        while !deferred.is_empty() {
             let mut progressed = false;
             let mut still_deferred = Vec::with_capacity(deferred.len());
             for entry in deferred {
-                let (inferred, blocked) = self.reinfer_deferred(&entry, program);
+                let (inferred, blocked) = self.reinfer_deferred(&entry, &alias_maps);
                 if !matches!(inferred, TypeExpr::Any)
                     && self.qualified_variables.get(&entry.qualified) != Some(&inferred)
                 {
@@ -1017,24 +1034,15 @@ impl TypeChecker {
     fn reinfer_deferred(
         &mut self,
         entry: &DeferredVariable,
-        program: &Program,
+        alias_maps: &AHashMap<String, AHashMap<String, String>>,
     ) -> (TypeExpr, bool) {
-        let alias_map = program
-            .namespaces
-            .iter()
-            .find(|(ns_path, _)| ns_path.to_string() == entry.ns)
-            .map(|(_, namespace)| {
-                namespace
-                    .aliases
-                    .iter()
-                    .map(|(alias, target)| (alias.to_string(), target.to_string()))
-                    .collect::<AHashMap<String, String>>()
-            })
-            .unwrap_or_default();
+        static EMPTY: std::sync::LazyLock<AHashMap<String, String>> =
+            std::sync::LazyLock::new(AHashMap::new);
+        let alias_map = alias_maps.get(&entry.ns).unwrap_or(&EMPTY);
 
         self.pending_dependency.set(false);
         let inferred =
-            self.shallow_infer_top_level_type(&entry.var, &entry.value, &alias_map, &entry.ns);
+            self.shallow_infer_top_level_type(&entry.var, &entry.value, alias_map, &entry.ns);
         (inferred, self.pending_dependency.get())
     }
 
@@ -5691,6 +5699,45 @@ mod tests {
             !has_nested,
             "top-level arrows must not be flagged as nested: {:?}",
             checker.errors.errors
+        );
+    }
+
+    /// A chain longer than any fixed round budget must still resolve. The
+    /// worklist shrinks every productive round, so termination comes from
+    /// running out of deferred entries rather than from a cap that would
+    /// silently leave deep chains typed `Any`.
+    #[test]
+    fn long_reverse_ordered_alias_chains_fully_resolve() {
+        use crate::lang::parser::parse_hot;
+        const DEPTH: usize = 12;
+
+        // Declared in dependency-reverse order: n depends on n-1, ... , 0 is
+        // the only concrete type. Worst case for a naive fixed point.
+        let mut source = String::from("\n");
+        for level in (1..=DEPTH).rev() {
+            source.push_str(&format!(
+                "        ::deep::n{} ns\n        v ::deep::n{}/v\n\n",
+                level,
+                level - 1
+            ));
+        }
+        source.push_str("        ::deep::n0 ns\n        v: Str \"hi\"\n");
+
+        let program = parse_hot(&source).expect("parse");
+        let mut checker = TypeChecker::new();
+        let _ = checker.check_program(&program);
+
+        let deepest = format!("::deep::n{}/v", DEPTH);
+        let resolved = checker
+            .qualified_variables
+            .get(&deepest)
+            .cloned()
+            .unwrap_or(TypeExpr::Any);
+        assert!(
+            matches!(resolved, TypeExpr::Str),
+            "{} must resolve through the full chain to Str, got {:?}",
+            deepest,
+            resolved
         );
     }
 

@@ -307,8 +307,12 @@ impl UnitCache {
         std::fs::create_dir_all(self.dir_for(unit)).map_err(|e| e.to_string())?;
 
         // Acquire cross-process file lock (best effort - proceed even if locking fails)
+        // Block rather than try_write: a writer that lost the lock still went
+        // on to write its entry, and the lock holder's sweep then deleted that
+        // fresh generation. Waiting keeps write-then-prune atomic per unit.
+        // Locks are per-unit, so unrelated units still save in parallel.
         let mut file_lock = self.acquire_file_lock(unit).ok();
-        let _file_lock_guard = file_lock.as_mut().and_then(|lock| lock.try_write().ok());
+        let file_lock_guard = file_lock.as_mut().and_then(|lock| lock.write().ok());
 
         // Check if cache already exists (another process may have just saved it)
         let cache_path = self.cache_path(unit, &cache_key);
@@ -352,14 +356,20 @@ impl UnitCache {
         // otherwise accumulate forever.
         // Collapse this unit to a single live generation, then age-sweep the
         // rest of the directory.
-        let suffix = format!(".{}", CacheType::Ast.extension());
-        super::prune_superseded_entries(
-            self.dir_for(unit),
-            &unit.scoped_fs_id(),
-            &suffix,
-            &cache_path,
-        );
-        super::prune_legacy_unscoped_entries(self.dir_for(unit), &unit.fs_safe_id(), &suffix);
+        // Only prune while holding this unit's lock. Unsynchronized, two
+        // processes writing different generations would each delete the
+        // other's freshly written entry and leave nothing cached.
+        if file_lock_guard.is_some() {
+            let suffix = format!(".{}", CacheType::Ast.extension());
+            super::prune_superseded_entries(
+                self.dir_for(unit),
+                &unit.scoped_fs_id(),
+                &suffix,
+                &cache_path,
+            );
+            super::prune_legacy_unscoped_entries(self.dir_for(unit), &unit.fs_safe_id(), &suffix);
+        }
+        drop(file_lock_guard);
         super::prune_stale_cache_files(self.dir_for(unit), &cache_path);
 
         tracing::debug!(
@@ -1340,6 +1350,91 @@ MyType -> Str fn (t: MyType): Str {
         assert!(
             other_location.exists(),
             "another location's scoped entry must survive"
+        );
+    }
+
+    /// Concurrent writers converge on one valid, loadable generation.
+    ///
+    /// Scope note: this is a smoke test, not a proof. The lost-generation race
+    /// it guards against (a writer that lost `try_write` writing an entry the
+    /// lock holder then sweeps) only manifests under real contention, and this
+    /// harness reproduces it only intermittently — it caught the pre-fix code
+    /// about one run in three, and not at all once rounds were added. The
+    /// structural fix is the blocking lock in `save`; what this test reliably
+    /// catches is gross breakage: an empty cache, a surviving half-written
+    /// file, or unbounded generation growth under parallel saves.
+    #[test]
+    fn concurrent_writers_leave_exactly_one_live_generation() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let cache_dir = dir.path().join("unit");
+        std::fs::create_dir_all(&cache_dir).unwrap();
+
+        let root = dir.path().join("mylib");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("lib.hot"), "::mylib ns\n\nv 0\n").unwrap();
+        let unit = CompilationUnit::Package {
+            name: "mylib".to_string(),
+            path: root.clone(),
+        };
+
+        // Each writer gets its own cache instance (its own lock fd), mirroring
+        // separate processes racing on the same unit. Repeated because losing
+        // the race is timing-dependent: a single round detects the unlocked
+        // write-then-prune only intermittently.
+        for round in 0..6 {
+            std::thread::scope(|scope| {
+                for generation in (round * 8)..(round * 8 + 8) {
+                    let cache_dir = cache_dir.clone();
+                    let unit = unit.clone();
+                    scope.spawn(move || {
+                        let cache = UnitCache::new(cache_dir);
+                        let mut namespaces = IndexMap::new();
+                        namespaces.insert(
+                            NsPath::from_string(&format!("::gen{}", generation)),
+                            Namespace {
+                                path: NsPath::from_string(&format!("::gen{}", generation)),
+                                scope: crate::lang::ast::Scope {
+                                    vars: IndexMap::new(),
+                                },
+                                meta: None,
+                                source_file: None,
+                                aliases: Default::default(),
+                            },
+                        );
+                        let _ = cache.save(&unit, &namespaces);
+                    });
+                }
+            });
+
+            let live: Vec<_> = std::fs::read_dir(&cache_dir)
+                .unwrap()
+                .flatten()
+                .filter(|e| e.file_name().to_string_lossy().ends_with(".ast.zst"))
+                .collect();
+            assert_eq!(
+                live.len(),
+                1,
+                "round {round}: concurrent writers must converge on one generation, found {:?}",
+                live.iter().map(|e| e.file_name()).collect::<Vec<_>>()
+            );
+        }
+
+        let entries: Vec<_> = std::fs::read_dir(&cache_dir)
+            .unwrap()
+            .flatten()
+            .filter(|e| e.file_name().to_string_lossy().ends_with(".ast.zst"))
+            .collect();
+        assert_eq!(
+            entries.len(),
+            1,
+            "concurrent writers must converge on one generation, found {:?}",
+            entries.iter().map(|e| e.file_name()).collect::<Vec<_>>()
+        );
+        // And the survivor must be loadable, not a half-written or deleted file.
+        let reader = UnitCache::new(cache_dir.clone());
+        assert!(
+            reader.load(&unit).ok().flatten().is_some(),
+            "the surviving entry must be readable"
         );
     }
 }

@@ -586,45 +586,56 @@ impl BytecodeCache {
         let mut paths: Vec<&str> = file_hashes.iter().map(|fh| fh.path.as_str()).collect();
         paths.sort_unstable();
         let mut hasher = HotHasher::new();
+        // The full project name is part of the identity, not just the
+        // truncated display prefix below — two projects whose names share a
+        // 40-char prefix must not collapse into one scope.
+        hasher.update(project_name.as_bytes());
+        hasher.update(&[0]);
         for path in paths {
             hasher.update(path.as_bytes());
             hasher.update(&[0]);
         }
         let digest = hasher.finalize();
+        // The name is only a human-readable hint; the digest carries identity.
+        // Bound it so a long project name cannot push a filename past a
+        // filesystem limit.
         let safe_project: String = project_name
             .chars()
             .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
+            .take(40)
             .collect();
-        format!("{}-{}", safe_project, &digest[..8])
+        format!("{}-{}", safe_project, &digest[..32])
     }
 
-    /// Get cache file path for a given cache key within a program scope.
-    fn scoped_cache_file_path(&self, scope: &str, cache_key: &str) -> PathBuf {
-        self.cache_dir.join(format!(
-            "{}-{}.{}",
-            scope,
-            cache_key,
-            CacheType::Bytecode.extension()
-        ))
+    /// Cross-process lock guarding generation replacement for one scope.
+    fn acquire_scope_lock(
+        &self,
+        scope: &str,
+    ) -> Result<fd_lock::RwLock<std::fs::File>, std::io::Error> {
+        std::fs::create_dir_all(&self.cache_dir)?;
+        let path = self.cache_dir.join(format!("{}.lock", scope));
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&path)?;
+        Ok(fd_lock::RwLock::new(file))
     }
 
-    /// Locate an entry by content key alone.
+    /// Marker naming the live generation for a program scope.
     ///
-    /// Readers only carry the key, so the scope is recovered by matching the
-    /// filename suffix. Entries written before scoping (a bare key) are still
-    /// honored so an upgrade does not throw away a warm cache.
+    /// Generation pruning must know which entry a save supersedes, but readers
+    /// only carry a content key. Putting the scope in the entry filename would
+    /// force a directory scan on every lookup — and `exists` runs on the
+    /// worker's per-request routing path. A sidecar keeps both O(1): lookups
+    /// address the key directly, saves read one small file.
+    fn scope_marker_path(&self, scope: &str) -> PathBuf {
+        self.cache_dir.join(format!("{}.current", scope))
+    }
+
+    /// Get cache file path for a given cache key.
     fn cache_file_path(&self, cache_key: &str) -> PathBuf {
-        let suffix = format!("-{}.{}", cache_key, CacheType::Bytecode.extension());
-        if let Ok(entries) = std::fs::read_dir(&self.cache_dir) {
-            for entry in entries.flatten() {
-                let name = entry.file_name();
-                let name = name.to_string_lossy();
-                if name.ends_with(&suffix) {
-                    return entry.path();
-                }
-            }
-        }
-        // Legacy (unscoped) location, also used as the "not found" answer.
         self.cache_dir
             .join(format!("{}.{}", cache_key, CacheType::Bytecode.extension()))
     }
@@ -718,7 +729,14 @@ impl BytecodeCache {
         validate_cache_metadata(&metadata, cache_key)?;
 
         let scope = Self::scope_id(&metadata.project_name, &metadata.file_hashes);
-        let cache_path = self.scoped_cache_file_path(&scope, cache_key);
+        let cache_path = self.cache_file_path(cache_key);
+
+        // Serialize generation replacement for this scope. Unsynchronized, two
+        // processes saving different generations would each delete the other's
+        // freshly written entry. Best effort: if the lock is unavailable, skip
+        // pruning rather than prune unsynchronized.
+        let mut scope_lock = self.acquire_scope_lock(&scope).ok();
+        let scope_guard = scope_lock.as_mut().and_then(|lock| lock.write().ok());
 
         tracing::debug!("Saving bytecode cache to: {}", cache_path.display());
 
@@ -782,9 +800,22 @@ impl BytecodeCache {
         // Collapse this program to a single live generation. Bytecode entries
         // are multi-megabyte, so relying on the age sweep alone let one
         // project accumulate tens of entries between prunes.
-        let suffix = format!(".{}", CacheType::Bytecode.extension());
-        super::prune_superseded_entries(&self.cache_dir, &scope, &suffix, &cache_path);
-        super::prune_legacy_bare_key_entries(&self.cache_dir, &suffix);
+        // Replace only the entry this scope itself published — never a
+        // neighbouring program's warm cache.
+        if scope_guard.is_some() {
+            let marker = self.scope_marker_path(&scope);
+            if let Ok(previous) = std::fs::read_to_string(&marker) {
+                let previous = previous.trim();
+                // Never build a deletion path from unvalidated file contents:
+                // a corrupt marker holding `../../x` would otherwise name an
+                // arbitrary victim. Only a well-formed cache key qualifies.
+                if previous != cache_key && super::is_cache_key(previous) {
+                    super::remove_invalid_cache_entry(&self.cache_file_path(previous));
+                }
+            }
+            let _ = std::fs::write(&marker, cache_key);
+        }
+        drop(scope_guard);
 
         // Opportunistic housekeeping: entries from other programs that have
         // gone untouched long enough to be considered abandoned.
@@ -1754,28 +1785,98 @@ mod tests {
         assert!(cache.exists(&newest) && cache.exists(&test_key));
     }
 
-    /// Pre-scoping entries are bare content keys; they stay readable until the
-    /// same program is re-saved, then they are reclaimed.
+    /// Saving one program must never evict another program's warm cache, and
+    /// worker bundle entries (keyed by build UUID) must survive too.
     #[test]
-    fn legacy_bare_key_entries_are_readable_then_reclaimed() {
+    fn saving_one_program_never_evicts_another_programs_entry() {
         let dir = tempfile::tempdir().expect("tempdir");
         let cache = BytecodeCache::new(dir.path().to_path_buf());
         std::fs::create_dir_all(cache.cache_dir()).unwrap();
 
-        let legacy_key = "a".repeat(64);
-        let legacy = dir.path().join(format!("{}.bc.zst", legacy_key));
-        std::fs::write(&legacy, b"legacy payload").unwrap();
+        let stranger = dir.path().join(format!("{}.bc.zst", "b".repeat(64)));
+        let bundle = dir
+            .path()
+            .join("550e8400-e29b-41d4-a716-446655440000.bc.zst");
+        std::fs::write(&stranger, b"another program").unwrap();
+        std::fs::write(&bundle, b"worker bundle").unwrap();
+
+        let first = save_generation(&cache, "v1");
+        let second = save_generation(&cache, "v2");
+
         assert!(
-            cache.exists(&legacy_key),
-            "legacy entries stay addressable before any re-save"
+            !cache.exists(&first),
+            "own superseded generation is removed"
         );
+        assert!(cache.exists(&second), "newest generation is addressable");
+        assert!(stranger.exists(), "another program's entry must survive");
+        assert!(bundle.exists(), "a worker bundle entry must survive");
+    }
+
+    /// Scope identity must come from the full project name, not the truncated
+    /// display prefix, or two long similarly-named projects share a scope and
+    /// evict each other.
+    #[test]
+    fn scope_id_uses_the_full_project_name() {
+        let hashes = vec![FileHash {
+            path: "src/a.hot".to_string(),
+            hash: "abc".to_string(),
+        }];
+        let prefix = "p".repeat(40);
+        let a = BytecodeCache::scope_id(&format!("{prefix}-alpha"), &hashes);
+        let b = BytecodeCache::scope_id(&format!("{prefix}-beta"), &hashes);
+        assert_ne!(a, b, "names sharing a long prefix must not share a scope");
+        assert_eq!(
+            a,
+            BytecodeCache::scope_id(&format!("{prefix}-alpha"), &hashes),
+            "scope must be stable for identical inputs"
+        );
+    }
+
+    /// The generation marker is read off disk and used to build a deletion
+    /// path. Contents that are not a well-formed cache key must be ignored.
+    #[test]
+    fn corrupt_generation_marker_cannot_delete_arbitrary_paths() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        // Cache lives in a subdirectory so `..` in a marker would escape it.
+        let cache_dir = dir.path().join("cache");
+        std::fs::create_dir_all(&cache_dir).unwrap();
+        let cache = BytecodeCache::new(cache_dir);
+
+        let outside = dir.path().join("precious.bc.zst");
+        std::fs::write(&outside, b"must survive").unwrap();
 
         let hashes = vec![FileHash {
             path: "src/a.hot".to_string(),
             hash: HotHasher::hash_content(b"v1"),
         }];
+        let scope = BytecodeCache::scope_id("demo", &hashes);
+        std::fs::write(
+            cache.cache_dir().join(format!("{}.current", scope)),
+            "../precious",
+        )
+        .unwrap();
+
+        let key = save_generation(&cache, "v1");
+
+        assert!(
+            outside.exists(),
+            "a marker that is not a valid cache key must never name a deletion target"
+        );
+        assert!(cache.exists(&key), "the new generation is still published");
+    }
+
+    /// Save one generation of the `demo` program with the given content.
+    fn save_generation(cache: &BytecodeCache, content: &str) -> String {
+        let hashes = vec![FileHash {
+            path: "src/a.hot".to_string(),
+            hash: HotHasher::hash_content(content.as_bytes()),
+        }];
         let key = BytecodeCache::calculate_cache_key("demo", &hashes).unwrap();
         let metadata = create_cache_metadata("demo", hashes, key.clone());
+        let empty_program = || crate::lang::ast::Program {
+            namespaces: indexmap::IndexMap::new(),
+            current_namespace: crate::lang::ast::NsPath::new(),
+        };
         cache
             .save(
                 &key,
@@ -1784,20 +1885,12 @@ mod tests {
                 &indexmap::IndexMap::new(),
                 &indexmap::IndexMap::new(),
                 &indexmap::IndexMap::new(),
-                &crate::lang::ast::Program {
-                    namespaces: indexmap::IndexMap::new(),
-                    current_namespace: crate::lang::ast::NsPath::new(),
-                },
-                &crate::lang::ast::HotAst::from_program(crate::lang::ast::Program {
-                    namespaces: indexmap::IndexMap::new(),
-                    current_namespace: crate::lang::ast::NsPath::new(),
-                }),
+                &empty_program(),
+                &crate::lang::ast::HotAst::from_program(empty_program()),
                 &Default::default(),
                 &Default::default(),
             )
             .expect("save");
-
-        assert!(!legacy.exists(), "legacy bare-key entry is reclaimed");
-        assert!(cache.exists(&key), "scoped entry is addressable");
+        key
     }
 }
