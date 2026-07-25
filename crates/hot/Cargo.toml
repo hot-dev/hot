@@ -120,6 +120,7 @@ libc = { workspace = true }
 blake3 = { workspace = true }
 
 [dev-dependencies]
+ahash = { workspace = true }
 filetime = "0.2"
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["test-util"] }
