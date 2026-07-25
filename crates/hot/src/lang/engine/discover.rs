@@ -387,8 +387,11 @@ fn compute_content_hash(content: &str) -> String {
 
 /// Get the unit cache instance
 fn get_unit_cache() -> crate::lang::cache::unit_cache::UnitCache {
-    crate::lang::cache::unit_cache::UnitCache::new(
+    // Project sources stay project-local; package ASTs are machine-scoped so
+    // one parsed copy of a dependency serves every project on the machine.
+    crate::lang::cache::unit_cache::UnitCache::with_package_dir(
         crate::lang::cache::unit_cache::UnitCache::default_cache_dir(),
+        crate::lang::cache::paths::get_package_unit_cache_dir(),
     )
 }
 

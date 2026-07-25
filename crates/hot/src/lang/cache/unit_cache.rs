@@ -10,7 +10,15 @@
 //!
 //! ## Cache Location
 //!
-//! The cache directory is determined by `cache_paths::get_unit_cache_dir()`:
+//! Package units and source-path units are stored in *different* directories.
+//! A package's parsed AST depends only on its own immutable sources plus the
+//! runtime identity already in the cache key, so it is machine-scoped
+//! (`cache_paths::get_package_unit_cache_dir()`) and one parsed copy serves
+//! every project. Project sources are project-scoped
+//! (`cache_paths::get_unit_cache_dir()`) so their ASTs never leak between
+//! checkouts.
+//!
+//! Source-path resolution:
 //! - `$HOT_HOME/cache/unit` if HOT_HOME is set
 //! - `./.hot/cache/unit` if `hot.hot` config exists (project-local cache)
 //! - System cache directory otherwise (platform-specific):
@@ -140,14 +148,39 @@ fn validate_cache_metadata(
 /// Caches parsed AST for packages and source paths
 /// Supports cross-process synchronization via file locking
 pub struct UnitCache {
-    /// Cache directory (typically .hot/cache/unit)
+    /// Cache directory for source-path units (project-local when in a project)
     cache_dir: PathBuf,
+    /// Cache directory for package units. Machine-scoped so one parsed copy of
+    /// a dependency serves every project; `None` means "same as `cache_dir`"
+    /// (used by tests that pin a single directory).
+    package_cache_dir: Option<PathBuf>,
 }
 
 impl UnitCache {
     /// Create a new unit cache manager
     pub fn new(cache_dir: PathBuf) -> Self {
-        Self { cache_dir }
+        Self {
+            cache_dir,
+            package_cache_dir: None,
+        }
+    }
+
+    /// Cache manager that stores package units in a separate (machine-scoped)
+    /// directory from source-path units.
+    pub fn with_package_dir(cache_dir: PathBuf, package_cache_dir: PathBuf) -> Self {
+        Self {
+            cache_dir,
+            package_cache_dir: Some(package_cache_dir),
+        }
+    }
+
+    /// Directory holding this unit's cache entry: packages are machine-scoped,
+    /// project sources stay project-local.
+    fn dir_for(&self, unit: &CompilationUnit) -> &Path {
+        match (unit, &self.package_cache_dir) {
+            (CompilationUnit::Package { .. }, Some(dir)) => dir,
+            _ => &self.cache_dir,
+        }
     }
 
     /// Get the default cache directory.
@@ -166,9 +199,10 @@ impl UnitCache {
         &self,
         unit: &CompilationUnit,
     ) -> Result<fd_lock::RwLock<std::fs::File>, std::io::Error> {
-        std::fs::create_dir_all(&self.cache_dir)?;
+        let dir = self.dir_for(unit);
+        std::fs::create_dir_all(dir)?;
 
-        let lock_path = self.cache_dir.join(format!("{}.lock", unit.fs_safe_id()));
+        let lock_path = dir.join(format!("{}.lock", unit.fs_safe_id()));
         let file = std::fs::OpenOptions::new()
             .read(true)
             .write(true)
@@ -187,7 +221,7 @@ impl UnitCache {
             &cache_key[..16],
             CacheType::Ast.extension()
         );
-        self.cache_dir.join(filename)
+        self.dir_for(unit).join(filename)
     }
 
     /// Compute cache key for a compilation unit
@@ -254,7 +288,7 @@ impl UnitCache {
         let cache_key = self.compute_cache_key(unit)?;
 
         // Ensure cache directory exists
-        std::fs::create_dir_all(&self.cache_dir).map_err(|e| e.to_string())?;
+        std::fs::create_dir_all(self.dir_for(unit)).map_err(|e| e.to_string())?;
 
         // Acquire cross-process file lock (best effort - proceed even if locking fails)
         let mut file_lock = self.acquire_file_lock(unit).ok();
@@ -300,7 +334,7 @@ impl UnitCache {
         // Opportunistic housekeeping: old-generation entries (superseded
         // versions/formats) are unreachable via their keys and would
         // otherwise accumulate forever.
-        super::prune_stale_cache_files(&self.cache_dir, &cache_path);
+        super::prune_stale_cache_files(self.dir_for(unit), &cache_path);
 
         tracing::debug!(
             "Saved cache for {} ({} namespaces, {} bytes -> {} bytes compressed, {:.1}x)",
@@ -1065,5 +1099,62 @@ MyType -> Str fn (t: MyType): Str {
         }
 
         println!("All {} variables match after round-trip!", total_vars);
+    }
+
+    #[test]
+    fn package_units_use_the_shared_dir_while_sources_stay_local() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let project = dir.path().join("project-local");
+        let shared = dir.path().join("machine-shared");
+        let cache = UnitCache::with_package_dir(project.clone(), shared.clone());
+
+        let root = dir.path().join("unit-src");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("a.hot"), "::a ns\n\nvalue 1\n").unwrap();
+
+        let package = CompilationUnit::Package {
+            name: "hot-std".to_string(),
+            path: root.clone(),
+        };
+        let source = CompilationUnit::SourcePath {
+            name: "src".to_string(),
+            path: root.clone(),
+        };
+
+        let namespaces = IndexMap::new();
+        cache.save(&package, &namespaces).expect("save package");
+        cache.save(&source, &namespaces).expect("save source");
+
+        let entries = |dir: &Path| -> Vec<String> {
+            std::fs::read_dir(dir)
+                .map(|read| {
+                    read.flatten()
+                        .map(|entry| entry.file_name().to_string_lossy().to_string())
+                        .filter(|name| name.ends_with(".ast.zst"))
+                        .collect()
+                })
+                .unwrap_or_default()
+        };
+
+        assert!(
+            entries(&shared).iter().all(|name| name.starts_with("pkg-")),
+            "shared dir holds only package units: {:?}",
+            entries(&shared)
+        );
+        assert!(
+            !entries(&shared).is_empty(),
+            "package unit must land in the shared dir"
+        );
+        assert!(
+            entries(&project)
+                .iter()
+                .all(|name| name.starts_with("src-")),
+            "project dir holds only source units: {:?}",
+            entries(&project)
+        );
+        assert!(
+            !entries(&project).is_empty(),
+            "source unit must land in the project dir"
+        );
     }
 }

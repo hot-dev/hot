@@ -1868,16 +1868,19 @@ fn (): Str { "unused" }
             &target_file,
             r#"::validation_target ns
 
-must-not-run fail("structural validation executed module code")
+value 1
 "#,
         )
         .unwrap();
 
         let src_paths = vec![src_dir.to_string_lossy().to_string()];
         let target_file = target_file.to_string_lossy().to_string();
+
+        // Structural validation collects the requirement without demanding a value.
         Engine::run_file_pipeline_with_deps(&target_file, &src_paths, &[], None, None, false)
             .expect("structural compile should collect, not require, context");
 
+        // Check and Execute both require it.
         let empty_context = AHashMap::new();
         let check_error = Engine::check_sources_pipeline_with_context(
             &src_paths,
@@ -1890,12 +1893,81 @@ must-not-run fail("structural validation executed module code")
         .unwrap_err();
         assert!(check_error.contains("Missing required context variable 'api.key'"));
 
-        let error = Engine::run_unified_pipeline(
-            &src_paths,
+        let error = execute_target(&src_paths, &target_file).unwrap_err();
+        assert!(error.contains("Missing required context variable 'api.key'"));
+    }
+
+    /// The canary calls hot-std's `fail`, so this only runs where the engine's
+    /// own resolver finds hot-std (installed, `HOT_HOME`, or a dev checkout run
+    /// from the repo root). `cargo test` sets the cwd to the package root, so a
+    /// machine without hot-std installed skips rather than failing on an
+    /// unrelated "Unresolved variable 'fail'".
+    #[test]
+    fn structural_validation_does_not_execute_module_code() {
+        let Some(_) = resolvable_hot_std() else {
+            eprintln!(
+                "skipping structural_validation_does_not_execute_module_code: \
+                 hot-std is not resolvable in this environment"
+            );
+            return;
+        };
+
+        let temp = tempfile::tempdir().unwrap();
+        let src_dir = temp.path().join("src");
+        std::fs::create_dir_all(&src_dir).unwrap();
+        std::fs::write(
+            src_dir.join("required_ctx.hot"),
+            r#"::required_ctx ns
+
+needs-key
+meta {ctx: {"api.key": {required: true}}}
+fn (): Str { "unused" }
+"#,
+        )
+        .unwrap();
+        let target_file = temp.path().join("validation_target.hot");
+        std::fs::write(
+            &target_file,
+            r#"::validation_target ns
+
+must-not-run fail("structural validation executed module code")
+"#,
+        )
+        .unwrap();
+
+        let src_paths = vec![src_dir.to_string_lossy().to_string()];
+        let target_file = target_file.to_string_lossy().to_string();
+
+        // Structural validation must not run the module's top-level code.
+        Engine::run_file_pipeline_with_deps(&target_file, &src_paths, &[], None, None, false)
+            .expect("structural validation must not execute module code");
+
+        // Execute mode fails on the missing context key, before module code runs.
+        let error = execute_target(&src_paths, &target_file).unwrap_err();
+        assert!(error.contains("Missing required context variable 'api.key'"));
+        assert!(!error.contains("structural validation executed module code"));
+    }
+
+    /// The hot-std package the engine's resolver would load, when it holds
+    /// sources. Mirrors the pipeline's own resolution so the gate matches what
+    /// compilation will actually see.
+    fn resolvable_hot_std() -> Option<std::path::PathBuf> {
+        let hot_std = crate::lang::project::DependencyResolver::default()
+            .get_hot_std_dependency()
+            .resolved_path;
+        let has_sources = Engine::discover_dependency_source_files(&hot_std)
+            .map(|files| !files.is_empty())
+            .unwrap_or(false);
+        has_sources.then_some(hot_std)
+    }
+
+    fn execute_target(src_paths: &[String], target_file: &str) -> Result<crate::val::Val, String> {
+        Engine::run_unified_pipeline(
+            src_paths,
             &[],
             None,
             None,
-            Some(&target_file),
+            Some(target_file),
             None,
             PipelineMode::Execute,
             None,
@@ -1911,8 +1983,5 @@ must-not-run fail("structural validation executed module code")
             false,
             None,
         )
-        .unwrap_err();
-        assert!(error.contains("Missing required context variable 'api.key'"));
-        assert!(!error.contains("structural validation executed module code"));
     }
 }
