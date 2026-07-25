@@ -883,8 +883,10 @@ impl TypeChecker {
         // such a program, which is precisely why the loop should not depend on
         // my failing to.
         let max_rounds = deferred.len().saturating_add(1);
+        let mut reached_fixed_point = deferred.is_empty();
         for _ in 0..max_rounds {
             if deferred.is_empty() {
+                reached_fixed_point = true;
                 break;
             }
             let mut progressed = false;
@@ -908,8 +910,27 @@ impl TypeChecker {
             // on something genuinely unresolvable (a cycle, or a reference to
             // a variable that does not exist).
             if !progressed {
+                reached_fixed_point = true;
                 break;
             }
+        }
+        if !reached_fixed_point && !deferred.is_empty() {
+            let remaining = deferred.len();
+            let mut affected_variables: Vec<String> = deferred
+                .iter()
+                .take(16)
+                .map(|entry| entry.qualified.clone())
+                .collect();
+            if remaining > affected_variables.len() {
+                affected_variables.push(format!(
+                    "... ({} more)",
+                    remaining - affected_variables.len()
+                ));
+            }
+            self.errors.add(CompilerError::TypeInferenceDidNotConverge {
+                variables: affected_variables,
+                location: None,
+            });
         }
         // Refresh type metadata now that top-level alias variables have been
         // inferred. Struct fields can legally use namespace-local aliases such

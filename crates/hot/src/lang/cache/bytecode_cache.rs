@@ -816,7 +816,9 @@ impl BytecodeCache {
             // Atomic replacement: a torn marker would either strand the
             // previous generation or, once validated, name nothing at all.
             let tmp = marker.with_extension(format!("current.tmp.{}", std::process::id()));
-            if std::fs::write(&tmp, cache_key).is_ok() && std::fs::rename(&tmp, &marker).is_err() {
+            if std::fs::write(&tmp, cache_key).is_ok()
+                && super::atomic_replace_file(&tmp, &marker).is_err()
+            {
                 let _ = std::fs::remove_file(&tmp);
             }
         }

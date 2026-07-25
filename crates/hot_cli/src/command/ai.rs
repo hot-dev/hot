@@ -203,10 +203,24 @@ fn extract_skill_hash(content: &str) -> Option<u64> {
     })
 }
 
-/// Whether the marker sits on line 1 — the layout the previous installer
-/// produced, which invalidates any YAML frontmatter beneath it.
-fn has_leading_marker(content: &str) -> bool {
-    content.starts_with("<!-- hot-skill-hash:") || content.starts_with("// hot-skill-hash:")
+/// Whether an old Markdown stamp is hiding YAML frontmatter on line 2.
+///
+/// A leading marker is valid for Markdown without frontmatter and for
+/// non-Markdown files. Only this exact legacy shape is broken; treating every
+/// moved marker as stale would overwrite local content prepended by a user.
+fn has_broken_legacy_frontmatter_layout(content: &str, is_markdown: bool) -> bool {
+    if !is_markdown {
+        return false;
+    }
+    let Some((marker, rest)) = content.split_once('\n') else {
+        return false;
+    };
+    let marker = marker.trim_end_matches('\r').trim();
+    let is_hash_marker = marker
+        .strip_prefix("<!-- hot-skill-hash:")
+        .and_then(|rest| rest.strip_suffix("-->"))
+        .is_some();
+    is_hash_marker && (rest.starts_with("---\n") || rest.starts_with("---\r\n"))
 }
 
 /// Stamp the content hash into a file without breaking its format.
@@ -307,9 +321,9 @@ fn setup_agent_skills(global: bool) -> Result<(), String> {
             let existing = fs::read_to_string(path)
                 .map_err(|e| format!("Failed to read {}: {}", path.display(), e))?;
 
-            // Rewrite when the source content changed, or when the stamp
-            // sits in the layout an older installer produced (marker on line
-            // 1, which invalidates the YAML frontmatter beneath it) — those
+            // Rewrite when the source content changed, or when the stamp sits
+            // in the exact broken layout an older installer produced: a
+            // Markdown marker on line 1 hiding frontmatter on line 2. Those
             // installs matched their own hash and so were never repaired.
             //
             // Deliberately *not* a byte comparison of the whole file: the
@@ -317,9 +331,9 @@ fn setup_agent_skills(global: bool) -> Result<(), String> {
             // local edits to a skill survive `hot ai update` as long as the
             // shipped content is unchanged. Comparing bytes would silently
             // start clobbering those edits.
-            let layout_matches =
-                has_leading_marker(&existing) == has_leading_marker(&content_with_hash);
-            if extract_skill_hash(&existing) == Some(hash) && layout_matches {
+            if extract_skill_hash(&existing) == Some(hash)
+                && !has_broken_legacy_frontmatter_layout(&existing, is_markdown)
+            {
                 return Ok(false);
             }
         }
@@ -413,7 +427,7 @@ fn setup_agent_skills(global: bool) -> Result<(), String> {
 
 #[cfg(test)]
 mod skill_stamp_tests {
-    use super::stamp_skill_hash;
+    use super::{has_broken_legacy_frontmatter_layout, stamp_skill_hash};
 
     const FRONTMATTER_SKILL: &str =
         "---\nname: hot-language\ndescription: >\n  Write Hot.\n---\n\n# Body\n";
@@ -471,5 +485,18 @@ mod skill_stamp_tests {
             format!("<!-- hot-skill-hash:1234 -->\n{FRONTMATTER_SKILL}")
         );
         assert!(!current.starts_with("<!-- hot-skill-hash"));
+    }
+
+    #[test]
+    fn only_a_leading_marker_hiding_frontmatter_is_legacy() {
+        let legacy = format!("<!-- hot-skill-hash:1234 -->\n{FRONTMATTER_SKILL}");
+        assert!(has_broken_legacy_frontmatter_layout(&legacy, true));
+
+        let plain_markdown = "<!-- hot-skill-hash:1234 -->\n# Reference\n\nLocally edited body\n";
+        assert!(!has_broken_legacy_frontmatter_layout(plain_markdown, true));
+
+        let prepended_edit = "<!-- LOCAL EDIT -->\n<!-- hot-skill-hash:1234 -->\n# Reference\n";
+        assert!(!has_broken_legacy_frontmatter_layout(prepended_edit, true));
+        assert!(!has_broken_legacy_frontmatter_layout(&legacy, false));
     }
 }

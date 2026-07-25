@@ -148,6 +148,13 @@ pub enum CompilerError {
         cycle_path: Vec<String>,
         location: Option<ErrorLocation>,
     },
+    /// Qualified-variable inference kept changing after every bounded pass.
+    /// This is a compiler fixed-point failure rather than an unresolved name:
+    /// accepting the last intermediate type would make results order-dependent.
+    TypeInferenceDidNotConverge {
+        variables: Vec<String>,
+        location: Option<ErrorLocation>,
+    },
     /// Invalid generic arity
     InvalidGenericArity {
         type_name: String,
@@ -529,6 +536,30 @@ impl fmt::Display for CompilerError {
                         type_name,
                         cycle_path.join(" -> ")
                     )
+                }
+            }
+            CompilerError::TypeInferenceDidNotConverge {
+                variables,
+                location,
+            } => {
+                let message = format!(
+                    "Top-level type inference did not converge for: {}",
+                    variables.join(", ")
+                );
+                if let Some(loc) = location {
+                    write!(
+                        f,
+                        "{}:{}:{}: {}",
+                        loc.file
+                            .as_ref()
+                            .map(|p| p.display().to_string())
+                            .unwrap_or_else(|| "<source>".to_string()),
+                        loc.line,
+                        loc.column,
+                        message
+                    )
+                } else {
+                    f.write_str(&message)
                 }
             }
             CompilerError::InvalidGenericArity {
@@ -1118,6 +1149,7 @@ impl CompilerErrors {
             CompilerError::CallLibError { location, .. } => location.as_ref(),
             CompilerError::InvalidTypeAnnotation { location, .. } => location.as_ref(),
             CompilerError::CircularTypeReference { location, .. } => location.as_ref(),
+            CompilerError::TypeInferenceDidNotConverge { location, .. } => location.as_ref(),
             CompilerError::InvalidGenericArity { location, .. } => location.as_ref(),
             CompilerError::InvalidUnionType { location, .. } => location.as_ref(),
             CompilerError::InvalidImplementation { location, .. } => location.as_ref(),
@@ -1286,6 +1318,16 @@ impl CompilerErrors {
                     .with_label(
                         Label::new((source_name.as_str(), span_start..span_end))
                             .with_message(format!("Cycle: {}", cycle_path.join(" -> ")))
+                            .with_color(label_color),
+                    );
+            }
+            CompilerError::TypeInferenceDidNotConverge { variables, .. } => {
+                report = report
+                    .with_code("type-inference-did-not-converge")
+                    .with_message("Top-level type inference did not converge")
+                    .with_label(
+                        Label::new((source_name.as_str(), span_start..span_end))
+                            .with_message(format!("Affected variables: {}", variables.join(", ")))
                             .with_color(label_color),
                     );
             }
@@ -1666,6 +1708,7 @@ impl CompilerError {
             CompilerError::CallLibError { location, .. } => location.as_ref(),
             CompilerError::InvalidTypeAnnotation { location, .. } => location.as_ref(),
             CompilerError::CircularTypeReference { location, .. } => location.as_ref(),
+            CompilerError::TypeInferenceDidNotConverge { location, .. } => location.as_ref(),
             CompilerError::InvalidGenericArity { location, .. } => location.as_ref(),
             CompilerError::InvalidUnionType { location, .. } => location.as_ref(),
             CompilerError::InvalidImplementation { location, .. } => location.as_ref(),
@@ -1720,6 +1763,7 @@ impl CompilerError {
             CompilerError::CallLibError { .. } => "call-lib-error",
             CompilerError::InvalidTypeAnnotation { .. } => "invalid-type-annotation",
             CompilerError::CircularTypeReference { .. } => "circular-type-reference",
+            CompilerError::TypeInferenceDidNotConverge { .. } => "type-inference-did-not-converge",
             CompilerError::InvalidGenericArity { .. } => "invalid-generic-arity",
             CompilerError::InvalidUnionType { .. } => "invalid-union-type",
             CompilerError::InvalidImplementation { .. } => "invalid-implementation",
@@ -1832,6 +1876,19 @@ mod diagnostic_tests {
     fn empty_collection_yields_no_diagnostics() {
         let errors = CompilerErrors::new();
         assert!(errors.to_diagnostics().is_empty());
+    }
+
+    #[test]
+    fn nonconvergent_inference_has_an_explicit_diagnostic() {
+        let error = CompilerError::TypeInferenceDidNotConverge {
+            variables: vec!["::app/a".to_string(), "::app/b".to_string()],
+            location: None,
+        };
+        assert_eq!(error.code(), "type-inference-did-not-converge");
+        assert!(
+            error.to_string().contains("did not converge"),
+            "the diagnostic must explain the fixed-point failure"
+        );
     }
 
     #[test]

@@ -1379,26 +1379,34 @@ MyType -> Str fn (t: MyType): Str {
         let mut lock = holder.acquire_file_lock(&unit).expect("acquire lock");
         let guard = lock.write().expect("hold lock");
 
-        let (tx, rx) = std::sync::mpsc::channel();
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
         let writer = {
             let cache_dir = cache_dir.clone();
             let unit = unit.clone();
             std::thread::spawn(move || {
                 let cache = UnitCache::new(cache_dir);
-                let _ = cache.save(&unit, &IndexMap::new());
-                let _ = tx.send(());
+                let _ = started_tx.send(());
+                let result = cache.save(&unit, &IndexMap::new());
+                let _ = done_tx.send(result);
             })
         };
 
+        started_rx
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("writer thread must start");
         assert!(
-            rx.recv_timeout(std::time::Duration::from_millis(300))
+            done_rx
+                .recv_timeout(std::time::Duration::from_millis(300))
                 .is_err(),
             "save must block while another writer holds the unit lock"
         );
 
         drop(guard);
-        rx.recv_timeout(std::time::Duration::from_secs(10))
-            .expect("save must proceed once the lock is released");
+        done_rx
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("save must proceed once the lock is released")
+            .expect("save must succeed after the lock is released");
         writer.join().expect("writer thread");
     }
 

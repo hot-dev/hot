@@ -122,3 +122,29 @@ fn hot_ai_update_preserves_local_edits_to_an_unchanged_skill() {
         "an unchanged skill must not be rewritten"
     );
 }
+
+#[test]
+fn hot_ai_update_preserves_content_prepended_before_a_valid_marker() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let project = temp.path();
+
+    run(project, &["ai", "add"]);
+    let reference = project
+        .join(".skills")
+        .join("hot-language")
+        .join("references")
+        .join("flows.md");
+    let customized = format!(
+        "<!-- MY PREPENDED CUSTOMIZATION -->\n{}",
+        std::fs::read_to_string(&reference).expect("read installed reference")
+    );
+    std::fs::write(&reference, &customized).expect("customize reference");
+
+    run(project, &["ai", "update"]);
+
+    assert_eq!(
+        std::fs::read_to_string(&reference).expect("read updated reference"),
+        customized,
+        "moving a valid marker below prepended local content must not trigger a rewrite"
+    );
+}
