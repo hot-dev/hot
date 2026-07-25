@@ -497,6 +497,15 @@ impl TypeContext {
 }
 
 /// Type checker for Hot programs
+/// A top-level variable whose inferred type depended on a qualified variable
+/// that was not resolved when it was first visited.
+struct DeferredVariable {
+    ns: String,
+    qualified: String,
+    var: Var,
+    value: Value,
+}
+
 pub struct TypeChecker {
     context: TypeContext,
     errors: CompilerErrors,
@@ -553,6 +562,11 @@ pub struct TypeChecker {
     /// `Any`. Mirrors how the compiler/VM looks up variables in
     /// `NamespaceRegistry`.
     qualified_variables: AHashMap<String, TypeExpr>,
+    /// Set by `shallow_infer_top_level_type` when an inference consulted a
+    /// qualified variable that is not resolved yet. Drives the worklist in
+    /// `check_program`: only variables blocked on something unresolved can
+    /// change on a later pass.
+    pending_dependency: std::cell::Cell<bool>,
     /// Short name → list of fully-qualified names for any variable declared
     /// with `core: true` metadata. Multiple entries are common for function
     /// aliases (e.g. `length` is `core: true` in both `::hot::coll` and
@@ -618,6 +632,7 @@ impl TypeChecker {
             impl_registry: AHashSet::new(),
             impl_locations: AHashMap::new(),
             qualified_variables: AHashMap::new(),
+            pending_dependency: std::cell::Cell::new(false),
             core_variables: AHashMap::new(),
             in_fn_body: 0,
             match_subject_stack: Vec::new(),
@@ -824,14 +839,46 @@ impl TypeChecker {
         //     ::a x: Str "hi"
         //     ::b y ::a/x          // depends on ::a/x
         //     ::c z ::b/y          // depends on ::b/y
-        // converge regardless of namespace iteration order. The map only ever
-        // grows and the underlying inference is deterministic, so a small
-        // bound on iterations is sufficient (3 covers everything realistic;
-        // we cap at 5 as a safety net).
-        for _ in 0..5 {
-            let before = self.qualified_variables.len();
-            self.collect_qualified_variables(program);
-            if self.qualified_variables.len() == before {
+        // converge regardless of namespace iteration order.
+        //
+        // Only variables blocked on an unresolved qualified reference can
+        // change on a later pass, so the first full scan reports them and
+        // subsequent rounds revisit just those. Two things this fixes over
+        // re-scanning the whole program until the map stops growing:
+        //
+        //  * cost — the old loop always paid one extra full scan purely to
+        //    observe that nothing changed (~493ms of a 983ms type check on a
+        //    large project);
+        //  * correctness — a pass can refine a type (`Any` -> `Str`) without
+        //    adding a key, so a length comparison could stop before the
+        //    deepest link in a chain resolved.
+        let mut deferred = self.collect_qualified_variables(program);
+        for _ in 0..4 {
+            if deferred.is_empty() {
+                break;
+            }
+
+            let mut progressed = false;
+            let mut still_deferred = Vec::with_capacity(deferred.len());
+            for entry in deferred {
+                let (inferred, blocked) = self.reinfer_deferred(&entry, program);
+                if !matches!(inferred, TypeExpr::Any)
+                    && self.qualified_variables.get(&entry.qualified) != Some(&inferred)
+                {
+                    self.qualified_variables
+                        .insert(entry.qualified.clone(), inferred);
+                    progressed = true;
+                }
+                if blocked {
+                    still_deferred.push(entry);
+                }
+            }
+            deferred = still_deferred;
+
+            // No refinement this round means the remaining entries are blocked
+            // on something genuinely unresolvable (a cycle, or a reference to
+            // a variable that does not exist).
+            if !progressed {
                 break;
             }
         }
@@ -916,7 +963,10 @@ impl TypeChecker {
     /// lambda bodies — those are walked later by `check_namespace` for
     /// type-mismatch checking. This pass only needs the *declared* types of
     /// top-level vars, which are cheap to determine and have no side effects.
-    fn collect_qualified_variables(&mut self, program: &Program) {
+    /// Full scan over every namespace. Returns the variables whose inference
+    /// consulted something unresolved — the only ones a later pass can change.
+    fn collect_qualified_variables(&mut self, program: &Program) -> Vec<DeferredVariable> {
+        let mut deferred = Vec::new();
         for (ns_path, namespace) in &program.namespaces {
             let ns_str = ns_path.to_string();
 
@@ -935,7 +985,16 @@ impl TypeChecker {
                     self.deprecated_defs.insert(qualified.clone(), note);
                 }
 
+                self.pending_dependency.set(false);
                 let inferred = self.shallow_infer_top_level_type(var, value, &alias_map, &ns_str);
+                if self.pending_dependency.get() {
+                    deferred.push(DeferredVariable {
+                        ns: ns_str.clone(),
+                        qualified: qualified.clone(),
+                        var: var.clone(),
+                        value: value.clone(),
+                    });
+                }
                 if !matches!(inferred, TypeExpr::Any)
                     || !self.qualified_variables.contains_key(&qualified)
                 {
@@ -950,6 +1009,33 @@ impl TypeChecker {
                 }
             }
         }
+        deferred
+    }
+
+    /// Re-infer one deferred variable. Returns the freshly inferred type and
+    /// whether it is still blocked on an unresolved dependency.
+    fn reinfer_deferred(
+        &mut self,
+        entry: &DeferredVariable,
+        program: &Program,
+    ) -> (TypeExpr, bool) {
+        let alias_map = program
+            .namespaces
+            .iter()
+            .find(|(ns_path, _)| ns_path.to_string() == entry.ns)
+            .map(|(_, namespace)| {
+                namespace
+                    .aliases
+                    .iter()
+                    .map(|(alias, target)| (alias.to_string(), target.to_string()))
+                    .collect::<AHashMap<String, String>>()
+            })
+            .unwrap_or_default();
+
+        self.pending_dependency.set(false);
+        let inferred =
+            self.shallow_infer_top_level_type(&entry.var, &entry.value, &alias_map, &entry.ns);
+        (inferred, self.pending_dependency.get())
     }
 
     /// Determine a top-level variable's type from its declaration without
@@ -1028,8 +1114,15 @@ impl TypeChecker {
             }
             Value::Ref(Ref::Ns(ns_ref)) => {
                 // var imports: `local-var ::ns/var` → look up the source.
-                self.lookup_qualified_ns_ref(ns_ref, alias_map)
-                    .unwrap_or(TypeExpr::Any)
+                match self.lookup_qualified_ns_ref(ns_ref, alias_map) {
+                    Some(resolved) if !matches!(resolved, TypeExpr::Any) => resolved,
+                    // Unknown or still `Any`: the target may resolve once more
+                    // of the program has been seen.
+                    _ => {
+                        self.pending_dependency.set(true);
+                        TypeExpr::Any
+                    }
+                }
             }
             Value::Ref(Ref::Var(var_ref)) => {
                 // Same-namespace top-level aliases (`alias original`) need to
@@ -1041,11 +1134,15 @@ impl TypeChecker {
                     let target_name = var_ref.var.sym.name();
                     if target_name != var.sym.name() {
                         let qualified = format!("{}/{}", ns_str, target_name);
-                        return self
-                            .qualified_variables
-                            .get(&qualified)
-                            .cloned()
-                            .unwrap_or(TypeExpr::Any);
+                        return match self.qualified_variables.get(&qualified) {
+                            Some(resolved) if !matches!(resolved, TypeExpr::Any) => {
+                                resolved.clone()
+                            }
+                            _ => {
+                                self.pending_dependency.set(true);
+                                TypeExpr::Any
+                            }
+                        };
                     }
                 }
                 TypeExpr::Any
@@ -5594,6 +5691,41 @@ mod tests {
             !has_nested,
             "top-level arrows must not be flagged as nested: {:?}",
             checker.errors.errors
+        );
+    }
+
+    /// Alias chains must resolve regardless of namespace iteration order.
+    ///
+    /// The qualified-variable fixed point terminated when the map stopped
+    /// *growing*, but a pass can refine a type (`Any` -> `Str`) without adding
+    /// a key. With namespaces visited in dependency-reverse order, that let
+    /// the loop stop one pass early and leave the deepest alias unresolved.
+    #[test]
+    fn deep_alias_chains_resolve_in_dependency_reverse_order() {
+        use crate::lang::parser::parse_hot;
+        let source = r#"
+        ::chain::c ns
+        z ::chain::b/y
+
+        ::chain::b ns
+        y ::chain::a/x
+
+        ::chain::a ns
+        x: Str "hi"
+        "#;
+        let program = parse_hot(source).expect("parse");
+        let mut checker = TypeChecker::new();
+        let _ = checker.check_program(&program);
+
+        let resolved = checker
+            .qualified_variables
+            .get("::chain::c/z")
+            .cloned()
+            .unwrap_or(TypeExpr::Any);
+        assert!(
+            matches!(resolved, TypeExpr::Str),
+            "::chain::c/z must resolve through b -> a to Str, got {:?}",
+            resolved
         );
     }
 }
