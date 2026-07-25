@@ -55,8 +55,11 @@ pub(crate) fn is_cache_key(value: &str) -> bool {
 /// A program-scope marker stem: `{name}-{32 hex}` as produced by
 /// `BytecodeCache::scope_id`.
 fn is_scope_marker_stem(stem: &str) -> bool {
-    stem.rsplit_once('-')
-        .is_some_and(|(name, digest)| !name.is_empty() && is_lower_hex(digest, 32))
+    stem.rsplit_once('-').is_some_and(|(name, digest)| {
+        !name.is_empty()
+            && name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
+            && is_lower_hex(digest, 32)
+    })
 }
 
 /// Hyphenated UUID (8-4-4-4-12 lowercase hex), as used for bundle cache keys.
@@ -237,7 +240,13 @@ pub(crate) fn prune_stale_cache_files(dir: &std::path::Path, keep: &std::path::P
         // never refreshed, so an actively used lock would look stale — and
         // deleting one while a process holds its fd splits later lockers
         // onto a fresh inode, silently breaking mutual exclusion.
-        if name.ends_with(".lock") {
+        //
+        // Scope markers are excluded for the same reason: a cache hit touches
+        // only the bytecode entry, so an actively used program's marker ages
+        // out while its entry stays live. Losing it strands the next
+        // superseded generation, which is exactly what the marker prevents.
+        // Both are tiny and bounded by distinct units, not by generations.
+        if name.ends_with(".lock") || name.ends_with(".current") {
             continue;
         }
         if !is_managed_cache_file_name(&name) {
@@ -356,5 +365,60 @@ mod prune_tests {
         assert!(!is_managed_cache_file_name("foreign.cache"));
         assert!(!is_managed_cache_file_name("notes.tmp"));
         assert!(!is_managed_cache_file_name("short.bc.zst"));
+    }
+
+    /// A live program's scope marker must not age out from under its entry:
+    /// cache hits touch only the bytecode file, so an expiring marker would
+    /// strand the next superseded generation.
+    #[test]
+    fn pruning_never_collects_scope_markers_or_locks() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let old = |name: &str| {
+            let path = dir.path().join(name);
+            std::fs::write(&path, b"x").unwrap();
+            filetime::set_file_mtime(
+                &path,
+                filetime::FileTime::from_system_time(
+                    std::time::SystemTime::now() - std::time::Duration::from_secs(90 * 24 * 3600),
+                ),
+            )
+            .unwrap();
+            path
+        };
+
+        let marker = old(&format!("demo-{}.current", "a".repeat(32)));
+        let lock = old(&format!("demo-{}.lock", "a".repeat(32)));
+        let entry = old(&format!("{}.bc.zst", "c".repeat(64)));
+        let keep = dir.path().join(format!("{}.bc.zst", "d".repeat(64)));
+        std::fs::write(&keep, b"x").unwrap();
+
+        prune_stale_cache_files(dir.path(), &keep);
+
+        assert!(marker.exists(), "scope markers must survive the age sweep");
+        assert!(lock.exists(), "lock files must survive the age sweep");
+        assert!(!entry.exists(), "a stale entry is still collected");
+    }
+
+    /// The marker predicate must match the shape `scope_id` produces, not any
+    /// file that happens to end in `.current`.
+    #[test]
+    fn only_scope_shaped_markers_are_managed() {
+        let digest = "a".repeat(32);
+        assert!(is_managed_cache_file_name(&format!(
+            "demo-{digest}.current"
+        )));
+        assert!(is_managed_cache_file_name(&format!(
+            "my_project_2-{digest}.current"
+        )));
+
+        assert!(!is_managed_cache_file_name("notes.current"));
+        assert!(!is_managed_cache_file_name(&format!(
+            "demo-{}.current",
+            "a".repeat(31)
+        )));
+        assert!(!is_managed_cache_file_name(&format!(
+            "bad name-{digest}.current"
+        )));
+        assert!(!is_managed_cache_file_name(&format!("-{digest}.current")));
     }
 }

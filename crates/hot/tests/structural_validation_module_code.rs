@@ -11,52 +11,55 @@
 //! a temp directory that links the in-repo hot-std also keeps the test's caches
 //! out of the repo and off the developer's real cache.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
-/// The hot-std shipped in this checkout, located relative to the crate.
-fn repo_hot_std() -> Option<PathBuf> {
-    let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let candidate = manifest.join("../../hot/pkg/hot-std");
-    candidate.join("src").is_dir().then_some(candidate)
+/// Write a minimal hot-std into `home/pkg/hot-std`.
+///
+/// The canary needs exactly one hot-std symbol — `fail` — and hot-std's own
+/// definition is a thin wrapper over a Rust native
+/// (`call-lib(::hot::exec/fail, ...)`), so a fixture reproduces it faithfully
+/// in a few lines. Synthesizing it keeps this test independent of repository
+/// layout: it behaves identically in the monorepo, in CI, and against a
+/// packaged or vendored `hot` crate, with no path probing and no skip branch
+/// that could quietly delete the coverage.
+fn write_hot_std_fixture(home: &Path) {
+    let root = home.join("pkg").join("hot-std");
+    let src = root.join("src").join("hot");
+    std::fs::create_dir_all(&src).expect("create fixture dirs");
+
+    std::fs::write(
+        root.join("pkg.hot"),
+        r#"::hot::pkg ns
+
+hot.pkg.hot-std {
+  name: "hot.dev/hot-std",
+  version: "0.0.0-fixture",
+  src-paths: ["src/"]
 }
+"#,
+    )
+    .expect("write fixture pkg.hot");
 
-/// Build a `HOT_HOME` whose `pkg/hot-std` resolves to the in-repo copy.
-fn link_hot_std(home: &Path, hot_std: &Path) {
-    let pkg = home.join("pkg");
-    std::fs::create_dir_all(&pkg).expect("create pkg dir");
-    let link = pkg.join("hot-std");
-    #[cfg(unix)]
-    std::os::unix::fs::symlink(hot_std, &link).expect("link hot-std");
-    #[cfg(not(unix))]
-    {
-        fn copy_dir(from: &Path, to: &Path) {
-            std::fs::create_dir_all(to).unwrap();
-            for entry in std::fs::read_dir(from).unwrap().flatten() {
-                let (src, dst) = (entry.path(), to.join(entry.file_name()));
-                if src.is_dir() {
-                    copy_dir(&src, &dst);
-                } else {
-                    let _ = std::fs::copy(&src, &dst);
-                }
-            }
-        }
-        copy_dir(hot_std, &link);
-    }
+    // `core: true` makes `fail` resolvable unqualified, as in real hot-std.
+    std::fs::write(
+        src.join("exec.hot"),
+        r#"::hot::exec ns
+
+fail
+meta { core: true }
+fn (lazy err: Any): Any {
+    call-lib(::hot::exec/fail, [err])
+}
+"#,
+    )
+    .expect("write fixture exec.hot");
 }
 
 #[test]
 fn structural_validation_does_not_execute_module_code() {
-    let Some(hot_std) = repo_hot_std() else {
-        panic!(
-            "in-repo hot-std not found relative to {}; this test must not be \
-             silently skipped — it exists to cover a gap CI previously had",
-            env!("CARGO_MANIFEST_DIR")
-        );
-    };
-
     let temp = tempfile::tempdir().expect("tempdir");
     let home = temp.path().join("hot-home");
-    link_hot_std(&home, &hot_std);
+    write_hot_std_fixture(&home);
 
     // SAFETY: this binary contains exactly one test, so nothing else in the
     // process can race on the environment.
@@ -134,5 +137,37 @@ must-not-run fail("structural validation executed module code")
     assert!(
         !error.contains("structural validation executed module code"),
         "module code must not have executed: {error}"
+    );
+
+    // Positive control: with the context satisfied, module code *does* run and
+    // the canary fires. Without this, a fixture whose `fail` silently stopped
+    // aborting would make every assertion above vacuously true.
+    let mut context = ahash::AHashMap::new();
+    context.insert("api.key".to_string(), hot::val::Val::from("present"));
+    let fired = hot::lang::engine::Engine::run_unified_pipeline(
+        &src_paths,
+        &[],
+        None,
+        None,
+        Some(&target_file),
+        None,
+        hot::lang::engine::PipelineMode::Execute,
+        None,
+        None,
+        None,
+        Some(context),
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+        false,
+        None,
+    );
+    let fired = fired.expect_err("module code should run once context is satisfied");
+    assert!(
+        fired.contains("structural validation executed module code"),
+        "the canary must be armed — expected the fail() message, got: {fired}"
     );
 }

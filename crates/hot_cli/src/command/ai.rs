@@ -192,23 +192,6 @@ fn setup_agents_md() -> Result<(), String> {
 
 /// Install/refresh the `hot-language` skill under `.skills/` (project) or
 /// `~/.skills/` (global).
-/// Read a stamped hash from an installed file.
-///
-/// The marker used to be line 1, but YAML frontmatter is only recognized
-/// when its opening `---` is the very first line (see `stamp_skill_hash`),
-/// so it now follows the frontmatter. Scan a small prefix so files written
-/// by either version are recognized and an upgrade is detected as
-/// unchanged instead of rewritten on every run.
-fn extract_skill_hash(content: &str) -> Option<u64> {
-    content.lines().take(64).find_map(|line| {
-        let line = line.trim();
-        line.strip_prefix("<!-- hot-skill-hash:")
-            .and_then(|rest| rest.strip_suffix("-->"))
-            .or_else(|| line.strip_prefix("// hot-skill-hash:"))
-            .and_then(|hash_str| hash_str.trim().parse::<u64>().ok())
-    })
-}
-
 /// Stamp the content hash into a file without breaking its format.
 ///
 /// A YAML frontmatter block must begin on line 1. Prepending the marker
@@ -307,9 +290,15 @@ fn setup_agent_skills(global: bool) -> Result<(), String> {
             let existing = fs::read_to_string(path)
                 .map_err(|e| format!("Failed to read {}: {}", path.display(), e))?;
 
-            let existing_hash = extract_skill_hash(&existing);
-
-            if existing_hash == Some(hash) {
+            // Skip only when the file already *is* what we would write.
+            //
+            // Comparing hashes compared content while ignoring layout, so an
+            // install written by an older version — marker on line 1, which
+            // invalidates the YAML frontmatter beneath it — matched its own
+            // stamp and was never rewritten. Broken installs stayed broken
+            // through every `hot ai update`. Byte equality also covers any
+            // future layout change for free.
+            if existing == content_with_hash {
                 return Ok(false);
             }
         }
@@ -403,7 +392,7 @@ fn setup_agent_skills(global: bool) -> Result<(), String> {
 
 #[cfg(test)]
 mod skill_stamp_tests {
-    use super::{extract_skill_hash, stamp_skill_hash};
+    use super::stamp_skill_hash;
 
     const FRONTMATTER_SKILL: &str =
         "---\nname: hot-language\ndescription: >\n  Write Hot.\n---\n\n# Body\n";
@@ -418,42 +407,48 @@ mod skill_stamp_tests {
             stamped.starts_with("---\n"),
             "frontmatter must remain at line 1:\n{stamped}"
         );
-        assert!(
-            stamped.contains("<!-- hot-skill-hash:42 -->"),
-            "hash marker must still be present:\n{stamped}"
-        );
-        // The marker belongs after the closing delimiter, not inside the block.
         let close = stamped.find("\n---\n").expect("closing delimiter");
-        let marker = stamped.find("<!-- hot-skill-hash:").expect("marker");
+        let marker = stamped
+            .find("<!-- hot-skill-hash:42 -->")
+            .expect("marker must be present");
         assert!(marker > close, "marker must follow the frontmatter block");
-        assert_eq!(extract_skill_hash(&stamped), Some(42));
+        assert!(stamped.contains("name: hot-language") && stamped.contains("# Body"));
     }
 
     #[test]
     fn stamping_markdown_without_frontmatter_prepends() {
         let stamped = stamp_skill_hash("# Reference\n\ntext\n", 7, true);
         assert!(stamped.starts_with("<!-- hot-skill-hash:7 -->\n"));
-        assert_eq!(extract_skill_hash(&stamped), Some(7));
+        assert!(stamped.ends_with("# Reference\n\ntext\n"));
     }
 
     #[test]
     fn stamping_non_markdown_prepends_line_comment() {
-        let stamped = stamp_skill_hash("::demo ns\n", 9, false);
-        assert!(stamped.starts_with("// hot-skill-hash:9\n"));
-        assert_eq!(extract_skill_hash(&stamped), Some(9));
+        assert_eq!(
+            stamp_skill_hash("::demo ns\n", 9, false),
+            "// hot-skill-hash:9\n::demo ns\n"
+        );
     }
 
-    /// Files written by the previous version carry the marker on line 1; they
-    /// must still be recognized so an upgrade rewrites once instead of on
-    /// every run.
+    /// The installer compares its output byte for byte against the file on
+    /// disk, so an unstable stamp would rewrite every skill on every run.
     #[test]
-    fn legacy_leading_marker_is_still_read() {
-        let legacy = format!("<!-- hot-skill-hash:1234 -->\n{}", FRONTMATTER_SKILL);
-        assert_eq!(extract_skill_hash(&legacy), Some(1234));
+    fn stamping_is_deterministic() {
+        assert_eq!(
+            stamp_skill_hash(FRONTMATTER_SKILL, 42, true),
+            stamp_skill_hash(FRONTMATTER_SKILL, 42, true)
+        );
     }
 
+    /// The layout an older version produced must never be what we write now,
+    /// or the migration in `write_skill_file` could not converge.
     #[test]
-    fn unstamped_content_has_no_hash() {
-        assert_eq!(extract_skill_hash(FRONTMATTER_SKILL), None);
+    fn legacy_layout_is_not_reproduced() {
+        let current = stamp_skill_hash(FRONTMATTER_SKILL, 1234, true);
+        assert_ne!(
+            current,
+            format!("<!-- hot-skill-hash:1234 -->\n{FRONTMATTER_SKILL}")
+        );
+        assert!(!current.starts_with("<!-- hot-skill-hash"));
     }
 }

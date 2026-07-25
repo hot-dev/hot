@@ -1353,87 +1353,96 @@ MyType -> Str fn (t: MyType): Str {
         );
     }
 
-    /// Concurrent writers converge on one valid, loadable generation.
+    /// `save` must wait for an already-held unit lock rather than writing
+    /// alongside the holder.
     ///
-    /// Scope note: this is a smoke test, not a proof. The lost-generation race
-    /// it guards against (a writer that lost `try_write` writing an entry the
-    /// lock holder then sweeps) only manifests under real contention, and this
-    /// harness reproduces it only intermittently — it caught the pre-fix code
-    /// about one run in three, and not at all once rounds were added. The
-    /// structural fix is the blocking lock in `save`; what this test reliably
-    /// catches is gross breakage: an empty cache, a surviving half-written
-    /// file, or unbounded generation growth under parallel saves.
+    /// Deterministic by construction: the lock is taken here, a writer is
+    /// spawned, and the writer must still be blocked a moment later. With a
+    /// non-blocking `try_write` the writer proceeds immediately — it writes an
+    /// entry the lock holder's sweep can then delete — and the test fails on
+    /// the "still blocked" assertion instead of relying on thread scheduling.
     #[test]
-    fn concurrent_writers_leave_exactly_one_live_generation() {
+    fn save_waits_for_an_already_held_unit_lock() {
         let dir = tempfile::tempdir().expect("tempdir");
         let cache_dir = dir.path().join("unit");
         std::fs::create_dir_all(&cache_dir).unwrap();
 
         let root = dir.path().join("mylib");
         std::fs::create_dir_all(&root).unwrap();
-        std::fs::write(root.join("lib.hot"), "::mylib ns\n\nv 0\n").unwrap();
+        std::fs::write(root.join("lib.hot"), "::mylib ns\n\nv 1\n").unwrap();
         let unit = CompilationUnit::Package {
             name: "mylib".to_string(),
             path: root.clone(),
         };
 
-        // Each writer gets its own cache instance (its own lock fd), mirroring
-        // separate processes racing on the same unit. Repeated because losing
-        // the race is timing-dependent: a single round detects the unlocked
-        // write-then-prune only intermittently.
-        for round in 0..6 {
-            std::thread::scope(|scope| {
-                for generation in (round * 8)..(round * 8 + 8) {
-                    let cache_dir = cache_dir.clone();
-                    let unit = unit.clone();
-                    scope.spawn(move || {
-                        let cache = UnitCache::new(cache_dir);
-                        let mut namespaces = IndexMap::new();
-                        namespaces.insert(
-                            NsPath::from_string(&format!("::gen{}", generation)),
-                            Namespace {
-                                path: NsPath::from_string(&format!("::gen{}", generation)),
-                                scope: crate::lang::ast::Scope {
-                                    vars: IndexMap::new(),
-                                },
-                                meta: None,
-                                source_file: None,
-                                aliases: Default::default(),
-                            },
-                        );
-                        let _ = cache.save(&unit, &namespaces);
-                    });
-                }
-            });
+        let holder = UnitCache::new(cache_dir.clone());
+        let mut lock = holder.acquire_file_lock(&unit).expect("acquire lock");
+        let guard = lock.write().expect("hold lock");
 
-            let live: Vec<_> = std::fs::read_dir(&cache_dir)
+        let (tx, rx) = std::sync::mpsc::channel();
+        let writer = {
+            let cache_dir = cache_dir.clone();
+            let unit = unit.clone();
+            std::thread::spawn(move || {
+                let cache = UnitCache::new(cache_dir);
+                let _ = cache.save(&unit, &IndexMap::new());
+                let _ = tx.send(());
+            })
+        };
+
+        assert!(
+            rx.recv_timeout(std::time::Duration::from_millis(300))
+                .is_err(),
+            "save must block while another writer holds the unit lock"
+        );
+
+        drop(guard);
+        rx.recv_timeout(std::time::Duration::from_secs(10))
+            .expect("save must proceed once the lock is released");
+        writer.join().expect("writer thread");
+    }
+
+    /// Successive generations of one unit collapse to a single live entry.
+    #[test]
+    fn sequential_generations_collapse_to_one_entry() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let cache_dir = dir.path().join("unit");
+        let cache = UnitCache::new(cache_dir.clone());
+
+        let root = dir.path().join("mylib");
+        std::fs::create_dir_all(&root).unwrap();
+        let unit = CompilationUnit::Package {
+            name: "mylib".to_string(),
+            path: root.clone(),
+        };
+
+        for generation in 0..5 {
+            std::fs::write(
+                root.join("lib.hot"),
+                format!("::mylib ns\n\nv {}\n", generation),
+            )
+            .unwrap();
+            cache.save(&unit, &IndexMap::new()).expect("save");
+
+            let entries: Vec<_> = std::fs::read_dir(&cache_dir)
                 .unwrap()
                 .flatten()
                 .filter(|e| e.file_name().to_string_lossy().ends_with(".ast.zst"))
                 .collect();
             assert_eq!(
-                live.len(),
+                entries.len(),
                 1,
-                "round {round}: concurrent writers must converge on one generation, found {:?}",
-                live.iter().map(|e| e.file_name()).collect::<Vec<_>>()
+                "generation {generation} must supersede its predecessor, found {:?}",
+                entries.iter().map(|e| e.file_name()).collect::<Vec<_>>()
             );
         }
 
-        let entries: Vec<_> = std::fs::read_dir(&cache_dir)
-            .unwrap()
-            .flatten()
-            .filter(|e| e.file_name().to_string_lossy().ends_with(".ast.zst"))
-            .collect();
-        assert_eq!(
-            entries.len(),
-            1,
-            "concurrent writers must converge on one generation, found {:?}",
-            entries.iter().map(|e| e.file_name()).collect::<Vec<_>>()
-        );
-        // And the survivor must be loadable, not a half-written or deleted file.
-        let reader = UnitCache::new(cache_dir.clone());
         assert!(
-            reader.load(&unit).ok().flatten().is_some(),
+            UnitCache::new(cache_dir)
+                .load(&unit)
+                .ok()
+                .flatten()
+                .is_some(),
             "the surviving entry must be readable"
         );
     }

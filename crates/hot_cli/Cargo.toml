@@ -56,6 +56,9 @@ winres = { workspace = true }
 # Note: cargo-bundle should be installed globally with:
 # cargo install cargo-bundle
 
+[dev-dependencies]
+tempfile = { workspace = true }
+
 [package.metadata.bundle]
 name = "hot"
 identifier = "dev.hot.hot"

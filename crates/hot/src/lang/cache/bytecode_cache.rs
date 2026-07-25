@@ -813,7 +813,12 @@ impl BytecodeCache {
                     super::remove_invalid_cache_entry(&self.cache_file_path(previous));
                 }
             }
-            let _ = std::fs::write(&marker, cache_key);
+            // Atomic replacement: a torn marker would either strand the
+            // previous generation or, once validated, name nothing at all.
+            let tmp = marker.with_extension(format!("current.tmp.{}", std::process::id()));
+            if std::fs::write(&tmp, cache_key).is_ok() && std::fs::rename(&tmp, &marker).is_err() {
+                let _ = std::fs::remove_file(&tmp);
+            }
         }
         drop(scope_guard);
 
