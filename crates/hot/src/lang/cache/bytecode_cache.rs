@@ -569,8 +569,62 @@ impl BytecodeCache {
             .finalize())
     }
 
-    /// Get cache file path for a given cache key
+    /// Identity of the *program* an entry belongs to, independent of its
+    /// content key.
+    ///
+    /// Without this, entries are bare content hashes and there is no way to
+    /// tell which of them supersede one another — so every recompile strands a
+    /// multi-megabyte file until the age sweep runs. Scoping on the project
+    /// plus its set of source paths keeps distinct programs apart (notably
+    /// `check` and `test`, which compile different path sets of the same
+    /// project) while letting successive edits of one program collapse.
+    ///
+    /// Changing the file *set* (adding, removing, or renaming a source)
+    /// changes the scope and leaves the previous entry for the age sweep;
+    /// editing file *contents* does not.
+    fn scope_id(project_name: &str, file_hashes: &[FileHash]) -> String {
+        let mut paths: Vec<&str> = file_hashes.iter().map(|fh| fh.path.as_str()).collect();
+        paths.sort_unstable();
+        let mut hasher = HotHasher::new();
+        for path in paths {
+            hasher.update(path.as_bytes());
+            hasher.update(&[0]);
+        }
+        let digest = hasher.finalize();
+        let safe_project: String = project_name
+            .chars()
+            .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
+            .collect();
+        format!("{}-{}", safe_project, &digest[..8])
+    }
+
+    /// Get cache file path for a given cache key within a program scope.
+    fn scoped_cache_file_path(&self, scope: &str, cache_key: &str) -> PathBuf {
+        self.cache_dir.join(format!(
+            "{}-{}.{}",
+            scope,
+            cache_key,
+            CacheType::Bytecode.extension()
+        ))
+    }
+
+    /// Locate an entry by content key alone.
+    ///
+    /// Readers only carry the key, so the scope is recovered by matching the
+    /// filename suffix. Entries written before scoping (a bare key) are still
+    /// honored so an upgrade does not throw away a warm cache.
     fn cache_file_path(&self, cache_key: &str) -> PathBuf {
+        let suffix = format!("-{}.{}", cache_key, CacheType::Bytecode.extension());
+        if let Ok(entries) = std::fs::read_dir(&self.cache_dir) {
+            for entry in entries.flatten() {
+                let name = entry.file_name();
+                let name = name.to_string_lossy();
+                if name.ends_with(&suffix) {
+                    return entry.path();
+                }
+            }
+        }
+        // Legacy (unscoped) location, also used as the "not found" answer.
         self.cache_dir
             .join(format!("{}.{}", cache_key, CacheType::Bytecode.extension()))
     }
@@ -663,7 +717,8 @@ impl BytecodeCache {
         self.ensure_cache_dir()?;
         validate_cache_metadata(&metadata, cache_key)?;
 
-        let cache_path = self.cache_file_path(cache_key);
+        let scope = Self::scope_id(&metadata.project_name, &metadata.file_hashes);
+        let cache_path = self.scoped_cache_file_path(&scope, cache_key);
 
         tracing::debug!("Saving bytecode cache to: {}", cache_path.display());
 
@@ -724,9 +779,15 @@ impl BytecodeCache {
             return Err(format!("Failed to rename cache file: {}", e));
         }
 
-        // Opportunistic housekeeping: old-generation entries (superseded
-        // versions/formats) are unreachable via their keys and would
-        // otherwise accumulate forever.
+        // Collapse this program to a single live generation. Bytecode entries
+        // are multi-megabyte, so relying on the age sweep alone let one
+        // project accumulate tens of entries between prunes.
+        let suffix = format!(".{}", CacheType::Bytecode.extension());
+        super::prune_superseded_entries(&self.cache_dir, &scope, &suffix, &cache_path);
+        super::prune_legacy_bare_key_entries(&self.cache_dir, &suffix);
+
+        // Opportunistic housekeeping: entries from other programs that have
+        // gone untouched long enough to be considered abandoned.
         super::prune_stale_cache_files(&self.cache_dir, &cache_path);
 
         tracing::debug!(
@@ -1624,5 +1685,119 @@ mod tests {
         assert_eq!(metadata.namespace, restored.namespace);
         assert_eq!(metadata.static_scope, restored.static_scope);
         assert_eq!(metadata.source, restored.source);
+    }
+
+    /// Bytecode entries are multi-megabyte, so a recompile must not strand the
+    /// previous one — while `check` and `test` (different path sets of the
+    /// same project) must keep their own live entries.
+    #[test]
+    fn saving_collapses_generations_per_program_scope() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let cache = BytecodeCache::new(dir.path().to_path_buf());
+        let program = create_test_bytecode_program();
+
+        let save = |paths: &[&str], content: &str| {
+            let hashes: Vec<FileHash> = paths
+                .iter()
+                .map(|path| FileHash {
+                    path: path.to_string(),
+                    hash: HotHasher::hash_content(content.as_bytes()),
+                })
+                .collect();
+            let key = BytecodeCache::calculate_cache_key("demo", &hashes).unwrap();
+            let metadata = create_cache_metadata("demo", hashes, key.clone());
+            cache
+                .save(
+                    &key,
+                    &program,
+                    metadata,
+                    &indexmap::IndexMap::new(),
+                    &indexmap::IndexMap::new(),
+                    &indexmap::IndexMap::new(),
+                    &crate::lang::ast::Program {
+                        namespaces: indexmap::IndexMap::new(),
+                        current_namespace: crate::lang::ast::NsPath::new(),
+                    },
+                    &crate::lang::ast::HotAst::from_program(crate::lang::ast::Program {
+                        namespaces: indexmap::IndexMap::new(),
+                        current_namespace: crate::lang::ast::NsPath::new(),
+                    }),
+                    &Default::default(),
+                    &Default::default(),
+                )
+                .expect("save");
+            key
+        };
+        let files = || -> usize {
+            std::fs::read_dir(dir.path())
+                .map(|read| {
+                    read.flatten()
+                        .filter(|e| e.file_name().to_string_lossy().ends_with(".bc.zst"))
+                        .count()
+                })
+                .unwrap_or(0)
+        };
+
+        // Three edits of the same program (same source paths).
+        let src_paths = ["src/a.hot", "src/b.hot"];
+        let last = save(&src_paths, "v1");
+        save(&src_paths, "v2");
+        let newest = save(&src_paths, "v3");
+        assert_eq!(files(), 1, "an edited program keeps one live entry");
+        assert!(cache.exists(&newest), "newest entry is findable by key");
+        assert!(!cache.exists(&last), "superseded entry is gone");
+
+        // A different path set (e.g. `test` vs `check`) is its own program.
+        let test_paths = ["src/a.hot", "src/b.hot", "test/t.hot"];
+        let test_key = save(&test_paths, "v3");
+        assert_eq!(files(), 2, "a different path set keeps its own entry");
+        assert!(cache.exists(&newest) && cache.exists(&test_key));
+    }
+
+    /// Pre-scoping entries are bare content keys; they stay readable until the
+    /// same program is re-saved, then they are reclaimed.
+    #[test]
+    fn legacy_bare_key_entries_are_readable_then_reclaimed() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let cache = BytecodeCache::new(dir.path().to_path_buf());
+        std::fs::create_dir_all(cache.cache_dir()).unwrap();
+
+        let legacy_key = "a".repeat(64);
+        let legacy = dir.path().join(format!("{}.bc.zst", legacy_key));
+        std::fs::write(&legacy, b"legacy payload").unwrap();
+        assert!(
+            cache.exists(&legacy_key),
+            "legacy entries stay addressable before any re-save"
+        );
+
+        let hashes = vec![FileHash {
+            path: "src/a.hot".to_string(),
+            hash: HotHasher::hash_content(b"v1"),
+        }];
+        let key = BytecodeCache::calculate_cache_key("demo", &hashes).unwrap();
+        let metadata = create_cache_metadata("demo", hashes, key.clone());
+        cache
+            .save(
+                &key,
+                &create_test_bytecode_program(),
+                metadata,
+                &indexmap::IndexMap::new(),
+                &indexmap::IndexMap::new(),
+                &indexmap::IndexMap::new(),
+                &crate::lang::ast::Program {
+                    namespaces: indexmap::IndexMap::new(),
+                    current_namespace: crate::lang::ast::NsPath::new(),
+                },
+                &crate::lang::ast::HotAst::from_program(crate::lang::ast::Program {
+                    namespaces: indexmap::IndexMap::new(),
+                    current_namespace: crate::lang::ast::NsPath::new(),
+                }),
+                &Default::default(),
+                &Default::default(),
+            )
+            .expect("save");
+
+        assert!(!legacy.exists(), "legacy bare-key entry is reclaimed");
+        assert!(cache.exists(&key), "scoped entry is addressable");
     }
 }

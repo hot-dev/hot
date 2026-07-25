@@ -63,8 +63,10 @@ fn is_unit_cache_stem(stem: &str) -> bool {
 /// Whether a filename is owned by Hot's cache layer and is therefore safe
 /// for opportunistic deletion.
 pub(crate) fn is_managed_cache_file_name(name: &str) -> bool {
-    if let Some(hash) = name.strip_suffix(".bc.zst")
-        && is_lower_hex(hash, 64)
+    if let Some(stem) = name.strip_suffix(".bc.zst")
+        && stem
+            .rsplit_once('-')
+            .map_or_else(|| is_lower_hex(stem, 64), |(_, key)| is_lower_hex(key, 64))
     {
         return true;
     }
@@ -169,6 +171,31 @@ pub(crate) fn prune_legacy_unscoped_entries(dir: &std::path::Path, unit_fs_id: &
         if rest
             .strip_suffix(suffix)
             .is_some_and(|key| is_lower_hex(key, 16))
+        {
+            let _ = std::fs::remove_file(&path);
+        }
+    }
+}
+
+/// Remove bytecode entries written before filenames carried program scope.
+///
+/// A legacy name is exactly `{64 hex key}{suffix}`. Readers still accept those
+/// (see `cache_file_path`), so this only runs once the same program has been
+/// re-saved under a scoped name and the old file is genuinely superseded.
+pub(crate) fn prune_legacy_bare_key_entries(dir: &std::path::Path, suffix: &str) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if name
+            .strip_suffix(suffix)
+            .is_some_and(|key| is_lower_hex(key, 64))
         {
             let _ = std::fs::remove_file(&path);
         }
