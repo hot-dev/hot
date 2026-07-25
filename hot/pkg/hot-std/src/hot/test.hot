@@ -478,6 +478,34 @@ fn (f) {
     call-lib(::hot::test/is-test, [f])
 }
 
+print-no-tests-warning
+meta {
+    doc: """
+    Loud, unmissable notice that discovery found nothing.
+
+    A run that exercised zero tests proved nothing, and reporting it as
+    success launders every possible discovery failure — wrong test.paths, a
+    pattern that matches nothing, a stale compile cache dropping test
+    namespaces — into a green build. The runner returns a distinct sentinel
+    so the CLI can exit nonzero; this banner is for the human reading the
+    terminal.
+    """
+}
+fn (pattern) {
+    println("")
+    println(`${::hot::term/bright-red("✗ zero tests were discovered — nothing ran")}`)
+    cond {
+        is-null(pattern) => { null }
+        => { println(`  the pattern "${pattern}" matched no tests`) }
+    }
+
+    println("  If this project has tests, discovery failed and this run proved nothing.")
+    println("  Check test.paths for the project; a stale build cache can also drop")
+    println("  test namespaces silently — touch a source file and re-run.")
+    println("  To permit empty runs: set hot.project.<name>.test.allow-empty true")
+    println("")
+}
+
 all-tests-passed
 meta {doc: """Return true if all tests passed - helper to avoid scoping issues."""}
 fn () {
@@ -524,7 +552,16 @@ fn (capture-output) {
         }
         => {
             final-counters get-test-counters()
-            is-zero(final-counters.tests.failed)
+            cond {
+                // Zero discovered is not a pass. Return a distinct sentinel —
+                // not `false` — so the CLI can tell "tests failed" apart from
+                // "nothing ran" and exit accordingly.
+                is-zero(final-counters.tests.total) => {
+                    print-no-tests-warning(null)
+                    "no-tests-discovered"
+                }
+                => { is-zero(final-counters.tests.failed) }
+            }
         }
     }
 }
@@ -567,7 +604,13 @@ fn (pattern, capture-output) {
         }
         => {
             final-counters get-test-counters()
-            is-zero(final-counters.tests.failed)
+            cond {
+                is-zero(final-counters.tests.total) => {
+                    print-no-tests-warning(pattern)
+                    "no-tests-discovered"
+                }
+                => { is-zero(final-counters.tests.failed) }
+            }
         }
     }
 }

@@ -98,7 +98,7 @@ impl Engine {
         task_queue: Option<Arc<crate::queue::ProcessingQueue<crate::lang::hot::task::TaskRequest>>>,
         stream_publisher: Option<Arc<crate::stream::StreamPubSub>>,
         color: bool,
-    ) -> Result<bool, String> {
+    ) -> Result<super::TestRunStatus, String> {
         // Integration mode: task_queue.is_some() means services are running and we must
         // share the same DB they're using (from conf). Otherwise create an ephemeral DB.
         let is_integration = task_queue.is_some();
@@ -282,8 +282,12 @@ impl Engine {
         .map_err(|e| format!("Task failed: {}", e))?;
 
         let result = match pipeline_result {
-            Ok(crate::val::Val::Bool(success)) => Ok(success),
-            Ok(_) => Ok(false),
+            Ok(crate::val::Val::Bool(true)) => Ok(super::TestRunStatus::Passed),
+            Ok(crate::val::Val::Bool(false)) => Ok(super::TestRunStatus::Failed),
+            Ok(crate::val::Val::Str(ref s)) if &**s == super::NO_TESTS_SENTINEL => {
+                Ok(super::TestRunStatus::NoTestsDiscovered)
+            }
+            Ok(_) => Ok(super::TestRunStatus::Failed),
             Err(e) => Err(e),
         };
 
