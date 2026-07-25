@@ -2370,16 +2370,24 @@ mod kata {
     }
 
     pub(super) fn parse_thin_pool_sectors(status: &str) -> Option<(u64, u64)> {
-        status
-            .split_whitespace()
-            .filter_map(|field| {
-                let field = field.trim_matches(|c: char| !c.is_ascii_digit() && c != '/');
-                let (used, total) = field.split_once('/')?;
-                let used = used.parse().ok()?;
-                let total = total.parse().ok()?;
-                (total >= used).then_some((used, total))
-            })
-            .max_by_key(|(_, total)| *total)
+        let fields: Vec<_> = status.split_whitespace().collect();
+        if fields.get(2) != Some(&"thin-pool") {
+            return None;
+        }
+
+        let total_sectors: u64 = fields.get(1)?.parse().ok()?;
+        let (used_blocks, total_blocks) = fields.get(5)?.split_once('/')?;
+        let used_blocks: u64 = used_blocks.parse().ok()?;
+        let total_blocks: u64 = total_blocks.parse().ok()?;
+        if total_blocks == 0 || used_blocks > total_blocks {
+            return None;
+        }
+
+        let used_sectors = u64::try_from(
+            u128::from(total_sectors) * u128::from(used_blocks) / u128::from(total_blocks),
+        )
+        .ok()?;
+        Some((used_sectors, total_sectors))
     }
 
     async fn ensure_devmapper_capacity(required_mb: u64) -> ExecutorResult<()> {
@@ -2393,6 +2401,7 @@ mod kata {
                 "status",
                 "--target",
                 "thin-pool",
+                "hot-devpool",
             ])
             .output()
             .await
@@ -2566,10 +2575,16 @@ mod kata_tests {
 
     #[test]
     fn test_parse_thin_pool_sectors() {
-        let status = "0 20971520 thin-pool 0 0/0 1024/20971520 - rw";
+        let status = "0 209715200 thin-pool 0 4919/2621440 84509/1638400 - rw discard_passdown";
         assert_eq!(
             super::kata::parse_thin_pool_sectors(status),
-            Some((1_024, 20_971_520))
+            Some((10_817_152, 209_715_200))
         );
+    }
+
+    #[test]
+    fn test_parse_thin_pool_sectors_rejects_invalid_data_usage() {
+        let status = "0 209715200 thin-pool 0 4919/2621440 2/1 - rw";
+        assert_eq!(super::kata::parse_thin_pool_sectors(status), None);
     }
 }
