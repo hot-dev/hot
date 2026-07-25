@@ -192,6 +192,23 @@ fn setup_agents_md() -> Result<(), String> {
 
 /// Install/refresh the `hot-language` skill under `.skills/` (project) or
 /// `~/.skills/` (global).
+/// The hash stamped into an installed file, wherever the marker sits.
+fn extract_skill_hash(content: &str) -> Option<u64> {
+    content.lines().take(64).find_map(|line| {
+        let line = line.trim();
+        line.strip_prefix("<!-- hot-skill-hash:")
+            .and_then(|rest| rest.strip_suffix("-->"))
+            .or_else(|| line.strip_prefix("// hot-skill-hash:"))
+            .and_then(|hash_str| hash_str.trim().parse::<u64>().ok())
+    })
+}
+
+/// Whether the marker sits on line 1 — the layout the previous installer
+/// produced, which invalidates any YAML frontmatter beneath it.
+fn has_leading_marker(content: &str) -> bool {
+    content.starts_with("<!-- hot-skill-hash:") || content.starts_with("// hot-skill-hash:")
+}
+
 /// Stamp the content hash into a file without breaking its format.
 ///
 /// A YAML frontmatter block must begin on line 1. Prepending the marker
@@ -290,15 +307,19 @@ fn setup_agent_skills(global: bool) -> Result<(), String> {
             let existing = fs::read_to_string(path)
                 .map_err(|e| format!("Failed to read {}: {}", path.display(), e))?;
 
-            // Skip only when the file already *is* what we would write.
+            // Rewrite when the source content changed, or when the stamp
+            // sits in the layout an older installer produced (marker on line
+            // 1, which invalidates the YAML frontmatter beneath it) — those
+            // installs matched their own hash and so were never repaired.
             //
-            // Comparing hashes compared content while ignoring layout, so an
-            // install written by an older version — marker on line 1, which
-            // invalidates the YAML frontmatter beneath it — matched its own
-            // stamp and was never rewritten. Broken installs stayed broken
-            // through every `hot ai update`. Byte equality also covers any
-            // future layout change for free.
-            if existing == content_with_hash {
+            // Deliberately *not* a byte comparison of the whole file: the
+            // hash covers the source, not the installed body, so a user's
+            // local edits to a skill survive `hot ai update` as long as the
+            // shipped content is unchanged. Comparing bytes would silently
+            // start clobbering those edits.
+            let layout_matches =
+                has_leading_marker(&existing) == has_leading_marker(&content_with_hash);
+            if extract_skill_hash(&existing) == Some(hash) && layout_matches {
                 return Ok(false);
             }
         }

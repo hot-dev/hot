@@ -86,3 +86,39 @@ fn hot_ai_repairs_a_legacy_stamped_skill() {
         "a second update must not rewrite an already-migrated skill"
     );
 }
+
+/// `hot ai update` must not clobber a user's local edits.
+///
+/// The stamp covers the *shipped source*, not the installed body, so an
+/// unchanged skill is left alone whatever the user did to it. A byte-for-byte
+/// comparison would repair layout correctly and silently destroy
+/// customizations — this pins the distinction.
+#[test]
+fn hot_ai_update_preserves_local_edits_to_an_unchanged_skill() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let project = temp.path();
+
+    run(project, &["ai", "add"]);
+    let skill_md = project
+        .join(".skills")
+        .join("hot-language")
+        .join("SKILL.md");
+
+    let customized = format!(
+        "{}\n<!-- MY LOCAL CUSTOMIZATION -->\n",
+        std::fs::read_to_string(&skill_md).unwrap().trim_end()
+    );
+    std::fs::write(&skill_md, &customized).unwrap();
+
+    run(project, &["ai", "update"]);
+
+    let after = std::fs::read_to_string(&skill_md).unwrap();
+    assert!(
+        after.contains("MY LOCAL CUSTOMIZATION"),
+        "a local edit must survive update while the shipped skill is unchanged"
+    );
+    assert_eq!(
+        after, customized,
+        "an unchanged skill must not be rewritten"
+    );
+}

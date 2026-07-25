@@ -870,11 +870,23 @@ impl TypeChecker {
             })
             .collect();
 
-        // No round cap: each round either resolves at least one variable or
-        // stops. An arbitrary bound would silently leave long chains typed
-        // `Any` — the very failure this loop exists to prevent — and the
-        // worklist shrinks monotonically, so termination does not need one.
-        while !deferred.is_empty() {
+        // Bound the rounds by the number of variables that were deferred.
+        //
+        // A dependency chain among D deferred variables is at most D links
+        // long, so D rounds can never truncate legitimate work — unlike the
+        // fixed cap this replaced, which silently left longer chains typed
+        // `Any`. The bound exists only to guarantee termination: `progressed`
+        // is set whenever *any* entry's inferred type differs from the stored
+        // one, and a blocked entry stays on the worklist, so a pair of
+        // mutually dependent variables whose inferred types alternate would
+        // otherwise spin forever and hang the compiler. I could not construct
+        // such a program, which is precisely why the loop should not depend on
+        // my failing to.
+        let max_rounds = deferred.len().saturating_add(1);
+        for _ in 0..max_rounds {
+            if deferred.is_empty() {
+                break;
+            }
             let mut progressed = false;
             let mut still_deferred = Vec::with_capacity(deferred.len());
             for entry in deferred {
