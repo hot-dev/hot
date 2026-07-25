@@ -78,6 +78,22 @@ impl CompilationUnit {
         self.id().replace(['/', '\\', ':'], "-").replace('.', "_")
     }
 
+    /// Filesystem-safe identity for this unit *at this location*.
+    ///
+    /// The plain `fs_safe_id` is only the unit's name, which is ambiguous in
+    /// the machine-shared package cache: two monorepos can each have a local
+    /// dependency called `mylib`. Appending a hash of the resolved path scopes
+    /// every entry (and its lock) to one specific directory, which is what
+    /// makes the generation sweep in `save` safe.
+    pub fn scoped_fs_id(&self) -> String {
+        let path = self
+            .path()
+            .canonicalize()
+            .unwrap_or_else(|_| self.path().to_path_buf());
+        let digest = crate::hasher::HotHasher::hash_content(path.to_string_lossy().as_bytes());
+        format!("{}-{}", self.fs_safe_id(), &digest[..8])
+    }
+
     /// Get the path to source files
     pub fn path(&self) -> &Path {
         match self {
@@ -202,7 +218,7 @@ impl UnitCache {
         let dir = self.dir_for(unit);
         std::fs::create_dir_all(dir)?;
 
-        let lock_path = dir.join(format!("{}.lock", unit.fs_safe_id()));
+        let lock_path = dir.join(format!("{}.lock", unit.scoped_fs_id()));
         let file = std::fs::OpenOptions::new()
             .read(true)
             .write(true)
@@ -217,7 +233,7 @@ impl UnitCache {
     fn cache_path(&self, unit: &CompilationUnit, cache_key: &str) -> PathBuf {
         let filename = format!(
             "{}-{}.{}",
-            unit.fs_safe_id(),
+            unit.scoped_fs_id(),
             &cache_key[..16],
             CacheType::Ast.extension()
         );
@@ -334,6 +350,16 @@ impl UnitCache {
         // Opportunistic housekeeping: old-generation entries (superseded
         // versions/formats) are unreachable via their keys and would
         // otherwise accumulate forever.
+        // Collapse this unit to a single live generation, then age-sweep the
+        // rest of the directory.
+        let suffix = format!(".{}", CacheType::Ast.extension());
+        super::prune_superseded_entries(
+            self.dir_for(unit),
+            &unit.scoped_fs_id(),
+            &suffix,
+            &cache_path,
+        );
+        super::prune_legacy_unscoped_entries(self.dir_for(unit), &unit.fs_safe_id(), &suffix);
         super::prune_stale_cache_files(self.dir_for(unit), &cache_path);
 
         tracing::debug!(
@@ -1155,6 +1181,165 @@ MyType -> Str fn (t: MyType): Str {
         assert!(
             !entries(&project).is_empty(),
             "source unit must land in the project dir"
+        );
+    }
+
+    /// The shared package cache must never serve one version's AST for
+    /// another. The key hashes every `.hot` file under the package root —
+    /// including `pkg.hot`, which carries the declared version — so a version
+    /// bump, a source edit, or a different install location all produce
+    /// distinct entries.
+    #[test]
+    fn package_cache_key_distinguishes_version_sources_and_location() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let cache = UnitCache::new(dir.path().join("cache"));
+
+        let write_pkg = |root: &Path, version: &str, body: &str| {
+            std::fs::create_dir_all(root.join("src")).unwrap();
+            std::fs::write(
+                root.join("pkg.hot"),
+                format!(
+                    "::hot::pkg ns\n\nhot.pkg.demo {{\n  name: \"demo\",\n  version: \"{version}\",\n  src: [\"src/\"],\n}}\n"
+                ),
+            )
+            .unwrap();
+            std::fs::write(root.join("src").join("lib.hot"), body).unwrap();
+        };
+        let unit_at = |root: &Path| CompilationUnit::Package {
+            name: "demo".to_string(),
+            path: root.to_path_buf(),
+        };
+
+        let root = dir.path().join("demo");
+        write_pkg(&root, "1.0.0", "::demo ns\n\nvalue 1\n");
+        let v1 = cache.compute_cache_key(&unit_at(&root)).unwrap();
+
+        // Same sources, bumped version in pkg.hot.
+        write_pkg(&root, "2.0.0", "::demo ns\n\nvalue 1\n");
+        let v2 = cache.compute_cache_key(&unit_at(&root)).unwrap();
+        assert_ne!(v1, v2, "a version bump must change the cache key");
+
+        // Same version, edited sources.
+        write_pkg(&root, "2.0.0", "::demo ns\n\nvalue 2\n");
+        let v2_edited = cache.compute_cache_key(&unit_at(&root)).unwrap();
+        assert_ne!(v2, v2_edited, "a source edit must change the cache key");
+
+        // Same name and content at a different install location.
+        let elsewhere = dir.path().join("elsewhere").join("demo");
+        write_pkg(&elsewhere, "2.0.0", "::demo ns\n\nvalue 2\n");
+        let other_location = cache.compute_cache_key(&unit_at(&elsewhere)).unwrap();
+        assert_ne!(
+            v2_edited, other_location,
+            "a different install location must not reuse another package's entry"
+        );
+
+        // Recomputing an unchanged package is stable (the cache can actually hit).
+        write_pkg(&root, "2.0.0", "::demo ns\n\nvalue 2\n");
+        assert_eq!(
+            v2_edited,
+            cache.compute_cache_key(&unit_at(&root)).unwrap(),
+            "unchanged package must produce a stable key"
+        );
+    }
+
+    /// A mutable unit must not accumulate generations, and the sweep must be
+    /// scoped to one unit at one location — two projects with a same-named
+    /// local dependency share the package cache directory.
+    #[test]
+    fn saving_collapses_generations_without_evicting_other_locations() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let cache_dir = dir.path().join("unit");
+        let cache = UnitCache::new(cache_dir.clone());
+
+        let make_lib = |root: &Path, body: &str| {
+            std::fs::create_dir_all(root).unwrap();
+            std::fs::write(root.join("lib.hot"), body).unwrap();
+        };
+        let unit_at = |root: &Path| CompilationUnit::Package {
+            name: "mylib".to_string(),
+            path: root.to_path_buf(),
+        };
+        let entries = |prefix: &str| -> usize {
+            std::fs::read_dir(&cache_dir)
+                .map(|read| {
+                    read.flatten()
+                        .filter(|entry| {
+                            let name = entry.file_name().to_string_lossy().to_string();
+                            name.starts_with(prefix) && name.ends_with(".ast.zst")
+                        })
+                        .count()
+                })
+                .unwrap_or(0)
+        };
+
+        // Project A edits its local dependency three times.
+        let a = dir.path().join("a").join("mylib");
+        let namespaces = IndexMap::new();
+        for body in [
+            "::mylib ns\n\nv 1\n",
+            "::mylib ns\n\nv 2\n",
+            "::mylib ns\n\nv 3\n",
+        ] {
+            make_lib(&a, body);
+            cache.save(&unit_at(&a), &namespaces).expect("save");
+        }
+        let a_prefix = unit_at(&a).scoped_fs_id();
+        assert_eq!(
+            entries(&a_prefix),
+            1,
+            "an edited unit keeps exactly one live generation"
+        );
+
+        // Project B has a different local dependency, also called `mylib`.
+        let b = dir.path().join("b").join("mylib");
+        make_lib(&b, "::mylib ns\n\nother 1\n");
+        cache.save(&unit_at(&b), &namespaces).expect("save");
+        let b_prefix = unit_at(&b).scoped_fs_id();
+        assert_ne!(
+            a_prefix, b_prefix,
+            "same name at different paths must differ"
+        );
+        assert_eq!(entries(&a_prefix), 1, "project A's entry survives");
+        assert_eq!(entries(&b_prefix), 1, "project B's entry is stored");
+
+        // Project A edits again: still must not touch project B.
+        make_lib(&a, "::mylib ns\n\nv 4\n");
+        cache.save(&unit_at(&a), &namespaces).expect("save");
+        assert_eq!(entries(&a_prefix), 1);
+        assert_eq!(entries(&b_prefix), 1, "sweep is scoped to one location");
+    }
+
+    /// Legacy (unscoped) entries are unreachable after the rename, so the
+    /// first save for a unit reclaims them — without touching a scoped entry
+    /// that belongs to a different location.
+    #[test]
+    fn saving_reclaims_legacy_unscoped_entries_only() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let cache_dir = dir.path().join("unit");
+        std::fs::create_dir_all(&cache_dir).unwrap();
+        let cache = UnitCache::new(cache_dir.clone());
+
+        let root = dir.path().join("mylib");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("lib.hot"), "::mylib ns\n\nv 1\n").unwrap();
+        let unit = CompilationUnit::Package {
+            name: "mylib".to_string(),
+            path: root.clone(),
+        };
+
+        // A pre-rename entry for this unit, and a scoped entry belonging to a
+        // different location that must survive.
+        let legacy = cache_dir.join("pkg-mylib-0123456789abcdef.ast.zst");
+        let other_location = cache_dir.join("pkg-mylib-feedface-0123456789abcdef.ast.zst");
+        std::fs::write(&legacy, b"stale").unwrap();
+        std::fs::write(&other_location, b"other project").unwrap();
+
+        cache.save(&unit, &IndexMap::new()).expect("save");
+
+        assert!(!legacy.exists(), "unreachable legacy entry is reclaimed");
+        assert!(
+            other_location.exists(),
+            "another location's scoped entry must survive"
         );
     }
 }

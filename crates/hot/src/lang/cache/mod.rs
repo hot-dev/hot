@@ -102,6 +102,79 @@ pub(crate) fn is_managed_cache_file_name(name: &str) -> bool {
     false
 }
 
+/// Drop superseded generations of a single cache entry.
+///
+/// Time-based pruning only reclaims *abandoned* entries; it does nothing about
+/// churn, where each edit to a unit's sources writes a new key and strands the
+/// previous one. A mutable unit (project sources, or a `local:` path
+/// dependency under active development) can therefore accumulate hundreds of
+/// dead entries long before any of them ages out.
+///
+/// `prefix` must be scoped to one unit *at one location* (see
+/// `CompilationUnit::scoped_fs_id`) so this never evicts a same-named unit
+/// belonging to another project sharing the directory. Immutable units
+/// (a released package version) simply have nothing to sweep.
+pub(crate) fn prune_superseded_entries(
+    dir: &std::path::Path,
+    prefix: &str,
+    suffix: &str,
+    keep: &std::path::Path,
+) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path == keep || !path.is_file() {
+            continue;
+        }
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        // `{prefix}-{key}{suffix}` — the trailing `-` keeps `pkg-lib-<hash>`
+        // from matching a longer unit name that merely starts the same way.
+        if name.starts_with(prefix)
+            && name[prefix.len()..].starts_with('-')
+            && name.ends_with(suffix)
+            && is_managed_cache_file_name(&name)
+        {
+            let _ = std::fs::remove_file(&path);
+        }
+    }
+}
+
+/// Remove entries written before unit cache names were scoped to a location.
+///
+/// Legacy names are exactly `{unit}-{16 hex key}{suffix}`. The loader now
+/// derives a location-scoped name, so no legacy file can ever be read again —
+/// they are unreachable for every project sharing the directory, not just this
+/// one. Matching the exact legacy shape (rather than a prefix) is what keeps
+/// this from touching a scoped entry belonging to another location.
+pub(crate) fn prune_legacy_unscoped_entries(dir: &std::path::Path, unit_fs_id: &str, suffix: &str) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        let Some(rest) = name
+            .strip_prefix(unit_fs_id)
+            .and_then(|r| r.strip_prefix('-'))
+        else {
+            continue;
+        };
+        if rest
+            .strip_suffix(suffix)
+            .is_some_and(|key| is_lower_hex(key, 16))
+        {
+            let _ = std::fs::remove_file(&path);
+        }
+    }
+}
+
 /// Best-effort sweep of stale files in a cache directory, called
 /// opportunistically after a successful cache save (off any hot path).
 ///
