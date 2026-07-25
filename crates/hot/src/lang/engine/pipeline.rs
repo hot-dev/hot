@@ -17,10 +17,12 @@
 //!     `::hot::test::run-tests` entry point.
 
 use super::discover::{
-    DiscoveredUnit, discover_compilation_units, parse_files_parallel, parse_units_with_cache,
+    DiscoveredUnit, NsMergePolicy, discover_compilation_units, merge_namespace,
+    parse_files_parallel, parse_units_with_cache,
 };
 use super::{
-    CompilationArtifacts, Engine, ExecutionWithArtifacts, ExtractedHandlers, PipelineMode,
+    CompilationArtifacts, ContextValidationPolicy, Engine, ExecutionWithArtifacts,
+    ExtractedHandlers, PipelineMode,
 };
 use ahash::{AHashMap, AHashSet};
 use std::sync::Arc;
@@ -122,9 +124,15 @@ impl Engine {
                     }
                 })?;
 
-            // Merge namespaces
+            // Member-merge namespaces; duplicate definitions across files
+            // are compile errors.
             for (ns_path, namespace) in parsed_program.namespaces {
-                program.namespaces.insert(ns_path, namespace);
+                merge_namespace(
+                    &mut program.namespaces,
+                    ns_path,
+                    namespace,
+                    NsMergePolicy::Strict,
+                )?;
             }
         }
 
@@ -230,7 +238,12 @@ impl Engine {
         })
     }
 
-    /// Run a single file using the pipeline with full dependency loading
+    /// Structurally validate a single file with full dependency loading.
+    ///
+    /// This is the build/compile entry point: it parses and compiles the
+    /// project, validates handlers, schedules, and box metadata, and collects
+    /// context requirements without requiring runtime context values or
+    /// executing module code.
     pub fn run_file_pipeline_with_deps(
         target_file: &str,
         src_paths: &[String],
@@ -247,7 +260,7 @@ impl Engine {
             project_name,
             Some(target_file),
             None,
-            PipelineMode::Execute,
+            PipelineMode::StructuralValidation,
             None,
             None,
             None, // No event publisher
@@ -723,6 +736,109 @@ impl Engine {
         .map(|_| ())
     }
 
+    pub(super) fn runtime_context_validation_policy(
+        context_storage: Option<&AHashMap<String, crate::val::Val>>,
+    ) -> ContextValidationPolicy {
+        ContextValidationPolicy::RequireSatisfied(
+            context_storage
+                .map(|storage| storage.keys().cloned().collect())
+                .unwrap_or_default(),
+        )
+    }
+
+    /// Post-compile structural validations shared by build, check, and execute
+    /// modes, with an explicit policy for runtime context satisfaction.
+    ///
+    /// These are cheap passes over the already-compiled program. Running them
+    /// in Execute mode as well gives `run`/`eval` the same pre-flight failures
+    /// `check` reports — before any user code executes — without paying for
+    /// the separate check pipeline's second full compile.
+    pub(super) fn validate_compiled_program(
+        compiler: &mut crate::lang::Compiler,
+        combined_program: &crate::lang::ast::Program,
+        conf: Option<&crate::val::Val>,
+        context_policy: ContextValidationPolicy,
+        color: bool,
+    ) -> Result<crate::lang::compiler::ctx_checker::ProgramCtxRequirements, String> {
+        // Validate event handlers (event parameter requirement)
+        if let Err(e) = compiler.extract_event_handlers(combined_program) {
+            let formatted = e.format_error(color);
+            return Err(String::from("Event handler validation errors:\n") + &formatted);
+        }
+
+        // Validate scheduled functions (event parameter requirement)
+        if let Err(e) = compiler.extract_scheduled_functions(combined_program) {
+            let formatted = e.format_error(color);
+            return Err(String::from("Scheduled function validation errors:\n") + &formatted);
+        }
+        if let Some(conf) = conf {
+            let policy = crate::db::SchedulePolicy::from_conf(conf);
+            for cron_expression in compiler.get_scheduled_functions().keys() {
+                crate::db::validate_recurring_schedule_interval(
+                    cron_expression,
+                    policy.min_interval_secs,
+                )
+                .map_err(|e| format!("Schedule policy error: {}", e.message()))?;
+            }
+        }
+
+        // Build call graph once for both ctx and box requirement resolution
+        let call_graph = crate::lang::compiler::call_graph::CallGraph::build(combined_program);
+
+        // Check context requirements using call graph resolution
+        // This only includes ctx requirements reachable from user code.
+        let ctx_requirements = call_graph.resolve_user_ctx_requirements(combined_program);
+
+        if ctx_requirements.has_requirements()
+            && let ContextValidationPolicy::RequireSatisfied(available_keys) = context_policy
+        {
+            let ctx_result = crate::lang::compiler::ctx_checker::check_ctx_requirements(
+                &ctx_requirements,
+                &available_keys,
+            );
+
+            if !ctx_result.is_ok() {
+                return Err(ctx_result.format_errors());
+            }
+
+            tracing::debug!(
+                " Context requirements satisfied: {} required keys found",
+                ctx_result.found_keys.len()
+            );
+        }
+
+        // Check box requirements: validate size names and report
+        let box_requirements = call_graph.resolve_user_box_requirements(combined_program);
+
+        if box_requirements.has_requirements() {
+            // Validate all declared size names are recognized
+            for req in &box_requirements.requirements {
+                if let Some(ref size) = req.requirement.min_size
+                    && crate::lang::compiler::box_checker::size_memory_mb(size).is_none()
+                {
+                    return Err(format!(
+                        "Invalid box size '{}' in meta {{box: {{min-size: \"{}\"}}}} on {}\n\
+                         Valid sizes: nano, micro, small, medium, large, xlarge, 2xlarge, 4xlarge",
+                        size, size, req.fqn
+                    ));
+                }
+            }
+
+            if let Some(min_size) = box_requirements.effective_min_size() {
+                tracing::debug!(
+                    " Box requirements: min-size={}, network={}, from {} function(s)",
+                    min_size,
+                    box_requirements.requires_network(),
+                    box_requirements.requirements.len()
+                );
+            }
+        }
+
+        // Hand the resolved ctx requirements back so Execute mode can apply
+        // defaults and secret keys without rebuilding the call graph.
+        Ok(ctx_requirements)
+    }
+
     /// Unified pipeline for all operations (run, eval, test, repl)
     #[allow(clippy::too_many_arguments)]
     pub fn run_unified_pipeline(
@@ -765,6 +881,19 @@ impl Engine {
                 .join(", ")
         );
 
+        // NOTE: an ad hoc-eval fast path over the precompiled hot-std image
+        // (lang::cache::std_artifact) lived here and was removed after
+        // measurement: it ran ~191ms vs ~60ms for this classic path. The
+        // image removes *compilation* of hot-std, but an eval snippet still
+        // needs the full merged AST resolved and type-checked for
+        // correctness (~110ms), so the image decode (~65ms) was pure
+        // addition. Caching bytecode cannot skip semantic analysis of
+        // arbitrary user code; the AST unit cache (6ms load) plus a normal
+        // compile is strictly cheaper. The seeded compiler extension it used
+        // (Compiler::seed_from_compiled / Engine::execute_eval_extension)
+        // remains in use by the worker, where the build is already resident
+        // in memory and no decode is paid.
+
         // Phase 2: Parse units with per-package caching
         tracing::debug!(" Unified Pipeline: Phase 2 - Parsing with per-package cache...");
         let (namespaces, parsed_files) = parse_units_with_cache(&units, color)?;
@@ -794,7 +923,10 @@ impl Engine {
             current_namespace: crate::lang::ast::NsPath::hot_main(),
         };
 
-        // Add namespaces from target file
+        // Add namespaces from target file. Member-merged: the target file is
+        // usually also discovered as part of its source unit (run pushes the
+        // file's directory onto src paths), and the same-file bindings are
+        // deduplicated by merge_namespace.
         for parsed in &extra_parsed_files {
             for (ns_path, namespace) in &parsed.namespaces {
                 tracing::debug!(
@@ -802,9 +934,12 @@ impl Engine {
                     ns_path,
                     namespace.scope.vars.len()
                 );
-                combined_program
-                    .namespaces
-                    .insert(ns_path.clone(), namespace.clone());
+                merge_namespace(
+                    &mut combined_program.namespaces,
+                    ns_path.clone(),
+                    namespace.clone(),
+                    NsMergePolicy::Strict,
+                )?;
             }
         }
 
@@ -851,7 +986,12 @@ impl Engine {
                         "Eval program has {} namespaces",
                         eval_program.namespaces.len()
                     );
-                    // Merge namespaces from eval code
+                    // Merge namespaces from eval code. Shadow policy: eval
+                    // input may re-declare an existing name (REPL-style
+                    // redefinition) and the newest binding wins, but other
+                    // members of an existing namespace are preserved —
+                    // previously an eval `::ns ns` declaration replaced the
+                    // project's entire namespace.
                     for (ns_path, namespace) in eval_program.namespaces {
                         tracing::debug!(
                             "Merging eval namespace '{}' with {} variables",
@@ -861,7 +1001,12 @@ impl Engine {
                         for (var, _value) in &namespace.scope.vars {
                             tracing::debug!("Eval variable: '{}'", var.sym.name());
                         }
-                        combined_program.namespaces.insert(ns_path, namespace);
+                        merge_namespace(
+                            &mut combined_program.namespaces,
+                            ns_path,
+                            namespace,
+                            NsMergePolicy::Shadow,
+                        )?;
                     }
                 }
                 Err(e) => {
@@ -985,94 +1130,47 @@ impl Engine {
 
         // Phase 3: Execute based on mode
         match mode {
+            PipelineMode::StructuralValidation => {
+                Self::validate_compiled_program(
+                    &mut compiler,
+                    &combined_program,
+                    conf,
+                    ContextValidationPolicy::CollectOnly,
+                    color,
+                )?;
+
+                tracing::debug!(" Unified Pipeline: structural validation completed successfully");
+                Ok(crate::val::Val::Null)
+            }
             PipelineMode::Check => {
                 // Check mode: validate only, no VM execution
                 tracing::debug!(" Unified Pipeline: Check mode - validating...");
 
-                // Validate event handlers (event parameter requirement)
-                if let Err(e) = compiler.extract_event_handlers(&combined_program) {
-                    let formatted = e.format_error(color);
-                    return Err(String::from("Event handler validation errors:\n") + &formatted);
-                }
-
-                // Validate scheduled functions (event parameter requirement)
-                if let Err(e) = compiler.extract_scheduled_functions(&combined_program) {
-                    let formatted = e.format_error(color);
-                    return Err(
-                        String::from("Scheduled function validation errors:\n") + &formatted
-                    );
-                }
-                if let Some(conf) = conf {
-                    let policy = crate::db::SchedulePolicy::from_conf(conf);
-                    for cron_expression in compiler.get_scheduled_functions().keys() {
-                        crate::db::validate_recurring_schedule_interval(
-                            cron_expression,
-                            policy.min_interval_secs,
-                        )
-                        .map_err(|e| format!("Schedule policy error: {}", e.message()))?;
-                    }
-                }
-
-                // Build call graph once for both ctx and box requirement resolution
-                let call_graph =
-                    crate::lang::compiler::call_graph::CallGraph::build(&combined_program);
-
-                // Check context requirements using call graph resolution
-                // This only includes ctx requirements reachable from user code.
-                let ctx_requirements = call_graph.resolve_user_ctx_requirements(&combined_program);
-
-                if ctx_requirements.has_requirements() {
-                    let available_keys: AHashSet<String> = context_storage
-                        .as_ref()
-                        .map(|cs| cs.keys().cloned().collect())
-                        .unwrap_or_default();
-
-                    let ctx_result = crate::lang::compiler::ctx_checker::check_ctx_requirements(
-                        &ctx_requirements,
-                        &available_keys,
-                    );
-
-                    if !ctx_result.is_ok() {
-                        return Err(ctx_result.format_errors());
-                    }
-
-                    tracing::debug!(
-                        " Context requirements satisfied: {} required keys found",
-                        ctx_result.found_keys.len()
-                    );
-                }
-
-                // Check box requirements: validate size names and report
-                let box_requirements = call_graph.resolve_user_box_requirements(&combined_program);
-
-                if box_requirements.has_requirements() {
-                    // Validate all declared size names are recognized
-                    for req in &box_requirements.requirements {
-                        if let Some(ref size) = req.requirement.min_size
-                            && crate::lang::compiler::box_checker::size_memory_mb(size).is_none()
-                        {
-                            return Err(format!(
-                                "Invalid box size '{}' in meta {{box: {{min-size: \"{}\"}}}} on {}\n\
-                                 Valid sizes: nano, micro, small, medium, large, xlarge, 2xlarge, 4xlarge",
-                                size, size, req.fqn
-                            ));
-                        }
-                    }
-
-                    if let Some(min_size) = box_requirements.effective_min_size() {
-                        tracing::debug!(
-                            " Box requirements: min-size={}, network={}, from {} function(s)",
-                            min_size,
-                            box_requirements.requires_network(),
-                            box_requirements.requirements.len()
-                        );
-                    }
-                }
+                Self::validate_compiled_program(
+                    &mut compiler,
+                    &combined_program,
+                    conf,
+                    Self::runtime_context_validation_policy(context_storage.as_ref()),
+                    color,
+                )?;
 
                 tracing::debug!(" Unified Pipeline: Check completed successfully");
                 Ok(crate::val::Val::Null)
             }
             PipelineMode::Execute => {
+                // Run the same post-compile validations as Check mode before
+                // any user code executes. This preserves pre-flight failures
+                // (e.g. missing required ctx keys) for run/eval without a
+                // separate check pipeline pass. The returned ctx
+                // requirements are reused below for defaults/secret keys.
+                let ctx_requirements = Self::validate_compiled_program(
+                    &mut compiler,
+                    &combined_program,
+                    conf,
+                    Self::runtime_context_validation_policy(context_storage.as_ref()),
+                    color,
+                )?;
+
                 // Execute and return final result using Arc for efficient sharing
                 let program = compiler.get_program_arc();
                 let hot_ast = Arc::new(crate::lang::ast::HotAst::from_program(
@@ -1103,11 +1201,8 @@ impl Engine {
                     vm.context_storage = context_storage;
                 }
 
-                // Extract ctx requirements via call graph and apply defaults + secret keys
-                let ctx_requirements =
-                    crate::lang::compiler::ctx_checker::extract_ctx_requirements_via_call_graph(
-                        &combined_program,
-                    );
+                // Apply defaults + secret keys from the ctx requirements
+                // the validation pass already resolved (call graph built once).
                 // Apply default values for keys not already in context_storage
                 for (key, default_val) in ctx_requirements.all_defaults() {
                     vm.context_storage.entry(key).or_insert(default_val);
@@ -1462,13 +1557,14 @@ impl Engine {
             return Err(format!("Parse errors:\n{}", parse_errors.join("\n")));
         }
 
-        // Merge parsed namespaces into combined program
+        // Merge parsed namespaces member-by-member using the same strict
+        // policy as the regular pipeline. Whole-namespace replacement here
+        // made worker/std artifacts silently drop declarations.
         for parsed in &parsed_files {
-            for (ns_path, namespace) in &parsed.namespaces {
-                combined_program
-                    .namespaces
-                    .insert(ns_path.clone(), namespace.clone());
-            }
+            super::discover::merge_program_namespaces_strict(
+                &mut combined_program.namespaces,
+                parsed.namespaces.clone(),
+            )?;
         }
 
         // Resolve variable references on the BASE program (before eval code)
@@ -1530,89 +1626,37 @@ impl Engine {
             hot_ast: crate::lang::ast::HotAst::from_program(combined_program.clone()),
         };
 
-        // Now parse and compile eval code if provided (for execution only, not caching)
-        // We need to compile eval code separately and append to the base program
-        let (final_program, final_combined_program) = if let Some(code) = eval_code {
-            // Clone the base program to extend it
-            let mut extended_program = compiler.get_program().clone();
-            let cached_instruction_count = extended_program.entry_point.len();
+        // Eval extends the base through the same seeded compiler path used by
+        // persisted bytecode cache hits. Cacheable artifacts remain base-only.
+        if let Some(code) = eval_code {
+            let result = Self::execute_eval_extension(
+                code,
+                compiler.seed(),
+                &combined_program,
+                super::cache::EvalRuntimeOptions {
+                    conf,
+                    emitter,
+                    execution_context,
+                    event_publisher,
+                    context_storage,
+                    database_pool,
+                    file_storage,
+                    store,
+                    embedding_provider,
+                    task_queue: None,
+                    stream_publisher,
+                    color,
+                    warnings_out: None,
+                },
+            )?;
+            return Ok(ExecutionWithArtifacts {
+                result,
+                artifacts: Some(artifacts),
+            });
+        }
 
-            // Create unique namespace for eval code
-            let eval_ns = if let Some(ref ctx) = execution_context {
-                let run_id_str = ctx.run_id.to_string();
-                let run_id_no_hyphens = run_id_str.replace('-', "");
-                let short_id = if run_id_no_hyphens.len() >= 12 {
-                    &run_id_no_hyphens[run_id_no_hyphens.len() - 12..]
-                } else {
-                    &run_id_no_hyphens
-                };
-                format!("::hot::$run::run-{}", short_id)
-            } else {
-                let temp_uuid = uuid::Uuid::now_v7().to_string();
-                let temp_no_hyphens = temp_uuid.replace('-', "");
-                let short_id = if temp_no_hyphens.len() >= 12 {
-                    &temp_no_hyphens[temp_no_hyphens.len() - 12..]
-                } else {
-                    &temp_no_hyphens
-                };
-                format!("::hot::$run::run-{}", short_id)
-            };
-
-            let eval_code_with_ns = format!("{} ns\n{}", eval_ns, code);
-            let mut eval_ast = crate::lang::parser::parse_hot(&eval_code_with_ns)
-                .map_err(|e| format!("Failed to parse eval code: {}", e))?;
-
-            // Compile just the eval code with the base registries pre-loaded
-            let mut eval_compiler = crate::lang::compiler::Compiler::new();
-
-            // Pre-populate the eval compiler with base registries
-            for (name, id) in compiler.get_function_mapping() {
-                eval_compiler.register_existing_function(name.clone(), *id);
-            }
-            for (name, id) in compiler.get_core_functions() {
-                eval_compiler.register_existing_core_function(name.clone(), *id);
-            }
-            for ((type_name, method_name), impl_name) in compiler.get_type_implementations() {
-                eval_compiler.register_existing_type_implementation(
-                    type_name.clone(),
-                    method_name.clone(),
-                    impl_name.clone(),
-                );
-            }
-
-            eval_compiler
-                .compile_program(&mut eval_ast)
-                .map_err(|e| format!("Failed to compile eval code: {}", e.format_error(color)))?;
-
-            // Merge eval program into extended program
-            let mut eval_program = eval_compiler.get_program().clone();
-
-            // Merge constants and remap IDs in eval instructions
-            let id_mapping = extended_program.merge_constants(eval_program.constants.clone());
-            crate::lang::bytecode::BytecodeProgram::remap_constant_ids(
-                &mut eval_program.entry_point,
-                &id_mapping,
-            );
-
-            // Append eval instructions to extended program
-            let _eval_start = extended_program.append_instructions(eval_program.entry_point);
-
-            tracing::debug!(
-                "✓ Extended bytecode: {} base + {} eval = {} total instructions",
-                cached_instruction_count,
-                extended_program.entry_point.len() - cached_instruction_count,
-                extended_program.entry_point.len()
-            );
-
-            // Merge eval AST into combined program for HotAst
-            for (ns_path, namespace) in eval_ast.namespaces {
-                combined_program.namespaces.insert(ns_path, namespace);
-            }
-
-            (Arc::new(extended_program), combined_program)
-        } else {
-            (compiler.get_program_arc(), combined_program)
-        };
+        let final_program = compiler.get_program_arc();
+        let final_combined_program = combined_program;
 
         // Extract ctx requirements via call graph before consuming final_combined_program
         let ctx_requirements =
@@ -1797,5 +1841,83 @@ impl Engine {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn structural_compile_allows_required_ctx_but_runtime_execute_rejects_empty_keys() {
+        let temp = tempfile::tempdir().unwrap();
+        let src_dir = temp.path().join("src");
+        std::fs::create_dir_all(&src_dir).unwrap();
+        std::fs::write(
+            src_dir.join("required_ctx.hot"),
+            r#"::required_ctx ns
+
+needs-key
+meta {ctx: {"api.key": {required: true}}}
+fn (): Str { "unused" }
+"#,
+        )
+        .unwrap();
+        let target_file = temp.path().join("validation_target.hot");
+        std::fs::write(
+            &target_file,
+            r#"::validation_target ns
+
+value 1
+"#,
+        )
+        .unwrap();
+
+        let src_paths = vec![src_dir.to_string_lossy().to_string()];
+        let target_file = target_file.to_string_lossy().to_string();
+
+        // Structural validation collects the requirement without demanding a value.
+        Engine::run_file_pipeline_with_deps(&target_file, &src_paths, &[], None, None, false)
+            .expect("structural compile should collect, not require, context");
+
+        // Check and Execute both require it.
+        let empty_context = AHashMap::new();
+        let check_error = Engine::check_sources_pipeline_with_context(
+            &src_paths,
+            &[],
+            None,
+            None,
+            Some(&empty_context),
+            false,
+        )
+        .unwrap_err();
+        assert!(check_error.contains("Missing required context variable 'api.key'"));
+
+        let error = execute_target(&src_paths, &target_file).unwrap_err();
+        assert!(error.contains("Missing required context variable 'api.key'"));
+    }
+
+    fn execute_target(src_paths: &[String], target_file: &str) -> Result<crate::val::Val, String> {
+        Engine::run_unified_pipeline(
+            src_paths,
+            &[],
+            None,
+            None,
+            Some(target_file),
+            None,
+            PipelineMode::Execute,
+            None,
+            None,
+            None,
+            Some(AHashMap::new()),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            false,
+            None,
+        )
     }
 }

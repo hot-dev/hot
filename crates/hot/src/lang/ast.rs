@@ -391,7 +391,32 @@ impl<'de> serde::Deserialize<'de> for AstVarIndex {
     }
 }
 
+/// Entry-list form of the var-index lookup table, used for cache
+/// serialization.
+pub type VarIndexEntries = Vec<((String, String), Vec<(Var, Value)>)>;
+
 impl AstVarIndex {
+    /// Decompose into entry lists (for cache serialization via the
+    /// `ast_cache` mirror types — the raw `Var`/`Value` serde in here is
+    /// JSON-only).
+    pub fn to_entries(&self) -> (VarIndexEntries, Vec<String>) {
+        let lookup = self
+            .lookup
+            .iter()
+            .map(|((scope, var), values)| ((scope.clone(), var.clone()), values.clone()))
+            .collect();
+        let scopes = self.scopes.iter().cloned().collect();
+        (lookup, scopes)
+    }
+
+    /// Rebuild from entry lists produced by [`Self::to_entries`].
+    pub fn from_entries(lookup: VarIndexEntries, scopes: Vec<String>) -> Self {
+        Self {
+            lookup: lookup.into_iter().collect(),
+            scopes: scopes.into_iter().collect(),
+        }
+    }
+
     /// Build index from Program for fast O(1) variable lookups at all nesting levels
     pub fn build(program: &Program) -> Self {
         let mut lookup = AHashMap::new();

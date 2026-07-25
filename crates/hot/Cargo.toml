@@ -20,6 +20,7 @@ test-utils = []
 ahash = { workspace = true }
 fastnum = { workspace = true }
 serde_json = { workspace = true, features = ["preserve_order", "arbitrary_precision"] }
+postcard = { workspace = true }
 serde = { workspace = true }
 uuid = { workspace = true, features = ["serde", "v4", "v7"] }
 ariadne.workspace = true
@@ -115,7 +116,14 @@ ammonia = "4.1.3"
 [target.'cfg(unix)'.dependencies]
 libc = { workspace = true }
 
+[target."cfg(windows)".dependencies]
+
+[build-dependencies]
+blake3 = { workspace = true }
+
 [dev-dependencies]
+ahash = { workspace = true }
+filetime = "0.2"
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["test-util"] }
 axum = { workspace = true }

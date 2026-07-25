@@ -3,7 +3,7 @@
 use hot::val::Val;
 
 use crate::cli::GlobalOptions;
-use crate::command::deploy::setup_live_build_for_dev;
+use crate::command::deploy::{is_ad_hoc_default_db, setup_live_build_for_dev_with_context};
 use crate::conf::{
     create_emitter, create_event_publisher, get_merged_src_paths, get_merged_test_paths,
 };
@@ -51,25 +51,40 @@ pub(crate) async fn run_run(
         .clone()
         .unwrap_or_else(|| hot::project::get_default_project_name(conf));
 
-    // Check context requirements before running
-    hot::lang::engine::Engine::check_sources_pipeline_with_context(
+    // No separate pre-flight check pass here: the Execute pipeline runs the
+    // same post-compile validations (ctx/box/handler/schedule) itself before
+    // executing any user code, so a check_sources_pipeline_with_context call
+    // would just compile hot-std and the project sources a second time.
+
+    // Reuse live-build compilation for runtime metadata preflight before any
+    // live-build records are mutated. None means an explicit empty key set,
+    // not structural-only validation.
+    let ad_hoc_default_db = is_ad_hoc_default_db(conf);
+    let available_context_keys = context_storage
+        .as_ref()
+        .map(|storage| storage.keys().cloned().collect())
+        .unwrap_or_default();
+    setup_live_build_for_dev_with_context(
+        conf,
+        global_options,
         &src_paths,
         &_test_paths,
-        Some(conf),
-        Some(&project_name),
-        context_storage.as_ref(),
-        hot::env::is_local_dev(),
-    )?;
+        available_context_keys,
+    )
+    .await?;
 
-    // Create or update live build for development
-    setup_live_build_for_dev(conf, global_options, &src_paths, &_test_paths).await?;
-
-    // Create database pool first if needed for emitter and file storage
-    let db_pool = match hot::db::create_db_pool(conf).await {
-        Ok(pool) => Some(std::sync::Arc::new(pool)),
-        Err(e) => {
-            tracing::warn!("Failed to create database pool for run: {}", e);
-            None
+    // The default ad-hoc database path is known to refuse pool creation.
+    // Avoid the doomed connection attempt so emitters, event publishers, and
+    // run records cannot initialize before Execute validation.
+    let db_pool = if ad_hoc_default_db {
+        None
+    } else {
+        match hot::db::create_db_pool(conf).await {
+            Ok(pool) => Some(std::sync::Arc::new(pool)),
+            Err(e) => {
+                tracing::warn!("Failed to create database pool for run: {}", e);
+                None
+            }
         }
     };
 
@@ -125,7 +140,8 @@ pub(crate) async fn run_run(
         (None, None, None, None, None, None)
     };
 
-    // Create file storage from config
+    // Local file storage construction is lazy and non-mutating, so preserve
+    // provider availability for valid ad-hoc programs.
     let file_storage: Option<std::sync::Arc<dyn hot::file_storage::FileStorage>> =
         match hot::file_storage::file_storage_from_config(conf).await {
             Ok(fs) => Some(std::sync::Arc::from(fs)),

@@ -10,7 +10,15 @@
 //!
 //! ## Cache Location
 //!
-//! The cache directory is determined by `cache_paths::get_unit_cache_dir()`:
+//! Package units and source-path units are stored in *different* directories.
+//! A package's parsed AST depends only on its own immutable sources plus the
+//! runtime identity already in the cache key, so it is machine-scoped
+//! (`cache_paths::get_package_unit_cache_dir()`) and one parsed copy serves
+//! every project. Project sources are project-scoped
+//! (`cache_paths::get_unit_cache_dir()`) so their ASTs never leak between
+//! checkouts.
+//!
+//! Source-path resolution:
 //! - `$HOT_HOME/cache/unit` if HOT_HOME is set
 //! - `./.hot/cache/unit` if `hot.hot` config exists (project-local cache)
 //! - System cache directory otherwise (platform-specific):
@@ -70,6 +78,22 @@ impl CompilationUnit {
         self.id().replace(['/', '\\', ':'], "-").replace('.', "_")
     }
 
+    /// Filesystem-safe identity for this unit *at this location*.
+    ///
+    /// The plain `fs_safe_id` is only the unit's name, which is ambiguous in
+    /// the machine-shared package cache: two monorepos can each have a local
+    /// dependency called `mylib`. Appending a hash of the resolved path scopes
+    /// every entry (and its lock) to one specific directory, which is what
+    /// makes the generation sweep in `save` safe.
+    pub fn scoped_fs_id(&self) -> String {
+        let path = self
+            .path()
+            .canonicalize()
+            .unwrap_or_else(|_| self.path().to_path_buf());
+        let digest = crate::hasher::HotHasher::hash_content(path.to_string_lossy().as_bytes());
+        format!("{}-{}", self.fs_safe_id(), &digest[..8])
+    }
+
     /// Get the path to source files
     pub fn path(&self) -> &Path {
         match self {
@@ -109,18 +133,70 @@ struct CacheFile {
     namespaces_data: Vec<u8>,
 }
 
+fn validate_cache_metadata(
+    metadata: &CacheMetadata,
+    expected_source_hash: &str,
+) -> Result<(), String> {
+    if metadata.source_hash != expected_source_hash {
+        return Err(format!(
+            "Unit cache source hash mismatch: cache={}, requested={}",
+            metadata.source_hash, expected_source_hash
+        ));
+    }
+    if metadata.version != CacheType::Ast.format_version() {
+        return Err(format!(
+            "Unit cache format version mismatch: cache={}, current={}",
+            metadata.version,
+            CacheType::Ast.format_version()
+        ));
+    }
+    if metadata.hot_version != crate::build_info::VERSION {
+        return Err(format!(
+            "Unit cache Hot version mismatch: cache={}, current={}",
+            metadata.hot_version,
+            crate::build_info::VERSION
+        ));
+    }
+    Ok(())
+}
+
 /// Compilation unit cache manager
 /// Caches parsed AST for packages and source paths
 /// Supports cross-process synchronization via file locking
 pub struct UnitCache {
-    /// Cache directory (typically .hot/cache/unit)
+    /// Cache directory for source-path units (project-local when in a project)
     cache_dir: PathBuf,
+    /// Cache directory for package units. Machine-scoped so one parsed copy of
+    /// a dependency serves every project; `None` means "same as `cache_dir`"
+    /// (used by tests that pin a single directory).
+    package_cache_dir: Option<PathBuf>,
 }
 
 impl UnitCache {
     /// Create a new unit cache manager
     pub fn new(cache_dir: PathBuf) -> Self {
-        Self { cache_dir }
+        Self {
+            cache_dir,
+            package_cache_dir: None,
+        }
+    }
+
+    /// Cache manager that stores package units in a separate (machine-scoped)
+    /// directory from source-path units.
+    pub fn with_package_dir(cache_dir: PathBuf, package_cache_dir: PathBuf) -> Self {
+        Self {
+            cache_dir,
+            package_cache_dir: Some(package_cache_dir),
+        }
+    }
+
+    /// Directory holding this unit's cache entry: packages are machine-scoped,
+    /// project sources stay project-local.
+    fn dir_for(&self, unit: &CompilationUnit) -> &Path {
+        match (unit, &self.package_cache_dir) {
+            (CompilationUnit::Package { .. }, Some(dir)) => dir,
+            _ => &self.cache_dir,
+        }
     }
 
     /// Get the default cache directory.
@@ -139,9 +215,10 @@ impl UnitCache {
         &self,
         unit: &CompilationUnit,
     ) -> Result<fd_lock::RwLock<std::fs::File>, std::io::Error> {
-        std::fs::create_dir_all(&self.cache_dir)?;
+        let dir = self.dir_for(unit);
+        std::fs::create_dir_all(dir)?;
 
-        let lock_path = self.cache_dir.join(format!("{}.lock", unit.fs_safe_id()));
+        let lock_path = dir.join(format!("{}.lock", unit.scoped_fs_id()));
         let file = std::fs::OpenOptions::new()
             .read(true)
             .write(true)
@@ -156,11 +233,11 @@ impl UnitCache {
     fn cache_path(&self, unit: &CompilationUnit, cache_key: &str) -> PathBuf {
         let filename = format!(
             "{}-{}.{}",
-            unit.fs_safe_id(),
+            unit.scoped_fs_id(),
             &cache_key[..16],
             CacheType::Ast.extension()
         );
-        self.cache_dir.join(filename)
+        self.dir_for(unit).join(filename)
     }
 
     /// Compute cache key for a compilation unit
@@ -175,8 +252,8 @@ impl UnitCache {
     }
 
     /// Try to load a cached unit
-    /// The cache key includes Hot version and format version, so if the file exists
-    /// it's guaranteed to be compatible (no post-load validation needed)
+    /// The full computed key and runtime metadata are revalidated from the
+    /// payload before the entry is accepted.
     pub fn load(&self, unit: &CompilationUnit) -> Result<Option<CachedUnit>, String> {
         // Compute cache key (includes version + file hashes)
         let cache_key = self.compute_cache_key(unit)?;
@@ -187,21 +264,30 @@ impl UnitCache {
             return Ok(None);
         }
 
-        // Read and decompress
+        // Read failures can be transient. Only bytes that were successfully
+        // read but then fail decode/validation establish corruption or staleness.
         let compressed = std::fs::read(&cache_path).map_err(|e| e.to_string())?;
-        let data = zstd::decode_all(compressed.as_slice()).map_err(|e| e.to_string())?;
+        let decoded = (|| {
+            let data = zstd::decode_all(compressed.as_slice()).map_err(|e| e.to_string())?;
+            let cache_file: CacheFile = postcard::from_bytes(&data)
+                .map_err(|e| format!("Failed to deserialize cache file: {}", e))?;
+            validate_cache_metadata(&cache_file.metadata, &cache_key)?;
+            let namespaces = ast_cache::deserialize_namespaces(&cache_file.namespaces_data)?;
+            Ok((cache_file.metadata, namespaces))
+        })();
+        let (metadata, namespaces) = match decoded {
+            Ok(decoded) => decoded,
+            Err(error) => {
+                super::remove_invalid_cache_entry(&cache_path);
+                return Err(error);
+            }
+        };
 
-        // Deserialize the cache file wrapper
-        let cache_file: CacheFile = serde_json::from_slice(&data)
-            .map_err(|e| format!("Failed to deserialize cache file: {}", e))?;
-
-        // Deserialize namespaces using ast_cache
-        let namespaces = ast_cache::deserialize_namespaces(&cache_file.namespaces_data)?;
-
+        super::touch_cache_entry(&cache_path);
         Ok(Some(CachedUnit {
-            version: cache_file.metadata.version,
-            hot_version: cache_file.metadata.hot_version,
-            source_hash: cache_file.metadata.source_hash,
+            version: metadata.version,
+            hot_version: metadata.hot_version,
+            source_hash: metadata.source_hash,
             namespaces,
         }))
     }
@@ -218,11 +304,15 @@ impl UnitCache {
         let cache_key = self.compute_cache_key(unit)?;
 
         // Ensure cache directory exists
-        std::fs::create_dir_all(&self.cache_dir).map_err(|e| e.to_string())?;
+        std::fs::create_dir_all(self.dir_for(unit)).map_err(|e| e.to_string())?;
 
         // Acquire cross-process file lock (best effort - proceed even if locking fails)
+        // Block rather than try_write: a writer that lost the lock still went
+        // on to write its entry, and the lock holder's sweep then deleted that
+        // fresh generation. Waiting keeps write-then-prune atomic per unit.
+        // Locks are per-unit, so unrelated units still save in parallel.
         let mut file_lock = self.acquire_file_lock(unit).ok();
-        let _file_lock_guard = file_lock.as_mut().and_then(|lock| lock.try_write().ok());
+        let file_lock_guard = file_lock.as_mut().and_then(|lock| lock.write().ok());
 
         // Check if cache already exists (another process may have just saved it)
         let cache_path = self.cache_path(unit, &cache_key);
@@ -244,8 +334,9 @@ impl UnitCache {
             namespaces_data,
         };
 
-        // Serialize to JSON
-        let data = serde_json::to_vec(&cache_file)
+        // Serialize with postcard (compact binary, much faster to decode
+        // than the previous serde_json encoding)
+        let data = postcard::to_allocvec(&cache_file)
             .map_err(|e| format!("Failed to serialize cache: {}", e))?;
 
         // Compress with zstd level 1 for speed (level 1 is ~3x faster than level 3
@@ -259,6 +350,27 @@ impl UnitCache {
         let temp_path = cache_path.with_extension("ast.zst.tmp");
         std::fs::write(&temp_path, &compressed).map_err(|e| e.to_string())?;
         std::fs::rename(&temp_path, &cache_path).map_err(|e| e.to_string())?;
+
+        // Opportunistic housekeeping: old-generation entries (superseded
+        // versions/formats) are unreachable via their keys and would
+        // otherwise accumulate forever.
+        // Collapse this unit to a single live generation, then age-sweep the
+        // rest of the directory.
+        // Only prune while holding this unit's lock. Unsynchronized, two
+        // processes writing different generations would each delete the
+        // other's freshly written entry and leave nothing cached.
+        if file_lock_guard.is_some() {
+            let suffix = format!(".{}", CacheType::Ast.extension());
+            super::prune_superseded_entries(
+                self.dir_for(unit),
+                &unit.scoped_fs_id(),
+                &suffix,
+                &cache_path,
+            );
+            super::prune_legacy_unscoped_entries(self.dir_for(unit), &unit.fs_safe_id(), &suffix);
+        }
+        drop(file_lock_guard);
+        super::prune_stale_cache_files(self.dir_for(unit), &cache_path);
 
         tracing::debug!(
             "Saved cache for {} ({} namespaces, {} bytes -> {} bytes compressed, {:.1}x)",
@@ -420,6 +532,116 @@ mod tests {
         };
 
         (path, ns)
+    }
+
+    fn create_test_unit(root: &Path) -> CompilationUnit {
+        let source = root.join("source");
+        std::fs::create_dir_all(&source).unwrap();
+        std::fs::write(source.join("test.hot"), b"::test ns\nvalue 1\n").unwrap();
+        CompilationUnit::SourcePath {
+            name: "test".to_string(),
+            path: source,
+        }
+    }
+
+    fn write_unit_cache_file(
+        cache: &UnitCache,
+        unit: &CompilationUnit,
+        requested_key: &str,
+        embedded_key: &str,
+        namespaces: &IndexMap<NsPath, Namespace>,
+    ) -> PathBuf {
+        std::fs::create_dir_all(&cache.cache_dir).unwrap();
+        let cache_file = CacheFile {
+            metadata: CacheMetadata {
+                version: CacheType::Ast.format_version(),
+                hot_version: crate::build_info::VERSION.to_string(),
+                source_hash: embedded_key.to_string(),
+            },
+            namespaces_data: ast_cache::serialize_namespaces(namespaces).unwrap(),
+        };
+        let data = postcard::to_allocvec(&cache_file).unwrap();
+        let compressed = zstd::encode_all(data.as_slice(), 1).unwrap();
+        let path = cache.cache_path(unit, requested_key);
+        std::fs::write(&path, compressed).unwrap();
+        path
+    }
+
+    #[test]
+    fn load_rejects_source_hash_mismatch_then_save_repairs() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let unit = create_test_unit(root.path());
+        let cache = UnitCache::new(root.path().join("cache"));
+        let requested_key = cache.compute_cache_key(&unit).unwrap();
+        let (path, namespace) = create_test_namespace("test");
+        let namespaces = [(path, namespace)].into_iter().collect();
+        let cache_path = write_unit_cache_file(
+            &cache,
+            &unit,
+            &requested_key,
+            "different-full-source-hash",
+            &namespaces,
+        );
+
+        let error = cache
+            .load(&unit)
+            .expect_err("source hash mismatch must fail");
+        assert!(error.contains("source hash mismatch"));
+        assert!(!cache_path.exists(), "stale unit cache must be deleted");
+
+        cache.save(&unit, &namespaces).expect("save must repair");
+        assert!(cache.load(&unit).unwrap().is_some());
+    }
+
+    #[test]
+    fn load_deletes_corrupt_unit_entry() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let unit = create_test_unit(root.path());
+        let cache = UnitCache::new(root.path().join("cache"));
+        let key = cache.compute_cache_key(&unit).unwrap();
+        std::fs::create_dir_all(&cache.cache_dir).unwrap();
+        let path = cache.cache_path(&unit, &key);
+        std::fs::write(&path, b"not-zstd").unwrap();
+
+        assert!(cache.load(&unit).is_err());
+        assert!(!path.exists(), "corrupt unit cache must be deleted");
+    }
+
+    #[test]
+    fn load_does_not_delete_unit_entry_on_read_failure() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let unit = create_test_unit(root.path());
+        let cache = UnitCache::new(root.path().join("cache"));
+        let key = cache.compute_cache_key(&unit).unwrap();
+        std::fs::create_dir_all(&cache.cache_dir).unwrap();
+        let path = cache.cache_path(&unit, &key);
+        std::fs::create_dir(&path).unwrap();
+
+        assert!(cache.load(&unit).is_err());
+        assert!(path.is_dir(), "read failures must leave the entry in place");
+    }
+
+    #[test]
+    fn load_touches_only_after_valid_unit_decode() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let unit = create_test_unit(root.path());
+        let cache = UnitCache::new(root.path().join("cache"));
+        let (path, namespace) = create_test_namespace("test");
+        let namespaces = [(path, namespace)].into_iter().collect();
+        cache.save(&unit, &namespaces).unwrap();
+
+        let key = cache.compute_cache_key(&unit).unwrap();
+        let cache_path = cache.cache_path(&unit, &key);
+        let old_system = std::time::SystemTime::now() - std::time::Duration::from_secs(48 * 3600);
+        let old = filetime::FileTime::from_system_time(old_system);
+        filetime::set_file_mtime(&cache_path, old).unwrap();
+
+        assert!(cache.load(&unit).unwrap().is_some());
+        let touched = std::fs::metadata(&cache_path).unwrap().modified().unwrap();
+        assert!(
+            touched > old_system,
+            "valid cache load must refresh modification time"
+        );
     }
 
     #[test]
@@ -913,5 +1135,323 @@ MyType -> Str fn (t: MyType): Str {
         }
 
         println!("All {} variables match after round-trip!", total_vars);
+    }
+
+    #[test]
+    fn package_units_use_the_shared_dir_while_sources_stay_local() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let project = dir.path().join("project-local");
+        let shared = dir.path().join("machine-shared");
+        let cache = UnitCache::with_package_dir(project.clone(), shared.clone());
+
+        let root = dir.path().join("unit-src");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("a.hot"), "::a ns\n\nvalue 1\n").unwrap();
+
+        let package = CompilationUnit::Package {
+            name: "hot-std".to_string(),
+            path: root.clone(),
+        };
+        let source = CompilationUnit::SourcePath {
+            name: "src".to_string(),
+            path: root.clone(),
+        };
+
+        let namespaces = IndexMap::new();
+        cache.save(&package, &namespaces).expect("save package");
+        cache.save(&source, &namespaces).expect("save source");
+
+        let entries = |dir: &Path| -> Vec<String> {
+            std::fs::read_dir(dir)
+                .map(|read| {
+                    read.flatten()
+                        .map(|entry| entry.file_name().to_string_lossy().to_string())
+                        .filter(|name| name.ends_with(".ast.zst"))
+                        .collect()
+                })
+                .unwrap_or_default()
+        };
+
+        assert!(
+            entries(&shared).iter().all(|name| name.starts_with("pkg-")),
+            "shared dir holds only package units: {:?}",
+            entries(&shared)
+        );
+        assert!(
+            !entries(&shared).is_empty(),
+            "package unit must land in the shared dir"
+        );
+        assert!(
+            entries(&project)
+                .iter()
+                .all(|name| name.starts_with("src-")),
+            "project dir holds only source units: {:?}",
+            entries(&project)
+        );
+        assert!(
+            !entries(&project).is_empty(),
+            "source unit must land in the project dir"
+        );
+    }
+
+    /// The shared package cache must never serve one version's AST for
+    /// another. The key hashes every `.hot` file under the package root —
+    /// including `pkg.hot`, which carries the declared version — so a version
+    /// bump, a source edit, or a different install location all produce
+    /// distinct entries.
+    #[test]
+    fn package_cache_key_distinguishes_version_sources_and_location() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let cache = UnitCache::new(dir.path().join("cache"));
+
+        let write_pkg = |root: &Path, version: &str, body: &str| {
+            std::fs::create_dir_all(root.join("src")).unwrap();
+            std::fs::write(
+                root.join("pkg.hot"),
+                format!(
+                    "::hot::pkg ns\n\nhot.pkg.demo {{\n  name: \"demo\",\n  version: \"{version}\",\n  src: [\"src/\"],\n}}\n"
+                ),
+            )
+            .unwrap();
+            std::fs::write(root.join("src").join("lib.hot"), body).unwrap();
+        };
+        let unit_at = |root: &Path| CompilationUnit::Package {
+            name: "demo".to_string(),
+            path: root.to_path_buf(),
+        };
+
+        let root = dir.path().join("demo");
+        write_pkg(&root, "1.0.0", "::demo ns\n\nvalue 1\n");
+        let v1 = cache.compute_cache_key(&unit_at(&root)).unwrap();
+
+        // Same sources, bumped version in pkg.hot.
+        write_pkg(&root, "2.0.0", "::demo ns\n\nvalue 1\n");
+        let v2 = cache.compute_cache_key(&unit_at(&root)).unwrap();
+        assert_ne!(v1, v2, "a version bump must change the cache key");
+
+        // Same version, edited sources.
+        write_pkg(&root, "2.0.0", "::demo ns\n\nvalue 2\n");
+        let v2_edited = cache.compute_cache_key(&unit_at(&root)).unwrap();
+        assert_ne!(v2, v2_edited, "a source edit must change the cache key");
+
+        // Same name and content at a different install location.
+        let elsewhere = dir.path().join("elsewhere").join("demo");
+        write_pkg(&elsewhere, "2.0.0", "::demo ns\n\nvalue 2\n");
+        let other_location = cache.compute_cache_key(&unit_at(&elsewhere)).unwrap();
+        assert_ne!(
+            v2_edited, other_location,
+            "a different install location must not reuse another package's entry"
+        );
+
+        // Recomputing an unchanged package is stable (the cache can actually hit).
+        write_pkg(&root, "2.0.0", "::demo ns\n\nvalue 2\n");
+        assert_eq!(
+            v2_edited,
+            cache.compute_cache_key(&unit_at(&root)).unwrap(),
+            "unchanged package must produce a stable key"
+        );
+    }
+
+    /// A mutable unit must not accumulate generations, and the sweep must be
+    /// scoped to one unit at one location — two projects with a same-named
+    /// local dependency share the package cache directory.
+    #[test]
+    fn saving_collapses_generations_without_evicting_other_locations() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let cache_dir = dir.path().join("unit");
+        let cache = UnitCache::new(cache_dir.clone());
+
+        let make_lib = |root: &Path, body: &str| {
+            std::fs::create_dir_all(root).unwrap();
+            std::fs::write(root.join("lib.hot"), body).unwrap();
+        };
+        let unit_at = |root: &Path| CompilationUnit::Package {
+            name: "mylib".to_string(),
+            path: root.to_path_buf(),
+        };
+        let entries = |prefix: &str| -> usize {
+            std::fs::read_dir(&cache_dir)
+                .map(|read| {
+                    read.flatten()
+                        .filter(|entry| {
+                            let name = entry.file_name().to_string_lossy().to_string();
+                            name.starts_with(prefix) && name.ends_with(".ast.zst")
+                        })
+                        .count()
+                })
+                .unwrap_or(0)
+        };
+
+        // Project A edits its local dependency three times.
+        let a = dir.path().join("a").join("mylib");
+        let namespaces = IndexMap::new();
+        for body in [
+            "::mylib ns\n\nv 1\n",
+            "::mylib ns\n\nv 2\n",
+            "::mylib ns\n\nv 3\n",
+        ] {
+            make_lib(&a, body);
+            cache.save(&unit_at(&a), &namespaces).expect("save");
+        }
+        let a_prefix = unit_at(&a).scoped_fs_id();
+        assert_eq!(
+            entries(&a_prefix),
+            1,
+            "an edited unit keeps exactly one live generation"
+        );
+
+        // Project B has a different local dependency, also called `mylib`.
+        let b = dir.path().join("b").join("mylib");
+        make_lib(&b, "::mylib ns\n\nother 1\n");
+        cache.save(&unit_at(&b), &namespaces).expect("save");
+        let b_prefix = unit_at(&b).scoped_fs_id();
+        assert_ne!(
+            a_prefix, b_prefix,
+            "same name at different paths must differ"
+        );
+        assert_eq!(entries(&a_prefix), 1, "project A's entry survives");
+        assert_eq!(entries(&b_prefix), 1, "project B's entry is stored");
+
+        // Project A edits again: still must not touch project B.
+        make_lib(&a, "::mylib ns\n\nv 4\n");
+        cache.save(&unit_at(&a), &namespaces).expect("save");
+        assert_eq!(entries(&a_prefix), 1);
+        assert_eq!(entries(&b_prefix), 1, "sweep is scoped to one location");
+    }
+
+    /// Legacy (unscoped) entries are unreachable after the rename, so the
+    /// first save for a unit reclaims them — without touching a scoped entry
+    /// that belongs to a different location.
+    #[test]
+    fn saving_reclaims_legacy_unscoped_entries_only() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let cache_dir = dir.path().join("unit");
+        std::fs::create_dir_all(&cache_dir).unwrap();
+        let cache = UnitCache::new(cache_dir.clone());
+
+        let root = dir.path().join("mylib");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("lib.hot"), "::mylib ns\n\nv 1\n").unwrap();
+        let unit = CompilationUnit::Package {
+            name: "mylib".to_string(),
+            path: root.clone(),
+        };
+
+        // A pre-rename entry for this unit, and a scoped entry belonging to a
+        // different location that must survive.
+        let legacy = cache_dir.join("pkg-mylib-0123456789abcdef.ast.zst");
+        let other_location = cache_dir.join("pkg-mylib-feedface-0123456789abcdef.ast.zst");
+        std::fs::write(&legacy, b"stale").unwrap();
+        std::fs::write(&other_location, b"other project").unwrap();
+
+        cache.save(&unit, &IndexMap::new()).expect("save");
+
+        assert!(!legacy.exists(), "unreachable legacy entry is reclaimed");
+        assert!(
+            other_location.exists(),
+            "another location's scoped entry must survive"
+        );
+    }
+
+    /// `save` must wait for an already-held unit lock rather than writing
+    /// alongside the holder.
+    ///
+    /// Deterministic by construction: the lock is taken here, a writer is
+    /// spawned, and the writer must still be blocked a moment later. With a
+    /// non-blocking `try_write` the writer proceeds immediately — it writes an
+    /// entry the lock holder's sweep can then delete — and the test fails on
+    /// the "still blocked" assertion instead of relying on thread scheduling.
+    #[test]
+    fn save_waits_for_an_already_held_unit_lock() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let cache_dir = dir.path().join("unit");
+        std::fs::create_dir_all(&cache_dir).unwrap();
+
+        let root = dir.path().join("mylib");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("lib.hot"), "::mylib ns\n\nv 1\n").unwrap();
+        let unit = CompilationUnit::Package {
+            name: "mylib".to_string(),
+            path: root.clone(),
+        };
+
+        let holder = UnitCache::new(cache_dir.clone());
+        let mut lock = holder.acquire_file_lock(&unit).expect("acquire lock");
+        let guard = lock.write().expect("hold lock");
+
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let writer = {
+            let cache_dir = cache_dir.clone();
+            let unit = unit.clone();
+            std::thread::spawn(move || {
+                let cache = UnitCache::new(cache_dir);
+                let _ = started_tx.send(());
+                let result = cache.save(&unit, &IndexMap::new());
+                let _ = done_tx.send(result);
+            })
+        };
+
+        started_rx
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("writer thread must start");
+        assert!(
+            done_rx
+                .recv_timeout(std::time::Duration::from_millis(300))
+                .is_err(),
+            "save must block while another writer holds the unit lock"
+        );
+
+        drop(guard);
+        done_rx
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("save must proceed once the lock is released")
+            .expect("save must succeed after the lock is released");
+        writer.join().expect("writer thread");
+    }
+
+    /// Successive generations of one unit collapse to a single live entry.
+    #[test]
+    fn sequential_generations_collapse_to_one_entry() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let cache_dir = dir.path().join("unit");
+        let cache = UnitCache::new(cache_dir.clone());
+
+        let root = dir.path().join("mylib");
+        std::fs::create_dir_all(&root).unwrap();
+        let unit = CompilationUnit::Package {
+            name: "mylib".to_string(),
+            path: root.clone(),
+        };
+
+        for generation in 0..5 {
+            std::fs::write(
+                root.join("lib.hot"),
+                format!("::mylib ns\n\nv {}\n", generation),
+            )
+            .unwrap();
+            cache.save(&unit, &IndexMap::new()).expect("save");
+
+            let entries: Vec<_> = std::fs::read_dir(&cache_dir)
+                .unwrap()
+                .flatten()
+                .filter(|e| e.file_name().to_string_lossy().ends_with(".ast.zst"))
+                .collect();
+            assert_eq!(
+                entries.len(),
+                1,
+                "generation {generation} must supersede its predecessor, found {:?}",
+                entries.iter().map(|e| e.file_name()).collect::<Vec<_>>()
+            );
+        }
+
+        assert!(
+            UnitCache::new(cache_dir)
+                .load(&unit)
+                .ok()
+                .flatten()
+                .is_some(),
+            "the surviving entry must be readable"
+        );
     }
 }

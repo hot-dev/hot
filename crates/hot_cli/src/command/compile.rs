@@ -18,8 +18,9 @@ pub(crate) async fn run_compile(
     // Create or update live build for development
     setup_live_build_for_dev(conf, _global_options, src_paths, test_paths).await?;
 
-    // Use the same approved pipeline as run command which properly loads hot-std
-    // Create a temporary empty file for validation
+    // Use the structural pipeline, which loads hot-std and project dependencies
+    // without requiring runtime context values or executing module code.
+    // Create a temporary empty file for validation.
     let temp_file = std::env::temp_dir().join("compile_validation.hot");
     std::fs::write(&temp_file, "// Compile validation file")
         .map_err(|e| format!("Failed to create temporary validation file: {}", e))?;

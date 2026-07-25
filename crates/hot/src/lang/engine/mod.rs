@@ -21,7 +21,7 @@ use crate::lang::bytecode::BytecodeProgram;
 use crate::lang::compiler::Compiler;
 use crate::lang::runtime::vm::VirtualMachine;
 use crate::val::Val;
-use ahash::AHashMap;
+use ahash::{AHashMap, AHashSet};
 use indexmap::IndexMap;
 use std::sync::Arc;
 
@@ -41,6 +41,9 @@ pub struct ExtractedHandlers {
 /// Pipeline execution mode
 #[derive(Debug, Clone)]
 pub enum PipelineMode {
+    /// Parse, compile, and validate program structure without requiring
+    /// runtime context values or executing module initialization.
+    StructuralValidation,
     /// Check only - compile and validate without execution
     Check,
     /// Execute and return final result
@@ -50,6 +53,17 @@ pub enum PipelineMode {
         pattern: Option<String>,
         capture_output: bool,
     },
+}
+
+/// Explicit policy for required runtime context validation.
+///
+/// This is intentionally separate from `Option<context_storage>`: an absent
+/// storage map can mean either "collect requirements only" or "runtime has
+/// zero keys", depending on the caller.
+#[derive(Debug, Clone)]
+pub(super) enum ContextValidationPolicy {
+    CollectOnly,
+    RequireSatisfied(AHashSet<String>),
 }
 
 /// Test execution result
@@ -66,6 +80,14 @@ pub struct IncrementalExecutionResult {
     pub new_state: indexmap::IndexMap<String, indexmap::IndexMap<String, crate::val::Val>>,
     pub total_instruction_count: usize,
     pub current_namespace: String,
+}
+
+/// Compiler state retained by the REPL between successful declaration turns.
+/// The seeded program is always an exact bytecode prefix of its successor.
+pub(crate) struct ReplCompilationState {
+    pub(crate) compiler_seed: crate::lang::compiler::CompilerSeed,
+    pub(crate) ast_program: crate::lang::ast::Program,
+    pub(crate) extension_id: usize,
 }
 
 /// Compilation artifacts that can be cached for reuse

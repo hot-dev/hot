@@ -78,6 +78,33 @@ struct SymbolVar {
     def_source: Option<hot::lang::ast::Source>,
 }
 
+fn normalize_file_path(path: &Path) -> PathBuf {
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .map(|cwd| cwd.join(path))
+            .unwrap_or_else(|_| path.to_path_buf())
+    };
+    if let Ok(canonical) = fs::canonicalize(&absolute) {
+        return canonical;
+    }
+
+    // Unsaved/new files may not exist yet. Normalize `.` and `..` lexically
+    // so their URI path still compares consistently with discovery output.
+    let mut normalized = PathBuf::new();
+    for component in absolute.components() {
+        match component {
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                normalized.pop();
+            }
+            _ => normalized.push(component.as_os_str()),
+        }
+    }
+    normalized
+}
+
 #[tower_lsp::async_trait]
 impl LanguageServer for Backend {
     async fn initialize(
@@ -882,16 +909,26 @@ impl Backend {
     ) -> Result<hot::lang::ast::Program, String> {
         use hot::lang::ast::Program;
 
+        let current_files: AHashSet<PathBuf> = current_program
+            .namespaces
+            .values()
+            .filter_map(|namespace| namespace.source_file.clone())
+            .map(|path| normalize_file_path(&path))
+            .collect();
         let mut comprehensive_program = Program {
             namespaces: Default::default(), // Use Default::default() for IndexMap
             current_namespace: current_program.current_namespace.clone(),
         };
 
         // 1. Load hot-std package
-        if let Ok(hot_std_program) = self.discover_and_parse_hot_files().await {
-            for (ns_path, namespace) in hot_std_program.namespaces {
-                comprehensive_program.namespaces.insert(ns_path, namespace);
-            }
+        if let Ok(hot_std_program) = self
+            .discover_and_parse_hot_files_excluding(&current_files)
+            .await
+        {
+            hot::lang::engine::discover::merge_program_namespaces_strict(
+                &mut comprehensive_program.namespaces,
+                hot_std_program.namespaces,
+            )?;
         }
 
         // 2. Load project dependencies from hot.hot config
@@ -904,12 +941,20 @@ impl Backend {
                     hot::lang::engine::Engine::discover_dependency_source_files(&dep.resolved_path)
                 {
                     for file_path in files {
-                        if let Ok(content) = std::fs::read_to_string(&file_path)
-                            && let Ok(parsed_program) = hot::lang::parser::parse_hot(&content)
+                        let normalized_file = normalize_file_path(Path::new(&file_path));
+                        if current_files.contains(&normalized_file) {
+                            continue;
+                        }
+                        if let Ok(content) = std::fs::read_to_string(&normalized_file)
+                            && let Ok(parsed_program) = hot::lang::parser::parse_hot_file(
+                                &content,
+                                normalized_file.to_string_lossy().as_ref(),
+                            )
                         {
-                            for (ns_path, namespace) in parsed_program.namespaces {
-                                comprehensive_program.namespaces.insert(ns_path, namespace);
-                            }
+                            hot::lang::engine::discover::merge_program_namespaces_strict(
+                                &mut comprehensive_program.namespaces,
+                                parsed_program.namespaces,
+                            )?;
                         }
                     }
                 }
@@ -922,23 +967,30 @@ impl Backend {
                 && let Ok(files) = self.discover_hot_files_in_dir(src_path_str)
             {
                 for file_path in files {
-                    if let Ok(content) = std::fs::read_to_string(&file_path)
-                        && let Ok(parsed_program) = hot::lang::parser::parse_hot(&content)
+                    let normalized_file = normalize_file_path(Path::new(&file_path));
+                    if current_files.contains(&normalized_file) {
+                        continue;
+                    }
+                    if let Ok(content) = std::fs::read_to_string(&normalized_file)
+                        && let Ok(parsed_program) = hot::lang::parser::parse_hot_file(
+                            &content,
+                            normalized_file.to_string_lossy().as_ref(),
+                        )
                     {
-                        for (ns_path, namespace) in parsed_program.namespaces {
-                            comprehensive_program.namespaces.insert(ns_path, namespace);
-                        }
+                        hot::lang::engine::discover::merge_program_namespaces_strict(
+                            &mut comprehensive_program.namespaces,
+                            parsed_program.namespaces,
+                        )?;
                     }
                 }
             }
         }
 
         // 4. Add the current file's program
-        for (ns_path, namespace) in &current_program.namespaces {
-            comprehensive_program
-                .namespaces
-                .insert(ns_path.clone(), namespace.clone());
-        }
+        hot::lang::engine::discover::merge_program_namespaces_strict(
+            &mut comprehensive_program.namespaces,
+            current_program.namespaces.clone(),
+        )?;
 
         Ok(comprehensive_program)
     }
@@ -952,7 +1004,7 @@ impl Backend {
             && let Some(loc) = error.location()
             && let Some(error_file) = &loc.file
         {
-            return error_file == &current_file_path;
+            return normalize_file_path(error_file) == normalize_file_path(&current_file_path);
         }
 
         // If we can't determine the file, show the error (better to show too many than too few)
@@ -1134,6 +1186,19 @@ impl Backend {
 
     /// Discover and parse all Hot files (standard library + project files)
     async fn discover_and_parse_hot_files(&self) -> Result<Program, String> {
+        self.discover_and_parse_hot_files_excluding(&AHashSet::new())
+            .await
+    }
+
+    async fn discover_and_parse_hot_files_excluding(
+        &self,
+        excluded: &AHashSet<PathBuf>,
+    ) -> Result<Program, String> {
+        let excluded: AHashSet<PathBuf> = excluded
+            .iter()
+            .map(|path| normalize_file_path(path))
+            .collect();
+
         // Start with hot-std files
         let mut all_hot_files = Vec::new();
 
@@ -1203,13 +1268,20 @@ impl Backend {
         };
 
         for file_path in all_hot_files {
-            if let Ok(content) = std::fs::read_to_string(&file_path)
-                && let Ok(parsed_program) = hot::lang::parser::parse_hot(&content)
+            let normalized_file = normalize_file_path(Path::new(&file_path));
+            if excluded.contains(&normalized_file) {
+                continue;
+            }
+            if let Ok(content) = std::fs::read_to_string(&normalized_file)
+                && let Ok(parsed_program) = hot::lang::parser::parse_hot_file(
+                    &content,
+                    normalized_file.to_string_lossy().as_ref(),
+                )
             {
-                // Merge namespaces from this file
-                for (ns_path, namespace) in parsed_program.namespaces {
-                    program.namespaces.insert(ns_path, namespace);
-                }
+                hot::lang::engine::discover::merge_program_namespaces_strict(
+                    &mut program.namespaces,
+                    parsed_program.namespaces,
+                )?;
             }
         }
 

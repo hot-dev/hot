@@ -11,7 +11,7 @@
 //!
 //! - **Linux**: `$XDG_CACHE_HOME/hot` or `~/.cache/hot`
 //! - **macOS**: `~/Library/Caches/hot`
-//! - **Windows**: `%LOCALAPPDATA%\hot\cache`
+//! - **Windows**: `%LOCALAPPDATA%\hot`
 //!
 //! ## Cache Structure
 //!
@@ -67,7 +67,7 @@ pub fn get_cache_base_dir() -> PathBuf {
 /// Platform-specific locations:
 /// - **Linux**: `$XDG_CACHE_HOME/hot` or `~/.cache/hot`
 /// - **macOS**: `~/Library/Caches/hot`
-/// - **Windows**: `%LOCALAPPDATA%\hot\cache`
+/// - **Windows**: `%LOCALAPPDATA%\hot`
 ///
 /// Falls back to `~/.hot` if platform detection fails.
 pub fn get_system_cache_dir() -> PathBuf {
@@ -81,9 +81,39 @@ pub fn get_system_cache_dir() -> PathBuf {
         return home.join(".hot");
     }
 
-    // Last resort: use current directory (shouldn't happen in practice)
-    tracing::warn!("Could not determine system cache directory, using .hot");
-    PathBuf::from(".hot")
+    // Last resort: use a per-user temp directory rather than the current
+    // working directory. Environments without HOME (cron, launchd, CI
+    // runners, profilers) would otherwise scatter `.hot/` directories into
+    // whatever cwd the process happened to run from — and once `.hot/`
+    // exists, has_project_config() treats that directory as a project.
+    let fallback = fallback_temp_cache_dir();
+    tracing::warn!(
+        "Could not determine system cache directory, using {}",
+        fallback.display()
+    );
+    fallback
+}
+
+#[cfg(unix)]
+fn fallback_temp_cache_dir() -> PathBuf {
+    // SAFETY: geteuid has no preconditions and does not mutate process state.
+    let effective_uid = unsafe { libc::geteuid() };
+    std::env::temp_dir().join(format!("hot-cache-uid-{}", effective_uid))
+}
+
+#[cfg(not(unix))]
+fn fallback_temp_cache_dir() -> PathBuf {
+    let user = std::env::var("USERNAME")
+        .ok()
+        .filter(|value| !value.is_empty())
+        .or_else(|| std::env::var("USER").ok().filter(|value| !value.is_empty()));
+    match user {
+        Some(user) => {
+            let user_hash = blake3::hash(user.as_bytes()).to_hex().to_string();
+            std::env::temp_dir().join(format!("hot-cache-user-{}", &user_hash[..16]))
+        }
+        None => std::env::temp_dir().join(format!("hot-cache-pid-{}", std::process::id())),
+    }
 }
 
 /// Get the platform-specific cache directory
@@ -107,9 +137,13 @@ fn get_platform_cache_dir() -> Option<PathBuf> {
 
 #[cfg(target_os = "windows")]
 fn get_platform_cache_dir() -> Option<PathBuf> {
-    // Windows: %LOCALAPPDATA%\hot\cache
+    // Windows: %LOCALAPPDATA%\hot
+    //
+    // This is the *base* directory, matching every other platform: the shared
+    // layout appends `cache/` itself (see `get_cache_root_dir`). Returning
+    // `…\hot\cache` here produced a doubled `…\hot\cache\cache\unit`.
     if let Ok(local_app_data) = std::env::var("LOCALAPPDATA") {
-        return Some(PathBuf::from(local_app_data).join("hot").join("cache"));
+        return Some(PathBuf::from(local_app_data).join("hot"));
     }
 
     // Fallback for Windows: %USERPROFILE%\.hot
@@ -163,6 +197,25 @@ pub fn get_bytecode_cache_dir() -> PathBuf {
 /// Used by `UnitCache` for per-unit (package/source) parsed AST storage.
 pub fn get_unit_cache_dir() -> PathBuf {
     get_cache_root_dir().join("unit")
+}
+
+/// Get the unit cache directory for *package* units (dependencies).
+///
+/// Deliberately machine-scoped rather than project-scoped: a package's
+/// parsed AST is a pure function of its own immutable sources plus the
+/// runtime identity already baked into the cache key, so it is identical
+/// for every project on the machine. Keeping it project-local made each
+/// project re-parse and re-store its own copy of hot-std (~110 KB and a
+/// full parse on that project's first run).
+///
+/// `HOT_HOME` still wins when set — it is an explicit whole-tree override.
+/// Project sources keep using [`get_unit_cache_dir`], since their content
+/// is project-specific and should not leak between checkouts.
+pub fn get_package_unit_cache_dir() -> PathBuf {
+    if let Ok(hot_home) = std::env::var("HOT_HOME") {
+        return PathBuf::from(hot_home).join("cache").join("unit");
+    }
+    get_system_cache_dir().join("cache").join("unit")
 }
 
 /// Get the git dependency cache directory (.hot/cache/git/).
@@ -246,6 +299,23 @@ mod tests {
     }
 
     #[test]
+    fn fallback_cache_dir_is_user_scoped() {
+        let fallback = fallback_temp_cache_dir();
+        assert_ne!(fallback, std::env::temp_dir().join("hot-cache"));
+
+        #[cfg(unix)]
+        {
+            // SAFETY: geteuid has no preconditions and does not mutate state.
+            let effective_uid = unsafe { libc::geteuid() };
+            assert!(
+                fallback.ends_with(format!("hot-cache-uid-{}", effective_uid)),
+                "fallback must be scoped to the effective user: {}",
+                fallback.display()
+            );
+        }
+    }
+
+    #[test]
     fn test_cache_subdirs() {
         // Note: These tests depend on current environment state
         // If HOT_HOME is set, they'll use that; otherwise project-local or system cache
@@ -261,5 +331,28 @@ mod tests {
         assert!(git_cache_dir.ends_with("cache/git"));
         assert!(cdn_cache_dir.ends_with("cache/cdn"));
         assert!(docs_cache_dir.ends_with("cache/docs"));
+    }
+
+    /// The platform base directory must not already end in `cache`: the shared
+    /// layout appends `cache/` itself, so a base of `…\hot\cache` yields a
+    /// doubled `…\hot\cache\cache\unit`. This held on every platform except
+    /// Windows, which returned the cache root as its base.
+    #[test]
+    fn system_cache_dir_is_a_base_not_a_cache_root() {
+        let base = get_system_cache_dir();
+        assert_ne!(
+            base.file_name().and_then(|name| name.to_str()),
+            Some("cache"),
+            "platform base must not end in `cache`: {}",
+            base.display()
+        );
+
+        let root = get_cache_root_dir();
+        let doubled = std::path::Path::new("cache").join("cache");
+        assert!(
+            !root.to_string_lossy().contains(&*doubled.to_string_lossy()),
+            "cache root must not contain a doubled cache segment: {}",
+            root.display()
+        );
     }
 }

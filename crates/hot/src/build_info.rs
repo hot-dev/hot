@@ -4,6 +4,9 @@ pub const VERSION: &str = env!("HOT_VERSION");
 /// Git SHA embedded at compile time (full 40-character SHA)
 pub const GIT_SHA: &str = env!("GIT_SHA");
 
+/// Fingerprint of the compiler/runtime source used for this build.
+pub const BUILD_FINGERPRINT: &str = env!("HOT_BUILD_FINGERPRINT");
+
 /// Parse a semver version string into (major, minor, patch) components.
 /// Returns None if the version string is invalid.
 /// Handles versions with pre-release suffixes like "0.11.0-beta".

@@ -34,6 +34,48 @@ pub struct CacheMetadata {
     pub cache_key: String,
 }
 
+/// Validate bytecode payload metadata against this runtime and the full key
+/// requested by the caller. Shared by normal cache files and hot-std images.
+pub(crate) fn validate_cache_metadata(
+    metadata: &CacheMetadata,
+    expected_cache_key: &str,
+) -> Result<(), String> {
+    if metadata.cache_key != expected_cache_key {
+        return Err(format!(
+            "Cache key mismatch: cache={}, requested={}",
+            metadata.cache_key, expected_cache_key
+        ));
+    }
+
+    if metadata.hot_version != crate::build_info::VERSION {
+        return Err(format!(
+            "Cache version mismatch: cache={}, current={}",
+            metadata.hot_version,
+            crate::build_info::VERSION
+        ));
+    }
+
+    // Keep accepting legacy metadata without a SHA. The full key still
+    // includes the build fingerprint and is mandatory above.
+    if !metadata.git_sha.is_empty() && metadata.git_sha != crate::build_info::GIT_SHA {
+        return Err(format!(
+            "Cache git SHA mismatch: cache={}, current={}",
+            &metadata.git_sha[..7.min(metadata.git_sha.len())],
+            &crate::build_info::GIT_SHA[..7.min(crate::build_info::GIT_SHA.len())]
+        ));
+    }
+
+    if metadata.cache_format_version != CacheType::Bytecode.format_version() {
+        return Err(format!(
+            "Cache format version mismatch: cache={}, current={}",
+            metadata.cache_format_version,
+            CacheType::Bytecode.format_version()
+        ));
+    }
+
+    Ok(())
+}
+
 /// Hash information for a source file
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FileHash {
@@ -100,8 +142,26 @@ pub struct CachedBytecodeArtifacts {
 }
 
 impl CachedBytecode {
-    /// Build cached bytecode plus runtime-ready shared artifacts.
+    /// Build cached bytecode plus runtime-ready shared artifacts, deriving
+    /// ctx defaults and secret keys from the AST call graph.
     pub fn new(metadata: CacheMetadata, artifacts: CachedBytecodeArtifacts) -> Self {
+        let ctx_requirements =
+            crate::lang::compiler::ctx_checker::extract_ctx_requirements_via_call_graph(
+                &artifacts.ast_program,
+            );
+        let ctx_defaults = ctx_requirements.all_defaults();
+        let secret_keys = ctx_requirements.all_secret_keys();
+        Self::with_derived(metadata, artifacts, ctx_defaults, secret_keys)
+    }
+
+    /// Like [`Self::new`] but with the call-graph-derived ctx data supplied
+    /// (from the cache payload), skipping the call-graph rebuild on load.
+    pub fn with_derived(
+        metadata: CacheMetadata,
+        artifacts: CachedBytecodeArtifacts,
+        ctx_defaults: AHashMap<String, crate::val::Val>,
+        secret_keys: AHashSet<String>,
+    ) -> Self {
         let CachedBytecodeArtifacts {
             program,
             function_mapping,
@@ -116,12 +176,8 @@ impl CachedBytecode {
         let runtime_core_variables = Arc::new(
             crate::lang::compiler::core_registry::extract_core_variables_from_ast(&ast_program),
         );
-        let ctx_requirements =
-            crate::lang::compiler::ctx_checker::extract_ctx_requirements_via_call_graph(
-                &ast_program,
-            );
-        let runtime_ctx_defaults = Arc::new(ctx_requirements.all_defaults());
-        let runtime_secret_keys = Arc::new(ctx_requirements.all_secret_keys());
+        let runtime_ctx_defaults = Arc::new(ctx_defaults);
+        let runtime_secret_keys = Arc::new(secret_keys);
 
         Self {
             runtime_program: Arc::new(program.clone()),
@@ -143,6 +199,254 @@ impl CachedBytecode {
             skill_specs,
         }
     }
+}
+
+/// On-disk cache payload (postcard inside zstd).
+///
+/// Sections that carry their own encoding stay as byte blobs
+/// (`ast_cache`-encoded namespaces), everything else is typed and encoded
+/// directly by the payload's own postcard pass. Same wire-format rules as
+/// the AST cache apply (see the module docs in ast_cache.rs): no variant
+/// reordering, no field changes without bumping
+/// `CacheType::Bytecode.format_version()`.
+#[derive(Serialize, Deserialize)]
+struct CacheFilePayload {
+    metadata: CacheMetadata,
+    /// BytecodeProgram via `BytecodeProgram::serialize` (postcard)
+    program_data: Vec<u8>,
+    /// AST program namespaces via `ast_cache::serialize_namespaces`
+    ast_program_namespaces: Vec<u8>,
+    /// HotAst namespaces via `ast_cache::serialize_namespaces`.
+    /// `None` means byte-identical to `ast_program_namespaces` (the common
+    /// case — storing it twice doubled decode time and disk for nothing).
+    hot_ast_namespaces: Option<Vec<u8>>,
+    /// AstVarIndex via `ast_cache::serialize_var_index`
+    var_index: Vec<u8>,
+    function_mapping: Vec<(String, u32)>,
+    core_functions: Vec<(String, u32)>,
+    type_implementations: Vec<((String, String), String)>,
+    tool_specs: crate::lang::hot::internal_mcp::ToolSchemaRegistry,
+    skill_specs: crate::lang::hot::internal_skill::SkillSpecRegistry,
+    /// Ctx default values resolved from the call graph at save time, so a
+    /// load skips rebuilding the call graph (~5ms for hot-std).
+    #[serde(with = "crate::lang::cache::ast_cache::tagged_val_map_serde")]
+    ctx_defaults: AHashMap<String, crate::val::Val>,
+    /// Secret ctx keys resolved at save time (sorted for deterministic bytes).
+    secret_keys: Vec<String>,
+}
+
+/// Decode a decompressed cache payload into a runtime-ready
+/// [`CachedBytecode`]. Shared by the on-disk cache and the hot-std
+/// release artifact. Performs no metadata validation — callers decide
+/// what "valid" means for their context.
+pub(crate) fn decode_cache_payload(decompressed: &[u8]) -> Result<Arc<CachedBytecode>, String> {
+    // Borrowed view: the byte sections alias `decompressed` directly instead
+    // of being copied out (postcard encodes Vec<u8> and &[u8] identically on
+    // the wire), and the sections then decode in parallel — they are
+    // independent and each costs ~10ms for a hot-std-sized payload.
+    let payload: CacheFilePayloadRef = postcard::from_bytes(decompressed)
+        .map_err(|e| format!("Failed to decode cache payload: {}", e))?;
+
+    let CacheFilePayloadRef {
+        metadata,
+        program_data,
+        ast_program_namespaces,
+        hot_ast_namespaces,
+        var_index,
+        function_mapping,
+        core_functions,
+        type_implementations,
+        tool_specs,
+        skill_specs,
+        ctx_defaults,
+        secret_keys,
+    } = payload;
+
+    let (program_res, (ast_res, (hot_res, var_res))) = rayon::join(
+        || BytecodeProgram::deserialize(program_data),
+        || {
+            rayon::join(
+                || crate::lang::cache::ast_cache::deserialize_namespaces(ast_program_namespaces),
+                || {
+                    rayon::join(
+                        || {
+                            hot_ast_namespaces
+                                .map(crate::lang::cache::ast_cache::deserialize_namespaces)
+                                .transpose()
+                        },
+                        || crate::lang::cache::ast_cache::deserialize_var_index(var_index),
+                    )
+                },
+            )
+        },
+    );
+
+    let program = program_res?;
+    let ast_program_namespaces =
+        ast_res.map_err(|e| format!("Failed to deserialize AST program namespaces: {}", e))?;
+    let hot_ast_namespaces =
+        hot_res.map_err(|e| format!("Failed to deserialize HotAst namespaces: {}", e))?;
+    let var_index = var_res?;
+
+    let ast_program = crate::lang::ast::Program {
+        namespaces: ast_program_namespaces,
+        current_namespace: crate::lang::ast::NsPath::new(),
+    };
+
+    // Reconstruct HotAst. A missing hot_ast section means it was
+    // byte-identical to the AST program namespaces at save time.
+    let hot_ast_namespaces = match hot_ast_namespaces {
+        Some(namespaces) => namespaces,
+        None => ast_program.namespaces.clone(),
+    };
+    let hot_ast = crate::lang::ast::HotAst {
+        program: ast_program.clone(),
+        namespaces: crate::lang::ast::Namespaces {
+            namespaces: hot_ast_namespaces,
+        },
+        var_index,
+    };
+
+    let function_mapping: indexmap::IndexMap<String, u32> = function_mapping.into_iter().collect();
+    let core_functions: indexmap::IndexMap<String, u32> = core_functions.into_iter().collect();
+    let type_implementations: indexmap::IndexMap<(String, String), String> =
+        type_implementations.into_iter().collect();
+
+    tracing::debug!(
+        "✓ Cache loaded from disk (project: {}, created: {}, {} functions, {} core, {} namespaces)",
+        metadata.project_name,
+        metadata.created_at,
+        function_mapping.len(),
+        core_functions.len(),
+        ast_program.namespaces.len()
+    );
+
+    let cached_bytecode = Arc::new(CachedBytecode::with_derived(
+        metadata,
+        CachedBytecodeArtifacts {
+            program,
+            function_mapping,
+            core_functions,
+            type_implementations,
+            ast_program,
+            hot_ast,
+            tool_specs,
+            skill_specs,
+        },
+        ctx_defaults,
+        secret_keys.into_iter().collect(),
+    ));
+
+    Ok(cached_bytecode)
+}
+
+/// Encode compilation artifacts into the compressed on-disk payload plus the
+/// runtime-ready [`CachedBytecode`]. Shared by the on-disk cache and the
+/// hot-std release artifact.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn encode_cache_payload(
+    metadata: CacheMetadata,
+    program: &BytecodeProgram,
+    function_mapping: &indexmap::IndexMap<String, u32>,
+    core_functions: &indexmap::IndexMap<String, u32>,
+    type_implementations: &indexmap::IndexMap<(String, String), String>,
+    ast_program: &crate::lang::ast::Program,
+    hot_ast: &crate::lang::ast::HotAst,
+    tool_specs: &crate::lang::hot::internal_mcp::ToolSchemaRegistry,
+    skill_specs: &crate::lang::hot::internal_skill::SkillSpecRegistry,
+) -> Result<(Vec<u8>, Arc<CachedBytecode>), String> {
+    // Build the in-memory entry first; its derived ctx data is persisted
+    // in the payload so loads skip the call-graph rebuild.
+    let cached_bytecode = Arc::new(CachedBytecode::new(
+        metadata.clone(),
+        CachedBytecodeArtifacts {
+            program: program.clone(),
+            function_mapping: function_mapping.clone(),
+            core_functions: core_functions.clone(),
+            type_implementations: type_implementations.clone(),
+            ast_program: ast_program.clone(),
+            hot_ast: hot_ast.clone(),
+            tool_specs: tool_specs.clone(),
+            skill_specs: skill_specs.clone(),
+        },
+    ));
+    let mut secret_keys: Vec<String> = cached_bytecode
+        .runtime_secret_keys
+        .iter()
+        .cloned()
+        .collect();
+    secret_keys.sort();
+
+    let mut hot_ast_bytes: Option<Vec<u8>>;
+    let payload = CacheFilePayload {
+        metadata,
+        program_data: program.serialize()?,
+        ast_program_namespaces: {
+            let bytes =
+                crate::lang::cache::ast_cache::serialize_namespaces(&ast_program.namespaces)?;
+            hot_ast_bytes = Some(crate::lang::cache::ast_cache::serialize_namespaces(
+                &hot_ast.namespaces.namespaces,
+            )?);
+            if hot_ast_bytes.as_deref() == Some(bytes.as_slice()) {
+                hot_ast_bytes = None;
+            }
+            bytes
+        },
+        hot_ast_namespaces: hot_ast_bytes,
+        var_index: crate::lang::cache::ast_cache::serialize_var_index(&hot_ast.var_index)?,
+        function_mapping: function_mapping
+            .iter()
+            .map(|(k, v)| (k.clone(), *v))
+            .collect(),
+        core_functions: core_functions
+            .iter()
+            .map(|(k, v)| (k.clone(), *v))
+            .collect(),
+        type_implementations: type_implementations
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect(),
+        tool_specs: tool_specs.clone(),
+        skill_specs: skill_specs.clone(),
+        ctx_defaults: (*cached_bytecode.runtime_ctx_defaults).clone(),
+        secret_keys,
+    };
+
+    let encoded = postcard::to_allocvec(&payload)
+        .map_err(|e| format!("Failed to encode cache payload: {}", e))?;
+
+    // Compress with zstd (level 1: the payload is already compact binary,
+    // favor speed)
+    let compressed = zstd::encode_all(encoded.as_slice(), 1)
+        .map_err(|e| format!("Failed to compress cache: {}", e))?;
+
+    Ok((compressed, cached_bytecode))
+}
+
+/// Borrowed view of [`CacheFilePayload`] for zero-copy decoding.
+///
+/// MUST stay field-for-field in sync with [`CacheFilePayload`]: postcard
+/// encodes `Vec<u8>` and `&[u8]` identically, so this deserializes the same
+/// wire format without copying the (multi-megabyte) byte sections.
+#[derive(Deserialize)]
+struct CacheFilePayloadRef<'a> {
+    metadata: CacheMetadata,
+    #[serde(borrow)]
+    program_data: &'a [u8],
+    #[serde(borrow)]
+    ast_program_namespaces: &'a [u8],
+    #[serde(borrow)]
+    hot_ast_namespaces: Option<&'a [u8]>,
+    #[serde(borrow)]
+    var_index: &'a [u8],
+    function_mapping: Vec<(String, u32)>,
+    core_functions: Vec<(String, u32)>,
+    type_implementations: Vec<((String, String), String)>,
+    tool_specs: crate::lang::hot::internal_mcp::ToolSchemaRegistry,
+    skill_specs: crate::lang::hot::internal_skill::SkillSpecRegistry,
+    #[serde(with = "crate::lang::cache::ast_cache::tagged_val_map_serde")]
+    ctx_defaults: AHashMap<String, crate::val::Val>,
+    secret_keys: Vec<String>,
 }
 
 /// In-memory cache entry with access tracking for LRU
@@ -265,7 +569,72 @@ impl BytecodeCache {
             .finalize())
     }
 
-    /// Get cache file path for a given cache key
+    /// Identity of the *program* an entry belongs to, independent of its
+    /// content key.
+    ///
+    /// Without this, entries are bare content hashes and there is no way to
+    /// tell which of them supersede one another — so every recompile strands a
+    /// multi-megabyte file until the age sweep runs. Scoping on the project
+    /// plus its set of source paths keeps distinct programs apart (notably
+    /// `check` and `test`, which compile different path sets of the same
+    /// project) while letting successive edits of one program collapse.
+    ///
+    /// Changing the file *set* (adding, removing, or renaming a source)
+    /// changes the scope and leaves the previous entry for the age sweep;
+    /// editing file *contents* does not.
+    fn scope_id(project_name: &str, file_hashes: &[FileHash]) -> String {
+        let mut paths: Vec<&str> = file_hashes.iter().map(|fh| fh.path.as_str()).collect();
+        paths.sort_unstable();
+        let mut hasher = HotHasher::new();
+        // The full project name is part of the identity, not just the
+        // truncated display prefix below — two projects whose names share a
+        // 40-char prefix must not collapse into one scope.
+        hasher.update(project_name.as_bytes());
+        hasher.update(&[0]);
+        for path in paths {
+            hasher.update(path.as_bytes());
+            hasher.update(&[0]);
+        }
+        let digest = hasher.finalize();
+        // The name is only a human-readable hint; the digest carries identity.
+        // Bound it so a long project name cannot push a filename past a
+        // filesystem limit.
+        let safe_project: String = project_name
+            .chars()
+            .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
+            .take(40)
+            .collect();
+        format!("{}-{}", safe_project, &digest[..32])
+    }
+
+    /// Cross-process lock guarding generation replacement for one scope.
+    fn acquire_scope_lock(
+        &self,
+        scope: &str,
+    ) -> Result<fd_lock::RwLock<std::fs::File>, std::io::Error> {
+        std::fs::create_dir_all(&self.cache_dir)?;
+        let path = self.cache_dir.join(format!("{}.lock", scope));
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&path)?;
+        Ok(fd_lock::RwLock::new(file))
+    }
+
+    /// Marker naming the live generation for a program scope.
+    ///
+    /// Generation pruning must know which entry a save supersedes, but readers
+    /// only carry a content key. Putting the scope in the entry filename would
+    /// force a directory scan on every lookup — and `exists` runs on the
+    /// worker's per-request routing path. A sidecar keeps both O(1): lookups
+    /// address the key directly, saves read one small file.
+    fn scope_marker_path(&self, scope: &str) -> PathBuf {
+        self.cache_dir.join(format!("{}.current", scope))
+    }
+
+    /// Get cache file path for a given cache key.
     fn cache_file_path(&self, cache_key: &str) -> PathBuf {
         self.cache_dir
             .join(format!("{}.{}", cache_key, CacheType::Bytecode.extension()))
@@ -284,16 +653,19 @@ impl BytecodeCache {
         {
             let mut cache = GLOBAL_MEMORY_CACHE.lock();
             if let Some(entry) = cache.get_mut(cache_key) {
-                // Update last accessed time
-                entry.last_accessed = std::time::Instant::now();
-                tracing::debug!(
-                    "✓ Cache loaded from MEMORY (project: {}, {} functions, {} core, {} namespaces)",
-                    entry.bytecode.metadata.project_name,
-                    entry.bytecode.function_mapping.len(),
-                    entry.bytecode.core_functions.len(),
-                    entry.bytecode.ast_program.namespaces.len()
-                );
-                return Ok(Arc::clone(&entry.bytecode));
+                if validate_cache_metadata(&entry.bytecode.metadata, cache_key).is_ok() {
+                    // Update last accessed time
+                    entry.last_accessed = std::time::Instant::now();
+                    tracing::debug!(
+                        "✓ Cache loaded from MEMORY (project: {}, {} functions, {} core, {} namespaces)",
+                        entry.bytecode.metadata.project_name,
+                        entry.bytecode.function_mapping.len(),
+                        entry.bytecode.core_functions.len(),
+                        entry.bytecode.ast_program.namespaces.len()
+                    );
+                    return Ok(Arc::clone(&entry.bytecode));
+                }
+                cache.remove(cache_key);
             }
         }
 
@@ -310,159 +682,28 @@ impl BytecodeCache {
 
         tracing::debug!("Loading bytecode cache from: {}", cache_path.display());
 
-        // Read compressed cache file
+        // A read failure may be transient (permissions, descriptor pressure,
+        // network filesystem). Do not delete or touch until bytes have been
+        // fully decoded and validated.
         let compressed_data =
             std::fs::read(&cache_path).map_err(|e| format!("Failed to read cache file: {}", e))?;
 
-        // Decompress with zstd
-        let decompressed = zstd::decode_all(compressed_data.as_slice())
-            .map_err(|e| format!("Failed to decompress cache: {}", e))?;
-
-        // Parse JSON
-        let combined: serde_json::Value = serde_json::from_slice(&decompressed)
-            .map_err(|e| format!("Failed to parse cache JSON: {}", e))?;
-
-        // Extract metadata
-        let metadata: CacheMetadata = serde_json::from_value(
-            combined
-                .get("metadata")
-                .ok_or("Missing metadata in cache")?
-                .clone(),
-        )
-        .map_err(|e| format!("Failed to deserialize metadata: {}", e))?;
-
-        // Validate cache metadata
-        self.validate_metadata(&metadata)?;
-
-        // Extract and deserialize program from JSON
-        let program_json = combined
-            .get("program_json")
-            .and_then(|v| v.as_str())
-            .ok_or("Missing program_json in cache")?;
-
-        let program = BytecodeProgram::deserialize(program_json)?;
-
-        // Deserialize AST program namespaces using custom ast_cache deserialization
-        let ast_program_namespaces_json = combined
-            .get("ast_program_namespaces_json")
-            .and_then(|v| v.as_str())
-            .ok_or("Missing ast_program_namespaces_json in cache")?;
-
-        let ast_program_namespaces = crate::lang::cache::ast_cache::deserialize_namespaces(
-            ast_program_namespaces_json.as_bytes(),
-        )
-        .map_err(|e| format!("Failed to deserialize AST program namespaces: {}", e))?;
-
-        let ast_program = crate::lang::ast::Program {
-            namespaces: ast_program_namespaces,
-            current_namespace: crate::lang::ast::NsPath::new(),
+        let decoded = (|| {
+            let decompressed = zstd::decode_all(compressed_data.as_slice())
+                .map_err(|e| format!("Failed to decompress cache: {}", e))?;
+            let cached_bytecode = decode_cache_payload(&decompressed)?;
+            validate_cache_metadata(&cached_bytecode.metadata, cache_key)?;
+            Ok(cached_bytecode)
+        })();
+        let cached_bytecode = match decoded {
+            Ok(cached) => cached,
+            Err(error) => {
+                crate::lang::cache::remove_invalid_cache_entry(&cache_path);
+                return Err(error);
+            }
         };
 
-        // Deserialize HotAst namespaces using custom ast_cache deserialization
-        let hot_ast_namespaces_json = combined
-            .get("hot_ast_namespaces_json")
-            .and_then(|v| v.as_str())
-            .ok_or("Missing hot_ast_namespaces_json in cache")?;
-
-        let hot_ast_namespaces = crate::lang::cache::ast_cache::deserialize_namespaces(
-            hot_ast_namespaces_json.as_bytes(),
-        )
-        .map_err(|e| format!("Failed to deserialize HotAst namespaces: {}", e))?;
-
-        // Deserialize var_index separately
-        let var_index_json = combined
-            .get("var_index_json")
-            .and_then(|v| v.as_str())
-            .ok_or("Missing var_index_json in cache")?;
-
-        let var_index: crate::lang::ast::AstVarIndex = serde_json::from_str(var_index_json)
-            .map_err(|e| format!("Failed to deserialize var_index: {}", e))?;
-
-        // Reconstruct HotAst
-        let hot_ast = crate::lang::ast::HotAst {
-            program: ast_program.clone(),
-            namespaces: crate::lang::ast::Namespaces {
-                namespaces: hot_ast_namespaces,
-            },
-            var_index,
-        };
-
-        // Deserialize registries
-        let function_mapping_vec: Vec<(String, u32)> = serde_json::from_value(
-            combined
-                .get("function_mapping")
-                .ok_or("Missing function_mapping in cache")?
-                .clone(),
-        )
-        .map_err(|e| format!("Failed to deserialize function_mapping: {}", e))?;
-
-        let core_functions_vec: Vec<(String, u32)> = serde_json::from_value(
-            combined
-                .get("core_functions")
-                .ok_or("Missing core_functions in cache")?
-                .clone(),
-        )
-        .map_err(|e| format!("Failed to deserialize core_functions: {}", e))?;
-
-        let type_implementations_vec: Vec<((String, String), String)> = serde_json::from_value(
-            combined
-                .get("type_implementations")
-                .ok_or("Missing type_implementations in cache")?
-                .clone(),
-        )
-        .map_err(|e| format!("Failed to deserialize type_implementations: {}", e))?;
-
-        // Convert back to IndexMaps
-        let function_mapping: indexmap::IndexMap<String, u32> =
-            function_mapping_vec.into_iter().collect();
-        let core_functions: indexmap::IndexMap<String, u32> =
-            core_functions_vec.into_iter().collect();
-        let type_implementations: indexmap::IndexMap<(String, String), String> =
-            type_implementations_vec.into_iter().collect();
-
-        tracing::debug!(
-            "✓ Cache loaded from disk (project: {}, created: {}, {} functions, {} core, {} namespaces)",
-            metadata.project_name,
-            metadata.created_at,
-            function_mapping.len(),
-            core_functions.len(),
-            ast_program.namespaces.len()
-        );
-
-        // Deserialize tool/skill spec registries. Old caches predate
-        // these fields, so default to empty registries on absence —
-        // the next compile will repopulate the on-disk cache with the
-        // current schemas.
-        let tool_specs: crate::lang::hot::internal_mcp::ToolSchemaRegistry = combined
-            .get("tool_specs_json")
-            .and_then(|v| v.as_str())
-            .map(serde_json::from_str)
-            .transpose()
-            .map_err(|e| format!("Failed to deserialize tool_specs: {}", e))?
-            .unwrap_or_default();
-
-        let skill_specs: crate::lang::hot::internal_skill::SkillSpecRegistry = combined
-            .get("skill_specs_json")
-            .and_then(|v| v.as_str())
-            .map(serde_json::from_str)
-            .transpose()
-            .map_err(|e| format!("Failed to deserialize skill_specs: {}", e))?
-            .unwrap_or_default();
-
-        let cached_bytecode = Arc::new(CachedBytecode::new(
-            metadata,
-            CachedBytecodeArtifacts {
-                program,
-                function_mapping,
-                core_functions,
-                type_implementations,
-                ast_program,
-                hot_ast,
-                tool_specs,
-                skill_specs,
-            },
-        ));
-
+        crate::lang::cache::touch_cache_entry(&cache_path);
         // Store in memory cache for next time
         self.store_in_memory(cache_key, Arc::clone(&cached_bytecode));
 
@@ -485,79 +726,38 @@ impl BytecodeCache {
         skill_specs: &crate::lang::hot::internal_skill::SkillSpecRegistry,
     ) -> Result<(), String> {
         self.ensure_cache_dir()?;
+        validate_cache_metadata(&metadata, cache_key)?;
 
+        let scope = Self::scope_id(&metadata.project_name, &metadata.file_hashes);
         let cache_path = self.cache_file_path(cache_key);
+
+        // Serialize generation replacement for this scope. Unsynchronized, two
+        // processes saving different generations would each delete the other's
+        // freshly written entry. Best effort: if the lock is unavailable, skip
+        // pruning rather than prune unsynchronized.
+        let mut scope_lock = self.acquire_scope_lock(&scope).ok();
+        let scope_guard = scope_lock.as_mut().and_then(|lock| lock.write().ok());
 
         tracing::debug!("Saving bytecode cache to: {}", cache_path.display());
 
-        // Serialize program to JSON
-        let program_json = program.serialize()?;
-
-        // Serialize AST program namespaces using custom ast_cache serialization
-        // This handles Val::Map with non-string keys correctly
-        let ast_program_namespaces_bytes =
-            crate::lang::cache::ast_cache::serialize_namespaces(&ast_program.namespaces)?;
-        let ast_program_namespaces_json = String::from_utf8(ast_program_namespaces_bytes)
-            .map_err(|e| format!("AST namespaces is not valid UTF-8: {}", e))?;
-
-        // Serialize HotAst namespaces using custom ast_cache serialization
-        let hot_ast_namespaces_bytes =
-            crate::lang::cache::ast_cache::serialize_namespaces(&hot_ast.namespaces.namespaces)?;
-        let hot_ast_namespaces_json = String::from_utf8(hot_ast_namespaces_bytes)
-            .map_err(|e| format!("HotAst namespaces is not valid UTF-8: {}", e))?;
-
-        // Serialize the var_index separately (it doesn't contain Val)
-        let var_index_json = serde_json::to_string(&hot_ast.var_index)
-            .map_err(|e| format!("Failed to serialize var_index: {}", e))?;
-
-        // Serialize registries as simple vectors for JSON compatibility
-        let function_mapping_vec: Vec<(String, u32)> = function_mapping
-            .iter()
-            .map(|(k, v)| (k.clone(), *v))
-            .collect();
-
-        let core_functions_vec: Vec<(String, u32)> = core_functions
-            .iter()
-            .map(|(k, v)| (k.clone(), *v))
-            .collect();
-
-        let type_implementations_vec: Vec<((String, String), String)> = type_implementations
-            .iter()
-            .map(|(k, v)| (k.clone(), v.clone()))
-            .collect();
-
-        // Serialize tool/skill spec registries so they survive cross-process
-        // cache reuse and zip-build deployment. Without this, a worker
-        // that only loads bytecode (no recompile) would have an empty
-        // global tool-schema registry and `::ai::tool/from-fn` would
-        // fail at module-init time.
-        let tool_specs_json = serde_json::to_string(tool_specs)
-            .map_err(|e| format!("Failed to serialize tool_specs: {}", e))?;
-        let skill_specs_json = serde_json::to_string(skill_specs)
-            .map_err(|e| format!("Failed to serialize skill_specs: {}", e))?;
-
-        // Create combined JSON structure
-        let combined_json = serde_json::json!({
-            "metadata": metadata,
-            "program_json": program_json,
-            "ast_program_namespaces_json": ast_program_namespaces_json,
-            "hot_ast_namespaces_json": hot_ast_namespaces_json,
-            "var_index_json": var_index_json,
-            "function_mapping": function_mapping_vec,
-            "core_functions": core_functions_vec,
-            "type_implementations": type_implementations_vec,
-            "tool_specs_json": tool_specs_json,
-            "skill_specs_json": skill_specs_json
-        });
-        let combined_str = serde_json::to_string(&combined_json)
-            .map_err(|e| format!("Failed to serialize combined data: {}", e))?;
-
-        // Compress with zstd
-        let compressed = zstd::encode_all(combined_str.as_bytes(), 3)
-            .map_err(|e| format!("Failed to compress cache: {}", e))?;
+        // Assemble the typed payload. The tool/skill spec registries are
+        // persisted so they survive cross-process cache reuse and zip-build
+        // deployment: a worker that only loads bytecode (no recompile) would
+        // otherwise have an empty global tool-schema registry and
+        // `::ai::tool/from-fn` would fail at module-init time.
+        let (compressed, cached_bytecode) = encode_cache_payload(
+            metadata,
+            program,
+            function_mapping,
+            core_functions,
+            type_implementations,
+            ast_program,
+            hot_ast,
+            tool_specs,
+            skill_specs,
+        )?;
 
         let compressed_size = compressed.len();
-        let json_size = combined_str.len();
 
         // Write to disk using atomic write pattern (write to .tmp, then rename).
         // Use a per-writer-unique temp path (PID + thread id + nanos) to
@@ -597,26 +797,46 @@ impl BytecodeCache {
             return Err(format!("Failed to rename cache file: {}", e));
         }
 
+        // Collapse this program to a single live generation. Bytecode entries
+        // are multi-megabyte, so relying on the age sweep alone let one
+        // project accumulate tens of entries between prunes.
+        // Replace only the entry this scope itself published — never a
+        // neighbouring program's warm cache.
+        if scope_guard.is_some() {
+            let marker = self.scope_marker_path(&scope);
+            if let Ok(previous) = std::fs::read_to_string(&marker) {
+                let previous = previous.trim();
+                // Never build a deletion path from unvalidated file contents:
+                // a corrupt marker holding `../../x` would otherwise name an
+                // arbitrary victim. Only a well-formed cache key qualifies.
+                if previous != cache_key && super::is_cache_key(previous) {
+                    super::remove_invalid_cache_entry(&self.cache_file_path(previous));
+                }
+            }
+            // Atomic replacement: a torn marker would either strand the
+            // previous generation or, once validated, name nothing at all.
+            let tmp = marker.with_extension(format!("current.tmp.{}", std::process::id()));
+            // `std::fs::rename` replaces an existing destination on every
+            // supported platform: on Windows std calls `MoveFileExW` with
+            // `MOVEFILE_REPLACE_EXISTING` (library/std/src/sys/fs/windows.rs).
+            // Hand-rolling that call would add a dependency and unsafe FFI
+            // without changing behavior.
+            if std::fs::write(&tmp, cache_key).is_ok() && std::fs::rename(&tmp, &marker).is_err() {
+                let _ = std::fs::remove_file(&tmp);
+            }
+        }
+        drop(scope_guard);
+
+        // Opportunistic housekeeping: entries from other programs that have
+        // gone untouched long enough to be considered abandoned.
+        super::prune_stale_cache_files(&self.cache_dir, &cache_path);
+
         tracing::debug!(
-            "Cache saved successfully ({} bytes compressed from {} bytes JSON)",
-            compressed_size,
-            json_size
+            "Cache saved successfully ({} bytes compressed)",
+            compressed_size
         );
 
-        // Also store in memory cache
-        let cached_bytecode = Arc::new(CachedBytecode::new(
-            metadata,
-            CachedBytecodeArtifacts {
-                program: program.clone(),
-                function_mapping: function_mapping.clone(),
-                core_functions: core_functions.clone(),
-                type_implementations: type_implementations.clone(),
-                ast_program: ast_program.clone(),
-                hot_ast: hot_ast.clone(),
-                tool_specs: tool_specs.clone(),
-                skill_specs: skill_specs.clone(),
-            },
-        ));
+        // Also store in memory cache (built above, before the payload)
         self.store_in_memory(cache_key, cached_bytecode);
 
         Ok(())
@@ -667,39 +887,6 @@ impl BytecodeCache {
     pub fn memory_stats(&self) -> (usize, usize) {
         let cache = GLOBAL_MEMORY_CACHE.lock();
         (cache.len(), MAX_GLOBAL_MEMORY_ENTRIES)
-    }
-
-    /// Validate cache metadata
-    fn validate_metadata(&self, metadata: &CacheMetadata) -> Result<(), String> {
-        // Check hot version (use build_info::VERSION which comes from resources/version.txt)
-        if metadata.hot_version != crate::build_info::VERSION {
-            return Err(format!(
-                "Cache version mismatch: cache={}, current={}",
-                metadata.hot_version,
-                crate::build_info::VERSION
-            ));
-        }
-
-        // Check git SHA (catches deploys where version wasn't bumped but code changed)
-        // Only check if the cached metadata has a git_sha (backward compatibility)
-        if !metadata.git_sha.is_empty() && metadata.git_sha != crate::build_info::GIT_SHA {
-            return Err(format!(
-                "Cache git SHA mismatch: cache={}, current={}",
-                &metadata.git_sha[..7.min(metadata.git_sha.len())],
-                &crate::build_info::GIT_SHA[..7.min(crate::build_info::GIT_SHA.len())]
-            ));
-        }
-
-        // Check cache format version
-        if metadata.cache_format_version != CacheType::Bytecode.format_version() {
-            return Err(format!(
-                "Cache format version mismatch: cache={}, current={}",
-                metadata.cache_format_version,
-                CacheType::Bytecode.format_version()
-            ));
-        }
-
-        Ok(())
     }
 
     /// Create file hashes for a list of file paths
@@ -893,7 +1080,7 @@ mod tests {
     use super::*;
     use crate::lang::bytecode::{
         BytecodeProgram, Constant, FlowResultModifier, FlowType, FunctionInfo, Instruction,
-        SourceLocation, VariableMetadata,
+        LambdaInfo, SourceLocation, VariableMetadata,
     };
     use crate::val::Val;
 
@@ -1050,6 +1237,35 @@ mod tests {
         program
     }
 
+    fn write_test_payload(
+        cache: &BytecodeCache,
+        requested_key: &str,
+        embedded_key: &str,
+    ) -> PathBuf {
+        std::fs::create_dir_all(cache.cache_dir()).expect("create cache dir");
+        let ast_program = crate::lang::ast::Program {
+            namespaces: indexmap::IndexMap::new(),
+            current_namespace: crate::lang::ast::NsPath::new(),
+        };
+        let hot_ast = crate::lang::ast::HotAst::new();
+        let metadata = create_cache_metadata("test", Vec::new(), embedded_key.to_string());
+        let (compressed, _) = encode_cache_payload(
+            metadata,
+            &BytecodeProgram::new(),
+            &indexmap::IndexMap::new(),
+            &indexmap::IndexMap::new(),
+            &indexmap::IndexMap::new(),
+            &ast_program,
+            &hot_ast,
+            &Default::default(),
+            &Default::default(),
+        )
+        .expect("encode payload");
+        let path = cache.cache_file_path(requested_key);
+        std::fs::write(&path, compressed).expect("write payload");
+        path
+    }
+
     #[test]
     fn test_bytecode_program_serialization_roundtrip() {
         let program = create_test_bytecode_program();
@@ -1101,6 +1317,107 @@ mod tests {
 
         // Verify entry_register_count
         assert_eq!(program.entry_register_count, restored.entry_register_count);
+    }
+
+    #[test]
+    fn full_payload_roundtrips_boxed_ctx_default_thunk() {
+        let lambda = LambdaInfo {
+            parameters: Vec::new(),
+            instructions: vec![Instruction::Return { value: 0 }],
+            register_count: 1,
+            capture_vars: vec!["captured".to_string()],
+            closure_env: [("captured".to_string(), Val::Int(42))]
+                .into_iter()
+                .collect(),
+            defining_namespace: "::test".to_string(),
+            is_lazy_param: true,
+            used_registers: vec![0],
+            structural_hash_cache: Default::default(),
+        };
+        let ctx_defaults = [(
+            "test.default".to_string(),
+            Val::Box(Box::new(lambda.clone())),
+        )]
+        .into_iter()
+        .collect();
+        let ast_program = crate::lang::ast::Program {
+            namespaces: indexmap::IndexMap::new(),
+            current_namespace: crate::lang::ast::NsPath::new(),
+        };
+        let hot_ast = crate::lang::ast::HotAst::new();
+        let key = "ctx-default-payload";
+        let payload = CacheFilePayload {
+            metadata: create_cache_metadata("test", Vec::new(), key.to_string()),
+            program_data: BytecodeProgram::new().serialize().unwrap(),
+            ast_program_namespaces: crate::lang::cache::ast_cache::serialize_namespaces(
+                &ast_program.namespaces,
+            )
+            .unwrap(),
+            hot_ast_namespaces: None,
+            var_index: crate::lang::cache::ast_cache::serialize_var_index(&hot_ast.var_index)
+                .unwrap(),
+            function_mapping: Vec::new(),
+            core_functions: Vec::new(),
+            type_implementations: Vec::new(),
+            tool_specs: Default::default(),
+            skill_specs: Default::default(),
+            ctx_defaults,
+            secret_keys: Vec::new(),
+        };
+        let encoded = postcard::to_allocvec(&payload).expect("encode full payload");
+        let compressed = zstd::encode_all(encoded.as_slice(), 1).expect("compress payload");
+        let decompressed = zstd::decode_all(compressed.as_slice()).expect("decompress payload");
+        let restored = decode_cache_payload(&decompressed).expect("decode full payload");
+        validate_cache_metadata(&restored.metadata, key).expect("metadata must validate");
+
+        let restored = restored
+            .runtime_ctx_defaults
+            .get("test.default")
+            .expect("ctx default");
+        let Val::Box(restored) = restored else {
+            panic!("ctx default must remain boxed");
+        };
+        assert_eq!(
+            restored.as_any().downcast_ref::<LambdaInfo>(),
+            Some(&lambda)
+        );
+    }
+
+    #[test]
+    fn load_rejects_key_mismatch_and_deletes_entry() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let cache = BytecodeCache::new(dir.path().to_path_buf());
+        let path = write_test_payload(&cache, "requested-key", "different-embedded-key");
+
+        let error = cache
+            .load("requested-key")
+            .expect_err("key mismatch must fail");
+        assert!(error.contains("Cache key mismatch"));
+        assert!(!path.exists(), "stale payload must be removed");
+    }
+
+    #[test]
+    fn load_deletes_corrupt_entry() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let cache = BytecodeCache::new(dir.path().to_path_buf());
+        std::fs::create_dir_all(cache.cache_dir()).unwrap();
+        let path = cache.cache_file_path("corrupt-key");
+        std::fs::write(&path, b"not-zstd").unwrap();
+
+        assert!(cache.load("corrupt-key").is_err());
+        assert!(!path.exists(), "corrupt payload must be removed");
+    }
+
+    #[test]
+    fn load_does_not_delete_on_read_failure() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let cache = BytecodeCache::new(dir.path().to_path_buf());
+        std::fs::create_dir_all(cache.cache_dir()).unwrap();
+        let path = cache.cache_file_path("unreadable-key");
+        std::fs::create_dir(&path).unwrap();
+
+        assert!(cache.load("unreadable-key").is_err());
+        assert!(path.is_dir(), "read failures must not remove the entry");
     }
 
     #[test]
@@ -1186,6 +1503,110 @@ mod tests {
                 constant
             );
         }
+    }
+
+    /// Schema-drift canary for the postcard bytecode encoding (see the
+    /// equivalent test in ast_cache.rs for rationale). If this fails, the
+    /// wire layout of BytecodeProgram/Constant/Instruction changed: bump
+    /// `CacheType::Bytecode.format_version()` in hasher.rs and update the
+    /// expected hash.
+    #[test]
+    fn postcard_bytecode_schema_drift_canary() {
+        let mut program = create_test_bytecode_program();
+        let mut map = indexmap::IndexMap::new();
+        map.insert(crate::val::Val::Int(1), crate::val::Val::from("one"));
+        program.add_constant(Constant::Val(crate::val::Val::Map(Box::new(map))));
+        program.add_constant(Constant::Val(crate::val::Val::Bytes(vec![1, 2, 3])));
+        program.add_constant(Constant::FunctionRef("::canary/f".into()));
+        program.add_constant(Constant::StringRef("branch".into()));
+
+        let bytes = program.serialize().expect("program must serialize");
+        let hash = crate::hasher::HotHasher::hash_content(&bytes);
+
+        let expected = "327a19cfc4a0ced16098b069a09e7d0f932d1e7357ab681d094d3eaabc57ff5e";
+        assert_eq!(
+            hash, expected,
+            "postcard bytecode wire layout changed (got hash {hash}). If \
+             intentional, bump CacheType::Bytecode format_version in \
+             hasher.rs and update this test's expected hash."
+        );
+    }
+
+    /// Bench (run explicitly): compile the installed hot-std sources to a
+    /// bytecode cache and time cold disk loads of the resulting entry.
+    ///
+    ///   cargo test --release -p hot --lib bench_bytecode_cache_load -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn bench_bytecode_cache_load() {
+        let std_src = "/usr/local/share/hot/pkg/hot-std/src";
+        if !std::path::Path::new(std_src).exists() {
+            eprintln!("hot-std not installed, skipping bench");
+            return;
+        }
+
+        let temp_dir = std::env::temp_dir().join(format!("hot_cache_bench_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&temp_dir);
+        std::fs::create_dir_all(&temp_dir).expect("create temp cache dir");
+        let cache = BytecodeCache::new(temp_dir.clone());
+
+        let (_, artifacts) = crate::lang::engine::Engine::compile_project_for_cache(
+            &[std_src.to_string()],
+            None,
+            Some("bench"),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .expect("hot-std must compile");
+
+        let cache_key = "bench_key_0000000000000000";
+        let metadata = create_cache_metadata("bench", vec![], cache_key.to_string());
+
+        let t0 = std::time::Instant::now();
+        cache
+            .save(
+                cache_key,
+                &artifacts.program,
+                metadata,
+                &artifacts.function_mapping,
+                &artifacts.core_functions,
+                &artifacts.type_implementations,
+                &artifacts.ast_program,
+                &artifacts.hot_ast,
+                &Default::default(),
+                &Default::default(),
+            )
+            .expect("save must succeed");
+        let save_ms = t0.elapsed().as_secs_f64() * 1000.0;
+
+        let disk_size = std::fs::metadata(temp_dir.join(format!("{}.bc.zst", cache_key)))
+            .map(|m| m.len())
+            .unwrap_or(0);
+
+        let mut load_times = Vec::new();
+        for _ in 0..5 {
+            cache.clear_memory();
+            let t = std::time::Instant::now();
+            let loaded = cache.load(cache_key).expect("load must succeed");
+            load_times.push(t.elapsed().as_secs_f64() * 1000.0);
+            assert!(!loaded.function_mapping.is_empty());
+        }
+        load_times.sort_by(|a, b| a.partial_cmp(b).unwrap());
+
+        eprintln!(
+            "bench_bytecode_cache_load: save {:.1}ms, disk {}KB, cold load median {:.1}ms (min {:.1} max {:.1}, n=5)",
+            save_ms,
+            disk_size / 1024,
+            load_times[2],
+            load_times[0],
+            load_times[4]
+        );
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
     }
 
     #[test]
@@ -1305,5 +1726,181 @@ mod tests {
         assert_eq!(metadata.namespace, restored.namespace);
         assert_eq!(metadata.static_scope, restored.static_scope);
         assert_eq!(metadata.source, restored.source);
+    }
+
+    /// Bytecode entries are multi-megabyte, so a recompile must not strand the
+    /// previous one — while `check` and `test` (different path sets of the
+    /// same project) must keep their own live entries.
+    #[test]
+    fn saving_collapses_generations_per_program_scope() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let cache = BytecodeCache::new(dir.path().to_path_buf());
+        let program = create_test_bytecode_program();
+
+        let save = |paths: &[&str], content: &str| {
+            let hashes: Vec<FileHash> = paths
+                .iter()
+                .map(|path| FileHash {
+                    path: path.to_string(),
+                    hash: HotHasher::hash_content(content.as_bytes()),
+                })
+                .collect();
+            let key = BytecodeCache::calculate_cache_key("demo", &hashes).unwrap();
+            let metadata = create_cache_metadata("demo", hashes, key.clone());
+            cache
+                .save(
+                    &key,
+                    &program,
+                    metadata,
+                    &indexmap::IndexMap::new(),
+                    &indexmap::IndexMap::new(),
+                    &indexmap::IndexMap::new(),
+                    &crate::lang::ast::Program {
+                        namespaces: indexmap::IndexMap::new(),
+                        current_namespace: crate::lang::ast::NsPath::new(),
+                    },
+                    &crate::lang::ast::HotAst::from_program(crate::lang::ast::Program {
+                        namespaces: indexmap::IndexMap::new(),
+                        current_namespace: crate::lang::ast::NsPath::new(),
+                    }),
+                    &Default::default(),
+                    &Default::default(),
+                )
+                .expect("save");
+            key
+        };
+        let files = || -> usize {
+            std::fs::read_dir(dir.path())
+                .map(|read| {
+                    read.flatten()
+                        .filter(|e| e.file_name().to_string_lossy().ends_with(".bc.zst"))
+                        .count()
+                })
+                .unwrap_or(0)
+        };
+
+        // Three edits of the same program (same source paths).
+        let src_paths = ["src/a.hot", "src/b.hot"];
+        let last = save(&src_paths, "v1");
+        save(&src_paths, "v2");
+        let newest = save(&src_paths, "v3");
+        assert_eq!(files(), 1, "an edited program keeps one live entry");
+        assert!(cache.exists(&newest), "newest entry is findable by key");
+        assert!(!cache.exists(&last), "superseded entry is gone");
+
+        // A different path set (e.g. `test` vs `check`) is its own program.
+        let test_paths = ["src/a.hot", "src/b.hot", "test/t.hot"];
+        let test_key = save(&test_paths, "v3");
+        assert_eq!(files(), 2, "a different path set keeps its own entry");
+        assert!(cache.exists(&newest) && cache.exists(&test_key));
+    }
+
+    /// Saving one program must never evict another program's warm cache, and
+    /// worker bundle entries (keyed by build UUID) must survive too.
+    #[test]
+    fn saving_one_program_never_evicts_another_programs_entry() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let cache = BytecodeCache::new(dir.path().to_path_buf());
+        std::fs::create_dir_all(cache.cache_dir()).unwrap();
+
+        let stranger = dir.path().join(format!("{}.bc.zst", "b".repeat(64)));
+        let bundle = dir
+            .path()
+            .join("550e8400-e29b-41d4-a716-446655440000.bc.zst");
+        std::fs::write(&stranger, b"another program").unwrap();
+        std::fs::write(&bundle, b"worker bundle").unwrap();
+
+        let first = save_generation(&cache, "v1");
+        let second = save_generation(&cache, "v2");
+
+        assert!(
+            !cache.exists(&first),
+            "own superseded generation is removed"
+        );
+        assert!(cache.exists(&second), "newest generation is addressable");
+        assert!(stranger.exists(), "another program's entry must survive");
+        assert!(bundle.exists(), "a worker bundle entry must survive");
+    }
+
+    /// Scope identity must come from the full project name, not the truncated
+    /// display prefix, or two long similarly-named projects share a scope and
+    /// evict each other.
+    #[test]
+    fn scope_id_uses_the_full_project_name() {
+        let hashes = vec![FileHash {
+            path: "src/a.hot".to_string(),
+            hash: "abc".to_string(),
+        }];
+        let prefix = "p".repeat(40);
+        let a = BytecodeCache::scope_id(&format!("{prefix}-alpha"), &hashes);
+        let b = BytecodeCache::scope_id(&format!("{prefix}-beta"), &hashes);
+        assert_ne!(a, b, "names sharing a long prefix must not share a scope");
+        assert_eq!(
+            a,
+            BytecodeCache::scope_id(&format!("{prefix}-alpha"), &hashes),
+            "scope must be stable for identical inputs"
+        );
+    }
+
+    /// The generation marker is read off disk and used to build a deletion
+    /// path. Contents that are not a well-formed cache key must be ignored.
+    #[test]
+    fn corrupt_generation_marker_cannot_delete_arbitrary_paths() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        // Cache lives in a subdirectory so `..` in a marker would escape it.
+        let cache_dir = dir.path().join("cache");
+        std::fs::create_dir_all(&cache_dir).unwrap();
+        let cache = BytecodeCache::new(cache_dir);
+
+        let outside = dir.path().join("precious.bc.zst");
+        std::fs::write(&outside, b"must survive").unwrap();
+
+        let hashes = vec![FileHash {
+            path: "src/a.hot".to_string(),
+            hash: HotHasher::hash_content(b"v1"),
+        }];
+        let scope = BytecodeCache::scope_id("demo", &hashes);
+        std::fs::write(
+            cache.cache_dir().join(format!("{}.current", scope)),
+            "../precious",
+        )
+        .unwrap();
+
+        let key = save_generation(&cache, "v1");
+
+        assert!(
+            outside.exists(),
+            "a marker that is not a valid cache key must never name a deletion target"
+        );
+        assert!(cache.exists(&key), "the new generation is still published");
+    }
+
+    /// Save one generation of the `demo` program with the given content.
+    fn save_generation(cache: &BytecodeCache, content: &str) -> String {
+        let hashes = vec![FileHash {
+            path: "src/a.hot".to_string(),
+            hash: HotHasher::hash_content(content.as_bytes()),
+        }];
+        let key = BytecodeCache::calculate_cache_key("demo", &hashes).unwrap();
+        let metadata = create_cache_metadata("demo", hashes, key.clone());
+        let empty_program = || crate::lang::ast::Program {
+            namespaces: indexmap::IndexMap::new(),
+            current_namespace: crate::lang::ast::NsPath::new(),
+        };
+        cache
+            .save(
+                &key,
+                &create_test_bytecode_program(),
+                metadata,
+                &indexmap::IndexMap::new(),
+                &indexmap::IndexMap::new(),
+                &indexmap::IndexMap::new(),
+                &empty_program(),
+                &crate::lang::ast::HotAst::from_program(empty_program()),
+                &Default::default(),
+                &Default::default(),
+            )
+            .expect("save");
+        key
     }
 }

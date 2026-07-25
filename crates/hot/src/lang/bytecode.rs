@@ -513,8 +513,9 @@ pub enum Instruction {
 /// Uses Val directly to leverage Hot's rich type system
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum Constant {
-    /// Direct Val storage for maximum compatibility
-    Val(crate::val::Val),
+    /// Direct Val storage for maximum compatibility.
+    /// Routed through TaggedVal: Val's own serde is JSON-only.
+    Val(#[serde(with = "crate::lang::cache::ast_cache::tagged_val_serde")] crate::val::Val),
     /// Function reference (for deferred function calls) — Arc<str> for cheap cloning
     FunctionRef(Arc<str>),
     /// Type reference (for type checking) — Arc<str> for cheap cloning
@@ -598,6 +599,7 @@ pub struct LambdaInfo {
     /// Variables captured from outer scope
     pub capture_vars: Vec<String>,
     /// Closure environment (captured variable values)
+    #[serde(with = "crate::lang::cache::ast_cache::tagged_val_map_serde")]
     pub closure_env: AHashMap<String, crate::val::Val>,
     /// Namespace where this lambda was defined (for lexical scoping)
     pub defining_namespace: String,
@@ -756,6 +758,7 @@ pub struct VariableInfo {
     /// Variable type (Function, Value, Type, etc.)
     pub var_type: VariableType,
     /// Metadata associated with the variable
+    #[serde(with = "crate::lang::cache::ast_cache::tagged_val_opt_serde")]
     pub metadata: Option<crate::val::Val>,
     /// Function ID if this is a function
     pub function_id: Option<FunctionId>,
@@ -940,6 +943,7 @@ pub struct VariableMetadata {
     /// Static scope path (hierarchical: "::ns/func/lambda") - for AST metadata lookup
     pub static_scope: Option<String>,
     /// Variable metadata (from AST)
+    #[serde(with = "crate::lang::cache::ast_cache::tagged_val_opt_serde")]
     pub meta: Option<crate::val::Val>,
     /// Source location information
     pub source: Option<SourceLocation>,
@@ -1431,13 +1435,13 @@ impl BytecodeProgram {
     }
 
     /// Serialize the bytecode program to JSON
-    pub fn serialize(&self) -> Result<String, String> {
-        serde_json::to_string_pretty(self).map_err(|e| format!("JSON serialization failed: {}", e))
+    pub fn serialize(&self) -> Result<Vec<u8>, String> {
+        postcard::to_allocvec(self).map_err(|e| format!("Bytecode serialization failed: {}", e))
     }
 
-    /// Deserialize the bytecode program from JSON
-    pub fn deserialize(json: &str) -> Result<Self, String> {
-        serde_json::from_str(json).map_err(|e| format!("JSON deserialization failed: {}", e))
+    /// Deserialize the bytecode program from postcard bytes
+    pub fn deserialize(data: &[u8]) -> Result<Self, String> {
+        postcard::from_bytes(data).map_err(|e| format!("Bytecode deserialization failed: {}", e))
     }
 
     /// Add variable metadata for emitter events

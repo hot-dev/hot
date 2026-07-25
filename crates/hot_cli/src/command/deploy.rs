@@ -40,6 +40,12 @@ fn resolve_local_build_storage_path(
     Ok(Path::new(build_dir).join(storage_path))
 }
 
+pub(crate) fn is_ad_hoc_default_db(conf: &Val) -> bool {
+    let db_uri = conf.get_str("db.uri");
+    !hot::lang::cache::paths::has_project_config()
+        && (db_uri == hot::db::DEFAULT_DB_URI || db_uri.starts_with("sqlite:.hot/"))
+}
+
 async fn handle_auto_deploy(
     conf: &Val,
     db: &hot::db::DatabasePool,
@@ -123,6 +129,27 @@ pub(crate) async fn setup_live_build_for_dev(
     .await
 }
 
+/// Set up a live build with runtime metadata preflight using the context keys
+/// that will be passed to the Execute pipeline.
+pub(crate) async fn setup_live_build_for_dev_with_context(
+    conf: &Val,
+    global_options: &GlobalOptions,
+    src_paths: &[String],
+    test_paths: &[String],
+    available_context_keys: ahash::AHashSet<String>,
+) -> Result<(), String> {
+    let secret_scan_opts = build_secret_scan_opts(conf, false);
+    setup_live_build_for_dev_with_validation(
+        conf,
+        global_options,
+        src_paths,
+        test_paths,
+        secret_scan_opts,
+        DevLiveBuildValidation::RuntimePreflight(available_context_keys),
+    )
+    .await
+}
+
 pub(crate) async fn setup_live_build_for_dev_with_secret_scan_opts(
     conf: &Val,
     global_options: &GlobalOptions,
@@ -130,12 +157,94 @@ pub(crate) async fn setup_live_build_for_dev_with_secret_scan_opts(
     test_paths: &[String],
     secret_scan_opts: hot::secret_scan::SecretScanOpts,
 ) -> Result<(), String> {
-    // Get project name before any DB work so local preflight checks still run
-    // when a live build would otherwise be skipped.
+    setup_live_build_for_dev_with_validation(
+        conf,
+        global_options,
+        src_paths,
+        test_paths,
+        secret_scan_opts,
+        DevLiveBuildValidation::Structural,
+    )
+    .await
+}
+
+enum DevLiveBuildValidation {
+    Structural,
+    RuntimePreflight(ahash::AHashSet<String>),
+}
+
+#[derive(Clone, Copy)]
+enum LiveBuildEarlyReturn {
+    AdHocDefaultDb,
+    MissingProfileIdentifiers,
+    ProfileResolutionFailed,
+    DatabaseUnavailable,
+}
+
+fn should_run_standalone_runtime_preflight(
+    validation: &DevLiveBuildValidation,
+    reason: LiveBuildEarlyReturn,
+) -> bool {
+    matches!(validation, DevLiveBuildValidation::RuntimePreflight(_))
+        && matches!(
+            reason,
+            LiveBuildEarlyReturn::MissingProfileIdentifiers
+                | LiveBuildEarlyReturn::ProfileResolutionFailed
+        )
+}
+
+fn standalone_runtime_preflight_for_early_return(
+    validation: &DevLiveBuildValidation,
+    reason: LiveBuildEarlyReturn,
+    src_paths: &[String],
+    project_name: &str,
+    conf: &Val,
+) -> Result<(), String> {
+    if !should_run_standalone_runtime_preflight(validation, reason) {
+        return Ok(());
+    }
+
+    let DevLiveBuildValidation::RuntimePreflight(available_context_keys) = validation else {
+        unreachable!("runtime preflight policy checked above");
+    };
+    hot::build::preflight_runtime_metadata_from_sources(
+        src_paths,
+        project_name,
+        conf,
+        available_context_keys,
+        hot::env::is_local_dev(),
+    )
+}
+
+async fn setup_live_build_for_dev_with_validation(
+    conf: &Val,
+    global_options: &GlobalOptions,
+    src_paths: &[String],
+    test_paths: &[String],
+    secret_scan_opts: hot::secret_scan::SecretScanOpts,
+    validation: DevLiveBuildValidation,
+) -> Result<(), String> {
     let project_name = global_options
         .project
         .clone()
         .unwrap_or_else(|| hot::project::get_default_project_name(conf));
+
+    // Ad hoc runs outside a project (no hot.hot / .hot) pointed at the
+    // default project-local sqlite database can never produce a live build —
+    // create_db_pool refuses to create .hot/db and profile resolution has no
+    // rows. Skip the whole setup instead of paying for source scanning and
+    // doomed connection attempts.
+    if is_ad_hoc_default_db(conf) {
+        tracing::debug!("Out-of-project run with default sqlite db, skipping live build setup");
+        standalone_runtime_preflight_for_early_return(
+            &validation,
+            LiveBuildEarlyReturn::AdHocDefaultDb,
+            src_paths,
+            &project_name,
+            conf,
+        )?;
+        return Ok(());
+    }
 
     let (resource_paths, respect_gitignore, resource_excludes) = resource_bundle_options(
         conf,
@@ -185,6 +294,13 @@ pub(crate) async fn setup_live_build_for_dev_with_secret_scan_opts(
         }
         None => {
             tracing::debug!("No profile configured, skipping live build creation");
+            standalone_runtime_preflight_for_early_return(
+                &validation,
+                LiveBuildEarlyReturn::MissingProfileIdentifiers,
+                src_paths,
+                &project_name,
+                conf,
+            )?;
             return Ok(());
         }
     };
@@ -194,6 +310,13 @@ pub(crate) async fn setup_live_build_for_dev_with_secret_scan_opts(
         Ok(pool) => pool,
         Err(e) => {
             tracing::debug!("Failed to connect to database: {}, skipping live build", e);
+            standalone_runtime_preflight_for_early_return(
+                &validation,
+                LiveBuildEarlyReturn::DatabaseUnavailable,
+                src_paths,
+                &project_name,
+                conf,
+            )?;
             return Ok(());
         }
     };
@@ -208,6 +331,13 @@ pub(crate) async fn setup_live_build_for_dev_with_secret_scan_opts(
                     "Profile resolution failed: {}, skipping live build creation",
                     e
                 );
+                standalone_runtime_preflight_for_early_return(
+                    &validation,
+                    LiveBuildEarlyReturn::ProfileResolutionFailed,
+                    src_paths,
+                    &project_name,
+                    conf,
+                )?;
                 return Ok(());
             }
         };
@@ -224,17 +354,16 @@ pub(crate) async fn setup_live_build_for_dev_with_secret_scan_opts(
     )
     .with_resources(resource_paths, respect_gitignore, resource_excludes)
     .with_secret_scan_opts(secret_scan_opts);
+    let build_context = match validation {
+        DevLiveBuildValidation::Structural => build_context,
+        DevLiveBuildValidation::RuntimePreflight(available_context_keys) => {
+            build_context.with_runtime_preflight(available_context_keys, conf.clone())
+        }
+    };
 
     // Create live build
-    match hot::build::setup_live_build_and_compiler(
-        &db,
-        build_context,
-        false, // enable_cache - disabled for now
-        None,  // cache_format
-        true,  // load_ctx_hot for CLI commands
-        hot::env::is_local_dev(),
-    )
-    .await
+    match hot::build::setup_live_build_and_compiler(&db, build_context, hot::env::is_local_dev())
+        .await
     {
         Ok(build_result) => {
             tracing::info!(
@@ -1024,6 +1153,32 @@ async fn deploy_via_database(build_uuid: Uuid, conf: &Val, strict: bool) -> Resu
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_standalone_runtime_preflight_only_runs_for_usable_db_profile_edges() {
+        let runtime = DevLiveBuildValidation::RuntimePreflight(ahash::AHashSet::new());
+        assert!(should_run_standalone_runtime_preflight(
+            &runtime,
+            LiveBuildEarlyReturn::MissingProfileIdentifiers,
+        ));
+        assert!(should_run_standalone_runtime_preflight(
+            &runtime,
+            LiveBuildEarlyReturn::ProfileResolutionFailed,
+        ));
+        assert!(!should_run_standalone_runtime_preflight(
+            &runtime,
+            LiveBuildEarlyReturn::AdHocDefaultDb,
+        ));
+        assert!(!should_run_standalone_runtime_preflight(
+            &runtime,
+            LiveBuildEarlyReturn::DatabaseUnavailable,
+        ));
+
+        assert!(!should_run_standalone_runtime_preflight(
+            &DevLiveBuildValidation::Structural,
+            LiveBuildEarlyReturn::MissingProfileIdentifiers,
+        ));
+    }
 
     #[test]
     fn test_resolve_local_build_storage_path_allows_relative_child() {

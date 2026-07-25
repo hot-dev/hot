@@ -25,6 +25,7 @@ pub struct SkillSpecEntry {
     /// Fully-qualified function name, e.g. `"::myapp/customer-tone"`.
     pub name: String,
     /// Raw `meta {skill: {...}}` map captured by the compiler.
+    #[serde(with = "crate::lang::cache::ast_cache::tagged_val_serde")]
     pub skill_meta: Val,
 }
 

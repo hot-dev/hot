@@ -31,8 +31,8 @@ impl CacheType {
     /// These are separate because the formats evolve independently
     pub fn format_version(&self) -> u32 {
         match self {
-            CacheType::Bytecode => 6, // Bumped to invalidate caches missing tool_specs/skill_specs
-            CacheType::Ast => 2,      // Bumped for required TypeField::type_expr in AST cache
+            CacheType::Bytecode => 9, // Bumped for deduped hot_ast namespaces section
+            CacheType::Ast => 3,      // Bumped for postcard encoding (was serde_json)
         }
     }
 }
@@ -53,6 +53,9 @@ impl CacheKeyBuilder {
         // Include git SHA to invalidate cache when runtime code changes
         // This catches deploys where version wasn't bumped but code changed
         hasher.update(crate::build_info::GIT_SHA.as_bytes());
+        // Include the actual compiler/runtime source tree. Local dirty builds
+        // can share a Git SHA while having incompatible cache wire behavior.
+        hasher.update(crate::build_info::BUILD_FINGERPRINT.as_bytes());
         // Include cache-type-specific format version
         hasher.update(&cache_type.format_version().to_le_bytes());
         Self { hasher }
@@ -101,17 +104,19 @@ pub fn compute_hot_file_hashes(source_dir: &Path) -> Result<Vec<(String, String)
         Vec::new()
     };
 
-    let hashes: Vec<(String, String)> = files
-        .par_iter()
-        .filter_map(|path| {
-            std::fs::read_to_string(path).ok().map(|content| {
-                let hash = HotHasher::hash_content(content.as_bytes());
-                (path.to_string_lossy().to_string(), hash)
-            })
-        })
-        .collect();
+    hash_source_files(&files)
+}
 
-    Ok(hashes)
+fn hash_source_files(files: &[PathBuf]) -> Result<Vec<(String, String)>, String> {
+    files
+        .par_iter()
+        .map(|path| {
+            let content = std::fs::read(path)
+                .map_err(|e| format!("Failed to read source file {}: {}", path.display(), e))?;
+            let hash = HotHasher::hash_content(&content);
+            Ok((path.to_string_lossy().to_string(), hash))
+        })
+        .collect()
 }
 
 impl HotHasher {
@@ -289,5 +294,24 @@ mod tests {
 
         let hash3 = compute_source_files_hash(&files_reversed);
         assert_eq!(hash1, hash3);
+    }
+
+    #[test]
+    fn compute_hot_file_hashes_hashes_raw_non_utf8_bytes() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("raw.hot");
+        let bytes = [0xff, 0xfe, 0x00, b'h', b'o', b't'];
+        std::fs::write(&path, bytes).expect("write raw source");
+
+        let hashes = compute_hot_file_hashes(dir.path()).expect("raw bytes must hash");
+        assert_eq!(hashes.len(), 1);
+        assert_eq!(hashes[0].1, HotHasher::hash_content(&bytes));
+    }
+
+    #[test]
+    fn source_hashing_propagates_read_errors() {
+        let missing = PathBuf::from("/definitely/missing/hot-source.hot");
+        let error = hash_source_files(&[missing]).expect_err("read error must propagate");
+        assert!(error.contains("Failed to read source file"));
     }
 }

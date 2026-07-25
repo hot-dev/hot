@@ -15,8 +15,10 @@
 //!   * `get_var_from_*` / `get_namespace_vars_from_vm` / `get_all_vars_from_vm`
 //!     — convenience accessors over a running [`crate::lang::runtime::vm::VirtualMachine`].
 
-use super::discover::{discover_compilation_units, parse_units_with_cache};
-use super::{Engine, ExecutedEngine, IncrementalExecutionResult};
+use super::discover::{
+    NsMergePolicy, discover_compilation_units, merge_namespace, parse_units_with_cache,
+};
+use super::{Engine, ExecutedEngine, IncrementalExecutionResult, ReplCompilationState};
 use ahash::AHashMap;
 use std::sync::Arc;
 
@@ -50,6 +52,131 @@ impl Engine {
             project_name,
             color,
         )
+    }
+
+    /// Extend a retained REPL compiler state and execute only its appended
+    /// bytecode. Callers commit the returned state for declarations and
+    /// discard it for standalone expressions.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn execute_repl_extension(
+        code: &str,
+        retained: Option<&ReplCompilationState>,
+        src_paths: &[String],
+        test_paths: &[String],
+        conf: Option<&crate::val::Val>,
+        project_name: Option<&str>,
+        preserved_state: &indexmap::IndexMap<String, indexmap::IndexMap<String, crate::val::Val>>,
+        preserved_namespace: Option<&str>,
+        context_storage: Option<AHashMap<String, crate::val::Val>>,
+        color: bool,
+    ) -> Result<(IncrementalExecutionResult, ReplCompilationState), String> {
+        let (seed, base_ast, execute_start, extension_id) = if let Some(retained) = retained {
+            (
+                retained.compiler_seed.clone(),
+                retained.ast_program.clone(),
+                retained.compiler_seed.program().entry_point.len(),
+                retained.extension_id,
+            )
+        } else {
+            let units = discover_compilation_units(conf, project_name, src_paths, test_paths)?;
+            let (namespaces, parsed_files) = parse_units_with_cache(&units, color)?;
+            let mut base_ast = crate::lang::ast::Program {
+                namespaces,
+                current_namespace: crate::lang::ast::NsPath::hot_main(),
+            };
+            let mut compiler = crate::lang::compiler::Compiler::new();
+            for parsed in parsed_files {
+                compiler.add_source_file(std::path::PathBuf::from(parsed.path), parsed.content);
+            }
+            compiler
+                .compile_program(&mut base_ast)
+                .map_err(|errors| format!("Compilation errors:\n{}", errors.format_error(color)))?;
+            (compiler.seed(), base_ast, 0, 0)
+        };
+
+        let repl_file = format!("<repl:{}>", extension_id);
+        let extension_ast =
+            crate::lang::parser::parse_hot_file(code, &repl_file).map_err(|error| {
+                error
+                    .format_error(code, color)
+                    .map(|formatted| format!("Parse errors:\n{}", formatted))
+                    .unwrap_or_else(|| format!("Parse error: {}", error))
+            })?;
+        let mut merged_ast = base_ast;
+        for (ns_path, namespace) in extension_ast.namespaces.clone() {
+            merge_namespace(
+                &mut merged_ast.namespaces,
+                ns_path,
+                namespace,
+                NsMergePolicy::Shadow,
+            )?;
+        }
+
+        let mut compiler = crate::lang::compiler::Compiler::from_seed(seed);
+        compiler.set_current_file(std::path::PathBuf::from(repl_file), code.to_string());
+        compiler
+            .compile_extension(&mut merged_ast, &extension_ast)
+            .map_err(|errors| format!("Compilation errors:\n{}", errors.format_error(color)))?;
+
+        crate::lang::hot::internal_mcp::set_registry(compiler.build_tool_specs(&merged_ast));
+        crate::lang::hot::internal_skill::set_registry(compiler.build_skill_specs(&merged_ast));
+
+        let program = compiler.get_program_arc();
+        debug_assert!(execute_start <= program.entry_point.len());
+        let total_instruction_count = program.entry_point.len();
+        let mut vm = crate::lang::runtime::vm::VirtualMachine::new(
+            program,
+            Some(Arc::new(crate::lang::ast::HotAst::from_program(
+                merged_ast.clone(),
+            ))),
+            compiler.get_function_mapping_arc(),
+            compiler.get_core_functions_arc(),
+            compiler.get_type_implementations_arc(),
+            compiler.get_core_variables_arc(),
+            conf.cloned(),
+        );
+
+        if let Some(context_storage) = context_storage {
+            vm.context_storage = context_storage;
+        }
+        let ctx_requirements =
+            crate::lang::compiler::ctx_checker::extract_ctx_requirements_via_call_graph(
+                &merged_ast,
+            );
+        for (key, default_val) in ctx_requirements.all_defaults() {
+            vm.context_storage.entry(key).or_insert(default_val);
+        }
+        vm.secret_keys = ctx_requirements.all_secret_keys();
+        vm.sync_secret_keys_to_execution_context();
+
+        vm.restore_namespace_variables(preserved_state);
+        if let Some(namespace) = preserved_namespace {
+            vm.set_current_namespace(namespace.to_string());
+        }
+
+        let result = if execute_start < total_instruction_count {
+            vm.execute_instruction_range(execute_start, total_instruction_count)
+                .map_err(|error| format!("Execution failed: {}", error))?
+        } else {
+            crate::val::Val::Null
+        };
+        let new_state = vm.get_all_namespace_vars().clone();
+        let current_namespace = vm.get_current_namespace().to_string();
+        let retained = ReplCompilationState {
+            compiler_seed: compiler.seed(),
+            ast_program: merged_ast,
+            extension_id: extension_id + 1,
+        };
+
+        Ok((
+            IncrementalExecutionResult {
+                result,
+                new_state,
+                total_instruction_count,
+                current_namespace,
+            },
+            retained,
+        ))
     }
 
     /// Execute code incrementally for REPL - compile all code but execute only new instructions
@@ -92,9 +219,17 @@ impl Engine {
             current_namespace: crate::lang::ast::NsPath::hot_main(),
         };
 
-        // Merge eval program namespaces (REPL code)
+        // Merge eval program namespaces (REPL code). Shadow policy: REPL
+        // input may re-declare an existing name and the newest binding wins,
+        // but declaring into an existing (e.g. project) namespace no longer
+        // replaces that namespace's other members.
         for (ns_path, namespace) in eval_program.namespaces {
-            combined_program.namespaces.insert(ns_path, namespace);
+            merge_namespace(
+                &mut combined_program.namespaces,
+                ns_path,
+                namespace,
+                NsMergePolicy::Shadow,
+            )?;
         }
 
         // Resolve variable references
@@ -260,9 +395,15 @@ impl Engine {
                 Ok(content) => {
                     match crate::lang::parser::parse_hot_file(&content, file_path) {
                         Ok(program) => {
-                            // Merge namespaces
+                            // Member-merge namespaces; duplicate definitions
+                            // across files are compile errors.
                             for (ns_path, namespace) in program.namespaces {
-                                combined_program.namespaces.insert(ns_path, namespace);
+                                merge_namespace(
+                                    &mut combined_program.namespaces,
+                                    ns_path,
+                                    namespace,
+                                    NsMergePolicy::Strict,
+                                )?;
                             }
                         }
                         Err(e) => {
@@ -284,9 +425,15 @@ impl Engine {
         if let Some(code) = eval_code {
             match crate::lang::parser::parse_hot(code) {
                 Ok(eval_program) => {
-                    // Merge eval program namespaces
+                    // Merge eval program namespaces (Shadow: newest binding
+                    // wins, existing namespace members are preserved)
                     for (ns_path, namespace) in eval_program.namespaces {
-                        combined_program.namespaces.insert(ns_path, namespace);
+                        merge_namespace(
+                            &mut combined_program.namespaces,
+                            ns_path,
+                            namespace,
+                            NsMergePolicy::Shadow,
+                        )?;
                     }
                 }
                 Err(e) => {
