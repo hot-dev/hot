@@ -881,52 +881,18 @@ impl Engine {
                 .join(", ")
         );
 
-        // Fast path: ad hoc eval against a pristine hot-std. When the only
-        // compilation unit is the hot-std package (no project sources, no
-        // target file), extend the system-level compiled hot-std image with
-        // just the eval snippet — the worker's cached-build eval mechanism.
-        // The first run compiles hot-std and persists the image; later runs
-        // load it (parallel section decode). Error rendering and ctx
-        // pre-flight mirror the classic path; any image problem (unbuildable
-        // hot-std, corrupt file) falls back to the classic combined compile.
-        if matches!(mode, PipelineMode::Execute)
-            && target_file.is_none()
-            && let Some(code) = eval_code
-            && let [only_unit] = units.as_slice()
-            && only_unit.unit.id() == "pkg-hot-std"
-            && let Some(image) =
-                crate::lang::cache::std_artifact::get_or_build(only_unit.unit.path())
-        {
-            tracing::debug!(" Unified Pipeline: using hot-std image fast path for eval");
-            let seed = crate::lang::compiler::Compiler::seed_from_compiled(
-                image.program.clone(),
-                image.function_mapping.clone(),
-                image.core_functions.clone(),
-                image.type_implementations.clone(),
-                (*image.runtime_core_variables).clone(),
-                &image.ast_program,
-            );
-            return Self::execute_eval_extension(
-                code,
-                seed,
-                &image.ast_program,
-                super::cache::EvalRuntimeOptions {
-                    conf,
-                    emitter,
-                    execution_context,
-                    event_publisher,
-                    context_storage,
-                    database_pool,
-                    file_storage,
-                    store,
-                    embedding_provider,
-                    task_queue,
-                    stream_publisher,
-                    color,
-                    warnings_out,
-                },
-            );
-        }
+        // NOTE: an ad hoc-eval fast path over the precompiled hot-std image
+        // (lang::cache::std_artifact) lived here and was removed after
+        // measurement: it ran ~191ms vs ~60ms for this classic path. The
+        // image removes *compilation* of hot-std, but an eval snippet still
+        // needs the full merged AST resolved and type-checked for
+        // correctness (~110ms), so the image decode (~65ms) was pure
+        // addition. Caching bytecode cannot skip semantic analysis of
+        // arbitrary user code; the AST unit cache (6ms load) plus a normal
+        // compile is strictly cheaper. The seeded compiler extension it used
+        // (Compiler::seed_from_compiled / Engine::execute_eval_extension)
+        // remains in use by the worker, where the build is already resident
+        // in memory and no decode is paid.
 
         // Phase 2: Parse units with per-package caching
         tracing::debug!(" Unified Pipeline: Phase 2 - Parsing with per-package cache...");

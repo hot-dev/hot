@@ -8,7 +8,6 @@
 pub mod ast_cache;
 pub mod bytecode_cache;
 pub mod paths;
-pub mod std_artifact;
 pub mod unit_cache;
 
 /// How long an untouched cache file survives before opportunistic pruning.
