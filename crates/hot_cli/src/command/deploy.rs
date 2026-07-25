@@ -362,14 +362,8 @@ async fn setup_live_build_for_dev_with_validation(
     };
 
     // Create live build
-    match hot::build::setup_live_build_and_compiler(
-        &db,
-        build_context,
-        false, // enable_cache - disabled for now
-        true,  // load_ctx_hot for CLI commands
-        hot::env::is_local_dev(),
-    )
-    .await
+    match hot::build::setup_live_build_and_compiler(&db, build_context, hot::env::is_local_dev())
+        .await
     {
         Ok(build_result) => {
             tracing::info!(
