@@ -1,0 +1,15 @@
+# Normalize all text files to LF on every platform. Windows CI checks out
+# this repo, and both `hot fmt --check` and include_str!-based comparisons
+# assume LF line endings.
+* text=auto eol=lf
+
+# Binary assets
+*.png binary
+*.webp binary
+*.bmp binary
+*.ico binary
+*.woff2 binary
+*.bin binary
+
+# Committed with CRLF upstream; keep byte-for-byte as-is.
+resources/app/assets/fonts/LICENSE-FiraSans.txt -text
