@@ -311,19 +311,13 @@ mod tests {
         // Test that migration paths are constructed correctly
         match get_resources_path() {
             Ok(_) => {
+                // ends_with compares whole path components, so it matches
+                // regardless of the platform separator (`\` on Windows).
                 if let Ok(sqlite_path) = get_migration_path("sqlite") {
-                    assert!(
-                        sqlite_path
-                            .to_string_lossy()
-                            .contains("db/sqlite/migrations")
-                    );
+                    assert!(sqlite_path.ends_with("db/sqlite/migrations"));
                 }
                 if let Ok(postgres_path) = get_migration_path("postgres") {
-                    assert!(
-                        postgres_path
-                            .to_string_lossy()
-                            .contains("db/postgres/migrations")
-                    );
+                    assert!(postgres_path.ends_with("db/postgres/migrations"));
                 }
             }
             Err(_) => {

@@ -43,6 +43,10 @@ env:
   SQLX_OFFLINE: 'true'
   CI: 'true'
   PG_URI: postgres://hot:hot@localhost:5432/hot
+  # The hot panic hook suppresses the default stderr dump; without this,
+  # panics on non-test threads (e.g. inside spawn_blocking) leave failing
+  # tests with no output at all in CI logs.
+  HOT_PANIC_STDERR: '1'
 
 jobs:
   test:
@@ -186,7 +190,9 @@ jobs:
           if [[ "${{ steps.svc.outputs.redis }}" == "true" ]]; then
             export REDIS_URL=redis://localhost:6379
           fi
-          cargo test --workspace --all-targets --locked -j ${{ matrix.cargo_jobs }}
+          # --no-fail-fast: on a discovery matrix we want every test binary's
+          # results per run, not just the first failing one.
+          cargo test --workspace --all-targets --locked --no-fail-fast -j ${{ matrix.cargo_jobs }}
 
       # ----- Hot suite (sqlite — always runs, no services needed) ----------
 
