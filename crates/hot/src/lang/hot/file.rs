@@ -791,13 +791,16 @@ mod tests {
     #[test]
     fn test_normalize_direct_path_simple() {
         let result = normalize_direct_path("foo/bar.txt").unwrap();
-        assert_eq!(result.to_string_lossy(), "foo/bar.txt");
+        // PathBuf joins with the platform separator (`\` on Windows), which
+        // is what direct-mode filesystem access wants — compare as paths,
+        // not strings.
+        assert_eq!(result, Path::new("foo").join("bar.txt"));
     }
 
     #[test]
     fn test_normalize_direct_path_with_dot() {
         let result = normalize_direct_path("./foo/bar.txt").unwrap();
-        assert_eq!(result.to_string_lossy(), "foo/bar.txt");
+        assert_eq!(result, Path::new("foo").join("bar.txt"));
     }
 
     #[test]

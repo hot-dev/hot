@@ -11831,23 +11831,35 @@ mod tests {
 
         let n = 20_000i64;
         let conf = val!({"jit": {"mode": "enabled", "threshold": 1}});
-        let mut vm = make_test_vm(program, conf);
 
-        // Warmup
-        let _ = vm
-            .execute_compiled_user_function(0, &[val!(100i64)])
+        // Production always runs the VM on VM_THREAD_STACK_SIZE threads (see
+        // vm.rs / coll.rs spawns); the test harness thread is far smaller —
+        // 20k non-tail JIT frames overflow the ~1 MB Windows default, and the
+        // stack guard budget is calibrated for VM-sized threads.
+        std::thread::Builder::new()
+            .stack_size(super::VM_THREAD_STACK_SIZE)
+            .spawn(move || {
+                let mut vm = make_test_vm(program, conf);
+
+                // Warmup
+                let _ = vm
+                    .execute_compiled_user_function(0, &[val!(100i64)])
+                    .unwrap();
+
+                let start = std::time::Instant::now();
+                let result = vm.execute_compiled_user_function(0, &[val!(n)]).unwrap();
+                let elapsed = start.elapsed();
+
+                let expected = n * (n + 1) / 2;
+                assert_eq!(result, val!(expected));
+
+                eprintln!("\n=== JIT self-recursive sum_down({}) ===", n);
+                eprintln!("  Time: {:?}", elapsed);
+                eprintln!("  Calls: ~{}", n);
+            })
+            .unwrap()
+            .join()
             .unwrap();
-
-        let start = std::time::Instant::now();
-        let result = vm.execute_compiled_user_function(0, &[val!(n)]).unwrap();
-        let elapsed = start.elapsed();
-
-        let expected = n * (n + 1) / 2;
-        assert_eq!(result, val!(expected));
-
-        eprintln!("\n=== JIT self-recursive sum_down({}) ===", n);
-        eprintln!("  Time: {:?}", elapsed);
-        eprintln!("  Calls: ~{}", n);
     }
 
     #[test]
