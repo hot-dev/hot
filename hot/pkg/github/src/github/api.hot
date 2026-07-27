@@ -69,9 +69,16 @@ fn
   }))
 }
 
+json-response-body fn (response: HttpResponse): Any {
+  match response.status {
+    204 | 205 => { null }
+    => { response.body }
+  }
+}
+
 json
 meta {
-    doc: """Like `request`, but unwraps: returns the decoded JSON body on 2xx, or an Err carrying `HttpError`. The shape used by all github endpoint functions."""
+    doc: """Like `request`, but unwraps: returns the decoded JSON body on 2xx, null for a no-content response, or an Err carrying `HttpError`. The shape used by all github endpoint functions."""
 }
 fn
 (method: Str, path: Str): Any {
@@ -81,7 +88,7 @@ fn
   response request(method, path, additional-headers, body)
   cond {
     is-err(response) => { response }
-    is-ok-response(response) => { response.body }
+    is-ok-response(response) => { json-response-body(response) }
     => { err(HttpError(response)) }
   }
 },
@@ -90,7 +97,40 @@ fn
   response request(method, path, additional-headers, body, token)
   cond {
     is-err(response) => { response }
-    is-ok-response(response) => { response.body }
+    is-ok-response(response) => { json-response-body(response) }
+    => { err(HttpError(response)) }
+  }
+}
+
+response-body
+meta {
+    doc: """
+    Return a response's decoded body, falling back to its wire bytes when the
+    transport has no decoded body. Text logs remain Str values while binary
+    archives remain Bytes.
+    """
+}
+fn (response: HttpResponse): Any {
+  match response.body {
+    Null => { response.body-bytes }
+    => { response.body }
+  }
+}
+
+download
+meta {
+    doc: """
+    Make an authenticated GET request for a GitHub download endpoint.
+    Returns the downloaded text or Bytes on 2xx, and an Err carrying
+    `HttpError` otherwise. The HTTP transport follows GitHub's temporary
+    redirect for Actions logs and artifacts.
+    """
+}
+fn (path: Str): Any {
+  response request("GET", path)
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { response-body(response) }
     => { err(HttpError(response)) }
   }
 }

@@ -3,24 +3,89 @@
 ::api ::github::api
 query-string ::hot::uri/query-string
 
-list-workflow-runs
+actions-path
+meta {doc: """Build a repository Actions API path, including its leading slash."""}
+fn (owner: Str, repo: Str, suffix: Str): Str {
+  `/repos/${owner}/${repo}/actions${suffix}`
+}
+
+with-query
+meta {doc: """Append GitHub REST query parameters to an endpoint path."""}
+fn (path: Str, params: Map): Str {
+  `${path}${query-string(params)}`
+}
+
+workflow-path fn (owner: Str, repo: Str, workflow: Any): Str {
+  actions-path(owner, repo, `/workflows/${workflow}`)
+}
+
+run-path fn (owner: Str, repo: Str, run-id: Any): Str {
+  actions-path(owner, repo, `/runs/${run-id}`)
+}
+
+attempt-path fn (owner: Str, repo: Str, run-id: Any, attempt: Any): Str {
+  `${run-path(owner, repo, run-id)}/attempts/${attempt}`
+}
+
+job-path fn (owner: Str, repo: Str, job-id: Any): Str {
+  actions-path(owner, repo, `/jobs/${job-id}`)
+}
+
+// ============================================================================
+// Workflows
+// ============================================================================
+
+list-workflows
 meta {
-    doc: """GET /repos/{owner}/{repo}/actions/runs - Recent workflow runs. `params` supports `branch`, `status` ("queued"/"in_progress"/"completed"), `event`, `per_page`, `page`. Returns a single page (GitHub default 30, max 100); pass `page` to paginate."""
+    doc: """GET /repos/{owner}/{repo}/actions/workflows - Repository workflows. `params` supports `per_page` and `page`."""
 }
 fn
 (owner: Str, repo: Str): Map {
-  ::api/json("GET", `/repos/${owner}/${repo}/actions/runs`)
+  ::api/json("GET", actions-path(owner, repo, "/workflows"))
 },
 (owner: Str, repo: Str, params: Map): Map {
-  ::api/json("GET", `/repos/${owner}/${repo}/actions/runs${query-string(params)}`)
+  ::api/json("GET", actions-path(owner, repo, "/workflows") |> with-query(params))
 }
 
-get-workflow-run
+get-workflow
 meta {
-    doc: """GET /repos/{owner}/{repo}/actions/runs/{run_id} - One run's status and conclusion — poll this to watch CI."""
+    doc: """GET /repos/{owner}/{repo}/actions/workflows/{workflow} - Get a workflow by numeric id or file name."""
 }
-fn (owner: Str, repo: Str, run-id: Any): Map {
-  ::api/json("GET", `/repos/${owner}/${repo}/actions/runs/${run-id}`)
+fn (owner: Str, repo: Str, workflow: Any): Map {
+  ::api/json("GET", workflow-path(owner, repo, workflow))
+}
+
+list-runs-for-workflow
+meta {
+    doc: """
+    GET /repos/{owner}/{repo}/actions/workflows/{workflow}/runs - Runs for
+    one workflow. `params` supports `actor`, `branch`, `event`, `status`,
+    `created`, `exclude_pull_requests`, `check_suite_id`, `head_sha`,
+    `per_page`, and `page`.
+    """
+}
+fn
+(owner: Str, repo: Str, workflow: Any): Map {
+  ::api/json("GET", `${workflow-path(owner, repo, workflow)}/runs`)
+},
+(owner: Str, repo: Str, workflow: Any, params: Map): Map {
+  ::api/json("GET", `${workflow-path(owner, repo, workflow)}/runs` |> with-query(params))
+}
+
+enable-workflow
+meta {
+    doc: """PUT /repos/{owner}/{repo}/actions/workflows/{workflow}/enable - Enable a workflow."""
+}
+fn (owner: Str, repo: Str, workflow: Any): Any {
+  ::api/json("PUT", `${workflow-path(owner, repo, workflow)}/enable`)
+}
+
+disable-workflow
+meta {
+    doc: """PUT /repos/{owner}/{repo}/actions/workflows/{workflow}/disable - Disable a workflow."""
+}
+fn (owner: Str, repo: Str, workflow: Any): Any {
+  ::api/json("PUT", `${workflow-path(owner, repo, workflow)}/disable`)
 }
 
 dispatch-workflow
@@ -28,22 +93,174 @@ meta {
     doc: """
     POST /repos/{owner}/{repo}/actions/workflows/{workflow}/dispatches -
     Trigger a `workflow_dispatch` workflow on a ref. `workflow` is the
-    file name (e.g. "deploy.yml") or numeric id; `inputs` (4-arity) is the
+    file name (e.g. "deploy.yml") or numeric id; `inputs` (5-arity) is the
     inputs Map. Returns null on success (GitHub replies 204).
     """
 }
 fn
-(owner: Str, repo: Str, workflow: Str, ref: Str): Any {
-  ::api/json("POST", `/repos/${owner}/${repo}/actions/workflows/${workflow}/dispatches`, {}, {ref: ref})
+(owner: Str, repo: Str, workflow: Any, ref: Str): Any {
+  ::api/json("POST", `${workflow-path(owner, repo, workflow)}/dispatches`, {}, {ref: ref})
 },
-(owner: Str, repo: Str, workflow: Str, ref: Str, inputs: Map): Any {
-  ::api/json("POST", `/repos/${owner}/${repo}/actions/workflows/${workflow}/dispatches`, {}, {ref: ref, inputs: inputs})
+(owner: Str, repo: Str, workflow: Any, ref: Str, inputs: Map): Any {
+  ::api/json("POST", `${workflow-path(owner, repo, workflow)}/dispatches`, {}, {ref: ref, inputs: inputs})
+}
+
+// ============================================================================
+// Runs and attempts
+// ============================================================================
+
+list-workflow-runs
+meta {
+    doc: """GET /repos/{owner}/{repo}/actions/runs - Recent workflow runs. `params` supports `branch`, `status` ("queued"/"in_progress"/"completed"), `event`, `per_page`, `page`. Returns a single page (GitHub default 30, max 100); pass `page` to paginate."""
+}
+fn
+(owner: Str, repo: Str): Map {
+  ::api/json("GET", actions-path(owner, repo, "/runs"))
+},
+(owner: Str, repo: Str, params: Map): Map {
+  ::api/json("GET", actions-path(owner, repo, "/runs") |> with-query(params))
+}
+
+get-workflow-run
+meta {
+    doc: """GET /repos/{owner}/{repo}/actions/runs/{run_id} - One run's status and conclusion — poll this to watch CI."""
+}
+fn (owner: Str, repo: Str, run-id: Any): Map {
+  ::api/json("GET", run-path(owner, repo, run-id))
+}
+
+get-workflow-run-attempt
+meta {
+    doc: """GET /repos/{owner}/{repo}/actions/runs/{run_id}/attempts/{attempt} - One attempt of a re-run workflow."""
+}
+fn (owner: Str, repo: Str, run-id: Any, attempt: Any): Map {
+  ::api/json("GET", attempt-path(owner, repo, run-id, attempt))
+}
+
+list-workflow-jobs
+meta {
+    doc: """
+    GET /repos/{owner}/{repo}/actions/runs/{run_id}/jobs - Jobs and step
+    conclusions for one workflow run. `params` supports `filter`
+    ("latest"/"all"), `per_page`, and `page`. This is the endpoint that
+    distinguishes a checkout-step failure from a later build or test failure.
+    """
+}
+fn
+(owner: Str, repo: Str, run-id: Any): Map {
+  ::api/json("GET", `${run-path(owner, repo, run-id)}/jobs`)
+},
+(owner: Str, repo: Str, run-id: Any, params: Map): Map {
+  ::api/json("GET", `${run-path(owner, repo, run-id)}/jobs` |> with-query(params))
+}
+
+list-workflow-attempt-jobs
+meta {
+    doc: """
+    GET /repos/{owner}/{repo}/actions/runs/{run_id}/attempts/{attempt}/jobs -
+    Jobs and step conclusions for one workflow attempt. `params` supports
+    `per_page` and `page`.
+    """
+}
+fn
+(owner: Str, repo: Str, run-id: Any, attempt: Any): Map {
+  ::api/json("GET", `${attempt-path(owner, repo, run-id, attempt)}/jobs`)
+},
+(owner: Str, repo: Str, run-id: Any, attempt: Any, params: Map): Map {
+  ::api/json("GET", `${attempt-path(owner, repo, run-id, attempt)}/jobs` |> with-query(params))
+}
+
+get-workflow-job
+meta {
+    doc: """
+    GET /repos/{owner}/{repo}/actions/jobs/{job_id} - One workflow job,
+    including its ordered steps and each step's status and conclusion.
+    """
+}
+fn (owner: Str, repo: Str, job-id: Any): Map {
+  ::api/json("GET", job-path(owner, repo, job-id))
+}
+
+download-workflow-job-logs
+meta {
+    doc: """
+    GET /repos/{owner}/{repo}/actions/jobs/{job_id}/logs - Download one
+    job's plain-text log. This is the smallest useful log request after
+    `list-workflow-jobs` identifies a failed checkout or test step.
+    """
+}
+fn (owner: Str, repo: Str, job-id: Any): Any {
+  ::api/download(`${job-path(owner, repo, job-id)}/logs`)
+}
+
+download-workflow-run-logs
+meta {
+    doc: """GET /repos/{owner}/{repo}/actions/runs/{run_id}/logs - Download a workflow run's log archive as Bytes."""
+}
+fn (owner: Str, repo: Str, run-id: Any): Any {
+  ::api/download(`${run-path(owner, repo, run-id)}/logs`)
+}
+
+download-workflow-attempt-logs
+meta {
+    doc: """GET /repos/{owner}/{repo}/actions/runs/{run_id}/attempts/{attempt}/logs - Download one attempt's log archive as Bytes."""
+}
+fn (owner: Str, repo: Str, run-id: Any, attempt: Any): Any {
+  ::api/download(`${attempt-path(owner, repo, run-id, attempt)}/logs`)
+}
+
+cancel-workflow-run
+meta {
+    doc: """POST /repos/{owner}/{repo}/actions/runs/{run_id}/cancel - Cancel a workflow run."""
+}
+fn (owner: Str, repo: Str, run-id: Any): Any {
+  ::api/json("POST", `${run-path(owner, repo, run-id)}/cancel`)
 }
 
 rerun-workflow
 meta {
-    doc: """POST /repos/{owner}/{repo}/actions/runs/{run_id}/rerun - Re-run a workflow run."""
+    doc: """
+    POST /repos/{owner}/{repo}/actions/runs/{run_id}/rerun - Re-run every
+    job in a workflow run. The optional `options` Map supports
+    `enable_debug_logging`.
+    """
 }
-fn (owner: Str, repo: Str, run-id: Any): Any {
-  ::api/json("POST", `/repos/${owner}/${repo}/actions/runs/${run-id}/rerun`, {}, {})
+fn
+(owner: Str, repo: Str, run-id: Any): Any {
+  rerun-workflow(owner, repo, run-id, {})
+},
+(owner: Str, repo: Str, run-id: Any, options: Map): Any {
+  ::api/json("POST", `${run-path(owner, repo, run-id)}/rerun`, {}, options)
+}
+
+rerun-failed-workflow-jobs
+meta {
+    doc: """
+    POST /repos/{owner}/{repo}/actions/runs/{run_id}/rerun-failed-jobs -
+    Re-run only failed jobs and their dependent jobs. The optional `options`
+    Map supports `enable_debug_logging`.
+    """
+}
+fn
+(owner: Str, repo: Str, run-id: Any): Any {
+  rerun-failed-workflow-jobs(owner, repo, run-id, {})
+},
+(owner: Str, repo: Str, run-id: Any, options: Map): Any {
+  ::api/json("POST", `${run-path(owner, repo, run-id)}/rerun-failed-jobs`, {}, options)
+}
+
+rerun-workflow-job
+meta {
+    doc: """
+    POST /repos/{owner}/{repo}/actions/jobs/{job_id}/rerun - Re-run one
+    job and its dependent jobs. The optional `options` Map supports
+    `enable_debug_logging`.
+    """
+}
+fn
+(owner: Str, repo: Str, job-id: Any): Any {
+  rerun-workflow-job(owner, repo, job-id, {})
+},
+(owner: Str, repo: Str, job-id: Any, options: Map): Any {
+  ::api/json("POST", `${job-path(owner, repo, job-id)}/rerun`, {}, options)
 }
