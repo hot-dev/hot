@@ -1813,6 +1813,10 @@ pub fn get_hotlib_map() -> &'static HotLibMap {
             HotLibFn::VmAwareFn(store::put),
         );
         map.insert(
+            "::hot::store/put-if-missing".to_string(),
+            HotLibFn::VmAwareFn(store::put_if_missing),
+        );
+        map.insert(
             "::hot::store/get".to_string(),
             HotLibFn::VmAwareFn(store::get),
         );

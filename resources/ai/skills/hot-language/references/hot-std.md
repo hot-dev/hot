@@ -686,7 +686,8 @@ Map type { name: Str, embedding: Embedding? }            // Named persistent map
 Embedding type { model: Str?, field: Str?, text-search: Bool? }
 
 // CRUD
-put fn (store: Map, key: Str, value: Any): Any           // Insert/update entry
+put fn (store: Map, key: Str, value: Any): Any           // Set entry, replacing existing value
+put-if-missing fn (store: Map, key: Str, value: Any): Bool // Atomically create; false if key exists
 get fn (store: Map, key: Str): Any?                      // Get by key (null if missing)
 get fn (store: Map, key: Str, default: Any): Any         // Get with default
 delete fn (store: Map, key: Str): Bool                   // Remove entry

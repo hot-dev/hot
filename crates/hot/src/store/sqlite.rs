@@ -255,6 +255,47 @@ impl Store for SqliteStore {
         })
     }
 
+    async fn put_if_missing(
+        &self,
+        store_name: &str,
+        key: serde_json::Value,
+        value: serde_json::Value,
+        embedding: Option<Vec<f32>>,
+        text_content: Option<String>,
+    ) -> Result<bool, String> {
+        let pool = self.sqlite_pool()?;
+        let key_str = serde_json::to_string(&key).map_err(|e| e.to_string())?;
+        let value_str = serde_json::to_string(&value).map_err(|e| e.to_string())?;
+        let embedding_bytes = embedding.as_ref().map(|e| Self::embedding_to_bytes(e));
+        let now = Utc::now().to_rfc3339();
+
+        let size: i64 = key_str.len() as i64
+            + value_str.len() as i64
+            + text_content.as_ref().map_or(0, |s| s.len() as i64)
+            + embedding.as_ref().map_or(0, |e| (e.len() * 4) as i64);
+
+        let result = sqlx::query(
+            "INSERT INTO store_map_entry (org_id, env_id, store_name, key, value, embedding, text_content, size, created_at, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             ON CONFLICT(org_id, env_id, store_name, key) DO NOTHING",
+        )
+        .bind(self.org_id)
+        .bind(self.env_id)
+        .bind(store_name)
+        .bind(&key_str)
+        .bind(&value_str)
+        .bind(&embedding_bytes)
+        .bind(&text_content)
+        .bind(size)
+        .bind(&now)
+        .bind(&now)
+        .execute(pool)
+        .await
+        .map_err(|e| format!("store put-if-missing failed: {e}"))?;
+
+        Ok(result.rows_affected() == 1)
+    }
+
     async fn get(
         &self,
         store_name: &str,
@@ -1154,6 +1195,82 @@ mod tests {
             store.get("t", &json!("k")).await.unwrap().unwrap().value,
             json!(2)
         );
+    }
+
+    #[tokio::test]
+    async fn test_put_if_missing_creates_only_new_keys() {
+        let (store, _pool, _org, _env) = temp_store().await;
+        store.ensure_store(&plain_config("t")).await.unwrap();
+
+        assert!(
+            store
+                .put_if_missing("t", json!("k"), json!(1), None, None)
+                .await
+                .unwrap()
+        );
+        let original = store.get("t", &json!("k")).await.unwrap().unwrap();
+
+        assert!(
+            !store
+                .put_if_missing("t", json!("k"), json!(2), None, None)
+                .await
+                .unwrap()
+        );
+        let stored = store.get("t", &json!("k")).await.unwrap().unwrap();
+        assert_eq!(stored.value, json!(1));
+        assert_eq!(stored.seq, original.seq);
+    }
+
+    #[tokio::test]
+    async fn test_put_if_missing_accepts_null_value() {
+        let (store, _pool, _org, _env) = temp_store().await;
+        store.ensure_store(&plain_config("t")).await.unwrap();
+
+        assert!(
+            store
+                .put_if_missing("t", json!("k"), serde_json::Value::Null, None, None)
+                .await
+                .unwrap()
+        );
+        assert_eq!(
+            store.get("t", &json!("k")).await.unwrap().unwrap().value,
+            serde_json::Value::Null
+        );
+        assert!(
+            !store
+                .put_if_missing("t", json!("k"), json!("replacement"), None, None)
+                .await
+                .unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_concurrent_put_if_missing_has_one_winner() {
+        let (store, _pool, _org, _env) = temp_store().await;
+        store.ensure_store(&plain_config("t")).await.unwrap();
+        let store = Arc::new(store);
+
+        let handles: Vec<_> = (0..16)
+            .map(|i| {
+                let store = store.clone();
+                tokio::spawn(async move {
+                    store
+                        .put_if_missing("t", json!("race"), json!(i), None, None)
+                        .await
+                        .unwrap()
+                })
+            })
+            .collect();
+
+        let mut winners = 0;
+        for handle in handles {
+            if handle.await.unwrap() {
+                winners += 1;
+            }
+        }
+
+        assert_eq!(winners, 1);
+        assert_eq!(store.length("t").await.unwrap(), 1);
     }
 
     #[tokio::test]

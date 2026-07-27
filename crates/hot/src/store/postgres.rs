@@ -291,6 +291,50 @@ impl Store for PgStore {
         })
     }
 
+    async fn put_if_missing(
+        &self,
+        store_name: &str,
+        key: serde_json::Value,
+        value: serde_json::Value,
+        embedding: Option<Vec<f32>>,
+        text_content: Option<String>,
+    ) -> Result<bool, String> {
+        let pg = self.pg_pool()?;
+        let embedding_literal = embedding
+            .as_ref()
+            .map(|e| Self::embedding_to_pgvector_literal(e));
+
+        let size: i64 = key.to_string().len() as i64
+            + value.to_string().len() as i64
+            + text_content.as_ref().map_or(0, |s| s.len() as i64)
+            + embedding.as_ref().map_or(0, |e| (e.len() * 4) as i64);
+
+        let query_str = if embedding_literal.is_some() {
+            "INSERT INTO store_map_entry (org_id, env_id, store_name, key, value, embedding, text_content, size)
+             VALUES ($1, $2, $3, $4, $5, $6::vector, $7, $8)
+             ON CONFLICT (org_id, env_id, store_name, key) DO NOTHING"
+        } else {
+            "INSERT INTO store_map_entry (org_id, env_id, store_name, key, value, embedding, text_content, size)
+             VALUES ($1, $2, $3, $4, $5, NULL, $7, $8)
+             ON CONFLICT (org_id, env_id, store_name, key) DO NOTHING"
+        };
+
+        let result = sqlx::query(query_str)
+            .bind(self.org_id)
+            .bind(self.env_id)
+            .bind(store_name)
+            .bind(&key)
+            .bind(&value)
+            .bind(&embedding_literal)
+            .bind(&text_content)
+            .bind(size)
+            .execute(pg)
+            .await
+            .map_err(|e| format!("store put-if-missing failed: {e}"))?;
+
+        Ok(result.rows_affected() == 1)
+    }
+
     async fn get(
         &self,
         store_name: &str,
@@ -919,6 +963,51 @@ impl Store for PgStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::store::{Store, StoreMapConfig};
+    use serde_json::json;
+
+    async fn postgres_store() -> Option<PgStore> {
+        let uri = match std::env::var("HOT_TEST_POSTGRES_URI") {
+            Ok(uri) => uri,
+            Err(_) => {
+                eprintln!("skipping: HOT_TEST_POSTGRES_URI is not set");
+                return None;
+            }
+        };
+        let schema =
+            std::env::var("HOT_TEST_POSTGRES_SCHEMA").unwrap_or_else(|_| "hot".to_string());
+        let conf = crate::val!({
+            "uri": uri,
+            "schema": schema,
+        });
+        crate::db::run_migrations(&conf)
+            .await
+            .expect("Postgres migrations should run");
+        let pool = Arc::new(
+            crate::db::create_db_pool(&conf)
+                .await
+                .expect("Postgres pool should connect"),
+        );
+        let test_data = crate::db::insert_test_data(&pool)
+            .await
+            .expect("Postgres test data should seed");
+        Some(PgStore::new(pool, test_data.org_id, test_data.env_id))
+    }
+
+    fn plain_config(name: &str) -> StoreMapConfig {
+        StoreMapConfig {
+            name: name.to_string(),
+            embedding_provider: None,
+            embedding_model: None,
+            embedding_conf: None,
+            embedding_field: None,
+            embedding_dimensions: None,
+            text_search: false,
+            embedding_on_error: None,
+            embed_fn: None,
+            embed_batch_fn: None,
+        }
+    }
 
     #[test]
     fn parses_pgvector_text_literal() {
@@ -946,5 +1035,44 @@ mod tests {
         assert!(!source.contains(concat!("embedding_", "raw")));
         assert!(source.contains("embedding::text as embedding_text"));
         assert!(source.contains("vector_dims(embedding)::bigint"));
+    }
+
+    #[tokio::test]
+    async fn postgres_put_if_missing_has_one_concurrent_winner() {
+        let Some(store) = postgres_store().await else {
+            return;
+        };
+        let name = format!("insert-test-{}", Uuid::now_v7());
+        store.ensure_store(&plain_config(&name)).await.unwrap();
+        let store = Arc::new(store);
+
+        let handles: Vec<_> = (0..8)
+            .map(|i| {
+                let store = store.clone();
+                let name = name.clone();
+                tokio::spawn(async move {
+                    store
+                        .put_if_missing(&name, json!("race"), json!(i), None, None)
+                        .await
+                        .unwrap()
+                })
+            })
+            .collect();
+
+        let mut winners = 0;
+        for handle in handles {
+            if handle.await.unwrap() {
+                winners += 1;
+            }
+        }
+
+        assert_eq!(winners, 1);
+        assert_eq!(store.length(&name).await.unwrap(), 1);
+        assert!(
+            !store
+                .put_if_missing(&name, json!("race"), json!("replacement"), None, None)
+                .await
+                .unwrap()
+        );
     }
 }

@@ -381,6 +381,45 @@ pub fn put(vm: &mut VirtualMachine, args: &[Val]) -> HotResult<Val> {
     }
 }
 
+pub fn put_if_missing(vm: &mut VirtualMachine, args: &[Val]) -> HotResult<Val> {
+    validate_args!("::hot::store/put-if-missing", args, 3);
+    let (store, config) = match ensure_store(vm, &args[0]) {
+        Ok(v) => v,
+        Err(e) => return HotResult::Err(e),
+    };
+
+    let key_json = val_to_json(&args[1]);
+    let value_json = val_to_json(&args[2]);
+
+    // Avoid a known-unnecessary embedding call. This is only a fast path:
+    // concurrent callers can both observe a missing key, compute embeddings,
+    // and still have the database select exactly one insert winner.
+    if config.embedding_model.is_some() {
+        match block_on(store.get_info(&config.name, &key_json)) {
+            Ok(Some(_)) => return HotResult::Ok(Val::Bool(false)),
+            Ok(None) => {}
+            Err(e) => return HotResult::Err(Val::from(e)),
+        }
+    }
+
+    let embedding = match embed_value(vm, &config, &args[2]) {
+        Ok(v) => v,
+        Err(e) => return HotResult::Err(e),
+    };
+    let text_content = extract_text_content(&args[2], &config);
+
+    match block_on(store.put_if_missing(
+        &config.name,
+        key_json,
+        value_json,
+        embedding,
+        text_content,
+    )) {
+        Ok(inserted) => HotResult::Ok(Val::Bool(inserted)),
+        Err(e) => HotResult::Err(Val::from(e)),
+    }
+}
+
 pub fn get(vm: &mut VirtualMachine, args: &[Val]) -> HotResult<Val> {
     validate_args_range!("::hot::store/get", args, 2, 3);
     let (store, config) = match ensure_store(vm, &args[0]) {

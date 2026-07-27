@@ -485,7 +485,7 @@ hash ::hot::hash/sha256("data")
 - `::hot::run` — `fail`, `cancel`, `exit`, `info`, `is-inline-run`
 - `::hot::meta` — `get(var)`
 - `::hot::task` — `start`, `cancel`, `await`, `send`, `receive`, `checkpoint`, `restore`
-- `::hot::store` — `put`, `get`, `delete`, `keys`, `vals`, `length`, `is-empty`, `list`, `search`, `filter`, `find-first`, `clear`, `destroy`
+- `::hot::store` — `put`, `put-if-missing`, `get`, `delete`, `keys`, `vals`, `length`, `is-empty`, `list`, `search`, `filter`, `find-first`, `clear`, `destroy`
 
 #### Reserved namespace prefixes
 
