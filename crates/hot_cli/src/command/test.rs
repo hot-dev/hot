@@ -406,3 +406,44 @@ async fn run_integration_test(
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn empty_test_run_fails_by_default() {
+        assert_eq!(empty_run_exit_code(&Val::Null, "demo"), NO_TESTS_EXIT_CODE);
+    }
+
+    #[test]
+    fn global_allow_empty_permits_empty_test_run() {
+        let conf = hot::val!({"test": {"allow-empty": true}});
+        assert_eq!(empty_run_exit_code(&conf, "demo"), 0);
+    }
+
+    #[test]
+    fn project_allow_empty_permits_empty_test_run() {
+        let conf = hot::val!({
+            "project": {
+                "demo": {
+                    "test": {"allow-empty": true},
+                },
+            },
+        });
+        assert_eq!(empty_run_exit_code(&conf, "demo"), 0);
+    }
+
+    #[test]
+    fn global_allow_empty_overrides_project_setting() {
+        let conf = hot::val!({
+            "test": {"allow-empty": false},
+            "project": {
+                "demo": {
+                    "test": {"allow-empty": true},
+                },
+            },
+        });
+        assert_eq!(empty_run_exit_code(&conf, "demo"), NO_TESTS_EXIT_CODE);
+    }
+}
