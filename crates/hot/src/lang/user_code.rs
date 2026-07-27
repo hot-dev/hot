@@ -111,13 +111,17 @@ static INSTALL_HOOK: Once = Once::new();
 ///    print a confusing standalone backtrace not associated with the
 ///    request that triggered it).
 ///
-/// If the env var `HOT_PANIC_STDERR=1` is set, the previous (default)
-/// hook is also invoked so backtraces still appear on stderr — useful
-/// for local debugging.
+/// If the env var `HOT_PANIC_STDERR` is set to anything other than `0`
+/// (e.g. `HOT_PANIC_STDERR=1`), the previous (default) hook is also
+/// invoked so backtraces still appear on stderr — useful for local
+/// debugging. Same convention as `RUST_BACKTRACE`: unset and `0` mean
+/// off.
 pub fn install_panic_hook() {
     INSTALL_HOOK.call_once(|| {
         let prev = std::panic::take_hook();
-        let also_stderr = std::env::var_os("HOT_PANIC_STDERR").is_some();
+        let also_stderr = std::env::var_os("HOT_PANIC_STDERR")
+            .map(|v| v != "0")
+            .unwrap_or(false);
 
         std::panic::set_hook(Box::new(move |info| {
             let location = info
