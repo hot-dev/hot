@@ -10,8 +10,18 @@ inputs:
   save-cache:
     description: >-
       Whether to save caches at job end. Set to 'false' for restore-only jobs
-      (e.g. cross-platform PR runs) so extra OS caches do not evict the hot
-      Linux entries from the repo's 10 GB Actions cache budget.
+      so per-PR cache snapshots do not churn the repo's 10 GB Actions cache
+      budget.
+    required: false
+    default: "true"
+  sccache-size:
+    description: "Maximum local sccache size before compression and upload."
+    required: false
+    default: "1G"
+  cache-rust-targets:
+    description: >-
+      Whether rust-cache should persist target directories. Disable when
+      sccache provides the compiled-artifact cache and quota is constrained.
     required: false
     default: "true"
 runs:
@@ -42,14 +52,17 @@ runs:
           echo "SCCACHE_DIR=$HOME/.cache/sccache" >> "$GITHUB_ENV"
         fi
         echo "RUSTC_WRAPPER=sccache" >> "$GITHUB_ENV"
-        echo "SCCACHE_CACHE_SIZE=2G" >> "$GITHUB_ENV"
+        echo "SCCACHE_CACHE_SIZE=${{ inputs.sccache-size }}" >> "$GITHUB_ENV"
 
     - name: Cache sccache artifacts
       if: inputs.save-cache == 'true'
       uses: actions/cache@v5
       with:
         path: ~/.cache/sccache
-        key: sccache-${{ runner.os }}-${{ inputs.rust-toolchain }}-${{ github.job }}-${{ github.run_id }}
+        # Stable across source-only runs: sccache content-addresses compiler
+        # inputs, so a fresh run_id key only duplicates the same dependency
+        # objects and burns quota.
+        key: sccache-${{ runner.os }}-${{ inputs.rust-toolchain }}-${{ github.job }}-${{ hashFiles('Cargo.lock', '.github/actions/rust-setup/action.yml') }}
         restore-keys: |
           sccache-${{ runner.os }}-${{ inputs.rust-toolchain }}-${{ github.job }}-
           sccache-${{ runner.os }}-${{ inputs.rust-toolchain }}-
@@ -59,7 +72,7 @@ runs:
       uses: actions/cache/restore@v5
       with:
         path: ~/.cache/sccache
-        key: sccache-${{ runner.os }}-${{ inputs.rust-toolchain }}-${{ github.job }}-${{ github.run_id }}
+        key: sccache-${{ runner.os }}-${{ inputs.rust-toolchain }}-${{ github.job }}-${{ hashFiles('Cargo.lock', '.github/actions/rust-setup/action.yml') }}
         restore-keys: |
           sccache-${{ runner.os }}-${{ inputs.rust-toolchain }}-${{ github.job }}-
           sccache-${{ runner.os }}-${{ inputs.rust-toolchain }}-
@@ -70,16 +83,28 @@ runs:
         # Cache key based on Cargo files and toolchain
         key: ${{ inputs.rust-toolchain }}
         save-if: ${{ inputs.save-cache == 'true' }}
+        cache-targets: ${{ inputs.cache-rust-targets }}
 
     - name: Cache Tailwind CSS CLI
+      if: inputs.save-cache == 'true'
       id: tailwind-cache
       uses: actions/cache@v5
       with:
         path: ~/.local/bin/tailwindcss*
         key: tailwindcss-${{ runner.os }}-${{ runner.arch }}-${{ inputs.tailwind-version }}
 
+    - name: Restore Tailwind CSS CLI (restore-only)
+      if: inputs.save-cache != 'true'
+      id: tailwind-restore
+      uses: actions/cache/restore@v5
+      with:
+        path: ~/.local/bin/tailwindcss*
+        key: tailwindcss-${{ runner.os }}-${{ runner.arch }}-${{ inputs.tailwind-version }}
+
     - name: Install Tailwind CSS CLI
-      if: steps.tailwind-cache.outputs.cache-hit != 'true'
+      if: >-
+        steps.tailwind-cache.outputs.cache-hit != 'true' &&
+        steps.tailwind-restore.outputs.cache-hit != 'true'
       shell: bash
       run: |
         case "$RUNNER_OS-$RUNNER_ARCH" in

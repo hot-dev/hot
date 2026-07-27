@@ -82,17 +82,28 @@ jobs:
         with:
           rust-toolchain: ${{ env.RUST_TOOLCHAIN }}
           tailwind-version: ${{ env.TAILWIND_VERSION }}
-          # Restore-only on PR runs: saving here would push the repo past the
-          # 10 GB Actions cache budget and LRU-evict the Linux caches that
-          # hot.yml depends on. Main pushes (and the weekly run, which is on
-          # main) keep the matrix caches warm.
+          # Restore-only on PR runs. Main/weekly saves use bounded sccache
+          # entries and registry-only rust-cache entries; persisting both full
+          # target/ and compiler caches for each OS would exceed the repo's
+          # 10 GB Actions cache budget.
           save-cache: ${{ github.ref == 'refs/heads/main' }}
+          sccache-size: 512M
+          cache-rust-targets: "false"
 
       # The ort crate downloads ONNX Runtime binaries at build time; cache
       # them like release.yml does.
       - name: Cache ORT downloads (macOS)
-        if: runner.os == 'macOS'
+        if: runner.os == 'macOS' && github.ref == 'refs/heads/main'
         uses: actions/cache@v5
+        with:
+          path: ~/Library/Caches/ort.pyke.io
+          key: ort-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            ort-${{ runner.os }}-
+
+      - name: Restore ORT downloads (macOS, restore-only)
+        if: runner.os == 'macOS' && github.ref != 'refs/heads/main'
+        uses: actions/cache/restore@v5
         with:
           path: ~/Library/Caches/ort.pyke.io
           key: ort-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
