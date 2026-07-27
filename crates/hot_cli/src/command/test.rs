@@ -77,17 +77,49 @@ pub(crate) async fn run_test(
     )
     .await
     {
-        Ok(success) => {
-            if success {
-                Ok(0) // Exit code 0 for success
-            } else {
-                Ok(1) // Exit code 1 for failure
-            }
+        Ok(hot::lang::engine::TestRunStatus::Passed) => Ok(0),
+        Ok(hot::lang::engine::TestRunStatus::Failed) => Ok(1),
+        Ok(hot::lang::engine::TestRunStatus::NoTestsDiscovered) => {
+            Ok(empty_run_exit_code(conf, &project_name))
         }
         Err(e) => {
             eprintln!("Test execution error: {}", e);
             Ok(1)
         }
+    }
+}
+
+/// Exit code for a run that discovered zero tests.
+///
+/// Nonzero by default: a run that exercised nothing proved nothing, and
+/// treating it as success launders every discovery failure into a green
+/// build. The code is 3 — the next free code, keeping the sequence dense:
+/// 1 is "tests failed", 2 belongs to clap's usage errors. Distinct from 1
+/// so scripts can tell "fix the code" from "fix the config or cache".
+/// (pytest draws the same distinction with its exit code 5.)
+///
+/// Escape hatch for genuinely testless projects, mirroring test.capture
+/// precedence: `hot.test.allow-empty` then `hot.project.<name>.test.allow-empty`.
+pub(crate) const NO_TESTS_EXIT_CODE: i32 = 3;
+
+fn empty_run_exit_code(conf: &Val, project_name: &str) -> i32 {
+    let allow_empty = match conf.get("test.allow-empty") {
+        Some(Val::Bool(b)) => b,
+        _ => hot::project::get_project_conf(conf, project_name)
+            .and_then(|project_conf| project_conf.get("test"))
+            .and_then(|test_conf| test_conf.get("allow-empty"))
+            .map(|v| matches!(v, Val::Bool(true)))
+            .unwrap_or(false),
+    };
+    if allow_empty {
+        eprintln!("hot.test: zero tests discovered; passing because test.allow-empty is set");
+        0
+    } else {
+        eprintln!(
+            "hot.test: zero tests discovered — exiting {} (set test.allow-empty to permit empty runs)",
+            NO_TESTS_EXIT_CODE
+        );
+        NO_TESTS_EXIT_CODE
     }
 }
 
@@ -363,16 +395,55 @@ async fn run_integration_test(
     info!("hot.test: Integration test run complete.");
 
     match test_result {
-        Ok(success) => {
-            if success {
-                Ok(0)
-            } else {
-                Ok(1)
-            }
+        Ok(hot::lang::engine::TestRunStatus::Passed) => Ok(0),
+        Ok(hot::lang::engine::TestRunStatus::Failed) => Ok(1),
+        Ok(hot::lang::engine::TestRunStatus::NoTestsDiscovered) => {
+            Ok(empty_run_exit_code(&merged_conf, project_name))
         }
         Err(e) => {
             eprintln!("Integration test execution error: {}", e);
             Ok(1)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn empty_test_run_fails_by_default() {
+        assert_eq!(empty_run_exit_code(&Val::Null, "demo"), NO_TESTS_EXIT_CODE);
+    }
+
+    #[test]
+    fn global_allow_empty_permits_empty_test_run() {
+        let conf = hot::val!({"test": {"allow-empty": true}});
+        assert_eq!(empty_run_exit_code(&conf, "demo"), 0);
+    }
+
+    #[test]
+    fn project_allow_empty_permits_empty_test_run() {
+        let conf = hot::val!({
+            "project": {
+                "demo": {
+                    "test": {"allow-empty": true},
+                },
+            },
+        });
+        assert_eq!(empty_run_exit_code(&conf, "demo"), 0);
+    }
+
+    #[test]
+    fn global_allow_empty_overrides_project_setting() {
+        let conf = hot::val!({
+            "test": {"allow-empty": false},
+            "project": {
+                "demo": {
+                    "test": {"allow-empty": true},
+                },
+            },
+        });
+        assert_eq!(empty_run_exit_code(&conf, "demo"), NO_TESTS_EXIT_CODE);
     }
 }

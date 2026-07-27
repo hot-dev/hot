@@ -14,7 +14,10 @@ const DEFAULT_SOCKET: &str = "/hot/hotbox.sock";
 
 #[derive(Clone)]
 enum Transport {
-    Unix(String),
+    // The path is only read on unix (the non-unix arm of `try_request`
+    // rejects the transport), but the variant carries it everywhere so
+    // `from_env` stays platform-independent.
+    Unix(#[cfg_attr(not(unix), allow(dead_code))] String),
     Tcp(String, u16),
     /// vsock transport for Firecracker microVMs. (cid, port)
     /// CID 2 = host from inside a guest VM.
@@ -235,10 +238,18 @@ impl HotboxClient {
         body: Option<Vec<u8>>,
     ) -> Result<HttpResponse, HotboxError> {
         match &self.transport {
+            #[cfg(unix)]
             Transport::Unix(path) => {
                 let stream = tokio::net::UnixStream::connect(path).await?;
                 send_http(stream, method, uri, body, self.auth_token.as_deref()).await
             }
+            // hotbox runs inside Linux containers; the binary only needs to
+            // *compile* elsewhere (e.g. `cargo test --workspace` on Windows).
+            #[cfg(not(unix))]
+            Transport::Unix(_) => Err(HotboxError {
+                status: None,
+                message: "unix socket transport is not supported on this platform; set HOTBOX_URL for TCP".to_string(),
+            }),
             Transport::Tcp(host, port) => {
                 let stream = tokio::net::TcpStream::connect((host.as_str(), *port)).await?;
                 send_http(stream, method, uri, body, self.auth_token.as_deref()).await

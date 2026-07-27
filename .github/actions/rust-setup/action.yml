@@ -1,5 +1,5 @@
 name: "Rust setup with cache, sccache, and Tailwind"
-description: "Installs Rust toolchain, enables rust-cache and sccache, and installs Tailwind CLI without npm"
+description: "Installs Rust toolchain, enables rust-cache and sccache, and installs Tailwind CLI without npm. Works on Linux, macOS, and Windows runners."
 inputs:
   rust-toolchain:
     description: "Rust toolchain version (e.g., 1.96.1)"
@@ -7,6 +7,23 @@ inputs:
   tailwind-version:
     description: "Tailwind CLI version (e.g., v3.4.13)"
     required: true
+  save-cache:
+    description: >-
+      Whether to save caches at job end. Set to 'false' for restore-only jobs
+      so per-PR cache snapshots do not churn the repo's 10 GB Actions cache
+      budget.
+    required: false
+    default: "true"
+  sccache-size:
+    description: "Maximum local sccache size before compression and upload."
+    required: false
+    default: "1G"
+  cache-rust-targets:
+    description: >-
+      Whether rust-cache should persist target directories. Disable when
+      sccache provides the compiled-artifact cache and quota is constrained.
+    required: false
+    default: "true"
 runs:
   using: "composite"
   steps:
@@ -25,15 +42,37 @@ runs:
     - name: Configure sccache (local disk cache)
       shell: bash
       run: |
+        # Keep the on-disk location at ~/.cache/sccache on every OS so it
+        # matches the actions/cache path below. The sccache server is spawned
+        # by cargo as a native process, so on Windows it needs a Windows path,
+        # not the Git Bash /c/... form.
+        if [[ "$RUNNER_OS" == "Windows" ]]; then
+          echo "SCCACHE_DIR=$(cygpath -w "$HOME/.cache/sccache")" >> "$GITHUB_ENV"
+        else
+          echo "SCCACHE_DIR=$HOME/.cache/sccache" >> "$GITHUB_ENV"
+        fi
         echo "RUSTC_WRAPPER=sccache" >> "$GITHUB_ENV"
-        echo "SCCACHE_DIR=$HOME/.cache/sccache" >> "$GITHUB_ENV"
-        echo "SCCACHE_CACHE_SIZE=2G" >> "$GITHUB_ENV"
+        echo "SCCACHE_CACHE_SIZE=${{ inputs.sccache-size }}" >> "$GITHUB_ENV"
 
     - name: Cache sccache artifacts
+      if: inputs.save-cache == 'true'
       uses: actions/cache@v5
       with:
         path: ~/.cache/sccache
-        key: sccache-${{ runner.os }}-${{ inputs.rust-toolchain }}-${{ github.job }}-${{ github.run_id }}
+        # Stable across source-only runs: sccache content-addresses compiler
+        # inputs, so a fresh run_id key only duplicates the same dependency
+        # objects and burns quota.
+        key: sccache-${{ runner.os }}-${{ inputs.rust-toolchain }}-${{ github.job }}-${{ hashFiles('Cargo.lock', '.github/actions/rust-setup/action.yml') }}
+        restore-keys: |
+          sccache-${{ runner.os }}-${{ inputs.rust-toolchain }}-${{ github.job }}-
+          sccache-${{ runner.os }}-${{ inputs.rust-toolchain }}-
+
+    - name: Restore sccache artifacts (restore-only)
+      if: inputs.save-cache != 'true'
+      uses: actions/cache/restore@v5
+      with:
+        path: ~/.cache/sccache
+        key: sccache-${{ runner.os }}-${{ inputs.rust-toolchain }}-${{ github.job }}-${{ hashFiles('Cargo.lock', '.github/actions/rust-setup/action.yml') }}
         restore-keys: |
           sccache-${{ runner.os }}-${{ inputs.rust-toolchain }}-${{ github.job }}-
           sccache-${{ runner.os }}-${{ inputs.rust-toolchain }}-
@@ -43,28 +82,58 @@ runs:
       with:
         # Cache key based on Cargo files and toolchain
         key: ${{ inputs.rust-toolchain }}
-        # Save cache even on failure
-        save-if: true
+        save-if: ${{ inputs.save-cache == 'true' }}
+        cache-targets: ${{ inputs.cache-rust-targets }}
 
     - name: Cache Tailwind CSS CLI
+      if: inputs.save-cache == 'true'
       id: tailwind-cache
       uses: actions/cache@v5
       with:
-        path: ~/.local/bin/tailwindcss
-        key: tailwindcss-linux-x64-${{ inputs.tailwind-version }}
+        path: ~/.local/bin/tailwindcss*
+        key: tailwindcss-${{ runner.os }}-${{ runner.arch }}-${{ inputs.tailwind-version }}
+
+    - name: Restore Tailwind CSS CLI (restore-only)
+      if: inputs.save-cache != 'true'
+      id: tailwind-restore
+      uses: actions/cache/restore@v5
+      with:
+        path: ~/.local/bin/tailwindcss*
+        key: tailwindcss-${{ runner.os }}-${{ runner.arch }}-${{ inputs.tailwind-version }}
 
     - name: Install Tailwind CSS CLI
-      if: steps.tailwind-cache.outputs.cache-hit != 'true'
+      if: >-
+        steps.tailwind-cache.outputs.cache-hit != 'true' &&
+        steps.tailwind-restore.outputs.cache-hit != 'true'
       shell: bash
       run: |
+        case "$RUNNER_OS-$RUNNER_ARCH" in
+          Linux-X64)   asset=tailwindcss-linux-x64 ;;
+          Linux-ARM64) asset=tailwindcss-linux-arm64 ;;
+          macOS-ARM64) asset=tailwindcss-macos-arm64 ;;
+          macOS-X64)   asset=tailwindcss-macos-x64 ;;
+          Windows-X64) asset=tailwindcss-windows-x64.exe ;;
+          *) echo "unsupported runner: $RUNNER_OS-$RUNNER_ARCH"; exit 1 ;;
+        esac
         mkdir -p ~/.local/bin
-        curl -sL -o tailwindcss https://github.com/tailwindlabs/tailwindcss/releases/download/${{ inputs.tailwind-version }}/tailwindcss-linux-x64
-        chmod +x tailwindcss
-        mv tailwindcss ~/.local/bin/tailwindcss
+        bin="$HOME/.local/bin/tailwindcss"
+        if [[ "$RUNNER_OS" == "Windows" ]]; then
+          bin="$bin.exe"
+        fi
+        curl -sSfL --retry 3 -o "$bin" \
+          "https://github.com/tailwindlabs/tailwindcss/releases/download/${{ inputs.tailwind-version }}/$asset"
+        chmod +x "$bin"
 
     - name: Add Tailwind to PATH
       shell: bash
-      run: echo "$HOME/.local/bin" >> $GITHUB_PATH
+      run: |
+        # Subsequent steps may run native (non-bash) processes, so PATH
+        # entries on Windows must be Windows paths.
+        if [[ "$RUNNER_OS" == "Windows" ]]; then
+          cygpath -w "$HOME/.local/bin" >> "$GITHUB_PATH"
+        else
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+        fi
 
     - name: Verify Tailwind version
       shell: bash

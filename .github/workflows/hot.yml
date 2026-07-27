@@ -47,6 +47,7 @@ jobs:
         with:
           rust-toolchain: ${{ env.RUST_TOOLCHAIN }}
           tailwind-version: ${{ env.TAILWIND_VERSION }}
+          save-cache: ${{ github.ref == 'refs/heads/main' }}
 
       # Clippy intentionally uses the workspace default feature set. Keeping it
       # aligned with the workspace test feature set avoids forcing cargo to
@@ -106,6 +107,7 @@ jobs:
         with:
           rust-toolchain: ${{ env.RUST_TOOLCHAIN }}
           tailwind-version: ${{ env.TAILWIND_VERSION }}
+          save-cache: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Install pgvector for Postgres tests
         run: |
@@ -164,6 +166,7 @@ jobs:
         with:
           rust-toolchain: ${{ env.RUST_TOOLCHAIN }}
           tailwind-version: ${{ env.TAILWIND_VERSION }}
+          save-cache: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Run Hot init
         run: cargo run --locked --bin hot -- init -c hot.test.hot --ctx hot/ci.ctx.hot
@@ -246,6 +249,7 @@ jobs:
         with:
           rust-toolchain: ${{ env.RUST_TOOLCHAIN }}
           tailwind-version: ${{ env.TAILWIND_VERSION }}
+          save-cache: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Install protobuf compiler (for containerd-client)
         run: sudo apt-get update && sudo apt-get install -y protobuf-compiler

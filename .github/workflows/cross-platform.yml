@@ -1,0 +1,277 @@
+# Cross-platform tests: run the Rust and Hot suites on macOS and Windows.
+#
+# Linux is intentionally absent — hot.yml already covers it. This workflow
+# exists to exercise the code paths only these platforms can reach (the
+# AppleMapJit code-memory backend on macOS arm64, Windows cache paths and
+# the System JIT backend on Windows x86_64).
+#
+# Services are best-effort: Postgres is brought up natively on both OSes and
+# probed; if the probe fails, service-backed tests self-skip and the probe
+# step logs it plainly. Redis runs on macOS only (there is no official
+# Redis/Valkey Windows build). Docker-backed suites (`hot test box`) and the
+# kata feature are structurally Linux-only and never run here.
+#
+# This workflow is intentionally NOT in branch protection's required checks
+# yet — promote it once it has a green track record.
+
+name: cross-platform
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+  schedule:
+    # Weekly rot check: dependency updates and runner-image changes break
+    # cross-platform builds even when nothing is pushed.
+    - cron: '17 6 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  RUST_TOOLCHAIN: 1.96.1
+  TAILWIND_VERSION: v4.1.18
+  CARGO_INCREMENTAL: '0'
+  CARGO_NET_RETRY: 2
+  CARGO_HTTP_TIMEOUT: 30
+  SQLX_OFFLINE: 'true'
+  CI: 'true'
+  PG_URI: postgres://hot:hot@localhost:5432/hot
+  # The hot panic hook suppresses the default stderr dump; without this,
+  # panics on non-test threads (e.g. inside spawn_blocking) leave failing
+  # tests with no output at all in CI logs.
+  HOT_PANIC_STDERR: '1'
+  # Backtraces pinpoint panics that originate inside std (e.g. Instant
+  # arithmetic) which otherwise only report a std source location.
+  RUST_BACKTRACE: '1'
+
+jobs:
+  test:
+    name: Rust + Hot Tests (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # macos-latest is arm64: exercises the AppleMapJit backend.
+          # 3 vCPU / 7 GB; the repo's .cargo/config.toml says jobs = 16,
+          # so pass -j explicitly (CLI beats config) to avoid OOM with
+          # memory-hungry crates.
+          - os: macos-latest
+            cargo_jobs: 3
+          # windows-latest is x86_64: exercises Windows cache paths and the
+          # System JIT backend. 4 vCPU / 16 GB.
+          - os: windows-latest
+            cargo_jobs: 4
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 150
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Setup toolchain, cache, sccache, tailwind
+        uses: ./.github/actions/rust-setup
+        with:
+          rust-toolchain: ${{ env.RUST_TOOLCHAIN }}
+          tailwind-version: ${{ env.TAILWIND_VERSION }}
+          # Restore-only on PR runs. Main/weekly saves use bounded sccache
+          # entries and registry-only rust-cache entries; persisting both full
+          # target/ and compiler caches for each OS would exceed the repo's
+          # 10 GB Actions cache budget.
+          save-cache: ${{ github.ref == 'refs/heads/main' }}
+          sccache-size: 512M
+          cache-rust-targets: "false"
+
+      # The ort crate downloads ONNX Runtime binaries at build time; cache
+      # them like release.yml does.
+      - name: Cache ORT downloads (macOS)
+        if: runner.os == 'macOS' && github.ref == 'refs/heads/main'
+        uses: actions/cache@v5
+        with:
+          path: ~/Library/Caches/ort.pyke.io
+          key: ort-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            ort-${{ runner.os }}-
+
+      - name: Restore ORT downloads (macOS, restore-only)
+        if: runner.os == 'macOS' && github.ref != 'refs/heads/main'
+        uses: actions/cache/restore@v5
+        with:
+          path: ~/Library/Caches/ort.pyke.io
+          key: ort-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            ort-${{ runner.os }}-
+
+      # ----- Best-effort services -----------------------------------------
+
+      - name: Set up Postgres + pgvector (macOS)
+        if: runner.os == 'macOS'
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          brew install postgresql@18
+          PG_PREFIX="$(brew --prefix postgresql@18)"
+          echo "$PG_PREFIX/bin" >> "$GITHUB_PATH"
+          export PATH="$PG_PREFIX/bin:$PATH"
+          brew services start postgresql@18
+          for _ in $(seq 30); do pg_isready -h localhost -q && break; sleep 1; done
+          # Build pgvector from source against this exact Postgres. The brew
+          # pgvector formula links against whatever PG major it was built
+          # for, which may not be @18.
+          git clone --depth 1 --branch v0.8.1 https://github.com/pgvector/pgvector "$RUNNER_TEMP/pgvector"
+          make -C "$RUNNER_TEMP/pgvector" PG_CONFIG="$PG_PREFIX/bin/pg_config"
+          make -C "$RUNNER_TEMP/pgvector" install PG_CONFIG="$PG_PREFIX/bin/pg_config"
+          psql -h localhost -d postgres -c "CREATE ROLE hot LOGIN SUPERUSER PASSWORD 'hot';"
+          createdb -h localhost -O hot hot
+
+      - name: Set up Postgres + pgvector (Windows)
+        if: runner.os == 'Windows'
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          # The runner image's preinstalled PostgreSQL is older than 18, but
+          # the migrations use PG18 features (uuidv7()), matching the
+          # postgres:18.x service containers on Linux and postgresql@18 on
+          # macOS — so install 18 explicitly.
+          $ErrorActionPreference = 'Stop'
+          choco install postgresql18 --yes --no-progress --params '/Password:root'
+          $pgRoot = 'C:\Program Files\PostgreSQL\18'
+          $pgBin = Join-Path $pgRoot 'bin'
+          Add-Content -Path $env:GITHUB_PATH -Value $pgBin
+          $env:Path = "$pgBin;$env:Path"
+          $env:PGPASSWORD = 'root'
+          $svc = Get-Service -Name 'postgresql*18*' -ErrorAction SilentlyContinue | Select-Object -First 1
+          if ($svc -and $svc.Status -ne 'Running') { Start-Service -Name $svc.Name }
+
+          # Build pgvector with MSVC against this Postgres.
+          git clone --depth 1 --branch v0.8.1 https://github.com/pgvector/pgvector "$env:RUNNER_TEMP\pgvector"
+          $vsPath = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -property installationPath
+          cmd /c "`"$vsPath\VC\Auxiliary\Build\vcvars64.bat`" && set `"PGROOT=$pgRoot`" && cd /d `"$env:RUNNER_TEMP\pgvector`" && nmake /F Makefile.win && nmake /F Makefile.win install"
+          if ($LASTEXITCODE -ne 0) { throw 'pgvector build failed' }
+
+          psql -U postgres -c "CREATE ROLE hot LOGIN SUPERUSER PASSWORD 'hot';"
+          createdb -U postgres -O hot hot
+
+      # No Redis on Windows: there is no official Redis or Valkey Windows
+      # build, and Memurai/WSL would add fragility. Redis-backed tests
+      # self-skip there.
+      - name: Set up Redis (macOS)
+        if: runner.os == 'macOS'
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          brew install redis
+          brew services start redis
+          for _ in $(seq 15); do
+            redis-cli ping 2>/dev/null | grep -q PONG && break
+            sleep 1
+          done
+
+      - name: Probe services
+        id: svc
+        run: |
+          pg=false redis=false
+          # Non-mutating probe: running CREATE EXTENSION here would install
+          # vector into the public schema and turn the initial migration's
+          # `CREATE EXTENSION ... WITH SCHEMA hot` into a no-op, breaking the
+          # hot.vector column type.
+          if command -v psql >/dev/null 2>&1; then
+            n="$(psql "$PG_URI" -tAc \
+              "SELECT count(*) FROM pg_available_extensions WHERE name='vector'" 2>/dev/null || echo 0)"
+            # Migrations require PG18 (uuidv7()); an older server must probe
+            # as unavailable rather than fail mid-suite.
+            v="$(psql "$PG_URI" -tAc "SHOW server_version_num" 2>/dev/null || echo 0)"
+            [[ "$n" == "1" && "$v" -ge 180000 ]] && pg=true
+          fi
+          if command -v redis-cli >/dev/null 2>&1; then
+            redis-cli ping 2>/dev/null | grep -q PONG && redis=true
+          fi
+          echo "pg=$pg" >> "$GITHUB_OUTPUT"
+          echo "redis=$redis" >> "$GITHUB_OUTPUT"
+          echo "::notice::Postgres available: $pg — Redis available: $redis (unavailable services mean those tests self-skip)"
+
+      # ----- Rust suite ----------------------------------------------------
+
+      - name: Run Rust tests
+        run: |
+          if [[ "${{ steps.svc.outputs.pg }}" == "true" ]]; then
+            export HOT_TEST_POSTGRES_URI="$PG_URI"
+            export HOT_TEST_POSTGRES_RESET_SCHEMA=1
+          fi
+          if [[ "${{ steps.svc.outputs.redis }}" == "true" ]]; then
+            export REDIS_URL=redis://localhost:6379
+          fi
+          # --no-fail-fast: on a discovery matrix we want every test binary's
+          # results per run, not just the first failing one.
+          cargo test --workspace --all-targets --locked --no-fail-fast -j ${{ matrix.cargo_jobs }}
+
+      # ----- Hot suite (sqlite — always runs, no services needed) ----------
+
+      - name: Run Hot init
+        run: cargo run --locked --bin hot -- init -c hot.test.hot --ctx hot/ci.ctx.hot
+
+      - name: Run Hot tests
+        env:
+          HOT_TEST_VAR: "set so that :hot.env/vars() is not empty"
+        run: cargo run --locked --bin hot -- test -c hot.test.hot --ctx hot/ci.ctx.hot
+
+      # ----- Hot suite (Postgres, best effort) ------------------------------
+
+      - name: Reset Postgres database for Hot tests
+        if: steps.svc.outputs.pg == 'true'
+        run: |
+          # The Rust tests above ran against this same instance (hot.yml uses
+          # separate per-job service containers); give the Hot suite a clean
+          # database.
+          psql "postgres://hot:hot@localhost:5432/postgres" \
+            -c "DROP DATABASE IF EXISTS hot WITH (FORCE);" \
+            -c "CREATE DATABASE hot OWNER hot;"
+
+      - name: Run Hot init (full suite, Postgres)
+        if: steps.svc.outputs.pg == 'true'
+        run: |
+          export HOT_TEST_POSTGRES_URI="$PG_URI"
+          export HOT_TEST_FILE_STORAGE_PATH=./.hot/pg-full/file
+          if [[ "${{ steps.svc.outputs.redis }}" == "true" ]]; then
+            export HOT_REDIS_URI=redis://localhost:6379
+            export HOT_QUEUE_TYPE=redis
+          fi
+          cargo run --locked --bin hot -- init -c hot.test.hot --ctx hot/ci.ctx.hot
+
+      - name: Run Hot tests (full suite, Postgres)
+        if: steps.svc.outputs.pg == 'true'
+        env:
+          HOT_TEST_VAR: "set so that :hot.env/vars() is not empty"
+        run: |
+          export HOT_TEST_POSTGRES_URI="$PG_URI"
+          export HOT_TEST_FILE_STORAGE_PATH=./.hot/pg-full/file
+          if [[ "${{ steps.svc.outputs.redis }}" == "true" ]]; then
+            export HOT_REDIS_URI=redis://localhost:6379
+            export HOT_QUEUE_TYPE=redis
+          fi
+          cargo run --locked --bin hot -- test -c hot.test.hot --ctx hot/ci.ctx.hot
+
+      - name: Run Postgres queue smoke tests (needs Postgres + Redis)
+        if: steps.svc.outputs.pg == 'true' && steps.svc.outputs.redis == 'true'
+        env:
+          HOT_TEST_VAR: "set so that :hot.env/vars() is not empty"
+        run: |
+          export HOT_TEST_POSTGRES_URI="$PG_URI"
+          export HOT_REDIS_URI=redis://localhost:6379
+          export HOT_QUEUE_TYPE=redis
+          cargo run --locked --bin hot -- init -c pg.redis.test.hot --ctx hot/ci.ctx.hot
+          cargo run --locked --bin hot -- test -c pg.redis.test.hot --ctx hot/ci.ctx.hot
+
+      # No `hot test box` steps: Docker is unavailable on macOS runners and
+      # Windows runners cannot run Linux containers.
+
+      - name: sccache stats
+        run: sccache --show-stats || true

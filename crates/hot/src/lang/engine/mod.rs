@@ -66,6 +66,25 @@ pub(super) enum ContextValidationPolicy {
     RequireSatisfied(AHashSet<String>),
 }
 
+/// Outcome of a test run, distinguishing "tests failed" from "nothing ran".
+///
+/// Zero discovered tests is its own state because reporting it as success
+/// launders every discovery failure — wrong test.paths, a pattern matching
+/// nothing, a stale compile cache dropping test namespaces — into a green
+/// build. Callers decide policy (the CLI exits 3); this type just refuses
+/// to conflate the states.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TestRunStatus {
+    Passed,
+    Failed,
+    NoTestsDiscovered,
+}
+
+/// Sentinel returned by the Hot-side runner (`::hot::test/run-tests`) when
+/// discovery finds zero tests. A distinct value rather than `false` so the
+/// distinction survives the trip through the pipeline's `Val` layer.
+pub const NO_TESTS_SENTINEL: &str = "no-tests-discovered";
+
 /// Test execution result
 #[derive(Debug, Clone)]
 pub struct TestResult {
@@ -359,6 +378,11 @@ impl Engine {
                 } else {
                     Some("One or more tests failed".to_string())
                 },
+            }]),
+            Ok(crate::val::Val::Str(ref s)) if &**s == NO_TESTS_SENTINEL => Ok(vec![TestResult {
+                name: pattern.unwrap_or("all tests").to_string(),
+                passed: false,
+                error: Some("zero tests were discovered — nothing ran".to_string()),
             }]),
             Ok(other) => Ok(vec![TestResult {
                 name: pattern.unwrap_or("all tests").to_string(),

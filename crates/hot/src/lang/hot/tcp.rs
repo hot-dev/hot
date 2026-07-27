@@ -716,8 +716,14 @@ mod tests {
                 Val::Int(port as i64),
                 Val::Map(Box::new(opts)),
             ]));
+            // Unix refuses a dead loopback port instantly ("... failed: ..."),
+            // but WinSock retries refused connects with backoff, so on slow
+            // Windows runners the deadline can win and the error surfaces as
+            // the timeout message instead. Either way, connect must not
+            // succeed.
+            let msg = err.to_string();
             assert!(
-                err.to_string().contains("failed"),
+                msg.contains("failed") || msg.contains("timed out"),
                 "expected connection failure, got: {:?}",
                 err
             );

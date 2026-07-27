@@ -88,15 +88,22 @@ impl SlidingWindow {
         {
             let mut last_sweep = self.last_sweep.lock().unwrap_or_else(|e| e.into_inner());
             if now.duration_since(*last_sweep) >= SWEEP_INTERVAL {
-                let stale_cutoff = now
-                    - SIGNUP_WINDOW
+                // checked_sub: Instant is unsigned on Windows, so `now - window`
+                // panics when the machine's uptime is shorter than the window.
+                // No cutoff means the machine is younger than the window, so
+                // nothing can be stale yet.
+                let stale_cutoff = now.checked_sub(
+                    SIGNUP_WINDOW
                         .max(SIGNIN_WINDOW)
                         .max(RESEND_WINDOW)
                         .max(OAUTH_CALLBACK_WINDOW)
                         .max(OAUTH_NEW_IDENTITY_WINDOW)
                         .max(CLAIM_HANDLE_WINDOW)
-                        .max(CHECKOUT_WINDOW);
-                windows.retain(|_, deque| deque.back().is_some_and(|t| *t >= stale_cutoff));
+                        .max(CHECKOUT_WINDOW),
+                );
+                if let Some(stale_cutoff) = stale_cutoff {
+                    windows.retain(|_, deque| deque.back().is_some_and(|t| *t >= stale_cutoff));
+                }
                 *last_sweep = now;
             }
         }
@@ -112,9 +119,12 @@ impl SlidingWindow {
         }
 
         let deque = windows.entry(key.to_string()).or_default();
-        let cutoff = now - window;
-        while deque.front().is_some_and(|t| *t < cutoff) {
-            deque.pop_front();
+        // See stale_cutoff above: no cutoff (uptime < window) means no entry
+        // can predate the window, so nothing expires.
+        if let Some(cutoff) = now.checked_sub(window) {
+            while deque.front().is_some_and(|t| *t < cutoff) {
+                deque.pop_front();
+            }
         }
 
         if deque.len() >= max {

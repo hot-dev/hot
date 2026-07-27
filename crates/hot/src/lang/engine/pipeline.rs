@@ -1340,7 +1340,7 @@ impl Engine {
                         };
 
                         match test_result {
-                            Ok(success) => Ok(crate::val::Val::Bool(success)),
+                            Ok(val) => Ok(val),
                             Err(e) => {
                                 // Fallback: if the Hot runner already set ::hot::test/test-run-success,
                                 // use that value instead of failing the whole run.
@@ -1744,7 +1744,7 @@ impl Engine {
         vm: &mut crate::lang::VirtualMachine,
         capture_output: bool,
         color: bool,
-    ) -> Result<bool, String> {
+    ) -> Result<crate::val::Val, String> {
         tracing::debug!(" Calling ::hot::test/run-tests({})", capture_output);
 
         // Call the Hot function ::hot::test/run-tests with capture_output parameter
@@ -1757,12 +1757,19 @@ impl Engine {
         match result {
             Ok(result) => {
                 tracing::debug!("Test execution completed successfully");
-                // The function returns true if all tests passed, false otherwise
+                // Bool means ran-and-passed/failed; the no-tests sentinel
+                // travels through unchanged so the CLI can distinguish
+                // "tests failed" from "nothing ran".
                 match result {
-                    crate::val::Val::Bool(success) => Ok(success),
+                    crate::val::Val::Bool(_) => Ok(result),
+                    crate::val::Val::Str(ref s)
+                        if &**s == crate::lang::engine::NO_TESTS_SENTINEL =>
+                    {
+                        Ok(result)
+                    }
                     _ => {
                         tracing::warn!(" Test runner returned non-boolean result: {:?}", result);
-                        Ok(false)
+                        Ok(crate::val::Val::Bool(false))
                     }
                 }
             }
@@ -1801,7 +1808,7 @@ impl Engine {
         pattern: &str,
         capture_output: bool,
         _color: bool,
-    ) -> Result<bool, String> {
+    ) -> Result<crate::val::Val, String> {
         tracing::debug!(
             " Calling ::hot::test/run-matching-tests({}, {})",
             pattern,
@@ -1815,12 +1822,18 @@ impl Engine {
         ];
         match vm.execute_function_call_by_name("::hot::test/run-matching-tests", &args) {
             Ok(result) => {
-                // The function returns true if all tests passed, false otherwise
+                // Bool means ran; the no-tests sentinel travels through so a
+                // pattern matching nothing is distinguishable from failures.
                 match result {
-                    crate::val::Val::Bool(success) => Ok(success),
+                    crate::val::Val::Bool(_) => Ok(result),
+                    crate::val::Val::Str(ref s)
+                        if &**s == crate::lang::engine::NO_TESTS_SENTINEL =>
+                    {
+                        Ok(result)
+                    }
                     _ => {
                         tracing::warn!(" Test runner returned non-boolean result: {:?}", result);
-                        Ok(false)
+                        Ok(crate::val::Val::Bool(false))
                     }
                 }
             }

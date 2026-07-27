@@ -4,6 +4,7 @@ meta {doc: """Testing framework with assertions and test runners."""}
 white ::hot::term/white
 red ::hot::term/red
 bright-green ::hot::term/bright-green
+bright-yellow ::hot::term/bright-yellow
 bright-red ::hot::term/bright-red
 colors ::hot::term/colors
 
@@ -443,6 +444,7 @@ fn () {
     }
 
     cond {
+        is-zero(tests-total) => { println(`\n${bright-yellow("no tests ran.\n")}`) }
         is-zero(tests-failed) => { println(`\n${bright-green("all tests passed!\n")}`) }
         => { println(`\n${::hot::term/bright-red(tests-failed)} tests failed.\n`) }
     }
@@ -476,6 +478,33 @@ meta {
 fn (f) {
     // Use the Rust hotlib implementation to avoid variable scoping issues
     call-lib(::hot::test/is-test, [f])
+}
+
+print-no-tests-warning
+meta {
+    doc: """
+    Notice that discovery found nothing.
+
+    A run that exercised zero tests proved nothing, and reporting it as
+    success launders every possible discovery failure — wrong test.paths, a
+    pattern that matches nothing, a stale compile cache dropping test
+    namespaces — into a green build. The runner returns a distinct sentinel,
+    and the CLI decides whether to fail or honor test.allow-empty.
+    """
+}
+fn (pattern) {
+    println("")
+    println(`${bright-yellow("! zero tests were discovered — nothing ran")}`)
+    cond {
+        is-null(pattern) => { null }
+        => { println(`  the pattern "${pattern}" matched no tests`) }
+    }
+
+    println("  If this project should contain tests, discovery failed and this run proved nothing.")
+    println("  Check test.paths for the project; a stale build cache can also drop")
+    println("  test namespaces silently — touch a source file and re-run.")
+    println("  To permit empty runs: set hot.project.<name>.test.allow-empty true")
+    println("")
 }
 
 all-tests-passed
@@ -524,7 +553,16 @@ fn (capture-output) {
         }
         => {
             final-counters get-test-counters()
-            is-zero(final-counters.tests.failed)
+            cond {
+                // Zero discovered is not a pass. Return a distinct sentinel —
+                // not `false` — so the CLI can tell "tests failed" apart from
+                // "nothing ran" and exit accordingly.
+                is-zero(final-counters.tests.total) => {
+                    print-no-tests-warning(null)
+                    "no-tests-discovered"
+                }
+                => { is-zero(final-counters.tests.failed) }
+            }
         }
     }
 }
@@ -567,7 +605,13 @@ fn (pattern, capture-output) {
         }
         => {
             final-counters get-test-counters()
-            is-zero(final-counters.tests.failed)
+            cond {
+                is-zero(final-counters.tests.total) => {
+                    print-no-tests-warning(pattern)
+                    "no-tests-discovered"
+                }
+                => { is-zero(final-counters.tests.failed) }
+            }
         }
     }
 }
