@@ -1194,7 +1194,13 @@ mod tests {
 
     #[test]
     fn test_resolve_local_build_storage_path_rejects_absolute_path() {
+        // On Windows "/etc/passwd" has no drive prefix, so is_absolute() is
+        // false and the RootDir escape guard rejects it instead. Either way
+        // the path must be refused.
         let err = resolve_local_build_storage_path(".hot/build", "/etc/passwd").unwrap_err();
-        assert!(err.contains("relative"));
+        assert!(
+            err.contains("relative") || err.contains("cannot escape"),
+            "got: {err}"
+        );
     }
 }

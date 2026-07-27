@@ -47,6 +47,9 @@ env:
   # panics on non-test threads (e.g. inside spawn_blocking) leave failing
   # tests with no output at all in CI logs.
   HOT_PANIC_STDERR: '1'
+  # Backtraces pinpoint panics that originate inside std (e.g. Instant
+  # arithmetic) which otherwise only report a std source location.
+  RUST_BACKTRACE: '1'
 
 jobs:
   test:
@@ -123,22 +126,24 @@ jobs:
         continue-on-error: true
         shell: pwsh
         run: |
-          # The runner image ships PostgreSQL preinstalled with its service
-          # disabled, and sets PGROOT/PGBIN. Default superuser is
-          # postgres/root per the image docs.
+          # The runner image's preinstalled PostgreSQL is older than 18, but
+          # the migrations use PG18 features (uuidv7()), matching the
+          # postgres:18.x service containers on Linux and postgresql@18 on
+          # macOS — so install 18 explicitly.
           $ErrorActionPreference = 'Stop'
-          $svc = Get-Service -Name 'postgresql*' | Select-Object -First 1
-          if (-not $svc) { throw 'no preinstalled PostgreSQL service found' }
-          Set-Service -Name $svc.Name -StartupType Manual
-          Start-Service -Name $svc.Name
-          Add-Content -Path $env:GITHUB_PATH -Value $env:PGBIN
-          $env:Path = "$env:PGBIN;$env:Path"
+          choco install postgresql18 --yes --no-progress --params '/Password:root'
+          $pgRoot = 'C:\Program Files\PostgreSQL\18'
+          $pgBin = Join-Path $pgRoot 'bin'
+          Add-Content -Path $env:GITHUB_PATH -Value $pgBin
+          $env:Path = "$pgBin;$env:Path"
           $env:PGPASSWORD = 'root'
+          $svc = Get-Service -Name 'postgresql*18*' -ErrorAction SilentlyContinue | Select-Object -First 1
+          if ($svc -and $svc.Status -ne 'Running') { Start-Service -Name $svc.Name }
 
-          # Build pgvector with MSVC against the image's Postgres.
+          # Build pgvector with MSVC against this Postgres.
           git clone --depth 1 --branch v0.8.1 https://github.com/pgvector/pgvector "$env:RUNNER_TEMP\pgvector"
           $vsPath = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -property installationPath
-          cmd /c "`"$vsPath\VC\Auxiliary\Build\vcvars64.bat`" && set `"PGROOT=$env:PGROOT`" && cd /d `"$env:RUNNER_TEMP\pgvector`" && nmake /F Makefile.win && nmake /F Makefile.win install"
+          cmd /c "`"$vsPath\VC\Auxiliary\Build\vcvars64.bat`" && set `"PGROOT=$pgRoot`" && cd /d `"$env:RUNNER_TEMP\pgvector`" && nmake /F Makefile.win && nmake /F Makefile.win install"
           if ($LASTEXITCODE -ne 0) { throw 'pgvector build failed' }
 
           psql -U postgres -c "CREATE ROLE hot LOGIN SUPERUSER PASSWORD 'hot';"
@@ -170,7 +175,10 @@ jobs:
           if command -v psql >/dev/null 2>&1; then
             n="$(psql "$PG_URI" -tAc \
               "SELECT count(*) FROM pg_available_extensions WHERE name='vector'" 2>/dev/null || echo 0)"
-            [[ "$n" == "1" ]] && pg=true
+            # Migrations require PG18 (uuidv7()); an older server must probe
+            # as unavailable rather than fail mid-suite.
+            v="$(psql "$PG_URI" -tAc "SHOW server_version_num" 2>/dev/null || echo 0)"
+            [[ "$n" == "1" && "$v" -ge 180000 ]] && pg=true
           fi
           if command -v redis-cli >/dev/null 2>&1; then
             redis-cli ping 2>/dev/null | grep -q PONG && redis=true
