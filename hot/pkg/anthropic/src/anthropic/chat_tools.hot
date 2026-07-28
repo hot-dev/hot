@@ -33,6 +33,36 @@ StreamStop         ::ai-chat/StreamStop
 
 DEFAULT_MAX_TOKENS 1024
 
+ChatRequestOptions
+meta {
+    doc: """
+    Per-request output controls for Anthropic Messages.
+
+    Claude Opus 5 has thinking enabled by default and counts thinking plus
+    visible text against `max_tokens`, so callers selecting it should use a
+    materially larger ceiling than the legacy 1024-token adapter default.
+    """
+}
+type {
+    max-tokens: Int,
+    effort: Str?,
+}
+
+DEFAULT_REQUEST_OPTIONS ChatRequestOptions({
+    max-tokens: DEFAULT_MAX_TOKENS,
+    effort: null,
+})
+
+apply-request-options
+meta { doc: "Apply output and effort controls to an Anthropic request map." }
+fn (request: Map, options: ChatRequestOptions): Map {
+    with-output assoc(request, "max_tokens", options.max-tokens)
+    match options.effort {
+        Null => { with-output }
+        Str => { assoc(with-output, "output_config", {effort: options.effort}) }
+    }
+}
+
 // ============================================================================
 // Outbound: ::ai::chat/Message -> Anthropic content blocks
 // ============================================================================
@@ -185,17 +215,30 @@ meta {
     """
 }
 fn (model: Str, messages: Vec<::ai-chat/Message>, system: Str?, tools: Vec<::ai-tool/Tool>?): ::ai-chat/ChatReply {
+    chat-with-tools-options(model, messages, system, tools, DEFAULT_REQUEST_OPTIONS)
+}
+
+chat-with-tools-options
+meta {
+    doc: """
+    `chat-with-tools` with an explicit output ceiling and Anthropic effort.
+    Bind this function in a closure when a session needs model-specific
+    controls while retaining the normalized four-argument chat contract.
+    """
+}
+fn (model: Str, messages: Vec<::ai-chat/Message>, system: Str?, tools: Vec<::ai-tool/Tool>?, options: ChatRequestOptions): ::ai-chat/ChatReply {
     anth-messages map(messages, to-anthropic-message)
     anth-tools if(is-null(tools), null, map(tools, to-anthropic-tool))
 
     base {
         model: model,
         messages: anth-messages,
-        max_tokens: DEFAULT_MAX_TOKENS
+        max_tokens: options.max-tokens
     }
 
     with-system if(is-null(system), base, assoc(base, "system", system))
-    with-tools if(is-null(anth-tools), with-system, assoc(with-system, "tools", anth-tools))
+    with-effort apply-request-options(with-system, options)
+    with-tools if(is-null(anth-tools), with-effort, assoc(with-effort, "tools", anth-tools))
 
     response ::messages/post(::messages/MessagesPostRequest(with-tools))
 
@@ -495,17 +538,33 @@ meta {
     """
 }
 fn (model: Str, messages: Vec<::ai-chat/Message>, system: Str?, tools: Vec<::ai-tool/Tool>?, on-delta: Fn): ::ai-chat/ChatReply {
+    chat-with-tools-stream-options(
+        model,
+        messages,
+        system,
+        tools,
+        on-delta,
+        DEFAULT_REQUEST_OPTIONS
+    )
+}
+
+chat-with-tools-stream-options
+meta {
+    doc: "Streaming `chat-with-tools` with explicit output and effort controls."
+}
+fn (model: Str, messages: Vec<::ai-chat/Message>, system: Str?, tools: Vec<::ai-tool/Tool>?, on-delta: Fn, options: ChatRequestOptions): ::ai-chat/ChatReply {
     anth-messages map(messages, to-anthropic-message)
     anth-tools if(is-null(tools), null, map(tools, to-anthropic-tool))
 
     base {
         model: model,
         messages: anth-messages,
-        max_tokens: DEFAULT_MAX_TOKENS
+        max_tokens: options.max-tokens
     }
 
     with-system if(is-null(system), base, assoc(base, "system", system))
-    with-tools if(is-null(anth-tools), with-system, assoc(with-system, "tools", anth-tools))
+    with-effort apply-request-options(with-system, options)
+    with-tools if(is-null(anth-tools), with-effort, assoc(with-effort, "tools", anth-tools))
 
     response ::messages/post-stream(::messages/MessagesPostRequest(with-tools))
 

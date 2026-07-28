@@ -9,6 +9,20 @@ meta ["test"]
 // Outbound conversions
 // ============================================================================
 
+test-request-options-carry-opus5-output-controls
+meta ["test"]
+fn () {
+    request ::ct/apply-request-options(
+        {model: "claude-opus-5"},
+        ::ct/ChatRequestOptions({
+            max-tokens: 16384,
+            effort: "high",
+        })
+    )
+    assert-eq(16384, request.max_tokens)
+    assert-eq("high", request.output_config.effort)
+}
+
 test-to-anthropic-user-message
 meta ["test"]
 fn () {

@@ -33,6 +33,7 @@ ChatCompletionRequest type {
     model: Str,
     messages: Vec<Message>,
     max_completion_tokens: Int?,
+    reasoning_effort: Str?,
     temperature: Dec?,
     top_p: Dec?,
     n: Int?,
@@ -44,7 +45,8 @@ ChatCompletionRequest type {
     user: Str?,
     tools: Vec<Map>?,
     tool_choice: Any?,
-    response_format: Map?
+    response_format: Map?,
+    stream_options: Map?
 }
 
 // Chat completion response

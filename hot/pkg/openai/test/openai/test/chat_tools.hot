@@ -9,6 +9,20 @@ meta ["test"]
 // Outbound conversions
 // ============================================================================
 
+test-request-options-carry-gpt56-tool-compatibility-controls
+meta ["test"]
+fn () {
+    request ::ct/apply-request-options(
+        {model: "gpt-5.6-sol"},
+        ::ct/ChatRequestOptions({
+            max-completion-tokens: 8192,
+            reasoning-effort: "none",
+        })
+    )
+    assert-eq(8192, request.max_completion_tokens)
+    assert-eq("none", request.reasoning_effort)
+}
+
 test-to-openai-user-message
 meta ["test"]
 fn () {

@@ -118,13 +118,37 @@ pub(crate) async fn setup_live_build_for_dev(
     src_paths: &[String],
     test_paths: &[String],
 ) -> Result<(), String> {
+    setup_live_build_for_dev_with_color(
+        conf,
+        global_options,
+        src_paths,
+        test_paths,
+        hot::env::is_local_dev(),
+    )
+    .await
+}
+
+/// Set up a live build with an explicit diagnostic color policy.
+///
+/// Long-running commands that report failures through `tracing` must disable
+/// color here. `tracing-subscriber` sanitizes embedded ANSI control sequences,
+/// which otherwise turns an Ariadne report into visible `\x1b` escapes.
+pub(crate) async fn setup_live_build_for_dev_with_color(
+    conf: &Val,
+    global_options: &GlobalOptions,
+    src_paths: &[String],
+    test_paths: &[String],
+    color: bool,
+) -> Result<(), String> {
     let secret_scan_opts = build_secret_scan_opts(conf, false);
-    setup_live_build_for_dev_with_secret_scan_opts(
+    setup_live_build_for_dev_with_validation(
         conf,
         global_options,
         src_paths,
         test_paths,
         secret_scan_opts,
+        DevLiveBuildValidation::Structural,
+        color,
     )
     .await
 }
@@ -146,6 +170,7 @@ pub(crate) async fn setup_live_build_for_dev_with_context(
         test_paths,
         secret_scan_opts,
         DevLiveBuildValidation::RuntimePreflight(available_context_keys),
+        hot::env::is_local_dev(),
     )
     .await
 }
@@ -164,6 +189,7 @@ pub(crate) async fn setup_live_build_for_dev_with_secret_scan_opts(
         test_paths,
         secret_scan_opts,
         DevLiveBuildValidation::Structural,
+        hot::env::is_local_dev(),
     )
     .await
 }
@@ -199,6 +225,7 @@ fn standalone_runtime_preflight_for_early_return(
     src_paths: &[String],
     project_name: &str,
     conf: &Val,
+    color: bool,
 ) -> Result<(), String> {
     if !should_run_standalone_runtime_preflight(validation, reason) {
         return Ok(());
@@ -212,7 +239,7 @@ fn standalone_runtime_preflight_for_early_return(
         project_name,
         conf,
         available_context_keys,
-        hot::env::is_local_dev(),
+        color,
     )
 }
 
@@ -223,6 +250,7 @@ async fn setup_live_build_for_dev_with_validation(
     test_paths: &[String],
     secret_scan_opts: hot::secret_scan::SecretScanOpts,
     validation: DevLiveBuildValidation,
+    color: bool,
 ) -> Result<(), String> {
     let project_name = global_options
         .project
@@ -242,6 +270,7 @@ async fn setup_live_build_for_dev_with_validation(
             src_paths,
             &project_name,
             conf,
+            color,
         )?;
         return Ok(());
     }
@@ -300,6 +329,7 @@ async fn setup_live_build_for_dev_with_validation(
                 src_paths,
                 &project_name,
                 conf,
+                color,
             )?;
             return Ok(());
         }
@@ -316,6 +346,7 @@ async fn setup_live_build_for_dev_with_validation(
                 src_paths,
                 &project_name,
                 conf,
+                color,
             )?;
             return Ok(());
         }
@@ -337,6 +368,7 @@ async fn setup_live_build_for_dev_with_validation(
                     src_paths,
                     &project_name,
                     conf,
+                    color,
                 )?;
                 return Ok(());
             }
@@ -362,9 +394,7 @@ async fn setup_live_build_for_dev_with_validation(
     };
 
     // Create live build
-    match hot::build::setup_live_build_and_compiler(&db, build_context, hot::env::is_local_dev())
-        .await
-    {
+    match hot::build::setup_live_build_and_compiler(&db, build_context, color).await {
         Ok(build_result) => {
             tracing::info!(
                 "Live build created for project '{}': build_id={}",

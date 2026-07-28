@@ -182,6 +182,14 @@ pub fn get_log_target_from_conf(conf: &crate::val::Val) -> LogTarget {
     LogTarget::from_str(&target_str).unwrap_or(DEFAULT_LOG_TARGET)
 }
 
+/// Whether console output may include ANSI styling.
+///
+/// Keep this shared with commands that render terminal diagnostics outside of
+/// `tracing` so their color policy matches the subscriber's.
+pub fn console_ansi_enabled() -> bool {
+    std::env::var("NO_COLOR").is_err() && crate::env::is_local_dev()
+}
+
 /// Get log directory from configuration
 pub fn get_log_dir_from_conf(conf: &crate::val::Val) -> Option<String> {
     let dir = conf.get_str_or_default("log.dir", "null");
@@ -295,7 +303,7 @@ pub fn setup_tracing(
     match log_target {
         LogTarget::Stdout => {
             // Disable ANSI colors if NO_COLOR is set or when running outside local development.
-            let use_ansi = std::env::var("NO_COLOR").is_err() && crate::env::is_local_dev();
+            let use_ansi = console_ansi_enabled();
 
             match format {
                 LogFormat::Full => {
@@ -341,7 +349,7 @@ pub fn setup_tracing(
                 {
                     eprintln!("Failed to create log directory {}: {}", dir, e);
                     // Fall back to console logging with simple format
-                    let use_ansi = std::env::var("NO_COLOR").is_err() && crate::env::is_local_dev();
+                    let use_ansi = console_ansi_enabled();
                     fmt::Subscriber::builder()
                         .with_writer(std::io::stderr)
                         .with_ansi(use_ansi)
@@ -395,7 +403,7 @@ pub fn setup_tracing(
                 error!(
                     "Log target set to 'file' but no log directory specified, falling back to stdout"
                 );
-                let use_ansi = std::env::var("NO_COLOR").is_err() && crate::env::is_local_dev();
+                let use_ansi = console_ansi_enabled();
                 fmt::Subscriber::builder()
                     .with_writer(std::io::stderr)
                     .with_ansi(use_ansi)
