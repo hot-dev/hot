@@ -1031,6 +1031,17 @@ fn kata_root_readonly(writable_rootfs: bool) -> bool {
     !writable_rootfs
 }
 
+/// Give every Kata sandbox its own cgroup.
+///
+/// When `linux.cgroupsPath` is omitted, the Kata runtime falls back to the
+/// shared `/kata_vc` path. Parallel boxes then place unrelated QEMU/shim
+/// processes in the same cgroup, so one box can interfere with another during
+/// startup or cleanup.
+#[cfg_attr(not(all(target_os = "linux", feature = "kata")), allow(dead_code))]
+fn kata_cgroups_path(container_id: &str) -> String {
+    format!("/hot-box/{container_id}")
+}
+
 /// Compute the OCI chain ID from a list of diff IDs.
 /// For a single layer, chain ID = diff ID.
 /// For multiple layers: chain_id(L0..Ln) = sha256(chain_id(L0..Ln-1) + " " + diff_id(Ln))
@@ -2013,7 +2024,7 @@ mod kata {
         #[allow(clippy::too_many_arguments)]
         fn build_spec(
             &self,
-            _container_id: &str,
+            container_id: &str,
             cmd: Option<Vec<String>>,
             env: Option<Vec<String>>,
             limits: Option<&crate::box_limits::BoxLimits>,
@@ -2196,6 +2207,7 @@ mod kata {
                         "cpu": { "quota": cpu_quota, "period": 100000 },
                         "pids": { "limit": if writable { 512 } else { 100 } }
                     },
+                    "cgroupsPath": kata_cgroups_path(container_id),
                     "namespaces": namespaces
                 },
                 "mounts": mounts
@@ -2469,6 +2481,15 @@ mod tests {
         assert_eq!("Docker".parse::<Backend>().unwrap(), Backend::Docker);
         assert_eq!("".parse::<Backend>().unwrap(), Backend::Docker);
         assert!("invalid".parse::<Backend>().is_err());
+    }
+
+    #[test]
+    fn test_kata_cgroup_path_is_unique_per_container() {
+        assert_eq!(kata_cgroups_path("container-a"), "/hot-box/container-a");
+        assert_ne!(
+            kata_cgroups_path("container-a"),
+            kata_cgroups_path("container-b")
+        );
     }
 
     #[test]

@@ -33,7 +33,7 @@ meta {
 
 DEFAULT_IMAGE "mcr.microsoft.com/playwright:v1.49.1-noble"
 PLAYWRIGHT_VERSION "1.49.1"
-INSTALL_CMD "cd /tmp && npm install --no-save playwright-core@1.49.1 > /dev/null 2>&1 && ICU=$(find /ms-playwright -name icudtl.dat 2>/dev/null | head -1) && [ -n \"$ICU\" ] && cp \"$ICU\" /dev/shm/icudtl.dat && rm -f \"$ICU\" && ln -s /dev/shm/icudtl.dat \"$ICU\" || true"
+INSTALL_CMD "cd /tmp && npm install --no-save playwright-core@1.49.1 > /dev/null && ICU=$(find /ms-playwright -name icudtl.dat 2>/dev/null | head -1) && if [ -n \"$ICU\" ]; then cp \"$ICU\" /dev/shm/icudtl.dat && rm -f \"$ICU\" && ln -s /dev/shm/icudtl.dat \"$ICU\"; fi"
 CHROME_ARGS """["--no-sandbox","--disable-setuid-sandbox"]"""
 
 // ============================================================================

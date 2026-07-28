@@ -5,11 +5,18 @@ build-screenshot-script ::playwright/build-screenshot-script
 build-pdf-script ::playwright/build-pdf-script
 build-scrape-script ::playwright/build-scrape-script
 escape-sh-double ::playwright/escape-sh-double
+INSTALL_CMD ::playwright/INSTALL_CMD
 ScreenshotOpts ::playwright/ScreenshotOpts
 PdfOpts ::playwright/PdfOpts
 ScrapeOpts ::playwright/ScrapeOpts
 
 TEST_URL "https://example.com"
+
+test-install-command-does-not-mask-npm-failures
+meta ["test"] fn () {
+    assert(contains(INSTALL_CMD, "npm install"), "should install playwright-core")
+    assert(not(contains(INSTALL_CMD, "|| true")), "should preserve npm failures")
+}
 
 // ============================================================================
 // escape-sh-double
