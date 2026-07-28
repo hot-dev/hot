@@ -1,0 +1,71 @@
+::github::commits ns
+
+::api ::github::api
+::uri ::hot::uri
+query-string ::hot::uri/query-string
+
+commit-path fn (owner: Str, repo: Str, ref: Str): Str {
+  `/repos/${owner}/${repo}/commits/${::uri/encode(ref)}`
+}
+
+compare-path fn (owner: Str, repo: Str, base: Str, head: Str): Str {
+  `/repos/${owner}/${repo}/compare/${::uri/encode(base)}...${::uri/encode(head)}`
+}
+
+get-commit
+meta {
+    doc: """
+    GET /repos/{owner}/{repo}/commits/{ref} - One commit, including
+    verification, stats, changed files, and patches. `ref` may be a SHA,
+    branch, or tag. `params` supports `per_page` and `page` for large commits.
+    """
+}
+fn
+(owner: Str, repo: Str, ref: Str): Map {
+  ::api/json("GET", commit-path(owner, repo, ref))
+},
+(owner: Str, repo: Str, ref: Str, params: Map): Map {
+  ::api/json("GET", `${commit-path(owner, repo, ref)}${query-string(params)}`)
+}
+
+compare-commits
+meta {
+    doc: """
+    GET /repos/{owner}/{repo}/compare/{base}...{head} - Compare two commits,
+    branches, or tags. Returns merge base, ahead/behind counts, commits, and
+    changed files. `params` supports `per_page` and `page`.
+    """
+}
+fn
+(owner: Str, repo: Str, base: Str, head: Str): Map {
+  ::api/json("GET", compare-path(owner, repo, base, head))
+},
+(owner: Str, repo: Str, base: Str, head: Str, params: Map): Map {
+  ::api/json("GET", `${compare-path(owner, repo, base, head)}${query-string(params)}`)
+}
+
+get-combined-status
+meta {
+    doc: """
+    GET /repos/{owner}/{repo}/commits/{ref}/status - Combined legacy commit
+    status and its latest status for every context.
+    """
+}
+fn (owner: Str, repo: Str, ref: Str): Map {
+  ::api/json("GET", `${commit-path(owner, repo, ref)}/status`)
+}
+
+list-statuses
+meta {
+    doc: """
+    GET /repos/{owner}/{repo}/commits/{ref}/statuses - Every legacy commit
+    status, newest first. `params` supports `per_page` and `page`.
+    """
+}
+fn
+(owner: Str, repo: Str, ref: Str): Vec {
+  ::api/json("GET", `${commit-path(owner, repo, ref)}/statuses`)
+},
+(owner: Str, repo: Str, ref: Str, params: Map): Vec {
+  ::api/json("GET", `${commit-path(owner, repo, ref)}/statuses${query-string(params)}`)
+}

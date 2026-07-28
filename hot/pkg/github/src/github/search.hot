@@ -1,21 +1,30 @@
 ::github::search ns
 
 ::api ::github::api
-::uri ::hot::uri
+query-string ::hot::uri/query-string
+
+search-path fn (resource: Str, query: Str, params: Map): Str {
+  `/search/${resource}${query-string({q: query, ...params})}`
+}
 
 search-repos
 meta {
-    doc: """GET /search/repositories - Search repositories with GitHub's query syntax, e.g. `"language:rust stars:>1000 topic:runtime"`."""
+    doc: """GET /search/repositories - Search repositories with GitHub's query syntax, e.g. `"language:rust stars:>1000 topic:runtime"`. `params` supports `sort`, `order`, `per_page`, and `page`."""
 }
-fn (query: Str): Map {
-  ::api/json("GET", `/search/repositories?q=${::uri/encode(query)}`)
+fn
+(query: Str): Map {
+  search-repos(query, {})
+},
+(query: Str, params: Map): Map {
+  ::api/json("GET", search-path("repositories", query, params))
 }
 
 search-issues
 meta {
     doc: """
     GET /search/issues - Search issues and PRs, e.g.
-    `"repo:hot-dev/hot is:issue is:open label:bug"`.
+    `"repo:hot-dev/hot is:issue is:open label:bug"`. `params` supports
+    `sort`, `order`, `per_page`, and `page`.
 
     **Example**
 
@@ -25,14 +34,22 @@ meta {
     ```
     """
 }
-fn (query: Str): Map {
-  ::api/json("GET", `/search/issues?q=${::uri/encode(query)}`)
+fn
+(query: Str): Map {
+  search-issues(query, {})
+},
+(query: Str, params: Map): Map {
+  ::api/json("GET", search-path("issues", query, params))
 }
 
 search-code
 meta {
-    doc: """GET /search/code - Search code, e.g. `"repo:hot-dev/hot ed25519 in:file language:rust"`."""
+    doc: """GET /search/code - Search code, e.g. `"repo:hot-dev/hot ed25519 in:file language:rust"`. `params` supports `sort`, `order`, `per_page`, and `page`."""
 }
-fn (query: Str): Map {
-  ::api/json("GET", `/search/code?q=${::uri/encode(query)}`)
+fn
+(query: Str): Map {
+  search-code(query, {})
+},
+(query: Str, params: Map): Map {
+  ::api/json("GET", search-path("code", query, params))
 }

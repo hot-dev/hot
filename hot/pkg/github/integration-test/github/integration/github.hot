@@ -10,6 +10,9 @@ meta ["test"]
 ::users ::github::users
 ::repos ::github::repos
 ::search ::github::search
+::checks ::github::checks
+::commits ::github::commits
+::rate-limit ::github::rate-limit
 
 test-authenticated-user
 meta ["test"] fn () {
@@ -44,4 +47,23 @@ meta ["test"] fn () {
     // must surface that as a clear Err, not a halt on .path/.sha.
     out ::repos/get-content("hot-dev", "hot-github-integration-test", "fixtures")
     assert(is-err(out), "directory path should err")
+}
+
+test-commit-check-and-status-evidence
+meta ["test"] fn () {
+    commit ::commits/get-commit("hot-dev", "hot", "main")
+    comparison ::commits/compare-commits("hot-dev", "hot", commit.sha, commit.sha)
+    checks ::checks/list-check-runs-for-ref("hot-dev", "hot", commit.sha, {per_page: 1})
+    status ::commits/get-combined-status("hot-dev", "hot", commit.sha)
+
+    assert-eq(commit.sha, comparison.base_commit.sha)
+    assert(is-some(checks.total_count))
+    assert(is-some(status.state))
+}
+
+test-rate-limit-shape
+meta ["test"] fn () {
+    limits ::rate-limit/get()
+    assert(is-some(limits.resources.core.remaining))
+    assert(is-some(limits.resources.search.remaining))
 }

@@ -1,0 +1,73 @@
+::github::artifacts ns
+
+::api ::github::api
+::actions ::github::actions
+
+artifact-path fn (owner: Str, repo: Str, artifact-id: Any): Str {
+  ::actions/actions-path(owner, repo, `/artifacts/${artifact-id}`)
+}
+
+list-artifacts
+meta {
+    doc: """
+    GET /repos/{owner}/{repo}/actions/artifacts - Repository Actions
+    artifacts. `params` supports `name`, `per_page`, and `page`.
+    """
+}
+fn
+(owner: Str, repo: Str): Map {
+  ::api/json("GET", ::actions/actions-path(owner, repo, "/artifacts"))
+},
+(owner: Str, repo: Str, params: Map): Map {
+  ::api/json(
+    "GET",
+    ::actions/actions-path(owner, repo, "/artifacts") |> ::actions/with-query(params)
+  )
+}
+
+list-workflow-run-artifacts
+meta {
+    doc: """
+    GET /repos/{owner}/{repo}/actions/runs/{run_id}/artifacts - Artifacts
+    produced by one workflow run. `params` supports `name`, `per_page`,
+    and `page`.
+    """
+}
+fn
+(owner: Str, repo: Str, run-id: Any): Map {
+  ::api/json("GET", `${::actions/run-path(owner, repo, run-id)}/artifacts`)
+},
+(owner: Str, repo: Str, run-id: Any, params: Map): Map {
+  ::api/json(
+    "GET",
+    `${::actions/run-path(owner, repo, run-id)}/artifacts`
+    |> ::actions/with-query(params)
+  )
+}
+
+get-artifact
+meta {
+    doc: """GET /repos/{owner}/{repo}/actions/artifacts/{artifact_id} - Get artifact metadata."""
+}
+fn (owner: Str, repo: Str, artifact-id: Any): Map {
+  ::api/json("GET", artifact-path(owner, repo, artifact-id))
+}
+
+download-artifact
+meta {
+    doc: """
+    GET /repos/{owner}/{repo}/actions/artifacts/{artifact_id}/zip -
+    Download an artifact ZIP archive as Bytes.
+    """
+}
+fn (owner: Str, repo: Str, artifact-id: Any): Any {
+  ::api/download(`${artifact-path(owner, repo, artifact-id)}/zip`)
+}
+
+delete-artifact
+meta {
+    doc: """DELETE /repos/{owner}/{repo}/actions/artifacts/{artifact_id} - Delete an artifact."""
+}
+fn (owner: Str, repo: Str, artifact-id: Any): Any {
+  ::api/json("DELETE", artifact-path(owner, repo, artifact-id))
+}
