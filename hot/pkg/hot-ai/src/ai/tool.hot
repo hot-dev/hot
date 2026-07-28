@@ -14,6 +14,9 @@ meta {
     """
 }
 
+::regex ::hot::regex
+::hash  ::hot::hash
+
 // ============================================================================
 // Types
 // ============================================================================
@@ -146,6 +149,39 @@ fn (f: Fn): Map {
 }
 
 // ============================================================================
+// Provider names
+// ============================================================================
+
+PROVIDER_NAME_LIMIT 64
+
+provider-name
+meta {
+    doc: """
+    Return a deterministic provider-safe alias for an internal tool name.
+
+    Hot tool names may be qualified (`::project/search`) or grouped
+    (`github/list-runs`), while model providers accept only letters, digits,
+    underscores, and hyphens. Valid short names pass through unchanged.
+    Rewritten names carry a hash suffix so two distinct internal names cannot
+    silently collapse onto the same provider-facing alias.
+    """
+}
+fn (name: Str): Str {
+    safe ::regex/replace-all(name, "[^a-zA-Z0-9_-]", "_")
+    cond {
+        and(gt(length(safe), 0),
+            and(lte(length(safe), PROVIDER_NAME_LIMIT), eq(safe, name))) => {
+            safe
+        }
+        => {
+            suffix slice(::hash/blake3(name), 0, 10)
+            prefix-limit sub(PROVIDER_NAME_LIMIT, add(length(suffix), 1))
+            `${slice(safe, 0, prefix-limit)}_${suffix}`
+        }
+    }
+}
+
+// ============================================================================
 // Construction
 // ============================================================================
 
@@ -241,7 +277,9 @@ meta {
     """
 }
 fn (tools: Vec<Tool>, name: Str): Tool? {
-    find-first(tools, eq(%.name, name))
+    find-first(tools, (tool) {
+        or(eq(tool.name, name), eq(provider-name(tool.name), name))
+    })
 }
 
 dispatch

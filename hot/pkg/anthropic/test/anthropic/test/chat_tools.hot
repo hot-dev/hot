@@ -97,6 +97,15 @@ fn () {
     assert(is-some(out.input_schema), "input_schema present")
 }
 
+test-to-anthropic-tool-uses-provider-safe-name
+meta ["test"]
+fn () {
+    t ::ai-tool/from-fn(tool-fixture-fn, {name: "github/list-runs"})
+    out ::ct/to-anthropic-tool(t)
+    assert-eq(::ai-tool/provider-name("github/list-runs"), out.name)
+    assert(::hot::regex/is-match(out.name, "^[a-zA-Z0-9_-]+$"))
+}
+
 // ============================================================================
 // Inbound conversions
 // ============================================================================

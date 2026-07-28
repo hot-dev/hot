@@ -72,7 +72,12 @@ meta {
     doc: """Convert a `::ai::tool/ToolCall` into an Anthropic `tool_use` content block."""
 }
 fn (call: ::ai-tool/ToolCall): Map {
-    {type: "tool_use", id: call.id, name: call.name, input: call.input}
+    {
+        type: "tool_use",
+        id: call.id,
+        name: ::ai-tool/provider-name(call.name),
+        input: call.input
+    }
 }
 
 to-anthropic-message
@@ -114,7 +119,11 @@ meta {
     """
 }
 fn (t: ::ai-tool/Tool): Map {
-    base {name: t.name, input_schema: t.input-schema}
+    base {
+        name: ::ai-tool/provider-name(t.name),
+        input_schema: t.input-schema
+    }
+
     if(is-null(t.description), base, assoc(base, "description", t.description))
 }
 
@@ -242,18 +251,23 @@ fn (model: Str, messages: Vec<::ai-chat/Message>, system: Str?, tools: Vec<::ai-
 
     response ::messages/post(::messages/MessagesPostRequest(with-tools))
 
-    blocks or(response.content, [])
-    text response-text(blocks)
-    calls response-tool-calls(blocks)
-    stop or(response.stop_reason, "end_turn")
+    match response {
+        Result.Err => { err(response) }
+        Result.Ok => {
+            blocks or(response.content, [])
+            text response-text(blocks)
+            calls response-tool-calls(blocks)
+            stop or(response.stop_reason, "end_turn")
 
-    ::ai-chat/ChatReply({
-        text: if(is-empty(text), null, text),
-        tool-calls: if(is-empty(calls), null, calls),
-        stop-reason: stop,
-        usage: response-usage(response.usage),
-        raw: response
-    })
+            ::ai-chat/ChatReply({
+                text: if(is-empty(text), null, text),
+                tool-calls: if(is-empty(calls), null, calls),
+                stop-reason: stop,
+                usage: response-usage(response.usage),
+                raw: response
+            })
+        }
+    }
 }
 
 // ============================================================================
