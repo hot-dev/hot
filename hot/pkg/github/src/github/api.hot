@@ -15,11 +15,25 @@ HttpError type {
     body: Any
 }
 
+GitHubResponse type {
+    status: Int,
+    headers: Map,
+    data: Any
+}
+
 HttpResponse -> HttpError fn (response: HttpResponse): HttpError {
   HttpError({
     status: response.status,
-    headers: response.headers,
+    headers: or(response.headers, {}),
     body: response.body
+  })
+}
+
+github-response fn (response: HttpResponse): GitHubResponse {
+  GitHubResponse({
+    status: response.status,
+    headers: or(response.headers, {}),
+    data: json-response-body(response)
   })
 }
 
@@ -76,6 +90,36 @@ json-response-body fn (response: HttpResponse): Any {
   }
 }
 
+json-response
+meta {
+    doc: """
+    Like `json`, but preserve successful response metadata as
+    `GitHubResponse({status, headers, data})`. Use this when an agent needs
+    pagination links, request ids, or rate-limit headers.
+    """
+}
+fn
+(method: Str, path: Str): GitHubResponse {
+  json-response(method, path, {}, "")
+},
+(method: Str, path: Str, additional-headers: Map, body: Any): GitHubResponse {
+  response request(method, path, additional-headers, body)
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { github-response(response) }
+    => { err(HttpError(response)) }
+  }
+},
+// 5-arity: explicit token override (App JWTs, installation tokens)
+(method: Str, path: Str, additional-headers: Map, body: Any, token: Str): GitHubResponse {
+  response request(method, path, additional-headers, body, token)
+  cond {
+    is-err(response) => { response }
+    is-ok-response(response) => { github-response(response) }
+    => { err(HttpError(response)) }
+  }
+}
+
 json
 meta {
     doc: """Like `request`, but unwraps: returns the decoded JSON body on 2xx, null for a no-content response, or an Err carrying `HttpError`. The shape used by all github endpoint functions."""
@@ -100,6 +144,153 @@ fn
     is-ok-response(response) => { json-response-body(response) }
     => { err(HttpError(response)) }
   }
+}
+
+link-url
+meta {
+    doc: """
+    Extract one relation URL (for example `"next"`) from a GitHub `link`
+    response header. Returns null when the relation is absent.
+    """
+}
+fn (headers: Map, relation: Str): Str? {
+  value or(get(headers, "link"), get(headers, "Link"), "")
+  candidate find-first(
+    split(value, ","),
+    (part) { contains(part, `rel="${relation}"`) }
+  )
+
+  match candidate {
+    Null => { null }
+    Str => {
+      first(split(trim(candidate), ">")) |> slice(1)
+    }
+  }
+}
+
+next-page-path
+meta {
+    doc: """
+    Return the relative API path from a GitHub response's `rel="next"` link,
+    or null on the final page. Rejects pagination links outside api.github.com.
+    """
+}
+fn (headers: Map): Str? {
+  url link-url(headers, "next")
+  match url {
+    Null => { null }
+    Str => {
+      if(
+        starts-with(url, `${::github/BASE_URL}/`),
+        slice(url, length(::github/BASE_URL)),
+        err(`GitHub pagination link is outside ${::github/BASE_URL}: ${url}`)
+      )
+    }
+  }
+}
+
+next-page-with-token fn (response: GitHubResponse, token: Str?): GitHubResponse? {
+  path next-page-path(response.headers)
+  match path {
+    Null => { null }
+    Str => {
+      match token {
+        Null => { json-response("GET", path) }
+        Str => { json-response("GET", path, {}, "", token) }
+      }
+    }
+  }
+}
+
+next-page
+meta {
+    doc: """
+    Fetch the next page represented by a `GitHubResponse`, preserving the next
+    response's metadata. Returns null when the supplied page is the last one.
+    Pass an explicit token as the second argument when the first page used a
+    token override.
+    """
+}
+fn
+(response: GitHubResponse): GitHubResponse? {
+  next-page-with-token(response, null)
+},
+(response: GitHubResponse, token: Str): GitHubResponse? {
+  next-page-with-token(response, token)
+}
+
+fetch-page fn (path: Str, token: Str?): GitHubResponse {
+  match token {
+    Null => { json-response("GET", path) }
+    Str => { json-response("GET", path, {}, "", token) }
+  }
+}
+
+collect-list-pages fn (path: Str, accumulated: Vec, token: Str?): Vec {
+  page fetch-page(path, token)
+  items match page.data {
+    Null => { [] }
+    Vec => { page.data }
+    => { err("GitHub paginate-list expected a Vec response body") }
+  }
+
+  combined concat(accumulated, items)
+  next next-page-path(page.headers)
+
+  match next {
+    Null => { combined }
+    Str => { collect-list-pages(next, combined, token) }
+  }
+}
+
+paginate-list
+meta {
+    doc: """
+    Fetch every page for an endpoint whose body is a Vec. Pagination follows
+    GitHub's `link` header serially. Prefer manual `json-response`/`next-page`
+    when the result may be very large. Pass an explicit token as the second
+    argument when using a token override.
+    """
+}
+fn
+(path: Str): Vec {
+  collect-list-pages(path, [], null)
+},
+(path: Str, token: Str): Vec {
+  collect-list-pages(path, [], token)
+}
+
+collect-key-pages fn (path: Str, key: Str, accumulated: Vec, token: Str?): Vec {
+  page fetch-page(path, token)
+  items get(page.data, key, [])
+  checked match items {
+    Vec => { items }
+    => { err(`GitHub paginate-key expected '${key}' to be a Vec`) }
+  }
+
+  combined concat(accumulated, checked)
+  next next-page-path(page.headers)
+
+  match next {
+    Null => { combined }
+    Str => { collect-key-pages(next, key, combined, token) }
+  }
+}
+
+paginate-key
+meta {
+    doc: """
+    Fetch every page for an endpoint whose item Vec is nested under `key`,
+    such as `"check_runs"` or `"items"`. Pass an explicit token as the third
+    argument when using a token override.
+    """
+}
+fn
+(path: Str, key: Str): Vec {
+  collect-key-pages(path, key, [], null)
+},
+(path: Str, key: Str, token: Str): Vec {
+  collect-key-pages(path, key, [], token)
 }
 
 response-body

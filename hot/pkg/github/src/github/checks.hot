@@ -1,0 +1,110 @@
+::github::checks ns
+
+::api ::github::api
+::uri ::hot::uri
+query-string ::hot::uri/query-string
+
+checks-path fn (owner: Str, repo: Str, suffix: Str): Str {
+  `/repos/${owner}/${repo}${suffix}`
+}
+
+check-run-path fn (owner: Str, repo: Str, check-run-id: Any): Str {
+  checks-path(owner, repo, `/check-runs/${check-run-id}`)
+}
+
+check-suite-path fn (owner: Str, repo: Str, check-suite-id: Any): Str {
+  checks-path(owner, repo, `/check-suites/${check-suite-id}`)
+}
+
+ref-checks-path fn (owner: Str, repo: Str, ref: Str, resource: Str): Str {
+  checks-path(owner, repo, `/commits/${::uri/encode(ref)}/${resource}`)
+}
+
+get-check-run
+meta {
+    doc: """GET /repos/{owner}/{repo}/check-runs/{check_run_id} - One check run and its structured output summary."""
+}
+fn (owner: Str, repo: Str, check-run-id: Any): Map {
+  ::api/json("GET", check-run-path(owner, repo, check-run-id))
+}
+
+list-check-runs-for-ref
+meta {
+    doc: """
+    GET /repos/{owner}/{repo}/commits/{ref}/check-runs - Check runs from
+    GitHub Actions and external CI for a SHA, branch, or tag. `params`
+    supports `check_name`, `status`, `filter` ("latest"/"all"), `app_id`,
+    `per_page`, and `page`.
+    """
+}
+fn
+(owner: Str, repo: Str, ref: Str): Map {
+  ::api/json("GET", ref-checks-path(owner, repo, ref, "check-runs"))
+},
+(owner: Str, repo: Str, ref: Str, params: Map): Map {
+  path ref-checks-path(owner, repo, ref, "check-runs")
+  ::api/json("GET", `${path}${query-string(params)}`)
+}
+
+list-check-run-annotations
+meta {
+    doc: """
+    GET /repos/{owner}/{repo}/check-runs/{check_run_id}/annotations -
+    Structured file, line, severity, and message evidence. `params` supports
+    `per_page` and `page`.
+    """
+}
+fn
+(owner: Str, repo: Str, check-run-id: Any): Vec {
+  ::api/json("GET", `${check-run-path(owner, repo, check-run-id)}/annotations`)
+},
+(owner: Str, repo: Str, check-run-id: Any, params: Map): Vec {
+  ::api/json(
+    "GET",
+    `${check-run-path(owner, repo, check-run-id)}/annotations${query-string(params)}`
+  )
+}
+
+get-check-suite
+meta {
+    doc: """GET /repos/{owner}/{repo}/check-suites/{check_suite_id} - One check suite."""
+}
+fn (owner: Str, repo: Str, check-suite-id: Any): Map {
+  ::api/json("GET", check-suite-path(owner, repo, check-suite-id))
+}
+
+list-check-suites-for-ref
+meta {
+    doc: """
+    GET /repos/{owner}/{repo}/commits/{ref}/check-suites - Check suites for
+    a SHA, branch, or tag. `params` supports `app_id`, `check_name`,
+    `per_page`, and `page`.
+    """
+}
+fn
+(owner: Str, repo: Str, ref: Str): Map {
+  ::api/json("GET", ref-checks-path(owner, repo, ref, "check-suites"))
+},
+(owner: Str, repo: Str, ref: Str, params: Map): Map {
+  path ref-checks-path(owner, repo, ref, "check-suites")
+  ::api/json("GET", `${path}${query-string(params)}`)
+}
+
+list-check-runs-for-suite
+meta {
+    doc: """
+    GET /repos/{owner}/{repo}/check-suites/{check_suite_id}/check-runs -
+    Check runs in one suite. `params` supports `check_name`, `status`,
+    `filter` ("latest"/"all"), `per_page`, and `page`.
+    """
+}
+fn
+(owner: Str, repo: Str, check-suite-id: Any): Map {
+  ::api/json("GET", `${check-suite-path(owner, repo, check-suite-id)}/check-runs`)
+},
+(owner: Str, repo: Str, check-suite-id: Any, params: Map): Map {
+  ::api/json(
+    "GET",
+    `${check-suite-path(owner, repo, check-suite-id)}/check-runs${query-string(params)}`
+  )
+}

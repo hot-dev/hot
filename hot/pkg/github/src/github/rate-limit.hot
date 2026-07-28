@@ -1,0 +1,15 @@
+::github::rate-limit ns
+
+::api ::github::api
+
+get
+meta {
+    doc: """
+    GET /rate_limit - Current rate-limit budgets by resource, including
+    `core`, `search`, `code_search`, and `graphql`. This call does not consume
+    the primary rate limit, though it can count toward secondary limits.
+    """
+}
+fn (): Map {
+  ::api/json("GET", "/rate_limit")
+}
