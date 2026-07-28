@@ -3,16 +3,17 @@
 
 use std::path::Path;
 
+use hot::log::LogTarget;
 use hot::stream::{StreamPubSub, StreamPubSubType};
 use hot::val::Val;
-use tracing::{debug, error, info, warn};
+use tracing::{Level, debug, error, info, warn};
 
 use crate::Env;
 use crate::build_info;
 use crate::cli::{EmitterOptions, GlobalOptions};
 use crate::command::api::run_api_with_stream_pubsub;
 use crate::command::app::run_app;
-use crate::command::deploy::setup_live_build_for_dev;
+use crate::command::deploy::setup_live_build_for_dev_with_color;
 use crate::command::init::check_and_run_init_if_needed;
 use crate::command::scheduler::run_scheduler;
 use crate::command::worker::{run_task_worker, run_worker_with_stream_pubsub_shared_context};
@@ -23,6 +24,88 @@ use crate::conf::{
 
 const HOT_DEV_WORKER_SHUTDOWN_TIMEOUT_SECONDS: i64 = 1;
 const HOT_DEV_TASK_SHUTDOWN_DRAIN_SECONDS: i64 = 5;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DevDiagnosticDestination {
+    Console,
+    Log,
+    Disabled,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct DevDiagnosticOutput {
+    destination: DevDiagnosticDestination,
+    color: bool,
+}
+
+impl DevDiagnosticOutput {
+    fn from_conf(conf: &Val) -> Self {
+        Self::for_target(
+            hot::log::get_log_target_from_conf(conf),
+            hot::log::console_ansi_enabled(),
+        )
+    }
+
+    fn for_target(target: LogTarget, console_ansi: bool) -> Self {
+        match target {
+            LogTarget::Stdout => Self {
+                destination: DevDiagnosticDestination::Console,
+                color: console_ansi,
+            },
+            LogTarget::File => Self {
+                destination: DevDiagnosticDestination::Log,
+                color: false,
+            },
+            LogTarget::None => Self {
+                destination: DevDiagnosticDestination::Disabled,
+                color: false,
+            },
+        }
+    }
+}
+
+fn write_console_diagnostic(diagnostic: &str) {
+    use std::io::Write;
+
+    let stdout = std::io::stdout();
+    let mut stdout = stdout.lock();
+    let _ = stdout.write_all(diagnostic.as_bytes());
+    if !diagnostic.ends_with('\n') {
+        let _ = stdout.write_all(b"\n");
+    }
+    let _ = stdout.flush();
+}
+
+fn report_dev_error(output: DevDiagnosticOutput, context: &str, diagnostic: &str) {
+    if output.destination == DevDiagnosticDestination::Disabled || !tracing::enabled!(Level::ERROR)
+    {
+        return;
+    }
+
+    match output.destination {
+        DevDiagnosticDestination::Console => {
+            error!("{}", context);
+            write_console_diagnostic(diagnostic);
+        }
+        DevDiagnosticDestination::Log => error!("{}: {}", context, diagnostic),
+        DevDiagnosticDestination::Disabled => unreachable!(),
+    }
+}
+
+fn report_dev_warning(output: DevDiagnosticOutput, context: &str, diagnostic: &str) {
+    if output.destination == DevDiagnosticDestination::Disabled || !tracing::enabled!(Level::WARN) {
+        return;
+    }
+
+    match output.destination {
+        DevDiagnosticDestination::Console => {
+            warn!("{}", context);
+            write_console_diagnostic(diagnostic);
+        }
+        DevDiagnosticDestination::Log => warn!("{}: {}", context, diagnostic),
+        DevDiagnosticDestination::Disabled => unreachable!(),
+    }
+}
 
 pub(crate) async fn run_dev(
     conf: Val,
@@ -82,6 +165,7 @@ pub(crate) async fn run_dev(
         conf
     };
     let conf = apply_hot_dev_shutdown_defaults(conf, &conf_files);
+    let diagnostic_output = DevDiagnosticOutput::from_conf(&conf);
 
     // Create or update live build for development
     // Extract global options from conf for live build setup
@@ -124,15 +208,15 @@ pub(crate) async fn run_dev(
         Some(&conf),
         Some(&project_name),
         context_storage_snapshot.as_ref(),
-        hot::env::is_local_dev(),
+        diagnostic_output.color,
     ) {
         if hot::env::is_local_dev() {
-            warn!("{}", e);
+            report_dev_warning(diagnostic_output, "hot.dev: Source validation failed", &e);
             warn!(
                 "Continuing in local dev mode — set context variables via the app UI or ctx.hot file"
             );
         } else {
-            error!("{}", e);
+            report_dev_error(diagnostic_output, "hot.dev: Source validation failed", &e);
             std::process::exit(1);
         }
     }
@@ -151,9 +235,16 @@ pub(crate) async fn run_dev(
     // CRITICAL: Wait for live build to complete before starting any services
     // This ensures event handlers and schedules are ready before worker processes events
     info!("hot.dev: Setting up live build and extracting event handlers...");
-    if let Err(e) = setup_live_build_for_dev(&conf, &global_options, &src_paths, &test_paths).await
+    if let Err(e) = setup_live_build_for_dev_with_color(
+        &conf,
+        &global_options,
+        &src_paths,
+        &test_paths,
+        diagnostic_output.color,
+    )
+    .await
     {
-        error!("Failed to setup live build for dev: {}", e);
+        report_dev_error(diagnostic_output, "Failed to setup live build for dev", &e);
         error!("Cannot start dev servers without a valid build");
         std::process::exit(1);
     }
@@ -436,6 +527,7 @@ pub(crate) async fn run_dev_file_watcher(
     use std::sync::mpsc::channel;
     use std::time::{Duration, Instant};
 
+    let diagnostic_output = DevDiagnosticOutput::from_conf(&conf);
     let (tx, rx) = channel();
     let mut watcher: RecommendedWatcher = match Watcher::new(tx, notify::Config::default()) {
         Ok(w) => w,
@@ -709,11 +801,12 @@ pub(crate) async fn run_dev_file_watcher(
             let current_src_paths = get_merged_src_paths(&conf, None, &[]);
             let current_test_paths = get_merged_test_paths(&conf, None, &[]);
 
-            match setup_live_build_for_dev(
+            match setup_live_build_for_dev_with_color(
                 &conf,
                 &global_options,
                 &current_src_paths,
                 &current_test_paths,
+                diagnostic_output.color,
             )
             .await
             {
@@ -721,9 +814,10 @@ pub(crate) async fn run_dev_file_watcher(
                     info!("hot.dev: Event handlers and schedules reloaded successfully");
                 }
                 Err(e) => {
-                    error!(
-                        "hot.dev: Failed to reload event handlers and schedules: {}",
-                        e,
+                    report_dev_error(
+                        diagnostic_output,
+                        "hot.dev: Failed to reload event handlers and schedules",
+                        &e,
                     );
                     error!("hot.dev: Fix the error and save again to retry");
                 }
@@ -735,5 +829,76 @@ pub(crate) async fn run_dev_file_watcher(
             // Reset timer AFTER rebuild completes and events are drained
             last_rebuild = Instant::now();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use hot::lang::parser::{ErrorLocation, ParseError};
+
+    #[test]
+    fn hot_dev_diagnostic_output_is_target_aware() {
+        assert_eq!(
+            DevDiagnosticOutput::for_target(LogTarget::Stdout, true),
+            DevDiagnosticOutput {
+                destination: DevDiagnosticDestination::Console,
+                color: true,
+            }
+        );
+        assert_eq!(
+            DevDiagnosticOutput::for_target(LogTarget::Stdout, false),
+            DevDiagnosticOutput {
+                destination: DevDiagnosticDestination::Console,
+                color: false,
+            }
+        );
+        assert_eq!(
+            DevDiagnosticOutput::for_target(LogTarget::File, true),
+            DevDiagnosticOutput {
+                destination: DevDiagnosticDestination::Log,
+                color: false,
+            }
+        );
+        assert_eq!(
+            DevDiagnosticOutput::for_target(LogTarget::None, true),
+            DevDiagnosticOutput {
+                destination: DevDiagnosticDestination::Disabled,
+                color: false,
+            }
+        );
+    }
+
+    #[test]
+    fn hot_dev_ariadne_color_matches_diagnostic_target() {
+        let source = "value ~ invalid";
+        let error = ParseError {
+            message: "Invalid character '~'".to_string(),
+            location: ErrorLocation {
+                line: 1,
+                column: 7,
+                position: 6,
+                length: 1,
+                file: Some("source.hot".into()),
+            },
+            source_context: Some(source.to_string()),
+        };
+
+        let console = DevDiagnosticOutput::for_target(LogTarget::Stdout, true);
+        let colored = error
+            .format_error(source, console.color)
+            .expect("Ariadne report should render");
+        assert!(colored.contains('\x1b'));
+
+        let file = DevDiagnosticOutput::for_target(LogTarget::File, true);
+        let plain = error
+            .format_error(source, file.color)
+            .expect("Ariadne report should render");
+        assert!(plain.contains("source.hot"));
+        assert!(plain.contains("Invalid character '~'"));
+        assert!(
+            !plain.contains('\x1b'),
+            "file diagnostics must not contain ANSI escapes: {plain:?}"
+        );
     }
 }
