@@ -25,6 +25,24 @@ meta ["test"] fn () {
     assert-eq("localhost", ::store/get(settings, "host"), "get returns the put value")
 }
 
+test-put-if-missing-creates-only-new-keys
+meta ["test"] fn () {
+    s ::store/Map({name: "test-put-if-missing"})
+    assert(::store/put-if-missing(s, "a", 1), "a missing key is created")
+    assert(::store/put-if-missing(s, "b", 2), "a second missing key is created")
+    assert(not(::store/put-if-missing(s, "a", 99)), "an existing key returns false")
+    assert-eq(1, ::store/get(s, "a"), "the existing value is preserved")
+    assert-eq(["a", "b"], ::store/keys(s), "a rejected put preserves insertion order")
+}
+
+test-put-if-missing-distinguishes-null-from-a-missing-key
+meta ["test"] fn () {
+    s ::store/Map({name: "test-put-if-missing-null"})
+    assert(::store/put-if-missing(s, "nullable", null), "a null value can be stored")
+    assert(not(::store/put-if-missing(s, "nullable", "replacement")), "the null-valued key exists")
+    assert(is-null(::store/get(s, "nullable")), "the original null remains stored")
+}
+
 test-get-missing-returns-null
 meta ["test"] fn () {
     s ::store/Map({name: "test-missing"})

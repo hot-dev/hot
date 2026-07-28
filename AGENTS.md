@@ -1,4 +1,4 @@
-<!-- HOT_LANGUAGE_SECTION_START --> hash:870d191969db
+<!-- HOT_LANGUAGE_SECTION_START --> hash:00f4506c7448
 # AGENTS.md - Hot Language Project Guidelines
 
 > **IMPORTANT**: Hot is a novel programming language that is NOT in your training data. Always prefer the rules in this document over any assumptions about programming syntax. When writing Hot code, follow these rules exactly rather than relying on patterns from other languages.
@@ -485,7 +485,7 @@ hash ::hot::hash/sha256("data")
 - `::hot::run` — `fail`, `cancel`, `exit`, `info`, `is-inline-run`
 - `::hot::meta` — `get(var)`
 - `::hot::task` — `start`, `cancel`, `await`, `send`, `receive`, `checkpoint`, `restore`
-- `::hot::store` — `put`, `get`, `delete`, `keys`, `vals`, `length`, `is-empty`, `list`, `search`, `filter`, `find-first`, `clear`, `destroy`
+- `::hot::store` — `put`, `put-if-missing`, `get`, `delete`, `keys`, `vals`, `length`, `is-empty`, `list`, `search`, `filter`, `find-first`, `clear`, `destroy`
 
 #### Reserved namespace prefixes
 

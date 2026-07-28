@@ -183,6 +183,17 @@ pub trait Store: Send + Sync {
         text_content: Option<String>,
     ) -> Result<StoreEntry, String>;
 
+    /// Create a key-value pair without replacing an existing entry.
+    /// Returns true only when this call inserted the row.
+    async fn put_if_missing(
+        &self,
+        store_name: &str,
+        key: serde_json::Value,
+        value: serde_json::Value,
+        embedding: Option<Vec<f32>>,
+        text_content: Option<String>,
+    ) -> Result<bool, String>;
+
     /// Get a value by key. Returns None if not found.
     async fn get(
         &self,

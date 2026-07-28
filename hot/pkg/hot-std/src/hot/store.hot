@@ -115,6 +115,32 @@ fn (store: Map, key: Any, value: Any): Any {
 }
 
 
+put-if-missing
+meta {
+    doc: """
+    Atomically create a key-value pair without replacing an existing entry.
+
+    `put` sets a key, replacing its value when it already exists.
+    `put-if-missing` returns `true` when this call created the entry and
+    `false` when the key already existed, leaving the stored value and
+    insertion order unchanged.
+
+    Stores with embeddings avoid a known-unnecessary embedding call when the
+    key already exists. Concurrent losing calls may still compute an unused
+    embedding before the database chooses the single winner.
+
+    **Example**
+
+    ```hot
+    created ::store/put-if-missing(settings, "initialized", true)
+    ```
+    """
+}
+fn (store: Map, key: Any, value: Any): Bool {
+    call-lib(::hot::store/put-if-missing, [store, key, value])
+}
+
+
 get
 meta {
     doc: """
