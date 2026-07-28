@@ -30,7 +30,9 @@ CreateMessageParams type {
     tool_choice: ToolChoice?,
     tools: Vec<Tool>?,
     top_k: Int?,
-    top_p: Dec?
+    top_p: Dec?,
+    output_config: Map?,
+    thinking: Map?
 }
 
 // Model ID string (e.g. "claude-sonnet-4-20250514", "claude-3-haiku-20240307")
@@ -93,7 +95,9 @@ MessagesPostRequest type {
     tool_choice: ToolChoice?,
     tools: Vec<Tool>?,
     top_k: Int?,
-    top_p: Dec?
+    top_p: Dec?,
+    output_config: Map?,
+    thinking: Map?
 }
 
 MessagesPostResponse type {

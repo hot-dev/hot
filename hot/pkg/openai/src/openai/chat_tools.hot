@@ -32,6 +32,40 @@ StreamStop         ::ai-chat/StreamStop
 
 DEFAULT_MAX_TOKENS 1024
 
+ChatRequestOptions
+meta {
+    doc: """
+    Per-request controls for the normalized Chat Completions adapter.
+
+    `reasoning-effort` is passed as `reasoning_effort`. When using GPT-5.6
+    with function tools through Chat Completions, set it to `"none"`; use the
+    Responses API for reasoning-enabled tool loops.
+    """
+}
+type {
+    max-completion-tokens: Int,
+    reasoning-effort: Str?,
+}
+
+DEFAULT_REQUEST_OPTIONS ChatRequestOptions({
+    max-completion-tokens: DEFAULT_MAX_TOKENS,
+    reasoning-effort: null,
+})
+
+apply-request-options
+meta { doc: "Apply output and reasoning controls to an OpenAI request map." }
+fn (request: Map, options: ChatRequestOptions): Map {
+    with-output assoc(
+        request,
+        "max_completion_tokens",
+        options.max-completion-tokens
+    )
+    match options.reasoning-effort {
+        Null => { with-output }
+        Str => { assoc(with-output, "reasoning_effort", options.reasoning-effort) }
+    }
+}
+
 // ============================================================================
 // Outbound: ::ai::chat/Message -> OpenAI Message
 // ============================================================================
@@ -199,6 +233,19 @@ meta {
     """
 }
 fn (model: Str, messages: Vec<::ai-chat/Message>, system: Str?, tools: Vec<::ai-tool/Tool>?): ::ai-chat/ChatReply {
+    chat-with-tools-options(model, messages, system, tools, DEFAULT_REQUEST_OPTIONS)
+}
+
+chat-with-tools-options
+meta {
+    doc: """
+    `chat-with-tools` with an explicit output ceiling and reasoning effort.
+    The original four-argument function remains the provider-agnostic
+    `::ai::chat/run-loop` contract; bind this function in a closure when a
+    session needs model-specific request controls.
+    """
+}
+fn (model: Str, messages: Vec<::ai-chat/Message>, system: Str?, tools: Vec<::ai-tool/Tool>?, options: ChatRequestOptions): ::ai-chat/ChatReply {
     sys-prefix if(is-null(system), [], [{role: "system", content: system}])
     body-msgs map(messages, to-openai-message)
     oai-messages concat(sys-prefix, body-msgs)
@@ -207,10 +254,11 @@ fn (model: Str, messages: Vec<::ai-chat/Message>, system: Str?, tools: Vec<::ai-
     base {
         model: model,
         messages: oai-messages,
-        max_completion_tokens: DEFAULT_MAX_TOKENS
+        max_completion_tokens: options.max-completion-tokens
     }
 
-    with-tools if(is-null(oai-tools), base, assoc(base, "tools", oai-tools))
+    with-reasoning apply-request-options(base, options)
+    with-tools if(is-null(oai-tools), with-reasoning, assoc(with-reasoning, "tools", oai-tools))
 
     response ::oai-chat/complete(::oai-chat/ChatCompletionRequest(with-tools))
 
@@ -498,6 +546,21 @@ meta {
     """
 }
 fn (model: Str, messages: Vec<::ai-chat/Message>, system: Str?, tools: Vec<::ai-tool/Tool>?, on-delta: Fn): ::ai-chat/ChatReply {
+    chat-with-tools-stream-options(
+        model,
+        messages,
+        system,
+        tools,
+        on-delta,
+        DEFAULT_REQUEST_OPTIONS
+    )
+}
+
+chat-with-tools-stream-options
+meta {
+    doc: "Streaming `chat-with-tools` with explicit output and reasoning controls."
+}
+fn (model: Str, messages: Vec<::ai-chat/Message>, system: Str?, tools: Vec<::ai-tool/Tool>?, on-delta: Fn, options: ChatRequestOptions): ::ai-chat/ChatReply {
     sys-prefix if(is-null(system), [], [{role: "system", content: system}])
     body-msgs map(messages, to-openai-message)
     oai-messages concat(sys-prefix, body-msgs)
@@ -506,11 +569,12 @@ fn (model: Str, messages: Vec<::ai-chat/Message>, system: Str?, tools: Vec<::ai-
     base {
         model: model,
         messages: oai-messages,
-        max_completion_tokens: DEFAULT_MAX_TOKENS,
+        max_completion_tokens: options.max-completion-tokens,
         stream_options: {include_usage: true}
     }
 
-    with-tools if(is-null(oai-tools), base, assoc(base, "tools", oai-tools))
+    with-reasoning apply-request-options(base, options)
+    with-tools if(is-null(oai-tools), with-reasoning, assoc(with-reasoning, "tools", oai-tools))
 
     response ::oai-chat/complete-stream(::oai-chat/ChatCompletionRequest(with-tools))
 
