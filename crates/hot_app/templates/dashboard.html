@@ -122,6 +122,13 @@ document.addEventListener('alpine:init', () => {
     </div>
 
     <!-- ========================================
+         QUEUE LATENCY (Waiting vs. Execution)
+         ======================================== -->
+    <div class="mb-6">
+        {% include "components/dashboard_queue_latency.html" %}
+    </div>
+
+    <!-- ========================================
          ACTIVITY OVERVIEW (Charts)
          ======================================== -->
     <div class="mb-6">
@@ -159,6 +166,8 @@ window.eventActivityTimelineChart = null;
 window.eventTypeTimelineChart = null;
 window.taskActivityTimelineChart = null;
 window.taskCusTimelineChart = null;
+window.runLatencyTimelineChart = null;
+window.taskLatencyTimelineChart = null;
 
 // Selected stream for flow visualization
 let selectedStreamId = null;
@@ -286,6 +295,8 @@ let previousEventActivityData = null;
 let previousEventTypeData = null;
 let previousTaskActivityData = null;
 let previousTaskCusData = null;
+let previousRunLatencyData = null;
+let previousTaskLatencyData = null;
 
 async function updateHeroMetrics() {
     try {
@@ -1595,6 +1606,194 @@ function updateTaskActivityTimelineChart(data) {
 }
 
 // ============================================
+// Waiting vs. Execution Latency
+// ============================================
+const latencyPercentiles = { run: 'p95', task: 'p95' };
+
+function formatLatencyMs(value) {
+    if (value == null || !Number.isFinite(Number(value))) return '—';
+    const ms = Math.max(0, Number(value));
+    if (ms < 1) return `${Math.round(ms * 1000)}µs`;
+    if (ms < 10) return `${ms.toFixed(1)}ms`;
+    if (ms < 1000) return `${Math.round(ms)}ms`;
+    if (ms < 60000) return `${(ms / 1000).toFixed(ms < 10000 ? 1 : 0)}s`;
+    return `${(ms / 60000).toFixed(1)}m`;
+}
+
+async function updateRunLatencyTimeline() {
+    await updateLatencyTimeline('run');
+}
+
+async function updateTaskLatencyTimeline() {
+    await updateLatencyTimeline('task');
+}
+
+async function updateLatencyTimeline(kind) {
+    try {
+        const params = buildFilterParams();
+        const response = await fetch(`/data/${kind}-latency-timeline?${params}`);
+        if (!response.ok) throw new Error(`${kind} latency fetch failed: ${response.status}`);
+        const data = await response.json();
+        if (kind === 'run') previousRunLatencyData = data;
+        else previousTaskLatencyData = data;
+        updateLatencyTimelineChart(kind, data);
+    } catch (error) {
+        console.error(`Error updating ${kind} latency timeline:`, error);
+        const previous = kind === 'run' ? previousRunLatencyData : previousTaskLatencyData;
+        if (previous) updateLatencyTimelineChart(kind, previous);
+    }
+}
+
+window.setLatencyPercentile = function(kind, percentile) {
+    if (!['run', 'task'].includes(kind) || !['p50', 'p95', 'p99'].includes(percentile)) return;
+    latencyPercentiles[kind] = percentile;
+    const data = kind === 'run' ? previousRunLatencyData : previousTaskLatencyData;
+    if (data) updateLatencyTimelineChart(kind, data);
+};
+
+function updateLatencyMetric(id, value) {
+    const element = document.getElementById(id);
+    if (element) element.textContent = value;
+}
+
+function updateLatencyTimelineChart(kind, data) {
+    const summary = data.summary || {};
+    updateLatencyMetric(`${kind}-latency-wait-p50`, formatLatencyMs(summary.p50 && summary.p50.waiting_ms));
+    updateLatencyMetric(`${kind}-latency-wait-p95`, formatLatencyMs(summary.p95 && summary.p95.waiting_ms));
+    updateLatencyMetric(`${kind}-latency-exec-p95`, formatLatencyMs(summary.p95 && summary.p95.execution_ms));
+
+    const sampleSuffix = summary.truncated ? '+' : '';
+    updateLatencyMetric(`${kind}-latency-samples`, `${formatNumber(summary.sample_count || 0)}${sampleSuffix}`);
+    const coverage = Number(summary.precise_coverage_percent || 0);
+    updateLatencyMetric(
+        `${kind}-latency-coverage`,
+        kind === 'run'
+            ? (summary.sample_count ? 'Direct timing' : 'No completed samples')
+            : (summary.sample_count ? `${coverage.toFixed(coverage === 100 ? 0 : 1)}% precise timing` : 'No completed samples')
+    );
+
+    const percentile = latencyPercentiles[kind];
+    ['p50', 'p95', 'p99'].forEach(value => {
+        const button = document.getElementById(`${kind}-latency-${value}-button`);
+        if (!button) return;
+        const active = value === percentile;
+        button.classList.toggle('bg-gray-100', active);
+        button.classList.toggle('dark:bg-gray-700', active);
+        button.classList.toggle('text-gray-900', active);
+        button.classList.toggle('dark:text-white', active);
+        button.classList.toggle('font-medium', active);
+        button.classList.toggle('text-gray-500', !active);
+        button.classList.toggle('dark:text-gray-400', !active);
+        button.setAttribute('aria-pressed', active ? 'true' : 'false');
+    });
+
+    const chartName = kind === 'run' ? 'runLatencyTimelineChart' : 'taskLatencyTimelineChart';
+    if (!window[chartName]) {
+        const chartDom = document.getElementById(chartName);
+        if (chartDom) window[chartName] = echarts.init(chartDom);
+    }
+    const chart = window[chartName];
+    if (!chart) return;
+
+    const selected = data[percentile] || {};
+    const waiting = selected.waiting_ms || [];
+    const execution = selected.execution_ms || [];
+    const hasData = waiting.some(value => value != null) || execution.some(value => value != null);
+    if (!hasData) {
+        chart.setOption({
+            title: {
+                text: `No completed ${kind} latency data for ${getFilterDescription()}`,
+                left: 'center',
+                top: 'center',
+                textStyle: { color: getSecondaryTextColor(), fontSize: 13, fontWeight: 'normal' }
+            },
+            series: [],
+            legend: { show: false },
+            tooltip: { show: false },
+            xAxis: { show: false },
+            yAxis: { show: false }
+        }, true);
+        return;
+    }
+
+    const series = [
+        {
+            name: 'Waiting',
+            type: 'line',
+            smooth: 0.2,
+            data: waiting,
+            itemStyle: { color: '#f59e0b' },
+            lineStyle: { width: 2 },
+            emphasis: { focus: 'series' },
+            connectNulls: false
+        },
+        {
+            name: 'Execution',
+            type: 'line',
+            smooth: 0.2,
+            data: execution,
+            itemStyle: { color: '#22c55e' },
+            lineStyle: { width: 2 },
+            emphasis: { focus: 'series' },
+            connectNulls: false
+        }
+    ].flatMap(config => splitLastSegmentDotted(config));
+
+    chart.setOption({
+        title: { show: false },
+        tooltip: {
+            trigger: 'axis',
+            formatter: function(params) {
+                if (!params || params.length === 0) return '';
+                const index = params[0].dataIndex;
+                const isLast = index === data.dates.length - 1;
+                let result = `${params[0].axisValue}${isLast ? ` <span style="color:${getSecondaryTextColor()}">(partial)</span>` : ''}<br/>`;
+                const seen = new Set();
+                params.forEach(param => {
+                    const name = param.seriesName.replace(/^__partial__/, '');
+                    if (!seen.has(name) && param.value != null) {
+                        seen.add(name);
+                        result += `${param.marker} ${name} ${percentile}: ${formatLatencyMs(param.value)}<br/>`;
+                    }
+                });
+                const count = (data.sample_counts || [])[index] || 0;
+                result += `<span style="color:${getSecondaryTextColor()}">${formatNumber(count)} sample${count === 1 ? '' : 's'}</span>`;
+                return result;
+            }
+        },
+        legend: {
+            data: ['Waiting', 'Execution'],
+            top: 0,
+            textStyle: { color: getTextColor() }
+        },
+        grid: { left: '3%', right: '4%', bottom: '15%', top: '16%', containLabel: true },
+        xAxis: {
+            type: 'category',
+            boundaryGap: false,
+            data: data.dates || [],
+            axisLabel: {
+                rotate: 45,
+                fontSize: 10,
+                color: getTextColor(),
+                formatter: function(value, index) {
+                    return index === data.dates.length - 1 ? value + '*' : value;
+                }
+            },
+            axisLine: { lineStyle: { color: getAxisLineColor() } }
+        },
+        yAxis: {
+            type: 'value',
+            name: percentile,
+            nameTextStyle: { color: getTextColor() },
+            axisLabel: { color: getTextColor(), formatter: formatLatencyMs },
+            axisLine: { lineStyle: { color: getAxisLineColor() } },
+            splitLine: { lineStyle: { color: getSplitLineColor() } }
+        },
+        series
+    }, true);
+}
+
+// ============================================
 // Task CUS Timeline
 // ============================================
 async function updateTaskCusTimeline() {
@@ -1858,6 +2057,9 @@ async function refreshDashboardData() {
         { name: 'agent health', run: updateAgentHealth },
         // Actionable issues — failed runs / tasks / unhandled events.
         { name: 'quick issues', run: updateQuickIssues },
+        // Operational latency is the primary queue-health signal.
+        { name: 'run latency', run: updateRunLatencyTimeline, chartId: 'runLatencyTimelineChart' },
+        { name: 'task latency', run: updateTaskLatencyTimeline, chartId: 'taskLatencyTimelineChart' },
         // Activity charts, in the order they appear on the page.
         { name: 'activity timeline', run: updateActivityTimeline, chartId: 'activityTimelineChart' },
         { name: 'run type timeline', run: updateRunTypeTimeline, chartId: 'runTypeTimelineChart' },
@@ -1898,7 +2100,9 @@ function resizeAllCharts() {
         'eventActivityTimelineChart',
         'eventTypeTimelineChart',
         'taskActivityTimelineChart',
-        'taskCusTimelineChart'
+        'taskCusTimelineChart',
+        'runLatencyTimelineChart',
+        'taskLatencyTimelineChart'
     ];
     charts.forEach(name => {
         if (window[name]) window[name].resize();
@@ -2043,6 +2247,12 @@ document.addEventListener('DOMContentLoaded', () => {
                 }
                 if (previousTaskCusData) {
                     updateTaskCusTimelineChart(previousTaskCusData);
+                }
+                if (previousRunLatencyData) {
+                    updateLatencyTimelineChart('run', previousRunLatencyData);
+                }
+                if (previousTaskLatencyData) {
+                    updateLatencyTimelineChart('task', previousTaskLatencyData);
                 }
             }
         });

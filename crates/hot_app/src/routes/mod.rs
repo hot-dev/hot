@@ -1,8 +1,8 @@
 use crate::auth::{AppState, guest_only_middleware, session_middleware};
 use crate::handlers::data::{
     event_activity_timeline_handler, event_handling_status_handler, event_type_timeline_handler,
-    stream_activity_timeline_handler, stream_composition_handler, task_activity_timeline_handler,
-    task_cus_timeline_handler,
+    run_latency_timeline_handler, stream_activity_timeline_handler, stream_composition_handler,
+    task_activity_timeline_handler, task_cus_timeline_handler, task_latency_timeline_handler,
 };
 use crate::handlers::docs::{
     docs_index_handler, docs_search_handler, pkg_route_handler, project_docs_index_handler,
@@ -92,6 +92,10 @@ pub fn routes(
         .route("/data/run-type-data", get(run_type_data_handler))
         .route("/data/status-chart-data", get(status_chart_data_handler))
         .route(
+            "/data/run-latency-timeline",
+            get(run_latency_timeline_handler),
+        )
+        .route(
             "/data/filtered-type-summary",
             get(filtered_type_summary_handler),
         )
@@ -125,6 +129,10 @@ pub fn routes(
             get(task_activity_timeline_handler),
         )
         .route("/data/task-cus-timeline", get(task_cus_timeline_handler))
+        .route(
+            "/data/task-latency-timeline",
+            get(task_latency_timeline_handler),
+        )
         .route("/projects", get(projects_list_handler))
         // Top-level context variables (with project selector)
         .route("/contexts", get(contexts_index_handler))
