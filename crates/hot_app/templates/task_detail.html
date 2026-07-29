@@ -7,6 +7,34 @@
 {% endblock %}
 
 {% block content %}
+<style>
+.task-timing-legend { display:flex; flex-wrap:wrap; gap:16px; margin-bottom:7px; font-size:12px; }
+.task-timing-legend-item { display:flex; align-items:center; gap:6px; }
+.task-timing-swatch { width:12px; height:12px; border-radius:2px; }
+.task-timing-waiting { background:linear-gradient(90deg,rgba(251,191,36,.55),rgba(245,158,11,.9)); }
+.task-timing-execution { background:linear-gradient(90deg,rgba(34,197,94,.5),rgba(34,197,94,.8)); }
+.task-timing-bar { display:flex; height:8px; overflow:visible; border-radius:4px; background:#e5e7eb; }
+.dark .task-timing-bar { background:#374151; }
+.task-timing-bucket { position:relative; height:100%; cursor:help; outline:none; }
+.task-timing-bucket:first-child { border-radius:4px 0 0 4px; }
+.task-timing-bucket:last-child { border-radius:0 4px 4px 0; }
+.task-timing-fill { display:flex; width:100%; height:100%; overflow:hidden; border-radius:inherit; }
+.task-timing-segment + .task-timing-segment { border-left:1px solid rgba(255,255,255,.85); }
+.dark .task-timing-segment + .task-timing-segment { border-left-color:rgba(17,24,39,.75); }
+.task-timing-trigger { position:relative; outline:none; }
+.task-timing-trigger:focus-visible { box-shadow:0 0 0 2px rgba(59,130,246,.55); }
+.task-timing-popover { position:absolute; top:calc(100% + 9px); left:0; z-index:60; width:280px; padding:10px 12px; border:1px solid #d1d5db; border-radius:7px; background:white; box-shadow:0 10px 25px rgba(15,23,42,.16); opacity:0; visibility:hidden; pointer-events:none; transform:translateY(-3px); transition:opacity .12s,transform .12s,visibility .12s; }
+.task-timing-bucket:last-child .task-timing-popover { left:auto; right:0; }
+.dark .task-timing-popover { border-color:#4b5563; background:#111827; color:#f3f4f6; }
+.task-timing-trigger:hover > .task-timing-popover,.task-timing-trigger:focus > .task-timing-popover,.task-timing-trigger:focus-within > .task-timing-popover { opacity:1; visibility:visible; pointer-events:auto; transform:translateY(0); }
+.task-timing-popover h4 { font-size:12px; font-weight:700; }
+.task-timing-popover p { margin-top:2px; color:#6b7280; font-size:11px; }
+.dark .task-timing-popover p { color:#9ca3af; }
+.task-timing-rows { display:grid; gap:5px; margin-top:9px; padding-top:8px; border-top:1px solid #e5e7eb; }
+.dark .task-timing-rows { border-top-color:#374151; }
+.task-timing-row { display:flex; justify-content:space-between; gap:12px; font-size:11px; }
+.task-timing-row strong { white-space:nowrap; }
+</style>
 <div id="task-detail-header"
      hx-get="/tasks/{{ task.task_id }}"
      hx-trigger="refresh"
@@ -82,35 +110,86 @@
         {% endif %}
     </div>
 
-    <!-- Timing breakdown bar (when container timing data available) -->
-    {% if task.slot_wait_ms.is_some() || task.image_pull_ms.is_some() || task.execution_ms.is_some() || task.logs_collect_ms.is_some() %}
-    {% let slot_wait = task.slot_wait_ms.unwrap_or(0) %}
-    {% let image_pull = task.image_pull_ms.unwrap_or(0) %}
-    {% let execution = task.execution_ms.unwrap_or(0) %}
-    {% let logs_collect = task.logs_collect_ms.unwrap_or(0) %}
-    {% let total = slot_wait + image_pull + execution + logs_collect %}
+    <!-- Primary task timing: creation -> workload start -> completion. -->
+    {% if task.waiting_ms.is_some() || task.task_execution_ms.is_some() %}
+    {% let waiting = task.waiting_ms.unwrap_or(0) %}
+    {% let execution = task.task_execution_ms.unwrap_or(0) %}
+    {% let total = waiting + execution %}
     {% if total > 0 %}
     <div class="mt-4 pt-4 border-t border-gray-200 dark:border-gray-700">
-        <h3 class="text-xs font-medium text-gray-500 dark:text-gray-400 mb-2 uppercase tracking-wider">Timing Breakdown</h3>
-        <div class="flex h-2 rounded-full overflow-hidden bg-gray-200 dark:bg-gray-700" title="slot wait: {{ slot_wait }}ms, image pull: {{ image_pull }}ms, execution: {{ execution }}ms, logs: {{ logs_collect }}ms">
-            {% if slot_wait > 0 %}
-            <div class="bg-amber-400 dark:bg-amber-600" style="width: {{ (slot_wait * 100 / total) }}%"></div>
-            {% endif %}
-            {% if image_pull > 0 %}
-            <div class="bg-blue-400 dark:bg-blue-600" style="width: {{ (image_pull * 100 / total) }}%"></div>
+        <h3 class="text-xs font-medium text-gray-500 dark:text-gray-400 mb-2 uppercase tracking-wider">Timeline</h3>
+        <div class="task-timing-legend">
+            <div class="task-timing-legend-item"><span class="task-timing-swatch task-timing-waiting"></span><span>Waiting</span><strong>{% match task.waiting_formatted %}{% when Some with (value) %}{{ value }}{% when None %}—{% endmatch %}</strong></div>
+            <div class="task-timing-legend-item"><span class="task-timing-swatch task-timing-execution"></span><span>Execution</span><strong>{% match task.task_execution_formatted %}{% when Some with (value) %}{{ value }}{% when None %}—{% endmatch %}</strong></div>
+        </div>
+        {% let publish = task.publish_wait_ms.unwrap_or(0) %}
+        {% let queue = task.queue_wait_ms.unwrap_or(task.retry_queue_age_ms.unwrap_or(0)) %}
+        {% let setup = task.worker_preparation_ms.unwrap_or(0) %}
+        {% let capacity = task.capacity_wait_ms.unwrap_or(0) %}
+        {% let pull = task.waiting_image_pull_ms.unwrap_or(0) %}
+        {% let runtime = task.waiting_runtime_start_ms.unwrap_or(0) %}
+        {% let known_waiting = publish + queue + setup + capacity + pull + runtime %}
+        {% let workload = task.execution_ms.unwrap_or(0) %}
+        {% let startup = task.execution_startup_ms.unwrap_or(0) %}
+        {% let logs = task.logs_collect_ms.unwrap_or(0) %}
+        {% let finalization = task.finalization_ms.unwrap_or(0) %}
+        {% let known_execution = startup + workload + logs + finalization %}
+        <div class="task-timing-bar">
+            {% if waiting > 0 %}
+            <div class="task-timing-bucket task-timing-trigger" tabindex="0" style="flex-grow:{{ waiting }};flex-basis:0" aria-label="Waiting timing breakdown">
+                <div class="task-timing-fill task-timing-waiting">
+                    {% if known_waiting > 0 %}
+                    {% if publish > 0 %}<div class="task-timing-segment" style="flex-grow:{{ publish }};flex-basis:0"></div>{% endif %}
+                    {% if queue > 0 %}<div class="task-timing-segment" style="flex-grow:{{ queue }};flex-basis:0"></div>{% endif %}
+                    {% if setup > 0 %}<div class="task-timing-segment" style="flex-grow:{{ setup }};flex-basis:0"></div>{% endif %}
+                    {% if capacity > 0 %}<div class="task-timing-segment" style="flex-grow:{{ capacity }};flex-basis:0"></div>{% endif %}
+                    {% if pull > 0 %}<div class="task-timing-segment" style="flex-grow:{{ pull }};flex-basis:0"></div>{% endif %}
+                    {% if runtime > 0 %}<div class="task-timing-segment" style="flex-grow:{{ runtime }};flex-basis:0"></div>{% endif %}
+                    {% else %}<div class="task-timing-segment" style="width:100%"></div>{% endif %}
+                </div>
+                <div class="task-timing-popover" role="tooltip">
+                    <h4>Waiting · {% match task.waiting_formatted %}{% when Some with (value) %}{{ value }}{% when None %}—{% endmatch %}</h4>
+                    <p>Task created → workload started{% match task.queue_backend %}{% when Some with (backend) %} · {{ backend }}{% when None %}{% endmatch %}</p>
+                    <div class="task-timing-rows">
+                        {% if publish > 0 %}<div class="task-timing-row"><span>Publish</span><strong>{{ publish }}ms</strong></div>{% endif %}
+                        {% if task.queue_wait_ms.is_some() %}<div class="task-timing-row"><span>Queue Wait</span><strong>{{ queue }}ms</strong></div>{% endif %}
+                        {% if task.retry_queue_age_ms.is_some() %}<div class="task-timing-row"><span>Retry / Reclaim Age</span><strong>{{ queue }}ms</strong></div>{% endif %}
+                        {% if setup > 0 %}<div class="task-timing-row"><span>Task Setup</span><strong>{{ setup }}ms</strong></div>{% endif %}
+                        {% if capacity > 0 %}<div class="task-timing-row"><span>Capacity Wait</span><strong>{{ capacity }}ms</strong></div>{% endif %}
+                        {% if pull > 0 %}<div class="task-timing-row"><span>Image Pull</span><strong>{{ pull }}ms</strong></div>{% endif %}
+                        {% if runtime > 0 %}<div class="task-timing-row"><span>Runtime Start</span><strong>{{ runtime }}ms</strong></div>{% endif %}
+                    </div>
+                </div>
+            </div>
             {% endif %}
             {% if execution > 0 %}
-            <div class="bg-green-400 dark:bg-green-600" style="width: {{ (execution * 100 / total) }}%"></div>
-            {% endif %}
-            {% if logs_collect > 0 %}
-            <div class="bg-purple-400 dark:bg-purple-600" style="width: {{ (logs_collect * 100 / total) }}%"></div>
+            <div class="task-timing-bucket task-timing-trigger" tabindex="0" style="flex-grow:{{ execution }};flex-basis:0" aria-label="Execution timing breakdown">
+                <div class="task-timing-fill task-timing-execution">
+                    {% if known_execution > 0 %}
+                    {% if startup > 0 %}<div class="task-timing-segment" style="flex-grow:{{ startup }};flex-basis:0"></div>{% endif %}
+                    {% if workload > 0 %}<div class="task-timing-segment" style="flex-grow:{{ workload }};flex-basis:0"></div>{% endif %}
+                    {% if logs > 0 %}<div class="task-timing-segment" style="flex-grow:{{ logs }};flex-basis:0"></div>{% endif %}
+                    {% if finalization > 0 %}<div class="task-timing-segment" style="flex-grow:{{ finalization }};flex-basis:0"></div>{% endif %}
+                    {% else %}<div class="task-timing-segment" style="width:100%"></div>{% endif %}
+                </div>
+                <div class="task-timing-popover" role="tooltip">
+                    <h4>Execution · {% match task.task_execution_formatted %}{% when Some with (value) %}{{ value }}{% when None %}—{% endmatch %}</h4>
+                    <p>Workload started → task completed</p>
+                    <div class="task-timing-rows">
+                        {% if startup > 0 %}<div class="task-timing-row"><span>Runtime Startup</span><strong>{{ startup }}ms</strong></div>{% endif %}
+                        {% if workload > 0 %}<div class="task-timing-row"><span>Workload Running</span><strong>{{ workload }}ms</strong></div>{% endif %}
+                        {% if logs > 0 %}<div class="task-timing-row"><span>Logs</span><strong>{{ logs }}ms</strong></div>{% endif %}
+                        {% if finalization > 0 %}<div class="task-timing-row"><span>Finalization</span><strong>{{ finalization }}ms</strong></div>{% endif %}
+                    </div>
+                </div>
+            </div>
             {% endif %}
         </div>
-        <div class="flex gap-4 mt-2 text-xs text-gray-600 dark:text-gray-400">
-            {% if slot_wait > 0 %}<span><span class="inline-block w-2 h-2 rounded bg-amber-400 dark:bg-amber-600 align-middle mr-1"></span>Slot wait: {{ slot_wait }}ms</span>{% endif %}
-            {% if image_pull > 0 %}<span><span class="inline-block w-2 h-2 rounded bg-blue-400 dark:bg-blue-600 align-middle mr-1"></span>Image pull: {{ image_pull }}ms</span>{% endif %}
-            {% if execution > 0 %}<span><span class="inline-block w-2 h-2 rounded bg-green-400 dark:bg-green-600 align-middle mr-1"></span>Execution: {{ execution }}ms</span>{% endif %}
-            {% if logs_collect > 0 %}<span><span class="inline-block w-2 h-2 rounded bg-purple-400 dark:bg-purple-600 align-middle mr-1"></span>Logs: {{ logs_collect }}ms</span>{% endif %}
+        <div class="mt-2 grid grid-cols-2 sm:grid-cols-4 gap-3 text-xs text-gray-600 dark:text-gray-400">
+            <div><span class="block uppercase tracking-wider">Created</span><strong class="text-gray-800 dark:text-gray-200">{{ task.created_at_formatted }}</strong></div>
+            <div><span class="block uppercase tracking-wider">Workload Start</span><strong class="text-gray-800 dark:text-gray-200">{% match task.workload_started_formatted %}{% when Some with (value) %}{{ value }}{% when None %}—{% endmatch %}</strong></div>
+            <div><span class="block uppercase tracking-wider">Completed</span><strong class="text-gray-800 dark:text-gray-200">{{ task.stop_time_formatted }}</strong></div>
+            <div><span class="block uppercase tracking-wider">Total</span><strong class="text-gray-800 dark:text-gray-200">{{ task.duration_formatted }}</strong></div>
         </div>
     </div>
     {% endif %}

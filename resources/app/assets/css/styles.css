@@ -1428,9 +1428,6 @@
   .bg-amber-100 {
     background-color: var(--color-amber-100);
   }
-  .bg-amber-400 {
-    background-color: var(--color-amber-400);
-  }
   .bg-amber-500 {
     background-color: var(--color-amber-500);
   }
@@ -1454,9 +1451,6 @@
   }
   .bg-blue-100 {
     background-color: var(--color-blue-100);
-  }
-  .bg-blue-400 {
-    background-color: var(--color-blue-400);
   }
   .bg-blue-600 {
     background-color: var(--color-blue-600);
@@ -1553,9 +1547,6 @@
   }
   .bg-purple-100 {
     background-color: var(--color-purple-100);
-  }
-  .bg-purple-400 {
-    background-color: var(--color-purple-400);
   }
   .bg-purple-500\/80 {
     background-color: color-mix(in srgb, oklch(62.7% 0.265 303.9) 80%, transparent);
@@ -3540,11 +3531,6 @@
       border-color: var(--color-yellow-800);
     }
   }
-  .dark\:bg-amber-600 {
-    &:where(.dark, .dark *) {
-      background-color: var(--color-amber-600);
-    }
-  }
   .dark\:bg-amber-900 {
     &:where(.dark, .dark *) {
       background-color: var(--color-amber-900);
@@ -3593,11 +3579,6 @@
       @supports (color: color-mix(in lab, red, red)) {
         background-color: color-mix(in oklab, var(--color-black) 90%, transparent);
       }
-    }
-  }
-  .dark\:bg-blue-600 {
-    &:where(.dark, .dark *) {
-      background-color: var(--color-blue-600);
     }
   }
   .dark\:bg-blue-800 {
@@ -3751,11 +3732,6 @@
       background-color: var(--color-gray-950);
     }
   }
-  .dark\:bg-green-600 {
-    &:where(.dark, .dark *) {
-      background-color: var(--color-green-600);
-    }
-  }
   .dark\:bg-green-700 {
     &:where(.dark, .dark *) {
       background-color: var(--color-green-700);
@@ -3827,11 +3803,6 @@
   .dark\:bg-orange-900 {
     &:where(.dark, .dark *) {
       background-color: var(--color-orange-900);
-    }
-  }
-  .dark\:bg-purple-600 {
-    &:where(.dark, .dark *) {
-      background-color: var(--color-purple-600);
     }
   }
   .dark\:bg-purple-800 {

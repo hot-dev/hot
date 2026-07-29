@@ -114,6 +114,8 @@ pub struct Task {
     pub duration_ms: Option<i64>,
     pub result: Option<serde_json::Value>,
     pub info: Option<serde_json::Value>,
+    #[sqlx(default)]
+    pub timing: Option<serde_json::Value>,
     pub timeout_ms: i64,
     pub retry_attempt: i16,
     pub next_retry_at: Option<DateTime<Utc>>,
@@ -1618,6 +1620,96 @@ impl Task {
         Ok(task.info)
     }
 
+    /// Replace task observability timing without touching application
+    /// checkpoint state in `info`.
+    pub async fn set_timing(
+        db: &crate::db::DatabasePool,
+        task_id: &Uuid,
+        timing: &serde_json::Value,
+    ) -> Result<(), TaskError> {
+        match db {
+            crate::db::DatabasePool::Postgres(pg_pool) => {
+                sqlx::query("UPDATE task SET timing = $1 WHERE task_id = $2")
+                    .bind(timing)
+                    .bind(task_id)
+                    .execute(pg_pool)
+                    .await?;
+            }
+            crate::db::DatabasePool::Sqlite(sqlite_pool) => {
+                sqlx::query("UPDATE task SET timing = ? WHERE task_id = ?")
+                    .bind(timing.to_string())
+                    .bind(task_id)
+                    .execute(sqlite_pool)
+                    .await?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Atomically apply a shallow timing patch. This intentionally matches
+    /// PostgreSQL JSONB `||` semantics on SQLite.
+    pub async fn merge_timing(
+        db: &crate::db::DatabasePool,
+        task_id: &Uuid,
+        patch: &serde_json::Value,
+    ) -> Result<(), TaskError> {
+        match db {
+            crate::db::DatabasePool::Postgres(pg_pool) => {
+                sqlx::query(
+                    "UPDATE task
+                     SET timing = COALESCE(timing, '{}'::jsonb) || $2
+                     WHERE task_id = $1",
+                )
+                .bind(task_id)
+                .bind(patch)
+                .execute(pg_pool)
+                .await?;
+            }
+            crate::db::DatabasePool::Sqlite(sqlite_pool) => {
+                sqlx::query(
+                    "WITH patch AS (
+                         SELECT key, value, type FROM json_each(?1)
+                     ),
+                     existing AS (
+                         SELECT old.key, old.value, old.type
+                         FROM task, json_each(COALESCE(task.timing, '{}')) AS old
+                         WHERE task.task_id = ?2
+                           AND old.key NOT IN (SELECT key FROM patch)
+                     ),
+                     merged AS (
+                         SELECT * FROM existing
+                         UNION ALL
+                         SELECT * FROM patch
+                     ),
+                     replacement AS (
+                         SELECT COALESCE(
+                             json_group_object(
+                                 key,
+                                 CASE
+                                     WHEN type IN ('array', 'object') THEN json(value)
+                                     WHEN type = 'true' THEN json('true')
+                                     WHEN type = 'false' THEN json('false')
+                                     WHEN type = 'null' THEN json('null')
+                                     ELSE value
+                                 END
+                             ),
+                             '{}'
+                         ) AS value
+                         FROM merged
+                     )
+                     UPDATE task
+                     SET timing = (SELECT value FROM replacement)
+                     WHERE task_id = ?2",
+                )
+                .bind(patch.to_string())
+                .bind(task_id)
+                .execute(sqlite_pool)
+                .await?;
+            }
+        }
+        Ok(())
+    }
+
     /// Find running tasks that have no heartbeat at all (legacy rows or pre-heartbeat tasks).
     /// These are tasks created before the heartbeat system was added.
     pub async fn find_running_without_heartbeat(
@@ -1752,6 +1844,60 @@ mod tests {
         assert!(task.stop_time.is_none());
         assert!(task.duration_ms.is_none());
         assert!(task.result.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_task_timing_is_separate_and_shallow_merged() {
+        let db = crate::db::test_db().await;
+        let (task_id, env_id, stream_id, build_id, _, _) = test_ids();
+        Task::insert(
+            &db,
+            &task_id,
+            &env_id,
+            &stream_id,
+            &build_id,
+            None,
+            "::app/timed",
+            None,
+            None,
+            "code",
+            60_000,
+            None,
+        )
+        .await
+        .unwrap();
+
+        Task::set_timing(
+            &db,
+            &task_id,
+            &serde_json::json!({
+                "queue_wait_ms": 7,
+                "nested": {"before": true}
+            }),
+        )
+        .await
+        .unwrap();
+        Task::merge_timing(
+            &db,
+            &task_id,
+            &serde_json::json!({
+                "nested": {"after": true},
+                "execution_ms": 11
+            }),
+        )
+        .await
+        .unwrap();
+
+        let task = Task::get(&db, &task_id).await.unwrap();
+        assert_eq!(
+            task.timing,
+            Some(serde_json::json!({
+                "queue_wait_ms": 7,
+                "nested": {"after": true},
+                "execution_ms": 11
+            }))
+        );
+        assert!(task.info.is_none());
     }
 
     #[tokio::test]

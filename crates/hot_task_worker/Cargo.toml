@@ -44,4 +44,5 @@ hot = { workspace = true, features = ["local-embeddings"] }
 libc = { workspace = true }
 
 [dev-dependencies]
+hot = { workspace = true, features = ["test-utils"] }
 sqlx = { workspace = true }

@@ -101,8 +101,10 @@ pub fn describe_exit_code(exit_code: i64) -> Option<&'static str> {
 pub struct ContainerTimings {
     pub slot_wait_ms: i64,
     pub image_pull_ms: i64,
+    pub runtime_start_ms: i64,
     pub execution_ms: i64,
     pub logs_collect_ms: i64,
+    pub workload_started_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 /// Backend selection for container execution.
@@ -596,6 +598,7 @@ mod docker {
                 }
             }
             timings.image_pull_ms = pull_start.elapsed().as_millis() as i64;
+            let runtime_start = Instant::now();
 
             let memory_bytes =
                 limits.map_or(512 * 1024 * 1024, |l| (l.memory_mb * 1024 * 1024) as i64);
@@ -689,6 +692,8 @@ mod docker {
                 .start_container(&container_id, None)
                 .await
                 .map_err(|e| ExecutorError::Start(e.to_string()))?;
+            timings.runtime_start_ms = runtime_start.elapsed().as_millis() as i64;
+            timings.workload_started_at = Some(chrono::Utc::now());
 
             tracing::debug!(
                 trace_id = trace_id,
@@ -780,6 +785,7 @@ mod docker {
             }
 
             timings.image_pull_ms = pull_start.elapsed().as_millis() as i64;
+            let runtime_start = Instant::now();
 
             let memory_bytes =
                 limits.map_or(512 * 1024 * 1024, |l| (l.memory_mb * 1024 * 1024) as i64);
@@ -876,6 +882,8 @@ mod docker {
                 .start_container(&container_id, None)
                 .await
                 .map_err(|e| ExecutorError::Start(e.to_string()))?;
+            timings.runtime_start_ms = runtime_start.elapsed().as_millis() as i64;
+            timings.workload_started_at = Some(chrono::Utc::now());
 
             let accumulator = LogAccumulator::from_docker(&self.docker, &container_id);
 
@@ -1353,6 +1361,7 @@ mod kata {
                 .await?;
             self.ensure_image(&mut images, image).await?;
             timings.image_pull_ms = pull_start.elapsed().as_millis() as i64;
+            let runtime_start = Instant::now();
 
             let (chain_id, image_env) = self
                 .get_image_chain_id(&mut images, &mut content, image)
@@ -1665,6 +1674,8 @@ mod kata {
                 return Err(e);
             }
 
+            timings.runtime_start_ms = runtime_start.elapsed().as_millis() as i64;
+            timings.workload_started_at = Some(chrono::Utc::now());
             let exec_start = Instant::now();
 
             tracing::debug!(

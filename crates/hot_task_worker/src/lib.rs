@@ -34,7 +34,10 @@ use hot::lang::cache::bytecode_cache::{BytecodeCache, CachedBytecode};
 use hot::lang::emitter::EngineEventEmitter;
 use hot::lang::event::{EventPublisher, ExecutionContext};
 use hot::lang::hot::task::TaskRequest;
-use hot::queue::{ConsumerLifecycle, ProcessingQueue, Queue, QueueInfrastructureError, QueueType};
+use hot::queue::{
+    ConsumerLifecycle, ProcessingQueue, Queue, QueueInfrastructureError, QueueLeaseTiming,
+    QueueType,
+};
 use hot::stream::{
     EnvEvent, EnvPublisher, StreamEvent, StreamNext, StreamPubSub, StreamPublisher,
     StreamSubscriberFactory,
@@ -946,6 +949,7 @@ pub async fn run(config: TaskWorkerConfig) -> Result<(), Box<dyn std::error::Err
                     claim = tq.claim_blocking() => {
                         match claim {
                             Ok(Some(lease_handle)) => {
+                                let queue_timing = lease_handle.timing();
                                 lease_handle.process(|request: TaskRequest| {
                                     let db = Arc::clone(&db_c);
                                     let tq2 = Arc::clone(&tq);
@@ -979,6 +983,7 @@ pub async fn run(config: TaskWorkerConfig) -> Result<(), Box<dyn std::error::Err
                                             usage_cache,
                                             coord,
                                             lease,
+                                            queue_timing,
                                             wid,
                                         )
                                         .await
@@ -1410,6 +1415,7 @@ async fn process_task(
     usage_stats_cache: UsageStatsCache,
     coordinator: Arc<shutdown::TaskShutdownCoordinator>,
     task_lease: Arc<dyn task_lease::TaskLease>,
+    queue_timing: QueueLeaseTiming,
     worker_id: String,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let task_id = Uuid::parse_str(&request.task_id)?;
@@ -1451,6 +1457,26 @@ async fn process_task(
             "Rejecting task queue message that does not match DB row: {}", e,
         );
         return Ok(());
+    }
+
+    let queue_wait_ms = queue_timing.queue_wait.as_millis().min(i64::MAX as u128) as i64;
+    let publish_wait_ms = queue_timing.enqueued_at.map(|enqueued_at| {
+        enqueued_at
+            .signed_duration_since(task.created_at)
+            .num_milliseconds()
+            .max(0)
+    });
+    let initial_timing = serde_json::json!({
+        "queue_backend": if queue_timing.enqueued_at.is_some() { "redis" } else { "memory" },
+        "enqueued_at": queue_timing.enqueued_at.map(|value| value.to_rfc3339()),
+        "claimed_at": queue_timing.claimed_at.to_rfc3339(),
+        "publish_wait_ms": publish_wait_ms,
+        "queue_wait_ms": if queue_timing.redelivered { None } else { Some(queue_wait_ms) },
+        "retry_queue_age_ms": if queue_timing.redelivered { Some(queue_wait_ms) } else { None },
+        "redelivered": queue_timing.redelivered,
+    });
+    if let Err(e) = Task::set_timing(&db, &task_id, &initial_timing).await {
+        tracing::warn!(task_id = %task_id, "Failed to persist task queue timing: {}", e);
     }
 
     // Register with shutdown coordinator for graceful drain. We stash the
@@ -1555,6 +1581,7 @@ async fn process_task(
                 worker_conf,
                 box_defaults,
                 usage_stats_cache,
+                queue_timing,
                 worker_id,
             )
             .await
@@ -1565,6 +1592,7 @@ async fn process_task(
             // head-of-line block container claims sharing the inflight cap). If no
             // permit frees up within the grace window, defer the message back to
             // the queue as fresh work so the slot is released promptly.
+            let capacity_wait_started = std::time::Instant::now();
             let _permit = match tokio::time::timeout(
                 CODE_SLOT_ACQUIRE_GRACE,
                 code_semaphore.acquire(),
@@ -1585,6 +1613,10 @@ async fn process_task(
                         as Box<dyn std::error::Error + Send + Sync>);
                 }
             };
+            let capacity_wait_ms = capacity_wait_started
+                .elapsed()
+                .as_millis()
+                .min(i64::MAX as u128) as i64;
 
             if let Err(e) = Task::mark_running(&db, &task_id).await {
                 tracing::error!(task_id = %task_id, "Failed to mark task running: {}", e);
@@ -1617,6 +1649,8 @@ async fn process_task(
                 worker_conf,
                 event_publisher,
                 Arc::clone(&coordinator),
+                queue_timing.claimed_at,
+                capacity_wait_ms,
             )
             .await
         }
@@ -1681,6 +1715,7 @@ async fn process_container_task(
     worker_conf: Val,
     box_defaults: Arc<box_limits::BoxDefaults>,
     usage_stats_cache: UsageStatsCache,
+    queue_timing: QueueLeaseTiming,
     worker_id: String,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let args = &request.args;
@@ -1917,6 +1952,7 @@ async fn process_container_task(
     let infra_retry_backoff_ms = worker_conf
         .get_int_or_default("queue.infra-retry-backoff-ms", 1_000)
         .max(0) as u64;
+    let capacity_wait_started = std::time::Instant::now();
     let resource_guard = match budget
         .acquire(
             resource_mem,
@@ -1957,6 +1993,10 @@ async fn process_container_task(
             return Ok(());
         }
     };
+    let resource_capacity_wait_ms = capacity_wait_started
+        .elapsed()
+        .as_millis()
+        .min(i64::MAX as u128) as i64;
 
     // -- Create data volume for /data/ --
     let data_volume = match data_volume::DataVolume::create(
@@ -2500,6 +2540,7 @@ async fn process_container_task(
                 if let Err(e) = Task::set_container_id(&db, &task_id, &container_id).await {
                     tracing::warn!(task_id = %task_id, "Failed to store container_id: {}", e);
                 }
+                let workload_execution_started = std::time::Instant::now();
 
                 // Poll-based monitoring loop
                 let deadline = tokio::time::Instant::now() + total_timeout;
@@ -2533,7 +2574,10 @@ async fn process_container_task(
                         }
                     }
                 };
-                timings.execution_ms = start.elapsed().as_millis() as i64 - timings.image_pull_ms;
+                timings.execution_ms = workload_execution_started
+                    .elapsed()
+                    .as_millis()
+                    .min(i64::MAX as u128) as i64;
 
                 match exit_code {
                     Some(code) => {
@@ -2655,6 +2699,32 @@ async fn process_container_task(
 
     match execution_result {
         Ok(Ok((output, timings))) => {
+            if let Some(workload_started_at) = timings.workload_started_at {
+                let capacity_wait_ms =
+                    resource_capacity_wait_ms.saturating_add(timings.slot_wait_ms.max(0));
+                record_task_workload_start(
+                    &db,
+                    &task_id,
+                    queue_timing.claimed_at,
+                    workload_started_at,
+                    capacity_wait_ms,
+                    timings.image_pull_ms,
+                    timings.runtime_start_ms,
+                )
+                .await;
+                if let Err(e) = Task::merge_timing(
+                    &db,
+                    &task_id,
+                    &serde_json::json!({
+                        "workload_execution_ms": timings.execution_ms.max(0),
+                        "logs_collect_ms": timings.logs_collect_ms.max(0),
+                    }),
+                )
+                .await
+                {
+                    tracing::warn!(task_id = %task_id, "Failed to persist task execution timing: {}", e);
+                }
+            }
             let status = if output.timed_out {
                 TaskStatus::TimedOut
             } else if output.exit_code != 0 {
@@ -2673,6 +2743,7 @@ async fn process_container_task(
                     "duration-ms": duration_ms,
                     "slot-wait-ms": timings.slot_wait_ms,
                     "image-pull-ms": timings.image_pull_ms,
+                    "runtime-start-ms": timings.runtime_start_ms,
                     "execution-ms": timings.execution_ms,
                     "logs-collect-ms": timings.logs_collect_ms,
                     "container-id": output.container_id,
@@ -2702,6 +2773,7 @@ async fn process_container_task(
                     "duration-ms": duration_ms,
                     "slot-wait-ms": timings.slot_wait_ms,
                     "image-pull-ms": timings.image_pull_ms,
+                    "runtime-start-ms": timings.runtime_start_ms,
                     "execution-ms": timings.execution_ms,
                     "logs-collect-ms": timings.logs_collect_ms,
                     "container-id": output.container_id,
@@ -2851,6 +2923,100 @@ async fn process_container_task(
     Ok(())
 }
 
+/// Persist the point where user workload code actually begins, plus the
+/// non-overlapping Waiting subphases that precede it.
+#[allow(clippy::too_many_arguments)]
+async fn record_task_workload_start(
+    db: &DatabasePool,
+    task_id: &Uuid,
+    claimed_at: chrono::DateTime<chrono::Utc>,
+    workload_started_at: chrono::DateTime<chrono::Utc>,
+    capacity_wait_ms: i64,
+    image_pull_ms: i64,
+    runtime_start_ms: i64,
+) {
+    let claimed_to_workload_ms = workload_started_at
+        .signed_duration_since(claimed_at)
+        .num_milliseconds()
+        .max(0);
+    let worker_preparation_ms = claimed_to_workload_ms
+        .saturating_sub(capacity_wait_ms.max(0))
+        .saturating_sub(image_pull_ms.max(0))
+        .saturating_sub(runtime_start_ms.max(0));
+    let patch = serde_json::json!({
+        "workload_started_at": workload_started_at.to_rfc3339(),
+        "capacity_wait_ms": capacity_wait_ms.max(0),
+        "image_pull_ms": image_pull_ms.max(0),
+        "runtime_start_ms": runtime_start_ms.max(0),
+        "worker_preparation_ms": worker_preparation_ms,
+    });
+    if let Err(e) = Task::merge_timing(db, task_id, &patch).await {
+        tracing::warn!(task_id = %task_id, "Failed to persist task workload timing: {}", e);
+    }
+}
+
+async fn finalize_task_timing(db: &DatabasePool, task_id: &Uuid) {
+    let task = match Task::get(db, task_id).await {
+        Ok(task) => task,
+        Err(e) => {
+            tracing::warn!(task_id = %task_id, "Failed to load task for timing finalization: {}", e);
+            return;
+        }
+    };
+    let Some(stop_time) = task.stop_time else {
+        return;
+    };
+    let workload_started_at = task
+        .timing
+        .as_ref()
+        .and_then(|timing| timing.get("workload_started_at"))
+        .and_then(serde_json::Value::as_str)
+        .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok())
+        .map(|value| value.with_timezone(&chrono::Utc));
+    let (waiting_ms, execution_ms) = if let Some(workload_started_at) = workload_started_at {
+        (
+            workload_started_at
+                .signed_duration_since(task.created_at)
+                .num_milliseconds()
+                .max(0),
+            stop_time
+                .signed_duration_since(workload_started_at)
+                .num_milliseconds()
+                .max(0),
+        )
+    } else {
+        (
+            stop_time
+                .signed_duration_since(task.created_at)
+                .num_milliseconds()
+                .max(0),
+            0,
+        )
+    };
+    let total_ms = stop_time
+        .signed_duration_since(task.created_at)
+        .num_milliseconds()
+        .max(0);
+    let mut patch = serde_json::json!({
+        "completed_at": stop_time.to_rfc3339(),
+        "waiting_ms": waiting_ms,
+        "execution_ms": execution_ms,
+        "total_ms": total_ms,
+    });
+    if workload_started_at.is_some()
+        && task
+            .timing
+            .as_ref()
+            .and_then(|timing| timing.get("workload_execution_ms"))
+            .is_none()
+    {
+        patch["workload_execution_ms"] = serde_json::json!(execution_ms);
+    }
+    if let Err(e) = Task::merge_timing(db, task_id, &patch).await {
+        tracing::warn!(task_id = %task_id, "Failed to finalize task timing: {}", e);
+    }
+}
+
 /// Execute a Hot code task (task_type == "code" or default).
 #[allow(clippy::too_many_arguments)]
 async fn process_code_task(
@@ -2867,6 +3033,8 @@ async fn process_code_task(
     worker_conf: Val,
     event_publisher: Option<Arc<dyn EventPublisher>>,
     coordinator: Arc<shutdown::TaskShutdownCoordinator>,
+    claimed_at: chrono::DateTime<chrono::Utc>,
+    capacity_wait_ms: i64,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let function_name = request.function_name.clone();
     let task_type = request.task_type.clone();
@@ -3021,6 +3189,7 @@ async fn process_code_task(
 
     let panic_label = format!("task_worker:{}:{}", fn_name_exec, task_id);
     let resource_registry_for_task = hot::lang::hot::resource::get_build_registry(&build_id);
+    let workload_started_at = chrono::Utc::now();
     let task_handle = tokio::task::spawn_blocking(move || {
         // Scope this task's view of `::hot::resource/*` to the bundle that
         // produced its bytecode. The guard installs the per-build registry
@@ -3073,6 +3242,16 @@ async fn process_code_task(
             }
         }
     });
+    record_task_workload_start(
+        &db,
+        &task_id,
+        claimed_at,
+        workload_started_at,
+        capacity_wait_ms,
+        0,
+        0,
+    )
+    .await;
 
     let timeout_dur = std::time::Duration::from_millis(timeout_ms);
     let execution_result = tokio::select! {
@@ -3370,6 +3549,8 @@ async fn complete_task_with_event(
             );
         }
     }
+
+    finalize_task_timing(db, task_id).await;
 
     // Re-read to get computed duration_ms (best-effort; null on timeout/error).
     let duration_ms = match tokio::time::timeout(DB_CALL_TIMEOUT, Task::get(db, task_id)).await {
@@ -4742,6 +4923,7 @@ mod tests {
             duration_ms: None,
             result: None,
             info: None,
+            timing: None,
             timeout_ms: request.timeout_ms as i64,
             retry_attempt: 0,
             next_retry_at: None,
@@ -4763,6 +4945,71 @@ mod tests {
 
         assert!(
             validate_task_request_matches_db(&request, &task, env_id, stream_id, build_id).is_ok()
+        );
+    }
+
+    #[tokio::test]
+    async fn task_timing_uses_creation_to_workload_and_workload_to_completion() {
+        let db = hot::db::test_db().await;
+        let task_id = Uuid::now_v7();
+        let env_id = Uuid::now_v7();
+        let stream_id = Uuid::now_v7();
+        let build_id = Uuid::now_v7();
+        Task::insert(
+            &db,
+            &task_id,
+            &env_id,
+            &stream_id,
+            &build_id,
+            None,
+            "::app/timed",
+            None,
+            None,
+            "code",
+            60_000,
+            None,
+        )
+        .await
+        .unwrap();
+
+        let claimed_at = chrono::Utc::now() - chrono::Duration::milliseconds(200);
+        let created_at = claimed_at - chrono::Duration::milliseconds(100);
+        let workload_started_at = claimed_at + chrono::Duration::milliseconds(100);
+        let hot::db::DatabasePool::Sqlite(pool) = &db else {
+            panic!("test_db should use SQLite");
+        };
+        sqlx::query("UPDATE task SET created_at = ? WHERE task_id = ?")
+            .bind(created_at)
+            .bind(task_id)
+            .execute(pool)
+            .await
+            .unwrap();
+        Task::set_timing(
+            &db,
+            &task_id,
+            &serde_json::json!({"claimed_at": claimed_at.to_rfc3339()}),
+        )
+        .await
+        .unwrap();
+        Task::mark_running(&db, &task_id).await.unwrap();
+        record_task_workload_start(&db, &task_id, claimed_at, workload_started_at, 10, 20, 10)
+            .await;
+        Task::complete(&db, &task_id, &TaskStatus::Completed, None)
+            .await
+            .unwrap();
+        finalize_task_timing(&db, &task_id).await;
+
+        let task = Task::get(&db, &task_id).await.unwrap();
+        let timing = task.timing.unwrap();
+        assert_eq!(timing["waiting_ms"], 200);
+        assert_eq!(timing["capacity_wait_ms"], 10);
+        assert_eq!(timing["image_pull_ms"], 20);
+        assert_eq!(timing["runtime_start_ms"], 10);
+        assert_eq!(timing["worker_preparation_ms"], 60);
+        assert!(timing["execution_ms"].as_i64().unwrap() >= 0);
+        assert_eq!(
+            timing["total_ms"].as_i64().unwrap(),
+            timing["waiting_ms"].as_i64().unwrap() + timing["execution_ms"].as_i64().unwrap()
         );
     }
 
