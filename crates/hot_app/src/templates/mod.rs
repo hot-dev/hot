@@ -538,6 +538,7 @@ pub struct RunDisplay {
     pub is_retry: bool,     // True if this is a retry run (retry_attempt > 0)
     // Pre-run phase timing for event-triggered runs.
     pub pre_run_wait_us: Option<i64>, // Total event creation -> run start time
+    pub pre_run_wait_formatted: Option<String>,
     pub publish_wait_us: Option<i64>, // Event creation -> Redis XADD
     pub publish_wait_formatted: Option<String>,
     pub queue_wait_us: Option<i64>, // Actual backend queue residence
@@ -900,6 +901,7 @@ impl RunDisplay {
         let duration_formatted = format_duration_us(duration_us);
 
         let publish_wait_formatted = queue_phases.publish_wait_us.map(format_duration_us);
+        let pre_run_wait_formatted = queue_phases.pre_run_wait_us.map(format_duration_us);
         let queue_wait_formatted = queue_phases.queue_wait_us.map(format_duration_us);
         let worker_preparation_formatted =
             queue_phases.worker_preparation_us.map(format_duration_us);
@@ -954,6 +956,7 @@ impl RunDisplay {
             next_retry_at: run.next_retry_at,
             is_retry: run.retry_attempt > 0,
             pre_run_wait_us: queue_phases.pre_run_wait_us,
+            pre_run_wait_formatted,
             publish_wait_us: queue_phases.publish_wait_us,
             publish_wait_formatted,
             queue_wait_us: queue_phases.queue_wait_us,
@@ -1001,6 +1004,7 @@ impl From<&Run> for RunDisplay {
         let duration_formatted = format_duration_us(duration_us);
 
         let publish_wait_formatted = queue_phases.publish_wait_us.map(format_duration_us);
+        let pre_run_wait_formatted = queue_phases.pre_run_wait_us.map(format_duration_us);
         let queue_wait_formatted = queue_phases.queue_wait_us.map(format_duration_us);
         let worker_preparation_formatted =
             queue_phases.worker_preparation_us.map(format_duration_us);
@@ -1051,6 +1055,7 @@ impl From<&Run> for RunDisplay {
             next_retry_at: run.next_retry_at,
             is_retry: run.retry_attempt > 0,
             pre_run_wait_us: queue_phases.pre_run_wait_us,
+            pre_run_wait_formatted,
             publish_wait_us: queue_phases.publish_wait_us,
             publish_wait_formatted,
             queue_wait_us: queue_phases.queue_wait_us,

@@ -149,20 +149,8 @@
     flex-shrink: 0;
 }
 
-.run-summary-legend-publish {
-    background: linear-gradient(90deg, rgba(251, 191, 36, 0.45) 0%, rgba(245, 158, 11, 0.8) 100%);
-}
-
-.run-summary-legend-queue-wait {
-    background: linear-gradient(90deg, rgba(253, 230, 138, 0.6) 0%, rgba(253, 224, 71, 0.9) 100%);
-}
-
-.run-summary-legend-worker-prep {
-    background: linear-gradient(90deg, rgba(125, 211, 252, 0.5) 0%, rgba(14, 165, 233, 0.8) 100%);
-}
-
-.run-summary-legend-compilation {
-    background: linear-gradient(90deg, rgba(107, 114, 128, 0.5) 0%, rgba(107, 114, 128, 0.8) 100%);
+.run-summary-legend-waiting {
+    background: linear-gradient(90deg, rgba(251, 191, 36, 0.55) 0%, rgba(245, 158, 11, 0.9) 100%);
 }
 
 .run-summary-legend-execution {
@@ -201,38 +189,178 @@
     height: 8px;
     background: rgba(229, 231, 235, 1);
     border-radius: 4px;
-    overflow: hidden;
     display: flex;
+    position: relative;
 }
 
 .dark .run-summary-combined-bar {
     background: rgba(64, 64, 64, 1);
 }
 
-.run-summary-bar-segment {
+.run-summary-bucket {
     height: 100%;
-    min-width: 1px;
+    position: relative;
     transition: width 0.3s ease;
+    cursor: help;
+    outline: none;
 }
 
-.run-summary-bar-publish {
-    background: linear-gradient(90deg, rgba(251, 191, 36, 0.45) 0%, rgba(245, 158, 11, 0.8) 100%);
+.run-summary-bucket:focus-visible {
+    box-shadow: 0 0 0 2px rgba(59, 130, 246, 0.65);
+    z-index: 3;
 }
 
-.run-summary-bar-queue-wait {
-    background: linear-gradient(90deg, rgba(253, 230, 138, 0.6) 0%, rgba(253, 224, 71, 0.9) 100%);
+.run-summary-bucket-fill {
+    display: flex;
+    width: 100%;
+    height: 100%;
+    overflow: hidden;
 }
 
-.run-summary-bar-worker-prep {
-    background: linear-gradient(90deg, rgba(125, 211, 252, 0.5) 0%, rgba(14, 165, 233, 0.8) 100%);
+.run-summary-bucket:first-child .run-summary-bucket-fill {
+    border-radius: 4px 0 0 4px;
 }
 
-.run-summary-bar-compilation {
-    background: linear-gradient(90deg, rgba(107, 114, 128, 0.5) 0%, rgba(107, 114, 128, 0.8) 100%);
+.run-summary-bucket:last-child .run-summary-bucket-fill {
+    border-radius: 0 4px 4px 0;
 }
 
-.run-summary-bar-execution {
+.run-summary-bucket:only-child .run-summary-bucket-fill {
+    border-radius: 4px;
+}
+
+.run-summary-bucket-waiting .run-summary-bucket-fill {
+    background: linear-gradient(90deg, rgba(251, 191, 36, 0.55) 0%, rgba(245, 158, 11, 0.9) 100%);
+}
+
+.run-summary-bucket-execution .run-summary-bucket-fill {
     background: linear-gradient(90deg, rgba(34, 197, 94, 0.5) 0%, rgba(34, 197, 94, 0.8) 100%);
+}
+
+.run-summary-breakdown-segment {
+    height: 100%;
+    background: transparent;
+}
+
+.run-summary-breakdown-segment + .run-summary-breakdown-segment {
+    border-left: 1px solid rgba(255, 255, 255, 0.8);
+}
+
+.dark .run-summary-breakdown-segment + .run-summary-breakdown-segment {
+    border-left-color: rgba(17, 24, 39, 0.75);
+}
+
+/* Accessible timing breakdowns: hover, keyboard focus, and mobile tap/focus. */
+.timing-breakdown-trigger {
+    position: relative;
+    cursor: help;
+    outline: none;
+}
+
+.timing-breakdown-trigger:focus-visible {
+    border-radius: 3px;
+    box-shadow: 0 0 0 2px rgba(59, 130, 246, 0.55);
+}
+
+.timing-breakdown-info {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 13px;
+    height: 13px;
+    border: 1px solid currentColor;
+    border-radius: 9999px;
+    font-size: 9px;
+    font-weight: 700;
+    line-height: 1;
+    text-transform: none;
+}
+
+.timing-breakdown-popover {
+    position: absolute;
+    top: calc(100% + 8px);
+    left: 0;
+    z-index: 50;
+    width: 270px;
+    padding: 10px 12px;
+    border: 1px solid rgba(209, 213, 219, 1);
+    border-radius: 7px;
+    background: white;
+    box-shadow: 0 10px 25px rgba(15, 23, 42, 0.16);
+    color: rgba(31, 41, 55, 1);
+    cursor: default;
+    opacity: 0;
+    visibility: hidden;
+    pointer-events: none;
+    transform: translateY(-3px);
+    transition: opacity 0.12s ease, transform 0.12s ease, visibility 0.12s;
+}
+
+.dark .timing-breakdown-popover {
+    border-color: rgba(75, 85, 99, 1);
+    background: rgba(17, 24, 39, 1);
+    color: rgba(243, 244, 246, 1);
+    box-shadow: 0 10px 25px rgba(0, 0, 0, 0.4);
+}
+
+.timing-breakdown-popover-above {
+    top: auto;
+    bottom: calc(100% + 10px);
+    transform: translateY(3px);
+}
+
+.timing-breakdown-popover-align-right {
+    right: 0;
+    left: auto;
+}
+
+.timing-breakdown-trigger:hover > .timing-breakdown-popover,
+.timing-breakdown-trigger:focus > .timing-breakdown-popover,
+.timing-breakdown-trigger:focus-within > .timing-breakdown-popover {
+    opacity: 1;
+    visibility: visible;
+    pointer-events: auto;
+    transform: translateY(0);
+}
+
+.timing-breakdown-heading {
+    font-size: 12px;
+    font-weight: 700;
+}
+
+.timing-breakdown-description {
+    margin-top: 2px;
+    color: rgba(107, 114, 128, 1);
+    font-size: 11px;
+}
+
+.dark .timing-breakdown-description {
+    color: rgba(156, 163, 175, 1);
+}
+
+.timing-breakdown-rows {
+    display: grid;
+    gap: 5px;
+    margin-top: 9px;
+    padding-top: 8px;
+    border-top: 1px solid rgba(229, 231, 235, 1);
+}
+
+.dark .timing-breakdown-rows {
+    border-top-color: rgba(55, 65, 81, 1);
+}
+
+.timing-breakdown-row {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 12px;
+    font-size: 11px;
+}
+
+.timing-breakdown-row strong {
+    white-space: nowrap;
+    font-weight: 600;
 }
 
 .timeline-axis {
@@ -2767,96 +2895,90 @@ window.ObservabilityTabs = class ObservabilityTabs {
         // Get execution time (stop - start, excludes queue wait)
         const execTimeUs = this.getExecTimeUs();
 
-        // Pre-run phases (available for event-triggered worker runs).
+        // Waiting phases (available for event-triggered worker runs).
+        const waitingTimeUs = this.getPreRunWaitUs() || Math.max(0, totalDurationUs - execTimeUs);
         const publishWaitUs = this.getPublishWaitUs();
         const queueWaitUs = this.getQueueWaitUs();
         const workerPreparationUs = this.getWorkerPreparationUs();
 
         // Calculate compilation overhead (clamp to 0 to handle timing precision issues)
-        // Use execTimeUs (not totalDurationUs) since compilation is part of execution, not queue wait
-        const compilationTimeUs = Math.max(0, execTimeUs - executionTimeUs);
-
-        // Total time for visualization (same as totalDurationUs, which already includes queue wait)
-        const totalTimeUs = totalDurationUs;
+        // Use execTimeUs since compilation/loading is part of Execution, not Waiting.
+        const handlerExecutionTimeUs = Math.min(Math.max(0, executionTimeUs), execTimeUs);
+        const compilationTimeUs = Math.max(0, execTimeUs - handlerExecutionTimeUs);
 
         let html = '<div class="timeline-view">';
 
         // Add run summary at the top
         if (totalDurationUs > 0) {
-            const hasPublishWait = publishWaitUs > 0;
-            const hasQueueWait = queueWaitUs > 0;
-            const hasWorkerPreparation = workerPreparationUs > 0;
-            const hasPreRunWait = hasPublishWait || hasQueueWait || hasWorkerPreparation;
-            const publishWaitPercent = hasPublishWait ? (publishWaitUs / totalTimeUs) * 100 : 0;
-            const queueWaitPercent = hasQueueWait ? (queueWaitUs / totalTimeUs) * 100 : 0;
-            const workerPreparationPercent = hasWorkerPreparation ? (workerPreparationUs / totalTimeUs) * 100 : 0;
-            const compilationPercent = (compilationTimeUs / totalTimeUs) * 100;
-            const executionPercent = (executionTimeUs / totalTimeUs) * 100;
+            const primaryTotalUs = Math.max(1, waitingTimeUs + execTimeUs);
+            const waitingPercent = (waitingTimeUs / primaryTotalUs) * 100;
+            const executionPercent = (execTimeUs / primaryTotalUs) * 100;
+            const waitingBreakdown = [
+                { label: 'Publish', value: publishWaitUs },
+                { label: 'Queue Wait', value: queueWaitUs },
+                { label: 'Invocation Setup', value: workerPreparationUs }
+            ].filter(part => part.value > 0);
+            const executionBreakdown = [
+                { label: 'Compilation & Loading', value: compilationTimeUs },
+                { label: 'Handler Execution', value: handlerExecutionTimeUs }
+            ].filter(part => part.value > 0);
+
+            const renderBreakdownRows = parts => parts.map(part =>
+                '<div class="timing-breakdown-row"><span>' + part.label + '</span><strong>' +
+                this.formatDuration(part.value) + '</strong></div>'
+            ).join('');
+
+            const renderBreakdownSegments = parts => {
+                const breakdownTotal = parts.reduce((sum, part) => sum + part.value, 0);
+                if (breakdownTotal <= 0) {
+                    return '<div class="run-summary-breakdown-segment" style="width:100%"></div>';
+                }
+                return parts.map(part =>
+                    '<div class="run-summary-breakdown-segment" style="width:' +
+                    ((part.value / breakdownTotal) * 100).toFixed(3) + '%"></div>'
+                ).join('');
+            };
 
             html += '<div class="run-summary">';
             html += '<div class="run-summary-title">Duration: <span class="font-semibold">' + this.formatDuration(totalDurationUs) + '</span>';
-            if (hasPreRunWait) {
-                html += ' <span class="text-gray-500 dark:text-gray-400 text-xs">(Run Time: ' + this.formatDuration(execTimeUs) + ')</span>';
-            }
             html += '</div>';
             html += '<div class="run-summary-legend">';
-            if (hasPublishWait) {
+            if (waitingTimeUs > 0) {
                 html += '  <div class="run-summary-legend-item">';
-                html += '    <div class="run-summary-legend-box run-summary-legend-publish"></div>';
-                html += '    <span class="run-summary-legend-label">Publish:</span>';
-                html += '    <span class="run-summary-legend-value">' + this.formatDuration(publishWaitUs) + ' <span class="run-summary-percent">(' + publishWaitPercent.toFixed(1) + '%)</span></span>';
+                html += '    <div class="run-summary-legend-box run-summary-legend-waiting"></div>';
+                html += '    <span class="run-summary-legend-label">Waiting:</span>';
+                html += '    <span class="run-summary-legend-value">' + this.formatDuration(waitingTimeUs) + ' <span class="run-summary-percent">(' + waitingPercent.toFixed(1) + '%)</span></span>';
                 html += '  </div>';
             }
-            if (hasQueueWait) {
+            if (execTimeUs > 0) {
                 html += '  <div class="run-summary-legend-item">';
-                html += '    <div class="run-summary-legend-box run-summary-legend-queue-wait"></div>';
-                html += '    <span class="run-summary-legend-label">Queue Wait:</span>';
-                html += '    <span class="run-summary-legend-value">' + this.formatDuration(queueWaitUs) + ' <span class="run-summary-percent">(' + queueWaitPercent.toFixed(1) + '%)</span></span>';
+                html += '    <div class="run-summary-legend-box run-summary-legend-execution"></div>';
+                html += '    <span class="run-summary-legend-label">Execution:</span>';
+                html += '    <span class="run-summary-legend-value">' + this.formatDuration(execTimeUs) + ' <span class="run-summary-percent">(' + executionPercent.toFixed(1) + '%)</span></span>';
                 html += '  </div>';
             }
-            if (hasWorkerPreparation) {
-                html += '  <div class="run-summary-legend-item">';
-                html += '    <div class="run-summary-legend-box run-summary-legend-worker-prep"></div>';
-                html += '    <span class="run-summary-legend-label">Worker Prep:</span>';
-                html += '    <span class="run-summary-legend-value">' + this.formatDuration(workerPreparationUs) + ' <span class="run-summary-percent">(' + workerPreparationPercent.toFixed(1) + '%)</span></span>';
-                html += '  </div>';
-            }
-            html += '  <div class="run-summary-legend-item">';
-            html += '    <div class="run-summary-legend-box run-summary-legend-compilation"></div>';
-            html += '    <span class="run-summary-legend-label">Compilation & Loading:</span>';
-            html += '    <span class="run-summary-legend-value">' + this.formatDuration(compilationTimeUs) + ' <span class="run-summary-percent">(' + compilationPercent.toFixed(1) + '%)</span></span>';
-            html += '  </div>';
-            html += '  <div class="run-summary-legend-item">';
-            html += '    <div class="run-summary-legend-box run-summary-legend-execution"></div>';
-            html += '    <span class="run-summary-legend-label">Execution:</span>';
-            html += '    <span class="run-summary-legend-value">' + this.formatDuration(executionTimeUs) + ' <span class="run-summary-percent">(' + executionPercent.toFixed(1) + '%)</span></span>';
-            html += '  </div>';
             html += '</div>';
             html += '<div class="run-summary-combined-bar">';
-            // Ensure minimum 1px width for each section
-            const publishWaitWidth = hasPublishWait ? Math.max(1, publishWaitPercent) : 0;
-            const queueWaitWidth = hasQueueWait ? Math.max(1, queueWaitPercent) : 0;
-            const workerPreparationWidth = hasWorkerPreparation ? Math.max(1, workerPreparationPercent) : 0;
-            const compilationWidth = Math.max(1, compilationPercent);
-            const executionWidth = Math.max(1, executionPercent);
-            // Normalize to 100%
-            const total = publishWaitWidth + queueWaitWidth + workerPreparationWidth + compilationWidth + executionWidth;
-            const normalizedPublishWait = (publishWaitWidth / total) * 100;
-            const normalizedQueueWait = (queueWaitWidth / total) * 100;
-            const normalizedWorkerPreparation = (workerPreparationWidth / total) * 100;
-            const normalizedCompilation = (compilationWidth / total) * 100;
-            const normalizedExecution = (executionWidth / total) * 100;
-            if (hasPublishWait) {
-                html += '  <div class="run-summary-bar-segment run-summary-bar-publish" style="width: ' + normalizedPublishWait.toFixed(2) + '%"></div>';
+            if (waitingTimeUs > 0) {
+                html += '<div class="run-summary-bucket run-summary-bucket-waiting timing-breakdown-trigger" tabindex="0" style="width:' + waitingPercent.toFixed(3) + '%" aria-describedby="timeline-waiting-breakdown">';
+                html += '  <div class="run-summary-bucket-fill">' + renderBreakdownSegments(waitingBreakdown) + '</div>';
+                html += '  <div id="timeline-waiting-breakdown" class="timing-breakdown-popover timing-breakdown-popover-above" role="tooltip">';
+                html += '    <div class="timing-breakdown-heading">Waiting · ' + this.formatDuration(waitingTimeUs) + '</div>';
+                html += '    <div class="timing-breakdown-description">Event created → handler started</div>';
+                html += '    <div class="timing-breakdown-rows">' + renderBreakdownRows(waitingBreakdown) + '</div>';
+                html += '  </div>';
+                html += '</div>';
             }
-            if (hasQueueWait) {
-                html += '  <div class="run-summary-bar-segment run-summary-bar-queue-wait" style="width: ' + normalizedQueueWait.toFixed(2) + '%"></div>';
+            if (execTimeUs > 0) {
+                html += '<div class="run-summary-bucket run-summary-bucket-execution timing-breakdown-trigger" tabindex="0" style="width:' + executionPercent.toFixed(3) + '%" aria-describedby="timeline-execution-breakdown">';
+                html += '  <div class="run-summary-bucket-fill">' + renderBreakdownSegments(executionBreakdown) + '</div>';
+                html += '  <div id="timeline-execution-breakdown" class="timing-breakdown-popover timing-breakdown-popover-above timing-breakdown-popover-align-right" role="tooltip">';
+                html += '    <div class="timing-breakdown-heading">Execution · ' + this.formatDuration(execTimeUs) + '</div>';
+                html += '    <div class="timing-breakdown-description">Handler started → run completed</div>';
+                html += '    <div class="timing-breakdown-rows">' + renderBreakdownRows(executionBreakdown) + '</div>';
+                html += '  </div>';
+                html += '</div>';
             }
-            if (hasWorkerPreparation) {
-                html += '  <div class="run-summary-bar-segment run-summary-bar-worker-prep" style="width: ' + normalizedWorkerPreparation.toFixed(2) + '%"></div>';
-            }
-            html += '  <div class="run-summary-bar-segment run-summary-bar-compilation" style="width: ' + normalizedCompilation.toFixed(2) + '%"></div>';
-            html += '  <div class="run-summary-bar-segment run-summary-bar-execution" style="width: ' + normalizedExecution.toFixed(2) + '%"></div>';
             html += '</div>';
             html += '</div>';
         }
@@ -3203,8 +3325,20 @@ window.ObservabilityTabs = class ObservabilityTabs {
         return 0;
     }
 
+    getPreRunWaitUs() {
+        // Waiting is event creation through handler run:start.
+        const durationContainer = document.getElementById('run-duration-container');
+        if (durationContainer) {
+            const preRunWaitUs = durationContainer.dataset.preRunWaitUs;
+            if (preRunWaitUs && preRunWaitUs !== '') {
+                return parseInt(preRunWaitUs, 10);
+            }
+        }
+        return 0;
+    }
+
     getQueueWaitUs() {
-        // Get queue wait time from data attribute (only for event-triggered runs)
+        // Queue Wait is the backend-residence component of Waiting.
         const durationContainer = document.getElementById('run-duration-container');
         if (durationContainer) {
             const queueWaitUs = durationContainer.dataset.queueWaitUs;
