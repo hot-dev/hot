@@ -53,6 +53,7 @@ pub struct LatencyPercentileSeries {
 pub struct LatencyTimelineData {
     dates: Vec<String>,
     sample_counts: Vec<i64>,
+    last_bucket_partial: bool,
     p50: LatencyPercentileSeries,
     p95: LatencyPercentileSeries,
     p99: LatencyPercentileSeries,
@@ -569,9 +570,14 @@ fn assemble_latency_timeline(
         .into_iter()
         .filter_map(|bucket| bucket.date.clone().map(|date| (date, bucket)))
         .collect::<BTreeMap<_, _>>();
-    let dates = match days {
-        Some(days) => crate::timezone::generate_time_buckets(time_unit, days, display_timezone),
-        None => by_date
+    // A capped query contains only the newest samples. Generating the full
+    // requested range in that case would turn omitted, pre-cap periods into
+    // misleading zero-activity buckets.
+    let dates = match (days, summary_bucket.truncated) {
+        (Some(days), false) => {
+            crate::timezone::generate_time_buckets(time_unit, days, display_timezone)
+        }
+        _ => by_date
             .keys()
             .cloned()
             .collect::<BTreeSet<_>>()
@@ -602,6 +608,13 @@ fn assemble_latency_timeline(
     } else {
         summary_bucket.precise_sample_count as f64 / summary_bucket.sample_count as f64 * 100.0
     };
+    let last_bucket_partial = days
+        .and_then(|days| {
+            crate::timezone::generate_time_buckets(time_unit, days, display_timezone)
+                .into_iter()
+                .last()
+        })
+        .is_some_and(|current_bucket| dates.last() == Some(&current_bucket));
 
     LatencyTimelineData {
         sample_counts: dates
@@ -613,6 +626,7 @@ fn assemble_latency_timeline(
                     .unwrap_or(0)
             })
             .collect(),
+        last_bucket_partial,
         p50: pair_series(|bucket| &bucket.p50),
         p95: pair_series(|bucket| &bucket.p95),
         p99: pair_series(|bucket| &bucket.p99),
@@ -684,5 +698,58 @@ mod tests {
         assert_eq!(data.summary.precise_sample_count, 1);
         assert_eq!(data.summary.precise_coverage_percent, 50.0);
         assert_eq!(data.summary.p50.waiting_ms, Some(20.0));
+    }
+
+    #[test]
+    fn capped_latency_does_not_synthesize_pre_cap_zero_buckets() {
+        let samples = vec![LatencySample {
+            date: "2026-07-29".to_string(),
+            waiting_ms: 10.0,
+            execution_ms: 20.0,
+            precise: true,
+        }];
+        let data = assemble_latency_timeline(
+            aggregate_latency_samples(samples, true),
+            Some(30),
+            "day",
+            "UTC",
+        );
+        assert_eq!(data.dates, vec!["2026-07-29"]);
+        assert_eq!(data.sample_counts, vec![1]);
+        assert!(data.last_bucket_partial);
+    }
+
+    #[test]
+    fn all_time_latency_does_not_mark_a_historical_last_bucket_partial() {
+        let samples = vec![LatencySample {
+            date: "2026-06".to_string(),
+            waiting_ms: 10.0,
+            execution_ms: 20.0,
+            precise: true,
+        }];
+        let data = assemble_latency_timeline(
+            aggregate_latency_samples(samples, false),
+            None,
+            "month",
+            "UTC",
+        );
+        assert!(!data.last_bucket_partial);
+    }
+
+    #[test]
+    fn capped_historical_latency_does_not_mark_its_last_bucket_partial() {
+        let samples = vec![LatencySample {
+            date: "2026-06-01".to_string(),
+            waiting_ms: 10.0,
+            execution_ms: 20.0,
+            precise: true,
+        }];
+        let data = assemble_latency_timeline(
+            aggregate_latency_samples(samples, true),
+            Some(30),
+            "day",
+            "UTC",
+        );
+        assert!(!data.last_bucket_partial);
     }
 }

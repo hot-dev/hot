@@ -1608,7 +1608,19 @@ function updateTaskActivityTimelineChart(data) {
 // ============================================
 // Waiting vs. Execution Latency
 // ============================================
-const latencyPercentiles = { run: 'p95', task: 'p95' };
+function storedLatencyPercentile(kind) {
+    try {
+        const value = localStorage.getItem(`hot.dashboard.${kind}.latency-percentile`);
+        return ['p50', 'p95', 'p99'].includes(value) ? value : 'p95';
+    } catch (_) {
+        return 'p95';
+    }
+}
+
+const latencyPercentiles = {
+    run: storedLatencyPercentile('run'),
+    task: storedLatencyPercentile('task')
+};
 
 function formatLatencyMs(value) {
     if (value == null || !Number.isFinite(Number(value))) return '—';
@@ -1647,6 +1659,10 @@ async function updateLatencyTimeline(kind) {
 window.setLatencyPercentile = function(kind, percentile) {
     if (!['run', 'task'].includes(kind) || !['p50', 'p95', 'p99'].includes(percentile)) return;
     latencyPercentiles[kind] = percentile;
+    try {
+        localStorage.setItem(`hot.dashboard.${kind}.latency-percentile`, percentile);
+    } catch (_) {}
+    updateLatencyPercentileButtons(kind);
     const data = kind === 'run' ? previousRunLatencyData : previousTaskLatencyData;
     if (data) updateLatencyTimelineChart(kind, data);
 };
@@ -1656,22 +1672,7 @@ function updateLatencyMetric(id, value) {
     if (element) element.textContent = value;
 }
 
-function updateLatencyTimelineChart(kind, data) {
-    const summary = data.summary || {};
-    updateLatencyMetric(`${kind}-latency-wait-p50`, formatLatencyMs(summary.p50 && summary.p50.waiting_ms));
-    updateLatencyMetric(`${kind}-latency-wait-p95`, formatLatencyMs(summary.p95 && summary.p95.waiting_ms));
-    updateLatencyMetric(`${kind}-latency-exec-p95`, formatLatencyMs(summary.p95 && summary.p95.execution_ms));
-
-    const sampleSuffix = summary.truncated ? '+' : '';
-    updateLatencyMetric(`${kind}-latency-samples`, `${formatNumber(summary.sample_count || 0)}${sampleSuffix}`);
-    const coverage = Number(summary.precise_coverage_percent || 0);
-    updateLatencyMetric(
-        `${kind}-latency-coverage`,
-        kind === 'run'
-            ? (summary.sample_count ? 'Direct timing' : 'No completed samples')
-            : (summary.sample_count ? `${coverage.toFixed(coverage === 100 ? 0 : 1)}% precise timing` : 'No completed samples')
-    );
-
+function updateLatencyPercentileButtons(kind) {
     const percentile = latencyPercentiles[kind];
     ['p50', 'p95', 'p99'].forEach(value => {
         const button = document.getElementById(`${kind}-latency-${value}-button`);
@@ -1686,6 +1687,35 @@ function updateLatencyTimelineChart(kind, data) {
         button.classList.toggle('dark:text-gray-400', !active);
         button.setAttribute('aria-pressed', active ? 'true' : 'false');
     });
+}
+
+function formatLatencyAxisLabel(value) {
+    const filtersRoot = document.querySelector('[x-data="dashboardFilters"]');
+    const filters = filtersRoot ? Alpine.$data(filtersRoot) : null;
+    const timeUnit = filters && filters.timeUnit;
+    if (timeUnit === 'hour' && value.length >= 16) return value.slice(11, 16);
+    if (timeUnit === 'day' && value.length >= 10) return value.slice(5, 10);
+    return value;
+}
+
+function updateLatencyTimelineChart(kind, data) {
+    const summary = data.summary || {};
+    updateLatencyMetric(`${kind}-latency-wait-p50`, formatLatencyMs(summary.p50 && summary.p50.waiting_ms));
+    updateLatencyMetric(`${kind}-latency-wait-p95`, formatLatencyMs(summary.p95 && summary.p95.waiting_ms));
+    updateLatencyMetric(`${kind}-latency-exec-p95`, formatLatencyMs(summary.p95 && summary.p95.execution_ms));
+
+    const sampleSuffix = summary.truncated ? '+' : '';
+    updateLatencyMetric(`${kind}-latency-samples`, `${formatNumber(summary.sample_count || 0)}${sampleSuffix}`);
+    const coverage = Number(summary.precise_coverage_percent || 0);
+    updateLatencyMetric(
+        `${kind}-latency-coverage`,
+        summary.sample_count
+            ? `${coverage.toFixed(coverage === 100 ? 0 : 1)}% precise timing`
+            : 'No completed samples'
+    );
+
+    const percentile = latencyPercentiles[kind];
+    updateLatencyPercentileButtons(kind);
 
     const chartName = kind === 'run' ? 'runLatencyTimelineChart' : 'taskLatencyTimelineChart';
     if (!window[chartName]) {
@@ -1716,7 +1746,7 @@ function updateLatencyTimelineChart(kind, data) {
         return;
     }
 
-    const series = [
+    const baseSeries = [
         {
             name: 'Waiting',
             type: 'line',
@@ -1737,7 +1767,10 @@ function updateLatencyTimelineChart(kind, data) {
             emphasis: { focus: 'series' },
             connectNulls: false
         }
-    ].flatMap(config => splitLastSegmentDotted(config));
+    ];
+    const series = data.last_bucket_partial
+        ? baseSeries.flatMap(config => splitLastSegmentDotted(config))
+        : baseSeries;
 
     chart.setOption({
         title: { show: false },
@@ -1746,7 +1779,7 @@ function updateLatencyTimelineChart(kind, data) {
             formatter: function(params) {
                 if (!params || params.length === 0) return '';
                 const index = params[0].dataIndex;
-                const isLast = index === data.dates.length - 1;
+                const isLast = data.last_bucket_partial && index === data.dates.length - 1;
                 let result = `${params[0].axisValue}${isLast ? ` <span style="color:${getSecondaryTextColor()}">(partial)</span>` : ''}<br/>`;
                 const seen = new Set();
                 params.forEach(param => {
@@ -1776,7 +1809,10 @@ function updateLatencyTimelineChart(kind, data) {
                 fontSize: 10,
                 color: getTextColor(),
                 formatter: function(value, index) {
-                    return index === data.dates.length - 1 ? value + '*' : value;
+                    const label = formatLatencyAxisLabel(value);
+                    return data.last_bucket_partial && index === data.dates.length - 1
+                        ? label + '*'
+                        : label;
                 }
             },
             axisLine: { lineStyle: { color: getAxisLineColor() } }

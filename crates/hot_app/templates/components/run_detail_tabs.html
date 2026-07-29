@@ -281,7 +281,7 @@
     top: calc(100% + 8px);
     left: 0;
     z-index: 50;
-    width: 270px;
+    width: min(270px, calc(100vw - 32px));
     padding: 10px 12px;
     border: 1px solid rgba(209, 213, 219, 1);
     border-radius: 7px;
@@ -2902,6 +2902,12 @@ window.ObservabilityTabs = class ObservabilityTabs {
         const retryQueueAgeUs = this.getRetryQueueAgeUs();
         const handlerDispatchWaitUs = this.getHandlerDispatchWaitUs();
         const workerPreparationUs = this.getWorkerPreparationUs();
+        const timingContainer = this.getDurationContainer();
+        const isTaskTiming = timingContainer?.dataset.timingKind === 'task';
+        const timingValue = key => {
+            const value = timingContainer?.dataset[key];
+            return value ? Math.max(0, parseInt(value, 10) || 0) : 0;
+        };
 
         // Calculate compilation overhead (clamp to 0 to handle timing precision issues)
         // Use execTimeUs since compilation/loading is part of Execution, not Waiting.
@@ -2915,17 +2921,31 @@ window.ObservabilityTabs = class ObservabilityTabs {
             const primaryTotalUs = Math.max(1, waitingTimeUs + execTimeUs);
             const waitingPercent = (waitingTimeUs / primaryTotalUs) * 100;
             const executionPercent = (execTimeUs / primaryTotalUs) * 100;
-            const waitingBreakdown = [
+            const waitingBreakdown = (isTaskTiming ? [
+                { label: 'Publish', value: publishWaitUs },
+                { label: 'Queue Wait', value: queueWaitUs },
+                { label: 'Retry / Reclaim Age', value: retryQueueAgeUs },
+                { label: 'Task Setup', value: workerPreparationUs },
+                { label: 'Capacity Wait', value: timingValue('capacityWaitUs') },
+                { label: 'Image Pull', value: timingValue('imagePullUs') },
+                { label: 'Runtime Start', value: timingValue('runtimeStartUs') },
+                { label: 'Other setup', value: timingValue('unattributedWaitUs') }
+            ] : [
                 { label: 'Publish', value: publishWaitUs },
                 { label: 'Queue Wait', value: queueWaitUs },
                 { label: 'Retry / Reclaim Age', value: retryQueueAgeUs },
                 { label: 'Handler Dispatch', value: handlerDispatchWaitUs },
                 { label: 'Invocation Setup', value: workerPreparationUs }
-            ].filter(part => part.value > 0);
-            const executionBreakdown = [
+            ]).filter(part => part.value > 0);
+            const executionBreakdown = (isTaskTiming ? [
+                { label: 'Runtime Startup', value: timingValue('executionStartupUs') },
+                { label: 'Workload Running', value: timingValue('workloadExecutionUs') },
+                { label: 'Logs', value: timingValue('logsCollectUs') },
+                { label: 'Finalization', value: timingValue('finalizationUs') }
+            ] : [
                 { label: 'Compilation & Loading', value: compilationTimeUs },
                 { label: 'Handler Execution', value: handlerExecutionTimeUs }
-            ].filter(part => part.value > 0);
+            ]).filter(part => part.value > 0);
 
             const renderBreakdownRows = parts => parts.map(part =>
                 '<div class="timing-breakdown-row"><span>' + part.label + '</span><strong>' +
@@ -2966,9 +2986,9 @@ window.ObservabilityTabs = class ObservabilityTabs {
             if (waitingTimeUs > 0) {
                 html += '<div class="run-summary-bucket run-summary-bucket-waiting timing-breakdown-trigger" tabindex="0" style="width:' + waitingPercent.toFixed(3) + '%" aria-describedby="timeline-waiting-breakdown">';
                 html += '  <div class="run-summary-bucket-fill">' + renderBreakdownSegments(waitingBreakdown) + '</div>';
-                html += '  <div id="timeline-waiting-breakdown" class="timing-breakdown-popover timing-breakdown-popover-above" role="tooltip">';
+                html += '  <div id="timeline-waiting-breakdown" class="timing-breakdown-popover" role="tooltip">';
                 html += '    <div class="timing-breakdown-heading">Waiting · ' + this.formatDuration(waitingTimeUs) + '</div>';
-                html += '    <div class="timing-breakdown-description">Event created → handler started</div>';
+                html += '    <div class="timing-breakdown-description">' + (isTaskTiming ? 'Task created → workload started' : 'Event created → handler started') + '</div>';
                 html += '    <div class="timing-breakdown-rows">' + renderBreakdownRows(waitingBreakdown) + '</div>';
                 html += '  </div>';
                 html += '</div>';
@@ -2976,9 +2996,9 @@ window.ObservabilityTabs = class ObservabilityTabs {
             if (execTimeUs > 0) {
                 html += '<div class="run-summary-bucket run-summary-bucket-execution timing-breakdown-trigger" tabindex="0" style="width:' + executionPercent.toFixed(3) + '%" aria-describedby="timeline-execution-breakdown">';
                 html += '  <div class="run-summary-bucket-fill">' + renderBreakdownSegments(executionBreakdown) + '</div>';
-                html += '  <div id="timeline-execution-breakdown" class="timing-breakdown-popover timing-breakdown-popover-above timing-breakdown-popover-align-right" role="tooltip">';
+                html += '  <div id="timeline-execution-breakdown" class="timing-breakdown-popover timing-breakdown-popover-align-right" role="tooltip">';
                 html += '    <div class="timing-breakdown-heading">Execution · ' + this.formatDuration(execTimeUs) + '</div>';
-                html += '    <div class="timing-breakdown-description">Handler started → run completed</div>';
+                html += '    <div class="timing-breakdown-description">' + (isTaskTiming ? 'Workload started → task completed' : 'Handler started → run completed') + '</div>';
                 html += '    <div class="timing-breakdown-rows">' + renderBreakdownRows(executionBreakdown) + '</div>';
                 html += '  </div>';
                 html += '</div>';
@@ -3293,9 +3313,14 @@ window.ObservabilityTabs = class ObservabilityTabs {
         return `${(totalMicros / 1_000_000).toFixed(1)}s`;
     }
 
+    getDurationContainer() {
+        return document.getElementById('run-duration-container')
+            || document.getElementById('task-duration-container');
+    }
+
     getRunDurationUs() {
         // Get total duration (queue wait + execution) from data attribute
-        const durationContainer = document.getElementById('run-duration-container');
+        const durationContainer = this.getDurationContainer();
         if (durationContainer) {
             const durationUs = durationContainer.dataset.durationUs;
             if (durationUs) {
@@ -3319,7 +3344,7 @@ window.ObservabilityTabs = class ObservabilityTabs {
 
     getExecTimeUs() {
         // Get execution time only (stop - start) from data attribute
-        const durationContainer = document.getElementById('run-duration-container');
+        const durationContainer = this.getDurationContainer();
         if (durationContainer) {
             const execTimeUs = durationContainer.dataset.execTimeUs;
             if (execTimeUs) {
@@ -3331,7 +3356,7 @@ window.ObservabilityTabs = class ObservabilityTabs {
 
     getPreRunWaitUs() {
         // Waiting is event creation through handler run:start.
-        const durationContainer = document.getElementById('run-duration-container');
+        const durationContainer = this.getDurationContainer();
         if (durationContainer) {
             const preRunWaitUs = durationContainer.dataset.preRunWaitUs;
             if (preRunWaitUs && preRunWaitUs !== '') {
@@ -3343,7 +3368,7 @@ window.ObservabilityTabs = class ObservabilityTabs {
 
     getQueueWaitUs() {
         // Queue Wait is the backend-residence component of Waiting.
-        const durationContainer = document.getElementById('run-duration-container');
+        const durationContainer = this.getDurationContainer();
         if (durationContainer) {
             const queueWaitUs = durationContainer.dataset.queueWaitUs;
             if (queueWaitUs && queueWaitUs !== '') {
@@ -3354,7 +3379,7 @@ window.ObservabilityTabs = class ObservabilityTabs {
     }
 
     getPublishWaitUs() {
-        const durationContainer = document.getElementById('run-duration-container');
+        const durationContainer = this.getDurationContainer();
         if (durationContainer) {
             const publishWaitUs = durationContainer.dataset.publishWaitUs;
             if (publishWaitUs && publishWaitUs !== '') {
@@ -3365,7 +3390,7 @@ window.ObservabilityTabs = class ObservabilityTabs {
     }
 
     getRetryQueueAgeUs() {
-        const durationContainer = document.getElementById('run-duration-container');
+        const durationContainer = this.getDurationContainer();
         if (durationContainer) {
             const retryQueueAgeUs = durationContainer.dataset.retryQueueAgeUs;
             if (retryQueueAgeUs && retryQueueAgeUs !== '') {
@@ -3376,7 +3401,7 @@ window.ObservabilityTabs = class ObservabilityTabs {
     }
 
     getHandlerDispatchWaitUs() {
-        const durationContainer = document.getElementById('run-duration-container');
+        const durationContainer = this.getDurationContainer();
         if (durationContainer) {
             const handlerDispatchWaitUs = durationContainer.dataset.handlerDispatchWaitUs;
             if (handlerDispatchWaitUs && handlerDispatchWaitUs !== '') {
@@ -3387,7 +3412,7 @@ window.ObservabilityTabs = class ObservabilityTabs {
     }
 
     getWorkerPreparationUs() {
-        const durationContainer = document.getElementById('run-duration-container');
+        const durationContainer = this.getDurationContainer();
         if (durationContainer) {
             const workerPreparationUs = durationContainer.dataset.workerPreparationUs;
             if (workerPreparationUs && workerPreparationUs !== '') {
