@@ -13,6 +13,12 @@ type EventHandlerCache = Arc<Mutex<AHashMap<(Uuid, String), CachedEventHandlers>
 static EVENT_HANDLER_CACHE: LazyLock<EventHandlerCache> =
     LazyLock::new(|| Arc::new(Mutex::new(AHashMap::new())));
 
+/// Exact build targets are immutable and tenant-verified by the worker before
+/// lookup, so their handler metadata can be cached without an environment
+/// revision query on every sparse schedule/call.
+static BUILD_EVENT_HANDLER_CACHE: LazyLock<EventHandlerCache> =
+    LazyLock::new(|| Arc::new(Mutex::new(AHashMap::new())));
+
 /// Cached event handlers with timestamp for optional TTL
 #[derive(Clone)]
 struct CachedEventHandlers {
@@ -23,6 +29,12 @@ struct CachedEventHandlers {
 
 /// Maximum cache entries (one per env_id + event_type combination)
 const MAX_EVENT_HANDLER_CACHE_ENTRIES: usize = 100;
+
+/// Cross-process deployments are detected through `runtime_revision`. Avoid
+/// paying for that PostgreSQL read on every event in a burst while keeping the
+/// stale window tightly bounded when another process deploys a build.
+const EVENT_HANDLER_REVISION_RECHECK_INTERVAL: std::time::Duration =
+    std::time::Duration::from_millis(500);
 
 #[derive(Error, Debug)]
 pub enum EventHandlerError {
@@ -260,6 +272,52 @@ impl EventHandler {
         }
     }
 
+    /// Cached exact-build lookup for immutable deployed build IDs.
+    pub async fn get_event_handlers_by_build_and_event_type_cached(
+        db: &crate::db::DatabasePool,
+        build_id: &Uuid,
+        event_type: &str,
+    ) -> Result<Vec<EventHandler>, EventHandlerError> {
+        let cache_key = (*build_id, event_type.to_string());
+        if let Ok(cache) = BUILD_EVENT_HANDLER_CACHE.lock()
+            && let Some(cached) = cache.get(&cache_key)
+        {
+            return Ok(cached.handlers.clone());
+        }
+
+        let handlers = Self::get_event_handlers_by_build_and_event_type(
+            db,
+            build_id,
+            event_type,
+            Some(i64::MAX),
+            None,
+        )
+        .await?;
+
+        if let Ok(mut cache) = BUILD_EVENT_HANDLER_CACHE.lock() {
+            if cache.len() >= MAX_EVENT_HANDLER_CACHE_ENTRIES
+                && !cache.contains_key(&cache_key)
+                && let Some(oldest_key) = cache
+                    .iter()
+                    .min_by_key(|(_, value)| value.cached_at)
+                    .map(|(key, _)| key.clone())
+            {
+                cache.remove(&oldest_key);
+            }
+            cache.insert(
+                cache_key,
+                CachedEventHandlers {
+                    handlers: handlers.clone(),
+                    // Exact build cache does not use runtime revisions.
+                    runtime_revision: 0,
+                    cached_at: std::time::Instant::now(),
+                },
+            );
+        }
+
+        Ok(handlers)
+    }
+
     async fn get_event_handlers_by_build_and_event_type_sqlite(
         db: &Pool<Sqlite>,
         build_id: &Uuid,
@@ -316,6 +374,24 @@ impl EventHandler {
         event_type: &str,
     ) -> Result<Vec<EventHandler>, EventHandlerError> {
         let cache_key = (*env_id, event_type.to_string());
+
+        // Local deployment paths invalidate this cache synchronously. For
+        // cross-process deployments, re-check the authoritative revision on a
+        // short interval instead of issuing one PostgreSQL query per event.
+        if let Ok(cache) = EVENT_HANDLER_CACHE.lock()
+            && let Some(cached) = cache.get(&cache_key)
+            && cached.cached_at.elapsed() < EVENT_HANDLER_REVISION_RECHECK_INTERVAL
+        {
+            tracing::debug!(
+                "✓ Event handlers cache HIT for env={}, type={} revision={} ({} handlers; revision check deferred)",
+                env_id,
+                event_type,
+                cached.runtime_revision,
+                cached.handlers.len()
+            );
+            return Ok(cached.handlers.clone());
+        }
+
         let runtime_revision = crate::db::Env::get_runtime_revision(db, env_id)
             .await
             .map_err(|e| EventHandlerError::RuntimeRevision(e.to_string()))?;
@@ -433,6 +509,9 @@ impl EventHandler {
             if count > 0 {
                 tracing::info!("Invalidated all {} event handler cache entries", count);
             }
+        }
+        if let Ok(mut cache) = BUILD_EVENT_HANDLER_CACHE.lock() {
+            cache.clear();
         }
     }
 
@@ -584,7 +663,7 @@ impl EventHandler {
         column: Option<i32>,
         position: Option<i32>,
     ) -> Result<(), EventHandlerError> {
-        match db {
+        let result = match db {
             crate::db::DatabasePool::Postgres(pg_pool) => {
                 Self::insert_event_handler_postgres(
                     pg_pool,
@@ -619,7 +698,13 @@ impl EventHandler {
                 )
                 .await
             }
+        };
+        if result.is_ok()
+            && let Ok(mut cache) = BUILD_EVENT_HANDLER_CACHE.lock()
+        {
+            cache.remove(&(*build_id, event_type.to_string()));
         }
+        result
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -877,6 +962,7 @@ impl EventHandler {
         db: &crate::db::DatabasePool,
         event_handler_id: &Uuid,
     ) -> Result<(), EventHandlerError> {
+        Self::invalidate_all_event_handler_cache();
         match db {
             crate::db::DatabasePool::Postgres(pg_pool) => {
                 sqlx::query("DELETE FROM event_handler WHERE event_handler_id = $1")

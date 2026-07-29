@@ -96,7 +96,7 @@
         </div>
 
         <!-- Row 2: Timing Information -->
-        <div id="run-duration-container" class="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 {% if r.queued_at.is_some() %}lg:grid-cols-6{% else %}lg:grid-cols-4{% endif %} gap-4 mt-4 pt-4 border-t border-gray-200 dark:border-gray-700" data-duration-us="{{ r.duration_us }}" data-exec-time-us="{{ r.exec_time_us }}" data-queue-wait-us="{% match r.queue_wait_us %}{% when Some with (us) %}{{ us }}{% when None %}{% endmatch %}">
+        <div id="run-duration-container" class="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 {% if r.queued_at.is_some() %}lg:grid-cols-8{% else %}lg:grid-cols-4{% endif %} gap-4 mt-4 pt-4 border-t border-gray-200 dark:border-gray-700" data-duration-us="{{ r.duration_us }}" data-exec-time-us="{{ r.exec_time_us }}" data-pre-run-wait-us="{% match r.pre_run_wait_us %}{% when Some with (us) %}{{ us }}{% when None %}{% endmatch %}" data-publish-wait-us="{% match r.publish_wait_us %}{% when Some with (us) %}{{ us }}{% when None %}{% endmatch %}" data-queue-wait-us="{% match r.queue_wait_us %}{% when Some with (us) %}{{ us }}{% when None %}{% endmatch %}" data-worker-preparation-us="{% match r.worker_preparation_us %}{% when Some with (us) %}{{ us }}{% when None %}{% endmatch %}">
             {% if r.queued_at.is_some() %}
             <!-- Event Time (only for event-triggered runs) -->
             <div>
@@ -104,11 +104,25 @@
                 <p class="text-xs font-semibold">{% match r.queued_at_formatted %}{% when Some with (t) %}{{ t }}{% when None %}{% endmatch %}</p>
             </div>
 
+            {% if r.publish_wait_us.is_some() %}
+            <div title="Event persistence through enqueue into the configured queue">
+                <h3 class="text-xs font-medium text-gray-500 dark:text-gray-400 mb-1 uppercase tracking-wider">Publish</h3>
+                <p class="text-xs font-semibold text-amber-600 dark:text-amber-400">{% match r.publish_wait_formatted %}{% when Some with (t) %}{{ t }}{% when None %}{% endmatch %}</p>
+            </div>
+            {% endif %}
+
             <!-- Queue Wait -->
-            <div>
+            <div title="Time resident in the configured queue backend before a worker claim">
                 <h3 class="text-xs font-medium text-gray-500 dark:text-gray-400 mb-1 uppercase tracking-wider">Queue Wait</h3>
                 <p class="text-xs font-semibold text-yellow-600 dark:text-yellow-400">{% match r.queue_wait_formatted %}{% when Some with (t) %}{{ t }}{% when None %}{% endmatch %}</p>
             </div>
+
+            {% if r.worker_preparation_us.is_some() %}
+            <div title="Worker claim through VM run:start, including hydration and routing">
+                <h3 class="text-xs font-medium text-gray-500 dark:text-gray-400 mb-1 uppercase tracking-wider">Worker Prep</h3>
+                <p class="text-xs font-semibold text-sky-600 dark:text-sky-400">{% match r.worker_preparation_formatted %}{% when Some with (t) %}{{ t }}{% when None %}{% endmatch %}</p>
+            </div>
+            {% endif %}
             {% endif %}
 
             <!-- Run Start -->

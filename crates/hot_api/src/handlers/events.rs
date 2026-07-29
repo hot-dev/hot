@@ -168,6 +168,7 @@ pub async fn publish_event_internal(
         secret_value_hashes: AHashSet::new(),
         access_id,
         agent_type: None,
+        queue_timing: None,
     };
 
     // Create the event message

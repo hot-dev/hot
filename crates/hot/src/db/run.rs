@@ -1577,8 +1577,8 @@ impl Run {
         Self::update_stop_time_and_status(db, run_id, stop_time, &RunStatus::Succeeded).await
     }
 
-    /// Update run info (for warnings, routing decisions, diagnostics)
-    /// Only updates if info is Some - does not clear existing info with None
+    /// Merge run info (for warnings, routing decisions, diagnostics).
+    /// Existing keys not present in the patch are preserved.
     pub async fn update_info(
         db: &crate::db::DatabasePool,
         run_id: &Uuid,
@@ -1591,19 +1591,27 @@ impl Run {
 
         match db {
             crate::db::DatabasePool::Postgres(pg_pool) => {
-                sqlx::query("UPDATE run SET info = $2 WHERE run_id = $1")
-                    .bind(run_id)
-                    .bind(info_val)
-                    .execute(pg_pool)
-                    .await?;
+                sqlx::query(
+                    "UPDATE run
+                     SET info = COALESCE(info, '{}'::jsonb) || $2
+                     WHERE run_id = $1",
+                )
+                .bind(run_id)
+                .bind(info_val)
+                .execute(pg_pool)
+                .await?;
             }
             crate::db::DatabasePool::Sqlite(sqlite_pool) => {
                 let info_str = info_val.to_string();
-                sqlx::query("UPDATE run SET info = ? WHERE run_id = ?")
-                    .bind(&info_str)
-                    .bind(run_id)
-                    .execute(sqlite_pool)
-                    .await?;
+                sqlx::query(
+                    "UPDATE run
+                     SET info = json_patch(COALESCE(info, '{}'), ?)
+                     WHERE run_id = ?",
+                )
+                .bind(&info_str)
+                .bind(run_id)
+                .execute(sqlite_pool)
+                .await?;
             }
         }
 

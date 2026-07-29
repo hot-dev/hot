@@ -1116,6 +1116,7 @@ async fn handle_tools_call_streaming(
         secret_value_hashes: AHashSet::new(),
         access_id,
         agent_type: None,
+        queue_timing: None,
     };
 
     // Convert MCP named arguments (JSON object) to positional Vec for Hot's call() function.

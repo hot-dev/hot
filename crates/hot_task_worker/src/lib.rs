@@ -2973,6 +2973,7 @@ async fn process_code_task(
         secret_value_hashes: Default::default(),
         access_id: None,
         agent_type: None,
+        queue_timing: None,
     };
 
     let origin_run_id = execution_context.origin_run_id;

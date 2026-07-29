@@ -32,6 +32,196 @@ const WORKER_SHUTDOWN_DRAIN_SECONDS: u64 = 30;
 const LOCAL_DEV_WORKER_SHUTDOWN_DRAIN_SECONDS: u64 = 5;
 const WORKER_HANDOFF_WAIT_LOG_MS: u64 = 100;
 
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+struct TenantStoreKey {
+    org_id: Uuid,
+    env_id: Uuid,
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+struct TenantContextKey {
+    org_id: Uuid,
+    env_id: Uuid,
+    project_id: Uuid,
+}
+
+#[derive(Clone)]
+struct CachedTenantContext {
+    values: AHashMap<String, Val>,
+    loaded_at: std::time::Instant,
+}
+
+/// Worker-lifetime clients and strictly tenant-keyed execution state.
+///
+/// File storage is safe to share because every operation requires a
+/// `FileStorageContext` and both local/S3 paths include org_id + env_id.
+/// Stores embed tenant identity, so they are cached under that exact UUID
+/// scope. Decrypted context is even narrower and also includes project_id.
+struct WorkerExecutionServices {
+    db: Arc<DatabasePool>,
+    file_storage: Option<Arc<dyn hot::file_storage::FileStorage>>,
+    embedding_provider: Option<Arc<dyn hot::store::embedding::EmbeddingProvider>>,
+    stores: Mutex<AHashMap<TenantStoreKey, Arc<dyn hot::store::Store>>>,
+    contexts: Mutex<AHashMap<TenantContextKey, CachedTenantContext>>,
+    context_ttl: std::time::Duration,
+}
+
+impl WorkerExecutionServices {
+    async fn new(db: Arc<DatabasePool>, conf: &Val) -> Self {
+        let file_storage = match hot::file_storage::file_storage_from_config(conf).await {
+            Ok(storage) => Some(Arc::from(storage)),
+            Err(e) => {
+                tracing::debug!("File storage not available for worker: {}", e);
+                None
+            }
+        };
+        let embedding_provider =
+            hot::store::embedding::embedding_provider_from_config(conf).map(Arc::from);
+        let context_ttl_ms = conf
+            .get_int_or_default("worker.context-cache-ttl-ms", 1_000)
+            .max(0) as u64;
+
+        Self {
+            db,
+            file_storage,
+            embedding_provider,
+            stores: Mutex::new(AHashMap::new()),
+            contexts: Mutex::new(AHashMap::new()),
+            context_ttl: std::time::Duration::from_millis(context_ttl_ms),
+        }
+    }
+
+    async fn store_for(
+        &self,
+        conf: &Val,
+        org_id: Uuid,
+        env_id: Uuid,
+    ) -> Option<Arc<dyn hot::store::Store>> {
+        let key = TenantStoreKey { org_id, env_id };
+        if let Some(store) = self.stores.lock().await.get(&key).cloned() {
+            return Some(store);
+        }
+
+        let store = match hot::store::store_from_config_with_db(
+            conf,
+            Some(Arc::clone(&self.db)),
+            Some(org_id),
+            Some(env_id),
+        )
+        .await
+        {
+            Ok(store) => Arc::from(store),
+            Err(e) => {
+                tracing::debug!(
+                    org_id = %org_id,
+                    env_id = %env_id,
+                    "Store not available for tenant-scoped event handler: {}",
+                    e
+                );
+                return None;
+            }
+        };
+
+        // A concurrent miss may have initialized the same tenant. Reuse the
+        // first inserted instance; UUID-keyed scopes can never cross tenants.
+        let mut stores = self.stores.lock().await;
+        Some(stores.entry(key).or_insert(store).clone())
+    }
+
+    async fn context_for(
+        &self,
+        encryption: &ContextEncryption,
+        key: TenantContextKey,
+    ) -> AHashMap<String, Val> {
+        if !self.context_ttl.is_zero()
+            && let Some(cached) = self.contexts.lock().await.get(&key).cloned()
+            && cached.loaded_at.elapsed() < self.context_ttl
+        {
+            return cached.values;
+        }
+
+        let mut values = AHashMap::new();
+        let mut cacheable = true;
+
+        match Context::get_by_env(self.db.as_ref(), &key.env_id).await {
+            Ok(context_vars) => {
+                for context_var in context_vars.into_iter().filter(|value| value.active) {
+                    match context_var.get_decrypted_value(encryption, &key.org_id) {
+                        Ok(value) => {
+                            values.insert(context_var.key, value);
+                        }
+                        Err(e) => {
+                            cacheable = false;
+                            tracing::warn!(
+                                org_id = %key.org_id,
+                                env_id = %key.env_id,
+                                "Failed to decrypt environment context variable '{}': {}",
+                                context_var.key,
+                                e
+                            );
+                        }
+                    }
+                }
+            }
+            Err(e) => {
+                cacheable = false;
+                tracing::warn!(
+                    org_id = %key.org_id,
+                    env_id = %key.env_id,
+                    "Failed to load environment context variables: {}",
+                    e
+                );
+            }
+        }
+
+        match Context::get_by_project(self.db.as_ref(), &key.project_id).await {
+            Ok(context_vars) => {
+                for context_var in context_vars.into_iter().filter(|value| value.active) {
+                    match context_var.get_decrypted_value(encryption, &key.org_id) {
+                        Ok(value) => {
+                            // Project context intentionally overrides env context.
+                            values.insert(context_var.key, value);
+                        }
+                        Err(e) => {
+                            cacheable = false;
+                            tracing::warn!(
+                                org_id = %key.org_id,
+                                env_id = %key.env_id,
+                                project_id = %key.project_id,
+                                "Failed to decrypt project context variable '{}': {}",
+                                context_var.key,
+                                e
+                            );
+                        }
+                    }
+                }
+            }
+            Err(e) => {
+                cacheable = false;
+                tracing::warn!(
+                    org_id = %key.org_id,
+                    env_id = %key.env_id,
+                    project_id = %key.project_id,
+                    "Failed to load project context variables: {}",
+                    e
+                );
+            }
+        }
+
+        if cacheable && !self.context_ttl.is_zero() {
+            self.contexts.lock().await.insert(
+                key,
+                CachedTenantContext {
+                    values: values.clone(),
+                    loaded_at: std::time::Instant::now(),
+                },
+            );
+        }
+
+        values
+    }
+}
+
 fn worker_queue_claimer_count(include_notifications: bool) -> usize {
     if include_notifications { 4 } else { 2 }
 }
@@ -2939,6 +3129,7 @@ async fn execute_single_event_handler(
     dev_context_storage: Option<DevContextStorage>, // Context from hot/ctx.hot for dev mode
     stream_publisher: Option<Arc<StreamPubSub>>, // Stream pub/sub for real-time SSE updates
     task_queue: Arc<ProcessingQueue<TaskRequest>>,
+    execution_services: Arc<WorkerExecutionServices>,
 ) -> Result<(), String> {
     // TIMING: Track execution phases
     let timing_start = std::time::Instant::now();
@@ -3069,6 +3260,12 @@ async fn execute_single_event_handler(
                 }
             }
         };
+    let org_id = org_id.ok_or_else(|| {
+        format!(
+            "Cannot execute build {} without an authoritative org_id for tenant-scoped services",
+            build.build_id
+        )
+    })?;
 
     // Extract retry attempt: use retry context from event data if present (for retried runs)
     let retry_attempt = if let Some(ref ctx) = retry_context {
@@ -3086,7 +3283,7 @@ async fn execute_single_event_handler(
         run_type_id,
         event_message.body.execution_context.env_id,
         user_id,
-        org_id,
+        Some(org_id),
         Some(build.build_id), // Use resolved deployed build_id (not event context which may be None for API-published events)
         Some(event_message.body.event.event_id), // Include the event_id (now exists in DB)
         origin_run_id,        // From retry context or event type
@@ -3099,6 +3296,9 @@ async fn execute_single_event_handler(
     .with_agent_type(
         resolve_agent_type_for_execution(db, &build.build_id, event_handler, event_message).await,
     );
+    if let Some(queue_timing) = event_message.body.execution_context.queue_timing.clone() {
+        _execution_context = _execution_context.with_queue_timing(queue_timing);
+    }
 
     let emitter_for_events = emitter.clone();
 
@@ -3662,109 +3862,26 @@ async fn execute_single_event_handler(
             }
         }
 
-        // Load from database if encryption is available (database values override hot/ctx.hot)
+        // Load tenant-scoped database values from the short-lived cache.
+        // Database values override hot/ctx.hot; the cache key includes the
+        // authoritative org, environment, and project UUIDs.
         if let Some(encryption) = &encryption {
             debug!(
                 "Loading context variables for project '{}' from database (encryption available)",
                 project.name
             );
-            // Get org_id for encryption key derivation (already resolved earlier for ExecutionContext)
-            let org_id = match org_id {
-                Some(id) => id,
-                None => {
-                    // Should not happen — org_id was resolved above — but fall back just in case
-                    debug!(
-                        "Fetching env {} from database for org_id (fallback)",
-                        project.env_id
-                    );
-                    let env = Env::get_env(db, &project.env_id)
-                        .await
-                        .map_err(|e| format!("Failed to get env for project: {}", e))?;
-                    debug!("Successfully fetched env, org_id={}", env.org_id);
-                    env.org_id
-                }
-            };
-
-            // 2. Load environment-level context variables (override hot/ctx.hot)
-            debug!(
-                "Fetching environment-level context variables for env {} from database",
-                project.env_id
-            );
-            match Context::get_by_env(db, &project.env_id).await {
-                Ok(context_vars) => {
-                    debug!(
-                        "Successfully fetched {} env-level context variables from database",
-                        context_vars.len()
-                    );
-                    for cv in context_vars {
-                        if !cv.active {
-                            continue;
-                        }
-                        match cv.get_decrypted_value(encryption, &org_id) {
-                            Ok(val) => {
-                                debug!(
-                                    "Loaded env-level context variable '{}' for env '{}' (overrides hot/ctx.hot)",
-                                    cv.key, project.env_id
-                                );
-                                storage.insert(cv.key.clone(), val);
-                            }
-                            Err(e) => {
-                                tracing::warn!(
-                                    "Failed to decrypt env-level context variable '{}': {}",
-                                    cv.key,
-                                    e
-                                );
-                            }
-                        }
-                    }
-                }
-                Err(e) => {
-                    tracing::warn!(
-                        "Failed to load env-level context variables from database: {}",
-                        e
-                    );
-                }
-            }
-
-            // 3. Load project-level context variables (override env-level and hot/ctx.hot)
-            debug!(
-                "Fetching project-level context variables for project {} from database",
-                project.project_id
-            );
-            match Context::get_by_project(db, &project.project_id).await {
-                Ok(context_vars) => {
-                    debug!(
-                        "Successfully fetched {} project-level context variables from database",
-                        context_vars.len()
-                    );
-                    for cv in context_vars {
-                        if !cv.active {
-                            continue;
-                        }
-                        match cv.get_decrypted_value(encryption, &org_id) {
-                            Ok(val) => {
-                                debug!(
-                                    "Loaded project-level context variable '{}' for project '{}' (overrides env and hot/ctx.hot)",
-                                    cv.key, project.name
-                                );
-                                storage.insert(cv.key.clone(), val);
-                            }
-                            Err(e) => {
-                                tracing::warn!(
-                                    "Failed to decrypt project-level context variable '{}': {}",
-                                    cv.key,
-                                    e
-                                );
-                            }
-                        }
-                    }
-                }
-                Err(e) => {
-                    tracing::warn!(
-                        "Failed to load project-level context variables from database: {}",
-                        e
-                    );
-                }
+            let database_context = execution_services
+                .context_for(
+                    encryption,
+                    TenantContextKey {
+                        org_id,
+                        env_id: project.env_id,
+                        project_id: project.project_id,
+                    },
+                )
+                .await;
+            for (key, value) in database_context {
+                storage.insert(key, value);
             }
         }
 
@@ -3838,30 +3955,11 @@ async fn execute_single_event_handler(
         timing_before_spawn
     );
 
-    let file_storage: Option<Arc<dyn hot::file_storage::FileStorage>> =
-        match hot::file_storage::file_storage_from_config(worker_conf).await {
-            Ok(s) => Some(Arc::from(s)),
-            Err(e) => {
-                tracing::debug!("File storage not available for event handler: {}", e);
-                None
-            }
-        };
-    let store: Option<Arc<dyn hot::store::Store>> = match hot::store::store_from_config_with_db(
-        worker_conf,
-        Some(Arc::new(db.clone())),
-        org_id,
-        Some(project.env_id),
-    )
-    .await
-    {
-        Ok(s) => Some(Arc::from(s)),
-        Err(e) => {
-            tracing::debug!("Store not available for event handler: {}", e);
-            None
-        }
-    };
-    let embedding_provider: Option<Arc<dyn hot::store::embedding::EmbeddingProvider>> =
-        hot::store::embedding::embedding_provider_from_config(worker_conf).map(Arc::from);
+    let file_storage = execution_services.file_storage.clone();
+    let store = execution_services
+        .store_for(worker_conf, org_id, project.env_id)
+        .await;
+    let embedding_provider = execution_services.embedding_provider.clone();
 
     let external_cancel = if worker_conf.get_bool_or_default("worker.cancel-on-timeout", true) {
         let token = Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -4561,6 +4659,39 @@ pub async fn run_with_components_shared_context(
     dev_context_storage: Option<DevContextStorage>,
     stream_publisher: Option<Arc<StreamPubSub>>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    run_with_components_shared_context_and_db(
+        queue_type,
+        redis_uri,
+        redis_cluster,
+        serialization,
+        threads,
+        worker_conf,
+        emitter,
+        event_publisher,
+        dev_context_storage,
+        stream_publisher,
+        None,
+    )
+    .await
+}
+
+/// Run the worker with reloadable dev context storage and an optional
+/// pre-created database pool. The CLI uses this to share the same PostgreSQL
+/// pool with the emitter and event publisher instead of opening a second pool.
+#[allow(clippy::too_many_arguments)]
+pub async fn run_with_components_shared_context_and_db(
+    queue_type: QueueType,
+    redis_uri: Option<String>,
+    redis_cluster: bool,
+    serialization: Serialization,
+    threads: Option<usize>,
+    worker_conf: Val,
+    emitter: Option<std::sync::Arc<dyn EngineEventEmitter>>,
+    event_publisher: Option<std::sync::Arc<dyn EventPublisher>>,
+    dev_context_storage: Option<DevContextStorage>,
+    stream_publisher: Option<Arc<StreamPubSub>>,
+    precreated_db: Option<Arc<DatabasePool>>,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     debug!("hot.dev: WORKER starting");
     validate_worker_semantics_conf(&worker_conf)?;
     let queue_metrics_enabled = worker_conf.get_bool_or_default("queue.metrics-enabled", true);
@@ -4592,28 +4723,41 @@ pub async fn run_with_components_shared_context(
 
     // Create database connection for event handler processing FIRST
     // This is needed by the emitter and event publisher
-    let db = match hot::db::create_db_pool(&worker_conf).await {
-        Ok(pool) => {
-            // Test the database connection
-            debug!("hot.dev: WORKER verifying database connectivity");
-            match hot::db::test_connection(&pool).await {
-                Ok(_) => {
-                    debug!("hot.dev: WORKER successfully connected to database");
-                    Some(Arc::new(pool))
-                }
-                Err(e) => {
-                    error!(
-                        "hot.dev: WORKER failed to verify database connection: {}",
-                        e
-                    );
-                    return Err(format!("Database connection test failed: {}", e).into());
+    let db = match precreated_db {
+        Some(pool) => {
+            debug!("hot.dev: WORKER reusing pre-created database pool");
+            hot::db::test_connection(pool.as_ref()).await.map_err(|e| {
+                error!(
+                    "hot.dev: WORKER failed to verify pre-created database connection: {}",
+                    e
+                );
+                format!("Database connection test failed: {}", e)
+            })?;
+            Some(pool)
+        }
+        None => match hot::db::create_db_pool(&worker_conf).await {
+            Ok(pool) => {
+                // Test the database connection
+                debug!("hot.dev: WORKER verifying database connectivity");
+                match hot::db::test_connection(&pool).await {
+                    Ok(_) => {
+                        debug!("hot.dev: WORKER successfully connected to database");
+                        Some(Arc::new(pool))
+                    }
+                    Err(e) => {
+                        error!(
+                            "hot.dev: WORKER failed to verify database connection: {}",
+                            e
+                        );
+                        return Err(format!("Database connection test failed: {}", e).into());
+                    }
                 }
             }
-        }
-        Err(e) => {
-            error!("hot.dev: WORKER failed to create database pool: {}", e);
-            return Err(format!("Database pool creation failed: {}", e).into());
-        }
+            Err(e) => {
+                error!("hot.dev: WORKER failed to create database pool: {}", e);
+                return Err(format!("Database pool creation failed: {}", e).into());
+            }
+        },
     };
 
     // Shared blob store for spilling large payloads on write (emitter/event
@@ -4679,6 +4823,16 @@ pub async fn run_with_components_shared_context(
             None
         }
     };
+
+    let execution_services = Arc::new(
+        WorkerExecutionServices::new(
+            db.as_ref()
+                .cloned()
+                .ok_or_else(|| worker_error("Worker database pool is unavailable"))?,
+            &worker_conf,
+        )
+        .await,
+    );
 
     if let Some(ref ctx_storage) = dev_context_storage
         && let Ok(ctx_guard) = ctx_storage.read()
@@ -5771,6 +5925,7 @@ pub async fn run_with_components_shared_context(
         let dev_context_storage_clone = dev_context_storage.clone();
         let stream_publisher_clone = stream_publisher.clone();
         let task_queue_clone = task_queue.clone();
+        let execution_services_clone = execution_services.clone();
         // Per-worker captures of the admin consumer names so the daily
         // queue_cleanup handler (built inside the worker spawn) can pin its
         // queue handles to w0's identity. See comment on `admin_*_name`
@@ -5814,6 +5969,7 @@ pub async fn run_with_components_shared_context(
                             );
                         }
                         ClaimedWorkerQueue::Event(lease) => {
+                            let queue_lease_timing = lease.timing();
                             // Process ONE event message (atomic operation)
                             match lease.process(|message| {
                                 let db_ref = db_clone.clone();
@@ -5828,6 +5984,7 @@ pub async fn run_with_components_shared_context(
                                 let dev_context_storage_ref = dev_context_storage_clone.clone();
                                 let stream_publisher_ref = stream_publisher_clone.clone();
                                 let task_queue_ref = task_queue_clone.clone();
+                                let execution_services_ref = execution_services_clone.clone();
                                 // Daily queue_cleanup admin handles. Each is pinned to w0's
                                 // stable consumer name so any XAUTOCLAIM done by
                                 // cleanup_stale_consumers (when draining a stale consumer that
@@ -5886,7 +6043,7 @@ pub async fn run_with_components_shared_context(
 
                                                 debug!("TIMING: event {} dequeued, starting processing", event_message.id);
 
-                                                let event_message =
+                                                let mut event_message =
                                                     hydrate_event_message_from_db(
                                                         worker_id,
                                                         db,
@@ -5895,15 +6052,59 @@ pub async fn run_with_components_shared_context(
                                                         infra_retry_backoff_ms,
                                                     )
                                                     .await?;
+                                                event_message.body.execution_context.queue_timing =
+                                                    Some(hot::lang::event::QueueExecutionTiming {
+                                                        backend: if queue_lease_timing
+                                                            .enqueued_at
+                                                            .is_some()
+                                                        {
+                                                            "redis".to_string()
+                                                        } else {
+                                                            "memory".to_string()
+                                                        },
+                                                        enqueued_at: queue_lease_timing.enqueued_at,
+                                                        claimed_at: queue_lease_timing.claimed_at,
+                                                        queue_wait_us: queue_lease_timing
+                                                            .queue_wait
+                                                            .as_micros()
+                                                            .min(u128::from(u64::MAX))
+                                                            as u64,
+                                                    });
 
                                                 debug!("TIMING: event {} security check done: {:?}", event_message.id, event_dequeue_time.elapsed());
 
-                                                // Step 1: Get ALL event handlers across ALL deployed builds in this environment
-                                                match EventHandler::get_event_handlers_by_env_and_event_type(
-                                                    db,
-                                                    &env_id,
-                                                    &event_message.body.event.event_type,
-                                                ).await {
+                                                // Exact call/schedule build targets bypass the
+                                                // environment revision query and use immutable
+                                                // build-scoped handler metadata. General events
+                                                // retain environment-wide multi-handler routing.
+                                                let exact_target_build = event_message
+                                                    .body
+                                                    .execution_context
+                                                    .build_id
+                                                    .filter(|_| {
+                                                        event_message.body.event.event_type
+                                                            == "hot:call"
+                                                            || event_message.body.event.event_type
+                                                                == "hot:schedule"
+                                                    });
+                                                let handlers_result =
+                                                    if let Some(build_id) = exact_target_build {
+                                                        EventHandler::get_event_handlers_by_build_and_event_type_cached(
+                                                            db,
+                                                            &build_id,
+                                                            &event_message.body.event.event_type,
+                                                        )
+                                                        .await
+                                                    } else {
+                                                        EventHandler::get_event_handlers_by_env_and_event_type(
+                                                            db,
+                                                            &env_id,
+                                                            &event_message.body.event.event_type,
+                                                        )
+                                                        .await
+                                                    };
+
+                                                match handlers_result {
                                                     Ok(all_handlers) => {
                                                         if all_handlers.is_empty() {
                                                             let err_msg = format!("No event handlers found for event type '{}'", event_message.body.event.event_type);
@@ -5946,8 +6147,25 @@ pub async fn run_with_components_shared_context(
                                                                     let target_build_id = event_message.body.execution_context.build_id;
                                                                     let target_project_id = event_message.body.event.target_project_id;
 
-                                                                    // Find the handler whose build contains the target function
-                                                                    match find_build_for_function(db, &env_id, &target_fn, &cache_ref, &worker_conf_ref, (target_build_id, target_project_id), &build_path_cache_ref).await {
+                                                                    // Exact build targets were already verified during DB hydration to
+                                                                    // belong to this environment/project. Route directly to that build's
+                                                                    // once-handler instead of scanning every project/build and reopening
+                                                                    // bytecode just to rediscover the authoritative target.
+                                                                    if let Some(target_build_id) = target_build_id {
+                                                                        if let Some(handler) = once_handlers.iter().find(|h| h.build_id == target_build_id) {
+                                                                            handlers_to_execute.push(handler.clone());
+                                                                        } else {
+                                                                            let err_msg = format!(
+                                                                                "Function '{}' targeted build {} but no event handler is registered for that build",
+                                                                                target_fn, target_build_id
+                                                                            );
+                                                                            error!("hot.dev: WORKER {} {}", worker_id, err_msg);
+                                                                            return Err(Box::new(std::io::Error::other(err_msg)) as Box<dyn std::error::Error + Send + Sync>);
+                                                                        }
+                                                                    // Legacy events without an immutable build target retain function
+                                                                    // discovery and project tie-breaking behavior.
+                                                                    } else {
+                                                                        match find_build_for_function(db, &env_id, &target_fn, &cache_ref, &worker_conf_ref, (None, target_project_id), &build_path_cache_ref).await {
                                                                         Ok(Some(routing_result)) => {
                                                                             // Find the once handler from that build
                                                                             if let Some(handler) = once_handlers.iter().find(|h| h.build_id == routing_result.build.build_id) {
@@ -5989,6 +6207,7 @@ pub async fn run_with_components_shared_context(
                                                                             );
                                                                             error!("hot.dev: WORKER {} {}", worker_id, err_msg);
                                                                             return Err(Box::new(std::io::Error::other(err_msg)) as Box<dyn std::error::Error + Send + Sync>);
+                                                                        }
                                                                         }
                                                                     }
                                                                 } else {
@@ -6066,7 +6285,7 @@ pub async fn run_with_components_shared_context(
 
                                                                 debug!("TIMING: event {} handler lookup done, calling execute_single_event_handler: {:?}", event_message.id, event_dequeue_time.elapsed());
 
-                                                                let execution_future = execute_single_event_handler(db, &handler_build, &env_id, &worker_conf_ref, &event_handler, &event_message, _emitter_ref.clone(), _event_publisher_ref.clone(), encryption_ref.clone(), cache_ref.clone(), shutdown_coord_ref.clone(), run_id, build_path_cache_ref.clone(), dev_context_storage_ref.clone(), stream_publisher_ref.clone(), task_queue_ref.clone());
+                                                                let execution_future = execute_single_event_handler(db, &handler_build, &env_id, &worker_conf_ref, &event_handler, &event_message, _emitter_ref.clone(), _event_publisher_ref.clone(), encryption_ref.clone(), cache_ref.clone(), shutdown_coord_ref.clone(), run_id, build_path_cache_ref.clone(), dev_context_storage_ref.clone(), stream_publisher_ref.clone(), task_queue_ref.clone(), execution_services_ref.clone());
 
                                                                                             match execution_future.await {
                                                                                                 Ok(()) => {
@@ -7123,6 +7342,49 @@ mod tests {
         assert!(!build_matches_exact_target(first, Some(second)));
         assert!(build_matches_exact_target(second, Some(second)));
         assert!(build_matches_exact_target(first, None));
+    }
+
+    #[test]
+    fn execution_service_keys_do_not_cross_tenant_scopes() {
+        let org_a = Uuid::now_v7();
+        let org_b = Uuid::now_v7();
+        let env_a = Uuid::now_v7();
+        let env_b = Uuid::now_v7();
+        let project_a = Uuid::now_v7();
+        let project_b = Uuid::now_v7();
+
+        assert_ne!(
+            TenantStoreKey {
+                org_id: org_a,
+                env_id: env_a,
+            },
+            TenantStoreKey {
+                org_id: org_b,
+                env_id: env_a,
+            }
+        );
+        assert_ne!(
+            TenantStoreKey {
+                org_id: org_a,
+                env_id: env_a,
+            },
+            TenantStoreKey {
+                org_id: org_a,
+                env_id: env_b,
+            }
+        );
+        assert_ne!(
+            TenantContextKey {
+                org_id: org_a,
+                env_id: env_a,
+                project_id: project_a,
+            },
+            TenantContextKey {
+                org_id: org_a,
+                env_id: env_a,
+                project_id: project_b,
+            }
+        );
     }
 
     async fn migrated_sqlite_file_db() -> (DatabasePool, PathBuf) {

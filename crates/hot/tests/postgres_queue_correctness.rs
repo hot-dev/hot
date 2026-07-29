@@ -6,6 +6,8 @@
 
 use hot::data::serialization::Serialization;
 use hot::db::{self, DatabasePool, Task, TaskStatus};
+use hot::lang::emitter::{DatabaseEngineEventEmitter, EngineEvent, EngineEventEmitter};
+use hot::lang::event::{ExecutionContext, QueueExecutionTiming};
 use hot::lang::hot::task::TaskRequest;
 use hot::queue::{ProcessingQueue, Queue, QueueProcessor, QueueType};
 use hot::val;
@@ -131,6 +133,55 @@ async fn postgres_task_lifecycle_smoke() {
     let test_data = db::insert_test_data(&db)
         .await
         .expect("test data should insert");
+
+    let mut execution_context = ExecutionContext::new(
+        Uuid::now_v7(),
+        test_data.stream_id,
+        hot::db::run::RunType::Event.as_id(),
+        Some(test_data.env_id),
+        Some(test_data.user_id),
+        Some(test_data.org_id),
+        Some(test_data.build_id),
+    );
+    let claimed_at = chrono::Utc::now();
+    execution_context.queue_timing = Some(QueueExecutionTiming {
+        backend: "redis".to_string(),
+        enqueued_at: Some(claimed_at - chrono::Duration::milliseconds(4)),
+        claimed_at,
+        queue_wait_us: 4_000,
+    });
+    let emitter = DatabaseEngineEventEmitter::new_with_pool(db.clone());
+    emitter.emit(EngineEvent::run_start(&execution_context));
+    emitter.emit(EngineEvent::run_stop(
+        &execution_context,
+        hot::val::Val::Null,
+    ));
+    emitter
+        .shutdown()
+        .await
+        .expect("Postgres emitter should flush timing info");
+    let timing_run = hot::db::run::Run::get_run(&db, &execution_context.run_id)
+        .await
+        .expect("timed run should be readable");
+    assert_eq!(
+        timing_run.info.as_ref().unwrap()["queue_timing"]["queue_wait_us"],
+        4_000
+    );
+
+    hot::db::run::Run::update_info(
+        &db,
+        &execution_context.run_id,
+        Some(&serde_json::json!({"warning": "route:dup"})),
+    )
+    .await
+    .expect("diagnostics should merge with timing info");
+    let timing_run = hot::db::run::Run::get_run(&db, &execution_context.run_id)
+        .await
+        .expect("merged run should be readable");
+    let info = timing_run.info.unwrap();
+    assert_eq!(info["queue_timing"]["queue_wait_us"], 4_000);
+    assert_eq!(info["warning"], "route:dup");
+
     let task_id = Uuid::now_v7();
 
     Task::insert(

@@ -1146,6 +1146,41 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn run_start_persists_queue_phase_timing() {
+        let db = crate::db::test_db().await;
+        let emitter = DatabaseEngineEventEmitter::new_with_pool(db.clone());
+        let mut execution_context = execution_context_with_org();
+        let claimed_at = chrono::Utc::now();
+        execution_context.queue_timing = Some(crate::lang::event::QueueExecutionTiming {
+            backend: "redis".to_string(),
+            enqueued_at: Some(claimed_at - chrono::Duration::milliseconds(5)),
+            claimed_at,
+            queue_wait_us: 5_000,
+        });
+
+        emitter.emit(EngineEvent::run_start(&execution_context));
+        emitter.emit(EngineEvent::run_stop(&execution_context, Val::Null));
+        emitter.shutdown().await.unwrap();
+
+        let crate::db::DatabasePool::Sqlite(pool) = db else {
+            panic!("test_db should return SQLite");
+        };
+        let info: String = sqlx::query_scalar("SELECT info FROM run WHERE run_id = ?")
+            .bind(execution_context.run_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        let info: serde_json::Value = serde_json::from_str(&info).unwrap();
+        assert_eq!(info["queue_timing"]["backend"], "redis");
+        assert_eq!(info["queue_timing"]["queue_wait_us"], 5_000);
+        assert!(
+            info["queue_timing"]["worker_preparation_us"]
+                .as_i64()
+                .is_some_and(|value| value >= 0)
+        );
+    }
+
+    #[tokio::test]
     async fn test_database_emitter_spills_large_call_args_to_blob() {
         let db = crate::db::test_db().await;
         let (blob_store, _tmp) = test_blob_store(&db);

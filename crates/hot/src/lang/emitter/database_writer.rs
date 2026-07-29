@@ -1159,14 +1159,34 @@ ON CONFLICT (call_id) DO UPDATE SET
         }
     }
 
-    /// Write a run:start record
-    /// Includes retry logic for foreign key violations on origin_run_id, which can happen
-    /// due to race conditions when a child run is processed before the parent run's
-    /// run:start has been written to the database.
+    /// Build phase timing diagnostics for the run's existing JSON info field.
+    fn queue_timing_info(
+        ctx: &ExecutionContext,
+        start_time: chrono::DateTime<chrono::Utc>,
+    ) -> Option<serde_json::Value> {
+        let timing = ctx.queue_timing.as_ref()?;
+        let worker_preparation_us = start_time
+            .signed_duration_since(timing.claimed_at)
+            .num_microseconds()
+            .unwrap_or(0)
+            .max(0);
+
+        Some(serde_json::json!({
+            "queue_timing": {
+                "backend": timing.backend.clone(),
+                "enqueued_at": timing.enqueued_at.map(|value| value.to_rfc3339()),
+                "claimed_at": timing.claimed_at.to_rfc3339(),
+                "queue_wait_us": timing.queue_wait_us,
+                "worker_preparation_us": worker_preparation_us,
+            }
+        }))
+    }
+
+    /// Write a run:start record.
     ///
-    /// Note: start_time uses event_time from the EngineEvent, which is captured at the moment
-    /// EngineEvent::run_start() is called (when the run actually begins executing).
-    /// This allows calculating queue wait time as: start_time - event.created_at
+    /// `start_time` is the EngineEvent timestamp captured when execution
+    /// actually begins. Origin FK failures are retried because a child event
+    /// can race its parent's asynchronous run:start write.
     async fn write_run_start(
         pool: &DatabasePool,
         ctx: &ExecutionContext,
@@ -1175,6 +1195,7 @@ ON CONFLICT (call_id) DO UPDATE SET
         // Use event_time which is captured when EngineEvent::run_start() is created
         // (the actual moment the run starts executing), not when this DB write happens
         let start_time = event_time;
+        let timing_info = Self::queue_timing_info(ctx, start_time);
         tracing::debug!(
             "DatabaseWriter: Writing run:start for run_id={}, event_id={:?}, origin_run_id={:?}",
             ctx.run_id,
@@ -1210,8 +1231,8 @@ ON CONFLICT (call_id) DO UPDATE SET
             let result: Result<u64, sqlx::Error> = match pool {
                 DatabasePool::Postgres(pg_pool) => {
                     sqlx::query(
-                        "INSERT INTO run (run_id, env_id, stream_id, build_id, run_type_id, origin_run_id, event_id, start_time, status_id, by_user_id, retry_attempt, access_id, agent_type)
-                         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+                        "INSERT INTO run (run_id, env_id, stream_id, build_id, run_type_id, origin_run_id, event_id, start_time, status_id, by_user_id, retry_attempt, access_id, agent_type, info)
+                         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
                          ON CONFLICT (run_id) DO NOTHING"
                     )
                     .bind(ctx.run_id)
@@ -1227,14 +1248,15 @@ ON CONFLICT (call_id) DO UPDATE SET
                     .bind(ctx.retry_attempt)
                     .bind(ctx.access_id)
                     .bind(&ctx.agent_type)
+                    .bind(&timing_info)
                     .execute(pg_pool)
                     .await
                     .map(|result| result.rows_affected())
                 }
                 DatabasePool::Sqlite(sqlite_pool) => {
                     sqlx::query(
-                        "INSERT OR IGNORE INTO run (run_id, env_id, stream_id, build_id, run_type_id, origin_run_id, event_id, start_time, status_id, by_user_id, retry_attempt, access_id, agent_type)
-                         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+                        "INSERT OR IGNORE INTO run (run_id, env_id, stream_id, build_id, run_type_id, origin_run_id, event_id, start_time, status_id, by_user_id, retry_attempt, access_id, agent_type, info)
+                         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
                     )
                     .bind(ctx.run_id)
                     .bind(ctx.env_id)
@@ -1249,6 +1271,7 @@ ON CONFLICT (call_id) DO UPDATE SET
                     .bind(ctx.retry_attempt)
                     .bind(ctx.access_id)
                     .bind(&ctx.agent_type)
+                    .bind(timing_info.as_ref().map(serde_json::Value::to_string))
                     .execute(sqlite_pool)
                     .await
                     .map(|result| result.rows_affected())
@@ -1348,6 +1371,7 @@ ON CONFLICT (call_id) DO UPDATE SET
         ctx: &ExecutionContext,
         start_time: chrono::DateTime<chrono::Utc>,
     ) -> Result<(), sqlx::Error> {
+        let timing_info = Self::queue_timing_info(ctx, start_time);
         match pool {
             DatabasePool::Postgres(pg_pool) => {
                 sqlx::query(
@@ -1355,7 +1379,8 @@ ON CONFLICT (call_id) DO UPDATE SET
                          origin_run_id = COALESCE(origin_run_id, $2),
                          event_id = COALESCE(event_id, $3),
                          agent_type = COALESCE(agent_type, $4),
-                         start_time = LEAST(start_time, $5)
+                         start_time = LEAST(start_time, $5),
+                         info = COALESCE(info, '{}'::jsonb) || COALESCE($6, '{}'::jsonb)
                      WHERE run_id = $1",
                 )
                 .bind(ctx.run_id)
@@ -1363,16 +1388,22 @@ ON CONFLICT (call_id) DO UPDATE SET
                 .bind(ctx.event_id)
                 .bind(&ctx.agent_type)
                 .bind(start_time)
+                .bind(&timing_info)
                 .execute(pg_pool)
                 .await?;
             }
             DatabasePool::Sqlite(sqlite_pool) => {
+                let timing_info = timing_info.as_ref().map(serde_json::Value::to_string);
                 sqlx::query(
                     "UPDATE run SET
                          origin_run_id = COALESCE(origin_run_id, ?2),
                          event_id = COALESCE(event_id, ?3),
                          agent_type = COALESCE(agent_type, ?4),
-                         start_time = MIN(start_time, ?5)
+                         start_time = MIN(start_time, ?5),
+                         info = CASE
+                             WHEN ?6 IS NULL THEN info
+                             ELSE json_patch(COALESCE(info, '{}'), ?6)
+                         END
                      WHERE run_id = ?1",
                 )
                 .bind(ctx.run_id)
@@ -1380,6 +1411,7 @@ ON CONFLICT (call_id) DO UPDATE SET
                 .bind(ctx.event_id)
                 .bind(&ctx.agent_type)
                 .bind(start_time)
+                .bind(&timing_info)
                 .execute(sqlite_pool)
                 .await?;
             }
@@ -1395,6 +1427,7 @@ ON CONFLICT (call_id) DO UPDATE SET
         result: &Val,
     ) -> Result<(), sqlx::Error> {
         let result_json = val_to_jsonb_string(result);
+        let timing_info = Self::queue_timing_info(ctx, start_time);
 
         crate::db::stream::Stream::create_or_get_stream(
             pool,
@@ -1407,12 +1440,13 @@ ON CONFLICT (call_id) DO UPDATE SET
         let rows_affected = match pool {
             DatabasePool::Postgres(pg_pool) => {
                 sqlx::query(
-                    "INSERT INTO hot.run (run_id, env_id, stream_id, build_id, run_type_id, origin_run_id, event_id, start_time, stop_time, status_id, result, by_user_id, retry_attempt, access_id, agent_type)
-                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::jsonb, $12, $13, $14, $15)
+                    "INSERT INTO hot.run (run_id, env_id, stream_id, build_id, run_type_id, origin_run_id, event_id, start_time, stop_time, status_id, result, by_user_id, retry_attempt, access_id, agent_type, info)
+                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::jsonb, $12, $13, $14, $15, $16)
                      ON CONFLICT (run_id) DO UPDATE
                      SET stop_time = EXCLUDED.stop_time,
                          status_id = EXCLUDED.status_id,
-                         result = EXCLUDED.result
+                         result = EXCLUDED.result,
+                         info = COALESCE(hot.run.info, '{}'::jsonb) || COALESCE(EXCLUDED.info, '{}'::jsonb)
                      WHERE hot.run.status_id = 1"
                 )
                 .bind(ctx.run_id)
@@ -1430,14 +1464,15 @@ ON CONFLICT (call_id) DO UPDATE SET
                 .bind(ctx.retry_attempt)
                 .bind(ctx.access_id)
                 .bind(&ctx.agent_type)
+                .bind(&timing_info)
                 .execute(pg_pool)
                 .await?
                 .rows_affected()
             }
             DatabasePool::Sqlite(sqlite_pool) => {
                 sqlx::query(
-                    "INSERT OR IGNORE INTO run (run_id, env_id, stream_id, build_id, run_type_id, origin_run_id, event_id, start_time, stop_time, status_id, result, by_user_id, retry_attempt, access_id, agent_type)
-                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+                    "INSERT OR IGNORE INTO run (run_id, env_id, stream_id, build_id, run_type_id, origin_run_id, event_id, start_time, stop_time, status_id, result, by_user_id, retry_attempt, access_id, agent_type, info)
+                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
                 )
                 .bind(ctx.run_id)
                 .bind(ctx.env_id)
@@ -1454,6 +1489,7 @@ ON CONFLICT (call_id) DO UPDATE SET
                 .bind(ctx.retry_attempt)
                 .bind(ctx.access_id)
                 .bind(&ctx.agent_type)
+                .bind(timing_info.as_ref().map(serde_json::Value::to_string))
                 .execute(sqlite_pool)
                 .await?
                 .rows_affected()
@@ -2339,6 +2375,27 @@ ON CONFLICT (call_id) DO UPDATE SET
 mod tests {
     use super::*;
     use crate::lang::bytecode::LambdaInfo;
+
+    #[test]
+    fn queue_timing_info_splits_queue_and_worker_preparation() {
+        let claimed_at = chrono::Utc::now();
+        let mut context = ExecutionContext::minimal(Uuid::now_v7(), Uuid::now_v7(), 4);
+        context.queue_timing = Some(crate::lang::event::QueueExecutionTiming {
+            backend: "redis".to_string(),
+            enqueued_at: Some(claimed_at - chrono::Duration::milliseconds(7)),
+            claimed_at,
+            queue_wait_us: 7_000,
+        });
+
+        let info = DatabaseWriter::queue_timing_info(
+            &context,
+            claimed_at + chrono::Duration::milliseconds(11),
+        )
+        .unwrap();
+        assert_eq!(info["queue_timing"]["backend"], "redis");
+        assert_eq!(info["queue_timing"]["queue_wait_us"], 7_000);
+        assert_eq!(info["queue_timing"]["worker_preparation_us"], 11_000);
+    }
 
     #[test]
     fn test_val_to_jsonb_string_uses_hot_data_repr() {

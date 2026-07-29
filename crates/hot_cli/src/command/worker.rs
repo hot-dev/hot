@@ -292,7 +292,7 @@ pub(crate) async fn run_worker_with_stream_pubsub_shared_context(
     full_worker_conf = full_worker_conf.set_str("runtime.profile", Some(profile.clone()), &profile);
 
     let server = tokio::spawn(async move {
-        match hot_worker::server::run_with_components_shared_context(
+        match hot_worker::server::run_with_components_shared_context_and_db(
             queue_type,
             redis_uri,
             redis_cluster,
@@ -303,6 +303,7 @@ pub(crate) async fn run_worker_with_stream_pubsub_shared_context(
             event_publisher,
             dev_context_storage,
             stream_pubsub, // Pass shared stream publisher
+            db_pool,
         )
         .await
         {

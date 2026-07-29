@@ -536,11 +536,77 @@ pub struct RunDisplay {
     pub retry_attempt: i16, // Current retry attempt (0 = first try)
     pub next_retry_at: Option<chrono::DateTime<chrono::Utc>>, // Next retry time
     pub is_retry: bool,     // True if this is a retry run (retry_attempt > 0)
-    // Queue timing - time between event enqueue and run start
-    pub queue_wait_us: Option<i64>, // Microseconds spent waiting in queue (event-triggered runs only)
+    // Pre-run phase timing for event-triggered runs.
+    pub pre_run_wait_us: Option<i64>, // Total event creation -> run start time
+    pub publish_wait_us: Option<i64>, // Event creation -> Redis XADD
+    pub publish_wait_formatted: Option<String>,
+    pub queue_wait_us: Option<i64>, // Actual backend queue residence
     pub queue_wait_formatted: Option<String>, // Formatted queue wait time
+    pub worker_preparation_us: Option<i64>, // Queue claim -> VM run:start
+    pub worker_preparation_formatted: Option<String>,
+    pub queue_backend: Option<String>,
     pub queued_at: Option<chrono::DateTime<chrono::Utc>>, // When event was enqueued
-    pub queued_at_formatted: Option<String>, // Formatted event time
+    pub queued_at_formatted: Option<String>,              // Formatted event time
+}
+
+struct RunQueuePhases {
+    pre_run_wait_us: Option<i64>,
+    publish_wait_us: Option<i64>,
+    queue_wait_us: Option<i64>,
+    worker_preparation_us: Option<i64>,
+    backend: Option<String>,
+}
+
+fn run_queue_phases(run: &Run) -> RunQueuePhases {
+    let pre_run_wait_us = run.queued_at.map(|queued_at| {
+        run.start_time
+            .signed_duration_since(queued_at)
+            .num_microseconds()
+            .unwrap_or(0)
+            .max(0)
+    });
+    let timing = run.info.as_ref().and_then(|info| info.get("queue_timing"));
+
+    let queue_wait_us = timing
+        .and_then(|value| value.get("queue_wait_us"))
+        .and_then(serde_json::Value::as_u64)
+        .map(|value| value.min(i64::MAX as u64) as i64)
+        .or(pre_run_wait_us);
+    let worker_preparation_us = timing
+        .and_then(|value| value.get("worker_preparation_us"))
+        .and_then(serde_json::Value::as_i64)
+        .map(|value| value.max(0));
+    let backend = timing
+        .and_then(|value| value.get("backend"))
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_string);
+    let enqueued_at = timing
+        .and_then(|value| value.get("enqueued_at"))
+        .and_then(serde_json::Value::as_str)
+        .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok())
+        .map(|value| value.with_timezone(&chrono::Utc));
+    let publish_wait_us = run
+        .queued_at
+        .zip(enqueued_at)
+        .map(|(queued_at, enqueued_at)| {
+            enqueued_at
+                .signed_duration_since(queued_at)
+                .num_microseconds()
+                .unwrap_or(0)
+                .max(0)
+        });
+
+    RunQueuePhases {
+        pre_run_wait_us,
+        publish_wait_us,
+        queue_wait_us,
+        worker_preparation_us,
+        backend,
+    }
+}
+
+pub(crate) fn run_queue_wait_us(run: &Run) -> Option<i64> {
+    run_queue_phases(run).queue_wait_us
 }
 
 #[derive(Debug, Clone)]
@@ -813,17 +879,8 @@ impl RunDisplay {
                 .unwrap_or(0)
         };
 
-        // Calculate queue wait time (start - queued_at) for event-triggered runs
-        let queue_wait_us = run.queued_at.map(|queued_at| {
-            run.start_time
-                .signed_duration_since(queued_at)
-                .num_microseconds()
-                .unwrap_or(0)
-                .max(0) // Clamp to 0 to handle any timing precision issues
-        });
-
-        // Total duration = queue wait + execution time
-        let duration_us = exec_time_us + queue_wait_us.unwrap_or(0);
+        let queue_phases = run_queue_phases(run);
+        let duration_us = exec_time_us + queue_phases.pre_run_wait_us.unwrap_or(0);
 
         let (exec_time_formatted, stop_time_formatted, is_completed) =
             if let Some(stop_time) = run.stop_time {
@@ -842,8 +899,10 @@ impl RunDisplay {
         // Format total duration
         let duration_formatted = format_duration_us(duration_us);
 
-        // Format queue wait time
-        let queue_wait_formatted = queue_wait_us.map(format_duration_us);
+        let publish_wait_formatted = queue_phases.publish_wait_us.map(format_duration_us);
+        let queue_wait_formatted = queue_phases.queue_wait_us.map(format_duration_us);
+        let worker_preparation_formatted =
+            queue_phases.worker_preparation_us.map(format_duration_us);
 
         // Format queued_at (event time)
         let queued_at_formatted = run.queued_at.map(|queued_at| {
@@ -894,8 +953,14 @@ impl RunDisplay {
             retry_attempt: run.retry_attempt,
             next_retry_at: run.next_retry_at,
             is_retry: run.retry_attempt > 0,
-            queue_wait_us,
+            pre_run_wait_us: queue_phases.pre_run_wait_us,
+            publish_wait_us: queue_phases.publish_wait_us,
+            publish_wait_formatted,
+            queue_wait_us: queue_phases.queue_wait_us,
             queue_wait_formatted,
+            worker_preparation_us: queue_phases.worker_preparation_us,
+            worker_preparation_formatted,
+            queue_backend: queue_phases.backend,
             queued_at: run.queued_at,
             queued_at_formatted,
         }
@@ -919,17 +984,8 @@ impl From<&Run> for RunDisplay {
                 .unwrap_or(0)
         };
 
-        // Calculate queue wait time (start - queued_at) for event-triggered runs
-        let queue_wait_us = run.queued_at.map(|queued_at| {
-            run.start_time
-                .signed_duration_since(queued_at)
-                .num_microseconds()
-                .unwrap_or(0)
-                .max(0) // Clamp to 0 to handle any timing precision issues
-        });
-
-        // Total duration = queue wait + execution time
-        let duration_us = exec_time_us + queue_wait_us.unwrap_or(0);
+        let queue_phases = run_queue_phases(run);
+        let duration_us = exec_time_us + queue_phases.pre_run_wait_us.unwrap_or(0);
 
         let (exec_time_formatted, stop_time_formatted, is_completed) =
             if let Some(stop_time) = run.stop_time {
@@ -944,8 +1000,10 @@ impl From<&Run> for RunDisplay {
         // Format total duration
         let duration_formatted = format_duration_us(duration_us);
 
-        // Format queue wait time
-        let queue_wait_formatted = queue_wait_us.map(format_duration_us);
+        let publish_wait_formatted = queue_phases.publish_wait_us.map(format_duration_us);
+        let queue_wait_formatted = queue_phases.queue_wait_us.map(format_duration_us);
+        let worker_preparation_formatted =
+            queue_phases.worker_preparation_us.map(format_duration_us);
 
         // Format queued_at (event time)
         let queued_at_formatted = run
@@ -992,8 +1050,14 @@ impl From<&Run> for RunDisplay {
             retry_attempt: run.retry_attempt,
             next_retry_at: run.next_retry_at,
             is_retry: run.retry_attempt > 0,
-            queue_wait_us,
+            pre_run_wait_us: queue_phases.pre_run_wait_us,
+            publish_wait_us: queue_phases.publish_wait_us,
+            publish_wait_formatted,
+            queue_wait_us: queue_phases.queue_wait_us,
             queue_wait_formatted,
+            worker_preparation_us: queue_phases.worker_preparation_us,
+            worker_preparation_formatted,
+            queue_backend: queue_phases.backend,
             queued_at: run.queued_at,
             queued_at_formatted,
         }

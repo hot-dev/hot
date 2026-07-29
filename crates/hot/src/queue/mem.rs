@@ -243,9 +243,12 @@ impl<T: Send + Sync + Serialize + DeserializeOwned + Clone + 'static> MemQueue<T
             return Err(Box::new(QueueProcessingError::RetryLimitExceeded));
         }
 
+        let queue_wait = retry_item.first_attempt.elapsed();
         Ok(Some(MemQueueLease {
             queue: self.clone(),
             retry_item: Some(retry_item),
+            claimed_at: chrono::Utc::now(),
+            queue_wait,
             completed: false,
         }))
     }
@@ -285,6 +288,8 @@ where
 {
     queue: MemQueue<T>,
     retry_item: Option<RetryItem<T>>,
+    claimed_at: chrono::DateTime<chrono::Utc>,
+    queue_wait: Duration,
     completed: bool,
 }
 
@@ -292,6 +297,14 @@ impl<T> MemQueueLease<T>
 where
     T: Send + Sync + Serialize + DeserializeOwned + Clone + 'static,
 {
+    pub fn timing(&self) -> super::QueueLeaseTiming {
+        super::QueueLeaseTiming {
+            claimed_at: self.claimed_at,
+            enqueued_at: None,
+            queue_wait: self.queue_wait,
+        }
+    }
+
     pub async fn process<F, Fut, R>(
         mut self,
         worker: F,

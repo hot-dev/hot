@@ -856,6 +856,7 @@ async fn create_scheduled_job(
                 secret_value_hashes: ahash::AHashSet::new(),
                 access_id: None, // Scheduler-initiated, no API access log
                 agent_type: None,
+                queue_timing: None,
             };
 
             // Create the event data for the generic schedule-event-handler
@@ -1236,6 +1237,7 @@ async fn queue_schedule_execution(
         secret_value_hashes: ahash::AHashSet::new(),
         access_id: None, // Scheduler-initiated, no API access log
         agent_type: None,
+        queue_timing: None,
     };
 
     // Create the event data
@@ -1469,6 +1471,7 @@ async fn process_pending_retries(
             secret_value_hashes: ahash::AHashSet::new(),
             access_id: run.access_id, // Propagate from original run if available
             agent_type: None,
+            queue_timing: None,
         };
 
         // Create the event

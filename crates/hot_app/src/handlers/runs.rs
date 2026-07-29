@@ -704,6 +704,7 @@ async fn run_action_handler(
         secret_value_hashes: AHashSet::new(),
         access_id: None, // Dashboard-initiated, no API access log
         agent_type: None,
+        queue_timing: None,
     };
 
     // Create event message

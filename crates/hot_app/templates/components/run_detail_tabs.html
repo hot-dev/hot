@@ -149,8 +149,16 @@
     flex-shrink: 0;
 }
 
+.run-summary-legend-publish {
+    background: linear-gradient(90deg, rgba(251, 191, 36, 0.45) 0%, rgba(245, 158, 11, 0.8) 100%);
+}
+
 .run-summary-legend-queue-wait {
     background: linear-gradient(90deg, rgba(253, 230, 138, 0.6) 0%, rgba(253, 224, 71, 0.9) 100%);
+}
+
+.run-summary-legend-worker-prep {
+    background: linear-gradient(90deg, rgba(125, 211, 252, 0.5) 0%, rgba(14, 165, 233, 0.8) 100%);
 }
 
 .run-summary-legend-compilation {
@@ -207,8 +215,16 @@
     transition: width 0.3s ease;
 }
 
+.run-summary-bar-publish {
+    background: linear-gradient(90deg, rgba(251, 191, 36, 0.45) 0%, rgba(245, 158, 11, 0.8) 100%);
+}
+
 .run-summary-bar-queue-wait {
     background: linear-gradient(90deg, rgba(253, 230, 138, 0.6) 0%, rgba(253, 224, 71, 0.9) 100%);
+}
+
+.run-summary-bar-worker-prep {
+    background: linear-gradient(90deg, rgba(125, 211, 252, 0.5) 0%, rgba(14, 165, 233, 0.8) 100%);
 }
 
 .run-summary-bar-compilation {
@@ -2751,8 +2767,10 @@ window.ObservabilityTabs = class ObservabilityTabs {
         // Get execution time (stop - start, excludes queue wait)
         const execTimeUs = this.getExecTimeUs();
 
-        // Get queue wait time (only for event-triggered runs)
+        // Pre-run phases (available for event-triggered worker runs).
+        const publishWaitUs = this.getPublishWaitUs();
         const queueWaitUs = this.getQueueWaitUs();
+        const workerPreparationUs = this.getWorkerPreparationUs();
 
         // Calculate compilation overhead (clamp to 0 to handle timing precision issues)
         // Use execTimeUs (not totalDurationUs) since compilation is part of execution, not queue wait
@@ -2765,24 +2783,42 @@ window.ObservabilityTabs = class ObservabilityTabs {
 
         // Add run summary at the top
         if (totalDurationUs > 0) {
+            const hasPublishWait = publishWaitUs > 0;
             const hasQueueWait = queueWaitUs > 0;
+            const hasWorkerPreparation = workerPreparationUs > 0;
+            const hasPreRunWait = hasPublishWait || hasQueueWait || hasWorkerPreparation;
+            const publishWaitPercent = hasPublishWait ? (publishWaitUs / totalTimeUs) * 100 : 0;
             const queueWaitPercent = hasQueueWait ? (queueWaitUs / totalTimeUs) * 100 : 0;
+            const workerPreparationPercent = hasWorkerPreparation ? (workerPreparationUs / totalTimeUs) * 100 : 0;
             const compilationPercent = (compilationTimeUs / totalTimeUs) * 100;
             const executionPercent = (executionTimeUs / totalTimeUs) * 100;
 
             html += '<div class="run-summary">';
             html += '<div class="run-summary-title">Duration: <span class="font-semibold">' + this.formatDuration(totalDurationUs) + '</span>';
-            if (hasQueueWait) {
+            if (hasPreRunWait) {
                 html += ' <span class="text-gray-500 dark:text-gray-400 text-xs">(Run Time: ' + this.formatDuration(execTimeUs) + ')</span>';
             }
             html += '</div>';
             html += '<div class="run-summary-legend">';
-            // Queue wait legend item (only show if there was queue wait)
+            if (hasPublishWait) {
+                html += '  <div class="run-summary-legend-item">';
+                html += '    <div class="run-summary-legend-box run-summary-legend-publish"></div>';
+                html += '    <span class="run-summary-legend-label">Publish:</span>';
+                html += '    <span class="run-summary-legend-value">' + this.formatDuration(publishWaitUs) + ' <span class="run-summary-percent">(' + publishWaitPercent.toFixed(1) + '%)</span></span>';
+                html += '  </div>';
+            }
             if (hasQueueWait) {
                 html += '  <div class="run-summary-legend-item">';
                 html += '    <div class="run-summary-legend-box run-summary-legend-queue-wait"></div>';
                 html += '    <span class="run-summary-legend-label">Queue Wait:</span>';
                 html += '    <span class="run-summary-legend-value">' + this.formatDuration(queueWaitUs) + ' <span class="run-summary-percent">(' + queueWaitPercent.toFixed(1) + '%)</span></span>';
+                html += '  </div>';
+            }
+            if (hasWorkerPreparation) {
+                html += '  <div class="run-summary-legend-item">';
+                html += '    <div class="run-summary-legend-box run-summary-legend-worker-prep"></div>';
+                html += '    <span class="run-summary-legend-label">Worker Prep:</span>';
+                html += '    <span class="run-summary-legend-value">' + this.formatDuration(workerPreparationUs) + ' <span class="run-summary-percent">(' + workerPreparationPercent.toFixed(1) + '%)</span></span>';
                 html += '  </div>';
             }
             html += '  <div class="run-summary-legend-item">';
@@ -2798,16 +2834,26 @@ window.ObservabilityTabs = class ObservabilityTabs {
             html += '</div>';
             html += '<div class="run-summary-combined-bar">';
             // Ensure minimum 1px width for each section
+            const publishWaitWidth = hasPublishWait ? Math.max(1, publishWaitPercent) : 0;
             const queueWaitWidth = hasQueueWait ? Math.max(1, queueWaitPercent) : 0;
+            const workerPreparationWidth = hasWorkerPreparation ? Math.max(1, workerPreparationPercent) : 0;
             const compilationWidth = Math.max(1, compilationPercent);
             const executionWidth = Math.max(1, executionPercent);
             // Normalize to 100%
-            const total = queueWaitWidth + compilationWidth + executionWidth;
+            const total = publishWaitWidth + queueWaitWidth + workerPreparationWidth + compilationWidth + executionWidth;
+            const normalizedPublishWait = (publishWaitWidth / total) * 100;
             const normalizedQueueWait = (queueWaitWidth / total) * 100;
+            const normalizedWorkerPreparation = (workerPreparationWidth / total) * 100;
             const normalizedCompilation = (compilationWidth / total) * 100;
             const normalizedExecution = (executionWidth / total) * 100;
+            if (hasPublishWait) {
+                html += '  <div class="run-summary-bar-segment run-summary-bar-publish" style="width: ' + normalizedPublishWait.toFixed(2) + '%"></div>';
+            }
             if (hasQueueWait) {
                 html += '  <div class="run-summary-bar-segment run-summary-bar-queue-wait" style="width: ' + normalizedQueueWait.toFixed(2) + '%"></div>';
+            }
+            if (hasWorkerPreparation) {
+                html += '  <div class="run-summary-bar-segment run-summary-bar-worker-prep" style="width: ' + normalizedWorkerPreparation.toFixed(2) + '%"></div>';
             }
             html += '  <div class="run-summary-bar-segment run-summary-bar-compilation" style="width: ' + normalizedCompilation.toFixed(2) + '%"></div>';
             html += '  <div class="run-summary-bar-segment run-summary-bar-execution" style="width: ' + normalizedExecution.toFixed(2) + '%"></div>';
@@ -3164,6 +3210,28 @@ window.ObservabilityTabs = class ObservabilityTabs {
             const queueWaitUs = durationContainer.dataset.queueWaitUs;
             if (queueWaitUs && queueWaitUs !== '') {
                 return parseInt(queueWaitUs, 10);
+            }
+        }
+        return 0;
+    }
+
+    getPublishWaitUs() {
+        const durationContainer = document.getElementById('run-duration-container');
+        if (durationContainer) {
+            const publishWaitUs = durationContainer.dataset.publishWaitUs;
+            if (publishWaitUs && publishWaitUs !== '') {
+                return parseInt(publishWaitUs, 10);
+            }
+        }
+        return 0;
+    }
+
+    getWorkerPreparationUs() {
+        const durationContainer = document.getElementById('run-duration-container');
+        if (durationContainer) {
+            const workerPreparationUs = durationContainer.dataset.workerPreparationUs;
+            if (workerPreparationUs && workerPreparationUs !== '') {
+                return parseInt(workerPreparationUs, 10);
             }
         }
         return 0;

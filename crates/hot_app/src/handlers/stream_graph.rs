@@ -217,13 +217,7 @@ pub async fn build_stream_graph(
                             .map(|r| serde_json::to_string(r).unwrap_or_else(|_| r.to_string()));
 
                         // Calculate queue wait time if available
-                        let queue_wait_us = run.queued_at.map(|queued_at| {
-                            run.start_time
-                                .signed_duration_since(queued_at)
-                                .num_microseconds()
-                                .unwrap_or(0)
-                                .max(0) // Clamp to 0
-                        });
+                        let queue_wait_us = templates::run_queue_wait_us(run);
 
                         nodes.push(templates::GraphNode {
                             id: run_element_id.clone(),
@@ -366,13 +360,7 @@ pub async fn build_stream_graph(
                     .map(|r| serde_json::to_string(r).unwrap_or_else(|_| r.to_string()));
 
                 // Calculate queue wait time if available
-                let queue_wait_us = run.queued_at.map(|queued_at| {
-                    run.start_time
-                        .signed_duration_since(queued_at)
-                        .num_microseconds()
-                        .unwrap_or(0)
-                        .max(0) // Clamp to 0
-                });
+                let queue_wait_us = templates::run_queue_wait_us(run);
 
                 nodes.push(templates::GraphNode {
                     id: element_id.clone(),

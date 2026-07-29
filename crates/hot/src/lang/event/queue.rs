@@ -7,7 +7,7 @@ use crate::val::Val;
 use ahash::{AHashMap, AHashSet};
 use serde::{Deserialize, Serialize};
 use std::str::FromStr;
-use tokio::sync::{mpsc, oneshot};
+use std::sync::Arc;
 use uuid::Uuid;
 
 /// Message format for deployment events
@@ -625,6 +625,7 @@ impl TryFrom<Message> for EventMessage {
                     None
                 }
             }),
+            queue_timing: None,
         };
 
         Ok(EventMessage {
@@ -642,9 +643,11 @@ impl TryFrom<Message> for EventMessage {
 ///
 /// Event publisher that sends events to a queue
 pub struct QueueEventPublisher {
-    queue: ProcessingQueue<Message>,
+    // ProcessingQueue::clone creates independent Redis consumer state and a
+    // fresh connection cache. Publishers only produce, so all publisher
+    // clones should share one queue/connection instead.
+    queue: Arc<ProcessingQueue<Message>>,
     queue_name: String,
-    shutdown_sender: mpsc::UnboundedSender<oneshot::Sender<()>>,
 }
 
 impl QueueEventPublisher {
@@ -666,24 +669,19 @@ impl QueueEventPublisher {
         redis_cluster: bool,
         serialization: Serialization,
     ) -> Self {
-        let (shutdown_sender, _shutdown_receiver) =
-            mpsc::unbounded_channel::<oneshot::Sender<()>>();
-
         // Create the actual queue using the hot queue system with cluster support
-        let queue = ProcessingQueue::<Message>::new_with_cluster(
-            queue_type,
-            queue_name.clone(),
-            redis_uri,
-            redis_cluster,
-            serialization,
-        )
-        .expect("Failed to create event queue");
+        let queue = Arc::new(
+            ProcessingQueue::<Message>::new_with_cluster(
+                queue_type,
+                queue_name.clone(),
+                redis_uri,
+                redis_cluster,
+                serialization,
+            )
+            .expect("Failed to create event queue"),
+        );
 
-        Self {
-            queue,
-            queue_name,
-            shutdown_sender,
-        }
+        Self { queue, queue_name }
     }
 
     /// Create a QueueEventPublisher with default settings for the "hot:event" queue
@@ -754,9 +752,8 @@ impl EventPublisher for QueueEventPublisher {
 impl Clone for QueueEventPublisher {
     fn clone(&self) -> Self {
         Self {
-            queue: self.queue.clone(),
+            queue: Arc::clone(&self.queue),
             queue_name: self.queue_name.clone(),
-            shutdown_sender: self.shutdown_sender.clone(),
         }
     }
 }
@@ -1074,6 +1071,11 @@ mod tests {
     #[tokio::test]
     async fn test_queue_event_publisher_creation() {
         let publisher = QueueEventPublisher::new_default();
+        let publisher_clone = publisher.clone();
+        assert!(
+            Arc::ptr_eq(&publisher.queue, &publisher_clone.queue),
+            "publisher clones must reuse producer connection state"
+        );
 
         // Create a test event
         let event = Event::new(
