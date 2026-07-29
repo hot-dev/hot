@@ -182,13 +182,10 @@ impl Task {
         timeout_ms: i64,
         by_user_id: Option<&Uuid>,
     ) -> Result<(), TaskError> {
-        // Bind this explicitly so SQLite retains sub-second precision instead
-        // of using its seconds-only CURRENT_TIMESTAMP default.
-        let created_at = Utc::now();
         match db {
             crate::db::DatabasePool::Postgres(pg_pool) => {
                 sqlx::query(
-                    "INSERT INTO task (task_id, env_id, stream_id, build_id, origin_run_id, task_status_id, function_name, args, options, task_type, timeout_ms, by_user_id, created_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)",
+                    "INSERT INTO task (task_id, env_id, stream_id, build_id, origin_run_id, task_status_id, function_name, args, options, task_type, timeout_ms, by_user_id) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)",
                 )
                 .bind(task_id)
                 .bind(env_id)
@@ -202,11 +199,13 @@ impl Task {
                 .bind(task_type)
                 .bind(timeout_ms)
                 .bind(by_user_id)
-                .bind(created_at)
                 .execute(pg_pool)
                 .await?;
             }
             crate::db::DatabasePool::Sqlite(sqlite_pool) => {
+                // Bind this explicitly so SQLite retains sub-second precision
+                // instead of using its seconds-only CURRENT_TIMESTAMP default.
+                let created_at = Utc::now();
                 let args_str = args.map(|a| serde_json::to_string(a).unwrap_or_default());
                 let options_str = options.map(|o| serde_json::to_string(o).unwrap_or_default());
                 sqlx::query(
@@ -241,11 +240,10 @@ impl Task {
         retry_attempt: i16,
         next_retry_at: DateTime<Utc>,
     ) -> Result<(), TaskError> {
-        let created_at = Utc::now();
         match db {
             crate::db::DatabasePool::Postgres(pg_pool) => {
                 sqlx::query(
-                    "INSERT INTO task (task_id, env_id, stream_id, build_id, origin_run_id, task_status_id, function_name, args, options, task_type, timeout_ms, retry_attempt, next_retry_at, by_user_id, created_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)",
+                    "INSERT INTO task (task_id, env_id, stream_id, build_id, origin_run_id, task_status_id, function_name, args, options, task_type, timeout_ms, retry_attempt, next_retry_at, by_user_id) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)",
                 )
                 .bind(new_task_id)
                 .bind(original.env_id)
@@ -261,11 +259,11 @@ impl Task {
                 .bind(retry_attempt)
                 .bind(next_retry_at)
                 .bind(original.by_user_id)
-                .bind(created_at)
                 .execute(pg_pool)
                 .await?;
             }
             crate::db::DatabasePool::Sqlite(sqlite_pool) => {
+                let created_at = Utc::now();
                 let args_str = original
                     .args
                     .as_ref()

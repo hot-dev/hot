@@ -720,25 +720,26 @@ impl Event {
                 )))
             })?;
 
-        // Bind this explicitly so SQLite retains sub-second precision instead
-        // of using its seconds-only CURRENT_TIMESTAMP default.
-        let created_at = Utc::now();
         match db {
             crate::db::DatabasePool::Postgres(pg_pool) => {
-                sqlx::query("INSERT INTO event (event_id, env_id, stream_id, event_type, event_data, event_time, created_at, created_by_user_id, access_id) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)")
+                // Keep PostgreSQL's database-clock DEFAULT now() as the
+                // authoritative durable-creation timestamp.
+                sqlx::query("INSERT INTO event (event_id, env_id, stream_id, event_type, event_data, event_time, created_by_user_id, access_id) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)")
                     .bind(event_id)
                     .bind(env_id)
                     .bind(stream_id)
                     .bind(event_type)
                     .bind(event_data)
                     .bind(event_time)
-                    .bind(created_at)
                     .bind(created_by_user_id)
                     .bind(access_id)
                     .execute(pg_pool)
                     .await?;
             }
             crate::db::DatabasePool::Sqlite(sqlite_pool) => {
+                // Bind this explicitly so SQLite retains sub-second precision
+                // instead of using its seconds-only CURRENT_TIMESTAMP default.
+                let created_at = Utc::now();
                 let event_data_str = serde_json::to_string(event_data).map_err(|e| {
                     EventError::Database(sqlx::Error::Protocol(format!(
                         "JSON serialization error: {}",
