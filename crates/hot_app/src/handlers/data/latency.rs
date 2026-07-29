@@ -85,6 +85,11 @@ struct LatencyFilters {
     project_id: Option<uuid::Uuid>,
 }
 
+struct LatencyQueryResult {
+    buckets: Vec<LatencyBucket>,
+    negative_sample_count: i64,
+}
+
 impl LatencyFilters {
     fn from_params(params: &AHashMap<String, String>) -> Self {
         let time_range = params
@@ -169,13 +174,24 @@ async fn latency_timeline_handler(
     };
 
     match buckets {
-        Ok(buckets) => Json(assemble_latency_timeline(
-            buckets,
-            filters.days,
-            &filters.time_unit,
-            &session.display_timezone,
-        ))
-        .into_response(),
+        Ok(result) => {
+            if result.negative_sample_count > 0 {
+                tracing::warn!(
+                    env_id = %env_id,
+                    project_id = ?filters.project_id,
+                    latency_kind = kind.name(),
+                    negative_sample_count = result.negative_sample_count,
+                    "Discarded negative dashboard latency samples; check clock synchronization and stored timing boundaries"
+                );
+            }
+            Json(assemble_latency_timeline(
+                result.buckets,
+                filters.days,
+                &filters.time_unit,
+                &session.display_timezone,
+            ))
+            .into_response()
+        }
         Err(error) => {
             tracing::error!(
                 env_id = %env_id,
@@ -199,6 +215,7 @@ type PostgresLatencyRow = (
     Option<f64>,
     Option<f64>,
     bool,
+    i64,
 );
 
 async fn query_postgres_latency(
@@ -207,7 +224,7 @@ async fn query_postgres_latency(
     filters: &LatencyFilters,
     display_timezone: &str,
     kind: LatencyKind,
-) -> Result<Vec<LatencyBucket>, sqlx::Error> {
+) -> Result<LatencyQueryResult, sqlx::Error> {
     let timestamp_column = match kind {
         LatencyKind::Run => "e.created_at",
         LatencyKind::Task => "t.created_at",
@@ -239,18 +256,29 @@ async fn query_postgres_latency(
         WITH candidate_samples AS (
             {candidate_sql}
         ),
-        limited_samples AS (
+        observed_samples AS (
             SELECT *
             FROM candidate_samples
             WHERE sample_created_at IS NOT NULL
-                AND waiting_ms >= 0
-                AND execution_ms >= 0
+                AND waiting_ms IS NOT NULL
+                AND execution_ms IS NOT NULL
             ORDER BY sample_created_at DESC
             LIMIT {LATENCY_QUERY_LIMIT}
         ),
+        sample_stats AS (
+            SELECT COUNT(*)::bigint AS negative_sample_count
+            FROM observed_samples
+            WHERE waiting_ms < 0 OR execution_ms < 0
+        ),
+        valid_samples AS (
+            SELECT *
+            FROM observed_samples
+            WHERE waiting_ms >= 0
+                AND execution_ms >= 0
+        ),
         samples AS (
             SELECT *
-            FROM limited_samples
+            FROM valid_samples
             ORDER BY sample_created_at DESC
             LIMIT {MAX_LATENCY_SAMPLES}
         )
@@ -264,7 +292,8 @@ async fn query_postgres_latency(
             percentile_cont(0.95) WITHIN GROUP (ORDER BY execution_ms)::double precision,
             percentile_cont(0.99) WITHIN GROUP (ORDER BY waiting_ms)::double precision,
             percentile_cont(0.99) WITHIN GROUP (ORDER BY execution_ms)::double precision,
-            (SELECT COUNT(*) > {MAX_LATENCY_SAMPLES} FROM limited_samples) AS truncated
+            (SELECT COUNT(*) > {MAX_LATENCY_SAMPLES} FROM observed_samples) AS truncated,
+            (SELECT negative_sample_count FROM sample_stats) AS negative_sample_count
         FROM samples
         GROUP BY GROUPING SETS ((period), ())
         ORDER BY period ASC NULLS LAST
@@ -282,7 +311,8 @@ async fn query_postgres_latency(
     let rows = query.fetch_all(pool).await?;
     let date_format = crate::timezone::postgres_date_format(&filters.time_unit);
 
-    Ok(rows
+    let negative_sample_count = rows.first().map(|row| row.10).unwrap_or_default();
+    let buckets = rows
         .into_iter()
         .map(
             |(
@@ -296,6 +326,7 @@ async fn query_postgres_latency(
                 p99_waiting,
                 p99_execution,
                 truncated,
+                _negative_sample_count,
             )| LatencyBucket {
                 date: period.map(|value| {
                     crate::timezone::format_in_timezone(&value, display_timezone, date_format)
@@ -317,7 +348,12 @@ async fn query_postgres_latency(
                 truncated,
             },
         )
-        .collect())
+        .collect();
+
+    Ok(LatencyQueryResult {
+        buckets,
+        negative_sample_count,
+    })
 }
 
 fn postgres_latency_candidate_sql(
@@ -378,7 +414,7 @@ async fn query_sqlite_latency(
     filters: &LatencyFilters,
     display_timezone: &str,
     kind: LatencyKind,
-) -> Result<Vec<LatencyBucket>, sqlx::Error> {
+) -> Result<LatencyQueryResult, sqlx::Error> {
     let timestamp_column = match kind {
         LatencyKind::Run => "e.created_at",
         LatencyKind::Task => "t.created_at",
@@ -403,19 +439,58 @@ async fn query_sqlite_latency(
     let candidate_sql = sqlite_latency_candidate_sql(kind, &period, &project_join, interval_filter);
     let query = format!(
         r#"
-        SELECT period, waiting_ms, execution_ms, precise
-        FROM ({candidate_sql})
-        WHERE sample_created_at IS NOT NULL
-            AND waiting_ms >= 0
-            AND execution_ms >= 0
-        ORDER BY sample_created_at DESC
-        LIMIT {LATENCY_QUERY_LIMIT}
+        WITH candidate_samples AS (
+            {candidate_sql}
+        ),
+        observed_samples AS (
+            SELECT *
+            FROM candidate_samples
+            WHERE sample_created_at IS NOT NULL
+                AND waiting_ms IS NOT NULL
+                AND execution_ms IS NOT NULL
+            ORDER BY sample_created_at DESC
+            LIMIT {LATENCY_QUERY_LIMIT}
+        ),
+        sample_stats AS (
+            SELECT
+                COUNT(*) AS observed_sample_count,
+                COUNT(CASE WHEN waiting_ms < 0 OR execution_ms < 0 THEN 1 END) AS negative_sample_count
+            FROM observed_samples
+        ),
+        limited_samples AS (
+            SELECT period, waiting_ms, execution_ms, precise
+            FROM observed_samples
+            WHERE waiting_ms >= 0
+                AND execution_ms >= 0
+            ORDER BY sample_created_at DESC
+            LIMIT {MAX_LATENCY_SAMPLES}
+        )
+        SELECT
+            period,
+            waiting_ms,
+            execution_ms,
+            precise,
+            NULL AS observed_sample_count,
+            NULL AS negative_sample_count
+        FROM limited_samples
+        UNION ALL
+        SELECT NULL, NULL, NULL, NULL, observed_sample_count, negative_sample_count
+        FROM sample_stats
         "#
     );
 
-    let mut query =
-        sqlx::query_as::<_, (String, f64, f64, bool)>(sqlx::AssertSqlSafe(query.as_str()))
-            .bind(env_id);
+    let mut query = sqlx::query_as::<
+        _,
+        (
+            Option<String>,
+            Option<f64>,
+            Option<f64>,
+            Option<bool>,
+            Option<i64>,
+            Option<i64>,
+        ),
+    >(sqlx::AssertSqlSafe(query.as_str()))
+    .bind(env_id);
     if let Some(days) = filters.days {
         query = query.bind(days);
     }
@@ -423,19 +498,32 @@ async fn query_sqlite_latency(
         query = query.bind(project_id);
     }
     let rows = query.fetch_all(pool).await?;
-    let truncated = rows.len() > MAX_LATENCY_SAMPLES;
+    let observed_sample_count = rows
+        .iter()
+        .find_map(|(_, _, _, _, count, _)| *count)
+        .unwrap_or_default();
+    let negative_sample_count = rows
+        .iter()
+        .find_map(|(_, _, _, _, _, count)| *count)
+        .unwrap_or_default();
+    let truncated = observed_sample_count > MAX_LATENCY_SAMPLES as i64;
     let samples = rows
         .into_iter()
-        .take(MAX_LATENCY_SAMPLES)
-        .map(|(date, waiting_ms, execution_ms, precise)| LatencySample {
-            date,
-            waiting_ms,
-            execution_ms,
-            precise,
+        .filter_map(|(date, waiting_ms, execution_ms, precise, _, _)| {
+            Some(LatencySample {
+                date: date?,
+                waiting_ms: waiting_ms?,
+                execution_ms: execution_ms?,
+                precise: precise?,
+            })
         })
+        .take(MAX_LATENCY_SAMPLES)
         .collect::<Vec<_>>();
 
-    Ok(aggregate_latency_samples(samples, truncated))
+    Ok(LatencyQueryResult {
+        buckets: aggregate_latency_samples(samples, truncated),
+        negative_sample_count,
+    })
 }
 
 fn sqlite_latency_candidate_sql(
@@ -670,6 +758,195 @@ mod tests {
         assert!(task_sql.contains("WHERE t.env_id = ?1"));
         assert!(task_sql.contains("$.waiting_ms"));
         assert!(task_sql.contains("$.execution_ms"));
+    }
+
+    #[tokio::test]
+    async fn sqlite_latency_counts_and_discards_negative_samples() {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .expect("in-memory SQLite should open");
+        sqlx::query(
+            r#"
+            CREATE TABLE task (
+                env_id BLOB NOT NULL,
+                created_at DATETIME NOT NULL,
+                start_time DATETIME,
+                stop_time DATETIME,
+                duration_ms INTEGER,
+                timing TEXT
+            )
+            "#,
+        )
+        .execute(&pool)
+        .await
+        .expect("task fixture table should be created");
+
+        let env_id = uuid::Uuid::now_v7();
+        let now = chrono::Utc::now();
+        for waiting_ms in [10.0, -5.0] {
+            sqlx::query(
+                "INSERT INTO task (env_id, created_at, start_time, stop_time, duration_ms, timing) VALUES (?, ?, ?, ?, ?, ?)",
+            )
+            .bind(env_id)
+            .bind(now - chrono::Duration::milliseconds(30))
+            .bind(now - chrono::Duration::milliseconds(20))
+            .bind(now)
+            .bind(20_i64)
+            .bind(serde_json::json!({
+                "waiting_ms": waiting_ms,
+                "execution_ms": 20.0,
+            }).to_string())
+            .execute(&pool)
+            .await
+            .expect("latency fixture should insert");
+        }
+
+        let result = query_sqlite_latency(
+            &pool,
+            env_id,
+            &LatencyFilters {
+                days: None,
+                time_unit: "day".to_string(),
+                project_id: None,
+            },
+            "UTC",
+            LatencyKind::Task,
+        )
+        .await
+        .expect("latency query should succeed");
+
+        assert_eq!(result.negative_sample_count, 1);
+        let summary = result
+            .buckets
+            .iter()
+            .find(|bucket| bucket.date.is_none())
+            .expect("summary bucket should exist");
+        assert_eq!(summary.sample_count, 1);
+        assert_eq!(summary.p50.waiting_ms, Some(10.0));
+    }
+
+    #[tokio::test]
+    async fn postgres_latency_counts_and_discards_negative_samples_when_configured() {
+        let Ok(uri) = std::env::var("HOT_TEST_POSTGRES_URI") else {
+            eprintln!("skipping: HOT_TEST_POSTGRES_URI is not set");
+            return;
+        };
+
+        let schema = format!("hot_latency_test_{}", uuid::Uuid::now_v7().simple());
+        let admin_pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&uri)
+            .await
+            .expect("PostgreSQL test database should connect");
+        sqlx::query(sqlx::AssertSqlSafe(format!("CREATE SCHEMA {schema}")))
+            .execute(&admin_pool)
+            .await
+            .expect("isolated latency test schema should be created");
+
+        let connection_schema = schema.clone();
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .after_connect(move |connection, _| {
+                let statement = format!("SET search_path TO {connection_schema}");
+                Box::pin(async move {
+                    sqlx::query(sqlx::AssertSqlSafe(statement))
+                        .execute(connection)
+                        .await?;
+                    Ok(())
+                })
+            })
+            .connect(&uri)
+            .await
+            .expect("schema-scoped PostgreSQL pool should connect");
+        sqlx::query(
+            r#"
+            CREATE TABLE event (
+                event_id UUID PRIMARY KEY,
+                env_id UUID NOT NULL,
+                created_at TIMESTAMPTZ NOT NULL
+            )
+            "#,
+        )
+        .execute(&pool)
+        .await
+        .expect("event fixture table should be created");
+        sqlx::query(
+            r#"
+            CREATE TABLE run (
+                event_id UUID NOT NULL,
+                env_id UUID NOT NULL,
+                build_id UUID,
+                run_type_id SMALLINT NOT NULL,
+                start_time TIMESTAMPTZ,
+                stop_time TIMESTAMPTZ
+            )
+            "#,
+        )
+        .execute(&pool)
+        .await
+        .expect("run fixture table should be created");
+
+        let env_id = uuid::Uuid::now_v7();
+        let now = chrono::Utc::now();
+        for (created_at, start_time) in [
+            (
+                now - chrono::Duration::milliseconds(30),
+                now - chrono::Duration::milliseconds(20),
+            ),
+            (now, now - chrono::Duration::milliseconds(5)),
+        ] {
+            let event_id = uuid::Uuid::now_v7();
+            sqlx::query("INSERT INTO event (event_id, env_id, created_at) VALUES ($1, $2, $3)")
+                .bind(event_id)
+                .bind(env_id)
+                .bind(created_at)
+                .execute(&pool)
+                .await
+                .expect("event latency fixture should insert");
+            sqlx::query(
+                "INSERT INTO run (event_id, env_id, run_type_id, start_time, stop_time) VALUES ($1, $2, $3, $4, $5)",
+            )
+            .bind(event_id)
+            .bind(env_id)
+            .bind(1_i16)
+            .bind(start_time)
+            .bind(now)
+            .execute(&pool)
+            .await
+            .expect("run latency fixture should insert");
+        }
+
+        let result = query_postgres_latency(
+            &pool,
+            env_id,
+            &LatencyFilters {
+                days: None,
+                time_unit: "day".to_string(),
+                project_id: None,
+            },
+            "UTC",
+            LatencyKind::Run,
+        )
+        .await
+        .expect("PostgreSQL latency query should succeed");
+
+        assert_eq!(result.negative_sample_count, 1);
+        let summary = result
+            .buckets
+            .iter()
+            .find(|bucket| bucket.date.is_none())
+            .expect("summary bucket should exist");
+        assert_eq!(summary.sample_count, 1);
+        assert!((summary.p50.waiting_ms.expect("p50 waiting") - 10.0).abs() < 0.01);
+
+        pool.close().await;
+        sqlx::query(sqlx::AssertSqlSafe(format!("DROP SCHEMA {schema} CASCADE")))
+            .execute(&admin_pool)
+            .await
+            .expect("isolated latency test schema should be removed");
+        admin_pool.close().await;
     }
 
     #[test]
