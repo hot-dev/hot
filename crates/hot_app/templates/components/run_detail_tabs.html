@@ -2738,6 +2738,8 @@ window.ObservabilityTabs = class ObservabilityTabs {
     getCallDataStatusMessage(status, retentionDays, size) {
         const py = size === 'sm' ? 'py-4' : 'py-8';
         const textSize = size === 'sm' ? 'text-sm' : 'text-sm';
+        const timingSubject =
+            this.getDurationContainer()?.dataset.timingKind === 'task' ? 'task' : 'run';
         switch (status) {
             case 'expired':
                 return `<div class="${textSize} text-gray-500 dark:text-gray-400 text-center ${py}">
@@ -2757,11 +2759,20 @@ window.ObservabilityTabs = class ObservabilityTabs {
             case 'empty':
                 return `<div class="${textSize} text-gray-500 dark:text-gray-400 text-center ${py}">
                     <p>No calls recorded</p>
-                    <p class="text-xs mt-2">This run completed without any tracked function calls</p>
+                    <p class="text-xs mt-2">This ${timingSubject} completed without any tracked function calls</p>
                 </div>`;
             default:
                 return null;
         }
+    }
+
+    normalizeCallDataStatus(status) {
+        const timingContainer = this.getDurationContainer();
+        const terminalTaskWithoutFinalizedRun =
+            status === 'collecting' &&
+            timingContainer?.dataset.timingKind === 'task' &&
+            timingContainer.dataset.executionComplete === 'true';
+        return terminalTaskWithoutFinalizedRun ? 'empty' : status;
     }
 
     async loadHierarchyData() {
@@ -2778,12 +2789,12 @@ window.ObservabilityTabs = class ObservabilityTabs {
 
             if (result.success) {
                 // Store retention metadata
-                this.callDataStatus = result.call_data_status;
+                this.callDataStatus = this.normalizeCallDataStatus(result.call_data_status);
                 this.callRetentionDays = result.call_retention_days;
                 this.hierarchyBuildId = result.build_id || null;
 
                 // Check if call data is unavailable for a known reason
-                const statusMsg = this.getCallDataStatusMessage(result.call_data_status, result.call_retention_days, 'sm');
+                const statusMsg = this.getCallDataStatusMessage(this.callDataStatus, result.call_retention_days, 'sm');
                 if (statusMsg) {
                     this.hierarchyTree.innerHTML = statusMsg;
                     return;
@@ -2816,7 +2827,7 @@ window.ObservabilityTabs = class ObservabilityTabs {
 
             if (!response.ok) {
                 console.error('Timeline API error:', response.status, response.statusText);
-                this.timelineView.innerHTML = `<div class="text-sm text-red-600 dark:text-red-500 text-center py-8">API Error: ${response.status}</div>`;
+                this.renderTimeline(`<div class="text-sm text-red-600 dark:text-red-500 text-center py-8">API Error: ${response.status}</div>`);
                 return;
             }
 
@@ -2824,33 +2835,33 @@ window.ObservabilityTabs = class ObservabilityTabs {
 
             if (result.success) {
                 // Store retention metadata (may already be set by hierarchy loader)
-                this.callDataStatus = result.call_data_status;
+                this.callDataStatus = this.normalizeCallDataStatus(result.call_data_status);
                 this.callRetentionDays = result.call_retention_days;
                 this.hierarchyBuildId = result.build_id || this.hierarchyBuildId;
+                this.timelineData = result.data;
 
                 // Check if call data is unavailable for a known reason
-                const statusMsg = this.getCallDataStatusMessage(result.call_data_status, result.call_retention_days, 'lg');
+                const statusMsg = this.getCallDataStatusMessage(this.callDataStatus, result.call_retention_days, 'lg');
                 if (statusMsg) {
-                    this.timelineView.innerHTML = statusMsg;
+                    this.renderTimeline(statusMsg);
                     return;
                 }
 
-                this.timelineData = result.data;
                 this.renderTimeline();
             } else {
                 const errorMsg = result.error || 'Unknown error';
                 console.error('Timeline load failed:', errorMsg);
-                this.timelineView.innerHTML = `<div class="text-sm text-gray-500 dark:text-gray-400 text-center py-8">
+                this.renderTimeline(`<div class="text-sm text-gray-500 dark:text-gray-400 text-center py-8">
                     <p>No execution timeline available</p>
                     <p class="text-xs mt-2">This run may not have function call tracking enabled</p>
-                </div>`;
+                </div>`);
             }
         } catch (error) {
             console.error('Error loading timeline:', error);
-            this.timelineView.innerHTML = `<div class="text-sm text-red-600 dark:text-red-500 text-center py-8">
+            this.renderTimeline(`<div class="text-sm text-red-600 dark:text-red-500 text-center py-8">
                 <p>Failed to load timeline</p>
                 <p class="text-xs mt-2">${error.message}</p>
-            </div>`;
+            </div>`);
         }
     }
 
@@ -3056,26 +3067,27 @@ window.ObservabilityTabs = class ObservabilityTabs {
         this.filesView.innerHTML = html;
     }
 
-    renderTimeline() {
-        if (!this.timelineData || !this.timelineData.tree || this.timelineData.tree.length === 0) {
-            this.timelineView.innerHTML = '<div class="text-sm text-gray-500 dark:text-gray-400 text-center py-8">No execution data found</div>';
-            return;
-        }
+    renderTimeline(traceStatusHtml = null) {
+        const hasTraceData =
+            Boolean(this.timelineData?.tree) &&
+            this.timelineData.tree.length > 0;
 
-        // Flatten the hierarchy into a timeline view
-        const items = this.flattenForTimeline(this.timelineData.tree);
+        // Timing is persisted independently from call traces. A completed task
+        // can therefore have a useful Waiting/Execution breakdown even when it
+        // did not execute any tracked Hot functions.
+        const items = hasTraceData ? this.flattenForTimeline(this.timelineData.tree) : [];
 
-        // Calculate time bounds
+        // Calculate trace bounds only when trace rows exist.
         const startTimes = items.map(i => new Date(i.start_time).getTime()).filter(t => !isNaN(t));
-        const minTime = Math.min(...startTimes);
-        const maxTime = Math.max(...items.map(i => {
+        const minTime = hasTraceData ? Math.min(...startTimes) : 0;
+        const maxTime = hasTraceData ? Math.max(...items.map(i => {
             if (!i.start_time || !i.duration_us) return minTime;
             return new Date(i.start_time).getTime() + (i.duration_us / 1000); // Convert μs to ms
-        }));
-        const totalDuration = maxTime - minTime;
+        })) : 0;
+        const totalDuration = hasTraceData ? maxTime - minTime : 0;
 
         // Calculate execution time (from hierarchy data)
-        const executionTimeUs = this.timelineData.total_duration_us || 0;
+        const executionTimeUs = hasTraceData ? (this.timelineData.total_duration_us || 0) : 0;
 
         // Get total duration from page header (includes queue wait)
         const totalDurationUs = this.getRunDurationUs();
@@ -3099,8 +3111,12 @@ window.ObservabilityTabs = class ObservabilityTabs {
 
         // Calculate compilation overhead (clamp to 0 to handle timing precision issues)
         // Use execTimeUs since compilation/loading is part of Execution, not Waiting.
-        const handlerExecutionTimeUs = Math.min(Math.max(0, executionTimeUs), execTimeUs);
-        const compilationTimeUs = Math.max(0, execTimeUs - handlerExecutionTimeUs);
+        const handlerExecutionTimeUs = hasTraceData
+            ? Math.min(Math.max(0, executionTimeUs), execTimeUs)
+            : 0;
+        const compilationTimeUs = hasTraceData
+            ? Math.max(0, execTimeUs - handlerExecutionTimeUs)
+            : 0;
 
         let html = '<div class="timeline-view">';
 
@@ -3232,6 +3248,22 @@ window.ObservabilityTabs = class ObservabilityTabs {
             html += renderDetailGroup('execution', 'Execution', execTimeUs, executionDescription, executionBreakdown);
             html += '</div>';
             html += '</div>';
+        }
+
+        if (!hasTraceData) {
+            const emptyTraceHtml =
+                traceStatusHtml ||
+                this.getCallDataStatusMessage(
+                    this.callDataStatus || 'empty',
+                    this.callRetentionDays,
+                    'lg'
+                ) ||
+                this.getCallDataStatusMessage('empty', this.callRetentionDays, 'lg');
+            html += emptyTraceHtml;
+            html += '</div>';
+            this.timelineView.innerHTML = html;
+            this.attachTimelineListeners();
+            return;
         }
 
         // Add time axis header

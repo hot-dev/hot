@@ -291,6 +291,7 @@
 <div id="task-duration-container"
      style="display:none"
      data-timing-kind="task"
+     data-execution-complete="{% if task.status == "completed" || task.status == "failed" || task.status == "cancelled" || task.status == "timed_out" %}true{% else %}false{% endif %}"
      data-duration-us="{{ task.total_duration_ms.unwrap_or(0) * 1000 }}"
      data-exec-time-us="{{ task.task_execution_ms.unwrap_or(0) * 1000 }}"
      data-pre-run-wait-us="{{ task.waiting_ms.unwrap_or(0) * 1000 }}"
