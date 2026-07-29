@@ -1156,6 +1156,8 @@ mod tests {
             enqueued_at: Some(claimed_at - chrono::Duration::milliseconds(5)),
             claimed_at,
             queue_wait_us: 5_000,
+            redelivered: false,
+            handler_dispatched_at: Some(claimed_at),
         });
 
         emitter.emit(EngineEvent::run_start(&execution_context));

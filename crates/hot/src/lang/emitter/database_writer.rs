@@ -1165,18 +1165,33 @@ ON CONFLICT (call_id) DO UPDATE SET
         start_time: chrono::DateTime<chrono::Utc>,
     ) -> Option<serde_json::Value> {
         let timing = ctx.queue_timing.as_ref()?;
-        let worker_preparation_us = start_time
+        let handler_dispatched_at = timing.handler_dispatched_at.unwrap_or(timing.claimed_at);
+        let handler_dispatch_wait_us = handler_dispatched_at
             .signed_duration_since(timing.claimed_at)
             .num_microseconds()
             .unwrap_or(0)
             .max(0);
+        let worker_preparation_us = start_time
+            .signed_duration_since(handler_dispatched_at)
+            .num_microseconds()
+            .unwrap_or(0)
+            .max(0);
+        let (queue_wait_us, retry_queue_age_us) = if timing.redelivered {
+            (None, Some(timing.queue_wait_us))
+        } else {
+            (Some(timing.queue_wait_us), None)
+        };
 
         Some(serde_json::json!({
             "queue_timing": {
                 "backend": timing.backend.clone(),
                 "enqueued_at": timing.enqueued_at.map(|value| value.to_rfc3339()),
                 "claimed_at": timing.claimed_at.to_rfc3339(),
-                "queue_wait_us": timing.queue_wait_us,
+                "queue_wait_us": queue_wait_us,
+                "retry_queue_age_us": retry_queue_age_us,
+                "redelivered": timing.redelivered,
+                "handler_dispatched_at": handler_dispatched_at.to_rfc3339(),
+                "handler_dispatch_wait_us": handler_dispatch_wait_us,
                 "worker_preparation_us": worker_preparation_us,
             }
         }))
@@ -2385,6 +2400,8 @@ mod tests {
             enqueued_at: Some(claimed_at - chrono::Duration::milliseconds(7)),
             claimed_at,
             queue_wait_us: 7_000,
+            redelivered: false,
+            handler_dispatched_at: Some(claimed_at + chrono::Duration::milliseconds(3)),
         });
 
         let info = DatabaseWriter::queue_timing_info(
@@ -2394,7 +2411,34 @@ mod tests {
         .unwrap();
         assert_eq!(info["queue_timing"]["backend"], "redis");
         assert_eq!(info["queue_timing"]["queue_wait_us"], 7_000);
-        assert_eq!(info["queue_timing"]["worker_preparation_us"], 11_000);
+        assert_eq!(info["queue_timing"]["handler_dispatch_wait_us"], 3_000);
+        assert_eq!(info["queue_timing"]["worker_preparation_us"], 8_000);
+    }
+
+    #[test]
+    fn queue_timing_info_does_not_label_redelivery_age_as_queue_wait() {
+        let claimed_at = chrono::Utc::now();
+        let mut context = ExecutionContext::minimal(Uuid::now_v7(), Uuid::now_v7(), 4);
+        context.queue_timing = Some(crate::lang::event::QueueExecutionTiming {
+            backend: "redis".to_string(),
+            enqueued_at: Some(claimed_at - chrono::Duration::seconds(20)),
+            claimed_at,
+            queue_wait_us: 20_000_000,
+            redelivered: true,
+            handler_dispatched_at: Some(claimed_at),
+        });
+
+        let info = DatabaseWriter::queue_timing_info(
+            &context,
+            claimed_at + chrono::Duration::milliseconds(2),
+        )
+        .unwrap();
+        assert!(info["queue_timing"]["queue_wait_us"].is_null());
+        assert_eq!(
+            info["queue_timing"]["retry_queue_age_us"],
+            serde_json::json!(20_000_000)
+        );
+        assert_eq!(info["queue_timing"]["redelivered"], true);
     }
 
     #[test]

@@ -149,6 +149,8 @@ async fn postgres_task_lifecycle_smoke() {
         enqueued_at: Some(claimed_at - chrono::Duration::milliseconds(4)),
         claimed_at,
         queue_wait_us: 4_000,
+        redelivered: false,
+        handler_dispatched_at: Some(claimed_at),
     });
     let emitter = DatabaseEngineEventEmitter::new_with_pool(db.clone());
     emitter.emit(EngineEvent::run_start(&execution_context));

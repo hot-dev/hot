@@ -1604,9 +1604,39 @@ impl Run {
             crate::db::DatabasePool::Sqlite(sqlite_pool) => {
                 let info_str = info_val.to_string();
                 sqlx::query(
-                    "UPDATE run
-                     SET info = json_patch(COALESCE(info, '{}'), ?)
-                     WHERE run_id = ?",
+                    "WITH patch AS (
+                         SELECT key, value, type FROM json_each(?1)
+                     ),
+                     existing AS (
+                         SELECT old.key, old.value, old.type
+                         FROM run, json_each(COALESCE(run.info, '{}')) AS old
+                         WHERE run.run_id = ?2
+                           AND old.key NOT IN (SELECT key FROM patch)
+                     ),
+                     merged AS (
+                         SELECT * FROM existing
+                         UNION ALL
+                         SELECT * FROM patch
+                     ),
+                     replacement AS (
+                         SELECT COALESCE(
+                             json_group_object(
+                                 key,
+                                 CASE
+                                     WHEN type IN ('array', 'object') THEN json(value)
+                                     WHEN type = 'true' THEN json('true')
+                                     WHEN type = 'false' THEN json('false')
+                                     WHEN type = 'null' THEN json('null')
+                                     ELSE value
+                                 END
+                             ),
+                             '{}'
+                         ) AS value
+                         FROM merged
+                     )
+                     UPDATE run
+                     SET info = (SELECT value FROM replacement)
+                     WHERE run_id = ?2",
                 )
                 .bind(&info_str)
                 .bind(run_id)
@@ -3333,5 +3363,50 @@ impl Run {
             }
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn sqlite_update_info_matches_postgres_shallow_merge_semantics() {
+        let db = crate::db::test_db().await;
+        let test_data = crate::db::insert_test_data(&db).await.unwrap();
+
+        Run::update_info(
+            &db,
+            &test_data.run_id,
+            Some(&serde_json::json!({
+                "nested": {"a": 1, "b": 2},
+                "preserved": true,
+                "nullable": 9
+            })),
+        )
+        .await
+        .unwrap();
+        Run::update_info(
+            &db,
+            &test_data.run_id,
+            Some(&serde_json::json!({
+                "nested": {"a": 3},
+                "nullable": null,
+                "array": [1, 2]
+            })),
+        )
+        .await
+        .unwrap();
+
+        let run = Run::get_run(&db, &test_data.run_id).await.unwrap();
+        assert_eq!(
+            run.info,
+            Some(serde_json::json!({
+                "nested": {"a": 3},
+                "preserved": true,
+                "nullable": null,
+                "array": [1, 2]
+            }))
+        );
     }
 }

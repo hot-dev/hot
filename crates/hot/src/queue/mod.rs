@@ -281,6 +281,9 @@ pub struct QueueLeaseTiming {
     pub enqueued_at: Option<chrono::DateTime<chrono::Utc>>,
     /// Backend queue residence measured at claim time.
     pub queue_wait: std::time::Duration,
+    /// True when this claim came from a backend retry/reclaim path. In that
+    /// case queue_wait is the item's age, not a fresh queue residence.
+    pub redelivered: bool,
 }
 
 impl<T> ProcessingQueueLease<T>

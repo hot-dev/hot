@@ -2484,6 +2484,7 @@ where
             claimed_at: self.claimed_at,
             enqueued_at: self.enqueued_at,
             queue_wait: self.queue_wait,
+            redelivered: matches!(self.source, FetchSource::Pending),
         }
     }
 

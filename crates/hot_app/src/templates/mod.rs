@@ -543,7 +543,11 @@ pub struct RunDisplay {
     pub publish_wait_formatted: Option<String>,
     pub queue_wait_us: Option<i64>, // Actual backend queue residence
     pub queue_wait_formatted: Option<String>, // Formatted queue wait time
-    pub worker_preparation_us: Option<i64>, // Queue claim -> VM run:start
+    pub retry_queue_age_us: Option<i64>, // Original enqueue -> retry/reclaim claim
+    pub retry_queue_age_formatted: Option<String>,
+    pub handler_dispatch_wait_us: Option<i64>, // Claim -> this handler's dispatch
+    pub handler_dispatch_wait_formatted: Option<String>,
+    pub worker_preparation_us: Option<i64>, // Handler dispatch -> VM run:start
     pub worker_preparation_formatted: Option<String>,
     pub queue_backend: Option<String>,
     pub queued_at: Option<chrono::DateTime<chrono::Utc>>, // When event was enqueued
@@ -554,6 +558,8 @@ struct RunQueuePhases {
     pre_run_wait_us: Option<i64>,
     publish_wait_us: Option<i64>,
     queue_wait_us: Option<i64>,
+    retry_queue_age_us: Option<i64>,
+    handler_dispatch_wait_us: Option<i64>,
     worker_preparation_us: Option<i64>,
     backend: Option<String>,
 }
@@ -568,11 +574,22 @@ fn run_queue_phases(run: &Run) -> RunQueuePhases {
     });
     let timing = run.info.as_ref().and_then(|info| info.get("queue_timing"));
 
-    let queue_wait_us = timing
-        .and_then(|value| value.get("queue_wait_us"))
+    let queue_wait_us = if timing.is_some() {
+        timing
+            .and_then(|value| value.get("queue_wait_us"))
+            .and_then(serde_json::Value::as_u64)
+            .map(|value| value.min(i64::MAX as u64) as i64)
+    } else {
+        pre_run_wait_us
+    };
+    let retry_queue_age_us = timing
+        .and_then(|value| value.get("retry_queue_age_us"))
         .and_then(serde_json::Value::as_u64)
-        .map(|value| value.min(i64::MAX as u64) as i64)
-        .or(pre_run_wait_us);
+        .map(|value| value.min(i64::MAX as u64) as i64);
+    let handler_dispatch_wait_us = timing
+        .and_then(|value| value.get("handler_dispatch_wait_us"))
+        .and_then(serde_json::Value::as_i64)
+        .map(|value| value.max(0));
     let worker_preparation_us = timing
         .and_then(|value| value.get("worker_preparation_us"))
         .and_then(serde_json::Value::as_i64)
@@ -601,6 +618,8 @@ fn run_queue_phases(run: &Run) -> RunQueuePhases {
         pre_run_wait_us,
         publish_wait_us,
         queue_wait_us,
+        retry_queue_age_us,
+        handler_dispatch_wait_us,
         worker_preparation_us,
         backend,
     }
@@ -903,6 +922,10 @@ impl RunDisplay {
         let publish_wait_formatted = queue_phases.publish_wait_us.map(format_duration_us);
         let pre_run_wait_formatted = queue_phases.pre_run_wait_us.map(format_duration_us);
         let queue_wait_formatted = queue_phases.queue_wait_us.map(format_duration_us);
+        let retry_queue_age_formatted = queue_phases.retry_queue_age_us.map(format_duration_us);
+        let handler_dispatch_wait_formatted = queue_phases
+            .handler_dispatch_wait_us
+            .map(format_duration_us);
         let worker_preparation_formatted =
             queue_phases.worker_preparation_us.map(format_duration_us);
 
@@ -961,6 +984,10 @@ impl RunDisplay {
             publish_wait_formatted,
             queue_wait_us: queue_phases.queue_wait_us,
             queue_wait_formatted,
+            retry_queue_age_us: queue_phases.retry_queue_age_us,
+            retry_queue_age_formatted,
+            handler_dispatch_wait_us: queue_phases.handler_dispatch_wait_us,
+            handler_dispatch_wait_formatted,
             worker_preparation_us: queue_phases.worker_preparation_us,
             worker_preparation_formatted,
             queue_backend: queue_phases.backend,
@@ -1006,6 +1033,10 @@ impl From<&Run> for RunDisplay {
         let publish_wait_formatted = queue_phases.publish_wait_us.map(format_duration_us);
         let pre_run_wait_formatted = queue_phases.pre_run_wait_us.map(format_duration_us);
         let queue_wait_formatted = queue_phases.queue_wait_us.map(format_duration_us);
+        let retry_queue_age_formatted = queue_phases.retry_queue_age_us.map(format_duration_us);
+        let handler_dispatch_wait_formatted = queue_phases
+            .handler_dispatch_wait_us
+            .map(format_duration_us);
         let worker_preparation_formatted =
             queue_phases.worker_preparation_us.map(format_duration_us);
 
@@ -1060,6 +1091,10 @@ impl From<&Run> for RunDisplay {
             publish_wait_formatted,
             queue_wait_us: queue_phases.queue_wait_us,
             queue_wait_formatted,
+            retry_queue_age_us: queue_phases.retry_queue_age_us,
+            retry_queue_age_formatted,
+            handler_dispatch_wait_us: queue_phases.handler_dispatch_wait_us,
+            handler_dispatch_wait_formatted,
             worker_preparation_us: queue_phases.worker_preparation_us,
             worker_preparation_formatted,
             queue_backend: queue_phases.backend,

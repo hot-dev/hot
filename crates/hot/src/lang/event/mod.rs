@@ -67,6 +67,12 @@ pub struct QueueExecutionTiming {
     pub enqueued_at: Option<DateTime<Utc>>,
     pub claimed_at: DateTime<Utc>,
     pub queue_wait_us: u64,
+    #[serde(default)]
+    pub redelivered: bool,
+    /// Captured immediately before dispatching this particular handler.
+    /// Older serialized queue messages fall back to claimed_at.
+    #[serde(default)]
+    pub handler_dispatched_at: Option<DateTime<Utc>>,
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]

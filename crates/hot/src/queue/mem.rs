@@ -302,6 +302,10 @@ where
             claimed_at: self.claimed_at,
             enqueued_at: None,
             queue_wait: self.queue_wait,
+            redelivered: self
+                .retry_item
+                .as_ref()
+                .is_some_and(|item| item.retry_count > 0),
         }
     }
 

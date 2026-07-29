@@ -2899,6 +2899,8 @@ window.ObservabilityTabs = class ObservabilityTabs {
         const waitingTimeUs = this.getPreRunWaitUs() || Math.max(0, totalDurationUs - execTimeUs);
         const publishWaitUs = this.getPublishWaitUs();
         const queueWaitUs = this.getQueueWaitUs();
+        const retryQueueAgeUs = this.getRetryQueueAgeUs();
+        const handlerDispatchWaitUs = this.getHandlerDispatchWaitUs();
         const workerPreparationUs = this.getWorkerPreparationUs();
 
         // Calculate compilation overhead (clamp to 0 to handle timing precision issues)
@@ -2916,6 +2918,8 @@ window.ObservabilityTabs = class ObservabilityTabs {
             const waitingBreakdown = [
                 { label: 'Publish', value: publishWaitUs },
                 { label: 'Queue Wait', value: queueWaitUs },
+                { label: 'Retry / Reclaim Age', value: retryQueueAgeUs },
+                { label: 'Handler Dispatch', value: handlerDispatchWaitUs },
                 { label: 'Invocation Setup', value: workerPreparationUs }
             ].filter(part => part.value > 0);
             const executionBreakdown = [
@@ -3355,6 +3359,28 @@ window.ObservabilityTabs = class ObservabilityTabs {
             const publishWaitUs = durationContainer.dataset.publishWaitUs;
             if (publishWaitUs && publishWaitUs !== '') {
                 return parseInt(publishWaitUs, 10);
+            }
+        }
+        return 0;
+    }
+
+    getRetryQueueAgeUs() {
+        const durationContainer = document.getElementById('run-duration-container');
+        if (durationContainer) {
+            const retryQueueAgeUs = durationContainer.dataset.retryQueueAgeUs;
+            if (retryQueueAgeUs && retryQueueAgeUs !== '') {
+                return parseInt(retryQueueAgeUs, 10);
+            }
+        }
+        return 0;
+    }
+
+    getHandlerDispatchWaitUs() {
+        const durationContainer = document.getElementById('run-duration-container');
+        if (durationContainer) {
+            const handlerDispatchWaitUs = durationContainer.dataset.handlerDispatchWaitUs;
+            if (handlerDispatchWaitUs && handlerDispatchWaitUs !== '') {
+                return parseInt(handlerDispatchWaitUs, 10);
             }
         }
         return 0;

@@ -51,6 +51,12 @@ struct CachedTenantContext {
     loaded_at: std::time::Instant,
 }
 
+#[derive(Clone)]
+struct CachedTenantStore {
+    store: Arc<dyn hot::store::Store>,
+    last_used: std::time::Instant,
+}
+
 /// Worker-lifetime clients and strictly tenant-keyed execution state.
 ///
 /// File storage is safe to share because every operation requires a
@@ -61,9 +67,10 @@ struct WorkerExecutionServices {
     db: Arc<DatabasePool>,
     file_storage: Option<Arc<dyn hot::file_storage::FileStorage>>,
     embedding_provider: Option<Arc<dyn hot::store::embedding::EmbeddingProvider>>,
-    stores: Mutex<AHashMap<TenantStoreKey, Arc<dyn hot::store::Store>>>,
+    stores: Mutex<AHashMap<TenantStoreKey, CachedTenantStore>>,
     contexts: Mutex<AHashMap<TenantContextKey, CachedTenantContext>>,
     context_ttl: std::time::Duration,
+    cache_max_entries: usize,
 }
 
 impl WorkerExecutionServices {
@@ -80,6 +87,9 @@ impl WorkerExecutionServices {
         let context_ttl_ms = conf
             .get_int_or_default("worker.context-cache-ttl-ms", 1_000)
             .max(0) as u64;
+        let cache_max_entries = conf
+            .get_int_or_default("worker.tenant-service-cache-max-entries", 1_024)
+            .max(0) as usize;
 
         Self {
             db,
@@ -88,6 +98,7 @@ impl WorkerExecutionServices {
             stores: Mutex::new(AHashMap::new()),
             contexts: Mutex::new(AHashMap::new()),
             context_ttl: std::time::Duration::from_millis(context_ttl_ms),
+            cache_max_entries,
         }
     }
 
@@ -98,8 +109,12 @@ impl WorkerExecutionServices {
         env_id: Uuid,
     ) -> Option<Arc<dyn hot::store::Store>> {
         let key = TenantStoreKey { org_id, env_id };
-        if let Some(store) = self.stores.lock().await.get(&key).cloned() {
-            return Some(store);
+        {
+            let mut stores = self.stores.lock().await;
+            if let Some(cached) = stores.get_mut(&key) {
+                cached.last_used = std::time::Instant::now();
+                return Some(Arc::clone(&cached.store));
+            }
         }
 
         let store = match hot::store::store_from_config_with_db(
@@ -124,8 +139,24 @@ impl WorkerExecutionServices {
 
         // A concurrent miss may have initialized the same tenant. Reuse the
         // first inserted instance; UUID-keyed scopes can never cross tenants.
+        if self.cache_max_entries == 0 {
+            return Some(store);
+        }
+
         let mut stores = self.stores.lock().await;
-        Some(stores.entry(key).or_insert(store).clone())
+        if let Some(cached) = stores.get_mut(&key) {
+            cached.last_used = std::time::Instant::now();
+            return Some(Arc::clone(&cached.store));
+        }
+        Self::evict_oldest_store_if_full(&mut stores, self.cache_max_entries);
+        stores.insert(
+            key,
+            CachedTenantStore {
+                store: Arc::clone(&store),
+                last_used: std::time::Instant::now(),
+            },
+        );
+        Some(store)
     }
 
     async fn context_for(
@@ -133,11 +164,17 @@ impl WorkerExecutionServices {
         encryption: &ContextEncryption,
         key: TenantContextKey,
     ) -> AHashMap<String, Val> {
-        if !self.context_ttl.is_zero()
-            && let Some(cached) = self.contexts.lock().await.get(&key).cloned()
-            && cached.loaded_at.elapsed() < self.context_ttl
         {
-            return cached.values;
+            let mut contexts = self.contexts.lock().await;
+            if self.context_ttl.is_zero() {
+                // Drop decrypted values immediately when caching is disabled.
+                contexts.clear();
+            } else {
+                Self::purge_expired_contexts(&mut contexts, self.context_ttl);
+                if let Some(cached) = contexts.get(&key) {
+                    return cached.values.clone();
+                }
+            }
         }
 
         let mut values = AHashMap::new();
@@ -208,8 +245,11 @@ impl WorkerExecutionServices {
             }
         }
 
-        if cacheable && !self.context_ttl.is_zero() {
-            self.contexts.lock().await.insert(
+        if cacheable && !self.context_ttl.is_zero() && self.cache_max_entries > 0 {
+            let mut contexts = self.contexts.lock().await;
+            Self::purge_expired_contexts(&mut contexts, self.context_ttl);
+            Self::evict_oldest_context_if_full(&mut contexts, self.cache_max_entries);
+            contexts.insert(
                 key,
                 CachedTenantContext {
                     values: values.clone(),
@@ -219,6 +259,45 @@ impl WorkerExecutionServices {
         }
 
         values
+    }
+
+    fn evict_oldest_store_if_full(
+        stores: &mut AHashMap<TenantStoreKey, CachedTenantStore>,
+        max_entries: usize,
+    ) {
+        if stores.len() < max_entries {
+            return;
+        }
+        if let Some(oldest_key) = stores
+            .iter()
+            .min_by_key(|(_, value)| value.last_used)
+            .map(|(key, _)| *key)
+        {
+            stores.remove(&oldest_key);
+        }
+    }
+
+    fn evict_oldest_context_if_full(
+        contexts: &mut AHashMap<TenantContextKey, CachedTenantContext>,
+        max_entries: usize,
+    ) {
+        if contexts.len() < max_entries {
+            return;
+        }
+        if let Some(oldest_key) = contexts
+            .iter()
+            .min_by_key(|(_, value)| value.loaded_at)
+            .map(|(key, _)| *key)
+        {
+            contexts.remove(&oldest_key);
+        }
+    }
+
+    fn purge_expired_contexts(
+        contexts: &mut AHashMap<TenantContextKey, CachedTenantContext>,
+        ttl: std::time::Duration,
+    ) {
+        contexts.retain(|_, value| value.loaded_at.elapsed() < ttl);
     }
 }
 
@@ -6069,6 +6148,8 @@ pub async fn run_with_components_shared_context_and_db(
                                                             .as_micros()
                                                             .min(u128::from(u64::MAX))
                                                             as u64,
+                                                        redelivered: queue_lease_timing.redelivered,
+                                                        handler_dispatched_at: None,
                                                     });
 
                                                 debug!("TIMING: event {} security check done: {:?}", event_message.id, event_dequeue_time.elapsed());
@@ -6108,6 +6189,13 @@ pub async fn run_with_components_shared_context_and_db(
                                                     Ok(all_handlers) => {
                                                         if all_handlers.is_empty() {
                                                             let err_msg = format!("No event handlers found for event type '{}'", event_message.body.event.event_type);
+                                                            if exact_target_build.is_some() {
+                                                                // A build-scoped event was published while its deployment
+                                                                // was changing. Keep it in the backend retry/DLQ path rather
+                                                                // than acknowledging it as permanently unhandled.
+                                                                return Err(Box::new(std::io::Error::other(err_msg))
+                                                                    as Box<dyn std::error::Error + Send + Sync>);
+                                                            }
                                                             acknowledge_unhandled_event_if_stable(
                                                                 worker_id,
                                                                 db,
@@ -6247,6 +6335,7 @@ pub async fn run_with_components_shared_context_and_db(
                                                         // Step 4: Execute the selected handlers
                                                         let execution_result: (Result<(), String>, bool) = {
                                                             let mut all_success = true;
+                                                            let mut started_any_handler = false;
                                                             let mut is_first_handler = true;
                                                             for event_handler in handlers_to_execute {
                                                                 // Get the build for this handler
@@ -6262,6 +6351,7 @@ pub async fn run_with_components_shared_context_and_db(
 
                                                                 // Skip if build is no longer runtime-visible (deactivated or superseded while event was in queue).
                                                                 if !handler_build.deployed
+                                                                    || !handler_build.active
                                                                     || handler_build.runtime_status
                                                                         != Build::RUNTIME_STATUS_READY
                                                                 {
@@ -6285,7 +6375,17 @@ pub async fn run_with_components_shared_context_and_db(
 
                                                                 debug!("TIMING: event {} handler lookup done, calling execute_single_event_handler: {:?}", event_message.id, event_dequeue_time.elapsed());
 
-                                                                let execution_future = execute_single_event_handler(db, &handler_build, &env_id, &worker_conf_ref, &event_handler, &event_message, _emitter_ref.clone(), _event_publisher_ref.clone(), encryption_ref.clone(), cache_ref.clone(), shutdown_coord_ref.clone(), run_id, build_path_cache_ref.clone(), dev_context_storage_ref.clone(), stream_publisher_ref.clone(), task_queue_ref.clone(), execution_services_ref.clone());
+                                                                let mut handler_event_message = event_message.clone();
+                                                                if let Some(timing) = handler_event_message
+                                                                    .body
+                                                                    .execution_context
+                                                                    .queue_timing
+                                                                    .as_mut()
+                                                                {
+                                                                    timing.handler_dispatched_at = Some(chrono::Utc::now());
+                                                                }
+                                                                started_any_handler = true;
+                                                                let execution_future = execute_single_event_handler(db, &handler_build, &env_id, &worker_conf_ref, &event_handler, &handler_event_message, _emitter_ref.clone(), _event_publisher_ref.clone(), encryption_ref.clone(), cache_ref.clone(), shutdown_coord_ref.clone(), run_id, build_path_cache_ref.clone(), dev_context_storage_ref.clone(), stream_publisher_ref.clone(), task_queue_ref.clone(), execution_services_ref.clone());
 
                                                                                             match execution_future.await {
                                                                                                 Ok(()) => {
@@ -6316,8 +6416,16 @@ pub async fn run_with_components_shared_context_and_db(
                                                                                             }
                                                                                             is_first_handler = false;
                                                                                         }
-                                                                                        // Always return Ok() - run was created, event should not be retried
-                                                                                        (Ok(()), all_success)
+                                                                                        if started_any_handler {
+                                                                                            // At least one run was created. Do not retry the whole
+                                                                                            // event and duplicate already-started side effects.
+                                                                                            (Ok(()), all_success)
+                                                                                        } else {
+                                                                                            (
+                                                                                                Err("No runtime-visible event handler could be started".to_string()),
+                                                                                                false,
+                                                                                            )
+                                                                                        }
                                                                                     };
 
                                                                                     match execution_result {
@@ -6331,7 +6439,6 @@ pub async fn run_with_components_shared_context_and_db(
                                                                                             }
                                                                                         }
                                                                                         (Err(e), _) => {
-                                                                                            // This should never happen now since we always return Ok()
                                                                                             let err_msg = format!("Failed to execute event handlers for event type '{}': {}", event_message.body.event.event_type, e);
                                                                                             error!("hot.dev: WORKER {} {}", worker_id, err_msg);
                                                                                             return Err(Box::new(std::io::Error::other(err_msg)) as Box<dyn std::error::Error + Send + Sync>);
@@ -7385,6 +7492,60 @@ mod tests {
                 project_id: project_b,
             }
         );
+    }
+
+    #[test]
+    fn tenant_context_cache_expires_and_evicts_decrypted_values() {
+        let org_id = Uuid::now_v7();
+        let env_id = Uuid::now_v7();
+        let oldest_key = TenantContextKey {
+            org_id,
+            env_id,
+            project_id: Uuid::now_v7(),
+        };
+        let current_key = TenantContextKey {
+            org_id,
+            env_id,
+            project_id: Uuid::now_v7(),
+        };
+        let mut contexts = AHashMap::new();
+        contexts.insert(
+            oldest_key,
+            CachedTenantContext {
+                values: AHashMap::new(),
+                loaded_at: std::time::Instant::now() - std::time::Duration::from_secs(2),
+            },
+        );
+        contexts.insert(
+            current_key,
+            CachedTenantContext {
+                values: AHashMap::new(),
+                loaded_at: std::time::Instant::now(),
+            },
+        );
+
+        WorkerExecutionServices::purge_expired_contexts(
+            &mut contexts,
+            std::time::Duration::from_secs(1),
+        );
+        assert!(!contexts.contains_key(&oldest_key));
+        assert!(contexts.contains_key(&current_key));
+
+        let next_key = TenantContextKey {
+            org_id,
+            env_id,
+            project_id: Uuid::now_v7(),
+        };
+        WorkerExecutionServices::evict_oldest_context_if_full(&mut contexts, 1);
+        contexts.insert(
+            next_key,
+            CachedTenantContext {
+                values: AHashMap::new(),
+                loaded_at: std::time::Instant::now(),
+            },
+        );
+        assert_eq!(contexts.len(), 1);
+        assert!(contexts.contains_key(&next_key));
     }
 
     async fn migrated_sqlite_file_db() -> (DatabasePool, PathBuf) {
