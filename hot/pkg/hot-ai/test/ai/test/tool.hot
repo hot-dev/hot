@@ -110,6 +110,19 @@ fn () {
     assert-eq("echo", tools[1].name)
 }
 
+test-provider-name-preserves-valid-names-and-aliases-qualified-names
+meta ["test"]
+fn () {
+    assert-eq("get_weather-2", ::tool/provider-name("get_weather-2"))
+
+    alias ::tool/provider-name("github/list-workflow-runs")
+    assert(lte(length(alias), ::tool/PROVIDER_NAME_LIMIT))
+    assert(::hot::regex/is-match(alias, "^[a-zA-Z0-9_-]+$"))
+    assert(not(eq(alias, "github/list-workflow-runs")))
+    assert-eq(alias, ::tool/provider-name("github/list-workflow-runs"))
+    assert(not(eq(alias, ::tool/provider-name("github:list-workflow-runs"))))
+}
+
 // ---------------------------------------------------------------------------
 // dispatch
 // ---------------------------------------------------------------------------
@@ -140,6 +153,20 @@ fn () {
     })
     result ::tool/dispatch(tools, call)
     assert-eq("Hello, Alice!", result.output)
+}
+
+test-dispatch-provider-safe-alias
+meta ["test"]
+fn () {
+    tools ::tool/for-agent([add-fn])
+    call ::tool/ToolCall({
+        id: "call-provider",
+        name: ::tool/provider-name(tools[0].name),
+        input: {x: 4, y: 6}
+    })
+    result ::tool/dispatch(tools, call)
+    assert-eq(false, result.is-error)
+    assert-eq(10, result.output)
 }
 
 test-dispatch-unknown-tool

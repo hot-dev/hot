@@ -77,7 +77,7 @@ fn (call: ::ai-tool/ToolCall): Map {
         id: call.id,
         type: "function",
         function: {
-            name: call.name,
+            name: ::ai-tool/provider-name(call.name),
             arguments: to-json(untype(or(call.input, {})))
         }
     }
@@ -120,7 +120,11 @@ meta {
     """
 }
 fn (t: ::ai-tool/Tool): Map {
-    function-base {name: t.name, parameters: t.input-schema}
+    function-base {
+        name: ::ai-tool/provider-name(t.name),
+        parameters: t.input-schema
+    }
+
     function cond {
         is-null(t.description) => { function-base }
         => { assoc(function-base, "description", t.description) }
@@ -262,19 +266,24 @@ fn (model: Str, messages: Vec<::ai-chat/Message>, system: Str?, tools: Vec<::ai-
 
     response ::oai-chat/complete(::oai-chat/ChatCompletionRequest(with-tools))
 
-    choices or(response.choices, [])
-    first-msg if(is-empty(choices), {}, or(choices[0].message, {}))
-    text response-text(first-msg)
-    calls response-tool-calls(first-msg)
-    finish if(is-empty(choices), "stop", or(choices[0].finish_reason, "stop"))
+    match response {
+        Result.Err => { err(response) }
+        Result.Ok => {
+            choices or(response.choices, [])
+            first-msg if(is-empty(choices), {}, or(choices[0].message, {}))
+            text response-text(first-msg)
+            calls response-tool-calls(first-msg)
+            finish if(is-empty(choices), "stop", or(choices[0].finish_reason, "stop"))
 
-    ::ai-chat/ChatReply({
-        text: if(is-empty(text), null, text),
-        tool-calls: if(is-empty(calls), null, calls),
-        stop-reason: finish,
-        usage: response-usage(response.usage),
-        raw: response
-    })
+            ::ai-chat/ChatReply({
+                text: if(is-empty(text), null, text),
+                tool-calls: if(is-empty(calls), null, calls),
+                stop-reason: finish,
+                usage: response-usage(response.usage),
+                raw: response
+            })
+        }
+    }
 }
 
 // ============================================================================

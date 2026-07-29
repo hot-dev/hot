@@ -92,6 +92,15 @@ fn () {
     assert(is-some(out.function.parameters), "parameters present")
 }
 
+test-to-openai-tool-uses-provider-safe-name
+meta ["test"]
+fn () {
+    t ::ai-tool/from-fn(tool-fixture-fn, {name: "github/list-runs"})
+    out ::ct/to-openai-tool(t)
+    assert-eq(::ai-tool/provider-name("github/list-runs"), out.function.name)
+    assert(::hot::regex/is-match(out.function.name, "^[a-zA-Z0-9_-]+$"))
+}
+
 // ============================================================================
 // Inbound conversions
 // ============================================================================
