@@ -59,6 +59,7 @@ struct RetryItem<T> {
     item: T,
     retry_count: usize,
     first_attempt: Instant,
+    redelivered: bool,
 }
 
 impl<T> RetryItem<T> {
@@ -67,14 +68,16 @@ impl<T> RetryItem<T> {
             item,
             retry_count: 0,
             first_attempt: Instant::now(),
+            redelivered: false,
         }
     }
 
-    fn from_parts(item: T, retry_count: usize, first_attempt: Instant) -> Self {
+    fn from_parts(item: T, retry_count: usize, first_attempt: Instant, redelivered: bool) -> Self {
         Self {
             item,
             retry_count,
             first_attempt,
+            redelivered,
         }
     }
 
@@ -305,7 +308,7 @@ where
             redelivered: self
                 .retry_item
                 .as_ref()
-                .is_some_and(|item| item.retry_count > 0),
+                .is_some_and(|item| item.redelivered),
         }
     }
 
@@ -329,10 +332,10 @@ where
         let queue_wait_ms = duration_ms(first_attempt.elapsed());
         let wait_target_p99_ms = queue_wait_target_p99_ms();
         let processing_started = Instant::now();
-        let delivery_source = if retry_item.retry_count == 0 {
-            "fresh"
-        } else {
+        let delivery_source = if retry_item.redelivered {
             "retry"
+        } else {
+            "fresh"
         };
 
         let result = match worker(item_for_worker).await {
@@ -378,6 +381,7 @@ where
                         retry_item.item,
                         retry_item.retry_count,
                         first_attempt,
+                        true,
                     );
                     if let Err(send_err) = self.queue.channels.tx.send(unchanged).await {
                         tracing::warn!(
@@ -403,8 +407,12 @@ where
                             "queue item processing failed"
                         );
                     }
-                    let updated =
-                        RetryItem::from_parts(retry_item.item, next_retry_count, first_attempt);
+                    let updated = RetryItem::from_parts(
+                        retry_item.item,
+                        next_retry_count,
+                        first_attempt,
+                        true,
+                    );
                     if updated.exceeded_retries() {
                         self.queue
                             .send_to_dlq(updated.item, "retry limit exceeded")
@@ -746,8 +754,13 @@ mod tests {
             assert!(queue.try_drain_dlq().is_empty());
         }
 
-        let result = queue
-            .dequeue_and_work(|item| async move { Ok::<i32, Box<dyn Error + Send + Sync>>(item) })
+        let lease = queue.claim_now().await.unwrap().expect("requeued item");
+        assert!(
+            lease.timing().redelivered,
+            "infrastructure requeues must be labeled as redeliveries"
+        );
+        let result = lease
+            .process(|item| async move { Ok::<i32, Box<dyn Error + Send + Sync>>(item) })
             .await
             .unwrap();
         assert_eq!(result, Some(5));

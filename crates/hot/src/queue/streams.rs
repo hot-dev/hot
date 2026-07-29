@@ -277,6 +277,7 @@ struct PrefetchedMessage {
     msg_id: String,
     payload: Vec<u8>,
     source: FetchSource,
+    redelivered: bool,
 }
 
 fn duration_ms(duration: Duration) -> u64 {
@@ -2054,10 +2055,11 @@ impl<T: Send + Sync + Serialize + DeserializeOwned + Clone + 'static> RedisStrea
         };
         Ok(parse_stream_messages(&result)
             .into_iter()
-            .map(|(msg_id, payload)| PrefetchedMessage {
+            .map(|(msg_id, payload, redelivered)| PrefetchedMessage {
                 msg_id,
                 payload,
                 source,
+                redelivered,
             })
             .collect())
     }
@@ -2099,6 +2101,7 @@ impl<T: Send + Sync + Serialize + DeserializeOwned + Clone + 'static> RedisStrea
             msg_id,
             payload,
             source,
+            redelivered,
         } = match prefetched {
             Some(m) => m,
             None => {
@@ -2150,6 +2153,7 @@ impl<T: Send + Sync + Serialize + DeserializeOwned + Clone + 'static> RedisStrea
             msg_id: Some(msg_id),
             payload: Some(payload),
             source,
+            redelivered,
             claimed_at,
             enqueued_at,
             queue_wait,
@@ -2469,6 +2473,7 @@ where
     msg_id: Option<String>,
     payload: Option<Vec<u8>>,
     source: FetchSource,
+    redelivered: bool,
     claimed_at: chrono::DateTime<chrono::Utc>,
     enqueued_at: Option<chrono::DateTime<chrono::Utc>>,
     queue_wait: Duration,
@@ -2484,7 +2489,7 @@ where
             claimed_at: self.claimed_at,
             enqueued_at: self.enqueued_at,
             queue_wait: self.queue_wait,
-            redelivered: matches!(self.source, FetchSource::Pending),
+            redelivered: self.redelivered || matches!(self.source, FetchSource::Pending),
         }
     }
 
@@ -2584,16 +2589,19 @@ impl<T: Send + Sync + Serialize + DeserializeOwned + Clone + 'static> QueueProce
 /// Parse a single stream message from XREADGROUP result.
 /// Returns the first (msg_id, payload) found, if any.
 fn parse_stream_message(result: &redis::Value) -> Option<(String, Vec<u8>)> {
-    parse_stream_messages(result).into_iter().next()
+    parse_stream_messages(result)
+        .into_iter()
+        .next()
+        .map(|(msg_id, payload, _)| (msg_id, payload))
 }
 
 /// Parse all messages from an XREADGROUP result.
 ///
 /// Shape: `[[stream-name, [[id, [field, value, ...]], ...]]]` or nil.
-/// We extract every `(id, payload)` pair, in order. Messages without a
+/// We extract every `(id, payload, redelivered)` tuple, in order. Messages without a
 /// `payload` field are silently skipped — the consumer group still has
 /// them in its PEL until ACKed.
-fn parse_stream_messages(result: &redis::Value) -> Vec<(String, Vec<u8>)> {
+fn parse_stream_messages(result: &redis::Value) -> Vec<(String, Vec<u8>, bool)> {
     if matches!(result, redis::Value::Nil) {
         return Vec::new();
     }
@@ -2633,6 +2641,7 @@ fn parse_stream_messages(result: &redis::Value) -> Vec<(String, Vec<u8>)> {
                 Err(_) => continue,
             };
             let mut payload: Option<Vec<u8>> = None;
+            let mut redelivered = false;
             let mut i = 0;
             while i + 1 < fields.len() {
                 let name: String = redis::from_redis_value_ref(&fields[i]).unwrap_or_default();
@@ -2640,12 +2649,15 @@ fn parse_stream_messages(result: &redis::Value) -> Vec<(String, Vec<u8>)> {
                     if let Ok(p) = redis::from_redis_value_ref::<Vec<u8>>(&fields[i + 1]) {
                         payload = Some(p);
                     }
-                    break;
+                } else if name == "original_id" {
+                    let original_id: String =
+                        redis::from_redis_value_ref(&fields[i + 1]).unwrap_or_default();
+                    redelivered = !original_id.is_empty();
                 }
                 i += 2;
             }
             if let Some(p) = payload {
-                out.push((msg_id, p));
+                out.push((msg_id, p, redelivered));
             }
         }
     }
@@ -2679,6 +2691,29 @@ mod tests {
         }
     }
 
+    #[test]
+    fn parser_marks_infrastructure_requeues_as_redelivered() {
+        let bulk = |value: &str| redis::Value::BulkString(value.as_bytes().to_vec());
+        let result = redis::Value::Array(vec![redis::Value::Array(vec![
+            bulk("{test-stream}"),
+            redis::Value::Array(vec![redis::Value::Array(vec![
+                bulk("1712345678901-0"),
+                redis::Value::Array(vec![
+                    bulk("payload"),
+                    redis::Value::BulkString(vec![1, 2, 3]),
+                    bulk("original_id"),
+                    bulk("1712345678000-0"),
+                ]),
+            ])]),
+        ])]);
+
+        let messages = parse_stream_messages(&result);
+        assert_eq!(
+            messages,
+            vec![("1712345678901-0".to_string(), vec![1, 2, 3], true)]
+        );
+    }
+
     #[tokio::test]
     async fn dropped_redis_lease_clears_in_flight_when_lock_is_busy() {
         let client = redis::Client::open("redis://127.0.0.1/").unwrap();
@@ -2693,6 +2728,7 @@ mod tests {
             msg_id: Some(msg_id.clone()),
             payload: Some(Vec::new()),
             source: FetchSource::Fresh,
+            redelivered: false,
             claimed_at: chrono::Utc::now(),
             enqueued_at: None,
             queue_wait: Duration::ZERO,
@@ -3145,8 +3181,17 @@ mod tests {
             queue.prefetched.lock().await.clear();
         }
 
-        let res = queue
-            .dequeue_and_work(|item: String| async move {
+        let lease = queue
+            .claim_now()
+            .await
+            .unwrap()
+            .expect("infrastructure retry should remain queued");
+        assert!(
+            lease.timing().redelivered,
+            "infrastructure requeues must be labeled as redeliveries"
+        );
+        let res = lease
+            .process(|item: String| async move {
                 assert_eq!(item, "flaky-infra");
                 Ok::<(), Box<dyn Error + Send + Sync>>(())
             })

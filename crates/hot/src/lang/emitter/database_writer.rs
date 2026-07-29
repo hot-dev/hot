@@ -1410,14 +1410,44 @@ ON CONFLICT (call_id) DO UPDATE SET
             DatabasePool::Sqlite(sqlite_pool) => {
                 let timing_info = timing_info.as_ref().map(serde_json::Value::to_string);
                 sqlx::query(
-                    "UPDATE run SET
+                    "WITH patch AS (
+                         SELECT key, value, type FROM json_each(COALESCE(?6, '{}'))
+                     ),
+                     existing AS (
+                         SELECT key, value, type
+                         FROM run, json_each(COALESCE(run.info, '{}'))
+                         WHERE run.run_id = ?1
+                           AND key NOT IN (SELECT key FROM patch)
+                     ),
+                     merged AS (
+                         SELECT key, value, type FROM existing
+                         UNION ALL
+                         SELECT key, value, type FROM patch
+                     ),
+                     replacement AS (
+                         SELECT COALESCE(
+                             json_group_object(
+                                 key,
+                                 CASE
+                                     WHEN type IN ('array', 'object') THEN json(value)
+                                     WHEN type = 'true' THEN json('true')
+                                     WHEN type = 'false' THEN json('false')
+                                     WHEN type = 'null' THEN json('null')
+                                     ELSE value
+                                 END
+                             ),
+                             '{}'
+                         ) AS info
+                         FROM merged
+                     )
+                     UPDATE run SET
                          origin_run_id = COALESCE(origin_run_id, ?2),
                          event_id = COALESCE(event_id, ?3),
                          agent_type = COALESCE(agent_type, ?4),
                          start_time = MIN(start_time, ?5),
                          info = CASE
                              WHEN ?6 IS NULL THEN info
-                             ELSE json_patch(COALESCE(info, '{}'), ?6)
+                             ELSE (SELECT info FROM replacement)
                          END
                      WHERE run_id = ?1",
                 )
@@ -2439,6 +2469,82 @@ mod tests {
             serde_json::json!(20_000_000)
         );
         assert_eq!(info["queue_timing"]["redelivered"], true);
+    }
+
+    #[tokio::test]
+    async fn sqlite_backfill_uses_postgres_shallow_merge_semantics() {
+        let db = crate::db::test_db().await;
+        let DatabasePool::Sqlite(pool) = &db else {
+            panic!("test_db should return SQLite");
+        };
+        let data = crate::db::insert_test_data(&db).await.unwrap();
+        let env_id = data.env_id;
+        let stream_id = data.stream_id;
+        let run_id = data.run_id;
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM run WHERE run_id = ?")
+                .bind(run_id)
+                .fetch_one(pool)
+                .await
+                .unwrap(),
+            1
+        );
+        sqlx::query(
+            r#"UPDATE run
+               SET info = '{"queue_timing":{"old":true},"nullable":null,"flag":true,"nested":{"keep":true}}'
+               WHERE run_id = ?"#,
+        )
+        .bind(run_id)
+        .execute(pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM run WHERE run_id = ?")
+                .bind(run_id)
+                .fetch_one(pool)
+                .await
+                .unwrap(),
+            1
+        );
+
+        let claimed_at = chrono::Utc::now();
+        let mut context = ExecutionContext::minimal(run_id, stream_id, 4);
+        context.env_id = Some(env_id);
+        context.queue_timing = Some(crate::lang::event::QueueExecutionTiming {
+            backend: "memory".to_string(),
+            enqueued_at: None,
+            claimed_at,
+            queue_wait_us: 10,
+            redelivered: false,
+            handler_dispatched_at: Some(claimed_at),
+        });
+        DatabaseWriter::backfill_run_provenance(
+            &db,
+            &context,
+            claimed_at + chrono::Duration::milliseconds(1),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM run WHERE run_id = ?")
+                .bind(run_id)
+                .fetch_one(pool)
+                .await
+                .unwrap(),
+            1
+        );
+
+        let info: String = sqlx::query_scalar("SELECT info FROM run WHERE run_id = ?")
+            .bind(run_id)
+            .fetch_one(pool)
+            .await
+            .unwrap();
+        let info: serde_json::Value = serde_json::from_str(&info).unwrap();
+        assert_eq!(info["nullable"], serde_json::Value::Null);
+        assert_eq!(info["flag"], true);
+        assert_eq!(info["nested"]["keep"], true);
+        assert!(info["queue_timing"].get("old").is_none());
+        assert_eq!(info["queue_timing"]["backend"], "memory");
     }
 
     #[test]

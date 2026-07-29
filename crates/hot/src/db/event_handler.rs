@@ -1144,6 +1144,9 @@ impl EventHandler {
 mod tests {
     use super::*;
 
+    static EVENT_HANDLER_CACHE_TEST_LOCK: tokio::sync::Mutex<()> =
+        tokio::sync::Mutex::const_new(());
+
     fn expire_build_cache_entry(build_id: Uuid, event_type: &str) {
         let mut cache = BUILD_EVENT_HANDLER_CACHE.lock().unwrap();
         let cached = cache
@@ -1154,6 +1157,7 @@ mod tests {
 
     #[tokio::test]
     async fn exact_build_cache_is_runtime_visible_bounded_and_does_not_pin_misses() {
+        let _cache_guard = EVENT_HANDLER_CACHE_TEST_LOCK.lock().await;
         EventHandler::invalidate_all_event_handler_cache();
         let db = crate::db::test_db().await;
         let data = crate::db::insert_test_data(&db).await.unwrap();
@@ -1263,6 +1267,7 @@ mod tests {
 
     #[tokio::test]
     async fn matching_env_revision_defers_the_next_database_check() {
+        let _cache_guard = EVENT_HANDLER_CACHE_TEST_LOCK.lock().await;
         EventHandler::invalidate_all_event_handler_cache();
         let db = crate::db::test_db().await;
         let data = crate::db::insert_test_data(&db).await.unwrap();
