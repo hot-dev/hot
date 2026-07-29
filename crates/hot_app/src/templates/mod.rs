@@ -648,21 +648,38 @@ pub struct TaskDisplay {
     pub stop_time_formatted: String,
     pub duration_formatted: String,
     pub duration_ms: Option<i64>,
+    pub total_duration_formatted: String,
+    pub total_duration_ms: Option<i64>,
     pub waiting_ms: Option<i64>,
     pub waiting_formatted: Option<String>,
     pub task_execution_ms: Option<i64>,
     pub task_execution_formatted: Option<String>,
     pub workload_started_formatted: Option<String>,
     pub publish_wait_ms: Option<i64>,
+    pub publish_wait_formatted: Option<String>,
     pub queue_wait_ms: Option<i64>,
+    pub queue_wait_formatted: Option<String>,
     pub retry_queue_age_ms: Option<i64>,
+    pub retry_queue_age_formatted: Option<String>,
     pub worker_preparation_ms: Option<i64>,
+    pub worker_preparation_formatted: Option<String>,
     pub capacity_wait_ms: Option<i64>,
+    pub capacity_wait_formatted: Option<String>,
     pub runtime_start_ms: Option<i64>,
     pub waiting_image_pull_ms: Option<i64>,
+    pub waiting_image_pull_formatted: Option<String>,
     pub waiting_runtime_start_ms: Option<i64>,
+    pub waiting_runtime_start_formatted: Option<String>,
+    pub unattributed_waiting_ms: Option<i64>,
+    pub unattributed_waiting_formatted: Option<String>,
     pub execution_startup_ms: Option<i64>,
+    pub execution_startup_formatted: Option<String>,
     pub finalization_ms: Option<i64>,
+    pub workload_execution_ms: Option<i64>,
+    pub workload_execution_formatted: Option<String>,
+    pub logs_collect_formatted: Option<String>,
+    pub finalization_formatted: Option<String>,
+    pub redelivered: bool,
     pub queue_backend: Option<String>,
     pub result: Option<String>,
     pub result_json: Option<String>,
@@ -832,6 +849,13 @@ impl TaskDisplay {
                     .zip(task_execution_ms)
                     .map(|(waiting, execution)| waiting.saturating_add(execution))
             });
+        // Preserve the existing task Duration semantics (claimed/started to
+        // completed). Total lifecycle time is a separate timeline value.
+        let duration_ms = task.duration_ms.or_else(|| {
+            task.start_time
+                .zip(task.stop_time)
+                .map(|(start, stop)| stop.signed_duration_since(start).num_milliseconds().max(0))
+        });
         let workload_execution_ms = timing_i64("workload_execution_ms").or(execution_ms);
         let logs_collect_ms = timing_i64("logs_collect_ms").or(logs_collect_ms);
         let image_pull_ms = timing_i64("image_pull_ms").or(image_pull_ms);
@@ -854,11 +878,33 @@ impl TaskDisplay {
                 .saturating_sub(logs_collect_ms.unwrap_or(0))
                 .saturating_sub(execution_startup_ms.unwrap_or(0))
         });
-        let duration_formatted = total_duration_ms
+        let duration_formatted = duration_ms
+            .map(format_duration_ms)
+            .unwrap_or_else(|| "-".to_string());
+        let total_duration_formatted = total_duration_ms
             .map(format_duration_ms)
             .unwrap_or_else(|| "-".to_string());
         let waiting_formatted = waiting_ms.map(format_duration_ms);
         let task_execution_formatted = task_execution_ms.map(format_duration_ms);
+        let publish_wait_ms = timing_i64("publish_wait_ms");
+        let queue_wait_ms = timing_i64("queue_wait_ms");
+        let retry_queue_age_ms = timing_i64("retry_queue_age_ms");
+        let worker_preparation_ms = timing_i64("worker_preparation_ms");
+        let capacity_wait_ms = timing_i64("capacity_wait_ms").or(slot_wait_ms);
+        let known_waiting_ms = publish_wait_ms
+            .unwrap_or(0)
+            .saturating_add(queue_wait_ms.or(retry_queue_age_ms).unwrap_or(0))
+            .saturating_add(worker_preparation_ms.unwrap_or(0))
+            .saturating_add(capacity_wait_ms.unwrap_or(0))
+            .saturating_add(waiting_image_pull_ms.unwrap_or(0))
+            .saturating_add(waiting_runtime_start_ms.unwrap_or(0));
+        let unattributed_waiting_ms = waiting_ms
+            .map(|total| total.saturating_sub(known_waiting_ms))
+            .filter(|value| *value > 0);
+        let redelivered = timing
+            .and_then(|value| value.get("redelivered"))
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false);
         let workload_started_formatted = effective_workload_started_at.map(|value| {
             format!(
                 "{} {}",
@@ -912,22 +958,39 @@ impl TaskDisplay {
             start_time_formatted,
             stop_time_formatted,
             duration_formatted,
-            duration_ms: total_duration_ms,
+            duration_ms,
+            total_duration_formatted,
+            total_duration_ms,
             waiting_ms,
             waiting_formatted,
             task_execution_ms,
             task_execution_formatted,
             workload_started_formatted,
-            publish_wait_ms: timing_i64("publish_wait_ms"),
-            queue_wait_ms: timing_i64("queue_wait_ms"),
-            retry_queue_age_ms: timing_i64("retry_queue_age_ms"),
-            worker_preparation_ms: timing_i64("worker_preparation_ms"),
-            capacity_wait_ms: timing_i64("capacity_wait_ms").or(slot_wait_ms),
+            publish_wait_ms,
+            publish_wait_formatted: publish_wait_ms.map(format_duration_ms),
+            queue_wait_ms,
+            queue_wait_formatted: queue_wait_ms.map(format_duration_ms),
+            retry_queue_age_ms,
+            retry_queue_age_formatted: retry_queue_age_ms.map(format_duration_ms),
+            worker_preparation_ms,
+            worker_preparation_formatted: worker_preparation_ms.map(format_duration_ms),
+            capacity_wait_ms,
+            capacity_wait_formatted: capacity_wait_ms.map(format_duration_ms),
             runtime_start_ms,
             waiting_image_pull_ms,
+            waiting_image_pull_formatted: waiting_image_pull_ms.map(format_duration_ms),
             waiting_runtime_start_ms,
+            waiting_runtime_start_formatted: waiting_runtime_start_ms.map(format_duration_ms),
+            unattributed_waiting_ms,
+            unattributed_waiting_formatted: unattributed_waiting_ms.map(format_duration_ms),
             execution_startup_ms,
+            execution_startup_formatted: execution_startup_ms.map(format_duration_ms),
             finalization_ms,
+            workload_execution_ms,
+            workload_execution_formatted: workload_execution_ms.map(format_duration_ms),
+            logs_collect_formatted: logs_collect_ms.map(format_duration_ms),
+            finalization_formatted: finalization_ms.map(format_duration_ms),
+            redelivered,
             queue_backend,
             result,
             result_json,

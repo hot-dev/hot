@@ -2626,7 +2626,7 @@ async fn process_container_task(
                     }
                 }
             }
-            Err(e) => Ok(Err(e)),
+            Err(e) => Ok(Err((e, timings))),
         }
     } else {
         // Kata: use atomic execute_with_extras (phased not supported)
@@ -2699,32 +2699,14 @@ async fn process_container_task(
 
     match execution_result {
         Ok(Ok((output, timings))) => {
-            if let Some(workload_started_at) = timings.workload_started_at {
-                let capacity_wait_ms =
-                    resource_capacity_wait_ms.saturating_add(timings.slot_wait_ms.max(0));
-                record_task_workload_start(
-                    &db,
-                    &task_id,
-                    queue_timing.claimed_at,
-                    workload_started_at,
-                    capacity_wait_ms,
-                    timings.image_pull_ms,
-                    timings.runtime_start_ms,
-                )
-                .await;
-                if let Err(e) = Task::merge_timing(
-                    &db,
-                    &task_id,
-                    &serde_json::json!({
-                        "workload_execution_ms": timings.execution_ms.max(0),
-                        "logs_collect_ms": timings.logs_collect_ms.max(0),
-                    }),
-                )
-                .await
-                {
-                    tracing::warn!(task_id = %task_id, "Failed to persist task execution timing: {}", e);
-                }
-            }
+            persist_container_timings(
+                &db,
+                &task_id,
+                queue_timing.claimed_at,
+                resource_capacity_wait_ms,
+                &timings,
+            )
+            .await;
             let status = if output.timed_out {
                 TaskStatus::TimedOut
             } else if output.exit_code != 0 {
@@ -2825,7 +2807,19 @@ async fn process_container_task(
                 "Container task finished"
             );
         }
-        Ok(Err(e)) => {
+        Ok(Err((e, timings))) => {
+            // Some backend errors can occur after the container has started
+            // (for example while waiting for it or collecting its result).
+            // Preserve that boundary so the elapsed workload time is not
+            // misreported as Waiting.
+            persist_container_timings(
+                &db,
+                &task_id,
+                queue_timing.claimed_at,
+                resource_capacity_wait_ms,
+                &timings,
+            )
+            .await;
             // Every executor error means the workload itself never ran to
             // completion — the failure is in container infrastructure
             // (pull, create, start, containerd/wait plumbing) — so don't
@@ -2853,6 +2847,11 @@ async fn process_container_task(
                 &user_message,
                 Some(serde_json::json!({
                     "duration-ms": duration_ms,
+                    "slot-wait-ms": timings.slot_wait_ms,
+                    "image-pull-ms": timings.image_pull_ms,
+                    "runtime-start-ms": timings.runtime_start_ms,
+                    "execution-ms": timings.execution_ms,
+                    "logs-collect-ms": timings.logs_collect_ms,
                     "size": limits.size.as_str(),
                     "compute-units": compute_units,
                     "infra-failure": is_infra_failure,
@@ -2955,11 +2954,54 @@ async fn record_task_workload_start(
     }
 }
 
+async fn persist_container_timings(
+    db: &DatabasePool,
+    task_id: &Uuid,
+    claimed_at: chrono::DateTime<chrono::Utc>,
+    resource_capacity_wait_ms: i64,
+    timings: &executor::ContainerTimings,
+) {
+    let Some(workload_started_at) = timings.workload_started_at else {
+        return;
+    };
+    let capacity_wait_ms = resource_capacity_wait_ms.saturating_add(timings.slot_wait_ms.max(0));
+    record_task_workload_start(
+        db,
+        task_id,
+        claimed_at,
+        workload_started_at,
+        capacity_wait_ms,
+        timings.image_pull_ms,
+        timings.runtime_start_ms,
+    )
+    .await;
+    if let Err(e) = Task::merge_timing(
+        db,
+        task_id,
+        &serde_json::json!({
+            "workload_execution_ms": timings.execution_ms.max(0),
+            "logs_collect_ms": timings.logs_collect_ms.max(0),
+        }),
+    )
+    .await
+    {
+        tracing::warn!(task_id = %task_id, "Failed to persist task execution timing: {}", e);
+    }
+}
+
 async fn finalize_task_timing(db: &DatabasePool, task_id: &Uuid) {
-    let task = match Task::get(db, task_id).await {
-        Ok(task) => task,
-        Err(e) => {
+    let task = match tokio::time::timeout(DB_CALL_TIMEOUT, Task::get(db, task_id)).await {
+        Ok(Ok(task)) => task,
+        Ok(Err(e)) => {
             tracing::warn!(task_id = %task_id, "Failed to load task for timing finalization: {}", e);
+            return;
+        }
+        Err(_) => {
+            tracing::warn!(
+                task_id = %task_id,
+                timeout_secs = DB_CALL_TIMEOUT.as_secs(),
+                "Task timing finalization load timed out"
+            );
             return;
         }
     };
@@ -3012,8 +3054,18 @@ async fn finalize_task_timing(db: &DatabasePool, task_id: &Uuid) {
     {
         patch["workload_execution_ms"] = serde_json::json!(execution_ms);
     }
-    if let Err(e) = Task::merge_timing(db, task_id, &patch).await {
-        tracing::warn!(task_id = %task_id, "Failed to finalize task timing: {}", e);
+    match tokio::time::timeout(DB_CALL_TIMEOUT, Task::merge_timing(db, task_id, &patch)).await {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => {
+            tracing::warn!(task_id = %task_id, "Failed to finalize task timing: {}", e);
+        }
+        Err(_) => {
+            tracing::warn!(
+                task_id = %task_id,
+                timeout_secs = DB_CALL_TIMEOUT.as_secs(),
+                "Task timing finalization write timed out"
+            );
+        }
     }
 }
 
@@ -4992,8 +5044,21 @@ mod tests {
         .await
         .unwrap();
         Task::mark_running(&db, &task_id).await.unwrap();
-        record_task_workload_start(&db, &task_id, claimed_at, workload_started_at, 10, 20, 10)
-            .await;
+        persist_container_timings(
+            &db,
+            &task_id,
+            claimed_at,
+            7,
+            &executor::ContainerTimings {
+                slot_wait_ms: 3,
+                image_pull_ms: 20,
+                runtime_start_ms: 10,
+                execution_ms: 40,
+                logs_collect_ms: 5,
+                workload_started_at: Some(workload_started_at),
+            },
+        )
+        .await;
         Task::complete(&db, &task_id, &TaskStatus::Completed, None)
             .await
             .unwrap();
@@ -5006,6 +5071,8 @@ mod tests {
         assert_eq!(timing["image_pull_ms"], 20);
         assert_eq!(timing["runtime_start_ms"], 10);
         assert_eq!(timing["worker_preparation_ms"], 60);
+        assert_eq!(timing["workload_execution_ms"], 40);
+        assert_eq!(timing["logs_collect_ms"], 5);
         assert!(timing["execution_ms"].as_i64().unwrap() >= 0);
         assert_eq!(
             timing["total_ms"].as_i64().unwrap(),

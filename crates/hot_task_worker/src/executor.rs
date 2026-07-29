@@ -301,7 +301,7 @@ impl BoxExecutor {
         limits: Option<&crate::box_limits::BoxLimits>,
         extras: Option<&ContainerExtras>,
         #[allow(unused_variables)] pre_start_hook: Option<PreStartHook>,
-    ) -> ExecutorResult<(ContainerOutput, ContainerTimings)> {
+    ) -> Result<(ContainerOutput, ContainerTimings), (ExecutorError, ContainerTimings)> {
         let mut timings = ContainerTimings::default();
         let result = match self {
             Self::Docker(e) => {
@@ -333,7 +333,10 @@ impl BoxExecutor {
                 .await
             }
         };
-        result.map(|output| (output, timings))
+        match result {
+            Ok(output) => Ok((output, timings)),
+            Err(error) => Err((error, timings)),
+        }
     }
 
     /// Pull image, create container, start it, and return the container_id.
