@@ -121,58 +121,71 @@
     font-size: 13px;
     font-weight: 500;
     color: rgba(55, 65, 81, 1);
-    margin-bottom: 8px;
+    margin-bottom: 6px;
 }
 
 .dark .run-summary-title {
     color: rgba(229, 231, 235, 1);
 }
 
-.run-summary-legend {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 16px;
-    margin-bottom: 6px;
+.run-summary-metrics {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, max-content));
+    gap: 8px 24px;
+    margin-bottom: 8px;
 }
 
-.run-summary-legend-item {
+.run-summary-metric {
     display: flex;
-    align-items: center;
+    align-items: baseline;
     gap: 6px;
+    min-width: 0;
     font-size: 12px;
 }
 
-.run-summary-legend-box {
-    width: 12px;
-    height: 12px;
-    border-radius: 2px;
-    flex-shrink: 0;
-}
-
-.run-summary-legend-waiting {
-    background: linear-gradient(90deg, rgba(251, 191, 36, 0.55) 0%, rgba(245, 158, 11, 0.9) 100%);
-}
-
-.run-summary-legend-execution {
-    background: linear-gradient(90deg, rgba(34, 197, 94, 0.5) 0%, rgba(34, 197, 94, 0.8) 100%);
-}
-
-.run-summary-legend-label {
+.run-summary-metric-label {
     color: rgba(107, 114, 128, 1);
-    white-space: nowrap;
 }
 
-.dark .run-summary-legend-label {
+.dark .run-summary-metric-label {
     color: rgba(156, 163, 175, 1);
 }
 
-.run-summary-legend-value {
-    font-weight: 600;
-    color: rgba(55, 65, 81, 1);
+.run-summary-metric-value {
+    color: rgba(31, 41, 55, 1);
+    font-weight: 700;
+    white-space: nowrap;
 }
 
-.dark .run-summary-legend-value {
-    color: rgba(229, 231, 235, 1);
+.dark .run-summary-metric-value {
+    color: rgba(243, 244, 246, 1);
+}
+
+.run-summary-metric-waiting .run-summary-metric-value {
+    color: rgba(217, 119, 6, 1);
+}
+
+.dark .run-summary-metric-waiting .run-summary-metric-value {
+    color: rgba(251, 191, 36, 1);
+}
+
+.run-summary-metric-execution .run-summary-metric-value {
+    color: rgba(22, 163, 74, 1);
+}
+
+.dark .run-summary-metric-execution .run-summary-metric-value {
+    color: rgba(74, 222, 128, 1);
+}
+
+.run-summary-hover-target {
+    position: relative;
+    cursor: help;
+    outline: none;
+}
+
+.run-summary-hover-target:focus-visible {
+    border-radius: 4px;
+    box-shadow: 0 0 0 2px rgba(59, 130, 246, 0.55);
 }
 
 .run-summary-percent {
@@ -186,11 +199,12 @@
 }
 
 .run-summary-combined-bar {
-    height: 8px;
+    height: 10px;
     background: rgba(229, 231, 235, 1);
-    border-radius: 4px;
+    border-radius: 5px;
     display: flex;
     position: relative;
+    overflow: visible;
 }
 
 .dark .run-summary-combined-bar {
@@ -201,32 +215,33 @@
     height: 100%;
     position: relative;
     transition: width 0.3s ease;
-    cursor: help;
-    outline: none;
-}
-
-.run-summary-bucket:focus-visible {
-    box-shadow: 0 0 0 2px rgba(59, 130, 246, 0.65);
-    z-index: 3;
 }
 
 .run-summary-bucket-fill {
     display: flex;
-    width: 100%;
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    width: max(100%, 2px);
+    min-width: 2px;
     height: 100%;
     overflow: hidden;
 }
 
 .run-summary-bucket:first-child .run-summary-bucket-fill {
-    border-radius: 4px 0 0 4px;
+    left: 0;
+    border-radius: 5px 0 0 5px;
 }
 
 .run-summary-bucket:last-child .run-summary-bucket-fill {
-    border-radius: 0 4px 4px 0;
+    right: 0;
+    border-radius: 0 5px 5px 0;
 }
 
 .run-summary-bucket:only-child .run-summary-bucket-fill {
-    border-radius: 4px;
+    left: 0;
+    right: auto;
+    border-radius: 5px;
 }
 
 .run-summary-bucket-waiting .run-summary-bucket-fill {
@@ -248,6 +263,179 @@
 
 .dark .run-summary-breakdown-segment + .run-summary-breakdown-segment {
     border-left-color: rgba(17, 24, 39, 0.75);
+}
+
+.run-summary-details {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 12px;
+    margin-top: 10px;
+}
+
+.run-summary-detail-group {
+    min-width: 0;
+    padding: 10px 12px;
+    border: 1px solid rgba(229, 231, 235, 1);
+    border-radius: 7px;
+    background: rgba(249, 250, 251, 0.72);
+}
+
+.dark .run-summary-detail-group {
+    border-color: rgba(55, 65, 81, 1);
+    background: rgba(17, 24, 39, 0.55);
+}
+
+.run-summary-detail-heading {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 12px;
+    font-size: 12px;
+    font-weight: 700;
+}
+
+.run-summary-detail-waiting .run-summary-detail-heading strong {
+    color: rgba(217, 119, 6, 1);
+}
+
+.dark .run-summary-detail-waiting .run-summary-detail-heading strong {
+    color: rgba(251, 191, 36, 1);
+}
+
+.run-summary-detail-execution .run-summary-detail-heading strong {
+    color: rgba(22, 163, 74, 1);
+}
+
+.dark .run-summary-detail-execution .run-summary-detail-heading strong {
+    color: rgba(74, 222, 128, 1);
+}
+
+.run-summary-detail-description {
+    margin-top: 2px;
+    color: rgba(107, 114, 128, 1);
+    font-size: 11px;
+}
+
+.dark .run-summary-detail-description {
+    color: rgba(156, 163, 175, 1);
+}
+
+.run-summary-detail-rows {
+    display: grid;
+    gap: 5px;
+    margin-top: 8px;
+    padding-top: 7px;
+    border-top: 1px solid rgba(229, 231, 235, 1);
+}
+
+.dark .run-summary-detail-rows {
+    border-top-color: rgba(55, 65, 81, 1);
+}
+
+.run-summary-detail-label {
+    display: inline-flex;
+    align-items: center;
+    min-width: 0;
+    gap: 6px;
+}
+
+.run-summary-detail-marker {
+    width: 8px;
+    height: 8px;
+    border-radius: 2px;
+    flex: 0 0 auto;
+}
+
+.run-summary-detail-waiting .run-summary-detail-marker {
+    background: rgba(245, 158, 11, 0.78);
+}
+
+.run-summary-detail-execution .run-summary-detail-marker {
+    background: rgba(34, 197, 94, 0.72);
+}
+
+.run-summary-detail-rows .timing-breakdown-row:nth-child(even) .run-summary-detail-marker {
+    opacity: 0.58;
+}
+
+.timing-breakdown-popover.timing-breakdown-popover-wide {
+    width: min(560px, calc(100vw - 48px));
+}
+
+.timing-breakdown-popover-summary {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 10px;
+    margin-top: 8px;
+}
+
+.timing-breakdown-popover-summary > div {
+    padding: 7px 8px;
+    border-radius: 5px;
+    background: rgba(249, 250, 251, 1);
+}
+
+.dark .timing-breakdown-popover-summary > div {
+    background: rgba(31, 41, 55, 0.82);
+}
+
+.timing-breakdown-popover-summary span {
+    display: block;
+    color: rgba(107, 114, 128, 1);
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+}
+
+.dark .timing-breakdown-popover-summary span {
+    color: rgba(156, 163, 175, 1);
+}
+
+.timing-breakdown-popover-summary strong {
+    display: block;
+    margin-top: 2px;
+    font-size: 12px;
+}
+
+.timing-breakdown-popover-columns {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 10px;
+    margin-top: 10px;
+}
+
+.timing-breakdown-popover .run-summary-detail-group {
+    padding: 8px 9px;
+    background: transparent;
+}
+
+.run-summary-hover-target:hover > .timing-breakdown-popover,
+.run-summary-hover-target:focus > .timing-breakdown-popover,
+.run-summary-hover-target:focus-within > .timing-breakdown-popover {
+    opacity: 1;
+    visibility: visible;
+    pointer-events: auto;
+    transform: translateY(0);
+}
+
+@media (max-width: 640px) {
+    .run-summary-metrics {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 6px 12px;
+    }
+
+    .run-summary-metric-total {
+        grid-column: 1 / -1;
+    }
+
+    .run-summary-details,
+    .timing-breakdown-popover-columns {
+        grid-template-columns: minmax(0, 1fr);
+    }
+
+    .timing-breakdown-popover.timing-breakdown-popover-wide {
+        width: min(420px, calc(100vw - 40px));
+    }
 }
 
 /* Accessible timing breakdowns: hover, keyboard focus, and mobile tap/focus. */
@@ -2921,7 +3109,7 @@ window.ObservabilityTabs = class ObservabilityTabs {
             const primaryTotalUs = Math.max(1, waitingTimeUs + execTimeUs);
             const waitingPercent = (waitingTimeUs / primaryTotalUs) * 100;
             const executionPercent = (execTimeUs / primaryTotalUs) * 100;
-            const waitingBreakdown = (isTaskTiming ? [
+            const waitingBreakdownCandidates = (isTaskTiming ? [
                 { label: 'Publish', value: publishWaitUs },
                 { label: 'Queue Wait', value: queueWaitUs },
                 { label: 'Retry / Reclaim Age', value: retryQueueAgeUs },
@@ -2929,15 +3117,15 @@ window.ObservabilityTabs = class ObservabilityTabs {
                 { label: 'Capacity Wait', value: timingValue('capacityWaitUs') },
                 { label: 'Image Pull', value: timingValue('imagePullUs') },
                 { label: 'Runtime Start', value: timingValue('runtimeStartUs') },
-                { label: 'Other setup', value: timingValue('unattributedWaitUs') }
+                { label: 'Other / Unattributed', value: timingValue('unattributedWaitUs') }
             ] : [
                 { label: 'Publish', value: publishWaitUs },
                 { label: 'Queue Wait', value: queueWaitUs },
                 { label: 'Retry / Reclaim Age', value: retryQueueAgeUs },
                 { label: 'Handler Dispatch', value: handlerDispatchWaitUs },
                 { label: 'Invocation Setup', value: workerPreparationUs }
-            ]).filter(part => part.value > 0);
-            const executionBreakdown = (isTaskTiming ? [
+            ]);
+            const executionBreakdownCandidates = (isTaskTiming ? [
                 { label: 'Runtime Startup', value: timingValue('executionStartupUs') },
                 { label: 'Workload Running', value: timingValue('workloadExecutionUs') },
                 { label: 'Logs', value: timingValue('logsCollectUs') },
@@ -2945,64 +3133,103 @@ window.ObservabilityTabs = class ObservabilityTabs {
             ] : [
                 { label: 'Compilation & Loading', value: compilationTimeUs },
                 { label: 'Handler Execution', value: handlerExecutionTimeUs }
-            ]).filter(part => part.value > 0);
+            ]);
 
-            const renderBreakdownRows = parts => parts.map(part =>
-                '<div class="timing-breakdown-row"><span>' + part.label + '</span><strong>' +
-                this.formatDuration(part.value) + '</strong></div>'
-            ).join('');
+            // Keep the phase rows mathematically consistent with their parent
+            // bucket. Any unmeasured remainder is shown explicitly instead of
+            // disappearing into the bar.
+            const reconcileBreakdown = (parts, parentTotal) => {
+                let remaining = Math.max(0, parentTotal);
+                const reconciled = [];
+                for (const part of parts) {
+                    if (part.value <= 0 || remaining <= 0) continue;
+                    const value = Math.min(part.value, remaining);
+                    reconciled.push({ ...part, value });
+                    remaining -= value;
+                }
+                if (remaining > 0) {
+                    reconciled.push({ label: 'Other / Unattributed', value: remaining });
+                }
+                return reconciled;
+            };
+            const waitingBreakdown = reconcileBreakdown(waitingBreakdownCandidates, waitingTimeUs);
+            const executionBreakdown = reconcileBreakdown(executionBreakdownCandidates, execTimeUs);
 
-            const renderBreakdownSegments = parts => {
-                const breakdownTotal = parts.reduce((sum, part) => sum + part.value, 0);
-                if (breakdownTotal <= 0) {
+            const renderBreakdownRows = parts => {
+                if (parts.length === 0) {
+                    return '<div class="timing-breakdown-row"><span class="text-gray-500 dark:text-gray-400">No recorded time</span><strong>0μs</strong></div>';
+                }
+                return parts.map(part =>
+                    '<div class="timing-breakdown-row"><span class="run-summary-detail-label">' +
+                    '<span class="run-summary-detail-marker" aria-hidden="true"></span>' +
+                    part.label + '</span><strong>' + this.formatDuration(part.value) + '</strong></div>'
+                ).join('');
+            };
+
+            const renderBreakdownSegments = (parts, parentTotal) => {
+                if (parentTotal <= 0 || parts.length === 0) {
                     return '<div class="run-summary-breakdown-segment" style="width:100%"></div>';
                 }
                 return parts.map(part =>
                     '<div class="run-summary-breakdown-segment" style="width:' +
-                    ((part.value / breakdownTotal) * 100).toFixed(3) + '%"></div>'
+                    ((part.value / parentTotal) * 100).toFixed(3) + '%"></div>'
                 ).join('');
             };
 
+            const waitingDescription = isTaskTiming
+                ? 'Task created → workload started'
+                : 'Event created → handler started';
+            const executionDescription = isTaskTiming
+                ? 'Workload started → task completed'
+                : 'Handler started → run completed';
+            const totalDescription = isTaskTiming
+                ? 'Task created → task completed'
+                : 'Event created → run completed';
+            const renderDetailGroup = (kind, label, total, description, parts) =>
+                '<div class="run-summary-detail-group run-summary-detail-' + kind + '">' +
+                '  <div class="run-summary-detail-heading"><span>' + label + '</span><strong>' +
+                this.formatDuration(total) + '</strong></div>' +
+                '  <div class="run-summary-detail-description">' + description + '</div>' +
+                '  <div class="run-summary-detail-rows">' + renderBreakdownRows(parts) + '</div>' +
+                '</div>';
+
             html += '<div class="run-summary">';
-            html += '<div class="run-summary-title">Duration: <span class="font-semibold">' + this.formatDuration(totalDurationUs) + '</span>';
+            html += '<div class="run-summary-title">Timing summary</div>';
+            html += '<div class="run-summary-metrics">';
+            html += '  <div class="run-summary-metric run-summary-metric-total"><span class="run-summary-metric-label">Total</span><span class="run-summary-metric-value">' + this.formatDuration(primaryTotalUs) + '</span></div>';
+            html += '  <div class="run-summary-metric run-summary-metric-waiting"><span class="run-summary-metric-label">Waiting</span><span class="run-summary-metric-value">' + this.formatDuration(waitingTimeUs) + ' <span class="run-summary-percent">(' + waitingPercent.toFixed(1) + '%)</span></span></div>';
+            html += '  <div class="run-summary-metric run-summary-metric-execution"><span class="run-summary-metric-label">Execution</span><span class="run-summary-metric-value">' + this.formatDuration(execTimeUs) + ' <span class="run-summary-percent">(' + executionPercent.toFixed(1) + '%)</span></span></div>';
             html += '</div>';
-            html += '<div class="run-summary-legend">';
+            html += '<div class="run-summary-hover-target" tabindex="0" aria-describedby="timeline-timing-breakdown" aria-label="Timing breakdown: ' + totalDescription + '">';
+            html += '<div class="run-summary-combined-bar" aria-hidden="true">';
             if (waitingTimeUs > 0) {
-                html += '  <div class="run-summary-legend-item">';
-                html += '    <div class="run-summary-legend-box run-summary-legend-waiting"></div>';
-                html += '    <span class="run-summary-legend-label">Waiting:</span>';
-                html += '    <span class="run-summary-legend-value">' + this.formatDuration(waitingTimeUs) + ' <span class="run-summary-percent">(' + waitingPercent.toFixed(1) + '%)</span></span>';
-                html += '  </div>';
-            }
-            if (execTimeUs > 0) {
-                html += '  <div class="run-summary-legend-item">';
-                html += '    <div class="run-summary-legend-box run-summary-legend-execution"></div>';
-                html += '    <span class="run-summary-legend-label">Execution:</span>';
-                html += '    <span class="run-summary-legend-value">' + this.formatDuration(execTimeUs) + ' <span class="run-summary-percent">(' + executionPercent.toFixed(1) + '%)</span></span>';
-                html += '  </div>';
-            }
-            html += '</div>';
-            html += '<div class="run-summary-combined-bar">';
-            if (waitingTimeUs > 0) {
-                html += '<div class="run-summary-bucket run-summary-bucket-waiting timing-breakdown-trigger" tabindex="0" style="width:' + waitingPercent.toFixed(3) + '%" aria-describedby="timeline-waiting-breakdown">';
-                html += '  <div class="run-summary-bucket-fill">' + renderBreakdownSegments(waitingBreakdown) + '</div>';
-                html += '  <div id="timeline-waiting-breakdown" class="timing-breakdown-popover" role="tooltip">';
-                html += '    <div class="timing-breakdown-heading">Waiting · ' + this.formatDuration(waitingTimeUs) + '</div>';
-                html += '    <div class="timing-breakdown-description">' + (isTaskTiming ? 'Task created → workload started' : 'Event created → handler started') + '</div>';
-                html += '    <div class="timing-breakdown-rows">' + renderBreakdownRows(waitingBreakdown) + '</div>';
-                html += '  </div>';
+                html += '<div class="run-summary-bucket run-summary-bucket-waiting" style="width:' + waitingPercent.toFixed(3) + '%">';
+                html += '  <div class="run-summary-bucket-fill">' + renderBreakdownSegments(waitingBreakdown, waitingTimeUs) + '</div>';
                 html += '</div>';
             }
             if (execTimeUs > 0) {
-                html += '<div class="run-summary-bucket run-summary-bucket-execution timing-breakdown-trigger" tabindex="0" style="width:' + executionPercent.toFixed(3) + '%" aria-describedby="timeline-execution-breakdown">';
-                html += '  <div class="run-summary-bucket-fill">' + renderBreakdownSegments(executionBreakdown) + '</div>';
-                html += '  <div id="timeline-execution-breakdown" class="timing-breakdown-popover timing-breakdown-popover-align-right" role="tooltip">';
-                html += '    <div class="timing-breakdown-heading">Execution · ' + this.formatDuration(execTimeUs) + '</div>';
-                html += '    <div class="timing-breakdown-description">' + (isTaskTiming ? 'Workload started → task completed' : 'Handler started → run completed') + '</div>';
-                html += '    <div class="timing-breakdown-rows">' + renderBreakdownRows(executionBreakdown) + '</div>';
-                html += '  </div>';
+                html += '<div class="run-summary-bucket run-summary-bucket-execution" style="width:' + executionPercent.toFixed(3) + '%">';
+                html += '  <div class="run-summary-bucket-fill">' + renderBreakdownSegments(executionBreakdown, execTimeUs) + '</div>';
                 html += '</div>';
             }
+            html += '</div>';
+            html += '<div id="timeline-timing-breakdown" class="timing-breakdown-popover timing-breakdown-popover-wide" role="tooltip">';
+            html += '  <div class="timing-breakdown-heading">Total · ' + this.formatDuration(primaryTotalUs) + '</div>';
+            html += '  <div class="timing-breakdown-description">' + totalDescription + '</div>';
+            html += '  <div class="timing-breakdown-popover-summary">';
+            html += '    <div><span>Total</span><strong>' + this.formatDuration(primaryTotalUs) + '</strong></div>';
+            html += '    <div><span>Waiting</span><strong>' + this.formatDuration(waitingTimeUs) + ' · ' + waitingPercent.toFixed(1) + '%</strong></div>';
+            html += '    <div><span>Execution</span><strong>' + this.formatDuration(execTimeUs) + ' · ' + executionPercent.toFixed(1) + '%</strong></div>';
+            html += '  </div>';
+            html += '  <div class="timing-breakdown-popover-columns">';
+            html += renderDetailGroup('waiting', 'Waiting', waitingTimeUs, waitingDescription, waitingBreakdown);
+            html += renderDetailGroup('execution', 'Execution', execTimeUs, executionDescription, executionBreakdown);
+            html += '  </div>';
+            html += '</div>';
+            html += '</div>';
+            html += '<div class="run-summary-details">';
+            html += renderDetailGroup('waiting', 'Waiting', waitingTimeUs, waitingDescription, waitingBreakdown);
+            html += renderDetailGroup('execution', 'Execution', execTimeUs, executionDescription, executionBreakdown);
             html += '</div>';
             html += '</div>';
         }
