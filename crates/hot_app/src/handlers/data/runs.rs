@@ -5,6 +5,7 @@ use axum::response::{IntoResponse, Json};
 use hot::db::{DatabasePool, Run};
 use hot::time_range::parse_time_range_cutoff;
 use std::sync::Arc;
+use uuid::Uuid;
 
 /// GET /data/run-type-data - Get run type chart data with cross-filters
 pub async fn run_type_data_handler(
@@ -24,6 +25,9 @@ pub async fn run_type_data_handler(
         .map(String::as_str)
         .unwrap_or("P7D");
     let time_unit = params.get("time_unit").map(String::as_str).unwrap_or("day");
+    let project_id = params
+        .get("project_id")
+        .and_then(|value| Uuid::parse_str(value).ok());
     let selected_run_types: Vec<&str> = params
         .get("run_types")
         .map(|types| types.split(',').collect())
@@ -38,6 +42,7 @@ pub async fn run_type_data_handler(
     let chart_data_json = match Run::get_run_type_chart_data_with_cross_filters(
         &db,
         &env_id,
+        project_id.as_ref(),
         time_range_cutoff,
         time_unit,
         &selected_run_types,
@@ -99,6 +104,9 @@ pub async fn status_chart_data_handler(
         .map(String::as_str)
         .unwrap_or("P7D");
     let time_unit = params.get("time_unit").map(String::as_str).unwrap_or("day");
+    let project_id = params
+        .get("project_id")
+        .and_then(|value| Uuid::parse_str(value).ok());
     let selected_statuses: Vec<&str> = params
         .get("statuses")
         .map(|statuses| statuses.split(',').collect())
@@ -113,6 +121,7 @@ pub async fn status_chart_data_handler(
     let chart_data_json = match Run::get_run_status_chart_data_with_cross_filters(
         &db,
         &env_id,
+        project_id.as_ref(),
         time_range_cutoff,
         time_unit,
         &selected_statuses,

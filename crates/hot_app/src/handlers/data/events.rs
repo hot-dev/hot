@@ -7,6 +7,7 @@ use hot::db::{DatabasePool, Event, Run};
 use serde::{Deserialize, Serialize};
 use sqlx;
 use std::sync::Arc;
+use uuid::Uuid;
 
 /// GET /data/event-timeline - Get event timeline data with clustering
 #[derive(Deserialize)]
@@ -236,6 +237,9 @@ pub async fn event_activity_timeline_handler(
         .get("time_unit")
         .map(|s| s.as_str())
         .unwrap_or("hour");
+    let project_id = params
+        .get("project_id")
+        .and_then(|value| Uuid::parse_str(value).ok());
 
     // Calculate days for interval
     let days = match time_range {
@@ -262,6 +266,22 @@ pub async fn event_activity_timeline_handler(
             let group_by_clause =
                 crate::timezone::postgres_date_trunc(time_unit, "e.created_at", display_timezone);
             let date_format = crate::timezone::postgres_date_format(time_unit);
+            let project_clause = if project_id.is_some() {
+                let placeholder = if interval.is_some() { "$3" } else { "$2" };
+                format!(
+                    "AND EXISTS (
+                        SELECT 1
+                        FROM run project_run
+                        JOIN build project_build ON project_build.build_id = project_run.build_id
+                        WHERE project_run.event_id = e.event_id
+                          AND project_run.env_id = e.env_id
+                          AND project_build.project_id = {}
+                    )",
+                    placeholder
+                )
+            } else {
+                String::new()
+            };
 
             let query = if let Some(_interval_str) = interval {
                 format!(
@@ -273,10 +293,11 @@ pub async fn event_activity_timeline_handler(
                     FROM event e
                     WHERE e.env_id = $1
                         AND e.created_at >= NOW() - ($2 || ' days')::INTERVAL
+                        {}
                     GROUP BY period, e.handled
                     ORDER BY period ASC
                     "#,
-                    group_by_clause
+                    group_by_clause, project_clause
                 )
             } else {
                 format!(
@@ -287,10 +308,11 @@ pub async fn event_activity_timeline_handler(
                         COUNT(*) as count
                     FROM event e
                     WHERE e.env_id = $1
+                        {}
                     GROUP BY period, e.handled
                     ORDER BY period ASC
                     "#,
-                    group_by_clause
+                    group_by_clause, project_clause
                 )
             };
 
@@ -301,6 +323,9 @@ pub async fn event_activity_timeline_handler(
 
             if interval.is_some() {
                 query_builder = query_builder.bind(days);
+            }
+            if let Some(project_id) = project_id {
+                query_builder = query_builder.bind(project_id);
             }
 
             let results = match query_builder.fetch_all(pg_pool).await {
@@ -353,16 +378,19 @@ pub async fn event_activity_timeline_handler(
                 .map(|d| *unhandled_map.get(d).unwrap_or(&0))
                 .collect();
 
-            let series = vec![
-                EventTimelineSeries {
-                    name: "Handled".to_string(),
-                    data: handled_data,
-                },
-                EventTimelineSeries {
+            let mut series = vec![EventTimelineSeries {
+                name: "Handled".to_string(),
+                data: handled_data,
+            }];
+            // Unhandled events have no project ownership in the current schema.
+            // With a project filter this chart means "events handled by this
+            // project" and omits a misleading zero-only unhandled series.
+            if project_id.is_none() {
+                series.push(EventTimelineSeries {
                     name: "Unhandled".to_string(),
                     data: unhandled_data,
-                },
-            ];
+                });
+            }
 
             Json(EventActivityTimelineData { dates, series }).into_response()
         }
@@ -370,6 +398,18 @@ pub async fn event_activity_timeline_handler(
             // Use timezone-aware date bucketing for SQLite
             let group_by_clause =
                 crate::timezone::sqlite_date_bucket(time_unit, "e.created_at", display_timezone);
+            let project_clause = if project_id.is_some() {
+                "AND EXISTS (
+                    SELECT 1
+                    FROM run project_run
+                    JOIN build project_build ON project_build.build_id = project_run.build_id
+                    WHERE project_run.event_id = e.event_id
+                      AND project_run.env_id = e.env_id
+                      AND project_build.project_id = ?
+                )"
+            } else {
+                ""
+            };
 
             let query = if interval.is_some() {
                 format!(
@@ -381,10 +421,11 @@ pub async fn event_activity_timeline_handler(
                     FROM event e
                     WHERE e.env_id = ?
                         AND e.created_at >= datetime('now', '-' || ? || ' days')
+                        {}
                     GROUP BY period, e.handled
                     ORDER BY period ASC
                     "#,
-                    group_by_clause
+                    group_by_clause, project_clause
                 )
             } else {
                 format!(
@@ -395,10 +436,11 @@ pub async fn event_activity_timeline_handler(
                         COUNT(*) as count
                     FROM event e
                     WHERE e.env_id = ?
+                        {}
                     GROUP BY period, e.handled
                     ORDER BY period ASC
                     "#,
-                    group_by_clause
+                    group_by_clause, project_clause
                 )
             };
 
@@ -408,6 +450,9 @@ pub async fn event_activity_timeline_handler(
 
             if interval.is_some() {
                 query_builder = query_builder.bind(days);
+            }
+            if let Some(project_id) = project_id {
+                query_builder = query_builder.bind(project_id);
             }
 
             let results = match query_builder.fetch_all(sqlite_pool).await {
@@ -456,16 +501,16 @@ pub async fn event_activity_timeline_handler(
                 .map(|d| *unhandled_map.get(d).unwrap_or(&0))
                 .collect();
 
-            let series = vec![
-                EventTimelineSeries {
-                    name: "Handled".to_string(),
-                    data: handled_data,
-                },
-                EventTimelineSeries {
+            let mut series = vec![EventTimelineSeries {
+                name: "Handled".to_string(),
+                data: handled_data,
+            }];
+            if project_id.is_none() {
+                series.push(EventTimelineSeries {
                     name: "Unhandled".to_string(),
                     data: unhandled_data,
-                },
-            ];
+                });
+            }
 
             Json(EventActivityTimelineData { dates, series }).into_response()
         }
@@ -510,6 +555,9 @@ pub async fn event_type_timeline_handler(
         .get("time_unit")
         .map(|s| s.as_str())
         .unwrap_or("hour");
+    let project_id = params
+        .get("project_id")
+        .and_then(|value| Uuid::parse_str(value).ok());
 
     // Calculate days for interval
     let days = match time_range {
@@ -536,6 +584,22 @@ pub async fn event_type_timeline_handler(
             let group_by_clause =
                 crate::timezone::postgres_date_trunc(time_unit, "e.created_at", display_timezone);
             let date_format = crate::timezone::postgres_date_format(time_unit);
+            let project_clause = if project_id.is_some() {
+                let placeholder = if interval.is_some() { "$3" } else { "$2" };
+                format!(
+                    "AND EXISTS (
+                        SELECT 1
+                        FROM run project_run
+                        JOIN build project_build ON project_build.build_id = project_run.build_id
+                        WHERE project_run.event_id = e.event_id
+                          AND project_run.env_id = e.env_id
+                          AND project_build.project_id = {}
+                    )",
+                    placeholder
+                )
+            } else {
+                String::new()
+            };
 
             let query = if let Some(_interval_str) = interval {
                 format!(
@@ -547,10 +611,11 @@ pub async fn event_type_timeline_handler(
                     FROM event e
                     WHERE e.env_id = $1
                         AND e.created_at >= NOW() - ($2 || ' days')::INTERVAL
+                        {}
                     GROUP BY period, e.event_type
                     ORDER BY period ASC, e.event_type ASC
                     "#,
-                    group_by_clause
+                    group_by_clause, project_clause
                 )
             } else {
                 format!(
@@ -561,10 +626,11 @@ pub async fn event_type_timeline_handler(
                         COUNT(*) as count
                     FROM event e
                     WHERE e.env_id = $1
+                        {}
                     GROUP BY period, e.event_type
                     ORDER BY period ASC, e.event_type ASC
                     "#,
-                    group_by_clause
+                    group_by_clause, project_clause
                 )
             };
 
@@ -575,6 +641,9 @@ pub async fn event_type_timeline_handler(
 
             if interval.is_some() {
                 query_builder = query_builder.bind(days);
+            }
+            if let Some(project_id) = project_id {
+                query_builder = query_builder.bind(project_id);
             }
 
             let results = match query_builder.fetch_all(pg_pool).await {
@@ -645,6 +714,18 @@ pub async fn event_type_timeline_handler(
             // Use timezone-aware date bucketing for SQLite
             let group_by_clause =
                 crate::timezone::sqlite_date_bucket(time_unit, "e.created_at", display_timezone);
+            let project_clause = if project_id.is_some() {
+                "AND EXISTS (
+                    SELECT 1
+                    FROM run project_run
+                    JOIN build project_build ON project_build.build_id = project_run.build_id
+                    WHERE project_run.event_id = e.event_id
+                      AND project_run.env_id = e.env_id
+                      AND project_build.project_id = ?3
+                )"
+            } else {
+                ""
+            };
 
             let query = if let Some(_interval_str) = interval {
                 format!(
@@ -656,10 +737,11 @@ pub async fn event_type_timeline_handler(
                     FROM event e
                     WHERE e.env_id = ?1
                         AND e.created_at >= datetime('now', '-' || ?2 || ' days')
+                        {}
                     GROUP BY period, e.event_type
                     ORDER BY period ASC, e.event_type ASC
                     "#,
-                    group_by_clause
+                    group_by_clause, project_clause
                 )
             } else {
                 format!(
@@ -670,10 +752,16 @@ pub async fn event_type_timeline_handler(
                         COUNT(*) as count
                     FROM event e
                     WHERE e.env_id = ?1
+                        {}
                     GROUP BY period, e.event_type
                     ORDER BY period ASC, e.event_type ASC
                     "#,
-                    group_by_clause
+                    group_by_clause,
+                    if project_id.is_some() {
+                        project_clause.replace("?3", "?2")
+                    } else {
+                        String::new()
+                    }
                 )
             };
 
@@ -683,6 +771,9 @@ pub async fn event_type_timeline_handler(
 
             if interval.is_some() {
                 query_builder = query_builder.bind(days);
+            }
+            if let Some(project_id) = project_id {
+                query_builder = query_builder.bind(project_id);
             }
 
             let results = match query_builder.fetch_all(sqlite_pool).await {
@@ -744,6 +835,156 @@ pub async fn event_type_timeline_handler(
 
             Json(EventTypeTimelineData { dates, series }).into_response()
         }
+    }
+}
+
+#[cfg(test)]
+mod dashboard_filter_tests {
+    use super::*;
+    use axum::extract::Extension;
+    use axum_extra::extract::CookieJar;
+    use http_body_util::BodyExt;
+
+    async fn json_body(response: axum::response::Response) -> serde_json::Value {
+        let bytes = response
+            .into_body()
+            .collect()
+            .await
+            .expect("collect response body")
+            .to_bytes();
+        serde_json::from_slice(&bytes).expect("valid JSON response")
+    }
+
+    async fn associate_event_with_run(db: &DatabasePool, run_id: Uuid, event_id: Uuid) {
+        match db {
+            DatabasePool::Sqlite(pool) => {
+                sqlx::query("UPDATE run SET event_id = ? WHERE run_id = ?")
+                    .bind(event_id)
+                    .bind(run_id)
+                    .execute(pool)
+                    .await
+                    .unwrap();
+            }
+            DatabasePool::Postgres(_) => unreachable!("test database is SQLite"),
+        }
+        Event::mark_event_as_handled(db, &event_id).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn event_charts_only_include_events_handled_by_selected_project() {
+        let db = hot::db::test_db().await;
+        let data = hot::db::insert_test_data(&db).await.unwrap();
+        let selected_event_id = Uuid::now_v7();
+        Event::insert_event(
+            &db,
+            &selected_event_id,
+            &data.env_id,
+            &data.stream_id,
+            "selected:event",
+            &serde_json::json!({}),
+            Utc::now(),
+            &data.user_id,
+            None,
+        )
+        .await
+        .unwrap();
+        associate_event_with_run(&db, data.run_id, selected_event_id).await;
+
+        let other_project_id = Uuid::now_v7();
+        hot::db::Project::insert_project(
+            &db,
+            &other_project_id,
+            &data.env_id,
+            "other-project",
+            &data.user_id,
+        )
+        .await
+        .unwrap();
+        let other_build_id = Uuid::now_v7();
+        hot::db::Build::insert_build(
+            &db,
+            &other_build_id,
+            &other_project_id,
+            "other-build",
+            0,
+            hot::db::Build::BUILD_TYPE_LIVE,
+            &data.user_id,
+        )
+        .await
+        .unwrap();
+        let other_run_id = Uuid::now_v7();
+        let other_stream_id = Uuid::now_v7();
+        hot::db::Run::insert_run(
+            &db,
+            &other_run_id,
+            &data.env_id,
+            &other_stream_id,
+            Some(&other_build_id),
+            hot::db::run::RunType::Run.as_id(),
+            None,
+            &data.user_id,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        let other_event_id = Uuid::now_v7();
+        Event::insert_event(
+            &db,
+            &other_event_id,
+            &data.env_id,
+            &other_stream_id,
+            "other:event",
+            &serde_json::json!({}),
+            Utc::now(),
+            &data.user_id,
+            None,
+        )
+        .await
+        .unwrap();
+        associate_event_with_run(&db, other_run_id, other_event_id).await;
+
+        let conf = hot::val!({"app": {"host": "localhost", "port": 4680}});
+        let session = Session::from_user_id(&db, &conf, &data.user_id, &CookieJar::new())
+            .await
+            .unwrap();
+        let db = Arc::new(db);
+        let params = AHashMap::from_iter([
+            ("project_id".to_string(), data.project_id.to_string()),
+            ("time_range".to_string(), "all".to_string()),
+            ("time_unit".to_string(), "day".to_string()),
+        ]);
+
+        let activity = json_body(
+            event_activity_timeline_handler(
+                State(db.clone()),
+                Query(params.clone()),
+                Extension(session.clone()),
+            )
+            .await
+            .into_response(),
+        )
+        .await;
+        let event_types = json_body(
+            event_type_timeline_handler(State(db), Query(params), Extension(session))
+                .await
+                .into_response(),
+        )
+        .await;
+
+        assert_eq!(activity["series"].as_array().unwrap().len(), 1);
+        assert_eq!(activity["series"][0]["name"], "Handled");
+        assert_eq!(
+            activity["series"][0]["data"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter_map(serde_json::Value::as_i64)
+                .sum::<i64>(),
+            1
+        );
+        assert_eq!(event_types["series"].as_array().unwrap().len(), 1);
+        assert_eq!(event_types["series"][0]["name"], "selected:event");
     }
 }
 

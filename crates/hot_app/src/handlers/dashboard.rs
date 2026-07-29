@@ -353,6 +353,7 @@ pub async fn cancelled_runs_widget_handler(
 #[template(path = "components/dashboard_unhandled_events_rows.html")]
 struct UnhandledEventsRows {
     events: Vec<templates::EventDisplay>,
+    project_filtered: bool,
 }
 
 /// GET /dashboard/widgets/unhandled-events - Get unhandled events table rows for Quick Issues
@@ -373,25 +374,36 @@ pub async fn unhandled_events_widget_handler(
         params.get("time_range").map(String::as_str),
         chrono::Utc::now(),
     );
+    let project_filtered = params
+        .get("project")
+        .and_then(|project| uuid::Uuid::parse_str(project).ok())
+        .is_some();
 
-    let mut events_data = Event::get_events_by_env_filtered(
-        &db,
-        &env_id,
-        Some(false),
-        time_range_cutoff,
-        None,
-        Some(5),
-        None,
-    )
-    .await
-    .unwrap_or_else(|e| {
-        tracing::error!(
-            "Failed to get events for unhandled events widget for env {}: {}",
-            env_id,
-            e
-        );
+    // An unhandled event has no run/build association from which project
+    // ownership could be derived. Do not leak environment-wide events into a
+    // project-filtered dashboard; render an explicit scoped empty state.
+    let mut events_data = if project_filtered {
         Vec::new()
-    });
+    } else {
+        Event::get_events_by_env_filtered(
+            &db,
+            &env_id,
+            Some(false),
+            time_range_cutoff,
+            None,
+            Some(5),
+            None,
+        )
+        .await
+        .unwrap_or_else(|e| {
+            tracing::error!(
+                "Failed to get events for unhandled events widget for env {}: {}",
+                env_id,
+                e
+            );
+            Vec::new()
+        })
+    };
     crate::handlers::rehydrate_events_for_display(blob_store.as_ref(), &session, &mut events_data)
         .await;
 
@@ -406,7 +418,10 @@ pub async fn unhandled_events_widget_handler(
         })
         .collect();
 
-    let template = UnhandledEventsRows { events };
+    let template = UnhandledEventsRows {
+        events,
+        project_filtered,
+    };
     Html(template.render().unwrap()).into_response()
 }
 

@@ -331,7 +331,7 @@ pub async fn stream_metrics_handler(
                 String::new()
             };
             let time_clause_event = if let Some(d) = days {
-                format!("AND e.event_time >= NOW() - ('{} days')::INTERVAL", d)
+                format!("AND e.created_at >= NOW() - ('{} days')::INTERVAL", d)
             } else {
                 String::new()
             };
@@ -390,40 +390,77 @@ pub async fn stream_metrics_handler(
                 (0, 0, 0, 0, 0)
             });
 
-            // Events: total + handled (environment-level, not project-filtered)
+            let event_project_clause = if project_id.is_some() {
+                "AND EXISTS (
+                    SELECT 1
+                    FROM run project_run
+                    JOIN build project_build ON project_build.build_id = project_run.build_id
+                    WHERE project_run.event_id = e.event_id
+                      AND project_run.env_id = e.env_id
+                      AND project_build.project_id = $2
+                )"
+            } else {
+                ""
+            };
+
+            // A project-scoped event means an event handled by that project.
             let event_query = format!(
                 r#"SELECT
                     COUNT(*) as total,
                     COUNT(*) FILTER (WHERE EXISTS (
-                        SELECT 1 FROM run r2 WHERE r2.event_id = e.event_id
+                        SELECT 1 FROM run r2
+                        WHERE r2.event_id = e.event_id AND r2.env_id = e.env_id
                     )) as handled
                 FROM event e
-                WHERE e.env_id = $1 {}"#,
-                time_clause_event
+                WHERE e.env_id = $1 {} {}"#,
+                time_clause_event, event_project_clause
             );
+            let mut event_qb =
+                sqlx::query_as(sqlx::AssertSqlSafe(event_query.as_str())).bind(env_id);
+            if let Some(ref pid) = project_id {
+                event_qb = event_qb.bind(pid);
+            }
             let (total_events, handled_events): (i64, i64) =
-                sqlx::query_as(sqlx::AssertSqlSafe(event_query.as_str()))
-                    .bind(env_id)
-                    .fetch_one(pg_pool)
-                    .await
-                    .unwrap_or_else(|e| {
-                        tracing::error!("Failed to get event metrics: {}", e);
-                        (0, 0)
-                    });
-
-            // Streams (environment-level, not project-filtered)
-            let stream_query = format!(
-                "SELECT COUNT(*) FROM stream s WHERE s.env_id = $1 {}",
-                time_clause_stream
-            );
-            let total_streams: i64 = sqlx::query_scalar(sqlx::AssertSqlSafe(stream_query.as_str()))
-                .bind(env_id)
-                .fetch_one(pg_pool)
-                .await
-                .unwrap_or_else(|e| {
-                    tracing::error!("Failed to get stream count: {}", e);
-                    0
+                event_qb.fetch_one(pg_pool).await.unwrap_or_else(|e| {
+                    tracing::error!("Failed to get event metrics: {}", e);
+                    (0, 0)
                 });
+
+            let stream_project_clause = if project_id.is_some() {
+                "AND (
+                    EXISTS (
+                        SELECT 1
+                        FROM run project_run
+                        JOIN build run_build ON run_build.build_id = project_run.build_id
+                        WHERE project_run.stream_id = s.stream_id
+                          AND project_run.env_id = s.env_id
+                          AND run_build.project_id = $2
+                    )
+                    OR EXISTS (
+                        SELECT 1
+                        FROM task project_task
+                        JOIN build task_build ON task_build.build_id = project_task.build_id
+                        WHERE project_task.stream_id = s.stream_id
+                          AND project_task.env_id = s.env_id
+                          AND task_build.project_id = $2
+                    )
+                )"
+            } else {
+                ""
+            };
+            let stream_query = format!(
+                "SELECT COUNT(*) FROM stream s WHERE s.env_id = $1 {} {}",
+                time_clause_stream, stream_project_clause
+            );
+            let mut stream_qb =
+                sqlx::query_scalar(sqlx::AssertSqlSafe(stream_query.as_str())).bind(env_id);
+            if let Some(ref pid) = project_id {
+                stream_qb = stream_qb.bind(pid);
+            }
+            let total_streams: i64 = stream_qb.fetch_one(pg_pool).await.unwrap_or_else(|e| {
+                tracing::error!("Failed to get stream count: {}", e);
+                0
+            });
 
             // Tasks: total + per-status + CUS
             let task_query = format!(
@@ -484,7 +521,7 @@ pub async fn stream_metrics_handler(
                 String::new()
             };
             let time_clause_event = if let Some(d) = days {
-                format!("AND e.event_time >= datetime('now', '-{} days')", d)
+                format!("AND e.created_at >= datetime('now', '-{} days')", d)
             } else {
                 String::new()
             };
@@ -542,38 +579,77 @@ pub async fn stream_metrics_handler(
                 (0, 0, 0, 0, 0)
             });
 
+            let event_project_clause = if project_id.is_some() {
+                "AND EXISTS (
+                    SELECT 1
+                    FROM run project_run
+                    JOIN build project_build ON project_build.build_id = project_run.build_id
+                    WHERE project_run.event_id = e.event_id
+                      AND project_run.env_id = e.env_id
+                      AND project_build.project_id = ?
+                )"
+            } else {
+                ""
+            };
             let event_query = format!(
                 r#"SELECT
                     COUNT(*) as total,
                     SUM(CASE WHEN EXISTS (
-                        SELECT 1 FROM run r2 WHERE r2.event_id = e.event_id
+                        SELECT 1 FROM run r2
+                        WHERE r2.event_id = e.event_id AND r2.env_id = e.env_id
                     ) THEN 1 ELSE 0 END) as handled
                 FROM event e
-                WHERE e.env_id = ? {}"#,
-                time_clause_event
+                WHERE e.env_id = ? {} {}"#,
+                time_clause_event, event_project_clause
             );
+            let mut event_qb =
+                sqlx::query_as(sqlx::AssertSqlSafe(event_query.as_str())).bind(env_id);
+            if let Some(ref pid) = project_id {
+                event_qb = event_qb.bind(pid);
+            }
             let (total_events, handled_events): (i64, i64) =
-                sqlx::query_as(sqlx::AssertSqlSafe(event_query.as_str()))
-                    .bind(env_id)
-                    .fetch_one(sqlite_pool)
-                    .await
-                    .unwrap_or_else(|e| {
-                        tracing::error!("Failed to get event metrics (sqlite): {}", e);
-                        (0, 0)
-                    });
-
-            let stream_query = format!(
-                "SELECT COUNT(*) FROM stream s WHERE s.env_id = ? {}",
-                time_clause_stream
-            );
-            let total_streams: i64 = sqlx::query_scalar(sqlx::AssertSqlSafe(stream_query.as_str()))
-                .bind(env_id)
-                .fetch_one(sqlite_pool)
-                .await
-                .unwrap_or_else(|e| {
-                    tracing::error!("Failed to get stream count (sqlite): {}", e);
-                    0
+                event_qb.fetch_one(sqlite_pool).await.unwrap_or_else(|e| {
+                    tracing::error!("Failed to get event metrics (sqlite): {}", e);
+                    (0, 0)
                 });
+
+            let stream_project_clause = if project_id.is_some() {
+                "AND (
+                    EXISTS (
+                        SELECT 1
+                        FROM run project_run
+                        JOIN build run_build ON run_build.build_id = project_run.build_id
+                        WHERE project_run.stream_id = s.stream_id
+                          AND project_run.env_id = s.env_id
+                          AND run_build.project_id = ?
+                    )
+                    OR EXISTS (
+                        SELECT 1
+                        FROM task project_task
+                        JOIN build task_build ON task_build.build_id = project_task.build_id
+                        WHERE project_task.stream_id = s.stream_id
+                          AND project_task.env_id = s.env_id
+                          AND task_build.project_id = ?
+                    )
+                )"
+            } else {
+                ""
+            };
+            let stream_query = format!(
+                "SELECT COUNT(*) FROM stream s WHERE s.env_id = ? {} {}",
+                time_clause_stream, stream_project_clause
+            );
+            let mut stream_qb =
+                sqlx::query_scalar(sqlx::AssertSqlSafe(stream_query.as_str())).bind(env_id);
+            if let Some(ref pid) = project_id {
+                // SQLite uses positional anonymous parameters here; bind once
+                // for each EXISTS branch.
+                stream_qb = stream_qb.bind(pid).bind(pid);
+            }
+            let total_streams: i64 = stream_qb.fetch_one(sqlite_pool).await.unwrap_or_else(|e| {
+                tracing::error!("Failed to get stream count (sqlite): {}", e);
+                0
+            });
 
             let task_query = format!(
                 r#"SELECT
@@ -661,6 +737,9 @@ pub async fn stream_activity_timeline_handler(
         .get("time_unit")
         .map(|s| s.as_str())
         .unwrap_or("hour");
+    let project_id = params
+        .get("project_id")
+        .and_then(|value| Uuid::parse_str(value).ok());
 
     // Calculate days for interval
     let days = match time_range {
@@ -687,6 +766,32 @@ pub async fn stream_activity_timeline_handler(
             let group_by_clause =
                 crate::timezone::postgres_date_trunc(time_unit, "s.created_at", display_timezone);
             let date_format = crate::timezone::postgres_date_format(time_unit);
+            let project_clause = if project_id.is_some() {
+                let placeholder = if interval.is_some() { "$3" } else { "$2" };
+                format!(
+                    "AND (
+                        EXISTS (
+                            SELECT 1
+                            FROM run project_run
+                            JOIN build run_build ON run_build.build_id = project_run.build_id
+                            WHERE project_run.stream_id = s.stream_id
+                              AND project_run.env_id = s.env_id
+                              AND run_build.project_id = {0}
+                        )
+                        OR EXISTS (
+                            SELECT 1
+                            FROM task project_task
+                            JOIN build task_build ON task_build.build_id = project_task.build_id
+                            WHERE project_task.stream_id = s.stream_id
+                              AND project_task.env_id = s.env_id
+                              AND task_build.project_id = {0}
+                        )
+                    )",
+                    placeholder
+                )
+            } else {
+                String::new()
+            };
 
             let query = if let Some(_interval_str) = interval {
                 format!(
@@ -697,10 +802,11 @@ pub async fn stream_activity_timeline_handler(
                     FROM stream s
                     WHERE s.env_id = $1
                         AND s.created_at >= NOW() - ($2 || ' days')::INTERVAL
+                        {}
                     GROUP BY period
                     ORDER BY period ASC
                     "#,
-                    group_by_clause
+                    group_by_clause, project_clause
                 )
             } else {
                 format!(
@@ -710,10 +816,11 @@ pub async fn stream_activity_timeline_handler(
                         COUNT(*) as count
                     FROM stream s
                     WHERE s.env_id = $1
+                        {}
                     GROUP BY period
                     ORDER BY period ASC
                     "#,
-                    group_by_clause
+                    group_by_clause, project_clause
                 )
             };
 
@@ -723,6 +830,9 @@ pub async fn stream_activity_timeline_handler(
 
             if interval.is_some() {
                 query_builder = query_builder.bind(days);
+            }
+            if let Some(project_id) = project_id {
+                query_builder = query_builder.bind(project_id);
             }
 
             let results = match query_builder.fetch_all(pg_pool).await {
@@ -769,6 +879,32 @@ pub async fn stream_activity_timeline_handler(
             // Use timezone-aware date bucketing for SQLite
             let group_by_clause =
                 crate::timezone::sqlite_date_bucket(time_unit, "s.created_at", display_timezone);
+            let project_placeholder = if interval.is_some() { "?3" } else { "?2" };
+            let project_clause = if project_id.is_some() {
+                format!(
+                    "AND (
+                        EXISTS (
+                            SELECT 1
+                            FROM run project_run
+                            JOIN build run_build ON run_build.build_id = project_run.build_id
+                            WHERE project_run.stream_id = s.stream_id
+                              AND project_run.env_id = s.env_id
+                              AND run_build.project_id = {0}
+                        )
+                        OR EXISTS (
+                            SELECT 1
+                            FROM task project_task
+                            JOIN build task_build ON task_build.build_id = project_task.build_id
+                            WHERE project_task.stream_id = s.stream_id
+                              AND project_task.env_id = s.env_id
+                              AND task_build.project_id = {0}
+                        )
+                    )",
+                    project_placeholder
+                )
+            } else {
+                String::new()
+            };
 
             let query = if let Some(_interval_str) = interval {
                 format!(
@@ -779,10 +915,11 @@ pub async fn stream_activity_timeline_handler(
                     FROM stream s
                     WHERE s.env_id = ?1
                         AND s.created_at >= datetime('now', '-' || ?2 || ' days')
+                        {}
                     GROUP BY period
                     ORDER BY period ASC
                     "#,
-                    group_by_clause
+                    group_by_clause, project_clause
                 )
             } else {
                 format!(
@@ -792,10 +929,11 @@ pub async fn stream_activity_timeline_handler(
                         COUNT(*) as count
                     FROM stream s
                     WHERE s.env_id = ?1
+                        {}
                     GROUP BY period
                     ORDER BY period ASC
                     "#,
-                    group_by_clause
+                    group_by_clause, project_clause
                 )
             };
 
@@ -805,6 +943,9 @@ pub async fn stream_activity_timeline_handler(
 
             if interval.is_some() {
                 query_builder = query_builder.bind(days);
+            }
+            if let Some(project_id) = project_id {
+                query_builder = query_builder.bind(project_id);
             }
 
             let results = match query_builder.fetch_all(sqlite_pool).await {
@@ -882,6 +1023,9 @@ pub async fn stream_composition_handler(
         .get("time_unit")
         .map(|s| s.as_str())
         .unwrap_or("hour");
+    let project_id = params
+        .get("project_id")
+        .and_then(|value| Uuid::parse_str(value).ok());
 
     // Calculate days for interval
     let days = match time_range {
@@ -909,7 +1053,67 @@ pub async fn stream_composition_handler(
                 crate::timezone::postgres_date_trunc(time_unit, "s.created_at", display_timezone);
             let date_format = crate::timezone::postgres_date_format(time_unit);
 
-            let query = if let Some(_interval_str) = interval {
+            let query = if project_id.is_some() {
+                let project_placeholder = if interval.is_some() { "$3" } else { "$2" };
+                let time_clause = if interval.is_some() {
+                    "AND s.created_at >= NOW() - ($2 || ' days')::INTERVAL"
+                } else {
+                    ""
+                };
+                format!(
+                    r#"
+                    WITH project_streams AS (
+                        SELECT
+                            s.created_at,
+                            (
+                                SELECT COUNT(*)
+                                FROM run project_run
+                                JOIN build run_build ON run_build.build_id = project_run.build_id
+                                WHERE project_run.stream_id = s.stream_id
+                                  AND project_run.env_id = s.env_id
+                                  AND run_build.project_id = {1}
+                            ) AS total_runs,
+                            (
+                                SELECT COUNT(DISTINCT project_run.event_id)
+                                FROM run project_run
+                                JOIN build run_build ON run_build.build_id = project_run.build_id
+                                WHERE project_run.stream_id = s.stream_id
+                                  AND project_run.env_id = s.env_id
+                                  AND run_build.project_id = {1}
+                            ) AS total_events
+                        FROM stream s
+                        WHERE s.env_id = $1
+                            {2}
+                            AND (
+                                EXISTS (
+                                    SELECT 1
+                                    FROM run project_run
+                                    JOIN build run_build ON run_build.build_id = project_run.build_id
+                                    WHERE project_run.stream_id = s.stream_id
+                                      AND project_run.env_id = s.env_id
+                                      AND run_build.project_id = {1}
+                                )
+                                OR EXISTS (
+                                    SELECT 1
+                                    FROM task project_task
+                                    JOIN build task_build ON task_build.build_id = project_task.build_id
+                                    WHERE project_task.stream_id = s.stream_id
+                                      AND project_task.env_id = s.env_id
+                                      AND task_build.project_id = {1}
+                                )
+                            )
+                    )
+                    SELECT
+                        {0} as period,
+                        CAST(AVG(s.total_runs) AS FLOAT8) as avg_runs,
+                        CAST(AVG(s.total_events) AS FLOAT8) as avg_events
+                    FROM project_streams s
+                    GROUP BY period
+                    ORDER BY period ASC
+                    "#,
+                    group_by_clause, project_placeholder, time_clause
+                )
+            } else if let Some(_interval_str) = interval {
                 format!(
                     r#"
                     SELECT
@@ -947,6 +1151,9 @@ pub async fn stream_composition_handler(
 
             if interval.is_some() {
                 query_builder = query_builder.bind(days);
+            }
+            if let Some(project_id) = project_id {
+                query_builder = query_builder.bind(project_id);
             }
 
             let results = match query_builder.fetch_all(pg_pool).await {
@@ -1006,7 +1213,67 @@ pub async fn stream_composition_handler(
             let group_by_clause =
                 crate::timezone::sqlite_date_bucket(time_unit, "s.created_at", display_timezone);
 
-            let query = if let Some(_interval_str) = interval {
+            let query = if project_id.is_some() {
+                let project_placeholder = if interval.is_some() { "?3" } else { "?2" };
+                let time_clause = if interval.is_some() {
+                    "AND s.created_at >= datetime('now', '-' || ?2 || ' days')"
+                } else {
+                    ""
+                };
+                format!(
+                    r#"
+                    WITH project_streams AS (
+                        SELECT
+                            s.created_at,
+                            (
+                                SELECT COUNT(*)
+                                FROM run project_run
+                                JOIN build run_build ON run_build.build_id = project_run.build_id
+                                WHERE project_run.stream_id = s.stream_id
+                                  AND project_run.env_id = s.env_id
+                                  AND run_build.project_id = {1}
+                            ) AS total_runs,
+                            (
+                                SELECT COUNT(DISTINCT project_run.event_id)
+                                FROM run project_run
+                                JOIN build run_build ON run_build.build_id = project_run.build_id
+                                WHERE project_run.stream_id = s.stream_id
+                                  AND project_run.env_id = s.env_id
+                                  AND run_build.project_id = {1}
+                            ) AS total_events
+                        FROM stream s
+                        WHERE s.env_id = ?1
+                            {2}
+                            AND (
+                                EXISTS (
+                                    SELECT 1
+                                    FROM run project_run
+                                    JOIN build run_build ON run_build.build_id = project_run.build_id
+                                    WHERE project_run.stream_id = s.stream_id
+                                      AND project_run.env_id = s.env_id
+                                      AND run_build.project_id = {1}
+                                )
+                                OR EXISTS (
+                                    SELECT 1
+                                    FROM task project_task
+                                    JOIN build task_build ON task_build.build_id = project_task.build_id
+                                    WHERE project_task.stream_id = s.stream_id
+                                      AND project_task.env_id = s.env_id
+                                      AND task_build.project_id = {1}
+                                )
+                            )
+                    )
+                    SELECT
+                        {0} as period,
+                        AVG(s.total_runs) as avg_runs,
+                        AVG(s.total_events) as avg_events
+                    FROM project_streams s
+                    GROUP BY period
+                    ORDER BY period ASC
+                    "#,
+                    group_by_clause, project_placeholder, time_clause
+                )
+            } else if let Some(_interval_str) = interval {
                 format!(
                     r#"
                     SELECT
@@ -1044,6 +1311,9 @@ pub async fn stream_composition_handler(
 
             if interval.is_some() {
                 query_builder = query_builder.bind(days);
+            }
+            if let Some(project_id) = project_id {
+                query_builder = query_builder.bind(project_id);
             }
 
             let results = match query_builder.fetch_all(sqlite_pool).await {
@@ -1096,5 +1366,111 @@ pub async fn stream_composition_handler(
             })
             .into_response()
         }
+    }
+}
+
+#[cfg(test)]
+mod dashboard_filter_tests {
+    use super::*;
+    use axum::extract::Extension;
+    use axum_extra::extract::CookieJar;
+    use http_body_util::BodyExt;
+
+    async fn json_body(response: axum::response::Response) -> serde_json::Value {
+        let bytes = response
+            .into_body()
+            .collect()
+            .await
+            .expect("collect response body")
+            .to_bytes();
+        serde_json::from_slice(&bytes).expect("valid JSON response")
+    }
+
+    #[tokio::test]
+    async fn stream_charts_only_include_streams_touched_by_selected_project() {
+        let db = hot::db::test_db().await;
+        let data = hot::db::insert_test_data(&db).await.unwrap();
+
+        let other_project_id = Uuid::now_v7();
+        hot::db::Project::insert_project(
+            &db,
+            &other_project_id,
+            &data.env_id,
+            "other-project",
+            &data.user_id,
+        )
+        .await
+        .unwrap();
+        let other_build_id = Uuid::now_v7();
+        hot::db::Build::insert_build(
+            &db,
+            &other_build_id,
+            &other_project_id,
+            "other-build",
+            0,
+            hot::db::Build::BUILD_TYPE_LIVE,
+            &data.user_id,
+        )
+        .await
+        .unwrap();
+        hot::db::Run::insert_run(
+            &db,
+            &Uuid::now_v7(),
+            &data.env_id,
+            &Uuid::now_v7(),
+            Some(&other_build_id),
+            hot::db::run::RunType::Run.as_id(),
+            None,
+            &data.user_id,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+
+        let conf = hot::val!({"app": {"host": "localhost", "port": 4680}});
+        let session = Session::from_user_id(&db, &conf, &data.user_id, &CookieJar::new())
+            .await
+            .unwrap();
+        let db = Arc::new(db);
+        let params = AHashMap::from_iter([
+            ("project_id".to_string(), data.project_id.to_string()),
+            ("time_range".to_string(), "all".to_string()),
+            ("time_unit".to_string(), "day".to_string()),
+        ]);
+
+        let activity = json_body(
+            stream_activity_timeline_handler(
+                State(db.clone()),
+                Query(params.clone()),
+                Extension(session.clone()),
+            )
+            .await
+            .into_response(),
+        )
+        .await;
+        let composition = json_body(
+            stream_composition_handler(State(db), Query(params), Extension(session))
+                .await
+                .into_response(),
+        )
+        .await;
+
+        let stream_count: i64 = activity["count"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(serde_json::Value::as_i64)
+            .sum();
+        assert_eq!(stream_count, 1);
+        assert_eq!(
+            composition["avg_runs"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter_map(serde_json::Value::as_f64)
+                .sum::<f64>(),
+            1.0
+        );
     }
 }
