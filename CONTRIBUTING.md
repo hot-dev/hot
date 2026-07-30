@@ -25,31 +25,45 @@ the exact `hot` version, OS, and the error output go a long way.
 See the [Repository Layout](README.md#repository-layout) section of the README
 for a tour of the crates and resources directories. The most common areas:
 
-- `crates/hot/` — language, runtime, storage, and packages core.
+- `crates/hot/` — language, runtime, storage, and package-system internals.
 - `crates/hot_cli/` — the `hot` binary.
 - `crates/hot_app/` — local web app and dashboard.
 - `hot/pkg/` — public Hot packages, including `hot-std`.
-- `resources/docs/`, `resources/init/`, `resources/db/` — docs, project
-  templates, and database migrations shipped with the binary.
+- `resources/docs/` — documentation source.
+- `resources/init/`, `resources/db/` — project templates and database
+  migrations packaged with the CLI.
 
 ## Development
 
 ### Prerequisites
 
 - Rust (toolchain pinned in `rust-toolchain.toml`)
+- Tailwind CSS CLI (`tailwindcss` on `PATH`; CI uses the version declared in
+  `.github/workflows/hot.yml`)
 - Docker, optional for most development but required for `::hot::box` container
   tasks and release packaging.
+- Postgres 18 with pgvector and Valkey/Redis are optional for the full
+  service-backed test suite.
+- `protoc` is required only for the Linux Kata feature check.
 
 ### Build, Check, Test
 
-The same commands CI runs:
+Run these core checks before opening a pull request. The Linux CI matrix
+additionally exercises service-backed and Docker suites:
 
 ```bash
 cargo fmt --check
-cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+cargo clippy --workspace --all-targets --locked -- -D warnings
 cargo test --workspace --all-targets --locked
-cargo run --locked --bin hot -- check --ctx hot/ci.ctx.hot
+./scripts/hot-static-checks.sh check
+cargo run --locked --bin hot -- init -c hot.test.hot --ctx hot/ci.ctx.hot
 cargo run --locked --bin hot -- test -c hot.test.hot --ctx hot/ci.ctx.hot
+```
+
+On Linux with `protoc` installed, also compile-check the optional Kata backend:
+
+```bash
+cargo test -p hot_task_worker --features kata --locked --no-run
 ```
 
 Run the local development stack:
@@ -64,19 +78,15 @@ Install optional git hooks:
 ./scripts/setup-git-hooks.sh
 ```
 
-### SQLx Offline Mode
+### Database Changes
 
-`.cargo/config.toml` sets `SQLX_OFFLINE=false` with `force = true` so local
-builds verify queries against a live database during development. CI overrides
-this to `true` (queries are checked against committed `.sqlx/` query metadata).
+The repository uses SQLx's runtime query APIs and does not commit `.sqlx/`
+offline-query metadata. Do not run `cargo sqlx prepare`.
 
-If you change a SQL query, regenerate the offline query data:
-
-```bash
-cargo sqlx prepare --workspace
-```
-
-Commit the resulting `.sqlx/` changes alongside your query change.
+For schema changes, add the next numbered migration under
+`resources/db/sqlite/migrations/` and `resources/db/postgres/migrations/` when
+the change applies to both databases. Follow the public/private migration
+boundary in [`resources/db/V2_MIGRATIONS.md`](resources/db/V2_MIGRATIONS.md).
 
 ## Style and Conventions
 
@@ -91,24 +101,33 @@ Commit the resulting `.sqlx/` changes alongside your query change.
   `resources/ai/AGENTS.md` by `cargo run --locked --bin hot -- ai add`. Do not
   hand-edit the root file. CI verifies they are in sync via
   `scripts/check-agents-sync.sh`.
-- **AI skill assets:** `resources/ai/skills/hot-language/` is the source copy
-  bundled with the CLI. After editing it, run
+- **AI skill assets:** `resources/ai/skills/` contains the source skills
+  bundled with the CLI. After editing any skill, run
   `bash scripts/sync-ai-assets.sh ../hot-skills` to update the public
   `hot-skills` mirror, then `bash scripts/check-ai-assets-sync.sh ../hot-skills`.
+  Skills are installed-product documentation: use versioned registry packages,
+  resolved dependency paths, and installed SDK metadata. Do not assume a Hot
+  source checkout, local sibling packages, SDK repository clones, or access to
+  internal applications.
 
 ## Testing Your Changes
 
-- **Rust unit/integration tests:** `cargo test --workspace`.
-- **Hot language and package tests:** `cargo run --locked --bin hot -- test -c hot.test.hot --ctx hot/ci.ctx.hot`.
-- **Provider/integration tests:** under `scripts/integration/`. These require
-  real provider credentials and are not run in CI for outside contributors.
-  Skip them unless you have your own credentials and can run them locally.
+- **Rust unit/integration tests:**
+  `cargo test --workspace --all-targets --locked`.
+- **Hot language and package tests:** initialize with
+  `cargo run --locked --bin hot -- init -c hot.test.hot --ctx hot/ci.ctx.hot`,
+  then run
+  `cargo run --locked --bin hot -- test -c hot.test.hot --ctx hot/ci.ctx.hot`.
+- **Optional package/integration tests:** scripts under `scripts/integration/`
+  have package-specific prerequisites. Some need provider credentials, while
+  others need local services or executables. They are not part of the default
+  CI suite; run the scripts relevant to your change.
 
 ## Pull Requests
 
 1. Fork the repository and create a branch from `main`.
 2. Make your change with tests where applicable.
-3. Run the CI commands above locally.
+3. Run the relevant checks above locally.
 4. Open a pull request against `main` using the PR template.
 5. Be prepared for review feedback. Maintainers may push small fixups directly
    for typos or minor cleanups; larger changes will be requested as updates.
@@ -119,11 +138,16 @@ history is meaningful.
 
 ## Releases
 
-Releases are cut by maintainers from the `stable` branch and tagged
-`vX.Y.Z` matching `resources/version.txt`. The release pipeline
-(`.github/workflows/release.yml`) is gated to the upstream repository and
-publishes installers, packages, and Homebrew formula updates that require
-maintainer-only secrets. It will not run on forks.
+`main` is the stable release branch. Maintainers update
+`resources/version.txt`, run `scripts/sync-version.sh`, commit the synchronized
+version files and refreshed `Cargo.lock` to `main`, and push a `vX.Y.Z` tag at
+that commit. The tag must match `resources/version.txt`. Pushing it starts
+`.github/workflows/release.yml`.
+
+Publishing jobs are gated to the upstream `hot-dev/hot` repository. Depending
+on repository configuration, the pipeline publishes the GitHub release,
+installers, package CDN, and Homebrew formula updates using maintainer-only
+credentials; forks cannot publish upstream artifacts.
 
 ## License
 

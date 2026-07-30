@@ -1,0 +1,116 @@
+::examples::hot_ai_agents::agent ns
+
+::chat    ::ai::chat
+::tool    ::ai::tool
+::session ::ai::session
+::runtime ::ai::agent::runtime
+::stream  ::ai::agent::stream
+
+ExampleAgent
+meta {
+    agent: {
+        name: "Example Agent",
+        description: "Offline-checkable example of a typed Hot AI tool loop.",
+        tags: ["example", "agent", "tools"],
+    },
+}
+type {
+    model: Str,
+}
+
+AGENT_NAME "example-agent"
+
+agent ExampleAgent({model: "offline-fixture"})
+
+rt ::runtime/create-runtime(AGENT_NAME, {
+    store-prefix: AGENT_NAME,
+    max-errors: 5,
+})
+
+add-numbers
+meta {doc: "Add two integers."}
+fn (x: Int, y: Int): Int {
+    add(x, y)
+}
+
+tools fn (): Vec<::tool/Tool> {
+    [::tool/from-fn(add-numbers)]
+}
+
+// A provider adapter owns this contract. This deterministic fixture requests
+// one tool, then answers after the normalized tool result appears in history.
+fixture-chat
+fn (model: Str, messages: Vec<::chat/Message>, system: Str?, available-tools: Vec<::tool/Tool>?): ::chat/ChatReply {
+    tool-result find-first(messages, eq(%.role, "tool"))
+    cond {
+        is-null(tool-result) => {
+            ::chat/ChatReply({
+                text: null,
+                tool-calls: [::tool/ToolCall({
+                    id: "call-1",
+                    name: "::examples::hot_ai_agents::agent/add-numbers",
+                    input: {x: 2, y: 3},
+                })],
+                stop-reason: "tool_use",
+                usage: null,
+                raw: null,
+            })
+        }
+        => {
+            ::chat/ChatReply({
+                text: `The answer is ${tool-result.content}.`,
+                tool-calls: null,
+                stop-reason: "end_turn",
+                usage: null,
+                raw: null,
+            })
+        }
+    }
+}
+
+answer fn (question: Str): Str {
+    opts ::chat/ChatOptions({
+        chat-fn: fixture-chat,
+        model: agent.model,
+        system: "Use tools for arithmetic.",
+        tools: tools(),
+        max-iterations: 4,
+        emit-steps: true,
+    })
+    ::chat/run-loop(opts, question)
+}
+
+ask
+meta {
+    agent: ExampleAgent,
+    on-event: "example-agent:ask",
+}
+fn (event) {
+    data event.data
+    session ::session/Session({
+        id: Str(or(data.session_id, "web:chat:demo")),
+        meta: {transport: "web"},
+    })
+    sender ::session/Identity({
+        id: Str(or(data.user_id, "web:user:demo")),
+        name: Str(or(data.user_name, "Demo User")),
+    })
+    ::runtime/register-session(rt, session)
+
+    payload {
+        session_id: session.id,
+        message_id: Str(or(data.message_id, Uuid())),
+        user_id: sender.id,
+    }
+    ::stream/emit-reply-start(AGENT_NAME, payload)
+    text answer(Str(or(data.question, "")))
+    ::stream/emit-reply-delta(AGENT_NAME, {...payload, delta: text})
+    ::stream/emit-reply-end(AGENT_NAME, {...payload, text})
+    {ok: true, text}
+}
+
+test-tool-loop
+meta ["test"]
+fn () {
+    assert-eq("The answer is 5.", answer("What is two plus three?"))
+}

@@ -979,7 +979,7 @@ pub(crate) enum DepsAction {
 
 #[derive(Subcommand, Debug)]
 #[command(
-    after_help = "Files created:\n  AGENTS.md              - AI agent instructions (passive context)\n  .skills/hot-language/  - Hot language skill with references\n\nExamples:\n  hot ai add           # Add AGENTS.md + bundled skill to project\n  hot ai add --global  # Install bundled skill to ~/.skills/\n  hot ai list          # Show installed files\n  hot ai update        # Update installed files to this Hot version\n\nFor the public skills.sh source, use:\n  npx skills add hot-dev/hot-skills"
+    after_help = "Files created:\n  AGENTS.md               - AI agent instructions (passive context)\n  .skills/hot-language/   - Hot language skill with references\n  .skills/hot-ai-agents/  - Hot AI agent and SDK integration skill\n\nExamples:\n  hot ai add           # Add AGENTS.md + bundled skills to project\n  hot ai add --global  # Install bundled skills to ~/.skills/\n  hot ai list          # Show installed files\n  hot ai update        # Update installed files to this Hot version\n\nFor the public skills.sh source, use:\n  npx skills add hot-dev/hot-skills"
 )]
 pub(crate) enum AiAction {
     /// Add AI coding support (AGENTS.md + .skills/) to the project

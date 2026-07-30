@@ -53,6 +53,14 @@ fn hot_ai_repairs_a_legacy_stamped_skill() {
         .join("hot-language")
         .join("SKILL.md");
     assert!(skill_md.is_file(), "hot ai add installs the skill");
+    assert!(
+        project
+            .join(".skills")
+            .join("hot-ai-agents")
+            .join("SKILL.md")
+            .is_file(),
+        "hot ai add installs every bundled skill"
+    );
 
     regress_to_legacy_layout(&skill_md);
     let legacy = std::fs::read_to_string(&skill_md).unwrap();

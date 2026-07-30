@@ -1,4 +1,4 @@
-//! `hot ai` — install / list / update AGENTS.md and the hot-language skill.
+//! `hot ai` — install / list / update AGENTS.md and bundled Hot skills.
 
 use std::fs;
 use tracing::info;
@@ -23,16 +23,18 @@ pub(crate) fn run_ai(action: &AiAction) -> Result<(), String> {
             println!("  AGENTS.md     - AI agent instructions {}", agents_status);
 
             let home = dirs::home_dir().unwrap_or_default();
-            let project_skills = std::path::Path::new(".skills/hot-language");
-            let global_skills = home.join(".skills/hot-language");
-            let skills_status = if project_skills.exists() {
-                "(installed - project)"
-            } else if global_skills.exists() {
-                "(installed - global)"
-            } else {
-                ""
-            };
-            println!("  .skills/      - Hot language skill  {}", skills_status);
+            for skill_name in bundled_skill_names()? {
+                let project_skill = std::path::Path::new(".skills").join(&skill_name);
+                let global_skill = home.join(".skills").join(&skill_name);
+                let status = if project_skill.exists() {
+                    "(installed - project)"
+                } else if global_skill.exists() {
+                    "(installed - global)"
+                } else {
+                    ""
+                };
+                println!("  .skills/{skill_name}/  {status}");
+            }
 
             let legacy_files = [
                 ("CLAUDE.md", "Old Claude Code file"),
@@ -71,12 +73,17 @@ pub(crate) fn run_ai(action: &AiAction) -> Result<(), String> {
             }
 
             let home = dirs::home_dir().unwrap_or_default();
-            let project_skills = std::path::Path::new(".skills/hot-language");
-            let global_skills = home.join(".skills/hot-language");
-            if project_skills.exists() {
+            let skill_names = bundled_skill_names()?;
+            let project_has_skills = skill_names
+                .iter()
+                .any(|name| std::path::Path::new(".skills").join(name).exists());
+            let global_has_skills = skill_names
+                .iter()
+                .any(|name| home.join(".skills").join(name).exists());
+            if project_has_skills {
                 setup_agent_skills(false)?;
                 updated_count += 1;
-            } else if global_skills.exists() {
+            } else if global_has_skills {
                 setup_agent_skills(true)?;
                 updated_count += 1;
             }
@@ -90,6 +97,43 @@ pub(crate) fn run_ai(action: &AiAction) -> Result<(), String> {
             Ok(())
         }
     }
+}
+
+/// Discover every skill bundled under `resources/ai/skills/`.
+///
+/// A directory is installable when it contains `SKILL.md`. Sorting keeps
+/// command output and installation behavior deterministic across filesystems.
+fn bundled_skill_names() -> Result<Vec<String>, String> {
+    let skills_dir = hot::resources::get_ai_path()?.join("skills");
+    let entries = fs::read_dir(&skills_dir).map_err(|e| {
+        format!(
+            "Failed to read bundled skills {}: {}",
+            skills_dir.display(),
+            e
+        )
+    })?;
+    let mut names = Vec::new();
+
+    for entry in entries {
+        let entry = entry.map_err(|e| format!("Failed to read bundled skill entry: {}", e))?;
+        let path = entry.path();
+        if path.is_dir() && path.join("SKILL.md").is_file() {
+            let name = entry
+                .file_name()
+                .into_string()
+                .map_err(|name| format!("Bundled skill name is not valid UTF-8: {name:?}"))?;
+            names.push(name);
+        }
+    }
+
+    names.sort();
+    if names.is_empty() {
+        return Err(format!(
+            "No bundled skills found in {}",
+            skills_dir.display()
+        ));
+    }
+    Ok(names)
 }
 
 /// Setup AGENTS.md with the canonical Hot section from resources/ai/AGENTS.md.
@@ -190,8 +234,6 @@ fn setup_agents_md() -> Result<(), String> {
     Ok(())
 }
 
-/// Install/refresh the `hot-language` skill under `.skills/` (project) or
-/// `~/.skills/` (global).
 /// The hash stamped into an installed file, wherever the marker sits.
 fn extract_skill_hash(content: &str) -> Option<u64> {
     content.lines().take(64).find_map(|line| {
@@ -256,6 +298,15 @@ fn stamp_skill_hash(content: &str, hash: u64, is_markdown: bool) -> String {
 }
 
 fn setup_agent_skills(global: bool) -> Result<(), String> {
+    for skill_name in bundled_skill_names()? {
+        setup_agent_skill(global, &skill_name)?;
+    }
+    Ok(())
+}
+
+/// Install/refresh one bundled skill under `.skills/` (project) or
+/// `~/.skills/` (global).
+fn setup_agent_skill(global: bool, skill_name: &str) -> Result<(), String> {
     use ahash::AHashSet;
     use std::collections::hash_map::DefaultHasher;
     use std::hash::{Hash, Hasher};
@@ -266,7 +317,7 @@ fn setup_agent_skills(global: bool) -> Result<(), String> {
         hasher.finish()
     }
 
-    let source_skill_dir = hot::resources::get_skill_path("hot-language")?;
+    let source_skill_dir = hot::resources::get_skill_path(skill_name)?;
 
     let (skills_base, location_desc) = if global {
         let home = dirs::home_dir().ok_or("Could not determine home directory")?;
@@ -382,7 +433,7 @@ fn setup_agent_skills(global: bool) -> Result<(), String> {
         }
     }
 
-    let skill_dir = skills_base.join("hot-language");
+    let skill_dir = skills_base.join(skill_name);
 
     let mut any_updated = false;
     let mut any_removed = false;
@@ -419,7 +470,7 @@ fn setup_agent_skills(global: bool) -> Result<(), String> {
             location_desc
         );
     } else {
-        println!("  .skills/hot-language/ is up to date");
+        println!("  .skills/{skill_name}/ is up to date");
     }
 
     Ok(())
