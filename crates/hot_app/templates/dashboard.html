@@ -265,6 +265,29 @@ function getSplitLineColor() {
     return isDarkMode() ? '#374151' : '#e5e7eb';
 }
 
+// Multi-series charts use a restrained fill so overlapping lines remain
+// distinguishable. Single-series charts can use a stronger fill.
+function subtleLineAreaStyle(color) {
+    const hex = color.replace('#', '');
+    const value = Number.parseInt(hex, 16);
+    const red = (value >> 16) & 255;
+    const green = (value >> 8) & 255;
+    const blue = value & 255;
+    return {
+        color: {
+            type: 'linear',
+            x: 0,
+            y: 0,
+            x2: 0,
+            y2: 1,
+            colorStops: [
+                { offset: 0, color: `rgba(${red}, ${green}, ${blue}, 0.14)` },
+                { offset: 1, color: `rgba(${red}, ${green}, ${blue}, 0.015)` }
+            ]
+        }
+    };
+}
+
 // Helper: split a series so the last segment is drawn with a dotted line
 // to visually indicate partial/incomplete measurement for the current period
 function splitLastSegmentDotted(seriesConfig) {
@@ -288,6 +311,7 @@ function splitLastSegmentDotted(seriesConfig) {
         name: '__partial__' + seriesConfig.name,
         data: dottedData,
         smooth: false,
+        areaStyle: { opacity: 0 },
         lineStyle: {
             ...(seriesConfig.lineStyle || {}),
             type: [2, 3]   // 2px dash, 3px gap — dotted pattern
@@ -613,6 +637,7 @@ function updateActivityTimelineChart(data) {
                     name: s.name,
                     type: 'line',
                     smooth: 0.2,
+                    areaStyle: subtleLineAreaStyle(statusColors[s.name.toLowerCase()] || '#6b7280'),
                     emphasis: {
                         focus: 'series'
                     },
@@ -765,6 +790,7 @@ function updateRunTypeTimelineChart(data) {
                     name: s.name,
                     type: 'line',
                     smooth: 0.2,
+                    areaStyle: subtleLineAreaStyle(runTypeColors[s.name] || '#6b7280'),
                     emphasis: {
                         focus: 'series'
                     },
@@ -1123,7 +1149,8 @@ function updateStreamCompositionChart(data) {
                         data: data.avg_runs,
                         itemStyle: {
                             color: '#10b981'
-                        }
+                        },
+                        areaStyle: subtleLineAreaStyle('#10b981')
                     },
                     {
                         name: 'Avg Events per Stream',
@@ -1132,7 +1159,8 @@ function updateStreamCompositionChart(data) {
                         data: data.avg_events,
                         itemStyle: {
                             color: '#f59e0b'
-                        }
+                        },
+                        areaStyle: subtleLineAreaStyle('#f59e0b')
                     }
                 ].flatMap(s => splitLastSegmentDotted(s))
             };
@@ -1202,6 +1230,9 @@ function updateEventActivityTimelineChart(data) {
                 itemStyle: {
                     color: series.name === 'Handled' ? '#10b981' : '#f59e0b'
                 },
+                areaStyle: subtleLineAreaStyle(
+                    series.name === 'Handled' ? '#10b981' : '#f59e0b'
+                ),
                 lineStyle: {
                     width: 2
                 },
@@ -1355,6 +1386,7 @@ function updateEventTypeTimelineChart(data) {
                 itemStyle: {
                     color: colors[index % colors.length]
                 },
+                areaStyle: subtleLineAreaStyle(colors[index % colors.length]),
                 lineStyle: {
                     width: 2
                 },
@@ -1610,6 +1642,7 @@ function updateTaskActivityTimelineChart(data) {
                     smooth: 0.2,
                     data: s.data,
                     itemStyle: { color: statusColors[s.name] || '#6b7280' },
+                    areaStyle: subtleLineAreaStyle(statusColors[s.name] || '#6b7280'),
                     lineStyle: { width: 2 },
                     emphasis: { focus: 'series' }
                 };
@@ -1803,6 +1836,7 @@ function updateLatencyTimelineChart(kind, data) {
             smooth: 0.2,
             data: waiting,
             itemStyle: { color: '#f59e0b' },
+            areaStyle: subtleLineAreaStyle('#f59e0b'),
             lineStyle: { width: 2 },
             emphasis: { focus: 'series' },
             connectNulls: false
@@ -1813,6 +1847,7 @@ function updateLatencyTimelineChart(kind, data) {
             smooth: 0.2,
             data: execution,
             itemStyle: { color: '#22c55e' },
+            areaStyle: subtleLineAreaStyle('#22c55e'),
             lineStyle: { width: 2 },
             emphasis: { focus: 'series' },
             connectNulls: false
