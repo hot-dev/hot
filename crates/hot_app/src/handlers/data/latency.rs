@@ -184,13 +184,14 @@ async fn latency_timeline_handler(
                     "Discarded negative dashboard latency samples; check clock synchronization and stored timing boundaries"
                 );
             }
-            Json(assemble_latency_timeline(
-                result.buckets,
-                filters.days,
-                &filters.time_unit,
-                &session.display_timezone,
-            ))
-            .into_response()
+            let requested_dates = filters.days.map(|days| {
+                crate::timezone::generate_time_buckets(
+                    &filters.time_unit,
+                    days,
+                    &session.display_timezone,
+                )
+            });
+            Json(assemble_latency_timeline(result.buckets, requested_dates)).into_response()
         }
         Err(error) => {
             tracing::error!(
@@ -645,9 +646,7 @@ fn percentile_cont(values: &[f64], percentile: f64) -> Option<f64> {
 
 fn assemble_latency_timeline(
     buckets: Vec<LatencyBucket>,
-    days: Option<i64>,
-    time_unit: &str,
-    display_timezone: &str,
+    requested_dates: Option<Vec<String>>,
 ) -> LatencyTimelineData {
     let summary_bucket = buckets
         .iter()
@@ -661,10 +660,8 @@ fn assemble_latency_timeline(
     // A capped query contains only the newest samples. Generating the full
     // requested range in that case would turn omitted, pre-cap periods into
     // misleading zero-activity buckets.
-    let dates = match (days, summary_bucket.truncated) {
-        (Some(days), false) => {
-            crate::timezone::generate_time_buckets(time_unit, days, display_timezone)
-        }
+    let dates = match (&requested_dates, summary_bucket.truncated) {
+        (Some(dates), false) => dates.clone(),
         _ => by_date
             .keys()
             .cloned()
@@ -696,13 +693,10 @@ fn assemble_latency_timeline(
     } else {
         summary_bucket.precise_sample_count as f64 / summary_bucket.sample_count as f64 * 100.0
     };
-    let last_bucket_partial = days
-        .and_then(|days| {
-            crate::timezone::generate_time_buckets(time_unit, days, display_timezone)
-                .into_iter()
-                .last()
-        })
-        .is_some_and(|current_bucket| dates.last() == Some(&current_bucket));
+    let last_bucket_partial = requested_dates
+        .as_ref()
+        .and_then(|dates| dates.last())
+        .is_some_and(|current_bucket| dates.last() == Some(current_bucket));
 
     LatencyTimelineData {
         sample_counts: dates
@@ -965,12 +959,7 @@ mod tests {
                 precise: false,
             },
         ];
-        let data = assemble_latency_timeline(
-            aggregate_latency_samples(samples, false),
-            None,
-            "day",
-            "UTC",
-        );
+        let data = assemble_latency_timeline(aggregate_latency_samples(samples, false), None);
         assert_eq!(data.summary.sample_count, 2);
         assert_eq!(data.summary.precise_sample_count, 1);
         assert_eq!(data.summary.precise_coverage_percent, 50.0);
@@ -987,9 +976,7 @@ mod tests {
         }];
         let data = assemble_latency_timeline(
             aggregate_latency_samples(samples, true),
-            Some(30),
-            "day",
-            "UTC",
+            Some(vec!["2026-07-28".to_string(), "2026-07-29".to_string()]),
         );
         assert_eq!(data.dates, vec!["2026-07-29"]);
         assert_eq!(data.sample_counts, vec![1]);
@@ -1004,12 +991,7 @@ mod tests {
             execution_ms: 20.0,
             precise: true,
         }];
-        let data = assemble_latency_timeline(
-            aggregate_latency_samples(samples, false),
-            None,
-            "month",
-            "UTC",
-        );
+        let data = assemble_latency_timeline(aggregate_latency_samples(samples, false), None);
         assert!(!data.last_bucket_partial);
     }
 
@@ -1023,9 +1005,7 @@ mod tests {
         }];
         let data = assemble_latency_timeline(
             aggregate_latency_samples(samples, true),
-            Some(30),
-            "day",
-            "UTC",
+            Some(vec!["2026-07-28".to_string(), "2026-07-29".to_string()]),
         );
         assert!(!data.last_bucket_partial);
     }
