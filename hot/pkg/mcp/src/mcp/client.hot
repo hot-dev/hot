@@ -1,152 +1,659 @@
 ::mcp::client ns
 meta {
-    doc: """MCP client session management. Handles the initialize handshake and provides internal request helpers used by tools, resources, and prompts modules."""
+    doc: """
+MCP client connection and request handling. Supports the modern 2026-07-28
+stateless protocol and legacy initialization-based protocol revisions over the
+same Streamable HTTP endpoint.
+"""
 }
 
 ::rpc ::json-rpc::client
+::rpc-types ::json-rpc::types
 ::types ::mcp::types
+::base64 ::hot::base64
+::regex ::hot::regex
 
+HttpResponse ::hot::http/HttpResponse
 StreamingHttpResponse ::hot::http/StreamingHttpResponse
 
-PROTOCOL_VERSION "2025-11-25"
+MODERN-PROTOCOL-VERSION "2026-07-28"
+LEGACY-PROTOCOL-VERSION "2025-11-25"
+
+META-PROTOCOL-VERSION "io.modelcontextprotocol/protocolVersion"
+META-CLIENT-INFO "io.modelcontextprotocol/clientInfo"
+META-CLIENT-CAPABILITIES "io.modelcontextprotocol/clientCapabilities"
+META-SERVER-INFO "io.modelcontextprotocol/serverInfo"
+META-LOG-LEVEL "io.modelcontextprotocol/logLevel"
+
+HEADER-MISMATCH -32020
+MISSING-CLIENT-CAPABILITY -32021
+UNSUPPORTED-PROTOCOL-VERSION -32022
 
 // ============================================================================
-// Session Initialization
+// Header and schema codecs
 // ============================================================================
 
-// Initialize an MCP session with a remote server.
-// Performs the full handshake: initialize request + initialized notification.
-initialize
+encode-header-value
 meta {
-    doc: """
-Connect to an MCP server and perform the initialize handshake.
-
-Sends an `initialize` request followed by an `initialized` notification.
-Returns a Session that must be passed to all subsequent operations
-(tools/list, tools/call, resources/read, etc.).
-
-**Example**
-
-```hot
-::mcp ::mcp::client
-::types ::mcp::types
-
-// Basic initialization (no client capabilities)
-session ::mcp/initialize(
-  "https://my-server.example.com/mcp",
-  ::types/ClientInfo({name: "my-app", version: "1.0.0"}),
-  null
-)
-session.server-info.name // => "my-server"
-session.protocol-version // => "2025-11-25"
-
-// With client capabilities
-session ::mcp/initialize(
-  "https://my-server.example.com/mcp",
-  ::types/ClientInfo({name: "my-app", version: "1.0.0"}),
-  ::types/ClientCapabilities({roots: {listChanged: true}, sampling: {}})
-)
-session.server-capabilities // => {tools: {...}, resources: {...}, ...}
-```
-"""
+    doc: """Encode an MCP routing header value using the Base64 sentinel when plain ASCII is unsafe."""
 }
-fn (url: Str, client-info: ::types/ClientInfo, capabilities: ::types/ClientCapabilities?): ::types/Session {
-  // Step 1: Send initialize request
+fn (value: Str): Str {
+  safe and(
+    eq(value, trim(value)),
+    ::regex/is-match(value, "^[ -~\\t]+$"),
+    not(and(starts-with(value, "=?base64?"), ends-with(value, "?=")))
+  )
+  if(safe, value, `=?base64?${::base64/encode(Bytes(value))}?=`)
+}
+
+contains-x-mcp-header fn cond (value: Any): Bool {
+  is-map(value) => {
+    or(
+      in("x-mcp-header", keys(value)),
+      some(vals(value), contains-x-mcp-header(%))
+    )
+  }
+
+  is-vec(value) => { some(value, contains-x-mcp-header(%)) }
+  => { false }
+}
+
+valid-header-suffix fn (value: Any): Bool {
+  and(
+    is-str(value),
+    not(is-empty(value)),
+    ::regex/is-match(value, "^[!#$%&'*+.^_`|~A-Za-z0-9-]+$")
+  )
+}
+
+property-header-analysis fn (schema: Any, path: Vec<Str>): Map {
+  cond {
+    not(is-map(schema)) => {
+      {valid: false, defs: [], reason: `Schema at '${join(path, ".")}' is not an object`}
+    }
+    => {
+      has-annotation in("x-mcp-header", keys(schema))
+      annotation get(schema, "x-mcp-header", null)
+      primitive get(schema, "type", null)
+      annotation-valid or(
+        not(has-annotation),
+        and(
+          valid-header-suffix(annotation),
+          in(primitive, ["string", "integer", "boolean"])
+        )
+      )
+      current-defs if(
+        has-annotation,
+        [{path: path, suffix: annotation, primitive: primitive}],
+        []
+      )
+
+      properties get(schema, "properties", null)
+      properties-valid or(is-null(properties), is-map(properties))
+      child-analyses if(
+        is-map(properties),
+        vals(map(properties, (name, child) {
+          property-header-analysis(child, concat(path, [Str(name)]))
+        })),
+        []
+      )
+      children reduce(child-analyses, (acc, analysis) {
+        {
+          valid: and(acc.valid, analysis.valid),
+          defs: concat(acc.defs, analysis.defs),
+          reason: or(acc.reason, analysis.reason)
+        }
+      }, {valid: true, defs: [], reason: null})
+
+      other-values vals(filter-keys(schema, (key) {
+        and(ne(key, "x-mcp-header"), ne(key, "properties"))
+      }))
+      unreachable some(other-values, contains-x-mcp-header(%))
+
+      {
+        valid: and(annotation-valid, properties-valid, children.valid, not(unreachable)),
+        defs: concat(current-defs, children.defs),
+        reason: cond {
+          not(annotation-valid) => {
+            `Invalid x-mcp-header at '${join(path, ".")}'`
+          }
+
+          not(properties-valid) => {
+            `properties at '${join(path, ".")}' is not an object`
+          }
+
+          unreachable => {
+            `x-mcp-header at '${join(path, ".")}' is not reachable through properties`
+          }
+          => { children.reason }
+        }
+      }
+    }
+  }
+}
+
+tool-header-analysis
+meta {
+    doc: """Validate and collect statically reachable `x-mcp-header` annotations from a tool."""
+}
+fn (tool: ::types/Tool): Map {
+  schema or(tool.input-schema, {type: "object", properties: {}})
+  cond {
+    not(is-map(schema)) => {
+      {valid: false, defs: [], reason: "inputSchema is not an object"}
+    }
+
+    in("x-mcp-header", keys(schema)) => {
+      {valid: false, defs: [], reason: "x-mcp-header cannot appear at the schema root"}
+    }
+    => {
+      root-other vals(filter-keys(schema, ne(%, "properties")))
+      root-unreachable some(root-other, contains-x-mcp-header(%))
+      properties get(schema, "properties", {})
+      analyses if(
+        is-map(properties),
+        vals(map(properties, (name, child) {
+          property-header-analysis(child, [Str(name)])
+        })),
+        []
+      )
+      combined reduce(analyses, (acc, analysis) {
+        {
+          valid: and(acc.valid, analysis.valid),
+          defs: concat(acc.defs, analysis.defs),
+          reason: or(acc.reason, analysis.reason)
+        }
+      }, {valid: true, defs: [], reason: null})
+      suffixes map(combined.defs, lowercase(%.suffix))
+      unique eq(length(suffixes), length(distinct(suffixes)))
+      {
+        valid: and(is-map(properties), not(root-unreachable), combined.valid, unique),
+        defs: combined.defs,
+        reason: cond {
+          not(is-map(properties)) => { "inputSchema.properties is not an object" }
+          root-unreachable => { "x-mcp-header is not reachable through properties" }
+          not(unique) => { "x-mcp-header names are not case-insensitively unique" }
+          => { combined.reason }
+        }
+      }
+    }
+  }
+}
+
+tool-parameter-headers
+meta {doc: """Build `Mcp-Param-*` headers for a modern HTTP tool call."""}
+fn (tool: ::types/Tool, arguments: Map?): Map {
+  analysis tool-header-analysis(tool)
+  cond {
+    not(analysis.valid) => {
+      err(`Invalid x-mcp-header definition for tool '${tool.name}': ${analysis.reason}`)
+    }
+    => {
+      reduce(analysis.defs, (headers, definition) {
+        value get-in(or(arguments, {}), definition.path, null)
+        cond {
+          is-null(value) => { headers }
+          eq(definition.primitive, "string") => {
+            if(
+              is-str(value),
+              assoc(headers, `Mcp-Param-${definition.suffix}`, encode-header-value(value)),
+              err(`MCP header argument '${join(definition.path, ".")}' must be a string`)
+            )
+          }
+
+          eq(definition.primitive, "integer") => {
+            if(
+              and(
+                is-int(value),
+                gte(value, -9007199254740991),
+                lte(value, 9007199254740991)
+              ),
+              assoc(headers, `Mcp-Param-${definition.suffix}`, Str(value)),
+              err(`MCP header argument '${join(definition.path, ".")}' must be a safe integer`)
+            )
+          }
+
+          eq(definition.primitive, "boolean") => {
+            if(
+              is-bool(value),
+              assoc(headers, `Mcp-Param-${definition.suffix}`, if(value, "true", "false")),
+              err(`MCP header argument '${join(definition.path, ".")}' must be a boolean`)
+            )
+          }
+          => { headers }
+        }
+      }, {})
+    }
+  }
+}
+
+valid-tool-for-session
+meta {doc: """Return whether a tool definition is valid for the session transport."""}
+fn (session: ::types/Session, tool: ::types/Tool): Bool {
+  or(ne(or(session.era, "legacy"), "modern"), tool-header-analysis(tool).valid)
+}
+
+// ============================================================================
+// Connection negotiation
+// ============================================================================
+
+default-server-info fn (): ::types/ServerInfo {
+  ::types/ServerInfo({name: "unknown", version: "unknown"})
+}
+
+default-server-capabilities fn (): ::types/ServerCapabilities {
+  ::types/ServerCapabilities({})
+}
+
+modern-params fn (params: Map?, client-info: ::types/ClientInfo, capabilities: ::types/ClientCapabilities?, version: Str, log-level: Str?): Map {
+  supplied or(params, {})
+  supplied-meta get(supplied, "_meta", {})
+  automatic {}
+    |> assoc(META-PROTOCOL-VERSION, version)
+    |> assoc(META-CLIENT-INFO, untype(client-info))
+    |> assoc(META-CLIENT-CAPABILITIES, or(untype(capabilities), {}))
+    |> assoc-some(META-LOG-LEVEL, log-level)
+  assoc(supplied, "_meta", merge(supplied-meta, automatic))
+}
+
+connect-legacy fn (url: Str, client-info: ::types/ClientInfo, capabilities: ::types/ClientCapabilities?, base-headers: Map): ::types/Session {
   req ::rpc/request("initialize", {
-    protocolVersion: PROTOCOL_VERSION,
+    protocolVersion: LEGACY-PROTOCOL-VERSION,
     capabilities: or(untype(capabilities), {}),
     clientInfo: untype(client-info)
   })
-
-  response ::rpc/send(url, {}, req)
+  raw ::rpc/send-raw(url, base-headers, req)
+  response ::rpc/parse-http-response(raw)
   result response.result
-
-  server-info ::types/ServerInfo(result.serverInfo)
-  server-caps ::types/ServerCapabilities(or(result.capabilities, {}))
-  session-id get(result, "sessionId", null)
-
-  // Build session headers for all subsequent requests
-  session-headers {"Mcp-Protocol-Version": PROTOCOL_VERSION}
+  selected-version or(result.protocolVersion, LEGACY-PROTOCOL-VERSION)
+  session-id or(
+    get(raw.headers, "mcp-session-id", null),
+    get(raw.headers, "Mcp-Session-Id", null),
+    get(result, "sessionId", null)
+  )
+  headers merge(base-headers, {"Mcp-Protocol-Version": selected-version})
     |> assoc-some("Mcp-Session-Id", session-id)
 
-  // Step 2: Send initialized notification
-  ::rpc/notify(url, session-headers, ::rpc/notification("notifications/initialized", null))
+  ::rpc/notify(
+    url,
+    headers,
+    ::rpc/notification("notifications/initialized", null)
+  )
 
   ::types/Session({
     url: url,
     session-id: session-id,
-    protocol-version: or(result.protocolVersion, PROTOCOL_VERSION),
-    server-info: server-info,
-    server-capabilities: server-caps,
-    headers: session-headers
+    protocol-version: selected-version,
+    server-info: ::types/ServerInfo(or(result.serverInfo, untype(default-server-info()))),
+    server-capabilities: ::types/ServerCapabilities(or(result.capabilities, {})),
+    headers: headers,
+    era: "legacy",
+    client-info: client-info,
+    client-capabilities: capabilities,
+    base-headers: base-headers,
+    discovery: null,
+    log-level: null
   })
 }
 
+modern-session fn (url: Str, client-info: ::types/ClientInfo, capabilities: ::types/ClientCapabilities?, base-headers: Map, log-level: Str?, discovery: Map): ::types/Session {
+  supported get(discovery, "supportedVersions", [])
+  cond {
+    not(in(MODERN-PROTOCOL-VERSION, supported)) => {
+      err(::rpc-types/Error({
+        code: UNSUPPORTED-PROTOCOL-VERSION,
+        message: "MCP server does not support protocol version 2026-07-28",
+        data: {supported: supported, requested: MODERN-PROTOCOL-VERSION}
+      }))
+    }
+    => {
+      result-meta get(discovery, "_meta", {})
+      info get(result-meta, META-SERVER-INFO, untype(default-server-info()))
+      ::types/Session({
+        url: url,
+        session-id: null,
+        protocol-version: MODERN-PROTOCOL-VERSION,
+        server-info: ::types/ServerInfo(info),
+        server-capabilities: ::types/ServerCapabilities(or(discovery.capabilities, {})),
+        headers: base-headers,
+        era: "modern",
+        client-info: client-info,
+        client-capabilities: capabilities,
+        base-headers: base-headers,
+        discovery: discovery,
+        log-level: log-level
+      })
+    }
+  }
+}
+
+response-json-rpc-message
+meta {
+    doc: """Extract a JSON-RPC message from JSON or buffered SSE transport responses."""
+}
+fn (response: HttpResponse): Map? {
+  cond {
+    is-map(response.body) => { response.body }
+    and(
+      is-str(response.body),
+      eq(::rpc/response-media-type(response), "text/event-stream")
+    ) => {
+      ::rpc/sse-json-rpc-response(response.body)
+    }
+    => { null }
+  }
+}
+
+modern-probe fn (url: Str, client-info: ::types/ClientInfo, capabilities: ::types/ClientCapabilities?, base-headers: Map, log-level: Str?): Map {
+  params modern-params({}, client-info, capabilities, MODERN-PROTOCOL-VERSION, log-level)
+  req ::rpc/request("server/discover", params)
+  headers merge(base-headers, {
+    "MCP-Protocol-Version": MODERN-PROTOCOL-VERSION,
+    "Mcp-Method": "server/discover"
+  })
+  raw ::rpc/send-raw(url, headers, req)
+  body or(response-json-rpc-message(raw), {})
+  error get(body, "error", null)
+  error-code if(is-map(error), get(error, "code", null), null)
+  recognized-modern-error and(
+    eq(raw.status, 400),
+    in(error-code, [
+      HEADER-MISMATCH,
+      MISSING-CLIENT-CAPABILITY,
+      UNSUPPORTED-PROTOCOL-VERSION
+    ])
+  )
+
+  cond {
+    and(is-map(body), is-map(get(body, "result", null))) => {
+      {kind: "modern", discovery: body.result}
+    }
+
+    recognized-modern-error => {
+      {kind: "modern-error", error: error}
+    }
+    => { {kind: "legacy"} }
+  }
+}
+
+connect
+meta {
+    doc: """
+Connect to an MCP server.
+
+The default `auto` mode probes the modern 2026-07-28 protocol with
+`server/discover` and falls back to the legacy initialize handshake only when
+the response is not a recognized modern response. Pass `ConnectionOptions`
+with `mode: "modern"` to pin modern behavior or `mode: "legacy"` to skip the
+probe. Caller headers are retained on every request.
+"""
+}
+fn
+(url: Str, client-info: ::types/ClientInfo, capabilities: ::types/ClientCapabilities?): ::types/Session {
+  connect(url, client-info, capabilities, null)
+},
+(url: Str, client-info: ::types/ClientInfo, capabilities: ::types/ClientCapabilities?, options: ::types/ConnectionOptions?): ::types/Session {
+  opts or(untype(options), {})
+  mode get(opts, "mode", "auto")
+  base-headers or(get(opts, "headers", null), {})
+  log-level get(opts, "log-level", null)
+  cond {
+    eq(mode, "legacy") => {
+      connect-legacy(url, client-info, capabilities, base-headers)
+    }
+
+    or(eq(mode, "auto"), eq(mode, "modern")) => {
+      probe modern-probe(url, client-info, capabilities, base-headers, log-level)
+      cond {
+        eq(probe.kind, "modern") => {
+          modern-session(
+            url,
+            client-info,
+            capabilities,
+            base-headers,
+            log-level,
+            probe.discovery
+          )
+        }
+
+        eq(probe.kind, "modern-error") => { err(probe.error) }
+        eq(mode, "auto") => {
+          connect-legacy(url, client-info, capabilities, base-headers)
+        }
+        => {
+          err(::rpc-types/Error({
+            code: UNSUPPORTED-PROTOCOL-VERSION,
+            message: "Server did not respond as a modern MCP server",
+            data: null
+          }))
+        }
+      }
+    }
+    => {
+      err(::rpc-types/Error({
+        code: ::rpc-types/INVALID_PARAMS,
+        message: `Unknown MCP connection mode '${mode}'`,
+        data: null
+      }))
+    }
+  }
+}
+
+// Preserve the original initialization API as an explicitly legacy connection.
+initialize
+meta {
+    doc: """
+Connect using the legacy initialize/initialized handshake.
+
+Use `connect` for automatic modern/legacy negotiation. The four-argument form
+accepts base HTTP headers such as Authorization.
+"""
+}
+fn
+(url: Str, client-info: ::types/ClientInfo, capabilities: ::types/ClientCapabilities?): ::types/Session {
+  connect-legacy(url, client-info, capabilities, {})
+},
+(url: Str, client-info: ::types/ClientInfo, capabilities: ::types/ClientCapabilities?, headers: Map): ::types/Session {
+  connect-legacy(url, client-info, capabilities, headers)
+}
+
 // ============================================================================
-// Internal Request Helpers
+// Request construction and dispatch
 // ============================================================================
 
-// Send a request within an active session and return the result map.
+session-era fn (session: ::types/Session): Str {
+  or(session.era, "legacy")
+}
+
+request-name fn cond (method: Str, params: Map): Str? {
+  or(eq(method, "tools/call"), eq(method, "prompts/get")) => {
+    get(params, "name", null)
+  }
+
+  eq(method, "resources/read") => { get(params, "uri", null) }
+  => { null }
+}
+
+request-context
+meta {doc: """Build the era-specific params and HTTP headers for an MCP request."""}
+fn (session: ::types/Session, method: Str, params: Map?, tool: ::types/Tool?): Map {
+  raw-params or(params, {})
+  cond {
+    eq(session-era(session), "modern") => {
+      encoded-params modern-params(
+        raw-params,
+        session.client-info,
+        session.client-capabilities,
+        session.protocol-version,
+        session.log-level
+      )
+      name request-name(method, raw-params)
+      standard merge(or(session.base-headers, session.headers, {}), {
+        "MCP-Protocol-Version": session.protocol-version,
+        "Mcp-Method": method
+      }) |> assoc-some(
+        "Mcp-Name",
+        if(is-some(name), encode-header-value(name), null)
+      )
+      custom if(
+        and(eq(method, "tools/call"), is-some(tool)),
+        tool-parameter-headers(tool, get(raw-params, "arguments", {})),
+        {}
+      )
+      {params: encoded-params, headers: merge(standard, custom)}
+    }
+    => { {params: params, headers: session.headers} }
+  }
+}
+
+session-request-with-tool
+meta {
+    doc: """Send an MCP request, optionally using a Tool definition for `x-mcp-header` mirroring."""
+}
+fn (session: ::types/Session, method: Str, params: Map?, tool: ::types/Tool?): Map {
+  context request-context(session, method, params, tool)
+  req ::rpc/request(method, context.params)
+  response ::rpc/send(session.url, context.headers, req)
+  result or(response.result, {})
+  cond {
+    and(
+      eq(session-era(session), "modern"),
+      not(in(get(result, "resultType", null), ["complete", "input_required"]))
+    ) => {
+      err(::rpc-types/Error({
+        code: ::rpc-types/INVALID_REQUEST,
+        message: "Modern MCP result is missing a valid resultType",
+        data: result
+      }))
+    }
+    => { result }
+  }
+}
+
 session-request
-meta {
-    doc: """
-Send a JSON-RPC request within an active MCP session. Returns the result map from the response.
-
-This is an internal helper used by the tools, resources, and prompts modules.
-
-**Example**
-
-```hot
-::client ::mcp::client
-result ::client/session-request(session, "ping", null)
-// => {}
-```
-"""
-}
+meta {doc: """Send a request over an active MCP connection and return its result."""}
 fn (session: ::types/Session, method: Str, params: Map?): Map {
-  req ::rpc/request(method, params)
-  response ::rpc/send(session.url, session.headers, req)
-  or(response.result, {})
+  session-request-with-tool(session, method, params, null)
 }
 
-// Send a streaming request within an active session.
-// Returns a StreamingHttpResponse whose .body is an SSE-parsed iterator.
+session-request-stream-with-tool
+meta {doc: """Send a streaming MCP request with optional tool header metadata."""}
+fn (session: ::types/Session, method: Str, params: Map?, tool: ::types/Tool?): StreamingHttpResponse {
+  context request-context(session, method, params, tool)
+  req ::rpc/request(method, context.params)
+  ::rpc/send-stream(session.url, context.headers, req)
+}
+
 session-request-stream
+meta {doc: """Send a streaming request over an active MCP connection."""}
+fn (session: ::types/Session, method: Str, params: Map?): StreamingHttpResponse {
+  session-request-stream-with-tool(session, method, params, null)
+}
+
+mrtr-retry-params
+meta {doc: """Build MRTR retry params without leaking fields from an earlier round."""}
+fn (params: Map?, result: Map, responses: Map?): Map {
+  clean filter-keys(
+    or(params, {}),
+    not(in(%, ["inputResponses", "requestState"]))
+  )
+  with-responses if(
+    is-map(responses),
+    assoc(clean, "inputResponses", responses),
+    clean
+  )
+  with-responses
+    |> assoc-some("requestState", get(result, "requestState", null))
+}
+
+session-request-with-input
 meta {
     doc: """
-Send a streaming JSON-RPC request within an active MCP session.
+Fulfill modern Multi Round-Trip Requests.
 
-Returns a StreamingHttpResponse whose `.body` is an SSE-parsed iterator
-yielding events with `.event`, `.data`, and `.id` fields.
+`handler` receives each requested server-to-client request and returns its
+response. The original request is retried with a fresh JSON-RPC ID,
+`inputResponses`, and the opaque `requestState`.
 """
 }
-fn (session: ::types/Session, method: Str, params: Map?): StreamingHttpResponse {
-  req ::rpc/request(method, params)
-  ::rpc/send-stream(session.url, session.headers, req)
+fn cond (session: ::types/Session, method: Str, params: Map?, handler: Fn, max-rounds: Int): Map {
+  lte(max-rounds, 0) => {
+    err(::rpc-types/Error({
+      code: ::rpc-types/INTERNAL_ERROR,
+      message: "MCP multi round-trip request exceeded its configured limit",
+      data: null
+    }))
+  }
+  => {
+    result session-request(session, method, params)
+    cond {
+      eq(get(result, "resultType", "complete"), "input_required") => {
+        requests get(result, "inputRequests", null)
+        responses if(
+          is-map(requests),
+          map(requests, (key, request) { handler(request) }),
+          null
+        )
+        retry-params mrtr-retry-params(params, result, responses)
+        session-request-with-input(
+          session,
+          method,
+          retry-params,
+          handler,
+          sub(max-rounds, 1)
+        )
+      }
+      => { result }
+    }
+  }
 }
 
-// ============================================================================
-// Utilities
-// ============================================================================
+session-request-with-tool-input
+meta {
+    doc: """MRTR request helper that also mirrors a tool's `x-mcp-header` parameters."""
+}
+fn cond (session: ::types/Session, method: Str, params: Map?, tool: ::types/Tool, handler: Fn, max-rounds: Int): Map {
+  lte(max-rounds, 0) => {
+    err(::rpc-types/Error({
+      code: ::rpc-types/INTERNAL_ERROR,
+      message: "MCP multi round-trip request exceeded its configured limit",
+      data: null
+    }))
+  }
+  => {
+    result session-request-with-tool(session, method, params, tool)
+    cond {
+      eq(get(result, "resultType", "complete"), "input_required") => {
+        requests get(result, "inputRequests", null)
+        responses if(
+          is-map(requests),
+          map(requests, (key, request) { handler(request) }),
+          null
+        )
+        retry-params mrtr-retry-params(params, result, responses)
+        session-request-with-tool-input(
+          session,
+          method,
+          retry-params,
+          tool,
+          handler,
+          sub(max-rounds, 1)
+        )
+      }
+      => { result }
+    }
+  }
+}
 
-// Ping the server to check connectivity.
 ping
 meta {
-    doc: """
-Ping the MCP server to verify the session is alive.
-
-Returns true if the server responds successfully.
-
-**Example**
-
-```hot
-::mcp ::mcp::client
-alive ::mcp/ping(session)
-// alive => true
-```
-"""
+    doc: """Check server connectivity using discovery for modern MCP or ping for legacy MCP."""
 }
 fn (session: ::types/Session): Bool {
-  session-request(session, "ping", null)
+  if(
+    eq(session-era(session), "modern"),
+    session-request(session, "server/discover", {}),
+    session-request(session, "ping", null)
+  )
   true
 }

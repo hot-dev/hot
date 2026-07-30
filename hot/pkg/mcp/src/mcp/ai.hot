@@ -2,8 +2,8 @@
 meta {
     doc: """
     Bridge between an external Model Context Protocol (MCP) server and
-    the Hot agent run-loop. Resolves a server config, performs the MCP
-    initialize handshake, lists the server's tools, and wraps each
+    the Hot agent run-loop. Resolves a server config, negotiates modern
+    discovery or legacy initialization, lists the server's tools, and wraps each
     remote tool as an `::ai::tool/Tool` so it can be merged with
     locally-defined tools and dispatched by `::ai::chat/run-loop`.
 
@@ -141,7 +141,12 @@ fn (resolved: Map): Map {
             fail(`::mcp::ai: server '${label}' has an empty 'url' field`)
         }
         => {
-            { url: url, headers: or(get(config, "headers"), {}) }
+            {
+                url: url,
+                headers: or(get(config, "headers"), {}),
+                mode: get(config, "mode", "auto"),
+                log-level: get(config, "log-level", null)
+            }
         }
     }
 }
@@ -169,9 +174,9 @@ fn (session: ::mcp-types/Session, remote: ::mcp-types/Tool): ::ai-tool/Tool {
         name: tool-name,
         description: or(remote.description, remote.title, null),
         input-schema: or(remote.input-schema, {type: "object", properties: {}}),
-        output-schema: null,
+        output-schema: remote.output-schema,
         fn: (input: Map) {
-            result ::mcp-tools/call(session, tool-name, input)
+            result ::mcp-tools/call-tool(session, remote, input)
             cond {
                 or(result.is-error, false) => { err(result) }
                 => { or(result.structured-content, result.content) }
@@ -197,7 +202,16 @@ meta {
 }
 fn (config: Map): Vec<::ai-tool/Tool> {
     validated validate-config({ name: null, config: config })
-    session ::client/initialize(validated.url, CLIENT-INFO, null)
+    session ::client/connect(
+        validated.url,
+        CLIENT-INFO,
+        null,
+        ::mcp-types/ConnectionOptions({
+            mode: validated.mode,
+            headers: validated.headers,
+            log-level: validated.log-level
+        })
+    )
     remote-tools ::mcp-tools/list-all(session)
     map(remote-tools, (rt) { wrap-remote-tool(session, rt) })
 }
@@ -230,7 +244,16 @@ fn (specs: Vec<Any>): Vec<::ai-tool/Tool> {
         => { reduce(specs, (acc, spec) {
             resolved resolve-spec(spec)
             validated validate-config(resolved)
-            session ::client/initialize(validated.url, CLIENT-INFO, null)
+            session ::client/connect(
+                validated.url,
+                CLIENT-INFO,
+                null,
+                ::mcp-types/ConnectionOptions({
+                    mode: validated.mode,
+                    headers: validated.headers,
+                    log-level: validated.log-level
+                })
+            )
             remote-tools ::mcp-tools/list-all(session)
             wrapped map(remote-tools, (rt) { wrap-remote-tool(session, rt) })
             concat(acc, wrapped)

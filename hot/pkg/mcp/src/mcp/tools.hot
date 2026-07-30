@@ -31,6 +31,7 @@ first(tools).name // => "get_weather"
 fn (session: ::types/Session): Vec<::types/Tool> {
   result ::client/session-request(session, "tools/list", {})
   map(get(result, "tools", []), ::types/Tool(%))
+    |> filter(::client/valid-tool-for-session(session, %))
 }
 
 // List tools with explicit cursor for manual pagination.
@@ -59,8 +60,13 @@ fn (session: ::types/Session, cursor: Str?): Map {
   params {} |> assoc-some("cursor", cursor)
   result ::client/session-request(session, "tools/list", params)
   {
-    tools: map(get(result, "tools", []), ::types/Tool(%)),
-    next-cursor: get(result, "nextCursor", null)
+    tools: map(get(result, "tools", []), ::types/Tool(%))
+      |> filter(::client/valid-tool-for-session(session, %)),
+    next-cursor: get(result, "nextCursor", null),
+    result-type: get(result, "resultType", "complete"),
+    ttl-ms: get(result, "ttlMs", null),
+    cache-scope: get(result, "cacheScope", null),
+    meta: get(result, "_meta", null)
   }
 }
 
@@ -93,6 +99,7 @@ collect-pages fn cond (session: ::types/Session, method: Str, key: Str, cursor: 
     params {} |> assoc-some("cursor", cursor)
     result ::client/session-request(session, method, params)
     items map(get(result, key, []), ::types/Tool(%))
+      |> filter(::client/valid-tool-for-session(session, %))
     combined concat(acc, items)
     next-cursor get(result, "nextCursor", null)
     if(is-null(next-cursor), combined, collect-pages(session, method, key, next-cursor, combined))
@@ -102,6 +109,43 @@ collect-pages fn cond (session: ::types/Session, method: Str, key: Str, cursor: 
 // ============================================================================
 // Tool Calling
 // ============================================================================
+
+tool-result fn (result: Map): ::types/ToolResult {
+  ::types/ToolResult({
+    content: map(get(result, "content", []), ::types/ToolContent(%)),
+    is-error: get(result, "isError", false),
+    structured-content: get(result, "structuredContent", null),
+    result-type: get(result, "resultType", "complete"),
+    input-requests: get(result, "inputRequests", null),
+    request-state: get(result, "requestState", null)
+  })
+}
+
+find-tool fn (session: ::types/Session, name: Str): ::types/Tool {
+  tool find-first(list-all(session), eq(%.name, name))
+  if(
+    is-some(tool),
+    tool,
+    err(`MCP tool '${name}' was not returned by tools/list`)
+  )
+}
+
+call-tool
+meta {
+    doc: """
+Call a previously listed Tool definition.
+
+Prefer this form when retaining the Tool is convenient: modern Streamable HTTP
+uses its `input-schema` to mirror any `x-mcp-header` parameters.
+"""
+}
+fn (session: ::types/Session, tool: ::types/Tool, arguments: Map?): ::types/ToolResult {
+  result ::client/session-request-with-tool(session, "tools/call", {
+    name: tool.name,
+    arguments: or(arguments, {})
+  }, tool)
+  tool-result(result)
+}
 
 // Call a tool and wait for the full result.
 call
@@ -126,20 +170,67 @@ result ::tools/call(session, "list_files", {})
 """
 }
 fn (session: ::types/Session, name: Str, arguments: Map?): ::types/ToolResult {
-  result ::client/session-request(session, "tools/call", {
-    name: name,
-    arguments: or(arguments, {})
-  })
-  ::types/ToolResult({
-    content: map(get(result, "content", []), ::types/ToolContent(%)),
-    is-error: get(result, "isError", false),
-    structured-content: get(result, "structuredContent", null)
-  })
+  cond {
+    eq(or(session.era, "legacy"), "modern") => {
+      call-tool(session, find-tool(session, name), arguments)
+    }
+    => {
+      result ::client/session-request(session, "tools/call", {
+        name: name,
+        arguments: or(arguments, {})
+      })
+      tool-result(result)
+    }
+  }
+}
+
+call-tool-with-input
+meta {
+    doc: """Call a Tool and fulfill modern Multi Round-Trip input requests with `handler`."""
+}
+fn (session: ::types/Session, tool: ::types/Tool, arguments: Map?, handler: Fn, max-rounds: Int): ::types/ToolResult {
+  result ::client/session-request-with-tool-input(
+    session,
+    "tools/call",
+    {name: tool.name, arguments: or(arguments, {})},
+    tool,
+    handler,
+    max-rounds
+  )
+  tool-result(result)
+}
+
+call-with-input
+meta {
+    doc: """Call a named tool and fulfill modern Multi Round-Trip input requests with `handler`."""
+}
+fn (session: ::types/Session, name: Str, arguments: Map?, handler: Fn, max-rounds: Int): ::types/ToolResult {
+  tool find-tool(session, name)
+  call-tool-with-input(session, tool, arguments, handler, max-rounds)
 }
 
 // Call a tool with SSE streaming. Returns an iterator of StreamEvent values.
 // The stream carries progress notifications, log messages, and the final
 // JSON-RPC response. Use for-each to process events in real time.
+call-stream-tool
+meta {
+    doc: """Stream a tool call using a retained Tool definition for modern routing headers."""
+}
+fn (session: ::types/Session, tool: ::types/Tool, arguments: Map?): Iter {
+  response ::client/session-request-stream-with-tool(session, "tools/call", {
+    name: tool.name,
+    arguments: or(arguments, {})
+  }, tool)
+  Iter(map(collect(response.body), (frame) {
+    parsed from-json(frame.data)
+    ::types/StreamEvent({
+      event: frame.event,
+      data: parsed,
+      id: frame.id
+    })
+  }))
+}
+
 call-stream
 meta {
     doc: """
@@ -166,10 +257,15 @@ last-event.data.result // => final tool result
 """
 }
 fn (session: ::types/Session, name: Str, arguments: Map?): Iter {
-  response ::client/session-request-stream(session, "tools/call", {
-    name: name,
-    arguments: or(arguments, {})
-  })
+  tool if(
+    eq(or(session.era, "legacy"), "modern"),
+    find-tool(session, name),
+    null
+  )
+  response ::client/session-request-stream-with-tool(session, "tools/call", {
+      name: name,
+      arguments: or(arguments, {})
+    }, tool)
   // response.body is an SSE-parsed iterator yielding
   // {event: "message", data: "<json-rpc-json>", id: "..."}
   Iter(map(collect(response.body), (frame) {

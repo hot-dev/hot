@@ -13,6 +13,7 @@ workspace = true
 [dependencies]
 ahash = { workspace = true }
 axum = { workspace = true }
+base64 = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
 hot = { workspace = true, features = ["s3-storage"] }
@@ -28,6 +29,8 @@ tempfile = { workspace = true }
 tower = { workspace = true, features = ["limit"] }
 utoipa = { workspace = true }
 utoipa-swagger-ui = { workspace = true }
+url = { workspace = true }
+jsonschema = { workspace = true }
 ipnet = "2.12.0"
 
 [dev-dependencies]

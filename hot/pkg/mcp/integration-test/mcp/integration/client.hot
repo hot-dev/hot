@@ -5,12 +5,31 @@ meta ["test"]
 // Integration Tests for MCP Client — Session Initialization
 // =============================================================================
 // These tests require an MCP server.
-// Set MCP_TEST_SERVER_URL in .env (e.g. http://localhost:4681/mcp/local/my-service)
+// Set MCP_TEST_SERVER_URL in .env
+// (e.g. http://localhost:4681/mcp/local/development/my-service)
 
 ::mcp ::mcp::client
 ::types ::mcp::types
 
 MCP_TEST_SERVER_URL ::hot::env/get("MCP_TEST_SERVER_URL", "")
+
+test-connect-auto-negotiates-modern
+meta ["test"]
+fn () {
+  assert(MCP_TEST_SERVER_URL, "Set MCP_TEST_SERVER_URL in .env for MCP integration tests")
+
+  session ::mcp/connect(
+    MCP_TEST_SERVER_URL,
+    ::types/ClientInfo({name: "mcp-test", version: "1.0.0"}),
+    ::types/ClientCapabilities({elicitation: {}}),
+    ::types/ConnectionOptions({mode: "modern", log-level: "info"})
+  )
+
+  assert-eq("modern", session.era, "2026-07-28 server should use the modern codec")
+  assert-eq("2026-07-28", session.protocol-version, "modern version should be negotiated")
+  assert(session.discovery, "modern server discovery should be retained")
+  assert(::mcp/ping(session), "modern discovery ping should succeed")
+}
 
 test-initialize-returns-session
 meta ["test"]

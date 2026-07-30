@@ -1,0 +1,63 @@
+::json-rpc::test::client ns
+meta ["test"]
+
+::client ::json-rpc::client
+::types ::json-rpc::types
+HttpResponse ::hot::http/HttpResponse
+
+test-buffered-sse-returns-final-response
+meta ["test"]
+fn () {
+    response HttpResponse({
+        status: 200,
+        headers: {"content-type": "text/event-stream; charset=utf-8"},
+        body: """event: message
+data: {"jsonrpc":"2.0","method":"notifications/progress","params":{"progress":1}}
+
+event: message
+data: {"jsonrpc":"2.0","id":"call-1","result":{"resultType":"complete","content":[]}}
+
+"""
+    })
+    parsed ::client/parse-http-response(response)
+    assert-eq("complete", parsed.result.resultType)
+}
+
+test-non-success-json-rpc-error-is-preserved
+meta ["test"]
+fn () {
+    response HttpResponse({
+        status: 400,
+        headers: {"content-type": "application/json"},
+        body: {
+            jsonrpc: "2.0",
+            id: "discover-1",
+            error: {
+                code: -32022,
+                message: "Unsupported protocol version",
+                data: {supported: ["2026-07-28"]}
+            }
+        }
+    })
+    attempt ::hot::internal::exec/contain(::client/parse-http-response, [response])
+    error err-value(attempt)
+    assert(is-err(attempt))
+    assert-eq(-32022, error.code)
+    assert-eq(["2026-07-28"], error.data.supported)
+}
+
+test-non-json-http-error-becomes-internal-error
+meta ["test"]
+fn () {
+    response HttpResponse({
+        status: 502,
+        headers: {"content-type": "text/plain"},
+        body: "upstream unavailable"
+    })
+    attempt ::hot::internal::exec/contain(::client/parse-http-response, [response])
+    error err-value(attempt)
+    assert(is-err(attempt))
+    assert-eq(::types/INTERNAL_ERROR, error.code)
+    assert-eq("HTTP 502", error.message)
+    assert-eq("upstream unavailable", error.data)
+}

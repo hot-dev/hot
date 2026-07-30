@@ -1,0 +1,290 @@
+::mcp::test::client ns
+meta {
+    doc: """
+Pure-Hot tests for MCP protocol-era request construction and header codecs.
+Network negotiation is covered by the integration suite.
+"""
+}
+
+::client ::mcp::client
+::types ::mcp::types
+::rpc ::json-rpc::client
+HttpResponse ::hot::http/HttpResponse
+
+test-client-info ::types/ClientInfo({
+    name: "hot-test",
+    version: "1.0.0"
+})
+
+modern-session fn (): ::types/Session {
+    ::types/Session({
+        url: "https://mcp.example.com/mcp",
+        session-id: null,
+        protocol-version: "2026-07-28",
+        server-info: ::types/ServerInfo({name: "test-server", version: "1.0.0"}),
+        server-capabilities: ::types/ServerCapabilities({tools: {}}),
+        headers: {Authorization: "Bearer secret"},
+        era: "modern",
+        client-info: test-client-info,
+        client-capabilities: ::types/ClientCapabilities({elicitation: {form: {}}}),
+        base-headers: {Authorization: "Bearer secret"},
+        discovery: {supportedVersions: ["2026-07-28"]},
+        log-level: "info"
+    })
+}
+
+legacy-session fn (): ::types/Session {
+    ::types/Session({
+        url: "https://mcp.example.com/mcp",
+        session-id: "session-1",
+        protocol-version: "2025-11-25",
+        server-info: ::types/ServerInfo({name: "test-server", version: "1.0.0"}),
+        server-capabilities: ::types/ServerCapabilities({tools: {}}),
+        headers: {
+            Authorization: "Bearer secret",
+            "Mcp-Protocol-Version": "2025-11-25",
+            "Mcp-Session-Id": "session-1"
+        },
+        era: "legacy",
+        client-info: test-client-info,
+        client-capabilities: null,
+        base-headers: {Authorization: "Bearer secret"},
+        discovery: null,
+        log-level: null
+    })
+}
+
+routed-tool fn (): ::types/Tool {
+    ::types/Tool({
+        name: "search",
+        description: "Search a region",
+        input-schema: {
+            type: "object",
+            properties: {
+                routing: {
+                    type: "object",
+                    properties: {
+                        region: {type: "string", "x-mcp-header": "Region"},
+                        priority: {type: "integer", "x-mcp-header": "Priority"},
+                        dryRun: {type: "boolean", "x-mcp-header": "Dry-Run"}
+                    }
+                }
+            }
+        }
+    })
+}
+
+test-header-value-encoding
+meta ["test"]
+fn () {
+    assert-eq("us-west1", ::client/encode-header-value("us-west1"))
+    assert-eq(
+        "=?base64?5YyX57Gz?=",
+        ::client/encode-header-value("北米"),
+        "non-ASCII values use the exact MCP Base64 sentinel"
+    )
+    assert-eq(
+        "=?base64?IHBhZGRlZCA=?=",
+        ::client/encode-header-value(" padded "),
+        "leading and trailing whitespace must be encoded"
+    )
+    assert-eq(
+        "=?base64?PT9iYXNlNjQ/bGl0ZXJhbD89?=",
+        ::client/encode-header-value("=?base64?literal?="),
+        "sentinel-looking literal values must be encoded"
+    )
+}
+
+test-buffered-sse-json-rpc-response
+meta ["test"]
+fn () {
+    response HttpResponse({
+        status: 200,
+        headers: {"content-type": "text/event-stream; charset=utf-8"},
+        body: """event: message
+data: {"jsonrpc":"2.0","method":"notifications/message","params":{"level":"info"}}
+
+event: message
+data: {"jsonrpc":"2.0","id":"call-1","result":{"resultType":"complete","content":[]}}
+
+"""
+    })
+    parsed ::rpc/parse-http-response(response)
+    assert-eq("complete", parsed.result.resultType)
+}
+
+test-modern-discovery-message-from-buffered-sse
+meta ["test"]
+fn () {
+    response HttpResponse({
+        status: 200,
+        headers: {"Content-Type": "text/event-stream"},
+        body: """event: message
+data: {"jsonrpc":"2.0","method":"notifications/message","params":{"level":"info"}}
+
+event: message
+data: {"jsonrpc":"2.0","id":"discover-1","result":{"resultType":"complete","supportedVersions":["2026-07-28"],"capabilities":{}}}
+
+"""
+    })
+    message ::client/response-json-rpc-message(response)
+    assert-eq(["2026-07-28"], message.result.supportedVersions)
+}
+
+test-mrtr-retry-params-replace-earlier-round
+meta ["test"]
+fn () {
+    params {
+        name: "tool",
+        arguments: {},
+        inputResponses: {old: {value: 1}},
+        requestState: "old-state"
+    }
+
+    without-state ::client/mrtr-retry-params(
+        params,
+        {resultType: "input_required", inputRequests: {next: {}}},
+        {next: {value: 2}}
+    )
+    assert-eq(null, get(without-state, "requestState", null))
+    assert-eq(null, get(without-state.inputResponses, "old", null))
+    assert-eq(2, without-state.inputResponses.next.value)
+
+    with-state ::client/mrtr-retry-params(
+        params,
+        {resultType: "input_required", requestState: "new-state"},
+        null
+    )
+    assert-eq("new-state", with-state.requestState)
+    assert-eq(null, get(with-state, "inputResponses", null))
+}
+
+test-tool-header-analysis-and-values
+meta ["test"]
+fn () {
+    tool routed-tool()
+    analysis ::client/tool-header-analysis(tool)
+    assert(analysis.valid, "nested properties are valid")
+    assert-eq(3, length(analysis.defs))
+
+    headers ::client/tool-parameter-headers(tool, {
+        routing: {region: "北米", priority: 42, dryRun: true}
+    })
+    assert-eq("=?base64?5YyX57Gz?=", get(headers, "Mcp-Param-Region"))
+    assert-eq("42", get(headers, "Mcp-Param-Priority"))
+    assert-eq("true", get(headers, "Mcp-Param-Dry-Run"))
+}
+
+test-tool-header-safe-integer-boundaries
+meta ["test"]
+fn () {
+    tool routed-tool()
+    min-header ::client/tool-parameter-headers(tool, {
+        routing: {priority: -9007199254740991}
+    })
+    max-header ::client/tool-parameter-headers(tool, {
+        routing: {priority: 9007199254740991}
+    })
+    assert-eq("-9007199254740991", get(min-header, "Mcp-Param-Priority"))
+    assert-eq("9007199254740991", get(max-header, "Mcp-Param-Priority"))
+
+    outcome ::hot::internal::exec/contain(
+        ::client/tool-parameter-headers,
+        [tool, {routing: {priority: -9223372036854775808}}]
+    )
+    assert(is-err(outcome), "out-of-range integers must be rejected without overflow")
+}
+
+test-invalid-tool-header-definitions
+meta ["test"]
+fn () {
+    duplicate ::types/Tool({
+        name: "duplicate",
+        input-schema: {
+            type: "object",
+            properties: {
+                a: {type: "string", "x-mcp-header": "Tenant"},
+                b: {type: "string", "x-mcp-header": "tenant"}
+            }
+        }
+    })
+    assert(
+        not(::client/tool-header-analysis(duplicate).valid),
+        "header suffixes are case-insensitively unique"
+    )
+
+    unreachable ::types/Tool({
+        name: "unreachable",
+        input-schema: {
+            type: "object",
+            properties: {
+                route: {
+                    oneOf: [{type: "string", "x-mcp-header": "Route"}]
+                }
+            }
+        }
+    })
+    assert(
+        not(::client/tool-header-analysis(unreachable).valid),
+        "annotations behind composition keywords are invalid"
+    )
+}
+
+test-modern-request-context
+meta ["test"]
+fn () {
+    context ::client/request-context(
+        modern-session(),
+        "tools/call",
+        {
+            name: "météo",
+            arguments: {
+                routing: {region: "北米", priority: 7, dryRun: false}
+            },
+            _meta: {
+                "app.example/custom": "kept",
+                "io.modelcontextprotocol/protocolVersion": "wrong"
+            }
+        },
+        routed-tool()
+    )
+    assert-eq("Bearer secret", context.headers.Authorization, "base auth retained")
+    assert-eq("2026-07-28", get(context.headers, "MCP-Protocol-Version"))
+    assert-eq("tools/call", get(context.headers, "Mcp-Method"))
+    assert-eq("=?base64?bcOpdMOpbw==?=", get(context.headers, "Mcp-Name"))
+    assert-eq("=?base64?5YyX57Gz?=", get(context.headers, "Mcp-Param-Region"))
+    assert-eq(
+        "2026-07-28",
+        get(context.params._meta, "io.modelcontextprotocol/protocolVersion")
+    )
+    assert-eq(
+        "hot-test",
+        get(context.params._meta, "io.modelcontextprotocol/clientInfo").name
+    )
+    assert-eq(
+        "info",
+        get(context.params._meta, "io.modelcontextprotocol/logLevel")
+    )
+    assert-eq("kept", get(context.params._meta, "app.example/custom"))
+}
+
+test-legacy-request-context
+meta ["test"]
+fn () {
+    context ::client/request-context(
+        legacy-session(),
+        "tools/call",
+        {name: "search", arguments: {}},
+        routed-tool()
+    )
+    assert-eq("2025-11-25", get(context.headers, "Mcp-Protocol-Version"))
+    assert-eq("session-1", get(context.headers, "Mcp-Session-Id"))
+    assert(
+        not(in("Mcp-Method", keys(context.headers))),
+        "modern routing headers are not added to legacy requests"
+    )
+    assert(
+        not(in("_meta", keys(context.params))),
+        "modern per-request metadata is not added to legacy requests"
+    )
+}

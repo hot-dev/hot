@@ -58,7 +58,11 @@ fn (session: ::types/Session, cursor: Str?): Map {
   result ::client/session-request(session, "resources/list", params)
   {
     resources: map(get(result, "resources", []), ::types/Resource(%)),
-    next-cursor: get(result, "nextCursor", null)
+    next-cursor: get(result, "nextCursor", null),
+    result-type: get(result, "resultType", "complete"),
+    ttl-ms: get(result, "ttlMs", null),
+    cache-scope: get(result, "cacheScope", null),
+    meta: get(result, "_meta", null)
   }
 }
 
@@ -100,6 +104,23 @@ collect-pages fn cond (session: ::types/Session, cursor: Str?, acc: Vec): Vec {
 // Resource Reading
 // ============================================================================
 
+read-result
+meta {
+    doc: """Read a resource and retain its modern result type, cache hints, and metadata."""
+}
+fn (session: ::types/Session, uri: Str): Map {
+  result ::client/session-request(session, "resources/read", {uri: uri})
+  {
+    contents: map(get(result, "contents", []), ::types/ResourceContent(%)),
+    result-type: get(result, "resultType", "complete"),
+    input-requests: get(result, "inputRequests", null),
+    request-state: get(result, "requestState", null),
+    ttl-ms: get(result, "ttlMs", null),
+    cache-scope: get(result, "cacheScope", null),
+    meta: get(result, "_meta", null)
+  }
+}
+
 // Read a resource by URI.
 read
 meta {
@@ -122,7 +143,21 @@ content.text // => "# My Project\n..."
 """
 }
 fn (session: ::types/Session, uri: Str): Vec<::types/ResourceContent> {
-  result ::client/session-request(session, "resources/read", {uri: uri})
+  read-result(session, uri).contents
+}
+
+read-with-input
+meta {
+    doc: """Read a resource while fulfilling modern Multi Round-Trip input requests."""
+}
+fn (session: ::types/Session, uri: Str, handler: Fn, max-rounds: Int): Vec<::types/ResourceContent> {
+  result ::client/session-request-with-input(
+    session,
+    "resources/read",
+    {uri: uri},
+    handler,
+    max-rounds
+  )
   map(get(result, "contents", []), ::types/ResourceContent(%))
 }
 
@@ -131,6 +166,23 @@ fn (session: ::types/Session, uri: Str): Vec<::types/ResourceContent> {
 // ============================================================================
 
 // List resource URI templates.
+list-templates-result
+meta {doc: """List resource templates and retain pagination/cache metadata."""}
+fn (session: ::types/Session): Map {
+  result ::client/session-request(session, "resources/templates/list", {})
+  {
+    templates: map(
+      get(result, "resourceTemplates", []),
+      ::types/ResourceTemplate(%)
+    ),
+    next-cursor: get(result, "nextCursor", null),
+    result-type: get(result, "resultType", "complete"),
+    ttl-ms: get(result, "ttlMs", null),
+    cache-scope: get(result, "cacheScope", null),
+    meta: get(result, "_meta", null)
+  }
+}
+
 list-templates
 meta {
     doc: """
@@ -150,6 +202,5 @@ first(templates).uri-template // => "file:///{path}"
 """
 }
 fn (session: ::types/Session): Vec<::types/ResourceTemplate> {
-  result ::client/session-request(session, "resources/templates/list", {})
-  map(get(result, "resourceTemplates", []), ::types/ResourceTemplate(%))
+  list-templates-result(session).templates
 }

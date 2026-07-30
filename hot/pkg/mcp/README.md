@@ -1,13 +1,15 @@
 # mcp
 
-MCP client for connecting to Model Context Protocol servers from Hot. Supports tool discovery and invocation, resource reading, prompt retrieval, and SSE streaming.
+MCP client for connecting to Model Context Protocol servers from Hot. It supports
+the stateless 2026-07-28 protocol and the legacy initialize-based protocols on
+the same API.
 
 ## Installation
 
 Add this to the `deps` in your `hot.hot` file:
 
 ```hot
-"hot.dev/mcp": "1.3.1"
+"hot.dev/mcp": "1.4.0"
 ```
 
 This package depends on `hot.dev/json-rpc` for JSON-RPC 2.0 message framing (installed automatically).
@@ -16,18 +18,31 @@ This package depends on `hot.dev/json-rpc` for JSON-RPC 2.0 message framing (ins
 
 ### Connect to an MCP Server
 
+`connect` probes `server/discover` and uses 2026-07-28 when available. It only
+falls back to the legacy initialize handshake when the endpoint is not
+recognizable as a modern server.
+
 ```hot
 ::mcp ::mcp::client
 ::types ::mcp::types
 
-session ::mcp/initialize(
+session ::mcp/connect(
   "https://my-server.example.com/mcp",
   types/ClientInfo({name: "my-app", version: "1.0.0"}),
-  null
+  types/ClientCapabilities({elicitation: {form: {}}}),
+  types/ConnectionOptions({
+    headers: {"Authorization": "Bearer ..."},
+    log-level: "info"
+  })
 )
 
 println(session.server-info.name)
+println(session.protocol-version)
 ```
+
+Use `::mcp/initialize(...)` when a caller must explicitly use the legacy
+handshake. `ConnectionOptions.mode` can also be set to `"modern"` or
+`"legacy"` to pin an era.
 
 ### Discover and Call Tools
 
@@ -39,6 +54,33 @@ for-each(tools, fn (tool) { println(tool.name) })
 
 result ::tools/call(session, "get_weather", {location: "Portland"})
 println(first(result.content).text)
+```
+
+Modern calls automatically emit `MCP-Protocol-Version`, `Mcp-Method`,
+`Mcp-Name`, and any valid `x-mcp-header` parameter headers required by the
+listed tool definition.
+
+### Fulfill Multi Round-Trip Input
+
+The 2026-07-28 protocol returns server-to-client requests as an
+`input_required` result. `call-with-input` handles the retry loop, creates a
+fresh JSON-RPC ID for every round, and echoes the opaque request state.
+
+```hot
+result ::tools/call-with-input(
+  session,
+  "publish_report",
+  {report-id: "rpt-42"},
+  fn (request) {
+    cond {
+      eq(request.method, "elicitation/create") => {
+        {action: "accept", content: {confirmed: true}}
+      }
+      => { err(`Unsupported input request: ${request.method}`) }
+    }
+  },
+  3
+)
 ```
 
 ### Stream a Tool Call
@@ -85,6 +127,21 @@ messages ::prompts/get-prompt(session, "code-review", {language: "hot", code: "a
 for-each(messages, fn (m) { println(`${m.role}: ${m.content.text}`) })
 ```
 
+### Listen for Modern Notifications
+
+```hot
+::subscriptions ::mcp::subscriptions
+::types ::mcp::types
+
+events ::subscriptions/listen(
+  session,
+  ::types/SubscriptionFilter({tools-list-changed: true})
+)
+for-each(events, fn (event) { println(event.data) })
+```
+
+The helper checks each opt-in against the capabilities returned by discovery.
+
 ### Paginate Through All Tools
 
 ```hot
@@ -111,7 +168,7 @@ if(is-some(first-page.next-cursor),
 
 run fn () {
   // Connect to an MCP server
-  session ::mcp/initialize(
+  session ::mcp/connect(
     "https://my-server.example.com/mcp",
     types/ClientInfo({name: "my-app", version: "1.0.0"}),
     null
@@ -138,15 +195,21 @@ run fn () {
 
 | Module | Description |
 |--------|-------------|
-| `::mcp::client` | Session initialization, ping, internal request helpers |
-| `::mcp::tools` | Tool listing (with pagination), calling, and SSE streaming |
-| `::mcp::resources` | Resource listing, reading, and URI template discovery |
-| `::mcp::prompts` | Prompt listing and retrieval with arguments |
+| `::mcp::client` | Automatic discovery, legacy initialization, request codecs, and MRTR helpers |
+| `::mcp::tools` | Tool listing, validated routing headers, calls, MRTR, and SSE streaming |
+| `::mcp::resources` | Resource listing, reading, caching metadata, and MRTR |
+| `::mcp::prompts` | Prompt listing, retrieval, caching metadata, and MRTR |
+| `::mcp::subscriptions` | Capability-gated 2026-07-28 notification streams |
 | `::mcp::types` | All MCP type definitions (Session, Tool, Resource, Prompt, etc.) |
 
 ## Protocol
 
-This package implements the [Model Context Protocol](https://modelcontextprotocol.io/) (MCP) Streamable HTTP transport (spec revision 2025-11-25). It uses the `hot.dev/json-rpc` package for JSON-RPC 2.0 message framing.
+This package implements the [Model Context Protocol](https://modelcontextprotocol.io/)
+2026-07-28 stateless Streamable HTTP protocol and remains compatible with
+initialize-based Streamable HTTP servers using 2025-11-25, 2025-06-18, or
+2025-03-26. The Hot server separately retains its deprecated 2024-11-05
+HTTP+SSE endpoints for older clients. The package uses `hot.dev/json-rpc` for
+JSON-RPC 2.0 framing.
 
 ## Documentation
 

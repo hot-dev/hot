@@ -155,6 +155,48 @@ fn (params: SearchParams): Vec {
 }
 ```
 
+For MCP 2026-07-28, Hot validates each advertised input and output schema as
+JSON Schema. Tool results with an `output-schema` are validated before they are
+returned. Unlike older MCP clients, modern clients can receive any JSON value
+in `structuredContent`; Hot automatically wraps non-object results as
+`{"result": ...}` only when serving a legacy client.
+
+### Routing Parameters with `x-mcp-header`
+
+The 2026-07-28 Streamable HTTP transport can mirror selected tool arguments
+into headers for routing by a load balancer, gateway, or WAF. Put
+`x-mcp-header` on a statically reachable string, integer, or boolean property
+in a custom input schema:
+
+```hot
+route-query
+meta {
+  mcp: {
+    service: "analytics",
+    input-schema: {
+      type: "object",
+      properties: {
+        tenant: {
+          type: "string",
+          "x-mcp-header": "Tenant"
+        },
+        query: {type: "string"}
+      },
+      required: ["tenant", "query"]
+    }
+  }
+}
+fn (tenant: Str, query: Str): Map {
+  // A modern client sends Mcp-Param-Tenant with the same value.
+  run-query(tenant, query)
+}
+```
+
+Hot checks the mirrored header against the JSON body before invoking the tool.
+Header names must be unique HTTP tokens. Values unsafe for an HTTP header are
+encoded using the MCP `=?base64?...?=` sentinel. Do not mark credentials,
+tokens, or PII for header mirroring.
+
 ## Services
 
 Services are the organizational unit for MCP tools. Each service gets its own MCP endpoint and groups related tools together.
@@ -352,34 +394,102 @@ Non-sensitive headers (like `content-type`, `user-agent`) and other `hot.request
 
 ### Protocol
 
-The endpoint implements MCP over JSON-RPC 2.0 and supports both MCP transport styles:
+The same Hot endpoint supports the new stateless protocol and existing MCP
+clients. A 2026-07-28 request is selected by its required request metadata and
+routing headers; legacy requests continue through their initialize-based
+codec.
 
-| Transport | Endpoint(s) | Notes |
-|-----------|-------------|-------|
-| Streamable HTTP (2025-03-26) | `POST /mcp/{org}/{env}/{service}` | Modern MCP transport. Requests and responses use one HTTP endpoint. `tools/call` may return `text/event-stream`. |
-| HTTP+SSE (2024-11-05, deprecated) | `GET /mcp/{org}/{env}/{service}` + `POST /mcp/{org}/{env}/{service}/messages?sessionId=...` | Deprecated transport for older clients. `GET` opens SSE and returns an `endpoint` event; `POST` sends JSON-RPC messages; responses arrive on the SSE stream. |
+| Protocol era | Endpoint(s) | Notes |
+|--------------|-------------|-------|
+| Stateless Streamable HTTP (2026-07-28) | `POST /mcp/{org}/{env}/{service}` | Begins with `server/discover`; every request carries version, client metadata, capabilities, and routing headers. No MCP session is created. |
+| Legacy Streamable HTTP (2025-03-26 through 2025-11-25) | `POST /mcp/{org}/{env}/{service}` | Uses `initialize` and `notifications/initialized`. Existing clients continue to work on the same URL. |
+| HTTP+SSE (2024-11-05, deprecated) | `GET /mcp/{org}/{env}/{service}` + `POST /mcp/{org}/{env}/{service}/messages?sessionId=...` | `GET` opens SSE and returns an `endpoint` event; `POST` sends JSON-RPC messages; responses arrive on the SSE stream. |
 
 Supported methods:
 
 | Method | Description |
 |--------|-------------|
-| `initialize` | Initialize the MCP session, returns server capabilities |
-| `ping` | Health/liveness check, returns empty object `{}` |
-| `notifications/initialized` | Client acknowledges initialization |
+| `server/discover` | Discover 2026-07-28 versions and server capabilities |
+| `initialize` | Initialize a legacy MCP session |
+| `ping` | Legacy health/liveness check |
+| `notifications/initialized` | Legacy initialization acknowledgement |
 | `tools/list` | List all available tools for this service |
 | `tools/call` | Execute a tool with arguments. Response may be JSON or SSE (`event: message` containing JSON-RPC payloads). |
+
+Modern requests must include `MCP-Protocol-Version` and `Mcp-Method`.
+`tools/call` also includes `Mcp-Name`, plus any tool parameter headers declared
+with `x-mcp-header`. Every successful modern result has a `resultType`;
+discovery and tool lists also carry cache metadata.
+
+Hot-hosted MCP services currently advertise `tools.listChanged: false`, so
+they do not open a `subscriptions/listen` stream. The `hot.dev/mcp` client
+package supports the method for external servers that advertise tool, prompt,
+or resource notification capabilities.
+
+Browser-origin requests are accepted only when the `Origin` is the endpoint's
+own origin or appears in `hot.mcp.allowed-origins`:
+
+```hot
+hot.mcp.allowed-origins [
+  "https://agent.example.com",
+  "http://localhost:3000"
+]
+```
 
 ### Timeouts
 
 - `mcp.timeout` controls Streamable HTTP `tools/call` execution timeout (default: `60` seconds).
 - `mcp.http-sse.session-timeout` controls HTTP+SSE transport session lifetime for `GET /mcp/{org}/{env}/{service}` (default: `300` seconds).
 
-### Example: Connecting with curl
+### Example: Modern Discovery with curl
 
 For local development, replace the base URL with `http://localhost:4681/mcp/local/development/{service}`.
 
 ```bash
-# Initialize session
+# Stateless 2026-07-28 discovery
+curl -X POST https://api.hot.dev/mcp/my-org/production/weather \
+  -H "Authorization: Bearer $HOT_API_KEY" \
+  -H "Content-Type: application/json" \
+  -H "MCP-Protocol-Version: 2026-07-28" \
+  -H "Mcp-Method: server/discover" \
+  -d '{
+    "jsonrpc": "2.0",
+    "id": 1,
+    "method": "server/discover",
+    "params": {
+      "_meta": {
+        "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+        "io.modelcontextprotocol/clientInfo": {
+          "name": "my-client",
+          "version": "1.0"
+        },
+        "io.modelcontextprotocol/clientCapabilities": {}
+      }
+    }
+  }'
+```
+
+The Hot `hot.dev/mcp` package builds these headers and metadata automatically.
+For example:
+
+```hot
+::mcp ::mcp::client
+::types ::mcp::types
+
+session ::mcp/connect(
+  "https://api.hot.dev/mcp/my-org/production/weather",
+  ::types/ClientInfo({name: "my-client", version: "1.0"}),
+  null,
+  ::types/ConnectionOptions({
+    headers: {"Authorization": `Bearer ${api-key}`}
+  })
+)
+```
+
+To verify legacy compatibility manually, use the same endpoint with the
+initialize handshake:
+
+```bash
 curl -X POST https://api.hot.dev/mcp/my-org/production/weather \
   -H "Authorization: Bearer $HOT_API_KEY" \
   -H "Content-Type: application/json" \
@@ -388,29 +498,9 @@ curl -X POST https://api.hot.dev/mcp/my-org/production/weather \
     "id": 1,
     "method": "initialize",
     "params": {
-      "protocolVersion": "2025-03-26",
+      "protocolVersion": "2025-11-25",
       "capabilities": {},
       "clientInfo": {"name": "my-client", "version": "1.0"}
-    }
-  }'
-
-# List available tools
-curl -X POST https://api.hot.dev/mcp/my-org/production/weather \
-  -H "Authorization: Bearer $HOT_API_KEY" \
-  -H "Content-Type: application/json" \
-  -d '{"jsonrpc": "2.0", "id": 2, "method": "tools/list"}'
-
-# Call a tool
-curl -X POST https://api.hot.dev/mcp/my-org/production/weather \
-  -H "Authorization: Bearer $HOT_API_KEY" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "jsonrpc": "2.0",
-    "id": 3,
-    "method": "tools/call",
-    "params": {
-      "name": "myapp_weather_get_forecast",
-      "arguments": {"city": "San Francisco", "days": 5}
     }
   }'
 ```
@@ -423,13 +513,25 @@ For long-running tool calls, use `-N` so curl prints SSE chunks as they arrive:
 curl -N -X POST https://api.hot.dev/mcp/my-org/production/weather \
   -H "Authorization: Bearer $HOT_API_KEY" \
   -H "Content-Type: application/json" \
+  -H "Accept: application/json, text/event-stream" \
+  -H "MCP-Protocol-Version: 2026-07-28" \
+  -H "Mcp-Method: tools/call" \
+  -H "Mcp-Name: myapp_weather_get_forecast" \
   -d '{
     "jsonrpc": "2.0",
     "id": 4,
     "method": "tools/call",
     "params": {
       "name": "myapp_weather_get_forecast",
-      "arguments": {"city": "San Francisco", "days": 5}
+      "arguments": {"city": "San Francisco", "days": 5},
+      "_meta": {
+        "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+        "io.modelcontextprotocol/clientInfo": {
+          "name": "my-client",
+          "version": "1.0"
+        },
+        "io.modelcontextprotocol/clientCapabilities": {}
+      }
     }
   }'
 
@@ -489,6 +591,12 @@ req.headers            // Map<Str, Str> — all HTTP headers (lowercased keys)
 req.query              // Map<Str, Str> — query string parameters
 req.ip                 // client IP address
 
+// 2026-07-28 MCP context — present for modern tool calls
+req.mcp.protocol-version     // "2026-07-28"
+req.mcp.client-capabilities  // capabilities from request _meta
+req.mcp.input-responses      // responses supplied on an MRTR retry, or null
+req.mcp.request-state        // opaque state echoed on an MRTR retry, or null
+
 // Auth context — present when auth: "required" (default)
 req.auth.type                  // "api-key" | "service-key" | "session"
 req.auth.service-key.id        // service key UUID (when type = "service-key")
@@ -498,6 +606,49 @@ req.auth.service-key.meta      // service key metadata (when type = "service-key
 // When auth: "none"
 req.auth                       // null
 ```
+
+## Multi Round-Trip Tool Input
+
+A modern tool can return `resultType: "input_required"` when it needs
+elicitation, sampling, or roots data from a capability the client advertised.
+The client retries the original call with a new JSON-RPC ID. Hot exposes that
+retry data through `hot.request.mcp`.
+
+```hot
+publish-report
+meta {mcp: {service: "reports"}}
+fn (report-id: Str): Map {
+  req ::hot::ctx/get("hot.request")
+  response get(req.mcp.input-responses, "confirm", null)
+
+  if(is-null(response), {
+    "resultType": "input_required",
+    "inputRequests": {
+      confirm: {
+        method: "elicitation/create",
+        params: {
+          mode: "form",
+          message: "Publish this report?",
+          requestedSchema: {
+            type: "object",
+            properties: {confirmed: {type: "boolean"}},
+            required: ["confirmed"]
+          }
+        }
+      }
+    },
+    // Treat requestState as attacker-controlled input. Integrity-protect it
+    // whenever it affects authorization or resource access.
+    "requestState": report-id
+  }, {
+    publish(report-id, response.content.confirmed)
+  })
+}
+```
+
+Hot rejects input requests for capabilities the caller did not advertise.
+Applications remain responsible for integrity protection, expiry, principal
+binding, and replay rules for security-sensitive `requestState` values.
 
 ### Using Headers
 
