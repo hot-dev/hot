@@ -2,19 +2,25 @@
 name: hot-language
 description: >
   Write code in the Hot programming language. Use when creating, editing,
-  or reviewing .hot files. Hot is a functional, expression-based language
-  with automatic parallelization, no infix operators, and expression-based
-  assignment syntax. IMPORTANT: Hot syntax differs significantly from
-  conventional languages - always check these references before writing Hot code.
+  or reviewing .hot files. Hot is an expression-oriented functional workflow
+  language with gradual typing, dependency-aware parallel flows, no arithmetic
+  or comparison infix operators, and binding syntax without `=`. IMPORTANT:
+  Hot syntax and execution semantics differ significantly from conventional
+  languages - always check these references before writing Hot code.
 metadata:
   author: hotdev
-  version: "1.0"
+  version: "1.1.1"
   license: Apache-2.0
 ---
 
 # Hot Language Skill
 
-Hot is a functional, expression-based language with automatic parallelization and type inference. This skill provides detailed reference documentation for the Hot programming language.
+Hot is an expression-oriented functional language for backend workflows.
+Ordinary function arguments are eager and ordinary function bodies are serial;
+an explicit `parallel` flow automatically schedules independent bindings by
+dependency. Types are gradual: known records are checked structurally, while
+constructed types and enum variants retain nominal runtime tags. This skill
+provides detailed reference documentation for the Hot programming language.
 
 > **Note**: For quick syntax rules, see AGENTS.md in the project root. This skill contains extended reference documentation.
 
@@ -32,6 +38,31 @@ Hot is a functional, expression-based language with automatic parallelization an
 | `items.0` | `items[0]` | Use brackets for array indexing |
 | `add (1, 2)` | `add(1, 2)` | No space before `(` when calling |
 | `{x}` for a map | `{x,}` or `{x: x}` | Single-key punning needs comma |
+
+## Semantic Rules Agents Must Preserve
+
+- Ordinary function arguments are eager, and ordinary function bodies are
+  serial. Never imply that Hot parallelizes arbitrary code.
+- Use `parallel` intentionally, usually for independent I/O. Hot analyzes
+  dependencies between bindings inside that flow; it cannot detect conflicts
+  in shared external state.
+- `parallel`, `cond-all`, and `match-all` naturally collect results. Use
+  `All<Map>` or `All<Vec>` to declare collection explicitly. A plain annotation
+  on one of these flows opts out of collection and describes one final value.
+- Function return annotations name the successful value, not a visible
+  `Result` wrapper. Do not add `ok(...)` around every successful return.
+- Binding a `Result` preserves it. Ordinary consumption unwraps `Ok` or
+  propagates `Err`. Lazy helpers inspect the intact Result; `match` selects by
+  variant and exposes its payload inside the selected arm.
+- Records are structurally compatible where their fields are known. Custom
+  types and enum variants also carry nominal tags used for matching and
+  dispatch.
+- Values have immutable semantics. Reusing a name or assigning a deep path
+  creates an updated binding rather than mutating a shared object.
+- A `lazy` argument is a non-memoized deferred computation. Bind `do value`
+  before reusing it if evaluating it may be expensive or effectful.
+- Prefer `map`, `filter`, `reduce`, iterators, and `for-each` for iteration.
+  Recursive calls are stack-safe only when they are genuinely in tail position.
 
 ## File Structure
 
@@ -110,18 +141,19 @@ fetch-all fn parallel (id: Str): All<Map> {
 
 ### Flows
 
-Flows are standalone constructs. The `fn` keyword makes them function definitions.
+Flows are expressions. Combining `fn` with a flow defines a function whose body
+uses that execution model.
 
 - `serial` - Sequential execution (default)
 - `cond` - First matching branch wins
 - `cond-all` - ALL matching branches execute, returns Map
 - `match` - Pattern match on types/values, first match wins; arms support unions (`A | B`), `T?` sugar for `T | Null`, and `Any` (matches everything)
 - `match-all` - Pattern match, ALL matches execute
-- `parallel` - Concurrent execution, returns Map
+- `parallel` - Dependency-aware concurrent execution, returns Map
 
 ```hot
 process fn (data: Map): Map {
-    // Standalone cond flow (errors propagate automatically)
+    // Inline cond flow (errors propagate automatically)
     validated cond {
         is-empty(data) => { err("Empty") }
         => { data }

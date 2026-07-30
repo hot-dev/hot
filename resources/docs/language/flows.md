@@ -4,7 +4,9 @@ description: "Use Hot flows for sequential logic, conditionals, matches, paralle
 
 # Flows
 
-Flows control how expressions execute. They're one of Hot's most powerful features, enabling parallel execution, conditional branching, and data pipelines.
+Flows are expressions that control how their contents execute and how their
+results are collected. Ordinary function bodies use a serial flow. Conditional,
+matching, and parallel flows make alternative execution strategies explicit.
 
 ## Flow Types
 
@@ -22,11 +24,12 @@ Flows control how expressions execute. They're one of Hot's most powerful featur
 
 Every flow can be used in two ways:
 
-**1. As a function modifier** — defines the entire function's execution model:
+**1. With `fn`** — defines a function whose body uses that flow's scheduling
+and result rules:
 
 {{snippet:flows#flow-as-modifier}}
 
-**2. Inline within any expression** — for local control flow:
+**2. As an inline expression** — provides local control flow:
 
 {{snippet:flows#flow-inline}}
 
@@ -46,13 +49,19 @@ You can make it explicit with `serial`:
 
 ## Parallel Flow
 
-Execute expressions concurrently with `parallel`:
+Request dependency-aware concurrency with `parallel`:
 
 {{snippet:flows#parallel-function}}
 
 {{result:flows#parallel-function}}
 
-This is much faster than sequential execution when operations are independent.
+Parallelism is explicit: Hot never changes an ordinary serial body into a
+parallel one. Within a `parallel` flow, dependency scheduling is automatic.
+
+`parallel`, `cond-all`, and `match-all` naturally return all branch results.
+Use `All<Map>` or `All<Vec>` when declaring that collected shape explicitly.
+A plain annotation such as `: Map` or `: Int` opts a naturally collect-all flow
+out of collection and describes its single final value instead.
 
 ### When to Use Parallel
 
@@ -72,6 +81,14 @@ enrich-user fn parallel (id: Str): All<Map> {
 }
 // user runs first, then orders+prefs run in parallel, then summary
 ```
+
+Dependency analysis follows references between Hot bindings. It cannot infer
+conflicts in external state. Independent branches that write the same database
+row, file, or remote resource may race even when no Hot value connects them.
+
+If one branch fails, the flow fails. Sibling work that already started cannot
+be rolled back automatically, so independently scheduled side effects should
+be idempotent or explicitly coordinated.
 
 ## Conditional Flow
 
@@ -425,7 +442,8 @@ Use flows within function bodies:
 
 ## Flow vs Function
 
-Flows are **part of functions**, not standalone. The `fn` keyword combined with a flow creates a function:
+Flows are expressions. Combining `fn` with a flow creates a callable function
+whose body uses that flow's scheduling and result rules:
 
 ```hot
 // Function with conditional flow
@@ -434,7 +452,7 @@ classify fn cond (x: Int): Str {
   => { "positive" }
 }
 
-// Standalone flow (inside a function body)
+// Inline flow expression inside a function body
 process fn (data: Map): Result {
   result cond {
     is-null(data) => { err("No data") }
@@ -561,4 +579,5 @@ steps: All<Vec> 5 |> add(2) |> mul(3)
 | `match-all` | Execute all matching type/value patterns |
 | `\|>` | Chain transformations on data |
 
-Flows make Hot's execution model explicit. You always know whether operations run in sequence, parallel, or conditionally.
+Flows make Hot's scheduling and result behavior explicit. You always know
+whether operations run in sequence, parallel, or conditionally.

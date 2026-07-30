@@ -1,6 +1,8 @@
 # Hot Flows Reference
 
-Flows are control structures in Hot that define execution patterns. They can be standalone expressions or combined with `fn` to create function definitions.
+Flows are expressions that define execution and result-collection patterns.
+They can be used inline or combined with `fn` to define a function whose body
+uses that flow.
 
 ## Flow Types
 
@@ -356,7 +358,10 @@ results match-all x {
 
 ## Parallel Flow
 
-Executes all branches concurrently. Returns Map keyed by variable names.
+Requests dependency-aware concurrency. Independent bindings execute
+concurrently, while bindings that reference earlier results wait for them.
+Parallelism is explicit: ordinary serial code is never parallelized
+automatically. The default result is a Map keyed by variable names.
 
 ### As Function Definition
 
@@ -380,6 +385,11 @@ enrich-user fn parallel (id: Str): All<Map> {
     summary build-summary(orders, prefs)
 }
 ```
+
+Dependency analysis follows references between Hot bindings. It cannot detect
+conflicts in external state such as two branches writing the same database row
+or file. If a branch fails, sibling effects that already started cannot be
+rolled back automatically.
 
 ### As Standalone Expression
 
@@ -415,6 +425,10 @@ Use `All<Vec>` or `All<Map>` annotations to collect all flow results.
 Bare `All` is allowed only on natural collect-all forms (`parallel`,
 `cond-all`, and `match-all`); use explicit `All<Vec>` or `All<Map>` on
 `serial`, `pipe`, `cond`, and `match`.
+
+A plain annotation on a natural collect-all flow is not documentation for its
+usual Map result: it opts the flow out of collection and describes one final
+value. Use `All<Map>` when the collected Map is part of the contract.
 
 | Shape | Behavior |
 |-------|----------|

@@ -4,7 +4,17 @@ description: "Define Hot types with structs, enums, nullable values, collections
 
 # Types
 
-Hot has an optional type system inspired by TypeScript. Add types where they help catch errors and document intent; skip them where they add noise.
+Hot is gradually typed. Add annotations where they help catch errors and
+document intent; skip them where they add noise. Hot infers types when it has
+enough information and uses `Any` when a value's type or shape cannot be
+established statically.
+
+The model is deliberately hybrid:
+
+- Plain records are checked structurally when their fields are known.
+- Constructed types and enum variants retain nominal runtime tags.
+- Literal and union types narrow the accepted values.
+- `Any` is the dynamic escape hatch at partially typed boundaries.
 
 ## Built-in Types
 
@@ -40,6 +50,12 @@ You can skip types entirely:
 {{snippet:types#types-optional-simple}}
 
 Hot will infer types where possible and allow `Any` elsewhere.
+
+This is best-effort static checking rather than whole-program proof. A known
+record can be checked against a required field shape, while an untyped
+`Map<Any, Any>` may be accepted and fail later when code accesses a missing
+field. Add annotations at API, storage, event, and other trust boundaries when
+you want stronger diagnostics.
 
 ## Generic Types
 
@@ -291,6 +307,11 @@ pick up the implementation without ever seeing it referenced near where
 it was declared. Local **type** definitions inside function bodies are
 still allowed; the rule applies only to arrows.
 
+Arrow coercions are one-hop. Hot does not search a chain such as
+`A -> B -> C` to satisfy a parameter requiring `C`. If more than one direct
+arrow could satisfy the same conversion, the call is ambiguous rather than
+silently choosing one.
+
 ## Result Types
 
 Hot doesn't have exceptions. Instead, use `Result` for operations that can fail:
@@ -328,6 +349,16 @@ Results automatically unwrap when used as function arguments—Ok values pass th
 See **[Error Handling](/docs/language/errors)** for the full story on Result types, automatic unwrapping, and lazy evaluation.
 
 ## Type Checking
+
+`hot check` validates annotations, known record fields, call signatures,
+exhaustive matches, and other statically visible constraints. It does not turn
+Hot into a fully static language: `Any`, dynamically shaped maps, and values
+from unresolved boundaries may defer failures until runtime.
+
+Structural compatibility and runtime identity answer different questions. A
+known record may satisfy a struct parameter by supplying every required field,
+while a value constructed with a type or enum constructor carries a nominal
+tag used by `match`, `is-type`, serialization, and overload dispatch.
 
 Use `is-*` functions to check built-in types at runtime:
 

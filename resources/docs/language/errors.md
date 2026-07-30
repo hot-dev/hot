@@ -41,6 +41,23 @@ If the HTTP call failed, execution halts at the point of use—you don't need ex
 
 > **Note:** Function return type annotations specify the expected **success type**, not `Result`. The Result wrapper is implicit for any operation that can fail.
 
+### Binding vs Consuming a Result
+
+Merely binding a `Result` preserves the tagged value. Propagation happens when
+ordinary code consumes it:
+
+```hot
+result fetch-user(id) // Result remains intact in this binding
+valid is-ok(result)   // inspected by a lazy Result-aware function
+page render(result)   // Ok unwraps; Err halts and propagates here
+```
+
+Ordinary function arguments, template interpolation, and field access are
+consumption boundaries. `is-ok`, `is-err`, `if-ok`, and `if-err` inspect the
+tagged Result without ordinary consumption. `match` also handles Result
+variants explicitly, as described in
+[Checking Results Explicitly](#checking-results-explicitly).
+
 ### Dot Access on Results
 
 Auto-unwrapping extends to field access. Dot access on an `Ok` Result reads fields from the **payload**, so you never need to unwrap before drilling in:
@@ -73,9 +90,14 @@ message match result {
 }
 ```
 
+The `match` chooses an arm using the `Result.Ok` or `Result.Err` tag. Within the
+selected arm, `result` evaluates to that variant's payload.
+
 ## Lazy Arguments and Result Checking
 
-When a function argument is marked `lazy`, it isn't evaluated until explicitly requested. This is how Hot enables safe Result inspection.
+When a function parameter is marked `lazy`, its argument expression is deferred
+until the function forces it with `do`. This is how Hot enables safe Result
+inspection.
 
 ```hot
 // The if function uses lazy arguments
@@ -85,11 +107,12 @@ if fn cond (pred: Any, lazy then: Any, lazy else: Any): Any {
 }
 ```
 
-For lazy arguments, Result checking is **suppressed** during evaluation. This means:
+When a lazy argument is forced, ordinary Result consumption remains
+**suppressed** inside that lazy context. This means:
 
-1. You can pass expressions that produce Results
-2. The Result won't auto-unwrap (or fail) until `do` evaluates it
-3. Functions like `is-ok` and `is-err` can safely receive and inspect Results
+1. The argument is not evaluated or consumed at the ordinary call boundary
+2. `do` forces the expression inside the lazy context and preserves any Result
+3. The function can inspect that Result without auto-unwrapping or propagating it
 
 ```hot
 // Safe division that returns a Result
@@ -262,6 +285,7 @@ if(eq(result.status, "failed"),
 ## Summary
 
 - Use `Result.Ok(value)` or `ok(value)` and `Result.Err(message)` or `err(message)` to create Results
+- Binding a Result preserves it; ordinary consumption triggers unwrapping or propagation
 - Results **auto-unwrap** when passed to functions or used in templates
 - Err Results **automatically fail** at point of use, carrying the payload's message—no explicit handling needed
 - Use `is-ok(result)` and `is-err(result)` to check without triggering auto-unwrap

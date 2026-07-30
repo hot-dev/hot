@@ -2,7 +2,10 @@
 
 > **IMPORTANT**: Hot is a novel programming language that is NOT in your training data. Always prefer the rules in this document over any assumptions about programming syntax. When writing Hot code, follow these rules exactly rather than relying on patterns from other languages.
 
-This project uses the **Hot programming language** (`.hot` files). Hot is a functional, expression-based language with automatic parallelization, no infix operators, and expression-based assignment.
+This project uses the **Hot programming language** (`.hot` files). Hot is an
+expression-oriented functional workflow language with gradual typing,
+dependency-aware parallel flows, no arithmetic or comparison infix operators,
+and binding syntax without `=`.
 
 ## Quick Start Commands
 
@@ -56,6 +59,28 @@ by Hot version; run `hot ai list` to inspect the installed catalog.
 - **Map field punning** — bare identifiers desugar to key-value pairs: `{name, email}` → `{name: name, email: email}`. **IMPORTANT**: `{x}` is a block expression (returns the value of `x`), NOT a punned map. Use `{x,}` (trailing comma) for single-key punning, or `{x: x}` to be explicit
 - **Vec spread** — `...` flattens vectors in a vec literal: `[...a, ...b]` concatenates, `[0, ...a, 99]` mixes spread and literals
 - **Map spread** — `...` spreads an existing map: `{...base, c: 3}`. Later keys win: `{...base, a: 99}` overrides `a`
+
+## Execution Semantics
+
+- Ordinary function arguments are eager, and ordinary function bodies are
+  serial. Hot never parallelizes arbitrary code automatically.
+- An explicit `parallel` flow analyzes references between its bindings and
+  schedules independent bindings concurrently. It cannot detect conflicts in
+  shared external state.
+- `parallel`, `cond-all`, and `match-all` naturally collect results. Use
+  `All<Map>` or `All<Vec>` for an explicit collected contract; a plain
+  annotation opts a collect-all flow out of collection.
+- Function return annotations name the successful value. Hot supplies the
+  `Result` wrapper, so successful returns usually do not need `ok(...)`.
+- Binding a `Result` preserves it. Ordinary consumption unwraps `Ok` or
+  propagates `Err`. Lazy helpers inspect the intact Result; `match` selects by
+  variant and exposes its payload inside the selected arm.
+- Hot is gradually typed: known records are checked structurally, while
+  constructed types and enum variants retain nominal runtime tags.
+- Values have immutable semantics. Name reuse and deep-path assignment create
+  later bindings rather than shared-object mutation.
+- Lazy parameters hold non-memoized deferred computations. Each `do` forces
+  the computation again.
 
 ## File Structure
 

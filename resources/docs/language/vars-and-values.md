@@ -83,6 +83,11 @@ Assign to nested paths to build up Maps:
 
 {{snippet:vars#deep-path-assign}}
 
+Despite the assignment-like syntax, this does not mutate a shared object. Hot
+constructs or immutably updates the collection and creates a later binding for
+its root name. Closures or other bindings that captured the earlier value
+continue to refer to that earlier value.
+
 Deep paths also work with Vec indices:
 
 {{snippet:vars#deep-path-vec}}
@@ -236,7 +241,7 @@ This lets you bend the language to your domain, making common operations feel bu
 
 ## Immutability
 
-All bindings are immutable. You cannot reassign a Var:
+Bindings and values are immutable. Reusing a name creates a later binding:
 
 ```hot
 count 1

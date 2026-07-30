@@ -69,6 +69,9 @@ use `hot ai list` to see that version's catalog. If you prefer the latest public
 skills through the skills.sh ecosystem, run
 `npx skills add hot-dev/hot-skills`.
 
+See [AI Coding Assistants](/docs/ai-coding) for project and global setup,
+validation, troubleshooting, and LLM-readable documentation.
+
 ## 4. Initialize
 
 Hot is designed to live alongside your existing code. Add it to an existing project or start fresh:

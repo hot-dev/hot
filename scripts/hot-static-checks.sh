@@ -184,6 +184,41 @@ cmd_check() {
         errors=$((errors + 1))
     fi
 
+    # 5. Compile the Hot source shipped in the language skill. These files are
+    # outside normal project source roots, so the default check does not see
+    # them. Keeping both the focused test corpus and copyable examples valid
+    # prevents an AI-facing snapshot from silently drifting behind the language.
+    echo ""
+    echo -e "${YELLOW}Step 5: Bundled Hot language skill source${NC}"
+    local skill_root="$PROJECT_ROOT/resources/ai/skills/hot-language"
+    local skill_source_errors=0
+    for skill_source in "$skill_root/test" "$skill_root/examples"; do
+        if cargo run --quiet -- check "$skill_source" --check.raw $ctx_args 2>/dev/null; then
+            echo -e "${GREEN}✓ ${skill_source#"$PROJECT_ROOT/"} passes static check${NC}"
+        else
+            echo -e "${RED}✗ ${skill_source#"$PROJECT_ROOT/"} failed static check${NC}"
+            cargo run -- check "$skill_source" --check.raw $ctx_args
+            skill_source_errors=$((skill_source_errors + 1))
+        fi
+    done
+    if [[ $skill_source_errors -ne 0 ]]; then
+        errors=$((errors + skill_source_errors))
+    fi
+
+    # 6. Reject the removed suffix-based flow-result syntax in canonical skill
+    # assets. Result collection is expressed with All<Vec>/All<Map> annotations.
+    echo ""
+    echo -e "${YELLOW}Step 6: Bundled skill syntax drift${NC}"
+    local stale_flow_syntax
+    stale_flow_syntax="$(rg -n '(parallel|serial|cond|cond-all|match|match-all)\|(one|vec|map)' "$skill_root" || true)"
+    if [[ -n "$stale_flow_syntax" ]]; then
+        echo -e "${RED}✗ Removed flow-result suffix syntax found:${NC}"
+        echo "$stale_flow_syntax"
+        errors=$((errors + 1))
+    else
+        echo -e "${GREEN}✓ No removed flow-result suffix syntax found${NC}"
+    fi
+
     echo ""
     if [[ $errors -eq 0 ]]; then
         echo -e "${GREEN}All checks passed!${NC}"

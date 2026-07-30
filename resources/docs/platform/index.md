@@ -6,6 +6,9 @@ description: "Understand Hot's platform model for projects, functions, runs, eve
 
 The Hot Platform is a complete backend workflow automation system. It combines a purpose-built programming language with managed infrastructure for running, monitoring, and scaling your workflows.
 
+Start with the [Platform Execution Model](/docs/platform/execution-model) to see
+how events, handlers, runs, tasks, retries, workers, and streams fit together.
+
 ## Architecture Overview
 
 <svg viewBox="0 0 720 592" class="w-full max-w-2xl mx-auto" style="font-family: system-ui, sans-serif;">
@@ -72,18 +75,18 @@ The Hot Platform is a complete backend workflow automation system. It combines a
   <path d="M 234 190 L 234 241" class="arch-arrow" marker-end="url(#arch-arrow-head)"/>
   <text x="246" y="220" class="arch-label">publishes events</text>
 
-  <!-- Streams (grouping runs and events) -->
+  <!-- Streams (grouping events, runs, and tasks) -->
   <rect x="16" y="246" width="688" height="112" rx="10" class="arch-box"/>
   <text x="360" y="272" text-anchor="middle" class="arch-title">Streams</text>
-  <text x="360" y="289" text-anchor="middle" class="arch-sub">Group related events &amp; runs for end-to-end tracing</text>
+  <text x="360" y="289" text-anchor="middle" class="arch-sub">Group related events, runs &amp; tasks for end-to-end tracing</text>
   <rect x="48" y="300" width="304" height="44" rx="6" class="arch-chip"/>
   <text x="200" y="326" text-anchor="middle" class="arch-sub">Events — async triggers</text>
   <rect x="368" y="300" width="304" height="44" rx="6" class="arch-chip"/>
-  <text x="520" y="326" text-anchor="middle" class="arch-sub">Runs — function executions</text>
+  <text x="520" y="326" text-anchor="middle" class="arch-sub">Runs &amp; tasks — executions</text>
 
   <!-- Streams -> Workers -->
   <path d="M 360 358 L 360 387" class="arch-arrow" marker-end="url(#arch-arrow-head)"/>
-  <text x="372" y="378" class="arch-label">workers pick up events &amp; execute runs</text>
+  <text x="372" y="378" class="arch-label">workers route events &amp; execute runs and tasks</text>
 
   <!-- Hot Workers (consumer: executes Hot code) -->
   <rect x="16" y="392" width="688" height="96" rx="10" class="arch-accent"/>
@@ -99,7 +102,7 @@ The Hot Platform is a complete backend workflow automation system. It combines a
 
   <!-- Everything is recorded and observable in Hot App -->
   <path d="M 360 488 L 360 507" class="arch-arrow-dashed" marker-end="url(#arch-arrow-head)"/>
-  <text x="372" y="502" class="arch-label">every run, event &amp; stream recorded</text>
+  <text x="372" y="502" class="arch-label">events, runs, tasks &amp; streams recorded</text>
 
   <!-- Hot App -->
   <rect x="16" y="512" width="688" height="64" rx="10" class="arch-box"/>
@@ -111,7 +114,9 @@ The Hot Platform is a complete backend workflow automation system. It combines a
 
 ### Runs
 
-Every function call creates a run—a tracked execution with:
+A run is one tracked, top-level function execution attempt initiated by the
+platform. Function calls inside that execution remain part of its trace rather
+than creating additional runs. Each run has:
 
 - Unique run ID for tracking
 - Full execution trace
@@ -138,13 +143,25 @@ fn (event) {
 
 ### Streams
 
-Streams provide real-time data flow for long-running operations like AI responses, live updates, and bidirectional communication.
+Streams correlate related events, runs, retries, and tasks into one execution
+history. The same stream ID also supports live run notifications and
+user-emitted data for AI responses, progress updates, and other interactive
+work.
 
 [Learn more about Streams →](/docs/platform/runs-events-streams)
 
+### Tasks
+
+Tasks are long-running asynchronous resources started by runs or other tasks.
+They inherit the current stream and are linked to the run that started them.
+Task execution is also represented by a task-type run.
+
+[Learn more about Tasks →](/docs/tasks)
+
 ### Workers
 
-Workers are the execution engine of the Hot Platform. They pick up runs from the queue, execute your Hot code, and report results back.
+Workers are the execution engine of the Hot Platform. They consume queued
+events and tasks, execute Hot code or containers, and report results back.
 
 - Scale horizontally by adding more workers
 - Process event handlers and scheduled jobs

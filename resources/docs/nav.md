@@ -14,9 +14,12 @@ migrations, editor reference).
 -->
 
 - [Getting Started](getting-started)
+  - [Adopting Hot](adopting-hot)
+  - [AI Coding Assistants](ai-coding)
 - [Demos](demos)
   - [Hot Chat](demos/hot-chat)
 - [Hot Language](language)
+  - [Language Evaluation Model](language/execution-model)
   - [Vars and Values](language/vars-and-values)
   - [Data Literals](language/data-literals)
   - [Functions](language/functions)
@@ -26,6 +29,7 @@ migrations, editor reference).
   - [Flows](language/flows)
   - [What Hot Doesn't Have](language/not-supported)
 - [Hot Platform](platform)
+  - [Platform Execution Model](platform/execution-model)
   - [Runs, Events & Streams](platform/runs-events-streams)
   - [Durable Execution](platform/durability)
   - [Tasks](tasks)

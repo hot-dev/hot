@@ -1251,7 +1251,9 @@ For self-hosted/local deployments without a subscription, all limits are unlimit
 
 ### Streams (Server-Sent Events)
 
-Streams provide real-time updates for run execution via Server-Sent Events (SSE). A stream groups related events and runs together, allowing you to track the full lifecycle of an operation.
+Streams provide real-time execution updates via Server-Sent Events (SSE). A
+stream groups related events, runs, and tasks together, allowing you to track
+the full lifecycle of an operation.
 
 #### Subscribe to Stream
 

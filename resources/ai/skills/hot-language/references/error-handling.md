@@ -51,6 +51,22 @@ greeting `Hello, ${name}!`
 
 If the HTTP call fails, execution halts at the point of use—no explicit error handling needed. Errors propagate automatically.
 
+### Binding vs Consuming
+
+Binding a `Result` preserves it. Ordinary function arguments, template
+interpolation, and field access consume it:
+
+```hot
+result fetch-user(id) // Result remains intact
+valid is-ok(result)   // lazy inspection preserves the tag
+page render(result)   // Ok unwraps; Err propagates here
+```
+
+Use Result-aware lazy functions or `match` when code needs to inspect the
+tagged value rather than trigger propagation. See
+[Pattern Matching on Results](#pattern-matching-on-results) for the match-arm
+payload rule.
+
 ## Checking Results Explicitly
 
 Use `is-ok` and `is-err` to inspect Results without triggering auto-unwrapping:
@@ -90,7 +106,9 @@ the payload.
 
 ## Lazy Arguments
 
-Arguments marked `lazy` aren't evaluated until explicitly needed. This enables:
+Ordinary arguments are eager. Arguments marked `lazy` instead arrive as
+deferred computations and aren't evaluated until explicitly forced. This
+enables:
 
 1. **Safe Result inspection** — `is-ok` and `is-err` can receive Results without triggering auto-unwrap
 2. **Short-circuit evaluation** — `and` and `or` don't evaluate unused branches
@@ -115,6 +133,10 @@ maybe-run fn (should-run: Bool, lazy action: Any): Any {
     if(should-run, do action, null)
 }
 ```
+
+Lazy arguments are not memoized. Each `do` forces the deferred computation
+again inside the lazy context and preserves any Result it produces. Bind the
+forced result before reusing it when evaluation is expensive or effectful.
 
 ### Short-Circuit Evaluation
 

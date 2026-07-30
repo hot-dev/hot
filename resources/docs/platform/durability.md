@@ -4,7 +4,15 @@ description: "See how Hot persists runs and event chains, retries failed steps w
 
 # Durable Execution
 
-Hot provides durable execution out of the box. Every function call is a persisted **run** with recorded inputs, outputs, and a full execution trace. Multi-step workflows are chains of **events** and runs — each step is independently tracked, retryable, and recoverable.
+Hot provides durable execution out of the box. Every platform-invoked,
+top-level function execution is a persisted **run** with recorded inputs,
+outputs, and a full execution trace. Nested function calls appear inside that
+trace. Multi-step workflows are chains of **events** and runs—each step is
+independently tracked, retryable, and recoverable.
+
+See the [Platform Execution Model](/docs/platform/execution-model) for how
+events, handlers, runs, tasks, retries, workers, and streams connect before
+diving into the durability guarantees below.
 
 ## How It Works
 
@@ -16,15 +24,86 @@ The durability model is built on three ideas:
 
 3. **Retries use the original input.** When a run fails and is retried, the retry receives the same event data as the original. No partial state to reconstruct — each attempt is a clean execution with the same input.
 
-```
-Event A → Run 1 (succeeds) → emits Event B
-                                 ↓
-                              Run 2 (fails)
-                                 ↓
-                              Run 2 retry (same Event B data) → succeeds → emits Event C
-                                                                              ↓
-                                                                           Run 3
-```
+<div class="my-8" style="overflow-x: auto; padding-bottom: 0.5rem;">
+<svg viewBox="0 0 920 400" class="w-full max-w-4xl mx-auto" style="min-width: 44rem; font-family: system-ui, sans-serif;" role="img" aria-labelledby="durable-chain-title durable-chain-desc">
+  <title id="durable-chain-title">Durable event and run retry chain</title>
+  <desc id="durable-chain-desc">Event A triggers Run 1, which succeeds and emits Event B. Run 2 fails, then a new linked retry uses the same Event B data, succeeds, emits Event C, and triggers Run 3.</desc>
+  <style>
+    .dur-stream { fill: #fafafa; stroke: #d1d5db; stroke-width: 2; stroke-dasharray: 7 7; }
+    .dur-node { fill: #ffffff; stroke: #d1d5db; stroke-width: 1.5; }
+    .dur-event { fill: #fff7ed; stroke: #f97316; }
+    .dur-success { fill: #f0fdf4; stroke: #22c55e; }
+    .dur-failed { fill: #fef2f2; stroke: #ef4444; }
+    .dur-retry { fill: #f5f3ff; stroke: #8b5cf6; }
+    .dur-title { fill: #111827; font-size: 16px; font-weight: 650; }
+    .dur-sub { fill: #6b7280; font-size: 12px; }
+    .dur-kicker { fill: #6b7280; font-size: 11px; font-weight: 700; letter-spacing: 1.4px; }
+    .dur-arrow { fill: none; stroke: #9ca3af; stroke-width: 2; }
+    .dur-label { fill: #6b7280; font-size: 11.5px; font-weight: 550; }
+    .dark .dur-stream { fill: #111113; stroke: #3f3f46; }
+    .dark .dur-node { fill: #1c1c20; stroke: #3f3f46; }
+    .dark .dur-event { fill: #431407; stroke: #fb923c; }
+    .dark .dur-success { fill: #052e16; stroke: #4ade80; }
+    .dark .dur-failed { fill: #450a0a; stroke: #f87171; }
+    .dark .dur-retry { fill: #2e1065; stroke: #a78bfa; }
+    .dark .dur-title { fill: #f4f4f5; }
+    .dark .dur-sub, .dark .dur-kicker, .dark .dur-label { fill: #a1a1aa; }
+    .dark .dur-arrow { stroke: #71717a; }
+  </style>
+  <defs>
+    <marker id="dur-arrowhead" markerWidth="9" markerHeight="8" refX="8" refY="4" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L0,8 L9,4 z" fill="#9ca3af"/>
+    </marker>
+  </defs>
+
+  <rect x="20" y="22" width="880" height="356" rx="20" class="dur-stream"/>
+  <text x="46" y="52" class="dur-kicker">ONE STREAM · EVERY STEP PERSISTED</text>
+
+  <rect x="45" y="86" width="140" height="64" rx="12" class="dur-node dur-event"/>
+  <text x="115" y="113" text-anchor="middle" class="dur-title">Event A</text>
+  <text x="115" y="134" text-anchor="middle" class="dur-sub">workflow input</text>
+
+  <path d="M185 118 L225 118" class="dur-arrow" marker-end="url(#dur-arrowhead)"/>
+
+  <rect x="225" y="86" width="150" height="64" rx="12" class="dur-node dur-success"/>
+  <text x="300" y="113" text-anchor="middle" class="dur-title">Run 1</text>
+  <text x="300" y="134" text-anchor="middle" class="dur-sub">succeeded</text>
+
+  <path d="M375 118 L415 118" class="dur-arrow" marker-end="url(#dur-arrowhead)"/>
+  <text x="395" y="106" text-anchor="middle" class="dur-label">emits</text>
+
+  <rect x="415" y="86" width="140" height="64" rx="12" class="dur-node dur-event"/>
+  <text x="485" y="113" text-anchor="middle" class="dur-title">Event B</text>
+  <text x="485" y="134" text-anchor="middle" class="dur-sub">next-step input</text>
+
+  <path d="M555 118 L605 118" class="dur-arrow" marker-end="url(#dur-arrowhead)"/>
+
+  <rect x="605" y="86" width="170" height="64" rx="12" class="dur-node dur-failed"/>
+  <text x="690" y="113" text-anchor="middle" class="dur-title">Run 2</text>
+  <text x="690" y="134" text-anchor="middle" class="dur-sub">failed</text>
+
+  <!-- Failure schedules a clean, linked retry on a second row -->
+  <path d="M690 150 L690 200 C690 232 665 246 625 246 L375 246 C345 246 340 262 340 282" class="dur-arrow" marker-end="url(#dur-arrowhead)"/>
+  <text x="515" y="235" text-anchor="middle" class="dur-label">new attempt · same Event B data · linked origin_run_id</text>
+
+  <rect x="255" y="282" width="170" height="64" rx="12" class="dur-node dur-retry"/>
+  <text x="340" y="309" text-anchor="middle" class="dur-title">Run 2 retry</text>
+  <text x="340" y="330" text-anchor="middle" class="dur-sub">succeeded</text>
+
+  <path d="M425 314 L485 314" class="dur-arrow" marker-end="url(#dur-arrowhead)"/>
+  <text x="455" y="302" text-anchor="middle" class="dur-label">emits</text>
+
+  <rect x="485" y="282" width="140" height="64" rx="12" class="dur-node dur-event"/>
+  <text x="555" y="309" text-anchor="middle" class="dur-title">Event C</text>
+  <text x="555" y="330" text-anchor="middle" class="dur-sub">workflow continues</text>
+
+  <path d="M625 314 L685 314" class="dur-arrow" marker-end="url(#dur-arrowhead)"/>
+
+  <rect x="685" y="282" width="150" height="64" rx="12" class="dur-node dur-success"/>
+  <text x="760" y="309" text-anchor="middle" class="dur-title">Run 3</text>
+  <text x="760" y="330" text-anchor="middle" class="dur-sub">next durable step</text>
+</svg>
+</div>
 
 Every arrow in this chain is persisted. Every run captures its input, output, timing, and full execution trace. If anything fails, retries pick up from the failed step — not from the beginning of the workflow.
 

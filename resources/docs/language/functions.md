@@ -148,7 +148,9 @@ Use explicit `(params) { body }` when:
 
 ## Lazy Arguments
 
-Arguments marked `lazy` aren't evaluated until needed. This enables short-circuit evaluation:
+Ordinary function arguments are evaluated before the function body runs.
+Arguments marked `lazy` instead arrive as deferred computations. This enables
+short-circuit evaluation:
 
 ```hot
 if fn
@@ -166,6 +168,20 @@ Use `do` to evaluate a lazy argument:
 {{snippet:functions#lazy-arguments}}
 
 This is how `if`, `and`, and `or` avoid evaluating unused branches.
+
+Lazy arguments are not memoized. Each `do` forces the deferred computation
+again. Bind the result of `do` if it will be used more than once, especially
+when the argument performs I/O or another side effect:
+
+```hot
+use-twice fn (lazy value: Any): Vec {
+  forced do value
+  [forced, forced]
+}
+```
+
+This argument-level laziness is separate from `Iter`: a lazy parameter defers
+one expression, while an iterator produces sequence elements on demand.
 
 ## Metadata on Functions
 

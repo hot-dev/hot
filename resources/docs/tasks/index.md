@@ -4,20 +4,27 @@ description: "Choose between short-lived Hot runs and long-running tasks, includ
 
 # Tasks
 
-Tasks are long-running, asynchronous processes on the Hot Platform. Understanding the distinction between **Runs** and **Tasks** helps you choose the right execution model for your workflow.
+Tasks are long-running, asynchronous processes on the Hot Platform. They extend
+the platform run model with a durable resource, background execution, and
+task-specific lifecycle controls. See the
+[Platform Execution Model](/docs/platform/execution-model) for their place in
+event and stream lineage.
 
-## Runs vs Tasks
+## Ordinary Runs vs Tasks
 
 | | Runs | Tasks |
 |---|------|-------|
 | **Duration** | Short-lived, synchronous | Long-running, asynchronous |
 | **Trigger** | HTTP requests, events, schedules | Started from runs or other tasks |
 | **Return** | Waits for completion, returns result | Returns immediately with `TaskInfo` |
+| **Execution record** | The run is the execution attempt | The task resource links to a task-type run |
 | **Use case** | Request-response, event handlers | Background jobs, containers, long-lived processes |
 
 ### Runs
 
-**Runs** are short-lived, synchronous function executions. Each run executes a Hot function to completion and returns a result. Runs are triggered by:
+**Runs** are short-lived, synchronous top-level function execution attempts.
+Nested Hot function calls remain inside the current run's trace. Runs are
+triggered by:
 
 - HTTP requests (API calls, webhooks)
 - Events (`send`, `hot:call`)
@@ -27,7 +34,11 @@ Runs block until the function completes. See [Runs, Events & Streams](/docs/plat
 
 ### Tasks
 
-**Tasks** are long-running, asynchronous processes. When you start a task, execution returns immediately with a `TaskInfo` containing the task ID and stream ID. The task runs in the background on the task worker.
+**Tasks** are long-running, asynchronous resources. When you start a task, the
+current run returns immediately with a `TaskInfo` containing the task ID and
+stream ID. The task inherits that stream, records the originating run, and
+executes in the background on a task worker. Its execution is recorded as a
+task-type run.
 
 There are two types of tasks:
 
@@ -46,9 +57,71 @@ There are two types of tasks:
 
 Tasks move through these states:
 
-```
-queued → running → completed | failed | timed_out | cancelled
-```
+<div class="my-8" style="overflow-x: auto; padding-bottom: 0.5rem;">
+<svg viewBox="0 0 920 310" class="w-full max-w-4xl mx-auto" style="min-width: 44rem; font-family: system-ui, sans-serif;" role="img" aria-labelledby="task-lifecycle-title task-lifecycle-desc">
+  <title id="task-lifecycle-title">Task lifecycle states</title>
+  <desc id="task-lifecycle-desc">A queued task becomes running, then finishes as completed, failed, timed out, or cancelled.</desc>
+  <style>
+    .tl-node { fill: #ffffff; stroke: #d1d5db; stroke-width: 1.5; }
+    .tl-queued { fill: #f9fafb; stroke: #9ca3af; }
+    .tl-running { fill: #fffbeb; stroke: #f59e0b; }
+    .tl-completed { fill: #f0fdf4; stroke: #22c55e; }
+    .tl-failed { fill: #fef2f2; stroke: #ef4444; }
+    .tl-timeout { fill: #fff7ed; stroke: #f97316; }
+    .tl-cancelled { fill: #f9fafb; stroke: #71717a; }
+    .tl-title { fill: #111827; font-size: 16px; font-weight: 650; }
+    .tl-sub { fill: #6b7280; font-size: 12px; }
+    .tl-arrow { fill: none; stroke: #9ca3af; stroke-width: 2; }
+    .tl-label { fill: #6b7280; font-size: 11.5px; font-weight: 550; }
+    .dark .tl-node { fill: #1c1c20; stroke: #3f3f46; }
+    .dark .tl-queued, .dark .tl-cancelled { fill: #18181b; stroke: #71717a; }
+    .dark .tl-running { fill: #422006; stroke: #fbbf24; }
+    .dark .tl-completed { fill: #052e16; stroke: #4ade80; }
+    .dark .tl-failed { fill: #450a0a; stroke: #f87171; }
+    .dark .tl-timeout { fill: #431407; stroke: #fb923c; }
+    .dark .tl-title { fill: #f4f4f5; }
+    .dark .tl-sub, .dark .tl-label { fill: #a1a1aa; }
+    .dark .tl-arrow { stroke: #71717a; }
+  </style>
+  <defs>
+    <marker id="tl-arrowhead" markerWidth="9" markerHeight="8" refX="8" refY="4" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L0,8 L9,4 z" fill="#9ca3af"/>
+    </marker>
+  </defs>
+
+  <rect x="45" y="119" width="160" height="68" rx="12" class="tl-node tl-queued"/>
+  <text x="125" y="148" text-anchor="middle" class="tl-title">queued</text>
+  <text x="125" y="170" text-anchor="middle" class="tl-sub">waiting for a worker</text>
+
+  <path d="M205 153 L285 153" class="tl-arrow" marker-end="url(#tl-arrowhead)"/>
+  <text x="245" y="141" text-anchor="middle" class="tl-label">claimed</text>
+
+  <rect x="285" y="119" width="180" height="68" rx="12" class="tl-node tl-running"/>
+  <text x="375" y="148" text-anchor="middle" class="tl-title">running</text>
+  <text x="375" y="170" text-anchor="middle" class="tl-sub">task worker executing</text>
+
+  <path d="M465 153 C535 153 535 52 625 52" class="tl-arrow" marker-end="url(#tl-arrowhead)"/>
+  <path d="M465 153 C535 153 535 119 625 119" class="tl-arrow" marker-end="url(#tl-arrowhead)"/>
+  <path d="M465 153 C535 153 535 186 625 186" class="tl-arrow" marker-end="url(#tl-arrowhead)"/>
+  <path d="M465 153 C535 153 535 253 625 253" class="tl-arrow" marker-end="url(#tl-arrowhead)"/>
+
+  <rect x="625" y="24" width="220" height="56" rx="11" class="tl-node tl-completed"/>
+  <text x="735" y="48" text-anchor="middle" class="tl-title">completed</text>
+  <text x="735" y="67" text-anchor="middle" class="tl-sub">finished successfully</text>
+
+  <rect x="625" y="91" width="220" height="56" rx="11" class="tl-node tl-failed"/>
+  <text x="735" y="115" text-anchor="middle" class="tl-title">failed</text>
+  <text x="735" y="134" text-anchor="middle" class="tl-sub">exited with an error</text>
+
+  <rect x="625" y="158" width="220" height="56" rx="11" class="tl-node tl-timeout"/>
+  <text x="735" y="182" text-anchor="middle" class="tl-title">timed_out</text>
+  <text x="735" y="201" text-anchor="middle" class="tl-sub">exceeded its timeout</text>
+
+  <rect x="625" y="225" width="220" height="56" rx="11" class="tl-node tl-cancelled"/>
+  <text x="735" y="249" text-anchor="middle" class="tl-title">cancelled</text>
+  <text x="735" y="268" text-anchor="middle" class="tl-sub">stopped cooperatively</text>
+</svg>
+</div>
 
 | State | Description |
 |-------|-------------|
