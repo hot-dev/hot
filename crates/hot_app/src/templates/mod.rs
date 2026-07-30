@@ -536,11 +536,101 @@ pub struct RunDisplay {
     pub retry_attempt: i16, // Current retry attempt (0 = first try)
     pub next_retry_at: Option<chrono::DateTime<chrono::Utc>>, // Next retry time
     pub is_retry: bool,     // True if this is a retry run (retry_attempt > 0)
-    // Queue timing - time between event enqueue and run start
-    pub queue_wait_us: Option<i64>, // Microseconds spent waiting in queue (event-triggered runs only)
+    // Pre-run phase timing for event-triggered runs.
+    pub pre_run_wait_us: Option<i64>, // Total event creation -> run start time
+    pub pre_run_wait_formatted: Option<String>,
+    pub publish_wait_us: Option<i64>, // Event creation -> Redis XADD
+    pub publish_wait_formatted: Option<String>,
+    pub queue_wait_us: Option<i64>, // Actual backend queue residence
     pub queue_wait_formatted: Option<String>, // Formatted queue wait time
+    pub retry_queue_age_us: Option<i64>, // Original enqueue -> retry/reclaim claim
+    pub retry_queue_age_formatted: Option<String>,
+    pub handler_dispatch_wait_us: Option<i64>, // Claim -> this handler's dispatch
+    pub handler_dispatch_wait_formatted: Option<String>,
+    pub worker_preparation_us: Option<i64>, // Handler dispatch -> VM run:start
+    pub worker_preparation_formatted: Option<String>,
+    pub queue_backend: Option<String>,
     pub queued_at: Option<chrono::DateTime<chrono::Utc>>, // When event was enqueued
-    pub queued_at_formatted: Option<String>, // Formatted event time
+    pub queued_at_formatted: Option<String>,              // Formatted event time
+}
+
+struct RunQueuePhases {
+    pre_run_wait_us: Option<i64>,
+    publish_wait_us: Option<i64>,
+    queue_wait_us: Option<i64>,
+    retry_queue_age_us: Option<i64>,
+    handler_dispatch_wait_us: Option<i64>,
+    worker_preparation_us: Option<i64>,
+    backend: Option<String>,
+}
+
+fn run_queue_phases(run: &Run) -> RunQueuePhases {
+    let pre_run_wait_us = run.queued_at.map(|queued_at| {
+        run.start_time
+            .signed_duration_since(queued_at)
+            .num_microseconds()
+            .unwrap_or(0)
+            .max(0)
+    });
+    let timing = run.info.as_ref().and_then(|info| info.get("queue_timing"));
+
+    let queue_wait_us = if timing.is_some() {
+        timing
+            .and_then(|value| value.get("queue_wait_us"))
+            .and_then(serde_json::Value::as_u64)
+            .map(|value| value.min(i64::MAX as u64) as i64)
+    } else {
+        pre_run_wait_us
+    };
+    let retry_queue_age_us = timing
+        .and_then(|value| value.get("retry_queue_age_us"))
+        .and_then(serde_json::Value::as_u64)
+        .map(|value| value.min(i64::MAX as u64) as i64);
+    let handler_dispatch_wait_us = timing
+        .and_then(|value| value.get("handler_dispatch_wait_us"))
+        .and_then(serde_json::Value::as_i64)
+        .map(|value| value.max(0));
+    let worker_preparation_us = timing
+        .and_then(|value| value.get("worker_preparation_us"))
+        .and_then(serde_json::Value::as_i64)
+        .map(|value| value.max(0));
+    let backend = timing
+        .and_then(|value| value.get("backend"))
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_string);
+    let enqueued_at = timing
+        .and_then(|value| value.get("enqueued_at"))
+        .and_then(serde_json::Value::as_str)
+        .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok())
+        .map(|value| value.with_timezone(&chrono::Utc));
+    let publish_wait_us = run
+        .queued_at
+        .zip(enqueued_at)
+        .map(|(queued_at, enqueued_at)| {
+            enqueued_at
+                .signed_duration_since(queued_at)
+                .num_microseconds()
+                .unwrap_or(0)
+                .max(0)
+        });
+
+    RunQueuePhases {
+        pre_run_wait_us,
+        publish_wait_us,
+        queue_wait_us,
+        retry_queue_age_us,
+        handler_dispatch_wait_us,
+        worker_preparation_us,
+        backend,
+    }
+}
+
+pub(crate) fn run_queue_wait_us(run: &Run) -> Option<i64> {
+    run_queue_phases(run).queue_wait_us
+}
+
+fn format_duration_ms(total_ms: i64) -> String {
+    format_duration_us(total_ms.saturating_mul(1_000))
 }
 
 #[derive(Debug, Clone)]
@@ -558,6 +648,39 @@ pub struct TaskDisplay {
     pub stop_time_formatted: String,
     pub duration_formatted: String,
     pub duration_ms: Option<i64>,
+    pub total_duration_formatted: String,
+    pub total_duration_ms: Option<i64>,
+    pub waiting_ms: Option<i64>,
+    pub waiting_formatted: Option<String>,
+    pub task_execution_ms: Option<i64>,
+    pub task_execution_formatted: Option<String>,
+    pub workload_started_formatted: Option<String>,
+    pub publish_wait_ms: Option<i64>,
+    pub publish_wait_formatted: Option<String>,
+    pub queue_wait_ms: Option<i64>,
+    pub queue_wait_formatted: Option<String>,
+    pub retry_queue_age_ms: Option<i64>,
+    pub retry_queue_age_formatted: Option<String>,
+    pub worker_preparation_ms: Option<i64>,
+    pub worker_preparation_formatted: Option<String>,
+    pub capacity_wait_ms: Option<i64>,
+    pub capacity_wait_formatted: Option<String>,
+    pub runtime_start_ms: Option<i64>,
+    pub waiting_image_pull_ms: Option<i64>,
+    pub waiting_image_pull_formatted: Option<String>,
+    pub waiting_runtime_start_ms: Option<i64>,
+    pub waiting_runtime_start_formatted: Option<String>,
+    pub unattributed_waiting_ms: Option<i64>,
+    pub unattributed_waiting_formatted: Option<String>,
+    pub execution_startup_ms: Option<i64>,
+    pub execution_startup_formatted: Option<String>,
+    pub finalization_ms: Option<i64>,
+    pub workload_execution_ms: Option<i64>,
+    pub workload_execution_formatted: Option<String>,
+    pub logs_collect_formatted: Option<String>,
+    pub finalization_formatted: Option<String>,
+    pub redelivered: bool,
+    pub queue_backend: Option<String>,
     pub result: Option<String>,
     pub result_json: Option<String>,
     // Container-specific fields parsed from result JSON
@@ -612,19 +735,6 @@ impl TaskDisplay {
             })
             .unwrap_or_else(|| "-".to_string());
 
-        let duration_formatted = task
-            .duration_ms
-            .map(|ms| {
-                if ms < 1000 {
-                    format!("{}ms", ms)
-                } else if ms < 60_000 {
-                    format!("{:.1}s", ms as f64 / 1000.0)
-                } else {
-                    format!("{:.1}m", ms as f64 / 60_000.0)
-                }
-            })
-            .unwrap_or_else(|| "-".to_string());
-
         let result = task
             .result
             .as_ref()
@@ -664,6 +774,8 @@ impl TaskDisplay {
         let execution_ms = result_obj.and_then(|r| r.get("execution-ms").and_then(|v| v.as_i64()));
         let logs_collect_ms =
             result_obj.and_then(|r| r.get("logs-collect-ms").and_then(|v| v.as_i64()));
+        let result_runtime_start_ms =
+            result_obj.and_then(|r| r.get("runtime-start-ms").and_then(|v| v.as_i64()));
         let container_id = result_obj.and_then(|r| {
             r.get("container-id")
                 .and_then(|v| v.as_str().map(String::from))
@@ -677,6 +789,133 @@ impl TaskDisplay {
             result_obj.and_then(|r| r.get("stdout").and_then(|v| v.as_str().map(String::from)));
         let stderr =
             result_obj.and_then(|r| r.get("stderr").and_then(|v| v.as_str().map(String::from)));
+
+        let timing = task.timing.as_ref();
+        let timing_i64 = |key: &str| {
+            timing
+                .and_then(|value| value.get(key))
+                .and_then(serde_json::Value::as_i64)
+                .map(|value| value.max(0))
+        };
+        let workload_started_at = timing
+            .and_then(|value| value.get("workload_started_at"))
+            .and_then(serde_json::Value::as_str)
+            .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok())
+            .map(|value| value.with_timezone(&chrono::Utc));
+        let effective_workload_started_at = workload_started_at.or(task.start_time);
+        let waiting_ms = timing_i64("waiting_ms").or_else(|| {
+            effective_workload_started_at
+                .map(|started_at| {
+                    started_at
+                        .signed_duration_since(task.created_at)
+                        .num_milliseconds()
+                        .max(0)
+                })
+                .or_else(|| {
+                    if task.status == "queued" {
+                        Some(
+                            chrono::Utc::now()
+                                .signed_duration_since(task.created_at)
+                                .num_milliseconds()
+                                .max(0),
+                        )
+                    } else {
+                        None
+                    }
+                })
+        });
+        let task_execution_ms = timing_i64("execution_ms")
+            .or_else(|| {
+                effective_workload_started_at.map(|started_at| {
+                    task.stop_time
+                        .unwrap_or_else(chrono::Utc::now)
+                        .signed_duration_since(started_at)
+                        .num_milliseconds()
+                        .max(0)
+                })
+            })
+            .or(task.duration_ms);
+        let total_duration_ms = timing_i64("total_ms")
+            .or_else(|| {
+                task.stop_time.map(|stop_time| {
+                    stop_time
+                        .signed_duration_since(task.created_at)
+                        .num_milliseconds()
+                        .max(0)
+                })
+            })
+            .or_else(|| {
+                waiting_ms
+                    .zip(task_execution_ms)
+                    .map(|(waiting, execution)| waiting.saturating_add(execution))
+            });
+        // Preserve the existing task Duration semantics (claimed/started to
+        // completed). Total lifecycle time is a separate timeline value.
+        let duration_ms = task.duration_ms.or_else(|| {
+            task.start_time
+                .zip(task.stop_time)
+                .map(|(start, stop)| stop.signed_duration_since(start).num_milliseconds().max(0))
+        });
+        let workload_execution_ms = timing_i64("workload_execution_ms").or(execution_ms);
+        let logs_collect_ms = timing_i64("logs_collect_ms").or(logs_collect_ms);
+        let image_pull_ms = timing_i64("image_pull_ms").or(image_pull_ms);
+        let runtime_start_ms = timing_i64("runtime_start_ms").or(result_runtime_start_ms);
+        let waiting_image_pull_ms = workload_started_at.and(image_pull_ms);
+        let waiting_runtime_start_ms = workload_started_at.and(runtime_start_ms);
+        let execution_startup_ms = if workload_started_at.is_none() {
+            Some(
+                image_pull_ms
+                    .unwrap_or(0)
+                    .saturating_add(runtime_start_ms.unwrap_or(0)),
+            )
+            .filter(|value| *value > 0)
+        } else {
+            None
+        };
+        let finalization_ms = task_execution_ms.map(|total| {
+            total
+                .saturating_sub(workload_execution_ms.unwrap_or(0))
+                .saturating_sub(logs_collect_ms.unwrap_or(0))
+                .saturating_sub(execution_startup_ms.unwrap_or(0))
+        });
+        let duration_formatted = duration_ms
+            .map(format_duration_ms)
+            .unwrap_or_else(|| "-".to_string());
+        let total_duration_formatted = total_duration_ms
+            .map(format_duration_ms)
+            .unwrap_or_else(|| "-".to_string());
+        let waiting_formatted = waiting_ms.map(format_duration_ms);
+        let task_execution_formatted = task_execution_ms.map(format_duration_ms);
+        let publish_wait_ms = timing_i64("publish_wait_ms");
+        let queue_wait_ms = timing_i64("queue_wait_ms");
+        let retry_queue_age_ms = timing_i64("retry_queue_age_ms");
+        let worker_preparation_ms = timing_i64("worker_preparation_ms");
+        let capacity_wait_ms = timing_i64("capacity_wait_ms").or(slot_wait_ms);
+        let known_waiting_ms = publish_wait_ms
+            .unwrap_or(0)
+            .saturating_add(queue_wait_ms.or(retry_queue_age_ms).unwrap_or(0))
+            .saturating_add(worker_preparation_ms.unwrap_or(0))
+            .saturating_add(capacity_wait_ms.unwrap_or(0))
+            .saturating_add(waiting_image_pull_ms.unwrap_or(0))
+            .saturating_add(waiting_runtime_start_ms.unwrap_or(0));
+        let unattributed_waiting_ms = waiting_ms
+            .map(|total| total.saturating_sub(known_waiting_ms))
+            .filter(|value| *value > 0);
+        let redelivered = timing
+            .and_then(|value| value.get("redelivered"))
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false);
+        let workload_started_formatted = effective_workload_started_at.map(|value| {
+            format!(
+                "{} {}",
+                crate::timezone::format_in_timezone(&value, timezone, "%Y-%m-%d %H:%M:%S"),
+                tz_abbr
+            )
+        });
+        let queue_backend = timing
+            .and_then(|value| value.get("queue_backend"))
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string);
 
         let origin_run_fn = task.origin_run_fn.clone();
 
@@ -719,7 +958,40 @@ impl TaskDisplay {
             start_time_formatted,
             stop_time_formatted,
             duration_formatted,
-            duration_ms: task.duration_ms,
+            duration_ms,
+            total_duration_formatted,
+            total_duration_ms,
+            waiting_ms,
+            waiting_formatted,
+            task_execution_ms,
+            task_execution_formatted,
+            workload_started_formatted,
+            publish_wait_ms,
+            publish_wait_formatted: publish_wait_ms.map(format_duration_ms),
+            queue_wait_ms,
+            queue_wait_formatted: queue_wait_ms.map(format_duration_ms),
+            retry_queue_age_ms,
+            retry_queue_age_formatted: retry_queue_age_ms.map(format_duration_ms),
+            worker_preparation_ms,
+            worker_preparation_formatted: worker_preparation_ms.map(format_duration_ms),
+            capacity_wait_ms,
+            capacity_wait_formatted: capacity_wait_ms.map(format_duration_ms),
+            runtime_start_ms,
+            waiting_image_pull_ms,
+            waiting_image_pull_formatted: waiting_image_pull_ms.map(format_duration_ms),
+            waiting_runtime_start_ms,
+            waiting_runtime_start_formatted: waiting_runtime_start_ms.map(format_duration_ms),
+            unattributed_waiting_ms,
+            unattributed_waiting_formatted: unattributed_waiting_ms.map(format_duration_ms),
+            execution_startup_ms,
+            execution_startup_formatted: execution_startup_ms.map(format_duration_ms),
+            finalization_ms,
+            workload_execution_ms,
+            workload_execution_formatted: workload_execution_ms.map(format_duration_ms),
+            logs_collect_formatted: logs_collect_ms.map(format_duration_ms),
+            finalization_formatted: finalization_ms.map(format_duration_ms),
+            redelivered,
+            queue_backend,
             result,
             result_json,
             exit_code,
@@ -728,7 +1000,7 @@ impl TaskDisplay {
             cus_multiplier,
             slot_wait_ms,
             image_pull_ms,
-            execution_ms,
+            execution_ms: workload_execution_ms,
             logs_collect_ms,
             container_id,
             backend,
@@ -813,17 +1085,8 @@ impl RunDisplay {
                 .unwrap_or(0)
         };
 
-        // Calculate queue wait time (start - queued_at) for event-triggered runs
-        let queue_wait_us = run.queued_at.map(|queued_at| {
-            run.start_time
-                .signed_duration_since(queued_at)
-                .num_microseconds()
-                .unwrap_or(0)
-                .max(0) // Clamp to 0 to handle any timing precision issues
-        });
-
-        // Total duration = queue wait + execution time
-        let duration_us = exec_time_us + queue_wait_us.unwrap_or(0);
+        let queue_phases = run_queue_phases(run);
+        let duration_us = exec_time_us + queue_phases.pre_run_wait_us.unwrap_or(0);
 
         let (exec_time_formatted, stop_time_formatted, is_completed) =
             if let Some(stop_time) = run.stop_time {
@@ -842,8 +1105,15 @@ impl RunDisplay {
         // Format total duration
         let duration_formatted = format_duration_us(duration_us);
 
-        // Format queue wait time
-        let queue_wait_formatted = queue_wait_us.map(format_duration_us);
+        let publish_wait_formatted = queue_phases.publish_wait_us.map(format_duration_us);
+        let pre_run_wait_formatted = queue_phases.pre_run_wait_us.map(format_duration_us);
+        let queue_wait_formatted = queue_phases.queue_wait_us.map(format_duration_us);
+        let retry_queue_age_formatted = queue_phases.retry_queue_age_us.map(format_duration_us);
+        let handler_dispatch_wait_formatted = queue_phases
+            .handler_dispatch_wait_us
+            .map(format_duration_us);
+        let worker_preparation_formatted =
+            queue_phases.worker_preparation_us.map(format_duration_us);
 
         // Format queued_at (event time)
         let queued_at_formatted = run.queued_at.map(|queued_at| {
@@ -894,8 +1164,19 @@ impl RunDisplay {
             retry_attempt: run.retry_attempt,
             next_retry_at: run.next_retry_at,
             is_retry: run.retry_attempt > 0,
-            queue_wait_us,
+            pre_run_wait_us: queue_phases.pre_run_wait_us,
+            pre_run_wait_formatted,
+            publish_wait_us: queue_phases.publish_wait_us,
+            publish_wait_formatted,
+            queue_wait_us: queue_phases.queue_wait_us,
             queue_wait_formatted,
+            retry_queue_age_us: queue_phases.retry_queue_age_us,
+            retry_queue_age_formatted,
+            handler_dispatch_wait_us: queue_phases.handler_dispatch_wait_us,
+            handler_dispatch_wait_formatted,
+            worker_preparation_us: queue_phases.worker_preparation_us,
+            worker_preparation_formatted,
+            queue_backend: queue_phases.backend,
             queued_at: run.queued_at,
             queued_at_formatted,
         }
@@ -919,17 +1200,8 @@ impl From<&Run> for RunDisplay {
                 .unwrap_or(0)
         };
 
-        // Calculate queue wait time (start - queued_at) for event-triggered runs
-        let queue_wait_us = run.queued_at.map(|queued_at| {
-            run.start_time
-                .signed_duration_since(queued_at)
-                .num_microseconds()
-                .unwrap_or(0)
-                .max(0) // Clamp to 0 to handle any timing precision issues
-        });
-
-        // Total duration = queue wait + execution time
-        let duration_us = exec_time_us + queue_wait_us.unwrap_or(0);
+        let queue_phases = run_queue_phases(run);
+        let duration_us = exec_time_us + queue_phases.pre_run_wait_us.unwrap_or(0);
 
         let (exec_time_formatted, stop_time_formatted, is_completed) =
             if let Some(stop_time) = run.stop_time {
@@ -944,8 +1216,15 @@ impl From<&Run> for RunDisplay {
         // Format total duration
         let duration_formatted = format_duration_us(duration_us);
 
-        // Format queue wait time
-        let queue_wait_formatted = queue_wait_us.map(format_duration_us);
+        let publish_wait_formatted = queue_phases.publish_wait_us.map(format_duration_us);
+        let pre_run_wait_formatted = queue_phases.pre_run_wait_us.map(format_duration_us);
+        let queue_wait_formatted = queue_phases.queue_wait_us.map(format_duration_us);
+        let retry_queue_age_formatted = queue_phases.retry_queue_age_us.map(format_duration_us);
+        let handler_dispatch_wait_formatted = queue_phases
+            .handler_dispatch_wait_us
+            .map(format_duration_us);
+        let worker_preparation_formatted =
+            queue_phases.worker_preparation_us.map(format_duration_us);
 
         // Format queued_at (event time)
         let queued_at_formatted = run
@@ -992,8 +1271,19 @@ impl From<&Run> for RunDisplay {
             retry_attempt: run.retry_attempt,
             next_retry_at: run.next_retry_at,
             is_retry: run.retry_attempt > 0,
-            queue_wait_us,
+            pre_run_wait_us: queue_phases.pre_run_wait_us,
+            pre_run_wait_formatted,
+            publish_wait_us: queue_phases.publish_wait_us,
+            publish_wait_formatted,
+            queue_wait_us: queue_phases.queue_wait_us,
             queue_wait_formatted,
+            retry_queue_age_us: queue_phases.retry_queue_age_us,
+            retry_queue_age_formatted,
+            handler_dispatch_wait_us: queue_phases.handler_dispatch_wait_us,
+            handler_dispatch_wait_formatted,
+            worker_preparation_us: queue_phases.worker_preparation_us,
+            worker_preparation_formatted,
+            queue_backend: queue_phases.backend,
             queued_at: run.queued_at,
             queued_at_formatted,
         }

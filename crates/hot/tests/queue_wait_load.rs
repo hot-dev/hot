@@ -63,16 +63,22 @@ async fn memory_queue_enqueue_to_dequeue_wait_p99_stays_below_target() {
     let tasks = (0..item_count).map(|_| {
         let queue = Arc::clone(&queue);
         tokio::spawn(async move {
-            queue
-                .process_blocking(|message: Message| async move {
-                    let created_at_unix_ms = message
-                        .head
-                        .get_int_or_default("created_at_unix_ms", 0)
-                        .max(0) as u64;
-                    let wait_ms = now_ms().saturating_sub(created_at_unix_ms);
-                    Ok::<u64, Box<dyn std::error::Error + Send + Sync>>(wait_ms)
-                })
-                .await
+            loop {
+                if let Some(wait_ms) = queue
+                    .process_blocking(|message: Message| async move {
+                        let created_at_unix_ms = message
+                            .head
+                            .get_int_or_default("created_at_unix_ms", 0)
+                            .max(0) as u64;
+                        let wait_ms = now_ms().saturating_sub(created_at_unix_ms);
+                        Ok::<u64, Box<dyn std::error::Error + Send + Sync>>(wait_ms)
+                    })
+                    .await?
+                {
+                    return Ok::<u64, Box<dyn std::error::Error + Send + Sync>>(wait_ms);
+                }
+                tokio::task::yield_now().await;
+            }
         })
     });
 
@@ -80,8 +86,7 @@ async fn memory_queue_enqueue_to_dequeue_wait_p99_stays_below_target() {
     for result in join_all(tasks).await {
         let wait_ms = result
             .expect("worker task should join")
-            .expect("queue processing should succeed")
-            .expect("queue should have work");
+            .expect("queue processing should succeed");
         waits_ms.push(wait_ms);
     }
 
@@ -99,4 +104,109 @@ async fn memory_queue_enqueue_to_dequeue_wait_p99_stays_below_target() {
         p99,
         p99_target_ms
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "load harness; requires HOT_REDIS_URI and explicit invocation"]
+async fn redis_queue_enqueue_to_dequeue_wait_p99_stays_below_target() {
+    let redis_uri = match std::env::var("HOT_REDIS_URI") {
+        Ok(uri) => uri,
+        Err(_) => {
+            eprintln!("skipping: HOT_REDIS_URI is not set");
+            return;
+        }
+    };
+    let client = redis::Client::open(redis_uri.as_str()).expect("Redis URI should parse");
+    client
+        .get_multiplexed_async_connection()
+        .await
+        .expect("Redis should be reachable");
+
+    let item_count = env_usize("HOT_QUEUE_LOAD_ITEMS", 512);
+    let p99_target_ms = env_usize("HOT_QUEUE_LOAD_P99_MS", 1_000) as u64;
+    let queue_name = format!("queue-load-redis-{}", Uuid::now_v7());
+    let queue = Arc::new(
+        ProcessingQueue::<Message>::new(
+            QueueType::Redis,
+            queue_name.clone(),
+            Some(redis_uri),
+            Serialization::Json,
+        )
+        .expect("Redis queue should construct")
+        .with_read_batch_size(8),
+    );
+
+    for _ in 0..item_count {
+        let created_at_unix_ms = now_ms();
+        queue
+            .enqueue(Message {
+                id: Uuid::now_v7(),
+                head: val!({
+                    "__type": "LoadHarnessMessage",
+                    "created_at_unix_ms": created_at_unix_ms as i64,
+                }),
+                body: val!({
+                    "ok": true,
+                }),
+            })
+            .await
+            .expect("enqueue should succeed");
+    }
+
+    let tasks = (0..item_count).map(|_| {
+        let queue = Arc::clone(&queue);
+        tokio::spawn(async move {
+            loop {
+                if let Some(wait_ms) = queue
+                    .process_blocking(|message: Message| async move {
+                        let created_at_unix_ms = message
+                            .head
+                            .get_int_or_default("created_at_unix_ms", 0)
+                            .max(0) as u64;
+                        Ok::<u64, Box<dyn std::error::Error + Send + Sync>>(
+                            now_ms().saturating_sub(created_at_unix_ms),
+                        )
+                    })
+                    .await?
+                {
+                    return Ok::<u64, Box<dyn std::error::Error + Send + Sync>>(wait_ms);
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+    });
+
+    let mut waits_ms = Vec::with_capacity(item_count);
+    for result in join_all(tasks).await {
+        waits_ms.push(
+            result
+                .expect("worker task should join")
+                .expect("queue processing should succeed"),
+        );
+    }
+    waits_ms.sort_unstable();
+    let p50 = percentile(&waits_ms, 0.50);
+    let p95 = percentile(&waits_ms, 0.95);
+    let p99 = percentile(&waits_ms, 0.99);
+    println!(
+        "redis queue load: items={} p50={}ms p95={}ms p99={}ms target={}ms",
+        item_count, p50, p95, p99, p99_target_ms
+    );
+    assert!(
+        p99 <= p99_target_ms,
+        "Redis queue wait p99 {}ms exceeded target {}ms",
+        p99,
+        p99_target_ms
+    );
+
+    let mut conn = client
+        .get_multiplexed_async_connection()
+        .await
+        .expect("Redis cleanup connection should open");
+    let stream = format!("{{{}}}", queue_name);
+    let _: redis::RedisResult<()> = redis::cmd("DEL")
+        .arg(&stream)
+        .arg(format!("{}:deadletter", stream))
+        .query_async(&mut conn)
+        .await;
 }

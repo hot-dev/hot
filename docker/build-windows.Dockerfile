@@ -1,14 +1,16 @@
 # Multi-stage build for Windows targets using cross-compilation
 FROM rustlang/rust:nightly as builder
 
+ARG TAILWIND_VERSION=v4.3.0
+
 # Download Tailwind CSS standalone executable (for the container architecture)
 RUN ARCH=$(uname -m) && \
     if [ "$ARCH" = "x86_64" ]; then \
-        curl -sLO https://github.com/tailwindlabs/tailwindcss/releases/latest/download/tailwindcss-linux-x64 && \
+        curl -sLO https://github.com/tailwindlabs/tailwindcss/releases/download/${TAILWIND_VERSION}/tailwindcss-linux-x64 && \
         chmod +x tailwindcss-linux-x64 && \
         mv tailwindcss-linux-x64 /usr/local/bin/tailwindcss; \
     elif [ "$ARCH" = "aarch64" ]; then \
-        curl -sLO https://github.com/tailwindlabs/tailwindcss/releases/latest/download/tailwindcss-linux-arm64 && \
+        curl -sLO https://github.com/tailwindlabs/tailwindcss/releases/download/${TAILWIND_VERSION}/tailwindcss-linux-arm64 && \
         chmod +x tailwindcss-linux-arm64 && \
         mv tailwindcss-linux-arm64 /usr/local/bin/tailwindcss; \
     else \

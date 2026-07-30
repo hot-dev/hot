@@ -159,6 +159,8 @@ window.eventActivityTimelineChart = null;
 window.eventTypeTimelineChart = null;
 window.taskActivityTimelineChart = null;
 window.taskCusTimelineChart = null;
+window.runLatencyTimelineChart = null;
+window.taskLatencyTimelineChart = null;
 
 // Selected stream for flow visualization
 let selectedStreamId = null;
@@ -167,8 +169,17 @@ let availableStreams = [];
 // ============================================
 // Helper Functions
 // ============================================
-function buildFilterParams() {
-    const filters = Alpine.$data(document.querySelector('[x-data="dashboardFilters"]'));
+function readDashboardFilters() {
+    const root = document.querySelector('[x-data="dashboardFilters"]');
+    const filters = root ? Alpine.$data(root) : null;
+    return Object.freeze({
+        selectedProject: filters && filters.selectedProject ? filters.selectedProject : '',
+        timeRange: filters && filters.timeRange ? filters.timeRange : 'P1D',
+        timeUnit: filters && filters.timeUnit ? filters.timeUnit : 'hour'
+    });
+}
+
+function buildFilterParams(filters = readDashboardFilters()) {
     const params = new URLSearchParams();
 
     if (filters.selectedProject) {
@@ -184,8 +195,7 @@ function buildFilterParams() {
     return params.toString();
 }
 
-function getFilterDescription() {
-    const filters = Alpine.$data(document.querySelector('[x-data="dashboardFilters"]'));
+function getFilterDescription(filters = readDashboardFilters()) {
     const timeRangeLabels = {
         'P1D': 'the last 24 hours',
         'P7D': 'the last 7 days',
@@ -194,6 +204,38 @@ function getFilterDescription() {
         'all': 'all time'
     };
     return timeRangeLabels[filters.timeRange] || 'the selected period';
+}
+
+let dashboardRefreshGeneration = 0;
+let dashboardRefreshController = null;
+
+function createDashboardRefreshContext() {
+    if (dashboardRefreshController) dashboardRefreshController.abort();
+    dashboardRefreshController = new AbortController();
+    const filters = readDashboardFilters();
+    return Object.freeze({
+        generation: ++dashboardRefreshGeneration,
+        filters,
+        params: buildFilterParams(filters),
+        signal: dashboardRefreshController.signal
+    });
+}
+
+function isCancelledDashboardRefresh(error, context) {
+    return Boolean(
+        context &&
+        (context.signal.aborted ||
+            context.generation !== dashboardRefreshGeneration ||
+            (error && error.name === 'AbortError'))
+    );
+}
+
+async function dashboardFetch(url, context) {
+    const response = await fetch(url, context ? { signal: context.signal } : undefined);
+    if (context && context.generation !== dashboardRefreshGeneration) {
+        throw new DOMException('Superseded dashboard refresh', 'AbortError');
+    }
+    return response;
 }
 
 // truncateUuid is now defined globally in private_layout.html
@@ -223,6 +265,29 @@ function getSplitLineColor() {
     return isDarkMode() ? '#374151' : '#e5e7eb';
 }
 
+// Multi-series charts use a restrained fill so overlapping lines remain
+// distinguishable. Single-series charts can use a stronger fill.
+function subtleLineAreaStyle(color) {
+    const hex = color.replace('#', '');
+    const value = Number.parseInt(hex, 16);
+    const red = (value >> 16) & 255;
+    const green = (value >> 8) & 255;
+    const blue = value & 255;
+    return {
+        color: {
+            type: 'linear',
+            x: 0,
+            y: 0,
+            x2: 0,
+            y2: 1,
+            colorStops: [
+                { offset: 0, color: `rgba(${red}, ${green}, ${blue}, 0.14)` },
+                { offset: 1, color: `rgba(${red}, ${green}, ${blue}, 0.015)` }
+            ]
+        }
+    };
+}
+
 // Helper: split a series so the last segment is drawn with a dotted line
 // to visually indicate partial/incomplete measurement for the current period
 function splitLastSegmentDotted(seriesConfig) {
@@ -246,6 +311,7 @@ function splitLastSegmentDotted(seriesConfig) {
         name: '__partial__' + seriesConfig.name,
         data: dottedData,
         smooth: false,
+        areaStyle: { opacity: 0 },
         lineStyle: {
             ...(seriesConfig.lineStyle || {}),
             type: [2, 3]   // 2px dash, 3px gap — dotted pattern
@@ -286,30 +352,33 @@ let previousEventActivityData = null;
 let previousEventTypeData = null;
 let previousTaskActivityData = null;
 let previousTaskCusData = null;
+let previousRunLatencyData = null;
+let previousTaskLatencyData = null;
 
-async function updateHeroMetrics() {
+async function updateHeroMetrics(context) {
+    const params = context ? context.params : buildFilterParams();
+    const filters = context ? context.filters : readDashboardFilters();
     try {
-        const params = buildFilterParams();
-
         // Fetch stream metrics (now includes all counts)
-        const streamResponse = await fetch(`/data/stream-metrics?${params}`);
+        const streamResponse = await dashboardFetch(`/data/stream-metrics?${params}`, context);
         if (!streamResponse.ok) throw new Error(`Stream metrics fetch failed: ${streamResponse.status}`);
         const streamData = await streamResponse.json();
 
         // Cache the successful data
-        previousHeroData = { streamData };
+        previousHeroData = { streamData, params, filters };
 
         // Update UI with new data
-        updateHeroMetricsUI(streamData);
+        updateHeroMetricsUI(streamData, filters);
 
         // Update status distribution chart with the same data
         updateStatusDistributionChart(streamData);
 
     } catch (error) {
+        if (isCancelledDashboardRefresh(error, context)) return;
         console.error('Error updating hero metrics:', error);
         // Use previous data if available
-        if (previousHeroData) {
-            updateHeroMetricsUI(previousHeroData.streamData);
+        if (previousHeroData && previousHeroData.params === params) {
+            updateHeroMetricsUI(previousHeroData.streamData, previousHeroData.filters);
             updateStatusDistributionChart(previousHeroData.streamData);
         }
     }
@@ -320,7 +389,7 @@ function formatNumber(num) {
     return num.toString().replace(/\B(?=(\d{3})+(?!\d))/g, ",");
 }
 
-function updateHeroMetricsUI(streamData) {
+function updateHeroMetricsUI(streamData, filters = readDashboardFilters()) {
     // Update Runs (first panel)
     const runsTotal = document.querySelector('#hero-runs-total');
     if (runsTotal) {
@@ -362,10 +431,16 @@ function updateHeroMetricsUI(streamData) {
     }
     const eventsUnhandled = document.querySelector('#hero-events-unhandled');
     if (eventsUnhandled) {
-        const totalEvents = streamData.total_events ?? 0;
-        const handledCount = streamData.handled_events ?? 0;
-        const unhandledCount = Math.max(0, totalEvents - handledCount);
-        eventsUnhandled.textContent = `${formatNumber(unhandledCount)} Unhandled`;
+        if (filters.selectedProject) {
+            eventsUnhandled.textContent = '— Unhandled';
+            eventsUnhandled.title = 'Unhandled events cannot be attributed to a project.';
+        } else {
+            const totalEvents = streamData.total_events ?? 0;
+            const handledCount = streamData.handled_events ?? 0;
+            const unhandledCount = Math.max(0, totalEvents - handledCount);
+            eventsUnhandled.textContent = `${formatNumber(unhandledCount)} Unhandled`;
+            eventsUnhandled.removeAttribute('title');
+        }
     }
 
     // Update Tasks
@@ -432,11 +507,11 @@ function updateHeroMetricsUI(streamData) {
     }
 }
 
-async function updateActivityTimeline() {
+async function updateActivityTimeline(context) {
     try {
-        const params = buildFilterParams();
+        const params = context ? context.params : buildFilterParams();
 
-        const response = await fetch(`/data/status-chart-data?${params}`);
+        const response = await dashboardFetch(`/data/status-chart-data?${params}`, context);
         if (!response.ok) throw new Error(`Activity timeline fetch failed: ${response.status}`);
         const data = await response.json();
 
@@ -447,6 +522,7 @@ async function updateActivityTimeline() {
         updateActivityTimelineChart(data);
 
     } catch (error) {
+        if (isCancelledDashboardRefresh(error, context)) return;
         console.error('Error updating activity timeline:', error);
         // Use previous data if available
         if (previousActivityData) {
@@ -561,6 +637,7 @@ function updateActivityTimelineChart(data) {
                     name: s.name,
                     type: 'line',
                     smooth: 0.2,
+                    areaStyle: subtleLineAreaStyle(statusColors[s.name.toLowerCase()] || '#6b7280'),
                     emphasis: {
                         focus: 'series'
                     },
@@ -579,10 +656,10 @@ function updateActivityTimelineChart(data) {
 // Run Type Distribution Timeline
 // ============================================
 
-async function updateRunTypeTimeline() {
+async function updateRunTypeTimeline(context) {
     try {
-        const params = buildFilterParams();
-        const response = await fetch(`/data/run-type-data?${params}`);
+        const params = context ? context.params : buildFilterParams();
+        const response = await dashboardFetch(`/data/run-type-data?${params}`, context);
         if (!response.ok) throw new Error(`Run type data fetch failed: ${response.status}`);
         const data = await response.json();
 
@@ -593,6 +670,7 @@ async function updateRunTypeTimeline() {
         updateRunTypeTimelineChart(data);
 
     } catch (error) {
+        if (isCancelledDashboardRefresh(error, context)) return;
         console.error('Error updating run type timeline:', error);
         // Use previous data if available
         if (previousRunTypeData) {
@@ -712,6 +790,7 @@ function updateRunTypeTimelineChart(data) {
                     name: s.name,
                     type: 'line',
                     smooth: 0.2,
+                    areaStyle: subtleLineAreaStyle(runTypeColors[s.name] || '#6b7280'),
                     emphasis: {
                         focus: 'series'
                     },
@@ -821,10 +900,10 @@ function updateStatusDistributionChart(data) {
 // ============================================
 // Stream Visualization Functions
 // ============================================
-async function updateStreamActivityTimeline() {
+async function updateStreamActivityTimeline(context) {
     try {
-        const params = buildFilterParams();
-        const response = await fetch(`/data/stream-activity-timeline?${params}`);
+        const params = context ? context.params : buildFilterParams();
+        const response = await dashboardFetch(`/data/stream-activity-timeline?${params}`, context);
         if (!response.ok) throw new Error(`Stream activity timeline fetch failed: ${response.status}`);
         const data = await response.json();
 
@@ -832,6 +911,7 @@ async function updateStreamActivityTimeline() {
         updateStreamActivityTimelineChart(data);
 
     } catch (error) {
+        if (isCancelledDashboardRefresh(error, context)) return;
         console.error('Error updating stream activity timeline:', error);
         if (previousStreamActivityData) {
             updateStreamActivityTimelineChart(previousStreamActivityData);
@@ -953,10 +1033,10 @@ function updateStreamActivityTimelineChart(data) {
     }
 }
 
-async function updateStreamComposition() {
+async function updateStreamComposition(context) {
     try {
-        const params = buildFilterParams();
-        const response = await fetch(`/data/stream-composition?${params}`);
+        const params = context ? context.params : buildFilterParams();
+        const response = await dashboardFetch(`/data/stream-composition?${params}`, context);
         if (!response.ok) throw new Error(`Stream composition fetch failed: ${response.status}`);
         const data = await response.json();
 
@@ -964,6 +1044,7 @@ async function updateStreamComposition() {
         updateStreamCompositionChart(data);
 
     } catch (error) {
+        if (isCancelledDashboardRefresh(error, context)) return;
         console.error('Error updating stream composition:', error);
         if (previousStreamCompositionData) {
             updateStreamCompositionChart(previousStreamCompositionData);
@@ -1068,7 +1149,8 @@ function updateStreamCompositionChart(data) {
                         data: data.avg_runs,
                         itemStyle: {
                             color: '#10b981'
-                        }
+                        },
+                        areaStyle: subtleLineAreaStyle('#10b981')
                     },
                     {
                         name: 'Avg Events per Stream',
@@ -1077,7 +1159,8 @@ function updateStreamCompositionChart(data) {
                         data: data.avg_events,
                         itemStyle: {
                             color: '#f59e0b'
-                        }
+                        },
+                        areaStyle: subtleLineAreaStyle('#f59e0b')
                     }
                 ].flatMap(s => splitLastSegmentDotted(s))
             };
@@ -1089,10 +1172,10 @@ function updateStreamCompositionChart(data) {
 // ============================================
 // Event Visualization Functions
 // ============================================
-async function updateEventActivityTimeline() {
+async function updateEventActivityTimeline(context) {
     try {
-        const params = buildFilterParams();
-        const response = await fetch(`/data/event-activity-timeline?${params}`);
+        const params = context ? context.params : buildFilterParams();
+        const response = await dashboardFetch(`/data/event-activity-timeline?${params}`, context);
         if (!response.ok) throw new Error(`Event activity timeline fetch failed: ${response.status}`);
         const data = await response.json();
 
@@ -1100,6 +1183,7 @@ async function updateEventActivityTimeline() {
         updateEventActivityTimelineChart(data);
 
     } catch (error) {
+        if (isCancelledDashboardRefresh(error, context)) return;
         console.error('Error updating event activity timeline:', error);
         if (previousEventActivityData) {
             updateEventActivityTimelineChart(previousEventActivityData);
@@ -1146,6 +1230,9 @@ function updateEventActivityTimelineChart(data) {
                 itemStyle: {
                     color: series.name === 'Handled' ? '#10b981' : '#f59e0b'
                 },
+                areaStyle: subtleLineAreaStyle(
+                    series.name === 'Handled' ? '#10b981' : '#f59e0b'
+                ),
                 lineStyle: {
                     width: 2
                 },
@@ -1238,10 +1325,10 @@ function updateEventActivityTimelineChart(data) {
     }
 }
 
-async function updateEventTypeTimeline() {
+async function updateEventTypeTimeline(context) {
     try {
-        const params = buildFilterParams();
-        const response = await fetch(`/data/event-type-timeline?${params}`);
+        const params = context ? context.params : buildFilterParams();
+        const response = await dashboardFetch(`/data/event-type-timeline?${params}`, context);
         if (!response.ok) throw new Error(`Event type timeline fetch failed: ${response.status}`);
         const data = await response.json();
 
@@ -1249,6 +1336,7 @@ async function updateEventTypeTimeline() {
         updateEventTypeTimelineChart(data);
 
     } catch (error) {
+        if (isCancelledDashboardRefresh(error, context)) return;
         console.error('Error updating event type timeline:', error);
         if (previousEventTypeData) {
             updateEventTypeTimelineChart(previousEventTypeData);
@@ -1298,6 +1386,7 @@ function updateEventTypeTimelineChart(data) {
                 itemStyle: {
                     color: colors[index % colors.length]
                 },
+                areaStyle: subtleLineAreaStyle(colors[index % colors.length]),
                 lineStyle: {
                     width: 2
                 },
@@ -1385,9 +1474,9 @@ function updateEventTypeTimelineChart(data) {
     }
 }
 
-async function updateEventHandlingStatus() {
+async function updateEventHandlingStatus(context) {
     try {
-        const response = await fetch(`/data/event-handling-status`);
+        const response = await dashboardFetch(`/data/event-handling-status`, context);
         if (!response.ok) throw new Error(`Event handling status fetch failed: ${response.status}`);
         const data = await response.json();
 
@@ -1395,6 +1484,7 @@ async function updateEventHandlingStatus() {
         updateEventHandlingStatusChart(data);
 
     } catch (error) {
+        if (isCancelledDashboardRefresh(error, context)) return;
         console.error('Error updating event handling status:', error);
         if (previousEventHandlingData) {
             updateEventHandlingStatusChart(previousEventHandlingData);
@@ -1500,16 +1590,17 @@ function updateEventHandlingStatusChart(data) {
 // ============================================
 // Task Activity Timeline
 // ============================================
-async function updateTaskActivityTimeline() {
+async function updateTaskActivityTimeline(context) {
     try {
-        const params = buildFilterParams();
-        const response = await fetch(`/data/task-activity-timeline?${params}`);
+        const params = context ? context.params : buildFilterParams();
+        const response = await dashboardFetch(`/data/task-activity-timeline?${params}`, context);
         if (!response.ok) throw new Error(`Task activity timeline fetch failed: ${response.status}`);
         const data = await response.json();
 
         previousTaskActivityData = data;
         updateTaskActivityTimelineChart(data);
     } catch (error) {
+        if (isCancelledDashboardRefresh(error, context)) return;
         console.error('Error updating task activity timeline:', error);
         if (previousTaskActivityData) {
             updateTaskActivityTimelineChart(previousTaskActivityData);
@@ -1551,6 +1642,7 @@ function updateTaskActivityTimelineChart(data) {
                     smooth: 0.2,
                     data: s.data,
                     itemStyle: { color: statusColors[s.name] || '#6b7280' },
+                    areaStyle: subtleLineAreaStyle(statusColors[s.name] || '#6b7280'),
                     lineStyle: { width: 2 },
                     emphasis: { focus: 'series' }
                 };
@@ -1595,18 +1687,247 @@ function updateTaskActivityTimelineChart(data) {
 }
 
 // ============================================
+// Waiting vs. Execution Latency
+// ============================================
+function storedLatencyPercentile(kind) {
+    try {
+        const value = localStorage.getItem(`hot.dashboard.${kind}.latency-percentile`);
+        return ['p50', 'p95', 'p99'].includes(value) ? value : 'p95';
+    } catch (_) {
+        return 'p95';
+    }
+}
+
+const latencyPercentiles = {
+    run: storedLatencyPercentile('run'),
+    task: storedLatencyPercentile('task')
+};
+
+function formatLatencyMs(value) {
+    if (value == null || !Number.isFinite(Number(value))) return '—';
+    const ms = Math.max(0, Number(value));
+    if (ms < 1) return `${Math.round(ms * 1000)}µs`;
+    if (ms < 10) return `${ms.toFixed(1)}ms`;
+    if (ms < 1000) return `${Math.round(ms)}ms`;
+    if (ms < 60000) return `${(ms / 1000).toFixed(ms < 10000 ? 1 : 0)}s`;
+    return `${(ms / 60000).toFixed(1)}m`;
+}
+
+async function updateRunLatencyTimeline(context) {
+    await updateLatencyTimeline('run', context);
+}
+
+async function updateTaskLatencyTimeline(context) {
+    await updateLatencyTimeline('task', context);
+}
+
+async function updateLatencyTimeline(kind, context) {
+    try {
+        const params = context ? context.params : buildFilterParams();
+        const response = await dashboardFetch(`/data/${kind}-latency-timeline?${params}`, context);
+        if (!response.ok) throw new Error(`${kind} latency fetch failed: ${response.status}`);
+        const data = await response.json();
+        if (kind === 'run') previousRunLatencyData = data;
+        else previousTaskLatencyData = data;
+        updateLatencyTimelineChart(kind, data);
+    } catch (error) {
+        if (isCancelledDashboardRefresh(error, context)) return;
+        console.error(`Error updating ${kind} latency timeline:`, error);
+        const previous = kind === 'run' ? previousRunLatencyData : previousTaskLatencyData;
+        if (previous) updateLatencyTimelineChart(kind, previous);
+    }
+}
+
+window.setLatencyPercentile = function(kind, percentile) {
+    if (!['run', 'task'].includes(kind) || !['p50', 'p95', 'p99'].includes(percentile)) return;
+    latencyPercentiles[kind] = percentile;
+    try {
+        localStorage.setItem(`hot.dashboard.${kind}.latency-percentile`, percentile);
+    } catch (_) {}
+    updateLatencyPercentileButtons(kind);
+    const data = kind === 'run' ? previousRunLatencyData : previousTaskLatencyData;
+    if (data) updateLatencyTimelineChart(kind, data);
+};
+
+function updateLatencyMetric(id, value) {
+    const element = document.getElementById(id);
+    if (element) element.textContent = value;
+}
+
+function updateLatencyPercentileButtons(kind) {
+    const percentile = latencyPercentiles[kind];
+    ['p50', 'p95', 'p99'].forEach(value => {
+        const button = document.getElementById(`${kind}-latency-${value}-button`);
+        if (!button) return;
+        const active = value === percentile;
+        button.classList.toggle('bg-gray-100', active);
+        button.classList.toggle('dark:bg-gray-700', active);
+        button.classList.toggle('text-gray-900', active);
+        button.classList.toggle('dark:text-white', active);
+        button.classList.toggle('font-medium', active);
+        button.classList.toggle('text-gray-500', !active);
+        button.classList.toggle('dark:text-gray-400', !active);
+        button.setAttribute('aria-pressed', active ? 'true' : 'false');
+    });
+}
+
+function formatLatencyAxisLabel(value) {
+    const filtersRoot = document.querySelector('[x-data="dashboardFilters"]');
+    const filters = filtersRoot ? Alpine.$data(filtersRoot) : null;
+    const timeUnit = filters && filters.timeUnit;
+    if (timeUnit === 'hour' && value.length >= 16) return value.slice(11, 16);
+    if (timeUnit === 'day' && value.length >= 10) return value.slice(5, 10);
+    return value;
+}
+
+function updateLatencyTimelineChart(kind, data) {
+    const summary = data.summary || {};
+    updateLatencyMetric(`${kind}-latency-wait-p50`, formatLatencyMs(summary.p50 && summary.p50.waiting_ms));
+    updateLatencyMetric(`${kind}-latency-exec-p50`, formatLatencyMs(summary.p50 && summary.p50.execution_ms));
+    updateLatencyMetric(`${kind}-latency-wait-p95`, formatLatencyMs(summary.p95 && summary.p95.waiting_ms));
+    updateLatencyMetric(`${kind}-latency-exec-p95`, formatLatencyMs(summary.p95 && summary.p95.execution_ms));
+
+    const sampleSuffix = summary.truncated ? '+' : '';
+    updateLatencyMetric(`${kind}-latency-samples`, `${formatNumber(summary.sample_count || 0)}${sampleSuffix}`);
+    const coverage = Number(summary.precise_coverage_percent || 0);
+    updateLatencyMetric(
+        `${kind}-latency-coverage`,
+        summary.sample_count
+            ? `${coverage.toFixed(coverage === 100 ? 0 : 1)}% precise timing`
+            : 'No completed samples'
+    );
+
+    const percentile = latencyPercentiles[kind];
+    updateLatencyPercentileButtons(kind);
+
+    const chartName = kind === 'run' ? 'runLatencyTimelineChart' : 'taskLatencyTimelineChart';
+    if (!window[chartName]) {
+        const chartDom = document.getElementById(chartName);
+        if (chartDom) window[chartName] = echarts.init(chartDom);
+    }
+    const chart = window[chartName];
+    if (!chart) return;
+
+    const selected = data[percentile] || {};
+    const waiting = selected.waiting_ms || [];
+    const execution = selected.execution_ms || [];
+    const hasData = waiting.some(value => value != null) || execution.some(value => value != null);
+    if (!hasData) {
+        chart.setOption({
+            title: {
+                text: `No completed ${kind} latency data for ${getFilterDescription()}`,
+                left: 'center',
+                top: 'center',
+                textStyle: { color: getSecondaryTextColor(), fontSize: 13, fontWeight: 'normal' }
+            },
+            series: [],
+            legend: { show: false },
+            tooltip: { show: false },
+            xAxis: { show: false },
+            yAxis: { show: false }
+        }, true);
+        return;
+    }
+
+    const baseSeries = [
+        {
+            name: 'Waiting',
+            type: 'line',
+            smooth: 0.2,
+            data: waiting,
+            itemStyle: { color: '#f59e0b' },
+            areaStyle: subtleLineAreaStyle('#f59e0b'),
+            lineStyle: { width: 2 },
+            emphasis: { focus: 'series' },
+            connectNulls: false
+        },
+        {
+            name: 'Execution',
+            type: 'line',
+            smooth: 0.2,
+            data: execution,
+            itemStyle: { color: '#22c55e' },
+            areaStyle: subtleLineAreaStyle('#22c55e'),
+            lineStyle: { width: 2 },
+            emphasis: { focus: 'series' },
+            connectNulls: false
+        }
+    ];
+    const series = data.last_bucket_partial
+        ? baseSeries.flatMap(config => splitLastSegmentDotted(config))
+        : baseSeries;
+
+    chart.setOption({
+        title: { show: false },
+        tooltip: {
+            trigger: 'axis',
+            formatter: function(params) {
+                if (!params || params.length === 0) return '';
+                const index = params[0].dataIndex;
+                const isLast = data.last_bucket_partial && index === data.dates.length - 1;
+                let result = `${params[0].axisValue}${isLast ? ` <span style="color:${getSecondaryTextColor()}">(partial)</span>` : ''}<br/>`;
+                const seen = new Set();
+                params.forEach(param => {
+                    const name = param.seriesName.replace(/^__partial__/, '');
+                    if (!seen.has(name) && param.value != null) {
+                        seen.add(name);
+                        result += `${param.marker} ${name} ${percentile}: ${formatLatencyMs(param.value)}<br/>`;
+                    }
+                });
+                const count = (data.sample_counts || [])[index] || 0;
+                result += `<span style="color:${getSecondaryTextColor()}">${formatNumber(count)} sample${count === 1 ? '' : 's'}</span>`;
+                return result;
+            }
+        },
+        legend: {
+            data: ['Waiting', 'Execution'],
+            top: 0,
+            textStyle: { color: getTextColor() }
+        },
+        grid: { left: '3%', right: '4%', bottom: '15%', top: '16%', containLabel: true },
+        xAxis: {
+            type: 'category',
+            boundaryGap: false,
+            data: data.dates || [],
+            axisLabel: {
+                rotate: 45,
+                fontSize: 10,
+                color: getTextColor(),
+                formatter: function(value, index) {
+                    const label = formatLatencyAxisLabel(value);
+                    return data.last_bucket_partial && index === data.dates.length - 1
+                        ? label + '*'
+                        : label;
+                }
+            },
+            axisLine: { lineStyle: { color: getAxisLineColor() } }
+        },
+        yAxis: {
+            type: 'value',
+            name: percentile,
+            nameTextStyle: { color: getTextColor() },
+            axisLabel: { color: getTextColor(), formatter: formatLatencyMs },
+            axisLine: { lineStyle: { color: getAxisLineColor() } },
+            splitLine: { lineStyle: { color: getSplitLineColor() } }
+        },
+        series
+    }, true);
+}
+
+// ============================================
 // Task CUS Timeline
 // ============================================
-async function updateTaskCusTimeline() {
+async function updateTaskCusTimeline(context) {
     try {
-        const params = buildFilterParams();
-        const response = await fetch(`/data/task-cus-timeline?${params}`);
+        const params = context ? context.params : buildFilterParams();
+        const response = await dashboardFetch(`/data/task-cus-timeline?${params}`, context);
         if (!response.ok) throw new Error(`Task CUS timeline fetch failed: ${response.status}`);
         const data = await response.json();
 
         previousTaskCusData = data;
         updateTaskCusTimelineChart(data);
     } catch (error) {
+        if (isCancelledDashboardRefresh(error, context)) return;
         console.error('Error updating task CUS timeline:', error);
         if (previousTaskCusData) {
             updateTaskCusTimelineChart(previousTaskCusData);
@@ -1683,24 +2004,21 @@ function updateTaskCusTimelineChart(data) {
 // ============================================
 // Quick Issues Functions
 // ============================================
-async function updateQuickIssues() {
+async function updateQuickIssues(context) {
     // Run sequentially to avoid hammering the server on small machines.
-    await updateFailedRuns();
-    await updateFailedTasks();
-    await updateUnhandledEvents();
+    await updateFailedRuns(context);
+    await updateFailedTasks(context);
+    await updateUnhandledEvents(context);
 }
 
-async function fetchWidgetHtml(url) {
-    const response = await fetch(url);
+async function fetchWidgetHtml(url, context) {
+    const response = await dashboardFetch(url, context);
     if (!response.ok) throw new Error(`Widget fetch failed: ${response.status}`);
     return response.text();
 }
 
-async function updateFailedRuns() {
-    const filtersElement = document.querySelector('[x-data="dashboardFilters"]');
-    if (!filtersElement) return;
-    const filters = Alpine.$data(filtersElement);
-    if (!filters) return;
+async function updateFailedRuns(context) {
+    const filters = context ? context.filters : readDashboardFilters();
 
     const params = new URLSearchParams();
     if (filters.selectedProject) params.append('project', filters.selectedProject);
@@ -1709,19 +2027,17 @@ async function updateFailedRuns() {
     const container = document.getElementById('failed-runs-container');
     if (container) {
         try {
-            container.innerHTML = await fetchWidgetHtml(`/dashboard/widgets/failed-runs?${params.toString()}`);
+            container.innerHTML = await fetchWidgetHtml(`/dashboard/widgets/failed-runs?${params.toString()}`, context);
             applyFormatting(container);
         } catch (e) {
+            if (isCancelledDashboardRefresh(e, context)) return;
             console.error('Failed to load failed runs widget:', e);
         }
     }
 }
 
-async function updateFailedTasks() {
-    const filtersElement = document.querySelector('[x-data="dashboardFilters"]');
-    if (!filtersElement) return;
-    const filters = Alpine.$data(filtersElement);
-    if (!filters) return;
+async function updateFailedTasks(context) {
+    const filters = context ? context.filters : readDashboardFilters();
 
     const params = new URLSearchParams();
     if (filters.selectedProject) params.append('project', filters.selectedProject);
@@ -1730,19 +2046,17 @@ async function updateFailedTasks() {
     const container = document.getElementById('failed-tasks-container');
     if (container) {
         try {
-            container.innerHTML = await fetchWidgetHtml(`/dashboard/widgets/failed-tasks?${params.toString()}`);
+            container.innerHTML = await fetchWidgetHtml(`/dashboard/widgets/failed-tasks?${params.toString()}`, context);
             applyFormatting(container);
         } catch (e) {
+            if (isCancelledDashboardRefresh(e, context)) return;
             console.error('Failed to load failed tasks widget:', e);
         }
     }
 }
 
-async function updateUnhandledEvents() {
-    const filtersElement = document.querySelector('[x-data="dashboardFilters"]');
-    if (!filtersElement) return;
-    const filters = Alpine.$data(filtersElement);
-    if (!filters) return;
+async function updateUnhandledEvents(context) {
+    const filters = context ? context.filters : readDashboardFilters();
 
     const params = new URLSearchParams();
     if (filters.selectedProject) params.append('project', filters.selectedProject);
@@ -1751,9 +2065,10 @@ async function updateUnhandledEvents() {
     const container = document.getElementById('unhandled-events-container');
     if (container) {
         try {
-            container.innerHTML = await fetchWidgetHtml(`/dashboard/widgets/unhandled-events?${params.toString()}`);
+            container.innerHTML = await fetchWidgetHtml(`/dashboard/widgets/unhandled-events?${params.toString()}`, context);
             applyFormatting(container);
         } catch (e) {
+            if (isCancelledDashboardRefresh(e, context)) return;
             console.error('Failed to load unhandled events widget:', e);
         }
     }
@@ -1762,13 +2077,14 @@ async function updateUnhandledEvents() {
 // ============================================
 // Getting Started Empty State (hides when projects exist)
 // ============================================
-async function updateGettingStarted() {
+async function updateGettingStarted(context) {
     const container = document.getElementById('getting-started-container');
     if (container) {
         try {
-            container.innerHTML = await fetchWidgetHtml('/dashboard/widgets/getting-started');
+            container.innerHTML = await fetchWidgetHtml('/dashboard/widgets/getting-started', context);
             applyFormatting(container);
         } catch (e) {
+            if (isCancelledDashboardRefresh(e, context)) return;
             console.error('Failed to load getting started widget:', e);
         }
     }
@@ -1777,11 +2093,8 @@ async function updateGettingStarted() {
 // ============================================
 // Agent Health (hides when no agent runs in window)
 // ============================================
-async function updateAgentHealth() {
-    const filtersElement = document.querySelector('[x-data="dashboardFilters"]');
-    if (!filtersElement) return;
-    const filters = Alpine.$data(filtersElement);
-    if (!filters) return;
+async function updateAgentHealth(context) {
+    const filters = context ? context.filters : readDashboardFilters();
 
     const params = new URLSearchParams();
     if (filters.selectedProject) params.append('project', filters.selectedProject);
@@ -1790,10 +2103,11 @@ async function updateAgentHealth() {
     const container = document.getElementById('agent-health-container');
     if (container) {
         try {
-            container.innerHTML = await fetchWidgetHtml(`/dashboard/widgets/agent-health?${params.toString()}`);
+            container.innerHTML = await fetchWidgetHtml(`/dashboard/widgets/agent-health?${params.toString()}`, context);
             applyFormatting(container);
             updateFailingAgentsBannerChip(container);
         } catch (e) {
+            if (isCancelledDashboardRefresh(e, context)) return;
             console.error('Failed to load agent health widget:', e);
         }
     }
@@ -1849,6 +2163,7 @@ function hideChartSkeleton(chartId) {
 // skeleton overlay once the task completes so each chart fades from
 // pulsing-placeholder → real chart in order, giving a clear progress cue.
 async function refreshDashboardData() {
+    const context = createDashboardRefreshContext();
     const tasks = [
         // Top-of-page KPIs + issues banner data (highest priority).
         { name: 'hero metrics', run: updateHeroMetrics },
@@ -1858,21 +2173,25 @@ async function refreshDashboardData() {
         { name: 'agent health', run: updateAgentHealth },
         // Actionable issues — failed runs / tasks / unhandled events.
         { name: 'quick issues', run: updateQuickIssues },
-        // Activity charts, in the order they appear on the page.
+        // Activity charts, grouped in the same domain order as the page.
         { name: 'activity timeline', run: updateActivityTimeline, chartId: 'activityTimelineChart' },
         { name: 'run type timeline', run: updateRunTypeTimeline, chartId: 'runTypeTimelineChart' },
-        { name: 'stream activity', run: updateStreamActivityTimeline, chartId: 'streamActivityTimelineChart' },
-        { name: 'stream composition', run: updateStreamComposition, chartId: 'streamCompositionChart' },
-        { name: 'event activity', run: updateEventActivityTimeline, chartId: 'eventActivityTimelineChart' },
-        { name: 'event type timeline', run: updateEventTypeTimeline, chartId: 'eventTypeTimelineChart' },
+        { name: 'run latency', run: updateRunLatencyTimeline, chartId: 'runLatencyTimelineChart' },
         { name: 'task activity', run: updateTaskActivityTimeline, chartId: 'taskActivityTimelineChart' },
         { name: 'task CUS timeline', run: updateTaskCusTimeline, chartId: 'taskCusTimelineChart' },
+        { name: 'task latency', run: updateTaskLatencyTimeline, chartId: 'taskLatencyTimelineChart' },
+        { name: 'event activity', run: updateEventActivityTimeline, chartId: 'eventActivityTimelineChart' },
+        { name: 'event type timeline', run: updateEventTypeTimeline, chartId: 'eventTypeTimelineChart' },
+        { name: 'stream activity', run: updateStreamActivityTimeline, chartId: 'streamActivityTimelineChart' },
+        { name: 'stream composition', run: updateStreamComposition, chartId: 'streamCompositionChart' },
     ];
 
     for (const task of tasks) {
+        if (context.signal.aborted || context.generation !== dashboardRefreshGeneration) return;
         try {
-            await task.run();
+            await task.run(context);
         } catch (error) {
+            if (isCancelledDashboardRefresh(error, context)) return;
             console.error(`Error refreshing ${task.name}:`, error);
         }
         // Always remove the skeleton, even on failure: the chart will show
@@ -1882,7 +2201,11 @@ async function refreshDashboardData() {
     }
 
     // Resize charts after data refresh to ensure proper rendering.
-    setTimeout(resizeAllCharts, 100);
+    if (context.generation === dashboardRefreshGeneration) {
+        setTimeout(() => {
+            if (context.generation === dashboardRefreshGeneration) resizeAllCharts();
+        }, 100);
+    }
 }
 
 // ============================================
@@ -1898,7 +2221,9 @@ function resizeAllCharts() {
         'eventActivityTimelineChart',
         'eventTypeTimelineChart',
         'taskActivityTimelineChart',
-        'taskCusTimelineChart'
+        'taskCusTimelineChart',
+        'runLatencyTimelineChart',
+        'taskLatencyTimelineChart'
     ];
     charts.forEach(name => {
         if (window[name]) window[name].resize();
@@ -2043,6 +2368,12 @@ document.addEventListener('DOMContentLoaded', () => {
                 }
                 if (previousTaskCusData) {
                     updateTaskCusTimelineChart(previousTaskCusData);
+                }
+                if (previousRunLatencyData) {
+                    updateLatencyTimelineChart('run', previousRunLatencyData);
+                }
+                if (previousTaskLatencyData) {
+                    updateLatencyTimelineChart('task', previousTaskLatencyData);
                 }
             }
         });

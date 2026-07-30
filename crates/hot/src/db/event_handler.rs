@@ -13,6 +13,13 @@ type EventHandlerCache = Arc<Mutex<AHashMap<(Uuid, String), CachedEventHandlers>
 static EVENT_HANDLER_CACHE: LazyLock<EventHandlerCache> =
     LazyLock::new(|| Arc::new(Mutex::new(AHashMap::new())));
 
+/// Exact build targets are tenant-verified by the worker before lookup. Most
+/// builds are immutable, but live builds reuse an ID while their handlers are
+/// replaced, so these entries use the same short freshness bound as env-wide
+/// routing.
+static BUILD_EVENT_HANDLER_CACHE: LazyLock<EventHandlerCache> =
+    LazyLock::new(|| Arc::new(Mutex::new(AHashMap::new())));
+
 /// Cached event handlers with timestamp for optional TTL
 #[derive(Clone)]
 struct CachedEventHandlers {
@@ -23,6 +30,12 @@ struct CachedEventHandlers {
 
 /// Maximum cache entries (one per env_id + event_type combination)
 const MAX_EVENT_HANDLER_CACHE_ENTRIES: usize = 100;
+
+/// Cross-process deployments are detected through `runtime_revision`. Avoid
+/// paying for that PostgreSQL read on every event in a burst while keeping the
+/// stale window tightly bounded when another process deploys a build.
+const EVENT_HANDLER_REVISION_RECHECK_INTERVAL: std::time::Duration =
+    std::time::Duration::from_millis(500);
 
 #[derive(Error, Debug)]
 pub enum EventHandlerError {
@@ -260,6 +273,123 @@ impl EventHandler {
         }
     }
 
+    /// Cached exact-build lookup for runtime-visible build IDs.
+    pub async fn get_event_handlers_by_build_and_event_type_cached(
+        db: &crate::db::DatabasePool,
+        build_id: &Uuid,
+        event_type: &str,
+    ) -> Result<Vec<EventHandler>, EventHandlerError> {
+        let cache_key = (*build_id, event_type.to_string());
+        if let Ok(cache) = BUILD_EVENT_HANDLER_CACHE.lock()
+            && let Some(cached) = cache.get(&cache_key)
+            && cached.cached_at.elapsed() < EVENT_HANDLER_REVISION_RECHECK_INTERVAL
+        {
+            return Ok(cached.handlers.clone());
+        }
+
+        let handlers = match db {
+            crate::db::DatabasePool::Postgres(pg_pool) => {
+                Self::get_runtime_visible_event_handlers_by_build_postgres(
+                    pg_pool, build_id, event_type,
+                )
+                .await?
+            }
+            crate::db::DatabasePool::Sqlite(sqlite_pool) => {
+                Self::get_runtime_visible_event_handlers_by_build_sqlite(
+                    sqlite_pool,
+                    build_id,
+                    event_type,
+                )
+                .await?
+            }
+        };
+
+        if let Ok(mut cache) = BUILD_EVENT_HANDLER_CACHE.lock() {
+            // A missing exact handler is retryable at the worker. Do not pin a
+            // transient deployment race as an empty cache entry.
+            if handlers.is_empty() {
+                cache.remove(&cache_key);
+                return Ok(handlers);
+            }
+            if cache.len() >= MAX_EVENT_HANDLER_CACHE_ENTRIES
+                && !cache.contains_key(&cache_key)
+                && let Some(oldest_key) = cache
+                    .iter()
+                    .min_by_key(|(_, value)| value.cached_at)
+                    .map(|(key, _)| key.clone())
+            {
+                cache.remove(&oldest_key);
+            }
+            cache.insert(
+                cache_key,
+                CachedEventHandlers {
+                    handlers: handlers.clone(),
+                    // Exact build cache does not use runtime revisions.
+                    runtime_revision: 0,
+                    cached_at: std::time::Instant::now(),
+                },
+            );
+        }
+
+        Ok(handlers)
+    }
+
+    async fn get_runtime_visible_event_handlers_by_build_sqlite(
+        db: &Pool<Sqlite>,
+        build_id: &Uuid,
+        event_type: &str,
+    ) -> Result<Vec<EventHandler>, EventHandlerError> {
+        let event_handlers = sqlx::query_as::<_, EventHandler>(
+            r#"
+            SELECT eh.event_handler_id, eh.build_id, eh.event_type, eh.ns, eh.var,
+                   eh.meta, eh.value, eh.file, eh.line, eh."column", eh.position
+            FROM event_handler eh
+            INNER JOIN build b ON eh.build_id = b.build_id
+            INNER JOIN project p ON b.project_id = p.project_id
+            WHERE eh.build_id = ?
+              AND eh.event_type = ?
+              AND p.active = 1
+              AND b.active = 1
+              AND b.deployed = 1
+              AND b.runtime_status = 'ready'
+            ORDER BY eh.ns, eh.var
+            "#,
+        )
+        .bind(build_id)
+        .bind(event_type)
+        .fetch_all(db)
+        .await?;
+        Ok(event_handlers)
+    }
+
+    async fn get_runtime_visible_event_handlers_by_build_postgres(
+        db: &Pool<Postgres>,
+        build_id: &Uuid,
+        event_type: &str,
+    ) -> Result<Vec<EventHandler>, EventHandlerError> {
+        let event_handlers = sqlx::query_as::<_, EventHandler>(
+            r#"
+            SELECT eh.event_handler_id, eh.build_id, eh.event_type, eh.ns, eh.var,
+                   eh.meta, eh.value, eh.file, eh.line, eh."column", eh.position
+            FROM event_handler eh
+            INNER JOIN build b ON eh.build_id = b.build_id
+            INNER JOIN project p ON b.project_id = p.project_id
+            WHERE eh.build_id = $1
+              AND eh.event_type = $2
+              AND p.active = true
+              AND b.active = true
+              AND b.deployed = true
+              AND b.runtime_status = 'ready'
+            ORDER BY eh.ns, eh.var
+            "#,
+        )
+        .bind(build_id)
+        .bind(event_type)
+        .fetch_all(db)
+        .await?;
+        Ok(event_handlers)
+    }
+
     async fn get_event_handlers_by_build_and_event_type_sqlite(
         db: &Pool<Sqlite>,
         build_id: &Uuid,
@@ -316,15 +446,36 @@ impl EventHandler {
         event_type: &str,
     ) -> Result<Vec<EventHandler>, EventHandlerError> {
         let cache_key = (*env_id, event_type.to_string());
+
+        // Local deployment paths invalidate this cache synchronously. For
+        // cross-process deployments, re-check the authoritative revision on a
+        // short interval instead of issuing one PostgreSQL query per event.
+        if let Ok(cache) = EVENT_HANDLER_CACHE.lock()
+            && let Some(cached) = cache.get(&cache_key)
+            && cached.cached_at.elapsed() < EVENT_HANDLER_REVISION_RECHECK_INTERVAL
+        {
+            tracing::debug!(
+                "✓ Event handlers cache HIT for env={}, type={} revision={} ({} handlers; revision check deferred)",
+                env_id,
+                event_type,
+                cached.runtime_revision,
+                cached.handlers.len()
+            );
+            return Ok(cached.handlers.clone());
+        }
+
         let runtime_revision = crate::db::Env::get_runtime_revision(db, env_id)
             .await
             .map_err(|e| EventHandlerError::RuntimeRevision(e.to_string()))?;
 
         // Check cache first
         if let Ok(mut cache) = EVENT_HANDLER_CACHE.lock()
-            && let Some(cached) = cache.get(&cache_key)
+            && let Some(cached) = cache.get_mut(&cache_key)
         {
             if cached.runtime_revision == runtime_revision {
+                // Defer the next revision read too. Without refreshing this
+                // timestamp, every later cache hit queries PostgreSQL.
+                cached.cached_at = std::time::Instant::now();
                 tracing::debug!(
                     "✓ Event handlers cache HIT for env={}, type={} revision={} ({} handlers)",
                     env_id,
@@ -434,6 +585,9 @@ impl EventHandler {
                 tracing::info!("Invalidated all {} event handler cache entries", count);
             }
         }
+        if let Ok(mut cache) = BUILD_EVENT_HANDLER_CACHE.lock() {
+            cache.clear();
+        }
     }
 
     async fn get_event_handlers_by_env_and_event_type_sqlite(
@@ -453,6 +607,7 @@ impl EventHandler {
             INNER JOIN project p ON b.project_id = p.project_id
             WHERE p.env_id = ?
               AND p.active = 1
+              AND b.active = 1
               AND b.deployed = 1
               AND b.runtime_status = 'ready'
               AND eh.event_type = ?
@@ -483,6 +638,7 @@ impl EventHandler {
             INNER JOIN project p ON b.project_id = p.project_id
             WHERE p.env_id = $1
               AND p.active = true
+              AND b.active = true
               AND b.deployed = true
               AND b.runtime_status = 'ready'
               AND eh.event_type = $2
@@ -584,7 +740,7 @@ impl EventHandler {
         column: Option<i32>,
         position: Option<i32>,
     ) -> Result<(), EventHandlerError> {
-        match db {
+        let result = match db {
             crate::db::DatabasePool::Postgres(pg_pool) => {
                 Self::insert_event_handler_postgres(
                     pg_pool,
@@ -619,7 +775,13 @@ impl EventHandler {
                 )
                 .await
             }
+        };
+        if result.is_ok()
+            && let Ok(mut cache) = BUILD_EVENT_HANDLER_CACHE.lock()
+        {
+            cache.remove(&(*build_id, event_type.to_string()));
         }
+        result
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -836,11 +998,7 @@ impl EventHandler {
         db: &crate::db::DatabasePool,
         build_id: &Uuid,
     ) -> Result<u64, EventHandlerError> {
-        // Invalidate all event handler caches since handlers are being modified
-        // (We don't have env_id here, so invalidate all to be safe)
-        Self::invalidate_all_event_handler_cache();
-
-        match db {
+        let rows_affected = match db {
             crate::db::DatabasePool::Postgres(pg_pool) => {
                 let result = sqlx::query("DELETE FROM event_handler WHERE build_id = $1")
                     .bind(build_id)
@@ -853,7 +1011,7 @@ impl EventHandler {
                         build_id
                     );
                 }
-                Ok(result.rows_affected())
+                result.rows_affected()
             }
             crate::db::DatabasePool::Sqlite(sqlite_pool) => {
                 let result = sqlx::query("DELETE FROM event_handler WHERE build_id = ?")
@@ -867,9 +1025,14 @@ impl EventHandler {
                         build_id
                     );
                 }
-                Ok(result.rows_affected())
+                result.rows_affected()
             }
-        }
+        };
+
+        // Invalidate after the mutation commits so a concurrent lookup cannot
+        // repopulate the cache with rows that are about to be deleted.
+        Self::invalidate_all_event_handler_cache();
+        Ok(rows_affected)
     }
 
     /// Delete a specific event handler
@@ -883,16 +1046,16 @@ impl EventHandler {
                     .bind(event_handler_id)
                     .execute(pg_pool)
                     .await?;
-                Ok(())
             }
             crate::db::DatabasePool::Sqlite(sqlite_pool) => {
                 sqlx::query("DELETE FROM event_handler WHERE event_handler_id = ?")
                     .bind(event_handler_id)
                     .execute(sqlite_pool)
                     .await?;
-                Ok(())
             }
-        }
+        };
+        Self::invalidate_all_event_handler_cache();
+        Ok(())
     }
 
     /// Get event handlers for deployed builds in a specific environment
@@ -974,5 +1137,164 @@ impl EventHandler {
                 Ok(count)
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    static EVENT_HANDLER_CACHE_TEST_LOCK: tokio::sync::Mutex<()> =
+        tokio::sync::Mutex::const_new(());
+
+    fn expire_build_cache_entry(build_id: Uuid, event_type: &str) {
+        let mut cache = BUILD_EVENT_HANDLER_CACHE.lock().unwrap();
+        let cached = cache
+            .get_mut(&(build_id, event_type.to_string()))
+            .expect("build handler cache entry should exist");
+        cached.cached_at = std::time::Instant::now() - EVENT_HANDLER_REVISION_RECHECK_INTERVAL;
+    }
+
+    #[tokio::test]
+    async fn exact_build_cache_is_runtime_visible_bounded_and_does_not_pin_misses() {
+        let _cache_guard = EVENT_HANDLER_CACHE_TEST_LOCK.lock().await;
+        EventHandler::invalidate_all_event_handler_cache();
+        let db = crate::db::test_db().await;
+        let data = crate::db::insert_test_data(&db).await.unwrap();
+        let crate::db::DatabasePool::Sqlite(pool) = &db else {
+            panic!("test_db should return SQLite");
+        };
+        sqlx::query(
+            "UPDATE build
+             SET deployed = 1, active = 1, runtime_status = 'ready'
+             WHERE build_id = ?",
+        )
+        .bind(data.build_id)
+        .execute(pool)
+        .await
+        .unwrap();
+
+        let event_type = "test:exact-cache";
+        assert!(
+            EventHandler::get_event_handlers_by_build_and_event_type_cached(
+                &db,
+                &data.build_id,
+                event_type,
+            )
+            .await
+            .unwrap()
+            .is_empty()
+        );
+
+        let handler_id = Uuid::now_v7();
+        EventHandler::insert_event_handler(
+            &db,
+            &handler_id,
+            &data.build_id,
+            event_type,
+            "test",
+            "first",
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        let handlers = EventHandler::get_event_handlers_by_build_and_event_type_cached(
+            &db,
+            &data.build_id,
+            event_type,
+        )
+        .await
+        .unwrap();
+        assert_eq!(handlers[0].var, "first");
+
+        sqlx::query("UPDATE event_handler SET var = 'reloaded' WHERE event_handler_id = ?")
+            .bind(handler_id)
+            .execute(pool)
+            .await
+            .unwrap();
+        expire_build_cache_entry(data.build_id, event_type);
+        let handlers = EventHandler::get_event_handlers_by_build_and_event_type_cached(
+            &db,
+            &data.build_id,
+            event_type,
+        )
+        .await
+        .unwrap();
+        assert_eq!(handlers[0].var, "reloaded");
+
+        sqlx::query("UPDATE build SET deployed = 0 WHERE build_id = ?")
+            .bind(data.build_id)
+            .execute(pool)
+            .await
+            .unwrap();
+        expire_build_cache_entry(data.build_id, event_type);
+        assert!(
+            EventHandler::get_event_handlers_by_build_and_event_type_cached(
+                &db,
+                &data.build_id,
+                event_type,
+            )
+            .await
+            .unwrap()
+            .is_empty()
+        );
+
+        // Empty results are deliberately not cached, so visibility is restored
+        // immediately rather than after another freshness window.
+        sqlx::query("UPDATE build SET deployed = 1 WHERE build_id = ?")
+            .bind(data.build_id)
+            .execute(pool)
+            .await
+            .unwrap();
+        assert_eq!(
+            EventHandler::get_event_handlers_by_build_and_event_type_cached(
+                &db,
+                &data.build_id,
+                event_type,
+            )
+            .await
+            .unwrap()
+            .len(),
+            1
+        );
+        EventHandler::invalidate_all_event_handler_cache();
+    }
+
+    #[tokio::test]
+    async fn matching_env_revision_defers_the_next_database_check() {
+        let _cache_guard = EVENT_HANDLER_CACHE_TEST_LOCK.lock().await;
+        EventHandler::invalidate_all_event_handler_cache();
+        let db = crate::db::test_db().await;
+        let data = crate::db::insert_test_data(&db).await.unwrap();
+        let event_type = "test:revision-cache";
+
+        EventHandler::get_event_handlers_by_env_and_event_type(&db, &data.env_id, event_type)
+            .await
+            .unwrap();
+        {
+            let mut cache = EVENT_HANDLER_CACHE.lock().unwrap();
+            cache
+                .get_mut(&(data.env_id, event_type.to_string()))
+                .unwrap()
+                .cached_at = std::time::Instant::now() - EVENT_HANDLER_REVISION_RECHECK_INTERVAL;
+        }
+
+        EventHandler::get_event_handlers_by_env_and_event_type(&db, &data.env_id, event_type)
+            .await
+            .unwrap();
+        let cache = EVENT_HANDLER_CACHE.lock().unwrap();
+        assert!(
+            cache
+                .get(&(data.env_id, event_type.to_string()))
+                .unwrap()
+                .cached_at
+                .elapsed()
+                < EVENT_HANDLER_REVISION_RECHECK_INTERVAL
+        );
     }
 }

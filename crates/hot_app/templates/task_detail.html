@@ -41,6 +41,9 @@
             {% else %}
                 <span class="px-2 py-1 text-xs font-semibold rounded-full bg-gray-100 text-gray-800 dark:bg-gray-800 dark:text-gray-200">{{ task.status }}</span>
             {% endif %}
+            {% if task.redelivered %}
+                <span class="ml-1 px-2 py-1 text-xs font-semibold rounded-full bg-amber-100 text-amber-800 dark:bg-amber-900 dark:text-amber-200" title="This task was reclaimed or re-enqueued after an earlier delivery">retry delivery</span>
+            {% endif %}
         </div>
         <div>
             <h3 class="text-xs font-medium text-gray-500 dark:text-gray-400 mb-1 uppercase tracking-wider">Size</h3>
@@ -82,39 +85,26 @@
         {% endif %}
     </div>
 
-    <!-- Timing breakdown bar (when container timing data available) -->
-    {% if task.slot_wait_ms.is_some() || task.image_pull_ms.is_some() || task.execution_ms.is_some() || task.logs_collect_ms.is_some() %}
-    {% let slot_wait = task.slot_wait_ms.unwrap_or(0) %}
-    {% let image_pull = task.image_pull_ms.unwrap_or(0) %}
-    {% let execution = task.execution_ms.unwrap_or(0) %}
-    {% let logs_collect = task.logs_collect_ms.unwrap_or(0) %}
-    {% let total = slot_wait + image_pull + execution + logs_collect %}
-    {% if total > 0 %}
-    <div class="mt-4 pt-4 border-t border-gray-200 dark:border-gray-700">
-        <h3 class="text-xs font-medium text-gray-500 dark:text-gray-400 mb-2 uppercase tracking-wider">Timing Breakdown</h3>
-        <div class="flex h-2 rounded-full overflow-hidden bg-gray-200 dark:bg-gray-700" title="slot wait: {{ slot_wait }}ms, image pull: {{ image_pull }}ms, execution: {{ execution }}ms, logs: {{ logs_collect }}ms">
-            {% if slot_wait > 0 %}
-            <div class="bg-amber-400 dark:bg-amber-600" style="width: {{ (slot_wait * 100 / total) }}%"></div>
-            {% endif %}
-            {% if image_pull > 0 %}
-            <div class="bg-blue-400 dark:bg-blue-600" style="width: {{ (image_pull * 100 / total) }}%"></div>
-            {% endif %}
-            {% if execution > 0 %}
-            <div class="bg-green-400 dark:bg-green-600" style="width: {{ (execution * 100 / total) }}%"></div>
-            {% endif %}
-            {% if logs_collect > 0 %}
-            <div class="bg-purple-400 dark:bg-purple-600" style="width: {{ (logs_collect * 100 / total) }}%"></div>
-            {% endif %}
+    <!-- Lifecycle timestamps remain available as metadata; the visual timing
+         breakdown lives only in the Timeline tab below. -->
+    <div class="mt-4 pt-4 border-t border-gray-200 dark:border-gray-700 grid grid-cols-2 sm:grid-cols-4 gap-4">
+        <div>
+            <h3 class="text-xs font-medium text-gray-500 dark:text-gray-400 mb-1 uppercase tracking-wider">Created</h3>
+            <p class="text-xs font-semibold">{{ task.created_at_formatted }}</p>
         </div>
-        <div class="flex gap-4 mt-2 text-xs text-gray-600 dark:text-gray-400">
-            {% if slot_wait > 0 %}<span><span class="inline-block w-2 h-2 rounded bg-amber-400 dark:bg-amber-600 align-middle mr-1"></span>Slot wait: {{ slot_wait }}ms</span>{% endif %}
-            {% if image_pull > 0 %}<span><span class="inline-block w-2 h-2 rounded bg-blue-400 dark:bg-blue-600 align-middle mr-1"></span>Image pull: {{ image_pull }}ms</span>{% endif %}
-            {% if execution > 0 %}<span><span class="inline-block w-2 h-2 rounded bg-green-400 dark:bg-green-600 align-middle mr-1"></span>Execution: {{ execution }}ms</span>{% endif %}
-            {% if logs_collect > 0 %}<span><span class="inline-block w-2 h-2 rounded bg-purple-400 dark:bg-purple-600 align-middle mr-1"></span>Logs: {{ logs_collect }}ms</span>{% endif %}
+        <div>
+            <h3 class="text-xs font-medium text-gray-500 dark:text-gray-400 mb-1 uppercase tracking-wider">Workload Start</h3>
+            <p class="text-xs font-semibold">{% match task.workload_started_formatted %}{% when Some with (value) %}{{ value }}{% when None %}—{% endmatch %}</p>
+        </div>
+        <div>
+            <h3 class="text-xs font-medium text-gray-500 dark:text-gray-400 mb-1 uppercase tracking-wider">Completed</h3>
+            <p class="text-xs font-semibold">{{ task.stop_time_formatted }}</p>
+        </div>
+        <div>
+            <h3 class="text-xs font-medium text-gray-500 dark:text-gray-400 mb-1 uppercase tracking-wider">Duration</h3>
+            <p class="text-xs font-semibold">{{ task.total_duration_formatted }}</p>
         </div>
     </div>
-    {% endif %}
-    {% endif %}
 
     <!-- Container details: exit code, container ID, CUS, multiplier -->
     <div class="mt-4 grid grid-cols-2 sm:grid-cols-4 gap-4">
@@ -133,14 +123,6 @@
         <div>
             <h3 class="text-xs font-medium text-gray-500 dark:text-gray-400 mb-1 uppercase tracking-wider">CUS Multiplier</h3>
             <p class="text-sm">{% match task.cus_multiplier %}{% when Some with (m) %}{{ m }}{% when None %}-{% endmatch %}</p>
-        </div>
-        <div>
-            <h3 class="text-xs font-medium text-gray-500 dark:text-gray-400 mb-1 uppercase tracking-wider">Created</h3>
-            <p class="text-sm">{{ task.created_at_formatted }}</p>
-        </div>
-        <div>
-            <h3 class="text-xs font-medium text-gray-500 dark:text-gray-400 mb-1 uppercase tracking-wider">Duration</h3>
-            <p class="text-sm">{{ task.duration_formatted }}</p>
         </div>
     </div>
     {% if task.infra_failure %}
@@ -306,6 +288,26 @@
 {% if let Some(run_id) = task.run_id %}
 <!-- Execution Trace Tabs (Timeline / Hierarchy) from the task's execution run -->
 <script>window.__observabilityRunId = '{{ run_id }}';</script>
+<div id="task-duration-container"
+     style="display:none"
+     data-timing-kind="task"
+     data-execution-complete="{% if task.status == "completed" || task.status == "failed" || task.status == "cancelled" || task.status == "timed_out" %}true{% else %}false{% endif %}"
+     data-duration-us="{{ task.total_duration_ms.unwrap_or(0) * 1000 }}"
+     data-exec-time-us="{{ task.task_execution_ms.unwrap_or(0) * 1000 }}"
+     data-pre-run-wait-us="{{ task.waiting_ms.unwrap_or(0) * 1000 }}"
+     data-publish-wait-us="{{ task.publish_wait_ms.unwrap_or(0) * 1000 }}"
+     data-queue-wait-us="{{ task.queue_wait_ms.unwrap_or(0) * 1000 }}"
+     data-retry-queue-age-us="{{ task.retry_queue_age_ms.unwrap_or(0) * 1000 }}"
+     data-handler-dispatch-wait-us="0"
+     data-worker-preparation-us="{{ task.worker_preparation_ms.unwrap_or(0) * 1000 }}"
+     data-capacity-wait-us="{{ task.capacity_wait_ms.unwrap_or(0) * 1000 }}"
+     data-image-pull-us="{{ task.waiting_image_pull_ms.unwrap_or(0) * 1000 }}"
+     data-runtime-start-us="{{ task.waiting_runtime_start_ms.unwrap_or(0) * 1000 }}"
+     data-unattributed-wait-us="{{ task.unattributed_waiting_ms.unwrap_or(0) * 1000 }}"
+     data-execution-startup-us="{{ task.execution_startup_ms.unwrap_or(0) * 1000 }}"
+     data-workload-execution-us="{{ task.workload_execution_ms.unwrap_or(0) * 1000 }}"
+     data-logs-collect-us="{{ task.logs_collect_ms.unwrap_or(0) * 1000 }}"
+     data-finalization-us="{{ task.finalization_ms.unwrap_or(0) * 1000 }}"></div>
 
 <!-- Hidden graph data for Stream Graph tab -->
 <div id="run-flow-graph-section" style="display: none;">

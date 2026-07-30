@@ -1577,8 +1577,8 @@ impl Run {
         Self::update_stop_time_and_status(db, run_id, stop_time, &RunStatus::Succeeded).await
     }
 
-    /// Update run info (for warnings, routing decisions, diagnostics)
-    /// Only updates if info is Some - does not clear existing info with None
+    /// Merge run info (for warnings, routing decisions, diagnostics).
+    /// Existing keys not present in the patch are preserved.
     pub async fn update_info(
         db: &crate::db::DatabasePool,
         run_id: &Uuid,
@@ -1591,19 +1591,57 @@ impl Run {
 
         match db {
             crate::db::DatabasePool::Postgres(pg_pool) => {
-                sqlx::query("UPDATE run SET info = $2 WHERE run_id = $1")
-                    .bind(run_id)
-                    .bind(info_val)
-                    .execute(pg_pool)
-                    .await?;
+                sqlx::query(
+                    "UPDATE run
+                     SET info = COALESCE(info, '{}'::jsonb) || $2
+                     WHERE run_id = $1",
+                )
+                .bind(run_id)
+                .bind(info_val)
+                .execute(pg_pool)
+                .await?;
             }
             crate::db::DatabasePool::Sqlite(sqlite_pool) => {
                 let info_str = info_val.to_string();
-                sqlx::query("UPDATE run SET info = ? WHERE run_id = ?")
-                    .bind(&info_str)
-                    .bind(run_id)
-                    .execute(sqlite_pool)
-                    .await?;
+                sqlx::query(
+                    "WITH patch AS (
+                         SELECT key, value, type FROM json_each(?1)
+                     ),
+                     existing AS (
+                         SELECT old.key, old.value, old.type
+                         FROM run, json_each(COALESCE(run.info, '{}')) AS old
+                         WHERE run.run_id = ?2
+                           AND old.key NOT IN (SELECT key FROM patch)
+                     ),
+                     merged AS (
+                         SELECT * FROM existing
+                         UNION ALL
+                         SELECT * FROM patch
+                     ),
+                     replacement AS (
+                         SELECT COALESCE(
+                             json_group_object(
+                                 key,
+                                 CASE
+                                     WHEN type IN ('array', 'object') THEN json(value)
+                                     WHEN type = 'true' THEN json('true')
+                                     WHEN type = 'false' THEN json('false')
+                                     WHEN type = 'null' THEN json('null')
+                                     ELSE value
+                                 END
+                             ),
+                             '{}'
+                         ) AS value
+                         FROM merged
+                     )
+                     UPDATE run
+                     SET info = (SELECT value FROM replacement)
+                     WHERE run_id = ?2",
+                )
+                .bind(&info_str)
+                .bind(run_id)
+                .execute(sqlite_pool)
+                .await?;
             }
         }
 
@@ -2776,6 +2814,7 @@ impl Run {
     pub async fn get_run_type_chart_data_with_cross_filters(
         db: &crate::db::DatabasePool,
         env_id: &Uuid,
+        project_id: Option<&Uuid>,
         time_range_cutoff: Option<chrono::DateTime<chrono::Utc>>,
         time_unit: &str,
         run_types: &[&str],
@@ -2794,6 +2833,16 @@ impl Run {
                 if time_range_cutoff.is_some() {
                     param_count += 1; // cutoff is $2
                 }
+
+                let (build_join, project_clause) = if project_id.is_some() {
+                    param_count += 1;
+                    (
+                        "JOIN build b ON r.build_id = b.build_id",
+                        format!("AND b.project_id = ${} ", param_count),
+                    )
+                } else {
+                    ("", String::new())
+                };
 
                 let run_type_placeholders = (0..run_types.len())
                     .map(|_| {
@@ -2826,17 +2875,27 @@ impl Run {
                     FROM run r
                     JOIN run_type rt ON r.run_type_id = rt.run_type_id
                     JOIN run_status rs ON r.status_id = rs.status_id
-                    WHERE r.env_id = $1 {}AND rt.run_type IN ({}) AND rs.status IN ({})
+                    {}
+                    WHERE r.env_id = $1 {}{}AND rt.run_type IN ({}) AND rs.status IN ({})
                     GROUP BY time_period, rt.run_type
                     ORDER BY time_period ASC, rt.run_type ASC
                     "#,
-                    group_by_clause, time_clause, run_type_placeholders, status_placeholders
+                    group_by_clause,
+                    build_join,
+                    time_clause,
+                    project_clause,
+                    run_type_placeholders,
+                    status_placeholders
                 );
 
                 let mut q = sqlx::query(sqlx::AssertSqlSafe(query.as_str())).bind(env_id);
 
                 if let Some(cutoff) = time_range_cutoff {
                     q = q.bind(cutoff);
+                }
+
+                if let Some(project_id) = project_id {
+                    q = q.bind(project_id);
                 }
 
                 for run_type in run_types {
@@ -2877,6 +2936,14 @@ impl Run {
                 } else {
                     "1=1"
                 };
+                let (build_join, project_clause) = if project_id.is_some() {
+                    (
+                        "JOIN build b ON r.build_id = b.build_id",
+                        "AND b.project_id = ?",
+                    )
+                } else {
+                    ("", "")
+                };
 
                 let run_type_placeholders = (0..run_types.len())
                     .map(|_| "?")
@@ -2897,17 +2964,27 @@ impl Run {
                     FROM run r
                     JOIN run_type rt ON r.run_type_id = rt.run_type_id
                     JOIN run_status rs ON r.status_id = rs.status_id
-                    WHERE r.env_id = ? AND {} AND rt.run_type IN ({}) AND rs.status IN ({})
+                    {}
+                    WHERE r.env_id = ? AND {} {} AND rt.run_type IN ({}) AND rs.status IN ({})
                     GROUP BY time_period, rt.run_type
                     ORDER BY time_period ASC, rt.run_type ASC
                     "#,
-                    group_by_clause, time_filter, run_type_placeholders, status_placeholders
+                    group_by_clause,
+                    build_join,
+                    time_filter,
+                    project_clause,
+                    run_type_placeholders,
+                    status_placeholders
                 );
 
                 let mut q = sqlx::query(sqlx::AssertSqlSafe(query.as_str())).bind(env_id);
 
                 if let Some(ref c) = time_cutoff_str {
                     q = q.bind(c);
+                }
+
+                if let Some(project_id) = project_id {
+                    q = q.bind(project_id);
                 }
 
                 for run_type in run_types {
@@ -2943,6 +3020,7 @@ impl Run {
     pub async fn get_run_status_chart_data_with_cross_filters(
         db: &crate::db::DatabasePool,
         env_id: &Uuid,
+        project_id: Option<&Uuid>,
         time_range_cutoff: Option<chrono::DateTime<chrono::Utc>>,
         time_unit: &str,
         statuses: &[&str],
@@ -2961,6 +3039,16 @@ impl Run {
                 if time_range_cutoff.is_some() {
                     param_count += 1; // cutoff is $2
                 }
+
+                let (build_join, project_clause) = if project_id.is_some() {
+                    param_count += 1;
+                    (
+                        "JOIN build b ON r.build_id = b.build_id",
+                        format!("AND b.project_id = ${} ", param_count),
+                    )
+                } else {
+                    ("", String::new())
+                };
 
                 let status_placeholders = (0..statuses.len())
                     .map(|_| {
@@ -2993,17 +3081,27 @@ impl Run {
                     FROM run r
                     JOIN run_status rs ON r.status_id = rs.status_id
                     JOIN run_type rt ON r.run_type_id = rt.run_type_id
-                    WHERE r.env_id = $1 {}AND rs.status IN ({}) AND rt.run_type IN ({})
+                    {}
+                    WHERE r.env_id = $1 {}{}AND rs.status IN ({}) AND rt.run_type IN ({})
                     GROUP BY time_period, rs.status
                     ORDER BY time_period ASC, rs.status ASC
                     "#,
-                    group_by_clause, time_clause, status_placeholders, run_type_placeholders
+                    group_by_clause,
+                    build_join,
+                    time_clause,
+                    project_clause,
+                    status_placeholders,
+                    run_type_placeholders
                 );
 
                 let mut q = sqlx::query(sqlx::AssertSqlSafe(query.as_str())).bind(env_id);
 
                 if let Some(cutoff) = time_range_cutoff {
                     q = q.bind(cutoff);
+                }
+
+                if let Some(project_id) = project_id {
+                    q = q.bind(project_id);
                 }
 
                 for status in statuses {
@@ -3044,6 +3142,14 @@ impl Run {
                 } else {
                     "1=1"
                 };
+                let (build_join, project_clause) = if project_id.is_some() {
+                    (
+                        "JOIN build b ON r.build_id = b.build_id",
+                        "AND b.project_id = ?",
+                    )
+                } else {
+                    ("", "")
+                };
 
                 let status_placeholders = (0..statuses.len())
                     .map(|_| "?")
@@ -3064,17 +3170,27 @@ impl Run {
                     FROM run r
                     JOIN run_status rs ON r.status_id = rs.status_id
                     JOIN run_type rt ON r.run_type_id = rt.run_type_id
-                    WHERE r.env_id = ? AND {} AND rs.status IN ({}) AND rt.run_type IN ({})
+                    {}
+                    WHERE r.env_id = ? AND {} {} AND rs.status IN ({}) AND rt.run_type IN ({})
                     GROUP BY time_period, rs.status
                     ORDER BY time_period ASC, rs.status ASC
                     "#,
-                    group_by_clause, time_filter, status_placeholders, run_type_placeholders
+                    group_by_clause,
+                    build_join,
+                    time_filter,
+                    project_clause,
+                    status_placeholders,
+                    run_type_placeholders
                 );
 
                 let mut q = sqlx::query(sqlx::AssertSqlSafe(query.as_str())).bind(env_id);
 
                 if let Some(ref c) = time_cutoff_str {
                     q = q.bind(c);
+                }
+
+                if let Some(project_id) = project_id {
+                    q = q.bind(project_id);
                 }
 
                 for status in statuses {
@@ -3325,5 +3441,131 @@ impl Run {
             }
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn sqlite_update_info_matches_postgres_shallow_merge_semantics() {
+        let db = crate::db::test_db().await;
+        let test_data = crate::db::insert_test_data(&db).await.unwrap();
+
+        Run::update_info(
+            &db,
+            &test_data.run_id,
+            Some(&serde_json::json!({
+                "nested": {"a": 1, "b": 2},
+                "preserved": true,
+                "nullable": 9
+            })),
+        )
+        .await
+        .unwrap();
+        Run::update_info(
+            &db,
+            &test_data.run_id,
+            Some(&serde_json::json!({
+                "nested": {"a": 3},
+                "nullable": null,
+                "array": [1, 2]
+            })),
+        )
+        .await
+        .unwrap();
+
+        let run = Run::get_run(&db, &test_data.run_id).await.unwrap();
+        assert_eq!(
+            run.info,
+            Some(serde_json::json!({
+                "nested": {"a": 3},
+                "preserved": true,
+                "nullable": null,
+                "array": [1, 2]
+            }))
+        );
+    }
+
+    #[tokio::test]
+    async fn dashboard_run_charts_apply_project_filter_within_environment() {
+        let db = crate::db::test_db().await;
+        let test_data = crate::db::insert_test_data(&db).await.unwrap();
+
+        let other_project_id = Uuid::now_v7();
+        crate::db::Project::insert_project(
+            &db,
+            &other_project_id,
+            &test_data.env_id,
+            "other-project",
+            &test_data.user_id,
+        )
+        .await
+        .unwrap();
+        let other_build_id = Uuid::now_v7();
+        crate::db::Build::insert_build(
+            &db,
+            &other_build_id,
+            &other_project_id,
+            "other-build",
+            0,
+            crate::db::Build::BUILD_TYPE_LIVE,
+            &test_data.user_id,
+        )
+        .await
+        .unwrap();
+        Run::insert_run(
+            &db,
+            &Uuid::now_v7(),
+            &test_data.env_id,
+            &Uuid::now_v7(),
+            Some(&other_build_id),
+            RunType::Run.as_id(),
+            None,
+            &test_data.user_id,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+
+        let type_data = Run::get_run_type_chart_data_with_cross_filters(
+            &db,
+            &test_data.env_id,
+            Some(&test_data.project_id),
+            None,
+            "day",
+            &["run"],
+            &["running"],
+        )
+        .await
+        .unwrap();
+        let status_data = Run::get_run_status_chart_data_with_cross_filters(
+            &db,
+            &test_data.env_id,
+            Some(&test_data.project_id),
+            None,
+            "day",
+            &["running"],
+            &["run"],
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            type_data
+                .values()
+                .filter_map(|bucket| bucket.get("run"))
+                .sum::<i64>(),
+            1
+        );
+        assert_eq!(
+            status_data
+                .values()
+                .filter_map(|bucket| bucket.get("running"))
+                .sum::<i64>(),
+            1
+        );
     }
 }

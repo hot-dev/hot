@@ -272,10 +272,31 @@ where
     Redis(Box<streams::RedisQueueLease<T>>),
 }
 
+#[derive(Clone, Copy, Debug)]
+pub struct QueueLeaseTiming {
+    /// Timestamp captured when Redis/memory handed the item to the claimer.
+    pub claimed_at: chrono::DateTime<chrono::Utc>,
+    /// Redis XADD timestamp. Memory queues do not expose a wall-clock enqueue
+    /// timestamp, so this is None for that backend.
+    pub enqueued_at: Option<chrono::DateTime<chrono::Utc>>,
+    /// Backend queue residence measured at claim time.
+    pub queue_wait: std::time::Duration,
+    /// True when this claim came from a backend retry/reclaim path. In that
+    /// case queue_wait is the item's age, not a fresh queue residence.
+    pub redelivered: bool,
+}
+
 impl<T> ProcessingQueueLease<T>
 where
     T: Send + Sync + serde::Serialize + serde::de::DeserializeOwned + Clone + 'static,
 {
+    pub fn timing(&self) -> QueueLeaseTiming {
+        match self {
+            ProcessingQueueLease::Memory(lease) => lease.timing(),
+            ProcessingQueueLease::Redis(lease) => lease.timing(),
+        }
+    }
+
     pub async fn process<F, Fut, R>(
         self,
         worker: F,

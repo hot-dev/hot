@@ -601,6 +601,7 @@ async fn webhook_handler_inner(
         secret_value_hashes: AHashSet::new(),
         access_id: None,
         agent_type: None,
+        queue_timing: None,
     };
 
     // Pre-compute secret value hashes for targeted masking of sensitive headers

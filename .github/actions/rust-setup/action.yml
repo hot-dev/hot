@@ -5,7 +5,7 @@ inputs:
     description: "Rust toolchain version (e.g., 1.96.1)"
     required: true
   tailwind-version:
-    description: "Tailwind CLI version (e.g., v3.4.13)"
+    description: "Tailwind CLI version (e.g., v4.3.0)"
     required: true
   save-cache:
     description: >-

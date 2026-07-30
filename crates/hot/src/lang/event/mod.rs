@@ -62,6 +62,20 @@ impl Event {
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct QueueExecutionTiming {
+    pub backend: String,
+    pub enqueued_at: Option<DateTime<Utc>>,
+    pub claimed_at: DateTime<Utc>,
+    pub queue_wait_us: u64,
+    #[serde(default)]
+    pub redelivered: bool,
+    /// Captured immediately before dispatching this particular handler.
+    /// Older serialized queue messages fall back to claimed_at.
+    #[serde(default)]
+    pub handler_dispatched_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ExecutionContext {
     pub env_id: Option<Uuid>,
     pub env_name: Option<String>,
@@ -96,6 +110,10 @@ pub struct ExecutionContext {
     /// handler belongs to an agent via `meta {agent: "TypeName"}`.
     #[serde(default)]
     pub agent_type: Option<String>,
+    /// Queue timestamps captured by the worker before tenant hydration and
+    /// propagated to run:start for phase-level observability.
+    #[serde(default)]
+    pub queue_timing: Option<QueueExecutionTiming>,
 }
 
 impl ExecutionContext {
@@ -129,6 +147,7 @@ impl ExecutionContext {
             secret_value_hashes: AHashSet::new(),
             access_id: None,
             agent_type: None,
+            queue_timing: None,
         }
     }
 
@@ -164,6 +183,7 @@ impl ExecutionContext {
             secret_value_hashes: AHashSet::new(),
             access_id: None,
             agent_type: None,
+            queue_timing: None,
         }
     }
 
@@ -203,6 +223,7 @@ impl ExecutionContext {
             secret_value_hashes: AHashSet::new(),
             access_id: None,
             agent_type: None,
+            queue_timing: None,
         }
     }
 
@@ -227,6 +248,7 @@ impl ExecutionContext {
             secret_value_hashes: AHashSet::new(),
             access_id: None,
             agent_type: None,
+            queue_timing: None,
         }
     }
 
@@ -276,6 +298,11 @@ impl ExecutionContext {
     /// Helper to set agent_type after construction (for agent handler runs)
     pub fn with_agent_type(mut self, agent_type: Option<String>) -> Self {
         self.agent_type = agent_type;
+        self
+    }
+
+    pub fn with_queue_timing(mut self, queue_timing: QueueExecutionTiming) -> Self {
+        self.queue_timing = Some(queue_timing);
         self
     }
 }

@@ -27,7 +27,7 @@ use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, Notify};
 use uuid::Uuid;
 use zstd::{Decoder, Encoder};
 
@@ -77,6 +77,11 @@ const STREAM_MAXLEN: u64 = 100_000;
 /// Workers that select! over multiple queues park here so we avoid hot
 /// looping while staying responsive to shutdown via the outer select.
 const PROCESS_BLOCKING_MS: u64 = 5_000;
+
+/// Maximum delay before re-checking Redis while all pending entries belong to
+/// active workers. Lease completion notifications normally wake the claimer
+/// sooner; this bound also covers dropped notifications and new backlog.
+const IN_FLIGHT_RECHECK_MS: u64 = 50;
 
 #[derive(Debug)]
 pub enum StreamsQueueError {
@@ -272,6 +277,7 @@ struct PrefetchedMessage {
     msg_id: String,
     payload: Vec<u8>,
     source: FetchSource,
+    redelivered: bool,
 }
 
 fn duration_ms(duration: Duration) -> u64 {
@@ -289,6 +295,11 @@ fn stream_message_age_ms(msg_id: &str) -> u64 {
         .timestamp_millis()
         .saturating_sub(enqueued_at_ms)
         .max(0) as u64
+}
+
+fn stream_message_timestamp(msg_id: &str) -> Option<chrono::DateTime<chrono::Utc>> {
+    let (millis, _sequence) = msg_id.split_once('-')?;
+    chrono::DateTime::from_timestamp_millis(millis.parse().ok()?)
 }
 
 struct RedisQueueDrainStats {
@@ -458,6 +469,10 @@ pub struct RedisStreamQueue<T> {
     /// entry into the buffer. Cleared per-entry by the success/DLQ paths
     /// in `process_inner`.
     in_flight: Arc<Mutex<HashSet<String>>>,
+    /// Wakes a claimer parked behind in-flight PEL entries as soon as a lease
+    /// completes. This avoids repeatedly issuing non-blocking PEL/fresh reads
+    /// for the entire duration of a handler execution.
+    lease_completed: Arc<Notify>,
     /// Max entries claimed by one XREADGROUP for this queue handle.
     read_batch_size: usize,
     /// Idle time in milliseconds before XAUTOCLAIM treats a pending message as
@@ -497,6 +512,7 @@ impl<T> Clone for RedisStreamQueue<T> {
             prefetched: Arc::new(Mutex::new(VecDeque::new())),
             refill_lock: Arc::new(Mutex::new(())),
             in_flight: Arc::new(Mutex::new(HashSet::new())),
+            lease_completed: Arc::new(Notify::new()),
             read_batch_size: self.read_batch_size,
             orphan_idle_ms: self.orphan_idle_ms,
             startup_window_ms: self.startup_window_ms,
@@ -533,6 +549,7 @@ impl<T> RedisStreamQueue<T> {
             prefetched: Arc::new(Mutex::new(VecDeque::new())),
             refill_lock: Arc::new(Mutex::new(())),
             in_flight: Arc::new(Mutex::new(HashSet::new())),
+            lease_completed: Arc::new(Notify::new()),
             read_batch_size: READ_BATCH_SIZE,
             orphan_idle_ms: ORPHAN_IDLE_MS,
             startup_window_ms: None,
@@ -567,6 +584,7 @@ impl<T> RedisStreamQueue<T> {
             prefetched: Arc::new(Mutex::new(VecDeque::new())),
             refill_lock: Arc::new(Mutex::new(())),
             in_flight: Arc::new(Mutex::new(HashSet::new())),
+            lease_completed: Arc::new(Notify::new()),
             read_batch_size: READ_BATCH_SIZE,
             orphan_idle_ms: ORPHAN_IDLE_MS,
             startup_window_ms: None,
@@ -615,6 +633,7 @@ impl<T> RedisStreamQueue<T> {
             prefetched: Arc::clone(&self.prefetched),
             refill_lock: Arc::clone(&self.refill_lock),
             in_flight: Arc::clone(&self.in_flight),
+            lease_completed: Arc::clone(&self.lease_completed),
             read_batch_size: self.read_batch_size,
             orphan_idle_ms: self.orphan_idle_ms,
             startup_window_ms: self.startup_window_ms,
@@ -778,6 +797,12 @@ impl<T> RedisStreamQueue<T> {
         }
 
         let mut guard = self.get_connection().await?;
+        // Concurrent first-use callers all pass the optimistic check above,
+        // then serialize on the cached connection mutex. Re-check while
+        // holding that mutex so only the first caller issues XGROUP CREATE.
+        if self.consumer_group_ensured.load(Ordering::Acquire) {
+            return Ok(());
+        }
         let conn = guard.as_mut().unwrap();
 
         // Choose the starting position for a NEW consumer group:
@@ -1626,10 +1651,6 @@ impl<T> RedisStreamQueue<T> {
 #[async_trait::async_trait]
 impl<T: Send + Sync + Serialize + DeserializeOwned> Queue<T> for RedisStreamQueue<T> {
     async fn enqueue(&self, item: T) -> Result<(), Box<dyn Error + Send + Sync>> {
-        // Ensure consumer group exists (creates stream too via MKSTREAM)
-        // Must be called before get_connection() to avoid deadlock (Mutex is not reentrant)
-        self.ensure_consumer_group().await?;
-
         let mut guard = self.get_connection().await?;
         let conn = guard.as_mut().unwrap();
 
@@ -1959,6 +1980,18 @@ impl<T: Send + Sync + Serialize + DeserializeOwned + Clone + 'static> RedisStrea
                 &self.consumer_name,
                 self.read_batch_size,
             );
+            if pending_all_inflight && block_ms > 0 {
+                // A non-blocking fresh read keeps new backlog from being
+                // starved by the PEL. If there is none, park until a worker
+                // finishes or a short safety interval elapses instead of
+                // hot-looping on the same in-flight PEL entry.
+                tokio::select! {
+                    _ = self.lease_completed.notified() => {}
+                    _ = tokio::time::sleep(Duration::from_millis(
+                        block_ms.min(IN_FLIGHT_RECHECK_MS),
+                    )) => {}
+                }
+            }
             return Ok(false);
         }
         self.drain_stats
@@ -2022,10 +2055,11 @@ impl<T: Send + Sync + Serialize + DeserializeOwned + Clone + 'static> RedisStrea
         };
         Ok(parse_stream_messages(&result)
             .into_iter()
-            .map(|(msg_id, payload)| PrefetchedMessage {
+            .map(|(msg_id, payload, redelivered)| PrefetchedMessage {
                 msg_id,
                 payload,
                 source,
+                redelivered,
             })
             .collect())
     }
@@ -2067,6 +2101,7 @@ impl<T: Send + Sync + Serialize + DeserializeOwned + Clone + 'static> RedisStrea
             msg_id,
             payload,
             source,
+            redelivered,
         } = match prefetched {
             Some(m) => m,
             None => {
@@ -2107,11 +2142,21 @@ impl<T: Send + Sync + Serialize + DeserializeOwned + Clone + 'static> RedisStrea
         self.drain_stats
             .maybe_log(&self.stream_name, &self.consumer_name, self.read_batch_size);
 
+        let claimed_at = chrono::Utc::now();
+        let enqueued_at = stream_message_timestamp(&msg_id);
+        let queue_wait = enqueued_at
+            .and_then(|enqueued_at| claimed_at.signed_duration_since(enqueued_at).to_std().ok())
+            .unwrap_or_default();
+
         Ok(Some(RedisQueueLease {
             queue: self.clone_for_lease(),
             msg_id: Some(msg_id),
             payload: Some(payload),
             source,
+            redelivered,
+            claimed_at,
+            enqueued_at,
+            queue_wait,
             completed: false,
         }))
     }
@@ -2428,6 +2473,10 @@ where
     msg_id: Option<String>,
     payload: Option<Vec<u8>>,
     source: FetchSource,
+    redelivered: bool,
+    claimed_at: chrono::DateTime<chrono::Utc>,
+    enqueued_at: Option<chrono::DateTime<chrono::Utc>>,
+    queue_wait: Duration,
     completed: bool,
 }
 
@@ -2435,6 +2484,15 @@ impl<T> RedisQueueLease<T>
 where
     T: Send + Sync + Serialize + DeserializeOwned + Clone + 'static,
 {
+    pub fn timing(&self) -> super::QueueLeaseTiming {
+        super::QueueLeaseTiming {
+            claimed_at: self.claimed_at,
+            enqueued_at: self.enqueued_at,
+            queue_wait: self.queue_wait,
+            redelivered: self.redelivered || matches!(self.source, FetchSource::Pending),
+        }
+    }
+
     pub async fn process<F, Fut, R>(
         mut self,
         worker: F,
@@ -2457,6 +2515,7 @@ where
             .process_one(msg_id.clone(), payload, self.source, worker)
             .await;
         self.queue.in_flight.lock().await.remove(&msg_id);
+        self.queue.lease_completed.notify_one();
         self.completed = true;
         result
     }
@@ -2476,14 +2535,17 @@ where
         match self.queue.in_flight.try_lock() {
             Ok(mut in_flight) => {
                 in_flight.remove(&msg_id);
+                self.queue.lease_completed.notify_one();
             }
             Err(_) => {
                 let in_flight = Arc::clone(&self.queue.in_flight);
+                let lease_completed = Arc::clone(&self.queue.lease_completed);
                 let queue = self.queue.stream_name.clone();
                 let message_id = msg_id.clone();
                 if let Ok(handle) = tokio::runtime::Handle::try_current() {
                     handle.spawn(async move {
                         in_flight.lock().await.remove(&message_id);
+                        lease_completed.notify_one();
                         tracing::warn!(
                             queue = queue,
                             message_id = message_id,
@@ -2527,16 +2589,19 @@ impl<T: Send + Sync + Serialize + DeserializeOwned + Clone + 'static> QueueProce
 /// Parse a single stream message from XREADGROUP result.
 /// Returns the first (msg_id, payload) found, if any.
 fn parse_stream_message(result: &redis::Value) -> Option<(String, Vec<u8>)> {
-    parse_stream_messages(result).into_iter().next()
+    parse_stream_messages(result)
+        .into_iter()
+        .next()
+        .map(|(msg_id, payload, _)| (msg_id, payload))
 }
 
 /// Parse all messages from an XREADGROUP result.
 ///
 /// Shape: `[[stream-name, [[id, [field, value, ...]], ...]]]` or nil.
-/// We extract every `(id, payload)` pair, in order. Messages without a
+/// We extract every `(id, payload, redelivered)` tuple, in order. Messages without a
 /// `payload` field are silently skipped — the consumer group still has
 /// them in its PEL until ACKed.
-fn parse_stream_messages(result: &redis::Value) -> Vec<(String, Vec<u8>)> {
+fn parse_stream_messages(result: &redis::Value) -> Vec<(String, Vec<u8>, bool)> {
     if matches!(result, redis::Value::Nil) {
         return Vec::new();
     }
@@ -2576,6 +2641,7 @@ fn parse_stream_messages(result: &redis::Value) -> Vec<(String, Vec<u8>)> {
                 Err(_) => continue,
             };
             let mut payload: Option<Vec<u8>> = None;
+            let mut redelivered = false;
             let mut i = 0;
             while i + 1 < fields.len() {
                 let name: String = redis::from_redis_value_ref(&fields[i]).unwrap_or_default();
@@ -2583,12 +2649,15 @@ fn parse_stream_messages(result: &redis::Value) -> Vec<(String, Vec<u8>)> {
                     if let Ok(p) = redis::from_redis_value_ref::<Vec<u8>>(&fields[i + 1]) {
                         payload = Some(p);
                     }
-                    break;
+                } else if name == "original_id" {
+                    let original_id: String =
+                        redis::from_redis_value_ref(&fields[i + 1]).unwrap_or_default();
+                    redelivered = !original_id.is_empty();
                 }
                 i += 2;
             }
             if let Some(p) = payload {
-                out.push((msg_id, p));
+                out.push((msg_id, p, redelivered));
             }
         }
     }
@@ -2622,6 +2691,29 @@ mod tests {
         }
     }
 
+    #[test]
+    fn parser_marks_infrastructure_requeues_as_redelivered() {
+        let bulk = |value: &str| redis::Value::BulkString(value.as_bytes().to_vec());
+        let result = redis::Value::Array(vec![redis::Value::Array(vec![
+            bulk("{test-stream}"),
+            redis::Value::Array(vec![redis::Value::Array(vec![
+                bulk("1712345678901-0"),
+                redis::Value::Array(vec![
+                    bulk("payload"),
+                    redis::Value::BulkString(vec![1, 2, 3]),
+                    bulk("original_id"),
+                    bulk("1712345678000-0"),
+                ]),
+            ])]),
+        ])]);
+
+        let messages = parse_stream_messages(&result);
+        assert_eq!(
+            messages,
+            vec![("1712345678901-0".to_string(), vec![1, 2, 3], true)]
+        );
+    }
+
     #[tokio::test]
     async fn dropped_redis_lease_clears_in_flight_when_lock_is_busy() {
         let client = redis::Client::open("redis://127.0.0.1/").unwrap();
@@ -2636,6 +2728,10 @@ mod tests {
             msg_id: Some(msg_id.clone()),
             payload: Some(Vec::new()),
             source: FetchSource::Fresh,
+            redelivered: false,
+            claimed_at: chrono::Utc::now(),
+            enqueued_at: None,
+            queue_wait: Duration::ZERO,
             completed: false,
         };
 
@@ -2673,6 +2769,63 @@ mod tests {
         let item2 = queue.dequeue().await.unwrap();
         assert_eq!(item2, Some("world".to_string()));
 
+        cleanup(&client, &queue_name).await;
+    }
+
+    #[tokio::test]
+    async fn enqueue_does_not_create_consumer_group() {
+        let Some(client) = try_client().await else {
+            eprintln!("skipping: Redis not available");
+            return;
+        };
+        let queue_name = format!("test_stream_producer_only_{}", Uuid::new_v4());
+        let queue = RedisStreamQueue::<String>::new(client.clone(), queue_name.clone());
+
+        queue.enqueue("hello".to_string()).await.unwrap();
+
+        let mut conn = client.get_multiplexed_async_connection().await.unwrap();
+        let groups: redis::Value = redis::cmd("XINFO")
+            .arg("GROUPS")
+            .arg(format!("{{{}}}", queue_name))
+            .query_async(&mut conn)
+            .await
+            .unwrap();
+        let groups: Vec<redis::Value> = redis::from_redis_value_ref(&groups).unwrap_or_default();
+        assert!(
+            groups.is_empty(),
+            "producer XADD must not create a consumer group"
+        );
+
+        cleanup(&client, &queue_name).await;
+    }
+
+    #[tokio::test]
+    async fn in_flight_pending_entry_parks_refill_loop() {
+        let Some(client) = try_client().await else {
+            eprintln!("skipping: Redis not available");
+            return;
+        };
+        let queue_name = format!("test_stream_inflight_park_{}", Uuid::new_v4());
+        let queue = RedisStreamQueue::<String>::new(client.clone(), queue_name.clone());
+        queue.enqueue("slow".to_string()).await.unwrap();
+        let lease = queue.claim_blocking().await.unwrap().unwrap();
+
+        let refills_before = queue.drain_stats.refill_calls.load(Ordering::Relaxed);
+        let started = Instant::now();
+        while started.elapsed() < Duration::from_millis(220) {
+            assert!(queue.claim_blocking().await.unwrap().is_none());
+        }
+        let refills = queue
+            .drain_stats
+            .refill_calls
+            .load(Ordering::Relaxed)
+            .saturating_sub(refills_before);
+        assert!(
+            refills <= 6,
+            "in-flight PEL polling should park; observed {refills} refills in 220ms"
+        );
+
+        drop(lease);
         cleanup(&client, &queue_name).await;
     }
 
@@ -3028,8 +3181,17 @@ mod tests {
             queue.prefetched.lock().await.clear();
         }
 
-        let res = queue
-            .dequeue_and_work(|item: String| async move {
+        let lease = queue
+            .claim_now()
+            .await
+            .unwrap()
+            .expect("infrastructure retry should remain queued");
+        assert!(
+            lease.timing().redelivered,
+            "infrastructure requeues must be labeled as redeliveries"
+        );
+        let res = lease
+            .process(|item: String| async move {
                 assert_eq!(item, "flaky-infra");
                 Ok::<(), Box<dyn Error + Send + Sync>>(())
             })

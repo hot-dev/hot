@@ -121,62 +121,71 @@
     font-size: 13px;
     font-weight: 500;
     color: rgba(55, 65, 81, 1);
-    margin-bottom: 8px;
+    margin-bottom: 6px;
 }
 
 .dark .run-summary-title {
     color: rgba(229, 231, 235, 1);
 }
 
-.run-summary-legend {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 16px;
-    margin-bottom: 6px;
+.run-summary-metrics {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, max-content));
+    gap: 8px 24px;
+    margin-bottom: 8px;
 }
 
-.run-summary-legend-item {
+.run-summary-metric {
     display: flex;
-    align-items: center;
+    align-items: baseline;
     gap: 6px;
+    min-width: 0;
     font-size: 12px;
 }
 
-.run-summary-legend-box {
-    width: 12px;
-    height: 12px;
-    border-radius: 2px;
-    flex-shrink: 0;
-}
-
-.run-summary-legend-queue-wait {
-    background: linear-gradient(90deg, rgba(253, 230, 138, 0.6) 0%, rgba(253, 224, 71, 0.9) 100%);
-}
-
-.run-summary-legend-compilation {
-    background: linear-gradient(90deg, rgba(107, 114, 128, 0.5) 0%, rgba(107, 114, 128, 0.8) 100%);
-}
-
-.run-summary-legend-execution {
-    background: linear-gradient(90deg, rgba(34, 197, 94, 0.5) 0%, rgba(34, 197, 94, 0.8) 100%);
-}
-
-.run-summary-legend-label {
+.run-summary-metric-label {
     color: rgba(107, 114, 128, 1);
-    white-space: nowrap;
 }
 
-.dark .run-summary-legend-label {
+.dark .run-summary-metric-label {
     color: rgba(156, 163, 175, 1);
 }
 
-.run-summary-legend-value {
-    font-weight: 600;
-    color: rgba(55, 65, 81, 1);
+.run-summary-metric-value {
+    color: rgba(31, 41, 55, 1);
+    font-weight: 700;
+    white-space: nowrap;
 }
 
-.dark .run-summary-legend-value {
-    color: rgba(229, 231, 235, 1);
+.dark .run-summary-metric-value {
+    color: rgba(243, 244, 246, 1);
+}
+
+.run-summary-metric-waiting .run-summary-metric-value {
+    color: rgba(217, 119, 6, 1);
+}
+
+.dark .run-summary-metric-waiting .run-summary-metric-value {
+    color: rgba(251, 191, 36, 1);
+}
+
+.run-summary-metric-execution .run-summary-metric-value {
+    color: rgba(22, 163, 74, 1);
+}
+
+.dark .run-summary-metric-execution .run-summary-metric-value {
+    color: rgba(74, 222, 128, 1);
+}
+
+.run-summary-hover-target {
+    position: relative;
+    cursor: help;
+    outline: none;
+}
+
+.run-summary-hover-target:focus-visible {
+    border-radius: 4px;
+    box-shadow: 0 0 0 2px rgba(59, 130, 246, 0.55);
 }
 
 .run-summary-percent {
@@ -190,33 +199,356 @@
 }
 
 .run-summary-combined-bar {
-    height: 8px;
+    height: 10px;
     background: rgba(229, 231, 235, 1);
-    border-radius: 4px;
-    overflow: hidden;
+    border-radius: 5px;
     display: flex;
+    position: relative;
+    overflow: visible;
 }
 
 .dark .run-summary-combined-bar {
     background: rgba(64, 64, 64, 1);
 }
 
-.run-summary-bar-segment {
+.run-summary-bucket {
     height: 100%;
-    min-width: 1px;
+    position: relative;
     transition: width 0.3s ease;
 }
 
-.run-summary-bar-queue-wait {
-    background: linear-gradient(90deg, rgba(253, 230, 138, 0.6) 0%, rgba(253, 224, 71, 0.9) 100%);
+.run-summary-bucket-fill {
+    display: flex;
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    width: max(100%, 2px);
+    min-width: 2px;
+    height: 100%;
+    overflow: hidden;
 }
 
-.run-summary-bar-compilation {
-    background: linear-gradient(90deg, rgba(107, 114, 128, 0.5) 0%, rgba(107, 114, 128, 0.8) 100%);
+.run-summary-bucket:first-child .run-summary-bucket-fill {
+    left: 0;
+    border-radius: 5px 0 0 5px;
 }
 
-.run-summary-bar-execution {
+.run-summary-bucket:last-child .run-summary-bucket-fill {
+    right: 0;
+    border-radius: 0 5px 5px 0;
+}
+
+.run-summary-bucket:only-child .run-summary-bucket-fill {
+    left: 0;
+    right: auto;
+    border-radius: 5px;
+}
+
+.run-summary-bucket-waiting .run-summary-bucket-fill {
+    background: linear-gradient(90deg, rgba(251, 191, 36, 0.55) 0%, rgba(245, 158, 11, 0.9) 100%);
+}
+
+.run-summary-bucket-execution .run-summary-bucket-fill {
     background: linear-gradient(90deg, rgba(34, 197, 94, 0.5) 0%, rgba(34, 197, 94, 0.8) 100%);
+}
+
+.run-summary-breakdown-segment {
+    height: 100%;
+    background: transparent;
+}
+
+.run-summary-breakdown-segment + .run-summary-breakdown-segment {
+    border-left: 1px solid rgba(255, 255, 255, 0.8);
+}
+
+.dark .run-summary-breakdown-segment + .run-summary-breakdown-segment {
+    border-left-color: rgba(17, 24, 39, 0.75);
+}
+
+.run-summary-details {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 12px;
+    margin-top: 10px;
+}
+
+.run-summary-detail-group {
+    min-width: 0;
+    padding: 10px 12px;
+    border: 1px solid rgba(229, 231, 235, 1);
+    border-radius: 7px;
+    background: rgba(249, 250, 251, 0.72);
+}
+
+.dark .run-summary-detail-group {
+    border-color: rgba(55, 65, 81, 1);
+    background: rgba(17, 24, 39, 0.55);
+}
+
+.run-summary-detail-heading {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 12px;
+    font-size: 12px;
+    font-weight: 700;
+}
+
+.run-summary-detail-waiting .run-summary-detail-heading strong {
+    color: rgba(217, 119, 6, 1);
+}
+
+.dark .run-summary-detail-waiting .run-summary-detail-heading strong {
+    color: rgba(251, 191, 36, 1);
+}
+
+.run-summary-detail-execution .run-summary-detail-heading strong {
+    color: rgba(22, 163, 74, 1);
+}
+
+.dark .run-summary-detail-execution .run-summary-detail-heading strong {
+    color: rgba(74, 222, 128, 1);
+}
+
+.run-summary-detail-description {
+    margin-top: 2px;
+    color: rgba(107, 114, 128, 1);
+    font-size: 11px;
+}
+
+.dark .run-summary-detail-description {
+    color: rgba(156, 163, 175, 1);
+}
+
+.run-summary-detail-rows {
+    display: grid;
+    gap: 5px;
+    margin-top: 8px;
+    padding-top: 7px;
+    border-top: 1px solid rgba(229, 231, 235, 1);
+}
+
+.dark .run-summary-detail-rows {
+    border-top-color: rgba(55, 65, 81, 1);
+}
+
+.run-summary-detail-label {
+    display: inline-flex;
+    align-items: center;
+    min-width: 0;
+    gap: 6px;
+}
+
+.run-summary-detail-marker {
+    width: 8px;
+    height: 8px;
+    border-radius: 2px;
+    flex: 0 0 auto;
+}
+
+.run-summary-detail-waiting .run-summary-detail-marker {
+    background: rgba(245, 158, 11, 0.78);
+}
+
+.run-summary-detail-execution .run-summary-detail-marker {
+    background: rgba(34, 197, 94, 0.72);
+}
+
+.run-summary-detail-rows .timing-breakdown-row:nth-child(even) .run-summary-detail-marker {
+    opacity: 0.58;
+}
+
+.timing-breakdown-popover.timing-breakdown-popover-wide {
+    width: min(560px, calc(100vw - 48px));
+}
+
+.timing-breakdown-popover-summary {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 10px;
+    margin-top: 8px;
+}
+
+.timing-breakdown-popover-summary > div {
+    padding: 7px 8px;
+    border-radius: 5px;
+    background: rgba(249, 250, 251, 1);
+}
+
+.dark .timing-breakdown-popover-summary > div {
+    background: rgba(31, 41, 55, 0.82);
+}
+
+.timing-breakdown-popover-summary span {
+    display: block;
+    color: rgba(107, 114, 128, 1);
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+}
+
+.dark .timing-breakdown-popover-summary span {
+    color: rgba(156, 163, 175, 1);
+}
+
+.timing-breakdown-popover-summary strong {
+    display: block;
+    margin-top: 2px;
+    font-size: 12px;
+}
+
+.timing-breakdown-popover-columns {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 10px;
+    margin-top: 10px;
+}
+
+.timing-breakdown-popover .run-summary-detail-group {
+    padding: 8px 9px;
+    background: transparent;
+}
+
+.run-summary-hover-target:hover > .timing-breakdown-popover,
+.run-summary-hover-target:focus > .timing-breakdown-popover,
+.run-summary-hover-target:focus-within > .timing-breakdown-popover {
+    opacity: 1;
+    visibility: visible;
+    pointer-events: auto;
+    transform: translateY(0);
+}
+
+@media (max-width: 640px) {
+    .run-summary-metrics {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 6px 12px;
+    }
+
+    .run-summary-metric-total {
+        grid-column: 1 / -1;
+    }
+
+    .run-summary-details,
+    .timing-breakdown-popover-columns {
+        grid-template-columns: minmax(0, 1fr);
+    }
+
+    .timing-breakdown-popover.timing-breakdown-popover-wide {
+        width: min(420px, calc(100vw - 40px));
+    }
+}
+
+/* Accessible timing breakdowns: hover, keyboard focus, and mobile tap/focus. */
+.timing-breakdown-trigger {
+    position: relative;
+    cursor: help;
+    outline: none;
+}
+
+.timing-breakdown-trigger:focus-visible {
+    border-radius: 3px;
+    box-shadow: 0 0 0 2px rgba(59, 130, 246, 0.55);
+}
+
+.timing-breakdown-info {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 13px;
+    height: 13px;
+    border: 1px solid currentColor;
+    border-radius: 9999px;
+    font-size: 9px;
+    font-weight: 700;
+    line-height: 1;
+    text-transform: none;
+}
+
+.timing-breakdown-popover {
+    position: absolute;
+    top: calc(100% + 8px);
+    left: 0;
+    z-index: 50;
+    width: min(270px, calc(100vw - 32px));
+    padding: 10px 12px;
+    border: 1px solid rgba(209, 213, 219, 1);
+    border-radius: 7px;
+    background: white;
+    box-shadow: 0 10px 25px rgba(15, 23, 42, 0.16);
+    color: rgba(31, 41, 55, 1);
+    cursor: default;
+    opacity: 0;
+    visibility: hidden;
+    pointer-events: none;
+    transform: translateY(-3px);
+    transition: opacity 0.12s ease, transform 0.12s ease, visibility 0.12s;
+}
+
+.dark .timing-breakdown-popover {
+    border-color: rgba(75, 85, 99, 1);
+    background: rgba(17, 24, 39, 1);
+    color: rgba(243, 244, 246, 1);
+    box-shadow: 0 10px 25px rgba(0, 0, 0, 0.4);
+}
+
+.timing-breakdown-popover-above {
+    top: auto;
+    bottom: calc(100% + 10px);
+    transform: translateY(3px);
+}
+
+.timing-breakdown-popover-align-right {
+    right: 0;
+    left: auto;
+}
+
+.timing-breakdown-trigger:hover > .timing-breakdown-popover,
+.timing-breakdown-trigger:focus > .timing-breakdown-popover,
+.timing-breakdown-trigger:focus-within > .timing-breakdown-popover {
+    opacity: 1;
+    visibility: visible;
+    pointer-events: auto;
+    transform: translateY(0);
+}
+
+.timing-breakdown-heading {
+    font-size: 12px;
+    font-weight: 700;
+}
+
+.timing-breakdown-description {
+    margin-top: 2px;
+    color: rgba(107, 114, 128, 1);
+    font-size: 11px;
+}
+
+.dark .timing-breakdown-description {
+    color: rgba(156, 163, 175, 1);
+}
+
+.timing-breakdown-rows {
+    display: grid;
+    gap: 5px;
+    margin-top: 9px;
+    padding-top: 8px;
+    border-top: 1px solid rgba(229, 231, 235, 1);
+}
+
+.dark .timing-breakdown-rows {
+    border-top-color: rgba(55, 65, 81, 1);
+}
+
+.timing-breakdown-row {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 12px;
+    font-size: 11px;
+}
+
+.timing-breakdown-row strong {
+    white-space: nowrap;
+    font-weight: 600;
 }
 
 .timeline-axis {
@@ -2406,6 +2738,8 @@ window.ObservabilityTabs = class ObservabilityTabs {
     getCallDataStatusMessage(status, retentionDays, size) {
         const py = size === 'sm' ? 'py-4' : 'py-8';
         const textSize = size === 'sm' ? 'text-sm' : 'text-sm';
+        const timingSubject =
+            this.getDurationContainer()?.dataset.timingKind === 'task' ? 'task' : 'run';
         switch (status) {
             case 'expired':
                 return `<div class="${textSize} text-gray-500 dark:text-gray-400 text-center ${py}">
@@ -2425,11 +2759,20 @@ window.ObservabilityTabs = class ObservabilityTabs {
             case 'empty':
                 return `<div class="${textSize} text-gray-500 dark:text-gray-400 text-center ${py}">
                     <p>No calls recorded</p>
-                    <p class="text-xs mt-2">This run completed without any tracked function calls</p>
+                    <p class="text-xs mt-2">This ${timingSubject} completed without any tracked function calls</p>
                 </div>`;
             default:
                 return null;
         }
+    }
+
+    normalizeCallDataStatus(status) {
+        const timingContainer = this.getDurationContainer();
+        const terminalTaskWithoutFinalizedRun =
+            status === 'collecting' &&
+            timingContainer?.dataset.timingKind === 'task' &&
+            timingContainer.dataset.executionComplete === 'true';
+        return terminalTaskWithoutFinalizedRun ? 'empty' : status;
     }
 
     async loadHierarchyData() {
@@ -2446,12 +2789,12 @@ window.ObservabilityTabs = class ObservabilityTabs {
 
             if (result.success) {
                 // Store retention metadata
-                this.callDataStatus = result.call_data_status;
+                this.callDataStatus = this.normalizeCallDataStatus(result.call_data_status);
                 this.callRetentionDays = result.call_retention_days;
                 this.hierarchyBuildId = result.build_id || null;
 
                 // Check if call data is unavailable for a known reason
-                const statusMsg = this.getCallDataStatusMessage(result.call_data_status, result.call_retention_days, 'sm');
+                const statusMsg = this.getCallDataStatusMessage(this.callDataStatus, result.call_retention_days, 'sm');
                 if (statusMsg) {
                     this.hierarchyTree.innerHTML = statusMsg;
                     return;
@@ -2484,7 +2827,7 @@ window.ObservabilityTabs = class ObservabilityTabs {
 
             if (!response.ok) {
                 console.error('Timeline API error:', response.status, response.statusText);
-                this.timelineView.innerHTML = `<div class="text-sm text-red-600 dark:text-red-500 text-center py-8">API Error: ${response.status}</div>`;
+                this.renderTimeline(`<div class="text-sm text-red-600 dark:text-red-500 text-center py-8">API Error: ${response.status}</div>`);
                 return;
             }
 
@@ -2492,33 +2835,33 @@ window.ObservabilityTabs = class ObservabilityTabs {
 
             if (result.success) {
                 // Store retention metadata (may already be set by hierarchy loader)
-                this.callDataStatus = result.call_data_status;
+                this.callDataStatus = this.normalizeCallDataStatus(result.call_data_status);
                 this.callRetentionDays = result.call_retention_days;
                 this.hierarchyBuildId = result.build_id || this.hierarchyBuildId;
+                this.timelineData = result.data;
 
                 // Check if call data is unavailable for a known reason
-                const statusMsg = this.getCallDataStatusMessage(result.call_data_status, result.call_retention_days, 'lg');
+                const statusMsg = this.getCallDataStatusMessage(this.callDataStatus, result.call_retention_days, 'lg');
                 if (statusMsg) {
-                    this.timelineView.innerHTML = statusMsg;
+                    this.renderTimeline(statusMsg);
                     return;
                 }
 
-                this.timelineData = result.data;
                 this.renderTimeline();
             } else {
                 const errorMsg = result.error || 'Unknown error';
                 console.error('Timeline load failed:', errorMsg);
-                this.timelineView.innerHTML = `<div class="text-sm text-gray-500 dark:text-gray-400 text-center py-8">
+                this.renderTimeline(`<div class="text-sm text-gray-500 dark:text-gray-400 text-center py-8">
                     <p>No execution timeline available</p>
                     <p class="text-xs mt-2">This run may not have function call tracking enabled</p>
-                </div>`;
+                </div>`);
             }
         } catch (error) {
             console.error('Error loading timeline:', error);
-            this.timelineView.innerHTML = `<div class="text-sm text-red-600 dark:text-red-500 text-center py-8">
+            this.renderTimeline(`<div class="text-sm text-red-600 dark:text-red-500 text-center py-8">
                 <p>Failed to load timeline</p>
                 <p class="text-xs mt-2">${error.message}</p>
-            </div>`;
+            </div>`);
         }
     }
 
@@ -2724,26 +3067,27 @@ window.ObservabilityTabs = class ObservabilityTabs {
         this.filesView.innerHTML = html;
     }
 
-    renderTimeline() {
-        if (!this.timelineData || !this.timelineData.tree || this.timelineData.tree.length === 0) {
-            this.timelineView.innerHTML = '<div class="text-sm text-gray-500 dark:text-gray-400 text-center py-8">No execution data found</div>';
-            return;
-        }
+    renderTimeline(traceStatusHtml = null) {
+        const hasTraceData =
+            Boolean(this.timelineData?.tree) &&
+            this.timelineData.tree.length > 0;
 
-        // Flatten the hierarchy into a timeline view
-        const items = this.flattenForTimeline(this.timelineData.tree);
+        // Timing is persisted independently from call traces. A completed task
+        // can therefore have a useful Waiting/Execution breakdown even when it
+        // did not execute any tracked Hot functions.
+        const items = hasTraceData ? this.flattenForTimeline(this.timelineData.tree) : [];
 
-        // Calculate time bounds
+        // Calculate trace bounds only when trace rows exist.
         const startTimes = items.map(i => new Date(i.start_time).getTime()).filter(t => !isNaN(t));
-        const minTime = Math.min(...startTimes);
-        const maxTime = Math.max(...items.map(i => {
+        const minTime = hasTraceData ? Math.min(...startTimes) : 0;
+        const maxTime = hasTraceData ? Math.max(...items.map(i => {
             if (!i.start_time || !i.duration_us) return minTime;
             return new Date(i.start_time).getTime() + (i.duration_us / 1000); // Convert μs to ms
-        }));
-        const totalDuration = maxTime - minTime;
+        })) : 0;
+        const totalDuration = hasTraceData ? maxTime - minTime : 0;
 
         // Calculate execution time (from hierarchy data)
-        const executionTimeUs = this.timelineData.total_duration_us || 0;
+        const executionTimeUs = hasTraceData ? (this.timelineData.total_duration_us || 0) : 0;
 
         // Get total duration from page header (includes queue wait)
         const totalDurationUs = this.getRunDurationUs();
@@ -2751,68 +3095,175 @@ window.ObservabilityTabs = class ObservabilityTabs {
         // Get execution time (stop - start, excludes queue wait)
         const execTimeUs = this.getExecTimeUs();
 
-        // Get queue wait time (only for event-triggered runs)
+        // Waiting phases (available for event-triggered worker runs).
+        const waitingTimeUs = this.getPreRunWaitUs() || Math.max(0, totalDurationUs - execTimeUs);
+        const publishWaitUs = this.getPublishWaitUs();
         const queueWaitUs = this.getQueueWaitUs();
+        const retryQueueAgeUs = this.getRetryQueueAgeUs();
+        const handlerDispatchWaitUs = this.getHandlerDispatchWaitUs();
+        const workerPreparationUs = this.getWorkerPreparationUs();
+        const timingContainer = this.getDurationContainer();
+        const isTaskTiming = timingContainer?.dataset.timingKind === 'task';
+        const timingValue = key => {
+            const value = timingContainer?.dataset[key];
+            return value ? Math.max(0, parseInt(value, 10) || 0) : 0;
+        };
 
         // Calculate compilation overhead (clamp to 0 to handle timing precision issues)
-        // Use execTimeUs (not totalDurationUs) since compilation is part of execution, not queue wait
-        const compilationTimeUs = Math.max(0, execTimeUs - executionTimeUs);
-
-        // Total time for visualization (same as totalDurationUs, which already includes queue wait)
-        const totalTimeUs = totalDurationUs;
+        // Use execTimeUs since compilation/loading is part of Execution, not Waiting.
+        const handlerExecutionTimeUs = hasTraceData
+            ? Math.min(Math.max(0, executionTimeUs), execTimeUs)
+            : 0;
+        const compilationTimeUs = hasTraceData
+            ? Math.max(0, execTimeUs - handlerExecutionTimeUs)
+            : 0;
 
         let html = '<div class="timeline-view">';
 
         // Add run summary at the top
         if (totalDurationUs > 0) {
-            const hasQueueWait = queueWaitUs > 0;
-            const queueWaitPercent = hasQueueWait ? (queueWaitUs / totalTimeUs) * 100 : 0;
-            const compilationPercent = (compilationTimeUs / totalTimeUs) * 100;
-            const executionPercent = (executionTimeUs / totalTimeUs) * 100;
+            const primaryTotalUs = Math.max(1, waitingTimeUs + execTimeUs);
+            const waitingPercent = (waitingTimeUs / primaryTotalUs) * 100;
+            const executionPercent = (execTimeUs / primaryTotalUs) * 100;
+            const waitingBreakdownCandidates = (isTaskTiming ? [
+                { label: 'Publish', value: publishWaitUs },
+                { label: 'Queue Wait', value: queueWaitUs },
+                { label: 'Retry / Reclaim Age', value: retryQueueAgeUs },
+                { label: 'Task Setup', value: workerPreparationUs },
+                { label: 'Capacity Wait', value: timingValue('capacityWaitUs') },
+                { label: 'Image Pull', value: timingValue('imagePullUs') },
+                { label: 'Runtime Start', value: timingValue('runtimeStartUs') },
+                { label: 'Other / Unattributed', value: timingValue('unattributedWaitUs') }
+            ] : [
+                { label: 'Publish', value: publishWaitUs },
+                { label: 'Queue Wait', value: queueWaitUs },
+                { label: 'Retry / Reclaim Age', value: retryQueueAgeUs },
+                { label: 'Handler Dispatch', value: handlerDispatchWaitUs },
+                { label: 'Invocation Setup', value: workerPreparationUs }
+            ]);
+            const executionBreakdownCandidates = (isTaskTiming ? [
+                { label: 'Runtime Startup', value: timingValue('executionStartupUs') },
+                { label: 'Workload Running', value: timingValue('workloadExecutionUs') },
+                { label: 'Logs', value: timingValue('logsCollectUs') },
+                { label: 'Finalization', value: timingValue('finalizationUs') }
+            ] : [
+                { label: 'Compilation & Loading', value: compilationTimeUs },
+                { label: 'Handler Execution', value: handlerExecutionTimeUs }
+            ]);
+
+            // Keep the phase rows mathematically consistent with their parent
+            // bucket. Any unmeasured remainder is shown explicitly instead of
+            // disappearing into the bar.
+            const reconcileBreakdown = (parts, parentTotal) => {
+                let remaining = Math.max(0, parentTotal);
+                const reconciled = [];
+                for (const part of parts) {
+                    if (part.value <= 0 || remaining <= 0) continue;
+                    const value = Math.min(part.value, remaining);
+                    reconciled.push({ ...part, value });
+                    remaining -= value;
+                }
+                if (remaining > 0) {
+                    reconciled.push({ label: 'Other / Unattributed', value: remaining });
+                }
+                return reconciled;
+            };
+            const waitingBreakdown = reconcileBreakdown(waitingBreakdownCandidates, waitingTimeUs);
+            const executionBreakdown = reconcileBreakdown(executionBreakdownCandidates, execTimeUs);
+
+            const renderBreakdownRows = parts => {
+                if (parts.length === 0) {
+                    return '<div class="timing-breakdown-row"><span class="text-gray-500 dark:text-gray-400">No recorded time</span><strong>0μs</strong></div>';
+                }
+                return parts.map(part =>
+                    '<div class="timing-breakdown-row"><span class="run-summary-detail-label">' +
+                    '<span class="run-summary-detail-marker" aria-hidden="true"></span>' +
+                    part.label + '</span><strong>' + this.formatDuration(part.value) + '</strong></div>'
+                ).join('');
+            };
+
+            const renderBreakdownSegments = (parts, parentTotal) => {
+                if (parentTotal <= 0 || parts.length === 0) {
+                    return '<div class="run-summary-breakdown-segment" style="width:100%"></div>';
+                }
+                return parts.map(part =>
+                    '<div class="run-summary-breakdown-segment" style="width:' +
+                    ((part.value / parentTotal) * 100).toFixed(3) + '%"></div>'
+                ).join('');
+            };
+
+            const waitingDescription = isTaskTiming
+                ? 'Task created → workload started'
+                : 'Event created → handler started';
+            const executionDescription = isTaskTiming
+                ? 'Workload started → task completed'
+                : 'Handler started → run completed';
+            const totalDescription = isTaskTiming
+                ? 'Task created → task completed'
+                : 'Event created → run completed';
+            const renderDetailGroup = (kind, label, total, description, parts) =>
+                '<div class="run-summary-detail-group run-summary-detail-' + kind + '">' +
+                '  <div class="run-summary-detail-heading"><span>' + label + '</span><strong>' +
+                this.formatDuration(total) + '</strong></div>' +
+                '  <div class="run-summary-detail-description">' + description + '</div>' +
+                '  <div class="run-summary-detail-rows">' + renderBreakdownRows(parts) + '</div>' +
+                '</div>';
 
             html += '<div class="run-summary">';
-            html += '<div class="run-summary-title">Duration: <span class="font-semibold">' + this.formatDuration(totalDurationUs) + '</span>';
-            if (hasQueueWait) {
-                html += ' <span class="text-gray-500 dark:text-gray-400 text-xs">(Run Time: ' + this.formatDuration(execTimeUs) + ')</span>';
+            html += '<div class="run-summary-title">Timing summary</div>';
+            html += '<div class="run-summary-metrics">';
+            html += '  <div class="run-summary-metric run-summary-metric-total"><span class="run-summary-metric-label">Total</span><span class="run-summary-metric-value">' + this.formatDuration(primaryTotalUs) + '</span></div>';
+            html += '  <div class="run-summary-metric run-summary-metric-waiting"><span class="run-summary-metric-label">Waiting</span><span class="run-summary-metric-value">' + this.formatDuration(waitingTimeUs) + ' <span class="run-summary-percent">(' + waitingPercent.toFixed(1) + '%)</span></span></div>';
+            html += '  <div class="run-summary-metric run-summary-metric-execution"><span class="run-summary-metric-label">Execution</span><span class="run-summary-metric-value">' + this.formatDuration(execTimeUs) + ' <span class="run-summary-percent">(' + executionPercent.toFixed(1) + '%)</span></span></div>';
+            html += '</div>';
+            html += '<div class="run-summary-hover-target" tabindex="0" aria-describedby="timeline-timing-breakdown" aria-label="Timing breakdown: ' + totalDescription + '">';
+            html += '<div class="run-summary-combined-bar" aria-hidden="true">';
+            if (waitingTimeUs > 0) {
+                html += '<div class="run-summary-bucket run-summary-bucket-waiting" style="width:' + waitingPercent.toFixed(3) + '%">';
+                html += '  <div class="run-summary-bucket-fill">' + renderBreakdownSegments(waitingBreakdown, waitingTimeUs) + '</div>';
+                html += '</div>';
+            }
+            if (execTimeUs > 0) {
+                html += '<div class="run-summary-bucket run-summary-bucket-execution" style="width:' + executionPercent.toFixed(3) + '%">';
+                html += '  <div class="run-summary-bucket-fill">' + renderBreakdownSegments(executionBreakdown, execTimeUs) + '</div>';
+                html += '</div>';
             }
             html += '</div>';
-            html += '<div class="run-summary-legend">';
-            // Queue wait legend item (only show if there was queue wait)
-            if (hasQueueWait) {
-                html += '  <div class="run-summary-legend-item">';
-                html += '    <div class="run-summary-legend-box run-summary-legend-queue-wait"></div>';
-                html += '    <span class="run-summary-legend-label">Queue Wait:</span>';
-                html += '    <span class="run-summary-legend-value">' + this.formatDuration(queueWaitUs) + ' <span class="run-summary-percent">(' + queueWaitPercent.toFixed(1) + '%)</span></span>';
-                html += '  </div>';
-            }
-            html += '  <div class="run-summary-legend-item">';
-            html += '    <div class="run-summary-legend-box run-summary-legend-compilation"></div>';
-            html += '    <span class="run-summary-legend-label">Compilation & Loading:</span>';
-            html += '    <span class="run-summary-legend-value">' + this.formatDuration(compilationTimeUs) + ' <span class="run-summary-percent">(' + compilationPercent.toFixed(1) + '%)</span></span>';
+            html += '<div id="timeline-timing-breakdown" class="timing-breakdown-popover timing-breakdown-popover-wide" role="tooltip">';
+            html += '  <div class="timing-breakdown-heading">Total · ' + this.formatDuration(primaryTotalUs) + '</div>';
+            html += '  <div class="timing-breakdown-description">' + totalDescription + '</div>';
+            html += '  <div class="timing-breakdown-popover-summary">';
+            html += '    <div><span>Total</span><strong>' + this.formatDuration(primaryTotalUs) + '</strong></div>';
+            html += '    <div><span>Waiting</span><strong>' + this.formatDuration(waitingTimeUs) + ' · ' + waitingPercent.toFixed(1) + '%</strong></div>';
+            html += '    <div><span>Execution</span><strong>' + this.formatDuration(execTimeUs) + ' · ' + executionPercent.toFixed(1) + '%</strong></div>';
             html += '  </div>';
-            html += '  <div class="run-summary-legend-item">';
-            html += '    <div class="run-summary-legend-box run-summary-legend-execution"></div>';
-            html += '    <span class="run-summary-legend-label">Execution:</span>';
-            html += '    <span class="run-summary-legend-value">' + this.formatDuration(executionTimeUs) + ' <span class="run-summary-percent">(' + executionPercent.toFixed(1) + '%)</span></span>';
+            html += '  <div class="timing-breakdown-popover-columns">';
+            html += renderDetailGroup('waiting', 'Waiting', waitingTimeUs, waitingDescription, waitingBreakdown);
+            html += renderDetailGroup('execution', 'Execution', execTimeUs, executionDescription, executionBreakdown);
             html += '  </div>';
             html += '</div>';
-            html += '<div class="run-summary-combined-bar">';
-            // Ensure minimum 1px width for each section
-            const queueWaitWidth = hasQueueWait ? Math.max(1, queueWaitPercent) : 0;
-            const compilationWidth = Math.max(1, compilationPercent);
-            const executionWidth = Math.max(1, executionPercent);
-            // Normalize to 100%
-            const total = queueWaitWidth + compilationWidth + executionWidth;
-            const normalizedQueueWait = (queueWaitWidth / total) * 100;
-            const normalizedCompilation = (compilationWidth / total) * 100;
-            const normalizedExecution = (executionWidth / total) * 100;
-            if (hasQueueWait) {
-                html += '  <div class="run-summary-bar-segment run-summary-bar-queue-wait" style="width: ' + normalizedQueueWait.toFixed(2) + '%"></div>';
-            }
-            html += '  <div class="run-summary-bar-segment run-summary-bar-compilation" style="width: ' + normalizedCompilation.toFixed(2) + '%"></div>';
-            html += '  <div class="run-summary-bar-segment run-summary-bar-execution" style="width: ' + normalizedExecution.toFixed(2) + '%"></div>';
+            html += '</div>';
+            html += '<div class="run-summary-details">';
+            html += renderDetailGroup('waiting', 'Waiting', waitingTimeUs, waitingDescription, waitingBreakdown);
+            html += renderDetailGroup('execution', 'Execution', execTimeUs, executionDescription, executionBreakdown);
             html += '</div>';
             html += '</div>';
+        }
+
+        if (!hasTraceData) {
+            const emptyTraceHtml =
+                traceStatusHtml ||
+                this.getCallDataStatusMessage(
+                    this.callDataStatus || 'empty',
+                    this.callRetentionDays,
+                    'lg'
+                ) ||
+                this.getCallDataStatusMessage('empty', this.callRetentionDays, 'lg');
+            html += emptyTraceHtml;
+            html += '</div>';
+            this.timelineView.innerHTML = html;
+            this.attachTimelineListeners();
+            return;
         }
 
         // Add time axis header
@@ -3121,9 +3572,14 @@ window.ObservabilityTabs = class ObservabilityTabs {
         return `${(totalMicros / 1_000_000).toFixed(1)}s`;
     }
 
+    getDurationContainer() {
+        return document.getElementById('run-duration-container')
+            || document.getElementById('task-duration-container');
+    }
+
     getRunDurationUs() {
         // Get total duration (queue wait + execution) from data attribute
-        const durationContainer = document.getElementById('run-duration-container');
+        const durationContainer = this.getDurationContainer();
         if (durationContainer) {
             const durationUs = durationContainer.dataset.durationUs;
             if (durationUs) {
@@ -3147,7 +3603,7 @@ window.ObservabilityTabs = class ObservabilityTabs {
 
     getExecTimeUs() {
         // Get execution time only (stop - start) from data attribute
-        const durationContainer = document.getElementById('run-duration-container');
+        const durationContainer = this.getDurationContainer();
         if (durationContainer) {
             const execTimeUs = durationContainer.dataset.execTimeUs;
             if (execTimeUs) {
@@ -3157,13 +3613,69 @@ window.ObservabilityTabs = class ObservabilityTabs {
         return 0;
     }
 
+    getPreRunWaitUs() {
+        // Waiting is event creation through handler run:start.
+        const durationContainer = this.getDurationContainer();
+        if (durationContainer) {
+            const preRunWaitUs = durationContainer.dataset.preRunWaitUs;
+            if (preRunWaitUs && preRunWaitUs !== '') {
+                return parseInt(preRunWaitUs, 10);
+            }
+        }
+        return 0;
+    }
+
     getQueueWaitUs() {
-        // Get queue wait time from data attribute (only for event-triggered runs)
-        const durationContainer = document.getElementById('run-duration-container');
+        // Queue Wait is the backend-residence component of Waiting.
+        const durationContainer = this.getDurationContainer();
         if (durationContainer) {
             const queueWaitUs = durationContainer.dataset.queueWaitUs;
             if (queueWaitUs && queueWaitUs !== '') {
                 return parseInt(queueWaitUs, 10);
+            }
+        }
+        return 0;
+    }
+
+    getPublishWaitUs() {
+        const durationContainer = this.getDurationContainer();
+        if (durationContainer) {
+            const publishWaitUs = durationContainer.dataset.publishWaitUs;
+            if (publishWaitUs && publishWaitUs !== '') {
+                return parseInt(publishWaitUs, 10);
+            }
+        }
+        return 0;
+    }
+
+    getRetryQueueAgeUs() {
+        const durationContainer = this.getDurationContainer();
+        if (durationContainer) {
+            const retryQueueAgeUs = durationContainer.dataset.retryQueueAgeUs;
+            if (retryQueueAgeUs && retryQueueAgeUs !== '') {
+                return parseInt(retryQueueAgeUs, 10);
+            }
+        }
+        return 0;
+    }
+
+    getHandlerDispatchWaitUs() {
+        const durationContainer = this.getDurationContainer();
+        if (durationContainer) {
+            const handlerDispatchWaitUs = durationContainer.dataset.handlerDispatchWaitUs;
+            if (handlerDispatchWaitUs && handlerDispatchWaitUs !== '') {
+                return parseInt(handlerDispatchWaitUs, 10);
+            }
+        }
+        return 0;
+    }
+
+    getWorkerPreparationUs() {
+        const durationContainer = this.getDurationContainer();
+        if (durationContainer) {
+            const workerPreparationUs = durationContainer.dataset.workerPreparationUs;
+            if (workerPreparationUs && workerPreparationUs !== '') {
+                return parseInt(workerPreparationUs, 10);
             }
         }
         return 0;
