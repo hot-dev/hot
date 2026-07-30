@@ -57,7 +57,11 @@ fn (session: ::types/Session, cursor: Str?): Map {
   result ::client/session-request(session, "prompts/list", params)
   {
     prompts: map(get(result, "prompts", []), ::types/Prompt(%)),
-    next-cursor: get(result, "nextCursor", null)
+    next-cursor: get(result, "nextCursor", null),
+    result-type: get(result, "resultType", "complete"),
+    ttl-ms: get(result, "ttlMs", null),
+    cache-scope: get(result, "cacheScope", null),
+    meta: get(result, "_meta", null)
   }
 }
 
@@ -99,6 +103,25 @@ collect-pages fn cond (session: ::types/Session, cursor: Str?, acc: Vec): Vec {
 // Prompt Retrieval
 // ============================================================================
 
+get-result
+meta {
+    doc: """Get a prompt and retain modern result type, MRTR, and metadata fields."""
+}
+fn (session: ::types/Session, name: Str, arguments: Map?): Map {
+  result ::client/session-request(session, "prompts/get", {
+    name: name,
+    arguments: or(arguments, {})
+  })
+  {
+    description: get(result, "description", null),
+    messages: map(get(result, "messages", []), ::types/PromptMessage(%)),
+    result-type: get(result, "resultType", "complete"),
+    input-requests: get(result, "inputRequests", null),
+    request-state: get(result, "requestState", null),
+    meta: get(result, "_meta", null)
+  }
+}
+
 // Get a prompt by name, optionally with arguments.
 get-prompt
 meta {
@@ -123,9 +146,18 @@ messages ::prompts/get-prompt(session, "greeting", {})
 """
 }
 fn (session: ::types/Session, name: Str, arguments: Map?): Vec<::types/PromptMessage> {
-  result ::client/session-request(session, "prompts/get", {
-    name: name,
-    arguments: or(arguments, {})
-  })
+  get-result(session, name, arguments).messages
+}
+
+get-with-input
+meta {doc: """Get a prompt while fulfilling modern Multi Round-Trip input requests."""}
+fn (session: ::types/Session, name: Str, arguments: Map?, handler: Fn, max-rounds: Int): Vec<::types/PromptMessage> {
+  result ::client/session-request-with-input(
+    session,
+    "prompts/get",
+    {name: name, arguments: or(arguments, {})},
+    handler,
+    max-rounds
+  )
   map(get(result, "messages", []), ::types/PromptMessage(%))
 }

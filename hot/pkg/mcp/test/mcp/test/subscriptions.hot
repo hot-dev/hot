@@ -1,0 +1,66 @@
+::mcp::test::subscriptions ns
+meta ["test"]
+
+::subscriptions ::mcp::subscriptions
+::types ::mcp::types
+
+test-wire-filter
+meta ["test"]
+fn () {
+  filter ::types/SubscriptionFilter({
+    tools-list-changed: true,
+    resource-subscriptions: ["file:///one"]
+  })
+  wire ::subscriptions/wire-filter(filter)
+  assert-eq(true, wire.toolsListChanged)
+  assert-eq(["file:///one"], wire.resourceSubscriptions)
+  assert-eq(null, get(wire, "promptsListChanged", null))
+}
+
+test-filter-matches-capabilities
+meta ["test"]
+fn () {
+  session ::types/Session({
+    url: "https://example.com/mcp",
+    session-id: null,
+    protocol-version: "2026-07-28",
+    server-info: ::types/ServerInfo({name: "server", version: "1"}),
+    server-capabilities: ::types/ServerCapabilities({
+      tools: {listChanged: true},
+      resources: {subscribe: true}
+    }),
+    headers: {},
+    era: "modern"
+  })
+  wire ::subscriptions/validate-filter(
+    session,
+    ::types/SubscriptionFilter({
+      tools-list-changed: true,
+      resource-subscriptions: ["file:///one"]
+    })
+  )
+  assert-eq(true, wire.toolsListChanged)
+  assert-eq(["file:///one"], wire.resourceSubscriptions)
+}
+
+test-filter-rejects-unadvertised-capability
+meta ["test"]
+fn () {
+  session ::types/Session({
+    url: "https://example.com/mcp",
+    session-id: null,
+    protocol-version: "2026-07-28",
+    server-info: ::types/ServerInfo({name: "server", version: "1"}),
+    server-capabilities: ::types/ServerCapabilities({tools: {listChanged: false}}),
+    headers: {},
+    era: "modern"
+  })
+  outcome ::hot::internal::exec/contain(
+    ::subscriptions/validate-filter,
+    [
+      session,
+      ::types/SubscriptionFilter({tools-list-changed: true})
+    ]
+  )
+  assert(is-err(outcome), "unadvertised notifications must be rejected")
+}

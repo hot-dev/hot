@@ -8,7 +8,8 @@ meta {doc: """Type definitions for the Model Context Protocol (MCP)."""}
 ClientInfo
 meta {
     doc: """
-Client identification sent during the initialize handshake.
+Client identification sent with modern request metadata or the legacy
+initialize handshake.
 
 **Example**
 
@@ -20,15 +21,18 @@ info ::types/ClientInfo({name: "my-app", version: "1.0.0"})
 }
 type {
   name: Str,
-  version: Str
+  version: Str,
+  title: Str?,
+  website-url: Str?,
+  icons: Vec<Map>?
 }
 
 ServerInfo
 meta {
     doc: """
-Server identification received during the initialize handshake.
+Server identification received from modern discovery or legacy initialization.
 
-Accessible via `session.server-info` after initialization.
+Accessible via `session.server-info` after connecting.
 
 **Example**
 
@@ -40,34 +44,42 @@ session.server-info.version // => "2.0.0"
 }
 type {
   name: Str,
-  version: Str
+  version: Str,
+  title: Str?,
+  website-url: Str?,
+  icons: Vec<Map>?
 }
 
 ClientCapabilities
 meta {
     doc: """
-Optional capabilities the client advertises during initialization.
+Optional capabilities advertised in every modern request or during legacy
+initialization.
 
 - `roots` - Filesystem root listing support
 - `sampling` - LLM sampling request support
+- `elicitation` - Form and URL elicitation support
 
 **Example**
 
 ```hot
 ::types ::mcp::types
-caps ::types/ClientCapabilities({roots: {listChanged: true}, sampling: {}})
+caps ::types/ClientCapabilities({sampling: {}, elicitation: {form: {}}})
 ```
 """
 }
 type {
   roots: Map?,
-  sampling: Map?
+  sampling: Map?,
+  elicitation: Map?,
+  experimental: Map?,
+  extensions: Map?
 }
 
 ServerCapabilities
 meta {
     doc: """
-Capabilities the server advertises during initialization.
+Capabilities the server advertises during discovery or initialization.
 
 - `tools` - Server provides callable tools
 - `resources` - Server provides readable resources
@@ -81,13 +93,33 @@ type {
   resources: Map?,
   prompts: Map?,
   logging: Map?,
-  completions: Map?
+  completions: Map?,
+  experimental: Map?,
+  extensions: Map?
+}
+
+ConnectionOptions
+meta {
+    doc: """
+Options for connecting to an MCP server.
+
+- `mode` — `"auto"` (default), `"modern"`, or `"legacy"`
+- `headers` — HTTP headers, including authorization, sent on every request
+- `log-level` — optional modern per-request logging threshold
+"""
+}
+type {
+  mode: Str?,
+  headers: Map?,
+  log-level: Str?
 }
 
 Session
 meta {
     doc: """
-An active MCP session. Created by `::mcp::client/initialize` and passed to all subsequent operations.
+An MCP connection context. Created by `::mcp::client/connect` and passed to
+subsequent operations. Modern contexts are stateless; `session-id` is retained
+only for legacy servers that assign one.
 
 - `url` - The MCP server endpoint
 - `session-id` - Server-assigned session ID (if any)
@@ -101,13 +133,13 @@ An active MCP session. Created by `::mcp::client/initialize` and passed to all s
 ```hot
 ::mcp ::mcp::client
 ::types ::mcp::types
-session ::mcp/initialize(
+session ::mcp/connect(
   "https://my-server.example.com/mcp",
   ::types/ClientInfo({name: "my-app", version: "1.0.0"}),
   null
 )
 session.url              // => "https://my-server.example.com/mcp"
-session.protocol-version // => "2025-11-25"
+session.protocol-version // => "2026-07-28" or a negotiated legacy version
 session.server-info.name // => "my-server"
 ```
 """
@@ -118,7 +150,29 @@ type {
   protocol-version: Str,
   server-info: ServerInfo,
   server-capabilities: ServerCapabilities,
-  headers: Map
+  headers: Map,
+  era: Str?,
+  client-info: ClientInfo?,
+  client-capabilities: ClientCapabilities?,
+  base-headers: Map?,
+  discovery: Map?,
+  log-level: Str?
+}
+
+SubscriptionFilter
+meta {
+    doc: """
+Notifications requested from a modern `subscriptions/listen` stream.
+
+Each field is opt-in. The server capability corresponding to a requested
+notification must advertise support.
+"""
+}
+type {
+  tools-list-changed: Bool?,
+  prompts-list-changed: Bool?,
+  resources-list-changed: Bool?,
+  resource-subscriptions: Vec<Str>?
 }
 
 // ============================================================================
@@ -151,7 +205,11 @@ type {
   name: Str,
   title: Str?,
   description: Str?,
-  input-schema: Map?
+  input-schema: Map?,
+  output-schema: Map?,
+  icons: Vec<Map>?,
+  annotations: Map?,
+  meta: Map?
 }
 
 ToolContent
@@ -196,7 +254,10 @@ first(result.content).text // => "Sunny, 72°F"
 type {
   content: Vec<ToolContent>,
   is-error: Bool?,
-  structured-content: Any?
+  structured-content: Any?,
+  result-type: Str?,
+  input-requests: Map?,
+  request-state: Str?
 }
 
 // ============================================================================
@@ -228,7 +289,12 @@ type {
   uri: Str,
   name: Str,
   description: Str?,
-  mime-type: Str?
+  mime-type: Str?,
+  title: Str?,
+  icons: Vec<Map>?,
+  annotations: Map?,
+  size: Int?,
+  meta: Map?
 }
 
 ResourceTemplate
@@ -246,7 +312,11 @@ type {
   uri-template: Str,
   name: Str,
   description: Str?,
-  mime-type: Str?
+  mime-type: Str?,
+  title: Str?,
+  icons: Vec<Map>?,
+  annotations: Map?,
+  meta: Map?
 }
 
 ResourceContent
@@ -275,7 +345,8 @@ type {
   uri: Str,
   text: Str?,
   blob: Str?,
-  mime-type: Str?
+  mime-type: Str?,
+  meta: Map?
 }
 
 // ============================================================================
@@ -307,7 +378,9 @@ type {
   name: Str,
   title: Str?,
   description: Str?,
-  arguments: Vec<Map>?
+  arguments: Vec<Map>?,
+  icons: Vec<Map>?,
+  meta: Map?
 }
 
 PromptMessage

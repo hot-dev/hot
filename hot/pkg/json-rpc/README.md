@@ -7,7 +7,7 @@ JSON-RPC 2.0 client for Hot. Supports standard request/response over HTTP and SS
 Add this to the `deps` in your `hot.hot` file:
 
 ```hot
-"hot.dev/json-rpc": "1.1.0"
+"hot.dev/json-rpc": "1.2.0"
 ```
 
 ## Usage
@@ -63,6 +63,11 @@ for-each(response.body, fn (event) {
   println(event.data)
 })
 ```
+
+`send` also accepts a buffered `text/event-stream` response and returns its
+final JSON-RPC result or error. Use `send-raw` when protocol negotiation needs
+the HTTP status and response headers; JSON-RPC error bodies are preserved even
+when the HTTP status is non-2xx.
 
 ### Parse a Response
 

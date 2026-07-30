@@ -2,9 +2,11 @@
 //!
 //! Implements the MCP JSON-RPC protocol for exposing Hot functions as AI tools.
 //!
-//! Supports two transports:
-//!   - **Streamable HTTP** (2025-03-26): `POST /mcp/{org}/{service}`
-//!     Modern transport. JSON-RPC request in, JSON or SSE response out.
+//! Supports both MCP protocol eras on the same endpoints:
+//!   - **Modern Streamable HTTP** (2026-07-28): stateless POST requests with
+//!     per-request metadata and routing headers.
+//!   - **Legacy Streamable HTTP** (2025-03-26 through 2025-11-25): POST
+//!     requests using the initialize handshake.
 //!   - **HTTP+SSE** (2024-11-05): `GET /mcp/{org}/{service}` + `POST /mcp/{org}/{service}/messages`
 //!     Deprecated transport kept for compatibility. GET opens persistent SSE
 //!     stream, POST sends messages, responses flow back over the SSE stream.
@@ -16,12 +18,13 @@ use ahash::{AHashMap, AHashSet};
 use axum::{
     Extension, Json,
     extract::{Path, Query, State},
-    http::StatusCode,
+    http::{HeaderMap, HeaderValue, StatusCode},
     response::{
         IntoResponse,
         sse::{Event as SseEvent, KeepAlive, Sse},
     },
 };
+use base64::Engine;
 use hot::db::{build::Build, mcp_tool::McpTool, org::Org, project::Project};
 use hot::permission::actions;
 use hot::stream::{
@@ -34,7 +37,6 @@ use crate::auth::{AuthContext, authenticate_token};
 use crate::client_ip::ClientIp;
 use crate::domain_resolver::ResolvedDomain;
 use crate::rate_limit::{self, PublicRateLimitMode};
-use axum::http::HeaderMap;
 use once_cell::sync::OnceCell;
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
@@ -116,6 +118,56 @@ const INVALID_REQUEST: i32 = -32600;
 const METHOD_NOT_FOUND: i32 = -32601;
 const INVALID_PARAMS: i32 = -32602;
 const INTERNAL_ERROR: i32 = -32603;
+const HEADER_MISMATCH: i32 = -32020;
+const UNSUPPORTED_CLIENT_CAPABILITY: i32 = -32021;
+const UNSUPPORTED_PROTOCOL_VERSION: i32 = -32022;
+
+const MODERN_PROTOCOL_VERSION: &str = "2026-07-28";
+const LEGACY_PROTOCOL_VERSIONS: &[&str] = &["2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05"];
+const SUPPORTED_PROTOCOL_VERSIONS: &[&str] = &[
+    MODERN_PROTOCOL_VERSION,
+    "2025-11-25",
+    "2025-06-18",
+    "2025-03-26",
+    "2024-11-05",
+];
+
+const META_PROTOCOL_VERSION: &str = "io.modelcontextprotocol/protocolVersion";
+const META_CLIENT_INFO: &str = "io.modelcontextprotocol/clientInfo";
+const META_CLIENT_CAPABILITIES: &str = "io.modelcontextprotocol/clientCapabilities";
+const META_SERVER_INFO: &str = "io.modelcontextprotocol/serverInfo";
+const META_LOG_LEVEL: &str = "io.modelcontextprotocol/logLevel";
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ProtocolEra {
+    Modern,
+    Legacy,
+}
+
+#[derive(Clone, Debug)]
+struct ProtocolContext {
+    era: ProtocolEra,
+    log_level: Option<String>,
+    client_capabilities: JsonValue,
+}
+
+impl ProtocolContext {
+    fn legacy() -> Self {
+        Self {
+            era: ProtocolEra::Legacy,
+            log_level: None,
+            client_capabilities: serde_json::json!({}),
+        }
+    }
+
+    fn is_modern(&self) -> bool {
+        self.era == ProtocolEra::Modern
+    }
+
+    fn should_emit_info_logs(&self) -> bool {
+        matches!(self.log_level.as_deref(), Some("debug" | "info"))
+    }
+}
 
 // ============================================================================
 // MCP Types
@@ -128,6 +180,8 @@ pub struct ServerCapabilities {
     pub tools: Option<ToolsCapability>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub logging: Option<LoggingCapability>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub extensions: Option<JsonValue>,
 }
 
 #[derive(Debug, Serialize)]
@@ -149,10 +203,15 @@ pub struct McpToolDef {
     pub title: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
+    pub input_schema: JsonValue,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub input_schema: Option<JsonValue>,
+    pub output_schema: Option<JsonValue>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub icons: Option<JsonValue>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub annotations: Option<JsonValue>,
+    #[serde(rename = "_meta", skip_serializing_if = "Option::is_none")]
+    pub meta: Option<JsonValue>,
 }
 
 /// MCP initialize result
@@ -167,6 +226,20 @@ pub struct InitializeResult {
 }
 
 #[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DiscoverResult {
+    pub supported_versions: Vec<&'static str>,
+    pub capabilities: ServerCapabilities,
+    pub result_type: &'static str,
+    pub ttl_ms: u64,
+    pub cache_scope: &'static str,
+    #[serde(rename = "_meta")]
+    pub meta: JsonValue,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub instructions: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
 pub struct ServerInfo {
     pub name: String,
     pub version: String,
@@ -176,6 +249,14 @@ pub struct ServerInfo {
 #[derive(Debug, Serialize)]
 pub struct ToolsListResult {
     pub tools: Vec<McpToolDef>,
+    #[serde(rename = "resultType", skip_serializing_if = "Option::is_none")]
+    pub result_type: Option<&'static str>,
+    #[serde(rename = "ttlMs", skip_serializing_if = "Option::is_none")]
+    pub ttl_ms: Option<u64>,
+    #[serde(rename = "cacheScope", skip_serializing_if = "Option::is_none")]
+    pub cache_scope: Option<&'static str>,
+    #[serde(rename = "_meta", skip_serializing_if = "Option::is_none")]
+    pub meta: Option<JsonValue>,
 }
 
 /// tools/call params
@@ -184,12 +265,20 @@ pub struct ToolsCallParams {
     pub name: String,
     #[serde(default)]
     pub arguments: Option<JsonValue>,
+    #[serde(rename = "inputResponses", default)]
+    pub input_responses: Option<JsonValue>,
+    #[serde(rename = "requestState", default)]
+    pub request_state: Option<String>,
 }
 
 /// tools/call result
 #[derive(Debug, Serialize)]
 pub struct ToolsCallResult {
+    #[serde(rename = "resultType", skip_serializing_if = "Option::is_none")]
+    pub result_type: Option<&'static str>,
     pub content: Vec<ToolResultContent>,
+    #[serde(rename = "structuredContent", skip_serializing_if = "Option::is_none")]
+    pub structured_content: Option<JsonValue>,
     #[serde(rename = "isError", skip_serializing_if = "Option::is_none")]
     pub is_error: Option<bool>,
     #[serde(rename = "_meta", skip_serializing_if = "Option::is_none")]
@@ -227,6 +316,850 @@ pub enum ToolResultContent {
         #[serde(skip_serializing_if = "Option::is_none")]
         annotations: Option<JsonValue>,
     },
+}
+
+fn server_info() -> ServerInfo {
+    ServerInfo {
+        name: "hot-mcp".to_string(),
+        version: env!("CARGO_PKG_VERSION").to_string(),
+    }
+}
+
+fn server_capabilities() -> ServerCapabilities {
+    ServerCapabilities {
+        tools: Some(ToolsCapability {
+            list_changed: false,
+        }),
+        logging: Some(LoggingCapability {}),
+        extensions: None,
+    }
+}
+
+fn modern_result_meta() -> JsonValue {
+    serde_json::json!({
+        (META_SERVER_INFO): server_info()
+    })
+}
+
+fn json_rpc_http_response(
+    status: StatusCode,
+    id: Option<JsonValue>,
+    code: i32,
+    message: impl Into<String>,
+    data: Option<JsonValue>,
+) -> axum::response::Response {
+    (
+        status,
+        Json(JsonRpcResponse::error(id, code, message.into(), data)),
+    )
+        .into_response()
+}
+
+fn request_meta(request: &JsonRpcRequest) -> Option<&serde_json::Map<String, JsonValue>> {
+    request
+        .params
+        .as_ref()
+        .and_then(JsonValue::as_object)
+        .and_then(|params| params.get("_meta"))
+        .and_then(JsonValue::as_object)
+}
+
+fn is_legacy_protocol_version(version: &str) -> bool {
+    LEGACY_PROTOCOL_VERSIONS.contains(&version)
+}
+
+fn request_claims_modern(request: &JsonRpcRequest, headers: &HeaderMap) -> bool {
+    if request_meta(request)
+        .and_then(|meta| meta.get(META_PROTOCOL_VERSION))
+        .is_some()
+        || headers.contains_key("mcp-method")
+        || headers.contains_key("mcp-name")
+        || request.method == "server/discover"
+    {
+        return true;
+    }
+
+    headers
+        .get("mcp-protocol-version")
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|version| !is_legacy_protocol_version(version))
+}
+
+fn decode_routing_header(value: &HeaderValue) -> Result<String, String> {
+    let value = value
+        .to_str()
+        .map_err(|_| "header is not valid visible ASCII".to_string())?;
+
+    if value.starts_with("=?base64?") && value.ends_with("?=") {
+        let encoded = &value[9..value.len() - 2];
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(encoded)
+            .map_err(|_| "header contains invalid Base64".to_string())?;
+        return String::from_utf8(bytes)
+            .map_err(|_| "Base64 header payload is not valid UTF-8".to_string());
+    }
+
+    let safe_ascii = !value.is_empty()
+        && !value.starts_with([' ', '\t'])
+        && !value.ends_with([' ', '\t'])
+        && value
+            .bytes()
+            .all(|byte| byte == b'\t' || (0x20..=0x7e).contains(&byte));
+    if !safe_ascii {
+        return Err("header value must use the MCP Base64 sentinel encoding".to_string());
+    }
+
+    Ok(value.to_string())
+}
+
+fn expected_mcp_name(request: &JsonRpcRequest) -> Option<&str> {
+    let params = request.params.as_ref()?.as_object()?;
+    match request.method.as_str() {
+        "tools/call" | "prompts/get" => params.get("name")?.as_str(),
+        "resources/read" => params.get("uri")?.as_str(),
+        _ => None,
+    }
+}
+
+fn valid_log_level(value: &str) -> bool {
+    matches!(
+        value,
+        "debug" | "info" | "notice" | "warning" | "error" | "critical" | "alert" | "emergency"
+    )
+}
+
+// Validation failures are already-complete HTTP responses that the handler
+// returns directly. Boxing them would only add allocation and call-site noise.
+#[allow(clippy::result_large_err)]
+fn validate_modern_request(
+    request: &JsonRpcRequest,
+    headers: &HeaderMap,
+) -> Result<ProtocolContext, axum::response::Response> {
+    let id = request.id.clone();
+    if request
+        .id
+        .as_ref()
+        .is_some_and(|id| !id.is_string() && !id.is_i64() && !id.is_u64())
+    {
+        return Err(json_rpc_http_response(
+            StatusCode::BAD_REQUEST,
+            id,
+            INVALID_REQUEST,
+            "JSON-RPC request id must be a string or integer",
+            None,
+        ));
+    }
+
+    let meta = request_meta(request).ok_or_else(|| {
+        json_rpc_http_response(
+            StatusCode::BAD_REQUEST,
+            id.clone(),
+            HEADER_MISMATCH,
+            "Missing modern MCP request metadata",
+            None,
+        )
+    })?;
+    let body_version = meta
+        .get(META_PROTOCOL_VERSION)
+        .and_then(JsonValue::as_str)
+        .ok_or_else(|| {
+            json_rpc_http_response(
+                StatusCode::BAD_REQUEST,
+                id.clone(),
+                HEADER_MISMATCH,
+                format!("Missing request metadata field '{}'", META_PROTOCOL_VERSION),
+                None,
+            )
+        })?;
+    let header_version = headers
+        .get("mcp-protocol-version")
+        .and_then(|value| value.to_str().ok())
+        .ok_or_else(|| {
+            json_rpc_http_response(
+                StatusCode::BAD_REQUEST,
+                id.clone(),
+                HEADER_MISMATCH,
+                "Missing or malformed MCP-Protocol-Version header",
+                None,
+            )
+        })?;
+    if header_version != body_version {
+        return Err(json_rpc_http_response(
+            StatusCode::BAD_REQUEST,
+            id,
+            HEADER_MISMATCH,
+            "MCP-Protocol-Version header does not match request metadata",
+            None,
+        ));
+    }
+    if body_version != MODERN_PROTOCOL_VERSION {
+        return Err(json_rpc_http_response(
+            StatusCode::BAD_REQUEST,
+            request.id.clone(),
+            UNSUPPORTED_PROTOCOL_VERSION,
+            "Unsupported protocol version",
+            Some(serde_json::json!({
+                "supported": SUPPORTED_PROTOCOL_VERSIONS,
+                "requested": body_version,
+            })),
+        ));
+    }
+
+    let header_method = headers
+        .get("mcp-method")
+        .and_then(|value| value.to_str().ok())
+        .ok_or_else(|| {
+            json_rpc_http_response(
+                StatusCode::BAD_REQUEST,
+                request.id.clone(),
+                HEADER_MISMATCH,
+                "Missing or malformed Mcp-Method header",
+                None,
+            )
+        })?;
+    if header_method != request.method {
+        return Err(json_rpc_http_response(
+            StatusCode::BAD_REQUEST,
+            request.id.clone(),
+            HEADER_MISMATCH,
+            "Mcp-Method header does not match request method",
+            None,
+        ));
+    }
+
+    if matches!(
+        request.method.as_str(),
+        "tools/call" | "prompts/get" | "resources/read"
+    ) {
+        let body_name = expected_mcp_name(request).ok_or_else(|| {
+            json_rpc_http_response(
+                StatusCode::BAD_REQUEST,
+                request.id.clone(),
+                INVALID_PARAMS,
+                "Named MCP request is missing params.name or params.uri",
+                None,
+            )
+        })?;
+        let header_name = headers
+            .get("mcp-name")
+            .ok_or_else(|| {
+                json_rpc_http_response(
+                    StatusCode::BAD_REQUEST,
+                    request.id.clone(),
+                    HEADER_MISMATCH,
+                    "Missing Mcp-Name header",
+                    None,
+                )
+            })
+            .and_then(|value| {
+                decode_routing_header(value).map_err(|error| {
+                    json_rpc_http_response(
+                        StatusCode::BAD_REQUEST,
+                        request.id.clone(),
+                        HEADER_MISMATCH,
+                        format!("Malformed Mcp-Name header: {}", error),
+                        None,
+                    )
+                })
+            })?;
+        if header_name != body_name {
+            return Err(json_rpc_http_response(
+                StatusCode::BAD_REQUEST,
+                request.id.clone(),
+                HEADER_MISMATCH,
+                "Mcp-Name header does not match request parameters",
+                None,
+            ));
+        }
+    }
+
+    if !meta
+        .get(META_CLIENT_CAPABILITIES)
+        .is_some_and(JsonValue::is_object)
+    {
+        return Err(json_rpc_http_response(
+            StatusCode::BAD_REQUEST,
+            request.id.clone(),
+            INVALID_PARAMS,
+            format!(
+                "Request metadata field '{}' must be an object",
+                META_CLIENT_CAPABILITIES
+            ),
+            None,
+        ));
+    }
+    if let Some(client_info) = meta.get(META_CLIENT_INFO)
+        && !client_info.is_object()
+    {
+        return Err(json_rpc_http_response(
+            StatusCode::BAD_REQUEST,
+            request.id.clone(),
+            INVALID_PARAMS,
+            format!(
+                "Request metadata field '{}' must be an object",
+                META_CLIENT_INFO
+            ),
+            None,
+        ));
+    }
+
+    let log_level = match meta.get(META_LOG_LEVEL) {
+        None => None,
+        Some(JsonValue::String(level)) if valid_log_level(level) => Some(level.clone()),
+        Some(_) => {
+            return Err(json_rpc_http_response(
+                StatusCode::BAD_REQUEST,
+                request.id.clone(),
+                INVALID_PARAMS,
+                format!("Request metadata field '{}' is invalid", META_LOG_LEVEL),
+                None,
+            ));
+        }
+    };
+
+    Ok(ProtocolContext {
+        era: ProtocolEra::Modern,
+        log_level,
+        client_capabilities: meta
+            .get(META_CLIENT_CAPABILITIES)
+            .cloned()
+            .unwrap_or_else(|| serde_json::json!({})),
+    })
+}
+
+fn normalize_origin(value: &str) -> Option<String> {
+    let parsed = url::Url::parse(value).ok()?;
+    if !matches!(parsed.scheme(), "http" | "https")
+        || parsed.host_str().is_none()
+        || !parsed.username().is_empty()
+        || parsed.password().is_some()
+        || parsed.query().is_some()
+        || parsed.fragment().is_some()
+        || parsed.path() != "/"
+    {
+        return None;
+    }
+    Some(parsed.origin().ascii_serialization())
+}
+
+fn request_origin(headers: &HeaderMap) -> Option<String> {
+    let host = headers
+        .get("host")?
+        .to_str()
+        .ok()?
+        .split(',')
+        .next()?
+        .trim();
+    let scheme = headers
+        .get("x-forwarded-proto")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.split(',').next())
+        .map(str::trim)
+        .filter(|value| matches!(*value, "http" | "https"))
+        .unwrap_or("http");
+    normalize_origin(&format!("{}://{}", scheme, host))
+}
+
+fn validate_mcp_origin(headers: &HeaderMap, conf: &Val) -> Result<(), String> {
+    let Some(origin_value) = headers.get("origin") else {
+        return Ok(());
+    };
+    let origin_value = origin_value
+        .to_str()
+        .map_err(|_| "Origin header is not valid ASCII".to_string())?;
+    let origin = normalize_origin(origin_value)
+        .ok_or_else(|| "Origin header is not a valid HTTP(S) origin".to_string())?;
+
+    if request_origin(headers).as_deref() == Some(origin.as_str()) {
+        return Ok(());
+    }
+
+    let allowed = conf.get_vec_str_or_default("mcp.allowed-origins", Vec::new());
+    if allowed
+        .iter()
+        .filter_map(|value| normalize_origin(value))
+        .any(|value| value == origin)
+    {
+        return Ok(());
+    }
+
+    Err("Origin is not allowed for this MCP endpoint".to_string())
+}
+
+#[derive(Clone, Copy, Debug)]
+enum McpHeaderPrimitive {
+    String,
+    Integer,
+    Boolean,
+}
+
+#[derive(Clone, Debug)]
+struct McpHeaderParameter {
+    path: Vec<String>,
+    header_suffix: String,
+    primitive: McpHeaderPrimitive,
+}
+
+fn contains_x_mcp_header(value: &JsonValue) -> bool {
+    match value {
+        JsonValue::Object(object) => {
+            object.contains_key("x-mcp-header") || object.values().any(contains_x_mcp_header)
+        }
+        JsonValue::Array(values) => values.iter().any(contains_x_mcp_header),
+        _ => false,
+    }
+}
+
+fn valid_http_token(value: &str) -> bool {
+    !value.is_empty()
+        && value.bytes().all(|byte| {
+            byte.is_ascii_alphanumeric()
+                || matches!(
+                    byte,
+                    b'!' | b'#'
+                        | b'$'
+                        | b'%'
+                        | b'&'
+                        | b'\''
+                        | b'*'
+                        | b'+'
+                        | b'-'
+                        | b'.'
+                        | b'^'
+                        | b'_'
+                        | b'`'
+                        | b'|'
+                        | b'~'
+                )
+        })
+}
+
+fn collect_mcp_header_parameters(
+    input_schema: &JsonValue,
+) -> Result<Vec<McpHeaderParameter>, String> {
+    fn visit_property(
+        schema: &JsonValue,
+        path: Vec<String>,
+        seen: &mut AHashSet<String>,
+        output: &mut Vec<McpHeaderParameter>,
+    ) -> Result<(), String> {
+        let object = schema
+            .as_object()
+            .ok_or_else(|| format!("schema at '{}' must be an object", path.join(".")))?;
+
+        if let Some(annotation) = object.get("x-mcp-header") {
+            let suffix = annotation
+                .as_str()
+                .ok_or_else(|| format!("x-mcp-header at '{}' must be a string", path.join(".")))?;
+            if !valid_http_token(suffix) {
+                return Err(format!(
+                    "x-mcp-header '{}' at '{}' is not a valid HTTP token",
+                    suffix,
+                    path.join(".")
+                ));
+            }
+            let normalized = suffix.to_ascii_lowercase();
+            if !seen.insert(normalized) {
+                return Err(format!(
+                    "x-mcp-header '{}' is not case-insensitively unique",
+                    suffix
+                ));
+            }
+            let primitive = match object.get("type").and_then(JsonValue::as_str) {
+                Some("string") => McpHeaderPrimitive::String,
+                Some("integer") => McpHeaderPrimitive::Integer,
+                Some("boolean") => McpHeaderPrimitive::Boolean,
+                _ => {
+                    return Err(format!(
+                        "x-mcp-header at '{}' requires type string, integer, or boolean",
+                        path.join(".")
+                    ));
+                }
+            };
+            output.push(McpHeaderParameter {
+                path: path.clone(),
+                header_suffix: suffix.to_string(),
+                primitive,
+            });
+        }
+
+        if let Some(properties) = object.get("properties") {
+            let properties = properties
+                .as_object()
+                .ok_or_else(|| format!("properties at '{}' must be an object", path.join(".")))?;
+            for (name, child) in properties {
+                let mut child_path = path.clone();
+                child_path.push(name.clone());
+                visit_property(child, child_path, seen, output)?;
+            }
+        }
+
+        for (key, value) in object {
+            if key != "x-mcp-header" && key != "properties" && contains_x_mcp_header(value) {
+                return Err(format!(
+                    "x-mcp-header at '{}' is not statically reachable through properties",
+                    path.join(".")
+                ));
+            }
+        }
+
+        Ok(())
+    }
+
+    let root = input_schema
+        .as_object()
+        .ok_or_else(|| "inputSchema must be a JSON Schema object".to_string())?;
+    if root.contains_key("x-mcp-header") {
+        return Err("x-mcp-header cannot be placed at the inputSchema root".to_string());
+    }
+    for (key, value) in root {
+        if key != "properties" && contains_x_mcp_header(value) {
+            return Err(
+                "x-mcp-header is only valid on properties reachable from the schema root"
+                    .to_string(),
+            );
+        }
+    }
+
+    let mut output = Vec::new();
+    let mut seen = AHashSet::new();
+    if let Some(properties) = root.get("properties") {
+        let properties = properties
+            .as_object()
+            .ok_or_else(|| "inputSchema.properties must be an object".to_string())?;
+        for (name, schema) in properties {
+            visit_property(schema, vec![name.clone()], &mut seen, &mut output)?;
+        }
+    }
+    Ok(output)
+}
+
+fn argument_at_path<'a>(arguments: &'a JsonValue, path: &[String]) -> Option<&'a JsonValue> {
+    let mut current = arguments;
+    for part in path {
+        current = current.as_object()?.get(part)?;
+    }
+    Some(current)
+}
+
+fn validate_mcp_parameter_headers(
+    headers: &HeaderMap,
+    input_schema: &JsonValue,
+    arguments: Option<&JsonValue>,
+) -> Result<(), String> {
+    const MAX_SAFE_INTEGER: i64 = 9_007_199_254_740_991;
+
+    let definitions = collect_mcp_header_parameters(input_schema)?;
+    let empty_arguments = JsonValue::Object(serde_json::Map::new());
+    let arguments = arguments.unwrap_or(&empty_arguments);
+    if !arguments.is_object() && !arguments.is_null() {
+        return Err("tools/call arguments must be an object".to_string());
+    }
+
+    for definition in definitions {
+        let header_name = format!("mcp-param-{}", definition.header_suffix);
+        let argument =
+            argument_at_path(arguments, &definition.path).filter(|value| !value.is_null());
+        let header = headers.get(&header_name);
+
+        match (argument, header) {
+            (None, None) => continue,
+            (None, Some(_)) => {
+                return Err(format!(
+                    "{} is present but argument '{}' is absent or null",
+                    header_name,
+                    definition.path.join(".")
+                ));
+            }
+            (Some(_), None) => {
+                return Err(format!(
+                    "{} is required for argument '{}'",
+                    header_name,
+                    definition.path.join(".")
+                ));
+            }
+            (Some(argument), Some(header)) => {
+                let decoded = decode_routing_header(header)
+                    .map_err(|error| format!("{} is malformed: {}", header_name, error))?;
+                let matches = match definition.primitive {
+                    McpHeaderPrimitive::String => {
+                        argument.as_str().is_some_and(|value| value == decoded)
+                    }
+                    McpHeaderPrimitive::Boolean => argument
+                        .as_bool()
+                        .is_some_and(|value| decoded == if value { "true" } else { "false" }),
+                    McpHeaderPrimitive::Integer => {
+                        let argument_value = argument
+                            .as_i64()
+                            .filter(|value| value.unsigned_abs() <= MAX_SAFE_INTEGER as u64)
+                            .or_else(|| {
+                                argument.as_u64().and_then(|value| {
+                                    (value <= MAX_SAFE_INTEGER as u64).then_some(value as i64)
+                                })
+                            });
+                        let header_value = decoded.parse::<i64>().ok();
+                        argument_value.is_some() && argument_value == header_value
+                    }
+                };
+                if !matches {
+                    return Err(format!(
+                        "{} does not match argument '{}'",
+                        header_name,
+                        definition.path.join(".")
+                    ));
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn legacy_output_schema(schema: JsonValue) -> JsonValue {
+    if schema
+        .as_object()
+        .and_then(|object| object.get("type"))
+        .and_then(JsonValue::as_str)
+        == Some("object")
+    {
+        schema
+    } else {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "result": schema
+            },
+            "required": ["result"],
+            "additionalProperties": false
+        })
+    }
+}
+
+fn structured_content_for_era(value: JsonValue, protocol: &ProtocolContext) -> JsonValue {
+    if protocol.is_modern() || value.is_object() {
+        value
+    } else {
+        serde_json::json!({ "result": value })
+    }
+}
+
+fn insert_modern_mcp_request_context(
+    request: &mut Val,
+    protocol: &ProtocolContext,
+    call_params: &ToolsCallParams,
+) {
+    if !protocol.is_modern() {
+        return;
+    }
+    let Val::Map(request_map) = request else {
+        return;
+    };
+    let mcp_context = serde_json::json!({
+        "protocol-version": MODERN_PROTOCOL_VERSION,
+        "client-capabilities": protocol.client_capabilities,
+        "input-responses": call_params.input_responses,
+        "request-state": call_params.request_state,
+    });
+    let mcp_val: Val = serde_json::from_value(mcp_context).unwrap_or(Val::Null);
+    request_map.insert(Val::from("mcp"), mcp_val);
+}
+
+fn build_json_schema(schema: &JsonValue, field: &str) -> Result<jsonschema::Validator, String> {
+    if !schema.is_object() {
+        return Err(format!("{} must be a JSON Schema object", field));
+    }
+    jsonschema::options()
+        .build(schema)
+        .map_err(|error| format!("{} is not a valid JSON Schema: {}", field, error))
+}
+
+fn validate_json_schema_instance(
+    schema: &JsonValue,
+    instance: &JsonValue,
+    field: &str,
+) -> Result<(), String> {
+    let validator = build_json_schema(schema, field)?;
+    validator
+        .validate(instance)
+        .map_err(|error| format!("{} validation failed: {}", field, error))
+}
+
+fn input_required_result(
+    result: &JsonValue,
+    protocol: &ProtocolContext,
+) -> Result<Option<JsonValue>, String> {
+    if !protocol.is_modern()
+        || result.get("resultType").and_then(JsonValue::as_str) != Some("input_required")
+    {
+        return Ok(None);
+    }
+
+    let object = result
+        .as_object()
+        .ok_or_else(|| "InputRequiredResult must be an object".to_string())?;
+    let input_requests = object.get("inputRequests");
+    let request_state = object.get("requestState");
+    if input_requests.is_none() && request_state.is_none() {
+        return Err("InputRequiredResult must include inputRequests or requestState".to_string());
+    }
+    if request_state.is_some_and(|value| !value.is_string()) {
+        return Err("InputRequiredResult.requestState must be a string".to_string());
+    }
+
+    if let Some(input_requests) = input_requests {
+        let requests = input_requests
+            .as_object()
+            .ok_or_else(|| "InputRequiredResult.inputRequests must be an object".to_string())?;
+        for (key, request) in requests {
+            let request = request.as_object().ok_or_else(|| {
+                format!(
+                    "InputRequiredResult.inputRequests.{} must be an object",
+                    key
+                )
+            })?;
+            let method = request
+                .get("method")
+                .and_then(JsonValue::as_str)
+                .ok_or_else(|| {
+                    format!(
+                        "InputRequiredResult.inputRequests.{}.method must be a string",
+                        key
+                    )
+                })?;
+            if let Some(params) = request.get("params")
+                && !params.is_object()
+            {
+                return Err(format!(
+                    "InputRequiredResult.inputRequests.{}.params must be an object",
+                    key
+                ));
+            }
+            let capability = match method {
+                "elicitation/create" => {
+                    let params = request.get("params").and_then(JsonValue::as_object).ok_or_else(
+                        || {
+                            format!(
+                                "InputRequiredResult.inputRequests.{}.params is required for elicitation/create",
+                                key
+                            )
+                        },
+                    )?;
+                    if !params.get("message").is_some_and(JsonValue::is_string) {
+                        return Err(format!(
+                            "InputRequiredResult.inputRequests.{}.params.message must be a string",
+                            key
+                        ));
+                    }
+                    if params
+                        .get("mode")
+                        .and_then(JsonValue::as_str)
+                        .is_some_and(|mode| !matches!(mode, "form" | "url"))
+                    {
+                        return Err(format!(
+                            "InputRequiredResult.inputRequests.{}.params.mode must be 'form' or 'url'",
+                            key
+                        ));
+                    }
+                    let elicitation = protocol
+                        .client_capabilities
+                        .get("elicitation")
+                        .and_then(JsonValue::as_object)
+                        .ok_or_else(|| {
+                            format!(
+                                "Client did not advertise the 'elicitation' capability required by input request '{}'",
+                                key
+                            )
+                        })?;
+                    if params.get("mode").and_then(JsonValue::as_str) == Some("url")
+                        && !elicitation.get("url").is_some_and(JsonValue::is_object)
+                    {
+                        return Err(format!(
+                            "Client did not advertise the 'elicitation.url' capability required by input request '{}'",
+                            key
+                        ));
+                    }
+                    "elicitation"
+                }
+                "sampling/createMessage" => {
+                    let params = request.get("params").and_then(JsonValue::as_object).ok_or_else(
+                        || {
+                            format!(
+                                "InputRequiredResult.inputRequests.{}.params is required for sampling/createMessage",
+                                key
+                            )
+                        },
+                    )?;
+                    if !params.get("messages").is_some_and(JsonValue::is_array)
+                        || !params.get("maxTokens").is_some_and(JsonValue::is_number)
+                    {
+                        return Err(format!(
+                            "InputRequiredResult.inputRequests.{}.params requires messages and maxTokens",
+                            key
+                        ));
+                    }
+                    let sampling = protocol
+                        .client_capabilities
+                        .get("sampling")
+                        .and_then(JsonValue::as_object)
+                        .ok_or_else(|| {
+                            format!(
+                                "Client did not advertise the 'sampling' capability required by input request '{}'",
+                                key
+                            )
+                        })?;
+                    if params
+                        .get("includeContext")
+                        .and_then(JsonValue::as_str)
+                        .is_some_and(|value| value != "none")
+                        && !sampling.get("context").is_some_and(JsonValue::is_object)
+                    {
+                        return Err(format!(
+                            "Client did not advertise the 'sampling.context' capability required by input request '{}'",
+                            key
+                        ));
+                    }
+                    if (params.contains_key("tools") || params.contains_key("toolChoice"))
+                        && !sampling.get("tools").is_some_and(JsonValue::is_object)
+                    {
+                        return Err(format!(
+                            "Client did not advertise the 'sampling.tools' capability required by input request '{}'",
+                            key
+                        ));
+                    }
+                    "sampling"
+                }
+                "roots/list" => "roots",
+                _ => {
+                    return Err(format!(
+                        "InputRequiredResult.inputRequests.{} has unsupported method '{}'",
+                        key, method
+                    ));
+                }
+            };
+            if !matches!(method, "elicitation/create" | "sampling/createMessage")
+                && !protocol
+                    .client_capabilities
+                    .get(capability)
+                    .is_some_and(JsonValue::is_object)
+            {
+                return Err(format!(
+                    "Client did not advertise the '{}' capability required by input request '{}'",
+                    capability, key
+                ));
+            }
+        }
+    }
+
+    let mut output = object.clone();
+    let mut meta = output
+        .remove("_meta")
+        .and_then(|value| value.as_object().cloned())
+        .unwrap_or_default();
+    if let Some(server_info) = modern_result_meta().get(META_SERVER_INFO).cloned() {
+        meta.insert(META_SERVER_INFO.to_string(), server_info);
+    }
+    output.insert("_meta".to_string(), JsonValue::Object(meta));
+    Ok(Some(JsonValue::Object(output)))
 }
 
 // ============================================================================
@@ -549,10 +1482,9 @@ async fn resolve_mcp_context_from_domain(
 
 /// Main MCP endpoint handler
 ///
-/// Handles JSON-RPC requests for MCP protocol (spec 2025-03-26):
-/// - initialize: Returns server capabilities with version negotiation
-/// - ping: Health check (returns empty result)
-/// - notifications/*: Acknowledged with HTTP 202 (no body)
+/// Handles modern 2026-07-28 and legacy MCP JSON-RPC requests:
+/// - server/discover: Stateless modern version/capability discovery
+/// - initialize/ping/notifications/initialized: Legacy session lifecycle
 /// - tools/list: Returns available tools for this service
 /// - tools/call: Executes a tool, streaming progress via SSE
 ///
@@ -759,6 +1691,25 @@ async fn mcp_handler_inner(
     request: JsonRpcRequest,
     source: McpRouteSource,
 ) -> Result<axum::response::Response, (StatusCode, Json<ApiErrorResponse>)> {
+    if let Err(message) = validate_mcp_origin(headers, conf) {
+        return Ok(json_rpc_http_response(
+            StatusCode::FORBIDDEN,
+            request.id,
+            INVALID_REQUEST,
+            message,
+            None,
+        ));
+    }
+
+    let protocol = if request_claims_modern(&request, headers) {
+        match validate_modern_request(&request, headers) {
+            Ok(protocol) => protocol,
+            Err(response) => return Ok(response),
+        }
+    } else {
+        ProtocolContext::legacy()
+    };
+
     let mcp_enabled = conf.get_bool_or_default("mcp.enabled", true);
     if !mcp_enabled {
         return Ok(Json(JsonRpcResponse::error(
@@ -789,7 +1740,7 @@ async fn mcp_handler_inner(
     let mcp_timeout = conf.get_int_or_default("mcp.timeout", 60) as u64;
 
     match request.method.as_str() {
-        "initialize" => {
+        "initialize" if !protocol.is_modern() => {
             let client_version = request
                 .params
                 .as_ref()
@@ -799,8 +1750,23 @@ async fn mcp_handler_inner(
                 .await
                 .map(|r| r.into_response())
         }
-        "ping" => {
+        "ping" if !protocol.is_modern() => {
             Ok(Json(JsonRpcResponse::success(request.id, serde_json::json!({}))).into_response())
+        }
+        "server/discover" if protocol.is_modern() => {
+            let auth = try_authenticate(db, headers).await?;
+            let ctx = source.resolve(db, auth).await?;
+            if let Err(exceeded) = rate_limit::check_org_rate_limit(
+                db,
+                &ctx.org.org_id,
+                PublicRateLimitMode::from_conf(conf),
+                "mcp-server-discover",
+            )
+            .await
+            {
+                return Ok(rate_limit::rate_limit_response(exceeded));
+            }
+            Ok(handle_discover(request.id).into_response())
         }
         "tools/list" => {
             let auth = try_authenticate(db, headers).await?;
@@ -815,7 +1781,7 @@ async fn mcp_handler_inner(
             {
                 return Ok(rate_limit::rate_limit_response(exceeded));
             }
-            handle_tools_list(db, &ctx, request.id)
+            handle_tools_list(db, &ctx, request.id, &protocol)
                 .await
                 .map(|r| r.into_response())
         }
@@ -862,16 +1828,24 @@ async fn mcp_handler_inner(
                 access_id,
                 client_ip.as_ref(),
                 headers,
+                protocol,
             )
             .await
         }
-        _ => Ok(Json(JsonRpcResponse::error(
-            request.id,
-            METHOD_NOT_FOUND,
-            format!("Method not found: {}", request.method),
-            None,
-        ))
-        .into_response()),
+        _ => {
+            let status = if protocol.is_modern() {
+                StatusCode::NOT_FOUND
+            } else {
+                StatusCode::OK
+            };
+            Ok(json_rpc_http_response(
+                status,
+                request.id,
+                METHOD_NOT_FOUND,
+                format!("Method not found: {}", request.method),
+                None,
+            ))
+        }
     }
 }
 
@@ -885,23 +1859,15 @@ async fn handle_initialize(
 ) -> Result<Json<JsonRpcResponse>, (StatusCode, Json<ApiErrorResponse>)> {
     // Version negotiation: echo the client's version if we support it,
     // otherwise respond with our latest supported version.
-    let protocol_version = match client_protocol_version {
-        Some(v @ "2025-03-26") | Some(v @ "2024-11-05") => v.to_string(),
-        _ => "2025-03-26".to_string(),
-    };
+    let protocol_version = client_protocol_version
+        .filter(|version| is_legacy_protocol_version(version))
+        .unwrap_or(LEGACY_PROTOCOL_VERSIONS[0])
+        .to_string();
 
     let result = InitializeResult {
         protocol_version,
-        capabilities: ServerCapabilities {
-            tools: Some(ToolsCapability {
-                list_changed: false,
-            }),
-            logging: Some(LoggingCapability {}),
-        },
-        server_info: ServerInfo {
-            name: "hot-mcp".to_string(),
-            version: env!("CARGO_PKG_VERSION").to_string(),
-        },
+        capabilities: server_capabilities(),
+        server_info: server_info(),
         instructions: None,
     };
 
@@ -911,11 +1877,28 @@ async fn handle_initialize(
     )))
 }
 
+fn handle_discover(id: Option<JsonValue>) -> Json<JsonRpcResponse> {
+    let result = DiscoverResult {
+        supported_versions: SUPPORTED_PROTOCOL_VERSIONS.to_vec(),
+        capabilities: server_capabilities(),
+        result_type: "complete",
+        ttl_ms: 0,
+        cache_scope: "private",
+        meta: modern_result_meta(),
+        instructions: None,
+    };
+    Json(JsonRpcResponse::success(
+        id,
+        serde_json::to_value(result).unwrap_or(JsonValue::Null),
+    ))
+}
+
 /// Handle tools/list request
 async fn handle_tools_list(
     db: &hot::db::DatabasePool,
     ctx: &McpContext,
     id: Option<JsonValue>,
+    protocol: &ProtocolContext,
 ) -> Result<Json<JsonRpcResponse>, (StatusCode, Json<ApiErrorResponse>)> {
     // Get all MCP tools for this environment and service
     let tools = McpTool::get_mcp_tools_by_env_and_service(db, &ctx.env.env_id, &ctx.service)
@@ -931,16 +1914,68 @@ async fn handle_tools_list(
     // Convert to MCP tool definitions
     let tool_defs: Vec<McpToolDef> = tools
         .into_iter()
-        .map(|t| McpToolDef {
-            name: t.name,
-            title: t.title,
-            description: t.description,
-            input_schema: t.input_schema,
-            annotations: t.annotations,
+        .filter_map(|t| {
+            let input_schema = t.input_schema.unwrap_or_else(|| {
+                serde_json::json!({
+                    "type": "object",
+                    "additionalProperties": false
+                })
+            });
+            if protocol.is_modern() {
+                if let Err(error) = build_json_schema(&input_schema, "inputSchema") {
+                    tracing::warn!(
+                        tool = %t.name,
+                        "Excluding MCP tool with invalid input schema: {}",
+                        error
+                    );
+                    return None;
+                }
+                if let Err(error) = collect_mcp_header_parameters(&input_schema) {
+                    tracing::warn!(
+                        tool = %t.name,
+                        "Excluding MCP tool with invalid x-mcp-header definition: {}",
+                        error
+                    );
+                    return None;
+                }
+                if let Some(output_schema) = t.output_schema.as_ref()
+                    && let Err(error) = build_json_schema(output_schema, "outputSchema")
+                {
+                    tracing::warn!(
+                        tool = %t.name,
+                        "Excluding MCP tool with invalid output schema: {}",
+                        error
+                    );
+                    return None;
+                }
+            }
+            let output_schema = t.output_schema.map(|schema| {
+                if protocol.is_modern() {
+                    schema
+                } else {
+                    legacy_output_schema(schema)
+                }
+            });
+            Some(McpToolDef {
+                name: t.name,
+                title: t.title,
+                description: t.description,
+                input_schema,
+                output_schema,
+                icons: t.icons,
+                annotations: t.annotations,
+                meta: t.meta,
+            })
         })
         .collect();
 
-    let result = ToolsListResult { tools: tool_defs };
+    let result = ToolsListResult {
+        tools: tool_defs,
+        result_type: protocol.is_modern().then_some("complete"),
+        ttl_ms: protocol.is_modern().then_some(0),
+        cache_scope: protocol.is_modern().then_some("private"),
+        meta: protocol.is_modern().then(modern_result_meta),
+    };
 
     Ok(Json(JsonRpcResponse::success(
         id,
@@ -948,7 +1983,7 @@ async fn handle_tools_list(
     )))
 }
 
-/// Handle tools/call with SSE streaming response (spec 2025-03-26)
+/// Handle tools/call with an SSE streaming response for both protocol eras.
 ///
 /// Per the MCP Streamable HTTP spec, the server MAY respond to JSON-RPC
 /// requests with `Content-Type: text/event-stream`, sending notifications
@@ -971,6 +2006,7 @@ async fn handle_tools_call_streaming(
     access_id: Option<Uuid>,
     client_ip: Option<&ClientIp>,
     headers: &HeaderMap,
+    protocol: ProtocolContext,
 ) -> Result<axum::response::Response, (StatusCode, Json<ApiErrorResponse>)> {
     // Parse params
     let call_params: ToolsCallParams = match params {
@@ -994,6 +2030,20 @@ async fn handle_tools_call_streaming(
             .into_response());
         }
     };
+    if protocol.is_modern()
+        && call_params
+            .input_responses
+            .as_ref()
+            .is_some_and(|value| !value.is_object())
+    {
+        return Ok(json_rpc_http_response(
+            StatusCode::BAD_REQUEST,
+            id,
+            INVALID_PARAMS,
+            "tools/call inputResponses must be an object".to_string(),
+            None,
+        ));
+    }
 
     // Look up the tool to verify it exists and get the function name
     let tool = match McpTool::get_mcp_tool_by_env_service_and_name(
@@ -1025,6 +2075,54 @@ async fn handle_tools_call_streaming(
             .into_response());
         }
     };
+
+    if protocol.is_modern()
+        && let Err(message) = validate_mcp_parameter_headers(
+            headers,
+            tool.input_schema.as_ref().unwrap_or(&serde_json::json!({
+                "type": "object",
+                "additionalProperties": false
+            })),
+            call_params.arguments.as_ref(),
+        )
+    {
+        return Ok(json_rpc_http_response(
+            StatusCode::BAD_REQUEST,
+            id,
+            HEADER_MISMATCH,
+            format!("MCP tool parameter header mismatch: {}", message),
+            None,
+        ));
+    }
+
+    if protocol.is_modern() {
+        let empty_arguments = serde_json::json!({});
+        let arguments = call_params.arguments.as_ref().unwrap_or(&empty_arguments);
+        let default_input_schema = serde_json::json!({
+            "type": "object",
+            "additionalProperties": false
+        });
+        let input_schema = tool.input_schema.as_ref().unwrap_or(&default_input_schema);
+        if let Err(message) =
+            validate_json_schema_instance(input_schema, arguments, "tool arguments")
+        {
+            let call_result = ToolsCallResult {
+                result_type: Some("complete"),
+                content: vec![ToolResultContent::Text {
+                    text: message,
+                    annotations: None,
+                }],
+                structured_content: None,
+                is_error: Some(true),
+                meta: Some(modern_result_meta()),
+            };
+            return Ok(Json(JsonRpcResponse::success(
+                id,
+                serde_json::to_value(call_result).unwrap_or(JsonValue::Null),
+            ))
+            .into_response());
+        }
+    }
 
     // Per-tool auth check: only exact `auth: "none"` is public. Missing,
     // malformed, or unknown values require auth.
@@ -1121,9 +2219,9 @@ async fn handle_tools_call_streaming(
 
     // Convert MCP named arguments (JSON object) to positional Vec for Hot's call() function.
     // MCP sends: {"name": "Cursor"} but Hot expects: ["Cursor"] (positional args).
-    let args_val: Val = match call_params.arguments {
+    let args_val: Val = match call_params.arguments.as_ref() {
         Some(args_json) => {
-            match convert_named_args_to_positional(&args_json, tool.input_schema.as_ref()) {
+            match convert_named_args_to_positional(args_json, tool.input_schema.as_ref()) {
                 Ok(val) => val,
                 Err(msg) => {
                     return Err((
@@ -1140,7 +2238,7 @@ async fn handle_tools_call_streaming(
     // Includes HTTP context (method, url, headers, query, ip) and auth identity.
     let url_path = format!("/mcp/{}/{}/{}", ctx.org.slug, ctx.env.name, ctx.service);
     let empty_query = std::collections::HashMap::new();
-    let caller_val = build_request_val(
+    let mut caller_val = build_request_val(
         "POST",
         &url_path,
         None,
@@ -1151,6 +2249,7 @@ async fn handle_tools_call_streaming(
         ctx.auth.as_ref(),
         &ctx.org.org_id,
     );
+    insert_modern_mcp_request_context(&mut caller_val, &protocol, &call_params);
 
     // Pre-compute secret value hashes for targeted masking.
     // Only sensitive fields (auth subtree, known sensitive headers, user-declared
@@ -1284,6 +2383,14 @@ async fn handle_tools_call_streaming(
     //    close the SSE stream."
     // =====================================================================
     let request_id = id;
+    let emit_info_logs = !protocol.is_modern() || protocol.should_emit_info_logs();
+    let output_schema = tool.output_schema.clone().map(|schema| {
+        if protocol.is_modern() {
+            schema
+        } else {
+            legacy_output_schema(schema)
+        }
+    });
 
     let sse_stream = async_stream::stream! {
         use hot::stream::{StreamEvent, StreamNext};
@@ -1309,43 +2416,46 @@ async fn handle_tools_call_streaming(
                 event = async { subscriber.next().await } => {
                     match event {
                         StreamNext::Event(StreamEvent::RunStart { run_id: started_run_id, .. }) => {
-                            // Send MCP log notification (spec §Logging)
-                            let notification = serde_json::json!({
-                                "jsonrpc": "2.0",
-                                "method": "notifications/message",
-                                "params": {
-                                    "level": "info",
-                                    "logger": "hot-mcp",
-                                    "data": {
-                                        "message": format!("Executing tool '{}'", tool_name),
-                                        "runId": started_run_id.to_string()
+                            if emit_info_logs {
+                                // Modern logging is explicitly requested per call.
+                                let notification = serde_json::json!({
+                                    "jsonrpc": "2.0",
+                                    "method": "notifications/message",
+                                    "params": {
+                                        "level": "info",
+                                        "logger": "hot-mcp",
+                                        "data": {
+                                            "message": format!("Executing tool '{}'", tool_name),
+                                            "runId": started_run_id.to_string()
+                                        }
                                     }
+                                });
+                                if let Ok(data) = serde_json::to_string(&notification) {
+                                    yield Ok::<SseEvent, Infallible>(
+                                        SseEvent::default().event("message").data(data)
+                                    );
                                 }
-                            });
-                            if let Ok(data) = serde_json::to_string(&notification) {
-                                yield Ok::<SseEvent, Infallible>(
-                                    SseEvent::default().event("message").data(data)
-                                );
                             }
                         }
                         StreamNext::Event(StreamEvent::StreamData { data_type, payload, .. }) => {
-                            // Forward stream data as MCP log notification
-                            let notification = serde_json::json!({
-                                "jsonrpc": "2.0",
-                                "method": "notifications/message",
-                                "params": {
-                                    "level": "info",
-                                    "logger": "hot-mcp",
-                                    "data": {
-                                        "type": data_type,
-                                        "payload": payload
+                            if emit_info_logs {
+                                let notification = serde_json::json!({
+                                    "jsonrpc": "2.0",
+                                    "method": "notifications/message",
+                                    "params": {
+                                        "level": "info",
+                                        "logger": "hot-mcp",
+                                        "data": {
+                                            "type": data_type,
+                                            "payload": payload
+                                        }
                                     }
+                                });
+                                if let Ok(data) = serde_json::to_string(&notification) {
+                                    yield Ok::<SseEvent, Infallible>(
+                                        SseEvent::default().event("message").data(data)
+                                    );
                                 }
-                            });
-                            if let Ok(data) = serde_json::to_string(&notification) {
-                                yield Ok::<SseEvent, Infallible>(
-                                    SseEvent::default().event("message").data(data)
-                                );
                             }
                         }
                         StreamNext::Event(StreamEvent::RunStop { result, .. }) => {
@@ -1381,6 +2491,63 @@ async fn handle_tools_call_streaming(
         // avoiding a DB round-trip and the associated race condition.
         let response = match outcome {
             Some(Outcome::Stopped { result }) => {
+                if let Some(ref result) = result {
+                    match input_required_result(result, &protocol) {
+                        Ok(Some(input_required)) => {
+                            let response = JsonRpcResponse::success(request_id, input_required);
+                            if let Ok(data) = serde_json::to_string(&response) {
+                                yield Ok::<SseEvent, Infallible>(
+                                    SseEvent::default().event("message").data(data)
+                                );
+                            }
+                            return;
+                        }
+                        Ok(None) => {}
+                        Err(message) => {
+                            let code = if message.starts_with("Client did not advertise") {
+                                UNSUPPORTED_CLIENT_CAPABILITY
+                            } else {
+                                INTERNAL_ERROR
+                            };
+                            let response = JsonRpcResponse::error(
+                                request_id,
+                                code,
+                                message,
+                                None,
+                            );
+                            if let Ok(data) = serde_json::to_string(&response) {
+                                yield Ok::<SseEvent, Infallible>(
+                                    SseEvent::default().event("message").data(data)
+                                );
+                            }
+                            return;
+                        }
+                    }
+                }
+                let structured_content = structured_content_for_era(
+                    result.clone().unwrap_or(JsonValue::Null),
+                    &protocol,
+                );
+                if let Some(ref output_schema) = output_schema
+                    && let Err(message) = validate_json_schema_instance(
+                        output_schema,
+                        &structured_content,
+                        "tool structuredContent",
+                    )
+                {
+                    let response = JsonRpcResponse::error(
+                        request_id,
+                        INTERNAL_ERROR,
+                        message,
+                        None,
+                    );
+                    if let Ok(data) = serde_json::to_string(&response) {
+                        yield Ok::<SseEvent, Infallible>(
+                            SseEvent::default().event("message").data(data)
+                        );
+                    }
+                    return;
+                }
                 let content = match result {
                     Some(ref r) => extract_content_from_result(r),
                     None => vec![ToolResultContent::Text {
@@ -1389,9 +2556,11 @@ async fn handle_tools_call_streaming(
                     }],
                 };
                 let call_result = ToolsCallResult {
+                    result_type: protocol.is_modern().then_some("complete"),
                     content,
+                    structured_content: Some(structured_content),
                     is_error: None,
-                    meta: None,
+                    meta: protocol.is_modern().then(modern_result_meta),
                 };
                 JsonRpcResponse::success(
                     request_id,
@@ -1401,12 +2570,14 @@ async fn handle_tools_call_streaming(
             Some(Outcome::Failed { error }) => {
                 let error_text = error.unwrap_or_else(|| "Unknown error".to_string());
                 let call_result = ToolsCallResult {
+                    result_type: protocol.is_modern().then_some("complete"),
                     content: vec![ToolResultContent::Text {
                         text: error_text,
                         annotations: None,
                     }],
+                    structured_content: None,
                     is_error: Some(true),
-                    meta: None,
+                    meta: protocol.is_modern().then(modern_result_meta),
                 };
                 JsonRpcResponse::success(
                     request_id,
@@ -1416,12 +2587,14 @@ async fn handle_tools_call_streaming(
             Some(Outcome::Cancelled { reason }) => {
                 let reason_text = reason.unwrap_or_else(|| "Execution cancelled".to_string());
                 let call_result = ToolsCallResult {
+                    result_type: protocol.is_modern().then_some("complete"),
                     content: vec![ToolResultContent::Text {
                         text: reason_text,
                         annotations: None,
                     }],
+                    structured_content: None,
                     is_error: Some(true),
-                    meta: None,
+                    meta: protocol.is_modern().then(modern_result_meta),
                 };
                 JsonRpcResponse::success(
                     request_id,
@@ -1464,9 +2637,16 @@ async fn handle_tools_call_streaming(
     };
 
     // KeepAlive sends SSE comments to prevent ALB/proxy idle timeout
-    Ok(Sse::new(sse_stream)
+    let mut response = Sse::new(sse_stream)
         .keep_alive(KeepAlive::default())
-        .into_response())
+        .into_response();
+    response
+        .headers_mut()
+        .insert("x-accel-buffering", HeaderValue::from_static("no"));
+    response
+        .headers_mut()
+        .insert("cache-control", HeaderValue::from_static("no-cache"));
+    Ok(response)
 }
 
 // ============================================================================
@@ -1661,6 +2841,13 @@ async fn mcp_sse_handler_core(
     Sse<impl futures::stream::Stream<Item = Result<SseEvent, Infallible>>>,
     (StatusCode, Json<ApiErrorResponse>),
 > {
+    if let Err(message) = validate_mcp_origin(&headers, &conf) {
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(ApiErrorResponse::new("forbidden", message)),
+        ));
+    }
+
     let mcp_enabled = conf.get_bool_or_default("mcp.enabled", true);
     if !mcp_enabled {
         return Err((
@@ -2285,8 +3472,384 @@ mod tests {
         assert_eq!(payloads, vec!["hello".to_string()]);
     }
 
+    fn modern_request(method: &str, params: JsonValue) -> JsonRpcRequest {
+        let mut params = params.as_object().cloned().unwrap_or_default();
+        params.insert(
+            "_meta".to_string(),
+            json!({
+                (META_PROTOCOL_VERSION): MODERN_PROTOCOL_VERSION,
+                (META_CLIENT_INFO): {"name": "hot-test", "version": "1.0.0"},
+                (META_CLIENT_CAPABILITIES): {}
+            }),
+        );
+        JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            id: Some(json!(1)),
+            method: method.to_string(),
+            params: Some(JsonValue::Object(params)),
+        }
+    }
+
+    fn modern_headers(method: &str, name: Option<&str>) -> HeaderMap {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "mcp-protocol-version",
+            HeaderValue::from_static(MODERN_PROTOCOL_VERSION),
+        );
+        headers.insert("mcp-method", HeaderValue::from_str(method).unwrap());
+        if let Some(name) = name {
+            headers.insert("mcp-name", HeaderValue::from_str(name).unwrap());
+        }
+        headers
+    }
+
+    #[test]
+    fn test_protocol_era_detection_keeps_legacy_version_headers_legacy() {
+        let request = JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            id: Some(json!(1)),
+            method: "tools/list".to_string(),
+            params: None,
+        };
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "mcp-protocol-version",
+            HeaderValue::from_static("2025-11-25"),
+        );
+        assert!(!request_claims_modern(&request, &headers));
+
+        headers.insert("mcp-method", HeaderValue::from_static("tools/list"));
+        assert!(request_claims_modern(&request, &headers));
+    }
+
+    #[test]
+    fn test_modern_request_validation_accepts_required_metadata_and_headers() {
+        let request = modern_request("tools/list", json!({}));
+        let protocol =
+            validate_modern_request(&request, &modern_headers("tools/list", None)).unwrap();
+        assert_eq!(protocol.era, ProtocolEra::Modern);
+        assert!(!protocol.should_emit_info_logs());
+        assert_eq!(protocol.client_capabilities, json!({}));
+    }
+
+    #[test]
+    fn test_json_schema_validation_supports_modern_non_object_outputs() {
+        let schema = json!({
+            "$schema": "https://json-schema.org/draft/2020-12/schema",
+            "type": "array",
+            "items": {"type": "integer"}
+        });
+        assert!(build_json_schema(&schema, "outputSchema").is_ok());
+        assert!(validate_json_schema_instance(&schema, &json!([1, 2]), "result").is_ok());
+        assert!(validate_json_schema_instance(&schema, &json!([1, "two"]), "result").is_err());
+        assert!(build_json_schema(&json!({"type": "not-a-type"}), "inputSchema").is_err());
+        assert!(build_json_schema(&json!(null), "inputSchema").is_err());
+    }
+
+    #[test]
+    fn test_input_required_result_validates_capabilities_and_preserves_meta() {
+        let protocol = ProtocolContext {
+            era: ProtocolEra::Modern,
+            log_level: None,
+            client_capabilities: json!({"elicitation": {}}),
+        };
+        let result = json!({
+            "resultType": "input_required",
+            "inputRequests": {
+                "login": {
+                    "method": "elicitation/create",
+                    "params": {
+                        "mode": "form",
+                        "message": "Log in",
+                        "requestedSchema": {"type": "object"}
+                    }
+                }
+            },
+            "requestState": "opaque",
+            "_meta": {"vendor.example/trace": "trace-1"}
+        });
+
+        let validated = input_required_result(&result, &protocol).unwrap().unwrap();
+        assert_eq!(validated["requestState"], "opaque");
+        assert_eq!(validated["_meta"]["vendor.example/trace"], "trace-1");
+        assert_eq!(validated["_meta"][META_SERVER_INFO]["name"], "hot-mcp");
+    }
+
+    #[test]
+    fn test_input_required_result_rejects_missing_fields_and_capabilities() {
+        let protocol = ProtocolContext {
+            era: ProtocolEra::Modern,
+            log_level: None,
+            client_capabilities: json!({}),
+        };
+        assert!(
+            input_required_result(&json!({"resultType": "input_required"}), &protocol).is_err()
+        );
+        let error = input_required_result(
+            &json!({
+                "resultType": "input_required",
+                "inputRequests": {
+                    "sample": {
+                        "method": "sampling/createMessage",
+                        "params": {
+                            "messages": [],
+                            "maxTokens": 100
+                        }
+                    }
+                }
+            }),
+            &protocol,
+        )
+        .unwrap_err();
+        assert!(error.contains("sampling"));
+    }
+
+    #[test]
+    fn test_input_required_result_honors_capability_subfeatures() {
+        let form_only = ProtocolContext {
+            era: ProtocolEra::Modern,
+            log_level: None,
+            client_capabilities: json!({"elicitation": {}}),
+        };
+        let url_error = input_required_result(
+            &json!({
+                "resultType": "input_required",
+                "inputRequests": {
+                    "login": {
+                        "method": "elicitation/create",
+                        "params": {
+                            "mode": "url",
+                            "message": "Sign in"
+                        }
+                    }
+                }
+            }),
+            &form_only,
+        )
+        .unwrap_err();
+        assert!(url_error.contains("elicitation.url"));
+
+        let sampling_without_tools = ProtocolContext {
+            era: ProtocolEra::Modern,
+            log_level: None,
+            client_capabilities: json!({"sampling": {}}),
+        };
+        let tools_error = input_required_result(
+            &json!({
+                "resultType": "input_required",
+                "inputRequests": {
+                    "sample": {
+                        "method": "sampling/createMessage",
+                        "params": {
+                            "messages": [],
+                            "maxTokens": 100,
+                            "tools": []
+                        }
+                    }
+                }
+            }),
+            &sampling_without_tools,
+        )
+        .unwrap_err();
+        assert!(tools_error.contains("sampling.tools"));
+    }
+
+    #[test]
+    fn test_input_required_result_is_modern_only() {
+        let result = json!({
+            "resultType": "input_required",
+            "requestState": "opaque"
+        });
+        assert!(
+            input_required_result(&result, &ProtocolContext::legacy())
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn test_modern_mcp_context_is_injected_into_hot_request() {
+        let protocol = ProtocolContext {
+            era: ProtocolEra::Modern,
+            log_level: None,
+            client_capabilities: json!({"elicitation": {}}),
+        };
+        let call_params = ToolsCallParams {
+            name: "publish".to_string(),
+            arguments: Some(json!({"report": "r-1"})),
+            input_responses: Some(json!({"confirm": {"action": "accept"}})),
+            request_state: Some("opaque-state".to_string()),
+        };
+        let mut request = val!({"method": "POST"});
+        insert_modern_mcp_request_context(&mut request, &protocol, &call_params);
+        let request_json = JsonValue::from(&request);
+
+        assert_eq!(
+            request_json["mcp"]["protocol-version"],
+            MODERN_PROTOCOL_VERSION
+        );
+        assert_eq!(
+            request_json["mcp"]["client-capabilities"]["elicitation"],
+            json!({})
+        );
+        assert_eq!(
+            request_json["mcp"]["input-responses"]["confirm"]["action"],
+            "accept"
+        );
+        assert_eq!(request_json["mcp"]["request-state"], "opaque-state");
+
+        let mut legacy_request = val!({"method": "POST"});
+        insert_modern_mcp_request_context(
+            &mut legacy_request,
+            &ProtocolContext::legacy(),
+            &call_params,
+        );
+        assert!(JsonValue::from(&legacy_request).get("mcp").is_none());
+    }
+
+    #[test]
+    fn test_modern_request_validation_rejects_header_body_mismatch() {
+        let request = modern_request("tools/list", json!({}));
+        let error =
+            validate_modern_request(&request, &modern_headers("tools/call", None)).unwrap_err();
+        assert_eq!(error.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[test]
+    fn test_modern_name_header_supports_base64_sentinel() {
+        let request = modern_request("tools/call", json!({"name": "météo", "arguments": {}}));
+        let mut headers = modern_headers("tools/call", None);
+        let encoded = base64::engine::general_purpose::STANDARD.encode("météo");
+        headers.insert(
+            "mcp-name",
+            HeaderValue::from_str(&format!("=?base64?{}?=", encoded)).unwrap(),
+        );
+        assert!(validate_modern_request(&request, &headers).is_ok());
+    }
+
+    #[test]
+    fn test_mcp_parameter_headers_validate_nested_and_encoded_values() {
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "routing": {
+                    "type": "object",
+                    "properties": {
+                        "region": {"type": "string", "x-mcp-header": "Region"},
+                        "priority": {"type": "integer", "x-mcp-header": "Priority"},
+                        "dryRun": {"type": "boolean", "x-mcp-header": "Dry-Run"}
+                    }
+                }
+            }
+        });
+        let arguments = json!({
+            "routing": {
+                "region": "北米",
+                "priority": 42,
+                "dryRun": true
+            }
+        });
+        let mut headers = HeaderMap::new();
+        let encoded = base64::engine::general_purpose::STANDARD.encode("北米");
+        headers.insert(
+            "mcp-param-region",
+            HeaderValue::from_str(&format!("=?base64?{}?=", encoded)).unwrap(),
+        );
+        headers.insert("mcp-param-priority", HeaderValue::from_static("42"));
+        headers.insert("mcp-param-dry-run", HeaderValue::from_static("true"));
+        assert!(validate_mcp_parameter_headers(&headers, &schema, Some(&arguments)).is_ok());
+
+        headers.insert("mcp-param-priority", HeaderValue::from_static("43"));
+        assert!(validate_mcp_parameter_headers(&headers, &schema, Some(&arguments)).is_err());
+    }
+
+    #[test]
+    fn test_invalid_x_mcp_header_locations_and_duplicates_are_rejected() {
+        let unreachable = json!({
+            "type": "object",
+            "properties": {
+                "route": {
+                    "oneOf": [
+                        {"type": "string", "x-mcp-header": "Route"}
+                    ]
+                }
+            }
+        });
+        assert!(collect_mcp_header_parameters(&unreachable).is_err());
+
+        let duplicate = json!({
+            "type": "object",
+            "properties": {
+                "one": {"type": "string", "x-mcp-header": "Tenant"},
+                "two": {"type": "string", "x-mcp-header": "tenant"}
+            }
+        });
+        assert!(collect_mcp_header_parameters(&duplicate).is_err());
+    }
+
+    #[test]
+    fn test_origin_validation_allows_same_origin_and_explicit_allowlist() {
+        let mut same_origin = HeaderMap::new();
+        same_origin.insert(
+            "origin",
+            HeaderValue::from_static("https://api.example.com"),
+        );
+        same_origin.insert("host", HeaderValue::from_static("api.example.com"));
+        same_origin.insert("x-forwarded-proto", HeaderValue::from_static("https"));
+        assert!(validate_mcp_origin(&same_origin, &val!({})).is_ok());
+
+        let mut local_origin = HeaderMap::new();
+        local_origin.insert("origin", HeaderValue::from_static("http://localhost:4681"));
+        local_origin.insert("host", HeaderValue::from_static("localhost:4681"));
+        assert!(validate_mcp_origin(&local_origin, &val!({})).is_ok());
+
+        let mut cross_origin = HeaderMap::new();
+        cross_origin.insert(
+            "origin",
+            HeaderValue::from_static("https://app.example.com"),
+        );
+        cross_origin.insert("host", HeaderValue::from_static("api.example.com"));
+        let conf = val!({"mcp": {"allowed-origins": ["https://app.example.com"]}});
+        assert!(validate_mcp_origin(&cross_origin, &conf).is_ok());
+        assert!(validate_mcp_origin(&cross_origin, &val!({})).is_err());
+
+        let mut spoofed_forwarded_host = same_origin;
+        spoofed_forwarded_host.insert(
+            "origin",
+            HeaderValue::from_static("https://attacker.example.com"),
+        );
+        spoofed_forwarded_host.insert(
+            "x-forwarded-host",
+            HeaderValue::from_static("attacker.example.com"),
+        );
+        assert!(validate_mcp_origin(&spoofed_forwarded_host, &val!({})).is_err());
+    }
+
+    #[test]
+    fn test_discover_result_uses_finalized_modern_shape() {
+        let response = handle_discover(Some(json!("discover")));
+        let value = serde_json::to_value(response.0).unwrap();
+        assert_eq!(value["result"]["resultType"], "complete");
+        assert_eq!(value["result"]["ttlMs"], 0);
+        assert_eq!(value["result"]["cacheScope"], "private");
+        assert_eq!(
+            value["result"]["supportedVersions"][0],
+            MODERN_PROTOCOL_VERSION
+        );
+        assert_eq!(
+            value["result"]["_meta"][META_SERVER_INFO]["name"],
+            "hot-mcp"
+        );
+    }
+
     #[tokio::test]
-    async fn test_initialize_supports_both_protocol_versions() {
+    async fn test_initialize_supports_all_legacy_protocol_versions() {
+        let response_latest = handle_initialize(Some(json!(0)), Some("2025-11-25"))
+            .await
+            .unwrap();
+        let value_latest = serde_json::to_value(response_latest.0).unwrap();
+        assert_eq!(value_latest["result"]["protocolVersion"], "2025-11-25");
+
         let response_2025 = handle_initialize(Some(json!(1)), Some("2025-03-26"))
             .await
             .unwrap();
@@ -2298,6 +3861,12 @@ mod tests {
             .unwrap();
         let value_2024 = serde_json::to_value(response_2024.0).unwrap();
         assert_eq!(value_2024["result"]["protocolVersion"], "2024-11-05");
+
+        let response_unknown = handle_initialize(Some(json!(3)), Some("1900-01-01"))
+            .await
+            .unwrap();
+        let value_unknown = serde_json::to_value(response_unknown.0).unwrap();
+        assert_eq!(value_unknown["result"]["protocolVersion"], "2025-11-25");
     }
 
     #[tokio::test]
@@ -3240,10 +4809,12 @@ mod tests {
     #[test]
     fn test_tools_call_result_meta_omitted_when_none() {
         let result = ToolsCallResult {
+            result_type: None,
             content: vec![ToolResultContent::Text {
                 text: "ok".to_string(),
                 annotations: None,
             }],
+            structured_content: None,
             is_error: None,
             meta: None,
         };
@@ -3455,6 +5026,100 @@ mod tests {
             .await
             .unwrap();
         serde_json::from_slice(&body).unwrap()
+    }
+
+    #[tokio::test]
+    async fn test_modern_discover_and_tools_list_on_existing_endpoint() {
+        let ctx = make_auth_test_context().await;
+        let discover = call_mcp(
+            &ctx,
+            modern_headers("server/discover", None),
+            modern_request("server/discover", json!({})),
+        )
+        .await;
+        assert_eq!(discover.status(), StatusCode::OK);
+        let discover = response_json(discover).await;
+        assert_eq!(discover["result"]["resultType"], "complete");
+        assert_eq!(
+            discover["result"]["supportedVersions"][0],
+            MODERN_PROTOCOL_VERSION
+        );
+
+        let list = call_mcp(
+            &ctx,
+            modern_headers("tools/list", None),
+            modern_request("tools/list", json!({})),
+        )
+        .await;
+        assert_eq!(list.status(), StatusCode::OK);
+        let list = response_json(list).await;
+        assert_eq!(list["result"]["resultType"], "complete");
+        assert_eq!(list["result"]["ttlMs"], 0);
+        assert_eq!(list["result"]["cacheScope"], "private");
+        assert_eq!(list["result"]["tools"].as_array().unwrap().len(), 3);
+        assert!(list["result"]["tools"][0]["inputSchema"].is_object());
+    }
+
+    #[tokio::test]
+    async fn test_modern_missing_headers_and_unknown_methods_use_modern_http_errors() {
+        let ctx = make_auth_test_context().await;
+        let missing_headers = call_mcp(
+            &ctx,
+            HeaderMap::new(),
+            modern_request("server/discover", json!({})),
+        )
+        .await;
+        assert_eq!(missing_headers.status(), StatusCode::BAD_REQUEST);
+        let missing_headers = response_json(missing_headers).await;
+        assert_eq!(missing_headers["error"]["code"], HEADER_MISMATCH);
+
+        let unknown = call_mcp(
+            &ctx,
+            modern_headers("unknown/method", None),
+            modern_request("unknown/method", json!({})),
+        )
+        .await;
+        assert_eq!(unknown.status(), StatusCode::NOT_FOUND);
+        let unknown = response_json(unknown).await;
+        assert_eq!(unknown["error"]["code"], METHOD_NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn test_modern_unsupported_version_advertises_supported_versions() {
+        let ctx = make_auth_test_context().await;
+        let mut request = modern_request("server/discover", json!({}));
+        request
+            .params
+            .as_mut()
+            .and_then(JsonValue::as_object_mut)
+            .and_then(|params| params.get_mut("_meta"))
+            .and_then(JsonValue::as_object_mut)
+            .unwrap()
+            .insert(META_PROTOCOL_VERSION.to_string(), json!("1900-01-01"));
+        let mut headers = modern_headers("server/discover", None);
+        headers.insert(
+            "mcp-protocol-version",
+            HeaderValue::from_static("1900-01-01"),
+        );
+
+        let response = call_mcp(&ctx, headers, request).await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let response = response_json(response).await;
+        assert_eq!(response["error"]["code"], UNSUPPORTED_PROTOCOL_VERSION);
+        assert_eq!(
+            response["error"]["data"]["supported"][0],
+            MODERN_PROTOCOL_VERSION
+        );
+    }
+
+    #[tokio::test]
+    async fn test_legacy_tools_list_shape_remains_legacy() {
+        let ctx = make_auth_test_context().await;
+        let response = call_mcp(&ctx, HeaderMap::new(), make_jsonrpc("tools/list", None)).await;
+        let response = response_json(response).await;
+        assert!(response["result"].get("resultType").is_none());
+        assert!(response["result"].get("ttlMs").is_none());
+        assert!(response["result"].get("cacheScope").is_none());
     }
 
     // --- Initialize / ping: always work without auth ---

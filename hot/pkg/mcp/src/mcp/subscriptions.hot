@@ -1,0 +1,99 @@
+::mcp::subscriptions ns
+meta {
+    doc: """
+Long-lived notification subscriptions for MCP 2026-07-28.
+
+The modern `subscriptions/listen` request replaces legacy GET notification
+streams. Every notification category is explicitly opted in.
+"""
+}
+
+::client ::mcp::client
+::types ::mcp::types
+
+wire-filter
+meta {doc: """Convert a typed subscription filter to the MCP wire shape."""}
+fn (filter: ::types/SubscriptionFilter): Map {
+  {}
+    |> assoc-some("toolsListChanged", filter.tools-list-changed)
+    |> assoc-some("promptsListChanged", filter.prompts-list-changed)
+    |> assoc-some("resourcesListChanged", filter.resources-list-changed)
+    |> assoc-some("resourceSubscriptions", filter.resource-subscriptions)
+}
+
+require-supported fn (supported: Bool, message: Str): Any {
+  if(supported, null, fail(message))
+}
+
+validate-filter
+meta {doc: """Validate subscription opt-ins against discovered server capabilities."""}
+fn (session: ::types/Session, filter: ::types/SubscriptionFilter): Map {
+  caps untype(session.server-capabilities)
+  tools get(caps, "tools", {})
+  prompts get(caps, "prompts", {})
+  resources get(caps, "resources", {})
+
+  if(
+    eq(filter.tools-list-changed, true),
+    require-supported(
+      eq(get(tools, "listChanged", false), true),
+      "MCP server did not advertise tools.listChanged"
+    )
+  )
+  if(
+    eq(filter.prompts-list-changed, true),
+    require-supported(
+      eq(get(prompts, "listChanged", false), true),
+      "MCP server did not advertise prompts.listChanged"
+    )
+  )
+  if(
+    eq(filter.resources-list-changed, true),
+    require-supported(
+      eq(get(resources, "listChanged", false), true),
+      "MCP server did not advertise resources.listChanged"
+    )
+  )
+  if(
+    and(
+      is-some(filter.resource-subscriptions),
+      gt(length(filter.resource-subscriptions), 0)
+    ),
+    require-supported(
+      eq(get(resources, "subscribe", false), true),
+      "MCP server did not advertise resources.subscribe"
+    )
+  )
+
+  wire-filter(filter)
+}
+
+listen
+meta {
+    doc: """
+Open a modern long-lived notification stream.
+
+Returns an iterator of parsed `StreamEvent` values. The final event, when a
+server closes the subscription gracefully, contains the
+`subscriptions/listen` JSON-RPC result.
+"""
+}
+fn (session: ::types/Session, filter: ::types/SubscriptionFilter): Iter {
+  if(
+    ne(or(session.era, "legacy"), "modern"),
+    err("subscriptions/listen requires MCP 2026-07-28")
+  )
+  notifications validate-filter(session, filter)
+  response ::client/session-request-stream(
+    session,
+    "subscriptions/listen",
+    {notifications: notifications}
+  )
+  Iter(map(collect(response.body), (frame) {
+    ::types/StreamEvent({
+      event: frame.event,
+      data: from-json(frame.data),
+      id: frame.id
+    })
+  }))
+}

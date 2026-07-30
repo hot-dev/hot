@@ -108,6 +108,7 @@ zip = "4.6"
 aws-lc-rs = "1.17.1"
 axum-extra = "0.12.6"
 jsonwebtoken = { version = "10.4.0", default-features = false, features = ["aws_lc_rs"] }
+jsonschema = { version = "0.49.2", default-features = false }
 time = "0.3.53"
 croner = "3.0"
 english-to-cron = "0.1.7"

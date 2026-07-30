@@ -112,9 +112,112 @@ fn (data: Map): ::types/Response {
   if(is-some(response.error), err(response.error), response)
 }
 
+response-media-type fn (response: HttpResponse): Str {
+  content-type or(
+    get(response.headers, "content-type", null),
+    get(response.headers, "Content-Type", "")
+  )
+  lowercase(trim(first(split(content-type, ";"))))
+}
+
+sse-json-rpc-response
+meta {
+    doc: """Extract the final JSON-RPC result or error from a buffered SSE response body."""
+}
+fn (body: Str): Map? {
+  normalized replace(replace(body, "\r\n", "\n"), "\r", "\n")
+  payloads map(split(normalized, "\n\n"), (frame) {
+    data-lines filter(
+      split(frame, "\n"),
+      starts-with(%, "data:")
+    )
+    if(
+      gt(length(data-lines), 0),
+      join(map(data-lines, trim-start(::hot::regex/replace(%, "^data:", ""))), "\n"),
+      null
+    )
+  }) |> filter(is-some(%))
+  messages map(payloads, from-json(%))
+    |> filter(and(
+      is-map(%),
+      eq(get(%, "jsonrpc", null), "2.0"),
+      or(in("result", keys(%)), in("error", keys(%)))
+    ))
+  if(gt(length(messages), 0), last(messages), null)
+}
+
+// Parse a full HTTP response while preserving a JSON-RPC error returned with
+// a non-2xx status. This is required by protocols such as MCP that use HTTP
+// status codes as part of version negotiation.
+parse-http-response
+meta {
+    doc: """
+Parse a full `HttpResponse` as JSON-RPC.
+
+When the body contains a JSON-RPC response, its result or error is preserved
+regardless of the HTTP status. Non-JSON-RPC HTTP failures become an internal
+JSON-RPC client error whose data contains the response body.
+"""
+}
+fn (response: HttpResponse): ::types/Response {
+  sse-message if(
+    and(is-str(response.body), eq(response-media-type(response), "text/event-stream")),
+    sse-json-rpc-response(response.body),
+    null
+  )
+  cond {
+      and(is-map(response.body), eq(get(response.body, "jsonrpc", null), "2.0")) => {
+        parse-response(response.body)
+      }
+
+      is-map(sse-message) => {
+        parse-response(sse-message)
+      }
+
+      is-ok-response(response) => {
+        err(::types/Error({
+          code: ::types/INTERNAL_ERROR,
+          message: "HTTP response did not contain a JSON-RPC message",
+          data: response.body
+        }))
+      }
+      => {
+        err(::types/Error({
+          code: ::types/INTERNAL_ERROR,
+          message: `HTTP ${response.status}`,
+          data: response.body
+        }))
+      }
+  }
+}
+
 // ============================================================================
 // Transport: HTTP
 // ============================================================================
+
+// Send a JSON-RPC request and retain the full HTTP response, including headers
+// and non-2xx JSON-RPC bodies.
+send-raw
+meta {
+    doc: """
+Send a JSON-RPC request over HTTP and return the full `HttpResponse`.
+
+Unlike `send`, this function does not interpret HTTP status codes or JSON-RPC
+errors. Use it when transport headers or status-aware negotiation are needed.
+"""
+}
+fn (url: Str, headers: Map, req: ::types/Request): HttpResponse {
+  body to-json(untype(req))
+  http-request(HttpRequest({
+    method: "POST",
+    url: url,
+    headers: merge({
+      "Content-Type": "application/json",
+      "Accept": "application/json, text/event-stream"
+    }, headers),
+    body: body
+  }))
+}
 
 // Send a JSON-RPC request and wait for the response.
 send
@@ -145,24 +248,7 @@ response ::rpc/send(url, headers, req)
 """
 }
 fn (url: Str, headers: Map, req: ::types/Request): ::types/Response {
-  body to-json(untype(req))
-  response http-request(HttpRequest({
-    method: "POST",
-    url: url,
-    headers: merge({
-      "Content-Type": "application/json",
-      "Accept": "application/json, text/event-stream"
-    }, headers),
-    body: body
-  }))
-  cond {
-      is-ok-response(response) => { parse-response(response.body) }
-      => { err(::types/Error({
-      code: ::types/INTERNAL_ERROR,
-      message: `HTTP ${response.status}`,
-      data: response.body
-    })) }
-  }
+  parse-http-response(send-raw(url, headers, req))
 }
 
 // Send a JSON-RPC request expecting an SSE stream back.
