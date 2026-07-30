@@ -368,7 +368,31 @@ jobs:
         EOF
 
     - name: Build binary
-      run: cargo build --release --target ${{ matrix.target }} -j 4
+      shell: bash
+      run: |
+        # Bundled SQLite 3.51.x can compile MSVC intrinsic paths that crash
+        # with STATUS_ILLEGAL_INSTRUCTION on otherwise supported x64 CPUs.
+        # Keep the mitigation target-specific; Windows ARM64 and other
+        # platforms retain SQLite's normal intrinsic paths.
+        if [[ "${{ matrix.target }}" == "x86_64-pc-windows-msvc" ]]; then
+          export LIBSQLITE3_FLAGS=SQLITE_DISABLE_INTRINSIC
+        fi
+        cargo build --release --target ${{ matrix.target }} -j 4
+
+    - name: Smoke test Windows x64 release binary
+      if: matrix.target == 'x86_64-pc-windows-msvc'
+      shell: pwsh
+      run: |
+        $binary = (Resolve-Path 'target\x86_64-pc-windows-msvc\release\hot.exe').Path
+        $versionOutput = & $binary version
+        if ($LASTEXITCODE -ne 0) {
+          throw "hot.exe version exited with code $LASTEXITCODE"
+        }
+        $versionText = ($versionOutput | Out-String).Trim()
+        if ([string]::IsNullOrWhiteSpace($versionText)) {
+          throw 'hot.exe version produced no output'
+        }
+        Write-Host $versionText
 
     - name: Build hotbox binary (Linux x86_64, static musl)
       if: matrix.platform == 'linux' && matrix.arch == 'x86_64'
