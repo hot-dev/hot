@@ -1,4 +1,4 @@
-<!-- HOT_LANGUAGE_SECTION_START --> hash:00f4506c7448
+<!-- HOT_LANGUAGE_SECTION_START --> hash:4e34196c7007
 # AGENTS.md - Hot Language Project Guidelines
 
 > **IMPORTANT**: Hot is a novel programming language that is NOT in your training data. Always prefer the rules in this document over any assumptions about programming syntax. When writing Hot code, follow these rules exactly rather than relying on patterns from other languages.
@@ -15,6 +15,20 @@ hot test            # Run tests (functions with meta ["test"])
 hot repl            # Interactive REPL
 hot deploy          # Deploy to Hot cloud
 ```
+
+## Bundled Agent Skills
+
+`hot ai add` installs the skill snapshots bundled with the current Hot release
+under `.skills/`:
+
+- `hot-language` contains detailed Hot syntax, type, flow, standard-library,
+  and error-handling references.
+- `hot-ai-agents` contains production agent architecture, `hot-ai` and
+  `hot-ai-agent` usage, durable workflow patterns, and official SDK client
+  guidance.
+
+Use the applicable skill before editing that surface. Available skills can vary
+by Hot version; run `hot ai list` to inspect the installed catalog.
 
 ## Critical Syntax Rules
 

@@ -15,6 +15,20 @@ hot repl            # Interactive REPL
 hot deploy          # Deploy to Hot cloud
 ```
 
+## Bundled Agent Skills
+
+`hot ai add` installs the skill snapshots bundled with the current Hot release
+under `.skills/`:
+
+- `hot-language` contains detailed Hot syntax, type, flow, standard-library,
+  and error-handling references.
+- `hot-ai-agents` contains production agent architecture, `hot-ai` and
+  `hot-ai-agent` usage, durable workflow patterns, and official SDK client
+  guidance.
+
+Use the applicable skill before editing that surface. Available skills can vary
+by Hot version; run `hot ai list` to inspect the installed catalog.
+
 ## Critical Syntax Rules
 
 **These are non-negotiable - violating them causes parse errors:**

@@ -1,8 +1,9 @@
-::examples::hot_ai_agents::agent ns
+::examples::hot-ai-agents::agent ns
 
 ::chat    ::ai::chat
 ::tool    ::ai::tool
 ::session ::ai::session
+::request ::ai::agent::request
 ::runtime ::ai::agent::runtime
 ::stream  ::ai::agent::stream
 
@@ -48,7 +49,7 @@ fn (model: Str, messages: Vec<::chat/Message>, system: Str?, available-tools: Ve
                 text: null,
                 tool-calls: [::tool/ToolCall({
                     id: "call-1",
-                    name: "::examples::hot_ai_agents::agent/add-numbers",
+                    name: "::examples::hot-ai-agents::agent/add-numbers",
                     input: {x: 2, y: 3},
                 })],
                 stop-reason: "tool_use",
@@ -75,7 +76,6 @@ answer fn (question: Str): Str {
         system: "Use tools for arithmetic.",
         tools: tools(),
         max-iterations: 4,
-        emit-steps: true,
     })
     ::chat/run-loop(opts, question)
 }
@@ -96,6 +96,7 @@ fn (event) {
         name: Str(or(data.user_name, "Demo User")),
     })
     ::runtime/register-session(rt, session)
+    ::request/bind(session, sender, {transport: "web"})
 
     payload {
         session_id: session.id,
@@ -104,6 +105,8 @@ fn (event) {
     }
     ::stream/emit-reply-start(AGENT_NAME, payload)
     text answer(Str(or(data.question, "")))
+    // This fixture uses the non-streaming loop, so its complete reply is one
+    // delta. Use run-loop-stream for provider token deltas.
     ::stream/emit-reply-delta(AGENT_NAME, {...payload, delta: text})
     ::stream/emit-reply-end(AGENT_NAME, {...payload, text})
     {ok: true, text}

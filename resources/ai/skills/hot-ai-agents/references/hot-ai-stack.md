@@ -167,7 +167,7 @@ answer ::chat/run-loop-stream(opts, question, on-delta)
 
 Use `run-loop` for non-streaming replies and `run-loop-messages` when resuming
 an explicit normalized history. The loop dispatches every tool call, appends
-assistant and tool-result turns, and stops at the iteration cap.
+assistant and tool-result turns, and fails if it reaches the iteration cap.
 
 Do not branch application code on native provider response blocks. Normalize
 to `ChatReply`, `ToolCall`, `ToolResult`, and `ReplyDelta` in the provider
@@ -197,6 +197,7 @@ result ::chat-turn/run-chat-turn(cfg, ::chat-turn/TurnInput({
     attachments: [],
     payload: {session_id: session.id, message_id: message-id},
     ctx-extras: {tenant_id: tenant-id},
+    fallback-text: null,
 }))
 ```
 

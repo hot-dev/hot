@@ -1,9 +1,20 @@
 //! `hot ai` — install / list / update AGENTS.md and bundled Hot skills.
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
+
+use serde::{Deserialize, Serialize};
 use tracing::info;
 
 use crate::cli::AiAction;
+
+const SKILL_MANIFEST_FILE: &str = ".hot-skill-manifest.json";
+
+#[derive(Debug, Default, Deserialize, Serialize)]
+struct InstalledSkillManifest {
+    version: u8,
+    files: BTreeMap<String, String>,
+}
 
 pub(crate) fn run_ai(action: &AiAction) -> Result<(), String> {
     match action {
@@ -23,7 +34,16 @@ pub(crate) fn run_ai(action: &AiAction) -> Result<(), String> {
             println!("  AGENTS.md     - AI agent instructions {}", agents_status);
 
             let home = dirs::home_dir().unwrap_or_default();
-            for skill_name in bundled_skill_names()? {
+            let project_skills = installed_hot_skill_names(std::path::Path::new(".skills"));
+            let global_skills = installed_hot_skill_names(&home.join(".skills"));
+            let mut skill_names = BTreeSet::new();
+            if let Ok(bundled) = bundled_skill_names() {
+                skill_names.extend(bundled);
+            }
+            skill_names.extend(project_skills.iter().cloned());
+            skill_names.extend(global_skills.iter().cloned());
+
+            for skill_name in skill_names {
                 let project_skill = std::path::Path::new(".skills").join(&skill_name);
                 let global_skill = home.join(".skills").join(&skill_name);
                 let status = if project_skill.exists() {
@@ -73,19 +93,27 @@ pub(crate) fn run_ai(action: &AiAction) -> Result<(), String> {
             }
 
             let home = dirs::home_dir().unwrap_or_default();
-            let skill_names = bundled_skill_names()?;
-            let project_has_skills = skill_names
-                .iter()
-                .any(|name| std::path::Path::new(".skills").join(name).exists());
-            let global_has_skills = skill_names
-                .iter()
-                .any(|name| home.join(".skills").join(name).exists());
-            if project_has_skills {
-                setup_agent_skills(false)?;
-                updated_count += 1;
-            } else if global_has_skills {
-                setup_agent_skills(true)?;
-                updated_count += 1;
+            let project_skills = installed_hot_skill_names(std::path::Path::new(".skills"));
+            let global_skills = installed_hot_skill_names(&home.join(".skills"));
+
+            if !project_skills.is_empty() || !global_skills.is_empty() {
+                let bundled: BTreeSet<String> = bundled_skill_names()?.into_iter().collect();
+                let project_targets: Vec<String> = project_skills
+                    .into_iter()
+                    .filter(|name| bundled.contains(name))
+                    .collect();
+                let global_targets: Vec<String> = global_skills
+                    .into_iter()
+                    .filter(|name| bundled.contains(name))
+                    .collect();
+
+                if !project_targets.is_empty() {
+                    setup_selected_agent_skills(false, &project_targets)?;
+                    updated_count += 1;
+                } else if !global_targets.is_empty() {
+                    setup_selected_agent_skills(true, &global_targets)?;
+                    updated_count += 1;
+                }
             }
 
             if updated_count == 0 {
@@ -97,6 +125,40 @@ pub(crate) fn run_ai(action: &AiAction) -> Result<(), String> {
             Ok(())
         }
     }
+}
+
+fn installed_hot_skill_names(skills_dir: &std::path::Path) -> Vec<String> {
+    let Ok(entries) = fs::read_dir(skills_dir) else {
+        return Vec::new();
+    };
+    let mut names = Vec::new();
+
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_dir() || !path.join("SKILL.md").is_file() {
+            continue;
+        }
+        let has_manifest = path.join(SKILL_MANIFEST_FILE).is_file();
+        let has_legacy_stamp = fs::read_to_string(path.join("SKILL.md"))
+            .ok()
+            .and_then(|content| extract_skill_hash(&content))
+            .is_some();
+        if (has_manifest || has_legacy_stamp)
+            && let Ok(name) = entry.file_name().into_string()
+        {
+            names.push(name);
+        }
+    }
+
+    names.sort();
+    names
+}
+
+fn setup_selected_agent_skills(global: bool, skill_names: &[String]) -> Result<(), String> {
+    for skill_name in skill_names {
+        setup_agent_skill(global, skill_name)?;
+    }
+    Ok(())
 }
 
 /// Discover every skill bundled under `resources/ai/skills/`.
@@ -234,67 +296,95 @@ fn setup_agents_md() -> Result<(), String> {
     Ok(())
 }
 
-/// The hash stamped into an installed file, wherever the marker sits.
-fn extract_skill_hash(content: &str) -> Option<u64> {
-    content.lines().take(64).find_map(|line| {
-        let line = line.trim();
-        line.strip_prefix("<!-- hot-skill-hash:")
-            .and_then(|rest| rest.strip_suffix("-->"))
-            .or_else(|| line.strip_prefix("// hot-skill-hash:"))
-            .and_then(|hash_str| hash_str.trim().parse::<u64>().ok())
-    })
-}
-
-/// Whether an old Markdown stamp is hiding YAML frontmatter on line 2.
-///
-/// A leading marker is valid for Markdown without frontmatter and for
-/// non-Markdown files. Only this exact legacy shape is broken; treating every
-/// moved marker as stale would overwrite local content prepended by a user.
-fn has_broken_legacy_frontmatter_layout(content: &str, is_markdown: bool) -> bool {
-    if !is_markdown {
-        return false;
-    }
-    let Some((marker, rest)) = content.split_once('\n') else {
-        return false;
-    };
-    let marker = marker.trim_end_matches('\r').trim();
-    let is_hash_marker = marker
-        .strip_prefix("<!-- hot-skill-hash:")
+fn parse_legacy_skill_hash_line(line: &str) -> Option<u64> {
+    let line = line.trim();
+    line.strip_prefix("<!-- hot-skill-hash:")
         .and_then(|rest| rest.strip_suffix("-->"))
-        .is_some();
-    is_hash_marker && (rest.starts_with("---\n") || rest.starts_with("---\r\n"))
+        .or_else(|| line.strip_prefix("// hot-skill-hash:"))
+        .and_then(|hash_str| hash_str.trim().parse::<u64>().ok())
 }
 
-/// Stamp the content hash into a file without breaking its format.
-///
-/// A YAML frontmatter block must begin on line 1. Prepending the marker
-/// invalidated every skill that has frontmatter — Codex reports
-/// "missing YAML frontmatter delimited by ---" and skips the skill — so
-/// for those files the marker goes immediately after the closing `---`.
-fn stamp_skill_hash(content: &str, hash: u64, is_markdown: bool) -> String {
-    if !is_markdown {
-        return format!("// hot-skill-hash:{}\n{}", hash, content);
+/// The hash stamped into a file by Hot versions before sidecar manifests.
+fn extract_skill_hash(content: &str) -> Option<u64> {
+    content
+        .lines()
+        .take(64)
+        .find_map(parse_legacy_skill_hash_line)
+}
+
+/// Remove one legacy hash marker without otherwise normalizing the file.
+fn strip_legacy_skill_hash(content: &str) -> String {
+    let mut stripped = String::with_capacity(content.len());
+    let mut removed = false;
+
+    for (index, line) in content.split_inclusive('\n').enumerate() {
+        let marker_candidate = line.trim_end_matches(['\n', '\r']);
+        if !removed && index < 64 && parse_legacy_skill_hash_line(marker_candidate).is_some() {
+            removed = true;
+            continue;
+        }
+        stripped.push_str(line);
     }
 
-    let marker = format!("<!-- hot-skill-hash:{} -->", hash);
-    if let Some(rest) = content.strip_prefix("---\n")
-        && let Some(close) = rest.find("\n---")
+    stripped
+}
+
+fn skill_content_hash(content: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    format!("{:x}", Sha256::digest(content))
+}
+
+fn legacy_skill_content_hash(content: &[u8]) -> Option<u64> {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+
+    let content = std::str::from_utf8(content).ok()?;
+    let mut hasher = DefaultHasher::new();
+    content.hash(&mut hasher);
+    Some(hasher.finish())
+}
+
+fn skill_manifest_key(path: &std::path::Path) -> String {
+    path.to_string_lossy().replace('\\', "/")
+}
+
+fn read_installed_skill_manifest(
+    skill_dir: &std::path::Path,
+) -> Result<Option<InstalledSkillManifest>, String> {
+    let path = skill_dir.join(SKILL_MANIFEST_FILE);
+    if !path.is_file() {
+        return Ok(None);
+    }
+
+    let content = fs::read_to_string(&path)
+        .map_err(|e| format!("Failed to read {}: {}", path.display(), e))?;
+    let manifest: InstalledSkillManifest = serde_json::from_str(&content)
+        .map_err(|e| format!("Failed to parse {}: {}", path.display(), e))?;
+    if manifest.version != 1 {
+        return Err(format!(
+            "Unsupported installed skill manifest version {} in {}",
+            manifest.version,
+            path.display()
+        ));
+    }
+    Ok(Some(manifest))
+}
+
+fn write_if_changed(path: &std::path::Path, content: &[u8]) -> Result<bool, String> {
+    if path.is_file()
+        && let Ok(existing) = fs::read(path)
+        && existing == content
     {
-        // `close` indexes the newline before the closing delimiter; step
-        // past that delimiter line to land just after the block.
-        let after_delim = close + 1;
-        let tail = &rest[after_delim..];
-        return match tail.find('\n') {
-            Some(offset) => {
-                let split = after_delim + offset + 1;
-                format!("---\n{}{}\n{}", &rest[..split], marker, &rest[split..])
-            }
-            // Frontmatter closes the file with no trailing newline.
-            None => format!("---\n{}\n{}\n", rest, marker),
-        };
+        return Ok(false);
     }
-
-    format!("{}\n{}", marker, content)
+    if let Some(parent) = path.parent()
+        && !parent.exists()
+    {
+        fs::create_dir_all(parent)
+            .map_err(|e| format!("Failed to create directory {}: {}", parent.display(), e))?;
+    }
+    fs::write(path, content).map_err(|e| format!("Failed to write {}: {}", path.display(), e))?;
+    Ok(true)
 }
 
 fn setup_agent_skills(global: bool) -> Result<(), String> {
@@ -308,14 +398,6 @@ fn setup_agent_skills(global: bool) -> Result<(), String> {
 /// `~/.skills/` (global).
 fn setup_agent_skill(global: bool, skill_name: &str) -> Result<(), String> {
     use ahash::AHashSet;
-    use std::collections::hash_map::DefaultHasher;
-    use std::hash::{Hash, Hasher};
-
-    fn content_hash(content: &str) -> u64 {
-        let mut hasher = DefaultHasher::new();
-        content.hash(&mut hasher);
-        hasher.finish()
-    }
 
     let source_skill_dir = hot::resources::get_skill_path(skill_name)?;
 
@@ -329,7 +411,7 @@ fn setup_agent_skill(global: bool, skill_name: &str) -> Result<(), String> {
     fn collect_source_files(
         dir: &std::path::Path,
         base: &std::path::Path,
-        files: &mut Vec<(std::path::PathBuf, String)>,
+        files: &mut Vec<(std::path::PathBuf, Vec<u8>)>,
     ) -> Result<(), String> {
         let entries = fs::read_dir(dir)
             .map_err(|e| format!("Failed to read directory {}: {}", dir.display(), e))?;
@@ -344,7 +426,7 @@ fn setup_agent_skill(global: bool, skill_name: &str) -> Result<(), String> {
                 let rel_path = path
                     .strip_prefix(base)
                     .map_err(|e| format!("Failed to get relative path: {}", e))?;
-                let content = fs::read_to_string(&path)
+                let content = fs::read(&path)
                     .map_err(|e| format!("Failed to read {}: {}", path.display(), e))?;
                 files.push((rel_path.to_path_buf(), content));
             }
@@ -352,53 +434,63 @@ fn setup_agent_skill(global: bool, skill_name: &str) -> Result<(), String> {
         Ok(())
     }
 
-    let mut skill_files: Vec<(std::path::PathBuf, String)> = Vec::new();
+    let mut skill_files: Vec<(std::path::PathBuf, Vec<u8>)> = Vec::new();
     collect_source_files(&source_skill_dir, &source_skill_dir, &mut skill_files)?;
 
-    let expected_files: AHashSet<String> = skill_files
+    let skill_dir = skills_base.join(skill_name);
+    let installed_manifest = read_installed_skill_manifest(&skill_dir)?;
+    let mut next_manifest = InstalledSkillManifest {
+        version: 1,
+        files: BTreeMap::new(),
+    };
+    let mut expected_files: AHashSet<String> = skill_files
         .iter()
-        .map(|(path, _)| path.to_string_lossy().to_string())
+        .map(|(path, _)| skill_manifest_key(path))
         .collect();
+    expected_files.insert(SKILL_MANIFEST_FILE.to_string());
 
     fn write_skill_file(
         path: &std::path::Path,
-        content: &str,
-        is_markdown: bool,
+        content: &[u8],
+        manifest_key: &str,
+        installed_manifest: Option<&InstalledSkillManifest>,
     ) -> Result<bool, String> {
-        let hash = content_hash(content);
-        let content_with_hash = stamp_skill_hash(content, hash, is_markdown);
+        let hash = skill_content_hash(content);
 
         if path.exists() {
-            let existing = fs::read_to_string(path)
-                .map_err(|e| format!("Failed to read {}: {}", path.display(), e))?;
+            let existing =
+                fs::read(path).map_err(|e| format!("Failed to read {}: {}", path.display(), e))?;
 
-            // Rewrite when the source content changed, or when the stamp sits
-            // in the exact broken layout an older installer produced: a
-            // Markdown marker on line 1 hiding frontmatter on line 2. Those
-            // installs matched their own hash and so were never repaired.
-            //
-            // Deliberately *not* a byte comparison of the whole file: the
-            // hash covers the source, not the installed body, so a user's
-            // local edits to a skill survive `hot ai update` as long as the
-            // shipped content is unchanged. Comparing bytes would silently
-            // start clobbering those edits.
-            if extract_skill_hash(&existing) == Some(hash)
-                && !has_broken_legacy_frontmatter_layout(&existing, is_markdown)
+            if installed_manifest.and_then(|manifest| manifest.files.get(manifest_key))
+                == Some(&hash)
             {
+                // The shipped source is unchanged. Preserve local edits while
+                // opportunistically cleaning a legacy marker from a manifest
+                // install that was only partially migrated.
+                if let Ok(existing_text) = std::str::from_utf8(&existing)
+                    && extract_skill_hash(existing_text).is_some()
+                {
+                    return write_if_changed(
+                        path,
+                        strip_legacy_skill_hash(existing_text).as_bytes(),
+                    );
+                }
                 return Ok(false);
+            }
+
+            // Migrate marker-based installs. The old marker records the hash
+            // of the shipped source, so a match means the source is unchanged
+            // and any other differences are user customizations to preserve.
+            if installed_manifest.is_none()
+                && let Some(legacy_hash) = legacy_skill_content_hash(content)
+                && let Ok(existing_text) = std::str::from_utf8(&existing)
+                && extract_skill_hash(existing_text) == Some(legacy_hash)
+            {
+                return write_if_changed(path, strip_legacy_skill_hash(existing_text).as_bytes());
             }
         }
 
-        if let Some(parent) = path.parent()
-            && !parent.exists()
-        {
-            fs::create_dir_all(parent)
-                .map_err(|e| format!("Failed to create directory {}: {}", parent.display(), e))?;
-        }
-
-        fs::write(path, &content_with_hash)
-            .map_err(|e| format!("Failed to write {}: {}", path.display(), e))?;
-        Ok(true)
+        write_if_changed(path, content)
     }
 
     fn collect_files(
@@ -433,16 +525,21 @@ fn setup_agent_skill(global: bool, skill_name: &str) -> Result<(), String> {
         }
     }
 
-    let skill_dir = skills_base.join(skill_name);
-
     let mut any_updated = false;
     let mut any_removed = false;
 
     for (rel_path, content) in &skill_files {
         let full_path = skill_dir.join(rel_path);
-        let rel_path_str = rel_path.to_string_lossy();
-        let is_markdown = rel_path_str.ends_with(".md");
-        if write_skill_file(&full_path, content, is_markdown)? {
+        let manifest_key = skill_manifest_key(rel_path);
+        next_manifest
+            .files
+            .insert(manifest_key.clone(), skill_content_hash(content));
+        if write_skill_file(
+            &full_path,
+            content,
+            &manifest_key,
+            installed_manifest.as_ref(),
+        )? {
             any_updated = true;
         }
     }
@@ -452,7 +549,7 @@ fn setup_agent_skill(global: bool, skill_name: &str) -> Result<(), String> {
         collect_files(&skill_dir, &skill_dir, &mut existing_files);
 
         for rel_path in existing_files {
-            let rel_str = rel_path.to_string_lossy().to_string();
+            let rel_str = skill_manifest_key(&rel_path);
             if !expected_files.contains(&rel_str) {
                 let full_path = skill_dir.join(&rel_path);
                 if fs::remove_file(&full_path).is_ok() {
@@ -461,6 +558,13 @@ fn setup_agent_skill(global: bool, skill_name: &str) -> Result<(), String> {
                 }
             }
         }
+    }
+
+    let mut manifest_content = serde_json::to_vec_pretty(&next_manifest)
+        .map_err(|e| format!("Failed to serialize installed skill manifest: {}", e))?;
+    manifest_content.push(b'\n');
+    if write_if_changed(&skill_dir.join(SKILL_MANIFEST_FILE), &manifest_content)? {
+        any_updated = true;
     }
 
     if any_updated || any_removed {
@@ -477,77 +581,28 @@ fn setup_agent_skill(global: bool, skill_name: &str) -> Result<(), String> {
 }
 
 #[cfg(test)]
-mod skill_stamp_tests {
-    use super::{has_broken_legacy_frontmatter_layout, stamp_skill_hash};
+mod skill_manifest_tests {
+    use super::{extract_skill_hash, strip_legacy_skill_hash};
 
     const FRONTMATTER_SKILL: &str =
         "---\nname: hot-language\ndescription: >\n  Write Hot.\n---\n\n# Body\n";
 
-    /// YAML frontmatter is only recognized when `---` is the very first line.
-    /// Stamping must never displace it — a skill that loses its frontmatter is
-    /// silently skipped by the agent runtimes that load it.
     #[test]
-    fn stamping_preserves_leading_frontmatter() {
-        let stamped = stamp_skill_hash(FRONTMATTER_SKILL, 42, true);
-        assert!(
-            stamped.starts_with("---\n"),
-            "frontmatter must remain at line 1:\n{stamped}"
-        );
-        let close = stamped.find("\n---\n").expect("closing delimiter");
-        let marker = stamped
-            .find("<!-- hot-skill-hash:42 -->")
-            .expect("marker must be present");
-        assert!(marker > close, "marker must follow the frontmatter block");
-        assert!(stamped.contains("name: hot-language") && stamped.contains("# Body"));
+    fn strips_marker_hiding_frontmatter() {
+        let legacy = format!("<!-- hot-skill-hash:42 -->\n{FRONTMATTER_SKILL}");
+        assert_eq!(strip_legacy_skill_hash(&legacy), FRONTMATTER_SKILL);
+        assert_eq!(extract_skill_hash(&legacy), Some(42));
     }
 
     #[test]
-    fn stamping_markdown_without_frontmatter_prepends() {
-        let stamped = stamp_skill_hash("# Reference\n\ntext\n", 7, true);
-        assert!(stamped.starts_with("<!-- hot-skill-hash:7 -->\n"));
-        assert!(stamped.ends_with("# Reference\n\ntext\n"));
-    }
-
-    #[test]
-    fn stamping_non_markdown_prepends_line_comment() {
+    fn strips_markers_without_changing_other_content() {
+        let markdown = "<!-- LOCAL EDIT -->\n<!-- hot-skill-hash:7 -->\n# Reference\n";
         assert_eq!(
-            stamp_skill_hash("::demo ns\n", 9, false),
-            "// hot-skill-hash:9\n::demo ns\n"
+            strip_legacy_skill_hash(markdown),
+            "<!-- LOCAL EDIT -->\n# Reference\n"
         );
-    }
 
-    /// The installer compares its output byte for byte against the file on
-    /// disk, so an unstable stamp would rewrite every skill on every run.
-    #[test]
-    fn stamping_is_deterministic() {
-        assert_eq!(
-            stamp_skill_hash(FRONTMATTER_SKILL, 42, true),
-            stamp_skill_hash(FRONTMATTER_SKILL, 42, true)
-        );
-    }
-
-    /// The layout an older version produced must never be what we write now,
-    /// or the migration in `write_skill_file` could not converge.
-    #[test]
-    fn legacy_layout_is_not_reproduced() {
-        let current = stamp_skill_hash(FRONTMATTER_SKILL, 1234, true);
-        assert_ne!(
-            current,
-            format!("<!-- hot-skill-hash:1234 -->\n{FRONTMATTER_SKILL}")
-        );
-        assert!(!current.starts_with("<!-- hot-skill-hash"));
-    }
-
-    #[test]
-    fn only_a_leading_marker_hiding_frontmatter_is_legacy() {
-        let legacy = format!("<!-- hot-skill-hash:1234 -->\n{FRONTMATTER_SKILL}");
-        assert!(has_broken_legacy_frontmatter_layout(&legacy, true));
-
-        let plain_markdown = "<!-- hot-skill-hash:1234 -->\n# Reference\n\nLocally edited body\n";
-        assert!(!has_broken_legacy_frontmatter_layout(plain_markdown, true));
-
-        let prepended_edit = "<!-- LOCAL EDIT -->\n<!-- hot-skill-hash:1234 -->\n# Reference\n";
-        assert!(!has_broken_legacy_frontmatter_layout(prepended_edit, true));
-        assert!(!has_broken_legacy_frontmatter_layout(&legacy, false));
+        let hot = "// hot-skill-hash:9\n::demo ns\n";
+        assert_eq!(strip_legacy_skill_hash(hot), "::demo ns\n");
     }
 }

@@ -341,13 +341,14 @@ hot completions fish > ~/.config/fish/completions/hot.fish
 Add AI coding support to help AI assistants understand Hot. This uses the open AGENTS.md and SKILL.md standards, which are supported by Cursor, Claude Code, GitHub Copilot, Windsurf, and many other AI coding tools.
 
 ```bash
-hot ai add              # Add AGENTS.md + .skills/hot-language/ to project
+hot ai add              # Add AGENTS.md + bundled skills to project
 hot ai add --global     # Install skills to ~/.skills/ (available in all projects)
 ```
 
-`hot ai add` installs the Hot language skill snapshot bundled with your Hot
-release, so it works offline and does not require Node or GitHub access. To
-install the latest public skill from the skills.sh ecosystem instead, use:
+`hot ai add` installs the skill snapshots bundled with your Hot release, so it
+works offline and does not require Node or GitHub access. Available skills can
+vary by Hot version; use `hot ai list` to inspect the installed release. To
+install the latest public skills from the skills.sh ecosystem instead, use:
 
 ```bash
 npx skills add hot-dev/hot-skills
@@ -356,6 +357,7 @@ npx skills add hot-dev/hot-skills
 Files created:
 - `AGENTS.md` — AI agent instructions (passive context)
 - `.skills/hot-language/` — Detailed Hot language skill with references
+- `.skills/hot-ai-agents/` — Hot AI agent and SDK integration guidance
 
 Other commands:
 

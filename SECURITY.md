@@ -5,8 +5,8 @@ safe.
 
 ## Supported Versions
 
-Security fixes are applied to the latest published `vX.Y.Z` release on the
-`stable` branch. Older minor versions are not maintained.
+Security fixes are applied on `main` and published in the latest `vX.Y.Z`
+release. Older minor versions are not maintained.
 
 | Version | Supported          |
 | ------- | ------------------ |

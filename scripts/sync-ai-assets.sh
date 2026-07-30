@@ -9,6 +9,7 @@ python3 - "$repo_root" "$mirror_repo" "$requested_skill" <<'PY'
 from __future__ import annotations
 
 import hashlib
+import re
 import shutil
 import sys
 from pathlib import Path
@@ -30,6 +31,12 @@ def skill_names(root: Path) -> list[str]:
     )
 
 
+def directory_names(root: Path) -> list[str]:
+    if not root.is_dir():
+        return []
+    return sorted(path.name for path in root.iterdir() if path.is_dir())
+
+
 def iter_files(root: Path):
     for path in sorted(root.rglob("*")):
         if path.is_file() and ".DS_Store" not in path.parts and "__pycache__" not in path.parts:
@@ -47,6 +54,24 @@ def tree_hash(root: Path) -> str:
     return digest.hexdigest()
 
 
+def parse_manifest(path: Path) -> dict[str, dict[str, str]]:
+    if not path.is_file():
+        return {}
+    sections: dict[str, dict[str, str]] = {}
+    current: dict[str, str] | None = None
+    for raw_line in path.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        section = re.fullmatch(r'\[skills\."([^"]+)"\]', line)
+        if section:
+            current = {}
+            sections[section.group(1)] = current
+            continue
+        value = re.fullmatch(r'([a-z_]+)\s*=\s*"([^"]*)"', line)
+        if current is not None and value:
+            current[value.group(1)] = value.group(2)
+    return sections
+
+
 if not skills_root.is_dir():
     raise SystemExit(f"Missing canonical skills directory: {skills_root}")
 if not mirror_repo.is_dir():
@@ -58,7 +83,21 @@ if not names:
 if requested_skill and requested_skill not in names:
     raise SystemExit(f"Missing source skill directory: {skills_root / requested_skill}")
 
+mirror_skills_root.mkdir(parents=True, exist_ok=True)
+existing_sections = parse_manifest(manifest_path)
+if requested_skill and set(existing_sections) != set(names):
+    raise SystemExit(
+        "Filtered sync requires a manifest matching the canonical skill set. "
+        "Run a full sync without a skill argument."
+    )
+
 targets = [requested_skill] if requested_skill else names
+if not requested_skill:
+    for stale_name in sorted(set(directory_names(mirror_skills_root)) - set(names)):
+        stale_dir = mirror_skills_root / stale_name
+        shutil.rmtree(stale_dir)
+        print(f"Removed stale mirrored skill {stale_dir}")
+
 for name in targets:
     source_dir = skills_root / name
     dest_dir = mirror_skills_root / name
@@ -78,12 +117,20 @@ lines = [
 ]
 for name in names:
     source_dir = skills_root / name
+    if requested_skill and name != requested_skill:
+        recorded_hash = existing_sections[name].get("tree_hash")
+        if not recorded_hash:
+            raise SystemExit(
+                f"Manifest is missing a tree hash for {name}; run a full sync."
+            )
+    else:
+        recorded_hash = tree_hash(source_dir)
     lines.extend(
         [
             f'[skills."{name}"]',
             f'source_path = "resources/ai/skills/{name}"',
             f'mirror_path = "skills/{name}"',
-            f'tree_hash = "{tree_hash(source_dir)}"',
+            f'tree_hash = "{recorded_hash}"',
             "",
         ]
     )

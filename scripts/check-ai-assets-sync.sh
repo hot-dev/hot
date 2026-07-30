@@ -31,6 +31,12 @@ def skill_names(root: Path) -> list[str]:
     )
 
 
+def directory_names(root: Path) -> list[str]:
+    if not root.is_dir():
+        return []
+    return sorted(path.name for path in root.iterdir() if path.is_dir())
+
+
 def iter_files(root: Path):
     for path in sorted(root.rglob("*")):
         if path.is_file() and ".DS_Store" not in path.parts and "__pycache__" not in path.parts:
@@ -90,6 +96,14 @@ targets = [requested_skill] if requested_skill else names
 mirror_available = mirror_repo.is_dir()
 if mirror_required and not mirror_available:
     fail_sync(f"Local hot-skills mirror repository is missing: {mirror_repo}")
+if mirror_available:
+    mirror_names = directory_names(mirror_repo / "skills")
+    if set(mirror_names) != set(names):
+        fail_sync(
+            "Canonical and mirrored skill directories differ.\n"
+            f"Canonical: {', '.join(names)}\n"
+            f"Mirror:    {', '.join(mirror_names)}"
+        )
 
 for name in targets:
     source_dir = skills_root / name
