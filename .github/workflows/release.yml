@@ -34,7 +34,7 @@ env:
   CARGO_NET_RETRY: 2
   CARGO_HTTP_TIMEOUT: 30
   SQLX_OFFLINE: 'true'
-  TAILWIND_VERSION: v4.1.18
+  TAILWIND_VERSION: v4.3.0
 
 jobs:
   validate-release:
@@ -230,17 +230,23 @@ jobs:
       shell: bash
       run: rustup target add ${{ matrix.target }}
 
-    - name: Install TailwindCSS CLI (macOS)
-      if: runner.os == 'macOS'
-      run: brew install tailwindcss
-
-    - name: Setup Homebrew (Linux)
-      if: runner.os == 'Linux'
-      uses: Homebrew/actions/setup-homebrew@main
-
-    - name: Install TailwindCSS CLI (Linux)
-      if: runner.os == 'Linux'
-      run: brew install tailwindcss
+    - name: Install TailwindCSS CLI (macOS/Linux)
+      if: runner.os != 'Windows'
+      shell: bash
+      run: |
+        case "$RUNNER_OS-$RUNNER_ARCH" in
+          Linux-X64)   asset=tailwindcss-linux-x64 ;;
+          Linux-ARM64) asset=tailwindcss-linux-arm64 ;;
+          macOS-ARM64) asset=tailwindcss-macos-arm64 ;;
+          macOS-X64)   asset=tailwindcss-macos-x64 ;;
+          *) echo "unsupported runner: $RUNNER_OS-$RUNNER_ARCH"; exit 1 ;;
+        esac
+        install_dir="$RUNNER_TEMP/tailwindcss-bin"
+        mkdir -p "$install_dir"
+        curl -sSfL --retry 3 -o "$install_dir/tailwindcss" \
+          "https://github.com/tailwindlabs/tailwindcss/releases/download/${TAILWIND_VERSION}/$asset"
+        chmod +x "$install_dir/tailwindcss"
+        echo "$install_dir" >> "$GITHUB_PATH"
 
     - name: Install TailwindCSS CLI (Windows)
       if: runner.os == 'Windows'
