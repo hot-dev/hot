@@ -52,10 +52,10 @@ valid is-ok(result)   // inspected by a lazy Result-aware function
 page render(result)   // Ok unwraps; Err halts and propagates here
 ```
 
-Ordinary function arguments, template interpolation, and field access are
-consumption boundaries. `is-ok`, `is-err`, `if-ok`, and `if-err` inspect the
-tagged Result without ordinary consumption. `match` also handles Result
-variants explicitly, as described in
+Ordinary function arguments, template interpolation, and ordinary field or
+index access are consumption boundaries. `is-ok`, `is-err`, `if-ok`, and
+`if-err` preserve the wrapper. `match` also handles Result variants explicitly,
+as described in
 [Checking Results Explicitly](#checking-results-explicitly).
 
 ### Dot Access on Results
@@ -67,7 +67,7 @@ response http-get("https://api.example.com/user/1")  // returns a Result
 name response.body.name   // reads .body.name from the Ok payload
 ```
 
-If the Result is an `Err`, the dot access halts execution at that point — the same propagation rule as passing an Err to a function.
+If the Result is an `Err`, the dot access halts execution at that point — the same propagation rule as passing an Err to a function. Use `is-ok`, `is-err`, or `match` when code needs to inspect the Result without consuming it.
 
 ## Checking Results Explicitly
 

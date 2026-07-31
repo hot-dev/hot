@@ -54,7 +54,7 @@ If the HTTP call fails, execution halts at the point of use—no explicit error 
 ### Binding vs Consuming
 
 Binding a `Result` preserves it. Ordinary function arguments, template
-interpolation, and field access consume it:
+interpolation, and ordinary field or index access consume it:
 
 ```hot
 result fetch-user(id) // Result remains intact

@@ -614,7 +614,7 @@ mod type_checking_tests {
     }
 
     #[test]
-    fn test_runtime_metadata_fields_do_not_warn() {
+    fn test_runtime_metadata_fields_warn_as_unknown_fields() {
         let source = r#"
             ::test ns
 
@@ -628,14 +628,21 @@ mod type_checking_tests {
         let errors = compile_and_get_type_errors(source);
         assert!(
             errors.is_empty(),
-            "Runtime metadata field access should compile. Got: {:?}",
+            "Unknown field access remains a warning. Got: {:?}",
             errors
         );
 
         let warnings = compile_and_get_warnings(source);
         assert!(
-            warnings.is_empty(),
-            "Runtime metadata fields should not warn. Got: {:?}",
+            ["$type", "$val"]
+                .iter()
+                .all(|expected| warnings.iter().any(|warning| {
+                    matches!(
+                        warning,
+                        CompilerError::UnknownField { field_name, .. } if field_name == expected
+                    )
+                })),
+            "Runtime metadata names should be ordinary unknown fields. Got: {:?}",
             warnings
         );
     }

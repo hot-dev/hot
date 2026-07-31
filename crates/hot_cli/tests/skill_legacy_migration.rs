@@ -1,9 +1,10 @@
 //! Installed skills keep their native file formats and migrate older stamps.
 
-use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use std::path::Path;
 use std::process::{Command, ExitStatus};
+
+use siphasher::sip::SipHasher13;
 
 const MANIFEST_FILE: &str = ".hot-skill-manifest.json";
 
@@ -12,9 +13,13 @@ fn hot_binary() -> &'static Path {
 }
 
 fn run_status(project: &Path, args: &[&str]) -> ExitStatus {
+    let home = project.join(".test-home");
+    std::fs::create_dir_all(&home).expect("create isolated home");
     Command::new(hot_binary())
         .args(args)
         .current_dir(project)
+        .env("HOME", &home)
+        .env("USERPROFILE", &home)
         .status()
         .unwrap_or_else(|e| panic!("run hot {args:?}: {e}"))
 }
@@ -24,8 +29,19 @@ fn run(project: &Path, args: &[&str]) {
     assert!(status.success(), "hot {args:?} should succeed");
 }
 
+fn run_with_home(project: &Path, home: &Path, args: &[&str]) {
+    let status = Command::new(hot_binary())
+        .args(args)
+        .current_dir(project)
+        .env("HOME", home)
+        .env("USERPROFILE", home)
+        .status()
+        .unwrap_or_else(|e| panic!("run hot {args:?}: {e}"));
+    assert!(status.success(), "hot {args:?} should succeed");
+}
+
 fn legacy_hash(content: &str) -> u64 {
-    let mut hasher = DefaultHasher::new();
+    let mut hasher = SipHasher13::new();
     content.hash(&mut hasher);
     hasher.finish()
 }
@@ -133,6 +149,176 @@ fn hot_ai_update_preserves_local_edits_when_shipped_source_is_unchanged() {
 }
 
 #[test]
+fn hot_ai_update_preserves_unmanaged_files() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let project = temp.path();
+
+    run(project, &["ai", "add"]);
+    let notes = project.join(".skills/hot-language/my-notes.md");
+    std::fs::write(&notes, "keep me\n").unwrap();
+
+    run(project, &["ai", "update"]);
+
+    assert_eq!(
+        std::fs::read_to_string(notes).unwrap(),
+        "keep me\n",
+        "update must not delete files absent from the managed manifest"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn hot_ai_update_does_not_follow_unmanaged_directory_symlinks() {
+    use std::os::unix::fs::symlink;
+
+    let temp = tempfile::tempdir().expect("tempdir");
+    let project = temp.path();
+    let outside = project.join("outside");
+    std::fs::create_dir(&outside).unwrap();
+    let sentinel = outside.join("keep.txt");
+    std::fs::write(&sentinel, "keep me\n").unwrap();
+
+    run(project, &["ai", "add"]);
+    symlink(
+        &outside,
+        project.join(".skills/hot-language/linked-outside"),
+    )
+    .unwrap();
+
+    run(project, &["ai", "update"]);
+
+    assert_eq!(
+        std::fs::read_to_string(sentinel).unwrap(),
+        "keep me\n",
+        "skill cleanup must never traverse an unmanaged directory symlink"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn hot_ai_update_rejects_a_managed_file_symlink() {
+    use std::os::unix::fs::symlink;
+
+    let temp = tempfile::tempdir().expect("tempdir");
+    let project = temp.path();
+
+    run(project, &["ai", "add"]);
+    let outside = project.join("outside-skill.md");
+    std::fs::write(&outside, "do not replace\n").unwrap();
+    let managed = project.join(".skills/hot-language/SKILL.md");
+    std::fs::remove_file(&managed).unwrap();
+    symlink(&outside, &managed).unwrap();
+
+    let status = run_status(project, &["ai", "update"]);
+
+    assert!(!status.success(), "managed symlinks must make update fail");
+    assert_eq!(
+        std::fs::read_to_string(outside).unwrap(),
+        "do not replace\n",
+        "skill update must never write through a managed file symlink"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn hot_ai_update_rejects_a_managed_directory_symlink() {
+    use std::os::unix::fs::symlink;
+
+    let temp = tempfile::tempdir().expect("tempdir");
+    let project = temp.path();
+
+    run(project, &["ai", "add"]);
+    let outside = project.join("outside-references");
+    std::fs::create_dir(&outside).unwrap();
+    let sentinel = outside.join("keep.txt");
+    std::fs::write(&sentinel, "keep me\n").unwrap();
+    let managed = project.join(".skills/hot-language/references");
+    std::fs::remove_dir_all(&managed).unwrap();
+    symlink(&outside, &managed).unwrap();
+
+    let status = run_status(project, &["ai", "update"]);
+
+    assert!(
+        !status.success(),
+        "symlinked managed directories must make update fail"
+    );
+    assert_eq!(
+        std::fs::read_to_string(sentinel).unwrap(),
+        "keep me\n",
+        "skill update must never write through a managed directory symlink"
+    );
+    assert_eq!(
+        std::fs::read_dir(outside).unwrap().count(),
+        1,
+        "skill update must not create managed files outside the skill tree"
+    );
+}
+
+#[test]
+fn hot_ai_update_refreshes_project_and_global_managed_skills() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let project = temp.path();
+    let home = project.join("home");
+    std::fs::create_dir(&home).unwrap();
+
+    run_with_home(project, &home, &["ai", "add"]);
+    run_with_home(project, &home, &["ai", "add", "--global"]);
+
+    std::fs::remove_dir_all(project.join(".skills/hot-ai-agents")).unwrap();
+    std::fs::remove_dir_all(home.join(".skills/hot-language")).unwrap();
+    let project_manifest = project.join(".skills/hot-language").join(MANIFEST_FILE);
+    let global_manifest = home.join(".skills/hot-ai-agents").join(MANIFEST_FILE);
+    std::fs::write(&project_manifest, "{not valid json").unwrap();
+    std::fs::write(&global_manifest, "{not valid json").unwrap();
+
+    run_with_home(project, &home, &["ai", "update"]);
+
+    for manifest in [project_manifest, global_manifest] {
+        let content = std::fs::read_to_string(&manifest).unwrap();
+        serde_json::from_str::<serde_json::Value>(&content)
+            .unwrap_or_else(|e| panic!("{} was not refreshed: {e}", manifest.display()));
+    }
+}
+
+#[test]
+fn hot_ai_update_repairs_a_corrupt_manifest_without_clobbering_files() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let project = temp.path();
+
+    run(project, &["ai", "add"]);
+    let skill_dir = project.join(".skills/hot-language");
+    let skill_md = skill_dir.join("SKILL.md");
+    let customized = format!(
+        "{}\n<!-- MY LOCAL CUSTOMIZATION -->\n",
+        std::fs::read_to_string(&skill_md).unwrap().trim_end()
+    );
+    std::fs::write(&skill_md, &customized).unwrap();
+    std::fs::write(skill_dir.join(MANIFEST_FILE), "{not valid json").unwrap();
+
+    run(project, &["ai", "update"]);
+
+    assert_eq!(
+        std::fs::read_to_string(&skill_md).unwrap(),
+        customized,
+        "manifest recovery must preserve existing skill files"
+    );
+    let repaired = std::fs::read_to_string(skill_dir.join(MANIFEST_FILE)).unwrap();
+    let parsed: serde_json::Value =
+        serde_json::from_str(&repaired).expect("manifest should be repaired as valid JSON");
+    assert_eq!(parsed["version"], 1);
+    assert!(
+        std::fs::read_dir(&skill_dir).unwrap().all(|entry| {
+            !entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".hot-skill-manifest.json.tmp-")
+        }),
+        "atomic manifest write must not leave a temporary file"
+    );
+}
+
+#[test]
 fn hot_ai_update_does_not_reinstall_a_removed_skill() {
     let temp = tempfile::tempdir().expect("tempdir");
     let project = temp.path();
@@ -173,4 +359,37 @@ fn hot_ai_list_and_empty_update_tolerate_a_missing_skill_bundle() {
             "hot {args:?} should not require resources when nothing is installed"
         );
     }
+}
+
+#[test]
+fn hot_ai_list_labels_external_skill_installs_honestly() {
+    let project = tempfile::tempdir().expect("project");
+    let isolated_home = project.path().join("home");
+    let skill_dir = project.path().join(".skills/hot-language");
+    std::fs::create_dir_all(&skill_dir).unwrap();
+    std::fs::create_dir(&isolated_home).unwrap();
+    std::fs::write(
+        skill_dir.join("SKILL.md"),
+        "---\nname: hot-language\ndescription: External install.\n---\n",
+    )
+    .unwrap();
+
+    let output = Command::new(hot_binary())
+        .args(["ai", "list"])
+        .current_dir(project.path())
+        .env("HOME", &isolated_home)
+        .env("USERPROFILE", &isolated_home)
+        .output()
+        .expect("run hot ai list");
+    assert!(output.status.success());
+
+    let stdout = String::from_utf8(output.stdout).expect("UTF-8 stdout");
+    assert!(
+        stdout.contains(".skills/hot-language/  (present - project, externally managed)"),
+        "external skill status should be explicit:\n{stdout}"
+    );
+    assert!(
+        !stdout.contains(".skills/hot-language/  (installed - project)"),
+        "external skill must not be reported as managed by hot ai:\n{stdout}"
+    );
 }

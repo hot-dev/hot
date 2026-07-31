@@ -2169,7 +2169,7 @@ unsafe extern "C" fn hot_jit_dot_access(obj_ptr: i64, prop_ptr: i64) -> i64 {
     if vm_ptr.is_null() {
         return new_owned_val(Val::err(Val::Str("JIT dot_access: no VM available".into())));
     }
-    let vm = unsafe { &*vm_ptr };
+    let vm = unsafe { &mut *vm_ptr };
     let obj_val = unsafe { &*(obj_ptr as *const Val) };
     let prop_val = unsafe { &*(prop_ptr as *const Val) };
     let prop_name = match prop_val {
@@ -2180,7 +2180,11 @@ unsafe extern "C" fn hot_jit_dot_access(obj_ptr: i64, prop_ptr: i64) -> i64 {
             )));
         }
     };
-    match vm.access_property(obj_val, prop_name) {
+    let prepared = match vm.unwrap_result_if_ok(obj_val) {
+        Ok(value) => value,
+        Err(_) => return HALT_SENTINEL,
+    };
+    match vm.access_property(&prepared, prop_name) {
         Ok(result) => new_owned_val(result),
         Err(err) => new_owned_val(Val::err(Val::Str(err.to_string().into()))),
     }
@@ -2524,34 +2528,52 @@ unsafe extern "C" fn hot_jit_str_starts_with(str_ptr: i64, prefix_ptr: i64) -> i
 /// `key_ptr` - OwnedVal pointer to the key (Str for maps, Int for vecs)
 /// Returns OwnedVal handle to the result.
 unsafe extern "C" fn hot_jit_dynamic_dot_access(obj_ptr: i64, key_ptr: i64) -> i64 {
+    let vm_ptr = get_jit_vm_ptr();
+    if vm_ptr.is_null() {
+        return new_owned_val(Val::err(Val::Str(
+            "JIT dynamic_dot_access: no VM available".into(),
+        )));
+    }
+    let vm = unsafe { &mut *vm_ptr };
     let obj_val = unsafe { &*(obj_ptr as *const Val) };
     let key_val = unsafe { &*(key_ptr as *const Val) };
-    let result = match obj_val {
-        Val::Map(m) => m.get(key_val).cloned().unwrap_or(Val::Null),
-        Val::Vec(v) => match key_val {
-            Val::Int(i) => {
-                if *i < 0 {
-                    Val::Null
-                } else {
-                    v.get(*i as usize).cloned().unwrap_or(Val::Null)
+    let prepared = match vm.unwrap_result_if_ok(obj_val) {
+        Ok(value) => value,
+        Err(_) => return HALT_SENTINEL,
+    };
+    let result = if let Val::Str(property_name) = key_val {
+        match vm.access_property(&prepared, property_name) {
+            Ok(value) => value,
+            Err(err) => return new_owned_val(Val::err(Val::Str(err.to_string().into()))),
+        }
+    } else {
+        match &prepared {
+            Val::Map(m) => m.get(key_val).cloned().unwrap_or(Val::Null),
+            Val::Vec(v) => match key_val {
+                Val::Int(i) => {
+                    if *i < 0 {
+                        Val::Null
+                    } else {
+                        v.get(*i as usize).cloned().unwrap_or(Val::Null)
+                    }
                 }
-            }
-            _ => Val::Null,
-        },
-        Val::Str(s) => match key_val {
-            Val::Int(i) => {
-                if *i < 0 {
-                    Val::Null
-                } else {
-                    s.chars()
-                        .nth(*i as usize)
-                        .map(|c| Val::from(c.to_string()))
-                        .unwrap_or(Val::Null)
+                _ => Val::Null,
+            },
+            Val::Str(s) => match key_val {
+                Val::Int(i) => {
+                    if *i < 0 {
+                        Val::Null
+                    } else {
+                        s.chars()
+                            .nth(*i as usize)
+                            .map(|c| Val::from(c.to_string()))
+                            .unwrap_or(Val::Null)
+                    }
                 }
-            }
+                _ => Val::Null,
+            },
             _ => Val::Null,
-        },
-        _ => Val::Null,
+        }
     };
     new_owned_val(result)
 }
@@ -2562,29 +2584,44 @@ unsafe extern "C" fn hot_jit_dynamic_dot_access(obj_ptr: i64, key_ptr: i64) -> i
 /// `val_ptr` - OwnedVal pointer to the value
 /// Returns OwnedVal handle to the modified object.
 unsafe extern "C" fn hot_jit_dynamic_dot_set(obj_ptr: i64, key_ptr: i64, val_ptr: i64) -> i64 {
+    let vm_ptr = get_jit_vm_ptr();
+    if vm_ptr.is_null() {
+        return new_owned_val(Val::err(Val::Str(
+            "JIT dynamic_dot_set: no VM available".into(),
+        )));
+    }
+    let vm = unsafe { &*vm_ptr };
     let obj_val = unsafe { &*(obj_ptr as *const Val) };
     let key_val = unsafe { &*(key_ptr as *const Val) };
     let new_value = unsafe { &*(val_ptr as *const Val) };
-    let result = match obj_val {
-        Val::Map(m) => {
-            let mut new_map = (**m).clone();
-            new_map.insert(key_val.clone(), new_value.clone());
-            Val::Map(Box::new(new_map))
+    let result = if let Val::Str(property_name) = key_val {
+        let mut result = obj_val.clone();
+        match vm.set_property(&mut result, property_name, new_value.clone()) {
+            Ok(()) => result,
+            Err(err) => return new_owned_val(Val::err(Val::Str(err.to_string().into()))),
         }
-        Val::Vec(v) => {
-            let mut new_vec = v.clone();
-            if let Val::Int(i) = key_val
-                && *i >= 0
-            {
-                let idx = *i as usize;
-                while new_vec.len() <= idx {
-                    new_vec.push(Val::Null);
-                }
-                new_vec[idx] = new_value.clone();
+    } else {
+        match obj_val {
+            Val::Map(m) => {
+                let mut new_map = (**m).clone();
+                new_map.insert(key_val.clone(), new_value.clone());
+                Val::Map(Box::new(new_map))
             }
-            Val::Vec(new_vec)
+            Val::Vec(v) => {
+                let mut new_vec = v.clone();
+                if let Val::Int(i) = key_val
+                    && *i >= 0
+                {
+                    let idx = *i as usize;
+                    while new_vec.len() <= idx {
+                        new_vec.push(Val::Null);
+                    }
+                    new_vec[idx] = new_value.clone();
+                }
+                Val::Vec(new_vec)
+            }
+            _ => obj_val.clone(),
         }
-        _ => obj_val.clone(),
     };
     new_owned_val(result)
 }
@@ -5760,9 +5797,11 @@ impl<'a> EmitCtx<'a> {
                     .ins()
                     .call(self.helper_refs.dot_access, &[obj_val, prop_const]);
                 let result = builder.inst_results(call)[0];
+                let halt_block = emit_halt_check(builder, result);
                 self.drop_owned_temps(builder, &[obj_temp]);
                 self.define_register(builder, *dest, RawKind::OwnedVal, result)?;
                 self.jump_to_next(builder, ip)?;
+                self.emit_halt_return(builder, halt_block);
                 Ok(EmitResult::Handled)
             }
             Instruction::MergeMaps { dest, source } => {
@@ -5946,6 +5985,7 @@ impl<'a> EmitCtx<'a> {
                     .ins()
                     .call(self.helper_refs.dot_access, &[obj_ptr, prop_ptr]);
                 let result = builder.inst_results(call)[0];
+                let halt_block = emit_halt_check(builder, result);
                 self.drop_owned_temps(builder, &[obj_temp]);
                 let null_sentinel = builder.ins().iconst(types::I64, 0);
                 let is_null = builder.ins().icmp(
@@ -5983,6 +6023,7 @@ impl<'a> EmitCtx<'a> {
                 let merged = builder.use_var(merge_var);
                 self.define_register(builder, *dest, RawKind::OwnedVal, merged)?;
                 self.jump_to_next(builder, ip)?;
+                self.emit_halt_return(builder, halt_block);
                 Ok(EmitResult::Handled)
             }
             Instruction::VecAppend { vec, value } => {
@@ -6152,9 +6193,11 @@ impl<'a> EmitCtx<'a> {
                     .ins()
                     .call(self.helper_refs.dynamic_dot_access, &[obj_ptr, prop_ptr]);
                 let result = builder.inst_results(call)[0];
+                let halt_block = emit_halt_check(builder, result);
                 self.drop_owned_temps(builder, &[obj_temp, prop_temp]);
                 self.define_register(builder, *dest, RawKind::OwnedVal, result)?;
                 self.jump_to_next(builder, ip)?;
+                self.emit_halt_return(builder, halt_block);
                 Ok(EmitResult::Handled)
             }
             Instruction::DynamicDotSet {

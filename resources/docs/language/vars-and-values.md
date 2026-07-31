@@ -85,12 +85,20 @@ Assign to nested paths to build up Maps:
 
 Despite the assignment-like syntax, this does not mutate a shared object. Hot
 constructs or immutably updates the collection and creates a later binding for
-its root name. Closures or other bindings that captured the earlier value
-continue to refer to that earlier value.
+its root name. A lambda captures the current values of outer names when it is
+created, so a later deep-path assignment does not change an already captured
+value. A named `fn` instead resolves an outer name from the current binding
+each time it runs.
 
 Deep paths also work with Vec indices:
 
 {{snippet:vars#deep-path-vec}}
+
+Bracket paths can be dynamic. Hot evaluates the bracket expression and uses
+the result as a Map key or, for an integer applied to a Vec, as its index.
+Paths can continue after the dynamic segment:
+
+{{snippet:vars#deep-path-dynamic}}
 
 ### Appending to Vectors
 

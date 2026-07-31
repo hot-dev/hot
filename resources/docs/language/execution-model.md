@@ -46,11 +46,10 @@ are defined in [Flows](/docs/language/flows#parallel-flow).
 ## Results at Evaluation Boundaries
 
 Binding a `Result` does not consume it. Ordinary function arguments, template
-interpolation, and field access are consumption boundaries: an `Ok` supplies
-its payload and an `Err` propagates. Lazy Result-aware helpers inspect the
-tagged Result without ordinary consumption. A `match` selects an arm from the
-variant tag, and the matched name exposes that variant's payload inside the
-arm.
+interpolation, and ordinary field or index access are consumption boundaries:
+an `Ok` supplies its payload and an `Err` propagates. Lazy Result-aware helpers
+preserve the wrapper. A `match` selects an arm from the variant identity, and
+the matched name exposes that variant's payload inside the arm.
 
 Function return annotations name the successful value rather than a visible
 `Result` wrapper. See [Error Handling](/docs/language/errors) for creation,

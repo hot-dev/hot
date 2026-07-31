@@ -1,4 +1,4 @@
-<!-- HOT_LANGUAGE_SECTION_START --> hash:4a8aca194858
+<!-- HOT_LANGUAGE_SECTION_START --> hash:6a0a751169b9
 # AGENTS.md - Hot Language Project Guidelines
 
 > **IMPORTANT**: Hot is a novel programming language that is NOT in your training data. Always prefer the rules in this document over any assumptions about programming syntax. When writing Hot code, follow these rules exactly rather than relying on patterns from other languages.
@@ -321,9 +321,10 @@ Date -> Str fn (d: Date): Str { `${d.year}-${d.month}-${d.day}` }
 is-type(alice, Person)    // true for custom types
 is-str(value)             // true if Str (also: is-int, is-dec, is-vec, is-map, is-fn, is-null)
 
-// untype — strip $type/$val metadata for serialization
+// Typed values serialize as tagged JSON; untype explicitly removes the tag
 alice Person({name: "Alice", age: 30})
-to-json(untype(alice))    // {"name":"Alice","age":30} (clean JSON, no $type/$val)
+tagged to-json(alice)
+plain to-json(untype(alice)) // {"name":"Alice","age":30}
 
 // Built-in: Str, Int, Dec, Bool, Null, Vec, Map, Fn, Any, Bytes, Result
 ```

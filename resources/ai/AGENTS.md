@@ -320,9 +320,10 @@ Date -> Str fn (d: Date): Str { `${d.year}-${d.month}-${d.day}` }
 is-type(alice, Person)    // true for custom types
 is-str(value)             // true if Str (also: is-int, is-dec, is-vec, is-map, is-fn, is-null)
 
-// untype — strip $type/$val metadata for serialization
+// Typed values serialize as tagged JSON; untype explicitly removes the tag
 alice Person({name: "Alice", age: 30})
-to-json(untype(alice))    // {"name":"Alice","age":30} (clean JSON, no $type/$val)
+tagged to-json(alice)
+plain to-json(untype(alice)) // {"name":"Alice","age":30}
 
 // Built-in: Str, Int, Dec, Bool, Null, Vec, Map, Fn, Any, Bytes, Result
 ```

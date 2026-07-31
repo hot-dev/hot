@@ -525,15 +525,18 @@ greet fn
 
 ## Untyping for Serialization
 
-Typed values carry internal runtime metadata. User code should rely on normal
-field access, `match`, and `is-type`; use `untype` before serializing typed data
-for JSON APIs or storage that expects plain maps:
+Typed values carry a transparent runtime wrapper, not a source-level reflection
+API. Use normal field access, `match`, and `is-type`. `to-json` preserves type
+identity with tagged JSON whose wrapper uses `$type` and `$val`. Field access
+never exposes or skips through those wrapper members: `value.$val` means a
+payload field literally named `$val`. Call `untype` first only when an API or
+storage system expects untagged maps:
 
 ```hot
 User type { id: Str, email: Str }
 user User({id: "u1", email: "a@example.com"})
 
-to-json(user)          // includes internal type metadata
+to-json(user)          // tagged JSON that preserves the User type
 to-json(untype(user))  // {"id":"u1","email":"a@example.com"}
 ```
 

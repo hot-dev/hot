@@ -39,10 +39,8 @@ meta ["test"] fn () {
   dog Animal.Dog
   cat Animal.Cat
 
-  // Initial variants behave like closed-enum variants: tagged maps
-  // with $type ending in the variant name.
-  assert(ends-with(dog.$type, ".Dog"), "Dog variant should tag as .Dog")
-  assert(ends-with(cat.$type, ".Cat"), "Cat variant should tag as .Cat")
+  assert(is-type(dog, Animal.Dog), "Dog should have the Dog variant")
+  assert(is-type(cat, Animal.Cat), "Cat should have the Cat variant")
 }
 
 test-open-enum-match-requires-default
@@ -78,8 +76,8 @@ test-arrow-enrollment-creates-variant
 meta ["test"] fn () {
   eagle Animal.Bird({species: "Eagle", wingspan: 2.1})
 
-  assert(ends-with(eagle.$type, ".Bird"), "Bird variant should tag as .Bird")
-  assert-eq("Eagle", eagle.$val.species, "Bird payload retains source type fields")
+  assert(is-type(eagle, Animal.Bird), "Bird constructor should create Animal.Bird")
+  assert-eq("Eagle", eagle.species, "Bird payload retains source type fields")
 }
 
 test-arrow-enrolled-variant-in-match
@@ -112,8 +110,8 @@ test-bodyless-arrow-synthesizes-wrap
 meta ["test"] fn () {
   salmon Animal.Fish({species: "Salmon"})
 
-  assert(ends-with(salmon.$type, ".Fish"), "Bodyless arrow still produces a variant")
-  assert-eq("Salmon", salmon.$val.species, "Synthesized wrap preserves payload")
+  assert(is-type(salmon, Animal.Fish), "Bodyless arrow still produces a variant")
+  assert-eq("Salmon", salmon.species, "Synthesized wrap preserves payload")
 }
 
 // -- Role-shaped variants: variant name differs from source type --
@@ -131,8 +129,8 @@ test-role-shaped-variant
 meta ["test"] fn () {
   gecko Animal.Reptile({length-cm: 12.5})
 
-  assert(ends-with(gecko.$type, ".Reptile"), "Role-shaped variant uses the target name")
-  assert-eq(12.5, gecko.$val.length-cm, "Role-shaped variant preserves source payload")
+  assert(is-type(gecko, Animal.Reptile), "Role-shaped variant uses the target name")
+  assert-eq(12.5, gecko.length-cm, "Role-shaped variant preserves source payload")
 }
 
 // -- Closed enums must be exhaustively matched --

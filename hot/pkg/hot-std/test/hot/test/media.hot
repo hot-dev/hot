@@ -75,11 +75,11 @@ fn () {
         quality: "standard"
     })
 
-    // Test field access via $val
-    assert-eq("output/city.png", media.$val.file.path, "Should access $val.file.path")
-    assert-eq("A futuristic city", media.$val.prompt, "Should access $val.prompt")
-    assert-eq("openai", media.$val.provider, "Should access $val.provider")
-    assert-eq("dall-e-3", media.$val.model, "Should access $val.model")
+    // Variant payload fields are transparent to normal field access.
+    assert-eq("output/city.png", media.file.path, "Should access file.path")
+    assert-eq("A futuristic city", media.prompt, "Should access prompt")
+    assert-eq("openai", media.provider, "Should access provider")
+    assert-eq("dall-e-3", media.model, "Should access model")
     assert(is-null(::hot::media/duration(media)), "duration() should return null for images")
 }
 
@@ -129,10 +129,9 @@ fn () {
         language: "en-US"
     })
 
-    // Test field access via $val
-    assert-eq("audio/greeting.wav", media.$val.file.path, "Should access $val.file.path")
-    assert-eq("Welcome message", media.$val.prompt, "Should access $val.prompt")
-    assert-eq("openai", media.$val.provider, "Should access $val.provider")
+    assert-eq("audio/greeting.wav", media.file.path, "Should access file.path")
+    assert-eq("Welcome message", media.prompt, "Should access prompt")
+    assert-eq("openai", media.provider, "Should access provider")
     assert-eq(2.75, ::hot::media/duration(media), "duration() should return duration_seconds")
 }
 
@@ -184,10 +183,9 @@ fn () {
         fps: 24
     })
 
-    // Test field access via $val
-    assert-eq("videos/animation.webm", media.$val.file.path, "Should access $val.file.path")
-    assert-eq("An animated logo reveal", media.$val.prompt, "Should access $val.prompt")
-    assert-eq("google", media.$val.provider, "Should access $val.provider")
+    assert-eq("videos/animation.webm", media.file.path, "Should access file.path")
+    assert-eq("An animated logo reveal", media.prompt, "Should access prompt")
+    assert-eq("google", media.provider, "Should access provider")
     assert-eq(5.0, ::hot::media/duration(media), "duration() should return duration_seconds")
 }
 
@@ -299,15 +297,14 @@ fn () {
     file-meta mock-file-meta("test.png", 100)
 
     // Test with pre-typed data (wrapping in Image type first)
-    // The variant constructor should extract the inner $val automatically
+    // The variant constructor accepts an already typed payload.
     image-media-typed Media.Image(Image({file: file-meta, prompt: "Typed", revised_prompt: null, model: "m", provider: "p", width: 100, height: 100, format: "png", style: null, quality: null}))
 
     // Test with struct literal directly (the simpler/preferred form)
     image-media-literal Media.Image({file: file-meta, prompt: "Literal", revised_prompt: null, model: "m", provider: "p", width: 100, height: 100, format: "png", style: null, quality: null})
 
-    // Both forms should have the same $type
-    assert-eq(image-media-typed.$type, "::hot::media/Media.Image", "Typed form should have correct $type")
-    assert-eq(image-media-literal.$type, "::hot::media/Media.Image", "Literal form should have correct $type")
+    assert(is-type(image-media-typed, Media.Image), "Typed form should create Media.Image")
+    assert(is-type(image-media-literal, Media.Image), "Literal form should create Media.Image")
 
     // Both should match correctly
     result-typed match image-media-typed {
@@ -326,8 +323,8 @@ fn () {
     assert-eq("image", result-literal, "Match should work with literal construction")
 
     // Both forms should have equivalent field access
-    assert-eq("Typed", image-media-typed.$val.prompt, "Typed form field access should work")
-    assert-eq("Literal", image-media-literal.$val.prompt, "Literal form field access should work")
+    assert-eq("Typed", image-media-typed.prompt, "Typed form field access should work")
+    assert-eq("Literal", image-media-literal.prompt, "Literal form field access should work")
 
     // Test default branch in match
     audio-media Media.Audio({file: file-meta, prompt: "Audio", revised_prompt: null, model: "m", provider: "p", duration_seconds: 60, sample_rate: 44100, channels: 2, format: "mp3", voice: null, speed: null})

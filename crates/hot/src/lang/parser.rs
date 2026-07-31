@@ -772,7 +772,8 @@ impl Parser {
                                 !has_whitespace // No whitespace = function call (standalone)
                             }
                             TokenType::LeftBracket => {
-                                // Check for whitespace: a[0] (index access) vs a [0] (variable assignment)
+                                // Check for whitespace: a[0] (access or deep assignment)
+                                // vs a [0] (ordinary variable assignment).
                                 let var_name_len = if let TokenType::Identifier(name) =
                                     &current_token.token_type
                                 {
@@ -782,14 +783,8 @@ impl Parser {
                                 };
                                 let has_whitespace =
                                     next_token.column > current_token.column + var_name_len as u32;
-
-                                // Check if this is empty brackets (append syntax: items[] value)
-                                // If so, it's a variable assignment, not a standalone expression
-                                let is_append = self.peek_n(2).is_some_and(|t| {
-                                    matches!(t.token_type, TokenType::RightBracket)
-                                });
-
-                                !has_whitespace && !is_append // No whitespace AND not append = standalone
+                                !has_whitespace
+                                    && self.adjacent_bracket_path_is_standalone(&current_token)
                             }
                             TokenType::RightBrace | TokenType::Comma => true, // End of scope or followed by comma
                             _ => false, // Likely a variable assignment
@@ -1082,19 +1077,24 @@ impl Parser {
                     break; // This is a value (has whitespace before [), not a path index
                 }
 
-                // Peek ahead to see if this is [] (append), [int] (index), or [value...] (array literal)
+                // Peek ahead to distinguish deep assignment from an adjacent
+                // value. Empty, integer, identifier, and string brackets are
+                // all assignment paths; other bracket contents belong to the
+                // value expression.
                 let next_token = self.peek_n(1);
                 let is_append = next_token
                     .as_ref()
                     .is_some_and(|t| matches!(t.token_type, TokenType::RightBracket));
-                let is_index = next_token
-                    .as_ref()
-                    .is_some_and(|t| matches!(t.token_type, TokenType::Int(_)))
-                    && self
-                        .peek_n(2)
-                        .is_some_and(|t| matches!(t.token_type, TokenType::RightBracket));
+                let is_path_part = next_token.as_ref().is_some_and(|t| {
+                    matches!(
+                        t.token_type,
+                        TokenType::Int(_) | TokenType::Identifier(_) | TokenType::String(_)
+                    )
+                }) && self
+                    .peek_n(2)
+                    .is_some_and(|t| matches!(t.token_type, TokenType::RightBracket));
 
-                if !is_append && !is_index {
+                if !is_append && !is_path_part {
                     break; // This is a value, not a path index or append
                 }
 
@@ -1106,19 +1106,23 @@ impl Parser {
                     last_token_end = bracket_token.position + bracket_token.length;
                     deep_path_parts.push(DeepPathPart::Append);
                 } else {
-                    // Integer index
-                    let index = match self.next() {
-                        Some(token) => {
-                            if let TokenType::Int(i) = token.token_type {
-                                i as usize
-                            } else {
+                    let path_part = match self.next() {
+                        Some(token) => match token.token_type {
+                            TokenType::Int(index) => DeepPathPart::Index(index as usize),
+                            TokenType::Identifier(name) => DeepPathPart::DynamicIndex(name),
+                            TokenType::String(key) => DeepPathPart::Key(key),
+                            other => {
                                 return Err(self.error(&format!(
-                                    "Expected integer index in brackets, got {:?}",
-                                    token.token_type
+                                    "Expected integer, identifier, or string in brackets, got {:?}",
+                                    other
                                 )));
                             }
+                        },
+                        None => {
+                            return Err(
+                                self.error("Expected integer, identifier, or string in brackets")
+                            );
                         }
-                        None => return Err(self.error("Expected integer index in brackets")),
                     };
 
                     // Expect closing bracket
@@ -1128,7 +1132,7 @@ impl Parser {
                     let bracket_token = self.next().unwrap(); // consume ]
                     last_token_end = bracket_token.position + bracket_token.length;
 
-                    deep_path_parts.push(DeepPathPart::Index(index));
+                    deep_path_parts.push(path_part);
                 }
             } else {
                 break;
@@ -5728,18 +5732,13 @@ impl Parser {
                             // Clear assignment patterns
                             TokenType::LeftBrace => true, // identifier { ... } (map literal)
                             TokenType::LeftBracket => {
-                                // Check whitespace: a[0] (index access) vs a [0] (vector assignment)
-                                // If there's whitespace, it's a vector assignment: a [0]
-                                // If no whitespace (adjacent), it might be an index access OR append syntax
+                                // Whitespace starts an ordinary vector assignment.
+                                // For an adjacent bracket path, distinguish a
+                                // read from deep assignment by what follows the
+                                // complete path.
                                 let has_whitespace =
                                     next_token.column > var_column + var_name_len as u32;
-
-                                // Also check for append syntax: items[] value (empty brackets)
-                                let is_append = self.peek_n(lookahead_index + 1).is_some_and(|t| {
-                                    matches!(t.token_type, TokenType::RightBracket)
-                                });
-
-                                has_whitespace || is_append // Treat as assignment if there's whitespace OR it's append syntax
+                                has_whitespace || !self.adjacent_bracket_path_is_standalone(&token)
                             }
                             TokenType::String(_) => true, // identifier "string"
                             TokenType::Int(_) => true,    // identifier 42
@@ -6142,6 +6141,87 @@ impl Parser {
 
     fn peek_n(&self, n: usize) -> Option<&Token> {
         self.tokens.get(self.token_index + n)
+    }
+
+    /// Distinguish an indexed value expression from indexed deep assignment.
+    ///
+    /// Both forms begin with the same adjacent path (`value[index]`). The path
+    /// is a value when it ends at a statement/expression boundary, and an
+    /// assignment target when another value follows it on the same statement.
+    fn adjacent_bracket_path_is_standalone(&self, root: &Token) -> bool {
+        let mut offset = 1;
+        let mut path_end = root.position + root.length;
+
+        loop {
+            let Some(token) = self.peek_n(offset) else {
+                return true;
+            };
+            if token.position != path_end {
+                break;
+            }
+
+            match token.token_type {
+                TokenType::LeftBracket => {
+                    let Some(path_part) = self.peek_n(offset + 1) else {
+                        return true;
+                    };
+
+                    // Empty brackets are append syntax and therefore require
+                    // an assignment value.
+                    if matches!(path_part.token_type, TokenType::RightBracket) {
+                        return false;
+                    }
+
+                    let is_path_part = matches!(
+                        path_part.token_type,
+                        TokenType::Int(_) | TokenType::Identifier(_) | TokenType::String(_)
+                    );
+                    let Some(close) = self.peek_n(offset + 2) else {
+                        return true;
+                    };
+                    if !is_path_part || !matches!(close.token_type, TokenType::RightBracket) {
+                        return true;
+                    }
+
+                    path_end = close.position + close.length;
+                    offset += 3;
+                }
+                TokenType::Dot => {
+                    let Some(property) = self.peek_n(offset + 1) else {
+                        return true;
+                    };
+                    if self.extract_property_name(&property.token_type).is_none() {
+                        return true;
+                    }
+                    path_end = property.position + property.length;
+                    offset += 2;
+                }
+                _ => break,
+            }
+        }
+
+        match self.peek_n(offset).map(|token| &token.token_type) {
+            None
+            | Some(
+                TokenType::Eof
+                | TokenType::Newline
+                | TokenType::Comma
+                | TokenType::RightBrace
+                | TokenType::RightBracket
+                | TokenType::RightParen
+                | TokenType::Pipe
+                | TokenType::PipeOp,
+            ) => true,
+            // Calling an indexed function value remains a standalone value.
+            Some(TokenType::LeftParen)
+                if self
+                    .peek_n(offset)
+                    .is_some_and(|token| token.position == path_end) =>
+            {
+                true
+            }
+            Some(_) => false,
+        }
     }
 
     fn next(&mut self) -> Option<Token> {

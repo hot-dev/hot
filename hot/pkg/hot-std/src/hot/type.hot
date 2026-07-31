@@ -559,7 +559,9 @@ untype
 meta {
     core: true,
     doc: """
-    Transform Hot typed structures to simple Val structures by removing internal type metadata.
+    Transform Hot typed structures to untagged values. `to-json` preserves
+    type identity with tagged JSON by default; call `untype` first when a
+    recipient expects ordinary untagged JSON.
 
     **Example**
 

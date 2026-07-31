@@ -37,6 +37,16 @@ config.servers[1] "db.example.com"
 config.retries 3
 // @end: deep-path-vec
 
+// @doc: deep-path-dynamic
+profile {name: "Ada"}
+field "name"
+profile[field] "Grace"
+
+workers [{status: "idle"}, {status: "idle"}]
+index 1
+workers[index].status "ready"
+// @end: deep-path-dynamic
+
 // @doc: deep-path-access
 user-nested {name: "Alice", settings: {theme: "dark"}}
 
@@ -107,6 +117,13 @@ meta ["test"] fn () {
   assert-eq("api.example.com", config.servers[0], "server 0")
   assert-eq("db.example.com", config.servers[1], "server 1")
   assert-eq(3, config.retries, "retries")
+}
+
+test-deep-path-dynamic
+meta ["test"] fn () {
+  assert-eq("Grace", profile.name, "dynamic map key")
+  assert-eq("idle", workers[0].status, "untouched vector element")
+  assert-eq("ready", workers[1].status, "dynamic vector index")
 }
 
 test-deep-path-access

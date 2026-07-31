@@ -3,12 +3,7 @@
 ::hot::test::docs::variant-unions ns
 meta ["test"]
 
-// Note: All functions used here are core (assert-eq, ends-with, is-type, assert, length, etc.)
-
-// Helper to check variant type ends with expected suffix
-check-variant fn (val, expected-suffix: Str, msg: Str) {
-  assert(ends-with(val.$type, expected-suffix), msg)
-}
+// Note: All functions used here are core (assert-eq, is-type, assert, length, etc.)
 
 // -- Basic Direction enum (unit variants only) --
 
@@ -27,11 +22,10 @@ meta ["test"] fn () {
   left Direction.Left
   right Direction.Right
 
-  // Unit variants should have $type field ending with the variant name
-  check-variant(up, ".Up", "Up variant should have $type ending with .Up")
-  check-variant(down, ".Down", "Down variant should have $type ending with .Down")
-  check-variant(left, ".Left", "Left variant should have $type ending with .Left")
-  check-variant(right, ".Right", "Right variant should have $type ending with .Right")
+  assert(is-type(up, Direction.Up), "Up should have the Up variant")
+  assert(is-type(down, Direction.Down), "Down should have the Down variant")
+  assert(is-type(left, Direction.Left), "Left should have the Left variant")
+  assert(is-type(right, Direction.Right), "Right should have the Right variant")
 }
 
 
@@ -57,11 +51,8 @@ meta ["test"] fn () {
   // Create a circle using the variant constructor
   circle Shape.Circle({radius: 5.0})
 
-  // Should have $type field ending with .Circle
-  check-variant(circle, ".Circle", "Circle should have $type ending with .Circle")
-
-  // Data should be in $val
-  assert-eq(5.0, circle.$val.radius, "Circle should have $val.radius field")
+  assert(is-type(circle, Shape.Circle), "Circle should have the Circle variant")
+  assert-eq(5.0, circle.radius, "Circle should expose its radius")
 }
 
 test-unit-variant-in-mixed-enum
@@ -69,16 +60,16 @@ meta ["test"] fn () {
   // Point is a unit variant in Shape - no function call needed
   point Shape.Point
 
-  check-variant(point, ".Point", "Point should have $type ending with .Point")
+  assert(is-type(point, Shape.Point), "Point should have the Point variant")
 }
 
 test-rectangle-variant
 meta ["test"] fn () {
   rect Shape.Rectangle({width: 10.0, height: 20.0})
 
-  check-variant(rect, ".Rectangle", "Rectangle should have $type ending with .Rectangle")
-  assert-eq(10.0, rect.$val.width, "Rectangle should have $val.width field")
-  assert-eq(20.0, rect.$val.height, "Rectangle should have $val.height field")
+  assert(is-type(rect, Shape.Rectangle), "Rectangle should have the Rectangle variant")
+  assert-eq(10.0, rect.width, "Rectangle should expose its width")
+  assert-eq(20.0, rect.height, "Rectangle should expose its height")
 }
 
 
@@ -102,7 +93,7 @@ test-result-ok
 meta ["test"] fn () {
   result Result.OkVal({value: 42})
 
-  check-variant(result, ".OkVal", "OkVal result should have $type ending with .OkVal")
+  assert(is-type(result, Result.OkVal), "Result should have the OkVal variant")
   assert-eq(42, result.value, "OkVal result should expose value field")
 }
 
@@ -110,7 +101,7 @@ test-result-err
 meta ["test"] fn () {
   result Result.ErrVal({message: "Something went wrong", code: 500})
 
-  check-variant(result, ".ErrVal", "ErrVal result should have $type ending with .ErrVal")
+  assert(is-type(result, Result.ErrVal), "Result should have the ErrVal variant")
   assert-eq("Something went wrong", result.message, "ErrVal result should expose message field")
   assert-eq(500, result.code, "ErrVal result should expose code field")
 }
@@ -131,8 +122,8 @@ test-option-some
 meta ["test"] fn () {
   opt Option.SomeVal({value: "hello"})
 
-  check-variant(opt, ".SomeVal", "SomeVal option should have $type ending with .SomeVal")
-  assert-eq("hello", opt.$val.value, "SomeVal option should have $val.value field")
+  assert(is-type(opt, Option.SomeVal), "Option should have the SomeVal variant")
+  assert-eq("hello", opt.value, "SomeVal option should expose its value")
 }
 
 test-option-none
@@ -140,7 +131,7 @@ meta ["test"] fn () {
   // None is a unit variant - no function call needed
   opt Option.None
 
-  check-variant(opt, ".None", "None option should have $type ending with .None")
+  assert(is-type(opt, Option.None), "Option should have the None variant")
 }
 
 
@@ -166,18 +157,18 @@ test-api-response-user
 meta ["test"] fn () {
   response ApiResponse.User({id: "123", name: "Alice"})
 
-  check-variant(response, ".User", "User response should have $type ending with .User")
-  assert-eq("123", response.$val.id, "User response should have $val.id field")
-  assert-eq("Alice", response.$val.name, "User response should have $val.name field")
+  assert(is-type(response, ApiResponse.User), "Response should have the User variant")
+  assert-eq("123", response.id, "User response should expose its id")
+  assert-eq("Alice", response.name, "User response should expose its name")
 }
 
 test-api-response-error
 meta ["test"] fn () {
   response ApiResponse.Error({code: 404, message: "Not found"})
 
-  check-variant(response, ".Error", "Error response should have $type ending with .Error")
-  assert-eq(404, response.$val.code, "Error response should have $val.code field")
-  assert-eq("Not found", response.$val.message, "Error response should have $val.message field")
+  assert(is-type(response, ApiResponse.Error), "Response should have the Error variant")
+  assert-eq(404, response.code, "Error response should expose its code")
+  assert-eq("Not found", response.message, "Error response should expose its message")
 }
 
 test-api-response-loading
@@ -185,7 +176,7 @@ meta ["test"] fn () {
   // Loading is a unit variant - no function call needed
   response ApiResponse.Loading
 
-  check-variant(response, ".Loading", "Loading response should have $type ending with .Loading")
+  assert(is-type(response, ApiResponse.Loading), "Response should have the Loading variant")
 }
 
 // -- Test: Variant type defined inside function body --
@@ -202,7 +193,7 @@ meta ["test"] fn () {
   // Use the locally defined variant type
   status LocalStatus.Active
 
-  check-variant(status, ".Active", "Local variant should have $type ending with .Active")
+  assert(is-type(status, LocalStatus.Active), "Local status should have the Active variant")
 }
 
 test-local-variant-type-with-data
@@ -219,11 +210,11 @@ meta ["test"] fn () {
 
   // Test unit variant
   failure LocalResult.Failure
-  check-variant(failure, ".Failure", "Local failure should have $type ending with .Failure")
+  assert(is-type(failure, LocalResult.Failure), "Local result should have the Failure variant")
 
   // Test type-reference variant
   success LocalResult.Success({value: 42})
-  check-variant(success, ".Success", "Local success should have $type ending with .Success")
+  assert(is-type(success, LocalResult.Success), "Local result should have the Success variant")
   assert-eq(42, success.value, "Local success should expose value: 42")
 }
 

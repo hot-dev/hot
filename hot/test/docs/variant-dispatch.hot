@@ -1,10 +1,7 @@
 // Variant Dispatch and Auto-Unwrap on Match
 //
-// Hot's match flow dispatches on the `$type` tag of an enum variant.
-// When a variant has a payload (e.g. `Animal.Bird({species: "Eagle"})`),
-// the payload is stored under `$val` and the variant tag under `$type`.
-// Match arms see the original tagged value; field access reaches into
-// `$val` automatically, so user code reads as if there were no wrapper.
+// Hot's match flow dispatches on an enum value's variant identity. When a
+// variant has a payload, normal field access reaches that payload directly.
 ::hot::test::docs::variant-dispatch ns
 meta ["test"]
 
@@ -29,7 +26,7 @@ Aquatic type {
 
 Aquatic -> Critter.Fish
 
-// -- Variant tag is what `match` dispatches on --
+// -- Match dispatches by variant identity --
 
 label-critter fn match (a: Critter): Str {
   Critter.Dog => { "dog" }
@@ -39,7 +36,7 @@ label-critter fn match (a: Critter): Str {
   _ => { "unknown" }
 }
 
-test-match-dispatches-by-variant-tag
+test-match-dispatches-by-variant
 meta ["test"] fn () {
   d Critter.Dog
   c Critter.Cat
@@ -52,26 +49,23 @@ meta ["test"] fn () {
   assert-eq("fish", label-critter(f), "Arrow-enrolled variant Fish dispatches correctly")
 }
 
-// -- Tagged shape: $type and $val --
+// -- Variant identity and payload --
 
-test-tagged-payload-shape
+test-variant-identity-and-payload
 meta ["test"] fn () {
   b Critter.Bird({species: "Eagle", wingspan: 2.1})
 
-  // The variant value is a tagged map: $type holds the fully-qualified
-  // variant name, and $val holds the validated payload.
-  assert(ends-with(b.$type, ".Bird"), "Variant tag is the qualified variant name")
-  assert-eq("Eagle", b.$val.species, "Payload is preserved under $val")
+  assert(is-type(b, Critter.Bird), "Variant identity is preserved")
+  assert-eq("Eagle", b.species, "Payload fields are accessible")
 }
 
-// -- Dot access reaches into $val automatically --
+// -- Dot access reaches the payload automatically --
 
-test-dot-access-skips-val
+test-dot-access-reaches-payload
 meta ["test"] fn () {
   b Critter.Bird({species: "Eagle", wingspan: 2.1})
 
-  // Field access on a tagged variant reaches into $val transparently —
-  // the user does not write `b.$val.species`.
+  // Field access on a variant reaches its payload transparently.
   assert-eq("Eagle", b.species, "Dot access reaches the variant payload")
   assert-eq(2.1, b.wingspan, "Numeric field also reaches the variant payload")
 }

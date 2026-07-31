@@ -133,7 +133,7 @@ meta ["test"] fn () {
 }
 
 // ============================================================================
-// Test 6: Property Access with $val
+// Test 6: Transparent Property Access
 // ============================================================================
 
 User type {
@@ -150,7 +150,7 @@ meta ["test"] fn () {
             settings: {theme: "dark", notifications: true}
         })
 
-    // Test direct property access (should work with $val traversal)
+    // Typed payload fields are available through ordinary property access.
     assert-eq("johndoe", user.username, "user.username should work")
     assert-eq("john@example.com", user.email, "user.email should work")
 

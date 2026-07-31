@@ -378,9 +378,14 @@ For custom types, use `is-type`:
 
 ## The `untype` Function
 
-Typed values carry internal metadata so Hot can preserve type identity at runtime. Most of the time, you should not think about that representation—Hot handles it transparently. Use normal field access, `match`, and `is-type` instead of reading runtime metadata directly.
+Typed values carry internal metadata so Hot can preserve type identity at runtime. That wrapper is transparent to field access and is not a source-level reflection API: use normal field access, `match`, and `is-type`.
 
-When data leaves the Hot system (over the wire, to a database, etc.), strip this metadata using `untype`:
+`to-json` preserves type identity using tagged JSON. Its serialized form uses
+`$type` and `$val` members where needed. Field and string-key index syntax never
+exposes or skips through those wrapper members. If the payload itself has a
+field named `$val`, for example, `value.$val` reads that payload field;
+otherwise it is absent just like any other field. Call `untype` first when a
+recipient instead expects ordinary untagged JSON:
 
 ```hot
 // Define a type
@@ -389,7 +394,7 @@ Person type { name: Str, age: Int }
 // Create a typed value
 alice Person({name: "Alice", age: 30})
 
-// Strip internal type metadata
+// Produce an untagged value
 untype(alice)  // {name: "Alice", age: 30}
 ```
 
@@ -398,14 +403,14 @@ untype(alice)  // {name: "Alice", age: 30}
 The most common use case is serializing typed data to JSON for HTTP requests:
 
 ```hot
-// Without untype, the JSON includes Hot's internal type metadata
+// Tagged JSON is the default for typed values
 to-json(alice)
 
-// With untype, you get clean JSON
+// Untype explicitly requests ordinary untagged JSON
 to-json(untype(alice))  // {"name":"Alice","age":30}
 ```
 
-This is especially important when calling external APIs that expect clean JSON payloads:
+Use `untype` when calling external APIs that expect untagged JSON payloads:
 
 ```hot
 // Sending typed data to an external API
@@ -445,4 +450,4 @@ untype(order)
 - Use **enums** (variant unions) for discriminated types: `Direction enum { Up, Down }`
 - Define type coercions with `Type -> OtherType fn`
 - Use `Result` with `Result.Ok()`/`Result.Err()` instead of exceptions (see [Error Handling](/docs/language/errors))
-- Use `untype` to strip type metadata when serializing data for external systems
+- `to-json` preserves typed values with tagged JSON; use `untype` when the target expects untagged JSON

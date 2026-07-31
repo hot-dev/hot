@@ -239,6 +239,255 @@ through-strict-call(true)"#;
     }
 
     #[test]
+    fn result_property_access_halts_on_err() {
+        let programs = [
+            (
+                "dot",
+                r#"::t ns
+probe fn (bad: Bool): Str {
+    result if(bad, err({message: "dot-access-strict"}), ok({message: "ok"}))
+    value result.message
+    `completed:${value}`
+}
+probe(false)
+probe(false)
+probe(true)"#,
+            ),
+            (
+                "dynamic",
+                r#"::t ns
+probe fn (bad: Bool): Str {
+    result if(bad, err({message: "dot-access-strict"}), ok({message: "ok"}))
+    key "message"
+    value result[key]
+    `completed:${value}`
+}
+probe(false)
+probe(false)
+probe(true)"#,
+            ),
+            (
+                "deep-path",
+                r#"::t ns
+probe fn (bad: Bool): Str {
+    result if(
+        bad,
+        err({message: "dot-access-strict"}),
+        ok({message: {value: "ok"}})
+    )
+    result.message.value "updated"
+    "completed"
+}
+probe(false)
+probe(false)
+probe(true)"#,
+            ),
+        ];
+
+        for (access, src) in programs {
+            let jit =
+                compile_and_run_with_std_conf(src, Some(crate::val!({"jit": {"threshold": 1}})));
+            let interp =
+                compile_and_run_with_std_conf(src, Some(crate::val!({"jit": {"mode": "off"}})));
+
+            for (mode, outcome) in [("jit", &jit), ("interpreter", &interp)] {
+                let text = match outcome {
+                    Ok(value) => format!("OK:{value:?}"),
+                    Err(error) => error.clone(),
+                };
+                assert!(
+                    text.contains("dot-access-strict"),
+                    "{mode} {access}: halt must carry the Err payload, got {text}"
+                );
+                assert!(
+                    !text.contains("completed:"),
+                    "{mode} {access}: property access consumed an Err without halting: {text}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn tagged_metadata_names_resolve_in_the_payload() {
+        let src = r#"::t ns
+probe fn (): Vec {
+    with-val from-json("{\"$type\":\"::my-types/A\",\"$val\":{\"$val\":{\"c\":1}}}")
+    shallow from-json("{\"$type\":\"::my-types/A\",\"$val\":{\"c\":1}}")
+    set-val from-json("{\"$type\":\"::my-types/A\",\"$val\":{\"c\":1}}")
+    set-type from-json("{\"$type\":\"::my-types/A\",\"$val\":{\"c\":1}}")
+    with-type from-json("{\"$type\":\"::my-types/A\",\"$val\":{\"$type\":\"payload-type\"}}")
+    val-key "$val"
+
+    before [with-val.$val.c, with-val[val-key].c, is-null(shallow.$val), with-type.$type]
+    set-val.$val {c: 2}
+    set-type.$type "payload-type"
+
+    [before[0], before[1], before[2], before[3], set-val.$val.c, set-type.$type]
+}
+probe()
+probe()
+probe()"#;
+
+        let jit = compile_and_run_with_std_conf(src, Some(crate::val!({"jit": {"threshold": 1}})))
+            .expect("JIT tagged payload field access");
+        let interp =
+            compile_and_run_with_std_conf(src, Some(crate::val!({"jit": {"mode": "off"}})))
+                .expect("interpreter tagged payload field access");
+        let expected = crate::val!([1, 1, true, "payload-type", 2, "payload-type"]);
+
+        assert_eq!(interp, expected, "interpreter must resolve metadata-shaped names in the payload");
+        assert_eq!(jit, expected, "JIT must resolve metadata-shaped names in the payload");
+    }
+
+    #[test]
+    fn tagged_unit_variant_metadata_is_hidden_from_source_fields() {
+        let read_src = r#"::t ns
+Choice enum { A }
+probe fn (): Vec {
+    value Choice.A
+    external from-json("{\"$type\":\"::external/Status.Ready\"}")
+    type-key "$type"
+    val-key "$val"
+    [
+        value.$type,
+        value[type-key],
+        value.$val,
+        value[val-key],
+        external.$type,
+        external[type-key],
+        external.$val,
+        external[val-key],
+        is-type(value, Choice.A)
+    ]
+}
+probe()
+probe()
+probe()"#;
+
+        let jit = compile_and_run_with_std_conf(
+            read_src,
+            Some(crate::val!({"jit": {"threshold": 1}})),
+        )
+        .expect("JIT unit variant metadata access");
+        let interp = compile_and_run_with_std_conf(
+            read_src,
+            Some(crate::val!({"jit": {"mode": "off"}})),
+        )
+        .expect("interpreter unit variant metadata access");
+        let expected = crate::val!([null, null, null, null, null, null, null, null, true]);
+        assert_eq!(interp, expected, "interpreter must hide unit variant metadata");
+        assert_eq!(jit, expected, "JIT must hide unit variant metadata");
+
+        let write_programs = [
+            (
+                "payload type field",
+                r#"::t ns
+Choice enum { A }
+probe fn () {
+    value Choice.A
+    value.$type "payload-type"
+    [is-type(value, Choice.A), value.$type]
+}
+probe()
+probe()
+probe()"#,
+            ),
+            (
+                "nested payload value field",
+                r#"::t ns
+Choice enum { A }
+probe fn () {
+    value Choice.A
+    value.$val.c 1
+    [is-type(value, Choice.A), value.$val.c]
+}
+probe()
+probe()
+probe()"#,
+            ),
+        ];
+
+        for (access, src) in write_programs {
+            let jit = compile_and_run_with_std_conf(
+                src,
+                Some(crate::val!({"jit": {"threshold": 1}})),
+            )
+            .unwrap_or_else(|error| panic!("JIT {access} assignment failed: {error}"));
+            let interp = compile_and_run_with_std_conf(
+                src,
+                Some(crate::val!({"jit": {"mode": "off"}})),
+            )
+            .unwrap_or_else(|error| panic!("interpreter {access} assignment failed: {error}"));
+            let expected = if access == "payload type field" {
+                crate::val!([true, "payload-type"])
+            } else {
+                crate::val!([true, 1])
+            };
+            assert_eq!(interp, expected, "interpreter {access} must write the payload");
+            assert_eq!(jit, expected, "JIT {access} must write the payload");
+        }
+    }
+
+    #[test]
+    fn custom_struct_fields_remain_direct() {
+        let src = r#"::t ns
+Profile type {name: Str}
+probe fn (): Vec {
+    value Profile({name: "Ada"})
+    value.name "Grace"
+    [value.name, is-type(value, Profile)]
+}
+probe()
+probe()
+probe()"#;
+
+        let jit = compile_and_run_with_std_conf(src, Some(crate::val!({"jit": {"threshold": 1}})))
+            .expect("JIT custom struct field access");
+        let interp =
+            compile_and_run_with_std_conf(src, Some(crate::val!({"jit": {"mode": "off"}})))
+                .expect("interpreter custom struct field access");
+        let expected = crate::val!(["Grace", true]);
+        assert_eq!(interp, expected, "interpreter must keep struct fields direct");
+        assert_eq!(jit, expected, "JIT must keep struct fields direct");
+    }
+
+    #[test]
+    fn dynamic_deep_assignment_updates_maps_and_vectors() {
+        let src = r#"::t ns
+probe fn (): Vec {
+    record {name: "Ada"}
+    field "name"
+    record[field] "Grace"
+
+    items [{name: "first"}, {name: "second"}]
+    index 1
+    items[index].name "updated"
+
+    record["title"] "Engineer"
+    [record, items, record.name, record.title, items[0].name, items[1].name]
+}
+probe()
+probe()
+probe()"#;
+
+        let jit = compile_and_run_with_std_conf(src, Some(crate::val!({"jit": {"threshold": 1}})))
+            .expect("JIT dynamic deep assignment");
+        let interp =
+            compile_and_run_with_std_conf(src, Some(crate::val!({"jit": {"mode": "off"}})))
+                .expect("interpreter dynamic deep assignment");
+        let expected = crate::val!([
+            {"name": "Grace", "title": "Engineer"},
+            [{"name": "first"}, {"name": "updated"}],
+            "Grace",
+            "Engineer",
+            "first",
+            "updated"
+        ]);
+        assert_eq!(interp, expected, "interpreter dynamic deep assignment");
+        assert_eq!(jit, expected, "JIT dynamic deep assignment");
+    }
+
+    #[test]
     fn jit_flow_result_does_not_steal_constant_refcounts() {
         // A conditional whose branches are constant-backed OwnedVals: the
         // flow result register must take a fresh clone rather than the baked

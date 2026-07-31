@@ -313,23 +313,20 @@ meta ["test"] fn () {
 
 test-empty-types
 meta ["test"] fn () {
-  // Just verify they are constructed correctly
-  assert-eq(token.$type, "::hot::test::docs::types/Token", "token type")
-  assert-eq(admin.$type, "::hot::test::docs::types/Admin", "admin type")
+  assert(is-type(token, Token), "token type")
+  assert(is-type(admin, Admin), "admin type")
 }
 
 test-enum-simple
 meta ["test"] fn () {
-  // Just verify they are constructed correctly
-  assert(::hot::str/ends-with(up-dir.$type, "/Direction.Up"), "up is Direction.Up")
-  assert(::hot::str/ends-with(down-dir.$type, "/Direction.Down"), "down is Direction.Down")
+  assert(is-type(up-dir, Direction.Up), "up is Direction.Up")
+  assert(is-type(down-dir, Direction.Down), "down is Direction.Down")
 }
 
 test-enum-with-data
 meta ["test"] fn () {
-  // Verify shape construction
-  assert(::hot::str/ends-with(shape-point.$type, "/Shape.Point"), "point is Shape.Point")
-  assert(::hot::str/ends-with(shape-circle.$type, "/Shape.Circle"), "circle is Shape.Circle")
+  assert(is-type(shape-point, Shape.Point), "point is Shape.Point")
+  assert(is-type(shape-circle, Shape.Circle), "circle is Shape.Circle")
   assert-eq(5.0, shape-circle.radius, "circle radius")
 }
 
@@ -346,8 +343,7 @@ meta ["test"] fn () {
 }
 
 // Regression: optional struct fields with custom/Fn types must round-trip
-// `null` as actual `Val::Null` rather than the typed shell
-// `{$type: "...", $val: null}`. Without the fix, `is-null` and friends
+// `null` as an actual null value. Without the fix, `is-null` and friends
 // silently lied for any `Fn?` / `MyType?` field set to null.
 NullableHolder type {
   callback: Fn?,

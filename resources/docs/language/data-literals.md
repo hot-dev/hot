@@ -38,6 +38,21 @@ For multi-line content that needs both indent-awareness and `${}` interpolation,
 
 Block template strings combine the best of both worlds: **indent-aware** like block strings (the closing ` ``` ` determines the base indentation to strip) and **interpolation** like template strings (`${}` expressions are evaluated). Like block strings, they have **no escape processing**. This makes them ideal for shell scripts, HTML templates, and embedded code that needs Hot variables.
 
+## Comments
+
+Use `//` for a line comment and `/* ... */` for a block comment. Block comments
+can span multiple lines or appear between expressions:
+
+```hot
+// Explain why this value is needed.
+timeout 30
+
+/*
+ * Block comments are useful for longer context.
+ */
+name /* inline block comment */ "Ada"
+```
+
 ## Numbers
 
 Hot has two number types: **Int** and **Dec**.
@@ -166,4 +181,5 @@ You can add types to your data for documentation and type checking:
 - Template strings use backticks with `${expression}` interpolation
 - Block strings (`"""..."""`) — no escape processing, indent-aware
 - Block template strings (`` ```...``` ``) for indent-aware content with `${}` interpolation
+- Comments use `//` for one line or `/* ... */` for a block
 - Access vectors with `[index]`, maps with `.property`

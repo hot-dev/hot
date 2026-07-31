@@ -152,16 +152,35 @@ Do not paste production API keys, model keys, customer data, `.env` contents,
 or private run payloads into an assistant unless the selected tool and
 environment are explicitly approved for that data.
 
-Use placeholders in prompts and examples:
+Hot code reads secrets from context variables:
 
-```bash
-export HOT_API_KEY=your-api-key
-export ANTHROPIC_API_KEY=your-provider-key
+```hot
+api-key ::hot::ctx/get("anthropic.api.key")
 ```
 
-Store real values through your normal secret-management path. See
-[Hot Configuration](/docs/configuration) and
-[Authentication](/docs/authentication).
+For local development, put the value in `.env`:
+
+```text
+ANTHROPIC_API_KEY=your-provider-key
+```
+
+Then map it to a Hot context key in `hot/ctx.hot`:
+
+```hot
+::hot::run::ctx ns
+::env ::hot::env
+
+::hot::ctx/set({
+  "anthropic.api.key": ::env/get("ANTHROPIC_API_KEY", "")
+})
+```
+
+Deployed projects do not use `hot/ctx.hot`. Set the same context key in
+**Context Variables** in the Hot App for the target environment or project.
+
+Use placeholders—not real values—in prompts and examples. See
+[Context Variables](/docs/app#context-variables) and
+[Context Requirements](/docs/language/meta#context-requirements).
 
 ## Troubleshooting
 

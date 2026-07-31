@@ -16,6 +16,16 @@ struct InstalledSkillManifest {
     files: BTreeMap<String, String>,
 }
 
+#[derive(Debug)]
+enum InstalledSkillManifestState {
+    Missing,
+    Valid(InstalledSkillManifest),
+    Corrupt {
+        path: std::path::PathBuf,
+        error: String,
+    },
+}
+
 pub(crate) fn run_ai(action: &AiAction) -> Result<(), String> {
     match action {
         AiAction::Add { global } => {
@@ -34,8 +44,13 @@ pub(crate) fn run_ai(action: &AiAction) -> Result<(), String> {
             println!("  AGENTS.md     - AI agent instructions {}", agents_status);
 
             let home = dirs::home_dir().unwrap_or_default();
-            let project_skills = installed_hot_skill_names(std::path::Path::new(".skills"));
-            let global_skills = installed_hot_skill_names(&home.join(".skills"));
+            let project_skills: BTreeSet<String> =
+                installed_hot_skill_names(std::path::Path::new(".skills"))
+                    .into_iter()
+                    .collect();
+            let global_skills: BTreeSet<String> = installed_hot_skill_names(&home.join(".skills"))
+                .into_iter()
+                .collect();
             let mut skill_names = BTreeSet::new();
             if let Ok(bundled) = bundled_skill_names() {
                 skill_names.extend(bundled);
@@ -46,10 +61,14 @@ pub(crate) fn run_ai(action: &AiAction) -> Result<(), String> {
             for skill_name in skill_names {
                 let project_skill = std::path::Path::new(".skills").join(&skill_name);
                 let global_skill = home.join(".skills").join(&skill_name);
-                let status = if project_skill.exists() {
+                let status = if project_skills.contains(&skill_name) {
                     "(installed - project)"
-                } else if global_skill.exists() {
+                } else if global_skills.contains(&skill_name) {
                     "(installed - global)"
+                } else if project_skill.exists() {
+                    "(present - project, externally managed)"
+                } else if global_skill.exists() {
+                    "(present - global, externally managed)"
                 } else {
                     ""
                 };
@@ -110,7 +129,8 @@ pub(crate) fn run_ai(action: &AiAction) -> Result<(), String> {
                 if !project_targets.is_empty() {
                     setup_selected_agent_skills(false, &project_targets)?;
                     updated_count += 1;
-                } else if !global_targets.is_empty() {
+                }
+                if !global_targets.is_empty() {
                     setup_selected_agent_skills(true, &global_targets)?;
                     updated_count += 1;
                 }
@@ -335,11 +355,14 @@ fn skill_content_hash(content: &[u8]) -> String {
 }
 
 fn legacy_skill_content_hash(content: &[u8]) -> Option<u64> {
-    use std::collections::hash_map::DefaultHasher;
+    use siphasher::sip::SipHasher13;
     use std::hash::{Hash, Hasher};
 
     let content = std::str::from_utf8(content).ok()?;
-    let mut hasher = DefaultHasher::new();
+    // Legacy Hot releases stamped `DefaultHasher::new()`, whose implementation
+    // was SipHash 1-3 with fixed keys. Pin that algorithm so migrations remain
+    // stable even if Rust changes DefaultHasher in a future toolchain.
+    let mut hasher = SipHasher13::new();
     content.hash(&mut hasher);
     Some(hasher.finish())
 }
@@ -348,18 +371,72 @@ fn skill_manifest_key(path: &std::path::Path) -> String {
     path.to_string_lossy().replace('\\', "/")
 }
 
+fn ensure_managed_path_is_not_symlinked(
+    skills_base: &std::path::Path,
+    path: &std::path::Path,
+) -> Result<(), String> {
+    let relative = path.strip_prefix(skills_base).map_err(|_| {
+        format!(
+            "Managed skill path {} is outside {}",
+            path.display(),
+            skills_base.display()
+        )
+    })?;
+    let mut current = skills_base.to_path_buf();
+
+    for component in std::iter::once(None).chain(relative.components().map(Some)) {
+        if let Some(component) = component {
+            let std::path::Component::Normal(component) = component else {
+                return Err(format!(
+                    "Managed skill path {} contains an unsupported component",
+                    path.display()
+                ));
+            };
+            current.push(component);
+        }
+
+        match fs::symlink_metadata(&current) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                return Err(format!(
+                    "Refusing to manage skill path {} because {} is a symlink",
+                    path.display(),
+                    current.display()
+                ));
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(format!(
+                    "Failed to inspect managed skill path {}: {}",
+                    current.display(),
+                    error
+                ));
+            }
+        }
+    }
+
+    Ok(())
+}
+
 fn read_installed_skill_manifest(
     skill_dir: &std::path::Path,
-) -> Result<Option<InstalledSkillManifest>, String> {
+) -> Result<InstalledSkillManifestState, String> {
     let path = skill_dir.join(SKILL_MANIFEST_FILE);
     if !path.is_file() {
-        return Ok(None);
+        return Ok(InstalledSkillManifestState::Missing);
     }
 
     let content = fs::read_to_string(&path)
         .map_err(|e| format!("Failed to read {}: {}", path.display(), e))?;
-    let manifest: InstalledSkillManifest = serde_json::from_str(&content)
-        .map_err(|e| format!("Failed to parse {}: {}", path.display(), e))?;
+    let manifest: InstalledSkillManifest = match serde_json::from_str(&content) {
+        Ok(manifest) => manifest,
+        Err(error) => {
+            return Ok(InstalledSkillManifestState::Corrupt {
+                path,
+                error: error.to_string(),
+            });
+        }
+    };
     if manifest.version != 1 {
         return Err(format!(
             "Unsupported installed skill manifest version {} in {}",
@@ -367,7 +444,7 @@ fn read_installed_skill_manifest(
             path.display()
         ));
     }
-    Ok(Some(manifest))
+    Ok(InstalledSkillManifestState::Valid(manifest))
 }
 
 fn write_if_changed(path: &std::path::Path, content: &[u8]) -> Result<bool, String> {
@@ -385,6 +462,59 @@ fn write_if_changed(path: &std::path::Path, content: &[u8]) -> Result<bool, Stri
     }
     fs::write(path, content).map_err(|e| format!("Failed to write {}: {}", path.display(), e))?;
     Ok(true)
+}
+
+fn write_atomic_if_changed(path: &std::path::Path, content: &[u8]) -> Result<bool, String> {
+    use std::io::Write;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    if path.is_file()
+        && let Ok(existing) = fs::read(path)
+        && existing == content
+    {
+        return Ok(false);
+    }
+    let parent = path
+        .parent()
+        .ok_or_else(|| format!("Path has no parent: {}", path.display()))?;
+    fs::create_dir_all(parent)
+        .map_err(|e| format!("Failed to create directory {}: {}", parent.display(), e))?;
+
+    static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("hot-skill-manifest");
+    let temp_path = parent.join(format!(
+        ".{file_name}.tmp-{}-{}",
+        std::process::id(),
+        TEMP_COUNTER.fetch_add(1, Ordering::Relaxed)
+    ));
+
+    let result = (|| {
+        let mut temp = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temp_path)
+            .map_err(|e| format!("Failed to create {}: {}", temp_path.display(), e))?;
+        temp.write_all(content)
+            .map_err(|e| format!("Failed to write {}: {}", temp_path.display(), e))?;
+        temp.sync_all()
+            .map_err(|e| format!("Failed to sync {}: {}", temp_path.display(), e))?;
+        fs::rename(&temp_path, path).map_err(|e| {
+            format!(
+                "Failed to rename {} to {}: {}",
+                temp_path.display(),
+                path.display(),
+                e
+            )
+        })
+    })();
+
+    if result.is_err() {
+        let _ = fs::remove_file(&temp_path);
+    }
+    result.map(|_| true)
 }
 
 fn setup_agent_skills(global: bool) -> Result<(), String> {
@@ -438,7 +568,27 @@ fn setup_agent_skill(global: bool, skill_name: &str) -> Result<(), String> {
     collect_source_files(&source_skill_dir, &source_skill_dir, &mut skill_files)?;
 
     let skill_dir = skills_base.join(skill_name);
-    let installed_manifest = read_installed_skill_manifest(&skill_dir)?;
+    ensure_managed_path_is_not_symlinked(&skills_base, &skill_dir)?;
+    ensure_managed_path_is_not_symlinked(&skills_base, &skill_dir.join(SKILL_MANIFEST_FILE))?;
+    for (rel_path, _) in &skill_files {
+        ensure_managed_path_is_not_symlinked(&skills_base, &skill_dir.join(rel_path))?;
+    }
+    let installed_manifest_state = read_installed_skill_manifest(&skill_dir)?;
+    let preserve_untracked_files = matches!(
+        &installed_manifest_state,
+        InstalledSkillManifestState::Corrupt { .. }
+    );
+    if let InstalledSkillManifestState::Corrupt { path, error } = &installed_manifest_state {
+        println!(
+            "  Warning: rebuilding corrupt skill manifest {} ({}) without overwriting existing files",
+            path.display(),
+            error
+        );
+    }
+    let installed_manifest = match &installed_manifest_state {
+        InstalledSkillManifestState::Valid(manifest) => Some(manifest),
+        InstalledSkillManifestState::Missing | InstalledSkillManifestState::Corrupt { .. } => None,
+    };
     let mut next_manifest = InstalledSkillManifest {
         version: 1,
         files: BTreeMap::new(),
@@ -454,12 +604,17 @@ fn setup_agent_skill(global: bool, skill_name: &str) -> Result<(), String> {
         content: &[u8],
         manifest_key: &str,
         installed_manifest: Option<&InstalledSkillManifest>,
+        preserve_untracked_files: bool,
     ) -> Result<bool, String> {
         let hash = skill_content_hash(content);
 
         if path.exists() {
             let existing =
                 fs::read(path).map_err(|e| format!("Failed to read {}: {}", path.display(), e))?;
+
+            if preserve_untracked_files {
+                return Ok(false);
+            }
 
             if installed_manifest.and_then(|manifest| manifest.files.get(manifest_key))
                 == Some(&hash)
@@ -501,9 +656,12 @@ fn setup_agent_skill(global: bool, skill_name: &str) -> Result<(), String> {
         if let Ok(entries) = fs::read_dir(dir) {
             for entry in entries.flatten() {
                 let path = entry.path();
-                if path.is_dir() {
+                let Ok(file_type) = entry.file_type() else {
+                    continue;
+                };
+                if file_type.is_dir() {
                     collect_files(&path, base, files);
-                } else if path.is_file()
+                } else if (file_type.is_file() || file_type.is_symlink())
                     && let Ok(rel) = path.strip_prefix(base)
                 {
                     files.push(rel.to_path_buf());
@@ -538,32 +696,60 @@ fn setup_agent_skill(global: bool, skill_name: &str) -> Result<(), String> {
             &full_path,
             content,
             &manifest_key,
-            installed_manifest.as_ref(),
+            installed_manifest,
+            preserve_untracked_files,
         )? {
             any_updated = true;
         }
     }
 
-    if skill_dir.exists() {
+    if skill_dir.exists()
+        && !preserve_untracked_files
+        && let Some(previous_manifest) = installed_manifest
+    {
         let mut existing_files = Vec::new();
         collect_files(&skill_dir, &skill_dir, &mut existing_files);
 
         for rel_path in existing_files {
             let rel_str = skill_manifest_key(&rel_path);
-            if !expected_files.contains(&rel_str) {
-                let full_path = skill_dir.join(&rel_path);
-                if fs::remove_file(&full_path).is_ok() {
-                    any_removed = true;
-                    cleanup_empty_dirs(&full_path, &skill_dir);
-                }
+            if expected_files.contains(&rel_str) {
+                continue;
             }
+            let Some(previous_hash) = previous_manifest.files.get(&rel_str) else {
+                continue;
+            };
+
+            let full_path = skill_dir.join(&rel_path);
+            let metadata = fs::symlink_metadata(&full_path)
+                .map_err(|e| format!("Failed to inspect {}: {}", full_path.display(), e))?;
+            if metadata.file_type().is_symlink() {
+                println!(
+                    "  Warning: preserving retired managed path {} because it is now a symlink",
+                    full_path.display()
+                );
+                continue;
+            }
+            let existing = fs::read(&full_path)
+                .map_err(|e| format!("Failed to read {}: {}", full_path.display(), e))?;
+            if skill_content_hash(&existing) != *previous_hash {
+                println!(
+                    "  Warning: preserving locally modified retired skill file {}",
+                    full_path.display()
+                );
+                continue;
+            }
+
+            fs::remove_file(&full_path)
+                .map_err(|e| format!("Failed to remove {}: {}", full_path.display(), e))?;
+            any_removed = true;
+            cleanup_empty_dirs(&full_path, &skill_dir);
         }
     }
 
     let mut manifest_content = serde_json::to_vec_pretty(&next_manifest)
         .map_err(|e| format!("Failed to serialize installed skill manifest: {}", e))?;
     manifest_content.push(b'\n');
-    if write_if_changed(&skill_dir.join(SKILL_MANIFEST_FILE), &manifest_content)? {
+    if write_atomic_if_changed(&skill_dir.join(SKILL_MANIFEST_FILE), &manifest_content)? {
         any_updated = true;
     }
 

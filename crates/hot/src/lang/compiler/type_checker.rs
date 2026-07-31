@@ -2819,14 +2819,6 @@ impl TypeChecker {
         }
     }
 
-    fn runtime_metadata_field_type(key: &str) -> Option<TypeExpr> {
-        match key {
-            "$type" => Some(TypeExpr::Str),
-            "$val" => Some(TypeExpr::Any),
-            _ => None,
-        }
-    }
-
     /// Value type for a keyed access. `Map<K, V>` → `V`; closed known
     /// records and struct types expose their declared/preserved fields.
     fn value_type(
@@ -2835,10 +2827,6 @@ impl TypeChecker {
         key: &str,
         location: Option<&ErrorLocation>,
     ) -> TypeExpr {
-        if let Some(metadata_type) = Self::runtime_metadata_field_type(key) {
-            return metadata_type;
-        }
-
         match base {
             TypeExpr::Map(_, val) => (**val).clone(),
             TypeExpr::Record { fields, open, .. } => {

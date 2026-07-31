@@ -2965,6 +2965,7 @@ impl VirtualMachine {
                 let object_val = self.get_register(object)?.clone();
                 let property_name = self.get_constant_string(property)?;
 
+                let object_val = self.unwrap_result_if_ok(&object_val)?;
                 let result = self.access_property(&object_val, &property_name)?;
                 self.set_register(dest, result)?;
                 self.instruction_pointer += 1;
@@ -2984,6 +2985,7 @@ impl VirtualMachine {
                 let object_val = self.get_register(object)?.clone();
                 let property_name = self.get_constant_string(property)?;
 
+                let object_val = self.unwrap_result_if_ok(&object_val)?;
                 let result = match self.access_property(&object_val, &property_name) {
                     Ok(val) => val,
                     Err(_) => {
@@ -3008,78 +3010,83 @@ impl VirtualMachine {
                 let object_val = self.get_register(object)?.clone();
                 let property_val = self.get_register(property)?.clone();
 
-                let result = match &object_val {
-                    Val::Map(m) => {
-                        // For maps, use the property value as the key directly
-                        match m.get(&property_val) {
-                            Some(v) => v.clone(),
-                            None => Val::Null,
+                let object_val = self.unwrap_result_if_ok(&object_val)?;
+                let result = if let Val::Str(property_name) = &property_val {
+                    self.access_property(&object_val, property_name)?
+                } else {
+                    match &object_val {
+                        Val::Map(m) => {
+                            // For maps, use the property value as the key directly
+                            match m.get(&property_val) {
+                                Some(v) => v.clone(),
+                                None => Val::Null,
+                            }
                         }
-                    }
-                    Val::Vec(v) => {
-                        // For vectors, property must be an integer index
-                        match &property_val {
-                            Val::Int(i) => {
-                                if *i < 0 {
-                                    Val::Null
-                                } else {
-                                    v.get(*i as usize).cloned().unwrap_or(Val::Null)
+                        Val::Vec(v) => {
+                            // For vectors, property must be an integer index
+                            match &property_val {
+                                Val::Int(i) => {
+                                    if *i < 0 {
+                                        Val::Null
+                                    } else {
+                                        v.get(*i as usize).cloned().unwrap_or(Val::Null)
+                                    }
+                                }
+                                _ => {
+                                    return Err(VmError::runtime(format!(
+                                        "Vector index must be an integer, got {:?}",
+                                        property_val
+                                    )));
                                 }
                             }
-                            _ => {
-                                return Err(VmError::runtime(format!(
-                                    "Vector index must be an integer, got {:?}",
-                                    property_val
-                                )));
-                            }
                         }
-                    }
-                    Val::Str(s) => {
-                        // For strings, property must be an integer index
-                        match &property_val {
-                            Val::Int(i) => {
-                                if *i < 0 {
-                                    Val::Null
-                                } else {
-                                    s.chars()
-                                        .nth(*i as usize)
-                                        .map(|c| Val::from(c.to_string()))
-                                        .unwrap_or(Val::Null)
+                        Val::Str(s) => {
+                            // For strings, property must be an integer index
+                            match &property_val {
+                                Val::Int(i) => {
+                                    if *i < 0 {
+                                        Val::Null
+                                    } else {
+                                        s.chars()
+                                            .nth(*i as usize)
+                                            .map(|c| Val::from(c.to_string()))
+                                            .unwrap_or(Val::Null)
+                                    }
+                                }
+                                _ => {
+                                    return Err(VmError::runtime(format!(
+                                        "String index must be an integer, got {:?}",
+                                        property_val
+                                    )));
                                 }
                             }
-                            _ => {
-                                return Err(VmError::runtime(format!(
-                                    "String index must be an integer, got {:?}",
-                                    property_val
-                                )));
-                            }
                         }
-                    }
-                    Val::Bytes(b) => {
-                        // For bytes, property must be an integer index
-                        match &property_val {
-                            Val::Int(i) => {
-                                if *i < 0 {
-                                    Val::Null
-                                } else {
-                                    b.get(*i as usize)
-                                        .map(|byte| Val::Int(*byte as i64))
-                                        .unwrap_or(Val::Null)
+                        Val::Bytes(b) => {
+                            // For bytes, property must be an integer index
+                            match &property_val {
+                                Val::Int(i) => {
+                                    if *i < 0 {
+                                        Val::Null
+                                    } else {
+                                        b.get(*i as usize)
+                                            .map(|byte| Val::Int(*byte as i64))
+                                            .unwrap_or(Val::Null)
+                                    }
+                                }
+                                _ => {
+                                    return Err(VmError::runtime(format!(
+                                        "Bytes index must be an integer, got {:?}",
+                                        property_val
+                                    )));
                                 }
                             }
-                            _ => {
-                                return Err(VmError::runtime(format!(
-                                    "Bytes index must be an integer, got {:?}",
-                                    property_val
-                                )));
-                            }
                         }
-                    }
-                    _ => {
-                        return Err(VmError::runtime(format!(
-                            "Cannot access property on {:?}",
-                            object_val
-                        )));
+                        _ => {
+                            return Err(VmError::runtime(format!(
+                                "Cannot access property on {:?}",
+                                object_val
+                            )));
+                        }
                     }
                 };
 
@@ -3121,71 +3128,77 @@ impl VirtualMachine {
                 let property_val = self.get_register(property)?.clone();
                 let new_value = self.get_register(value)?.clone();
 
-                match &mut object_val {
-                    Val::Map(m) => {
-                        // For maps, use the property value as the key directly
-                        m.insert(property_val, new_value);
-                    }
-                    Val::Vec(v) => {
-                        // For vectors, property must be an integer index
-                        match &property_val {
-                            Val::Int(i) => {
-                                if *i < 0 {
-                                    return Err(VmError::runtime(format!(
-                                        "Vector index cannot be negative: {}",
-                                        i
-                                    )));
-                                }
-                                let idx = usize::try_from(*i).map_err(|_| {
-                                    VmError::runtime(format!(
-                                        "Vector index {} is too large to address",
-                                        i
-                                    ))
-                                })?;
-                                // Growing the vector to `idx + 1` is a user-controlled
-                                // allocation, so gate it on the configured collection
-                                // size limit and use try_reserve to convert allocator
-                                // failure into a recoverable runtime error.
-                                if idx >= v.len() {
-                                    let new_len = idx.checked_add(1).ok_or_else(|| {
+                if let Val::Str(property_name) = &property_val {
+                    self.set_property(&mut object_val, property_name, new_value)?;
+                } else {
+                    match &mut object_val {
+                        Val::Map(m) => {
+                            // For maps, use the property value as the key directly
+                            m.insert(property_val, new_value);
+                        }
+                        Val::Vec(v) => {
+                            // For vectors, property must be an integer index
+                            match &property_val {
+                                Val::Int(i) => {
+                                    if *i < 0 {
+                                        return Err(VmError::runtime(format!(
+                                            "Vector index cannot be negative: {}",
+                                            i
+                                        )));
+                                    }
+                                    let idx = usize::try_from(*i).map_err(|_| {
                                         VmError::runtime(format!(
-                                            "Vector index {} would overflow length",
+                                            "Vector index {} is too large to address",
                                             i
                                         ))
                                     })?;
-                                    if let Err(e) =
-                                        crate::lang::runtime::limits::check_collection_size(
-                                            "dynamic vector assign",
-                                            new_len,
-                                        )
-                                    {
-                                        return Err(VmError::runtime(e.to_string()));
+                                    // Growing the vector to `idx + 1` is a user-controlled
+                                    // allocation, so gate it on the configured collection
+                                    // size limit and use try_reserve to convert allocator
+                                    // failure into a recoverable runtime error.
+                                    if idx >= v.len() {
+                                        let new_len = idx.checked_add(1).ok_or_else(|| {
+                                            VmError::runtime(format!(
+                                                "Vector index {} would overflow length",
+                                                i
+                                            ))
+                                        })?;
+                                        if let Err(e) =
+                                            crate::lang::runtime::limits::check_collection_size(
+                                                "dynamic vector assign",
+                                                new_len,
+                                            )
+                                        {
+                                            return Err(VmError::runtime(e.to_string()));
+                                        }
+                                        let additional = new_len - v.len();
+                                        if let Err(e) =
+                                            crate::lang::runtime::limits::try_reserve_vec(
+                                                "dynamic vector assign",
+                                                v,
+                                                additional,
+                                            )
+                                        {
+                                            return Err(VmError::runtime(e.to_string()));
+                                        }
+                                        v.resize(new_len, Val::Null);
                                     }
-                                    let additional = new_len - v.len();
-                                    if let Err(e) = crate::lang::runtime::limits::try_reserve_vec(
-                                        "dynamic vector assign",
-                                        v,
-                                        additional,
-                                    ) {
-                                        return Err(VmError::runtime(e.to_string()));
-                                    }
-                                    v.resize(new_len, Val::Null);
+                                    v[idx] = new_value;
                                 }
-                                v[idx] = new_value;
-                            }
-                            _ => {
-                                return Err(VmError::runtime(format!(
-                                    "Vector index must be an integer, got {:?}",
-                                    property_val
-                                )));
+                                _ => {
+                                    return Err(VmError::runtime(format!(
+                                        "Vector index must be an integer, got {:?}",
+                                        property_val
+                                    )));
+                                }
                             }
                         }
-                    }
-                    _ => {
-                        return Err(VmError::runtime(format!(
-                            "Cannot set property on {:?}",
-                            object_val
-                        )));
+                        _ => {
+                            return Err(VmError::runtime(format!(
+                                "Cannot set property on {:?}",
+                                object_val
+                            )));
+                        }
                     }
                 }
 
@@ -5088,7 +5101,8 @@ impl VirtualMachine {
     /// - If val is a Result.Err: call fail() with the error $val
     /// - Otherwise: return the value as-is
     ///
-    /// NOTE: This should ONLY be called for non-lazy function arguments and template literal parts
+    /// Call this only at ordinary Result-consumption boundaries. Callers that
+    /// support non-consuming inspection must handle those exceptions first.
     pub(crate) fn unwrap_result_if_ok(&mut self, val: &Val) -> VmResult<Val> {
         // Cache the debug-env check: this runs per argument per call, and
         // std::env::var is far too expensive for that hot path.
@@ -9528,6 +9542,29 @@ impl VirtualMachine {
         self.store_variable(name, value)
     }
 
+    /// Return true when a map uses Hot's tagged JSON wrapper representation.
+    ///
+    /// Data-bearing tagged values have a `$val` payload. Unit enum variants do
+    /// not, but their local type name has the `Enum.Variant` form. Custom
+    /// structs may also carry a qualified `$type`; their local type name has no
+    /// dot and their fields remain directly accessible.
+    fn is_tagged_wrapper(&self, map: &IndexMap<Val, Val>) -> bool {
+        let Some(Val::Str(type_name)) = map.get(&Val::from("$type")) else {
+            return false;
+        };
+        if !type_name.starts_with("::") {
+            return false;
+        }
+        if map.contains_key(&Val::from("$val")) {
+            return true;
+        }
+
+        type_name
+            .rsplit('/')
+            .next()
+            .is_some_and(|local_name| local_name.contains('.'))
+    }
+
     /// Set a property of a value (supports both map keys and vector indices)
     pub(crate) fn set_property(
         &self,
@@ -9537,6 +9574,16 @@ impl VirtualMachine {
     ) -> VmResult<()> {
         match value {
             Val::Map(map) => {
+                if self.is_tagged_wrapper(map) {
+                    if let Some(payload) = map.get_mut(&Val::from("$val")) {
+                        return self.set_property(payload, property, new_value);
+                    }
+                    let mut payload = Val::Null;
+                    self.set_property(&mut payload, property, new_value)?;
+                    map.insert(Val::from("$val"), payload);
+                    return Ok(());
+                }
+
                 // Map assignment: set the property as a string key
                 map.insert(Val::from(property.to_string()), new_value);
                 Ok(())
@@ -9607,15 +9654,14 @@ impl VirtualMachine {
                     }
                 }
 
-                // If this is a typed object with unified pattern, unwrap $val for property access
-                // BUT: never unwrap for $type or $val - these should always be read from the outer wrapper
-                if property != "$type"
-                    && property != "$val"
-                    && let Some(inner_val) = map.get(&Val::from("$val"))
-                    && let Val::Map(inner_map) = inner_val
-                    && let Some(prop_val) = inner_map.get(&Val::from(property.to_string()))
-                {
-                    return Ok(prop_val.clone());
+                // Tagged values expose only their payload to source-level field
+                // access. `$type` and `$val` are ordinary payload field names;
+                // they never reveal or skip over the wrapper itself.
+                if self.is_tagged_wrapper(map) {
+                    return match map.get(&Val::from("$val")) {
+                        Some(payload) => self.access_property(payload, property),
+                        None => Ok(Val::Null),
+                    };
                 }
 
                 // Map access: look up the property as a string key

@@ -70,9 +70,9 @@ fn () {
     success Result.Ok(42)
     failure Result.Err("error message")
 
-    // Verify the types are correct
-    assert-eq("::hot::type/Result.Ok", success.$type, "Result.Ok should create correct type")
-    assert-eq("::hot::type/Result.Err", failure.$type, "Result.Err should create correct type")
+    // Verify the variants through the public type API
+    assert(is-type(success, Result.Ok), "Result.Ok should create the Ok variant")
+    assert(is-type(failure, Result.Err), "Result.Err should create the Err variant")
 
     // Verify the values
     success-value success
@@ -195,7 +195,7 @@ fn () {
     // Wrap in result using type alias with .Variant
     final-result Result.Ok(upper-str)
 
-    assert-eq("::hot::type/Result.Ok", final-result.$type, "Complex mixed aliases should work")
+    assert(is-type(final-result, Result.Ok), "Complex mixed aliases should work")
     actual if-ok(final-result, (ok-value) { ok-value })
     assert-eq("17", actual, "Complex calculation with aliases should be correct")
 }
@@ -233,8 +233,7 @@ fn () {
     // Both direct and aliased construction should work
     direct-ok Result.Ok("direct")
 
-    // Both should produce the same type
-    assert-eq("::hot::type/Result.Ok", direct-ok.$type, "Direct variant should have correct type")
+    assert(is-type(direct-ok, Result.Ok), "Direct variant should have correct type")
 
     // Both should be usable in match expressions
     result match direct-ok {
@@ -256,8 +255,8 @@ fn () {
     success ok-helper(42)
     failure err-helper("something went wrong")
 
-    assert-eq("::hot::type/Result.Ok", success.$type, "ok() helper should create Result.Ok")
-    assert-eq("::hot::type/Result.Err", failure.$type, "err() helper should create Result.Err")
+    assert(is-ok(success), "ok() helper should create Result.Ok")
+    assert(is-err(failure), "err() helper should create Result.Err")
 }
 
 // ----------------------------------------------------------------------------
