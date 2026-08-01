@@ -15,11 +15,11 @@ Add this to the `deps` in your `hot.hot` file:
 "hot.dev/hot-ai-agent": "1.4.0"
 ```
 
-`hot-ai-agent` depends on `hot-ai` 1.5.0 or later:
+`hot-ai-agent` 1.4.0 depends on `hot-ai` 1.7.0 or later. A current pair is:
 
 ```hot
-"hot.dev/hot-ai": "1.5.0",
-"hot.dev/hot-ai-agent": "1.1.0",
+"hot.dev/hot-ai": "1.8.1",
+"hot.dev/hot-ai-agent": "1.4.0",
 ```
 
 ## Namespaces
@@ -33,6 +33,20 @@ Add this to the `deps` in your `hot.hot` file:
   counters, error logging, and time helpers.
 - `::ai::agent::render` - neutral reply records and common text helpers.
 - `::ai::agent::stream` - stable agent-level stream event labels and emit helpers.
+- `::ai::agent::request` - request-scoped session, sender, and trusted context
+  binding for statically registered tools.
+- `::ai::agent::chat-turn` - the standard memory-grounded, streaming chat
+  lifecycle.
+- `::ai::agent::auth` - composable platform, shared-secret, and HMAC request
+  verification.
+- `::ai::agent::attachments` and `::ai::agent::blob` - bounded attachment
+  normalization and durable content-addressed artifacts.
+- `::ai::agent::callbacks` - validated and optionally signed completion
+  callbacks.
+- `::ai::agent::lifecycle` and `::ai::agent::synthesis` - session jobs and
+  one-shot synthesis helpers.
+- `::ai::agent::memory` and `::ai::agent::notify` - common memory commands and
+  durable notification records.
 - `::ai::agent::mcp` - helpers for agent-scoped MCP tools.
 
 The package deliberately does not depend on transport vendor packages such as

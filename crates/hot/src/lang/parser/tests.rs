@@ -421,12 +421,14 @@ fn test_namespace_definition_and_switching() {
 }
 
 #[test]
-fn test_deep_path_access() {
-    // Bracket whitespace differentiates deep access from assignment.
+fn test_bracket_deep_assignment() {
+    // An adjacent bracket path followed by a value is deep assignment.
     let source = r#"
-        // Deep bracket access without whitespace
+        // Integer, nested, dynamic, and literal-key paths
         a[0] 42
         nested[0][1] "value"
+        selected[key] "value"
+        keyed["name"] "value"
 
         // Vector literal with whitespace
         b [42, 43]
@@ -439,7 +441,7 @@ fn test_deep_path_access() {
     let result = parse_hot(source);
     assert!(
         result.is_ok(),
-        "Failed to parse deep path access: {:?}",
+        "Failed to parse bracket deep assignment: {:?}",
         result.err()
     );
 
@@ -455,6 +457,39 @@ fn test_deep_path_access() {
         .keys()
         .any(|var| var.deep_set.is_some());
     assert!(has_deep_path_var, "Should have variables with deep paths");
+
+    let dynamic = default_ns
+        .scope
+        .vars
+        .keys()
+        .find(|var| var.sym.name() == "selected")
+        .expect("dynamic assignment variable");
+    assert_eq!(
+        dynamic.deep_set,
+        Some(DeepPath::DynamicIndex("key".to_string()))
+    );
+
+    let keyed = default_ns
+        .scope
+        .vars
+        .keys()
+        .find(|var| var.sym.name() == "keyed")
+        .expect("string-key assignment variable");
+    assert_eq!(keyed.deep_set, Some(DeepPath::Key("name".to_string())));
+}
+
+#[test]
+fn test_negative_literal_vector_index_is_rejected() {
+    for source in ["items[-1] 42", "value items[-1]"] {
+        let error = format!(
+            "{:?}",
+            parse_hot(source).expect_err("negative literal index must not parse")
+        );
+        assert!(
+            error.contains("Vector indices cannot be negative"),
+            "unexpected error for {source:?}: {error}"
+        );
+    }
 }
 
 #[test]

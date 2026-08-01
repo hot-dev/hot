@@ -184,6 +184,48 @@ cmd_check() {
         errors=$((errors + 1))
     fi
 
+    # 5. Compile Hot source shipped in every bundled skill. These files are
+    # outside normal project source roots, so the default check does not see
+    # them. Discovering test/examples directories keeps newly added skills in
+    # coverage instead of relying on a hard-coded list.
+    echo ""
+    echo -e "${YELLOW}Step 5: Bundled Hot language skill source${NC}"
+    local skills_root="$PROJECT_ROOT/resources/ai/skills"
+    local skill_source_errors=0
+    while IFS= read -r skill_source; do
+        if ! find "$skill_source" -type f -name '*.hot' -print -quit | grep -q .; then
+            continue
+        fi
+        if cargo run --quiet -- check "$skill_source" --check.raw $ctx_args 2>/dev/null; then
+            echo -e "${GREEN}✓ ${skill_source#"$PROJECT_ROOT/"} passes static check${NC}"
+        else
+            echo -e "${RED}✗ ${skill_source#"$PROJECT_ROOT/"} failed static check${NC}"
+            cargo run -- check "$skill_source" --check.raw $ctx_args
+            skill_source_errors=$((skill_source_errors + 1))
+        fi
+    done < <(find "$skills_root" -mindepth 2 -maxdepth 2 -type d \( -name test -o -name examples \) -print | sort)
+    if [[ $skill_source_errors -ne 0 ]]; then
+        errors=$((errors + skill_source_errors))
+    fi
+
+    # 6. Reject the removed suffix-based flow-result syntax in canonical skill
+    # assets. Result collection is expressed with All<Vec>/All<Map> annotations.
+    echo ""
+    echo -e "${YELLOW}Step 6: Bundled skill syntax drift${NC}"
+    local stale_flow_syntax
+    if command -v rg >/dev/null 2>&1; then
+        stale_flow_syntax="$(rg -n '(parallel|serial|cond|cond-all|match|match-all)\|(one|vec|map)' "$skills_root" || true)"
+    else
+        stale_flow_syntax="$(grep -REn '(parallel|serial|cond|cond-all|match|match-all)\|(one|vec|map)' "$skills_root" || true)"
+    fi
+    if [[ -n "$stale_flow_syntax" ]]; then
+        echo -e "${RED}✗ Removed flow-result suffix syntax found:${NC}"
+        echo "$stale_flow_syntax"
+        errors=$((errors + 1))
+    else
+        echo -e "${GREEN}✓ No removed flow-result suffix syntax found${NC}"
+    fi
+
     echo ""
     if [[ $errors -eq 0 ]]; then
         echo -e "${GREEN}All checks passed!${NC}"

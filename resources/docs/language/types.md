@@ -4,7 +4,17 @@ description: "Define Hot types with structs, enums, nullable values, collections
 
 # Types
 
-Hot has an optional type system inspired by TypeScript. Add types where they help catch errors and document intent; skip them where they add noise.
+Hot is gradually typed. Add annotations where they help catch errors and
+document intent; skip them where they add noise. Hot infers types when it has
+enough information and uses `Any` when a value's type or shape cannot be
+established statically.
+
+The model is deliberately hybrid:
+
+- Plain records are checked structurally when their fields are known.
+- Constructed types and enum variants retain nominal runtime tags.
+- Literal and union types narrow the accepted values.
+- `Any` is the dynamic escape hatch at partially typed boundaries.
 
 ## Built-in Types
 
@@ -40,6 +50,12 @@ You can skip types entirely:
 {{snippet:types#types-optional-simple}}
 
 Hot will infer types where possible and allow `Any` elsewhere.
+
+This is best-effort static checking rather than whole-program proof. A known
+record can be checked against a required field shape, while an untyped
+`Map<Any, Any>` may be accepted and fail later when code accesses a missing
+field. Add annotations at API, storage, event, and other trust boundaries when
+you want stronger diagnostics.
 
 ## Generic Types
 
@@ -291,6 +307,11 @@ pick up the implementation without ever seeing it referenced near where
 it was declared. Local **type** definitions inside function bodies are
 still allowed; the rule applies only to arrows.
 
+Arrow coercions are one-hop. Hot does not search a chain such as
+`A -> B -> C` to satisfy a parameter requiring `C`. If more than one direct
+arrow could satisfy the same conversion, the call is ambiguous rather than
+silently choosing one.
+
 ## Result Types
 
 Hot doesn't have exceptions. Instead, use `Result` for operations that can fail:
@@ -329,6 +350,16 @@ See **[Error Handling](/docs/language/errors)** for the full story on Result typ
 
 ## Type Checking
 
+`hot check` validates annotations, known record fields, call signatures,
+exhaustive matches, and other statically visible constraints. It does not turn
+Hot into a fully static language: `Any`, dynamically shaped maps, and values
+from unresolved boundaries may defer failures until runtime.
+
+Structural compatibility and runtime identity answer different questions. A
+known record may satisfy a struct parameter by supplying every required field,
+while a value constructed with a type or enum constructor carries a nominal
+tag used by `match`, `is-type`, serialization, and overload dispatch.
+
 Use `is-*` functions to check built-in types at runtime:
 
 ```hot
@@ -347,9 +378,15 @@ For custom types, use `is-type`:
 
 ## The `untype` Function
 
-Typed values carry internal metadata so Hot can preserve type identity at runtime. Most of the time, you should not think about that representation—Hot handles it transparently. Use normal field access, `match`, and `is-type` instead of reading runtime metadata directly.
+Typed values carry internal metadata so Hot can preserve type identity at runtime. That wrapper is transparent to field access and is not a source-level reflection API: use normal field access, `match`, and `is-type`.
 
-When data leaves the Hot system (over the wire, to a database, etc.), strip this metadata using `untype`:
+`to-json` preserves that identity with Hot's tagged JSON representation, and
+`from-json` restores it. Treat the tag as a wire format rather than constructing
+or inspecting its metadata in Hot code. The serialized tag is an implementation
+boundary, not an alternate source-level type-construction or reflection API.
+
+Call `untype` before serialization when a recipient expects ordinary untagged
+JSON:
 
 ```hot
 // Define a type
@@ -358,7 +395,7 @@ Person type { name: Str, age: Int }
 // Create a typed value
 alice Person({name: "Alice", age: 30})
 
-// Strip internal type metadata
+// Produce an untagged value
 untype(alice)  // {name: "Alice", age: 30}
 ```
 
@@ -367,14 +404,14 @@ untype(alice)  // {name: "Alice", age: 30}
 The most common use case is serializing typed data to JSON for HTTP requests:
 
 ```hot
-// Without untype, the JSON includes Hot's internal type metadata
+// Tagged JSON is the default for typed values
 to-json(alice)
 
-// With untype, you get clean JSON
+// Untype explicitly requests ordinary untagged JSON
 to-json(untype(alice))  // {"name":"Alice","age":30}
 ```
 
-This is especially important when calling external APIs that expect clean JSON payloads:
+Use `untype` when calling external APIs that expect untagged JSON payloads:
 
 ```hot
 // Sending typed data to an external API
@@ -414,4 +451,4 @@ untype(order)
 - Use **enums** (variant unions) for discriminated types: `Direction enum { Up, Down }`
 - Define type coercions with `Type -> OtherType fn`
 - Use `Result` with `Result.Ok()`/`Result.Err()` instead of exceptions (see [Error Handling](/docs/language/errors))
-- Use `untype` to strip type metadata when serializing data for external systems
+- `to-json` preserves typed values with tagged JSON; use `untype` when the target expects untagged JSON

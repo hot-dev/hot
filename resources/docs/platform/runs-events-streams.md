@@ -1,14 +1,20 @@
 ---
-description: "Understand how Hot represents function runs, emitted events, streaming output, logs, traces, and execution history."
+description: "Reference Hot run and event records, stream lineage, live output, logs, traces, and lifecycle states."
 ---
 
 # Runs, Events & Streams
 
-Hot Platform uses three core primitives for workflow execution: **Runs**, **Events**, and **Streams**. Understanding these concepts is essential for building effective Hot applications.
+This page is the detailed reference for run and event records plus stream
+lineage and live delivery. Start with the
+[Platform Execution Model](/docs/platform/execution-model) for the complete
+relationship among events, handlers, runs, tasks, retries, workers, and streams.
 
 ## Runs
 
-A **Run** is a single execution of a Hot function. Every function call creates a run, whether triggered by an API request, event, or schedule.
+A **Run** is one platform-invoked, top-level Hot function execution attempt,
+such as an API call, selected event handler, schedule, or task execution.
+Ordinary function calls inside it remain part of the same run's execution
+trace.
 
 ### Run Lifecycle
 
@@ -161,10 +167,10 @@ send("hot:schedule:new", {
 
 See [Dynamic Schedules](/docs/schedules#dynamic-schedules) for more details.
 
-**5. Direct Call** (from another run)
+**5. Asynchronous Function Dispatch** (from another run)
 ```hot
 process-batch fn (orders) {
-  // Each send creates a separate run
+  // Each send publishes an event that dispatches a separate run
   map(orders, (order) {
     send("hot:call", {
       fn: "::myapp::orders/process-order",
@@ -247,6 +253,9 @@ fn (event) {
 
 ```
 
+An event may match zero, one, or multiple handlers. Each selected handler
+invocation is recorded as its own run in the event's stream.
+
 ### Event Delivery
 
 Hot guarantees **at-least-once delivery** for events:
@@ -261,10 +270,20 @@ Handlers should be idempotent when they perform external side effects, because t
 
 ## Streams
 
-**Streams** provide real-time, bidirectional data flow for scenarios where request/response isn't sufficient.
+**Streams** are the correlation boundary for platform work. Related events,
+runs, retries, and tasks share a stream ID, producing one end-to-end workflow
+history. A new externally published event creates a stream unless its request
+supplies an existing `stream_id`; events and tasks created inside running Hot
+code inherit the current stream.
+
+The same stream ID is also a live delivery channel. Clients can subscribe to
+run lifecycle notifications and data emitted with `::hot::stream/data`.
+User-emitted stream data is ephemeral and is not persisted with the durable
+event, run, and task records.
 
 ### Use Cases
 
+- **Workflow lineage** - Trace related events, runs, retries, and tasks
 - **AI/LLM Responses** - Stream tokens as they're generated
 - **Live Updates** - Push data to clients in real-time
 - **Long-Running Operations** - Report progress incrementally
@@ -357,18 +376,67 @@ while (true) {
 }
 ```
 
-### Stream States
+### Subscription States
 
-```
-┌─────────┐    ┌─────────┐    ┌─────────┐
-│  open   │ -> │ active  │ -> │ closed  │
-└─────────┘    └─────────┘    └─────────┘
-                    │
-                    v
-              ┌─────────┐
-              │  error  │
-              └─────────┘
-```
+<div class="my-8" style="overflow-x: auto; padding-bottom: 0.5rem;">
+<svg viewBox="0 0 820 280" class="w-full max-w-3xl mx-auto" style="min-width: 44rem; font-family: system-ui, sans-serif;" role="img" aria-labelledby="subscription-lifecycle-title subscription-lifecycle-desc">
+  <title id="subscription-lifecycle-title">Live stream subscription lifecycle</title>
+  <desc id="subscription-lifecycle-desc">An open subscription becomes active, then either closes normally or enters an error state.</desc>
+  <style>
+    .sl-node { fill: #ffffff; stroke: #d1d5db; stroke-width: 1.5; }
+    .sl-open { fill: #f9fafb; stroke: #9ca3af; }
+    .sl-active { fill: #eff6ff; stroke: #3b82f6; }
+    .sl-closed { fill: #f0fdf4; stroke: #22c55e; }
+    .sl-error { fill: #fef2f2; stroke: #ef4444; }
+    .sl-title { fill: #111827; font-size: 17px; font-weight: 650; }
+    .sl-sub { fill: #6b7280; font-size: 12px; }
+    .sl-arrow { fill: none; stroke: #9ca3af; stroke-width: 2; }
+    .sl-label { fill: #6b7280; font-size: 11.5px; font-weight: 550; }
+    .dark .sl-node { fill: #1c1c20; stroke: #3f3f46; }
+    .dark .sl-open { fill: #18181b; stroke: #71717a; }
+    .dark .sl-active { fill: #172554; stroke: #60a5fa; }
+    .dark .sl-closed { fill: #052e16; stroke: #4ade80; }
+    .dark .sl-error { fill: #450a0a; stroke: #f87171; }
+    .dark .sl-title { fill: #f4f4f5; }
+    .dark .sl-sub, .dark .sl-label { fill: #a1a1aa; }
+    .dark .sl-arrow { stroke: #71717a; }
+  </style>
+  <defs>
+    <marker id="sl-arrowhead" markerWidth="9" markerHeight="8" refX="8" refY="4" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L0,8 L9,4 z" fill="#9ca3af"/>
+    </marker>
+  </defs>
+
+  <rect x="35" y="106" width="180" height="68" rx="12" class="sl-node sl-open"/>
+  <text x="125" y="135" text-anchor="middle" class="sl-title">open</text>
+  <text x="125" y="157" text-anchor="middle" class="sl-sub">connection established</text>
+
+  <path d="M215 140 L305 140" class="sl-arrow" marker-end="url(#sl-arrowhead)"/>
+  <text x="260" y="128" text-anchor="middle" class="sl-label">subscribed</text>
+
+  <rect x="305" y="106" width="190" height="68" rx="12" class="sl-node sl-active"/>
+  <text x="400" y="135" text-anchor="middle" class="sl-title">active</text>
+  <text x="400" y="157" text-anchor="middle" class="sl-sub">receiving live events</text>
+
+  <path d="M495 140 C550 140 550 70 610 70" class="sl-arrow" marker-end="url(#sl-arrowhead)"/>
+  <text x="548" y="90" text-anchor="middle" class="sl-label">complete</text>
+
+  <path d="M495 140 C550 140 550 210 610 210" class="sl-arrow" marker-end="url(#sl-arrowhead)"/>
+  <text x="548" y="201" text-anchor="middle" class="sl-label">failure</text>
+
+  <rect x="610" y="36" width="180" height="68" rx="12" class="sl-node sl-closed"/>
+  <text x="700" y="65" text-anchor="middle" class="sl-title">closed</text>
+  <text x="700" y="87" text-anchor="middle" class="sl-sub">normal completion</text>
+
+  <rect x="610" y="176" width="180" height="68" rx="12" class="sl-node sl-error"/>
+  <text x="700" y="205" text-anchor="middle" class="sl-title">error</text>
+  <text x="700" y="227" text-anchor="middle" class="sl-sub">connection interrupted</text>
+</svg>
+</div>
+
+The subscription lifecycle is distinct from the durable stream record. Closing
+a client connection does not delete the events, runs, or tasks correlated by
+the stream ID.
 
 ### Viewing Streams
 
@@ -381,7 +449,7 @@ Active and completed streams are visible in the Hot App:
 
 ## Monitoring
 
-All runs, events, and streams are visible in the **Hot App** with:
+All runs, events, tasks, and streams are visible in the **Hot App** with:
 
 - Real-time updates as executions happen
 - Filtering by status, function, event type

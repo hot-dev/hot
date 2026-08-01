@@ -83,9 +83,31 @@ Assign to nested paths to build up Maps:
 
 {{snippet:vars#deep-path-assign}}
 
+Despite the assignment-like syntax, this does not mutate a shared object. Hot
+constructs or immutably updates the collection and creates a later binding for
+its root name. A lambda captures the current values of outer names when it is
+created, so a later deep-path assignment does not change an already captured
+value. A named `fn` instead resolves an outer name from the current binding
+each time it runs.
+
 Deep paths also work with Vec indices:
 
 {{snippet:vars#deep-path-vec}}
+
+When a missing path is followed by a literal integer index, Hot creates a Vec.
+Assigning past its current end grows the Vec and fills intervening positions
+with `null`, subject to the runtime collection-size limit:
+
+{{snippet:vars#deep-path-vec-growth}}
+
+Bracket paths can be dynamic. A bracket segment accepts an integer or string
+literal, or a bare variable whose value is used as a Map key or, for an integer
+applied to a Vec, as its index. It is not a general expression position; compute
+a more complex key first and bind it to a name. Because a dynamic key does not
+tell the compiler which collection to create, its parent must already exist.
+Paths can continue after the dynamic segment:
+
+{{snippet:vars#deep-path-dynamic}}
 
 ### Appending to Vectors
 
@@ -236,7 +258,7 @@ This lets you bend the language to your domain, making common operations feel bu
 
 ## Immutability
 
-All bindings are immutable. You cannot reassign a Var:
+Bindings and values are immutable. Reusing a name creates a later binding:
 
 ```hot
 count 1

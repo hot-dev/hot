@@ -292,14 +292,14 @@ fn call_prepared_with_vm_multi_args(
                 match vm.execute_compiled_user_function(function_id, args) {
                     Ok(result) => return Ok(result),
                     Err(vm_error) => {
-                        return Err(format!("Compiled function call failed: {:?}", vm_error));
+                        return Err(format!("Compiled function call failed: {}", vm_error));
                     }
                 }
             }
 
             match vm.execute_function_call_by_name(name, args) {
                 Ok(result) => Ok(result),
-                Err(vm_error) => Err(format!("VM function call failed: {:?}", vm_error)),
+                Err(vm_error) => Err(format!("VM function call failed: {}", vm_error)),
             }
         }
         PreparedFunction::CallableVal(function_val) => {
@@ -309,7 +309,7 @@ fn call_prepared_with_vm_multi_args(
 
             match vm.execute_lambda(function_val, args) {
                 Ok(result) => Ok(result),
-                Err(vm_error) => Err(format!("Lambda execution failed: {:?}", vm_error)),
+                Err(vm_error) => Err(format!("Lambda execution failed: {}", vm_error)),
             }
         }
         PreparedFunction::Invalid => Err(
@@ -1888,6 +1888,7 @@ fn pmap_vec(
                             let f = task_vm.get_failure().unwrap_or(FailureState {
                                 msg: "pmap item halted".to_string(),
                                 data: Val::Null,
+                                plain_vm_error: false,
                             });
                             task_vm.reset_failure_state();
                             chunk_halt = Some(PmapHalt {
@@ -1962,7 +1963,11 @@ fn pmap_vec(
         if let Some(h) = halt {
             match h.kind {
                 PmapHaltKind::Fail => {
-                    vm.set_failure(h.msg.clone(), h.data.clone());
+                    // Re-raised on the parent VM as the message the worker
+                    // recorded; the interpreter surfaces it via HotResult::Err
+                    // without a Result prefix, so mark it plain to keep the
+                    // JIT boundary's message identical.
+                    vm.set_failure_plain_vm_error(h.msg.clone(), h.data.clone());
                 }
                 PmapHaltKind::Cancel => {
                     vm.set_cancellation(h.msg.clone(), h.data.clone());

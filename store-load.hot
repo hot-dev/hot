@@ -79,13 +79,10 @@ for-each(range(1, 121), (i) { put-user(i) })
 // 3. events — text-search-enabled audit-style payloads.
 // ---------------------------------------------------------------------------
 
-events {
- "$type": "::hot::store/Map",
- "$val": {
-  name: "events",
-  embedding: EmbeddingOptions.Embedding(Embedding({text-search: true})),
- },
-}
+events ::store/Map({
+ name: "events",
+ embedding: EmbeddingOptions.Embedding(Embedding({text-search: true})),
+})
 
 event-kind fn (i: Int): Str {
  cond {

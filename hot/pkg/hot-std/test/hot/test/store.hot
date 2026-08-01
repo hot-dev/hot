@@ -15,8 +15,8 @@ meta ["test"] fn () {
             dimensions: 2,
         }),
     })
-    assert-eq("test", s.embedding.$val.provider, "Embedding(...) coerces to EmbeddingOptions.Embedding")
-    assert-eq("custom-v1", s.embedding.$val.model, "custom embedding payload is preserved")
+    assert-eq("test", s.embedding.provider, "Embedding(...) coerces to EmbeddingOptions.Embedding")
+    assert-eq("custom-v1", s.embedding.model, "custom embedding payload is preserved")
 }
 
 test-put-and-get

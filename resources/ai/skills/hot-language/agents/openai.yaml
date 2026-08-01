@@ -1,0 +1,4 @@
+interface:
+  display_name: "Hot Language"
+  short_description: "Write and review Hot language code"
+  default_prompt: "Use $hot-language to write or review Hot code with correct syntax and execution semantics."

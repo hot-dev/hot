@@ -58,11 +58,19 @@ hot ai add              # Add AGENTS.md + skills to project
 hot ai add --global     # Install skills to ~/.skills/ (available in all projects)
 ```
 
-This creates an `AGENTS.md` file and a `.skills/hot-language/` directory that teach your AI assistant about Hot syntax and best practices. Works with Cursor, Claude Code, GitHub Copilot, Windsurf, and many other AI coding tools.
+This creates an `AGENTS.md` file and installs the skills bundled with your Hot
+release under `.skills/`. Current bundles include Hot language guidance and may
+include specialized guidance such as Hot AI agents and SDK integrations. Works
+with Cursor, Claude Code, GitHub Copilot, Windsurf, and many other AI coding
+tools.
 
-`hot ai add` uses the skill snapshot bundled with your installed Hot release. If
-you prefer to install the latest public skill through the skills.sh ecosystem,
-run `npx skills add hot-dev/hot-skills`.
+`hot ai add` uses the skill snapshots bundled with your installed Hot release;
+use `hot ai list` to see that version's catalog. If you prefer the latest public
+skills through the skills.sh ecosystem, run
+`npx skills add hot-dev/hot-skills`.
+
+See [AI Coding Assistants](/docs/ai-coding) for project and global setup,
+validation, troubleshooting, and LLM-readable documentation.
 
 ## 4. Initialize
 

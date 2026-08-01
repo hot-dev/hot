@@ -2,6 +2,10 @@
 
 Hot provides two approaches for working with sequences: **eager collection functions** for immediate processing and **lazy iterators** for streaming and large data.
 
+Iterator laziness is separate from a `lazy` function parameter. Collection
+functions normally evaluate immediately; `Iter` produces elements on demand;
+`lazy` defers evaluation of one argument expression.
+
 ## Eager Collection Functions
 
 Process entire collections at once. Best for small/medium data where you need all results.

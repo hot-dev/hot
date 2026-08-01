@@ -175,9 +175,9 @@ task-c fn (): Str { "result-c" }
 // All<Vec> - return as vector instead of map
 parallel-as-vec fn (): Vec {
     results: All<Vec> parallel {
-        task-a()
-        task-b()
-        task-c()
+        a task-a()
+        b task-b()
+        c task-c()
     }
 
     results
@@ -187,14 +187,14 @@ parallel-as-vec fn (): Vec {
 // All<Map> - explicit map collection shape
 parallel-as-map fn (): Map {
     result: All<Map> parallel {
-        task-a()
-        task-b()
-        task-c()
+        a task-a()
+        b task-b()
+        c task-c()
     }
 
     result
 }
-// Returns: {parallel_branch_0: "result-a", parallel_branch_1: "result-b", parallel_branch_2: "result-c"}
+// Returns: {a: "result-a", b: "result-b", c: "result-c"}
 
 // ============================================
 // NESTED FLOWS

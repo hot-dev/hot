@@ -1031,6 +1031,15 @@ impl TypeChecker {
                 let var_name = var.sym.name().to_string();
                 let qualified = format!("{}/{}", ns_str, var_name);
 
+                // A deep-path assignment (`ports[3] 5`, `m.b 2`) mutates an
+                // existing binding; it does not redefine the root. Inferring
+                // from the assigned value would clobber the root's recorded
+                // type (Vec -> Int) and fail later collection calls with a
+                // spurious mismatch.
+                if var.deep_set.is_some() || var.deep_path.is_some() {
+                    continue;
+                }
+
                 if let Some(note) = Self::deprecated_meta_note(var) {
                     self.deprecated_defs.insert(qualified.clone(), note);
                 }
@@ -2380,7 +2389,14 @@ impl TypeChecker {
             };
             self.current_def = None;
             self.current_def_src = None;
-            self.context.add_variable(var_name, inferred_type);
+            // A deep-path assignment (`ports[3] 5`, `m.b 2`) mutates the
+            // existing binding; the assigned value's type must not replace
+            // the root's recorded type (Vec -> Int would fail later
+            // collection calls with a spurious mismatch). The value was
+            // still walked above so errors inside it are reported.
+            if var.deep_set.is_none() && var.deep_path.is_none() {
+                self.context.add_variable(var_name, inferred_type);
+            }
         }
 
         Ok(())
@@ -2819,14 +2835,6 @@ impl TypeChecker {
         }
     }
 
-    fn runtime_metadata_field_type(key: &str) -> Option<TypeExpr> {
-        match key {
-            "$type" => Some(TypeExpr::Str),
-            "$val" => Some(TypeExpr::Any),
-            _ => None,
-        }
-    }
-
     /// Value type for a keyed access. `Map<K, V>` → `V`; closed known
     /// records and struct types expose their declared/preserved fields.
     fn value_type(
@@ -2835,10 +2843,6 @@ impl TypeChecker {
         key: &str,
         location: Option<&ErrorLocation>,
     ) -> TypeExpr {
-        if let Some(metadata_type) = Self::runtime_metadata_field_type(key) {
-            return metadata_type;
-        }
-
         match base {
             TypeExpr::Map(_, val) => (**val).clone(),
             TypeExpr::Record { fields, open, .. } => {

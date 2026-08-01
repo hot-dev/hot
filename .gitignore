@@ -1,5 +1,6 @@
 /target
 /.data
+/.ci/hot-skills-mirror/
 node_modules/
 .hot/
 .skills/

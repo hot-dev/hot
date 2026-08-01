@@ -33,7 +33,7 @@ meta ["test"] fn () {
     // Access fields through transparent typed field access
     assert-eq(10, p.x, "Point x should be 10")
     assert-eq(20, p.y, "Point y should be 20")
-    assert-eq("::hot::test::type-constructor/Point", p.$type, "Type should be set correctly")
+    assert(is-type(p, Point), "Constructed value should be a Point")
 }
 
 // ============================================================================
@@ -130,7 +130,7 @@ meta ["test"] fn () {
 
     // The inner field should be a typed Inner object
     inner_obj result.inner
-    assert-eq("::hot::test::type-constructor/Inner", inner_obj.$type, "Inner should be typed")
+    assert(is-type(inner_obj, Inner), "Inner should be typed")
     assert-eq(42, inner_obj.value, "Inner value should be 42")
 }
 
@@ -191,7 +191,7 @@ meta ["test"] fn () {
     assert(not(is-err(result)), "Vec of custom type should construct")
 
     first_tag result.tags[0]
-    assert-eq("::hot::test::type-constructor/Tag", first_tag.$type, "First tag should be typed")
+    assert(is-type(first_tag, Tag), "First tag should be typed")
     assert-eq("color", first_tag.key, "First tag key should be 'color'")
 }
 
@@ -258,10 +258,10 @@ meta ["test"] fn () {
     assert(not(is-err(result)), "Deeply nested construction should succeed")
 
     location result.location
-    assert-eq("::hot::test::type-constructor/Location", location.$type, "Location should be typed")
+    assert(is-type(location, Location), "Location should be typed")
 
     coords location.coords
-    assert-eq("::hot::test::type-constructor/Coordinates", coords.$type, "Coordinates should be typed")
+    assert(is-type(coords, Coordinates), "Coordinates should be typed")
     assert-eq(40.7128, coords.lat, "Latitude should be correct")
 }
 
@@ -376,7 +376,7 @@ meta ["test"] fn () {
     result Simple({a: 1, b: "hello", c: true})
 
     assert(not(is-err(result)), "Construction should succeed")
-    assert-eq("::hot::test::type-constructor/Simple", result.$type, "Should have $type")
+    assert(is-type(result, Simple), "Should construct a Simple value")
     assert-eq(1, result.a, "Field a should be accessible")
     assert-eq("hello", result.b, "Field b should be accessible")
     assert-eq(true, result.c, "Field c should be accessible")
@@ -396,7 +396,7 @@ meta ["test"] fn () {
     result Marker({})
 
     assert(not(is-err(result)), "Empty type construction should succeed")
-    assert-eq("::hot::test::type-constructor/Marker", result.$type, "Should have $type")
+    assert(is-type(result, Marker), "Should construct a Marker value")
 }
 
 // ============================================================================
@@ -463,8 +463,8 @@ meta ["test"] fn () {
 
     assert(not(is-err(circle-drawing)), "Drawing with circle should succeed")
     // The shape should be inferred as Circle variant
-    assert-eq("::hot::test::type-constructor/EnumTestShape.Circle", circle-drawing.shape.$type,
-              "Shape should be inferred as Circle variant")
+    assert(is-type(circle-drawing.shape, EnumTestShape.Circle),
+           "Shape should be inferred as Circle variant")
     // Dot access auto-unwraps typed values, so we can access .radius directly
     assert-eq(5.0, circle-drawing.shape.radius, "Circle radius should be 5.0")
 
@@ -472,8 +472,8 @@ meta ["test"] fn () {
     rect-drawing EnumTestDrawing({shape: {width: 10.0, height: 20.0}})
 
     assert(not(is-err(rect-drawing)), "Drawing with rectangle should succeed")
-    assert-eq("::hot::test::type-constructor/EnumTestShape.Rectangle", rect-drawing.shape.$type,
-              "Shape should be inferred as Rectangle variant")
+    assert(is-type(rect-drawing.shape, EnumTestShape.Rectangle),
+           "Shape should be inferred as Rectangle variant")
 }
 
 // ============================================================================
@@ -500,9 +500,7 @@ meta ["test"] fn () {
     result TieContainer({item: {value: 42}})
 
     assert(not(is-err(result)), "Container should succeed")
-    // With a tie, it should be left as a raw map (no $type)
-    assert-eq(null, result.item.$type,
-              "Ambiguous match should leave as raw map (no $type)")
+    assert(is-map(result.item), "Ambiguous match should leave a raw map")
     assert-eq(42, result.item.value, "Value should be preserved")
 }
 
@@ -526,9 +524,7 @@ meta ["test"] fn () {
     result NoMatchHolder({data: {other-field: "test"}})
 
     assert(not(is-err(result)), "Holder should succeed")
-    // No match means raw map preserved
-    assert-eq(null, result.data.$type,
-              "No matching variant should leave as raw map")
+    assert(is-map(result.data), "No matching variant should leave a raw map")
     assert-eq("test", result.data.other-field, "Field should be preserved")
 }
 

@@ -543,6 +543,13 @@ async fn async_main(providers: CliProviders) {
                 // Merge it with the default configuration
                 conf = conf.merge(&hot_config);
 
+                // Configuration programs materialize resolved defaults as well
+                // as explicitly authored values. Reapply HOT_* overrides after
+                // loading so those generated defaults cannot erase an operator
+                // override such as HOT_JIT_THRESHOLD. CLI flags are still
+                // applied last and remain the highest-precedence source.
+                conf = apply_env_vars(conf);
+
                 // Check minimum Hot version requirement from hot.min-version
                 if let Some(min_version_val) = conf.get("min-version")
                     && let hot::val::Val::Str(min_version) = min_version_val

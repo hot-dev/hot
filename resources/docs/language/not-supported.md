@@ -145,8 +145,8 @@ result safe-divide(10, 0)
 
 // Use match for pattern matching on Result
 match result {
-  Result.Ok => log(`Result: ${result}`)
-  Result.Err => log(`Error: ${result}`)
+  Result.Ok => println(`Result: ${result}`)
+  Result.Err => println(`Error: ${result}`)
 }
 ```
 

@@ -11,7 +11,7 @@
 //!     execution context, artifact collection).
 //!   * `check_sources_pipeline_*` — typecheck-only pipelines (with
 //!     diagnostics, dependencies, or context).
-//!   * `run_unified_pipeline[_with_artifacts]` and `find_eval_result` —
+//!   * `run_unified_pipeline[_with_artifacts]` —
 //!     the actual unified pipeline that all of the above delegate to.
 //!   * `call_test_runner[_with_pattern]` — invokes the in-language
 //!     `::hot::test::run-tests` entry point.
@@ -1229,22 +1229,13 @@ impl Engine {
                     Ok(result) => {
                         tracing::debug!(" Unified Pipeline execution completed successfully");
 
-                        // For eval code, try to find a specific result variable first,
-                        // but fall back to the direct VM result if no variables are found
                         if eval_code.is_some() {
-                            // Use the current namespace after execution (user code may have changed it)
-                            let current_ns = vm.get_current_namespace().to_string();
-                            tracing::debug!(" Current namespace after execution: '{}'", current_ns);
-                            match Self::find_eval_result(&mut vm, &current_ns) {
-                                Ok(val) if !matches!(val, crate::val::Val::Null) => return Ok(val),
-                                _ => {
-                                    // No specific result variable found, return the direct VM result
-                                    tracing::debug!(
-                                        " No eval result variable found, using direct VM result"
-                                    );
-                                    return Ok(result);
-                                }
-                            }
+                            // The VM tracks the destination of the final value-producing
+                            // instruction. That is the eval expression's value even when
+                            // it is Null. Falling back to the namespace's last binding
+                            // would incorrectly print a preceding key variable for a
+                            // terminal missing-key lookup.
+                            return Ok(result);
                         }
 
                         Ok(result)
@@ -1386,38 +1377,6 @@ impl Engine {
                 }
             }
         }
-    }
-
-    /// Find and return the result of the last executed variable in the specified namespace
-    fn find_eval_result(
-        vm: &mut crate::lang::VirtualMachine,
-        namespace_path: &str,
-    ) -> Result<crate::val::Val, String> {
-        tracing::debug!(" Looking for eval result in namespace: {}", namespace_path);
-
-        if let Some(namespace_vars) = vm.get_namespace_vars(Some(namespace_path)) {
-            tracing::debug!(
-                " Found namespace {} with {} variables",
-                namespace_path,
-                namespace_vars.len()
-            );
-
-            // Get the last variable - IndexMap maintains insertion order, so the last entry is the most recent
-            if let Some((var_name, val)) = namespace_vars.iter().next_back() {
-                tracing::debug!(
-                    " Found last eval result variable '{}' with value: {:?}",
-                    var_name,
-                    val
-                );
-                return Ok(val.clone());
-            }
-
-            tracing::debug!(" No variables found in namespace: {}", namespace_path);
-        } else {
-            tracing::debug!(" Namespace not found: {}", namespace_path);
-        }
-
-        Ok(crate::val::Val::Null)
     }
 
     /// Unified pipeline that returns both execution result and compilation artifacts
@@ -1722,19 +1681,8 @@ impl Engine {
             .execute()
             .map_err(|e| format!("Execution failed: {}", e))?;
 
-        // For eval code, try to find a specific result variable
-        let final_result = if eval_code.is_some() {
-            let current_ns = vm.get_current_namespace().to_string();
-            match Self::find_eval_result(&mut vm, &current_ns) {
-                Ok(val) if !matches!(val, crate::val::Val::Null) => val,
-                _ => result,
-            }
-        } else {
-            result
-        };
-
         Ok(ExecutionWithArtifacts {
-            result: final_result,
+            result,
             artifacts: Some(artifacts),
         })
     }

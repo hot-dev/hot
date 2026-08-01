@@ -34,8 +34,29 @@ user.settings.notifications true
 // @doc: deep-path-vec
 config.servers[0] "api.example.com"
 config.servers[1] "db.example.com"
+config.backends[0].host "api.internal"
+config.backends[1].host "db.internal"
 config.retries 3
 // @end: deep-path-vec
+
+// @doc: deep-path-vec-growth
+ports [4680]
+ports[3] 4683
+
+dynamic-ports [4680]
+port-index 3
+dynamic-ports[port-index] 4683
+// @end: deep-path-vec-growth
+
+// @doc: deep-path-dynamic
+profile {name: "Ada"}
+field "name"
+profile[field] "Grace"
+
+workers [{status: "idle"}, {status: "idle"}]
+index 1
+workers[index].status "ready"
+// @end: deep-path-dynamic
 
 // @doc: deep-path-access
 user-nested {name: "Alice", settings: {theme: "dark"}}
@@ -103,10 +124,28 @@ meta ["test"] fn () {
 test-deep-path-vec
 meta ["test"] fn () {
   // Deep path assignment with integer indices creates a vector
+  assert(is-vec(config.servers), "indexed deep path creates a vector")
   assert-eq(2, ::hot::coll/length(config.servers), "servers length")
   assert-eq("api.example.com", config.servers[0], "server 0")
   assert-eq("db.example.com", config.servers[1], "server 1")
+  assert(is-vec(config.backends), "continued indexed path creates a vector")
+  assert-eq("api.internal", config.backends[0].host, "backend 0")
+  assert-eq("db.internal", config.backends[1].host, "backend 1")
   assert-eq(3, config.retries, "retries")
+}
+
+test-deep-path-vec-growth
+meta ["test"] fn () {
+  expected [4680, null, null, 4683]
+  assert-eq(expected, ports, "literal index grows and null-pads")
+  assert-eq(expected, dynamic-ports, "dynamic index grows and null-pads")
+}
+
+test-deep-path-dynamic
+meta ["test"] fn () {
+  assert-eq("Grace", profile.name, "dynamic map key")
+  assert-eq("idle", workers[0].status, "untouched vector element")
+  assert-eq("ready", workers[1].status, "dynamic vector index")
 }
 
 test-deep-path-access

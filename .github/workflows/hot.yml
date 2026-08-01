@@ -55,15 +55,25 @@ jobs:
       - name: Cargo clippy
         run: cargo clippy --workspace --all-targets --locked -j 4 -- -D warnings
 
+      - name: Checkout published AI skill mirror
+        uses: actions/checkout@v5
+        with:
+          repository: hot-dev/hot-skills
+          # Keep the second checkout outside Cargo's disposable target tree so
+          # cache cleanup cannot remove it before the sync check runs.
+          path: .ci/hot-skills-mirror
+          persist-credentials: false
+
       - name: Verify AGENTS.md sync
         run: bash ./scripts/check-agents-sync.sh
 
       - name: Verify AI skill assets sync
-        run: bash ./scripts/check-ai-assets-sync.sh
+        run: bash ./scripts/check-ai-assets-sync.sh ./.ci/hot-skills-mirror
 
       # `hot-static-checks.sh check` runs the default project check, the package
-      # aggregate check, `hot fmt --check` over all Hot source, and validates
-      # {{snippet:...}} references in docs.
+      # aggregate check, `hot fmt --check` over all Hot source, validates
+      # {{snippet:...}} references, and compiles bundled Hot-language skill
+      # examples/tests.
       - name: Hot static checks
         run: ./scripts/hot-static-checks.sh check
 

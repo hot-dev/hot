@@ -6,6 +6,11 @@ description: "Build event-driven workflows in Hot with typed event handlers, emi
 
 Events are the primary way to trigger asynchronous work in Hot. Event handlers run when specific events occur, enabling decoupled, scalable workflows.
 
+One event can select zero, one, or multiple handlers. Each selected handler
+invocation becomes a run in the event's stream. See the
+[Platform Execution Model](/docs/platform/execution-model) for the complete
+event, run, task, and stream lifecycle.
+
 ## Event Handlers
 
 Define event handlers using the `on-event` metadata:

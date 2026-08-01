@@ -44,6 +44,7 @@ dotenvy = { workspace = true }
 dirs = { workspace = true }
 open = { workspace = true }
 sha2 = { workspace = true }
+siphasher = { workspace = true }
 
 # ONNX Runtime (used by fastembed) has no prebuilt binaries for Windows ARM64
 # or macOS Intel when using the downloaded-binaries backend.

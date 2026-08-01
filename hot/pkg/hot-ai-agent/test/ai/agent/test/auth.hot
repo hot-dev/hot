@@ -3,6 +3,7 @@ meta ["test"]
 
 ::auth ::ai::agent::auth
 ::hmac ::hot::hmac
+Verifier ::ai::agent::auth/Verifier
 
 build-headers fn (sig: Str): Map {
     {
@@ -322,13 +323,13 @@ fn () {
     shared ::auth/shared-secret-verifier(::auth/BearerOptions({token: "supersecret"}))
     anon ::auth/anonymous()
 
-    assert-eq("::ai::agent::auth/Verifier.Platform", platform.$type)
-    assert-eq(["api-key"], platform.$val.require-types)
-    assert-eq("::ai::agent::auth/Verifier.Hmac", hmac.$type)
-    assert-eq("x-hot-signature", hmac.$val.header)
-    assert-eq("::ai::agent::auth/Verifier.SharedSecret", shared.$type)
-    assert-eq("supersecret", shared.$val.token)
-    assert-eq("::ai::agent::auth/Verifier.Anonymous", anon.$type)
+    assert(is-type(platform, Verifier.Platform))
+    assert-eq(["api-key"], platform.require-types)
+    assert(is-type(hmac, Verifier.Hmac))
+    assert-eq("x-hot-signature", hmac.header)
+    assert(is-type(shared, Verifier.SharedSecret))
+    assert-eq("supersecret", shared.token)
+    assert(is-type(anon, Verifier.Anonymous))
 }
 
 test-verify-anonymous-allows

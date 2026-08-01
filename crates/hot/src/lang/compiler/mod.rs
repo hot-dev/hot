@@ -2583,7 +2583,12 @@ impl Compiler {
                         );
 
                         // Check if this is a deep set operation (e.g., items[] "value")
-                        if let Some(deep_set_path) = &var_ref.var.deep_set {
+                        if let Some(deep_set_path) = var_ref
+                            .var
+                            .deep_set
+                            .as_ref()
+                            .or(var_ref.var.deep_path.as_ref())
+                        {
                             self.compile_deep_set_assignment(var_name, deep_set_path, value_reg)?;
                         } else {
                             self.store_variable(var_name, value_reg);
@@ -6064,21 +6069,26 @@ impl Compiler {
             .program
             .add_constant(Constant::Val(Val::from(var_name.to_string())));
 
-        // Determine the default value based on the deep path
-        // If the first path segment is an Append, default to empty vec; otherwise default to empty map
-        let default_val = if matches!(deep_path, crate::lang::ast::DeepPath::Append) {
-            Val::vec_empty()
+        // A leading literal index or append establishes a Vec root. A dynamic
+        // selector is ambiguous, so its collection must already exist.
+        if Self::deep_path_starts_with_dynamic_index(deep_path) {
+            self.emit_instruction(Instruction::LoadVar {
+                dest: base_reg,
+                var_name: var_name_constant,
+            });
         } else {
-            Val::map_empty()
-        };
-
-        // Try to load the existing variable, but don't fail if it doesn't exist
-        let default_constant = self.program.add_constant(Constant::Val(default_val));
-        self.emit_instruction(Instruction::LoadVarOrDefault {
-            dest: base_reg,
-            var_name: var_name_constant,
-            default_value: default_constant,
-        });
+            let default_val = if Self::deep_path_starts_with_literal_vector_selector(deep_path) {
+                Val::vec_empty()
+            } else {
+                Val::map_empty()
+            };
+            let default_constant = self.program.add_constant(Constant::Val(default_val));
+            self.emit_instruction(Instruction::LoadVarOrDefault {
+                dest: base_reg,
+                var_name: var_name_constant,
+                default_value: default_constant,
+            });
+        }
 
         // 2. Set the deep property on the loaded/default variable
         self.compile_deep_set_recursive(base_reg, deep_path, value_reg)?;
@@ -6168,8 +6178,10 @@ impl Compiler {
                 // Create a register to hold the intermediate object
                 let intermediate_reg = self.allocate_register();
 
-                // Check if right is Append - if so, left should create a Vec as default
-                let right_is_append = matches!(**right, crate::lang::ast::DeepPath::Append);
+                // A following literal index or append establishes a Vec at
+                // the parent path instead of a string-keyed Map.
+                let right_requires_vec = Self::deep_path_starts_with_literal_vector_selector(right);
+                let right_requires_existing = Self::deep_path_starts_with_dynamic_index(right);
 
                 // First, navigate to the parent object using the left path
                 // This will recursively handle nested chains
@@ -6177,7 +6189,8 @@ impl Compiler {
                     base_reg,
                     left,
                     intermediate_reg,
-                    right_is_append,
+                    right_requires_vec,
+                    right_requires_existing,
                 )?;
 
                 // Now set the property in the intermediate object
@@ -6193,26 +6206,15 @@ impl Compiler {
     }
 
     /// Access a deep path, creating empty maps/vecs as needed
-    /// The `next_is_append` parameter indicates if the next operation will be an Append,
-    /// in which case we should create an empty Vec instead of an empty Map as the default
-    fn compile_deep_path_access_or_create(
-        &mut self,
-        base_reg: RegisterId,
-        deep_path: &crate::lang::ast::DeepPath,
-        dest_reg: RegisterId,
-    ) -> Result<(), String> {
-        self.compile_deep_path_access_or_create_with_default(base_reg, deep_path, dest_reg, false)
-    }
-
-    /// Access a deep path, creating empty maps/vecs as needed
-    /// The `next_is_append` parameter indicates if the next operation will be an Append,
-    /// in which case we should create an empty Vec instead of an empty Map as the default
+    /// `next_requires_vec` indicates that the following path segment is a
+    /// literal index or append, so the missing value must be created as a Vec.
     fn compile_deep_path_access_or_create_with_default(
         &mut self,
         base_reg: RegisterId,
         deep_path: &crate::lang::ast::DeepPath,
         dest_reg: RegisterId,
-        next_is_append: bool,
+        next_requires_vec: bool,
+        next_requires_existing: bool,
     ) -> Result<(), String> {
         match deep_path {
             crate::lang::ast::DeepPath::Key(key) => {
@@ -6220,37 +6222,47 @@ impl Compiler {
                 let key_constant = self
                     .program
                     .add_constant(Constant::Val(Val::from(key.clone())));
-                let default_constant = if next_is_append {
-                    self.program.add_constant(Constant::Val(Val::vec_empty()))
+                if next_requires_existing {
+                    self.emit_instruction(Instruction::DotAccess {
+                        dest: dest_reg,
+                        object: base_reg,
+                        property: key_constant,
+                    });
                 } else {
-                    self.program.add_constant(Constant::Val(Val::map_empty()))
-                };
+                    let default_constant = if next_requires_vec {
+                        self.program.add_constant(Constant::Val(Val::vec_empty()))
+                    } else {
+                        self.program.add_constant(Constant::Val(Val::map_empty()))
+                    };
 
-                self.emit_instruction(Instruction::DotAccessOrDefault {
-                    dest: dest_reg,
-                    object: base_reg,
-                    property: key_constant,
-                    default_value: default_constant,
-                });
+                    self.emit_instruction(Instruction::DotAccessOrDefault {
+                        dest: dest_reg,
+                        object: base_reg,
+                        property: key_constant,
+                        default_value: default_constant,
+                    });
+                }
 
                 Ok(())
             }
             crate::lang::ast::DeepPath::Chain(left, right) => {
                 // Navigate to left first, then to right
-                // Check if right is Append - if so, left should create a Vec as default
-                let right_is_append = matches!(**right, crate::lang::ast::DeepPath::Append);
+                let right_requires_vec = Self::deep_path_starts_with_literal_vector_selector(right);
+                let right_requires_existing = Self::deep_path_starts_with_dynamic_index(right);
                 let intermediate_reg = self.allocate_register();
                 self.compile_deep_path_access_or_create_with_default(
                     base_reg,
                     left,
                     intermediate_reg,
-                    right_is_append,
+                    right_requires_vec,
+                    right_requires_existing,
                 )?;
                 self.compile_deep_path_access_or_create_with_default(
                     intermediate_reg,
                     right,
                     dest_reg,
-                    next_is_append,
+                    next_requires_vec,
+                    next_requires_existing,
                 )?;
                 Ok(())
             }
@@ -6260,18 +6272,26 @@ impl Compiler {
                 let index_constant = self
                     .program
                     .add_constant(Constant::Val(Val::from(index_str)));
-                let default_constant = if next_is_append {
-                    self.program.add_constant(Constant::Val(Val::vec_empty()))
+                if next_requires_existing {
+                    self.emit_instruction(Instruction::DotAccess {
+                        dest: dest_reg,
+                        object: base_reg,
+                        property: index_constant,
+                    });
                 } else {
-                    self.program.add_constant(Constant::Val(Val::map_empty()))
-                };
+                    let default_constant = if next_requires_vec {
+                        self.program.add_constant(Constant::Val(Val::vec_empty()))
+                    } else {
+                        self.program.add_constant(Constant::Val(Val::map_empty()))
+                    };
 
-                self.emit_instruction(Instruction::DotAccessOrDefault {
-                    dest: dest_reg,
-                    object: base_reg,
-                    property: index_constant,
-                    default_value: default_constant,
-                });
+                    self.emit_instruction(Instruction::DotAccessOrDefault {
+                        dest: dest_reg,
+                        object: base_reg,
+                        property: index_constant,
+                        default_value: default_constant,
+                    });
+                }
 
                 Ok(())
             }
@@ -6309,6 +6329,28 @@ impl Compiler {
         }
     }
 
+    fn deep_path_starts_with_literal_vector_selector(
+        deep_path: &crate::lang::ast::DeepPath,
+    ) -> bool {
+        match deep_path {
+            crate::lang::ast::DeepPath::Index(_) | crate::lang::ast::DeepPath::Append => true,
+            crate::lang::ast::DeepPath::Chain(left, _) => {
+                Self::deep_path_starts_with_literal_vector_selector(left)
+            }
+            _ => false,
+        }
+    }
+
+    fn deep_path_starts_with_dynamic_index(deep_path: &crate::lang::ast::DeepPath) -> bool {
+        match deep_path {
+            crate::lang::ast::DeepPath::DynamicIndex(_) => true,
+            crate::lang::ast::DeepPath::Chain(left, _) => {
+                Self::deep_path_starts_with_dynamic_index(left)
+            }
+            _ => false,
+        }
+    }
+
     /// Set a value back into a deep path
     fn compile_deep_path_set_back(
         &mut self,
@@ -6334,7 +6376,15 @@ impl Compiler {
             crate::lang::ast::DeepPath::Chain(left, right) => {
                 // For chains, we need to navigate to the parent and then set
                 let parent_reg = self.allocate_register();
-                self.compile_deep_path_access_or_create(base_reg, left, parent_reg)?;
+                let right_requires_vec = Self::deep_path_starts_with_literal_vector_selector(right);
+                let right_requires_existing = Self::deep_path_starts_with_dynamic_index(right);
+                self.compile_deep_path_access_or_create_with_default(
+                    base_reg,
+                    left,
+                    parent_reg,
+                    right_requires_vec,
+                    right_requires_existing,
+                )?;
                 self.compile_deep_path_set_back(parent_reg, right, value_reg)?;
 
                 // Now set the modified parent back
@@ -7066,8 +7116,19 @@ impl Compiler {
                     // Compile the value expression
                     let value_reg = self.compile_value(value_expr)?;
 
-                    // Store the variable
-                    self.store_variable(var_name, value_reg);
+                    // A reference parsed inside a flow carries its path as a
+                    // read path. In assignment position that same path is the
+                    // write target.
+                    if let Some(deep_set_path) = var_ref
+                        .var
+                        .deep_set
+                        .as_ref()
+                        .or(var_ref.var.deep_path.as_ref())
+                    {
+                        self.compile_deep_set_assignment(var_name, deep_set_path, value_reg)?;
+                    } else {
+                        self.store_variable(var_name, value_reg);
+                    }
 
                     i += 2; // Skip both expressions
                     continue;
@@ -7178,6 +7239,22 @@ impl Compiler {
                     // This looks like a variable assignment: var_name expression
                     let var_name = var_ref.var.sym.name();
                     let value_expr = &flow.expressions[i + 1];
+
+                    // A deep-path assignment is a read-modify-write of an
+                    // existing binding. Parallel branches are independent
+                    // slots keyed by name, so there is no coherent order for
+                    // concurrent writes into the same root; previously the
+                    // path was silently dropped and the root rebound to the
+                    // bare value. Reject it instead of losing data.
+                    if var_ref.var.deep_set.is_some() || var_ref.var.deep_path.is_some() {
+                        return Err(format!(
+                            "Deep-path assignment ('{}...') is not supported inside a \
+                             parallel flow: branches run concurrently, so writing into an \
+                             existing binding has no defined order. Bind a new name in the \
+                             branch and merge after the flow, or use a serial flow.",
+                            var_name
+                        ));
+                    }
 
                     tracing::trace!(
                         "Compiler: Creating deferred thunk for parallel variable: '{}' = {:?}",
@@ -7322,8 +7399,22 @@ impl Compiler {
                             // Compile the value expression
                             let value_reg = self.compile_value(value_expr)?;
 
-                            // Store the variable
-                            self.store_variable(var_name, value_reg);
+                            // A path-bearing reference followed by a value is
+                            // a deep assignment, not a rebinding of its root.
+                            if let Some(deep_set_path) = var_ref
+                                .var
+                                .deep_set
+                                .as_ref()
+                                .or(var_ref.var.deep_path.as_ref())
+                            {
+                                self.compile_deep_set_assignment(
+                                    var_name,
+                                    deep_set_path,
+                                    value_reg,
+                                )?;
+                            } else {
+                                self.store_variable(var_name, value_reg);
+                            }
 
                             last_reg = value_reg;
                             i += 2; // Skip both expressions
@@ -7435,7 +7526,20 @@ impl Compiler {
                             let var_name = var_ref.var.sym.name();
                             let value_expr = &flow.expressions[i + 1];
                             let value_reg = self.compile_value(value_expr)?;
-                            self.store_variable(var_name, value_reg);
+                            if let Some(deep_set_path) = var_ref
+                                .var
+                                .deep_set
+                                .as_ref()
+                                .or(var_ref.var.deep_path.as_ref())
+                            {
+                                self.compile_deep_set_assignment(
+                                    var_name,
+                                    deep_set_path,
+                                    value_reg,
+                                )?;
+                            } else {
+                                self.store_variable(var_name, value_reg);
+                            }
                             last_reg = value_reg;
                             i += 2;
                             continue;

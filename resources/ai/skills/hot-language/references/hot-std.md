@@ -557,7 +557,7 @@ is-inline-run fn (): Bool                                // true if running inli
 ```hot
 i info()
 if(gt(i.run.retry-attempt, 0),
-    log(`retry ${i.run.retry-attempt} of ${i.run.max-retries}`),
+    println(`retry ${i.run.retry-attempt} of ${i.run.max-retries}`),
     null)
 ```
 

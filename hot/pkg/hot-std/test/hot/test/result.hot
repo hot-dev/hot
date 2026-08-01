@@ -167,6 +167,18 @@ meta ["test"] fn () {
     assert(contains(Str(err-value(caught)), "the real reason"), "halt carries the payload message")
 }
 
+// Regression: assignment is a Result-consumption boundary. It must halt on
+// Err before rewriting the error payload as though the wrapper were a Map.
+test-err-assignment-preserves-original-payload
+meta ["test"] fn () {
+    caught ::hot::internal::exec/contain(() {
+        failure err({message: "original error", code: "E_ORIGINAL"})
+        failure.message "rewritten"
+    })
+    assert(is-err(caught), "assignment through Err halts")
+    assert(contains(Str(err-value(caught)), "original error"), "original payload survives")
+}
+
 // err-message extracts human-readable text from every payload shape
 // in the convention: plain Str, {message}, halt Failure ({msg} under a
 // typed wrapper), and bare payloads.

@@ -3,7 +3,6 @@ name: Release
 on:
   push:
     branches:
-      - 'stable'
       - 'beta'
       - 'pkg-release'
     tags:
@@ -73,7 +72,7 @@ jobs:
         if [[ "${{ github.ref }}" == "refs/heads/pkg-release" || "${{ github.event.inputs.release_scope }}" == "packages_only" ]]; then
           IS_PACKAGE_ONLY=true
         fi
-        if [[ "$IS_BETA" == "true" || "$IS_PACKAGE_ONLY" == "true" || "${{ github.event.inputs.publish_to_cdn }}" == "true" || "${{ github.ref }}" == "refs/heads/stable" || "${{ github.ref_type }}" == "tag" ]]; then
+        if [[ "$IS_BETA" == "true" || "$IS_PACKAGE_ONLY" == "true" || "${{ github.event.inputs.publish_to_cdn }}" == "true" || "${{ github.ref_type }}" == "tag" ]]; then
           PUBLISH_PACKAGE_CDN=true
         fi
 
@@ -1187,7 +1186,7 @@ jobs:
         name: packages-windows
         path: target/packages/*.exe
 
-  # Determine release channel based on branch.
+  # Determine release channel from the triggering ref.
   # The public hot repo does not use GitHub Environments; staging/production
   # environments belong to hot-cloud deployments.
   determine-release-channel:
@@ -1199,10 +1198,10 @@ jobs:
       is_stable_release: ${{ steps.channel.outputs.is_stable_release }}
       is_beta: ${{ steps.channel.outputs.is_beta }}
     steps:
-      - name: Determine release channel from branch
+      - name: Determine release channel from ref
         id: channel
         run: |
-          if [[ "${{ github.ref_type }}" == "tag" || "${{ github.ref }}" == "refs/heads/stable" ]]; then
+          if [[ "${{ github.ref_type }}" == "tag" ]]; then
             echo "channel=stable" >> $GITHUB_OUTPUT
             echo "is_stable_release=true" >> $GITHUB_OUTPUT
             echo "is_beta=false" >> $GITHUB_OUTPUT
@@ -1261,7 +1260,7 @@ jobs:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
     - name: Validate AWS secrets for S3 upload
-      if: ${{ (needs.validate-release.outputs.is_beta == 'true' || github.event.inputs.publish_to_cdn == 'true' || github.ref == 'refs/heads/stable' || github.ref_type == 'tag') && vars.RELEASE_S3_BUCKET != '' }}
+      if: ${{ (needs.validate-release.outputs.is_beta == 'true' || github.event.inputs.publish_to_cdn == 'true' || github.ref_type == 'tag') && vars.RELEASE_S3_BUCKET != '' }}
       run: |
         if [ -z "${{ secrets.RELEASE_AWS_ROLE_ARN }}" ]; then
           echo "::error::RELEASE_AWS_ROLE_ARN secret is not configured."
@@ -1270,14 +1269,14 @@ jobs:
         fi
 
     - name: Configure AWS credentials for S3 upload
-      if: ${{ (needs.validate-release.outputs.is_beta == 'true' || github.event.inputs.publish_to_cdn == 'true' || github.ref == 'refs/heads/stable' || github.ref_type == 'tag') && vars.RELEASE_S3_BUCKET != '' }}
+      if: ${{ (needs.validate-release.outputs.is_beta == 'true' || github.event.inputs.publish_to_cdn == 'true' || github.ref_type == 'tag') && vars.RELEASE_S3_BUCKET != '' }}
       uses: aws-actions/configure-aws-credentials@v6
       with:
         role-to-assume: ${{ secrets.RELEASE_AWS_ROLE_ARN }}
         aws-region: ${{ vars.RELEASE_AWS_REGION || 'us-east-2' }}
 
     - name: Upload installers to S3
-      if: ${{ (needs.validate-release.outputs.is_beta == 'true' || github.event.inputs.publish_to_cdn == 'true' || github.ref == 'refs/heads/stable' || github.ref_type == 'tag') && vars.RELEASE_S3_BUCKET != '' }}
+      if: ${{ (needs.validate-release.outputs.is_beta == 'true' || github.event.inputs.publish_to_cdn == 'true' || github.ref_type == 'tag') && vars.RELEASE_S3_BUCKET != '' }}
       run: |
         VERSION="${{ steps.version.outputs.version }}"
         BUCKET="${{ vars.RELEASE_S3_BUCKET }}"
@@ -1368,7 +1367,7 @@ jobs:
         fi
 
     - name: Invalidate CloudFront cache
-      if: ${{ (needs.validate-release.outputs.is_beta == 'true' || github.event.inputs.publish_to_cdn == 'true' || github.ref == 'refs/heads/stable' || github.ref_type == 'tag') && vars.RELEASE_S3_BUCKET != '' && vars.RELEASE_CLOUDFRONT_DIST_ID != '' }}
+      if: ${{ (needs.validate-release.outputs.is_beta == 'true' || github.event.inputs.publish_to_cdn == 'true' || github.ref_type == 'tag') && vars.RELEASE_S3_BUCKET != '' && vars.RELEASE_CLOUDFRONT_DIST_ID != '' }}
       run: |
         echo "Invalidating CloudFront cache for updated paths..."
         if [ "${{ needs.validate-release.outputs.is_beta }}" = "true" ]; then

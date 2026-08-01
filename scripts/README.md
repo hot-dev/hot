@@ -12,9 +12,13 @@ package documentation, and local integration tests.
 - `check-*.sh`, `sync-*.sh`, and `fix-*.sh` are repository maintenance helpers.
   `check-agents-sync.sh` verifies that root `AGENTS.md` was generated from
   `resources/ai/AGENTS.md` by `cargo run --locked --bin hot -- ai add`.
-  `sync-ai-assets.sh` copies the canonical `resources/ai/skills/` skill files
+  `sync-ai-assets.sh` copies every canonical `resources/ai/skills/` skill
   into a sibling `hot-skills` checkout, and `check-ai-assets-sync.sh` verifies
-  the public mirror against the recorded manifest hash.
+  every public mirror tree against the recorded manifest hashes. Pass a skill
+  name as the second argument only when intentionally syncing or checking one
+  skill; filtered sync preserves every unrelated manifest hash so CI still
+  detects unsynchronized source changes. A full sync removes mirror directories
+  whose canonical skill was deleted.
 - `integration/*.sh` contains package integration test runners. Use the package
   or service name as the filename, for example `integration/resend.sh`.
 - `noisy-load-benchmark.sh` runs the `hot/test/noisy-load` stress project

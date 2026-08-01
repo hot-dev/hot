@@ -102,6 +102,37 @@ fn env_var_to_conf_key(env_var: &str) -> String {
         .replace('_', ".")
 }
 
+/// Preserve the configuration schema's scalar/container type when an
+/// environment variable replaces an existing value. Environment variables
+/// arrive as strings, but storing every override as `Str` makes numeric and
+/// boolean settings render differently and forces each consumer to compensate.
+fn coerce_env_value(existing: Option<Val>, value: String) -> Val {
+    match existing {
+        Some(Val::Int(_)) => value
+            .parse::<i64>()
+            .map(Val::Int)
+            .unwrap_or_else(|_| Val::from(value)),
+        Some(Val::Dec(_)) => match serde_json::from_str::<Val>(&value) {
+            Ok(parsed @ (Val::Int(_) | Val::Dec(_))) => parsed,
+            _ => Val::from(value),
+        },
+        Some(Val::Bool(_)) => match value.trim().to_ascii_lowercase().as_str() {
+            "1" | "true" | "on" | "yes" => Val::Bool(true),
+            "0" | "false" | "off" | "no" => Val::Bool(false),
+            _ => Val::from(value),
+        },
+        Some(Val::Vec(_)) => match serde_json::from_str::<Val>(&value) {
+            Ok(parsed @ Val::Vec(_)) => parsed,
+            _ => Val::from(value),
+        },
+        Some(Val::Map(_)) => match serde_json::from_str::<Val>(&value) {
+            Ok(parsed @ Val::Map(_)) => parsed,
+            _ => Val::from(value),
+        },
+        _ => Val::from(value),
+    }
+}
+
 pub(crate) fn create_default_conf() -> Val {
     // Create app and api default configurations using their server modules
     let profile_conf = hot::profile::get_resolved_conf(Val::map_empty());
@@ -260,13 +291,49 @@ pub(crate) fn apply_env_vars(conf: Val) -> Val {
     for (key, value) in env::vars() {
         if key.starts_with("HOT_") {
             let conf_key = env_var_to_conf_key(&key);
-            // Create a new Val with the path for this env var
-            let new_val = val!({ conf_key.as_str(): value.as_str() });
-            conf = conf.merge(&new_val);
+            // A path that extends an existing scalar (HOT_LOG_LEVEL_EXTRA ->
+            // log.level.extra while log.level is a Str) would replace that
+            // scalar with a materialized map, silently destroying the
+            // configured value. Skip such variables instead of clobbering.
+            if env_path_extends_scalar(&conf, &conf_key) {
+                tracing::warn!(
+                    "Ignoring environment variable {}: path '{}' extends an existing \
+                     scalar setting",
+                    key,
+                    conf_key
+                );
+                continue;
+            }
+            // Environment names map to nested configuration paths. A literal
+            // one-entry map would create a `"jit.threshold"` key rather than
+            // the `{jit: {threshold: ...}}` shape read by the runtime.
+            let value = coerce_env_value(conf.get(&conf_key), value);
+            conf = conf.set(&conf_key, value);
         }
     }
 
     conf
+}
+
+/// True when setting `conf_key` would have to write *through* an existing
+/// non-map value: some strict prefix of the dotted path resolves to a scalar,
+/// so `set` would replace that scalar with a materialized map.
+fn env_path_extends_scalar(conf: &Val, conf_key: &str) -> bool {
+    let mut current = conf;
+    for part in conf_key.split('.') {
+        match current {
+            Val::Map(map) => match map.get(&Val::from(part)) {
+                Some(next) => current = next,
+                // Path leaves the existing tree here; `set` only creates new
+                // nested maps below this point, destroying nothing.
+                None => return false,
+            },
+            // Path parts remain but the tree already ended in a non-map:
+            // the env path extends an existing scalar.
+            _ => return true,
+        }
+    }
+    false
 }
 
 // Function to extract options from the command enum
@@ -961,6 +1028,7 @@ pub(crate) fn reload_conf_after_init(base_conf: &Val) -> Result<Val, String> {
         Ok(hot_config) => {
             tracing::debug!("Successfully loaded configuration from newly created hot.hot");
             conf = conf.merge(&hot_config);
+            conf = apply_env_vars(conf);
         }
         Err(e) => {
             return Err(format!(

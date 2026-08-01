@@ -1,0 +1,4 @@
+interface:
+  display_name: "Hot AI Agents"
+  short_description: "Build durable AI agents and SDK clients"
+  default_prompt: "Use $hot-ai-agents to build a production-ready Hot agent and its client integration."

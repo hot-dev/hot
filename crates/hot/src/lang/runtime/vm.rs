@@ -53,16 +53,16 @@ fn is_cancellation_payload(val: &Val) -> bool {
 
 fn terminal_payload_type(val: &Val) -> Option<String> {
     if let Val::Map(map) = val
-        && let Some(Val::Str(type_str)) = map.get(&Val::from("$type"))
+        && let Some(type_str) = crate::val::tagged_type_name(map)
         && matches!(
-            &**type_str,
+            type_str,
             "::hot::run/Failure"
                 | "::hot::task/Failure"
                 | "::hot::run/Cancellation"
                 | "::hot::task/Cancellation"
         )
     {
-        return Some((**type_str).to_owned());
+        return Some(type_str.to_owned());
     }
 
     None
@@ -87,6 +87,13 @@ pub fn max_recursion_depth() -> usize {
 pub struct FailureState {
     pub msg: String,
     pub data: Val,
+    /// True when the halt records a plain `VmError` raised inside a JIT'd
+    /// frame (not a Result.Err consumption). The JIT boundary surfaces these
+    /// with the message as-is; Result halts get the interpreter's
+    /// `Result error:` prefix. The interpreter never records plain runtime
+    /// errors here (they unwind natively), so this is always false outside
+    /// the JIT helper path.
+    pub plain_vm_error: bool,
 }
 
 /// Thread-safe failure state holder
@@ -848,13 +855,12 @@ impl VirtualMachine {
     fn get_value_type_name(&self, value: &Val) -> String {
         match value {
             Val::Map(m) => {
-                // Check if this is a typed value with $type metadata
-                if let Some(Val::Str(type_name)) = m.get(&Val::from("$type")) {
+                if let Some(type_name) = crate::val::tagged_type_name(m) {
                     // Extract just the type name from the full path
                     if let Some(last_part) = type_name.split('/').next_back() {
                         last_part.to_string()
                     } else {
-                        (**type_name).to_owned()
+                        type_name.to_owned()
                     }
                 } else {
                     "Map".to_string()
@@ -960,35 +966,8 @@ impl VirtualMachine {
                     instruction
                 );
 
-                // Track the destination register of the last instruction that produces a value
-                match instruction {
-                    Instruction::LoadConst { dest, .. }
-                    | Instruction::Move { dest, .. }
-                    | Instruction::Add { dest, .. }
-                    | Instruction::Call { dest, .. }
-                    | Instruction::CallWithSpread { dest, .. }
-                    | Instruction::CallNative { dest, .. }
-                    | Instruction::LoadVar { dest, .. }
-                    | Instruction::LoadVarOrDefault { dest, .. }
-                    | Instruction::LoadScoped { dest, .. }
-                    | Instruction::CaptureVar { dest, .. }
-                    | Instruction::LoadFunctionRef { dest, .. }
-                    | Instruction::EndFlow { dest, .. }
-                    | Instruction::Pipe { dest, .. }
-                    | Instruction::DefineFunction { dest, .. }
-                    | Instruction::DotAccess { dest, .. }
-                    | Instruction::DotAccessOrDefault { dest, .. }
-                    | Instruction::GetTypePath { dest, .. }
-                    | Instruction::IsType { dest, .. }
-                    | Instruction::TemplateInterpolate { dest, .. }
-                    | Instruction::CallLibBuiltin { dest, .. }
-                    | Instruction::CallUserFunction { dest, .. }
-                    | Instruction::CallLambda { dest, .. }
-                    | Instruction::ExtractInnerVal { dest, .. }
-                    | Instruction::ConstructTyped { dest, .. } => {
-                        last_result_register = *dest;
-                    }
-                    _ => {}
+                if let Some(dest) = self.get_instruction_dest(instruction) {
+                    last_result_register = dest;
                 }
 
                 self.execute_instruction(instruction)?;
@@ -1314,35 +1293,8 @@ impl VirtualMachine {
                     instruction
                 );
 
-                // Track the destination register of the last instruction that produces a value
-                match instruction {
-                    Instruction::LoadConst { dest, .. }
-                    | Instruction::Move { dest, .. }
-                    | Instruction::Add { dest, .. }
-                    | Instruction::Call { dest, .. }
-                    | Instruction::CallWithSpread { dest, .. }
-                    | Instruction::CallNative { dest, .. }
-                    | Instruction::LoadVar { dest, .. }
-                    | Instruction::LoadVarOrDefault { dest, .. }
-                    | Instruction::LoadScoped { dest, .. }
-                    | Instruction::CaptureVar { dest, .. }
-                    | Instruction::LoadFunctionRef { dest, .. }
-                    | Instruction::EndFlow { dest, .. }
-                    | Instruction::Pipe { dest, .. }
-                    | Instruction::DefineFunction { dest, .. }
-                    | Instruction::DotAccess { dest, .. }
-                    | Instruction::DotAccessOrDefault { dest, .. }
-                    | Instruction::GetTypePath { dest, .. }
-                    | Instruction::IsType { dest, .. }
-                    | Instruction::TemplateInterpolate { dest, .. }
-                    | Instruction::CallLibBuiltin { dest, .. }
-                    | Instruction::CallUserFunction { dest, .. }
-                    | Instruction::CallLambda { dest, .. }
-                    | Instruction::ExtractInnerVal { dest, .. }
-                    | Instruction::ConstructTyped { dest, .. } => {
-                        last_result_register = *dest;
-                    }
-                    _ => {}
+                if let Some(dest) = self.get_instruction_dest(instruction) {
+                    last_result_register = dest;
                 }
 
                 self.execute_instruction(instruction)?;
@@ -2965,6 +2917,7 @@ impl VirtualMachine {
                 let object_val = self.get_register(object)?.clone();
                 let property_name = self.get_constant_string(property)?;
 
+                let object_val = self.unwrap_result_if_ok(&object_val)?;
                 let result = self.access_property(&object_val, &property_name)?;
                 self.set_register(dest, result)?;
                 self.instruction_pointer += 1;
@@ -2979,17 +2932,20 @@ impl VirtualMachine {
                 let dest = *dest;
                 let object = *object;
                 let property = *property;
-                let default_value = *default_value;
-                // Execute dot access with default value if property doesn't exist
+                // Execute property access while constructing a deep path.
                 let object_val = self.get_register(object)?.clone();
                 let property_name = self.get_constant_string(property)?;
 
-                let result = match self.access_property(&object_val, &property_name) {
-                    Ok(val) => val,
-                    Err(_) => {
-                        // Property doesn't exist, use default value
-                        self.load_constant(default_value)?
-                    }
+                let object_val = self.unwrap_result_if_ok(&object_val)?;
+                // Missing ordinary fields are represented by Null. Semantic
+                // errors (including a nested Result.Err) must still unwind;
+                // treating them as a missing field would silently consume the
+                // error during deep-path construction.
+                let result = self.access_property(&object_val, &property_name)?;
+                let result = if matches!(&result, Val::Null) {
+                    self.load_constant(*default_value)?
+                } else {
+                    result
                 };
 
                 self.set_register(dest, result)?;
@@ -3008,80 +2964,7 @@ impl VirtualMachine {
                 let object_val = self.get_register(object)?.clone();
                 let property_val = self.get_register(property)?.clone();
 
-                let result = match &object_val {
-                    Val::Map(m) => {
-                        // For maps, use the property value as the key directly
-                        match m.get(&property_val) {
-                            Some(v) => v.clone(),
-                            None => Val::Null,
-                        }
-                    }
-                    Val::Vec(v) => {
-                        // For vectors, property must be an integer index
-                        match &property_val {
-                            Val::Int(i) => {
-                                if *i < 0 {
-                                    Val::Null
-                                } else {
-                                    v.get(*i as usize).cloned().unwrap_or(Val::Null)
-                                }
-                            }
-                            _ => {
-                                return Err(VmError::runtime(format!(
-                                    "Vector index must be an integer, got {:?}",
-                                    property_val
-                                )));
-                            }
-                        }
-                    }
-                    Val::Str(s) => {
-                        // For strings, property must be an integer index
-                        match &property_val {
-                            Val::Int(i) => {
-                                if *i < 0 {
-                                    Val::Null
-                                } else {
-                                    s.chars()
-                                        .nth(*i as usize)
-                                        .map(|c| Val::from(c.to_string()))
-                                        .unwrap_or(Val::Null)
-                                }
-                            }
-                            _ => {
-                                return Err(VmError::runtime(format!(
-                                    "String index must be an integer, got {:?}",
-                                    property_val
-                                )));
-                            }
-                        }
-                    }
-                    Val::Bytes(b) => {
-                        // For bytes, property must be an integer index
-                        match &property_val {
-                            Val::Int(i) => {
-                                if *i < 0 {
-                                    Val::Null
-                                } else {
-                                    b.get(*i as usize)
-                                        .map(|byte| Val::Int(*byte as i64))
-                                        .unwrap_or(Val::Null)
-                                }
-                            }
-                            _ => {
-                                return Err(VmError::runtime(format!(
-                                    "Bytes index must be an integer, got {:?}",
-                                    property_val
-                                )));
-                            }
-                        }
-                    }
-                    _ => {
-                        return Err(VmError::runtime(format!(
-                            "Cannot access property on {:?}",
-                            object_val
-                        )));
-                    }
-                };
+                let result = self.access_dynamic_property(&object_val, &property_val)?;
 
                 self.set_register(dest, result)?;
                 self.instruction_pointer += 1;
@@ -3121,73 +3004,7 @@ impl VirtualMachine {
                 let property_val = self.get_register(property)?.clone();
                 let new_value = self.get_register(value)?.clone();
 
-                match &mut object_val {
-                    Val::Map(m) => {
-                        // For maps, use the property value as the key directly
-                        m.insert(property_val, new_value);
-                    }
-                    Val::Vec(v) => {
-                        // For vectors, property must be an integer index
-                        match &property_val {
-                            Val::Int(i) => {
-                                if *i < 0 {
-                                    return Err(VmError::runtime(format!(
-                                        "Vector index cannot be negative: {}",
-                                        i
-                                    )));
-                                }
-                                let idx = usize::try_from(*i).map_err(|_| {
-                                    VmError::runtime(format!(
-                                        "Vector index {} is too large to address",
-                                        i
-                                    ))
-                                })?;
-                                // Growing the vector to `idx + 1` is a user-controlled
-                                // allocation, so gate it on the configured collection
-                                // size limit and use try_reserve to convert allocator
-                                // failure into a recoverable runtime error.
-                                if idx >= v.len() {
-                                    let new_len = idx.checked_add(1).ok_or_else(|| {
-                                        VmError::runtime(format!(
-                                            "Vector index {} would overflow length",
-                                            i
-                                        ))
-                                    })?;
-                                    if let Err(e) =
-                                        crate::lang::runtime::limits::check_collection_size(
-                                            "dynamic vector assign",
-                                            new_len,
-                                        )
-                                    {
-                                        return Err(VmError::runtime(e.to_string()));
-                                    }
-                                    let additional = new_len - v.len();
-                                    if let Err(e) = crate::lang::runtime::limits::try_reserve_vec(
-                                        "dynamic vector assign",
-                                        v,
-                                        additional,
-                                    ) {
-                                        return Err(VmError::runtime(e.to_string()));
-                                    }
-                                    v.resize(new_len, Val::Null);
-                                }
-                                v[idx] = new_value;
-                            }
-                            _ => {
-                                return Err(VmError::runtime(format!(
-                                    "Vector index must be an integer, got {:?}",
-                                    property_val
-                                )));
-                            }
-                        }
-                    }
-                    _ => {
-                        return Err(VmError::runtime(format!(
-                            "Cannot set property on {:?}",
-                            object_val
-                        )));
-                    }
-                }
+                self.set_dynamic_property(&mut object_val, &property_val, new_value)?;
 
                 // Store the modified object back to the register
                 self.set_register(object, object_val)?;
@@ -3514,16 +3331,8 @@ impl VirtualMachine {
                 // This allows both `Variant({...})` and `Variant(Type({...}))` to work equivalently.
                 let src_val = self.get_register(src)?.clone();
                 let extracted = match &src_val {
-                    Val::Map(map) => {
-                        if map.contains_key(&Val::from("$type")) {
-                            if let Some(inner_val) = map.get(&Val::from("$val")) {
-                                inner_val.clone()
-                            } else {
-                                src_val
-                            }
-                        } else {
-                            src_val
-                        }
+                    Val::Map(map) if crate::val::tagged_type_name(map).is_some() => {
+                        map.get(&Val::from("$val")).cloned().unwrap_or(src_val)
                     }
                     _ => src_val,
                 };
@@ -4196,9 +4005,9 @@ impl VirtualMachine {
             // This is a reference to another custom type - call its constructor
             // If data is already typed with matching type (or enum variant), return as-is
             if let Val::Map(m) = data
-                && let Some(Val::Str(existing_type)) = m.get(&Val::from("$type"))
+                && let Some(existing_type) = crate::val::tagged_type_name(m)
             {
-                let existing = &**existing_type;
+                let existing = existing_type;
                 // Exact match (e.g., "::ns/Type" == "::ns/Type")
                 // OR enum variant match (e.g., "::ns/Type.Variant" starts with "::ns/Type.")
                 if existing == type_name || existing.starts_with(&format!("{}.", type_name)) {
@@ -4440,7 +4249,7 @@ impl VirtualMachine {
 
         // If data is already typed (has $type), extract its $val for reconstruction
         let raw_data = match data {
-            Val::Map(m) if m.contains_key(&Val::from("$type")) => {
+            Val::Map(m) if crate::val::tagged_type_name(m).is_some() => {
                 m.get(&Val::from("$val")).cloned().unwrap_or(data.clone())
             }
             _ => data.clone(),
@@ -4626,10 +4435,7 @@ impl VirtualMachine {
         let Val::Map(map) = data else {
             return None;
         };
-        let Some(Val::Str(type_name)) = map.get(&Val::from("$type")) else {
-            return None;
-        };
-        Some(type_name)
+        crate::val::tagged_type_name(map)
     }
 
     fn type_info_matches_type(type_info: &Val, existing_type: &str) -> bool {
@@ -5088,7 +4894,8 @@ impl VirtualMachine {
     /// - If val is a Result.Err: call fail() with the error $val
     /// - Otherwise: return the value as-is
     ///
-    /// NOTE: This should ONLY be called for non-lazy function arguments and template literal parts
+    /// Call this only at ordinary Result-consumption boundaries. Callers that
+    /// support non-consuming inspection must handle those exceptions first.
     pub(crate) fn unwrap_result_if_ok(&mut self, val: &Val) -> VmResult<Val> {
         // Cache the debug-env check: this runs per argument per call, and
         // std::env::var is far too expensive for that hot path.
@@ -5117,15 +4924,15 @@ impl VirtualMachine {
         // Check if this is a Result type (variant union format)
         // Format: {$type: "::hot::type/Result.Ok", $val: ...} or {$type: "::hot::type/Result.Err", $val: ...}
         if let Val::Map(m) = val
-            && let Some(Val::Str(type_str)) = m.get(&Val::from("$type"))
+            && let Some(type_str) = crate::val::tagged_type_name(m)
         {
             // Result.Ok - return the inner value
-            if &**type_str == "::hot::type/Result.Ok" {
+            if type_str == "::hot::type/Result.Ok" {
                 return Ok(m.get(&Val::from("$val")).cloned().unwrap_or(Val::Null));
             }
 
             // Result.Err - fail with the error
-            if &**type_str == "::hot::type/Result.Err" {
+            if type_str == "::hot::type/Result.Err" {
                 let err_val = m.get(&Val::from("$val")).cloned().unwrap_or(Val::Null);
 
                 let msg = Self::result_err_message(&err_val);
@@ -5254,8 +5061,8 @@ impl VirtualMachine {
     ///
     /// Includes the Val discriminant of each argument so that overloads dispatched
     /// by type (e.g. `add(Int, Int)` vs `add(Str, Str)`) get distinct cache entries.
-    /// For `Val::Map`, also includes the `$type` field (if present) so that custom
-    /// typed maps (e.g. `User` vs `Shape`) produce distinct cache keys.
+    /// For tagged `Val::Map` values, also includes the nominal type name so
+    /// custom types (e.g. `User` vs `Shape`) produce distinct cache keys.
     #[inline(always)]
     fn dispatch_cache_key(name: &str, args: &[Val]) -> u64 {
         use std::hash::{Hash, Hasher};
@@ -5264,10 +5071,8 @@ impl VirtualMachine {
         args.len().hash(&mut hasher);
         for arg in args {
             std::mem::discriminant(arg).hash(&mut hasher);
-            // For maps with a $type field (custom types like User, Shape, etc.),
-            // include the type name so different custom types get distinct cache entries.
             if let Val::Map(m) = arg
-                && let Some(Val::Str(type_name)) = m.get(&Val::from("$type"))
+                && let Some(type_name) = crate::val::tagged_type_name(m)
             {
                 type_name.hash(&mut hasher);
             }
@@ -5786,8 +5591,7 @@ impl VirtualMachine {
         // silently produces a null result. (`call_function_value` performs the same
         // unwrap for the lexical-scope path; this one covers direct-Call dispatch.)
         if let Val::Map(m) = &function_val
-            && let Some(Val::Str(tn)) = m.get(&Val::from("$type"))
-            && &**tn == "::hot::type/Fn"
+            && crate::val::tagged_type_name(m) == Some("::hot::type/Fn")
             && let Some(inner) = m.get(&Val::from("$val"))
         {
             function_val = inner.clone();
@@ -6316,8 +6120,7 @@ impl VirtualMachine {
                 // that was loaded from such a field — e.g. `f h.body; f(args)` where `body:
                 // Fn?` — fell through to the "non-callable" default and returned `Val::Null`,
                 // which presented to the user as a function silently producing null.
-                if let Some(Val::Str(type_name)) = map.get(&Val::from("$type"))
-                    && &**type_name == "::hot::type/Fn"
+                if crate::val::tagged_type_name(map) == Some("::hot::type/Fn")
                     && let Some(inner) = map.get(&Val::from("$val"))
                 {
                     tracing::trace!("VM: Unwrapping typed Fn value and recursing");
@@ -6491,13 +6294,12 @@ impl VirtualMachine {
             Val::Bool(_) => "Bool".to_string(),
             Val::Vec(_) => "Vec".to_string(),
             Val::Map(map) => {
-                // Check if this is a typed object with $type metadata
-                if let Some(Val::Str(type_name)) = map.get(&Val::from("$type")) {
+                if let Some(type_name) = crate::val::tagged_type_name(map) {
                     // Extract just the type name from "::namespace/TypeName"
                     if let Some(slash_pos) = type_name.rfind('/') {
                         type_name[slash_pos + 1..].to_string()
                     } else {
-                        (**type_name).to_owned()
+                        type_name.to_owned()
                     }
                 } else {
                     "Map".to_string()
@@ -6523,9 +6325,8 @@ impl VirtualMachine {
             Val::Byte(_) => "::hot::type/Byte".to_string(),
             Val::Bytes(_) => "::hot::type/Bytes".to_string(),
             Val::Map(map) => {
-                // Check for $type field for custom types (including Result.Ok/Result.Err variants)
-                if let Some(Val::Str(type_str)) = map.get(&Val::from("$type")) {
-                    (**type_str).to_owned()
+                if let Some(type_str) = crate::val::tagged_type_name(map) {
+                    type_str.to_owned()
                 } else {
                     // Plain map
                     "::hot::type/Map".to_string()
@@ -7146,10 +6947,9 @@ impl VirtualMachine {
 
     fn is_result_shaped(val: &Val) -> bool {
         if let Val::Map(map) = val
-            && let Some(Val::Str(type_str)) = map.get(&Val::from("$type"))
+            && let Some(type_str) = crate::val::tagged_type_name(map)
         {
-            return &**type_str == "::hot::type/Result.Err"
-                || &**type_str == "::hot::type/Result.Ok";
+            return type_str == "::hot::type/Result.Err" || type_str == "::hot::type/Result.Ok";
         }
         false
     }
@@ -9274,27 +9074,48 @@ impl VirtualMachine {
         match instruction {
             Instruction::LoadConst { dest, .. }
             | Instruction::Move { dest, .. }
-            | Instruction::Add { dest, .. }
-            | Instruction::Call { dest, .. }
-            | Instruction::CallNative { dest, .. }
-            | Instruction::LoadVar { dest, .. }
-            | Instruction::LoadVarOrDefault { dest, .. }
-            | Instruction::LoadScoped { dest, .. }
-            | Instruction::CaptureVar { dest, .. }
             | Instruction::LoadFunctionRef { dest, .. }
+            | Instruction::LoadTypeRef { dest, .. }
             | Instruction::EndFlow { dest, .. }
             | Instruction::Pipe { dest, .. }
             | Instruction::DefineFunction { dest, .. }
+            | Instruction::Add { dest, .. }
+            | Instruction::Sub { dest, .. }
+            | Instruction::Mul { dest, .. }
+            | Instruction::Eq { dest, .. }
+            | Instruction::StrEndsWith { dest, .. }
+            | Instruction::StrStartsWith { dest, .. }
+            | Instruction::Gt { dest, .. }
+            | Instruction::Lt { dest, .. }
+            | Instruction::Call { dest, .. }
+            | Instruction::CallLambda { dest, .. }
+            | Instruction::CallWithSpread { dest, .. }
+            | Instruction::CallNative { dest, .. }
+            | Instruction::CallUserFunction { dest, .. }
+            | Instruction::TemplateInterpolate { dest, .. }
             | Instruction::DotAccess { dest, .. }
             | Instruction::DotAccessOrDefault { dest, .. }
+            | Instruction::DynamicDotAccess { dest, .. }
             | Instruction::GetTypePath { dest, .. }
-            | Instruction::IsType { dest, .. }
-            | Instruction::TemplateInterpolate { dest, .. }
             | Instruction::CallLibBuiltin { dest, .. }
-            | Instruction::CallUserFunction { dest, .. }
-            | Instruction::CallLambda { dest, .. }
             | Instruction::ExtractInnerVal { dest, .. }
-            | Instruction::ConstructTyped { dest, .. } => Some(*dest),
+            | Instruction::ConstructTyped { dest, .. }
+            | Instruction::IsType { dest, .. }
+            | Instruction::EnsureResult { dest, .. }
+            | Instruction::MakeVec { dest, .. }
+            | Instruction::MakeVecWithSpread { dest, .. }
+            | Instruction::MergeMaps { dest, .. }
+            | Instruction::LoadVar { dest, .. }
+            | Instruction::LoadVarOrDefault { dest, .. }
+            | Instruction::LoadGlobal { dest, .. }
+            | Instruction::LoadScoped { dest, .. }
+            | Instruction::CaptureVar { dest, .. }
+            | Instruction::WrapOk { dest, .. } => Some(*dest),
+            Instruction::DotSet { object, .. } | Instruction::DynamicDotSet { object, .. } => {
+                Some(*object)
+            }
+            Instruction::VecAppend { vec, .. } => Some(*vec),
+            Instruction::SetElement { collection, .. } => Some(*collection),
             _ => None,
         }
     }
@@ -9302,6 +9123,17 @@ impl VirtualMachine {
     /// Set the VM failure state (thread-safe, first failure wins)
     /// Returns true if this was the first failure, false if already failed
     pub fn set_failure(&self, msg: String, data: Val) -> bool {
+        self.set_failure_state(msg, data, false)
+    }
+
+    /// Record a plain `VmError` halt raised inside a JIT'd frame. Same
+    /// first-failure-wins semantics as `set_failure`, but marks the entry so
+    /// the JIT boundary re-raises the message without the Result prefix.
+    pub(crate) fn set_failure_plain_vm_error(&self, msg: String, data: Val) -> bool {
+        self.set_failure_state(msg, data, true)
+    }
+
+    fn set_failure_state(&self, msg: String, data: Val, plain_vm_error: bool) -> bool {
         // Use compare_exchange to atomically check and set failed flag
         if self
             .failure_state
@@ -9311,7 +9143,11 @@ impl VirtualMachine {
         {
             // We're the first failure - store our failure state
             if let Ok(mut failure) = self.failure_state.failure.write() {
-                *failure = Some(FailureState { msg, data });
+                *failure = Some(FailureState {
+                    msg,
+                    data,
+                    plain_vm_error,
+                });
             }
             tracing::trace!("VM: Failure state set (first failure)");
             true
@@ -9339,14 +9175,24 @@ impl VirtualMachine {
             return Ok(());
         }
         if self.has_failed() {
-            let msg = self
-                .get_failure()
-                .map(|f| f.msg)
-                .unwrap_or_else(|| "halted".to_string());
-            return Err(VmError::runtime_with_ip(
-                format!("Result error: {}", msg),
-                self.instruction_pointer,
-            ));
+            let failure = self.get_failure();
+            // Plain VmErrors re-raise verbatim (the interpreter never
+            // prefixes them); Result.Err consumption halts carry the same
+            // `Result error:` prefix `unwrap_result_if_ok` raises.
+            let msg = match &failure {
+                Some(f) if f.plain_vm_error => {
+                    // Plain helper failures are only the JIT's transport for
+                    // an ordinary VmError. Once reconstructed, clear that
+                    // transport state so HOF callers do not mistake it for an
+                    // explicit `fail()` raised by the callback.
+                    let msg = f.msg.clone();
+                    self.reset_failure_state();
+                    msg
+                }
+                Some(f) => format!("Result error: {}", f.msg),
+                None => "Result error: halted".to_string(),
+            };
+            return Err(VmError::runtime_with_ip(msg, self.instruction_pointer));
         }
         if self.has_cancelled() {
             let msg = self
@@ -9528,15 +9374,59 @@ impl VirtualMachine {
         self.store_variable(name, value)
     }
 
+    /// Return true when a map uses Hot's tagged JSON wrapper representation.
+    ///
+    /// A data-bearing wrapper consists of `$type`, `$val`, and the one defined
+    /// wrapper-metadata member, `$origin`. A unit enum wrapper consists only of
+    /// `$type`, whose local name has the `Enum.Variant` form. Rejecting every
+    /// other sibling field keeps foreign maps stable instead of guessing that
+    /// arbitrary `$...` application data is Hot metadata.
+    fn is_tagged_wrapper(&self, map: &IndexMap<Val, Val>) -> bool {
+        let Some(Val::Str(type_name)) = map.get(&Val::from("$type")) else {
+            return false;
+        };
+        if !type_name.starts_with("::") {
+            return false;
+        }
+        if map.contains_key(&Val::from("$val")) {
+            return map.keys().all(|key| {
+                matches!(key, Val::Str(name) if matches!(&**name, "$type" | "$val" | "$origin"))
+            });
+        }
+
+        map.len() == 1
+            && type_name
+                .rsplit('/')
+                .next()
+                .is_some_and(|local_name| local_name.contains('.'))
+    }
+
     /// Set a property of a value (supports both map keys and vector indices)
     pub(crate) fn set_property(
-        &self,
+        &mut self,
         value: &mut Val,
         property: &str,
         new_value: Val,
     ) -> VmResult<()> {
+        // Assignment is an ordinary Result-consumption boundary. Preserve an
+        // Ok wrapper while updating its payload, but never allow assignment to
+        // rewrite an Err payload before that error propagates.
+        if value.is_err() {
+            return self.propagate_assignment_result_err(value);
+        }
+
         match value {
             Val::Map(map) => {
+                if self.is_tagged_wrapper(map) {
+                    if let Some(payload) = map.get_mut(&Val::from("$val")) {
+                        return self.set_property(payload, property, new_value);
+                    }
+                    let mut payload = Val::Null;
+                    self.set_property(&mut payload, property, new_value)?;
+                    map.insert(Val::from("$val"), payload);
+                    return Ok(());
+                }
+
                 // Map assignment: set the property as a string key
                 map.insert(Val::from(property.to_string()), new_value);
                 Ok(())
@@ -9544,18 +9434,7 @@ impl VirtualMachine {
             Val::Vec(vec) => {
                 // Vector assignment: try to parse property as index
                 match property.parse::<usize>() {
-                    Ok(index) => {
-                        if index < vec.len() {
-                            vec[index] = new_value;
-                            Ok(())
-                        } else {
-                            Err(VmError::runtime(format!(
-                                "Vector index {} out of bounds (length: {})",
-                                index,
-                                vec.len()
-                            )))
-                        }
-                    }
+                    Ok(index) => Self::set_vector_index(vec, index, new_value),
                     Err(_) => Err(VmError::runtime(format!(
                         "Cannot set property '{}' on vector - property must be a valid index",
                         property
@@ -9569,16 +9448,127 @@ impl VirtualMachine {
                 *value = Val::Map(Box::new(new_map));
                 Ok(())
             }
-            _ => Err(VmError::runtime(format!(
-                "Cannot set property '{}' on value of type {:?}",
-                property,
-                std::mem::discriminant(value)
+            _ => {
+                let type_path = self.get_value_type_path(value);
+                Err(VmError::runtime(format!(
+                    "Cannot set property '{}' on value of type {}",
+                    property, type_path
+                )))
+            }
+        }
+    }
+
+    fn set_vector_index(vec: &mut Vec<Val>, index: usize, new_value: Val) -> VmResult<()> {
+        if index >= vec.len() {
+            let new_len = index.checked_add(1).ok_or_else(|| {
+                VmError::runtime(format!("Vector index {} would overflow length", index))
+            })?;
+            if let Err(error) = crate::lang::runtime::limits::check_collection_size(
+                "deep vector assignment",
+                new_len,
+            ) {
+                return Err(VmError::runtime(error.to_string()));
+            }
+            let additional = new_len - vec.len();
+            if let Err(error) = crate::lang::runtime::limits::try_reserve_vec(
+                "deep vector assignment",
+                vec,
+                additional,
+            ) {
+                return Err(VmError::runtime(error.to_string()));
+            }
+            vec.resize(new_len, Val::Null);
+        }
+        vec[index] = new_value;
+        Ok(())
+    }
+
+    /// Set a property selected by a runtime value. Tagged values always expose
+    /// their payload, regardless of whether the runtime key is a string.
+    pub(crate) fn set_dynamic_property(
+        &mut self,
+        value: &mut Val,
+        property: &Val,
+        new_value: Val,
+    ) -> VmResult<()> {
+        // A dynamic key cannot tell the compiler which collection to create,
+        // so its parent must already exist (documented in vars-and-values).
+        // Enforce that uniformly for every runtime key type — string keys
+        // must not silently materialize a Map where an integer key errors.
+        if matches!(value, Val::Null) {
+            return Err(VmError::runtime(format!(
+                "Cannot assign dynamic key {} on a missing or null parent - \
+                 a dynamic segment's parent collection must already exist",
+                self.value_to_string(property)
+            )));
+        }
+        if let Val::Str(property_name) = property {
+            return self.set_property(value, property_name, new_value);
+        }
+        if value.is_err() {
+            return self.propagate_assignment_result_err(value);
+        }
+
+        match value {
+            Val::Map(map) if self.is_tagged_wrapper(map) => {
+                let Some(payload) = map.get_mut(&Val::from("$val")) else {
+                    return Err(VmError::runtime(
+                        "Cannot dynamically assign through a tagged unit value".to_string(),
+                    ));
+                };
+                self.set_dynamic_property(payload, property, new_value)
+            }
+            Val::Map(map) => {
+                map.insert(property.clone(), new_value);
+                Ok(())
+            }
+            Val::Vec(vec) => match property {
+                Val::Int(index) if *index < 0 => Err(VmError::runtime(format!(
+                    "Vector index cannot be negative: {}",
+                    index
+                ))),
+                Val::Int(index) => {
+                    let index = usize::try_from(*index).map_err(|_| {
+                        VmError::runtime(format!("Vector index {} is too large to address", index))
+                    })?;
+                    Self::set_vector_index(vec, index, new_value)
+                }
+                other => Err(VmError::runtime(format!(
+                    "Vector index must be an integer, got {:?}",
+                    other
+                ))),
+            },
+            other => Err(VmError::runtime(format!(
+                "Cannot set dynamic property on {:?}",
+                other
             ))),
         }
     }
 
+    /// Assignment always consumes a Result, even while a surrounding lazy
+    /// Result-aware call temporarily suppresses ordinary argument unwrapping.
+    /// Restore normal checking for this boundary and return the propagation
+    /// error instead of assuming the helper must fail and panicking the VM.
+    fn propagate_assignment_result_err(&mut self, value: &Val) -> VmResult<()> {
+        let previous = self.suppress_result_checking;
+        self.suppress_result_checking = false;
+        let result = self.unwrap_result_if_ok(value).map(|_| ());
+        self.suppress_result_checking = previous;
+        result
+    }
+
     /// Access a property of a value (supports both map keys and vector indices)
-    pub fn access_property(&self, value: &Val, property: &str) -> VmResult<Val> {
+    pub fn access_property(&mut self, value: &Val, property: &str) -> VmResult<Val> {
+        // Recursive tagged-payload access obeys the same Result boundary as
+        // top-level access. This prevents an Err nested in another wrapper
+        // from being read through as an ordinary map.
+        if value.is_err() {
+            return self.unwrap_result_if_ok(value);
+        }
+        if let Some(payload) = value.unwrap_ok() {
+            return self.access_property(payload, property);
+        }
+
         match value {
             Val::Map(map) => {
                 // Check if this is a function alias that needs to be resolved first
@@ -9607,15 +9597,14 @@ impl VirtualMachine {
                     }
                 }
 
-                // If this is a typed object with unified pattern, unwrap $val for property access
-                // BUT: never unwrap for $type or $val - these should always be read from the outer wrapper
-                if property != "$type"
-                    && property != "$val"
-                    && let Some(inner_val) = map.get(&Val::from("$val"))
-                    && let Val::Map(inner_map) = inner_val
-                    && let Some(prop_val) = inner_map.get(&Val::from(property.to_string()))
-                {
-                    return Ok(prop_val.clone());
+                // Tagged values expose only their payload to source-level field
+                // access. `$type` and `$val` are ordinary payload field names;
+                // they never reveal or skip over the wrapper itself.
+                if self.is_tagged_wrapper(map) {
+                    return match map.get(&Val::from("$val")) {
+                        Some(payload) => self.access_property(payload, property),
+                        None => Ok(Val::Null),
+                    };
                 }
 
                 // Map access: look up the property as a string key
@@ -9703,6 +9692,64 @@ impl VirtualMachine {
                 // Other types don't support property access
                 Ok(Val::Null)
             }
+        }
+    }
+
+    /// Access a property selected by a runtime value. The interpreter and JIT
+    /// both call this path so invalid keys and tagged payloads have identical
+    /// behavior in both engines.
+    pub(crate) fn access_dynamic_property(&mut self, value: &Val, property: &Val) -> VmResult<Val> {
+        if let Val::Str(property_name) = property {
+            return self.access_property(value, property_name);
+        }
+        if value.is_err() {
+            return self.unwrap_result_if_ok(value);
+        }
+        if let Some(payload) = value.unwrap_ok() {
+            return self.access_dynamic_property(payload, property);
+        }
+
+        match value {
+            Val::Map(map) if self.is_tagged_wrapper(map) => match map.get(&Val::from("$val")) {
+                Some(payload) => self.access_dynamic_property(payload, property),
+                None => Ok(Val::Null),
+            },
+            Val::Map(map) => Ok(map.get(property).cloned().unwrap_or(Val::Null)),
+            Val::Vec(vec) => match property {
+                Val::Int(index) if *index < 0 => Ok(Val::Null),
+                Val::Int(index) => Ok(vec.get(*index as usize).cloned().unwrap_or(Val::Null)),
+                other => Err(VmError::runtime(format!(
+                    "Vector index must be an integer, got {:?}",
+                    other
+                ))),
+            },
+            Val::Str(string) => match property {
+                Val::Int(index) if *index < 0 => Ok(Val::Null),
+                Val::Int(index) => Ok(string
+                    .chars()
+                    .nth(*index as usize)
+                    .map(|character| Val::from(character.to_string()))
+                    .unwrap_or(Val::Null)),
+                other => Err(VmError::runtime(format!(
+                    "String index must be an integer, got {:?}",
+                    other
+                ))),
+            },
+            Val::Bytes(bytes) => match property {
+                Val::Int(index) if *index < 0 => Ok(Val::Null),
+                Val::Int(index) => Ok(bytes
+                    .get(*index as usize)
+                    .map(|byte| Val::Int(*byte as i64))
+                    .unwrap_or(Val::Null)),
+                other => Err(VmError::runtime(format!(
+                    "Bytes index must be an integer, got {:?}",
+                    other
+                ))),
+            },
+            other => Err(VmError::runtime(format!(
+                "Cannot access property on {:?}",
+                other
+            ))),
         }
     }
 
@@ -10221,6 +10268,7 @@ impl VirtualMachine {
                         | Instruction::Pipe { dest, .. }
                         | Instruction::DefineFunction { dest, .. }
                         | Instruction::DotAccess { dest, .. }
+                        | Instruction::DynamicDotAccess { dest, .. }
                         | Instruction::DotAccessOrDefault { dest, .. }
                         | Instruction::GetTypePath { dest, .. }
                         | Instruction::IsType { dest, .. }
@@ -10231,6 +10279,22 @@ impl VirtualMachine {
                         | Instruction::ConstructTyped { dest, .. } => {
                             // Get the result from the destination register
                             if let Ok(val) = self.get_register(*dest) {
+                                last_result = val.clone();
+                            }
+                        }
+                        Instruction::DotSet { object, .. }
+                        | Instruction::DynamicDotSet { object, .. } => {
+                            if let Ok(val) = self.get_register(*object) {
+                                last_result = val.clone();
+                            }
+                        }
+                        Instruction::VecAppend { vec, .. } => {
+                            if let Ok(val) = self.get_register(*vec) {
+                                last_result = val.clone();
+                            }
+                        }
+                        Instruction::SetElement { collection, .. } => {
+                            if let Ok(val) = self.get_register(*collection) {
                                 last_result = val.clone();
                             }
                         }

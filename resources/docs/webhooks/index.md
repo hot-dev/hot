@@ -279,9 +279,14 @@ For example, an API key with permission `{"webhook:internal": ["execute"]}` can 
 
 Permissions are configured when creating or editing API keys in the Hot App. See [Hot App > API Keys](/docs/app#api-keys) for details.
 
-## Execution Model
+## Synchronous Webhook Handling
 
 Webhook handlers execute **synchronously**. When a request arrives, Hot calls your function and waits for it to return before sending the HTTP response. This is important for services like Slack that require a response within 3 seconds.
+
+The handler invocation is one platform run; ordinary function calls made by the
+handler remain inside that run's trace. See the
+[Platform Execution Model](/docs/platform/execution-model) for the distinction
+between calls, runs, and child events.
 
 For long-running work, acknowledge the webhook immediately and process asynchronously using `send()`:
 

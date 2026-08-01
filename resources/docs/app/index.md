@@ -205,6 +205,29 @@ api-key ::hot::ctx/get("API_KEY")
 debug-mode ::hot::ctx/get("DEBUG", false)
 ```
 
+### Local Development
+
+`hot dev` loads `hot/ctx.hot`. Use it to map values from `.env` to the context
+keys your Hot code reads:
+
+```hot
+::hot::run::ctx ns
+::env ::hot::env
+
+::hot::ctx/set({
+  "anthropic.api.key": ::env/get("ANTHROPIC_API_KEY", "")
+})
+```
+
+`hot init` adds both `.env` and `hot/ctx.hot` to `.gitignore`.
+
+### Deployed Projects
+
+Deployed projects do not use `hot/ctx.hot`. Add the same keys under **Context
+Variables** in the Hot App. Environment-level values apply to every project in
+the environment; project-level values override them. Hot stores these values
+encrypted in the database and loads them at runtime.
+
 ## Docs
 
 The **Docs** section provides auto-generated documentation for your deployed Hot projects:

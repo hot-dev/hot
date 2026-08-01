@@ -51,6 +51,22 @@ greeting `Hello, ${name}!`
 
 If the HTTP call fails, execution halts at the point of use—no explicit error handling needed. Errors propagate automatically.
 
+### Binding vs Consuming
+
+Binding a `Result` preserves it. Ordinary function arguments, template
+interpolation, and ordinary field or index access consume it:
+
+```hot
+result fetch-user(id) // Result remains intact
+valid is-ok(result)   // lazy inspection preserves the tag
+page render(result)   // Ok unwraps; Err propagates here
+```
+
+Use Result-aware lazy functions or `match` when code needs to inspect the
+tagged value rather than trigger propagation. See
+[Pattern Matching on Results](#pattern-matching-on-results) for the match-arm
+payload rule.
+
 ## Checking Results Explicitly
 
 Use `is-ok` and `is-err` to inspect Results without triggering auto-unwrapping:
@@ -90,7 +106,9 @@ the payload.
 
 ## Lazy Arguments
 
-Arguments marked `lazy` aren't evaluated until explicitly needed. This enables:
+Ordinary arguments are eager. Arguments marked `lazy` instead arrive as
+deferred computations and aren't evaluated until explicitly forced. This
+enables:
 
 1. **Safe Result inspection** — `is-ok` and `is-err` can receive Results without triggering auto-unwrap
 2. **Short-circuit evaluation** — `and` and `or` don't evaluate unused branches
@@ -115,6 +133,10 @@ maybe-run fn (should-run: Bool, lazy action: Any): Any {
     if(should-run, do action, null)
 }
 ```
+
+Lazy arguments are not memoized. Each `do` forces the deferred computation
+again inside the lazy context and preserves any Result it produces. Bind the
+forced result before reusing it when evaluation is expensive or effectful.
 
 ### Short-Circuit Evaluation
 
@@ -203,7 +225,7 @@ Payload convention: a plain `Str` for simple errors, or a Map with a
 including a halt's `Failure`:
 
 ```hot
-if-err(conn, (e) { log(`db down: ${err-message(e)}`) })
+if-err(conn, (e) { println(`db down: ${err-message(e)}`) })
 ```
 
 ### Pattern 5: Result Combinators
@@ -213,13 +235,13 @@ Use `if-ok` and `if-err` to selectively transform Ok or Err results. Whichever v
 ```hot
 // if-ok: transform the Ok value; Err passes through
 fetch-user(id)
-    |> if-ok(%.name)        // Ok("Alice") → "Alice's name"; Err → unchanged
+    |> if-ok((user) { user.name }) // Ok payload is passed to the handler
     |> if-err("Anonymous")  // Err → "Anonymous"; Ok → unchanged
 
 // Chain for full handling
 result fetch-data(id)
-    |> if-ok(process-data(%))
-    |> if-err(log-and-default(%))
+    |> if-ok((data) { process-data(data) })
+    |> if-err((error) { log-and-default(error) })
 ```
 
 ## Summary
@@ -228,7 +250,8 @@ result fetch-data(id)
 - Results **auto-unwrap** when passed to functions or used in templates
 - Err Results **automatically fail** at point of use
 - Use `is-ok(result)` and `is-err(result)` to check without triggering auto-unwrap
-- Use `if-ok` and `if-err` to selectively transform Ok or Err values
+- Use `if-ok` and `if-err` to transform the selected unwrapped payload; the
+  result is wrapped again and an unmatched variant passes through unchanged
 - Use `match` with `Result.Ok` and `Result.Err` patterns
 - **Lazy arguments** suppress Result checking, enabling safe inspection
 - Most code can ignore error handling; errors propagate automatically

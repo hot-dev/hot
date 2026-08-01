@@ -7,10 +7,23 @@ use std::any::Any;
 use std::cmp::{Ord, Ordering, PartialOrd};
 use std::fmt;
 use std::hash::{Hash, Hasher};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 pub(crate) const HOT_BYTE_TYPE: &str = "::hot::type/Byte";
 pub(crate) const HOT_BYTES_TYPE: &str = "::hot::type/Bytes";
+
+/// Return the nominal type carried by Hot's internal tagged-value representation.
+///
+/// This is an implementation-level lookup. User code should construct types and
+/// inspect them with the language's type operations rather than reading or
+/// writing representation keys directly.
+pub(crate) fn tagged_type_name(map: &IndexMap<Val, Val>) -> Option<&str> {
+    static TYPE_KEY: OnceLock<Val> = OnceLock::new();
+    match map.get(TYPE_KEY.get_or_init(|| Val::from("$type"))) {
+        Some(Val::Str(name)) => Some(name),
+        _ => None,
+    }
+}
 
 pub use crate::val;
 // Re-export indexmap for use by macros
@@ -2819,7 +2832,6 @@ impl Val {
 
     /// Create a typed map with given type and content (unified type system)
     pub fn typed_map(type_name: &str, content: IndexMap<Val, Val>) -> Self {
-        // Create unified $type pattern
         let mut map = content;
         map.insert(Val::from("$type"), Val::from(type_name.to_string()));
         Val::Map(Box::new(map))
@@ -2862,8 +2874,7 @@ impl Val {
     /// Format: {$type: "::hot::type/Result.Ok", $val: ...}
     pub fn is_ok(&self) -> bool {
         if let Val::Map(map) = self
-            && let Some(Val::Str(type_str)) = map.get(&Val::from("$type"))
-            && &**type_str == "::hot::type/Result.Ok"
+            && tagged_type_name(map) == Some("::hot::type/Result.Ok")
         {
             return true;
         }
@@ -2874,8 +2885,7 @@ impl Val {
     /// Format: {$type: "::hot::type/Result.Err", $val: ...}
     pub fn is_err(&self) -> bool {
         if let Val::Map(map) = self
-            && let Some(Val::Str(type_str)) = map.get(&Val::from("$type"))
-            && &**type_str == "::hot::type/Result.Err"
+            && tagged_type_name(map) == Some("::hot::type/Result.Err")
         {
             return true;
         }
@@ -2886,8 +2896,7 @@ impl Val {
     /// Returns the $val field from {$type: "::hot::type/Result.Ok", $val: ...}
     pub fn unwrap_ok(&self) -> Option<&Val> {
         if let Val::Map(map) = self
-            && let Some(Val::Str(type_str)) = map.get(&Val::from("$type"))
-            && &**type_str == "::hot::type/Result.Ok"
+            && tagged_type_name(map) == Some("::hot::type/Result.Ok")
         {
             return map.get(&Val::from("$val"));
         }
@@ -2898,8 +2907,7 @@ impl Val {
     /// Returns the $val field from {$type: "::hot::type/Result.Err", $val: ...}
     pub fn unwrap_err(&self) -> Option<&Val> {
         if let Val::Map(map) = self
-            && let Some(Val::Str(type_str)) = map.get(&Val::from("$type"))
-            && &**type_str == "::hot::type/Result.Err"
+            && tagged_type_name(map) == Some("::hot::type/Result.Err")
         {
             return map.get(&Val::from("$val"));
         }
@@ -2909,9 +2917,10 @@ impl Val {
     /// Check if this is a Cancellation type (run or task)
     pub fn is_cancelled(&self) -> bool {
         if let Val::Map(map) = self
-            && let Some(Val::Str(type_str)) = map.get(&Val::from("$type"))
-            && (&**type_str == "::hot::run/Cancellation"
-                || &**type_str == "::hot::task/Cancellation")
+            && matches!(
+                tagged_type_name(map),
+                Some("::hot::run/Cancellation" | "::hot::task/Cancellation")
+            )
         {
             return true;
         }
@@ -2921,9 +2930,10 @@ impl Val {
     /// Extract cancellation value if this is a Cancellation type (run or task)
     pub fn unwrap_cancelled(&self) -> Option<&Val> {
         if let Val::Map(map) = self
-            && let Some(Val::Str(type_str)) = map.get(&Val::from("$type"))
-            && (&**type_str == "::hot::run/Cancellation"
-                || &**type_str == "::hot::task/Cancellation")
+            && matches!(
+                tagged_type_name(map),
+                Some("::hot::run/Cancellation" | "::hot::task/Cancellation")
+            )
         {
             return map.get(&Val::from("$val"));
         }

@@ -109,10 +109,10 @@ hot run file.hot          # Run one Hot file
 hot check                 # Type/check project source
 hot test                  # Run Hot tests
 hot deploy                # Build and deploy to Hot Dev Cloud
-hot ai add                # Add AGENTS.md + Hot language skill for AI tools
+hot ai add                # Add AGENTS.md + bundled Hot skills for AI tools
 ```
 
-`hot ai add` installs the Hot language skill snapshot bundled with the CLI.
+`hot ai add` installs the bundled Hot language and AI agent skill snapshots.
 
 ## Related Repositories
 

@@ -201,7 +201,7 @@ process-result fn (result: Result): Str {
 handle-event fn (event: Event): Action {
     action match event {
         Event.Click => {
-            log(`Clicked at ${event.x}, ${event.y}`)
+            println(`Clicked at ${event.x}, ${event.y}`)
             Action.Navigate({target: event.target})
         }
 
@@ -328,9 +328,9 @@ fetch-c fn (): Str { "c" }
 // @doc: parallel-all-vec
 parallel-as-vec fn (): Vec {
     results: All<Vec> parallel {
-        fetch-a()
-        fetch-b()
-        fetch-c()
+        a fetch-a()
+        b fetch-b()
+        c fetch-c()
     }
 
     results
@@ -427,10 +427,10 @@ meta ["test"] fn () {
 test-describe-shape
 meta ["test"] fn () {
     circle Shape.Circle({radius: 5.0})
-    assert-eq("Circle with radius 5", describe-shape(circle), "circle description")
+    assert-eq("Circle with radius 5.0", describe-shape(circle), "circle description")
 
     rect Shape.Rectangle({width: 10.0, height: 20.0})
-    assert-eq("Rectangle 10x20", describe-shape(rect), "rectangle description")
+    assert-eq("Rectangle 10.0x20.0", describe-shape(rect), "rectangle description")
 
     assert-eq("A point", describe-shape(Shape.Point), "point description")
 }

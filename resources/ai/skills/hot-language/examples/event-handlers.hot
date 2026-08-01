@@ -110,7 +110,7 @@ fn (event) {
 
     // Log retry attempt
     if(gt(i.run.retry-attempt, 0),
-        log(`Retry attempt ${i.run.retry-attempt} of ${i.run.max-retries}`),
+        println(`Retry attempt ${i.run.retry-attempt} of ${i.run.max-retries}`),
         null)
 
     // Process the event

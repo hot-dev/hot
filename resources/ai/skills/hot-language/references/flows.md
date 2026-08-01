@@ -1,6 +1,8 @@
 # Hot Flows Reference
 
-Flows are control structures in Hot that define execution patterns. They can be standalone expressions or combined with `fn` to create function definitions.
+Flows are expressions that define execution and result-collection patterns.
+They can be used inline or combined with `fn` to define a function whose body
+uses that flow.
 
 ## Flow Types
 
@@ -315,7 +317,7 @@ After matching, access the value directly through the matched variable:
 handle fn (event: Event): Action {
     action match event {
         Event.Click => {
-            log(`Clicked at ${event.x}, ${event.y}`)
+            println(`Clicked at ${event.x}, ${event.y}`)
             Action.Navigate(event.target)
         }
         Event.KeyPress => {
@@ -356,7 +358,10 @@ results match-all x {
 
 ## Parallel Flow
 
-Executes all branches concurrently. Returns Map keyed by variable names.
+Requests dependency-aware concurrency. Independent bindings execute
+concurrently, while bindings that reference earlier results wait for them.
+Parallelism is explicit: ordinary serial code is never parallelized
+automatically. The default result is a Map keyed by variable names.
 
 ### As Function Definition
 
@@ -381,6 +386,11 @@ enrich-user fn parallel (id: Str): All<Map> {
 }
 ```
 
+Dependency analysis follows references between Hot bindings. It cannot detect
+conflicts in external state such as two branches writing the same database row
+or file. If a branch fails, sibling effects that already started cannot be
+rolled back automatically.
+
 ### As Standalone Expression
 
 ```hot
@@ -399,11 +409,13 @@ process fn (userId: Str): Map {
 
 ### Error Handling in Parallel
 
-If any branch returns an error, the parallel flow short-circuits:
+Parallel branches run independently. An `Err` produced by one branch remains
+in that branch's result slot; it does not cancel sibling branches. Consuming
+that result later still propagates the error normally:
 
 ```hot
 fetch-all fn parallel (ids: Vec<Str>): All<Map> {
-    a fetch(ids[0])  // If this returns err(...), flow stops
+    a fetch(ids[0])  // An Err remains in a
     b fetch(ids[1])
     c fetch(ids[2])
 }
@@ -416,6 +428,10 @@ Bare `All` is allowed only on natural collect-all forms (`parallel`,
 `cond-all`, and `match-all`); use explicit `All<Vec>` or `All<Map>` on
 `serial`, `pipe`, `cond`, and `match`.
 
+A plain annotation on a natural collect-all flow is not documentation for its
+usual Map result: it opts the flow out of collection and describes one final
+value. Use `All<Map>` when the collected Map is part of the contract.
+
 | Shape | Behavior |
 |-------|----------|
 | Plain/no annotation | Return single value (default for serial, cond, match) |
@@ -426,9 +442,9 @@ Bare `All` is allowed only on natural collect-all forms (`parallel`,
 ```hot
 // Return parallel results as a vector instead of a map
 results: All<Vec> parallel {
-    fetch-a()
-    fetch-b()
-    fetch-c()
+    a fetch-a()
+    b fetch-b()
+    c fetch-c()
 }
 // Returns: [result-a, result-b, result-c]
 
@@ -439,6 +455,19 @@ result: All<Map> parallel {
 }
 // Returns: {a: result-a, b: result-b}
 ```
+
+`parallel` schedules named bindings and their dependency graph. Standalone,
+unbound expressions are not collected as result slots, so give every concurrent
+operation a binding even when the requested output shape is `All<Vec>`. The
+function-definition form (`fn parallel ...`) can collect its unbound body
+expressions into an explicit `All<Vec>`, but named bindings remain the clearest
+and most portable form between standalone and function flows. Deep-path
+assignment into an existing binding (`st.a.b 99`) is a compile-time error
+inside `parallel` (standalone blocks and `fn parallel` bodies alike) —
+concurrent writes into a shared root have no defined order; bind a new name
+and merge after the flow. The check does not look inside nested flows: never
+deep-assign to an outer binding from a `serial { }` block nested in a parallel
+branch — its merge order is undefined.
 
 ## Nested Flows
 

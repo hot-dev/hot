@@ -65,4 +65,5 @@ Manual `release.yml` runs expose:
 |-------|-------------|
 | `publish_to_cdn` | When `true`, publish installer and package CDN artifacts if the relevant S3 variables are configured. |
 
-Stable releases should use immutable `vX.Y.Z` tags or the `stable` branch with a new `resources/version.txt` patch version.
+Stable releases use immutable `vX.Y.Z` tags pushed from `main`, with the tag
+matching the version in `resources/version.txt`.
