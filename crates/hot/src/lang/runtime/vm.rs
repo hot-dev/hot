@@ -87,6 +87,13 @@ pub fn max_recursion_depth() -> usize {
 pub struct FailureState {
     pub msg: String,
     pub data: Val,
+    /// True when the halt records a plain `VmError` raised inside a JIT'd
+    /// frame (not a Result.Err consumption). The JIT boundary surfaces these
+    /// with the message as-is; Result halts get the interpreter's
+    /// `Result error:` prefix. The interpreter never records plain runtime
+    /// errors here (they unwind natively), so this is always false outside
+    /// the JIT helper path.
+    pub plain_vm_error: bool,
 }
 
 /// Thread-safe failure state holder
@@ -9135,6 +9142,17 @@ impl VirtualMachine {
     /// Set the VM failure state (thread-safe, first failure wins)
     /// Returns true if this was the first failure, false if already failed
     pub fn set_failure(&self, msg: String, data: Val) -> bool {
+        self.set_failure_state(msg, data, false)
+    }
+
+    /// Record a plain `VmError` halt raised inside a JIT'd frame. Same
+    /// first-failure-wins semantics as `set_failure`, but marks the entry so
+    /// the JIT boundary re-raises the message without the Result prefix.
+    pub(crate) fn set_failure_plain_vm_error(&self, msg: String, data: Val) -> bool {
+        self.set_failure_state(msg, data, true)
+    }
+
+    fn set_failure_state(&self, msg: String, data: Val, plain_vm_error: bool) -> bool {
         // Use compare_exchange to atomically check and set failed flag
         if self
             .failure_state
@@ -9144,7 +9162,11 @@ impl VirtualMachine {
         {
             // We're the first failure - store our failure state
             if let Ok(mut failure) = self.failure_state.failure.write() {
-                *failure = Some(FailureState { msg, data });
+                *failure = Some(FailureState {
+                    msg,
+                    data,
+                    plain_vm_error,
+                });
             }
             tracing::trace!("VM: Failure state set (first failure)");
             true
@@ -9172,14 +9194,16 @@ impl VirtualMachine {
             return Ok(());
         }
         if self.has_failed() {
-            let msg = self
-                .get_failure()
-                .map(|f| f.msg)
-                .unwrap_or_else(|| "halted".to_string());
-            return Err(VmError::runtime_with_ip(
-                format!("Result error: {}", msg),
-                self.instruction_pointer,
-            ));
+            let failure = self.get_failure();
+            // Plain VmErrors re-raise verbatim (the interpreter never
+            // prefixes them); Result.Err consumption halts carry the same
+            // `Result error:` prefix `unwrap_result_if_ok` raises.
+            let msg = match &failure {
+                Some(f) if f.plain_vm_error => f.msg.clone(),
+                Some(f) => format!("Result error: {}", f.msg),
+                None => "Result error: halted".to_string(),
+            };
+            return Err(VmError::runtime_with_ip(msg, self.instruction_pointer));
         }
         if self.has_cancelled() {
             let msg = self
@@ -9435,11 +9459,13 @@ impl VirtualMachine {
                 *value = Val::Map(Box::new(new_map));
                 Ok(())
             }
-            _ => Err(VmError::runtime(format!(
-                "Cannot set property '{}' on value of type {:?}",
-                property,
-                std::mem::discriminant(value)
-            ))),
+            _ => {
+                let type_path = self.get_value_type_path(value);
+                Err(VmError::runtime(format!(
+                    "Cannot set property '{}' on value of type {}",
+                    property, type_path
+                )))
+            }
         }
     }
 
@@ -9476,6 +9502,17 @@ impl VirtualMachine {
         property: &Val,
         new_value: Val,
     ) -> VmResult<()> {
+        // A dynamic key cannot tell the compiler which collection to create,
+        // so its parent must already exist (documented in vars-and-values).
+        // Enforce that uniformly for every runtime key type — string keys
+        // must not silently materialize a Map where an integer key errors.
+        if matches!(value, Val::Null) {
+            return Err(VmError::runtime(format!(
+                "Cannot assign dynamic key {} on a missing or null parent - \
+                 a dynamic segment's parent collection must already exist",
+                self.value_to_string(property)
+            )));
+        }
         if let Val::Str(property_name) = property {
             return self.set_property(value, property_name, new_value);
         }

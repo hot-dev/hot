@@ -467,6 +467,7 @@ struct JitHelperRefs {
     set_element: FuncRef,
     construct_typed: FuncRef,
     lookup_var: FuncRef,
+    lookup_var_required: FuncRef,
     vec_push: FuncRef,
     get_type_path: FuncRef,
     is_type_check: FuncRef,
@@ -1340,6 +1341,10 @@ fn compile_supported_function(
         hot_jit_construct_typed as *const u8,
     );
     builder.symbol("hot_jit_lookup_var", hot_jit_lookup_var as *const u8);
+    builder.symbol(
+        "hot_jit_lookup_var_required",
+        hot_jit_lookup_var_required as *const u8,
+    );
     builder.symbol("hot_jit_vec_push", hot_jit_vec_push as *const u8);
     builder.symbol("hot_jit_get_type_path", hot_jit_get_type_path as *const u8);
     builder.symbol("hot_jit_is_type_check", hot_jit_is_type_check as *const u8);
@@ -2476,6 +2481,8 @@ unsafe extern "C" fn hot_jit_get_type_path(val_ptr: i64) -> i64 {
 
 /// JIT helper: look up a variable by name through the VM.
 /// Returns an OwnedVal handle to the resolved value, or Val::Null if not found.
+/// Lenient by design: used only for closure capture, where the interpreter
+/// also skips names it cannot resolve. `LoadVar` uses the strict variant.
 unsafe extern "C" fn hot_jit_lookup_var(name_ptr: i64) -> i64 {
     let vm_ptr = get_jit_vm_ptr();
     if vm_ptr.is_null() {
@@ -2490,6 +2497,28 @@ unsafe extern "C" fn hot_jit_lookup_var(name_ptr: i64) -> i64 {
     match vm.lookup_variable(name) {
         Ok(val) => new_owned_val(val),
         Err(_) => new_owned_val(Val::Null),
+    }
+}
+
+/// JIT helper: strict variable lookup for `LoadVar`. The interpreter halts
+/// when `LoadVar` cannot resolve a name (`lookup_variable(..)?`), so the
+/// compiled tier must halt too instead of materializing Null — otherwise
+/// e.g. a dynamic deep assignment to a fresh variable silently succeeds
+/// under JIT where the interpreter raises "Variable not found".
+unsafe extern "C" fn hot_jit_lookup_var_required(name_ptr: i64) -> i64 {
+    let vm_ptr = get_jit_vm_ptr();
+    if vm_ptr.is_null() {
+        return new_owned_val(Val::Null);
+    }
+    let vm = unsafe { &mut *vm_ptr };
+    let name_val = unsafe { &*(name_ptr as *const Val) };
+    let name = match name_val {
+        Val::Str(s) => s.as_ref().to_string(),
+        _ => return new_owned_val(Val::Null),
+    };
+    match vm.lookup_variable(&name) {
+        Ok(val) => new_owned_val(val),
+        Err(err) => vm_runtime_error_to_halt(vm, err),
     }
 }
 
@@ -3213,6 +3242,14 @@ fn declare_jit_helpers(
             &[types::I64],
             &[types::I64],
         )?,
+        lookup_var_required: declare_helper_func(
+            module,
+            func,
+            ptr_ty,
+            "hot_jit_lookup_var_required",
+            &[types::I64],
+            &[types::I64],
+        )?,
         vec_push: declare_helper_func(
             module,
             func,
@@ -3561,7 +3598,9 @@ fn vm_runtime_error_to_halt(vm: &VirtualMachine, err: VmError) -> i64 {
             VmError::RuntimeError(error) => error.message.clone(),
             _ => err.to_string(),
         };
-        vm.set_failure(message.clone(), Val::from(message));
+        // Marked plain so the boundary re-raises the message exactly as the
+        // interpreter would, without the Result-consumption prefix.
+        vm.set_failure_plain_vm_error(message.clone(), Val::from(message));
     }
     HALT_SENTINEL
 }
@@ -5324,17 +5363,24 @@ impl<'a> EmitCtx<'a> {
                         value = clone_owned_raw(builder, &self.helper_refs, value);
                     }
                     self.define_register(builder, *dest, kind, value)?;
+                    self.jump_to_next(builder, ip)?;
                 } else {
                     let name_val = new_owned_val(Val::Str(name.to_string().into()));
                     let name_raw = builder.ins().iconst(types::I64, name_val);
-                    let call = builder.ins().call(self.helper_refs.lookup_var, &[name_raw]);
-                    let result = builder.inst_results(call)[0];
-                    self.define_register(builder, *dest, RawKind::OwnedVal, result)?;
                     if let Ok(idx) = self.remap_reg(*dest) {
                         self.compile_time_owned.insert(idx);
                     }
+                    // Strict lookup: the interpreter halts when LoadVar cannot
+                    // resolve the name, so the compiled tier must too.
+                    let call = builder
+                        .ins()
+                        .call(self.helper_refs.lookup_var_required, &[name_raw]);
+                    let result = builder.inst_results(call)[0];
+                    let halt_block = emit_halt_check(builder, result);
+                    self.define_register(builder, *dest, RawKind::OwnedVal, result)?;
+                    self.jump_to_next(builder, ip)?;
+                    self.emit_halt_return(builder, halt_block);
                 }
-                self.jump_to_next(builder, ip)?;
                 Ok(EmitResult::Handled)
             }
             Instruction::LoadFunctionRef {

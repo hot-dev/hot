@@ -1888,6 +1888,7 @@ fn pmap_vec(
                             let f = task_vm.get_failure().unwrap_or(FailureState {
                                 msg: "pmap item halted".to_string(),
                                 data: Val::Null,
+                                plain_vm_error: false,
                             });
                             task_vm.reset_failure_state();
                             chunk_halt = Some(PmapHalt {
@@ -1962,7 +1963,11 @@ fn pmap_vec(
         if let Some(h) = halt {
             match h.kind {
                 PmapHaltKind::Fail => {
-                    vm.set_failure(h.msg.clone(), h.data.clone());
+                    // Re-raised on the parent VM as the message the worker
+                    // recorded; the interpreter surfaces it via HotResult::Err
+                    // without a Result prefix, so mark it plain to keep the
+                    // JIT boundary's message identical.
+                    vm.set_failure_plain_vm_error(h.msg.clone(), h.data.clone());
                 }
                 PmapHaltKind::Cancel => {
                     vm.set_cancellation(h.msg.clone(), h.data.clone());

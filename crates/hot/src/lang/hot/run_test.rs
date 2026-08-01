@@ -590,6 +590,228 @@ inspect(rewrite())"#;
     }
 
     #[test]
+    fn jit_and_interpreter_halt_on_missing_variable_in_dynamic_deep_assign() {
+        // LoadVar must stay strict in the compiled tier: a dynamic deep
+        // assignment to a fresh (unbound) variable halts the interpreter with
+        // "Variable not found"; the JIT lookup helper previously materialized
+        // Null and let the assignment succeed.
+        let src = r#"::t ns
+probe fn (n: Int): Map {
+    k "a"
+    fresh[k] n
+    fresh
+}
+probe(1)
+probe(2)
+probe(3)"#;
+
+        for (mode, conf) in [
+            ("jit", crate::val!({"jit": {"threshold": 1}})),
+            ("interpreter", crate::val!({"jit": {"mode": "off"}})),
+        ] {
+            let error = compile_and_run_with_std_conf(src, Some(conf))
+                .expect_err("unbound dynamic deep-assign target must halt");
+            assert!(
+                error.contains("Variable 'fresh' not found (unified lookup)"),
+                "{mode}: {error}"
+            );
+            assert!(!error.contains("Result error"), "{mode}: {error}");
+        }
+    }
+
+    #[test]
+    fn jit_and_interpreter_property_halt_messages_match() {
+        // Property halts from a compiled frame previously surfaced with an
+        // extra "Result error:" wrapper the interpreter does not add. Warm
+        // the function with valid calls so the final one runs compiled.
+        let src = r#"::t ns
+probe fn (i: Int): Vec {
+    v [1, 2]
+    v[i] 9
+    v
+}
+probe(0)
+probe(0)
+probe(0)
+probe(-1)"#;
+
+        let jit = compile_and_run_with_std_conf(src, Some(crate::val!({"jit": {"threshold": 1}})))
+            .expect_err("negative dynamic index must halt under JIT");
+        let interp =
+            compile_and_run_with_std_conf(src, Some(crate::val!({"jit": {"mode": "off"}})))
+                .expect_err("negative dynamic index must halt interpreted");
+        // Same user-visible message in both engines: no extra
+        // "Result error:" wrapper from the compiled tier.
+        let expected = "Vector index cannot be negative: -1";
+        assert!(interp.contains(expected), "{interp}");
+        assert!(jit.contains(expected), "{jit}");
+        assert!(!jit.contains("Result error"), "{jit}");
+    }
+
+    #[test]
+    fn captured_halt_does_not_mask_later_halts() {
+        // A halt consumed by is-err (lazy capture boundary) must clear the
+        // VM failure state: previously the stale state made every later
+        // compiled-frame boundary treat its own halt as pre-existing and
+        // suppress it, so the program continued where the interpreter halts.
+        let src = r#"::t ns
+trap fn (): Int {
+    r err("masked-halt-probe")
+    r.k 5
+    9
+}
+first is-err(trap())
+boom trap()
+"never-reached""#;
+
+        for (mode, conf) in [
+            ("jit", crate::val!({"jit": {"threshold": 1}})),
+            ("interpreter", crate::val!({"jit": {"mode": "off"}})),
+        ] {
+            let error = compile_and_run_with_std_conf(src, Some(conf))
+                .expect_err("halt after a captured halt must still propagate");
+            assert!(error.contains("masked-halt-probe"), "{mode}: {error}");
+        }
+    }
+
+    #[test]
+    fn serial_flow_deep_path_assignment_updates_the_root() {
+        let src = r#"::t ns
+probe fn (): Map {
+    st {a: {b: 1}}
+    r serial {
+        st.a.b 99
+        st
+    }
+    r
+}
+probe()
+probe()
+probe()"#;
+
+        let jit = compile_and_run_with_std_conf(src, Some(crate::val!({"jit": {"threshold": 1}})))
+            .expect("JIT serial-flow deep assignment");
+        let interp =
+            compile_and_run_with_std_conf(src, Some(crate::val!({"jit": {"mode": "off"}})))
+                .expect("interpreter serial-flow deep assignment");
+        let expected = crate::val!({"a": {"b": 99}});
+        assert_eq!(interp, expected);
+        assert_eq!(jit, expected);
+    }
+
+    #[test]
+    fn parallel_flow_rejects_deep_path_assignment() {
+        // Parallel branches are independent slots keyed by name; a deep-path
+        // write into an existing binding has no defined order. Previously the
+        // path was silently dropped and the root rebound to the bare value.
+        let src = r#"::t ns
+probe fn (): Map {
+    st {a: {b: 1}}
+    r parallel {
+        st.a.b 99
+        other 5
+    }
+    r
+}
+probe()"#;
+
+        let error = compile_and_run_with_std_conf(src, None)
+            .expect_err("deep-path assignment in parallel must be rejected");
+        assert!(error.contains("parallel flow"), "{error}");
+    }
+
+    #[test]
+    fn serial_fn_body_deep_path_assignment_updates_the_root() {
+        // The flow-body parser previously split `st.a n` into two auto-named
+        // slots, silently dropping the write in `fn serial` bodies.
+        let src = r#"::t ns
+probe fn serial (n: Int) {
+    st {a: 1}
+    st.a n
+    st
+}
+probe(9)
+probe(9)
+probe(9)"#;
+
+        let jit = compile_and_run_with_std_conf(src, Some(crate::val!({"jit": {"threshold": 1}})))
+            .expect("JIT fn-serial deep assignment");
+        let interp =
+            compile_and_run_with_std_conf(src, Some(crate::val!({"jit": {"mode": "off"}})))
+                .expect("interpreter fn-serial deep assignment");
+        let expected = crate::val!({"a": 9});
+        assert_eq!(interp, expected);
+        assert_eq!(jit, expected);
+    }
+
+    #[test]
+    fn parallel_fn_body_rejects_deep_path_assignment() {
+        // Same parser path as above: `fn parallel` bodies previously
+        // decomposed the write into auto-named slots (silent data loss)
+        // instead of reaching the compiler's rejection.
+        for src in [
+            r#"::t ns
+probe fn parallel (n: Int) {
+    st {a: 1}
+    st.a n
+}
+probe(3)"#,
+            r#"::t ns
+probe fn parallel (n: Int) {
+    st [1, 2, 3]
+    st[0] n
+}
+probe(3)"#,
+        ] {
+            let error = compile_and_run_with_std_conf(src, None)
+                .expect_err("deep-path assignment in fn parallel must be rejected");
+            assert!(error.contains("parallel flow"), "{error}");
+        }
+    }
+
+    #[test]
+    fn dynamic_string_key_assignment_requires_an_existing_parent() {
+        // Int keys already errored on a missing parent; string keys silently
+        // materialized a Map, contradicting the documented rule that a
+        // dynamic segment's parent must already exist.
+        let src = r#"::t ns
+probe fn (): Map {
+    data {}
+    key "x"
+    data.child[key] 5
+    data
+}
+probe()"#;
+
+        for (mode, conf) in [
+            ("jit", crate::val!({"jit": {"threshold": 1}})),
+            ("interpreter", crate::val!({"jit": {"mode": "off"}})),
+        ] {
+            let error = compile_and_run_with_std_conf(src, Some(conf))
+                .expect_err("missing dynamic parent must fail for string keys");
+            assert!(
+                error.contains("parent collection must already exist"),
+                "{mode}: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn deep_path_assignment_keeps_the_root_type_for_collection_calls() {
+        // A namespace-scope deep-path assignment previously re-registered the
+        // root's type from the assigned value (Vec -> Int), failing later
+        // collection calls with a span-less compile-time type mismatch.
+        let src = r#"::t ns
+ports [4680]
+ports[3] 4683
+length(ports)"#;
+
+        let result = compile_and_run_with_std_conf(src, None)
+            .expect("collection call after ns-scope deep assignment");
+        assert_eq!(result, Val::Int(4));
+    }
+
+    #[test]
     fn jit_flow_result_does_not_steal_constant_refcounts() {
         // A conditional whose branches are constant-backed OwnedVals: the
         // flow result register must take a fresh clone rather than the baked
@@ -1344,6 +1566,7 @@ mod parallel_failure_tests {
                     *failure = Some(crate::lang::runtime::vm::FailureState {
                         msg: first_msg.clone(),
                         data: first_data.clone(),
+                        plain_vm_error: false,
                     });
                 }
                 true
@@ -1362,6 +1585,7 @@ mod parallel_failure_tests {
                     *failure = Some(crate::lang::runtime::vm::FailureState {
                         msg: second_msg,
                         data: second_data,
+                        plain_vm_error: false,
                     });
                 }
                 true

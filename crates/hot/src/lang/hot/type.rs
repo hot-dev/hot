@@ -1216,6 +1216,13 @@ pub fn result_is_ok(
                             if let Some(saved) = saved_suppress {
                                 vm.set_suppress_result_checking(saved);
                             }
+                            // is-ok is a halt boundary for its lazy arg (like
+                            // if-err): the halt is consumed here, so clear the
+                            // halt state or every later JIT-frame boundary
+                            // would treat its own halt as pre-existing and
+                            // suppress it.
+                            vm.reset_failure_state();
+                            vm.reset_cancellation_state();
                             // If evaluation failed, consider it an error result (not ok)
                             return HotResult::Ok(Val::Bool(false));
                         }
@@ -1314,6 +1321,13 @@ pub fn result_is_err(
                             if let Some(saved) = saved_suppress {
                                 vm.set_suppress_result_checking(saved);
                             }
+                            // is-err is a halt boundary for its lazy arg (like
+                            // if-err): the halt is consumed here, so clear the
+                            // halt state or every later JIT-frame boundary
+                            // would treat its own halt as pre-existing and
+                            // suppress it.
+                            vm.reset_failure_state();
+                            vm.reset_cancellation_state();
                             // If evaluation failed, consider it an error result (is err)
                             return HotResult::Ok(Val::Bool(true));
                         }
@@ -1527,11 +1541,35 @@ pub fn result_if_ok(
                     };
                     let result = match vm.execute_lambda(&args[0], &[]) {
                         Ok(val) => val,
-                        Err(_err) => {
+                        Err(err) => {
                             if let Some(saved) = saved_suppress {
                                 vm.set_suppress_result_checking(saved);
                             }
-                            return HotResult::Ok(Val::err(Val::from("evaluation failed")));
+                            // if-ok is a halt boundary for its lazy first arg
+                            // (mirror of if-err): capture the structured
+                            // failure payload and clear the halt state so
+                            // downstream code (and later JIT-frame halt
+                            // boundaries) run normally.
+                            let err_val = if let Some(f) = vm.get_failure() {
+                                vm.reset_failure_state();
+                                vm.reset_cancellation_state();
+                                if matches!(f.data, Val::Null) {
+                                    Val::from(f.msg)
+                                } else {
+                                    f.data
+                                }
+                            } else if let Some(c) = vm.get_cancellation() {
+                                vm.reset_failure_state();
+                                vm.reset_cancellation_state();
+                                if matches!(c.data, Val::Null) {
+                                    Val::from(c.msg)
+                                } else {
+                                    c.data
+                                }
+                            } else {
+                                Val::from(err.to_string())
+                            };
+                            return HotResult::Ok(Val::err(err_val));
                         }
                     };
                     if let Some(saved) = saved_suppress {

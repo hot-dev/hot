@@ -461,7 +461,13 @@ unbound expressions are not collected as result slots, so give every concurrent
 operation a binding even when the requested output shape is `All<Vec>`. The
 function-definition form (`fn parallel ...`) can collect its unbound body
 expressions into an explicit `All<Vec>`, but named bindings remain the clearest
-and most portable form between standalone and function flows.
+and most portable form between standalone and function flows. Deep-path
+assignment into an existing binding (`st.a.b 99`) is a compile-time error
+inside `parallel` (standalone blocks and `fn parallel` bodies alike) —
+concurrent writes into a shared root have no defined order; bind a new name
+and merge after the flow. The check does not look inside nested flows: never
+deep-assign to an outer binding from a `serial { }` block nested in a parallel
+branch — its merge order is undefined.
 
 ## Nested Flows
 

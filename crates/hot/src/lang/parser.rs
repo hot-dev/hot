@@ -1042,106 +1042,7 @@ impl Parser {
         };
 
         // Check for deep path: var.path.to.value or var.path[0] (dots and brackets for variable definitions)
-        let mut deep_path_parts = Vec::new();
-        // Track the end position of the last token for adjacency check
-        let mut last_token_end = var_name_end_pos;
-        loop {
-            if self.check(&TokenType::Dot) {
-                self.next(); // consume dot
-
-                // Expect identifier after dot
-                let part_name = match self.next() {
-                    Some(token) => {
-                        last_token_end = token.position + token.length;
-                        if let Some(name) = self.extract_property_name(&token.token_type) {
-                            name
-                        } else {
-                            return Err(self.error(&format!(
-                                "Expected identifier after dot, got {:?}",
-                                token.token_type
-                            )));
-                        }
-                    }
-                    None => return Err(self.error("Expected identifier after dot")),
-                };
-
-                deep_path_parts.push(DeepPathPart::Key(part_name));
-            } else if self.check(&TokenType::LeftBracket) {
-                // Check if the bracket is immediately adjacent (no whitespace)
-                // If there's whitespace, it's a value like `items [1, 2, 3]`, not a path like `items[0]`
-                let bracket_token_pos = self.peek().map(|t| t.position);
-                let bracket_is_adjacent =
-                    bracket_token_pos.is_some_and(|pos| pos == last_token_end);
-
-                if !bracket_is_adjacent {
-                    break; // This is a value (has whitespace before [), not a path index
-                }
-
-                // Peek ahead to distinguish deep assignment from an adjacent
-                // value. Empty, integer, identifier, and string brackets are
-                // all assignment paths; other bracket contents belong to the
-                // value expression.
-                let next_token = self.peek_n(1);
-                let is_append = next_token
-                    .as_ref()
-                    .is_some_and(|t| matches!(t.token_type, TokenType::RightBracket));
-                let is_path_part = next_token.as_ref().is_some_and(|t| {
-                    matches!(
-                        t.token_type,
-                        TokenType::Int(_) | TokenType::Identifier(_) | TokenType::String(_)
-                    )
-                }) && self
-                    .peek_n(2)
-                    .is_some_and(|t| matches!(t.token_type, TokenType::RightBracket));
-
-                if !is_append && !is_path_part {
-                    break; // This is a value, not a path index or append
-                }
-
-                self.next(); // consume [
-
-                if is_append {
-                    // Empty brackets: append to vector
-                    let bracket_token = self.next().unwrap(); // consume ]
-                    last_token_end = bracket_token.position + bracket_token.length;
-                    deep_path_parts.push(DeepPathPart::Append);
-                } else {
-                    let path_part = match self.next() {
-                        Some(token) => match token.token_type {
-                            TokenType::Int(index) => {
-                                let index = usize::try_from(index)
-                                    .map_err(|_| self.error("Vector indices cannot be negative"))?;
-                                DeepPathPart::Index(index)
-                            }
-                            TokenType::Identifier(name) => DeepPathPart::DynamicIndex(name),
-                            TokenType::String(key) => DeepPathPart::Key(key),
-                            other => {
-                                return Err(self.error(&format!(
-                                    "Expected integer, identifier, or string in brackets, got {:?}",
-                                    other
-                                )));
-                            }
-                        },
-                        None => {
-                            return Err(
-                                self.error("Expected integer, identifier, or string in brackets")
-                            );
-                        }
-                    };
-
-                    // Expect closing bracket
-                    if !self.check(&TokenType::RightBracket) {
-                        return Err(self.error("Expected ']' after index"));
-                    }
-                    let bracket_token = self.next().unwrap(); // consume ]
-                    last_token_end = bracket_token.position + bracket_token.length;
-
-                    deep_path_parts.push(path_part);
-                }
-            } else {
-                break;
-            }
-        }
+        let deep_path_parts = self.parse_deep_path_parts(var_name_end_pos)?;
 
         // If we found deep path parts, set them on the variable
         if !deep_path_parts.is_empty() {
@@ -2377,11 +2278,11 @@ impl Parser {
                 // or just: value_expr (with auto-generated variable name)
 
                 // Check if the next token looks like a variable name followed by something
-                let maybe_var_assignment = if let Some(token) = self.peek().cloned() {
+                let ident_token_end = self.peek().and_then(|token| {
                     matches!(token.token_type, TokenType::Identifier(_))
-                } else {
-                    false
-                };
+                        .then_some(token.position + token.length)
+                });
+                let maybe_var_assignment = ident_token_end.is_some();
 
                 if maybe_var_assignment {
                     // Try parsing as variable assignment: name expression
@@ -2390,6 +2291,51 @@ impl Parser {
                     let saved_var_counter = self.var_counter;
 
                     if let Ok(var_name) = self.expect_identifier() {
+                        // Deep-path statement: `name.path value` / `name[k] value`.
+                        // The pair detection below would otherwise treat the
+                        // path as a bare expression and silently split the
+                        // assignment into two auto-named slots, dropping the
+                        // write. Parse the path here so serial bodies
+                        // deep-assign exactly like braced fn bodies, and
+                        // parallel bodies get the compiler's explicit
+                        // rejection instead of silent data loss.
+                        if matches!(flow_type, FlowType::Serial | FlowType::Parallel)
+                            && (self.check(&TokenType::Dot) || self.check(&TokenType::LeftBracket))
+                        {
+                            let path_save = self.token_index;
+                            let parts = self.parse_deep_path_parts(ident_token_end.unwrap_or(0))?;
+                            // Only an assignment when a value expression
+                            // follows on the same statement; calls, pipes,
+                            // and statement ends stay bare expressions.
+                            let assignment_follows = !parts.is_empty()
+                                && self.peek().is_some_and(|t| {
+                                    !matches!(
+                                        t.token_type,
+                                        TokenType::Newline
+                                            | TokenType::RightBrace
+                                            | TokenType::LeftParen
+                                            | TokenType::Pipe
+                                            | TokenType::Arrow
+                                            | TokenType::Comma
+                                    )
+                                });
+                            if assignment_follows {
+                                let var = Var {
+                                    sym: Sym::String(var_name),
+                                    deep_set: Some(DeepPath::from_vec(parts)),
+                                    deep_path: None,
+                                    meta: None,
+                                    type_annotation: None,
+                                    src: None,
+                                };
+                                expressions.push(Value::Ref(Ref::Var(VarRef { var, src: None })));
+                                let value_expr = self.parse_value()?;
+                                expressions.push(value_expr);
+                                continue;
+                            }
+                            self.token_index = path_save;
+                        }
+
                         // Check if the next token is NOT a call/operator (i.e., this is var assignment)
                         // Look for patterns that indicate this is NOT a variable assignment
                         let is_function_call = self.check(&TokenType::LeftParen);
@@ -6143,6 +6089,116 @@ impl Parser {
     }
 
     // Helper methods
+
+    /// Consume a deep-path suffix (`.field`, `[0]`, `[key]`, `["key"]`, `[]`)
+    /// starting at the current token. `last_token_end` is the source end
+    /// position of the path root, used for the bracket-adjacency check
+    /// (`items[0]` is a path; `items [0]` is a value). Consumes nothing and
+    /// returns an empty vec when no path is present.
+    fn parse_deep_path_parts(
+        &mut self,
+        mut last_token_end: usize,
+    ) -> ParseResult<Vec<DeepPathPart>> {
+        let mut deep_path_parts = Vec::new();
+        loop {
+            if self.check(&TokenType::Dot) {
+                self.next(); // consume dot
+
+                // Expect identifier after dot
+                let part_name = match self.next() {
+                    Some(token) => {
+                        last_token_end = token.position + token.length;
+                        if let Some(name) = self.extract_property_name(&token.token_type) {
+                            name
+                        } else {
+                            return Err(self.error(&format!(
+                                "Expected identifier after dot, got {:?}",
+                                token.token_type
+                            )));
+                        }
+                    }
+                    None => return Err(self.error("Expected identifier after dot")),
+                };
+
+                deep_path_parts.push(DeepPathPart::Key(part_name));
+            } else if self.check(&TokenType::LeftBracket) {
+                // Check if the bracket is immediately adjacent (no whitespace)
+                // If there's whitespace, it's a value like `items [1, 2, 3]`, not a path like `items[0]`
+                let bracket_token_pos = self.peek().map(|t| t.position);
+                let bracket_is_adjacent =
+                    bracket_token_pos.is_some_and(|pos| pos == last_token_end);
+
+                if !bracket_is_adjacent {
+                    break; // This is a value (has whitespace before [), not a path index
+                }
+
+                // Peek ahead to distinguish deep assignment from an adjacent
+                // value. Empty, integer, identifier, and string brackets are
+                // all assignment paths; other bracket contents belong to the
+                // value expression.
+                let next_token = self.peek_n(1);
+                let is_append = next_token
+                    .as_ref()
+                    .is_some_and(|t| matches!(t.token_type, TokenType::RightBracket));
+                let is_path_part = next_token.as_ref().is_some_and(|t| {
+                    matches!(
+                        t.token_type,
+                        TokenType::Int(_) | TokenType::Identifier(_) | TokenType::String(_)
+                    )
+                }) && self
+                    .peek_n(2)
+                    .is_some_and(|t| matches!(t.token_type, TokenType::RightBracket));
+
+                if !is_append && !is_path_part {
+                    break; // This is a value, not a path index or append
+                }
+
+                self.next(); // consume [
+
+                if is_append {
+                    // Empty brackets: append to vector
+                    let bracket_token = self.next().unwrap(); // consume ]
+                    last_token_end = bracket_token.position + bracket_token.length;
+                    deep_path_parts.push(DeepPathPart::Append);
+                } else {
+                    let path_part = match self.next() {
+                        Some(token) => match token.token_type {
+                            TokenType::Int(index) => {
+                                let index = usize::try_from(index)
+                                    .map_err(|_| self.error("Vector indices cannot be negative"))?;
+                                DeepPathPart::Index(index)
+                            }
+                            TokenType::Identifier(name) => DeepPathPart::DynamicIndex(name),
+                            TokenType::String(key) => DeepPathPart::Key(key),
+                            other => {
+                                return Err(self.error(&format!(
+                                    "Expected integer, identifier, or string in brackets, got {:?}",
+                                    other
+                                )));
+                            }
+                        },
+                        None => {
+                            return Err(
+                                self.error("Expected integer, identifier, or string in brackets")
+                            );
+                        }
+                    };
+
+                    // Expect closing bracket
+                    if !self.check(&TokenType::RightBracket) {
+                        return Err(self.error("Expected ']' after index"));
+                    }
+                    let bracket_token = self.next().unwrap(); // consume ]
+                    last_token_end = bracket_token.position + bracket_token.length;
+
+                    deep_path_parts.push(path_part);
+                }
+            } else {
+                break;
+            }
+        }
+        Ok(deep_path_parts)
+    }
 
     // Token manipulation helpers
 

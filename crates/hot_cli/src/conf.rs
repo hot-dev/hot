@@ -291,6 +291,19 @@ pub(crate) fn apply_env_vars(conf: Val) -> Val {
     for (key, value) in env::vars() {
         if key.starts_with("HOT_") {
             let conf_key = env_var_to_conf_key(&key);
+            // A path that extends an existing scalar (HOT_LOG_LEVEL_EXTRA ->
+            // log.level.extra while log.level is a Str) would replace that
+            // scalar with a materialized map, silently destroying the
+            // configured value. Skip such variables instead of clobbering.
+            if env_path_extends_scalar(&conf, &conf_key) {
+                tracing::warn!(
+                    "Ignoring environment variable {}: path '{}' extends an existing \
+                     scalar setting",
+                    key,
+                    conf_key
+                );
+                continue;
+            }
             // Environment names map to nested configuration paths. A literal
             // one-entry map would create a `"jit.threshold"` key rather than
             // the `{jit: {threshold: ...}}` shape read by the runtime.
@@ -300,6 +313,27 @@ pub(crate) fn apply_env_vars(conf: Val) -> Val {
     }
 
     conf
+}
+
+/// True when setting `conf_key` would have to write *through* an existing
+/// non-map value: some strict prefix of the dotted path resolves to a scalar,
+/// so `set` would replace that scalar with a materialized map.
+fn env_path_extends_scalar(conf: &Val, conf_key: &str) -> bool {
+    let mut current = conf;
+    for part in conf_key.split('.') {
+        match current {
+            Val::Map(map) => match map.get(&Val::from(part)) {
+                Some(next) => current = next,
+                // Path leaves the existing tree here; `set` only creates new
+                // nested maps below this point, destroying nothing.
+                None => return false,
+            },
+            // Path parts remain but the tree already ended in a non-map:
+            // the env path extends an existing scalar.
+            _ => return true,
+        }
+    }
+    false
 }
 
 // Function to extract options from the command enum

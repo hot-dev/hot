@@ -125,34 +125,56 @@ pub(crate) fn run_ai(action: &AiAction) -> Result<(), String> {
             info!("Updating AI support files...");
             let mut updated_count = 0;
 
+            let home = ai_home_dir().unwrap_or_default();
+            let project_skills = installed_hot_skill_names(std::path::Path::new(".skills"));
+            let global_skills = installed_hot_skill_names(&home.join(".skills"));
+
+            // Resolve the bundle lazily: an update with nothing installed
+            // must not require the skill resources to be present.
+            let (project_targets, global_targets): (Vec<String>, Vec<String>) =
+                if project_skills.is_empty() && global_skills.is_empty() {
+                    (Vec::new(), Vec::new())
+                } else {
+                    let bundled: BTreeSet<String> = bundled_skill_names()?.into_iter().collect();
+                    (
+                        project_skills
+                            .into_iter()
+                            .filter(|name| bundled.contains(name))
+                            .collect(),
+                        global_skills
+                            .into_iter()
+                            .filter(|name| bundled.contains(name))
+                            .collect(),
+                    )
+                };
+
+            // Validate every skill path this update will touch BEFORE
+            // refreshing AGENTS.md, so a rejected path (e.g. a symlinked
+            // .skills base) cannot leave a half-completed update with
+            // AGENTS.md rewritten and the skills untouched.
+            for (scope_global, targets) in [(false, &project_targets), (true, &global_targets)] {
+                if targets.is_empty() {
+                    continue;
+                }
+                let (skills_base, _) = agent_skills_base(scope_global)?;
+                ensure_managed_path_is_not_symlinked(&skills_base, &skills_base)?;
+                for name in targets {
+                    ensure_managed_path_is_not_symlinked(&skills_base, &skills_base.join(name))?;
+                }
+            }
+
             if std::path::Path::new("AGENTS.md").exists() {
                 setup_agents_md()?;
                 updated_count += 1;
             }
 
-            let home = ai_home_dir().unwrap_or_default();
-            let project_skills = installed_hot_skill_names(std::path::Path::new(".skills"));
-            let global_skills = installed_hot_skill_names(&home.join(".skills"));
-
-            if !project_skills.is_empty() || !global_skills.is_empty() {
-                let bundled: BTreeSet<String> = bundled_skill_names()?.into_iter().collect();
-                let project_targets: Vec<String> = project_skills
-                    .into_iter()
-                    .filter(|name| bundled.contains(name))
-                    .collect();
-                let global_targets: Vec<String> = global_skills
-                    .into_iter()
-                    .filter(|name| bundled.contains(name))
-                    .collect();
-
-                if !project_targets.is_empty() {
-                    setup_selected_agent_skills(false, &project_targets)?;
-                    updated_count += 1;
-                }
-                if !global_targets.is_empty() {
-                    setup_selected_agent_skills(true, &global_targets)?;
-                    updated_count += 1;
-                }
+            if !project_targets.is_empty() {
+                setup_selected_agent_skills(false, &project_targets)?;
+                updated_count += 1;
+            }
+            if !global_targets.is_empty() {
+                setup_selected_agent_skills(true, &global_targets)?;
+                updated_count += 1;
             }
 
             if updated_count == 0 {

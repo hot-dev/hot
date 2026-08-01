@@ -7240,6 +7240,22 @@ impl Compiler {
                     let var_name = var_ref.var.sym.name();
                     let value_expr = &flow.expressions[i + 1];
 
+                    // A deep-path assignment is a read-modify-write of an
+                    // existing binding. Parallel branches are independent
+                    // slots keyed by name, so there is no coherent order for
+                    // concurrent writes into the same root; previously the
+                    // path was silently dropped and the root rebound to the
+                    // bare value. Reject it instead of losing data.
+                    if var_ref.var.deep_set.is_some() || var_ref.var.deep_path.is_some() {
+                        return Err(format!(
+                            "Deep-path assignment ('{}...') is not supported inside a \
+                             parallel flow: branches run concurrently, so writing into an \
+                             existing binding has no defined order. Bind a new name in the \
+                             branch and merge after the flow, or use a serial flow.",
+                            var_name
+                        ));
+                    }
+
                     tracing::trace!(
                         "Compiler: Creating deferred thunk for parallel variable: '{}' = {:?}",
                         var_name,

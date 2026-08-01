@@ -491,3 +491,36 @@ fn hot_ai_add_rejects_a_symlinked_skills_root_before_writing_agents() {
         "skills preflight must happen before AGENTS.md is written"
     );
 }
+
+#[cfg(unix)]
+#[test]
+fn hot_ai_update_rejects_a_symlinked_skills_root_before_touching_agents() {
+    use std::os::unix::fs::symlink;
+
+    let project = tempfile::tempdir().expect("project");
+    run(project.path(), &["ai", "add"]);
+
+    // Make the AGENTS.md managed section stale so a half-completed update
+    // would be observable, then swap .skills for a symlink.
+    let agents_path = project.path().join("AGENTS.md");
+    let agents_before = std::fs::read_to_string(&agents_path).expect("read AGENTS.md");
+    let stale = agents_before.replacen("hash:", "hash:stale", 1);
+    assert_ne!(stale, agents_before, "expected a section hash to perturb");
+    std::fs::write(&agents_path, &stale).unwrap();
+
+    let real_skills = project.path().join(".skills-real");
+    std::fs::rename(project.path().join(".skills"), &real_skills).unwrap();
+    symlink(&real_skills, project.path().join(".skills")).unwrap();
+
+    let status = run_status(project.path(), &["ai", "update"]);
+
+    assert!(
+        !status.success(),
+        "symlinked skills root must reject update"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&agents_path).expect("read AGENTS.md"),
+        stale,
+        "update must preflight skill paths before rewriting AGENTS.md"
+    );
+}

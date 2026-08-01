@@ -96,8 +96,10 @@ iter-from-vec-example fn (): Vec {
 
 // @doc: iter-from-range
 iter-from-range-example fn (): Vec {
+    // range is eager and already returns a Vec; wrap with Iter() only
+    // when an explicit iterator is needed.
     numbers range(1, 6)
-    collect(numbers)
+    numbers
 }
 // @end: iter-from-range
 
@@ -258,7 +260,7 @@ meta ["test"] fn () {
 test-iter-from-range
 meta ["test"] fn () {
     result iter-from-range-example()
-    assert-eq([1, 2, 3, 4, 5], result, "collect iterator from range")
+    assert-eq([1, 2, 3, 4, 5], result, "eager range returns a Vec")
 }
 
 test-next-example

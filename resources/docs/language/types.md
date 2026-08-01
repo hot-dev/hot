@@ -386,10 +386,14 @@ exposes or skips through those wrapper members. If the payload itself has a
 field named `$val`, for example, `value.$val` reads that payload field;
 otherwise it is absent just like any other field. Hot recognizes the reserved
 wrapper only when its members are `$type`, `$val`, and the optional defined
-metadata member `$origin`. A foreign Map with any other sibling data field—even
-one beginning with `$`—remains an ordinary Map, so adding a literal `$val`
-field cannot change how its siblings are read. Call `untype` first when a
-recipient instead expects ordinary untagged JSON:
+metadata member `$origin`. For a foreign Map with any other sibling data
+field—even one beginning with `$`—field access stays ordinary: every member
+reads literally, so adding a literal `$val` field cannot change how its
+siblings are read. Type predicates are stricter than field access, though: any
+Map carrying a `$type` member is no longer an ordinary Map to them — `is-map`
+returns `false`, and `is-type` matches the carried name when it is the fully
+qualified type path that `to-json` emits (a short name does not match). Call `untype` first when a recipient instead expects ordinary
+untagged JSON:
 
 ```hot
 // Define a type

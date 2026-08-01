@@ -575,6 +575,15 @@ but named bindings work consistently in both forms. Branches complete
 independently, so an `Err` remains in its branch's slot rather than cancelling
 siblings. It propagates when ordinary code later consumes that result.
 
+Because branches are independent slots, a deep-path assignment into an
+existing binding (`st.a.b 99`) is rejected at compile time inside `parallel` —
+both the standalone block and `fn parallel` forms: concurrent writes into a
+shared root have no defined order. Bind a new name in the branch and merge
+after the flow, or use a serial flow. The check does not look inside nested
+flows: a `serial { }` block nested in a parallel branch can still write to an
+outer binding, but its merge order across branches is undefined — treat that
+pattern as unsupported.
+
 ## Summary
 
 | Flow | Use When |
