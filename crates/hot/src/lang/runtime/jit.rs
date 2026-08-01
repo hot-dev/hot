@@ -459,6 +459,7 @@ struct JitHelperRefs {
     make_vec: FuncRef,
     call_lib: FuncRef,
     dot_access: FuncRef,
+    dot_access_or_default: FuncRef,
     merge_maps: FuncRef,
     template_interpolate: FuncRef,
     extract_inner_val: FuncRef,
@@ -1319,6 +1320,10 @@ fn compile_supported_function(
     builder.symbol("hot_jit_make_vec", hot_jit_make_vec as *const u8);
     builder.symbol("hot_jit_call_lib", hot_jit_call_lib as *const u8);
     builder.symbol("hot_jit_dot_access", hot_jit_dot_access as *const u8);
+    builder.symbol(
+        "hot_jit_dot_access_or_default",
+        hot_jit_dot_access_or_default as *const u8,
+    );
     builder.symbol("hot_jit_merge_maps", hot_jit_merge_maps as *const u8);
     builder.symbol(
         "hot_jit_template_interpolate",
@@ -2180,13 +2185,41 @@ unsafe extern "C" fn hot_jit_dot_access(obj_ptr: i64, prop_ptr: i64) -> i64 {
             )));
         }
     };
-    let prepared = match vm.unwrap_result_if_ok(obj_val) {
-        Ok(value) => value,
-        Err(_) => return HALT_SENTINEL,
-    };
-    match vm.access_property(&prepared, prop_name) {
+    match vm.access_property(obj_val, prop_name) {
         Ok(result) => new_owned_val(result),
-        Err(err) => new_owned_val(Val::err(Val::Str(err.to_string().into()))),
+        Err(err) => vm_runtime_error_to_halt(vm, err),
+    }
+}
+
+/// JIT helper for deep-path access. It shares the VM's property semantics and
+/// substitutes the supplied default only for a missing/Null value; semantic
+/// errors still halt the compiled frame.
+unsafe extern "C" fn hot_jit_dot_access_or_default(
+    obj_ptr: i64,
+    prop_ptr: i64,
+    default_ptr: i64,
+) -> i64 {
+    let vm_ptr = get_jit_vm_ptr();
+    if vm_ptr.is_null() {
+        return HALT_SENTINEL;
+    }
+    let vm = unsafe { &mut *vm_ptr };
+    let obj_val = unsafe { &*(obj_ptr as *const Val) };
+    let prop_val = unsafe { &*(prop_ptr as *const Val) };
+    let default_val = unsafe { &*(default_ptr as *const Val) };
+    let prop_name = match prop_val {
+        Val::Str(property) => property.as_ref(),
+        _ => {
+            return vm_runtime_error_to_halt(
+                vm,
+                "JIT dot_access_or_default: expected Str for property name",
+            );
+        }
+    };
+    match vm.access_property(obj_val, prop_name) {
+        Ok(Val::Null) => new_owned_val(default_val.clone()),
+        Ok(result) => new_owned_val(result),
+        Err(error) => vm_runtime_error_to_halt(vm, error),
     }
 }
 
@@ -2537,43 +2570,9 @@ unsafe extern "C" fn hot_jit_dynamic_dot_access(obj_ptr: i64, key_ptr: i64) -> i
     let vm = unsafe { &mut *vm_ptr };
     let obj_val = unsafe { &*(obj_ptr as *const Val) };
     let key_val = unsafe { &*(key_ptr as *const Val) };
-    let prepared = match vm.unwrap_result_if_ok(obj_val) {
+    let result = match vm.access_dynamic_property(obj_val, key_val) {
         Ok(value) => value,
-        Err(_) => return HALT_SENTINEL,
-    };
-    let result = if let Val::Str(property_name) = key_val {
-        match vm.access_property(&prepared, property_name) {
-            Ok(value) => value,
-            Err(err) => return new_owned_val(Val::err(Val::Str(err.to_string().into()))),
-        }
-    } else {
-        match &prepared {
-            Val::Map(m) => m.get(key_val).cloned().unwrap_or(Val::Null),
-            Val::Vec(v) => match key_val {
-                Val::Int(i) => {
-                    if *i < 0 {
-                        Val::Null
-                    } else {
-                        v.get(*i as usize).cloned().unwrap_or(Val::Null)
-                    }
-                }
-                _ => Val::Null,
-            },
-            Val::Str(s) => match key_val {
-                Val::Int(i) => {
-                    if *i < 0 {
-                        Val::Null
-                    } else {
-                        s.chars()
-                            .nth(*i as usize)
-                            .map(|c| Val::from(c.to_string()))
-                            .unwrap_or(Val::Null)
-                    }
-                }
-                _ => Val::Null,
-            },
-            _ => Val::Null,
-        }
+        Err(err) => return vm_runtime_error_to_halt(vm, err),
     };
     new_owned_val(result)
 }
@@ -2590,39 +2589,14 @@ unsafe extern "C" fn hot_jit_dynamic_dot_set(obj_ptr: i64, key_ptr: i64, val_ptr
             "JIT dynamic_dot_set: no VM available".into(),
         )));
     }
-    let vm = unsafe { &*vm_ptr };
+    let vm = unsafe { &mut *vm_ptr };
     let obj_val = unsafe { &*(obj_ptr as *const Val) };
     let key_val = unsafe { &*(key_ptr as *const Val) };
     let new_value = unsafe { &*(val_ptr as *const Val) };
-    let result = if let Val::Str(property_name) = key_val {
-        let mut result = obj_val.clone();
-        match vm.set_property(&mut result, property_name, new_value.clone()) {
-            Ok(()) => result,
-            Err(err) => return new_owned_val(Val::err(Val::Str(err.to_string().into()))),
-        }
-    } else {
-        match obj_val {
-            Val::Map(m) => {
-                let mut new_map = (**m).clone();
-                new_map.insert(key_val.clone(), new_value.clone());
-                Val::Map(Box::new(new_map))
-            }
-            Val::Vec(v) => {
-                let mut new_vec = v.clone();
-                if let Val::Int(i) = key_val
-                    && *i >= 0
-                {
-                    let idx = *i as usize;
-                    while new_vec.len() <= idx {
-                        new_vec.push(Val::Null);
-                    }
-                    new_vec[idx] = new_value.clone();
-                }
-                Val::Vec(new_vec)
-            }
-            _ => obj_val.clone(),
-        }
-    };
+    let mut result = obj_val.clone();
+    if let Err(err) = vm.set_dynamic_property(&mut result, key_val, new_value.clone()) {
+        return vm_runtime_error_to_halt(vm, err);
+    }
     new_owned_val(result)
 }
 
@@ -2646,7 +2620,7 @@ unsafe extern "C" fn hot_jit_dot_set(obj_ptr: i64, key_ptr: i64, val_ptr: i64) -
     };
     match vm.set_property(&mut obj_val, &prop_name, new_value) {
         Ok(()) => new_owned_val(obj_val),
-        Err(_) => new_owned_val(obj_val),
+        Err(err) => vm_runtime_error_to_halt(vm, err),
     }
 }
 
@@ -3173,6 +3147,14 @@ fn declare_jit_helpers(
             &[types::I64, types::I64],
             &[types::I64],
         )?,
+        dot_access_or_default: declare_helper_func(
+            module,
+            func,
+            ptr_ty,
+            "hot_jit_dot_access_or_default",
+            &[types::I64, types::I64, types::I64],
+            &[types::I64],
+        )?,
         merge_maps: declare_helper_func(
             module,
             func,
@@ -3562,6 +3544,16 @@ fn vm_error_to_owned_val(err: impl std::fmt::Display, error_capture_active: bool
     } else {
         new_owned_val(Val::err(Val::Str(err.to_string().into())))
     }
+}
+
+/// Property helpers represent interpreter `VmError` unwinding with the JIT's
+/// halt sentinel. Record the failure first so the compiled-frame boundary can
+/// surface the same immediate error instead of treating it as an ordinary
+/// Result value and continuing execution.
+fn vm_runtime_error_to_halt(vm: &VirtualMachine, err: impl std::fmt::Display) -> i64 {
+    let message = err.to_string();
+    vm.set_failure(message.clone(), Val::from(message));
+    HALT_SENTINEL
 }
 
 /// HOT_OWNED_TRACE=1 logs every OwnedVal handle event with the caller's
@@ -5067,11 +5059,20 @@ impl<'a> EmitCtx<'a> {
         builder: &mut FunctionBuilder<'_>,
         halt_block: cranelift_codegen::ir::Block,
     ) {
+        self.emit_halt_return_excluding(builder, halt_block, &[]);
+    }
+
+    fn emit_halt_return_excluding(
+        &self,
+        builder: &mut FunctionBuilder<'_>,
+        halt_block: cranelift_codegen::ir::Block,
+        excluded_registers: &[usize],
+    ) {
         builder.switch_to_block(halt_block);
         builder.seal_block(halt_block);
         let call = builder.ins().call(self.helper_refs.failure_err, &[]);
         let err_val = builder.inst_results(call)[0];
-        self.emit_cleanup_owned(builder);
+        self.emit_cleanup_owned_excluding(builder, excluded_registers);
         builder.ins().return_(&[err_val]);
     }
 
@@ -5111,8 +5112,18 @@ impl<'a> EmitCtx<'a> {
 
     /// Drop all owned registers and locals. Used for cleanup before return/error paths.
     fn emit_cleanup_owned(&self, builder: &mut FunctionBuilder<'_>) {
+        self.emit_cleanup_owned_excluding(builder, &[]);
+    }
+
+    fn emit_cleanup_owned_excluding(
+        &self,
+        builder: &mut FunctionBuilder<'_>,
+        excluded_registers: &[usize],
+    ) {
         for (idx, existing_kind) in self.register_kinds.iter().enumerate() {
-            if *existing_kind == Some(RawKind::OwnedVal) && !self.compile_time_owned.contains(&idx)
+            if *existing_kind == Some(RawKind::OwnedVal)
+                && !self.compile_time_owned.contains(&idx)
+                && !excluded_registers.contains(&idx)
             {
                 drop_owned_var(builder, &self.helper_refs, self.registers[idx]);
             }
@@ -5981,47 +5992,15 @@ impl<'a> EmitCtx<'a> {
                 let prop = constant_string(self.program, *property)?;
                 let prop_val = new_owned_val(Val::Str(prop.to_string().into()));
                 let prop_ptr = builder.ins().iconst(types::I64, prop_val);
-                let call = builder
-                    .ins()
-                    .call(self.helper_refs.dot_access, &[obj_ptr, prop_ptr]);
-                let result = builder.inst_results(call)[0];
-                let halt_block = emit_halt_check(builder, result);
-                self.drop_owned_temps(builder, &[obj_temp]);
-                let null_sentinel = builder.ins().iconst(types::I64, 0);
-                let is_null = builder.ins().icmp(
-                    cranelift_codegen::ir::condcodes::IntCC::Equal,
-                    result,
-                    null_sentinel,
+                let (default_ptr, default_temp) = self.owned_operand(builder, *default_value)?;
+                let call = builder.ins().call(
+                    self.helper_refs.dot_access_or_default,
+                    &[obj_ptr, prop_ptr, default_ptr],
                 );
-                let merge_var = builder.declare_var(types::I64);
-                let use_result_block = builder.create_block();
-                let use_default_block = builder.create_block();
-                let merge_block = builder.create_block();
-                builder
-                    .ins()
-                    .brif(is_null, use_default_block, &[], use_result_block, &[]);
-
-                builder.switch_to_block(use_result_block);
-                builder.seal_block(use_result_block);
-                builder.def_var(merge_var, result);
-                builder.ins().jump(merge_block, &[]);
-
-                builder.switch_to_block(use_default_block);
-                builder.seal_block(use_default_block);
-                let default_kind = self.register_kind(*default_value)?;
-                let default_raw = self.reg_value(builder, *default_value)?;
-                let default_ptr = if default_kind == RawKind::OwnedVal {
-                    clone_owned_raw(builder, &self.helper_refs, default_raw)
-                } else {
-                    promote_to_owned(builder, &self.helper_refs, default_kind, default_raw)?
-                };
-                builder.def_var(merge_var, default_ptr);
-                builder.ins().jump(merge_block, &[]);
-
-                builder.switch_to_block(merge_block);
-                builder.seal_block(merge_block);
-                let merged = builder.use_var(merge_var);
-                self.define_register(builder, *dest, RawKind::OwnedVal, merged)?;
+                let result = builder.inst_results(call)[0];
+                self.drop_owned_temps(builder, &[obj_temp, default_temp]);
+                let halt_block = emit_halt_check(builder, result);
+                self.define_register(builder, *dest, RawKind::OwnedVal, result)?;
                 self.jump_to_next(builder, ip)?;
                 self.emit_halt_return(builder, halt_block);
                 Ok(EmitResult::Handled)
@@ -6205,6 +6184,7 @@ impl<'a> EmitCtx<'a> {
                 property,
                 value,
             } => {
+                let object_idx = self.remap_reg(*object)?;
                 let (obj_ptr, obj_temp) = self.owned_operand(builder, *object)?;
                 let (prop_ptr, prop_temp) = self.owned_operand(builder, *property)?;
                 let (val_ptr, val_temp) = self.owned_operand(builder, *value)?;
@@ -6213,9 +6193,19 @@ impl<'a> EmitCtx<'a> {
                     &[obj_ptr, prop_ptr, val_ptr],
                 );
                 let result = builder.inst_results(call)[0];
+                // The helper returns a replacement object. Release the old
+                // owned register before branching, and mark its register as
+                // already consumed so halt cleanup cannot interpret the
+                // sentinel as an OwnedVal after the continuation redefines it.
+                if obj_temp.is_none() {
+                    drop_owned_raw(builder, &self.helper_refs, obj_ptr);
+                    self.compile_time_owned.insert(object_idx);
+                }
                 self.drop_owned_temps(builder, &[obj_temp, prop_temp, val_temp]);
+                let halt_block = emit_halt_check(builder, result);
                 self.define_register(builder, *object, RawKind::OwnedVal, result)?;
                 self.jump_to_next(builder, ip)?;
+                self.emit_halt_return_excluding(builder, halt_block, &[object_idx]);
                 Ok(EmitResult::Handled)
             }
             Instruction::DotSet {
@@ -6223,6 +6213,7 @@ impl<'a> EmitCtx<'a> {
                 property,
                 value,
             } => {
+                let object_idx = self.remap_reg(*object)?;
                 let (obj_ptr, obj_temp) = self.owned_operand(builder, *object)?;
                 let prop_name = constant_string(self.program, *property)?;
                 let prop_val = new_owned_val(Val::Str(prop_name.to_string().into()));
@@ -6232,9 +6223,15 @@ impl<'a> EmitCtx<'a> {
                     .ins()
                     .call(self.helper_refs.dot_set, &[obj_ptr, prop_ptr, val_ptr]);
                 let result = builder.inst_results(call)[0];
+                if obj_temp.is_none() {
+                    drop_owned_raw(builder, &self.helper_refs, obj_ptr);
+                    self.compile_time_owned.insert(object_idx);
+                }
                 self.drop_owned_temps(builder, &[obj_temp, val_temp]);
+                let halt_block = emit_halt_check(builder, result);
                 self.define_register(builder, *object, RawKind::OwnedVal, result)?;
                 self.jump_to_next(builder, ip)?;
+                self.emit_halt_return_excluding(builder, halt_block, &[object_idx]);
                 Ok(EmitResult::Handled)
             }
             Instruction::MakeVecWithSpread {
@@ -10503,6 +10500,92 @@ mod tests {
         )
     }
 
+    fn dynamic_dot_set_program() -> BytecodeProgram {
+        let mut program = BytecodeProgram::new();
+        let object_name = program.constants.len() as u32;
+        program.constants.push(Constant::Val(val!("object")));
+        let key_name = program.constants.len() as u32;
+        program.constants.push(Constant::Val(val!("key")));
+        let value_name = program.constants.len() as u32;
+        program.constants.push(Constant::Val(val!("value")));
+        program.functions.push(FunctionInfo {
+            name: "::test/dynamic-set".to_string(),
+            namespace: "::test".to_string(),
+            arity: 3,
+            is_variadic: false,
+            param_names: vec!["object".to_string(), "key".to_string(), "value".to_string()],
+            param_types: vec![],
+            return_type: 0,
+            lazy_params: vec![false, false, false],
+            flow_type: None,
+            instructions: vec![
+                Instruction::LoadVar {
+                    dest: 0,
+                    var_name: object_name,
+                },
+                Instruction::LoadVar {
+                    dest: 1,
+                    var_name: key_name,
+                },
+                Instruction::LoadVar {
+                    dest: 2,
+                    var_name: value_name,
+                },
+                Instruction::DynamicDotSet {
+                    object: 0,
+                    property: 1,
+                    value: 2,
+                },
+                Instruction::Return { value: 0 },
+            ],
+            register_count: 3,
+            source: None,
+        });
+        program
+    }
+
+    fn static_dot_set_program(property_name: &str) -> BytecodeProgram {
+        let mut program = BytecodeProgram::new();
+        let object_name = program.constants.len() as u32;
+        program.constants.push(Constant::Val(val!("object")));
+        let property = program.constants.len() as u32;
+        program
+            .constants
+            .push(Constant::Val(Val::from(property_name.to_string())));
+        let value_name = program.constants.len() as u32;
+        program.constants.push(Constant::Val(val!("value")));
+        program.functions.push(FunctionInfo {
+            name: "::test/static-property".to_string(),
+            namespace: "::test".to_string(),
+            arity: 2,
+            is_variadic: false,
+            param_names: vec!["object".to_string(), "value".to_string()],
+            param_types: vec![],
+            return_type: 0,
+            lazy_params: vec![false, false],
+            flow_type: None,
+            instructions: vec![
+                Instruction::LoadVar {
+                    dest: 0,
+                    var_name: object_name,
+                },
+                Instruction::LoadVar {
+                    dest: 1,
+                    var_name: value_name,
+                },
+                Instruction::DotSet {
+                    object: 0,
+                    property,
+                    value: 1,
+                },
+                Instruction::Return { value: 0 },
+            ],
+            register_count: 2,
+            source: None,
+        });
+        program
+    }
+
     #[test]
     fn jitted_function_uses_defining_namespace_for_alias_lookup() {
         let mut program = BytecodeProgram::new();
@@ -14214,6 +14297,62 @@ mod tests {
         assert_eq!(result, val!(8));
     }
 
+    #[test]
+    fn jit_and_interpreter_halt_on_property_access_errors() {
+        let mut program = BytecodeProgram::new();
+        let object_name = program.constants.len() as u32;
+        program.constants.push(Constant::Val(val!("object")));
+        let missing_name = program.constants.len() as u32;
+        program.constants.push(Constant::Val(val!("Missing")));
+        program.functions.push(FunctionInfo {
+            name: "::test/missing-variant".to_string(),
+            namespace: "::test".to_string(),
+            arity: 1,
+            is_variadic: false,
+            param_names: vec!["object".to_string()],
+            param_types: vec![],
+            return_type: 0,
+            lazy_params: vec![false],
+            flow_type: None,
+            instructions: vec![
+                Instruction::LoadVar {
+                    dest: 0,
+                    var_name: object_name,
+                },
+                Instruction::DotAccess {
+                    dest: 1,
+                    object: 0,
+                    property: missing_name,
+                },
+                Instruction::Return { value: 1 },
+            ],
+            register_count: 2,
+            source: None,
+        });
+        let type_ref = Val::Box(Box::new(crate::lang::refs::TypeRef::new(
+            "::test/Choice".to_string(),
+            IndexMap::new(),
+        )));
+        let args = [type_ref];
+        let mut interpreter = make_test_vm(
+            program.clone(),
+            val!({"jit": {"mode": "disabled", "threshold": 1}}),
+        );
+        let mut jitted = make_test_vm(program, val!({"jit": {"mode": "enabled", "threshold": 1}}));
+
+        let interpreter_error = interpreter
+            .execute_compiled_user_function(0, &args)
+            .expect_err("interpreter access must halt")
+            .to_string();
+        let jit_error = jitted
+            .execute_compiled_user_function(0, &args)
+            .expect_err("JIT access must halt")
+            .to_string();
+        assert!(interpreter_error.contains("does not have variant"));
+        assert!(jit_error.contains("does not have variant"));
+        assert!(jitted.jit_has_compiled_function(0));
+    }
+
     // --- DotSet test ---
 
     #[test]
@@ -14260,10 +14399,200 @@ mod tests {
 
         let conf = val!({"jit": {"mode": "enabled", "threshold": 1}});
         let mut vm = make_test_vm(program, conf);
-        let result = vm
-            .execute_compiled_user_function(0, &[val!({"x": 1})])
+        for _ in 0..3 {
+            let result = vm
+                .execute_compiled_user_function(0, &[val!({"x": 1})])
+                .unwrap();
+            assert_eq!(result, val!({"x": 99}));
+        }
+    }
+
+    #[test]
+    fn jit_and_interpreter_grow_static_vector_assignment_identically() {
+        let program = static_dot_set_program("5");
+        let args = [val!([10, 20]), val!(99)];
+        let mut interpreter = make_test_vm(
+            program.clone(),
+            val!({"jit": {"mode": "disabled", "threshold": 1}}),
+        );
+        let mut jitted = make_test_vm(program, val!({"jit": {"mode": "enabled", "threshold": 1}}));
+
+        let expected = val!([10, 20, null, null, null, 99]);
+        assert_eq!(
+            interpreter
+                .execute_compiled_user_function(0, &args)
+                .unwrap(),
+            expected
+        );
+        assert_eq!(
+            jitted.execute_compiled_user_function(0, &args).unwrap(),
+            expected
+        );
+        assert!(jitted.jit_has_compiled_function(0));
+    }
+
+    #[test]
+    fn jit_and_interpreter_halt_on_invalid_static_assignment() {
+        let program = static_dot_set_program("field");
+        let args = [val!(7), val!(99)];
+        let mut interpreter = make_test_vm(
+            program.clone(),
+            val!({"jit": {"mode": "disabled", "threshold": 1}}),
+        );
+        let mut jitted = make_test_vm(program, val!({"jit": {"mode": "enabled", "threshold": 1}}));
+
+        let interpreter_error = interpreter
+            .execute_compiled_user_function(0, &args)
+            .expect_err("interpreter assignment must halt")
+            .to_string();
+        let jit_error = jitted
+            .execute_compiled_user_function(0, &args)
+            .expect_err("JIT assignment must halt")
+            .to_string();
+        assert!(interpreter_error.contains("Cannot set property"));
+        assert!(jit_error.contains("Cannot set property"));
+        assert!(jitted.jit_has_compiled_function(0));
+    }
+
+    #[test]
+    fn jit_and_interpreter_halt_on_invalid_dynamic_vector_keys() {
+        for key in [val!(-1), val!("not-an-index")] {
+            let program = dynamic_dot_set_program();
+            let args = [val!([10, 20]), key, val!(99)];
+            let mut interpreter = make_test_vm(
+                program.clone(),
+                val!({"jit": {"mode": "disabled", "threshold": 1}}),
+            );
+            let mut jitted =
+                make_test_vm(program, val!({"jit": {"mode": "enabled", "threshold": 1}}));
+
+            assert!(
+                interpreter
+                    .execute_compiled_user_function(0, &args)
+                    .is_err()
+            );
+            assert!(jitted.execute_compiled_user_function(0, &args).is_err());
+            assert!(jitted.jit_has_compiled_function(0));
+        }
+    }
+
+    #[test]
+    fn jit_and_interpreter_enforce_dynamic_vector_collection_limit() {
+        let program = dynamic_dot_set_program();
+        let too_large = crate::lang::runtime::limits::DEFAULT_MAX_COLLECTION_SIZE as i64;
+        let args = [val!([1]), Val::Int(too_large), val!(99)];
+        let mut interpreter = make_test_vm(
+            program.clone(),
+            val!({"jit": {"mode": "disabled", "threshold": 1}}),
+        );
+        let mut jitted = make_test_vm(program, val!({"jit": {"mode": "enabled", "threshold": 1}}));
+
+        let interpreter_error = interpreter
+            .execute_compiled_user_function(0, &args)
+            .expect_err("interpreter must enforce collection limit")
+            .to_string();
+        let jit_error = jitted
+            .execute_compiled_user_function(0, &args)
+            .expect_err("JIT must enforce collection limit")
+            .to_string();
+        assert!(interpreter_error.contains("limit"));
+        assert!(jit_error.contains("limit"));
+        assert!(jitted.jit_has_compiled_function(0));
+    }
+
+    #[test]
+    fn jit_and_interpreter_route_non_string_keys_through_tagged_payloads() {
+        let mut payload = IndexMap::new();
+        payload.insert(val!(0), val!("old"));
+        let mut wrapper = IndexMap::new();
+        wrapper.insert(Val::from("$type"), Val::from("::test/Tagged"));
+        wrapper.insert(Val::from("$val"), Val::Map(Box::new(payload)));
+        let args = [Val::Map(Box::new(wrapper)), val!(0), val!("new")];
+        let program = dynamic_dot_set_program();
+        let mut interpreter = make_test_vm(
+            program.clone(),
+            val!({"jit": {"mode": "disabled", "threshold": 1}}),
+        );
+        let mut jitted = make_test_vm(program, val!({"jit": {"mode": "enabled", "threshold": 1}}));
+
+        let interpreted = interpreter
+            .execute_compiled_user_function(0, &args)
             .unwrap();
-        assert_eq!(result, val!({"x": 99}));
+        let compiled = jitted.execute_compiled_user_function(0, &args).unwrap();
+        assert_eq!(compiled, interpreted);
+        assert_eq!(compiled.unwrap_ok(), None);
+        let Val::Map(outer) = compiled else {
+            panic!("tagged result must remain a map")
+        };
+        assert!(
+            !outer.contains_key(&val!(0)),
+            "key must not leak beside tag"
+        );
+        let Some(Val::Map(payload)) = outer.get(&Val::from("$val")) else {
+            panic!("tagged payload must remain a map")
+        };
+        assert_eq!(payload.get(&val!(0)), Some(&val!("new")));
+        assert!(jitted.jit_has_compiled_function(0));
+    }
+
+    #[test]
+    fn jit_and_interpreter_preserve_reserved_tagged_metadata() {
+        let mut payload = IndexMap::new();
+        payload.insert(Val::from("message"), Val::from("original"));
+        let mut wrapper = IndexMap::new();
+        wrapper.insert(Val::from("$type"), Val::from("::hot::run/Failure"));
+        wrapper.insert(Val::from("$origin"), val!({"name": "test"}));
+        wrapper.insert(Val::from("$val"), Val::Map(Box::new(payload)));
+        let args = [Val::Map(Box::new(wrapper)), val!("rewritten")];
+        let program = static_dot_set_program("message");
+        let mut interpreter = make_test_vm(
+            program.clone(),
+            val!({"jit": {"mode": "disabled", "threshold": 1}}),
+        );
+        let mut jitted = make_test_vm(program, val!({"jit": {"mode": "enabled", "threshold": 1}}));
+
+        let interpreted = interpreter
+            .execute_compiled_user_function(0, &args)
+            .unwrap();
+        let compiled = jitted.execute_compiled_user_function(0, &args).unwrap();
+        assert_eq!(compiled, interpreted);
+        let Val::Map(outer) = compiled else {
+            panic!("tagged result must remain a map")
+        };
+        assert_eq!(
+            outer.get(&Val::from("$origin")),
+            Some(&val!({"name": "test"}))
+        );
+        let Some(Val::Map(payload)) = outer.get(&Val::from("$val")) else {
+            panic!("tagged payload must remain a map")
+        };
+        assert_eq!(payload.get(&Val::from("message")), Some(&val!("rewritten")));
+        assert!(jitted.jit_has_compiled_function(0));
+    }
+
+    #[test]
+    fn jit_and_interpreter_halt_before_rewriting_result_err_payload() {
+        let program = static_dot_set_program("message");
+        let args = [Val::err(val!({"message": "original"})), val!("rewritten")];
+        let mut interpreter = make_test_vm(
+            program.clone(),
+            val!({"jit": {"mode": "disabled", "threshold": 1}}),
+        );
+        let mut jitted = make_test_vm(program, val!({"jit": {"mode": "enabled", "threshold": 1}}));
+
+        let interpreter_error = interpreter
+            .execute_compiled_user_function(0, &args)
+            .expect_err("interpreter must propagate Result.Err")
+            .to_string();
+        let jit_error = jitted
+            .execute_compiled_user_function(0, &args)
+            .expect_err("JIT must propagate Result.Err")
+            .to_string();
+        assert!(interpreter_error.contains("original"));
+        assert!(jit_error.contains("original"));
+        assert!(!interpreter_error.contains("rewritten"));
+        assert!(!jit_error.contains("rewritten"));
+        assert!(jitted.jit_has_compiled_function(0));
     }
 
     // --- StoreGlobal test ---

@@ -479,6 +479,20 @@ fn test_bracket_deep_assignment() {
 }
 
 #[test]
+fn test_negative_literal_vector_index_is_rejected() {
+    for source in ["items[-1] 42", "value items[-1]"] {
+        let error = format!(
+            "{:?}",
+            parse_hot(source).expect_err("negative literal index must not parse")
+        );
+        assert!(
+            error.contains("Vector indices cannot be negative"),
+            "unexpected error for {source:?}: {error}"
+        );
+    }
+}
+
+#[test]
 fn test_variable_and_function_references() {
     let source = r#"
         // Variable references

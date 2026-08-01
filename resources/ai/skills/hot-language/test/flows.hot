@@ -201,7 +201,7 @@ process-result fn (result: Result): Str {
 handle-event fn (event: Event): Action {
     action match event {
         Event.Click => {
-            log(`Clicked at ${event.x}, ${event.y}`)
+            println(`Clicked at ${event.x}, ${event.y}`)
             Action.Navigate({target: event.target})
         }
 
@@ -328,9 +328,9 @@ fetch-c fn (): Str { "c" }
 // @doc: parallel-all-vec
 parallel-as-vec fn (): Vec {
     results: All<Vec> parallel {
-        fetch-a()
-        fetch-b()
-        fetch-c()
+        a fetch-a()
+        b fetch-b()
+        c fetch-c()
     }
 
     results

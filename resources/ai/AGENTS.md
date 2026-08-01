@@ -599,7 +599,7 @@ if(lt(version, current-version(db)), fail("migration went backwards"), data)
 
 // Pattern 5: Result combinators — transform Ok or Err selectively
 fetch-user(id)
-    |> if-ok(%.name)
+    |> if-ok((user) { user.name })
     |> if-err("Anonymous")
 
 // Pattern 6: Fan-out isolation — OnErr.Preserve keeps per-item Errs

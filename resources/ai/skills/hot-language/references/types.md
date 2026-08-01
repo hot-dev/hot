@@ -529,7 +529,9 @@ Typed values carry a transparent runtime wrapper, not a source-level reflection
 API. Use normal field access, `match`, and `is-type`. `to-json` preserves type
 identity with tagged JSON whose wrapper uses `$type` and `$val`. Field access
 never exposes or skips through those wrapper members: `value.$val` means a
-payload field literally named `$val`. Call `untype` first only when an API or
+payload field literally named `$val`. A tagged wrapper may also contain
+reserved `$...` metadata such as `$origin`; a foreign Map with ordinary sibling
+data fields remains an ordinary Map. Call `untype` first only when an API or
 storage system expects untagged maps:
 
 ```hot

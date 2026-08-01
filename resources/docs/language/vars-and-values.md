@@ -94,8 +94,17 @@ Deep paths also work with Vec indices:
 
 {{snippet:vars#deep-path-vec}}
 
-Bracket paths can be dynamic. Hot evaluates the bracket expression and uses
-the result as a Map key or, for an integer applied to a Vec, as its index.
+When a missing path is followed by a literal integer index, Hot creates a Vec.
+Assigning past its current end grows the Vec and fills intervening positions
+with `null`, subject to the runtime collection-size limit:
+
+{{snippet:vars#deep-path-vec-growth}}
+
+Bracket paths can be dynamic. A bracket segment accepts an integer or string
+literal, or a bare variable whose value is used as a Map key or, for an integer
+applied to a Vec, as its index. It is not a general expression position; compute
+a more complex key first and bind it to a name. Because a dynamic key does not
+tell the compiler which collection to create, its parent must already exist.
 Paths can continue after the dynamic segment:
 
 {{snippet:vars#deep-path-dynamic}}

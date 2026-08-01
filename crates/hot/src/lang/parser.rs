@@ -1108,7 +1108,11 @@ impl Parser {
                 } else {
                     let path_part = match self.next() {
                         Some(token) => match token.token_type {
-                            TokenType::Int(index) => DeepPathPart::Index(index as usize),
+                            TokenType::Int(index) => {
+                                let index = usize::try_from(index)
+                                    .map_err(|_| self.error("Vector indices cannot be negative"))?;
+                                DeepPathPart::Index(index)
+                            }
                             TokenType::Identifier(name) => DeepPathPart::DynamicIndex(name),
                             TokenType::String(key) => DeepPathPart::Key(key),
                             other => {
@@ -4841,7 +4845,9 @@ impl Parser {
                         Some(token) => match &token.token_type {
                             TokenType::Int(i) => {
                                 self.expect_token(&TokenType::RightBracket)?;
-                                deep_path_parts.push(DeepPathPart::Index(*i as usize));
+                                let index = usize::try_from(*i)
+                                    .map_err(|_| self.error("Vector indices cannot be negative"))?;
+                                deep_path_parts.push(DeepPathPart::Index(index));
                             }
                             TokenType::Identifier(name) => {
                                 let var_name = name.clone();
@@ -4940,7 +4946,9 @@ impl Parser {
                         Some(token) => match &token.token_type {
                             TokenType::Int(i) => {
                                 self.expect_token(&TokenType::RightBracket)?;
-                                deep_path_parts.push(DeepPathPart::Index(*i as usize));
+                                let index = usize::try_from(*i)
+                                    .map_err(|_| self.error("Vector indices cannot be negative"))?;
+                                deep_path_parts.push(DeepPathPart::Index(index));
                             }
                             TokenType::Identifier(name) => {
                                 let var_name = name.clone();
@@ -5035,7 +5043,10 @@ impl Parser {
                                 TokenType::Int(i) => {
                                     // Static integer index
                                     self.expect_token(&TokenType::RightBracket)?;
-                                    deep_path_parts.push(DeepPathPart::Index(*i as usize));
+                                    let index = usize::try_from(*i).map_err(|_| {
+                                        self.error("Vector indices cannot be negative")
+                                    })?;
+                                    deep_path_parts.push(DeepPathPart::Index(index));
                                 }
                                 TokenType::Identifier(name) => {
                                     // Dynamic index via variable reference

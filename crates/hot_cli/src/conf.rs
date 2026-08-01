@@ -961,6 +961,7 @@ pub(crate) fn reload_conf_after_init(base_conf: &Val) -> Result<Val, String> {
         Ok(hot_config) => {
             tracing::debug!("Successfully loaded configuration from newly created hot.hot");
             conf = conf.merge(&hot_config);
+            conf = apply_env_vars(conf);
         }
         Err(e) => {
             return Err(format!(

@@ -225,7 +225,7 @@ Payload convention: a plain `Str` for simple errors, or a Map with a
 including a halt's `Failure`:
 
 ```hot
-if-err(conn, (e) { log(`db down: ${err-message(e)}`) })
+if-err(conn, (e) { println(`db down: ${err-message(e)}`) })
 ```
 
 ### Pattern 5: Result Combinators
@@ -235,13 +235,13 @@ Use `if-ok` and `if-err` to selectively transform Ok or Err results. Whichever v
 ```hot
 // if-ok: transform the Ok value; Err passes through
 fetch-user(id)
-    |> if-ok(%.name)        // Ok("Alice") → "Alice's name"; Err → unchanged
+    |> if-ok((user) { user.name }) // Ok payload is passed to the handler
     |> if-err("Anonymous")  // Err → "Anonymous"; Ok → unchanged
 
 // Chain for full handling
 result fetch-data(id)
-    |> if-ok(process-data(%))
-    |> if-err(log-and-default(%))
+    |> if-ok((data) { process-data(data) })
+    |> if-err((error) { log-and-default(error) })
 ```
 
 ## Summary
@@ -250,7 +250,8 @@ result fetch-data(id)
 - Results **auto-unwrap** when passed to functions or used in templates
 - Err Results **automatically fail** at point of use
 - Use `is-ok(result)` and `is-err(result)` to check without triggering auto-unwrap
-- Use `if-ok` and `if-err` to selectively transform Ok or Err values
+- Use `if-ok` and `if-err` to transform the selected unwrapped payload; the
+  result is wrapped again and an unmatched variant passes through unchanged
 - Use `match` with `Result.Ok` and `Result.Err` patterns
 - **Lazy arguments** suppress Result checking, enabling safe inspection
 - Most code can ignore error handling; errors propagate automatically

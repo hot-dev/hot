@@ -340,6 +340,28 @@ probe()"#;
     }
 
     #[test]
+    fn foreign_tagged_map_with_siblings_stays_an_ordinary_map() {
+        let src = r#"::t ns
+probe fn (): Vec {
+    flat from-json("{\"$type\":\"::foreign/A\",\"n\":2}")
+    flat.$val {c: 3}
+    [flat.n, flat.$val.c]
+}
+probe()
+probe()
+probe()"#;
+
+        let jit = compile_and_run_with_std_conf(src, Some(crate::val!({"jit": {"threshold": 1}})))
+            .expect("JIT foreign tagged-looking map assignment");
+        let interp =
+            compile_and_run_with_std_conf(src, Some(crate::val!({"jit": {"mode": "off"}})))
+                .expect("interpreter foreign tagged-looking map assignment");
+        let expected = crate::val!([2, 3]);
+        assert_eq!(interp, expected);
+        assert_eq!(jit, expected);
+    }
+
+    #[test]
     fn tagged_unit_variant_metadata_is_hidden_from_source_fields() {
         let read_src = r#"::t ns
 Choice enum { A }

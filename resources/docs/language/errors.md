@@ -53,9 +53,11 @@ page render(result)   // Ok unwraps; Err halts and propagates here
 ```
 
 Ordinary function arguments, template interpolation, and ordinary field or
-index access are consumption boundaries. `is-ok`, `is-err`, `if-ok`, and
-`if-err` preserve the wrapper. `match` also handles Result variants explicitly,
-as described in
+index access are consumption boundaries. `is-ok` and `is-err` inspect the
+wrapper without consuming it. `if-ok` and `if-err` pass the selected variant's
+unwrapped payload to a handler, then return a Result; the unmatched variant
+passes through unchanged. `match` also handles Result variants explicitly, as
+described in
 [Checking Results Explicitly](#checking-results-explicitly).
 
 ### Dot Access on Results
@@ -248,7 +250,7 @@ a halt's `Failure` payload — so handlers never hand-roll extraction:
 
 ```hot
 conn ::pg/connect(opts)
-if-err(conn, (e) { log(`db down: ${err-message(e)}`) })
+if-err(conn, (e) { println(`db down: ${err-message(e)}`) })
 ```
 
 ### Pattern 6: Chain Fallible Steps

@@ -184,15 +184,18 @@ cmd_check() {
         errors=$((errors + 1))
     fi
 
-    # 5. Compile the Hot source shipped in the language skill. These files are
+    # 5. Compile Hot source shipped in every bundled skill. These files are
     # outside normal project source roots, so the default check does not see
-    # them. Keeping both the focused test corpus and copyable examples valid
-    # prevents an AI-facing snapshot from silently drifting behind the language.
+    # them. Discovering test/examples directories keeps newly added skills in
+    # coverage instead of relying on a hard-coded list.
     echo ""
     echo -e "${YELLOW}Step 5: Bundled Hot language skill source${NC}"
-    local skill_root="$PROJECT_ROOT/resources/ai/skills/hot-language"
+    local skills_root="$PROJECT_ROOT/resources/ai/skills"
     local skill_source_errors=0
-    for skill_source in "$skill_root/test" "$skill_root/examples"; do
+    while IFS= read -r skill_source; do
+        if ! find "$skill_source" -type f -name '*.hot' -print -quit | grep -q .; then
+            continue
+        fi
         if cargo run --quiet -- check "$skill_source" --check.raw $ctx_args 2>/dev/null; then
             echo -e "${GREEN}✓ ${skill_source#"$PROJECT_ROOT/"} passes static check${NC}"
         else
@@ -200,7 +203,7 @@ cmd_check() {
             cargo run -- check "$skill_source" --check.raw $ctx_args
             skill_source_errors=$((skill_source_errors + 1))
         fi
-    done
+    done < <(find "$skills_root" -mindepth 2 -maxdepth 2 -type d \( -name test -o -name examples \) -print | sort)
     if [[ $skill_source_errors -ne 0 ]]; then
         errors=$((errors + skill_source_errors))
     fi
@@ -210,7 +213,11 @@ cmd_check() {
     echo ""
     echo -e "${YELLOW}Step 6: Bundled skill syntax drift${NC}"
     local stale_flow_syntax
-    stale_flow_syntax="$(rg -n '(parallel|serial|cond|cond-all|match|match-all)\|(one|vec|map)' "$skill_root" || true)"
+    if command -v rg >/dev/null 2>&1; then
+        stale_flow_syntax="$(rg -n '(parallel|serial|cond|cond-all|match|match-all)\|(one|vec|map)' "$skills_root" || true)"
+    else
+        stale_flow_syntax="$(grep -REn '(parallel|serial|cond|cond-all|match|match-all)\|(one|vec|map)' "$skills_root" || true)"
+    fi
     if [[ -n "$stale_flow_syntax" ]]; then
         echo -e "${RED}✗ Removed flow-result suffix syntax found:${NC}"
         echo "$stale_flow_syntax"

@@ -139,7 +139,9 @@ Access properties with dot notation:
 
 {{result:data-literals#map-access}}
 
-**Map vs Object**: Hot calls these `Map` instead of Object. Keys are always strings.
+**Map vs Object**: Hot calls these `Map` instead of Object. Map-literal keys use
+identifier or string syntax. Dynamic bracket access can also use a runtime key;
+dot access is always a string-field lookup.
 
 ### Map Spread
 

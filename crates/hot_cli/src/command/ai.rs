@@ -10,6 +10,20 @@ use crate::cli::AiAction;
 
 const SKILL_MANIFEST_FILE: &str = ".hot-skill-manifest.json";
 
+fn ai_home_dir() -> Option<std::path::PathBuf> {
+    // Honor shell-provided home overrides before platform APIs. Besides making
+    // CLI behavior predictable in Git Bash and similar environments, this is
+    // what keeps global-install integration tests isolated on Windows, where
+    // dirs::home_dir() otherwise ignores HOME/USERPROFILE and uses the real
+    // profile known folder.
+    ["HOME", "USERPROFILE"]
+        .into_iter()
+        .filter_map(std::env::var_os)
+        .find(|value| !value.is_empty())
+        .map(std::path::PathBuf::from)
+        .or_else(dirs::home_dir)
+}
+
 #[derive(Debug, Default, Deserialize, Serialize)]
 struct InstalledSkillManifest {
     version: u8,
@@ -31,6 +45,9 @@ pub(crate) fn run_ai(action: &AiAction) -> Result<(), String> {
         AiAction::Add { global } => {
             info!("Adding AI coding support using AGENTS.md + SKILL.md standards...");
 
+            // Validate skill ownership and the destination root before writing
+            // AGENTS.md so a rejected skill install cannot leave a partial add.
+            preflight_agent_skills(*global)?;
             setup_agents_md()?;
             setup_agent_skills(*global)?;
 
@@ -43,7 +60,7 @@ pub(crate) fn run_ai(action: &AiAction) -> Result<(), String> {
             let agents_status = if agents_exists { "(installed)" } else { "" };
             println!("  AGENTS.md     - AI agent instructions {}", agents_status);
 
-            let home = dirs::home_dir().unwrap_or_default();
+            let home = ai_home_dir().unwrap_or_default();
             let project_skills: BTreeSet<String> =
                 installed_hot_skill_names(std::path::Path::new(".skills"))
                     .into_iter()
@@ -111,7 +128,7 @@ pub(crate) fn run_ai(action: &AiAction) -> Result<(), String> {
                 updated_count += 1;
             }
 
-            let home = dirs::home_dir().unwrap_or_default();
+            let home = ai_home_dir().unwrap_or_default();
             let project_skills = installed_hot_skill_names(std::path::Path::new(".skills"));
             let global_skills = installed_hot_skill_names(&home.join(".skills"));
 
@@ -155,7 +172,7 @@ fn installed_hot_skill_names(skills_dir: &std::path::Path) -> Vec<String> {
 
     for entry in entries.flatten() {
         let path = entry.path();
-        if !path.is_dir() || !path.join("SKILL.md").is_file() {
+        if !path.is_dir() {
             continue;
         }
         let has_manifest = path.join(SKILL_MANIFEST_FILE).is_file();
@@ -448,20 +465,7 @@ fn read_installed_skill_manifest(
 }
 
 fn write_if_changed(path: &std::path::Path, content: &[u8]) -> Result<bool, String> {
-    if path.is_file()
-        && let Ok(existing) = fs::read(path)
-        && existing == content
-    {
-        return Ok(false);
-    }
-    if let Some(parent) = path.parent()
-        && !parent.exists()
-    {
-        fs::create_dir_all(parent)
-            .map_err(|e| format!("Failed to create directory {}: {}", parent.display(), e))?;
-    }
-    fs::write(path, content).map_err(|e| format!("Failed to write {}: {}", path.display(), e))?;
-    Ok(true)
+    write_atomic_if_changed(path, content)
 }
 
 fn write_atomic_if_changed(path: &std::path::Path, content: &[u8]) -> Result<bool, String> {
@@ -485,10 +489,11 @@ fn write_atomic_if_changed(path: &std::path::Path, content: &[u8]) -> Result<boo
         .file_name()
         .and_then(|name| name.to_str())
         .unwrap_or("hot-skill-manifest");
+    let sequence = TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
     let temp_path = parent.join(format!(
         ".{file_name}.tmp-{}-{}",
         std::process::id(),
-        TEMP_COUNTER.fetch_add(1, Ordering::Relaxed)
+        sequence
     ));
 
     let result = (|| {
@@ -501,14 +506,75 @@ fn write_atomic_if_changed(path: &std::path::Path, content: &[u8]) -> Result<boo
             .map_err(|e| format!("Failed to write {}: {}", temp_path.display(), e))?;
         temp.sync_all()
             .map_err(|e| format!("Failed to sync {}: {}", temp_path.display(), e))?;
-        fs::rename(&temp_path, path).map_err(|e| {
-            format!(
-                "Failed to rename {} to {}: {}",
-                temp_path.display(),
-                path.display(),
-                e
-            )
-        })
+        #[cfg(not(windows))]
+        {
+            fs::rename(&temp_path, path).map_err(|e| {
+                format!(
+                    "Failed to rename {} to {}: {}",
+                    temp_path.display(),
+                    path.display(),
+                    e
+                )
+            })
+        }
+
+        // std::fs::rename does not replace an existing destination on Windows.
+        // Keep the old file recoverable while installing the fully-synced temp
+        // file, and restore it if the second rename fails.
+        #[cfg(windows)]
+        {
+            if !path.exists() {
+                return fs::rename(&temp_path, path).map_err(|e| {
+                    format!(
+                        "Failed to rename {} to {}: {}",
+                        temp_path.display(),
+                        path.display(),
+                        e
+                    )
+                });
+            }
+
+            let backup_path = parent.join(format!(
+                ".{file_name}.backup-{}-{}",
+                std::process::id(),
+                sequence
+            ));
+            fs::rename(path, &backup_path).map_err(|e| {
+                format!(
+                    "Failed to stage existing {} as {}: {}",
+                    path.display(),
+                    backup_path.display(),
+                    e
+                )
+            })?;
+            match fs::rename(&temp_path, path) {
+                Ok(()) => {
+                    fs::remove_file(&backup_path).map_err(|e| {
+                        format!(
+                            "Updated {} but failed to remove backup {}: {}",
+                            path.display(),
+                            backup_path.display(),
+                            e
+                        )
+                    })?;
+                    Ok(())
+                }
+                Err(error) => {
+                    let restore_error = fs::rename(&backup_path, path).err();
+                    Err(format!(
+                        "Failed to install {} as {}: {}{}",
+                        temp_path.display(),
+                        path.display(),
+                        error,
+                        restore_error
+                            .map(|restore| format!(
+                                "; restoring the original also failed: {restore}"
+                            ))
+                            .unwrap_or_default()
+                    ))
+                }
+            }
+        }
     })();
 
     if result.is_err() {
@@ -524,6 +590,46 @@ fn setup_agent_skills(global: bool) -> Result<(), String> {
     Ok(())
 }
 
+fn agent_skills_base(global: bool) -> Result<(std::path::PathBuf, &'static str), String> {
+    if global {
+        let home = ai_home_dir().ok_or("Could not determine home directory")?;
+        Ok((home.join(".skills"), "global"))
+    } else {
+        Ok((std::path::PathBuf::from(".skills"), "project"))
+    }
+}
+
+fn has_legacy_skill_stamp(skill_dir: &std::path::Path) -> bool {
+    fs::read_to_string(skill_dir.join("SKILL.md"))
+        .ok()
+        .and_then(|content| extract_skill_hash(&content))
+        .is_some()
+}
+
+fn validate_skill_ownership(skill_dir: &std::path::Path) -> Result<(), String> {
+    if skill_dir.exists()
+        && !skill_dir.join(SKILL_MANIFEST_FILE).is_file()
+        && !has_legacy_skill_stamp(skill_dir)
+    {
+        return Err(format!(
+            "Refusing to overwrite externally managed skill {}. Remove it or choose a different installation scope before running hot ai add.",
+            skill_dir.display()
+        ));
+    }
+    Ok(())
+}
+
+fn preflight_agent_skills(global: bool) -> Result<(), String> {
+    let (skills_base, _) = agent_skills_base(global)?;
+    ensure_managed_path_is_not_symlinked(&skills_base, &skills_base)?;
+    for skill_name in bundled_skill_names()? {
+        let skill_dir = skills_base.join(skill_name);
+        ensure_managed_path_is_not_symlinked(&skills_base, &skill_dir)?;
+        validate_skill_ownership(&skill_dir)?;
+    }
+    Ok(())
+}
+
 /// Install/refresh one bundled skill under `.skills/` (project) or
 /// `~/.skills/` (global).
 fn setup_agent_skill(global: bool, skill_name: &str) -> Result<(), String> {
@@ -531,12 +637,7 @@ fn setup_agent_skill(global: bool, skill_name: &str) -> Result<(), String> {
 
     let source_skill_dir = hot::resources::get_skill_path(skill_name)?;
 
-    let (skills_base, location_desc) = if global {
-        let home = dirs::home_dir().ok_or("Could not determine home directory")?;
-        (home.join(".skills"), "global")
-    } else {
-        (std::path::PathBuf::from(".skills"), "project")
-    };
+    let (skills_base, location_desc) = agent_skills_base(global)?;
 
     fn collect_source_files(
         dir: &std::path::Path,
@@ -569,6 +670,7 @@ fn setup_agent_skill(global: bool, skill_name: &str) -> Result<(), String> {
 
     let skill_dir = skills_base.join(skill_name);
     ensure_managed_path_is_not_symlinked(&skills_base, &skill_dir)?;
+    validate_skill_ownership(&skill_dir)?;
     ensure_managed_path_is_not_symlinked(&skills_base, &skill_dir.join(SKILL_MANIFEST_FILE))?;
     for (rel_path, _) in &skill_files {
         ensure_managed_path_is_not_symlinked(&skills_base, &skill_dir.join(rel_path))?;
@@ -688,6 +790,10 @@ fn setup_agent_skill(global: bool, skill_name: &str) -> Result<(), String> {
 
     for (rel_path, content) in &skill_files {
         let full_path = skill_dir.join(rel_path);
+        // Repeat the component check immediately before the atomic write. The
+        // rename replaces a leaf symlink rather than following it, while this
+        // recheck protects parent components changed since preflight.
+        ensure_managed_path_is_not_symlinked(&skills_base, &full_path)?;
         let manifest_key = skill_manifest_key(rel_path);
         next_manifest
             .files
@@ -720,6 +826,7 @@ fn setup_agent_skill(global: bool, skill_name: &str) -> Result<(), String> {
             };
 
             let full_path = skill_dir.join(&rel_path);
+            ensure_managed_path_is_not_symlinked(&skills_base, &full_path)?;
             let metadata = fs::symlink_metadata(&full_path)
                 .map_err(|e| format!("Failed to inspect {}: {}", full_path.display(), e))?;
             if metadata.file_type().is_symlink() {
@@ -749,7 +856,9 @@ fn setup_agent_skill(global: bool, skill_name: &str) -> Result<(), String> {
     let mut manifest_content = serde_json::to_vec_pretty(&next_manifest)
         .map_err(|e| format!("Failed to serialize installed skill manifest: {}", e))?;
     manifest_content.push(b'\n');
-    if write_atomic_if_changed(&skill_dir.join(SKILL_MANIFEST_FILE), &manifest_content)? {
+    let manifest_path = skill_dir.join(SKILL_MANIFEST_FILE);
+    ensure_managed_path_is_not_symlinked(&skills_base, &manifest_path)?;
+    if write_atomic_if_changed(&manifest_path, &manifest_content)? {
         any_updated = true;
     }
 

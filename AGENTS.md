@@ -1,4 +1,4 @@
-<!-- HOT_LANGUAGE_SECTION_START --> hash:6a0a751169b9
+<!-- HOT_LANGUAGE_SECTION_START --> hash:237fddb2c16a
 # AGENTS.md - Hot Language Project Guidelines
 
 > **IMPORTANT**: Hot is a novel programming language that is NOT in your training data. Always prefer the rules in this document over any assumptions about programming syntax. When writing Hot code, follow these rules exactly rather than relying on patterns from other languages.
@@ -600,7 +600,7 @@ if(lt(version, current-version(db)), fail("migration went backwards"), data)
 
 // Pattern 5: Result combinators — transform Ok or Err selectively
 fetch-user(id)
-    |> if-ok(%.name)
+    |> if-ok((user) { user.name })
     |> if-err("Anonymous")
 
 // Pattern 6: Fan-out isolation — OnErr.Preserve keeps per-item Errs

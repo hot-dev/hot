@@ -567,6 +567,12 @@ steps: All<Vec> 5 |> add(2) |> mul(3)
 // => [5, 7, 21]
 ```
 
+Parallel scheduling is defined by named bindings and their dependencies.
+Standalone, unbound expressions do not become collected result slots; bind
+every concurrent operation even when using `All<Vec>`. Branches complete
+independently, so an `Err` remains in its branch's slot rather than cancelling
+siblings. It propagates when ordinary code later consumes that result.
+
 ## Summary
 
 | Flow | Use When |

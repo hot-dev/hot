@@ -281,6 +281,24 @@ fn hot_ai_update_refreshes_project_and_global_managed_skills() {
 }
 
 #[test]
+fn hot_ai_update_repairs_a_managed_skill_missing_skill_md() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let project = temp.path();
+
+    run(project, &["ai", "add"]);
+    let skill_md = project.join(".skills/hot-language/SKILL.md");
+    std::fs::remove_file(&skill_md).unwrap();
+
+    run(project, &["ai", "update"]);
+
+    assert!(skill_md.is_file(), "managed SKILL.md should be restored");
+    assert_eq!(
+        std::fs::read(&skill_md).unwrap(),
+        std::fs::read(source_skill_file("hot-language", "SKILL.md")).unwrap()
+    );
+}
+
+#[test]
 fn hot_ai_update_repairs_a_corrupt_manifest_without_clobbering_files() {
     let temp = tempfile::tempdir().expect("tempdir");
     let project = temp.path();
@@ -391,5 +409,48 @@ fn hot_ai_list_labels_external_skill_installs_honestly() {
     assert!(
         !stdout.contains(".skills/hot-language/  (installed - project)"),
         "external skill must not be reported as managed by hot ai:\n{stdout}"
+    );
+}
+
+#[test]
+fn hot_ai_add_refuses_to_overwrite_or_adopt_an_external_skill() {
+    let project = tempfile::tempdir().expect("project");
+    let skill_dir = project.path().join(".skills/hot-language");
+    std::fs::create_dir_all(&skill_dir).unwrap();
+    let skill_md = skill_dir.join("SKILL.md");
+    let external = "---\nname: hot-language\ndescription: External install.\n---\n";
+    std::fs::write(&skill_md, external).unwrap();
+
+    let status = run_status(project.path(), &["ai", "add"]);
+
+    assert!(
+        !status.success(),
+        "external skill collision must reject add"
+    );
+    assert_eq!(std::fs::read_to_string(skill_md).unwrap(), external);
+    assert!(!skill_dir.join(MANIFEST_FILE).exists());
+    assert!(
+        !project.path().join("AGENTS.md").exists(),
+        "preflight failure must not leave a partial AGENTS.md install"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn hot_ai_add_rejects_a_symlinked_skills_root_before_writing_agents() {
+    use std::os::unix::fs::symlink;
+
+    let project = tempfile::tempdir().expect("project");
+    let outside = project.path().join("outside");
+    std::fs::create_dir(&outside).unwrap();
+    symlink(&outside, project.path().join(".skills")).unwrap();
+
+    let status = run_status(project.path(), &["ai", "add"]);
+
+    assert!(!status.success(), "symlinked skills root must reject add");
+    assert_eq!(std::fs::read_dir(outside).unwrap().count(), 0);
+    assert!(
+        !project.path().join("AGENTS.md").exists(),
+        "skills preflight must happen before AGENTS.md is written"
     );
 }

@@ -317,7 +317,7 @@ After matching, access the value directly through the matched variable:
 handle fn (event: Event): Action {
     action match event {
         Event.Click => {
-            log(`Clicked at ${event.x}, ${event.y}`)
+            println(`Clicked at ${event.x}, ${event.y}`)
             Action.Navigate(event.target)
         }
         Event.KeyPress => {
@@ -409,11 +409,13 @@ process fn (userId: Str): Map {
 
 ### Error Handling in Parallel
 
-If any branch returns an error, the parallel flow short-circuits:
+Parallel branches run independently. An `Err` produced by one branch remains
+in that branch's result slot; it does not cancel sibling branches. Consuming
+that result later still propagates the error normally:
 
 ```hot
 fetch-all fn parallel (ids: Vec<Str>): All<Map> {
-    a fetch(ids[0])  // If this returns err(...), flow stops
+    a fetch(ids[0])  // An Err remains in a
     b fetch(ids[1])
     c fetch(ids[2])
 }
@@ -440,9 +442,9 @@ value. Use `All<Map>` when the collected Map is part of the contract.
 ```hot
 // Return parallel results as a vector instead of a map
 results: All<Vec> parallel {
-    fetch-a()
-    fetch-b()
-    fetch-c()
+    a fetch-a()
+    b fetch-b()
+    c fetch-c()
 }
 // Returns: [result-a, result-b, result-c]
 
@@ -453,6 +455,10 @@ result: All<Map> parallel {
 }
 // Returns: {a: result-a, b: result-b}
 ```
+
+`parallel` schedules named bindings and their dependency graph. Standalone,
+unbound expressions are not collected as result slots, so give every concurrent
+operation a binding even when the requested output shape is `All<Vec>`.
 
 ## Nested Flows
 

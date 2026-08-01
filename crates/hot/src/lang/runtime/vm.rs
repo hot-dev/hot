@@ -960,35 +960,8 @@ impl VirtualMachine {
                     instruction
                 );
 
-                // Track the destination register of the last instruction that produces a value
-                match instruction {
-                    Instruction::LoadConst { dest, .. }
-                    | Instruction::Move { dest, .. }
-                    | Instruction::Add { dest, .. }
-                    | Instruction::Call { dest, .. }
-                    | Instruction::CallWithSpread { dest, .. }
-                    | Instruction::CallNative { dest, .. }
-                    | Instruction::LoadVar { dest, .. }
-                    | Instruction::LoadVarOrDefault { dest, .. }
-                    | Instruction::LoadScoped { dest, .. }
-                    | Instruction::CaptureVar { dest, .. }
-                    | Instruction::LoadFunctionRef { dest, .. }
-                    | Instruction::EndFlow { dest, .. }
-                    | Instruction::Pipe { dest, .. }
-                    | Instruction::DefineFunction { dest, .. }
-                    | Instruction::DotAccess { dest, .. }
-                    | Instruction::DotAccessOrDefault { dest, .. }
-                    | Instruction::GetTypePath { dest, .. }
-                    | Instruction::IsType { dest, .. }
-                    | Instruction::TemplateInterpolate { dest, .. }
-                    | Instruction::CallLibBuiltin { dest, .. }
-                    | Instruction::CallUserFunction { dest, .. }
-                    | Instruction::CallLambda { dest, .. }
-                    | Instruction::ExtractInnerVal { dest, .. }
-                    | Instruction::ConstructTyped { dest, .. } => {
-                        last_result_register = *dest;
-                    }
-                    _ => {}
+                if let Some(dest) = self.get_instruction_dest(instruction) {
+                    last_result_register = dest;
                 }
 
                 self.execute_instruction(instruction)?;
@@ -1314,35 +1287,8 @@ impl VirtualMachine {
                     instruction
                 );
 
-                // Track the destination register of the last instruction that produces a value
-                match instruction {
-                    Instruction::LoadConst { dest, .. }
-                    | Instruction::Move { dest, .. }
-                    | Instruction::Add { dest, .. }
-                    | Instruction::Call { dest, .. }
-                    | Instruction::CallWithSpread { dest, .. }
-                    | Instruction::CallNative { dest, .. }
-                    | Instruction::LoadVar { dest, .. }
-                    | Instruction::LoadVarOrDefault { dest, .. }
-                    | Instruction::LoadScoped { dest, .. }
-                    | Instruction::CaptureVar { dest, .. }
-                    | Instruction::LoadFunctionRef { dest, .. }
-                    | Instruction::EndFlow { dest, .. }
-                    | Instruction::Pipe { dest, .. }
-                    | Instruction::DefineFunction { dest, .. }
-                    | Instruction::DotAccess { dest, .. }
-                    | Instruction::DotAccessOrDefault { dest, .. }
-                    | Instruction::GetTypePath { dest, .. }
-                    | Instruction::IsType { dest, .. }
-                    | Instruction::TemplateInterpolate { dest, .. }
-                    | Instruction::CallLibBuiltin { dest, .. }
-                    | Instruction::CallUserFunction { dest, .. }
-                    | Instruction::CallLambda { dest, .. }
-                    | Instruction::ExtractInnerVal { dest, .. }
-                    | Instruction::ConstructTyped { dest, .. } => {
-                        last_result_register = *dest;
-                    }
-                    _ => {}
+                if let Some(dest) = self.get_instruction_dest(instruction) {
+                    last_result_register = dest;
                 }
 
                 self.execute_instruction(instruction)?;
@@ -2980,18 +2926,20 @@ impl VirtualMachine {
                 let dest = *dest;
                 let object = *object;
                 let property = *property;
-                let default_value = *default_value;
-                // Execute dot access with default value if property doesn't exist
+                // Execute property access while constructing a deep path.
                 let object_val = self.get_register(object)?.clone();
                 let property_name = self.get_constant_string(property)?;
 
                 let object_val = self.unwrap_result_if_ok(&object_val)?;
-                let result = match self.access_property(&object_val, &property_name) {
-                    Ok(val) => val,
-                    Err(_) => {
-                        // Property doesn't exist, use default value
-                        self.load_constant(default_value)?
-                    }
+                // Missing ordinary fields are represented by Null. Semantic
+                // errors (including a nested Result.Err) must still unwind;
+                // treating them as a missing field would silently consume the
+                // error during deep-path construction.
+                let result = self.access_property(&object_val, &property_name)?;
+                let result = if matches!(&result, Val::Null) {
+                    self.load_constant(*default_value)?
+                } else {
+                    result
                 };
 
                 self.set_register(dest, result)?;
@@ -3010,85 +2958,7 @@ impl VirtualMachine {
                 let object_val = self.get_register(object)?.clone();
                 let property_val = self.get_register(property)?.clone();
 
-                let object_val = self.unwrap_result_if_ok(&object_val)?;
-                let result = if let Val::Str(property_name) = &property_val {
-                    self.access_property(&object_val, property_name)?
-                } else {
-                    match &object_val {
-                        Val::Map(m) => {
-                            // For maps, use the property value as the key directly
-                            match m.get(&property_val) {
-                                Some(v) => v.clone(),
-                                None => Val::Null,
-                            }
-                        }
-                        Val::Vec(v) => {
-                            // For vectors, property must be an integer index
-                            match &property_val {
-                                Val::Int(i) => {
-                                    if *i < 0 {
-                                        Val::Null
-                                    } else {
-                                        v.get(*i as usize).cloned().unwrap_or(Val::Null)
-                                    }
-                                }
-                                _ => {
-                                    return Err(VmError::runtime(format!(
-                                        "Vector index must be an integer, got {:?}",
-                                        property_val
-                                    )));
-                                }
-                            }
-                        }
-                        Val::Str(s) => {
-                            // For strings, property must be an integer index
-                            match &property_val {
-                                Val::Int(i) => {
-                                    if *i < 0 {
-                                        Val::Null
-                                    } else {
-                                        s.chars()
-                                            .nth(*i as usize)
-                                            .map(|c| Val::from(c.to_string()))
-                                            .unwrap_or(Val::Null)
-                                    }
-                                }
-                                _ => {
-                                    return Err(VmError::runtime(format!(
-                                        "String index must be an integer, got {:?}",
-                                        property_val
-                                    )));
-                                }
-                            }
-                        }
-                        Val::Bytes(b) => {
-                            // For bytes, property must be an integer index
-                            match &property_val {
-                                Val::Int(i) => {
-                                    if *i < 0 {
-                                        Val::Null
-                                    } else {
-                                        b.get(*i as usize)
-                                            .map(|byte| Val::Int(*byte as i64))
-                                            .unwrap_or(Val::Null)
-                                    }
-                                }
-                                _ => {
-                                    return Err(VmError::runtime(format!(
-                                        "Bytes index must be an integer, got {:?}",
-                                        property_val
-                                    )));
-                                }
-                            }
-                        }
-                        _ => {
-                            return Err(VmError::runtime(format!(
-                                "Cannot access property on {:?}",
-                                object_val
-                            )));
-                        }
-                    }
-                };
+                let result = self.access_dynamic_property(&object_val, &property_val)?;
 
                 self.set_register(dest, result)?;
                 self.instruction_pointer += 1;
@@ -3128,79 +2998,7 @@ impl VirtualMachine {
                 let property_val = self.get_register(property)?.clone();
                 let new_value = self.get_register(value)?.clone();
 
-                if let Val::Str(property_name) = &property_val {
-                    self.set_property(&mut object_val, property_name, new_value)?;
-                } else {
-                    match &mut object_val {
-                        Val::Map(m) => {
-                            // For maps, use the property value as the key directly
-                            m.insert(property_val, new_value);
-                        }
-                        Val::Vec(v) => {
-                            // For vectors, property must be an integer index
-                            match &property_val {
-                                Val::Int(i) => {
-                                    if *i < 0 {
-                                        return Err(VmError::runtime(format!(
-                                            "Vector index cannot be negative: {}",
-                                            i
-                                        )));
-                                    }
-                                    let idx = usize::try_from(*i).map_err(|_| {
-                                        VmError::runtime(format!(
-                                            "Vector index {} is too large to address",
-                                            i
-                                        ))
-                                    })?;
-                                    // Growing the vector to `idx + 1` is a user-controlled
-                                    // allocation, so gate it on the configured collection
-                                    // size limit and use try_reserve to convert allocator
-                                    // failure into a recoverable runtime error.
-                                    if idx >= v.len() {
-                                        let new_len = idx.checked_add(1).ok_or_else(|| {
-                                            VmError::runtime(format!(
-                                                "Vector index {} would overflow length",
-                                                i
-                                            ))
-                                        })?;
-                                        if let Err(e) =
-                                            crate::lang::runtime::limits::check_collection_size(
-                                                "dynamic vector assign",
-                                                new_len,
-                                            )
-                                        {
-                                            return Err(VmError::runtime(e.to_string()));
-                                        }
-                                        let additional = new_len - v.len();
-                                        if let Err(e) =
-                                            crate::lang::runtime::limits::try_reserve_vec(
-                                                "dynamic vector assign",
-                                                v,
-                                                additional,
-                                            )
-                                        {
-                                            return Err(VmError::runtime(e.to_string()));
-                                        }
-                                        v.resize(new_len, Val::Null);
-                                    }
-                                    v[idx] = new_value;
-                                }
-                                _ => {
-                                    return Err(VmError::runtime(format!(
-                                        "Vector index must be an integer, got {:?}",
-                                        property_val
-                                    )));
-                                }
-                            }
-                        }
-                        _ => {
-                            return Err(VmError::runtime(format!(
-                                "Cannot set property on {:?}",
-                                object_val
-                            )));
-                        }
-                    }
-                }
+                self.set_dynamic_property(&mut object_val, &property_val, new_value)?;
 
                 // Store the modified object back to the register
                 self.set_register(object, object_val)?;
@@ -9288,27 +9086,43 @@ impl VirtualMachine {
         match instruction {
             Instruction::LoadConst { dest, .. }
             | Instruction::Move { dest, .. }
-            | Instruction::Add { dest, .. }
-            | Instruction::Call { dest, .. }
-            | Instruction::CallNative { dest, .. }
-            | Instruction::LoadVar { dest, .. }
-            | Instruction::LoadVarOrDefault { dest, .. }
-            | Instruction::LoadScoped { dest, .. }
-            | Instruction::CaptureVar { dest, .. }
             | Instruction::LoadFunctionRef { dest, .. }
+            | Instruction::LoadTypeRef { dest, .. }
             | Instruction::EndFlow { dest, .. }
             | Instruction::Pipe { dest, .. }
             | Instruction::DefineFunction { dest, .. }
+            | Instruction::Add { dest, .. }
+            | Instruction::Sub { dest, .. }
+            | Instruction::Mul { dest, .. }
+            | Instruction::Eq { dest, .. }
+            | Instruction::StrEndsWith { dest, .. }
+            | Instruction::StrStartsWith { dest, .. }
+            | Instruction::Gt { dest, .. }
+            | Instruction::Lt { dest, .. }
+            | Instruction::Call { dest, .. }
+            | Instruction::CallLambda { dest, .. }
+            | Instruction::CallWithSpread { dest, .. }
+            | Instruction::CallNative { dest, .. }
+            | Instruction::CallUserFunction { dest, .. }
+            | Instruction::TemplateInterpolate { dest, .. }
             | Instruction::DotAccess { dest, .. }
             | Instruction::DotAccessOrDefault { dest, .. }
+            | Instruction::DynamicDotAccess { dest, .. }
             | Instruction::GetTypePath { dest, .. }
-            | Instruction::IsType { dest, .. }
-            | Instruction::TemplateInterpolate { dest, .. }
             | Instruction::CallLibBuiltin { dest, .. }
-            | Instruction::CallUserFunction { dest, .. }
-            | Instruction::CallLambda { dest, .. }
             | Instruction::ExtractInnerVal { dest, .. }
-            | Instruction::ConstructTyped { dest, .. } => Some(*dest),
+            | Instruction::ConstructTyped { dest, .. }
+            | Instruction::IsType { dest, .. }
+            | Instruction::EnsureResult { dest, .. }
+            | Instruction::MakeVec { dest, .. }
+            | Instruction::MakeVecWithSpread { dest, .. }
+            | Instruction::MergeMaps { dest, .. }
+            | Instruction::LoadVar { dest, .. }
+            | Instruction::LoadVarOrDefault { dest, .. }
+            | Instruction::LoadGlobal { dest, .. }
+            | Instruction::LoadScoped { dest, .. }
+            | Instruction::CaptureVar { dest, .. }
+            | Instruction::WrapOk { dest, .. } => Some(*dest),
             _ => None,
         }
     }
@@ -9544,10 +9358,12 @@ impl VirtualMachine {
 
     /// Return true when a map uses Hot's tagged JSON wrapper representation.
     ///
-    /// Data-bearing tagged values have a `$val` payload. Unit enum variants do
-    /// not, but their local type name has the `Enum.Variant` form. Custom
-    /// structs may also carry a qualified `$type`; their local type name has no
-    /// dot and their fields remain directly accessible.
+    /// A data-bearing wrapper consists of `$type`, `$val`, and optional
+    /// reserved `$...` metadata such as `$origin`. A unit enum wrapper consists
+    /// only of `$type`, whose local name has the `Enum.Variant` form. Rejecting
+    /// ordinary sibling fields keeps foreign maps stable: adding a literal
+    /// `$val` field cannot suddenly hide those siblings behind wrapper
+    /// semantics.
     fn is_tagged_wrapper(&self, map: &IndexMap<Val, Val>) -> bool {
         let Some(Val::Str(type_name)) = map.get(&Val::from("$type")) else {
             return false;
@@ -9556,22 +9372,33 @@ impl VirtualMachine {
             return false;
         }
         if map.contains_key(&Val::from("$val")) {
-            return true;
+            return map
+                .keys()
+                .all(|key| matches!(key, Val::Str(name) if name.starts_with('$')));
         }
 
-        type_name
-            .rsplit('/')
-            .next()
-            .is_some_and(|local_name| local_name.contains('.'))
+        map.len() == 1
+            && type_name
+                .rsplit('/')
+                .next()
+                .is_some_and(|local_name| local_name.contains('.'))
     }
 
     /// Set a property of a value (supports both map keys and vector indices)
     pub(crate) fn set_property(
-        &self,
+        &mut self,
         value: &mut Val,
         property: &str,
         new_value: Val,
     ) -> VmResult<()> {
+        // Assignment is an ordinary Result-consumption boundary. Preserve an
+        // Ok wrapper while updating its payload, but never allow assignment to
+        // rewrite an Err payload before that error propagates.
+        if value.is_err() {
+            self.unwrap_result_if_ok(value)?;
+            unreachable!("Result.Err consumption must halt")
+        }
+
         match value {
             Val::Map(map) => {
                 if self.is_tagged_wrapper(map) {
@@ -9591,18 +9418,7 @@ impl VirtualMachine {
             Val::Vec(vec) => {
                 // Vector assignment: try to parse property as index
                 match property.parse::<usize>() {
-                    Ok(index) => {
-                        if index < vec.len() {
-                            vec[index] = new_value;
-                            Ok(())
-                        } else {
-                            Err(VmError::runtime(format!(
-                                "Vector index {} out of bounds (length: {})",
-                                index,
-                                vec.len()
-                            )))
-                        }
-                    }
+                    Ok(index) => Self::set_vector_index(vec, index, new_value),
                     Err(_) => Err(VmError::runtime(format!(
                         "Cannot set property '{}' on vector - property must be a valid index",
                         property
@@ -9624,8 +9440,95 @@ impl VirtualMachine {
         }
     }
 
+    fn set_vector_index(vec: &mut Vec<Val>, index: usize, new_value: Val) -> VmResult<()> {
+        if index >= vec.len() {
+            let new_len = index.checked_add(1).ok_or_else(|| {
+                VmError::runtime(format!("Vector index {} would overflow length", index))
+            })?;
+            if let Err(error) = crate::lang::runtime::limits::check_collection_size(
+                "deep vector assignment",
+                new_len,
+            ) {
+                return Err(VmError::runtime(error.to_string()));
+            }
+            let additional = new_len - vec.len();
+            if let Err(error) = crate::lang::runtime::limits::try_reserve_vec(
+                "deep vector assignment",
+                vec,
+                additional,
+            ) {
+                return Err(VmError::runtime(error.to_string()));
+            }
+            vec.resize(new_len, Val::Null);
+        }
+        vec[index] = new_value;
+        Ok(())
+    }
+
+    /// Set a property selected by a runtime value. Tagged values always expose
+    /// their payload, regardless of whether the runtime key is a string.
+    pub(crate) fn set_dynamic_property(
+        &mut self,
+        value: &mut Val,
+        property: &Val,
+        new_value: Val,
+    ) -> VmResult<()> {
+        if let Val::Str(property_name) = property {
+            return self.set_property(value, property_name, new_value);
+        }
+        if value.is_err() {
+            self.unwrap_result_if_ok(value)?;
+            unreachable!("Result.Err consumption must halt")
+        }
+
+        match value {
+            Val::Map(map) if self.is_tagged_wrapper(map) => {
+                let Some(payload) = map.get_mut(&Val::from("$val")) else {
+                    return Err(VmError::runtime(
+                        "Cannot dynamically assign through a tagged unit value".to_string(),
+                    ));
+                };
+                self.set_dynamic_property(payload, property, new_value)
+            }
+            Val::Map(map) => {
+                map.insert(property.clone(), new_value);
+                Ok(())
+            }
+            Val::Vec(vec) => match property {
+                Val::Int(index) if *index < 0 => Err(VmError::runtime(format!(
+                    "Vector index cannot be negative: {}",
+                    index
+                ))),
+                Val::Int(index) => {
+                    let index = usize::try_from(*index).map_err(|_| {
+                        VmError::runtime(format!("Vector index {} is too large to address", index))
+                    })?;
+                    Self::set_vector_index(vec, index, new_value)
+                }
+                other => Err(VmError::runtime(format!(
+                    "Vector index must be an integer, got {:?}",
+                    other
+                ))),
+            },
+            other => Err(VmError::runtime(format!(
+                "Cannot set dynamic property on {:?}",
+                other
+            ))),
+        }
+    }
+
     /// Access a property of a value (supports both map keys and vector indices)
-    pub fn access_property(&self, value: &Val, property: &str) -> VmResult<Val> {
+    pub fn access_property(&mut self, value: &Val, property: &str) -> VmResult<Val> {
+        // Recursive tagged-payload access obeys the same Result boundary as
+        // top-level access. This prevents an Err nested in another wrapper
+        // from being read through as an ordinary map.
+        if value.is_err() {
+            return self.unwrap_result_if_ok(value);
+        }
+        if let Some(payload) = value.unwrap_ok() {
+            return self.access_property(payload, property);
+        }
+
         match value {
             Val::Map(map) => {
                 // Check if this is a function alias that needs to be resolved first
@@ -9749,6 +9652,64 @@ impl VirtualMachine {
                 // Other types don't support property access
                 Ok(Val::Null)
             }
+        }
+    }
+
+    /// Access a property selected by a runtime value. The interpreter and JIT
+    /// both call this path so invalid keys and tagged payloads have identical
+    /// behavior in both engines.
+    pub(crate) fn access_dynamic_property(&mut self, value: &Val, property: &Val) -> VmResult<Val> {
+        if let Val::Str(property_name) = property {
+            return self.access_property(value, property_name);
+        }
+        if value.is_err() {
+            return self.unwrap_result_if_ok(value);
+        }
+        if let Some(payload) = value.unwrap_ok() {
+            return self.access_dynamic_property(payload, property);
+        }
+
+        match value {
+            Val::Map(map) if self.is_tagged_wrapper(map) => match map.get(&Val::from("$val")) {
+                Some(payload) => self.access_dynamic_property(payload, property),
+                None => Ok(Val::Null),
+            },
+            Val::Map(map) => Ok(map.get(property).cloned().unwrap_or(Val::Null)),
+            Val::Vec(vec) => match property {
+                Val::Int(index) if *index < 0 => Ok(Val::Null),
+                Val::Int(index) => Ok(vec.get(*index as usize).cloned().unwrap_or(Val::Null)),
+                other => Err(VmError::runtime(format!(
+                    "Vector index must be an integer, got {:?}",
+                    other
+                ))),
+            },
+            Val::Str(string) => match property {
+                Val::Int(index) if *index < 0 => Ok(Val::Null),
+                Val::Int(index) => Ok(string
+                    .chars()
+                    .nth(*index as usize)
+                    .map(|character| Val::from(character.to_string()))
+                    .unwrap_or(Val::Null)),
+                other => Err(VmError::runtime(format!(
+                    "String index must be an integer, got {:?}",
+                    other
+                ))),
+            },
+            Val::Bytes(bytes) => match property {
+                Val::Int(index) if *index < 0 => Ok(Val::Null),
+                Val::Int(index) => Ok(bytes
+                    .get(*index as usize)
+                    .map(|byte| Val::Int(*byte as i64))
+                    .unwrap_or(Val::Null)),
+                other => Err(VmError::runtime(format!(
+                    "Bytes index must be an integer, got {:?}",
+                    other
+                ))),
+            },
+            other => Err(VmError::runtime(format!(
+                "Cannot access property on {:?}",
+                other
+            ))),
         }
     }
 
@@ -10267,6 +10228,7 @@ impl VirtualMachine {
                         | Instruction::Pipe { dest, .. }
                         | Instruction::DefineFunction { dest, .. }
                         | Instruction::DotAccess { dest, .. }
+                        | Instruction::DynamicDotAccess { dest, .. }
                         | Instruction::DotAccessOrDefault { dest, .. }
                         | Instruction::GetTypePath { dest, .. }
                         | Instruction::IsType { dest, .. }

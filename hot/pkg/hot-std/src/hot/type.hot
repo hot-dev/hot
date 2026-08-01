@@ -716,13 +716,13 @@ meta {
     **Example**
 
     ```hot
-    ok(1) |> if-ok(add(%, 10))
+    ok(1) |> if-ok((n) { add(n, 10) })
     // Ok(11)
 
     ok(1) |> if-ok("replaced")
     // Ok("replaced")
 
-    err("bad") |> if-ok(add(%, 10))
+    err("bad") |> if-ok((n) { add(n, 10) })
     // Err("bad") — passes through unchanged
     ```
     """
@@ -747,7 +747,7 @@ meta {
     err("bad") |> if-err("default")
     // Ok("default") — recovers with default value
 
-    err("bad") |> if-err(err(\`wrapped: ${%}\`))
+    err("bad") |> if-err((e) { err(\`wrapped: ${e}\`) })
     // Err("wrapped: bad") — transforms the error
 
     err("bad") |> if-err((e) { fetch-backup() })
@@ -844,7 +844,7 @@ meta {
     err-message(err({message: "pg: bad", code: "42"}))  // "pg: bad"
 
     r ::pg/connect(opts)
-    if-err(r, (e) { log(`db down: ${err-message(e)}`) })
+    if-err(r, (e) { println(`db down: ${err-message(e)}`) })
     ```
     """
 }

@@ -384,7 +384,11 @@ Typed values carry internal metadata so Hot can preserve type identity at runtim
 `$type` and `$val` members where needed. Field and string-key index syntax never
 exposes or skips through those wrapper members. If the payload itself has a
 field named `$val`, for example, `value.$val` reads that payload field;
-otherwise it is absent just like any other field. Call `untype` first when a
+otherwise it is absent just like any other field. Hot recognizes the reserved
+wrapper only when every member besides `$type` and `$val` is reserved `$...`
+metadata (such as `$origin`). A foreign Map with ordinary sibling data fields
+remains an ordinary Map, so adding a literal `$val` field cannot change how its
+siblings are read. Call `untype` first when a
 recipient instead expects ordinary untagged JSON:
 
 ```hot

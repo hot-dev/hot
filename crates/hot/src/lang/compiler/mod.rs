@@ -6064,9 +6064,12 @@ impl Compiler {
             .program
             .add_constant(Constant::Val(Val::from(var_name.to_string())));
 
-        // Determine the default value based on the deep path
-        // If the first path segment is an Append, default to empty vec; otherwise default to empty map
-        let default_val = if matches!(deep_path, crate::lang::ast::DeepPath::Append) {
+        // A leading literal index or append establishes a Vec root. Dynamic
+        // indices remain ambiguous and therefore require an existing value.
+        let default_val = if matches!(
+            deep_path,
+            crate::lang::ast::DeepPath::Index(_) | crate::lang::ast::DeepPath::Append
+        ) {
             Val::vec_empty()
         } else {
             Val::map_empty()
@@ -6168,8 +6171,12 @@ impl Compiler {
                 // Create a register to hold the intermediate object
                 let intermediate_reg = self.allocate_register();
 
-                // Check if right is Append - if so, left should create a Vec as default
-                let right_is_append = matches!(**right, crate::lang::ast::DeepPath::Append);
+                // A following literal index or append establishes a Vec at
+                // the parent path instead of a string-keyed Map.
+                let right_requires_vec = matches!(
+                    **right,
+                    crate::lang::ast::DeepPath::Index(_) | crate::lang::ast::DeepPath::Append
+                );
 
                 // First, navigate to the parent object using the left path
                 // This will recursively handle nested chains
@@ -6177,7 +6184,7 @@ impl Compiler {
                     base_reg,
                     left,
                     intermediate_reg,
-                    right_is_append,
+                    right_requires_vec,
                 )?;
 
                 // Now set the property in the intermediate object
@@ -6193,8 +6200,8 @@ impl Compiler {
     }
 
     /// Access a deep path, creating empty maps/vecs as needed
-    /// The `next_is_append` parameter indicates if the next operation will be an Append,
-    /// in which case we should create an empty Vec instead of an empty Map as the default
+    /// `next_requires_vec` indicates that the following path segment is a
+    /// literal index or append, so the missing value must be created as a Vec.
     fn compile_deep_path_access_or_create(
         &mut self,
         base_reg: RegisterId,
@@ -6205,14 +6212,14 @@ impl Compiler {
     }
 
     /// Access a deep path, creating empty maps/vecs as needed
-    /// The `next_is_append` parameter indicates if the next operation will be an Append,
-    /// in which case we should create an empty Vec instead of an empty Map as the default
+    /// `next_requires_vec` indicates that the following path segment is a
+    /// literal index or append, so the missing value must be created as a Vec.
     fn compile_deep_path_access_or_create_with_default(
         &mut self,
         base_reg: RegisterId,
         deep_path: &crate::lang::ast::DeepPath,
         dest_reg: RegisterId,
-        next_is_append: bool,
+        next_requires_vec: bool,
     ) -> Result<(), String> {
         match deep_path {
             crate::lang::ast::DeepPath::Key(key) => {
@@ -6220,7 +6227,7 @@ impl Compiler {
                 let key_constant = self
                     .program
                     .add_constant(Constant::Val(Val::from(key.clone())));
-                let default_constant = if next_is_append {
+                let default_constant = if next_requires_vec {
                     self.program.add_constant(Constant::Val(Val::vec_empty()))
                 } else {
                     self.program.add_constant(Constant::Val(Val::map_empty()))
@@ -6237,20 +6244,22 @@ impl Compiler {
             }
             crate::lang::ast::DeepPath::Chain(left, right) => {
                 // Navigate to left first, then to right
-                // Check if right is Append - if so, left should create a Vec as default
-                let right_is_append = matches!(**right, crate::lang::ast::DeepPath::Append);
+                let right_requires_vec = matches!(
+                    **right,
+                    crate::lang::ast::DeepPath::Index(_) | crate::lang::ast::DeepPath::Append
+                );
                 let intermediate_reg = self.allocate_register();
                 self.compile_deep_path_access_or_create_with_default(
                     base_reg,
                     left,
                     intermediate_reg,
-                    right_is_append,
+                    right_requires_vec,
                 )?;
                 self.compile_deep_path_access_or_create_with_default(
                     intermediate_reg,
                     right,
                     dest_reg,
-                    next_is_append,
+                    next_requires_vec,
                 )?;
                 Ok(())
             }
@@ -6260,7 +6269,7 @@ impl Compiler {
                 let index_constant = self
                     .program
                     .add_constant(Constant::Val(Val::from(index_str)));
-                let default_constant = if next_is_append {
+                let default_constant = if next_requires_vec {
                     self.program.add_constant(Constant::Val(Val::vec_empty()))
                 } else {
                     self.program.add_constant(Constant::Val(Val::map_empty()))
