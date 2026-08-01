@@ -385,10 +385,10 @@ Typed values carry internal metadata so Hot can preserve type identity at runtim
 exposes or skips through those wrapper members. If the payload itself has a
 field named `$val`, for example, `value.$val` reads that payload field;
 otherwise it is absent just like any other field. Hot recognizes the reserved
-wrapper only when every member besides `$type` and `$val` is reserved `$...`
-metadata (such as `$origin`). A foreign Map with ordinary sibling data fields
-remains an ordinary Map, so adding a literal `$val` field cannot change how its
-siblings are read. Call `untype` first when a
+wrapper only when its members are `$type`, `$val`, and the optional defined
+metadata member `$origin`. A foreign Map with any other sibling data field—even
+one beginning with `$`—remains an ordinary Map, so adding a literal `$val`
+field cannot change how its siblings are read. Call `untype` first when a
 recipient instead expects ordinary untagged JSON:
 
 ```hot

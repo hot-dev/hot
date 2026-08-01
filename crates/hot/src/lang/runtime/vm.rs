@@ -9123,6 +9123,11 @@ impl VirtualMachine {
             | Instruction::LoadScoped { dest, .. }
             | Instruction::CaptureVar { dest, .. }
             | Instruction::WrapOk { dest, .. } => Some(*dest),
+            Instruction::DotSet { object, .. } | Instruction::DynamicDotSet { object, .. } => {
+                Some(*object)
+            }
+            Instruction::VecAppend { vec, .. } => Some(*vec),
+            Instruction::SetElement { collection, .. } => Some(*collection),
             _ => None,
         }
     }
@@ -9358,12 +9363,11 @@ impl VirtualMachine {
 
     /// Return true when a map uses Hot's tagged JSON wrapper representation.
     ///
-    /// A data-bearing wrapper consists of `$type`, `$val`, and optional
-    /// reserved `$...` metadata such as `$origin`. A unit enum wrapper consists
-    /// only of `$type`, whose local name has the `Enum.Variant` form. Rejecting
-    /// ordinary sibling fields keeps foreign maps stable: adding a literal
-    /// `$val` field cannot suddenly hide those siblings behind wrapper
-    /// semantics.
+    /// A data-bearing wrapper consists of `$type`, `$val`, and the one defined
+    /// wrapper-metadata member, `$origin`. A unit enum wrapper consists only of
+    /// `$type`, whose local name has the `Enum.Variant` form. Rejecting every
+    /// other sibling field keeps foreign maps stable instead of guessing that
+    /// arbitrary `$...` application data is Hot metadata.
     fn is_tagged_wrapper(&self, map: &IndexMap<Val, Val>) -> bool {
         let Some(Val::Str(type_name)) = map.get(&Val::from("$type")) else {
             return false;
@@ -9372,9 +9376,9 @@ impl VirtualMachine {
             return false;
         }
         if map.contains_key(&Val::from("$val")) {
-            return map
-                .keys()
-                .all(|key| matches!(key, Val::Str(name) if name.starts_with('$')));
+            return map.keys().all(|key| {
+                matches!(key, Val::Str(name) if matches!(&**name, "$type" | "$val" | "$origin"))
+            });
         }
 
         map.len() == 1
@@ -9395,8 +9399,7 @@ impl VirtualMachine {
         // Ok wrapper while updating its payload, but never allow assignment to
         // rewrite an Err payload before that error propagates.
         if value.is_err() {
-            self.unwrap_result_if_ok(value)?;
-            unreachable!("Result.Err consumption must halt")
+            return self.propagate_assignment_result_err(value);
         }
 
         match value {
@@ -9477,8 +9480,7 @@ impl VirtualMachine {
             return self.set_property(value, property_name, new_value);
         }
         if value.is_err() {
-            self.unwrap_result_if_ok(value)?;
-            unreachable!("Result.Err consumption must halt")
+            return self.propagate_assignment_result_err(value);
         }
 
         match value {
@@ -9515,6 +9517,18 @@ impl VirtualMachine {
                 other
             ))),
         }
+    }
+
+    /// Assignment always consumes a Result, even while a surrounding lazy
+    /// Result-aware call temporarily suppresses ordinary argument unwrapping.
+    /// Restore normal checking for this boundary and return the propagation
+    /// error instead of assuming the helper must fail and panicking the VM.
+    fn propagate_assignment_result_err(&mut self, value: &Val) -> VmResult<()> {
+        let previous = self.suppress_result_checking;
+        self.suppress_result_checking = false;
+        let result = self.unwrap_result_if_ok(value).map(|_| ());
+        self.suppress_result_checking = previous;
+        result
     }
 
     /// Access a property of a value (supports both map keys and vector indices)
@@ -10239,6 +10253,22 @@ impl VirtualMachine {
                         | Instruction::ConstructTyped { dest, .. } => {
                             // Get the result from the destination register
                             if let Ok(val) = self.get_register(*dest) {
+                                last_result = val.clone();
+                            }
+                        }
+                        Instruction::DotSet { object, .. }
+                        | Instruction::DynamicDotSet { object, .. } => {
+                            if let Ok(val) = self.get_register(*object) {
+                                last_result = val.clone();
+                            }
+                        }
+                        Instruction::VecAppend { vec, .. } => {
+                            if let Ok(val) = self.get_register(*vec) {
+                                last_result = val.clone();
+                            }
+                        }
+                        Instruction::SetElement { collection, .. } => {
+                            if let Ok(val) = self.get_register(*collection) {
                                 last_result = val.clone();
                             }
                         }

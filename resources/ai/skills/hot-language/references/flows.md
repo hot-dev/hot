@@ -458,7 +458,10 @@ result: All<Map> parallel {
 
 `parallel` schedules named bindings and their dependency graph. Standalone,
 unbound expressions are not collected as result slots, so give every concurrent
-operation a binding even when the requested output shape is `All<Vec>`.
+operation a binding even when the requested output shape is `All<Vec>`. The
+function-definition form (`fn parallel ...`) can collect its unbound body
+expressions into an explicit `All<Vec>`, but named bindings remain the clearest
+and most portable form between standalone and function flows.
 
 ## Nested Flows
 

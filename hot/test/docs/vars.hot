@@ -34,6 +34,8 @@ user.settings.notifications true
 // @doc: deep-path-vec
 config.servers[0] "api.example.com"
 config.servers[1] "db.example.com"
+config.backends[0].host "api.internal"
+config.backends[1].host "db.internal"
 config.retries 3
 // @end: deep-path-vec
 
@@ -126,6 +128,9 @@ meta ["test"] fn () {
   assert-eq(2, ::hot::coll/length(config.servers), "servers length")
   assert-eq("api.example.com", config.servers[0], "server 0")
   assert-eq("db.example.com", config.servers[1], "server 1")
+  assert(is-vec(config.backends), "continued indexed path creates a vector")
+  assert-eq("api.internal", config.backends[0].host, "backend 0")
+  assert-eq("db.internal", config.backends[1].host, "backend 1")
   assert-eq(3, config.retries, "retries")
 }
 

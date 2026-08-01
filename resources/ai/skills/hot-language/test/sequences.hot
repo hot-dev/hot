@@ -157,10 +157,10 @@ for-each-example fn (): Int {
 // @doc: range-examples
 range-examples fn (): Map {
     {
-        end-only: collect(range(5)),
-        start-end: collect(range(1, 6)),
-        with-step: collect(range(0, 10, 2)),
-        reverse: collect(range(5, 0, -1))
+        end-only: range(5),
+        start-end: range(1, 6),
+        with-step: range(0, 10, 2),
+        reverse: range(5, 0, -1)
     }
 }
 // @end: range-examples

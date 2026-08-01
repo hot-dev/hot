@@ -345,7 +345,8 @@ probe()"#;
 probe fn (): Vec {
     flat from-json("{\"$type\":\"::foreign/A\",\"n\":2}")
     flat.$val {c: 3}
-    [flat.n, flat.$val.c]
+    metadata from-json("{\"$type\":\"::foreign/B\",\"$val\":1,\"$metadata\":{\"source\":\"foreign\"}}")
+    [flat.n, flat.$val.c, metadata.$val, metadata.$metadata.source]
 }
 probe()
 probe()
@@ -356,7 +357,7 @@ probe()"#;
         let interp =
             compile_and_run_with_std_conf(src, Some(crate::val!({"jit": {"mode": "off"}})))
                 .expect("interpreter foreign tagged-looking map assignment");
-        let expected = crate::val!([2, 3]);
+        let expected = crate::val!([2, 3, 1, "foreign"]);
         assert_eq!(interp, expected);
         assert_eq!(jit, expected);
     }
@@ -507,6 +508,85 @@ probe()"#;
         ]);
         assert_eq!(interp, expected, "interpreter dynamic deep assignment");
         assert_eq!(jit, expected, "JIT dynamic deep assignment");
+    }
+
+    #[test]
+    fn deep_assignment_creates_and_grows_vectors_in_both_engines() {
+        let src = r#"::t ns
+probe fn (): Vec {
+    literal {}
+    literal.rows[0].host "api"
+
+    dynamic {rows: []}
+    index 3
+    dynamic.rows[index].host "worker"
+
+    [literal, dynamic]
+}
+probe()
+probe()
+probe()"#;
+
+        let jit = compile_and_run_with_std_conf(src, Some(crate::val!({"jit": {"threshold": 1}})))
+            .expect("JIT deep vector creation");
+        let interp =
+            compile_and_run_with_std_conf(src, Some(crate::val!({"jit": {"mode": "off"}})))
+                .expect("interpreter deep vector creation");
+        let expected = crate::val!([
+            {"rows": [{"host": "api"}]},
+            {"rows": [null, null, null, {"host": "worker"}]}
+        ]);
+        assert_eq!(interp, expected);
+        assert_eq!(jit, expected);
+    }
+
+    #[test]
+    fn dynamic_deep_assignment_requires_an_existing_collection_parent() {
+        let src = r#"::t ns
+probe fn (): Map {
+    data {}
+    index 0
+    data.rows[index].host "worker"
+    data
+}
+probe()"#;
+
+        for (mode, conf) in [
+            ("jit", crate::val!({"jit": {"threshold": 1}})),
+            ("interpreter", crate::val!({"jit": {"mode": "off"}})),
+        ] {
+            let error = compile_and_run_with_std_conf(src, Some(conf))
+                .expect_err("missing dynamic collection parent must fail");
+            assert!(
+                error.contains("dynamic") || error.contains("Null"),
+                "{mode}: unexpected error: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn lazy_result_evaluation_propagates_assignment_errors_without_panicking() {
+        let src = r#"::t ns
+rewrite fn (): Any {
+    failure err({message: "original lazy error"})
+    failure.message "rewritten"
+    failure
+}
+inspect fn match (result: Result): Str {
+    Result.Ok => { "ok" }
+    Result.Err => { "err" }
+}
+inspect(rewrite())"#;
+
+        for (mode, conf) in [
+            ("jit", crate::val!({"jit": {"threshold": 1}})),
+            ("interpreter", crate::val!({"jit": {"mode": "off"}})),
+        ] {
+            let error = compile_and_run_with_std_conf(src, Some(conf))
+                .expect_err("assignment through lazy Result.Err must propagate");
+            assert!(error.contains("original lazy error"), "{mode}: {error}");
+            assert!(!error.contains("channel closed"), "{mode}: {error}");
+        }
     }
 
     #[test]

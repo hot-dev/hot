@@ -161,8 +161,8 @@ process fn (data: Map): Map {
 
     // Parallel flow
     results parallel {
-        fetch-a(validated)
-        fetch-b(validated)
+        a fetch-a(validated)
+        b fetch-b(validated)
     }
 
     results

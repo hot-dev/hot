@@ -569,7 +569,9 @@ steps: All<Vec> 5 |> add(2) |> mul(3)
 
 Parallel scheduling is defined by named bindings and their dependencies.
 Standalone, unbound expressions do not become collected result slots; bind
-every concurrent operation even when using `All<Vec>`. Branches complete
+every concurrent operation even when using `All<Vec>`. A `fn parallel`
+definition can collect unbound body expressions into an explicit `All<Vec>`,
+but named bindings work consistently in both forms. Branches complete
 independently, so an `Err` remains in its branch's slot rather than cancelling
 siblings. It propagates when ordinary code later consumes that result.
 

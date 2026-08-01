@@ -13,11 +13,17 @@ meta ["test"] fn () {
     uuid4-str Str(uuid4)
     assert(is-str(uuid4-str), "uuid-v4 should coerce to a string")
     assert(is-uuid(uuid4), "is-uuid should return true for uuid-v4")
+    assert-eq(36, length(uuid4-str), "uuid-v4 has canonical length")
+    assert-eq("4", uuid4-str[14], "uuid-v4 encodes version 4")
+    assert(contains("89ab", uuid4-str[19]), "uuid-v4 has an RFC variant nibble")
     // Test UUID v7 generation
     uuid7 Uuid(7)
     uuid7-str Str(uuid7)
     assert(is-str(uuid7-str), "uuid-v7 should coerce to a string")
     assert(is-uuid(uuid7), "is-uuid should return true for uuid-v7")
+    assert-eq(36, length(uuid7-str), "uuid-v7 has canonical length")
+    assert-eq("7", uuid7-str[14], "uuid-v7 encodes version 7")
+    assert(contains("89ab", uuid7-str[19]), "uuid-v7 has an RFC variant nibble")
     // Test is-uuid with string
     valid_uuid_str "550e8400-e29b-41d4-a716-446655440000"
     assert(is-uuid(valid_uuid_str), "is-uuid should return true for valid UUID string")

@@ -9,6 +9,8 @@ use tracing::info;
 use crate::cli::AiAction;
 
 const SKILL_MANIFEST_FILE: &str = ".hot-skill-manifest.json";
+const SKILL_OWNER_FILE: &str = ".hot-skill-owner";
+const SKILL_OWNER_CONTENT: &[u8] = b"managed-by=hot-cli\n";
 
 fn ai_home_dir() -> Option<std::path::PathBuf> {
     // Honor shell-provided home overrides before platform APIs. Besides making
@@ -176,11 +178,12 @@ fn installed_hot_skill_names(skills_dir: &std::path::Path) -> Vec<String> {
             continue;
         }
         let has_manifest = path.join(SKILL_MANIFEST_FILE).is_file();
+        let has_owner_marker = path.join(SKILL_OWNER_FILE).is_file();
         let has_legacy_stamp = fs::read_to_string(path.join("SKILL.md"))
             .ok()
             .and_then(|content| extract_skill_hash(&content))
             .is_some();
-        if (has_manifest || has_legacy_stamp)
+        if (has_manifest || has_owner_marker || has_legacy_stamp)
             && let Ok(name) = entry.file_name().into_string()
         {
             names.push(name);
@@ -609,8 +612,16 @@ fn has_legacy_skill_stamp(skill_dir: &std::path::Path) -> bool {
 fn validate_skill_ownership(skill_dir: &std::path::Path) -> Result<(), String> {
     if skill_dir.exists()
         && !skill_dir.join(SKILL_MANIFEST_FILE).is_file()
+        && !skill_dir.join(SKILL_OWNER_FILE).is_file()
         && !has_legacy_skill_stamp(skill_dir)
     {
+        if skill_dir.is_dir()
+            && fs::read_dir(skill_dir)
+                .map(|mut entries| entries.next().is_none())
+                .unwrap_or(false)
+        {
+            return Ok(());
+        }
         return Err(format!(
             "Refusing to overwrite externally managed skill {}. Remove it or choose a different installation scope before running hot ai add.",
             skill_dir.display()
@@ -672,6 +683,7 @@ fn setup_agent_skill(global: bool, skill_name: &str) -> Result<(), String> {
     ensure_managed_path_is_not_symlinked(&skills_base, &skill_dir)?;
     validate_skill_ownership(&skill_dir)?;
     ensure_managed_path_is_not_symlinked(&skills_base, &skill_dir.join(SKILL_MANIFEST_FILE))?;
+    ensure_managed_path_is_not_symlinked(&skills_base, &skill_dir.join(SKILL_OWNER_FILE))?;
     for (rel_path, _) in &skill_files {
         ensure_managed_path_is_not_symlinked(&skills_base, &skill_dir.join(rel_path))?;
     }
@@ -679,7 +691,10 @@ fn setup_agent_skill(global: bool, skill_name: &str) -> Result<(), String> {
     let preserve_untracked_files = matches!(
         &installed_manifest_state,
         InstalledSkillManifestState::Corrupt { .. }
-    );
+    ) || matches!(
+        &installed_manifest_state,
+        InstalledSkillManifestState::Missing
+    ) && skill_dir.join(SKILL_OWNER_FILE).is_file();
     if let InstalledSkillManifestState::Corrupt { path, error } = &installed_manifest_state {
         println!(
             "  Warning: rebuilding corrupt skill manifest {} ({}) without overwriting existing files",
@@ -700,6 +715,11 @@ fn setup_agent_skill(global: bool, skill_name: &str) -> Result<(), String> {
         .map(|(path, _)| skill_manifest_key(path))
         .collect();
     expected_files.insert(SKILL_MANIFEST_FILE.to_string());
+    expected_files.insert(SKILL_OWNER_FILE.to_string());
+    next_manifest.files.insert(
+        SKILL_OWNER_FILE.to_string(),
+        skill_content_hash(SKILL_OWNER_CONTENT),
+    );
 
     fn write_skill_file(
         path: &std::path::Path,
@@ -856,6 +876,11 @@ fn setup_agent_skill(global: bool, skill_name: &str) -> Result<(), String> {
     let mut manifest_content = serde_json::to_vec_pretty(&next_manifest)
         .map_err(|e| format!("Failed to serialize installed skill manifest: {}", e))?;
     manifest_content.push(b'\n');
+    let owner_path = skill_dir.join(SKILL_OWNER_FILE);
+    ensure_managed_path_is_not_symlinked(&skills_base, &owner_path)?;
+    if write_atomic_if_changed(&owner_path, SKILL_OWNER_CONTENT)? {
+        any_updated = true;
+    }
     let manifest_path = skill_dir.join(SKILL_MANIFEST_FILE);
     ensure_managed_path_is_not_symlinked(&skills_base, &manifest_path)?;
     if write_atomic_if_changed(&manifest_path, &manifest_content)? {

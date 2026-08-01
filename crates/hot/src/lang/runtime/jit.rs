@@ -2,7 +2,7 @@ use crate::lang::bytecode::{
     BytecodeProgram, Constant, FlowResultModifier, FlowType, FunctionId, FunctionInfo, Instruction,
     LambdaInfo,
 };
-use crate::lang::runtime::vm::{VirtualMachine, VmResult};
+use crate::lang::runtime::vm::{VirtualMachine, VmError, VmResult};
 use crate::val::Val;
 use ahash::AHashMap;
 use cranelift_codegen::ir::{
@@ -2212,7 +2212,9 @@ unsafe extern "C" fn hot_jit_dot_access_or_default(
         _ => {
             return vm_runtime_error_to_halt(
                 vm,
-                "JIT dot_access_or_default: expected Str for property name",
+                VmError::runtime(
+                    "JIT dot_access_or_default: expected Str for property name".to_string(),
+                ),
             );
         }
     };
@@ -3550,9 +3552,17 @@ fn vm_error_to_owned_val(err: impl std::fmt::Display, error_capture_active: bool
 /// halt sentinel. Record the failure first so the compiled-frame boundary can
 /// surface the same immediate error instead of treating it as an ordinary
 /// Result value and continuing execution.
-fn vm_runtime_error_to_halt(vm: &VirtualMachine, err: impl std::fmt::Display) -> i64 {
-    let message = err.to_string();
-    vm.set_failure(message.clone(), Val::from(message));
+fn vm_runtime_error_to_halt(vm: &VirtualMachine, err: VmError) -> i64 {
+    // Result propagation has already recorded its original payload. Do not
+    // overwrite that state with the display-formatted VmError (which prefixes
+    // `Runtime error:` and caused successively wrapped JIT diagnostics).
+    if !vm.has_failed() && !vm.has_cancelled() {
+        let message = match &err {
+            VmError::RuntimeError(error) => error.message.clone(),
+            _ => err.to_string(),
+        };
+        vm.set_failure(message.clone(), Val::from(message));
+    }
     HALT_SENTINEL
 }
 
@@ -3907,15 +3917,9 @@ fn collect_used_registers(instructions: &[Instruction]) -> std::collections::BTr
                 regs.insert(*left);
                 regs.insert(*right);
             }
-            Instruction::DotAccessOrDefault {
-                dest,
-                object,
-                default_value,
-                ..
-            } => {
+            Instruction::DotAccessOrDefault { dest, object, .. } => {
                 regs.insert(*dest);
                 regs.insert(*object);
-                regs.insert(*default_value);
             }
             Instruction::VecAppend { vec, value } => {
                 regs.insert(*vec);
@@ -5992,13 +5996,22 @@ impl<'a> EmitCtx<'a> {
                 let prop = constant_string(self.program, *property)?;
                 let prop_val = new_owned_val(Val::Str(prop.to_string().into()));
                 let prop_ptr = builder.ins().iconst(types::I64, prop_val);
-                let (default_ptr, default_temp) = self.owned_operand(builder, *default_value)?;
+                let default_val = match self.program.constants.get(*default_value as usize) {
+                    Some(Constant::Val(value)) => value.clone(),
+                    _ => {
+                        return Err(format!(
+                            "Expected value constant c{} for deep-path default",
+                            default_value
+                        ));
+                    }
+                };
+                let default_ptr = builder.ins().iconst(types::I64, new_owned_val(default_val));
                 let call = builder.ins().call(
                     self.helper_refs.dot_access_or_default,
                     &[obj_ptr, prop_ptr, default_ptr],
                 );
                 let result = builder.inst_results(call)[0];
-                self.drop_owned_temps(builder, &[obj_temp, default_temp]);
+                self.drop_owned_temps(builder, &[obj_temp]);
                 let halt_block = emit_halt_check(builder, result);
                 self.define_register(builder, *dest, RawKind::OwnedVal, result)?;
                 self.jump_to_next(builder, ip)?;
@@ -6197,7 +6210,7 @@ impl<'a> EmitCtx<'a> {
                 // owned register before branching, and mark its register as
                 // already consumed so halt cleanup cannot interpret the
                 // sentinel as an OwnedVal after the continuation redefines it.
-                if obj_temp.is_none() {
+                if obj_temp.is_none() && !self.compile_time_owned.contains(&object_idx) {
                     drop_owned_raw(builder, &self.helper_refs, obj_ptr);
                     self.compile_time_owned.insert(object_idx);
                 }
@@ -6223,7 +6236,7 @@ impl<'a> EmitCtx<'a> {
                     .ins()
                     .call(self.helper_refs.dot_set, &[obj_ptr, prop_ptr, val_ptr]);
                 let result = builder.inst_results(call)[0];
-                if obj_temp.is_none() {
+                if obj_temp.is_none() && !self.compile_time_owned.contains(&object_idx) {
                     drop_owned_raw(builder, &self.helper_refs, obj_ptr);
                     self.compile_time_owned.insert(object_idx);
                 }
@@ -10586,6 +10599,61 @@ mod tests {
         program
     }
 
+    fn constant_object_set_program(dynamic: bool) -> BytecodeProgram {
+        let mut program = BytecodeProgram::new();
+        let object = program.constants.len() as u32;
+        program.constants.push(Constant::Val(val!({"a": 0})));
+        let property = program.constants.len() as u32;
+        program.constants.push(Constant::Val(val!("a")));
+        let value_name = program.constants.len() as u32;
+        program.constants.push(Constant::Val(val!("value")));
+
+        let mut instructions = vec![
+            Instruction::LoadConst {
+                dest: 0,
+                constant: object,
+            },
+            Instruction::LoadVar {
+                dest: 1,
+                var_name: value_name,
+            },
+        ];
+        if dynamic {
+            instructions.push(Instruction::LoadConst {
+                dest: 2,
+                constant: property,
+            });
+            instructions.push(Instruction::DynamicDotSet {
+                object: 0,
+                property: 2,
+                value: 1,
+            });
+        } else {
+            instructions.push(Instruction::DotSet {
+                object: 0,
+                property,
+                value: 1,
+            });
+        }
+        instructions.push(Instruction::Return { value: 0 });
+
+        program.functions.push(FunctionInfo {
+            name: "::test/constant-object-set".to_string(),
+            namespace: "::test".to_string(),
+            arity: 1,
+            is_variadic: false,
+            param_names: vec!["value".to_string()],
+            param_types: vec![],
+            return_type: 0,
+            lazy_params: vec![false],
+            flow_type: None,
+            instructions,
+            register_count: if dynamic { 3 } else { 2 },
+            source: None,
+        });
+        program
+    }
+
     #[test]
     fn jitted_function_uses_defining_namespace_for_alias_lookup() {
         let mut program = BytecodeProgram::new();
@@ -14408,6 +14476,82 @@ mod tests {
     }
 
     #[test]
+    fn jit_set_helpers_do_not_release_compile_time_owned_objects() {
+        for dynamic in [false, true] {
+            let program = constant_object_set_program(dynamic);
+            let conf = val!({"jit": {"mode": "enabled", "threshold": 1}});
+            let mut vm = make_test_vm(program, conf);
+
+            for value in 0..32 {
+                let result = vm
+                    .execute_compiled_user_function(0, &[Val::Int(value)])
+                    .unwrap_or_else(|error| panic!("dynamic={dynamic}, value={value}: {error}"));
+                assert_eq!(result, val!({"a": value}));
+            }
+            assert!(vm.jit_has_compiled_function(0));
+        }
+    }
+
+    #[test]
+    fn jit_and_interpreter_load_deep_path_defaults_from_constants() {
+        let mut program = BytecodeProgram::new();
+        let object_name = program.constants.len() as u32;
+        program.constants.push(Constant::Val(val!("object")));
+        let property = program.constants.len() as u32;
+        program.constants.push(Constant::Val(val!("child")));
+        let default_value = program.constants.len() as u32;
+        program
+            .constants
+            .push(Constant::Val(val!({"created": true})));
+        program.functions.push(FunctionInfo {
+            name: "::test/deep-path-default".to_string(),
+            namespace: "::test".to_string(),
+            arity: 1,
+            is_variadic: false,
+            param_names: vec!["object".to_string()],
+            param_types: vec![],
+            return_type: 0,
+            lazy_params: vec![false],
+            flow_type: None,
+            instructions: vec![
+                Instruction::LoadVar {
+                    dest: 0,
+                    var_name: object_name,
+                },
+                Instruction::DotAccessOrDefault {
+                    dest: 1,
+                    object: 0,
+                    property,
+                    default_value,
+                },
+                Instruction::Return { value: 1 },
+            ],
+            register_count: 2,
+            source: None,
+        });
+
+        let mut interpreter = make_test_vm(
+            program.clone(),
+            val!({"jit": {"mode": "disabled", "threshold": 1}}),
+        );
+        let mut jitted = make_test_vm(program, val!({"jit": {"mode": "enabled", "threshold": 1}}));
+        let expected = val!({"created": true});
+        assert_eq!(
+            interpreter
+                .execute_compiled_user_function(0, &[Val::Null])
+                .unwrap(),
+            expected
+        );
+        assert_eq!(
+            jitted
+                .execute_compiled_user_function(0, &[Val::Null])
+                .unwrap(),
+            expected
+        );
+        assert!(jitted.jit_has_compiled_function(0));
+    }
+
+    #[test]
     fn jit_and_interpreter_grow_static_vector_assignment_identically() {
         let program = static_dot_set_program("5");
         let args = [val!([10, 20]), val!(99)];
@@ -14592,6 +14736,7 @@ mod tests {
         assert!(jit_error.contains("original"));
         assert!(!interpreter_error.contains("rewritten"));
         assert!(!jit_error.contains("rewritten"));
+        assert_eq!(jit_error, interpreter_error);
         assert!(jitted.jit_has_compiled_function(0));
     }
 

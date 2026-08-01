@@ -47,9 +47,11 @@ are defined in [Flows](/docs/language/flows#parallel-flow).
 
 Binding a `Result` does not consume it. Ordinary function arguments, template
 interpolation, and ordinary field or index access are consumption boundaries:
-an `Ok` supplies its payload and an `Err` propagates. Lazy Result-aware helpers
-preserve the wrapper. A `match` selects an arm from the variant identity, and
-the matched name exposes that variant's payload inside the arm.
+an `Ok` supplies its payload and an `Err` propagates. Result-aware helpers make
+their boundary explicit: `is-*` inspects the intact variant, while `if-*`
+selects a handler and supplies its payload. A `match` selects an arm from the
+variant identity, and the matched name exposes that variant's payload inside
+the arm.
 
 Function return annotations name the successful value rather than a visible
 `Result` wrapper. See [Error Handling](/docs/language/errors) for creation,

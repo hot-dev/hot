@@ -7,6 +7,7 @@ use std::process::{Command, ExitStatus};
 use siphasher::sip::SipHasher13;
 
 const MANIFEST_FILE: &str = ".hot-skill-manifest.json";
+const OWNER_FILE: &str = ".hot-skill-owner";
 
 fn hot_binary() -> &'static Path {
     Path::new(env!("CARGO_BIN_EXE_hot"))
@@ -98,6 +99,8 @@ fn hot_ai_installs_raw_files_and_repairs_legacy_stamps() {
 
     std::fs::remove_file(language_dir.join(MANIFEST_FILE)).expect("remove new manifest");
     std::fs::remove_file(agent_dir.join(MANIFEST_FILE)).expect("remove new manifest");
+    std::fs::remove_file(language_dir.join(OWNER_FILE)).expect("remove new owner marker");
+    std::fs::remove_file(agent_dir.join(OWNER_FILE)).expect("remove new owner marker");
     regress_to_legacy_layout(&language_skill, true);
     regress_to_legacy_layout(&agent_skill, true);
     regress_to_legacy_layout(&agent_yaml, false);
@@ -433,6 +436,40 @@ fn hot_ai_add_refuses_to_overwrite_or_adopt_an_external_skill() {
         !project.path().join("AGENTS.md").exists(),
         "preflight failure must not leave a partial AGENTS.md install"
     );
+}
+
+#[test]
+fn hot_ai_add_uses_an_empty_preexisting_skill_directory() {
+    let project = tempfile::tempdir().expect("project");
+    let skill_dir = project.path().join(".skills/hot-language");
+    std::fs::create_dir_all(&skill_dir).unwrap();
+
+    run(project.path(), &["ai", "add"]);
+
+    assert!(skill_dir.join("SKILL.md").is_file());
+    assert!(skill_dir.join(MANIFEST_FILE).is_file());
+    assert!(skill_dir.join(OWNER_FILE).is_file());
+}
+
+#[test]
+fn hot_ai_update_recovers_when_the_manifest_was_deleted() {
+    let project = tempfile::tempdir().expect("project");
+    run(project.path(), &["ai", "add"]);
+
+    let skill_dir = project.path().join(".skills/hot-language");
+    let skill_md = skill_dir.join("SKILL.md");
+    let customized = format!(
+        "{}\n<!-- LOCAL -->\n",
+        std::fs::read_to_string(&skill_md).unwrap().trim_end()
+    );
+    std::fs::write(&skill_md, &customized).unwrap();
+    std::fs::remove_file(skill_dir.join(MANIFEST_FILE)).unwrap();
+
+    run(project.path(), &["ai", "update"]);
+
+    assert_eq!(std::fs::read_to_string(skill_md).unwrap(), customized);
+    assert!(skill_dir.join(MANIFEST_FILE).is_file());
+    assert!(skill_dir.join(OWNER_FILE).is_file());
 }
 
 #[cfg(unix)]
