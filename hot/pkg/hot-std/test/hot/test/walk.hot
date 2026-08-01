@@ -7,38 +7,74 @@ uppercase ::hot::str/uppercase
 assert-eq ::hot::test/assert-eq
 if ::hot::bool/if
 
-// Test data with Hot type metadata
-typed-structure {
-    "$type": "MessagesPostRequest",
-    model: "claude-3-5-sonnet-20241022",
-    messages: [
-        {
-            "$type": "InputMessage",
-            role: "user",
-            content: "Hello, Claude!"
-        }
-    ],
-    max_tokens: 100
+InputMessage type {
+    role: Str,
+    content: Str
 }
 
-nested-typed-structure {
-    "$type": "Response",
-    "$val": {
-        status: "ok",
-        data: {
-            "$type": "UserData",
-            name: "John",
-            age: 30,
-            preferences: {
-                "$type": "Preferences",
-                "$val": {
-                    theme: "dark",
-                    notifications: true
-                }
-            }
-        }
-    }
+MessagesPostRequest type {
+    model: Any,
+    messages: Vec,
+    max_tokens: Int
 }
+
+Preferences type {
+    theme: Str,
+    notifications: Bool
+}
+
+UserData type {
+    name: Str,
+    age: Int,
+    preferences: Preferences
+}
+
+Response type {
+    status: Str,
+    data: UserData
+}
+
+Model type Str
+
+Metadata type {
+    created_at: Str,
+    source: Str
+}
+
+UserPayload type {
+    name: Str,
+    email: Str,
+    metadata: Metadata
+}
+
+ApiRequest type {
+    endpoint: Str,
+    payload: UserPayload
+}
+
+// Test data constructed through Hot's type system.
+typed-structure MessagesPostRequest({
+    model: "claude-3-5-sonnet-20241022",
+    messages: [
+        InputMessage({
+            role: "user",
+            content: "Hello, Claude!"
+        })
+    ],
+    max_tokens: 100
+})
+
+nested-typed-structure Response({
+    status: "ok",
+    data: UserData({
+        name: "John",
+        age: 30,
+        preferences: Preferences({
+            theme: "dark",
+            notifications: true
+        })
+    })
+})
 
 test-untype-simple
 meta ["test"] fn () {
@@ -109,22 +145,16 @@ meta ["test"] fn () {
 
 test-untype-anthropic-request
 meta ["test"] fn () {
-    anthropic-request {
-        "$type": "MessagesPostRequest",
-        model: {
-            "$type": "Model",
-            "$val": "claude-3-5-sonnet-20241022"
-        },
+    anthropic-request MessagesPostRequest({
+        model: Model("claude-3-5-sonnet-20241022"),
         messages: [
-            {
-                "$type": "InputMessage",
+            InputMessage({
                 role: "user",
                 content: "Hello, Claude!"
-            }
+            })
         ],
-        max_tokens: 100,
-        "$metadata": "should be removed"
-    }
+        max_tokens: 100
+    })
 
     result untype(anthropic-request)
     expected {
@@ -143,23 +173,17 @@ meta ["test"] fn () {
 
 test-transform-hot-to-simple
 meta ["test"] fn () {
-    // This is what you might get from Hot type constructors
-    hot-typed-data {
-        "$type": "ApiRequest",
+    hot-typed-data ApiRequest({
         endpoint: "/api/users",
-        payload: {
-            "$type": "UserPayload",
-            "$val": {
-                name: "John Doe",
-                email: "john@example.com",
-                metadata: {
-                    "$type": "Metadata",
-                    created_at: "2024-01-01",
-                    source: "web"
-                }
-            }
-        }
-    }
+        payload: UserPayload({
+            name: "John Doe",
+            email: "john@example.com",
+            metadata: Metadata({
+                created_at: "2024-01-01",
+                source: "web"
+            })
+        })
+    })
 
     // Transform to simple structure for JSON serialization or external APIs
     simple-data untype(hot-typed-data)

@@ -448,7 +448,7 @@ meta {
     ```
     """
 }
-fn (value: Any): Bool { is-type(value, Map) }
+fn (value: Any): Bool { is-type(value, "::hot::type/Map") }
 
 
 is-byte

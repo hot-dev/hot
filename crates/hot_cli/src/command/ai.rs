@@ -148,20 +148,11 @@ pub(crate) fn run_ai(action: &AiAction) -> Result<(), String> {
                     )
                 };
 
-            // Validate every skill path this update will touch BEFORE
-            // refreshing AGENTS.md, so a rejected path (e.g. a symlinked
-            // .skills base) cannot leave a half-completed update with
-            // AGENTS.md rewritten and the skills untouched.
-            for (scope_global, targets) in [(false, &project_targets), (true, &global_targets)] {
-                if targets.is_empty() {
-                    continue;
-                }
-                let (skills_base, _) = agent_skills_base(scope_global)?;
-                ensure_managed_path_is_not_symlinked(&skills_base, &skills_base)?;
-                for name in targets {
-                    ensure_managed_path_is_not_symlinked(&skills_base, &skills_base.join(name))?;
-                }
-            }
+            // Validate every source, destination, and installed manifest this
+            // update will touch before refreshing AGENTS.md. The write path
+            // repeats the safety checks to narrow the TOCTOU window.
+            preflight_selected_agent_skills(false, &project_targets)?;
+            preflight_selected_agent_skills(true, &global_targets)?;
 
             if std::path::Path::new("AGENTS.md").exists() {
                 setup_agents_md()?;
@@ -652,15 +643,86 @@ fn validate_skill_ownership(skill_dir: &std::path::Path) -> Result<(), String> {
     Ok(())
 }
 
-fn preflight_agent_skills(global: bool) -> Result<(), String> {
-    let (skills_base, _) = agent_skills_base(global)?;
-    ensure_managed_path_is_not_symlinked(&skills_base, &skills_base)?;
-    for skill_name in bundled_skill_names()? {
-        let skill_dir = skills_base.join(skill_name);
-        ensure_managed_path_is_not_symlinked(&skills_base, &skill_dir)?;
-        validate_skill_ownership(&skill_dir)?;
+fn collect_source_files(
+    dir: &std::path::Path,
+    base: &std::path::Path,
+    files: &mut Vec<(std::path::PathBuf, Vec<u8>)>,
+) -> Result<(), String> {
+    let entries = fs::read_dir(dir)
+        .map_err(|e| format!("Failed to read directory {}: {}", dir.display(), e))?;
+
+    for entry in entries {
+        let entry = entry.map_err(|e| format!("Failed to read directory entry: {}", e))?;
+        let path = entry.path();
+
+        if path.is_dir() {
+            collect_source_files(&path, base, files)?;
+        } else if path.is_file() {
+            let rel_path = path
+                .strip_prefix(base)
+                .map_err(|e| format!("Failed to get relative path: {}", e))?;
+            let content =
+                fs::read(&path).map_err(|e| format!("Failed to read {}: {}", path.display(), e))?;
+            files.push((rel_path.to_path_buf(), content));
+        }
     }
     Ok(())
+}
+
+fn bundled_skill_files(skill_name: &str) -> Result<Vec<(std::path::PathBuf, Vec<u8>)>, String> {
+    let source_skill_dir = hot::resources::get_skill_path(skill_name)?;
+    let mut skill_files = Vec::new();
+    collect_source_files(&source_skill_dir, &source_skill_dir, &mut skill_files)?;
+    Ok(skill_files)
+}
+
+fn manifest_relative_path(key: &str) -> Result<std::path::PathBuf, String> {
+    use std::path::Component;
+
+    let path = std::path::Path::new(key);
+    if key.is_empty()
+        || !path
+            .components()
+            .all(|component| matches!(component, Component::Normal(_)))
+    {
+        return Err(format!("Invalid managed skill manifest path: {key}"));
+    }
+    Ok(path.to_path_buf())
+}
+
+fn preflight_agent_skill(global: bool, skill_name: &str) -> Result<(), String> {
+    let skill_files = bundled_skill_files(skill_name)?;
+    let (skills_base, _) = agent_skills_base(global)?;
+    let skill_dir = skills_base.join(skill_name);
+
+    ensure_managed_path_is_not_symlinked(&skills_base, &skills_base)?;
+    ensure_managed_path_is_not_symlinked(&skills_base, &skill_dir)?;
+    validate_skill_ownership(&skill_dir)?;
+    ensure_managed_path_is_not_symlinked(&skills_base, &skill_dir.join(SKILL_MANIFEST_FILE))?;
+    ensure_managed_path_is_not_symlinked(&skills_base, &skill_dir.join(SKILL_OWNER_FILE))?;
+    for (rel_path, _) in &skill_files {
+        ensure_managed_path_is_not_symlinked(&skills_base, &skill_dir.join(rel_path))?;
+    }
+
+    if let InstalledSkillManifestState::Valid(manifest) = read_installed_skill_manifest(&skill_dir)?
+    {
+        for key in manifest.files.keys() {
+            let rel_path = manifest_relative_path(key)?;
+            ensure_managed_path_is_not_symlinked(&skills_base, &skill_dir.join(rel_path))?;
+        }
+    }
+    Ok(())
+}
+
+fn preflight_selected_agent_skills(global: bool, skill_names: &[String]) -> Result<(), String> {
+    for skill_name in skill_names {
+        preflight_agent_skill(global, skill_name)?;
+    }
+    Ok(())
+}
+
+fn preflight_agent_skills(global: bool) -> Result<(), String> {
+    preflight_selected_agent_skills(global, &bundled_skill_names()?)
 }
 
 /// Install/refresh one bundled skill under `.skills/` (project) or
@@ -668,38 +730,8 @@ fn preflight_agent_skills(global: bool) -> Result<(), String> {
 fn setup_agent_skill(global: bool, skill_name: &str) -> Result<(), String> {
     use ahash::AHashSet;
 
-    let source_skill_dir = hot::resources::get_skill_path(skill_name)?;
-
     let (skills_base, location_desc) = agent_skills_base(global)?;
-
-    fn collect_source_files(
-        dir: &std::path::Path,
-        base: &std::path::Path,
-        files: &mut Vec<(std::path::PathBuf, Vec<u8>)>,
-    ) -> Result<(), String> {
-        let entries = fs::read_dir(dir)
-            .map_err(|e| format!("Failed to read directory {}: {}", dir.display(), e))?;
-
-        for entry in entries {
-            let entry = entry.map_err(|e| format!("Failed to read directory entry: {}", e))?;
-            let path = entry.path();
-
-            if path.is_dir() {
-                collect_source_files(&path, base, files)?;
-            } else if path.is_file() {
-                let rel_path = path
-                    .strip_prefix(base)
-                    .map_err(|e| format!("Failed to get relative path: {}", e))?;
-                let content = fs::read(&path)
-                    .map_err(|e| format!("Failed to read {}: {}", path.display(), e))?;
-                files.push((rel_path.to_path_buf(), content));
-            }
-        }
-        Ok(())
-    }
-
-    let mut skill_files: Vec<(std::path::PathBuf, Vec<u8>)> = Vec::new();
-    collect_source_files(&source_skill_dir, &source_skill_dir, &mut skill_files)?;
+    let skill_files = bundled_skill_files(skill_name)?;
 
     let skill_dir = skills_base.join(skill_name);
     ensure_managed_path_is_not_symlinked(&skills_base, &skill_dir)?;

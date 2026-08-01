@@ -206,6 +206,11 @@ fn hot_ai_update_rejects_a_managed_file_symlink() {
     let project = temp.path();
 
     run(project, &["ai", "add"]);
+    let agents_path = project.join("AGENTS.md");
+    let agents_before = std::fs::read_to_string(&agents_path).unwrap();
+    let stale_agents = agents_before.replacen("hash:", "hash:stale", 1);
+    assert_ne!(stale_agents, agents_before);
+    std::fs::write(&agents_path, &stale_agents).unwrap();
     let outside = project.join("outside-skill.md");
     std::fs::write(&outside, "do not replace\n").unwrap();
     let managed = project.join(".skills/hot-language/SKILL.md");
@@ -220,6 +225,11 @@ fn hot_ai_update_rejects_a_managed_file_symlink() {
         "do not replace\n",
         "skill update must never write through a managed file symlink"
     );
+    assert_eq!(
+        std::fs::read_to_string(agents_path).unwrap(),
+        stale_agents,
+        "descendant preflight must fail before AGENTS.md is refreshed"
+    );
 }
 
 #[cfg(unix)]
@@ -231,6 +241,11 @@ fn hot_ai_update_rejects_a_managed_directory_symlink() {
     let project = temp.path();
 
     run(project, &["ai", "add"]);
+    let agents_path = project.join("AGENTS.md");
+    let agents_before = std::fs::read_to_string(&agents_path).unwrap();
+    let stale_agents = agents_before.replacen("hash:", "hash:stale", 1);
+    assert_ne!(stale_agents, agents_before);
+    std::fs::write(&agents_path, &stale_agents).unwrap();
     let outside = project.join("outside-references");
     std::fs::create_dir(&outside).unwrap();
     let sentinel = outside.join("keep.txt");
@@ -254,6 +269,11 @@ fn hot_ai_update_rejects_a_managed_directory_symlink() {
         std::fs::read_dir(outside).unwrap().count(),
         1,
         "skill update must not create managed files outside the skill tree"
+    );
+    assert_eq!(
+        std::fs::read_to_string(agents_path).unwrap(),
+        stale_agents,
+        "descendant preflight must fail before AGENTS.md is refreshed"
     );
 }
 
@@ -470,6 +490,36 @@ fn hot_ai_update_recovers_when_the_manifest_was_deleted() {
     assert_eq!(std::fs::read_to_string(skill_md).unwrap(), customized);
     assert!(skill_dir.join(MANIFEST_FILE).is_file());
     assert!(skill_dir.join(OWNER_FILE).is_file());
+}
+
+#[test]
+fn hot_ai_update_rejects_an_unsupported_manifest_before_touching_agents() {
+    let project = tempfile::tempdir().expect("project");
+    run(project.path(), &["ai", "add"]);
+
+    let agents_path = project.path().join("AGENTS.md");
+    let agents_before = std::fs::read_to_string(&agents_path).unwrap();
+    let stale_agents = agents_before.replacen("hash:", "hash:stale", 1);
+    assert_ne!(stale_agents, agents_before);
+    std::fs::write(&agents_path, &stale_agents).unwrap();
+
+    let manifest_path = project
+        .path()
+        .join(".skills/hot-language")
+        .join(MANIFEST_FILE);
+    std::fs::write(&manifest_path, "{\"version\":2,\"files\":{}}\n").unwrap();
+
+    let status = run_status(project.path(), &["ai", "update"]);
+
+    assert!(
+        !status.success(),
+        "unsupported manifests must reject update"
+    );
+    assert_eq!(
+        std::fs::read_to_string(agents_path).unwrap(),
+        stale_agents,
+        "manifest validation must happen before AGENTS.md is refreshed"
+    );
 }
 
 #[cfg(unix)]

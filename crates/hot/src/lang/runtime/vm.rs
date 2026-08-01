@@ -53,16 +53,16 @@ fn is_cancellation_payload(val: &Val) -> bool {
 
 fn terminal_payload_type(val: &Val) -> Option<String> {
     if let Val::Map(map) = val
-        && let Some(Val::Str(type_str)) = map.get(&Val::from("$type"))
+        && let Some(type_str) = crate::val::tagged_type_name(map)
         && matches!(
-            &**type_str,
+            type_str,
             "::hot::run/Failure"
                 | "::hot::task/Failure"
                 | "::hot::run/Cancellation"
                 | "::hot::task/Cancellation"
         )
     {
-        return Some((**type_str).to_owned());
+        return Some(type_str.to_owned());
     }
 
     None
@@ -855,13 +855,12 @@ impl VirtualMachine {
     fn get_value_type_name(&self, value: &Val) -> String {
         match value {
             Val::Map(m) => {
-                // Check if this is a typed value with $type metadata
-                if let Some(Val::Str(type_name)) = m.get(&Val::from("$type")) {
+                if let Some(type_name) = crate::val::tagged_type_name(m) {
                     // Extract just the type name from the full path
                     if let Some(last_part) = type_name.split('/').next_back() {
                         last_part.to_string()
                     } else {
-                        (**type_name).to_owned()
+                        type_name.to_owned()
                     }
                 } else {
                     "Map".to_string()
@@ -3332,16 +3331,8 @@ impl VirtualMachine {
                 // This allows both `Variant({...})` and `Variant(Type({...}))` to work equivalently.
                 let src_val = self.get_register(src)?.clone();
                 let extracted = match &src_val {
-                    Val::Map(map) => {
-                        if map.contains_key(&Val::from("$type")) {
-                            if let Some(inner_val) = map.get(&Val::from("$val")) {
-                                inner_val.clone()
-                            } else {
-                                src_val
-                            }
-                        } else {
-                            src_val
-                        }
+                    Val::Map(map) if crate::val::tagged_type_name(map).is_some() => {
+                        map.get(&Val::from("$val")).cloned().unwrap_or(src_val)
                     }
                     _ => src_val,
                 };
@@ -4014,9 +4005,9 @@ impl VirtualMachine {
             // This is a reference to another custom type - call its constructor
             // If data is already typed with matching type (or enum variant), return as-is
             if let Val::Map(m) = data
-                && let Some(Val::Str(existing_type)) = m.get(&Val::from("$type"))
+                && let Some(existing_type) = crate::val::tagged_type_name(m)
             {
-                let existing = &**existing_type;
+                let existing = existing_type;
                 // Exact match (e.g., "::ns/Type" == "::ns/Type")
                 // OR enum variant match (e.g., "::ns/Type.Variant" starts with "::ns/Type.")
                 if existing == type_name || existing.starts_with(&format!("{}.", type_name)) {
@@ -4258,7 +4249,7 @@ impl VirtualMachine {
 
         // If data is already typed (has $type), extract its $val for reconstruction
         let raw_data = match data {
-            Val::Map(m) if m.contains_key(&Val::from("$type")) => {
+            Val::Map(m) if crate::val::tagged_type_name(m).is_some() => {
                 m.get(&Val::from("$val")).cloned().unwrap_or(data.clone())
             }
             _ => data.clone(),
@@ -4444,10 +4435,7 @@ impl VirtualMachine {
         let Val::Map(map) = data else {
             return None;
         };
-        let Some(Val::Str(type_name)) = map.get(&Val::from("$type")) else {
-            return None;
-        };
-        Some(type_name)
+        crate::val::tagged_type_name(map)
     }
 
     fn type_info_matches_type(type_info: &Val, existing_type: &str) -> bool {
@@ -4936,15 +4924,15 @@ impl VirtualMachine {
         // Check if this is a Result type (variant union format)
         // Format: {$type: "::hot::type/Result.Ok", $val: ...} or {$type: "::hot::type/Result.Err", $val: ...}
         if let Val::Map(m) = val
-            && let Some(Val::Str(type_str)) = m.get(&Val::from("$type"))
+            && let Some(type_str) = crate::val::tagged_type_name(m)
         {
             // Result.Ok - return the inner value
-            if &**type_str == "::hot::type/Result.Ok" {
+            if type_str == "::hot::type/Result.Ok" {
                 return Ok(m.get(&Val::from("$val")).cloned().unwrap_or(Val::Null));
             }
 
             // Result.Err - fail with the error
-            if &**type_str == "::hot::type/Result.Err" {
+            if type_str == "::hot::type/Result.Err" {
                 let err_val = m.get(&Val::from("$val")).cloned().unwrap_or(Val::Null);
 
                 let msg = Self::result_err_message(&err_val);
@@ -5073,8 +5061,8 @@ impl VirtualMachine {
     ///
     /// Includes the Val discriminant of each argument so that overloads dispatched
     /// by type (e.g. `add(Int, Int)` vs `add(Str, Str)`) get distinct cache entries.
-    /// For `Val::Map`, also includes the `$type` field (if present) so that custom
-    /// typed maps (e.g. `User` vs `Shape`) produce distinct cache keys.
+    /// For tagged `Val::Map` values, also includes the nominal type name so
+    /// custom types (e.g. `User` vs `Shape`) produce distinct cache keys.
     #[inline(always)]
     fn dispatch_cache_key(name: &str, args: &[Val]) -> u64 {
         use std::hash::{Hash, Hasher};
@@ -5083,10 +5071,8 @@ impl VirtualMachine {
         args.len().hash(&mut hasher);
         for arg in args {
             std::mem::discriminant(arg).hash(&mut hasher);
-            // For maps with a $type field (custom types like User, Shape, etc.),
-            // include the type name so different custom types get distinct cache entries.
             if let Val::Map(m) = arg
-                && let Some(Val::Str(type_name)) = m.get(&Val::from("$type"))
+                && let Some(type_name) = crate::val::tagged_type_name(m)
             {
                 type_name.hash(&mut hasher);
             }
@@ -5605,8 +5591,7 @@ impl VirtualMachine {
         // silently produces a null result. (`call_function_value` performs the same
         // unwrap for the lexical-scope path; this one covers direct-Call dispatch.)
         if let Val::Map(m) = &function_val
-            && let Some(Val::Str(tn)) = m.get(&Val::from("$type"))
-            && &**tn == "::hot::type/Fn"
+            && crate::val::tagged_type_name(m) == Some("::hot::type/Fn")
             && let Some(inner) = m.get(&Val::from("$val"))
         {
             function_val = inner.clone();
@@ -6135,8 +6120,7 @@ impl VirtualMachine {
                 // that was loaded from such a field — e.g. `f h.body; f(args)` where `body:
                 // Fn?` — fell through to the "non-callable" default and returned `Val::Null`,
                 // which presented to the user as a function silently producing null.
-                if let Some(Val::Str(type_name)) = map.get(&Val::from("$type"))
-                    && &**type_name == "::hot::type/Fn"
+                if crate::val::tagged_type_name(map) == Some("::hot::type/Fn")
                     && let Some(inner) = map.get(&Val::from("$val"))
                 {
                     tracing::trace!("VM: Unwrapping typed Fn value and recursing");
@@ -6310,13 +6294,12 @@ impl VirtualMachine {
             Val::Bool(_) => "Bool".to_string(),
             Val::Vec(_) => "Vec".to_string(),
             Val::Map(map) => {
-                // Check if this is a typed object with $type metadata
-                if let Some(Val::Str(type_name)) = map.get(&Val::from("$type")) {
+                if let Some(type_name) = crate::val::tagged_type_name(map) {
                     // Extract just the type name from "::namespace/TypeName"
                     if let Some(slash_pos) = type_name.rfind('/') {
                         type_name[slash_pos + 1..].to_string()
                     } else {
-                        (**type_name).to_owned()
+                        type_name.to_owned()
                     }
                 } else {
                     "Map".to_string()
@@ -6342,9 +6325,8 @@ impl VirtualMachine {
             Val::Byte(_) => "::hot::type/Byte".to_string(),
             Val::Bytes(_) => "::hot::type/Bytes".to_string(),
             Val::Map(map) => {
-                // Check for $type field for custom types (including Result.Ok/Result.Err variants)
-                if let Some(Val::Str(type_str)) = map.get(&Val::from("$type")) {
-                    (**type_str).to_owned()
+                if let Some(type_str) = crate::val::tagged_type_name(map) {
+                    type_str.to_owned()
                 } else {
                     // Plain map
                     "::hot::type/Map".to_string()
@@ -6965,10 +6947,9 @@ impl VirtualMachine {
 
     fn is_result_shaped(val: &Val) -> bool {
         if let Val::Map(map) = val
-            && let Some(Val::Str(type_str)) = map.get(&Val::from("$type"))
+            && let Some(type_str) = crate::val::tagged_type_name(map)
         {
-            return &**type_str == "::hot::type/Result.Err"
-                || &**type_str == "::hot::type/Result.Ok";
+            return type_str == "::hot::type/Result.Err" || type_str == "::hot::type/Result.Ok";
         }
         false
     }
@@ -9199,7 +9180,15 @@ impl VirtualMachine {
             // prefixes them); Result.Err consumption halts carry the same
             // `Result error:` prefix `unwrap_result_if_ok` raises.
             let msg = match &failure {
-                Some(f) if f.plain_vm_error => f.msg.clone(),
+                Some(f) if f.plain_vm_error => {
+                    // Plain helper failures are only the JIT's transport for
+                    // an ordinary VmError. Once reconstructed, clear that
+                    // transport state so HOF callers do not mistake it for an
+                    // explicit `fail()` raised by the callback.
+                    let msg = f.msg.clone();
+                    self.reset_failure_state();
+                    msg
+                }
                 Some(f) => format!("Result error: {}", f.msg),
                 None => "Result error: halted".to_string(),
             };

@@ -380,20 +380,13 @@ For custom types, use `is-type`:
 
 Typed values carry internal metadata so Hot can preserve type identity at runtime. That wrapper is transparent to field access and is not a source-level reflection API: use normal field access, `match`, and `is-type`.
 
-`to-json` preserves type identity using tagged JSON. Its serialized form uses
-`$type` and `$val` members where needed. Field and string-key index syntax never
-exposes or skips through those wrapper members. If the payload itself has a
-field named `$val`, for example, `value.$val` reads that payload field;
-otherwise it is absent just like any other field. Hot recognizes the reserved
-wrapper only when its members are `$type`, `$val`, and the optional defined
-metadata member `$origin`. For a foreign Map with any other sibling data
-field—even one beginning with `$`—field access stays ordinary: every member
-reads literally, so adding a literal `$val` field cannot change how its
-siblings are read. Type predicates are stricter than field access, though: any
-Map carrying a `$type` member is no longer an ordinary Map to them — `is-map`
-returns `false`, and `is-type` matches the carried name when it is the fully
-qualified type path that `to-json` emits (a short name does not match). Call `untype` first when a recipient instead expects ordinary
-untagged JSON:
+`to-json` preserves that identity with Hot's tagged JSON representation, and
+`from-json` restores it. Treat the tag as a wire format rather than constructing
+or inspecting its metadata in Hot code. The serialized tag is an implementation
+boundary, not an alternate source-level type-construction or reflection API.
+
+Call `untype` before serialization when a recipient expects ordinary untagged
+JSON:
 
 ```hot
 // Define a type

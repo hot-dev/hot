@@ -1373,6 +1373,37 @@ caller(true)"#;
         }
     }
 
+    #[test]
+    fn pmap_callback_runtime_errors_have_interpreter_jit_parity() {
+        let source = r#"::test ns
+process fn (x: Int): Vec {
+    values [1, 2]
+    index sub(0, 1)
+    values[index] x
+    values
+}
+pmap([1, 2, 3, 4, 5, 6, 7, 8], process)"#;
+
+        let interpreter = compile_and_run_with_std_conf(
+            source,
+            Some(crate::val!({"engine": {"threads": 2}, "jit": {"mode": "off"}})),
+        )
+        .expect("interpreter pmap should return a callback error value");
+        let jit = compile_and_run_with_std_conf(
+            source,
+            Some(crate::val!({"engine": {"threads": 2}, "jit": {"threshold": 1}})),
+        )
+        .expect("JIT pmap should return the same callback error value");
+
+        assert_eq!(jit, interpreter);
+        assert!(jit.is_err(), "expected Result.Err, got {jit:?}");
+        assert!(
+            jit.unwrap_err()
+                .is_some_and(|error| error.to_string().contains("Vector index cannot be negative")),
+            "unexpected pmap error: {jit:?}"
+        );
+    }
+
     /// Helper to create a test VM
     fn create_test_vm() -> VirtualMachine {
         use crate::lang::bytecode::BytecodeProgram;

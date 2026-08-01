@@ -51,9 +51,9 @@ pub(crate) fn str_internal(args: &[Val]) -> HotResult<Val> {
         Val::Null => HotResult::Ok(Val::from("")),
         Val::Map(m) => {
             // Typed object special-cases
-            if let Some(Val::Str(type_name)) = m.get(&Val::from("$type")) {
+            if let Some(type_name) = crate::val::tagged_type_name(m) {
                 // For Fn and Namespace types, stringify to their $val
-                if (&**type_name == "::hot::type/Fn" || &**type_name == "::hot::type/Namespace")
+                if (type_name == "::hot::type/Fn" || type_name == "::hot::type/Namespace")
                     && m.get(&Val::from("$val")).is_some()
                     && let Some(Val::Str(val)) = m.get(&Val::from("$val"))
                 {
@@ -128,10 +128,8 @@ pub fn str_constructor(
     // If arg is a typed object, try user-defined implementation: SourceType -> Str
     if let Val::Map(map) = &args[0] {
         tracing::debug!("str_constructor_vm: Processing map argument: {:?}", map);
-        let _has_type = map.contains_key(&Val::from("$type"));
         // If this is a typed Fn value, unwrap to its $val string before proceeding
-        if let Some(Val::Str(tn)) = map.get(&Val::from("$type"))
-            && &**tn == "::hot::type/Fn"
+        if crate::val::tagged_type_name(map) == Some("::hot::type/Fn")
             && let Some(inner) = map.get(&Val::from("$val"))
         {
             // Stringify function refs by their $val (e.g., "::ns/fn")
@@ -139,14 +137,14 @@ pub fn str_constructor(
                 return HotResult::Ok(Val::from(s.clone()));
             }
         }
-        if let Some(Val::Str(type_name_full)) = map.get(&Val::from("$type")) {
+        if let Some(type_name_full) = crate::val::tagged_type_name(map) {
             let source_short = type_name_full
                 .rsplit('/')
                 .next()
                 .unwrap_or(type_name_full)
                 .to_string();
             let key = (source_short.clone(), "Str".to_string());
-            let key_full = (type_name_full.clone(), "Str".to_string());
+            let key_full = (type_name_full.to_owned(), "Str".to_string());
 
             tracing::debug!(
                 "Type dispatch: Looking for implementation for type '{}' (short: '{}') -> Str",
@@ -190,12 +188,14 @@ pub fn str_constructor(
                     // Create a new typed object with the inner data and the type
                     if let Val::Map(inner_map) = inner_val {
                         let mut typed_inner = inner_map.clone();
-                        typed_inner.insert(Val::from("$type"), Val::from(type_name_full.clone()));
+                        typed_inner
+                            .insert(Val::from("$type"), Val::from(type_name_full.to_owned()));
                         Val::Map(typed_inner)
                     } else {
                         // For non-map $val, create a simple typed wrapper
                         let mut typed_wrapper = indexmap::IndexMap::new();
-                        typed_wrapper.insert(Val::from("$type"), Val::from(type_name_full.clone()));
+                        typed_wrapper
+                            .insert(Val::from("$type"), Val::from(type_name_full.to_owned()));
                         typed_wrapper.insert(Val::from("$val"), inner_val.clone());
                         Val::Map(Box::new(typed_wrapper))
                     }
@@ -247,8 +247,7 @@ pub fn str_constructor(
                         // Guard: if the implementation returned the same typed value,
                         // fall through to str_internal to avoid infinite recursion
                         if let Val::Map(result_map) = &val
-                            && let Some(Val::Str(rt)) = result_map.get(&Val::from("$type"))
-                            && **rt == **type_name_full
+                            && crate::val::tagged_type_name(result_map) == Some(type_name_full)
                         {
                             return str_internal(args);
                         }
@@ -288,9 +287,7 @@ fn int_internal(args: &[Val]) -> HotResult<Val> {
         Val::Bool(b) => HotResult::Ok(Val::Int(if *b { 1 } else { 0 })),
         Val::Map(m) => {
             // Check if this is a typed object that implements Int
-            if let Some(type_val) = m.get(&Val::from("$type"))
-                && let Val::Str(_type_name) = type_val
-            {
+            if crate::val::tagged_type_name(m).is_some() {
                 // Look for $val field or type implementation
                 if let Some(val_field) = m.get(&Val::from("$val")) {
                     return int_internal(std::slice::from_ref(val_field));
@@ -314,7 +311,7 @@ pub fn int_constructor(
         )));
     }
     if let Val::Map(map) = &args[0]
-        && let Some(Val::Str(type_name_full)) = map.get(&Val::from("$type"))
+        && let Some(type_name_full) = crate::val::tagged_type_name(map)
     {
         let source_short = type_name_full
             .rsplit('/')
@@ -363,9 +360,7 @@ fn dec_internal(args: &[Val]) -> HotResult<Val> {
         Val::Bool(b) => HotResult::Ok(Val::Dec(D256::from(if *b { 1 } else { 0 }))),
         Val::Map(m) => {
             // Check if this is a typed object that implements Dec
-            if let Some(type_val) = m.get(&Val::from("$type"))
-                && let Val::Str(_type_name) = type_val
-            {
+            if crate::val::tagged_type_name(m).is_some() {
                 // Look for $val field or type implementation
                 if let Some(val_field) = m.get(&Val::from("$val")) {
                     return dec_internal(std::slice::from_ref(val_field));
@@ -389,7 +384,7 @@ pub fn dec_constructor(
         )));
     }
     if let Val::Map(map) = &args[0]
-        && let Some(Val::Str(type_name_full)) = map.get(&Val::from("$type"))
+        && let Some(type_name_full) = crate::val::tagged_type_name(map)
     {
         let source_short = type_name_full
             .rsplit('/')
@@ -454,7 +449,7 @@ pub fn bool_constructor(
         )));
     }
     if let Val::Map(map) = &args[0]
-        && let Some(Val::Str(type_name_full)) = map.get(&Val::from("$type"))
+        && let Some(type_name_full) = crate::val::tagged_type_name(map)
     {
         let source_short = type_name_full
             .rsplit('/')
@@ -774,9 +769,7 @@ pub fn namespace_constructor(args: &[Val]) -> HotResult<Val> {
         }
         Val::Map(m) => {
             // If already a typed Namespace, return as-is
-            if let Some(Val::Str(tn)) = m.get(&Val::from("$type"))
-                && &**tn == "::hot::type/Namespace"
-            {
+            if crate::val::tagged_type_name(m) == Some("::hot::type/Namespace") {
                 return HotResult::Ok(Val::Map(m.clone()));
             }
             HotResult::Err(Val::from(
@@ -826,9 +819,7 @@ pub fn fn_constructor(args: &[Val]) -> HotResult<Val> {
         }
         // Already a typed Fn – pass through
         Val::Map(m) => {
-            if let Some(Val::Str(tn)) = m.get(&Val::from("$type"))
-                && &**tn == "::hot::type/Fn"
-            {
+            if crate::val::tagged_type_name(m) == Some("::hot::type/Fn") {
                 return HotResult::Ok(Val::Map(m.clone()));
             }
             return HotResult::Err(Val::from("Fn constructor expects Str | Fn"));
@@ -910,9 +901,8 @@ fn get_value_type_path(value: &Val) -> Option<String> {
         Val::Byte(_) => Some("::hot::type/Byte".to_string()),
         Val::Bytes(_) => Some("::hot::type/Bytes".to_string()),
         Val::Map(map) => {
-            // Check for $type field for custom types (including Result.Ok/Result.Err variants)
-            if let Some(Val::Str(type_str)) = map.get(&Val::from("$type")) {
-                Some((**type_str).to_owned())
+            if let Some(type_str) = crate::val::tagged_type_name(map) {
+                Some(type_str.to_owned())
             } else {
                 // Plain map
                 Some("::hot::type/Map".to_string())
@@ -1093,11 +1083,7 @@ pub fn typed_map(args: &[Val]) -> HotResult<Val> {
         _ => return HotResult::Err(Val::from("typed-map expects a string type name")),
     };
 
-    // Create a map with type information
-    let mut map = IndexMap::new();
-    map.insert(Val::from("$type"), Val::from(type_name));
-
-    // Add any additional key-value pairs
+    let mut content = IndexMap::new();
     if args.len() > 1 {
         if !(args.len() - 1).is_multiple_of(2) {
             return HotResult::Err(Val::from(
@@ -1106,11 +1092,11 @@ pub fn typed_map(args: &[Val]) -> HotResult<Val> {
         }
 
         for chunk in args[1..].chunks(2) {
-            map.insert(chunk[0].clone(), chunk[1].clone());
+            content.insert(chunk[0].clone(), chunk[1].clone());
         }
     }
 
-    HotResult::Ok(Val::Map(Box::new(map)))
+    HotResult::Ok(Val::typed_map(&type_name, content))
 }
 
 /// Untype function - removes type information from typed objects recursively
@@ -1131,8 +1117,7 @@ pub fn untype(args: &[Val]) -> HotResult<Val> {
 pub fn untype_recursive(form: &Val) -> HotResult<Val> {
     match form {
         Val::Map(map) => {
-            // If this is a typed structure with $type, prefer $val if present
-            if map.contains_key(&Val::from("$type")) {
+            if crate::val::tagged_type_name(map).is_some() {
                 if let Some(val_content) = map.get(&Val::from("$val")) {
                     return untype_recursive(val_content);
                 }
@@ -1269,14 +1254,12 @@ pub fn result_is_ok(
 
     match actual_val {
         // Check for Result variant format: {$type: "::hot::type/Result.Ok"|"::hot::type/Result.Err", $val: ...}
-        Val::Map(map) => {
-            if let Some(Val::Str(type_str)) = map.get(&Val::from("$type")) {
-                if &**type_str == "::hot::type/Result.Ok" {
-                    return HotResult::Ok(Val::Bool(true));
-                }
-                if &**type_str == "::hot::type/Result.Err" {
-                    return HotResult::Ok(Val::Bool(false));
-                }
+        Val::Map(_) => {
+            if actual_val.is_ok() {
+                return HotResult::Ok(Val::Bool(true));
+            }
+            if actual_val.is_err() {
+                return HotResult::Ok(Val::Bool(false));
             }
             // Non-Result maps are considered "ok" (successful values)
             HotResult::Ok(Val::Bool(true))
@@ -1373,14 +1356,12 @@ pub fn result_is_err(
     }
     match actual_val {
         // Check for Result variant format: {$type: "::hot::type/Result.Ok"|"::hot::type/Result.Err", $val: ...}
-        Val::Map(map) => {
-            if let Some(Val::Str(type_str)) = map.get(&Val::from("$type")) {
-                if &**type_str == "::hot::type/Result.Err" {
-                    return HotResult::Ok(Val::Bool(true));
-                }
-                if &**type_str == "::hot::type/Result.Ok" {
-                    return HotResult::Ok(Val::Bool(false));
-                }
+        Val::Map(_) => {
+            if actual_val.is_err() {
+                return HotResult::Ok(Val::Bool(true));
+            }
+            if actual_val.is_ok() {
+                return HotResult::Ok(Val::Bool(false));
             }
             // Non-Result maps are not errors
             HotResult::Ok(Val::Bool(false))
@@ -1450,14 +1431,12 @@ fn classify_result(val: &Val) -> (Option<bool>, Option<Val>) {
         }
     }
 
-    if let Val::Map(map) = actual
-        && let Some(Val::Str(type_str)) = map.get(&Val::from("$type"))
-    {
+    if let Val::Map(map) = actual {
         let payload = map.get(&Val::from("$val")).cloned();
-        if &**type_str == "::hot::type/Result.Ok" {
+        if actual.is_ok() {
             return (Some(true), payload);
         }
-        if &**type_str == "::hot::type/Result.Err" {
+        if actual.is_err() {
             return (Some(false), payload);
         }
     }
@@ -1604,15 +1583,11 @@ pub fn result_if_ok(
     // Check if Ok or Err
     let (is_ok, payload) = match actual_val {
         Val::Map(map) => {
-            if let Some(Val::Str(type_str)) = map.get(&Val::from("$type")) {
-                if &**type_str == "::hot::type/Result.Ok" {
-                    let val = map.get(&Val::from("$val")).cloned().unwrap_or(Val::Null);
-                    (true, val)
-                } else if &**type_str == "::hot::type/Result.Err" {
-                    (false, actual_val.clone())
-                } else {
-                    (true, actual_val.clone())
-                }
+            if actual_val.is_ok() {
+                let val = map.get(&Val::from("$val")).cloned().unwrap_or(Val::Null);
+                (true, val)
+            } else if actual_val.is_err() {
+                (false, actual_val.clone())
             } else {
                 (true, actual_val.clone())
             }
@@ -1730,14 +1705,12 @@ pub fn result_if_err(
     // Check if Ok or Err
     match actual_val {
         Val::Map(map) => {
-            if let Some(Val::Str(type_str)) = map.get(&Val::from("$type")) {
-                if &**type_str == "::hot::type/Result.Ok" {
-                    return HotResult::Ok(actual_val.clone());
-                }
-                if &**type_str == "::hot::type/Result.Err" {
-                    let err_payload = map.get(&Val::from("$val")).cloned().unwrap_or(Val::Null);
-                    return handle_err_branch(vm, &args[1], &err_payload);
-                }
+            if actual_val.is_ok() {
+                return HotResult::Ok(actual_val.clone());
+            }
+            if actual_val.is_err() {
+                let err_payload = map.get(&Val::from("$val")).cloned().unwrap_or(Val::Null);
+                return handle_err_branch(vm, &args[1], &err_payload);
             }
             HotResult::Ok(actual_val.clone())
         }
@@ -1757,11 +1730,11 @@ fn is_callable(val: &Val) -> bool {
                     .is_some()
         }
         Val::Map(m) => {
-            if let Some(Val::Str(type_str)) = m.get(&Val::from("$type")) {
-                &**type_str == "::hot::type/Fn" || &**type_str == "::hot::type/FunctionAlias"
-            } else {
-                false
-            }
+            crate::val::tagged_type_name(m) == Some("::hot::type/Fn")
+                || matches!(
+                    m.get(&Val::from("$type")),
+                    Some(Val::Str(type_str)) if &**type_str == "::hot::type/FunctionAlias"
+                )
         }
         _ => false,
     }

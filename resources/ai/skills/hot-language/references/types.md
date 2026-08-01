@@ -526,16 +526,11 @@ greet fn
 ## Untyping for Serialization
 
 Typed values carry a transparent runtime wrapper, not a source-level reflection
-API. Use normal field access, `match`, and `is-type`. `to-json` preserves type
-identity with tagged JSON whose wrapper uses `$type` and `$val`. Field access
-never exposes or skips through those wrapper members: `value.$val` means a
-payload field literally named `$val`. A tagged wrapper may also contain the
-defined metadata member `$origin`; for a foreign Map with any other sibling
-data field—even one beginning with `$`—field access stays ordinary and every
-member reads literally. Type predicates are stricter: any Map carrying a
-`$type` member makes `is-map` return `false`, and `is-type` matches the
-carried name only when it is the fully qualified type path that `to-json`
-emits (short names do not match). Call `untype` first only when an API or storage system expects
+API. Use normal field access, `match`, and `is-type`; do not construct or inspect
+the wrapper metadata directly. `to-json` preserves nominal identity with Hot's
+tagged JSON representation, and `from-json` restores it. The serialized tag is
+an implementation boundary, not an alternate source-level type-construction or
+reflection API. Call `untype` first when an API or storage system expects
 untagged maps:
 
 ```hot

@@ -290,9 +290,9 @@ impl JitTypeTag {
             | (Self::Vec, Val::Vec(_))
             | (Self::Byte, Val::Byte(_))
             | (Self::Bytes, Val::Bytes(_)) => true,
-            (Self::Map, Val::Map(map)) => !matches!(map.get(type_key_val()), Some(Val::Str(_))),
+            (Self::Map, Val::Map(map)) => crate::val::tagged_type_name(map).is_none(),
             (Self::TypedMap(name), Val::Map(map)) => {
-                matches!(map.get(type_key_val()), Some(Val::Str(s)) if &**s == name.as_str())
+                crate::val::tagged_type_name(map).is_some_and(|actual| actual == name)
             }
             (Self::Boxed(name), Val::Box(b)) => b.type_name() == name.as_str(),
             _ => false,
@@ -307,12 +307,8 @@ impl JitTypeTag {
             Val::Dec(_) => Self::Dec,
             Val::Str(_) => Self::Str,
             Val::Vec(_) => Self::Vec,
-            Val::Map(map) => map
-                .get(&Val::from("$type"))
-                .and_then(|v| match v {
-                    Val::Str(s) => Some(Self::TypedMap(s.to_string())),
-                    _ => None,
-                })
+            Val::Map(map) => crate::val::tagged_type_name(map)
+                .map(|name| Self::TypedMap(name.to_owned()))
                 .unwrap_or(Self::Map),
             Val::Box(v) => Self::Boxed(v.type_name().to_string()),
             Val::Byte(_) => Self::Byte,
@@ -1015,13 +1011,6 @@ pub fn log_jit_stats_summary() {
             stats.lambda_jit_fallbacks
         );
     }
-}
-
-/// Shared `$type` key for allocation-free typed-map guards. Building
-/// `Val::from("$type")` per check would allocate a fresh `Arc<str>` each time.
-fn type_key_val() -> &'static Val {
-    static KEY: std::sync::OnceLock<Val> = std::sync::OnceLock::new();
-    KEY.get_or_init(|| Val::from("$type"))
 }
 
 impl TypeSig {
@@ -2277,17 +2266,10 @@ unsafe extern "C" fn hot_jit_template_interpolate(parts_ptr: *const i64, parts_c
 unsafe extern "C" fn hot_jit_extract_inner_val(src_ptr: i64) -> i64 {
     let src_val = unsafe { &*(src_ptr as *const Val) };
     let extracted = match src_val {
-        Val::Map(map) => {
-            if map.contains_key(&Val::from("$type")) {
-                if let Some(inner_val) = map.get(&Val::from("$val")) {
-                    inner_val.clone()
-                } else {
-                    src_val.clone()
-                }
-            } else {
-                src_val.clone()
-            }
-        }
+        Val::Map(map) if crate::val::tagged_type_name(map).is_some() => map
+            .get(&Val::from("$val"))
+            .cloned()
+            .unwrap_or_else(|| src_val.clone()),
         _ => src_val.clone(),
     };
     new_owned_val(extracted)
@@ -2327,12 +2309,10 @@ unsafe extern "C" fn hot_jit_ensure_result(val_ptr: i64) -> i64 {
 
     // Check if already a Result type
     if let Val::Map(ref map) = val
-        && let Some(Val::Str(s)) = map.get(&Val::from("$type"))
+        && let Some(s) = crate::val::tagged_type_name(map)
+        && (s == "::hot::type/Result.Ok" || s == "::hot::type/Result.Err")
     {
-        let s: &str = s;
-        if s == "::hot::type/Result.Ok" || s == "::hot::type/Result.Err" {
-            return new_owned_val(val);
-        }
+        return new_owned_val(val);
     }
 
     // Wrap in Result.Ok

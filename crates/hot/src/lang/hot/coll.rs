@@ -292,14 +292,14 @@ fn call_prepared_with_vm_multi_args(
                 match vm.execute_compiled_user_function(function_id, args) {
                     Ok(result) => return Ok(result),
                     Err(vm_error) => {
-                        return Err(format!("Compiled function call failed: {:?}", vm_error));
+                        return Err(format!("Compiled function call failed: {}", vm_error));
                     }
                 }
             }
 
             match vm.execute_function_call_by_name(name, args) {
                 Ok(result) => Ok(result),
-                Err(vm_error) => Err(format!("VM function call failed: {:?}", vm_error)),
+                Err(vm_error) => Err(format!("VM function call failed: {}", vm_error)),
             }
         }
         PreparedFunction::CallableVal(function_val) => {
@@ -309,7 +309,7 @@ fn call_prepared_with_vm_multi_args(
 
             match vm.execute_lambda(function_val, args) {
                 Ok(result) => Ok(result),
-                Err(vm_error) => Err(format!("Lambda execution failed: {:?}", vm_error)),
+                Err(vm_error) => Err(format!("Lambda execution failed: {}", vm_error)),
             }
         }
         PreparedFunction::Invalid => Err(
