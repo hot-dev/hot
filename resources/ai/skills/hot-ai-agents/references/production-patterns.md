@@ -16,6 +16,11 @@
 Use one handler for a short atomic operation. Split a workflow when a stage
 must be independently retryable, pausable, inspectable, or resumable.
 
+When a client-triggered run starts long work, return the task id immediately
+and wait through the official SDK. Use `::hot::task/await` only when subsequent
+Hot-side work in the same execution genuinely depends on the task result. A
+client wait should not consume the originating run's lifetime.
+
 For an asynchronous media pipeline:
 
 - ingest the artifact;

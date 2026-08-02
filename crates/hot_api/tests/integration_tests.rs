@@ -16,6 +16,8 @@ use hot::db::run::{Run, RunType};
 use hot::db::schedule::Schedule;
 use hot::db::service_key::ServiceKey;
 use hot::db::session::Session;
+use hot::db::stream::Stream;
+use hot::db::task::{Task, TaskStatus};
 use hot::db::{DatabasePool, create_db_pool, insert_default_data};
 use hot::storage::BuildStorage;
 use hot::val;
@@ -1059,6 +1061,36 @@ async fn create_test_run(
     (run_id, stream_id)
 }
 
+async fn create_test_task(
+    db: &DatabasePool,
+    env_id: &Uuid,
+    build_id: &Uuid,
+    user_id: &Uuid,
+) -> (Uuid, Uuid) {
+    let task_id = Uuid::now_v7();
+    let stream_id = Uuid::now_v7();
+    Stream::create_or_get_stream(db, stream_id, *env_id)
+        .await
+        .unwrap();
+    Task::insert(
+        db,
+        &task_id,
+        env_id,
+        &stream_id,
+        build_id,
+        None,
+        "background-work",
+        Some(&json!({"input": "value"})),
+        None,
+        "code",
+        60_000,
+        Some(user_id),
+    )
+    .await
+    .unwrap();
+    (task_id, stream_id)
+}
+
 #[tokio::test]
 async fn test_get_run() {
     let db = create_test_db().await;
@@ -1123,6 +1155,88 @@ async fn test_get_run_not_found() {
 
     // Get non-existent run
     let uri = format!("/v1/runs/{}", fake_run_id);
+    let (status, _) = make_request(&app, Method::GET, &uri, &api_key, None).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn test_get_task_and_subscribe_to_completed_snapshot() {
+    let db = create_test_db().await;
+    let (_api_key_id, api_key) = create_test_api_key(&db.0).await;
+    let (_, user_id) = hot::db::get_default_org_and_user_ids(&db.0).await.unwrap();
+    let env = Env::get_default_env(&db.0).await.unwrap();
+    let project_id = create_test_project(&db.0, &env.env_id, &user_id).await;
+    let build_id = create_test_build(&db.0, &project_id, &user_id, false).await;
+    let (task_id, _) = create_test_task(&db.0, &env.env_id, &build_id, &user_id).await;
+
+    Task::complete(
+        &db.0,
+        &task_id,
+        &TaskStatus::Completed,
+        Some(&json!({"answer": 42})),
+    )
+    .await
+    .unwrap();
+
+    let api_v1_routes = axum::Router::new()
+        .route(
+            "/v1/tasks/{task_id}",
+            axum::routing::get(hot_api::handlers::get_task),
+        )
+        .route(
+            "/v1/tasks/{task_id}/subscribe",
+            axum::routing::get(hot_api::handlers::subscribe_to_task),
+        )
+        .route_layer(axum::middleware::from_fn_with_state(
+            db.clone(),
+            hot_api::auth::api_key_auth_middleware,
+        ));
+    let app = axum::Router::new()
+        .merge(api_v1_routes)
+        .with_state(db.clone());
+
+    let uri = format!("/v1/tasks/{task_id}");
+    let (status, response) = make_request(&app, Method::GET, &uri, &api_key, None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(response["data"]["task_id"], task_id.to_string());
+    assert_eq!(response["data"]["status"], "completed");
+    assert_eq!(response["data"]["result"]["answer"], 42);
+
+    let request = Request::builder()
+        .method(Method::GET)
+        .uri(format!("/v1/tasks/{task_id}/subscribe"))
+        .header("Authorization", format!("Bearer {api_key}"))
+        .body(Body::empty())
+        .unwrap();
+    let response = app.oneshot(request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let bytes = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+        .await
+        .unwrap();
+    let body = String::from_utf8(bytes.to_vec()).unwrap();
+    assert!(body.contains("event: task:update"));
+    assert!(body.contains("\"status\":\"completed\""));
+    assert!(body.contains("\"answer\":42"));
+}
+
+#[tokio::test]
+async fn test_get_task_not_found() {
+    let db = create_test_db().await;
+    let (_api_key_id, api_key) = create_test_api_key(&db.0).await;
+    let api_v1_routes = axum::Router::new()
+        .route(
+            "/v1/tasks/{task_id}",
+            axum::routing::get(hot_api::handlers::get_task),
+        )
+        .route_layer(axum::middleware::from_fn_with_state(
+            db.clone(),
+            hot_api::auth::api_key_auth_middleware,
+        ));
+    let app = axum::Router::new()
+        .merge(api_v1_routes)
+        .with_state(db.clone());
+
+    let uri = format!("/v1/tasks/{}", Uuid::new_v4());
     let (status, _) = make_request(&app, Method::GET, &uri, &api_key, None).await;
     assert_eq!(status, StatusCode::NOT_FOUND);
 }

@@ -34,7 +34,7 @@ and verify the resulting lockfile. Do not require a clone of an SDK repository.
 
 Every SDK mirrors the Hot API v1 resources:
 
-- events, streams, and runs;
+- events, streams, runs, and tasks;
 - files, projects, and builds;
 - context, domains, sessions, and service keys;
 - organization and environment.
@@ -66,12 +66,26 @@ Recognize these stream events:
 - `run:stop`, `run:fail`, or `run:cancel`: inspect `run.result` or the SDK's
   structured run failure;
 - `stream:complete`: the current SSE connection ended.
+- `task:update`: a durable task snapshot. `completed`, `failed`, `cancelled`,
+  and `timed_out` are terminal task states.
 
 ## Choose a Stream Lifecycle
 
 For one request and one matching run, use `subscribe-with-event`. It atomically
 opens the stream and publishes, reconnects across the server's connection cap
-in current SDKs, and stops after the first terminal run event.
+in current SDKs, and stops after the terminal run correlated to the published
+event. Unrelated runs on the same stream do not end the iterator.
+
+When that run starts a long-lived task, return the task id to the client and
+call the SDK task waiter. The waiter subscribes to the task endpoint, receives
+the current persisted snapshot first, reconnects when necessary, and therefore
+cannot miss completion that happened before subscription setup. Successful
+waits return the terminal task record; failed, cancelled, and timed-out tasks
+raise a structured task error containing that record.
+
+Use Hot-side `::hot::task/await` only when later Hot code in the same execution
+depends on the result. Client-owned waiting belongs in the SDK so the
+originating run can finish promptly.
 
 For a multi-turn browser session:
 
@@ -84,14 +98,24 @@ For a multi-turn browser session:
    replay missed data.
 
 The high-level `subscribeWithEvent` / `subscribe_with_event` helpers are
-one-run iterators: they stop after the first terminal run event. A persistent
-multi-turn UI should consume the raw BFF subscribe-with-event response for its
-first connection, publish later turns separately, and reattach through the
-existing-stream subscribe endpoint.
+one-run iterators: they stop after their published event's terminal run. A
+persistent multi-turn UI should consume the raw BFF subscribe-with-event
+response for its first connection, publish later turns separately, and
+reattach through the existing-stream subscribe endpoint.
 
 Two simultaneous subscribers can cause the same reply to render twice.
 Closing the subscription after one `reply:end` can miss later workflow output,
 including approval-resume results.
+
+Task waiter names are:
+
+| Language | Get snapshot | Wait for completion |
+| --- | --- | --- |
+| JavaScript/TypeScript | `hot.tasks.get(taskId)` | `await hot.tasks.wait(taskId)` |
+| Python | `hot.tasks.get(task_id)` | `hot.tasks.wait(task_id)` / `await hot.tasks.wait(task_id)` |
+| Go | `client.Tasks.Get(ctx, taskID)` | `client.Tasks.Wait(ctx, taskID, nil)` |
+| Rust | `client.tasks().get(task_id).await` | `client.tasks().wait(task_id, TaskWaitOptions::default()).await` |
+| Java | `client.tasks().get(taskId)` | `client.tasks().waitFor(taskId)` |
 
 ## JavaScript and TypeScript
 
@@ -290,6 +314,8 @@ Close `StreamEvents` and avoid whole-request timeouts on SSE.
 - Maintain one subscriber per multi-turn stream.
 - Correlate messages with stable session and message ids.
 - Handle every terminal run event and structured run failure.
+- Return task ids from asynchronous runs and use the SDK task waiter.
+- Treat the first `task:update` as the durable source of truth after reconnect.
 - Handle the server's SSE connection cap and cancellation.
 - Do not assume reconnect replays data.
 - Render structured state events independently from reply text.

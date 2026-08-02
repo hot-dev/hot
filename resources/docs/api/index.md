@@ -1,10 +1,10 @@
 ---
-description: "REST API reference for Hot projects, builds, runs, events, streams, files, secrets, agents, MCP services, and API keys."
+description: "REST API reference for Hot projects, builds, runs, tasks, events, streams, files, secrets, agents, MCP services, and API keys."
 ---
 
 # HOT API
 
-The Hot API provides programmatic access to manage projects, builds, runs, events, and more.
+The Hot API provides programmatic access to manage projects, builds, runs, tasks, events, and more.
 
 > **Official SDKs** are available for JavaScript/TypeScript, Python, Go, Rust,
 > and Java — see [SDKs](api/sdks). The examples on this page show the raw
@@ -994,6 +994,72 @@ GET /v1/runs/stats
   "meta": {...}
 }
 ```
+
+---
+
+### Tasks
+
+Tasks are asynchronous code or container executions. Use the task endpoints
+when a run returns a task id and the client needs to follow that work without
+keeping the originating run open.
+
+#### Get Task
+
+```http
+GET /v1/tasks/{task_id}
+```
+
+Returns the latest persisted task snapshot. Task status is one of `queued`,
+`running`, `completed`, `failed`, `cancelled`, or `timed_out`.
+
+```json
+{
+  "data": {
+    "task_id": "550e8400-e29b-41d4-a716-446655440000",
+    "env_id": "660e8400-e29b-41d4-a716-446655440000",
+    "stream_id": "770e8400-e29b-41d4-a716-446655440000",
+    "build_id": "880e8400-e29b-41d4-a716-446655440000",
+    "run_id": null,
+    "origin_run_id": "990e8400-e29b-41d4-a716-446655440000",
+    "function_name": "::myapp::jobs/render",
+    "task_type": "code",
+    "status": "completed",
+    "start_time": "2024-01-15T10:30:00Z",
+    "stop_time": "2024-01-15T10:31:20Z",
+    "duration_ms": 80000,
+    "result": {"asset_id": "asset_123"},
+    "timeout_ms": 3600000,
+    "retry_attempt": 0,
+    "next_retry_at": null,
+    "created_at": "2024-01-15T10:29:59Z"
+  },
+  "meta": {...}
+}
+```
+
+#### Subscribe to Task
+
+```http
+GET /v1/tasks/{task_id}/subscribe
+Accept: text/event-stream
+```
+
+The response is an SSE stream of `task:update` events. The first event is
+always the latest persisted task snapshot, even if the task was already
+terminal before the connection opened. Subsequent events report state changes,
+and the stream closes after a terminal snapshot.
+
+```text
+event: task:update
+data: {"type":"task:update","task":{"task_id":"...","status":"running",...}}
+
+event: task:update
+data: {"type":"task:update","task":{"task_id":"...","status":"completed","result":{...},...}}
+```
+
+Clients should reconnect to the same endpoint after an interrupted connection;
+the persisted first snapshot makes reconnection race-free. The official SDK
+task waiters implement this behavior.
 
 ---
 

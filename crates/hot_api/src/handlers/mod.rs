@@ -18,6 +18,7 @@ mod schedules;
 mod service_keys;
 mod sessions;
 mod streams;
+mod tasks;
 mod webhook;
 
 // Re-export all handlers
@@ -38,6 +39,7 @@ pub use schedules::*;
 pub use service_keys::*;
 pub use sessions::*;
 pub use streams::*;
+pub use tasks::*;
 pub use webhook::*;
 
 // ============================================================================

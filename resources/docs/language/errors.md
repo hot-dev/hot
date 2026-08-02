@@ -279,6 +279,11 @@ if(eq(result.status, "failed"),
   use-value(result.result))
 ```
 
+This server-side wait is appropriate because the same Hot execution consumes
+the result. When a client starts independent background work, return `info.id`
+instead and use the SDK task waiter. That waiter follows the durable task state
+without keeping the originating run alive.
+
 > **Note:** `::hot::lang/try` and `::hot::lang/try-call` were removed in Hot
 > 2.6.0. Old code that wrapped calls in `try` to detect failures should
 > branch on the returned `Result` directly (Pattern 2); fan-out loops that
@@ -294,7 +299,8 @@ if(eq(result.status, "failed"),
 - Use `if-ok` to chain fallible steps; an `Err` short-circuits the chain
 - Use `OnErr.Preserve` with eligible map-shaped APIs when you intentionally want to keep domain errors as values
 - Use `fail()` / `cancel()` for bugs and broken invariants, not ordinary recoverable domain errors
-- Supervise untrusted or independent work with a task boundary (`::hot::task/start` + `await`)
+- Supervise untrusted work with a task boundary; await it in Hot only when the same execution needs the result
+- Return independent task ids to clients and wait with the SDK task resource
 - Use `match` for pattern matching on `Result.Ok` and `Result.Err` variants
 - Dot access on Results automatically accesses fields within the payload: `result.name`
 - **Lazy arguments** suppress Result checking, enabling safe inspection and short-circuit evaluation

@@ -528,7 +528,11 @@ impl Task {
                 let task = sqlx::query_as::<_, Task>(sqlx::AssertSqlSafe(q.as_str()))
                     .bind(task_id)
                     .fetch_one(pg_pool)
-                    .await?;
+                    .await
+                    .map_err(|error| match error {
+                        sqlx::Error::RowNotFound => TaskError::NotFound,
+                        other => TaskError::Database(other),
+                    })?;
                 Ok(task)
             }
             crate::db::DatabasePool::Sqlite(sqlite_pool) => {
@@ -540,7 +544,11 @@ impl Task {
                 let task = sqlx::query_as::<_, Task>(sqlx::AssertSqlSafe(q.as_str()))
                     .bind(task_id)
                     .fetch_one(sqlite_pool)
-                    .await?;
+                    .await
+                    .map_err(|error| match error {
+                        sqlx::Error::RowNotFound => TaskError::NotFound,
+                        other => TaskError::Database(other),
+                    })?;
                 Ok(task)
             }
         }

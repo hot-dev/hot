@@ -14,7 +14,7 @@ Official client libraries for the Hot API, released in lockstep versions:
 | Rust | [`hot-dev`](https://crates.io/crates/hot-dev) (crates.io) | [hot-dev/hot-rust](https://github.com/hot-dev/hot-rust) | [docs.rs](https://docs.rs/hot-dev) |
 | Java | `dev.hot:hot-sdk` (Maven Central) | [hot-dev/hot-java](https://github.com/hot-dev/hot-java) | [javadoc.io](https://javadoc.io/doc/dev.hot/hot-sdk) |
 
-Every SDK covers the full API v1 surface: the twelve resources ([Endpoints](api)),
+Every SDK covers the full API v1 surface: the thirteen resources ([Endpoints](api)),
 SSE run-stream subscriptions with automatic reconnection across the API's
 5-minute stream timeout, structured API errors, and escape hatches for
 endpoints that do not yet have a helper.
@@ -200,7 +200,9 @@ try (StreamEvents events = client.streams().subscribeWithEvent(Map.of(
 
 ## Call a Hot Function
 
-Every SDK wraps the publish-and-wait flow for `hot:call` events:
+Every SDK wraps the publish-and-wait flow for `hot:call` events. The helper
+publishes through the atomic subscribe-with-event endpoint, correlates the
+terminal run to the published event, and reconnects without publishing twice:
 
 <!-- tabs:start -->
 #### **JavaScript**
@@ -241,6 +243,72 @@ Object result = client.events().callHot("::myapp::math/add-nums", List.of(2, 3))
 // result equals 5
 ```
 <!-- tabs:end -->
+
+## Wait for a Background Task
+
+When a Hot run starts a task for a client, return the task id immediately and
+let the SDK wait for its durable result. The task subscription sends the latest
+persisted snapshot first, including a terminal snapshot when the task completed
+before the client subscribed. Waiters reconnect automatically and return the
+completed task record. Failed, cancelled, and timed-out tasks raise a structured
+task error containing that record.
+
+<!-- tabs:start -->
+#### **JavaScript**
+
+```javascript
+const task = await hot.tasks.wait(taskId, { timeoutMs: 300_000 });
+console.log(task.result);
+```
+
+#### **Python**
+
+```python
+task = hot.tasks.wait(task_id, timeout=300)
+print(task["result"])
+
+# AsyncHotClient exposes the same resource:
+task = await async_hot.tasks.wait(task_id, timeout=300)
+```
+
+#### **Go**
+
+```go
+task, err := client.Tasks.Wait(ctx, taskID, &hot.WaitForTaskOptions{
+	Timeout: 5 * time.Minute,
+})
+if err != nil {
+	log.Fatal(err)
+}
+fmt.Println(task["result"])
+```
+
+#### **Rust**
+
+```rust
+let task = client
+    .tasks()
+    .wait(task_id, TaskWaitOptions {
+        timeout: Duration::from_secs(300),
+        ..TaskWaitOptions::default()
+    })
+    .await?;
+println!("{:?}", task.get("result"));
+```
+
+#### **Java**
+
+```java
+Map<String, Object> task = client.tasks().waitFor(
+    taskId,
+    new TaskWaitOptions().timeout(Duration.ofMinutes(5)));
+System.out.println(task.get("result"));
+```
+<!-- tabs:end -->
+
+Use `::hot::task/await` inside Hot only when later Hot code in that same
+execution depends on the task result. Keeping a run alive just so a client can
+wait defeats the task's asynchronous lifecycle.
 
 ## Errors
 
@@ -318,9 +386,13 @@ All five SDKs follow the same conventions:
   responds 429 with a `retry_after`. Streaming and raw requests never retry.
 - **Streaming reconnection.** `subscribeWithEvent` resubscribes across the
   API's 5-minute SSE timeout, dedupes replayed `run:start` and terminal
-  events by `run_id`, and ends after the first terminal `run:*` event. Use
-  the plain `subscribe` when your app expects multiple independent runs on
-  one stream.
+  events by `run_id`, and ends after the terminal run correlated to the event
+  it published. Unrelated runs on the same stream do not end the iterator. Use
+  the plain `subscribe` when your app expects multiple independent runs on one
+  stream.
+- **Durable task waiting.** `tasks.wait` (or the language-equivalent method)
+  reads `task:update` snapshots, reconnects across transport interruptions, and
+  cannot miss a task that became terminal before subscription setup.
 - **Identification.** Each SDK sends `User-Agent: hot-sdk-<lang>/<version>`.
 - **Escape hatches.** A `request(...)` method (plus a raw-response variant)
   covers endpoints that do not yet have a resource helper.
