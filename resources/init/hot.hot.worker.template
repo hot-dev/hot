@@ -9,6 +9,8 @@
 // Database Configuration
 hot.db.uri ::env/get("HOT_DB_URI", "")
 hot.db.schema "hot"
+hot.db.statement-timeout-ms Int(::env/get("HOT_DB_STATEMENT_TIMEOUT_MS", "30000"))
+hot.db.lock-timeout-ms Int(::env/get("HOT_DB_LOCK_TIMEOUT_MS", "5000"))
 
 // Logging Configuration
 hot.log.level ::env/get("HOT_LOG_LEVEL", "info")
@@ -52,6 +54,7 @@ hot.worker.reserved-memory-mb Int(::env/get("HOT_WORKER_RESERVED_MEMORY_MB", "51
 hot.worker.db-reserved-connections Int(::env/get("HOT_WORKER_DB_RESERVED_CONNECTIONS", "4"))
 hot.worker.db-max-connections ::env/get("HOT_WORKER_DB_MAX_CONNECTIONS", "auto")
 hot.worker.cancel-on-timeout Bool(::env/get("HOT_WORKER_CANCEL_ON_TIMEOUT", "true"))
+hot.worker.max-blocking-executions Int(::env/get("HOT_WORKER_MAX_BLOCKING_EXECUTIONS", "-1"))
 hot.worker.event-ordering ::env/get("HOT_WORKER_EVENT_ORDERING", "current")
 hot.worker.handler-concurrency ::env/get("HOT_WORKER_HANDLER_CONCURRENCY", "serial")
 hot.worker.shared-process Bool(::env/get("HOT_WORKER_SHARED_PROCESS", "false"))

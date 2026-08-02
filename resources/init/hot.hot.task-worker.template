@@ -9,7 +9,10 @@
 // Database Configuration
 hot.db.uri ::env/get("HOT_DB_URI", "")
 hot.db.schema "hot"
+hot.db.statement-timeout-ms Int(::env/get("HOT_DB_STATEMENT_TIMEOUT_MS", "30000"))
+hot.db.lock-timeout-ms Int(::env/get("HOT_DB_LOCK_TIMEOUT_MS", "5000"))
 hot.worker.db-max-connections ::env/get("HOT_WORKER_DB_MAX_CONNECTIONS", "auto")
+hot.worker.max-blocking-executions Int(::env/get("HOT_WORKER_MAX_BLOCKING_EXECUTIONS", "-1"))
 
 // Logging Configuration
 hot.log.level ::env/get("HOT_LOG_LEVEL", "info")
