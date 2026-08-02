@@ -32,12 +32,75 @@ async fn reset_schema_if_requested(uri: &str, schema: &str) {
         .connect(uri)
         .await
         .expect("reset pool should connect");
+    // Refuse to run against a database where these extensions live outside the
+    // test schema. Relocating them via `ALTER EXTENSION ... SET SCHEMA` would
+    // make the `DROP SCHEMA ... CASCADE` below cascade-drop every dependent
+    // object database-wide (e.g. vector columns on unrelated public tables).
+    // Fresh hot-cloud Compose volumes install the extensions into `hot`. This
+    // check MUST run before the drop so a shared database is refused instead
+    // of destroyed.
+    for extension in ["vector", "pg_trgm"] {
+        let installed_schema: Option<String> = sqlx::query_scalar(
+            "SELECT n.nspname FROM pg_extension e JOIN pg_namespace n ON n.oid = e.extnamespace WHERE e.extname = $1",
+        )
+        .bind(extension)
+        .fetch_optional(&pool)
+        .await
+        .expect("extension location should be queryable");
+        if let Some(installed) = installed_schema.as_deref().filter(|name| *name != schema) {
+            panic!(
+                "extension `{}` is installed in schema `{}`, not the test schema `{}`; \
+                 this test needs a dedicated database (fresh hot-cloud Compose volumes install \
+                 the extensions into the `hot` schema). Refusing to relocate a shared extension \
+                 because teardown's DROP SCHEMA ... CASCADE would destroy dependent objects \
+                 outside the test schema.",
+                extension, installed, schema
+            );
+        }
+    }
+
+    // Even when the extensions live inside the test schema, dropping it would
+    // cascade onto any column elsewhere in the database that uses an
+    // extension-owned type (e.g. a `vector` column on a `public` table). That
+    // happens when a pre-fix harness relocated shared extensions into the test
+    // schema. Refuse rather than destroy those columns.
+    let dependent_columns: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM pg_attribute a \
+         JOIN pg_class c ON c.oid = a.attrelid \
+         JOIN pg_namespace cn ON cn.oid = c.relnamespace \
+         JOIN pg_type t ON t.oid = a.atttypid \
+         JOIN pg_depend d ON d.objid = t.oid AND d.deptype = 'e' \
+         JOIN pg_extension e ON e.oid = d.refobjid \
+         WHERE e.extname IN ('vector', 'pg_trgm') \
+           AND cn.nspname <> $1 \
+           AND a.attnum > 0 \
+           AND NOT a.attisdropped",
+    )
+    .bind(schema)
+    .fetch_one(&pool)
+    .await
+    .expect("extension-dependent columns should be queryable");
+    if dependent_columns > 0 {
+        panic!(
+            "{} column(s) outside the test schema `{}` use types owned by the `vector`/`pg_trgm` \
+             extensions; `DROP SCHEMA {} CASCADE` would drop those columns along with the \
+             extensions. This test needs a dedicated database. Refusing to reset a shared one.",
+            dependent_columns, schema, schema
+        );
+    }
+
     pool.execute(sqlx::AssertSqlSafe(format!(
         "drop schema if exists {} cascade",
         schema
     )))
     .await
     .expect("test schema should reset");
+    pool.execute(sqlx::AssertSqlSafe(format!(
+        "create schema if not exists {}",
+        schema
+    )))
+    .await
+    .expect("test schema should be recreated");
     pool.close().await;
 }
 
@@ -51,6 +114,10 @@ async fn postgres_db() -> Option<(DatabasePool, String)> {
     };
 
     let schema = std::env::var("HOT_TEST_POSTGRES_SCHEMA").unwrap_or_else(|_| "hot".to_string());
+    assert_eq!(
+        schema, "hot",
+        "Postgres migrations contain schema-qualified hot.* objects; isolate this test with a dedicated database, not a different schema"
+    );
     reset_schema_if_requested(&uri, &schema).await;
 
     let conf = val!({
@@ -134,6 +201,56 @@ async fn postgres_task_lifecycle_smoke() {
         .await
         .expect("test data should insert");
 
+    if let DatabasePool::Postgres(pool) = &db {
+        let statement_timeout: String = sqlx::query_scalar("SHOW statement_timeout")
+            .fetch_one(pool)
+            .await
+            .expect("statement timeout should be readable");
+        let lock_timeout: String = sqlx::query_scalar("SHOW lock_timeout")
+            .fetch_one(pool)
+            .await
+            .expect("lock timeout should be readable");
+        assert_eq!(statement_timeout, "30s");
+        assert_eq!(lock_timeout, "5s");
+    }
+
+    let cancelled_task_id = Uuid::now_v7();
+    Task::insert(
+        &db,
+        &cancelled_task_id,
+        &test_data.env_id,
+        &test_data.stream_id,
+        &test_data.build_id,
+        Some(&test_data.run_id),
+        "::app/cancel-race",
+        None,
+        None,
+        "code",
+        300_000,
+        Some(&test_data.user_id),
+    )
+    .await
+    .expect("cancel-race task should insert");
+    assert!(Task::cancel(&db, &cancelled_task_id).await.unwrap());
+    assert!(
+        !Task::claim_for_worker(&db, &cancelled_task_id, "late-worker")
+            .await
+            .unwrap()
+    );
+    assert!(!Task::mark_running(&db, &cancelled_task_id).await.unwrap());
+    assert!(
+        !Task::complete(&db, &cancelled_task_id, &TaskStatus::Completed, None, None)
+            .await
+            .unwrap()
+    );
+    assert_eq!(
+        Task::get(&db, &cancelled_task_id)
+            .await
+            .unwrap()
+            .task_status_id,
+        TaskStatus::Cancelled.as_id()
+    );
+
     let mut execution_context = ExecutionContext::new(
         Uuid::now_v7(),
         test_data.stream_id,
@@ -216,8 +333,29 @@ async fn postgres_task_lifecycle_smoke() {
         .expect("task row should be readable after running");
     assert_eq!(task.task_status_id, TaskStatus::Running.as_id());
 
+    Task::set_worker(&db, &task_id, "postgres-test-worker")
+        .await
+        .expect("task worker ownership should persist");
+    assert!(
+        Task::release_worker(&db, &task_id, "postgres-test-worker")
+            .await
+            .expect("unfinished task ownership should release"),
+        "release_worker with the owning worker id should report a released row"
+    );
+    let released = Task::get(&db, &task_id)
+        .await
+        .expect("released task should remain readable");
+    assert!(released.worker_id.is_none());
+    assert!(
+        Task::find_zombie_tasks(&db, 30)
+            .await
+            .expect("released task should be eligible for reconciliation")
+            .iter()
+            .any(|candidate| candidate.task_id == task_id)
+    );
+
     let result = serde_json::json!({"ok": true});
-    Task::complete(&db, &task_id, &TaskStatus::Completed, Some(&result))
+    Task::complete(&db, &task_id, &TaskStatus::Completed, Some(&result), None)
         .await
         .expect("task should complete");
     let task = Task::get(&db, &task_id)
@@ -286,6 +424,7 @@ async fn postgres_task_lifecycle_smoke() {
                     &redis_task_id,
                     &TaskStatus::Completed,
                     Some(&serde_json::json!({"ok": true, "backend": "redis"})),
+                    None,
                 )
                 .await?;
                 Ok::<_, Box<dyn Error + Send + Sync>>(request.task_id)
@@ -304,4 +443,63 @@ async fn postgres_task_lifecycle_smoke() {
     }
 
     drop_schema(&db, &schema).await;
+}
+
+#[tokio::test]
+async fn redis_success_path_rejects_an_ack_lost_before_commit() {
+    let Some(client) = redis_client_if_available().await else {
+        return;
+    };
+    let queue_name = format!("hot:ack-loss:test-{}", Uuid::now_v7().simple());
+    let stream_key = format!("{{{}}}", queue_name);
+    let queue = ProcessingQueue::<String>::new(
+        QueueType::Redis,
+        queue_name.clone(),
+        std::env::var("HOT_REDIS_URI")
+            .or_else(|_| std::env::var("REDIS_URL"))
+            .ok(),
+        Serialization::Json,
+    )
+    .expect("Redis queue should construct");
+    queue
+        .enqueue("ack-loss".to_string())
+        .await
+        .expect("test message should enqueue");
+
+    let client_for_worker = client.clone();
+    let stream_for_worker = stream_key.clone();
+    let result = queue
+        .dequeue_and_work(move |message| async move {
+            assert_eq!(message, "ack-loss");
+            let mut conn = client_for_worker.get_multiplexed_async_connection().await?;
+            let pending: redis::Value = redis::cmd("XPENDING")
+                .arg(&stream_for_worker)
+                .arg("hot-workers")
+                .arg("-")
+                .arg("+")
+                .arg(1)
+                .query_async(&mut conn)
+                .await?;
+            let entries: Vec<Vec<redis::Value>> =
+                redis::from_redis_value_ref(&pending).unwrap_or_default();
+            let message_id: String = entries
+                .first()
+                .and_then(|entry| entry.first())
+                .and_then(|value| redis::from_redis_value_ref(value).ok())
+                .expect("worker delivery should be present in the Redis PEL");
+            let pre_acked: i64 = redis::cmd("XACK")
+                .arg(&stream_for_worker)
+                .arg("hot-workers")
+                .arg(&message_id)
+                .query_async(&mut conn)
+                .await?;
+            assert_eq!(pre_acked, 1, "test must consume the pending ACK first");
+
+            Ok::<_, Box<dyn Error + Send + Sync>>(())
+        })
+        .await;
+
+    let err = result.expect_err("the queue must reject a success ACK count of zero");
+    assert!(err.to_string().contains("affected 0 entries"));
+    cleanup_redis_queue(&client, &queue_name).await;
 }

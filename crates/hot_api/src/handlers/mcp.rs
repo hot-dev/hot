@@ -2215,6 +2215,8 @@ async fn handle_tools_call_streaming(
         access_id,
         agent_type: None,
         queue_timing: None,
+        // Enqueue-only producer context; the worker stamps deadline_at at admission
+        deadline_at: None,
     };
 
     // Convert MCP named arguments (JSON object) to positional Vec for Hot's call() function.

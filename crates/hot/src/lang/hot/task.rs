@@ -13,6 +13,12 @@ use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+/// Native task primitives run on a blocking VM thread. Every async DB/queue
+/// operation they bridge into must have a short wall-clock ceiling so the VM's
+/// cooperative cancellation can regain control before the worker hard timeout.
+const TASK_NATIVE_IO_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+const PARENT_COMPLETION_RESERVE: std::time::Duration = std::time::Duration::from_secs(5);
+
 fn err_val(msg: String) -> Val {
     Val::err(Val::from(msg))
 }
@@ -169,12 +175,17 @@ pub fn start(vm: &mut VirtualMachine, args: &[Val]) -> HotResult<Val> {
     let db = vm.get_database_pool();
     let task_queue = vm.get_task_queue();
 
-    tokio::runtime::Handle::current().block_on(async {
-        let task_inserted = if let Some(db) = db {
-            // Ensure the origin run row exists in the DB before inserting the task.
-            // The emitter/writer pipeline is async, so the run:start may not be committed yet.
-            // Use ON CONFLICT to avoid duplicates if the writer already flushed it.
-            if let Err(e) = crate::db::run::Run::ensure_run_exists(
+    let start_result = tokio::runtime::Handle::current().block_on(async {
+        let db =
+            db.ok_or_else(|| err_val("::hot::task/start: no database configured".to_string()))?;
+        let queue = task_queue
+            .ok_or_else(|| err_val("::hot::task/start: no task queue configured".to_string()))?;
+
+        // The emitter/writer pipeline is async, so run:start may not be
+        // committed yet. Bound this bridge just like the task insert itself.
+        match tokio::time::timeout(
+            TASK_NATIVE_IO_TIMEOUT,
+            crate::db::run::Run::ensure_run_exists(
                 &db,
                 &ctx.run_id,
                 &env_id,
@@ -184,22 +195,33 @@ pub fn start(vm: &mut VirtualMachine, args: &[Val]) -> HotResult<Val> {
                 ctx.origin_run_id.as_ref(),
                 ctx.user_id.as_ref().unwrap_or(&Uuid::nil()),
                 ctx.access_id.as_ref(),
-            )
-            .await
-            {
-                tracing::warn!(
-                    "::hot::task/start: failed to ensure origin run exists: {}",
+            ),
+        )
+        .await
+        {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => {
+                return Err(err_val(format!(
+                    "::hot::task/start: failed to create origin run: {}",
                     e
-                );
+                )));
             }
+            Err(_) => {
+                return Err(err_val(format!(
+                    "::hot::task/start: origin run write timed out after {}s",
+                    TASK_NATIVE_IO_TIMEOUT.as_secs()
+                )));
+            }
+        }
 
-            // Insert task row with status 'queued'
-            let args_json_opt = if args_json.is_null() {
-                None
-            } else {
-                Some(&args_json)
-            };
-            match crate::db::Task::insert(
+        let args_json_opt = if args_json.is_null() {
+            None
+        } else {
+            Some(&args_json)
+        };
+        match tokio::time::timeout(
+            TASK_NATIVE_IO_TIMEOUT,
+            crate::db::Task::insert(
                 &db,
                 &task_id,
                 &env_id,
@@ -212,40 +234,68 @@ pub fn start(vm: &mut VirtualMachine, args: &[Val]) -> HotResult<Val> {
                 &task_type,
                 timeout_ms as i64,
                 ctx.user_id.as_ref(),
-            )
-            .await
-            {
-                Ok(()) => true,
-                Err(e) => {
-                    tracing::error!(
-                        task_id = %task_id,
-                        "::hot::task/start: failed to insert task row; task will not be enqueued: {}",
-                        e
-                    );
-                    false
-                }
+            ),
+        )
+        .await
+        {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => {
+                return Err(err_val(format!(
+                    "::hot::task/start: failed to insert task: {}",
+                    e
+                )));
             }
-        } else {
-            tracing::error!(
-                task_id = %task_id,
-                "::hot::task/start: no database configured; task will not be enqueued"
-            );
-            false
-        };
+            Err(_) => {
+                return Err(err_val(format!(
+                    "::hot::task/start: task insert timed out after {}s",
+                    TASK_NATIVE_IO_TIMEOUT.as_secs()
+                )));
+            }
+        }
 
-        // Enqueue to task queue
-        if task_inserted && let Some(queue) = task_queue {
-            if let Err(e) = queue.enqueue(request).await {
-                tracing::error!(
-                    task_id = %task_id,
+        match tokio::time::timeout(TASK_NATIVE_IO_TIMEOUT, queue.enqueue(request)).await {
+            Ok(Ok(())) => Ok(()),
+            Ok(Err(e)) => {
+                let failure = serde_json::json!({
+                    "$type": "::hot::run/Failure",
+                    "$val": {"msg": format!("Failed to enqueue task: {}", e)}
+                });
+                fail_task_after_enqueue_error(
+                    &db,
+                    &task_id,
+                    "::hot::task/start",
+                    &failure,
+                    TASK_NATIVE_IO_TIMEOUT,
+                )
+                .await;
+                Err(err_val(format!(
                     "::hot::task/start: failed to enqueue task: {}",
                     e
-                );
+                )))
             }
-        } else if task_inserted {
-            tracing::warn!("::hot::task/start: no task queue configured");
+            Err(_) => {
+                let failure = serde_json::json!({
+                    "$type": "::hot::run/Failure",
+                    "$val": {"msg": "Timed out enqueueing task"}
+                });
+                fail_task_after_enqueue_error(
+                    &db,
+                    &task_id,
+                    "::hot::task/start",
+                    &failure,
+                    TASK_NATIVE_IO_TIMEOUT,
+                )
+                .await;
+                Err(err_val(format!(
+                    "::hot::task/start: queue write timed out after {}s",
+                    TASK_NATIVE_IO_TIMEOUT.as_secs()
+                )))
+            }
         }
     });
+    if let Err(e) = start_result {
+        return HotResult::Err(e);
+    }
 
     // Build typed Stream value
     let stream_val = crate::val!({
@@ -345,13 +395,20 @@ pub fn send(vm: &mut VirtualMachine, args: &[Val]) -> HotResult<Val> {
                 payload: payload_json,
             };
 
-            tokio::runtime::Handle::current().block_on(async {
-                if let Err(e) = pub_sub.publish(event).await {
-                    tracing::warn!("::hot::task/send: failed to publish: {}", e);
-                }
+            let published = tokio::runtime::Handle::current().block_on(async {
+                tokio::time::timeout(TASK_NATIVE_IO_TIMEOUT, pub_sub.publish(event)).await
             });
-
-            HotResult::Ok(Val::from(true))
+            match published {
+                Ok(Ok(())) => HotResult::Ok(Val::from(true)),
+                Ok(Err(e)) => HotResult::Err(err_val(format!(
+                    "::hot::task/send: failed to publish: {}",
+                    e
+                ))),
+                Err(_) => HotResult::Err(err_val(format!(
+                    "::hot::task/send: publish timed out after {}s",
+                    TASK_NATIVE_IO_TIMEOUT.as_secs()
+                ))),
+            }
         }
         None => HotResult::Err(err_val(
             "::hot::task/send: no stream publisher available".to_string(),
@@ -461,15 +518,28 @@ pub fn cancel(vm: &mut VirtualMachine, args: &[Val]) -> HotResult<Val> {
 
     let cancelled = tokio::runtime::Handle::current().block_on(async {
         let was_cancelled = if let Some(db) = &db {
-            match crate::db::Task::cancel(db, &task_id).await {
-                Ok(c) => c,
-                Err(e) => {
+            match tokio::time::timeout(
+                TASK_NATIVE_IO_TIMEOUT,
+                crate::db::Task::cancel(db, &task_id),
+            )
+            .await
+            {
+                Ok(Ok(c)) => c,
+                Ok(Err(e)) => {
                     tracing::error!(task_id = %task_id, "::hot::task/cancel: DB error: {}", e);
-                    false
+                    return Err(err_val(format!("::hot::task/cancel: DB error: {}", e)));
+                }
+                Err(_) => {
+                    return Err(err_val(format!(
+                        "::hot::task/cancel: database write timed out after {}s",
+                        TASK_NATIVE_IO_TIMEOUT.as_secs()
+                    )));
                 }
             }
         } else {
-            false
+            return Err(err_val(
+                "::hot::task/cancel: no database available".to_string(),
+            ));
         };
 
         if was_cancelled
@@ -479,15 +549,24 @@ pub fn cancel(vm: &mut VirtualMachine, args: &[Val]) -> HotResult<Val> {
                 task_id: task_id_str.clone(),
                 payload: serde_json::json!({"$cancel": true}),
             };
-            if let Err(e) = pub_sub.publish(event).await {
-                tracing::warn!(task_id = %task_id, "::hot::task/cancel: failed to publish cancel message: {}", e);
+            match tokio::time::timeout(TASK_NATIVE_IO_TIMEOUT, pub_sub.publish(event)).await {
+                Ok(Ok(())) => {}
+                Ok(Err(e)) => {
+                    tracing::warn!(task_id = %task_id, "::hot::task/cancel: failed to publish cancel message: {}", e);
+                }
+                Err(_) => {
+                    tracing::warn!(task_id = %task_id, "::hot::task/cancel: cancel publish timed out");
+                }
             }
         }
 
-        was_cancelled
+        Ok::<bool, Val>(was_cancelled)
     });
 
-    HotResult::Ok(Val::from(cancelled))
+    match cancelled {
+        Ok(cancelled) => HotResult::Ok(Val::from(cancelled)),
+        Err(e) => HotResult::Err(e),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -539,6 +618,8 @@ pub fn await_task(vm: &mut VirtualMachine, args: &[Val]) -> HotResult<Val> {
         }
     };
 
+    let execution_context = vm.get_execution_context().clone();
+
     // Capture the cancellation token so the poll loop can release the blocking
     // VM thread promptly on worker shutdown or run timeout instead of pinning it
     // for up to the task's (potentially 24h) timeout.
@@ -551,56 +632,66 @@ pub fn await_task(vm: &mut VirtualMachine, args: &[Val]) -> HotResult<Val> {
     };
 
     let task = tokio::runtime::Handle::current().block_on(async {
-        const TERMINAL_STATUSES: &[&str] = &["completed", "failed", "timed_out", "cancelled"];
         const MAX_TIMEOUT_MS: i64 = 24 * 60 * 60 * 1000; // 24 hours
-        const INITIAL_DELAY_MS: u64 = 100;
-        const MAX_DELAY_MS: u64 = 5000;
-        // Cap each sleep slice so cancellation is observed within ~250ms even
-        // while the backoff delay grows toward MAX_DELAY_MS.
-        const CANCEL_POLL_SLICE_MS: u64 = 250;
 
-        let mut task = match crate::db::Task::get(&db, &task_id).await {
-            Ok(t) => t,
-            Err(e) => return Err(err_val(format!("::hot::task/await: task not found: {}", e))),
-        };
+        let task =
+            match tokio::time::timeout(TASK_NATIVE_IO_TIMEOUT, crate::db::Task::get(&db, &task_id))
+                .await
+            {
+                Ok(Ok(t)) => t,
+                Ok(Err(crate::db::TaskError::NotFound)) => {
+                    return Err(err_val(format!(
+                        "::hot::task/await: task not found: {}",
+                        task_id
+                    )));
+                }
+                Ok(Err(e)) => {
+                    return Err(err_val(format!(
+                        "::hot::task/await: task lookup failed: {}",
+                        e
+                    )));
+                }
+                Err(_) => {
+                    return Err(err_val(format!(
+                        "::hot::task/await: database read timed out after {}s",
+                        TASK_NATIVE_IO_TIMEOUT.as_secs()
+                    )));
+                }
+            };
 
         let timeout_ms = task.timeout_ms.clamp(1000, MAX_TIMEOUT_MS) as u64;
-        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(timeout_ms);
-
-        let mut delay_ms = INITIAL_DELAY_MS;
-
-        while !TERMINAL_STATUSES.contains(&task.status.as_str()) {
-            if is_cancelled() {
-                return Err(err_val(
-                    "::hot::task/await: cancelled while waiting for task".to_string(),
-                ));
-            }
-            if std::time::Instant::now() >= deadline {
-                return Err(err_val(
-                    "::hot::task/await: timeout waiting for task to complete".to_string(),
-                ));
-            }
-
-            let mut remaining = delay_ms;
-            while remaining > 0 {
-                if is_cancelled() {
-                    return Err(err_val(
-                        "::hot::task/await: cancelled while waiting for task".to_string(),
+        let requested_wait = std::time::Duration::from_millis(timeout_ms);
+        let wait_budget = match execution_context.as_ref() {
+            Some(ctx) => {
+                match ctx.cap_wait_to_deadline(requested_wait, PARENT_COMPLETION_RESERVE) {
+                    Some(budget) => budget,
+                    None => {
+                        return Err(err_val(
+                        "::hot::task/await: parent execution deadline is too close to wait for task"
+                            .to_string(),
                     ));
+                    }
                 }
-                let slice = remaining.min(CANCEL_POLL_SLICE_MS);
-                tokio::time::sleep(std::time::Duration::from_millis(slice)).await;
-                remaining -= slice;
             }
-            delay_ms = (delay_ms * 2).min(MAX_DELAY_MS);
+            None => requested_wait,
+        };
+        let deadline = tokio::time::Instant::now() + wait_budget;
 
-            task = match crate::db::Task::get(&db, &task_id).await {
-                Ok(t) => t,
-                Err(e) => return Err(err_val(format!("::hot::task/await: task not found: {}", e))),
-            };
-        }
-
-        Ok::<crate::db::Task, Val>(task)
+        let db = &db;
+        await_task_poll_loop(
+            task,
+            deadline,
+            &is_cancelled,
+            move |read_timeout| async move {
+                match tokio::time::timeout(read_timeout, crate::db::Task::get(db, &task_id)).await {
+                    Ok(Ok(t)) => Ok(t),
+                    Ok(Err(crate::db::TaskError::NotFound)) => Err(PollFailure::NotFound),
+                    Ok(Err(e)) => Err(PollFailure::Transport(e.to_string())),
+                    Err(_) => Err(PollFailure::TimedOut(read_timeout)),
+                }
+            },
+        )
+        .await
     });
 
     let task = match task {
@@ -714,9 +805,214 @@ pub fn await_task(vm: &mut VirtualMachine, args: &[Val]) -> HotResult<Val> {
     HotResult::Ok(result)
 }
 
+/// Compute the next sleep slice (ms) for `::hot::task/await`'s backoff loop.
+///
+/// Bounded by the remaining backoff delay, the cancellation poll interval,
+/// and the time left until the await deadline. A return of 0 means the
+/// deadline has been reached (sub-millisecond remainders truncate to 0) and
+/// the loop must wake instead of sleeping past it.
+fn backoff_sleep_slice_ms(
+    remaining_delay_ms: u64,
+    poll_slice_ms: u64,
+    remaining_to_deadline: std::time::Duration,
+) -> u64 {
+    let deadline_ms = u64::try_from(remaining_to_deadline.as_millis()).unwrap_or(u64::MAX);
+    remaining_delay_ms.min(poll_slice_ms).min(deadline_ms)
+}
+
+/// Sleep out one backoff delay in short slices, capping every slice by the
+/// remaining time to `deadline` so the loop wakes AT the deadline instead of
+/// overshooting it — a full backoff sleep (up to MAX_DELAY_MS) landing past
+/// the deadline would consume the PARENT_COMPLETION_RESERVE that
+/// `cap_wait_to_deadline` set aside for the parent run's finalization.
+///
+/// Returns true if `is_cancelled` observed a cancellation while sleeping.
+async fn sleep_backoff_capped(
+    delay_ms: u64,
+    poll_slice_ms: u64,
+    deadline: tokio::time::Instant,
+    is_cancelled: &dyn Fn() -> bool,
+) -> bool {
+    let mut remaining = delay_ms;
+    while remaining > 0 {
+        if is_cancelled() {
+            return true;
+        }
+        let to_deadline = deadline.saturating_duration_since(tokio::time::Instant::now());
+        let slice = backoff_sleep_slice_ms(remaining, poll_slice_ms, to_deadline);
+        if slice == 0 {
+            // Deadline reached mid-backoff: wake now so the caller's deadline
+            // check fires instead of sleeping into the parent's reserve.
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(slice)).await;
+        remaining -= slice;
+    }
+    false
+}
+
+/// A single failed status poll inside `::hot::task/await`'s wait loop,
+/// classified by how the loop must respond to it.
+#[derive(Debug)]
+enum PollFailure {
+    /// The task row does not exist. Rows are inserted before the queue
+    /// enqueue, so a missing row means the task is gone, not "not yet
+    /// visible" — the await fails immediately.
+    NotFound,
+    /// The database read failed in transit. Retryable: the task may still be
+    /// running, so the poll counts as missed while await budget remains.
+    Transport(String),
+    /// The database read exceeded its timeout slice. Retryable, same as
+    /// `Transport`.
+    TimedOut(std::time::Duration),
+}
+
+impl std::fmt::Display for PollFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            PollFailure::NotFound => write!(f, "task not found"),
+            PollFailure::Transport(e) => write!(f, "task lookup failed: {}", e),
+            PollFailure::TimedOut(t) => write!(f, "database read timed out after {:?}", t),
+        }
+    }
+}
+
+/// Drive `poll` until `task` reaches a terminal status, the await `deadline`
+/// passes, or `is_cancelled` observes a cancellation.
+///
+/// A timed-out or transport-errored poll is a MISSED poll, not a fatal error:
+/// while the await deadline still has budget the task may yet complete, so
+/// the failure is logged at warn and the next backoff tick retries. Each
+/// poll's timeout slice is capped at the remaining budget, so failed polls
+/// can never extend the wait past `deadline` — the deadline check at the top
+/// of the loop fires instead, mentioning the last poll failure.
+/// `PollFailure::NotFound` stays fatal: task rows exist before enqueue, so a
+/// missing row means the task is gone.
+async fn await_task_poll_loop<F, Fut>(
+    mut task: crate::db::Task,
+    deadline: tokio::time::Instant,
+    is_cancelled: &dyn Fn() -> bool,
+    mut poll: F,
+) -> Result<crate::db::Task, Val>
+where
+    F: FnMut(std::time::Duration) -> Fut,
+    Fut: std::future::Future<Output = Result<crate::db::Task, PollFailure>>,
+{
+    const TERMINAL_STATUSES: &[&str] = &["completed", "failed", "timed_out", "cancelled"];
+    const INITIAL_DELAY_MS: u64 = 100;
+    const MAX_DELAY_MS: u64 = 5000;
+    // Cap each sleep slice so cancellation is observed within ~250ms even
+    // while the backoff delay grows toward MAX_DELAY_MS.
+    const CANCEL_POLL_SLICE_MS: u64 = 250;
+
+    let mut delay_ms = INITIAL_DELAY_MS;
+    let mut last_poll_failure: Option<String> = None;
+
+    while !TERMINAL_STATUSES.contains(&task.status.as_str()) {
+        if is_cancelled() {
+            return Err(err_val(
+                "::hot::task/await: cancelled while waiting for task".to_string(),
+            ));
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return Err(match last_poll_failure {
+                Some(failure) => err_val(format!(
+                    "::hot::task/await: timeout waiting for task to complete (last poll error: {})",
+                    failure
+                )),
+                None => {
+                    err_val("::hot::task/await: timeout waiting for task to complete".to_string())
+                }
+            });
+        }
+
+        if sleep_backoff_capped(delay_ms, CANCEL_POLL_SLICE_MS, deadline, is_cancelled).await {
+            return Err(err_val(
+                "::hot::task/await: cancelled while waiting for task".to_string(),
+            ));
+        }
+        delay_ms = (delay_ms * 2).min(MAX_DELAY_MS);
+
+        let remaining_to_deadline = deadline.saturating_duration_since(tokio::time::Instant::now());
+        let read_timeout = TASK_NATIVE_IO_TIMEOUT.min(remaining_to_deadline);
+        match poll(read_timeout).await {
+            Ok(t) => {
+                last_poll_failure = None;
+                task = t;
+            }
+            Err(PollFailure::NotFound) => {
+                return Err(err_val(format!(
+                    "::hot::task/await: task not found: {}",
+                    task.task_id
+                )));
+            }
+            Err(failure) => {
+                tracing::warn!(
+                    task_id = %task.task_id,
+                    "::hot::task/await: missed a status poll ({}); retrying until the await deadline",
+                    failure
+                );
+                last_poll_failure = Some(failure.to_string());
+            }
+        }
+    }
+
+    Ok(task)
+}
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+/// Compensate for an enqueue failure after the task row was inserted by
+/// terminally failing the task — but only while it is still `queued`.
+///
+/// A client-side enqueue error or timeout does not prove the queue entry
+/// never landed server-side (dropping the enqueue future abandons only the
+/// reply, not the write). If a worker has already claimed the task
+/// (queued -> running), overwriting it to `failed` would clobber a
+/// legitimate execution and suppress its real result, so the guarded write
+/// skips the row and the claim is logged instead. Compensation failures are
+/// logged, never swallowed: the row would otherwise stay `queued` forever.
+pub(crate) async fn fail_task_after_enqueue_error(
+    db: &crate::db::DatabasePool,
+    task_id: &Uuid,
+    fn_label: &str,
+    failure: &serde_json::Value,
+    io_timeout: std::time::Duration,
+) {
+    match tokio::time::timeout(
+        io_timeout,
+        crate::db::Task::fail_if_queued(db, task_id, Some(failure)),
+    )
+    .await
+    {
+        Ok(Ok(true)) => {}
+        Ok(Ok(false)) => {
+            tracing::warn!(
+                task_id = %task_id,
+                "{}: task already claimed by a worker after an enqueue failure; the queue entry likely landed — leaving the task untouched",
+                fn_label
+            );
+        }
+        Ok(Err(e)) => {
+            tracing::error!(
+                task_id = %task_id,
+                "{}: failed to persist enqueue-failure compensation: {}",
+                fn_label,
+                e
+            );
+        }
+        Err(_) => {
+            tracing::error!(
+                task_id = %task_id,
+                "{}: enqueue-failure compensation timed out after {}s",
+                fn_label,
+                io_timeout.as_secs()
+            );
+        }
+    }
+}
 
 /// Extract a qualified function name from a Val that represents a function.
 fn extract_function_name(fn_name: &str, val: &Val) -> Result<String, Val> {
@@ -788,14 +1084,23 @@ pub fn checkpoint(vm: &mut VirtualMachine, args: &[Val]) -> HotResult<Val> {
     let data_json: serde_json::Value =
         serde_json::to_value(args[0].to_hot_data_repr()).unwrap_or(serde_json::Value::Null);
 
-    let result = tokio::runtime::Handle::current()
-        .block_on(async { crate::db::Task::set_checkpoint(&db, &task_id, &data_json).await });
+    let result = tokio::runtime::Handle::current().block_on(async {
+        tokio::time::timeout(
+            TASK_NATIVE_IO_TIMEOUT,
+            crate::db::Task::set_checkpoint(&db, &task_id, &data_json),
+        )
+        .await
+    });
 
     match result {
-        Ok(()) => HotResult::Ok(Val::Bool(true)),
-        Err(e) => HotResult::Err(err_val(format!(
+        Ok(Ok(())) => HotResult::Ok(Val::Bool(true)),
+        Ok(Err(e)) => HotResult::Err(err_val(format!(
             "::hot::task/checkpoint: failed to save: {}",
             e
+        ))),
+        Err(_) => HotResult::Err(err_val(format!(
+            "::hot::task/checkpoint: database write timed out after {}s",
+            TASK_NATIVE_IO_TIMEOUT.as_secs()
         ))),
     }
 }
@@ -857,18 +1162,27 @@ pub fn restore(vm: &mut VirtualMachine, args: &[Val]) -> HotResult<Val> {
         }
     };
 
-    let result = tokio::runtime::Handle::current()
-        .block_on(async { crate::db::Task::get_checkpoint(&db, &task_id).await });
+    let result = tokio::runtime::Handle::current().block_on(async {
+        tokio::time::timeout(
+            TASK_NATIVE_IO_TIMEOUT,
+            crate::db::Task::get_checkpoint(&db, &task_id),
+        )
+        .await
+    });
 
     match result {
-        Ok(Some(data)) => {
+        Ok(Ok(Some(data))) => {
             let val: Val = serde_json::from_value(data).unwrap_or(Val::Null);
             HotResult::Ok(val)
         }
-        Ok(None) => HotResult::Ok(Val::Null),
-        Err(e) => HotResult::Err(err_val(format!(
+        Ok(Ok(None)) => HotResult::Ok(Val::Null),
+        Ok(Err(e)) => HotResult::Err(err_val(format!(
             "::hot::task/restore: failed to load: {}",
             e
+        ))),
+        Err(_) => HotResult::Err(err_val(format!(
+            "::hot::task/restore: database read timed out after {}s",
+            TASK_NATIVE_IO_TIMEOUT.as_secs()
         ))),
     }
 }
@@ -1010,6 +1324,219 @@ mod tests {
         assert!(deserialized.org_id.is_none());
         assert!(deserialized.user_id.is_none());
         assert!(deserialized.args.is_null());
+    }
+
+    // -----------------------------------------------------------------------
+    // task/await backoff deadline-capping tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_backoff_slice_bounded_by_poll_interval() {
+        let far_deadline = std::time::Duration::from_secs(60);
+        assert_eq!(backoff_sleep_slice_ms(5000, 250, far_deadline), 250);
+    }
+
+    #[test]
+    fn test_backoff_slice_bounded_by_remaining_delay() {
+        let far_deadline = std::time::Duration::from_secs(60);
+        assert_eq!(backoff_sleep_slice_ms(100, 250, far_deadline), 100);
+    }
+
+    #[test]
+    fn test_backoff_slice_bounded_by_deadline() {
+        assert_eq!(
+            backoff_sleep_slice_ms(5000, 250, std::time::Duration::from_millis(80)),
+            80
+        );
+    }
+
+    #[test]
+    fn test_backoff_slice_zero_at_or_past_deadline() {
+        assert_eq!(
+            backoff_sleep_slice_ms(5000, 250, std::time::Duration::ZERO),
+            0
+        );
+        // A sub-millisecond remainder truncates to zero: wake at the deadline
+        // rather than sleeping a whole extra slice past it.
+        assert_eq!(
+            backoff_sleep_slice_ms(5000, 250, std::time::Duration::from_micros(500)),
+            0
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_backoff_sleep_wakes_at_deadline_mid_backoff() {
+        // The deadline lands between two backoff slices of a max-length (5s)
+        // backoff sleep; the loop must wake exactly at the deadline, never
+        // past it (overshooting would consume the parent completion reserve).
+        let start = tokio::time::Instant::now();
+        let deadline = start + std::time::Duration::from_millis(600);
+        let cancelled = sleep_backoff_capped(5000, 250, deadline, &|| false).await;
+        assert!(!cancelled);
+        assert_eq!(
+            tokio::time::Instant::now(),
+            deadline,
+            "backoff sleep must not overshoot the await deadline"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_backoff_sleep_full_delay_when_deadline_far() {
+        let start = tokio::time::Instant::now();
+        let deadline = start + std::time::Duration::from_secs(60);
+        let cancelled = sleep_backoff_capped(1000, 250, deadline, &|| false).await;
+        assert!(!cancelled);
+        assert_eq!(
+            tokio::time::Instant::now() - start,
+            std::time::Duration::from_millis(1000),
+            "without deadline pressure the full backoff delay is slept"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_backoff_sleep_observes_cancellation() {
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(60);
+        assert!(sleep_backoff_capped(1000, 250, deadline, &|| true).await);
+    }
+
+    // -----------------------------------------------------------------------
+    // task/await poll-loop resilience tests
+    // -----------------------------------------------------------------------
+
+    fn poll_loop_task(status: &str) -> crate::db::Task {
+        crate::db::Task {
+            task_id: Uuid::nil(),
+            env_id: Uuid::nil(),
+            stream_id: Uuid::nil(),
+            build_id: Uuid::nil(),
+            origin_run_id: None,
+            task_status_id: 2,
+            status: status.to_string(),
+            function_name: "::app/fn".to_string(),
+            args: None,
+            options: None,
+            task_type: "code".to_string(),
+            start_time: None,
+            stop_time: None,
+            duration_ms: None,
+            result: None,
+            info: None,
+            timing: None,
+            timeout_ms: 300_000,
+            retry_attempt: 0,
+            next_retry_at: None,
+            created_at: chrono::Utc::now(),
+            by_user_id: None,
+            run_id: None,
+            worker_id: None,
+            last_heartbeat_at: None,
+            container_id: None,
+            origin_run_fn: None,
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_poll_loop_terminal_task_returns_without_polling() {
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(60);
+        let polls = std::cell::Cell::new(0u32);
+        let task = await_task_poll_loop(
+            poll_loop_task("completed"),
+            deadline,
+            &|| false,
+            |_read_timeout: std::time::Duration| {
+                polls.set(polls.get() + 1);
+                async { Ok(poll_loop_task("completed")) }
+            },
+        )
+        .await
+        .expect("an already-terminal task must be returned as-is");
+        assert_eq!(task.status, "completed");
+        assert_eq!(polls.get(), 0, "no polls needed for a terminal task");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_poll_loop_transient_poll_failures_then_success() {
+        // One timed-out poll and one transport-errored poll are MISSED polls,
+        // not fatal errors: with deadline budget left the await must keep
+        // polling and return the task's eventual terminal result.
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(60);
+        let polls = std::cell::Cell::new(0u32);
+        let task = await_task_poll_loop(
+            poll_loop_task("running"),
+            deadline,
+            &|| false,
+            |_read_timeout: std::time::Duration| {
+                let attempt = polls.get();
+                polls.set(attempt + 1);
+                async move {
+                    match attempt {
+                        0 => Err(PollFailure::TimedOut(TASK_NATIVE_IO_TIMEOUT)),
+                        1 => Err(PollFailure::Transport(
+                            "connection reset by peer".to_string(),
+                        )),
+                        _ => Ok(poll_loop_task("completed")),
+                    }
+                }
+            },
+        )
+        .await
+        .expect("transient poll failures with budget left must not fail the await");
+        assert_eq!(task.status, "completed");
+        assert_eq!(polls.get(), 3);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_poll_loop_persistent_poll_failures_hit_deadline_exactly() {
+        let start = tokio::time::Instant::now();
+        let deadline = start + std::time::Duration::from_secs(30);
+        let err = await_task_poll_loop(
+            poll_loop_task("running"),
+            deadline,
+            &|| false,
+            |read_timeout: std::time::Duration| async move {
+                // Model a hung read: tokio::time::timeout consumes the whole
+                // slice before reporting Elapsed.
+                tokio::time::sleep(read_timeout).await;
+                Err(PollFailure::TimedOut(read_timeout))
+            },
+        )
+        .await
+        .expect_err("persistent poll failures must end in a deadline error");
+        assert_eq!(
+            tokio::time::Instant::now(),
+            deadline,
+            "failed-poll retries must not extend the wait past the deadline"
+        );
+        let msg = format!("{:?}", err);
+        assert!(
+            msg.contains("timeout waiting for task to complete"),
+            "unexpected error: {msg}"
+        );
+        assert!(
+            msg.contains("last poll error"),
+            "deadline error must mention the last poll failure: {msg}"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn test_poll_loop_not_found_fails_immediately() {
+        let start = tokio::time::Instant::now();
+        let deadline = start + std::time::Duration::from_secs(60);
+        let err = await_task_poll_loop(
+            poll_loop_task("running"),
+            deadline,
+            &|| false,
+            |_read_timeout: std::time::Duration| async { Err(PollFailure::NotFound) },
+        )
+        .await
+        .expect_err("a missing task row must fail the await immediately");
+        let msg = format!("{:?}", err);
+        assert!(msg.contains("task not found"), "unexpected error: {msg}");
+        assert_eq!(
+            tokio::time::Instant::now() - start,
+            std::time::Duration::from_millis(100),
+            "NotFound must fail on the first poll, not retry to the deadline"
+        );
     }
 
     // -----------------------------------------------------------------------

@@ -466,6 +466,17 @@ impl BoxExecutor {
         }
     }
 
+    /// Best-effort cleanup for Docker setup futures cancelled before they
+    /// returned a container ID. The task label survives create/start races and
+    /// lets the caller remove any container that appeared at the deadline.
+    pub async fn cleanup_task_containers(&self, task_id: &str) {
+        match self {
+            Self::Docker(e) => e.cleanup_task_containers(task_id).await,
+            #[cfg(all(target_os = "linux", feature = "kata"))]
+            Self::Kata(_) => {}
+        }
+    }
+
     /// Force-cleanup an orphan container previously returned by
     /// `list_orphan_containers`. Best-effort; never returns an error.
     #[cfg_attr(not(all(target_os = "linux", feature = "kata")), allow(dead_code))]
@@ -487,7 +498,9 @@ mod docker {
     use crate::log_accumulator::LogAccumulator;
     use bollard::Docker;
     use bollard::models::{ContainerCreateBody, HostConfig};
-    use bollard::query_parameters::{CreateImageOptionsBuilder, WaitContainerOptionsBuilder};
+    use bollard::query_parameters::{
+        CreateImageOptionsBuilder, ListContainersOptionsBuilder, WaitContainerOptionsBuilder,
+    };
     use futures::stream::StreamExt;
     use std::collections::HashMap;
 
@@ -753,6 +766,33 @@ mod docker {
         /// Remove a stopped container.
         pub async fn remove_container(&self, container_id: &str) {
             self.docker.remove_container(container_id, None).await.ok();
+        }
+
+        pub async fn cleanup_task_containers(&self, task_id: &str) {
+            let mut filters = HashMap::new();
+            filters.insert(
+                "label".to_string(),
+                vec![format!("hot.dev/task-id={}", task_id)],
+            );
+            let options = ListContainersOptionsBuilder::default()
+                .all(true)
+                .filters(&filters)
+                .build();
+            match self.docker.list_containers(Some(options)).await {
+                Ok(containers) => {
+                    for container_id in containers.into_iter().filter_map(|container| container.id)
+                    {
+                        self.kill_and_remove(&container_id).await;
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        task_id,
+                        "Failed to list Docker containers during timeout cleanup: {}",
+                        e
+                    );
+                }
+            }
         }
 
         #[allow(clippy::too_many_arguments)]
@@ -2509,6 +2549,50 @@ mod tests {
     #[test]
     fn test_backend_display() {
         assert_eq!(Backend::Docker.to_string(), "docker");
+    }
+
+    /// Exercises the cleanup path used when the task worker's outer deadline
+    /// cancels container setup/execution. Run explicitly on a Docker host with:
+    /// `cargo test -p hot_task_worker docker_outer_timeout_cleanup_removes_container -- --ignored`
+    #[tokio::test]
+    #[ignore = "requires a local Docker daemon and may pull alpine:3.21"]
+    async fn docker_outer_timeout_cleanup_removes_container() {
+        let executor = docker::DockerExecutor::new(1, 5).expect("connect to Docker");
+        let task_id = uuid::Uuid::now_v7().to_string();
+        let mut timings = ContainerTimings::default();
+        let container_id = tokio::time::timeout(
+            std::time::Duration::from_secs(60),
+            executor.create_and_start(
+                "alpine:3.21",
+                Some(vec![
+                    "/bin/sh".to_string(),
+                    "-c".to_string(),
+                    "sleep 60".to_string(),
+                ]),
+                None,
+                Some(&task_id),
+                None,
+                None,
+                &mut timings,
+            ),
+        )
+        .await
+        .expect("Docker setup exceeded test deadline")
+        .expect("start test container");
+
+        assert_eq!(executor.inspect_status(&container_id).await.unwrap(), None);
+
+        tokio::time::timeout(
+            std::time::Duration::from_secs(15),
+            executor.cleanup_task_containers(&task_id),
+        )
+        .await
+        .expect("timeout cleanup exceeded deadline");
+
+        assert!(matches!(
+            executor.inspect_status(&container_id).await,
+            Err(ExecutorError::ContainerNotFound(_))
+        ));
     }
 }
 

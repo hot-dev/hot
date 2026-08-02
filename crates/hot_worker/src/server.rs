@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::str::FromStr;
 use std::sync::{Arc, OnceLock, RwLock};
-use tokio::sync::{Mutex, mpsc, watch};
+use tokio::sync::{Mutex, Semaphore, mpsc, watch};
 use tokio::task::JoinHandle;
 use tracing::{debug, error, info, warn};
 use uuid::Uuid;
@@ -307,6 +307,21 @@ fn worker_queue_claimer_count(include_notifications: bool) -> usize {
 
 fn worker_handoff_capacity(worker_count: usize) -> usize {
     worker_count.max(1)
+}
+
+fn blocking_execution_capacity(worker_count: usize, configured_max: i64) -> usize {
+    let workers = worker_count.max(1);
+    let capacity = if configured_max < 0 {
+        workers.saturating_mul(2)
+    } else {
+        usize::try_from(configured_max)
+            .unwrap_or(usize::MAX)
+            .max(workers)
+    };
+    // Semaphore::new panics above MAX_PERMITS, so an oversized configured
+    // value must degrade to the largest legal ceiling instead of crashing
+    // the worker at startup.
+    capacity.min(Semaphore::MAX_PERMITS)
 }
 
 fn duration_ms(duration: std::time::Duration) -> u64 {
@@ -709,9 +724,44 @@ mod graceful_shutdown {
             Ok(failed_count)
         }
     }
+
+    /// RAII guard that unregisters a run from the `ShutdownCoordinator` when
+    /// dropped. `execute_single_event_handler` arms one as its first action so
+    /// every exit path — success, VM/join errors, blocking-slot admission
+    /// failure, early `?` returns, and the hard-timeout backstop — releases
+    /// the caller's `register_run` entry. Without it, error exits leak
+    /// `active_runs`/`active_cancel_tokens` entries forever, so
+    /// `active_run_count()` never returns to zero and every graceful shutdown
+    /// waits out the full drain timeout.
+    ///
+    /// Deliberately held by the async function and NOT moved into the blocking
+    /// VM closure: on hard timeout the async function returns while the
+    /// detached VM thread keeps running, and the run must stop counting as
+    /// active the moment the executor slot is freed — not when the thread
+    /// eventually dies. `unregister_run` is idempotent, so overlapping cleanup
+    /// (e.g. `fail_active_runs` during shutdown) stays harmless.
+    pub struct RunRegistration {
+        coordinator: Arc<ShutdownCoordinator>,
+        run_id: Uuid,
+    }
+
+    impl RunRegistration {
+        pub fn new(coordinator: Arc<ShutdownCoordinator>, run_id: Uuid) -> Self {
+            Self {
+                coordinator,
+                run_id,
+            }
+        }
+    }
+
+    impl Drop for RunRegistration {
+        fn drop(&mut self) {
+            self.coordinator.unregister_run(&self.run_id);
+        }
+    }
 }
 
-use graceful_shutdown::ShutdownCoordinator;
+use graceful_shutdown::{RunRegistration, ShutdownCoordinator};
 
 /// Cache for extracted build paths
 /// Maps build_id -> extracted directory path
@@ -1038,8 +1088,119 @@ pub const DEFAULT_RUN_TIMEOUT_SECONDS: u64 = 300; // 5 minutes
 /// VM to unwind before the worker hard-detaches the blocking thread and frees the
 /// executor slot. Only applied when `worker.cancel-on-timeout` is enabled.
 pub const RUN_TIMEOUT_HARD_GRACE: std::time::Duration = std::time::Duration::from_secs(5);
+/// Persisting the timeout/result is best-effort after VM execution. It must not
+/// contradict the hard-timeout guarantee by pinning the executor slot forever.
+pub const RUN_RESULT_FLUSH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 pub const DEFAULT_QUEUE_TYPE: QueueType = QueueType::Memory;
 pub const DEFAULT_SERIALIZATION: Serialization = Serialization::ZstdJson; // must match Serialization's #[default]
+
+async fn bounded_run_result_write<F, T>(
+    timeout: std::time::Duration,
+    write: F,
+) -> Result<T, tokio::time::error::Elapsed>
+where
+    F: std::future::Future<Output = T>,
+{
+    tokio::time::timeout(timeout, write).await
+}
+
+/// Ceiling on how long an admitted event handler may wait for a blocking
+/// execution slot.
+///
+/// The wait happens while the handler already holds one of the worker's
+/// executor slots and BEFORE its run budget starts (`deadline_at` is stamped
+/// only after admission), so an unbounded `acquire` here can pin every
+/// executor slot indefinitely once enough detached timed-out VM threads
+/// accumulate — each detached thread intentionally holds its permit until it
+/// actually exits. 30 seconds is long enough to ride out a burst of detached
+/// work draining, but short enough that the un-ACKed event goes back for
+/// redelivery promptly. `min_event_orphan_idle_floor_ms` includes this
+/// ceiling so orphan reclaim can never start a duplicate execution while a
+/// handler is still legally waiting at this gate.
+pub const BLOCKING_SLOT_ACQUIRE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Error message for blocking-slot admission timeouts. The event executor
+/// matches on it (via `is_blocking_slot_timeout_error`) to recognize that the
+/// handler produced no run side effects and the event is safe to leave
+/// un-ACKed for redelivery. The bracketed token exists solely for that
+/// classification: engine errors are propagated verbatim, so matching on
+/// human-readable words alone could misclassify a future engine error that
+/// happens to start the same way. Only this constant may contain the token.
+const BLOCKING_SLOT_TIMEOUT_ERROR: &str =
+    "[blocking-slot-admission-timeout] Timed out waiting for a blocking execution slot";
+
+fn is_blocking_slot_timeout_error(error: &str) -> bool {
+    error.contains("[blocking-slot-admission-timeout]")
+}
+
+/// Whether a failed handler execution should leave the event un-ACKed for
+/// redelivery. Only safe when the failure is the blocking-slot admission
+/// timeout (the handler produced no run side effects) AND no earlier handler
+/// for the same event already started a run — redelivering after a run
+/// started would duplicate its side effects.
+fn should_redeliver_event_after_handler_error(error: &str, started_any_handler: bool) -> bool {
+    is_blocking_slot_timeout_error(error) && !started_any_handler
+}
+
+/// Acquire a blocking-execution permit, bounded by `acquire_timeout`
+/// (production passes `BLOCKING_SLOT_ACQUIRE_TIMEOUT`; tests pass a short
+/// duration to stay deterministic without waiting out the real ceiling).
+async fn acquire_blocking_execution_slot(
+    blocking_execution_slots: Arc<Semaphore>,
+    run_id: Uuid,
+    acquire_timeout: std::time::Duration,
+) -> Result<tokio::sync::OwnedSemaphorePermit, String> {
+    match tokio::time::timeout(
+        acquire_timeout,
+        Arc::clone(&blocking_execution_slots).acquire_owned(),
+    )
+    .await
+    {
+        Ok(Ok(permit)) => Ok(permit),
+        Ok(Err(_)) => Err("Blocking execution limiter closed".to_string()),
+        Err(_) => {
+            warn!(
+                run_id = %run_id,
+                timeout_secs = acquire_timeout.as_secs(),
+                available_permits = blocking_execution_slots.available_permits(),
+                "Blocking execution slot admission timed out; detached timed-out VM threads are holding the permits"
+            );
+            Err(format!(
+                "{} after {}s",
+                BLOCKING_SLOT_TIMEOUT_ERROR,
+                acquire_timeout.as_secs()
+            ))
+        }
+    }
+}
+
+/// Floor for the hot:event orphan-reclaim idle threshold.
+///
+/// A handler that claimed an event may legally spend up to
+/// `BLOCKING_SLOT_ACQUIRE_TIMEOUT` waiting for blocking-slot admission
+/// (outside its run budget), then `run-timeout` plus `RUN_TIMEOUT_HARD_GRACE`
+/// executing, before the worker gives up — and the event is only ACKed after
+/// that. For a SINGLE-handler event, reclaiming below this floor would
+/// XAUTOCLAIM an un-ACKed event whose handler is still legally live and start
+/// a duplicate execution on another worker. The extra 5s covers result-flush
+/// and scheduling slack.
+///
+/// Residual: this floor covers ONE admission wait plus ONE run budget. An
+/// event with N matching handlers executes them serially, each with its own
+/// admission wait and run budget, so an N-handler event whose handlers run
+/// long (or queue behind slot admission) can legally outlive the floor and be
+/// XAUTOCLAIMed mid-execution — duplicating the side effects of the handlers
+/// that already ran. Operators running multi-handler events with long
+/// budgets should raise `queue.event-orphan-idle-ms` (the configured value is
+/// only floored here, never lowered) to at least N times this floor.
+fn min_event_orphan_idle_floor_ms(run_timeout: std::time::Duration) -> u64 {
+    run_timeout
+        .saturating_add(BLOCKING_SLOT_ACQUIRE_TIMEOUT)
+        .saturating_add(RUN_TIMEOUT_HARD_GRACE)
+        .saturating_add(std::time::Duration::from_secs(5))
+        .as_millis()
+        .min(u64::MAX as u128) as u64
+}
 
 // Simplified approach: ensure proper build isolation without complex caching
 // Each build execution will be isolated by using fresh compilation contexts
@@ -3209,7 +3370,12 @@ async fn execute_single_event_handler(
     stream_publisher: Option<Arc<StreamPubSub>>, // Stream pub/sub for real-time SSE updates
     task_queue: Arc<ProcessingQueue<TaskRequest>>,
     execution_services: Arc<WorkerExecutionServices>,
+    blocking_execution_slots: Arc<Semaphore>,
 ) -> Result<(), String> {
+    // The caller already registered `run_id`; from here this guard owns
+    // unregistration on every exit path (see `RunRegistration` docs).
+    let _run_registration = RunRegistration::new(Arc::clone(&shutdown_coordinator), run_id);
+
     // TIMING: Track execution phases
     let timing_start = std::time::Instant::now();
 
@@ -3355,6 +3521,8 @@ async fn execute_single_event_handler(
         // Normal (non-retry) scheduled events have retry_attempt = 0.
         event_message.body.execution_context.retry_attempt
     };
+
+    let run_timeout = get_run_timeout(worker_conf);
 
     let mut _execution_context = ExecutionContext::new_with_event_and_origin(
         run_id,
@@ -4003,9 +4171,6 @@ async fn execute_single_event_handler(
         }
     };
 
-    // Clone execution context (secret_value_hashes already populated by API handler)
-    let execution_context_for_events = _execution_context.clone();
-
     let timing_after_context = timing_start.elapsed();
     debug!(
         "TIMING [{}]: context_loading: {:?} (delta: {:?})",
@@ -4034,11 +4199,44 @@ async fn execute_single_event_handler(
         timing_before_spawn
     );
 
+    // A Tokio spawn_blocking task cannot be forcefully cancelled. Keep the
+    // permit inside the blocking closure so a timed-out, detached VM continues
+    // to count against the process-wide ceiling until it actually exits.
+    //
+    // The acquire is bounded by BLOCKING_SLOT_ACQUIRE_TIMEOUT: this await runs
+    // while the handler already holds an executor slot, so waiting forever here
+    // would let accumulated detached threads pin the whole worker. On timeout
+    // the error propagates to the event executor, which leaves the event
+    // un-ACKed for redelivery (no run side effects have happened yet).
+    let blocking_slot_wait_started = std::time::Instant::now();
+    let blocking_execution_permit = acquire_blocking_execution_slot(
+        blocking_execution_slots,
+        run_id,
+        BLOCKING_SLOT_ACQUIRE_TIMEOUT,
+    )
+    .await?;
+    let blocking_slot_wait = blocking_slot_wait_started.elapsed();
+    if blocking_slot_wait >= std::time::Duration::from_millis(100) {
+        warn!(
+            run_id = %run_id,
+            wait_ms = blocking_slot_wait.as_millis(),
+            "Event handler waited for a blocking execution slot; detached timed-out work is applying backpressure"
+        );
+    }
+
     let file_storage = execution_services.file_storage.clone();
     let store = execution_services
         .store_for(worker_conf, org_id, project.env_id)
         .await;
     let embedding_provider = execution_services.embedding_provider.clone();
+
+    // Align the propagated parent deadline with the timeout clock that starts
+    // immediately below. Time spent queued behind detached blocking work is
+    // backpressure, not part of the newly admitted handler's run budget.
+    _execution_context.deadline_at = chrono::Duration::from_std(run_timeout)
+        .ok()
+        .map(|duration| chrono::Utc::now() + duration);
+    let execution_context_for_events = _execution_context.clone();
 
     let external_cancel = if worker_conf.get_bool_or_default("worker.cancel-on-timeout", true) {
         let token = Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -4049,7 +4247,7 @@ async fn execute_single_event_handler(
     };
     let cancel_timer = external_cancel.as_ref().map(|token| {
         let token = Arc::clone(token);
-        let timeout = get_run_timeout(worker_conf);
+        let timeout = run_timeout;
         tokio::spawn(async move {
             tokio::time::sleep(timeout).await;
             token.store(true, std::sync::atomic::Ordering::Relaxed);
@@ -4075,10 +4273,12 @@ async fn execute_single_event_handler(
         let file_storage = file_storage.clone();
         let run_id_for_timing = run_id;
         let external_cancel = external_cancel.clone();
+        let blocking_execution_permit = blocking_execution_permit;
 
         let panic_label = format!("worker:{}", function_name);
         let spawn_scheduled = std::time::Instant::now();
         tokio::task::spawn_blocking(move || {
+            let _blocking_execution_permit = blocking_execution_permit;
             let spawn_entered = std::time::Instant::now();
             debug!(
                 "TIMING [{}]: spawn_blocking entered",
@@ -4370,7 +4570,6 @@ async fn execute_single_event_handler(
     // non-cooperative orphan is still executing. Cooperative VMs unwind promptly
     // and avoid overlap; for non-cooperative ones the two can briefly run
     // concurrently, which is why event handlers must be idempotent.
-    let run_timeout = get_run_timeout(worker_conf);
     let hard_timeout = if external_cancel.is_some() {
         run_timeout.saturating_add(RUN_TIMEOUT_HARD_GRACE)
     } else {
@@ -4430,18 +4629,47 @@ async fn execute_single_event_handler(
                     failure,
                 ));
                 let flush_started = std::time::Instant::now();
-                if let Err(e) = em.flush_run(run_id).await {
-                    error!("Failed to flush timeout failure for run {}: {}", run_id, e);
+                match bounded_run_result_write(RUN_RESULT_FLUSH_TIMEOUT, em.flush_run(run_id)).await {
+                    Ok(Ok(())) => {}
+                    Ok(Err(e)) => {
+                        error!("Failed to flush timeout failure for run {}: {}", run_id, e);
+                    }
+                    Err(_) => {
+                        error!(
+                            run_id = %run_id,
+                            timeout_secs = RUN_RESULT_FLUSH_TIMEOUT.as_secs(),
+                            "Flushing timeout failure timed out; releasing executor slot"
+                        );
+                    }
                 }
                 debug!(
                     "TIMING [{}]: timeout_flush_run: {:?}",
                     run_id.as_simple(),
                     flush_started.elapsed()
                 );
-            } else if let Err(e) = hot::db::Run::fail_run(db, &run_id, &timeout_error).await {
-                error!("Failed to mark run {} as timed out: {}", run_id, e);
+            } else {
+                match bounded_run_result_write(
+                    RUN_RESULT_FLUSH_TIMEOUT,
+                    hot::db::Run::fail_run(db, &run_id, &timeout_error),
+                )
+                .await
+                {
+                    Ok(Ok(())) => {}
+                    Ok(Err(e)) => {
+                        error!("Failed to mark run {} as timed out: {}", run_id, e);
+                    }
+                    Err(_) => {
+                        error!(
+                            run_id = %run_id,
+                            timeout_secs = RUN_RESULT_FLUSH_TIMEOUT.as_secs(),
+                            "Marking timed-out run failed to finish before executor release"
+                        );
+                    }
+                }
             }
-            shutdown_coordinator.unregister_run(&run_id);
+            // The RunRegistration guard unregisters the run as this return
+            // unwinds — the run stops counting as active now, even though the
+            // detached VM thread may keep executing.
             return Err(timeout_error);
         }
     };
@@ -4493,8 +4721,18 @@ async fn execute_single_event_handler(
     // This guarantees the SSE handler can query the run from the database
     if let Some(ref em) = emitter {
         let flush_started = std::time::Instant::now();
-        if let Err(e) = em.flush_run(run_id).await {
-            tracing::warn!("Failed to flush emitter before stream publish: {}", e);
+        match bounded_run_result_write(RUN_RESULT_FLUSH_TIMEOUT, em.flush_run(run_id)).await {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => {
+                tracing::warn!("Failed to flush emitter before stream publish: {}", e);
+            }
+            Err(_) => {
+                tracing::warn!(
+                    run_id = %run_id,
+                    timeout_secs = RUN_RESULT_FLUSH_TIMEOUT.as_secs(),
+                    "Emitter flush timed out before stream publish"
+                );
+            }
         }
         debug!(
             "TIMING [{}]: flush_run: {:?}",
@@ -4623,8 +4861,7 @@ async fn execute_single_event_handler(
         });
     }
 
-    // Unregister run on successful completion (whether Ok or Err Result)
-    shutdown_coordinator.unregister_run(&run_id);
+    // The RunRegistration guard unregisters the run as this function returns.
     Ok(())
 }
 
@@ -4646,7 +4883,8 @@ pub fn get_resolved_conf(conf: Val) -> Val {
         "shared-process": false,
         "local-write-concurrency": 1i64,
         "startup-runtime-build-limit": 1_000i64,
-        "startup-runtime-repair": true
+        "startup-runtime-repair": true,
+        "max-blocking-executions": -1i64
     });
 
     // Merge with provided conf (the provided conf will override defaults)
@@ -4786,17 +5024,19 @@ pub async fn run_with_components_shared_context_and_db(
     let queue_orphan_idle_ms = worker_conf
         .get_int_or_default("queue.event-orphan-idle-ms", 60_000)
         .max(1) as u64;
-    let min_event_orphan_idle_ms = get_run_timeout(&worker_conf)
-        .saturating_add(RUN_TIMEOUT_HARD_GRACE)
-        .saturating_add(std::time::Duration::from_secs(5))
-        .as_millis()
-        .min(u64::MAX as u128) as u64;
+    // Invariant (single-handler events): reclaim idle must exceed the longest
+    // an un-ACKed single-handler event can legally be alive on a healthy
+    // worker — blocking-slot admission wait plus run budget plus hard grace.
+    // Multi-handler events run handlers serially and can legally outlive this
+    // floor; see `min_event_orphan_idle_floor_ms` for the residual and the
+    // `queue.event-orphan-idle-ms` conf key operators can raise to cover it.
+    let min_event_orphan_idle_ms = min_event_orphan_idle_floor_ms(get_run_timeout(&worker_conf));
     let event_orphan_idle_ms = queue_orphan_idle_ms.max(min_event_orphan_idle_ms);
     if event_orphan_idle_ms != queue_orphan_idle_ms {
         tracing::warn!(
             configured_ms = queue_orphan_idle_ms,
             effective_ms = event_orphan_idle_ms,
-            "Raising hot:event orphan reclaim idle to stay beyond worker.run-timeout and avoid duplicate live handler execution"
+            "Raising hot:event orphan reclaim idle to stay beyond blocking-slot admission plus worker.run-timeout and avoid duplicate live handler execution"
         );
     }
 
@@ -5533,6 +5773,11 @@ pub async fn run_with_components_shared_context_and_db(
     let vm_budget =
         hot::runtime_budget::derive_worker_vm_concurrency(&worker_conf, requested_worker_count);
     let worker_count = vm_budget.resolved;
+    let configured_max_blocking_executions =
+        worker_conf.get_int_or_default("worker.max-blocking-executions", -1);
+    let max_blocking_executions =
+        blocking_execution_capacity(worker_count, configured_max_blocking_executions);
+    let blocking_execution_slots = Arc::new(Semaphore::new(max_blocking_executions));
 
     info!(
         "hot.dev: WORKER starting with {} concurrent workers (requested={}, cpu_limit={}, memory_limit={:?}, memory_limit_mb={:?}, explicit_vm_concurrency={}, shared_process={})",
@@ -5543,6 +5788,11 @@ pub async fn run_with_components_shared_context_and_db(
         vm_budget.memory_limit_mb,
         vm_budget.explicit,
         vm_budget.shared_process,
+    );
+    info!(
+        max_blocking_executions,
+        configured_max = configured_max_blocking_executions,
+        "hot.dev: WORKER bounded blocking VM executions"
     );
 
     // Create shared bytecode cache for all workers (in-memory LRU cache)
@@ -6005,6 +6255,7 @@ pub async fn run_with_components_shared_context_and_db(
         let stream_publisher_clone = stream_publisher.clone();
         let task_queue_clone = task_queue.clone();
         let execution_services_clone = execution_services.clone();
+        let blocking_execution_slots_clone = blocking_execution_slots.clone();
         // Per-worker captures of the admin consumer names so the daily
         // queue_cleanup handler (built inside the worker spawn) can pin its
         // queue handles to w0's identity. See comment on `admin_*_name`
@@ -6064,6 +6315,7 @@ pub async fn run_with_components_shared_context_and_db(
                                 let stream_publisher_ref = stream_publisher_clone.clone();
                                 let task_queue_ref = task_queue_clone.clone();
                                 let execution_services_ref = execution_services_clone.clone();
+                                let blocking_execution_slots_ref = blocking_execution_slots_clone.clone();
                                 // Daily queue_cleanup admin handles. Each is pinned to w0's
                                 // stable consumer name so any XAUTOCLAIM done by
                                 // cleanup_stale_consumers (when draining a stale consumer that
@@ -6384,13 +6636,13 @@ pub async fn run_with_components_shared_context_and_db(
                                                                 {
                                                                     timing.handler_dispatched_at = Some(chrono::Utc::now());
                                                                 }
-                                                                started_any_handler = true;
-                                                                let execution_future = execute_single_event_handler(db, &handler_build, &env_id, &worker_conf_ref, &event_handler, &handler_event_message, _emitter_ref.clone(), _event_publisher_ref.clone(), encryption_ref.clone(), cache_ref.clone(), shutdown_coord_ref.clone(), run_id, build_path_cache_ref.clone(), dev_context_storage_ref.clone(), stream_publisher_ref.clone(), task_queue_ref.clone(), execution_services_ref.clone());
+                                                                let execution_future = execute_single_event_handler(db, &handler_build, &env_id, &worker_conf_ref, &event_handler, &handler_event_message, _emitter_ref.clone(), _event_publisher_ref.clone(), encryption_ref.clone(), cache_ref.clone(), shutdown_coord_ref.clone(), run_id, build_path_cache_ref.clone(), dev_context_storage_ref.clone(), stream_publisher_ref.clone(), task_queue_ref.clone(), execution_services_ref.clone(), blocking_execution_slots_ref.clone());
 
                                                                                             match execution_future.await {
                                                                                                 Ok(()) => {
+                                                                                                    started_any_handler = true;
                                                                                                     debug!("Successfully executed event handler: {}", event_handler.event_handler_id);
-                                                                                                    // Run is already unregistered by execute_single_event_handler
+                                                                                                    // Run is unregistered by execute_single_event_handler's RAII guard on every exit path
 
                                                                                                     // Update run info with routing warning if this is the first handler
                                                                                                     // and a tie-breaker was used (routing_warning is set)
@@ -6400,10 +6652,21 @@ pub async fn run_with_components_shared_context_and_db(
                                                                                                                 warn!("hot.dev: WORKER {} failed to update run {} info with routing warning: {}", worker_id, run_id, e);
                                                                                                             }
                                                                                                 }
+                                                                                                Err(e) if should_redeliver_event_after_handler_error(&e, started_any_handler) => {
+                                                                                                    // Blocking-slot admission timed out before any run side effects
+                                                                                                    // for this event: leave it un-ACKed via the standard
+                                                                                                    // infrastructure-retry path so it is redelivered once detached
+                                                                                                    // blocking work frees capacity. (If an earlier handler already
+                                                                                                    // started a run, the arm below applies instead: redelivering the
+                                                                                                    // whole event would duplicate that run's side effects.)
+                                                                                                    warn!("hot.dev: WORKER {} deferring event '{}' for redelivery: {}", worker_id, event_message.body.event.event_type, e);
+                                                                                                    return Err(worker_infrastructure_retry_error(e, infra_retry_backoff_ms));
+                                                                                                }
                                                                                                 Err(e) => {
+                                                                                                    started_any_handler = true;
                                                                                                     error!("Failed to execute event handler {}: {}", event_handler.event_handler_id, e);
                                                                                                     all_success = false;
-                                                                                                    // Run is already unregistered by execute_single_event_handler
+                                                                                                    // Run is unregistered by execute_single_event_handler's RAII guard on every exit path
 
                                                                                                     // Still update run info with routing warning even on failure
                                                                                                     if is_first_handler
@@ -7441,6 +7704,28 @@ mod tests {
     use super::*;
     use hot::val;
 
+    #[tokio::test]
+    async fn run_result_write_timeout_bounds_a_stuck_flush() {
+        let started = std::time::Instant::now();
+        let result = bounded_run_result_write(
+            std::time::Duration::from_millis(20),
+            std::future::pending::<Result<(), String>>(),
+        )
+        .await;
+
+        assert!(result.is_err());
+        assert!(started.elapsed() < std::time::Duration::from_secs(1));
+        assert_eq!(
+            bounded_run_result_write(
+                std::time::Duration::from_secs(1),
+                std::future::ready(Ok::<_, String>(())),
+            )
+            .await
+            .unwrap(),
+            Ok(())
+        );
+    }
+
     #[test]
     fn duplicate_function_routing_honors_exact_endpoint_build() {
         let first = Uuid::now_v7();
@@ -7706,6 +7991,241 @@ mod tests {
     fn worker_handoff_capacity_never_drops_to_zero() {
         assert_eq!(worker_handoff_capacity(0), 1);
         assert_eq!(worker_handoff_capacity(4), 4);
+    }
+
+    #[test]
+    fn blocking_execution_capacity_bounds_detached_work() {
+        assert_eq!(blocking_execution_capacity(0, -1), 2);
+        assert_eq!(blocking_execution_capacity(4, -1), 8);
+        assert_eq!(blocking_execution_capacity(4, 0), 4);
+        assert_eq!(blocking_execution_capacity(4, 2), 4);
+        assert_eq!(blocking_execution_capacity(4, 6), 6);
+    }
+
+    #[test]
+    fn blocking_execution_capacity_clamps_to_semaphore_limit() {
+        // Semaphore::new panics above MAX_PERMITS; oversized config must
+        // degrade to the largest legal ceiling instead of crashing startup.
+        assert_eq!(
+            blocking_execution_capacity(4, i64::MAX),
+            Semaphore::MAX_PERMITS
+        );
+        let _ = Semaphore::new(blocking_execution_capacity(4, i64::MAX));
+    }
+
+    #[tokio::test]
+    async fn blocking_slot_admission_times_out_instead_of_pinning_executor() {
+        let slots = Arc::new(Semaphore::new(1));
+        // Simulate a detached timed-out VM thread that still holds its permit.
+        let held = Arc::clone(&slots)
+            .acquire_owned()
+            .await
+            .expect("permit should be available");
+
+        let err = acquire_blocking_execution_slot(
+            Arc::clone(&slots),
+            Uuid::now_v7(),
+            std::time::Duration::from_millis(20),
+        )
+        .await
+        .expect_err("admission must time out while all permits are held");
+        assert!(
+            is_blocking_slot_timeout_error(&err),
+            "unexpected admission error: {err}"
+        );
+
+        drop(held);
+        let permit = acquire_blocking_execution_slot(
+            slots,
+            Uuid::now_v7(),
+            std::time::Duration::from_millis(20),
+        )
+        .await
+        .expect("freed capacity must admit immediately");
+        drop(permit);
+    }
+
+    #[test]
+    fn slot_admission_timeout_redelivers_only_side_effect_free_events() {
+        let timeout_error = format!("{} after 30s", BLOCKING_SLOT_TIMEOUT_ERROR);
+
+        // No handler started a run yet: safe to leave the event un-ACKed.
+        assert!(should_redeliver_event_after_handler_error(
+            &timeout_error,
+            false
+        ));
+        // An earlier handler already ran: redelivery would duplicate its run.
+        assert!(!should_redeliver_event_after_handler_error(
+            &timeout_error,
+            true
+        ));
+        // Any other handler failure keeps the existing ACK-and-continue path.
+        assert!(!should_redeliver_event_after_handler_error(
+            "Event handler panicked: boom",
+            false
+        ));
+        // An engine error that merely starts with the same human-readable
+        // words must NOT be classified as side-effect-free: only the unique
+        // bracketed token marks the admission timeout.
+        assert!(!should_redeliver_event_after_handler_error(
+            "Timed out waiting for a blocking execution slot in the engine",
+            false
+        ));
+    }
+
+    #[test]
+    fn event_orphan_reclaim_floor_covers_slot_admission_wait() {
+        let run_timeout = std::time::Duration::from_secs(DEFAULT_RUN_TIMEOUT_SECONDS);
+        let legal_lifetime_ms = run_timeout
+            .saturating_add(BLOCKING_SLOT_ACQUIRE_TIMEOUT)
+            .saturating_add(RUN_TIMEOUT_HARD_GRACE)
+            .as_millis() as u64;
+
+        // The floor must exceed the longest an un-ACKed SINGLE-handler event
+        // can legally be alive on a healthy worker (admission wait + run
+        // budget + hard grace), or reclaim would start a duplicate live
+        // execution. Multi-handler events can legally exceed the floor; see
+        // `min_event_orphan_idle_floor_ms` docs.
+        assert!(min_event_orphan_idle_floor_ms(run_timeout) > legal_lifetime_ms);
+        assert!(min_event_orphan_idle_floor_ms(std::time::Duration::MAX) > 0);
+    }
+
+    #[test]
+    fn run_registration_guard_unregisters_run_on_drop() {
+        let coordinator = Arc::new(ShutdownCoordinator::new(1));
+        let run_id = Uuid::now_v7();
+        coordinator.register_run(run_id);
+        coordinator
+            .register_cancel_token(run_id, Arc::new(std::sync::atomic::AtomicBool::new(false)));
+
+        let guard = RunRegistration::new(Arc::clone(&coordinator), run_id);
+        assert_eq!(coordinator.active_run_count(), 1);
+        drop(guard);
+        assert_eq!(coordinator.active_run_count(), 0);
+
+        // unregister_run is idempotent, so explicit cleanup racing the guard
+        // (e.g. fail_active_runs during shutdown) stays harmless.
+        coordinator.unregister_run(&run_id);
+        assert_eq!(coordinator.active_run_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn error_exit_from_event_handler_unregisters_active_run() {
+        let (db, db_path) = migrated_sqlite_file_db().await;
+        let test_data = hot::db::insert_test_data(&db)
+            .await
+            .expect("test data should insert");
+        let build = Build::get_build(&db, &test_data.build_id)
+            .await
+            .expect("test build should exist");
+
+        // An event env that differs from the build's project env forces the
+        // early error exit in execute_single_event_handler, before any VM
+        // execution or run side effects.
+        let mismatched_env_id = Uuid::now_v7();
+        let event_id = Uuid::now_v7();
+        let stream_id = Uuid::now_v7();
+        let event_message = EventMessage {
+            id: event_id,
+            head: AHashMap::new(),
+            body: hot::lang::event::queue::EventMessageBody {
+                event: hot::lang::event::Event {
+                    event_id,
+                    env_id: mismatched_env_id,
+                    stream_id,
+                    event_type: "hot:call".to_string(),
+                    event_data: val!({
+                        "fn": "demo/handler",
+                        "args": [],
+                    }),
+                    event_time: chrono::Utc::now(),
+                    target_project_id: None,
+                    target_project_name: None,
+                },
+                execution_context: ExecutionContext::new(
+                    Uuid::now_v7(),
+                    stream_id,
+                    hot::db::run::RunType::Call.as_id(),
+                    Some(mismatched_env_id),
+                    Some(test_data.user_id),
+                    Some(test_data.org_id),
+                    None,
+                ),
+            },
+        };
+        let event_handler = EventHandler {
+            event_handler_id: Uuid::now_v7(),
+            build_id: build.build_id,
+            event_type: "hot:call".to_string(),
+            ns: "demo".to_string(),
+            var: "handler".to_string(),
+            meta: None,
+            value: None,
+            file: None,
+            line: None,
+            column: None,
+            position: None,
+        };
+
+        let worker_conf = get_resolved_conf(val!({}));
+        let cache_dir =
+            std::env::temp_dir().join(format!("hot-worker-test-cache-{}", Uuid::new_v4()));
+        let cache = Arc::new(hot::lang::cache::bytecode_cache::BytecodeCache::new(
+            cache_dir.clone(),
+        ));
+        let task_queue = Arc::new(
+            ProcessingQueue::<TaskRequest>::new(
+                QueueType::Memory,
+                format!("worker-run-unregister-test-{}", Uuid::new_v4()),
+                None,
+                Serialization::Json,
+            )
+            .expect("task queue should build"),
+        );
+        let execution_services =
+            Arc::new(WorkerExecutionServices::new(Arc::new(db.clone()), &worker_conf).await);
+
+        // Mirror the event executor: the caller registers the run, then hands
+        // unregistration responsibility to execute_single_event_handler.
+        let shutdown_coordinator = Arc::new(ShutdownCoordinator::new(1));
+        let run_id = Uuid::now_v7();
+        shutdown_coordinator.register_run(run_id);
+        assert_eq!(shutdown_coordinator.active_run_count(), 1);
+
+        let result = execute_single_event_handler(
+            &db,
+            &build,
+            &mismatched_env_id,
+            &worker_conf,
+            &event_handler,
+            &event_message,
+            None,
+            None,
+            None,
+            cache,
+            Arc::clone(&shutdown_coordinator),
+            run_id,
+            Arc::new(BuildPathCache::new()),
+            None,
+            None,
+            task_queue,
+            execution_services,
+            Arc::new(Semaphore::new(1)),
+        )
+        .await;
+
+        assert!(result.is_err(), "env mismatch must fail the handler");
+        assert_eq!(
+            shutdown_coordinator.active_run_count(),
+            0,
+            "an error exit must unregister the run so shutdown does not hang"
+        );
+
+        if let DatabasePool::Sqlite(pool) = &db {
+            pool.close().await;
+        }
+        let _ = std::fs::remove_file(db_path);
+        let _ = std::fs::remove_dir_all(cache_dir);
     }
 
     #[test]

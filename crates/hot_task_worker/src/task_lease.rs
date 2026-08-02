@@ -85,6 +85,7 @@ pub const DEFAULT_LEASE_TTL: Duration = Duration::from_secs(120);
 /// Redis blips. With `DEFAULT_LEASE_TTL = 120s` and this at 30s, a single
 /// missed tick still leaves ~90s of TTL.
 pub const DEFAULT_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(30);
+const REDIS_COMMAND_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Token-matched extend Lua: only PEXPIRE if the key still holds our token.
 ///
@@ -391,24 +392,28 @@ impl RedisLeaseInner {
         if guard.is_some() {
             return Ok(());
         }
-        let new = match &self.client {
-            RedisLeaseClient::Standalone(c) => {
-                // Disable redis-rs 1.x's 500ms default response timeout so a
-                // lease `SET NX` / extend script isn't clipped under load and
-                // spuriously deferred (which feeds the queue's retry budget).
-                // See `hot::redis::standalone_async_config` for the rationale.
-                let mc = c
-                    .get_multiplexed_async_connection_with_config(
-                        &hot::redis::standalone_async_config(),
-                    )
-                    .await?;
-                RedisLeaseConn::Standalone(mc)
-            }
-            RedisLeaseClient::Cluster(c) => {
-                let cc = c.get_async_connection().await?;
-                RedisLeaseConn::Cluster(cc)
-            }
-        };
+        let new = tokio::time::timeout(REDIS_COMMAND_TIMEOUT, async {
+            Ok::<RedisLeaseConn, LeaseError>(match &self.client {
+                RedisLeaseClient::Standalone(c) => {
+                    // Disable redis-rs 1.x's 500ms default response timeout so a
+                    // lease `SET NX` / extend script isn't clipped under load and
+                    // spuriously deferred (which feeds the queue's retry budget).
+                    // See `hot::redis::standalone_async_config` for the rationale.
+                    let mc = c
+                        .get_multiplexed_async_connection_with_config(
+                            &hot::redis::standalone_async_config(),
+                        )
+                        .await?;
+                    RedisLeaseConn::Standalone(mc)
+                }
+                RedisLeaseClient::Cluster(c) => {
+                    let cc = c.get_async_connection().await?;
+                    RedisLeaseConn::Cluster(cc)
+                }
+            })
+        })
+        .await
+        .map_err(|_| LeaseError::Redis("connection timed out after 10s".to_string()))??;
         *guard = Some(new);
         Ok(())
     }
@@ -419,9 +424,13 @@ impl RedisLeaseInner {
         let conn = guard.as_mut().ok_or_else(|| {
             LeaseError::Redis("connection vanished after ensure_connection".to_string())
         })?;
-        match conn.run_cmd(cmd).await {
-            Ok(v) => Ok(v),
-            Err(e) => {
+        match tokio::time::timeout(REDIS_COMMAND_TIMEOUT, conn.run_cmd(cmd)).await {
+            Err(_) => {
+                *guard = None;
+                Err(LeaseError::Redis("command timed out after 10s".to_string()))
+            }
+            Ok(Ok(v)) => Ok(v),
+            Ok(Err(e)) => {
                 tracing::debug!(error = %e, "Lease Redis command failed; clearing cached connection");
                 *guard = None;
                 Err(e)
@@ -440,9 +449,14 @@ impl RedisLeaseInner {
         let conn = guard.as_mut().ok_or_else(|| {
             LeaseError::Redis("connection vanished after ensure_connection".to_string())
         })?;
-        match conn.run_script(script, keys, args).await {
-            Ok(v) => Ok(v),
-            Err(e) => {
+        match tokio::time::timeout(REDIS_COMMAND_TIMEOUT, conn.run_script(script, keys, args)).await
+        {
+            Err(_) => {
+                *guard = None;
+                Err(LeaseError::Redis("script timed out after 10s".to_string()))
+            }
+            Ok(Ok(v)) => Ok(v),
+            Ok(Err(e)) => {
                 tracing::debug!(error = %e, "Lease Redis script failed; clearing cached connection");
                 *guard = None;
                 Err(e)

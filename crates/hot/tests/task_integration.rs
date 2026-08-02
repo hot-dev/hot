@@ -116,7 +116,7 @@ async fn test_task_full_db_lifecycle() {
 
     // Complete
     let result = serde_json::json!({"output": "done"});
-    Task::complete(&db, &task_id, &TaskStatus::Completed, Some(&result))
+    Task::complete(&db, &task_id, &TaskStatus::Completed, Some(&result), None)
         .await
         .unwrap();
     let task = Task::get(&db, &task_id).await.unwrap();
@@ -150,7 +150,7 @@ async fn test_task_failure_lifecycle() {
     Task::mark_running(&db, &task_id).await.unwrap();
 
     let err = serde_json::json!({"error": "something broke"});
-    Task::complete(&db, &task_id, &TaskStatus::Failed, Some(&err))
+    Task::complete(&db, &task_id, &TaskStatus::Failed, Some(&err), None)
         .await
         .unwrap();
 
@@ -183,7 +183,7 @@ async fn test_task_timeout_lifecycle() {
     Task::mark_running(&db, &task_id).await.unwrap();
 
     let err = serde_json::json!({"error": "Task timed out"});
-    Task::complete(&db, &task_id, &TaskStatus::TimedOut, Some(&err))
+    Task::complete(&db, &task_id, &TaskStatus::TimedOut, Some(&err), None)
         .await
         .unwrap();
 

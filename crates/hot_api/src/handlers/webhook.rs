@@ -602,6 +602,8 @@ async fn webhook_handler_inner(
         access_id: None,
         agent_type: None,
         queue_timing: None,
+        // Enqueue-only producer context; the worker stamps deadline_at at admission
+        deadline_at: None,
     };
 
     // Pre-compute secret value hashes for targeted masking of sensitive headers

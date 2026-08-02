@@ -23,3 +23,6 @@ english-to-cron = { workspace = true }
 tracing = { workspace = true }
 uuid = { workspace = true, features = ["serde", "v4", "v7"] }
 hot = { workspace = true }
+
+[dev-dependencies]
+hot = { workspace = true, features = ["test-utils"] }

@@ -18,14 +18,27 @@ static INIT_RUSTLS: Once = Once::new();
 /// retry budget and lands in the dead-letter queue — stranding the underlying
 /// task in `queued` forever.
 ///
-/// We disable the per-command response timeout to match cluster mode (whose
-/// builder already defaults `response_timeout` to `None`) and to restore the
-/// pre-1.x semantics the queue/subscriber code was written against. Liveness
-/// is still bounded by each blocking command's own server-side `BLOCK` timeout
-/// and by transport-level connection errors, which fail in-flight commands
-/// rather than hanging.
+/// We disable the redis-rs response timeout to match cluster mode (whose
+/// builder defaults `response_timeout` to `None`). The queue, subscriber, and
+/// task-lease wrappers apply operation-aware Tokio deadlines instead: short
+/// commands are bounded tightly while blocking reads get enough time to reach
+/// their server-side `BLOCK` timeout.
 pub fn standalone_async_config() -> ::redis::AsyncConnectionConfig {
     ::redis::AsyncConnectionConfig::new().set_response_timeout(None)
+}
+
+/// Whether a Redis command failure indicates the underlying connection is
+/// broken and must be replaced (IO errors, dropped/reset connections, RESP
+/// protocol desync, ...) rather than a per-command failure (server error
+/// replies, type errors, ...).
+///
+/// redis 1.x `MultiplexedConnection` never reconnects on its own — only
+/// `ConnectionManager` does — so after a silent drop (LB idle reaping,
+/// failover, ...) every subsequent command on the same connection fails or
+/// times out forever. Callers that cache connections must evict the cached
+/// connection when this returns true so the next call reconnects fresh.
+pub(crate) fn error_indicates_broken_connection(err: &::redis::RedisError) -> bool {
+    err.is_io_error() || err.is_connection_dropped() || err.is_unrecoverable_error()
 }
 
 /// Initialize Rustls crypto provider (required for TLS connections)
@@ -72,4 +85,40 @@ pub fn is_cluster_uri(uri: &str) -> bool {
     // AWS Elasticache typically provides single endpoint even for clusters
     // User must set redis.cluster=true in config for these cases
     false
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn io_errors_indicate_a_broken_connection() {
+        for kind in [
+            std::io::ErrorKind::BrokenPipe,
+            std::io::ErrorKind::ConnectionReset,
+            std::io::ErrorKind::UnexpectedEof,
+            std::io::ErrorKind::TimedOut,
+        ] {
+            let err = ::redis::RedisError::from(std::io::Error::new(kind, "socket failure"));
+            assert!(
+                error_indicates_broken_connection(&err),
+                "IO error {kind:?} must evict the cached connection"
+            );
+        }
+    }
+
+    #[test]
+    fn per_command_failures_do_not_indicate_a_broken_connection() {
+        let type_err = ::redis::RedisError::from((
+            ::redis::ErrorKind::UnexpectedReturnType,
+            "unexpected return type",
+        ));
+        assert!(!error_indicates_broken_connection(&type_err));
+
+        let server_err = ::redis::RedisError::from((
+            ::redis::ErrorKind::Server(::redis::ServerErrorKind::ResponseError),
+            "WRONGTYPE Operation against a key holding the wrong kind of value",
+        ));
+        assert!(!error_indicates_broken_connection(&server_err));
+    }
 }

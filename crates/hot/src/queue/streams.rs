@@ -73,10 +73,17 @@ const READ_BATCH_SIZE: usize = 1;
 /// this ensures streams don't grow unbounded between janitor passes.
 const STREAM_MAXLEN: u64 = 100_000;
 
+/// Soft upper bound on dead-letter stream length (`XADD MAXLEN ~`).
+const DLQ_MAXLEN: u64 = 10_000;
+
 /// Block duration (ms) used by `process_blocking` for the new-message read.
 /// Workers that select! over multiple queues park here so we avoid hot
 /// looping while staying responsive to shutdown via the outer select.
 const PROCESS_BLOCKING_MS: u64 = 5_000;
+/// Client-side ceiling for all queue Redis commands. This exceeds the longest
+/// server-side queue BLOCK (5s), while still bounding commands that otherwise
+/// have no redis-rs response timeout.
+const REDIS_COMMAND_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Maximum delay before re-checking Redis while all pending entries belong to
 /// active workers. Lease completion notifications normally wake the claimer
@@ -114,6 +121,23 @@ impl From<redis::ParsingError> for StreamsQueueError {
     fn from(e: redis::ParsingError) -> Self {
         Self::RedisError(e.to_string())
     }
+}
+
+/// Successful worker completion is only durable once Redis confirms that the
+/// exact pending entry was acknowledged. Treating `0` as success can silently
+/// drop the only retry signal after a task's terminal DB write failed.
+fn require_single_stream_ack(
+    ack_value: &redis::Value,
+    msg_id: &str,
+) -> Result<(), StreamsQueueError> {
+    let acked: i64 = redis::from_redis_value_ref(ack_value)?;
+    if acked != 1 {
+        return Err(StreamsQueueError::RedisError(format!(
+            "XACK for message {} affected {} entries",
+            msg_id, acked
+        )));
+    }
+    Ok(())
 }
 
 /// Pull a named field out of a single XINFO GROUPS record.
@@ -219,43 +243,81 @@ enum RedisClient {
 impl RedisClient {
     /// Create a new connection (lazily cached per-worker)
     async fn connect(&self) -> Result<RedisConnectionOwned, StreamsQueueError> {
-        match self {
-            RedisClient::Standalone(client) => {
-                // Disable redis-rs 1.x's 500ms default response timeout: this
-                // connection issues `XREADGROUP ... BLOCK 5000` and must not
-                // abort blocking reads (or commands slowed by load) mid-flight.
-                // See `crate::redis::standalone_async_config` for the rationale.
-                let conn = client
-                    .get_multiplexed_async_connection_with_config(
-                        &crate::redis::standalone_async_config(),
-                    )
-                    .await?;
-                Ok(RedisConnectionOwned::Standalone(conn))
+        tokio::time::timeout(REDIS_COMMAND_TIMEOUT, async {
+            match self {
+                RedisClient::Standalone(client) => {
+                    // Disable redis-rs 1.x's 500ms default response timeout: this
+                    // connection issues `XREADGROUP ... BLOCK 5000` and must not
+                    // abort blocking reads (or commands slowed by load) mid-flight.
+                    // See `crate::redis::standalone_async_config` for the rationale.
+                    let conn = client
+                        .get_multiplexed_async_connection_with_config(
+                            &crate::redis::standalone_async_config(),
+                        )
+                        .await?;
+                    Ok(RedisConnectionOwned {
+                        conn: RedisConnectionKind::Standalone(conn),
+                        broken: false,
+                    })
+                }
+                RedisClient::Cluster(client) => {
+                    let conn = client.get_async_connection().await?;
+                    Ok(RedisConnectionOwned {
+                        conn: RedisConnectionKind::Cluster(conn),
+                        broken: false,
+                    })
+                }
             }
-            RedisClient::Cluster(client) => {
-                let conn = client.get_async_connection().await?;
-                Ok(RedisConnectionOwned::Cluster(conn))
-            }
-        }
+        })
+        .await
+        .map_err(|_| StreamsQueueError::RedisError("connection timed out after 10s".to_string()))?
     }
 }
 
 /// Owned connection for a worker
-enum RedisConnectionOwned {
+struct RedisConnectionOwned {
+    conn: RedisConnectionKind,
+    /// Set when a command failed in a way that indicates the connection
+    /// itself is dead (client-side timeout on a half-open socket, IO error,
+    /// ...). `get_connection` drops broken connections so the next call
+    /// reconnects — redis 1.x `MultiplexedConnection` never reconnects on
+    /// its own, so without eviction every later command would time out
+    /// forever and stall the queue.
+    broken: bool,
+}
+
+enum RedisConnectionKind {
     Standalone(MultiplexedConnection),
     Cluster(AsyncClusterConnection),
 }
 
 impl RedisConnectionOwned {
     async fn cmd(&mut self, cmd: &redis::Cmd) -> Result<redis::Value, StreamsQueueError> {
-        match self {
-            RedisConnectionOwned::Standalone(conn) => {
-                let result = cmd.query_async(conn).await?;
-                Ok(result)
+        let result = tokio::time::timeout(REDIS_COMMAND_TIMEOUT, async {
+            match &mut self.conn {
+                RedisConnectionKind::Standalone(conn) => cmd.query_async(conn).await,
+                RedisConnectionKind::Cluster(conn) => cmd.query_async(conn).await,
             }
-            RedisConnectionOwned::Cluster(conn) => {
-                let result = cmd.query_async(conn).await?;
-                Ok(result)
+        })
+        .await;
+
+        match result {
+            Ok(Ok(value)) => Ok(value),
+            Ok(Err(e)) => {
+                if crate::redis::error_indicates_broken_connection(&e) {
+                    self.broken = true;
+                }
+                Err(e.into())
+            }
+            Err(_elapsed) => {
+                // A client-side timeout on a command with a bounded server
+                // side (everything here is <= BLOCK 5000) means the reply is
+                // never coming — typically a half-open socket after a silent
+                // LB drop. Mark the connection for eviction.
+                self.broken = true;
+                Err(StreamsQueueError::RedisError(
+                    "command timed out after 10s".to_string(),
+                ))
             }
         }
     }
@@ -593,11 +655,16 @@ impl<T> RedisStreamQueue<T> {
         }
     }
 
-    /// Get a connection, creating one if necessary
+    /// Get a connection, creating one if necessary. Connections marked
+    /// broken by a previous command failure are evicted here, so the caller
+    /// always gets a connection that is at least freshly established.
     async fn get_connection(
         &self,
     ) -> Result<tokio::sync::MutexGuard<'_, Option<RedisConnectionOwned>>, StreamsQueueError> {
         let mut guard = self.cached_conn.lock().await;
+        if guard.as_ref().is_some_and(|conn| conn.broken) {
+            *guard = None;
+        }
         if guard.is_none() {
             let conn = self.client.connect().await?;
             *guard = Some(conn);
@@ -2020,9 +2087,6 @@ impl<T: Send + Sync + Serialize + DeserializeOwned + Clone + 'static> RedisStrea
             FetchSource::Pending => "0",
         };
 
-        let mut guard = self.get_connection().await?;
-        let conn = guard.as_mut().unwrap();
-
         let mut cmd = redis::cmd("XREADGROUP");
         cmd.arg("GROUP")
             .arg(&self.consumer_group)
@@ -2034,7 +2098,18 @@ impl<T: Send + Sync + Serialize + DeserializeOwned + Clone + 'static> RedisStrea
         }
         cmd.arg("STREAMS").arg(&self.stream_name).arg(id_arg);
 
-        let result = match conn.cmd(&cmd.clone()).await {
+        // Hold the cached-connection lock only for the read itself: the
+        // NOGROUP recovery below re-enters `ensure_consumer_group()` and
+        // `get_connection()`, which re-lock the same non-reentrant mutex —
+        // recovering while this guard was still alive would permanently
+        // deadlock the worker future.
+        let first_attempt = {
+            let mut guard = self.get_connection().await?;
+            let conn = guard.as_mut().unwrap();
+            conn.cmd(&cmd).await
+        };
+
+        let result = match first_attempt {
             Ok(result) => result,
             Err(StreamsQueueError::RedisError(e)) if e.contains("NOGROUP") => {
                 // `hot queue clear` deletes Redis stream keys, which also
@@ -2049,7 +2124,7 @@ impl<T: Send + Sync + Serialize + DeserializeOwned + Clone + 'static> RedisStrea
                 self.ensure_consumer_group().await?;
                 let mut guard = self.get_connection().await?;
                 let conn = guard.as_mut().unwrap();
-                conn.cmd(&cmd.clone()).await?
+                conn.cmd(&cmd).await?
             }
             Err(e) => return Err(e),
         };
@@ -2271,7 +2346,7 @@ impl<T: Send + Sync + Serialize + DeserializeOwned + Clone + 'static> RedisStrea
                 // halves the per-message Redis command count on success.
                 let mut guard = self.get_connection().await?;
                 let conn = guard.as_mut().unwrap();
-                let _ = conn
+                let ack_value = conn
                     .cmd(
                         &redis::cmd("XACK")
                             .arg(&self.stream_name)
@@ -2279,7 +2354,9 @@ impl<T: Send + Sync + Serialize + DeserializeOwned + Clone + 'static> RedisStrea
                             .arg(&msg_id)
                             .clone(),
                     )
-                    .await;
+                    .await?;
+                require_single_stream_ack(&ack_value, &msg_id)
+                    .map_err(|e| Box::new(e) as Box<dyn Error + Send + Sync>)?;
                 if queue_timing_enabled() {
                     tracing::info!(
                         target: "hot::queue::timing",
@@ -2421,6 +2498,16 @@ impl<T: Send + Sync + Serialize + DeserializeOwned + Clone + 'static> RedisStrea
 
     /// ACK a single message and copy it into the DLQ. Used both for retry
     /// exhaustion and unrecoverable deserialization failures.
+    ///
+    /// The DLQ copy and the source XACK run in one Lua script (same pattern
+    /// as `requeue_msg_for_infrastructure_retry`) so they are atomic: if the
+    /// XACK does not remove exactly one pending entry, the fresh DLQ copy is
+    /// rolled back and the script fails. On error the caller must leave the
+    /// message pending — a later redelivery re-attempts the move, and the
+    /// atomicity guarantees exactly one DLQ copy ever lands.
+    ///
+    /// The two keys share a hash slot in cluster mode because the DLQ name
+    /// is derived as `<stream>:deadletter` from the hash-tagged stream name.
     async fn move_msg_to_dlq(
         &self,
         msg_id: &str,
@@ -2430,31 +2517,43 @@ impl<T: Send + Sync + Serialize + DeserializeOwned + Clone + 'static> RedisStrea
         let mut guard = self.get_connection().await?;
         let conn = guard.as_mut().unwrap();
 
-        let _ = conn
-            .cmd(
-                &redis::cmd("XACK")
-                    .arg(&self.stream_name)
-                    .arg(&self.consumer_group)
-                    .arg(msg_id)
-                    .clone(),
+        let script = r#"
+            local new_id = redis.call(
+                'XADD',
+                KEYS[2],
+                'MAXLEN',
+                '~',
+                ARGV[3],
+                '*',
+                'payload',
+                ARGV[4],
+                'reason',
+                ARGV[5],
+                'original_id',
+                ARGV[2],
+                'timestamp',
+                ARGV[6]
             )
-            .await;
+            local acked = redis.call('XACK', KEYS[1], ARGV[1], ARGV[2])
+            if acked ~= 1 then
+                redis.call('XDEL', KEYS[2], new_id)
+                return redis.error_reply('DLQ move XACK failed for ' .. ARGV[2])
+            end
+            return new_id
+        "#;
 
         let _: String = conn
             .cmd(
-                &redis::cmd("XADD")
+                &redis::cmd("EVAL")
+                    .arg(script)
+                    .arg(2)
+                    .arg(&self.stream_name)
                     .arg(&self.dlq_stream)
-                    .arg("MAXLEN")
-                    .arg("~")
-                    .arg(10000)
-                    .arg("*")
-                    .arg("payload")
-                    .arg(payload)
-                    .arg("reason")
-                    .arg(&reason)
-                    .arg("original_id")
+                    .arg(&self.consumer_group)
                     .arg(msg_id)
-                    .arg("timestamp")
+                    .arg(DLQ_MAXLEN)
+                    .arg(payload)
+                    .arg(&reason)
                     .arg(chrono::Utc::now().timestamp())
                     .clone(),
             )
@@ -2712,6 +2811,193 @@ mod tests {
             messages,
             vec![("1712345678901-0".to_string(), vec![1, 2, 3], true)]
         );
+    }
+
+    #[test]
+    fn stream_ack_requires_exactly_one_pending_entry() {
+        assert!(require_single_stream_ack(&redis::Value::Int(1), "1-0").is_ok());
+
+        for acked in [0, 2] {
+            let err = require_single_stream_ack(&redis::Value::Int(acked), "1-0")
+                .expect_err("an ACK count other than one must not report success");
+            assert!(
+                err.to_string()
+                    .contains(&format!("affected {} entries", acked))
+            );
+        }
+    }
+
+    #[test]
+    fn stream_ack_rejects_malformed_redis_response() {
+        let err =
+            require_single_stream_ack(&redis::Value::BulkString(b"not-an-integer".to_vec()), "1-0")
+                .expect_err("a malformed ACK response must not report success");
+
+        assert!(matches!(err, StreamsQueueError::RedisError(_)));
+    }
+
+    /// The DLQ move must be atomic: one successful call ACKs the pending
+    /// entry and lands exactly one DLQ copy; a re-attempt for an entry that
+    /// is no longer pending must fail AND roll back its fresh DLQ copy, so
+    /// retries can never produce duplicates.
+    #[tokio::test]
+    async fn move_to_dlq_acks_and_copies_exactly_once() {
+        let Some(client) = try_client().await else {
+            eprintln!("skipping: Redis not available");
+            return;
+        };
+        let queue_name = format!("test_stream_dlq_atomic_{}", Uuid::new_v4());
+        let queue = RedisStreamQueue::<String>::new(client.clone(), queue_name.clone());
+
+        queue.enqueue("doomed".to_string()).await.unwrap();
+        let lease = queue.claim_blocking().await.unwrap().unwrap();
+        let msg_id = lease.msg_id.clone().unwrap();
+        let payload = lease.payload.clone().unwrap();
+
+        queue
+            .move_msg_to_dlq(&msg_id, &payload, "test reason".to_string())
+            .await
+            .expect("DLQ move of a pending entry should succeed");
+
+        assert_eq!(queue.pending_len().await.unwrap(), 0);
+
+        let mut conn = client.get_multiplexed_async_connection().await.unwrap();
+        let dlq_len: i64 = redis::cmd("XLEN")
+            .arg(&queue.dlq_stream)
+            .query_async(&mut conn)
+            .await
+            .unwrap();
+        assert_eq!(dlq_len, 1);
+
+        // Second attempt: entry is no longer pending, so XACK returns 0 and
+        // the script must delete its fresh copy and surface an error.
+        let err = queue
+            .move_msg_to_dlq(&msg_id, &payload, "test reason".to_string())
+            .await
+            .expect_err("DLQ move of an already-acked entry must fail");
+        assert!(matches!(err, StreamsQueueError::RedisError(_)));
+
+        let dlq_len: i64 = redis::cmd("XLEN")
+            .arg(&queue.dlq_stream)
+            .query_async(&mut conn)
+            .await
+            .unwrap();
+        assert_eq!(
+            dlq_len, 1,
+            "failed DLQ move must roll back its fresh DLQ copy"
+        );
+
+        // The single DLQ record references the original entry.
+        let entries: redis::Value = redis::cmd("XRANGE")
+            .arg(&queue.dlq_stream)
+            .arg("-")
+            .arg("+")
+            .query_async(&mut conn)
+            .await
+            .unwrap();
+        assert!(
+            format!("{:?}", entries).contains(&msg_id),
+            "DLQ entry should record the original message id"
+        );
+
+        drop(lease);
+        cleanup(&client, &queue_name).await;
+    }
+
+    /// A cached connection marked broken by a failed command must be
+    /// replaced on the next `get_connection` call instead of being reused
+    /// forever (redis 1.x `MultiplexedConnection` never reconnects itself).
+    #[tokio::test]
+    async fn broken_cached_connection_is_replaced_on_next_get() {
+        let Some(client) = try_client().await else {
+            eprintln!("skipping: Redis not available");
+            return;
+        };
+        let queue_name = format!("test_stream_evict_{}", Uuid::new_v4());
+        let queue = RedisStreamQueue::<String>::new(client.clone(), queue_name.clone());
+
+        {
+            let mut guard = queue.get_connection().await.unwrap();
+            guard.as_mut().unwrap().broken = true;
+        }
+
+        let mut guard = queue.get_connection().await.unwrap();
+        let conn = guard.as_mut().unwrap();
+        assert!(!conn.broken, "evicted connection must be replaced fresh");
+        let pong = conn.cmd(&redis::cmd("PING")).await.unwrap();
+        assert_eq!(pong, redis::Value::SimpleString("PONG".to_string()));
+    }
+
+    /// Per-command server failures (error replies, e.g. a failed DLQ-move
+    /// script) must NOT evict the connection — only connection-level
+    /// failures may.
+    #[tokio::test]
+    async fn server_error_reply_does_not_mark_connection_broken() {
+        let Some(client) = try_client().await else {
+            eprintln!("skipping: Redis not available");
+            return;
+        };
+        let queue_name = format!("test_stream_srverr_{}", Uuid::new_v4());
+        let queue = RedisStreamQueue::<String>::new(client.clone(), queue_name.clone());
+
+        let mut guard = queue.get_connection().await.unwrap();
+        let conn = guard.as_mut().unwrap();
+        conn.cmd(
+            &redis::cmd("EVAL")
+                .arg("return redis.error_reply('boom')")
+                .arg(0)
+                .clone(),
+        )
+        .await
+        .expect_err("script error reply must surface as Err");
+        assert!(
+            !conn.broken,
+            "a server error reply must not evict the connection"
+        );
+    }
+
+    /// A connection killed out from under us (stand-in for a silent LB
+    /// drop) must be marked broken by the next failing command so
+    /// `get_connection` evicts it.
+    #[tokio::test]
+    async fn killed_connection_is_marked_broken_by_next_command() {
+        let Some(client) = try_client().await else {
+            eprintln!("skipping: Redis not available");
+            return;
+        };
+        let queue_name = format!("test_stream_killed_{}", Uuid::new_v4());
+        let queue = RedisStreamQueue::<String>::new(client.clone(), queue_name.clone());
+
+        let mut guard = queue.get_connection().await.unwrap();
+        let conn = guard.as_mut().unwrap();
+        let client_id: i64 =
+            redis::from_redis_value_ref(&conn.cmd(redis::cmd("CLIENT").arg("ID")).await.unwrap())
+                .unwrap();
+
+        let mut admin = client.get_multiplexed_async_connection().await.unwrap();
+        let killed: i64 = redis::cmd("CLIENT")
+            .arg("KILL")
+            .arg("ID")
+            .arg(client_id)
+            .query_async(&mut admin)
+            .await
+            .unwrap();
+        assert_eq!(killed, 1);
+
+        conn.cmd(&redis::cmd("PING"))
+            .await
+            .expect_err("command on a killed connection must fail");
+        assert!(
+            conn.broken,
+            "a connection-level failure must mark the cached connection broken"
+        );
+        drop(guard);
+
+        // The next get_connection call replaces it with a working one.
+        let mut guard = queue.get_connection().await.unwrap();
+        let conn = guard.as_mut().unwrap();
+        assert!(!conn.broken);
+        conn.cmd(&redis::cmd("PING")).await.unwrap();
     }
 
     #[tokio::test]
@@ -3086,6 +3372,75 @@ mod tests {
                 .consumer_group_ensured
                 .load(std::sync::atomic::Ordering::Acquire)
         );
+
+        cleanup(&client, &queue_name).await;
+    }
+
+    /// NOGROUP recovery must not self-deadlock: the recovery path
+    /// (reset the ensured flag, recreate the group, retry the read once)
+    /// re-locks the cached-connection mutex, so it must only run after the
+    /// failed read's own guard has been released. Regression test for a
+    /// permanent worker hang when an operator wipes the queue (e.g.
+    /// `hot queue clear` deletes the stream key and with it the consumer
+    /// group) while a live worker keeps its queue handle.
+    #[tokio::test]
+    async fn nogroup_recovery_does_not_deadlock_read_batch() {
+        let Some(client) = try_client().await else {
+            eprintln!("skipping: Redis not available");
+            return;
+        };
+        let queue_name = format!("test_stream_nogroup_{}", Uuid::new_v4());
+        let stream_key = format!("{{{}}}", queue_name);
+        let queue = RedisStreamQueue::<String>::new(client.clone(), queue_name.clone());
+
+        // Establish the group and cache the ensured flag, as a live worker
+        // would have before the operator intervenes.
+        queue.enqueue("first".to_string()).await.unwrap();
+        let lease = queue.claim_blocking().await.unwrap().unwrap();
+        lease
+            .process(|item| async move { Ok::<String, Box<dyn Error + Send + Sync>>(item) })
+            .await
+            .unwrap();
+
+        // Operator wipes the queue out from under the worker: deleting the
+        // stream key also deletes the consumer group.
+        let mut admin = client.get_multiplexed_async_connection().await.unwrap();
+        let deleted: i64 = redis::cmd("DEL")
+            .arg(&stream_key)
+            .query_async(&mut admin)
+            .await
+            .unwrap();
+        assert_eq!(deleted, 1);
+
+        // The next read hits NOGROUP and must recover (recreate the group,
+        // retry once) instead of hanging forever on the connection mutex.
+        let batch = tokio::time::timeout(
+            Duration::from_secs(5),
+            queue.read_batch_with(FetchSource::Fresh, 1, 0),
+        )
+        .await
+        .expect("NOGROUP recovery must not deadlock read_batch_with")
+        .expect("recovery should recreate the group and retry the read");
+        assert!(batch.is_empty(), "recreated stream has no entries yet");
+        assert!(
+            queue
+                .consumer_group_ensured
+                .load(std::sync::atomic::Ordering::Acquire),
+            "recovery must re-ensure the consumer group"
+        );
+
+        // The recovered handle keeps working end-to-end.
+        queue.enqueue("second".to_string()).await.unwrap();
+        let got = tokio::time::timeout(
+            Duration::from_secs(5),
+            queue.dequeue_and_work(|item: String| async move {
+                Ok::<String, Box<dyn Error + Send + Sync>>(item)
+            }),
+        )
+        .await
+        .expect("dequeue after NOGROUP recovery must not hang")
+        .unwrap();
+        assert_eq!(got, Some("second".to_string()));
 
         cleanup(&client, &queue_name).await;
     }
