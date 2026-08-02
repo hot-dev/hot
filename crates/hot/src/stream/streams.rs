@@ -20,6 +20,7 @@ use redis::Client;
 use redis::aio::MultiplexedConnection;
 use redis::cluster::ClusterClient;
 use redis::cluster_async::ClusterConnection as AsyncClusterConnection;
+use std::future::Future;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::Mutex;
@@ -49,56 +50,99 @@ fn mcp_sse_transport_session_key(transport_session_id: &Uuid) -> String {
 enum RedisConnectionPool {
     Standalone {
         client: Client,
-        cached_conn: Arc<Mutex<CachedStandaloneConn>>,
+        cached_conn: Arc<Mutex<CachedConn<MultiplexedConnection>>>,
     },
     Cluster {
         client: ClusterClient,
-        cached_conn: Arc<Mutex<Option<AsyncClusterConnection>>>,
+        cached_conn: Arc<Mutex<CachedConn<AsyncClusterConnection>>>,
     },
 }
 
-/// Standalone pool slot: the cached connection plus a monotonically
-/// increasing generation, bumped each time a new connection is installed.
+/// Pool slot: the cached connection plus a monotonically increasing
+/// generation, bumped each time a new connection is installed.
 /// `ConnectionGuard`s capture the generation at checkout and evict only
 /// while it still matches, so a late-failing holder of an old, dead
 /// connection cannot clobber a healthy replacement another caller has
 /// already established (which would force pointless reconnect churn
-/// under fan-out). The Cluster arm needs no generation: its guard holds
-/// the slot mutex for its whole lifetime, so no replacement can
-/// interleave between checkout and eviction.
-#[derive(Default)]
-struct CachedStandaloneConn {
-    conn: Option<MultiplexedConnection>,
+/// under fan-out). Both pool arms share this scheme: standalone
+/// `MultiplexedConnection` and cluster `ClusterConnection` are both
+/// cheap `Arc`-backed handles, so guards hold a clone of the handle —
+/// never the slot mutex — and the slot lock is only ever taken for the
+/// brief checkout/eviction critical sections.
+struct CachedConn<C> {
+    conn: Option<C>,
     generation: u64,
+}
+
+// Manual impl: `#[derive(Default)]` would needlessly require `C: Default`.
+impl<C> Default for CachedConn<C> {
+    fn default() -> Self {
+        Self {
+            conn: None,
+            generation: 0,
+        }
+    }
+}
+
+/// Check out a connection from a pool slot: clone the cached handle when
+/// one is present, otherwise dial via `connect` and install the result
+/// under a bumped generation. Dialing happens while the slot lock is held
+/// so concurrent cold callers coalesce into one dial instead of stampeding
+/// the server; the lock is released before this returns, so callers never
+/// hold it while running commands.
+async fn checkout_conn<C: Clone>(
+    cached_conn: &Mutex<CachedConn<C>>,
+    connect: impl Future<Output = Result<C, StreamPubSubError>>,
+) -> Result<(C, u64), StreamPubSubError> {
+    let mut slot = cached_conn.lock().await;
+    if let Some(conn) = slot.conn.as_ref() {
+        return Ok((conn.clone(), slot.generation));
+    }
+    let conn = connect.await?;
+    slot.conn = Some(conn.clone());
+    slot.generation += 1;
+    Ok((conn, slot.generation))
+}
+
+/// Drop the slot's connection so the next checkout dials fresh — but only
+/// while the slot generation still matches the evicting guard's checkout,
+/// so a stale guard cannot discard a healthy replacement (see
+/// `CachedConn`).
+async fn evict_slot<C>(cached_conn: &Mutex<CachedConn<C>>, generation: u64) {
+    let mut slot = cached_conn.lock().await;
+    if slot.generation == generation {
+        slot.conn = None;
+    }
 }
 
 impl RedisConnectionPool {
     fn new_standalone(client: Client) -> Self {
         Self::Standalone {
             client,
-            cached_conn: Arc::new(Mutex::new(CachedStandaloneConn::default())),
+            cached_conn: Arc::new(Mutex::new(CachedConn::default())),
         }
     }
 
     fn new_cluster(client: ClusterClient) -> Self {
         Self::Cluster {
             client,
-            cached_conn: Arc::new(Mutex::new(None)),
+            cached_conn: Arc::new(Mutex::new(CachedConn::default())),
         }
     }
 
-    /// Get a cached connection for short-lived operations (publish)
+    /// Get a cached connection for short-lived operations (publish).
+    ///
+    /// The returned guard owns a clone of the pooled handle — never the
+    /// pool lock — so a caller holding one guard can safely call other
+    /// pool-locking methods (see `ConnectionGuard`).
     async fn get_connection(&self) -> Result<ConnectionGuard<'_>, StreamPubSubError> {
         match self {
             RedisConnectionPool::Standalone {
                 client,
                 cached_conn,
             } => {
-                let mut guard = cached_conn.lock().await;
-                let (conn, generation) = if let Some(conn) = guard.conn.as_ref() {
-                    (conn.clone(), guard.generation)
-                } else {
-                    let conn = tokio::time::timeout(
+                let (conn, generation) = checkout_conn(cached_conn, async {
+                    tokio::time::timeout(
                         REDIS_COMMAND_TIMEOUT,
                         client.get_multiplexed_async_connection_with_config(
                             &crate::redis::standalone_async_config(),
@@ -110,12 +154,9 @@ impl RedisConnectionPool {
                             "Redis connection timed out after 10s".into(),
                         )
                     })?
-                    .map_err(|e| StreamPubSubError::ConnectionError(e.to_string()))?;
-                    guard.conn = Some(conn.clone());
-                    guard.generation += 1;
-                    (conn, guard.generation)
-                };
-                drop(guard);
+                    .map_err(|e| StreamPubSubError::ConnectionError(e.to_string()))
+                })
+                .await?;
                 Ok(ConnectionGuard::Standalone {
                     conn,
                     cached_conn: cached_conn.as_ref(),
@@ -126,20 +167,22 @@ impl RedisConnectionPool {
                 client,
                 cached_conn,
             } => {
-                let mut guard = cached_conn.lock().await;
-                if guard.is_none() {
-                    let conn =
-                        tokio::time::timeout(REDIS_COMMAND_TIMEOUT, client.get_async_connection())
-                            .await
-                            .map_err(|_| {
-                                StreamPubSubError::ConnectionError(
-                                    "Redis cluster connection timed out after 10s".into(),
-                                )
-                            })?
-                            .map_err(|e| StreamPubSubError::ConnectionError(e.to_string()))?;
-                    *guard = Some(conn);
-                }
-                Ok(ConnectionGuard::Cluster(guard))
+                let (conn, generation) = checkout_conn(cached_conn, async {
+                    tokio::time::timeout(REDIS_COMMAND_TIMEOUT, client.get_async_connection())
+                        .await
+                        .map_err(|_| {
+                            StreamPubSubError::ConnectionError(
+                                "Redis cluster connection timed out after 10s".into(),
+                            )
+                        })?
+                        .map_err(|e| StreamPubSubError::ConnectionError(e.to_string()))
+                })
+                .await?;
+                Ok(ConnectionGuard::Cluster {
+                    conn,
+                    cached_conn: cached_conn.as_ref(),
+                    generation,
+                })
             }
         }
     }
@@ -185,18 +228,36 @@ impl RedisConnectionPool {
     }
 }
 
-/// Guard that holds a connection for short-lived operations
+/// Guard that holds a connection for short-lived operations.
+///
+/// Both variants own a cheap clone of the pooled connection handle plus a
+/// reference back to the slot for failure eviction — never the slot mutex
+/// itself. This is load-bearing: an earlier version had the Cluster
+/// variant hold the pool's `MutexGuard` for the guard's whole lifetime,
+/// so any method that called another pool-locking method while its guard
+/// was alive (e.g. `get_mcp_sse_transport_session`'s expired-binding path
+/// calling `delete_mcp_sse_transport_session`) self-deadlocked on the
+/// non-reentrant mutex in cluster mode. Never reintroduce a variant that
+/// carries the pool lock across the guard's lifetime.
 enum ConnectionGuard<'a> {
     Standalone {
         conn: MultiplexedConnection,
         /// The pool slot this connection was cloned from, so a failed
         /// command can evict it and force the next caller to reconnect.
-        cached_conn: &'a Mutex<CachedStandaloneConn>,
+        cached_conn: &'a Mutex<CachedConn<MultiplexedConnection>>,
         /// Slot generation at checkout; eviction is skipped when the slot
-        /// has since been replaced (see `CachedStandaloneConn`).
+        /// has since been replaced (see `CachedConn`).
         generation: u64,
     },
-    Cluster(tokio::sync::MutexGuard<'a, Option<AsyncClusterConnection>>),
+    Cluster {
+        conn: AsyncClusterConnection,
+        /// The pool slot this connection was cloned from, so a failed
+        /// command can evict it and force the next caller to reconnect.
+        cached_conn: &'a Mutex<CachedConn<AsyncClusterConnection>>,
+        /// Slot generation at checkout; eviction is skipped when the slot
+        /// has since been replaced (see `CachedConn`).
+        generation: u64,
+    },
 }
 
 impl ConnectionGuard<'_> {
@@ -204,15 +265,7 @@ impl ConnectionGuard<'_> {
         let result = tokio::time::timeout(REDIS_COMMAND_TIMEOUT, async {
             match self {
                 ConnectionGuard::Standalone { conn, .. } => cmd.query_async(conn).await,
-                ConnectionGuard::Cluster(guard) => match guard.as_mut() {
-                    Some(conn) => cmd.query_async(conn).await,
-                    // A previous failing command on this guard evicted the
-                    // slot; surface an error instead of panicking.
-                    None => Err(redis::RedisError::from((
-                        redis::ErrorKind::Io,
-                        "cluster connection was evicted after a previous failure",
-                    ))),
-                },
+                ConnectionGuard::Cluster { conn, .. } => cmd.query_async(conn).await,
             }
         })
         .await;
@@ -250,15 +303,12 @@ impl ConnectionGuard<'_> {
                 cached_conn,
                 generation,
                 ..
-            } => {
-                let mut slot = cached_conn.lock().await;
-                if slot.generation == *generation {
-                    slot.conn = None;
-                }
-            }
-            ConnectionGuard::Cluster(guard) => {
-                **guard = None;
-            }
+            } => evict_slot(cached_conn, *generation).await,
+            ConnectionGuard::Cluster {
+                cached_conn,
+                generation,
+                ..
+            } => evict_slot(cached_conn, *generation).await,
         }
     }
 }
@@ -350,8 +400,14 @@ impl McpSseTransportSessionStore for RedisStreamsPubSub {
         transport_session_id: Uuid,
     ) -> Result<Option<McpSseTransportSessionBinding>, StreamPubSubError> {
         let key = mcp_sse_transport_session_key(&transport_session_id);
-        let mut conn = self.connection_pool.get_connection().await?;
-        let value = conn.cmd(&redis::cmd("GET").arg(&key).clone()).await?;
+        // Scope the guard to the single GET: the expired-binding path
+        // below re-enters the pool via `delete_mcp_sse_transport_session`,
+        // and no guard should stay alive across another pool call (with
+        // the old lock-holding Cluster guard this exact path deadlocked).
+        let value = {
+            let mut conn = self.connection_pool.get_connection().await?;
+            conn.cmd(&redis::cmd("GET").arg(&key).clone()).await?
+        };
 
         if matches!(value, redis::Value::Nil) {
             return Ok(None);
@@ -845,11 +901,66 @@ mod tests {
         Some(client)
     }
 
-    fn standalone_slot(pool: &RedisConnectionPool) -> &Arc<Mutex<CachedStandaloneConn>> {
+    fn standalone_slot(
+        pool: &RedisConnectionPool,
+    ) -> &Arc<Mutex<CachedConn<MultiplexedConnection>>> {
         match pool {
             RedisConnectionPool::Standalone { cached_conn, .. } => cached_conn,
             RedisConnectionPool::Cluster { .. } => unreachable!("standalone pool expected"),
         }
+    }
+
+    /// Slot checkout/eviction semantics shared by both pool arms. The
+    /// cluster arm reuses exactly this generic code (its guard owns a
+    /// clone of the connection handle, never the slot mutex), so this
+    /// also covers the paths a real cluster deployment exercises.
+    #[tokio::test]
+    async fn slot_checkout_clones_cached_and_generations_gate_eviction() {
+        let slot: Mutex<CachedConn<u8>> = Mutex::new(CachedConn::default());
+
+        // Cold checkout dials and installs generation 1.
+        let (conn, generation) = checkout_conn(&slot, async { Ok(7) }).await.unwrap();
+        assert_eq!((conn, generation), (7, 1));
+
+        // Warm checkout clones the cached handle without dialing.
+        let (conn, generation) = checkout_conn(&slot, async {
+            panic!("must not dial while a healthy connection is cached")
+        })
+        .await
+        .unwrap();
+        assert_eq!((conn, generation), (7, 1));
+
+        // Stale-generation eviction is a no-op...
+        evict_slot(&slot, 0).await;
+        assert!(slot.lock().await.conn.is_some());
+
+        // ...matching-generation eviction clears the slot...
+        evict_slot(&slot, 1).await;
+        assert!(slot.lock().await.conn.is_none());
+
+        // ...and the next checkout dials fresh under a bumped generation,
+        // so the evicting (now stale) guard can no longer clobber it.
+        let (conn, generation) = checkout_conn(&slot, async { Ok(9) }).await.unwrap();
+        assert_eq!((conn, generation), (9, 2));
+        evict_slot(&slot, 1).await;
+        assert!(slot.lock().await.conn.is_some());
+    }
+
+    /// A failed dial must leave the slot untouched — nothing cached and
+    /// the generation unchanged — so the failure cannot masquerade as an
+    /// install.
+    #[tokio::test]
+    async fn slot_checkout_failed_dial_leaves_slot_untouched() {
+        let slot: Mutex<CachedConn<u8>> = Mutex::new(CachedConn::default());
+        checkout_conn(&slot, async {
+            Err(StreamPubSubError::ConnectionError("dial failed".into()))
+        })
+        .await
+        .expect_err("dial failure must surface");
+
+        let slot = slot.lock().await;
+        assert!(slot.conn.is_none());
+        assert_eq!(slot.generation, 0);
     }
 
     /// Eviction replaces the pool slot only; in-flight holders keep their
@@ -977,6 +1088,55 @@ mod tests {
         // The next caller reconnects fresh.
         let mut guard2 = pool.get_connection().await.unwrap();
         guard2.cmd(&redis::cmd("PING")).await.unwrap();
+    }
+
+    /// End-to-end expiry arc against a real standalone Redis: reading an
+    /// expired binding must delete it and return `None`. This is the exact
+    /// get -> delete pool re-entry that self-deadlocked when the Cluster
+    /// guard held the pool mutex for its whole lifetime; the checkout and
+    /// guard-scoping code is shared between arms, so this pins the
+    /// re-entrant behavior for the paths a cluster deployment runs too.
+    #[tokio::test]
+    async fn expired_session_read_deletes_binding_and_returns_none() {
+        let Some(client) = try_client().await else {
+            eprintln!("skipping: Redis not available");
+            return;
+        };
+        let pubsub = RedisStreamsPubSub::new(client.clone());
+
+        let transport_session_id = Uuid::new_v4();
+        let binding = McpSseTransportSessionBinding {
+            transport_session_id,
+            env_id: Uuid::new_v4(),
+            route_key: "test-route".to_string(),
+            principal: crate::stream::McpSseTransportPrincipal::Session(Uuid::new_v4()),
+            // Already logically expired while the Redis TTL (60s) still
+            // holds the key, forcing get() down its eager-delete path.
+            expires_at: chrono::Utc::now() - chrono::Duration::seconds(30),
+        };
+        pubsub
+            .put_mcp_sse_transport_session(binding, Duration::from_secs(60))
+            .await
+            .unwrap();
+
+        let got = tokio::time::timeout(
+            Duration::from_secs(5),
+            pubsub.get_mcp_sse_transport_session(transport_session_id),
+        )
+        .await
+        .expect("expiry path must not hang on pool re-entry")
+        .unwrap();
+        assert_eq!(got, None, "expired binding must read as absent");
+
+        // The expiry path must have deleted the key eagerly, not left it
+        // for the TTL.
+        let mut admin = client.get_multiplexed_async_connection().await.unwrap();
+        let exists: i64 = redis::cmd("EXISTS")
+            .arg(mcp_sse_transport_session_key(&transport_session_id))
+            .query_async(&mut admin)
+            .await
+            .unwrap();
+        assert_eq!(exists, 0, "expired binding must be deleted on read");
     }
 
     /// After a command error the env subscriber must drop its dead
