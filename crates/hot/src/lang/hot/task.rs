@@ -1425,6 +1425,7 @@ mod tests {
             timeout_ms: 300_000,
             retry_attempt: 0,
             next_retry_at: None,
+            parent_task_id: None,
             created_at: chrono::Utc::now(),
             by_user_id: None,
             run_id: None,

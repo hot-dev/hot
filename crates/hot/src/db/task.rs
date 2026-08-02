@@ -119,6 +119,12 @@ pub struct Task {
     pub timeout_ms: i64,
     pub retry_attempt: i16,
     pub next_retry_at: Option<DateTime<Utc>>,
+    /// The task this row retries, when the row was created by
+    /// [`Task::insert_retry`]. `None` for first-run tasks and for retry rows
+    /// created before lineage tracking existed. A partial unique index on
+    /// `(parent_task_id, retry_attempt)` makes retry creation idempotent.
+    #[sqlx(default)]
+    pub parent_task_id: Option<Uuid>,
     pub created_at: DateTime<Utc>,
     pub by_user_id: Option<Uuid>,
     pub run_id: Option<Uuid>,
@@ -231,7 +237,16 @@ impl Task {
         Ok(())
     }
 
-    /// Insert a retry task — copies fields from the original but with a new ID and incremented attempt.
+    /// Insert a retry task — copies fields from the original but with a new ID
+    /// and the caller's attempt number, recording `original` as the parent.
+    ///
+    /// Idempotent at the database level: the partial unique index on
+    /// `(parent_task_id, retry_attempt)` turns a duplicate insert for the same
+    /// parent + attempt into a no-op (`ON CONFLICT DO NOTHING`). Returns `true`
+    /// when this call created the retry row, `false` when another writer (or a
+    /// crashed earlier attempt) already created it — callers must then skip
+    /// their enqueue, because the existing row's creator owns delivery and the
+    /// queued-task reconciler re-enqueues it if that creator crashed first.
     #[allow(clippy::too_many_arguments)]
     pub async fn insert_retry(
         db: &crate::db::DatabasePool,
@@ -239,17 +254,18 @@ impl Task {
         original: &Task,
         retry_attempt: i16,
         next_retry_at: DateTime<Utc>,
-    ) -> Result<(), TaskError> {
-        match db {
+    ) -> Result<bool, TaskError> {
+        let rows_affected = match db {
             crate::db::DatabasePool::Postgres(pg_pool) => {
                 sqlx::query(
-                    "INSERT INTO task (task_id, env_id, stream_id, build_id, origin_run_id, task_status_id, function_name, args, options, task_type, timeout_ms, retry_attempt, next_retry_at, by_user_id) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)",
+                    "INSERT INTO task (task_id, env_id, stream_id, build_id, origin_run_id, parent_task_id, task_status_id, function_name, args, options, task_type, timeout_ms, retry_attempt, next_retry_at, by_user_id) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15) ON CONFLICT (parent_task_id, retry_attempt) WHERE parent_task_id IS NOT NULL DO NOTHING",
                 )
                 .bind(new_task_id)
                 .bind(original.env_id)
                 .bind(original.stream_id)
                 .bind(original.build_id)
                 .bind(original.origin_run_id)
+                .bind(original.task_id)
                 .bind(TaskStatus::Queued.as_id())
                 .bind(&original.function_name)
                 .bind(&original.args)
@@ -260,7 +276,8 @@ impl Task {
                 .bind(next_retry_at)
                 .bind(original.by_user_id)
                 .execute(pg_pool)
-                .await?;
+                .await?
+                .rows_affected()
             }
             crate::db::DatabasePool::Sqlite(sqlite_pool) => {
                 let created_at = Utc::now();
@@ -273,13 +290,14 @@ impl Task {
                     .as_ref()
                     .map(|o| serde_json::to_string(o).unwrap_or_default());
                 sqlx::query(
-                    "INSERT INTO task (task_id, env_id, stream_id, build_id, origin_run_id, task_status_id, function_name, args, options, task_type, timeout_ms, retry_attempt, next_retry_at, by_user_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    "INSERT INTO task (task_id, env_id, stream_id, build_id, origin_run_id, parent_task_id, task_status_id, function_name, args, options, task_type, timeout_ms, retry_attempt, next_retry_at, by_user_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT (parent_task_id, retry_attempt) WHERE parent_task_id IS NOT NULL DO NOTHING",
                 )
                 .bind(new_task_id)
                 .bind(original.env_id)
                 .bind(original.stream_id)
                 .bind(original.build_id)
                 .bind(original.origin_run_id)
+                .bind(original.task_id)
                 .bind(TaskStatus::Queued.as_id())
                 .bind(&original.function_name)
                 .bind(args_str)
@@ -291,10 +309,11 @@ impl Task {
                 .bind(original.by_user_id)
                 .bind(created_at)
                 .execute(sqlite_pool)
-                .await?;
+                .await?
+                .rows_affected()
             }
-        }
-        Ok(())
+        };
+        Ok(rows_affected == 1)
     }
 
     /// Mark a task as running and set start_time.
@@ -3109,5 +3128,145 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(disabled, unfiltered);
+    }
+
+    // -----------------------------------------------------------------------
+    // insert_retry idempotency (partial unique index on parent + attempt)
+    // -----------------------------------------------------------------------
+
+    async fn insert_parent_task(db: &crate::db::DatabasePool) -> Task {
+        let (task_id, env_id, stream_id, build_id, _, _) = test_ids();
+        Task::insert(
+            db,
+            &task_id,
+            &env_id,
+            &stream_id,
+            &build_id,
+            None,
+            "::app/retried",
+            None,
+            None,
+            "code",
+            60_000,
+            None,
+        )
+        .await
+        .unwrap();
+        Task::get(db, &task_id).await.unwrap()
+    }
+
+    #[tokio::test]
+    async fn test_insert_retry_duplicate_parent_attempt_is_noop() {
+        let db = crate::db::test_db().await;
+        let parent = insert_parent_task(&db).await;
+        assert_eq!(
+            parent.parent_task_id, None,
+            "first-run rows carry no lineage"
+        );
+
+        let first_id = Uuid::now_v7();
+        let second_id = Uuid::now_v7();
+        let at = Utc::now();
+        assert!(
+            Task::insert_retry(&db, &first_id, &parent, 1, at)
+                .await
+                .unwrap()
+        );
+        assert!(
+            !Task::insert_retry(&db, &second_id, &parent, 1, at)
+                .await
+                .unwrap(),
+            "a second retry insert for the same parent + attempt must report not-inserted"
+        );
+
+        // Exactly one retry row exists, and it is the first writer's.
+        assert_eq!(
+            Task::get_count_by_env(&db, &parent.env_id).await.unwrap(),
+            2
+        );
+        let child = Task::get(&db, &first_id).await.unwrap();
+        assert_eq!(child.parent_task_id, Some(parent.task_id));
+        assert_eq!(child.retry_attempt, 1);
+        assert!(matches!(
+            Task::get(&db, &second_id).await,
+            Err(TaskError::NotFound)
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_insert_retry_infra_and_budget_attempts_occupy_distinct_slots() {
+        let db = crate::db::test_db().await;
+        let parent = insert_parent_task(&db).await;
+        let at = Utc::now();
+
+        // Infra retries (shutdown drain) preserve the parent's attempt number
+        // while budget retries increment it, so the two kinds must never
+        // collide with each other — only with a duplicate of their own kind.
+        let infra_attempt = parent.retry_attempt;
+        let budget_attempt = parent.retry_attempt + 1;
+        assert!(
+            Task::insert_retry(&db, &Uuid::now_v7(), &parent, infra_attempt, at)
+                .await
+                .unwrap(),
+            "the first infra retry must insert"
+        );
+        assert!(
+            Task::insert_retry(&db, &Uuid::now_v7(), &parent, budget_attempt, at)
+                .await
+                .unwrap(),
+            "a budget retry must not collide with the parent's infra retry"
+        );
+        assert!(
+            !Task::insert_retry(&db, &Uuid::now_v7(), &parent, infra_attempt, at)
+                .await
+                .unwrap(),
+            "a second infra retry of the same parent must collide"
+        );
+        assert!(
+            !Task::insert_retry(&db, &Uuid::now_v7(), &parent, budget_attempt, at)
+                .await
+                .unwrap(),
+            "a second budget retry of the same parent must collide"
+        );
+        assert_eq!(
+            Task::get_count_by_env(&db, &parent.env_id).await.unwrap(),
+            3,
+            "parent + one infra retry + one budget retry"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_insert_retry_concurrent_racers_create_exactly_one_row() {
+        let db = crate::db::test_db().await;
+        let parent = insert_parent_task(&db).await;
+        let at = Utc::now();
+
+        let first_id = Uuid::now_v7();
+        let second_id = Uuid::now_v7();
+        let (a, b) = tokio::join!(
+            Task::insert_retry(&db, &first_id, &parent, 1, at),
+            Task::insert_retry(&db, &second_id, &parent, 1, at),
+        );
+        let (a, b) = (a.unwrap(), b.unwrap());
+        assert!(
+            a ^ b,
+            "exactly one racer may create the retry row (got {a} and {b})"
+        );
+        assert_eq!(
+            Task::get_count_by_env(&db, &parent.env_id).await.unwrap(),
+            2
+        );
+    }
+
+    #[tokio::test]
+    async fn test_first_run_rows_with_null_parent_never_collide() {
+        let db = crate::db::test_db().await;
+
+        // Pre-migration rows and every first-run task share NULL parent and
+        // retry_attempt 0; the partial index must exempt them all.
+        let p1 = insert_parent_task(&db).await;
+        let p2 = insert_parent_task(&db).await;
+        assert_eq!((p1.parent_task_id, p1.retry_attempt), (None, 0));
+        assert_eq!((p2.parent_task_id, p2.retry_attempt), (None, 0));
     }
 }

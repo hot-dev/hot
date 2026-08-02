@@ -498,7 +498,21 @@ impl TaskShutdownCoordinator {
         )
         .await
         {
-            Ok(Ok(_)) => {}
+            Ok(Ok(true)) => {}
+            Ok(Ok(false)) => {
+                // The (parent, attempt) unique key says an infra retry of
+                // this task already exists — e.g. a prior drain of the same
+                // row got as far as insert_retry before a brownout. Skip the
+                // enqueue: the row's creator owns delivery, and if it crashed
+                // before enqueueing, reconcile_queued_tasks re-enqueues the
+                // stale queued row, so the retry cannot be stranded.
+                tracing::info!(
+                    task_id = %task.task_id,
+                    attempt = next_attempt,
+                    "Shutdown: infra-retry row already exists for this attempt — skipping duplicate enqueue"
+                );
+                return;
+            }
             Ok(Err(e)) => {
                 tracing::error!(
                     task_id = %task.task_id,
@@ -845,5 +859,54 @@ mod tests {
 
         let retry = claim_enqueued_request(&task_queue).await;
         assert_ne!(retry.task_id, active.task_id.to_string());
+    }
+
+    #[tokio::test]
+    async fn infra_retry_skips_enqueue_when_retry_row_already_exists() {
+        let db = hot::db::test_db().await;
+        let task_queue = memory_task_queue();
+        let stream_publisher = memory_stream_pubsub();
+        let active = dummy_active_task(Uuid::now_v7());
+        insert_running_task(&db, &active).await;
+
+        // A previous drain of the same task (or a racing writer during a DB
+        // brownout) already created the infra retry for this parent +
+        // attempt, but never enqueued it. Infra retries preserve the
+        // parent's retry_attempt, so the duplicate targets the same slot.
+        let row = Task::get(&db, &active.task_id).await.unwrap();
+        assert!(
+            Task::insert_retry(
+                &db,
+                &Uuid::now_v7(),
+                &row,
+                row.retry_attempt,
+                chrono::Utc::now()
+            )
+            .await
+            .unwrap()
+        );
+
+        TaskShutdownCoordinator::apply_finalize_outcome(
+            &db,
+            &stream_publisher,
+            &task_queue,
+            &active,
+            &serde_json::json!({"msg": SHUTDOWN_REASON}),
+            FinalizeOutcome::RetryOnly,
+        )
+        .await;
+
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), task_queue.claim_blocking())
+                .await
+                .is_err(),
+            "a duplicate infra retry must not be enqueued — the existing row \
+             is recovered by reconcile_queued_tasks"
+        );
+        assert_eq!(
+            Task::get_count_by_env(&db, &active.env_id).await.unwrap(),
+            2,
+            "no second retry row may be created"
+        );
     }
 }

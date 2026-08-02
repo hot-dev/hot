@@ -1515,13 +1515,30 @@ async fn maybe_retry_zombie_task(
     let next_retry_at = chrono::Utc::now() + chrono::Duration::milliseconds(delay_ms);
     let new_task_id = Uuid::now_v7();
 
-    if let Err(e) = Task::insert_retry(db, &new_task_id, task, next_attempt, next_retry_at).await {
-        tracing::error!(
-            task_id = %task.task_id,
-            new_task_id = %new_task_id,
-            "Failed to insert retry for zombie task: {}", e,
-        );
-        return;
+    match Task::insert_retry(db, &new_task_id, task, next_attempt, next_retry_at).await {
+        Ok(true) => {}
+        Ok(false) => {
+            // The (parent, attempt) unique key says another writer — e.g. the
+            // failure path's maybe_retry_task, or a crashed earlier reap that
+            // got as far as insert_retry — already created this retry row.
+            // Skip the enqueue: the row's creator owns delivery, and if it
+            // crashed before enqueueing, reconcile_queued_tasks re-enqueues
+            // the stale queued row, so the retry cannot be stranded.
+            tracing::info!(
+                task_id = %task.task_id,
+                attempt = next_attempt,
+                "Zombie retry row already exists for this attempt — skipping duplicate retry"
+            );
+            return;
+        }
+        Err(e) => {
+            tracing::error!(
+                task_id = %task.task_id,
+                new_task_id = %new_task_id,
+                "Failed to insert retry for zombie task: {}", e,
+            );
+            return;
+        }
     }
 
     let org_id = match hot::db::Env::get_env(db, &task.env_id).await {
@@ -4813,7 +4830,21 @@ async fn maybe_retry_task(
     )
     .await
     {
-        Ok(Ok(_)) => {}
+        Ok(Ok(true)) => {}
+        Ok(Ok(false)) => {
+            // The (parent, attempt) unique key says another writer — e.g. the
+            // zombie reaper, or a crashed earlier attempt that got as far as
+            // insert_retry — already created this retry row. Skip the
+            // enqueue: the row's creator owns delivery, and if it crashed
+            // before enqueueing, reconcile_queued_tasks re-enqueues the stale
+            // queued row, so the retry cannot be stranded.
+            tracing::info!(
+                task_id = %failed_task_id,
+                attempt = next_attempt,
+                "Retry row already exists for this attempt — skipping duplicate retry"
+            );
+            return;
+        }
         Ok(Err(e)) => {
             tracing::error!(
                 task_id = %failed_task_id,
@@ -6134,6 +6165,7 @@ mod tests {
             timeout_ms: request.timeout_ms as i64,
             retry_attempt: 0,
             next_retry_at: None,
+            parent_task_id: None,
             created_at: now,
             by_user_id: None,
             run_id: None,
@@ -6996,6 +7028,137 @@ mod tests {
             2,
             "a terminal failure with retry budget must insert its retry task"
         );
+    }
+
+    #[tokio::test]
+    async fn retry_skips_enqueue_when_retry_row_already_exists() {
+        let db = hot::db::test_db().await;
+        let queue_name = format!("{{hot:task}}-retry-dup-{}", Uuid::now_v7());
+        let queue = ProcessingQueue::<TaskRequest>::new(
+            QueueType::Memory,
+            queue_name,
+            None,
+            Serialization::Json,
+        )
+        .unwrap();
+        let retry_options = serde_json::json!({"retry": {"attempts": 2, "delay": 0}});
+
+        let (request, mut task, _, _, _) = make_task_request_and_row();
+        task.options = Some(retry_options.clone());
+        insert_test_task(&db, &task).await;
+        Task::mark_running(&db, &task.task_id).await.unwrap();
+        let error = task_failure_json("boom", None);
+        assert!(
+            Task::complete(&db, &task.task_id, &TaskStatus::Failed, Some(&error), None)
+                .await
+                .unwrap()
+        );
+
+        // Another writer (e.g. the zombie reaper, or a crashed earlier
+        // attempt) already created the retry row for attempt 1 but never
+        // enqueued it.
+        let row = Task::get(&db, &task.task_id).await.unwrap();
+        assert!(
+            Task::insert_retry(&db, &Uuid::now_v7(), &row, 1, chrono::Utc::now())
+                .await
+                .unwrap()
+        );
+
+        // maybe_retry_task must treat the duplicate insert as already-retried
+        // and skip its enqueue — the existing row is recovered by
+        // reconcile_queued_tasks, never by a second retry row.
+        maybe_retry_task(&db, &queue, &task.task_id, &request).await;
+        // Sleep past the (clamped, 100ms min) retry delay so a buggy delayed
+        // enqueue would have landed before the assertion.
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        assert_eq!(
+            queue.len().await.unwrap(),
+            0,
+            "a duplicate retry must not be enqueued"
+        );
+        assert_eq!(
+            Task::get_count_by_env(&db, &task.env_id).await.unwrap(),
+            2,
+            "no second retry row may be created"
+        );
+
+        // Positive control: with no pre-existing retry row the same path
+        // inserts the retry row and enqueues exactly one request.
+        let (request, mut fresh, _, _, _) = make_task_request_and_row();
+        fresh.options = Some(retry_options);
+        insert_test_task(&db, &fresh).await;
+        Task::mark_running(&db, &fresh.task_id).await.unwrap();
+        assert!(
+            Task::complete(&db, &fresh.task_id, &TaskStatus::Failed, Some(&error), None)
+                .await
+                .unwrap()
+        );
+        maybe_retry_task(&db, &queue, &fresh.task_id, &request).await;
+        assert_eq!(Task::get_count_by_env(&db, &fresh.env_id).await.unwrap(), 2);
+        tokio::time::timeout(std::time::Duration::from_secs(2), queue.claim_blocking())
+            .await
+            .expect("a fresh failure with budget must enqueue its retry")
+            .unwrap()
+            .expect("memory queue claim should yield the enqueued retry");
+    }
+
+    #[tokio::test]
+    async fn zombie_retry_skips_enqueue_when_retry_row_already_exists() {
+        let db = hot::db::test_db().await;
+        let queue_name = format!("{{hot:task}}-zombie-dup-{}", Uuid::now_v7());
+        let queue = ProcessingQueue::<TaskRequest>::new(
+            QueueType::Memory,
+            queue_name,
+            None,
+            Serialization::Json,
+        )
+        .unwrap();
+        let retry_options = serde_json::json!({"retry": {"attempts": 2, "delay": 0}});
+
+        let (_request, mut task, _, _, _) = make_task_request_and_row();
+        task.options = Some(retry_options.clone());
+        insert_test_task(&db, &task).await;
+        let row = Task::get(&db, &task.task_id).await.unwrap();
+
+        // The failure path already created the budget retry for attempt 1
+        // (row.retry_attempt + 1) — the reaper racing it must not double it.
+        assert!(
+            Task::insert_retry(
+                &db,
+                &Uuid::now_v7(),
+                &row,
+                row.retry_attempt + 1,
+                chrono::Utc::now()
+            )
+            .await
+            .unwrap()
+        );
+
+        maybe_retry_zombie_task(&db, &row, &queue).await;
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        assert_eq!(
+            queue.len().await.unwrap(),
+            0,
+            "a duplicate zombie retry must not be enqueued"
+        );
+        assert_eq!(
+            Task::get_count_by_env(&db, &task.env_id).await.unwrap(),
+            2,
+            "no second retry row may be created"
+        );
+
+        // Positive control: a fresh zombie with budget inserts + enqueues.
+        let (_request, mut fresh, _, _, _) = make_task_request_and_row();
+        fresh.options = Some(retry_options);
+        insert_test_task(&db, &fresh).await;
+        let fresh_row = Task::get(&db, &fresh.task_id).await.unwrap();
+        maybe_retry_zombie_task(&db, &fresh_row, &queue).await;
+        assert_eq!(Task::get_count_by_env(&db, &fresh.env_id).await.unwrap(), 2);
+        tokio::time::timeout(std::time::Duration::from_secs(2), queue.claim_blocking())
+            .await
+            .expect("a fresh zombie with budget must enqueue its retry")
+            .unwrap()
+            .expect("memory queue claim should yield the enqueued retry");
     }
 
     #[test]
