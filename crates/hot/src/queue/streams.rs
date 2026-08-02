@@ -759,6 +759,68 @@ impl<T> RedisStreamQueue<T> {
         Ok(!entries.is_empty())
     }
 
+    /// Reset the PEL idle clock of `msg_id` for THIS consumer without
+    /// incrementing its delivery counter.
+    ///
+    /// Long-running workers call this periodically while a claimed entry is
+    /// still being processed, so orphan reclaim (sibling janitors running
+    /// XAUTOCLAIM) never mistakes a live delivery for an orphan and starts a
+    /// duplicate execution.
+    ///
+    /// Implementation: a Lua-guarded `XCLAIM <stream> <group> <consumer> 0
+    /// <id> JUSTID`. The XPENDING ownership guard is load-bearing — a bare
+    /// `XCLAIM ... 0` *transfers* ownership from whoever currently holds the
+    /// entry, so touching after a sibling legitimately reclaimed it would
+    /// steal it back mid-execution. `JUSTID` both skips fetching the entry
+    /// body and (per Redis XCLAIM semantics) leaves the delivery/retry
+    /// counter unchanged, so touches never consume `MAX_PROCESSING_RETRIES`
+    /// budget.
+    ///
+    /// Returns `Ok(true)` when the idle clock was reset, `Ok(false)` when
+    /// there was nothing to touch — entry already ACKed (post-ACK touches
+    /// are harmless no-ops, not errors) or now owned by another consumer.
+    /// Bounded by `REDIS_COMMAND_TIMEOUT` like every other queue command.
+    pub async fn touch_pending_entry(&self, msg_id: &str) -> Result<bool, StreamsQueueError> {
+        let mut guard = self.get_connection().await?;
+        let conn = guard.as_mut().unwrap();
+
+        // KEYS[1] stream; ARGV[1] group, ARGV[2] consumer, ARGV[3] entry id.
+        // XPENDING's consumer filter makes the guard a single call: it only
+        // returns the entry when it is both still pending AND still owned
+        // by ARGV[2]. Guard and XCLAIM are atomic inside the script, so a
+        // concurrent XAUTOCLAIM cannot slip between them.
+        let script = r#"
+            local owned = redis.call(
+                'XPENDING', KEYS[1], ARGV[1], ARGV[3], ARGV[3], 1, ARGV[2]
+            )
+            if owned == false or #owned == 0 then
+                return 0
+            end
+            local touched = redis.call(
+                'XCLAIM', KEYS[1], ARGV[1], ARGV[2], 0, ARGV[3], 'JUSTID'
+            )
+            if touched == false or #touched == 0 then
+                return 0
+            end
+            return 1
+        "#;
+
+        let value = conn
+            .cmd(
+                &redis::cmd("EVAL")
+                    .arg(script)
+                    .arg(1)
+                    .arg(&self.stream_name)
+                    .arg(&self.consumer_group)
+                    .arg(&self.consumer_name)
+                    .arg(msg_id)
+                    .clone(),
+            )
+            .await?;
+        let touched: i64 = redis::from_redis_value_ref(&value)?;
+        Ok(touched == 1)
+    }
+
     pub fn with_consumer_group(mut self, group: String) -> Self {
         self.consumer_group = group;
         self
@@ -2592,6 +2654,17 @@ where
         }
     }
 
+    /// Keepalive handle for this delivery, used to refresh its PEL idle
+    /// clock while `process` runs (see [`RedisLeaseKeepalive`]). Returns
+    /// `None` once the lease has been consumed.
+    pub fn keepalive(&self) -> Option<RedisLeaseKeepalive<T>> {
+        let msg_id = self.msg_id.clone()?;
+        Some(RedisLeaseKeepalive {
+            queue: self.queue.clone_for_lease(),
+            msg_id,
+        })
+    }
+
     pub async fn process<F, Fut, R>(
         mut self,
         worker: F,
@@ -2660,6 +2733,36 @@ where
                 );
             }
         }
+    }
+}
+
+/// Detachable keepalive handle for a claimed-but-not-yet-ACKed stream entry.
+///
+/// Obtained from [`RedisQueueLease::keepalive`] before the lease is consumed
+/// by `process`, and typically moved into a periodic task that calls
+/// [`touch`](Self::touch) while the worker executes. Holding this handle does
+/// NOT extend the lease's lifecycle — it only refreshes the PEL idle clock —
+/// so a keepalive whose entry has been ACKed or reclaimed by another consumer
+/// simply observes `Ok(false)` and should stop touching.
+///
+/// The handle shares the lease's cached connection (and its mutex) with the
+/// claiming queue handle, so a touch may briefly wait behind an in-flight
+/// `XREADGROUP BLOCK` — bounded and negligible at keepalive cadences.
+pub struct RedisLeaseKeepalive<T> {
+    queue: RedisStreamQueue<T>,
+    msg_id: String,
+}
+
+impl<T> RedisLeaseKeepalive<T> {
+    /// Stream entry id this handle refreshes. Useful for logging.
+    pub fn msg_id(&self) -> &str {
+        &self.msg_id
+    }
+
+    /// Reset the entry's PEL idle clock for the owning consumer. See
+    /// [`RedisStreamQueue::touch_pending_entry`] for exact semantics.
+    pub async fn touch(&self) -> Result<bool, StreamsQueueError> {
+        self.queue.touch_pending_entry(&self.msg_id).await
     }
 }
 
@@ -3339,6 +3442,163 @@ mod tests {
             "processed lease should be ACKed"
         );
 
+        cleanup(&client, &queue_name).await;
+    }
+
+    /// Helper: `(consumer, idle_ms, delivery_count)` for one PEL entry via
+    /// `XPENDING <stream> <group> <id> <id> 1` (extended form).
+    async fn xpending_entry(
+        client: &redis::Client,
+        stream: &str,
+        group: &str,
+        msg_id: &str,
+    ) -> Option<(String, i64, i64)> {
+        let mut conn = client.get_multiplexed_async_connection().await.unwrap();
+        let val: redis::Value = redis::cmd("XPENDING")
+            .arg(stream)
+            .arg(group)
+            .arg(msg_id)
+            .arg(msg_id)
+            .arg(1)
+            .query_async(&mut conn)
+            .await
+            .unwrap_or(redis::Value::Nil);
+        // Extended shape: [[id, consumer, idle-ms, delivery-count], ...]
+        let entries: Vec<redis::Value> = redis::from_redis_value_ref(&val).unwrap_or_default();
+        let entry: Vec<redis::Value> = redis::from_redis_value_ref(entries.first()?).ok()?;
+        if entry.len() < 4 {
+            return None;
+        }
+        Some((
+            redis::from_redis_value_ref(&entry[1]).ok()?,
+            redis::from_redis_value_ref(&entry[2]).ok()?,
+            redis::from_redis_value_ref(&entry[3]).ok()?,
+        ))
+    }
+
+    /// The PEL-touch keepalive must reset a live delivery's idle clock
+    /// WITHOUT bumping its delivery counter (`JUSTID`), and a post-ACK touch
+    /// must be a harmless no-op rather than an error.
+    #[tokio::test]
+    async fn touch_pending_entry_resets_idle_without_bumping_delivery_count() {
+        let Some(client) = try_client().await else {
+            eprintln!("skipping: Redis not available");
+            return;
+        };
+        let queue_name = format!("test_stream_touch_{}", Uuid::new_v4());
+        let stream_key = format!("{{{}}}", queue_name);
+        let queue = RedisStreamQueue::<i64>::new(client.clone(), queue_name.clone());
+
+        queue.enqueue(7).await.unwrap();
+        let lease = queue
+            .claim_blocking()
+            .await
+            .unwrap()
+            .expect("message should be claimed");
+        let keepalive = lease
+            .keepalive()
+            .expect("unconsumed lease must expose a keepalive");
+        let msg_id = keepalive.msg_id().to_string();
+
+        // Let the un-ACKed delivery accumulate observable idle time.
+        tokio::time::sleep(Duration::from_millis(400)).await;
+        let (owner, idle_before, count_before) =
+            xpending_entry(&client, &stream_key, DEFAULT_CONSUMER_GROUP, &msg_id)
+                .await
+                .expect("claimed entry must be pending");
+        assert_eq!(owner, queue.consumer_name());
+        assert!(
+            idle_before >= 300,
+            "idle should have grown, got {idle_before}"
+        );
+        assert_eq!(count_before, 1);
+
+        // Touch resets idle toward zero and leaves the delivery counter alone.
+        assert!(keepalive.touch().await.unwrap());
+        let (owner, idle_after, count_after) =
+            xpending_entry(&client, &stream_key, DEFAULT_CONSUMER_GROUP, &msg_id)
+                .await
+                .expect("touched entry must remain pending");
+        assert_eq!(owner, queue.consumer_name());
+        assert!(
+            idle_after < 300,
+            "touch must reset the idle clock, got {idle_after}"
+        );
+        assert_eq!(
+            count_after, 1,
+            "JUSTID touch must not bump the delivery counter"
+        );
+
+        // ACK through the normal path, then touch again: harmless no-op.
+        let got = lease
+            .process(|item| async move { Ok::<i64, Box<dyn Error + Send + Sync>>(item) })
+            .await
+            .unwrap();
+        assert_eq!(got, Some(7));
+        assert!(
+            !keepalive.touch().await.unwrap(),
+            "post-ACK touch must be a no-op, not an error"
+        );
+        assert_eq!(
+            xpending_count(&client, &stream_key, DEFAULT_CONSUMER_GROUP).await,
+            0
+        );
+
+        cleanup(&client, &queue_name).await;
+    }
+
+    /// A touch must never move ownership: once another consumer holds the
+    /// entry (e.g. a sibling janitor's XAUTOCLAIM after a real orphan
+    /// verdict), touching from the original claimer is a no-op that leaves
+    /// the new owner intact instead of stealing the entry back.
+    #[tokio::test]
+    async fn touch_pending_entry_does_not_steal_foreign_entries() {
+        let Some(client) = try_client().await else {
+            eprintln!("skipping: Redis not available");
+            return;
+        };
+        let queue_name = format!("test_stream_touch_foreign_{}", Uuid::new_v4());
+        let stream_key = format!("{{{}}}", queue_name);
+        let queue = RedisStreamQueue::<i64>::new(client.clone(), queue_name.clone());
+
+        queue.enqueue(1).await.unwrap();
+        let lease = queue
+            .claim_blocking()
+            .await
+            .unwrap()
+            .expect("message should be claimed");
+        let keepalive = lease
+            .keepalive()
+            .expect("unconsumed lease must expose a keepalive");
+        let msg_id = keepalive.msg_id().to_string();
+
+        // Simulate a sibling janitor reclaiming the delivery.
+        let mut admin = client.get_multiplexed_async_connection().await.unwrap();
+        let _: redis::Value = redis::cmd("XCLAIM")
+            .arg(&stream_key)
+            .arg(DEFAULT_CONSUMER_GROUP)
+            .arg("sibling-janitor")
+            .arg(0)
+            .arg(&msg_id)
+            .arg("JUSTID")
+            .query_async(&mut admin)
+            .await
+            .unwrap();
+
+        assert!(
+            !keepalive.touch().await.unwrap(),
+            "touching an entry owned by another consumer must be a no-op"
+        );
+        let (owner, _idle, _count) =
+            xpending_entry(&client, &stream_key, DEFAULT_CONSUMER_GROUP, &msg_id)
+                .await
+                .expect("entry must remain pending for the reclaimer");
+        assert_eq!(
+            owner, "sibling-janitor",
+            "touch must not steal the entry back from its new owner"
+        );
+
+        drop(lease);
         cleanup(&client, &queue_name).await;
     }
 

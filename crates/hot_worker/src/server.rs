@@ -1185,14 +1185,20 @@ async fn acquire_blocking_execution_slot(
 /// a duplicate execution on another worker. The extra 5s covers result-flush
 /// and scheduling slack.
 ///
-/// Residual: this floor covers ONE admission wait plus ONE run budget. An
-/// event with N matching handlers executes them serially, each with its own
-/// admission wait and run budget, so an N-handler event whose handlers run
-/// long (or queue behind slot admission) can legally outlive the floor and be
-/// XAUTOCLAIMed mid-execution — duplicating the side effects of the handlers
-/// that already ran. Operators running multi-handler events with long
-/// budgets should raise `queue.event-orphan-idle-ms` (the configured value is
-/// only floored here, never lowered) to at least N times this floor.
+/// Multi-handler liveness: this floor budgets ONE admission wait plus ONE
+/// run budget, while an event with N matching handlers executes them
+/// serially — each with its own admission wait and run budget — before the
+/// single trailing ACK. That gap is closed by the PEL-touch keepalive
+/// (`spawn_event_lease_keepalive`): while an event is being processed, the
+/// executor periodically resets the delivery's PEL idle clock
+/// (ownership-guarded `XCLAIM ... JUSTID`, delivery counter untouched) so
+/// orphan reclaim keeps seeing it as live no matter how many handlers run.
+/// The floor remains the backstop for the keepalive itself: if the touch
+/// task dies with its worker, reclaim still waits out one full legal
+/// single-handler lifetime before redelivering. Raising
+/// `queue.event-orphan-idle-ms` (the configured value is only floored here,
+/// never lowered) is therefore no longer required for multi-handler events,
+/// though it remains available for a wider reclaim margin.
 fn min_event_orphan_idle_floor_ms(run_timeout: std::time::Duration) -> u64 {
     run_timeout
         .saturating_add(BLOCKING_SLOT_ACQUIRE_TIMEOUT)
@@ -1200,6 +1206,118 @@ fn min_event_orphan_idle_floor_ms(run_timeout: std::time::Duration) -> u64 {
         .saturating_add(std::time::Duration::from_secs(5))
         .as_millis()
         .min(u64::MAX as u128) as u64
+}
+
+/// Floor for the PEL-touch keepalive interval. Guards against a tiny
+/// (test-sized) orphan-idle configuration turning the keepalive into a
+/// Redis-hammering busy loop.
+const EVENT_KEEPALIVE_MIN_INTERVAL_MS: u64 = 5_000;
+
+/// Cadence of the PEL-touch keepalive for an executing event: one third of
+/// the effective orphan-reclaim idle threshold, floored at
+/// `EVENT_KEEPALIVE_MIN_INTERVAL_MS`. A live delivery gets at least two
+/// touch opportunities inside every reclaim window, and failed touches
+/// retry at half cadence, so a single missed or failed touch cannot let a
+/// sibling janitor XAUTOCLAIM it mid-execution even at small configured
+/// run-timeouts.
+fn event_keepalive_interval_ms(effective_orphan_idle_ms: u64) -> u64 {
+    (effective_orphan_idle_ms / 3).max(EVENT_KEEPALIVE_MIN_INTERVAL_MS)
+}
+
+/// Abort-on-drop guard around the keepalive task spawned by
+/// `spawn_event_lease_keepalive`. Dropping the guard aborts the touch loop,
+/// so it stops on EVERY processing exit path — ACK, handler error, executor
+/// panic — and can never keep refreshing an entry the worker is no longer
+/// working on.
+struct EventKeepaliveGuard(tokio::task::JoinHandle<()>);
+
+impl Drop for EventKeepaliveGuard {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
+/// Keep a claimed hot:event delivery visibly alive in the Redis PEL while
+/// its (possibly many) handlers execute serially.
+///
+/// `min_event_orphan_idle_floor_ms` budgets one admission wait plus one run
+/// budget, but an N-handler event pays that cost N times before the single
+/// trailing ACK. Instead of asking operators to over-provision the reclaim
+/// idle, the executor touches the delivery every
+/// `event_keepalive_interval_ms` (ownership-guarded `XCLAIM ... JUSTID`,
+/// which does not increment the delivery counter) so sibling janitors keep
+/// seeing it as live.
+///
+/// Returns `None` for memory queues (no PEL, no orphan reclaim — nothing to
+/// keep alive) and for already-consumed leases. The returned guard must live
+/// exactly as long as processing: dropping it aborts the touch task.
+///
+/// Coverage window: from executor pickup (the first touch fires
+/// immediately, resetting any idle accrued in the prefetch buffer or the
+/// claimer->executor handoff) through the trailing ACK. Time spent buffered
+/// BEFORE pickup is covered only by the orphan-idle floor, so under
+/// sustained executor saturation a still-buffered delivery can exceed the
+/// reclaim idle and be XAUTOCLAIMed — a pre-existing tail risk the
+/// keepalive narrows but does not close.
+fn spawn_event_lease_keepalive(
+    lease: &ProcessingQueueLease<Message>,
+    effective_orphan_idle_ms: u64,
+    worker_id: usize,
+) -> Option<EventKeepaliveGuard> {
+    let keepalive = match lease {
+        ProcessingQueueLease::Memory(_) => return None,
+        ProcessingQueueLease::Redis(lease) => lease.keepalive()?,
+    };
+    let interval =
+        std::time::Duration::from_millis(event_keepalive_interval_ms(effective_orphan_idle_ms));
+    let handle = tokio::spawn(async move {
+        // First touch immediately: the delivery may have accrued idle in the
+        // prefetch buffer or the claimer->executor handoff before this
+        // executor picked it up, so the reclaim window is reset at execution
+        // start rather than assumed fresh. (Time spent buffered BEFORE
+        // pickup is covered only by the orphan-idle floor; see the fn doc.)
+        let mut delay = std::time::Duration::ZERO;
+        loop {
+            tokio::time::sleep(delay).await;
+            match keepalive.touch().await {
+                Ok(true) => {
+                    debug!(
+                        "hot.dev: WORKER {} keepalive touched event delivery {}",
+                        worker_id,
+                        keepalive.msg_id()
+                    );
+                    delay = interval;
+                }
+                Ok(false) => {
+                    // ACKed concurrently or reclaimed by a sibling: this
+                    // consumer no longer owns the entry, so there is nothing
+                    // left to keep alive (and touching must never steal the
+                    // entry back).
+                    warn!(
+                        "hot.dev: WORKER {} keepalive stopping: event delivery {} is no longer pending for this consumer",
+                        worker_id,
+                        keepalive.msg_id()
+                    );
+                    break;
+                }
+                Err(e) => {
+                    // Transient Redis failure: retry at half cadence so a
+                    // single failed touch (worst case one command timeout
+                    // plus a reconnect) cannot stack a full extra interval
+                    // onto the gap between successful touches — this keeps
+                    // the margin at small configured run-timeouts too.
+                    debug!(
+                        "hot.dev: WORKER {} keepalive touch failed for event delivery {}: {}",
+                        worker_id,
+                        keepalive.msg_id(),
+                        e
+                    );
+                    delay = interval / 2;
+                }
+            }
+        }
+    });
+    Some(EventKeepaliveGuard(handle))
 }
 
 // Simplified approach: ensure proper build isolation without complex caching
@@ -5024,12 +5142,13 @@ pub async fn run_with_components_shared_context_and_db(
     let queue_orphan_idle_ms = worker_conf
         .get_int_or_default("queue.event-orphan-idle-ms", 60_000)
         .max(1) as u64;
-    // Invariant (single-handler events): reclaim idle must exceed the longest
-    // an un-ACKed single-handler event can legally be alive on a healthy
-    // worker — blocking-slot admission wait plus run budget plus hard grace.
-    // Multi-handler events run handlers serially and can legally outlive this
-    // floor; see `min_event_orphan_idle_floor_ms` for the residual and the
-    // `queue.event-orphan-idle-ms` conf key operators can raise to cover it.
+    // Invariant: reclaim idle must exceed the longest an un-ACKed
+    // single-handler event can legally be alive on a healthy worker —
+    // blocking-slot admission wait plus run budget plus hard grace. Events
+    // whose serial multi-handler execution outlives this window stay
+    // reclaim-safe via the PEL-touch keepalive (`spawn_event_lease_keepalive`),
+    // for which this floor is the crash backstop; see
+    // `min_event_orphan_idle_floor_ms`.
     let min_event_orphan_idle_ms = min_event_orphan_idle_floor_ms(get_run_timeout(&worker_conf));
     let event_orphan_idle_ms = queue_orphan_idle_ms.max(min_event_orphan_idle_ms);
     if event_orphan_idle_ms != queue_orphan_idle_ms {
@@ -6300,6 +6419,16 @@ pub async fn run_with_components_shared_context_and_db(
                         }
                         ClaimedWorkerQueue::Event(lease) => {
                             let queue_lease_timing = lease.timing();
+                            // Keep this delivery's PEL idle clock refreshed while
+                            // (possibly many) handlers execute serially, so orphan
+                            // reclaim never duplicates a live multi-handler event.
+                            // The guard aborts the touch task on every exit path
+                            // (ACK, error, panic); see spawn_event_lease_keepalive.
+                            let _keepalive_guard = spawn_event_lease_keepalive(
+                                &lease,
+                                event_orphan_idle_ms,
+                                worker_id,
+                            );
                             // Process ONE event message (atomic operation)
                             match lease.process(|message| {
                                 let db_ref = db_clone.clone();
@@ -8084,10 +8213,97 @@ mod tests {
         // The floor must exceed the longest an un-ACKed SINGLE-handler event
         // can legally be alive on a healthy worker (admission wait + run
         // budget + hard grace), or reclaim would start a duplicate live
-        // execution. Multi-handler events can legally exceed the floor; see
-        // `min_event_orphan_idle_floor_ms` docs.
+        // execution. Multi-handler events can legally exceed the floor; the
+        // PEL-touch keepalive keeps those visibly alive, with this floor as
+        // its crash backstop — see `min_event_orphan_idle_floor_ms` docs.
         assert!(min_event_orphan_idle_floor_ms(run_timeout) > legal_lifetime_ms);
         assert!(min_event_orphan_idle_floor_ms(std::time::Duration::MAX) > 0);
+    }
+
+    #[test]
+    fn event_keepalive_cadence_gives_multiple_touches_per_reclaim_window() {
+        // Exactly one third of the effective reclaim idle once above the floor.
+        assert_eq!(event_keepalive_interval_ms(3 * 340_000), 340_000);
+        // Tiny (test-sized) configurations are floored so the touch loop
+        // cannot become a Redis-hammering busy loop.
+        assert_eq!(
+            event_keepalive_interval_ms(0),
+            EVENT_KEEPALIVE_MIN_INTERVAL_MS
+        );
+        assert_eq!(
+            event_keepalive_interval_ms(EVENT_KEEPALIVE_MIN_INTERVAL_MS),
+            EVENT_KEEPALIVE_MIN_INTERVAL_MS
+        );
+        // At the default effective orphan idle (>= the floor), a delivery
+        // gets at least two touch opportunities per reclaim window, so one
+        // missed/failed touch cannot orphan it.
+        let floor = min_event_orphan_idle_floor_ms(std::time::Duration::from_secs(
+            DEFAULT_RUN_TIMEOUT_SECONDS,
+        ));
+        assert!(event_keepalive_interval_ms(floor) * 3 <= floor);
+    }
+
+    #[tokio::test]
+    async fn event_keepalive_guard_aborts_touch_task_on_drop() {
+        struct SignalOnDrop(Option<tokio::sync::oneshot::Sender<()>>);
+        impl Drop for SignalOnDrop {
+            fn drop(&mut self) {
+                if let Some(tx) = self.0.take() {
+                    let _ = tx.send(());
+                }
+            }
+        }
+
+        let (dropped_tx, dropped_rx) = tokio::sync::oneshot::channel::<()>();
+        // Construct the drop signal OUTSIDE the async block so it is owned by
+        // the future itself: whether the abort lands before or after the
+        // task's first poll, dropping the future runs the destructor.
+        let signal = SignalOnDrop(Some(dropped_tx));
+        let guard = EventKeepaliveGuard(tokio::spawn(async move {
+            let _signal = signal;
+            std::future::pending::<()>().await;
+        }));
+        drop(guard);
+
+        tokio::time::timeout(std::time::Duration::from_secs(5), dropped_rx)
+            .await
+            .expect("dropping the guard must abort the keepalive task")
+            .expect("the aborted task must run its destructors");
+    }
+
+    #[tokio::test]
+    async fn memory_event_lease_spawns_no_keepalive() {
+        let queue = ProcessingQueue::<Message>::new(
+            QueueType::Memory,
+            "hot:event-keepalive-test".to_string(),
+            None,
+            Serialization::Json,
+        )
+        .expect("memory queue should build");
+        queue
+            .enqueue(Message {
+                id: Uuid::now_v7(),
+                head: Val::map_empty(),
+                body: Val::map_empty(),
+            })
+            .await
+            .expect("enqueue should succeed");
+        let lease = queue
+            .claim_blocking()
+            .await
+            .expect("claim should succeed")
+            .expect("memory claim always yields a lease");
+
+        assert!(
+            spawn_event_lease_keepalive(&lease, 60_000, 0).is_none(),
+            "memory backend has no PEL / orphan reclaim: keepalive must be a no-op"
+        );
+
+        // Drain the lease so the memory queue does not re-enqueue on drop.
+        lease
+            .process(|_message| async move { Ok::<(), WorkerError>(()) })
+            .await
+            .expect("processing the drained lease should succeed");
     }
 
     #[test]
