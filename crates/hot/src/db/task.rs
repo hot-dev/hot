@@ -476,6 +476,15 @@ impl Task {
 
     /// Complete a task with a final status, result, and computed duration.
     ///
+    /// `duration_ms_override` persists an explicitly measured billable
+    /// duration instead of the default `stop_time - start_time` computation.
+    /// `start_time` is stamped at CLAIM, so the stop-start span covers
+    /// worker-side setup and teardown too; container tasks pass their
+    /// execution-window snapshot here so the row's `duration_ms` (read back
+    /// for `task:complete` events and summed into the task-minutes quota)
+    /// matches what the user was actually billed. `None` preserves the
+    /// historical stop-start computation unchanged.
+    ///
     /// `fence_worker` is an optional ownership fence: when `Some(worker_id)`
     /// the update additionally requires the row's `worker_id` to match, so a
     /// worker's terminal write cannot land on a row whose ownership has been
@@ -488,6 +497,7 @@ impl Task {
         task_id: &Uuid,
         status: &TaskStatus,
         result: Option<&serde_json::Value>,
+        duration_ms_override: Option<i64>,
         fence_worker: Option<&str>,
     ) -> Result<bool, TaskError> {
         let now = Utc::now();
@@ -498,7 +508,7 @@ impl Task {
                 r#"UPDATE task SET
                         task_status_id = $1,
                         stop_time = $2,
-                        duration_ms = EXTRACT(EPOCH FROM ($2 - start_time)) * 1000,
+                        duration_ms = COALESCE($8::bigint, EXTRACT(EPOCH FROM ($2 - start_time)) * 1000),
                         result = $3
                     WHERE task_id = $4
                       AND task_status_id IN ($5, $6)
@@ -511,6 +521,7 @@ impl Task {
             .bind(queued_id)
             .bind(running_id)
             .bind(fence_worker)
+            .bind(duration_ms_override)
             .execute(pg_pool)
             .await?
             .rows_affected(),
@@ -520,7 +531,7 @@ impl Task {
                     r#"UPDATE task SET
                         task_status_id = ?,
                         stop_time = ?,
-                        duration_ms = CAST((julianday(?) - julianday(start_time)) * 86400000 AS INTEGER),
+                        duration_ms = COALESCE(?, CAST((julianday(?) - julianday(start_time)) * 86400000 AS INTEGER)),
                         result = ?
                     WHERE task_id = ?
                       AND task_status_id IN (?, ?)
@@ -528,6 +539,7 @@ impl Task {
                 )
                 .bind(status.as_id())
                 .bind(now)
+                .bind(duration_ms_override)
                 .bind(now)
                 .bind(result_str)
                 .bind(task_id)
@@ -2272,9 +2284,16 @@ mod tests {
 
         let result = serde_json::json!({"output": "done"});
         assert!(
-            Task::complete(&db, &task_id, &TaskStatus::Completed, Some(&result), None)
-                .await
-                .unwrap()
+            Task::complete(
+                &db,
+                &task_id,
+                &TaskStatus::Completed,
+                Some(&result),
+                None,
+                None
+            )
+            .await
+            .unwrap()
         );
 
         let task = Task::get(&db, &task_id).await.unwrap();
@@ -2283,6 +2302,89 @@ mod tests {
         assert!(task.stop_time.is_some());
         assert!(task.duration_ms.is_some());
         assert!(task.duration_ms.unwrap() >= 0);
+    }
+
+    #[tokio::test]
+    async fn test_complete_duration_override_persists_verbatim() {
+        // `start_time` is stamped at claim, so the default stop-start
+        // duration covers worker-side setup and teardown too. A caller that
+        // measured the billable window itself (container tasks) passes it
+        // as `duration_ms_override` and the row must store it verbatim.
+        let db = crate::db::test_db().await;
+        let (task_id, env_id, stream_id, build_id, _, _) = test_ids();
+
+        Task::insert(
+            &db, &task_id, &env_id, &stream_id, &build_id, None, "::app/fn", None, None, "code",
+            60_000, None,
+        )
+        .await
+        .unwrap();
+        assert!(Task::mark_running(&db, &task_id).await.unwrap());
+
+        // Accrue a real claim-to-persist gap so the stop-start computation
+        // could not coincidentally equal the override.
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+
+        let result = serde_json::json!({"exit-code": 0});
+        assert!(
+            Task::complete(
+                &db,
+                &task_id,
+                &TaskStatus::Completed,
+                Some(&result),
+                Some(543_210),
+                None,
+            )
+            .await
+            .unwrap()
+        );
+
+        let task = Task::get(&db, &task_id).await.unwrap();
+        assert_eq!(task.task_status_id, TaskStatus::Completed.as_id());
+        assert!(task.stop_time.is_some());
+        assert_eq!(
+            task.duration_ms,
+            Some(543_210),
+            "an explicit override must be persisted verbatim, not the \
+             stop-start computation"
+        );
+        assert_eq!(task.result.unwrap(), result, "result payload unaffected");
+    }
+
+    #[tokio::test]
+    async fn test_complete_without_override_keeps_stop_start_duration() {
+        // `None` must preserve the historical behavior: duration_ms is the
+        // stop-start computation from the claim-stamped start_time.
+        let db = crate::db::test_db().await;
+        let (task_id, env_id, stream_id, build_id, _, _) = test_ids();
+
+        Task::insert(
+            &db, &task_id, &env_id, &stream_id, &build_id, None, "::app/fn", None, None, "code",
+            60_000, None,
+        )
+        .await
+        .unwrap();
+        assert!(Task::mark_running(&db, &task_id).await.unwrap());
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+
+        assert!(
+            Task::complete(&db, &task_id, &TaskStatus::Completed, None, None, None)
+                .await
+                .unwrap()
+        );
+
+        let task = Task::get(&db, &task_id).await.unwrap();
+        let duration = task
+            .duration_ms
+            .expect("stop-start duration must still be computed when no override is given");
+        assert!(
+            duration >= 20,
+            "duration must cover the running window (got {duration})"
+        );
+        assert!(
+            duration < 60_000,
+            "duration must be the computed span, not garbage (got {duration})"
+        );
     }
 
     #[tokio::test]
@@ -2330,14 +2432,21 @@ mod tests {
 
         let first = serde_json::json!({"output": "done"});
         assert!(
-            Task::complete(&db, &task_id, &TaskStatus::Completed, Some(&first), None)
-                .await
-                .unwrap()
+            Task::complete(
+                &db,
+                &task_id,
+                &TaskStatus::Completed,
+                Some(&first),
+                None,
+                None
+            )
+            .await
+            .unwrap()
         );
 
         let stale = serde_json::json!({"error": "late stale write"});
         assert!(
-            !Task::complete(&db, &task_id, &TaskStatus::Failed, Some(&stale), None)
+            !Task::complete(&db, &task_id, &TaskStatus::Failed, Some(&stale), None, None)
                 .await
                 .unwrap()
         );
@@ -2362,7 +2471,7 @@ mod tests {
         Task::mark_running(&db, &task_id).await.unwrap();
 
         let error = serde_json::json!({"error": "something broke"});
-        Task::complete(&db, &task_id, &TaskStatus::Failed, Some(&error), None)
+        Task::complete(&db, &task_id, &TaskStatus::Failed, Some(&error), None, None)
             .await
             .unwrap();
 
@@ -2397,9 +2506,16 @@ mod tests {
         );
         let stale = serde_json::json!({"output": "late"});
         assert!(
-            !Task::complete(&db, &task_id, &TaskStatus::Completed, Some(&stale), None)
-                .await
-                .unwrap()
+            !Task::complete(
+                &db,
+                &task_id,
+                &TaskStatus::Completed,
+                Some(&stale),
+                None,
+                None
+            )
+            .await
+            .unwrap()
         );
 
         let task = Task::get(&db, &task_id).await.unwrap();
@@ -2421,7 +2537,7 @@ mod tests {
         .unwrap();
         Task::mark_running(&db, &task_id).await.unwrap();
 
-        Task::complete(&db, &task_id, &TaskStatus::TimedOut, None, None)
+        Task::complete(&db, &task_id, &TaskStatus::TimedOut, None, None, None)
             .await
             .unwrap();
 
@@ -2454,6 +2570,7 @@ mod tests {
                 &task_id,
                 &TaskStatus::Completed,
                 Some(&result),
+                None,
                 Some("worker-fence"),
             )
             .await
@@ -2491,6 +2608,7 @@ mod tests {
                 &task_id,
                 &TaskStatus::TimedOut,
                 Some(&stale),
+                None,
                 Some("worker-other"),
             )
             .await
@@ -2534,13 +2652,14 @@ mod tests {
                 &task_id,
                 &TaskStatus::TimedOut,
                 None,
+                None,
                 Some("worker-orig")
             )
             .await
             .unwrap()
         );
         assert!(
-            Task::complete(&db, &task_id, &TaskStatus::Failed, None, None)
+            Task::complete(&db, &task_id, &TaskStatus::Failed, None, None, None)
                 .await
                 .unwrap()
         );
@@ -2626,9 +2745,16 @@ mod tests {
         assert!(Task::mark_running(&db, &task_id).await.unwrap());
         let real = serde_json::json!({"output": "done"});
         assert!(
-            Task::complete(&db, &task_id, &TaskStatus::Completed, Some(&real), None)
-                .await
-                .unwrap()
+            Task::complete(
+                &db,
+                &task_id,
+                &TaskStatus::Completed,
+                Some(&real),
+                None,
+                None
+            )
+            .await
+            .unwrap()
         );
 
         let failure = serde_json::json!({"error": "late compensation"});

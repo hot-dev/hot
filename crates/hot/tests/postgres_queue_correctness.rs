@@ -293,9 +293,16 @@ async fn postgres_task_lifecycle_smoke() {
     );
     assert!(!Task::mark_running(&db, &cancelled_task_id).await.unwrap());
     assert!(
-        !Task::complete(&db, &cancelled_task_id, &TaskStatus::Completed, None, None)
-            .await
-            .unwrap()
+        !Task::complete(
+            &db,
+            &cancelled_task_id,
+            &TaskStatus::Completed,
+            None,
+            None,
+            None
+        )
+        .await
+        .unwrap()
     );
     assert_eq!(
         Task::get(&db, &cancelled_task_id)
@@ -409,14 +416,70 @@ async fn postgres_task_lifecycle_smoke() {
     );
 
     let result = serde_json::json!({"ok": true});
-    Task::complete(&db, &task_id, &TaskStatus::Completed, Some(&result), None)
-        .await
-        .expect("task should complete");
+    Task::complete(
+        &db,
+        &task_id,
+        &TaskStatus::Completed,
+        Some(&result),
+        None,
+        None,
+    )
+    .await
+    .expect("task should complete");
     let task = Task::get(&db, &task_id)
         .await
         .expect("task row should be readable after complete");
     assert_eq!(task.task_status_id, TaskStatus::Completed.as_id());
     assert!(task.stop_time.is_some());
+    assert!(
+        task.duration_ms.is_some(),
+        "without an override the Postgres arm must still compute stop-start duration"
+    );
+
+    // Postgres arm of the `duration_ms_override` COALESCE: an explicitly
+    // measured billable duration must be persisted verbatim instead of the
+    // claim-to-persist stop-start computation (container tasks rely on this
+    // so the task-minutes quota and re-read event duration exclude worker
+    // setup/teardown).
+    let override_task_id = Uuid::now_v7();
+    Task::insert(
+        &db,
+        &override_task_id,
+        &test_data.env_id,
+        &test_data.stream_id,
+        &test_data.build_id,
+        Some(&test_data.run_id),
+        "::app/duration-override",
+        None,
+        None,
+        "container",
+        300_000,
+        Some(&test_data.user_id),
+    )
+    .await
+    .expect("override task should insert");
+    assert!(Task::mark_running(&db, &override_task_id).await.unwrap());
+    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    assert!(
+        Task::complete(
+            &db,
+            &override_task_id,
+            &TaskStatus::Completed,
+            Some(&serde_json::json!({"exit-code": 0})),
+            Some(543_210),
+            None,
+        )
+        .await
+        .expect("override task should complete")
+    );
+    let override_task = Task::get(&db, &override_task_id)
+        .await
+        .expect("override task row should be readable");
+    assert_eq!(
+        override_task.duration_ms,
+        Some(543_210),
+        "duration_ms_override must be persisted verbatim on the Postgres arm"
+    );
 
     if let Some(redis_client) = redis_client_if_available().await {
         let redis_task_id = Uuid::now_v7();
@@ -478,6 +541,7 @@ async fn postgres_task_lifecycle_smoke() {
                     &redis_task_id,
                     &TaskStatus::Completed,
                     Some(&serde_json::json!({"ok": true, "backend": "redis"})),
+                    None,
                     None,
                 )
                 .await?;

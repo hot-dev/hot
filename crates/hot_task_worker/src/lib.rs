@@ -153,6 +153,23 @@ const TASK_COMPLETION_ATTEMPTS: usize = 3;
 const CONTAINER_KILL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 const CONTAINER_LOGS_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
+/// Outer backstop for the multi-step Kata timeout cleanup.
+/// `cleanup_after_timeout` sweeps every setup-retry container id and, for
+/// each one, kills the task, deletes the task/container records, removes the
+/// devmapper snapshot and IO FIFOs, and tears down CNI. Bounding that whole
+/// sequence with the single-step `CONTAINER_KILL_TIMEOUT` can cancel it
+/// mid-way — e.g. after DeleteContainer but before RemoveSnapshot/CNI
+/// teardown — and a snapshot or netns that outlives its container record has
+/// no discovery key left: startup recovery enumerates containerd Container
+/// records (`list_orphan_containers`), so it can never rediscover the leak
+/// even though snapshot/FIFO/netns names are deterministically derived from
+/// the container id. Size the envelope for the sum of the per-id sweeps
+/// (`MAX_SETUP_ATTEMPTS` container ids plus the final CNI teardown) rather
+/// than a single step. Per-step bounding *inside* `cleanup_orphan` (so one
+/// wedged containerd call cannot starve the remaining steps) belongs to the
+/// executor and is flagged for the kata cross-check.
+const KATA_TIMEOUT_CLEANUP_ENVELOPE: std::time::Duration = std::time::Duration::from_secs(120);
+
 /// Worker-side heartbeat interval (the background heartbeat task ticks every
 /// 15s and bumps `last_heartbeat_at` on every task this worker owns).
 /// Co-located here so the reaper threshold can be expressed as a multiple of
@@ -284,12 +301,23 @@ where
     tokio::time::timeout_at(deadline, setup).await
 }
 
+/// Bounded data-volume cleanup. When `cleanup()` completes it defuses the
+/// volume's `Drop` (no double-umount); when it times out the volume is handed
+/// to a detached thread instead of being dropped here, because `Drop` re-runs
+/// the same umount SYNCHRONOUSLY and a hung (D-state) umount would pin this
+/// tokio worker thread forever — a handful of such tasks would stall the
+/// whole worker.
 async fn cleanup_data_volume_with_timeout(task_id: &Uuid, volume: data_volume::DataVolume) {
     if tokio::time::timeout(CONTAINER_KILL_TIMEOUT, volume.cleanup())
         .await
         .is_err()
     {
-        tracing::error!(task_id = %task_id, "data volume cleanup timed out — backing file may leak");
+        tracing::error!(
+            task_id = %task_id,
+            mount_point = %volume.mount_point().display(),
+            "data volume cleanup timed out — detaching the final unmount to a background thread; the mount and backing file may leak until it completes"
+        );
+        let _ = volume.drop_detached();
     }
 }
 
@@ -1354,6 +1382,7 @@ async fn reap_zombie_tasks(
             &db::TaskStatus::Failed,
             Some(&error),
             None,
+            None,
         )
         .await
         {
@@ -2239,6 +2268,8 @@ async fn process_task(
 async fn finish_container_setup_timeout<G: Send>(
     db: &DatabasePool,
     stream_publisher: &StreamPubSub,
+    task_queue: &ProcessingQueue<TaskRequest>,
+    request: &TaskRequest,
     task_id: &Uuid,
     env_id: Uuid,
     stream_id: Uuid,
@@ -2270,11 +2301,17 @@ async fn finish_container_setup_timeout<G: Send>(
         task_type,
         TaskStatus::TimedOut,
         Some(&error),
+        None,
         Some(worker_id),
     )
     .await;
     if persisted {
         publish_task_alert(db, org_id, env_id, task_id, "task:failed", &error).await;
+        // A setup timeout is a terminal failure of THIS attempt exactly like
+        // the runtime failure/timeout arms one await later: honor the user's
+        // retry budget through the same gate, strictly after the fenced
+        // terminal write persisted (persist-before-retry).
+        maybe_retry_task(db, task_queue, task_id, request).await;
     }
 
     if let Some(handle) = file_server_handle
@@ -2340,6 +2377,7 @@ async fn process_container_task(
             &request.task_type,
             TaskStatus::Failed,
             Some(&error),
+            None,
             None,
         )
         .await
@@ -2444,6 +2482,7 @@ async fn process_container_task(
                         TaskStatus::Failed,
                         Some(&error),
                         None,
+                        None,
                     )
                     .await
                     {
@@ -2497,6 +2536,7 @@ async fn process_container_task(
                         TaskStatus::Failed,
                         Some(&error),
                         None,
+                        None,
                     )
                     .await
                     {
@@ -2526,6 +2566,7 @@ async fn process_container_task(
                             &request.task_type,
                             TaskStatus::Failed,
                             Some(&error),
+                            None,
                             None,
                         )
                         .await
@@ -2589,6 +2630,7 @@ async fn process_container_task(
                 TaskStatus::Failed,
                 Some(&error),
                 None,
+                None,
             )
             .await
             {
@@ -2628,6 +2670,7 @@ async fn process_container_task(
                 TaskStatus::Failed,
                 Some(&error),
                 None,
+                None,
             )
             .await
             {
@@ -2651,18 +2694,28 @@ async fn process_container_task(
     .await
     {
         Ok(true) => {}
-        Ok(false) => return Ok(()),
+        Ok(false) => {
+            // Not ours to run: clean the just-created volume via the bounded
+            // helper rather than an implicit (synchronous) Drop.
+            if let Some(vol) = data_volume {
+                cleanup_data_volume_with_timeout(&task_id, vol).await;
+            }
+            return Ok(());
+        }
         Err(e) => {
+            if let Some(vol) = data_volume {
+                cleanup_data_volume_with_timeout(&task_id, vol).await;
+            }
             return Err(Box::new(e));
         }
     }
 
-    // The user-visible timeout starts once this worker owns the task. Every
-    // post-claim setup operation and the container runtime share this one
-    // deadline, so storage/file-server preparation cannot pin a running row
-    // outside the advertised task budget.
+    // The user-visible TIMEOUT budget starts once this worker owns the task.
+    // Every post-claim setup operation and the container runtime share this
+    // one deadline, so storage/file-server preparation cannot pin a running
+    // row outside the advertised task budget. Billing deliberately does NOT
+    // share this anchor — see `execution_start` below.
     let total_timeout = std::time::Duration::from_millis(timeout_ms);
-    let start = std::time::Instant::now();
     let task_deadline = tokio::time::Instant::now() + total_timeout;
 
     let trace_id = request.task_id.clone();
@@ -2719,6 +2772,8 @@ async fn process_container_task(
         finish_container_setup_timeout(
             &db,
             &stream_publisher,
+            &task_queue,
+            &request,
             &task_id,
             env_id,
             stream_id,
@@ -2780,6 +2835,7 @@ async fn process_container_task(
                     &request.task_type,
                     TaskStatus::Failed,
                     Some(&error),
+                    None,
                     Some(&worker_id),
                 )
                 .await
@@ -2797,6 +2853,8 @@ async fn process_container_task(
                 finish_container_setup_timeout(
                     &db,
                     &stream_publisher,
+                    &task_queue,
+                    &request,
                     &task_id,
                     env_id,
                     stream_id,
@@ -2866,6 +2924,7 @@ async fn process_container_task(
                 &request.task_type,
                 TaskStatus::Failed,
                 Some(&error),
+                None,
                 Some(&worker_id),
             )
             .await
@@ -2907,6 +2966,7 @@ async fn process_container_task(
                             &request.task_type,
                             TaskStatus::Failed,
                             Some(&error),
+                            None,
                             Some(&worker_id),
                         )
                         .await
@@ -2932,6 +2992,8 @@ async fn process_container_task(
                         finish_container_setup_timeout(
                             &db,
                             &stream_publisher,
+                            &task_queue,
+                            &request,
                             &task_id,
                             env_id,
                             stream_id,
@@ -2964,6 +3026,7 @@ async fn process_container_task(
                     &request.task_type,
                     TaskStatus::Failed,
                     Some(&error),
+                    None,
                     Some(&worker_id),
                 )
                 .await
@@ -3050,6 +3113,7 @@ async fn process_container_task(
                 &request.task_type,
                 TaskStatus::Failed,
                 Some(&error),
+                None,
                 Some(&worker_id),
             )
             .await
@@ -3092,6 +3156,7 @@ async fn process_container_task(
                         &request.task_type,
                         TaskStatus::Failed,
                         Some(&error),
+                        None,
                         Some(&worker_id),
                     )
                     .await;
@@ -3130,6 +3195,7 @@ async fn process_container_task(
                     &request.task_type,
                     TaskStatus::Failed,
                     Some(&error),
+                    None,
                     Some(&worker_id),
                 )
                 .await;
@@ -3161,6 +3227,7 @@ async fn process_container_task(
                     &request.task_type,
                     TaskStatus::Failed,
                     Some(&error),
+                    None,
                     Some(&worker_id),
                 )
                 .await;
@@ -3175,6 +3242,8 @@ async fn process_container_task(
                 finish_container_setup_timeout(
                     &db,
                     &stream_publisher,
+                    &task_queue,
+                    &request,
                     &task_id,
                     env_id,
                     stream_id,
@@ -3257,6 +3326,14 @@ async fn process_container_task(
         "Starting container command"
     );
 
+    // Billing/duration clock: CUS and the user-visible `duration-ms` measure
+    // the workload execution window only. Everything before this point (run
+    // record, file server, bundle download/extract for mounts, Kata storage
+    // init) is worker-side infrastructure time — it counts against the
+    // claim-anchored `task_deadline` above, but must never be billed as user
+    // compute or inflate the reported duration.
+    let execution_start = std::time::Instant::now();
+
     let extras_ref = if extras.binds.is_empty()
         && extras.extra_env.is_empty()
         && !extras.writable_rootfs
@@ -3270,7 +3347,14 @@ async fn process_container_task(
 
     // Use phased execution for Docker: create, store container_id, poll.
     // Kata still uses atomic execute_with_extras.
-    let execution_result = if matches!(executor.backend(), executor::Backend::Docker) {
+    //
+    // Every arm snapshots `duration_ms` at the moment execution ends —
+    // before log collection and container/VM teardown — so cleanup time
+    // (which runs behind its own bounded envelopes, up to
+    // KATA_TIMEOUT_CLEANUP_ENVELOPE after a Kata timeout) is never billed
+    // as user compute. See `bill_before_cleanup`.
+    let is_docker = matches!(executor.backend(), executor::Backend::Docker);
+    let (execution_result, duration_ms) = if is_docker {
         let mut timings = executor::ContainerTimings::default();
         match tokio::time::timeout_at(
             task_deadline,
@@ -3350,21 +3434,24 @@ async fn process_container_task(
                     .as_millis()
                     .min(i64::MAX as u128) as i64;
 
-                match exit_code {
-                    Some(code) => {
-                        let logs_start = std::time::Instant::now();
-                        let (stdout, stderr) = tokio::time::timeout(
-                            CONTAINER_LOGS_TIMEOUT,
-                            executor.collect_logs(&container_id),
-                        )
-                        .await
-                        .ok()
-                        .and_then(Result::ok)
-                        .unwrap_or_default();
-                        timings.logs_collect_ms = logs_start.elapsed().as_millis() as i64;
-                        remove_container_with_timeout(&executor, &container_id, &task_id).await;
+                // Execution has ended (exit observed or wall-clock deadline
+                // hit): everything below — log collection, kill/remove — is
+                // worker teardown, so snapshot the billable window first.
+                let (duration_ms, output) = bill_before_cleanup(execution_start, async {
+                    match exit_code {
+                        Some(code) => {
+                            let logs_start = std::time::Instant::now();
+                            let (stdout, stderr) = tokio::time::timeout(
+                                CONTAINER_LOGS_TIMEOUT,
+                                executor.collect_logs(&container_id),
+                            )
+                            .await
+                            .ok()
+                            .and_then(Result::ok)
+                            .unwrap_or_default();
+                            timings.logs_collect_ms = logs_start.elapsed().as_millis() as i64;
+                            remove_container_with_timeout(&executor, &container_id, &task_id).await;
 
-                        Ok(Ok((
                             executor::ContainerOutput {
                                 exit_code: code,
                                 stdout,
@@ -3372,26 +3459,23 @@ async fn process_container_task(
                                 container_id,
                                 timed_out: false,
                                 oom_killed: code == 137,
-                            },
-                            timings,
-                        )))
-                    }
-                    None => {
-                        // Timed out
-                        let logs_start = std::time::Instant::now();
-                        let (stdout, stderr) = tokio::time::timeout(
-                            CONTAINER_LOGS_TIMEOUT,
-                            executor.collect_logs(&container_id),
-                        )
-                        .await
-                        .ok()
-                        .and_then(Result::ok)
-                        .unwrap_or_default();
-                        timings.logs_collect_ms = logs_start.elapsed().as_millis() as i64;
-                        kill_and_remove_with_timeout(&executor, &container_id, Some(&task_id))
-                            .await;
+                            }
+                        }
+                        None => {
+                            // Timed out
+                            let logs_start = std::time::Instant::now();
+                            let (stdout, stderr) = tokio::time::timeout(
+                                CONTAINER_LOGS_TIMEOUT,
+                                executor.collect_logs(&container_id),
+                            )
+                            .await
+                            .ok()
+                            .and_then(Result::ok)
+                            .unwrap_or_default();
+                            timings.logs_collect_ms = logs_start.elapsed().as_millis() as i64;
+                            kill_and_remove_with_timeout(&executor, &container_id, Some(&task_id))
+                                .await;
 
-                        Ok(Ok((
                             executor::ContainerOutput {
                                 exit_code: -1,
                                 stdout,
@@ -3399,13 +3483,18 @@ async fn process_container_task(
                                 container_id,
                                 timed_out: true,
                                 oom_killed: false,
-                            },
-                            timings,
-                        )))
+                            }
+                        }
                     }
-                }
+                })
+                .await;
+
+                (Ok(Ok((output, timings))), duration_ms)
             }
-            Ok(Err(e)) => Ok(Err((e, timings))),
+            Ok(Err(e)) => (
+                Ok(Err((e, timings))),
+                billable_execution_ms(execution_start),
+            ),
             Err(elapsed) => {
                 tracing::warn!(
                     task_id = %task_id,
@@ -3413,19 +3502,22 @@ async fn process_container_task(
                     timeout_ms,
                     "Docker image pull/create/start exceeded the task wall-clock timeout"
                 );
-                if tokio::time::timeout(
-                    CONTAINER_KILL_TIMEOUT,
-                    executor.cleanup_task_containers(&trace_id),
-                )
-                .await
-                .is_err()
-                {
-                    tracing::error!(
-                        task_id = %task_id,
-                        "Docker setup-timeout cleanup also timed out; orphan cleanup will retry on restart"
-                    );
-                }
-                Err(elapsed)
+                let (duration_ms, ()) = bill_before_cleanup(execution_start, async {
+                    if tokio::time::timeout(
+                        CONTAINER_KILL_TIMEOUT,
+                        executor.cleanup_task_containers(&trace_id),
+                    )
+                    .await
+                    .is_err()
+                    {
+                        tracing::error!(
+                            task_id = %task_id,
+                            "Docker setup-timeout cleanup also timed out; orphan cleanup will retry on restart"
+                        );
+                    }
+                })
+                .await;
+                (Err(elapsed), duration_ms)
             }
         }
     } else {
@@ -3444,34 +3536,51 @@ async fn process_container_task(
             ),
         )
         .await;
-        if result.is_err() {
-            // The executor's internal timeout starts counting only once the
-            // VM is booted, so this outer wall-clock timeout (which also
-            // covers slot wait, image pull, and boot) fires first — dropping
-            // the execute future before its own cleanup can run. Reap the
-            // leaked VM, snapshot, FIFOs, and netns here.
-            tracing::warn!(
-                task_id = %task_id,
-                timeout_ms,
-                "Kata execution cancelled by outer timeout — cleaning up leaked VM state"
-            );
-            if !bounded_cleanup(
-                CONTAINER_KILL_TIMEOUT,
-                executor.cleanup_after_timeout(&trace_id, limits.network),
-            )
-            .await
-            {
-                tracing::error!(
+        // Execution has ended (result returned or the outer timeout fired):
+        // determine the billable window before the leaked-VM reaping below,
+        // whose bounded envelope (up to KATA_TIMEOUT_CLEANUP_ENVELOPE) is
+        // infrastructure teardown, not user compute. Prefer the workload-end
+        // instant the executor stamped before its own internal teardown
+        // (FIFO/log finalize, kill, VM/snapshot/CNI cleanup): on every path
+        // that completed inside the deadline the executor tears down BEFORE
+        // returning, so a post-await snapshot alone would bill that teardown.
+        // The snapshot below remains the fallback for paths that never stamp
+        // it (outer-timeout cancellation, setup failures).
+        let workload_ended_at = match &result {
+            Ok(Ok((_, timings))) | Ok(Err((_, timings))) => timings.workload_ended_at,
+            Err(_) => None,
+        };
+        let (fallback_ms, ()) = bill_before_cleanup(execution_start, async {
+            if result.is_err() {
+                // The executor's internal timeout starts counting only once
+                // the VM is booted, so this outer wall-clock timeout (which
+                // also covers slot wait, image pull, and boot) fires first —
+                // dropping the execute future before its own cleanup can run.
+                // Reap the leaked VM, snapshot, FIFOs, and netns here.
+                tracing::warn!(
                     task_id = %task_id,
-                    timeout_secs = CONTAINER_KILL_TIMEOUT.as_secs(),
-                    "Kata timeout cleanup also timed out; startup orphan cleanup will retry"
+                    timeout_ms,
+                    "Kata execution cancelled by outer timeout — cleaning up leaked VM state"
                 );
+                if !bounded_cleanup(
+                    KATA_TIMEOUT_CLEANUP_ENVELOPE,
+                    executor.cleanup_after_timeout(&trace_id, limits.network),
+                )
+                .await
+                {
+                    tracing::error!(
+                        task_id = %task_id,
+                        timeout_secs = KATA_TIMEOUT_CLEANUP_ENVELOPE.as_secs(),
+                        "Kata timeout cleanup also timed out; startup orphan cleanup can only recover ids that still have containerd container records — snapshots/netns past DeleteContainer may leak"
+                    );
+                }
             }
-        }
-        result
+        })
+        .await;
+        let duration_ms =
+            billable_ms_preferring_executor_window(execution_start, workload_ended_at, fallback_ms);
+        (result, duration_ms)
     };
-
-    let duration_ms = start.elapsed().as_millis() as i64;
 
     // Clean up file server (Docker: direct handle; Kata: via oneshot channel).
     // A wedged listener (e.g. blocked on a stuck client connection) must not
@@ -3494,13 +3603,10 @@ async fn process_container_task(
     }
 
     // Clean up data volume (unmount + remove backing file). A hung loop
-    // unmount can pin the task worker, so apply the same wall-clock cap.
-    if let Some(vol) = data_volume
-        && tokio::time::timeout(CONTAINER_KILL_TIMEOUT, vol.cleanup())
-            .await
-            .is_err()
-    {
-        tracing::error!(task_id = %task_id, "data_volume cleanup timed out — backing file may leak");
+    // unmount can pin the task worker, so apply the shared wall-clock cap
+    // and detached-drop fallback used by every other cleanup site.
+    if let Some(vol) = data_volume {
+        cleanup_data_volume_with_timeout(&task_id, vol).await;
     }
 
     // Release resource budget
@@ -3593,6 +3699,7 @@ async fn process_container_task(
                 &request.task_type,
                 status.clone(),
                 Some(&result_json),
+                Some(duration_ms),
                 Some(&worker_id),
             )
             .await;
@@ -3677,6 +3784,7 @@ async fn process_container_task(
                 &request.task_type,
                 TaskStatus::Failed,
                 Some(&error),
+                Some(duration_ms),
                 Some(&worker_id),
             )
             .await;
@@ -3717,6 +3825,7 @@ async fn process_container_task(
                 &request.task_type,
                 TaskStatus::TimedOut,
                 Some(&error),
+                Some(duration_ms),
                 Some(&worker_id),
             )
             .await;
@@ -3740,6 +3849,65 @@ async fn process_container_task(
     }
 
     Ok(())
+}
+
+/// Elapsed billable milliseconds for a container task, measured from the
+/// point the worker actually dispatched the workload (post-setup) — never
+/// from claim. The task DEADLINE is anchored at claim so setup and runtime
+/// share one wall-clock budget, but billing CUS = ceil(duration ×
+/// multiplier) and the user-visible `duration-ms` must only cover the
+/// execution window: worker-side setup (bundle download/extract,
+/// file-server start) is infrastructure time, not user compute.
+///
+/// The same boundary applies on the way out: snapshot at the moment
+/// execution ends (result returned / timeout fired / error surfaced),
+/// never after teardown — see `bill_before_cleanup`.
+fn billable_execution_ms(execution_start: std::time::Instant) -> i64 {
+    billable_execution_ms_at(execution_start, std::time::Instant::now())
+}
+
+/// Billable window ending at an explicit instant instead of "now". Used
+/// when the executor itself reports when the workload finished (see
+/// `ContainerTimings::workload_ended_at`), which is always at or before
+/// the caller's own post-await snapshot.
+fn billable_execution_ms_at(
+    execution_start: std::time::Instant,
+    workload_end: std::time::Instant,
+) -> i64 {
+    workload_end
+        .saturating_duration_since(execution_start)
+        .as_millis()
+        .min(i64::MAX as u128) as i64
+}
+
+/// Billable window for the atomic (Kata) arm: prefer the workload-end
+/// instant the executor stamped BEFORE its internal teardown (FIFO/log
+/// finalize, kill, VM/snapshot/netns cleanup) — a post-await snapshot alone
+/// would bill that teardown as user compute. `fallback_ms` is the caller's
+/// own pre-cleanup snapshot, used for paths that never stamp the instant
+/// (outer-timeout cancellation, setup failures).
+fn billable_ms_preferring_executor_window(
+    execution_start: std::time::Instant,
+    workload_ended_at: Option<std::time::Instant>,
+    fallback_ms: i64,
+) -> i64 {
+    workload_ended_at.map_or(fallback_ms, |ended_at| {
+        billable_execution_ms_at(execution_start, ended_at)
+    })
+}
+
+/// Snapshot the billable execution window at the moment execution ends,
+/// THEN run `cleanup`. Teardown — log collection, container kill/remove,
+/// leaked-VM reaping — runs behind its own bounded envelopes (up to
+/// `KATA_TIMEOUT_CLEANUP_ENVELOPE` after a Kata timeout) and is worker
+/// infrastructure time: letting it precede the snapshot would inflate both
+/// the CUS charge and the user-visible `duration-ms`.
+async fn bill_before_cleanup<F>(execution_start: std::time::Instant, cleanup: F) -> (i64, F::Output)
+where
+    F: std::future::Future,
+{
+    let duration_ms = billable_execution_ms(execution_start);
+    (duration_ms, cleanup.await)
 }
 
 /// Persist the point where user workload code actually begins, plus the
@@ -3954,6 +4122,7 @@ async fn process_code_task(
                     &task_type,
                     TaskStatus::Failed,
                     Some(&error),
+                    None,
                     Some(&worker_id),
                 )
                 .await
@@ -4177,7 +4346,7 @@ async fn process_code_task(
             if let Err(e) = hot::db::Task::set_run_id(&db, &task_id, &run_id).await {
                 tracing::warn!(task_id = %task_id, run_id = %run_id, "Failed to set task run_id: {}", e);
             }
-            if complete_task_with_event(&db, &stream_publisher, &task_id, env_id, stream_id, &function_name, &task_type, TaskStatus::Cancelled, Some(&cancellation), Some(&worker_id)).await {
+            if complete_task_with_event(&db, &stream_publisher, &task_id, env_id, stream_id, &function_name, &task_type, TaskStatus::Cancelled, Some(&cancellation), None, Some(&worker_id)).await {
                 publish_task_alert(&db, org_id, env_id, &task_id, "task:cancelled", &cancellation).await;
             }
             drop(inbox_tx);
@@ -4227,6 +4396,7 @@ async fn process_code_task(
                     &task_type,
                     status.clone(),
                     Some(&result_json),
+                    None,
                     Some(&worker_id),
                 )
                 .await
@@ -4255,6 +4425,7 @@ async fn process_code_task(
                     &task_type,
                     TaskStatus::Completed,
                     Some(&result_json),
+                    None,
                     Some(&worker_id),
                 )
                 .await;
@@ -4273,6 +4444,7 @@ async fn process_code_task(
                 &task_type,
                 TaskStatus::Failed,
                 Some(&error),
+                None,
                 Some(&worker_id),
             )
             .await
@@ -4294,6 +4466,7 @@ async fn process_code_task(
                 &task_type,
                 TaskStatus::Failed,
                 Some(&error),
+                None,
                 Some(&worker_id),
             )
             .await
@@ -4330,6 +4503,7 @@ async fn process_code_task(
                 &task_type,
                 TaskStatus::TimedOut,
                 Some(&error),
+                None,
                 Some(&worker_id),
             )
             .await
@@ -4488,11 +4662,18 @@ fn json_numeric_tolerant_eq(a: &serde_json::Value, b: &serde_json::Value) -> boo
     }
 }
 
+/// `duration_ms_override` is threaded verbatim to [`Task::complete`]:
+/// container tasks pass their billable execution-window snapshot so the
+/// row's `duration_ms` doesn't degrade to the claim-to-persist stop-start
+/// span (which would fold setup and teardown into billing reads); all other
+/// callers pass `None` for the historical computed duration.
+#[allow(clippy::too_many_arguments)]
 async fn persist_terminal_task(
     db: &DatabasePool,
     task_id: &Uuid,
     status: &TaskStatus,
     result: Option<&serde_json::Value>,
+    duration_ms_override: Option<i64>,
     fence_worker: Option<&str>,
     attempt_timeout: std::time::Duration,
     max_attempts: usize,
@@ -4501,7 +4682,14 @@ async fn persist_terminal_task(
     for attempt in 1..=max_attempts {
         match tokio::time::timeout(
             attempt_timeout,
-            Task::complete(db, task_id, status, result, fence_worker),
+            Task::complete(
+                db,
+                task_id,
+                status,
+                result,
+                duration_ms_override,
+                fence_worker,
+            ),
         )
         .await
         {
@@ -4649,6 +4837,12 @@ async fn persist_terminal_task(
 
 /// Complete a task in the DB and emit a `task:complete` env event.
 ///
+/// `duration_ms_override`: container terminal writes pass the billable
+/// execution-window snapshot so the persisted `duration_ms` (and therefore
+/// the re-read event payload and the task-minutes quota) reflects the
+/// window the user was billed for instead of the claim-to-persist span;
+/// every other caller passes `None` for the stop-start computation.
+///
 /// `fence_worker` is threaded to `Task::complete`: pass this worker's id when
 /// the row was claimed by this worker so a write cannot land after ownership
 /// was released or taken over; pass `None` for rows this worker never claimed
@@ -4671,6 +4865,7 @@ async fn complete_task_with_event(
     task_type: &str,
     status: TaskStatus,
     result: Option<&serde_json::Value>,
+    duration_ms_override: Option<i64>,
     fence_worker: Option<&str>,
 ) -> bool {
     // A task:complete event is only truthful after the terminal row is
@@ -4682,6 +4877,7 @@ async fn complete_task_with_event(
         task_id,
         &status,
         result,
+        duration_ms_override,
         fence_worker,
         TASK_COMPLETION_DB_TIMEOUT,
         TASK_COMPLETION_ATTEMPTS,
@@ -4697,7 +4893,11 @@ async fn complete_task_with_event(
 
     finalize_task_timing(db, task_id).await;
 
-    // Re-read to get computed duration_ms (best-effort; null on timeout/error).
+    // Re-read the row's duration_ms for the event (best-effort; null on
+    // timeout/error). For container tasks the row carries the billable
+    // execution-window snapshot persisted via `duration_ms_override` above,
+    // so the event reports the same window the user was billed for; for all
+    // other tasks it is the stop-start computation from `Task::complete`.
     let duration_ms = match tokio::time::timeout(DB_CALL_TIMEOUT, Task::get(db, task_id)).await {
         Ok(Ok(t)) => t.duration_ms,
         Ok(Err(_)) => None,
@@ -5186,6 +5386,148 @@ fn bundle_extract_dir(build_id: &Uuid) -> std::path::PathBuf {
     std::path::PathBuf::from(format!(".hot/task-worker/build-{}", build_id.simple()))
 }
 
+/// Prefix of the unique per-attempt temp dirs extraction writes into before
+/// atomically renaming over the final `build-{id}` path. The final directory
+/// can therefore only ever be observed fully formed.
+const BUNDLE_EXTRACT_TEMP_PREFIX: &str = ".tmp-";
+
+/// Any in-flight extraction finishes well inside this window; a temp dir
+/// older than it belongs to an attempt whose process died mid-extract and
+/// would otherwise accumulate on disk forever.
+const BUNDLE_EXTRACT_TEMP_MAX_AGE: std::time::Duration = std::time::Duration::from_secs(60 * 60);
+
+static BUNDLE_EXTRACT_LOCKS: std::sync::OnceLock<Mutex<HashMap<Uuid, std::sync::Weak<Mutex<()>>>>> =
+    std::sync::OnceLock::new();
+
+/// Per-build single-flight for local bundle extraction (same weak-registry
+/// pattern as `usage_stats_org_lock`): two concurrent local attempts for the
+/// same build — e.g. a retry racing the detached blocking writer of a
+/// cancelled attempt — must not download and extract twice, nor race each
+/// other's install into the final path.
+async fn bundle_extract_lock(build_id: Uuid) -> Arc<Mutex<()>> {
+    let locks = BUNDLE_EXTRACT_LOCKS.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut locks = locks.lock().await;
+    locks.retain(|_, lock| lock.strong_count() > 0);
+    if let Some(lock) = locks.get(&build_id).and_then(std::sync::Weak::upgrade) {
+        return lock;
+    }
+    let lock = Arc::new(Mutex::new(()));
+    locks.insert(build_id, Arc::downgrade(&lock));
+    lock
+}
+
+/// A build's extract dir counts as complete only when it holds
+/// `manifest.hot` — the pre-existing marker every consumer already relies
+/// on. With atomic installs the final directory's existence implies
+/// completeness; the marker check additionally heals directories left
+/// half-written by older workers that extracted straight into the final
+/// path.
+fn bundle_extract_is_complete(extract_dir: &std::path::Path) -> bool {
+    extract_dir.join("manifest.hot").exists()
+}
+
+/// Age-based sweep of orphaned extraction temp dirs (a process death
+/// mid-extract leaves one behind; a merely cancelled attempt's detached
+/// writer cleans up after itself). Runs whenever an extraction prepares its
+/// own temp dir in the same parent. Best-effort.
+fn sweep_stale_bundle_extract_temps(parent: &std::path::Path, max_age: std::time::Duration) {
+    let Ok(entries) = std::fs::read_dir(parent) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            continue;
+        };
+        if !name.starts_with(BUNDLE_EXTRACT_TEMP_PREFIX) {
+            continue;
+        }
+        let stale = entry
+            .metadata()
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|t| t.elapsed().ok())
+            .is_some_and(|age| age >= max_age);
+        if stale {
+            tracing::warn!(
+                path = %entry.path().display(),
+                "Removing stale bundle extraction temp dir left by a dead attempt"
+            );
+            let _ = std::fs::remove_dir_all(entry.path());
+        }
+    }
+}
+
+/// Atomically install a fully extracted temp dir at its final path. The
+/// winner renames into place; a loser (the final dir was installed first)
+/// removes its own temp dir and succeeds iff the final dir is complete.
+fn install_extracted_bundle(
+    temp_dir: &std::path::Path,
+    extract_dir: &std::path::Path,
+) -> Result<(), String> {
+    // Heal a partial dir left by an older worker that extracted directly
+    // into the final path (pre-atomic-install layout): it would otherwise
+    // both fail the rename below and poison every future attempt.
+    if extract_dir.exists() && !bundle_extract_is_complete(extract_dir) {
+        let _ = std::fs::remove_dir_all(extract_dir);
+    }
+    match std::fs::rename(temp_dir, extract_dir) {
+        Ok(()) => Ok(()),
+        Err(rename_err) => {
+            // Another attempt (a concurrent worker process, or a cancelled
+            // attempt's detached extraction) installed first. Its rename was
+            // atomic, so a complete final dir means our work is done.
+            let _ = std::fs::remove_dir_all(temp_dir);
+            if bundle_extract_is_complete(extract_dir) {
+                Ok(())
+            } else {
+                Err(format!(
+                    "Failed to install extracted bundle at {}: {}",
+                    extract_dir.display(),
+                    rename_err
+                ))
+            }
+        }
+    }
+}
+
+/// Blocking half of `ensure_bundle_extracted`: sweep stale temps, extract
+/// into a fresh per-attempt temp dir NEXT TO the final path (same
+/// filesystem, so the install rename is atomic), then rename into place. A
+/// cancelled attempt's detached blocking task keeps writing only into its
+/// own temp dir, never the shared final path, so a retry can never collide
+/// with it ('File exists') or observe its partial files.
+fn extract_bundle_to_dir(build_data: &[u8], extract_dir: &std::path::Path) -> Result<(), String> {
+    let parent = extract_dir
+        .parent()
+        .map(std::path::Path::to_path_buf)
+        .unwrap_or_else(|| std::path::PathBuf::from("."));
+    std::fs::create_dir_all(&parent).map_err(|e| {
+        format!(
+            "Failed to create bundle extract parent dir {}: {}",
+            parent.display(),
+            e
+        )
+    })?;
+    sweep_stale_bundle_extract_temps(&parent, BUNDLE_EXTRACT_TEMP_MAX_AGE);
+
+    let dir_name = extract_dir
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("bundle");
+    let temp_dir = parent.join(format!(
+        "{}{}-{}",
+        BUNDLE_EXTRACT_TEMP_PREFIX,
+        dir_name,
+        Uuid::new_v4().simple()
+    ));
+    if let Err(e) = hot::bundle::extract_bundle_from_bytes(build_data, &temp_dir) {
+        let _ = std::fs::remove_dir_all(&temp_dir);
+        return Err(format!("Failed to extract bundle: {}", e));
+    }
+    install_extracted_bundle(&temp_dir, extract_dir)
+}
+
 /// Ensure a bundle build is extracted to its local cache dir, downloading
 /// from storage if needed. Idempotent — if the extract dir already contains
 /// `manifest.hot` we assume a previous worker invocation extracted it and
@@ -5197,7 +5539,16 @@ async fn ensure_bundle_extracted(
     conf: &Val,
 ) -> Result<std::path::PathBuf, String> {
     let extract_dir = bundle_extract_dir(build_id);
-    if extract_dir.join("manifest.hot").exists() {
+    if bundle_extract_is_complete(&extract_dir) {
+        return Ok(extract_dir);
+    }
+
+    // Per-build single-flight: concurrent local attempts download and
+    // extract once, not N times. A cancelled holder releases the lock on
+    // drop; its detached blocking writer below keeps to its own temp dir.
+    let flight = bundle_extract_lock(*build_id).await;
+    let _guard = flight.lock().await;
+    if bundle_extract_is_complete(&extract_dir) {
         return Ok(extract_dir);
     }
 
@@ -5209,12 +5560,9 @@ async fn ensure_bundle_extracted(
         .await
         .map_err(|e| format!("Failed to retrieve build data: {}", e))?;
     let extract_dir_for_task = extract_dir.clone();
-    tokio::task::spawn_blocking(move || {
-        hot::bundle::extract_bundle_from_bytes(&build_data, &extract_dir_for_task)
-    })
-    .await
-    .map_err(|e| format!("Bundle extraction task failed: {}", e))?
-    .map_err(|e| format!("Failed to extract bundle: {}", e))?;
+    tokio::task::spawn_blocking(move || extract_bundle_to_dir(&build_data, &extract_dir_for_task))
+        .await
+        .map_err(|e| format!("Bundle extraction task failed: {}", e))??;
     Ok(extract_dir)
 }
 
@@ -5644,6 +5992,7 @@ async fn adopt_orphaned_containers(
                     status.clone(),
                     Some(&result_json),
                     None,
+                    None,
                 )
                 .await;
                 if persisted && status == TaskStatus::Failed {
@@ -5669,6 +6018,7 @@ async fn adopt_orphaned_containers(
                     &task.task_type,
                     TaskStatus::Failed,
                     Some(&error),
+                    None,
                     None,
                 )
                 .await
@@ -5791,6 +6141,7 @@ async fn cleanup_kata_orphans(
             &task.task_type,
             TaskStatus::Failed,
             Some(&error),
+            None,
             None,
         )
         .await
@@ -5927,6 +6278,7 @@ async fn monitor_adopted_container(
                     status.clone(),
                     Some(&result_json),
                     None,
+                    None,
                 )
                 .await;
 
@@ -5975,6 +6327,7 @@ async fn monitor_adopted_container(
                         TaskStatus::TimedOut,
                         Some(&error),
                         None,
+                        None,
                     )
                     .await
                     {
@@ -6006,6 +6359,7 @@ async fn monitor_adopted_container(
                         &task.task_type,
                         TaskStatus::Failed,
                         Some(&error),
+                        None,
                         None,
                     )
                     .await
@@ -6601,7 +6955,7 @@ mod tests {
         insert_test_task(&db, &done).await;
         Task::mark_running(&db, &done.task_id).await.unwrap();
         assert!(
-            Task::complete(&db, &done.task_id, &TaskStatus::Completed, None, None)
+            Task::complete(&db, &done.task_id, &TaskStatus::Completed, None, None, None)
                 .await
                 .unwrap()
         );
@@ -6686,6 +7040,7 @@ mod tests {
                 &TaskStatus::Completed,
                 None,
                 None,
+                None,
                 std::time::Duration::from_secs(1),
                 2,
             )
@@ -6704,6 +7059,7 @@ mod tests {
                 &db,
                 &cancelled_task.task_id,
                 &TaskStatus::Failed,
+                None,
                 None,
                 None,
                 std::time::Duration::from_secs(1),
@@ -6729,6 +7085,7 @@ mod tests {
                 &closed_db,
                 &Uuid::now_v7(),
                 &TaskStatus::Failed,
+                None,
                 None,
                 None,
                 std::time::Duration::from_millis(20),
@@ -6763,6 +7120,7 @@ mod tests {
                 &TaskStatus::Failed,
                 Some(&reaper_error),
                 None,
+                None,
             )
             .await
             .unwrap()
@@ -6775,6 +7133,7 @@ mod tests {
                 &task.task_id,
                 &TaskStatus::Failed,
                 Some(&our_error),
+                None,
                 Some("worker-a"),
                 std::time::Duration::from_secs(1),
                 2,
@@ -6810,6 +7169,7 @@ mod tests {
                 &task.task_id,
                 &TaskStatus::TimedOut,
                 Some(&our_error),
+                None,
                 Some("worker-a"),
             )
             .await
@@ -6824,6 +7184,7 @@ mod tests {
                 &task.task_id,
                 &TaskStatus::TimedOut,
                 Some(&our_error),
+                None,
                 Some("worker-a"),
                 std::time::Duration::from_secs(1),
                 2,
@@ -6906,6 +7267,7 @@ mod tests {
                 &task.task_id,
                 &TaskStatus::Failed,
                 Some(&stored_form),
+                None,
                 Some("worker-a"),
             )
             .await
@@ -6925,6 +7287,7 @@ mod tests {
                 &task.task_id,
                 &TaskStatus::Failed,
                 Some(&our_form),
+                None,
                 Some("worker-a"),
                 std::time::Duration::from_secs(1),
                 2,
@@ -6969,6 +7332,7 @@ mod tests {
                 &task.task_id,
                 &TaskStatus::Cancelled,
                 Some(&cancellation),
+                None,
                 Some("worker-a"),
                 std::time::Duration::from_secs(1),
                 2,
@@ -6992,6 +7356,7 @@ mod tests {
                 &task.task_type,
                 TaskStatus::Cancelled,
                 Some(&cancellation),
+                None,
                 Some("worker-a"),
             )
             .await,
@@ -7036,6 +7401,7 @@ mod tests {
                 &task.task_id,
                 &TaskStatus::TimedOut,
                 Some(&our_error),
+                None,
                 Some("worker-a"),
                 std::time::Duration::from_secs(1),
                 2,
@@ -7073,6 +7439,7 @@ mod tests {
                 TaskStatus::Failed,
                 Some(&error),
                 None,
+                None,
             )
             .await,
             "a lost terminal race must tell callers to suppress alerts and retries"
@@ -7102,6 +7469,7 @@ mod tests {
                 &owned.task_type,
                 TaskStatus::Failed,
                 Some(&error),
+                None,
                 Some("worker-a"),
             )
             .await
@@ -7217,6 +7585,7 @@ mod tests {
                 &failed.task_id,
                 &TaskStatus::Failed,
                 Some(&error),
+                None,
                 None
             )
             .await
@@ -7249,9 +7618,16 @@ mod tests {
         Task::mark_running(&db, &task.task_id).await.unwrap();
         let error = task_failure_json("boom", None);
         assert!(
-            Task::complete(&db, &task.task_id, &TaskStatus::Failed, Some(&error), None)
-                .await
-                .unwrap()
+            Task::complete(
+                &db,
+                &task.task_id,
+                &TaskStatus::Failed,
+                Some(&error),
+                None,
+                None
+            )
+            .await
+            .unwrap()
         );
 
         // Another writer (e.g. the zombie reaper, or a crashed earlier
@@ -7289,9 +7665,16 @@ mod tests {
         insert_test_task(&db, &fresh).await;
         Task::mark_running(&db, &fresh.task_id).await.unwrap();
         assert!(
-            Task::complete(&db, &fresh.task_id, &TaskStatus::Failed, Some(&error), None)
-                .await
-                .unwrap()
+            Task::complete(
+                &db,
+                &fresh.task_id,
+                &TaskStatus::Failed,
+                Some(&error),
+                None,
+                None
+            )
+            .await
+            .unwrap()
         );
         maybe_retry_task(&db, &queue, &fresh.task_id, &request).await;
         assert_eq!(Task::get_count_by_env(&db, &fresh.env_id).await.unwrap(), 2);
@@ -7359,6 +7742,407 @@ mod tests {
             .expect("a fresh zombie with budget must enqueue its retry")
             .unwrap()
             .expect("memory queue claim should yield the enqueued retry");
+    }
+
+    #[tokio::test]
+    async fn container_setup_timeout_honors_user_retry_budget() {
+        let db = hot::db::test_db().await;
+        let publisher =
+            StreamPubSub::new(hot::stream::StreamPubSubType::Memory, None, false).unwrap();
+        let queue_name = format!("{{hot:task}}-setup-timeout-retry-{}", Uuid::now_v7());
+        let queue = ProcessingQueue::<TaskRequest>::new(
+            QueueType::Memory,
+            queue_name,
+            None,
+            Serialization::Json,
+        )
+        .unwrap();
+
+        // With retry budget: a timeout during SETUP (e.g. bundle mounts) is a
+        // terminal failure of this attempt and must spawn exactly one retry
+        // row, the same as a timeout one await later in the runtime arms.
+        let (request, mut task, _, _, _) = make_task_request_and_row();
+        task.options = Some(serde_json::json!({"retry": {"attempts": 2, "delay": 0}}));
+        insert_test_task(&db, &task).await;
+        Task::mark_running(&db, &task.task_id).await.unwrap();
+        assert!(
+            Task::set_worker(&db, &task.task_id, "worker-a")
+                .await
+                .unwrap()
+        );
+        finish_container_setup_timeout(
+            &db,
+            &publisher,
+            &queue,
+            &request,
+            &task.task_id,
+            task.env_id,
+            task.stream_id,
+            None,
+            &task.function_name,
+            &task.task_type,
+            "worker-a",
+            "bundle mount preparation",
+            None,
+            None,
+            (),
+        )
+        .await;
+        let row = Task::get(&db, &task.task_id).await.unwrap();
+        assert_eq!(
+            row.task_status_id,
+            TaskStatus::TimedOut.as_id(),
+            "the fenced TimedOut write must persist before any retry"
+        );
+        assert_eq!(
+            Task::get_count_by_env(&db, &task.env_id).await.unwrap(),
+            2,
+            "a setup timeout with retry budget must insert exactly one retry row"
+        );
+
+        // Without budget: terminal TimedOut only, no retry row.
+        let (request, no_budget, _, _, _) = make_task_request_and_row();
+        insert_test_task(&db, &no_budget).await;
+        Task::mark_running(&db, &no_budget.task_id).await.unwrap();
+        assert!(
+            Task::set_worker(&db, &no_budget.task_id, "worker-a")
+                .await
+                .unwrap()
+        );
+        finish_container_setup_timeout(
+            &db,
+            &publisher,
+            &queue,
+            &request,
+            &no_budget.task_id,
+            no_budget.env_id,
+            no_budget.stream_id,
+            None,
+            &no_budget.function_name,
+            &no_budget.task_type,
+            "worker-a",
+            "file-server setup",
+            None,
+            None,
+            (),
+        )
+        .await;
+        assert_eq!(
+            Task::get_count_by_env(&db, &no_budget.env_id)
+                .await
+                .unwrap(),
+            1,
+            "a setup timeout without retry budget must not spawn retries"
+        );
+    }
+
+    #[test]
+    fn container_billing_measures_execution_window_not_setup_gap() {
+        // A task that spent ~5s in worker-side setup (bundle download and
+        // extract, file-server start) before dispatching a ~0.5s workload:
+        // the billing clock must anchor at dispatch, not at claim.
+        let now = std::time::Instant::now();
+        let claimed_at = now
+            .checked_sub(std::time::Duration::from_millis(5_500))
+            .expect("monotonic clock is past process start");
+        let execution_start = now
+            .checked_sub(std::time::Duration::from_millis(500))
+            .expect("monotonic clock is past process start");
+
+        let billed = billable_execution_ms(execution_start);
+        assert!(
+            billed >= 500,
+            "the workload window itself must be billed (got {billed})"
+        );
+        assert!(
+            billed < 5_000,
+            "worker-side setup before dispatch must not be billed as user compute (got {billed})"
+        );
+        // The DEADLINE stays anchored at claim (covered by
+        // claimed_container_setup_obeys_shared_task_deadline); this only
+        // pins that the two anchors are genuinely distinct clocks.
+        assert!(claimed_at.elapsed() >= std::time::Duration::from_millis(5_500));
+    }
+
+    #[tokio::test]
+    async fn timed_out_container_bills_pre_cleanup_window_only() {
+        // A workload that ran ~200ms before its timeout fired, followed by a
+        // slow infrastructure teardown (log collection, kill/remove; the Kata
+        // arm's leaked-VM reaping can burn up to KATA_TIMEOUT_CLEANUP_ENVELOPE
+        // = 120s): every execution arm snapshots the billable window via
+        // bill_before_cleanup the moment execution ends, so teardown time is
+        // never charged as user compute or reported in `duration-ms`.
+        let execution_start = std::time::Instant::now()
+            .checked_sub(std::time::Duration::from_millis(200))
+            .expect("monotonic clock is past process start");
+
+        let cleanup_ran = std::sync::atomic::AtomicBool::new(false);
+        let (billed, ()) = bill_before_cleanup(execution_start, async {
+            // Simulated slow teardown, strictly after the snapshot.
+            tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+            cleanup_ran.store(true, std::sync::atomic::Ordering::SeqCst);
+        })
+        .await;
+
+        assert!(
+            cleanup_ran.load(std::sync::atomic::Ordering::SeqCst),
+            "cleanup must still run to completion after the snapshot"
+        );
+        assert!(
+            billed >= 200,
+            "the pre-timeout workload window must be billed (got {billed})"
+        );
+        let after_cleanup = billable_execution_ms(execution_start);
+        assert!(
+            after_cleanup >= billed + 150,
+            "the clock kept running through the ~150ms cleanup (billed={billed}, \
+             after={after_cleanup}); the snapshot preceding it is what keeps \
+             teardown out of the charge"
+        );
+    }
+
+    #[test]
+    fn kata_billing_prefers_executor_reported_workload_end_over_fallback() {
+        // The Kata executor stamps `workload_ended_at` the moment the in-VM
+        // wait resolves (or its internal timeout fires), BEFORE its internal
+        // teardown (log finalize, kill, VM/snapshot/CNI cleanup). The lib.rs
+        // arm's own post-await snapshot only lands after that teardown, so
+        // billing must prefer the executor-reported instant. The Kata
+        // runtime path itself is cfg-gated (linux + kata); this exercises
+        // the portable selection plumbing.
+        let now = std::time::Instant::now();
+        let execution_start = now
+            .checked_sub(std::time::Duration::from_millis(300))
+            .expect("monotonic clock is past process start");
+        // Workload finished 100ms in; the remaining ~200ms up to `now` play
+        // the role of executor-internal teardown.
+        let workload_ended_at = execution_start + std::time::Duration::from_millis(100);
+        // The fallback snapshot was taken after that teardown.
+        let fallback_ms = billable_execution_ms(execution_start);
+        assert!(
+            fallback_ms >= 300,
+            "fallback covers teardown (got {fallback_ms})"
+        );
+
+        let billed = billable_ms_preferring_executor_window(
+            execution_start,
+            Some(workload_ended_at),
+            fallback_ms,
+        );
+        assert_eq!(
+            billed, 100,
+            "the executor-reported window must win over the post-teardown fallback"
+        );
+
+        // No executor-reported end (outer-timeout cancellation, setup
+        // failure): the fallback snapshot is used verbatim.
+        assert_eq!(
+            billable_ms_preferring_executor_window(execution_start, None, fallback_ms),
+            fallback_ms,
+            "without an executor-reported end the fallback must be used unchanged"
+        );
+
+        // A (theoretical) end before the start saturates to zero rather
+        // than going negative.
+        let before_start = execution_start
+            .checked_sub(std::time::Duration::from_millis(50))
+            .expect("monotonic clock is past process start");
+        assert_eq!(
+            billable_ms_preferring_executor_window(execution_start, Some(before_start), 999),
+            0,
+            "an end before the start must saturate to zero"
+        );
+    }
+
+    #[tokio::test]
+    async fn container_terminal_persist_stores_billable_snapshot_not_claim_to_persist() {
+        // `start_time` is stamped at CLAIM, so Task::complete's default
+        // stop-start duration folds worker-side setup and teardown into the
+        // row's `duration_ms` — which feeds the re-read `task:complete`
+        // event and the task-minutes quota. Container terminal writes must
+        // instead persist the billable execution-window snapshot verbatim.
+        let db = hot::db::test_db().await;
+        let (_request, task, _, _, _) = make_task_request_and_row();
+        insert_test_task(&db, &task).await;
+        Task::mark_running(&db, &task.task_id).await.unwrap();
+
+        // Let a measurable claim-to-persist gap accrue so the stop-start
+        // computation could not coincidentally equal the snapshot below.
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+
+        let snapshot_ms = 123_456i64;
+        let result = serde_json::json!({"exit-code": 0, "duration-ms": snapshot_ms});
+        assert!(
+            persist_terminal_task(
+                &db,
+                &task.task_id,
+                &TaskStatus::Completed,
+                Some(&result),
+                Some(snapshot_ms),
+                None,
+                std::time::Duration::from_secs(1),
+                1,
+            )
+            .await
+        );
+
+        let row = Task::get(&db, &task.task_id).await.unwrap();
+        assert_eq!(
+            row.duration_ms,
+            Some(snapshot_ms),
+            "the persisted duration must be the billable snapshot, not the \
+             claim-to-persist stop-start span"
+        );
+    }
+
+    fn bundle_test_parent(label: &str) -> std::path::PathBuf {
+        let parent = std::env::temp_dir().join(format!(
+            "hot-bundle-test-{}-{}",
+            label,
+            Uuid::new_v4().simple()
+        ));
+        std::fs::create_dir_all(&parent).unwrap();
+        parent
+    }
+
+    fn make_complete_temp_dir(parent: &std::path::Path, name: &str) -> std::path::PathBuf {
+        let dir = parent.join(format!("{}{}", BUNDLE_EXTRACT_TEMP_PREFIX, name));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("manifest.hot"), b"{}").unwrap();
+        dir
+    }
+
+    #[test]
+    fn bundle_install_rename_race_leaves_exactly_one_valid_dir() {
+        let parent = bundle_test_parent("race");
+        let final_dir = parent.join("build-race");
+        let winner = make_complete_temp_dir(&parent, "build-race-a");
+        let loser = make_complete_temp_dir(&parent, "build-race-b");
+
+        // While attempts are still writing (temp dirs exist), the final path
+        // must not exist — it can only appear via the atomic rename, so a
+        // partial dir is never observable at the final path.
+        assert!(!final_dir.exists());
+
+        install_extracted_bundle(&winner, &final_dir).unwrap();
+        assert!(bundle_extract_is_complete(&final_dir));
+
+        // The loser's rename hits the installed dir; it must clean up its
+        // own temp dir and treat the complete final dir as success.
+        install_extracted_bundle(&loser, &final_dir).unwrap();
+        assert!(
+            !loser.exists(),
+            "the losing attempt must remove its temp dir"
+        );
+        assert!(bundle_extract_is_complete(&final_dir));
+
+        let leftovers: Vec<String> = std::fs::read_dir(&parent)
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(
+            leftovers,
+            vec!["build-race".to_string()],
+            "exactly one valid dir must remain after the race"
+        );
+        std::fs::remove_dir_all(&parent).unwrap();
+    }
+
+    #[test]
+    fn bundle_install_heals_legacy_partial_final_dir() {
+        let parent = bundle_test_parent("heal");
+        let final_dir = parent.join("build-poisoned");
+        // Older workers extracted straight into the final path; a process
+        // death mid-extract left a partial dir with no manifest.hot marker.
+        std::fs::create_dir_all(final_dir.join("hot/src")).unwrap();
+        std::fs::write(final_dir.join("hot/src/partial.hot"), b"x").unwrap();
+        assert!(!bundle_extract_is_complete(&final_dir));
+
+        let temp = make_complete_temp_dir(&parent, "build-poisoned-fresh");
+        install_extracted_bundle(&temp, &final_dir).unwrap();
+        assert!(bundle_extract_is_complete(&final_dir));
+        assert!(
+            !final_dir.join("hot/src/partial.hot").exists(),
+            "the poisoned partial content must be replaced, not merged into"
+        );
+        std::fs::remove_dir_all(&parent).unwrap();
+    }
+
+    #[test]
+    fn stale_bundle_extract_temps_swept_only_past_max_age() {
+        let parent = bundle_test_parent("sweep");
+        let stale = make_complete_temp_dir(&parent, "build-old");
+        let installed = parent.join("build-live");
+        std::fs::create_dir_all(&installed).unwrap();
+        std::fs::write(installed.join("manifest.hot"), b"{}").unwrap();
+
+        // Zero max age: every temp counts as stale; installed final dirs are
+        // never swept regardless.
+        sweep_stale_bundle_extract_temps(&parent, std::time::Duration::ZERO);
+        assert!(!stale.exists(), "an expired temp dir must be swept");
+        assert!(installed.exists(), "final build dirs must never be swept");
+
+        // A fresh temp under the real max age survives (in-flight extract).
+        let fresh = make_complete_temp_dir(&parent, "build-inflight");
+        sweep_stale_bundle_extract_temps(&parent, BUNDLE_EXTRACT_TEMP_MAX_AGE);
+        assert!(fresh.exists(), "an in-flight temp dir must not be swept");
+        std::fs::remove_dir_all(&parent).unwrap();
+    }
+
+    #[test]
+    fn failed_bundle_extraction_leaves_no_temp_or_final_dir() {
+        let parent = bundle_test_parent("badzip");
+        let final_dir = parent.join("build-bad");
+
+        let err = extract_bundle_to_dir(b"not a zip archive", &final_dir).unwrap_err();
+        assert!(err.contains("Failed to extract bundle"), "got: {err}");
+        assert!(!final_dir.exists(), "a failed extraction must not install");
+        let temps: Vec<String> = std::fs::read_dir(&parent)
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.starts_with(BUNDLE_EXTRACT_TEMP_PREFIX))
+            .collect();
+        assert!(
+            temps.is_empty(),
+            "a failed extraction must remove its temp dir, found {temps:?}"
+        );
+        std::fs::remove_dir_all(&parent).unwrap();
+    }
+
+    #[tokio::test]
+    async fn bundle_extraction_lock_is_single_flight_per_build() {
+        let build_a = Uuid::now_v7();
+        let first = bundle_extract_lock(build_a).await;
+        let same_build = bundle_extract_lock(build_a).await;
+        let other_build = bundle_extract_lock(Uuid::now_v7()).await;
+
+        assert!(Arc::ptr_eq(&first, &same_build));
+        assert!(!Arc::ptr_eq(&first, &other_build));
+
+        let guard = first.lock().await;
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(20), same_build.lock())
+                .await
+                .is_err(),
+            "a second local attempt for the same build must wait for the in-flight extraction"
+        );
+        drop(guard);
+        let follower =
+            tokio::time::timeout(std::time::Duration::from_millis(100), same_build.lock())
+                .await
+                .expect("the follower must proceed once the first extraction completes");
+        drop(follower);
+
+        drop(first);
+        drop(same_build);
+        let _trigger_cleanup = bundle_extract_lock(Uuid::now_v7()).await;
+        let locks = BUNDLE_EXTRACT_LOCKS.get().unwrap().lock().await;
+        assert!(
+            !locks.contains_key(&build_a),
+            "inactive build locks must not accumulate for the worker lifetime"
+        );
     }
 
     #[test]
@@ -7612,10 +8396,11 @@ mod tests {
                 execution_ms: 40,
                 logs_collect_ms: 5,
                 workload_started_at: Some(workload_started_at),
+                workload_ended_at: None,
             },
         )
         .await;
-        Task::complete(&db, &task_id, &TaskStatus::Completed, None, None)
+        Task::complete(&db, &task_id, &TaskStatus::Completed, None, None, None)
             .await
             .unwrap();
         finalize_task_timing(&db, &task_id).await;

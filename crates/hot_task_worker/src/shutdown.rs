@@ -22,7 +22,10 @@
 //!            1. enqueue an "infra retry" copy onto {hot:task} (immediate,
 //!               no delay, doesn't count against the user's max_retries
 //!               budget — this is a system-initiated re-run, not a failure
-//!               of the user's code)
+//!               of the user's code). Skipped when the lineage has already
+//!               burned MAX_INFRA_RETRY_GENERATIONS such retries — the
+//!               terminal record then says "budget exhausted" instead of
+//!               "re-enqueued", so nobody waits on a re-run that won't come.
 //!            2. mark the original task row failed in DB
 //!            3. publish task:complete event so consumers see the failure
 //!
@@ -91,6 +94,20 @@ const MAX_INFRA_RETRY_GENERATIONS: i16 = 3;
 /// task:complete stream event. Distinct from user-error reasons so dashboards
 /// and retry analytics can separate "infra interruption" from "user bug".
 const SHUTDOWN_REASON: &str = "Task interrupted by worker shutdown — re-enqueued for retry";
+
+/// Reason string for a lineage that has already consumed all
+/// [`MAX_INFRA_RETRY_GENERATIONS`] budget-exempt retries. Unlike
+/// [`SHUTDOWN_REASON`] this is a *permanent* failure — no fresh generation is
+/// enqueued — so the payload must not claim a re-run is coming: it carries
+/// `infra_interrupted: false` (alerting that suppresses transient
+/// interruptions must fire for a dead lineage) plus `infra_retry_exhausted:
+/// true` so event consumers can still tell exhaustion apart from a user bug.
+fn shutdown_exhausted_reason() -> String {
+    format!(
+        "Task interrupted by worker shutdown — infrastructure retry budget exhausted ({} generations); not re-enqueued",
+        MAX_INFRA_RETRY_GENERATIONS,
+    )
+}
 
 /// Metadata tracked for each active task during shutdown.
 ///
@@ -331,6 +348,11 @@ impl TaskShutdownCoordinator {
     /// Fail the task in DB, publish the task:complete event, and enqueue an
     /// infra-retry copy onto the queue. Each step is wrapped in its own
     /// timeout so a slow DB or Redis can't stall the whole drain.
+    ///
+    /// A lineage that has already exhausted its infra-retry budget is NOT
+    /// re-enqueued, so the cap is decided *before* the terminal payload is
+    /// composed: cap-blocked tasks get an honest "budget exhausted" record
+    /// instead of one claiming a re-run is coming.
     async fn finalize_interrupted_task(
         db: &DatabasePool,
         stream_publisher: &StreamPubSub,
@@ -339,14 +361,35 @@ impl TaskShutdownCoordinator {
     ) {
         let op_timeout = Duration::from_secs(SHUTDOWN_OP_TIMEOUT_SECS);
 
-        let error = serde_json::json!({
-            "$type": "::hot::task/Failure",
-            "$val": {
-                "msg": SHUTDOWN_REASON,
-                "err": null,
-                "infra_interrupted": true,
-            }
-        });
+        // 0. Decide the infra-retry budget up front so the terminal record
+        // matches what actually happens next. If the row can't be read we
+        // assume budget remains — enqueue_infra_retry re-checks the persisted
+        // counter before creating a generation, so the cap still holds.
+        let budget_exhausted = match timeout(op_timeout, Task::get(db, &task.task_id)).await {
+            Ok(Ok(row)) => row.infra_retry_count >= MAX_INFRA_RETRY_GENERATIONS,
+            _ => false,
+        };
+
+        let error = if budget_exhausted {
+            serde_json::json!({
+                "$type": "::hot::task/Failure",
+                "$val": {
+                    "msg": shutdown_exhausted_reason(),
+                    "err": null,
+                    "infra_interrupted": false,
+                    "infra_retry_exhausted": true,
+                }
+            })
+        } else {
+            serde_json::json!({
+                "$type": "::hot::task/Failure",
+                "$val": {
+                    "msg": SHUTDOWN_REASON,
+                    "err": null,
+                    "infra_interrupted": true,
+                }
+            })
+        };
 
         // 1. Mark the original task as failed. `None` timeout means the
         // client-side future was dropped — the statement may still commit
@@ -354,12 +397,28 @@ impl TaskShutdownCoordinator {
         // definite failure.
         let write = timeout(
             op_timeout,
-            Task::complete(db, &task.task_id, &TaskStatus::Failed, Some(&error), None),
+            Task::complete(
+                db,
+                &task.task_id,
+                &TaskStatus::Failed,
+                Some(&error),
+                None,
+                None,
+            ),
         )
         .await
         .ok();
         let outcome = Self::classify_terminal_write(&task.task_id, write);
-        Self::apply_finalize_outcome(db, stream_publisher, task_queue, task, &error, outcome).await;
+        Self::apply_finalize_outcome(
+            db,
+            stream_publisher,
+            task_queue,
+            task,
+            &error,
+            outcome,
+            budget_exhausted,
+        )
+        .await;
     }
 
     /// Map the shutdown-time `Task::complete` result onto what finalize may
@@ -402,6 +461,7 @@ impl TaskShutdownCoordinator {
         task: &ActiveTask,
         error: &serde_json::Value,
         outcome: FinalizeOutcome,
+        retry_budget_exhausted: bool,
     ) {
         let op_timeout = Duration::from_secs(SHUTDOWN_OP_TIMEOUT_SECS);
 
@@ -453,6 +513,17 @@ impl TaskShutdownCoordinator {
         // Safe even when an unknown terminal write later turns out to have
         // committed: the retry is a fresh task row, and the original queue
         // message resolves against the (then terminal) original row.
+        //
+        // A cap-blocked lineage skips the enqueue entirely — its terminal
+        // record (written above) already says the budget is exhausted.
+        if retry_budget_exhausted {
+            tracing::error!(
+                task_id = %task.task_id,
+                max_infra_retries = MAX_INFRA_RETRY_GENERATIONS,
+                "Shutdown: infra-retry lineage limit reached — task failed permanently, not re-enqueued"
+            );
+            return;
+        }
         Self::enqueue_infra_retry(db, task_queue, task).await;
     }
 
@@ -788,6 +859,7 @@ mod tests {
             &active,
             &serde_json::json!({"msg": SHUTDOWN_REASON}),
             FinalizeOutcome::RetryOnly,
+            false,
         )
         .await;
 
@@ -822,6 +894,7 @@ mod tests {
             &active,
             &serde_json::json!({"msg": SHUTDOWN_REASON}),
             FinalizeOutcome::Skip,
+            false,
         )
         .await;
 
@@ -858,6 +931,23 @@ mod tests {
 
         let row = Task::get(&db, &active.task_id).await.unwrap();
         assert_eq!(row.task_status_id, TaskStatus::Failed.as_id());
+
+        // Under the infra-retry cap the record keeps its historical shape:
+        // "re-enqueued for retry" with the alert-suppression marker set.
+        let result = row.result.expect("failure result should be set");
+        let val = result.get("$val").expect("result should be tagged Failure");
+        assert_eq!(
+            val.get("msg").and_then(|m| m.as_str()),
+            Some(SHUTDOWN_REASON)
+        );
+        assert_eq!(
+            val.get("infra_interrupted").and_then(|v| v.as_bool()),
+            Some(true),
+        );
+        assert!(
+            val.get("infra_retry_exhausted").is_none(),
+            "an under-cap interruption must not carry the exhaustion marker"
+        );
 
         let event = tokio::time::timeout(Duration::from_secs(1), env_events.next())
             .await
@@ -909,6 +999,7 @@ mod tests {
             &active,
             &serde_json::json!({"msg": SHUTDOWN_REASON}),
             FinalizeOutcome::RetryOnly,
+            false,
         )
         .await;
 
@@ -959,6 +1050,115 @@ mod tests {
                 .await
                 .is_err(),
             "a task at the persisted infra retry limit must not create a fresh queue entry"
+        );
+        assert_eq!(
+            Task::get_count_by_env(&db, &root_active.env_id)
+                .await
+                .unwrap(),
+            i64::from(MAX_INFRA_RETRY_GENERATIONS) + 1,
+            "no generation beyond the cap may be inserted"
+        );
+    }
+
+    #[tokio::test]
+    async fn cap_blocked_finalize_writes_exhausted_record_and_skips_enqueue() {
+        let db = hot::db::test_db().await;
+        let task_queue = memory_task_queue();
+        let stream_publisher = memory_stream_pubsub();
+        let root_active = dummy_active_task(Uuid::now_v7());
+        insert_running_task(&db, &root_active).await;
+
+        // Walk the lineage to the persisted generation cap, then interrupt
+        // the last (running) generation.
+        let mut row = Task::get(&db, &root_active.task_id).await.unwrap();
+        for _ in 0..MAX_INFRA_RETRY_GENERATIONS {
+            let child_id = Uuid::now_v7();
+            assert!(
+                Task::insert_infra_retry(&db, &child_id, &row, chrono::Utc::now())
+                    .await
+                    .unwrap()
+            );
+            row = Task::get(&db, &child_id).await.unwrap();
+        }
+        Task::mark_running(&db, &row.task_id).await.unwrap();
+
+        let mut capped_active = dummy_active_task(row.task_id);
+        capped_active.env_id = row.env_id;
+        capped_active.stream_id = row.stream_id;
+        capped_active.original_request.env_id = row.env_id.to_string();
+        capped_active.original_request.stream_id = row.stream_id.to_string();
+        capped_active.original_request.build_id = row.build_id.to_string();
+
+        let mut env_events = stream_publisher
+            .subscribe_env(capped_active.env_id)
+            .await
+            .unwrap();
+
+        TaskShutdownCoordinator::finalize_interrupted_task(
+            &db,
+            &stream_publisher,
+            &task_queue,
+            &capped_active,
+        )
+        .await;
+
+        // The terminal record must be honest: budget exhausted, no re-run
+        // coming, and NOT flagged as a transient (alert-suppressed)
+        // interruption.
+        let failed = Task::get(&db, &row.task_id).await.unwrap();
+        assert_eq!(failed.task_status_id, TaskStatus::Failed.as_id());
+        let result = failed.result.expect("failure result should be set");
+        let val = result.get("$val").expect("result should be tagged Failure");
+        assert_eq!(
+            val.get("msg").and_then(|m| m.as_str()),
+            Some(shutdown_exhausted_reason().as_str()),
+        );
+        assert_eq!(
+            val.get("infra_interrupted").and_then(|v| v.as_bool()),
+            Some(false),
+            "a dead lineage must not carry the alert-suppression flag"
+        );
+        assert_eq!(
+            val.get("infra_retry_exhausted").and_then(|v| v.as_bool()),
+            Some(true),
+        );
+
+        // The published task:complete carries the same exhausted payload.
+        let event = tokio::time::timeout(Duration::from_secs(1), env_events.next())
+            .await
+            .expect("a durable terminal write must publish task:complete")
+            .expect("subscription should stay open");
+        match event {
+            EnvEvent::TaskComplete {
+                task_id,
+                status,
+                error,
+                ..
+            } => {
+                assert_eq!(task_id, row.task_id);
+                assert_eq!(status, "failed");
+                let error = error.expect("exhausted completion must carry the error payload");
+                let val = error
+                    .get("$val")
+                    .expect("event error should be tagged Failure");
+                assert_eq!(
+                    val.get("infra_retry_exhausted").and_then(|v| v.as_bool()),
+                    Some(true),
+                );
+                assert_eq!(
+                    val.get("infra_interrupted").and_then(|v| v.as_bool()),
+                    Some(false),
+                );
+            }
+            other => panic!("expected TaskComplete, got {:?}", other),
+        }
+
+        // No fresh queue entry and no generation beyond the cap.
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), task_queue.claim_blocking())
+                .await
+                .is_err(),
+            "a cap-blocked lineage must not be re-enqueued"
         );
         assert_eq!(
             Task::get_count_by_env(&db, &root_active.env_id)
