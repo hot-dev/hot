@@ -8,3 +8,9 @@
 -- Existing rows keep NULL parents; NULL rows are exempt from the index.
 ALTER TABLE hot.task ADD COLUMN parent_task_id uuid;
 CREATE UNIQUE INDEX idx_task_parent_retry_unique ON hot.task USING btree (parent_task_id, retry_attempt) WHERE (parent_task_id IS NOT NULL);
+
+-- Persist the number of infrastructure retries in a task lineage. Redis
+-- delivery counts restart for every newly-enqueued retry message, so they
+-- cannot bound shutdown-driven retry generations on their own.
+ALTER TABLE hot.task
+    ADD COLUMN infra_retry_count smallint NOT NULL DEFAULT 0;

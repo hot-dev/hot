@@ -10,3 +10,9 @@ ALTER TABLE task ADD COLUMN parent_task_id blob;
 CREATE UNIQUE INDEX idx_task_parent_retry_unique
     ON task(parent_task_id, retry_attempt)
     WHERE parent_task_id IS NOT NULL;
+
+-- Persist the number of infrastructure retries in a task lineage. Queue
+-- delivery counts restart for every newly-enqueued retry message, so they
+-- cannot bound shutdown-driven retry generations on their own.
+ALTER TABLE task
+    ADD COLUMN infra_retry_count integer NOT NULL DEFAULT 0;
