@@ -5,7 +5,7 @@ use hot::data::serialization::Serialization;
 use hot::lang::event::EventMessage;
 use hot::queue::{
     ConsumerLifecycle, ProcessingQueue, ProcessingQueueLease, Queue, QueueInfrastructureError,
-    QueueType,
+    QueueType, streams::PRESERVE_DELIVERY_COUNT_TOKEN,
 };
 use hot::val;
 use hot::val::Val;
@@ -345,6 +345,29 @@ fn worker_infrastructure_retry_error(message: impl Into<String>, backoff_ms: u64
         message,
         std::time::Duration::from_millis(backoff_ms),
     ))
+}
+
+/// Infrastructure-retry error for setup/admission-timeout redeliveries,
+/// which opt IN to cumulative delivery counting.
+///
+/// These redeliveries flow through `requeue_msg_for_infrastructure_retry`,
+/// which XADDs a FRESH stream entry and thereby resets the Redis delivery
+/// counter — so without the opt-in a deterministically failing setup (e.g.
+/// a bundle that can never finish downloading) would requeue forever. The
+/// token makes the queue carry the cumulative count across requeues so
+/// repeat offenders eventually reach the DLQ.
+///
+/// Only the `[event-setup-timeout]` and `[blocking-slot-admission-timeout]`
+/// redeliveries may use this helper. Every other infrastructure retry —
+/// especially the healthy running-task redelivery deferrals, which
+/// legitimately requeue dozens of times while an hours-long task executes —
+/// must keep the default reset behavior via
+/// `worker_infrastructure_retry_error`.
+fn worker_counted_redelivery_error(message: impl Into<String>, backoff_ms: u64) -> WorkerError {
+    worker_infrastructure_retry_error(
+        format!("{} {}", message.into(), PRESERVE_DELIVERY_COUNT_TOKEN),
+        backoff_ms,
+    )
 }
 
 fn validate_worker_semantics_conf(conf: &Val) -> Result<(), WorkerError> {
@@ -1158,10 +1181,30 @@ pub const RUN_TIMEOUT_HARD_GRACE: std::time::Duration = std::time::Duration::fro
 /// Persisting the timeout/result is best-effort after VM execution. It must not
 /// contradict the hard-timeout guarantee by pinning the executor slot forever.
 pub const RUN_RESULT_FLUSH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
-/// Wall-clock ceiling for handler preparation before user code is admitted to
-/// the blocking executor. This covers tenant lookups, build retrieval, cache
-/// preparation, context loading, stores, and blocking-slot admission.
+/// Wall-clock ceiling for the post-retrieval half of handler preparation:
+/// bytecode-cache work, context loading, store creation, and blocking-slot
+/// admission. The watchdog window for this half starts once source
+/// resolution completes (see `await_event_handler_setup`); the resolution
+/// half — which may include a full bundle download — is bounded separately
+/// by `EVENT_SOURCE_RETRIEVAL_TIMEOUT`.
 pub const EVENT_SETUP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Wall-clock ceiling for the source-resolution phase of handler setup —
+/// tenant/build lookups plus, for cold bundle builds, retrieving the bundle
+/// from storage and extracting/precompiling it.
+///
+/// Storage retrieval needs a bigger budget than the rest of setup because it
+/// is plain async work with NO partial progress: a redelivery restarts the
+/// download from byte zero (extraction/compile at least self-heal across
+/// attempts via their on-disk completion marker). Under the flat 30s
+/// watchdog a bundle that deterministically takes longer to download would
+/// requeue forever — watchdog fires, the event requeues with a fresh
+/// delivery counter, and the next attempt starts the download over. 120s
+/// covers a 2 GB bundle at ~20 MB/s (~100s) with slack; before the setup
+/// watchdog existed this phase was unbounded. For warm builds (live or
+/// already-extracted) resolution completes in microseconds, so the
+/// effective setup bound stays `EVENT_SETUP_TIMEOUT`.
+pub const EVENT_SOURCE_RETRIEVAL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
 pub const DEFAULT_QUEUE_TYPE: QueueType = QueueType::Memory;
 pub const DEFAULT_SERIALIZATION: Serialization = Serialization::ZstdJson; // must match Serialization's #[default]
 
@@ -1220,15 +1263,54 @@ fn should_redeliver_event_after_handler_error(error: &str, started_any_handler: 
         && !started_any_handler
 }
 
+/// Watchdog for event-handler preparation, split into two sequential
+/// windows so a legitimate cold-bundle download is not confused with a hung
+/// setup:
+///
+/// 1. Source resolution (everything up to the `source_resolved` signal,
+///    which may include a full bundle retrieval from storage): bounded by
+///    `retrieval_timeout`.
+/// 2. Post-retrieval setup (bytecode cache, context loading, stores,
+///    blocking-slot admission — until `setup_complete`): a fresh
+///    `setup_timeout` that starts only when window 1 closes.
+///
+/// Builds that never touch storage pass the checkpoint immediately, so
+/// their effective bound remains `setup_timeout`. Both windows produce the
+/// same `[event-setup-timeout]` token: either way no run side effects have
+/// happened and the event is safe to leave un-ACKed for redelivery.
 async fn await_event_handler_setup<F>(
     execution: F,
     mut setup_complete: tokio::sync::oneshot::Receiver<()>,
+    mut source_resolved: tokio::sync::oneshot::Receiver<()>,
+    retrieval_timeout: std::time::Duration,
     setup_timeout: std::time::Duration,
 ) -> Result<(), String>
 where
     F: std::future::Future<Output = Result<(), String>>,
 {
+    let watchdog = async {
+        // A closed channel counts as passing the checkpoint: the execution
+        // returned through an early error path, and the biased select below
+        // surfaces that original error before this watchdog can fire.
+        if tokio::time::timeout(retrieval_timeout, &mut source_resolved)
+            .await
+            .is_err()
+        {
+            return format!(
+                "{} after {}s resolving handler sources",
+                EVENT_SETUP_TIMEOUT_ERROR,
+                retrieval_timeout.as_secs_f64(),
+            );
+        }
+        tokio::time::sleep(setup_timeout).await;
+        format!(
+            "{} after {}s",
+            EVENT_SETUP_TIMEOUT_ERROR,
+            setup_timeout.as_secs_f64(),
+        )
+    };
     tokio::pin!(execution);
+    tokio::pin!(watchdog);
     tokio::select! {
         biased;
         result = &mut execution => result,
@@ -1239,13 +1321,7 @@ where
             let _ = setup;
             execution.await
         }
-        _ = tokio::time::sleep(setup_timeout) => {
-            Err(format!(
-                "{} after {}s",
-                EVENT_SETUP_TIMEOUT_ERROR,
-                setup_timeout.as_secs_f64(),
-            ))
-        }
+        message = &mut watchdog => Err(message),
     }
 }
 
@@ -1284,17 +1360,26 @@ async fn acquire_blocking_execution_slot(
 /// Floor for the hot:event orphan-reclaim idle threshold.
 ///
 /// A handler that claimed an event may legally spend up to
-/// `EVENT_SETUP_TIMEOUT` in preparation (including blocking-slot admission),
-/// then `run-timeout` plus `RUN_TIMEOUT_HARD_GRACE`
-/// executing, before the worker gives up — and the event is only ACKed after
-/// that. For a SINGLE-handler event, reclaiming below this floor would
+/// `EVENT_SOURCE_RETRIEVAL_TIMEOUT` resolving sources (including a cold
+/// bundle download), plus `EVENT_SETUP_TIMEOUT` in post-retrieval
+/// preparation (including blocking-slot admission), then `run-timeout` plus
+/// `RUN_TIMEOUT_HARD_GRACE` executing, before the worker gives up — and the
+/// event is only ACKed after that. This floor budgets that FULL legal
+/// pre-ACK lifetime: for a SINGLE-handler event, reclaiming below it would
 /// XAUTOCLAIM an un-ACKed event whose handler is still legally live and start
 /// a duplicate execution on another worker. The extra 5s covers result-flush
 /// and scheduling slack.
 ///
-/// Multi-handler liveness: this floor budgets ONE admission wait plus ONE
-/// run budget, while an event with N matching handlers executes them
-/// serially — each with its own admission wait and run budget — before the
+/// In practice the retrieval window is already covered live by the
+/// PEL-touch keepalive, which starts at executor pickup — BEFORE handler
+/// setup begins (see the executor loop in `start_server`) — so this floor
+/// is backstop-only math for the case where the keepalive dies with its
+/// worker.
+///
+/// Multi-handler liveness: this floor budgets ONE full setup (retrieval,
+/// preparation, admission wait) plus ONE run budget, while an event with N
+/// matching handlers executes them serially — each with its own setup and
+/// run budget — before the
 /// single trailing ACK. That gap is closed by the PEL-touch keepalive
 /// (`spawn_event_lease_keepalive`): while an event is being processed, the
 /// executor periodically resets the delivery's PEL idle clock
@@ -1308,6 +1393,7 @@ async fn acquire_blocking_execution_slot(
 /// though it remains available for a wider reclaim margin.
 fn min_event_orphan_idle_floor_ms(run_timeout: std::time::Duration) -> u64 {
     run_timeout
+        .saturating_add(EVENT_SOURCE_RETRIEVAL_TIMEOUT)
         .saturating_add(EVENT_SETUP_TIMEOUT)
         .saturating_add(RUN_TIMEOUT_HARD_GRACE)
         .saturating_add(std::time::Duration::from_secs(5))
@@ -1347,9 +1433,11 @@ impl Drop for EventKeepaliveGuard {
 /// Keep a claimed hot:event delivery visibly alive in the Redis PEL while
 /// its (possibly many) handlers execute serially.
 ///
-/// `min_event_orphan_idle_floor_ms` budgets one admission wait plus one run
-/// budget, but an N-handler event pays that cost N times before the single
-/// trailing ACK. Instead of asking operators to over-provision the reclaim
+/// `min_event_orphan_idle_floor_ms` budgets one full setup (source
+/// retrieval plus post-retrieval preparation including admission) plus one
+/// run budget, but an N-handler event pays the per-handler cost N times
+/// before the single trailing ACK. Instead of asking operators to
+/// over-provision the reclaim
 /// idle, the executor touches the delivery every
 /// `event_keepalive_interval_ms` (ownership-guarded `XCLAIM ... JUSTID`,
 /// which does not increment the delivery counter) so sibling janitors keep
@@ -3598,6 +3686,7 @@ async fn execute_single_event_handler(
     blocking_execution_slots: Arc<Semaphore>,
 ) -> Result<(), String> {
     let (setup_complete_tx, setup_complete_rx) = tokio::sync::oneshot::channel();
+    let (source_resolved_tx, source_resolved_rx) = tokio::sync::oneshot::channel();
     let execution = execute_single_event_handler_inner(
         db,
         build,
@@ -3617,10 +3706,18 @@ async fn execute_single_event_handler(
         task_queue,
         execution_services,
         blocking_execution_slots,
+        source_resolved_tx,
         setup_complete_tx,
     );
 
-    await_event_handler_setup(execution, setup_complete_rx, EVENT_SETUP_TIMEOUT).await
+    await_event_handler_setup(
+        execution,
+        setup_complete_rx,
+        source_resolved_rx,
+        EVENT_SOURCE_RETRIEVAL_TIMEOUT,
+        EVENT_SETUP_TIMEOUT,
+    )
+    .await
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -3643,6 +3740,7 @@ async fn execute_single_event_handler_inner(
     task_queue: Arc<ProcessingQueue<TaskRequest>>,
     execution_services: Arc<WorkerExecutionServices>,
     blocking_execution_slots: Arc<Semaphore>,
+    source_resolved: tokio::sync::oneshot::Sender<()>,
     setup_complete: tokio::sync::oneshot::Sender<()>,
 ) -> Result<(), String> {
     // The caller already registered `run_id`; from here this guard owns
@@ -4071,6 +4169,13 @@ async fn execute_single_event_handler_inner(
             } // Close the else block for marker file check
         } // Close the else block for in-memory cache check
     };
+
+    // Source resolution is done — every branch above (live paths, cached
+    // extraction, and the cold storage-retrieval path) has produced its
+    // src_paths. Hand the setup watchdog over from the roomy
+    // EVENT_SOURCE_RETRIEVAL_TIMEOUT window to the tight EVENT_SETUP_TIMEOUT
+    // window for the remaining preparation.
+    let _ = source_resolved.send(());
 
     let timing_after_build_path = timing_start.elapsed();
     debug!(
@@ -5200,10 +5305,11 @@ pub async fn run_with_components_shared_context_and_db(
         .max(1) as u64;
     // Invariant: reclaim idle must exceed the longest an un-ACKed
     // single-handler event can legally be alive on a healthy worker —
-    // blocking-slot admission wait plus run budget plus hard grace. Events
-    // whose serial multi-handler execution outlives this window stay
-    // reclaim-safe via the PEL-touch keepalive (`spawn_event_lease_keepalive`),
-    // for which this floor is the crash backstop; see
+    // source retrieval plus post-retrieval setup (including blocking-slot
+    // admission) plus run budget plus hard grace. Events whose serial
+    // multi-handler execution outlives this window stay reclaim-safe via
+    // the PEL-touch keepalive (`spawn_event_lease_keepalive`), for which
+    // this floor is the crash backstop; see
     // `min_event_orphan_idle_floor_ms`.
     let min_event_orphan_idle_ms = min_event_orphan_idle_floor_ms(get_run_timeout(&worker_conf));
     let event_orphan_idle_ms = queue_orphan_idle_ms.max(min_event_orphan_idle_ms);
@@ -6838,14 +6944,19 @@ pub async fn run_with_components_shared_context_and_db(
                                                                                                             }
                                                                                                 }
                                                                                                 Err(e) if should_redeliver_event_after_handler_error(&e, started_any_handler) => {
-                                                                                                    // Blocking-slot admission timed out before any run side effects
-                                                                                                    // for this event: leave it un-ACKed via the standard
+                                                                                                    // Setup or blocking-slot admission timed out before any run side
+                                                                                                    // effects for this event: leave it un-ACKed via the standard
                                                                                                     // infrastructure-retry path so it is redelivered once detached
                                                                                                     // blocking work frees capacity. (If an earlier handler already
                                                                                                     // started a run, the arm below applies instead: redelivering the
                                                                                                     // whole event would duplicate that run's side effects.)
+                                                                                                    //
+                                                                                                    // These redeliveries opt into cumulative delivery counting: the
+                                                                                                    // infra requeue otherwise resets the delivery counter, and a
+                                                                                                    // deterministically failing setup would loop forever instead of
+                                                                                                    // escalating to the DLQ.
                                                                                                     warn!("hot.dev: WORKER {} deferring event '{}' for redelivery: {}", worker_id, event_message.body.event.event_type, e);
-                                                                                                    return Err(worker_infrastructure_retry_error(e, infra_retry_backoff_ms));
+                                                                                                    return Err(worker_counted_redelivery_error(e, infra_retry_backoff_ms));
                                                                                                 }
                                                                                                 Err(e) => {
                                                                                                     started_any_handler = true;
@@ -8267,49 +8378,172 @@ mod tests {
         ));
     }
 
+    /// Pins the escalation contract: the setup-timeout and blocking-slot
+    /// admission-timeout redeliveries opt INTO cumulative delivery counting
+    /// (their infra requeues would otherwise reset the delivery counter and
+    /// loop forever on a deterministic failure), while ordinary
+    /// infrastructure retries — the shape used by healthy running-task
+    /// deferrals — stay opted out.
+    #[test]
+    fn setup_and_admission_timeout_redeliveries_opt_into_delivery_counting() {
+        for timeout_error in [
+            format!("{} after 30s", EVENT_SETUP_TIMEOUT_ERROR),
+            format!(
+                "{} after 120s resolving handler sources",
+                EVENT_SETUP_TIMEOUT_ERROR
+            ),
+            format!("{} after 30s", BLOCKING_SLOT_TIMEOUT_ERROR),
+        ] {
+            // Sanity: these are exactly the errors routed through the
+            // counted-redelivery arm of the event executor.
+            assert!(should_redeliver_event_after_handler_error(
+                &timeout_error,
+                false
+            ));
+
+            let err = worker_counted_redelivery_error(timeout_error.clone(), 0);
+            let infra = err
+                .downcast_ref::<QueueInfrastructureError>()
+                .expect("counted redelivery must remain an infrastructure retry");
+            assert!(
+                hot::queue::streams::infrastructure_requeue_preserves_delivery_count(
+                    &infra.to_string()
+                ),
+                "redelivery for '{timeout_error}' must opt into delivery counting"
+            );
+        }
+
+        // The default constructor — used by every other infra retry,
+        // including running-task deferrals — must NOT carry the counter.
+        let err = worker_infrastructure_retry_error("transient database error", 0);
+        let infra = err
+            .downcast_ref::<QueueInfrastructureError>()
+            .expect("plain infrastructure retry");
+        assert!(
+            !hot::queue::streams::infrastructure_requeue_preserves_delivery_count(
+                &infra.to_string()
+            ),
+            "plain infrastructure retries must keep the reset-on-requeue behavior"
+        );
+    }
+
     #[tokio::test]
     async fn event_setup_watchdog_bounds_pending_preparation() {
         let (setup_tx, setup_rx) = tokio::sync::oneshot::channel();
+        let (source_tx, source_rx) = tokio::sync::oneshot::channel();
         let execution = async move {
-            let _keep_sender_alive = setup_tx;
+            let _keep_senders_alive = (setup_tx, source_tx);
             std::future::pending::<Result<(), String>>().await
         };
 
-        let err =
-            await_event_handler_setup(execution, setup_rx, std::time::Duration::from_millis(20))
-                .await
-                .expect_err("pending setup must hit its wall-clock ceiling");
+        // Neither checkpoint fires: the source-resolution window bounds the
+        // whole preparation.
+        let err = await_event_handler_setup(
+            execution,
+            setup_rx,
+            source_rx,
+            std::time::Duration::from_millis(20),
+            std::time::Duration::from_secs(3600),
+        )
+        .await
+        .expect_err("pending setup must hit its wall-clock ceiling");
         assert!(is_event_setup_timeout_error(&err));
+        assert!(
+            err.contains("resolving handler sources"),
+            "a pre-checkpoint hang must be attributed to source resolution: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn event_setup_watchdog_rearms_after_source_resolution() {
+        let (setup_tx, setup_rx) = tokio::sync::oneshot::channel();
+        let (source_tx, source_rx) = tokio::sync::oneshot::channel();
+        let execution = async move {
+            let _keep_sender_alive = setup_tx;
+            source_tx.send(()).unwrap();
+            std::future::pending::<Result<(), String>>().await
+        };
+
+        // The checkpoint fires immediately, so the post-retrieval window is
+        // the binding one even though the retrieval window is enormous.
+        let err = await_event_handler_setup(
+            execution,
+            setup_rx,
+            source_rx,
+            std::time::Duration::from_secs(3600),
+            std::time::Duration::from_millis(20),
+        )
+        .await
+        .expect_err("post-retrieval setup must hit its own wall-clock ceiling");
+        assert!(is_event_setup_timeout_error(&err));
+        assert!(
+            !err.contains("resolving handler sources"),
+            "a post-checkpoint hang must not be attributed to source resolution: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn event_setup_watchdog_gives_source_retrieval_its_own_budget() {
+        let (setup_tx, setup_rx) = tokio::sync::oneshot::channel();
+        let (source_tx, source_rx) = tokio::sync::oneshot::channel();
+        let execution = async move {
+            // Simulate a storage retrieval that legitimately outlives the
+            // post-retrieval setup window.
+            tokio::time::sleep(std::time::Duration::from_millis(60)).await;
+            source_tx.send(()).unwrap();
+            setup_tx.send(()).unwrap();
+            Ok(())
+        };
+
+        await_event_handler_setup(
+            execution,
+            setup_rx,
+            source_rx,
+            std::time::Duration::from_millis(500),
+            std::time::Duration::from_millis(20),
+        )
+        .await
+        .expect("a slow retrieval within its own budget must not trip the setup watchdog");
     }
 
     #[tokio::test]
     async fn event_setup_watchdog_disarms_for_vm_execution() {
         let (setup_tx, setup_rx) = tokio::sync::oneshot::channel();
+        let (source_tx, source_rx) = tokio::sync::oneshot::channel();
         let execution = async move {
+            source_tx.send(()).unwrap();
             setup_tx.send(()).unwrap();
             tokio::time::sleep(std::time::Duration::from_millis(40)).await;
             Ok(())
         };
 
-        await_event_handler_setup(execution, setup_rx, std::time::Duration::from_millis(10))
-            .await
-            .expect("the setup ceiling must be disabled once VM execution starts");
+        await_event_handler_setup(
+            execution,
+            setup_rx,
+            source_rx,
+            std::time::Duration::from_millis(10),
+            std::time::Duration::from_millis(10),
+        )
+        .await
+        .expect("the setup ceiling must be disabled once VM execution starts");
     }
 
     #[test]
     fn event_orphan_reclaim_floor_covers_slot_admission_wait() {
         let run_timeout = std::time::Duration::from_secs(DEFAULT_RUN_TIMEOUT_SECONDS);
         let legal_lifetime_ms = run_timeout
+            .saturating_add(EVENT_SOURCE_RETRIEVAL_TIMEOUT)
             .saturating_add(EVENT_SETUP_TIMEOUT)
             .saturating_add(RUN_TIMEOUT_HARD_GRACE)
             .as_millis() as u64;
 
         // The floor must exceed the longest an un-ACKed SINGLE-handler event
-        // can legally be alive on a healthy worker (admission wait + run
-        // budget + hard grace), or reclaim would start a duplicate live
-        // execution. Multi-handler events can legally exceed the floor; the
-        // PEL-touch keepalive keeps those visibly alive, with this floor as
-        // its crash backstop — see `min_event_orphan_idle_floor_ms` docs.
+        // can legally be alive on a healthy worker (source retrieval +
+        // post-retrieval setup incl. admission wait + run budget + hard
+        // grace), or reclaim would start a duplicate live execution.
+        // Multi-handler events can legally exceed the floor; the PEL-touch
+        // keepalive keeps those visibly alive, with this floor as its crash
+        // backstop — see `min_event_orphan_idle_floor_ms` docs.
         assert!(min_event_orphan_idle_floor_ms(run_timeout) > legal_lifetime_ms);
         assert!(min_event_orphan_idle_floor_ms(std::time::Duration::MAX) > 0);
     }

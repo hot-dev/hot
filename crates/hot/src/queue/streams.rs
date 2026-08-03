@@ -37,6 +37,51 @@ const DEFAULT_CONSUMER_GROUP: &str = "hot-workers";
 /// Maximum number of retries before moving to dead letter queue
 const MAX_PROCESSING_RETRIES: usize = 3;
 
+/// Reason-token opt-in for carrying the cumulative delivery count across an
+/// infrastructure requeue.
+///
+/// `requeue_msg_for_infrastructure_retry` XADDs a FRESH stream entry (and
+/// ACKs the old one), which resets the Redis delivery counter — so by
+/// default infrastructure retries never consume the
+/// `MAX_PROCESSING_RETRIES` budget. That is deliberate for healthy
+/// deferrals (e.g. a running task redelivered while it executes, which can
+/// legitimately requeue dozens of times over hours). But a requeue loop
+/// driven by a *deterministic* failure (e.g. an event-handler setup that
+/// can never finish inside its watchdog) would spin forever.
+///
+/// Workers opt a requeue into bounded escalation by including this token in
+/// the `QueueInfrastructureError` message: the fresh entry is then stamped
+/// with a `prior_deliveries` field carrying `redis_delivery_count +
+/// old_prior_deliveries`, and the DLQ gate compares the cumulative total
+/// against `MAX_PROCESSING_RETRIES`. Entries without the field read as 0,
+/// so old in-flight messages and never-counted requeues keep today's
+/// behavior.
+///
+/// An accrued count is never lost: an opted-out requeue of a message that
+/// already carries `prior_deliveries > 0` re-stamps the existing value
+/// unchanged (it consumes no budget but does not reset it either), so a
+/// deterministic stall that alternates counted and uncounted failure
+/// reasons still escalates to the DLQ.
+///
+/// This lives in the reason string (same bracketed-token idiom the workers
+/// already use for `[event-setup-timeout]` and friends) so the opt-in can
+/// travel from worker code to both queue backends without widening
+/// `QueueInfrastructureError` itself.
+pub const PRESERVE_DELIVERY_COUNT_TOKEN: &str = "[preserve-delivery-count]";
+
+/// Whether an infrastructure-retry reason opts into carrying the cumulative
+/// delivery count across the requeue (see [`PRESERVE_DELIVERY_COUNT_TOKEN`]).
+pub fn infrastructure_requeue_preserves_delivery_count(reason: &str) -> bool {
+    reason.contains(PRESERVE_DELIVERY_COUNT_TOKEN)
+}
+
+/// DLQ gate: the message's cumulative delivery total — its current PEL
+/// delivery count plus any count carried across opted-in infrastructure
+/// requeues — has exceeded the retry budget.
+fn exceeded_processing_retries(delivery_count: usize, prior_deliveries: usize) -> bool {
+    delivery_count.saturating_add(prior_deliveries) > MAX_PROCESSING_RETRIES
+}
+
 /// Idle time in milliseconds before claiming orphaned messages
 const ORPHAN_IDLE_MS: u64 = 60_000; // 1 minute
 
@@ -340,6 +385,9 @@ struct PrefetchedMessage {
     payload: Vec<u8>,
     source: FetchSource,
     redelivered: bool,
+    /// Cumulative delivery count carried across opted-in infrastructure
+    /// requeues (`prior_deliveries` entry field); 0 when absent.
+    prior_deliveries: usize,
 }
 
 fn duration_ms(duration: Duration) -> u64 {
@@ -2192,12 +2240,15 @@ impl<T: Send + Sync + Serialize + DeserializeOwned + Clone + 'static> RedisStrea
         };
         Ok(parse_stream_messages(&result)
             .into_iter()
-            .map(|(msg_id, payload, redelivered)| PrefetchedMessage {
-                msg_id,
-                payload,
-                source,
-                redelivered,
-            })
+            .map(
+                |(msg_id, payload, redelivered, prior_deliveries)| PrefetchedMessage {
+                    msg_id,
+                    payload,
+                    source,
+                    redelivered,
+                    prior_deliveries,
+                },
+            )
             .collect())
     }
 
@@ -2239,6 +2290,7 @@ impl<T: Send + Sync + Serialize + DeserializeOwned + Clone + 'static> RedisStrea
             payload,
             source,
             redelivered,
+            prior_deliveries,
         } = match prefetched {
             Some(m) => m,
             None => {
@@ -2291,6 +2343,7 @@ impl<T: Send + Sync + Serialize + DeserializeOwned + Clone + 'static> RedisStrea
             payload: Some(payload),
             source,
             redelivered,
+            prior_deliveries,
             claimed_at,
             enqueued_at,
             queue_wait,
@@ -2307,6 +2360,7 @@ impl<T: Send + Sync + Serialize + DeserializeOwned + Clone + 'static> RedisStrea
         msg_id: String,
         payload: Vec<u8>,
         source: FetchSource,
+        prior_deliveries: usize,
         worker: F,
     ) -> Result<Option<R>, Box<dyn Error + Send + Sync>>
     where
@@ -2325,14 +2379,18 @@ impl<T: Send + Sync + Serialize + DeserializeOwned + Clone + 'static> RedisStrea
                 self.get_delivery_count(conn, &msg_id).await?
             }
         };
+        // Cumulative deliveries: what Redis counted for THIS entry plus what
+        // opted-in infrastructure requeues carried over from its ancestors
+        // (each requeue is a fresh entry, so the Redis counter alone resets).
+        let effective_delivery_count = delivery_count.saturating_add(prior_deliveries);
         let queue_wait_ms = stream_message_age_ms(&msg_id);
         let wait_target_p99_ms = queue_wait_target_p99_ms();
 
-        if delivery_count > MAX_PROCESSING_RETRIES {
+        if exceeded_processing_retries(delivery_count, prior_deliveries) {
             tracing::warn!(
                 "Message {} exceeded max retries ({}/{}), moving to DLQ",
                 msg_id,
-                delivery_count,
+                effective_delivery_count,
                 MAX_PROCESSING_RETRIES
             );
             if queue_timing_enabled() {
@@ -2344,7 +2402,7 @@ impl<T: Send + Sync + Serialize + DeserializeOwned + Clone + 'static> RedisStrea
                     queue_wait_ms = queue_wait_ms,
                     wait_target_p99_ms = wait_target_p99_ms,
                     processing_ms = 0u64,
-                    retry_count = delivery_count.saturating_sub(1),
+                    retry_count = effective_delivery_count.saturating_sub(1),
                     outcome = "retry_exhausted",
                     message_id = %msg_id,
                     "queue item skipped"
@@ -2355,7 +2413,7 @@ impl<T: Send + Sync + Serialize + DeserializeOwned + Clone + 'static> RedisStrea
                 &payload,
                 format!(
                     "Exceeded max retries ({}/{})",
-                    delivery_count, MAX_PROCESSING_RETRIES
+                    effective_delivery_count, MAX_PROCESSING_RETRIES
                 ),
             )
             .await?;
@@ -2380,7 +2438,7 @@ impl<T: Send + Sync + Serialize + DeserializeOwned + Clone + 'static> RedisStrea
                         queue_wait_ms = queue_wait_ms,
                         wait_target_p99_ms = wait_target_p99_ms,
                         processing_ms = 0u64,
-                        retry_count = delivery_count.saturating_sub(1),
+                        retry_count = effective_delivery_count.saturating_sub(1),
                         outcome = "deserialize_error",
                         message_id = %msg_id,
                         "queue item skipped"
@@ -2393,9 +2451,10 @@ impl<T: Send + Sync + Serialize + DeserializeOwned + Clone + 'static> RedisStrea
         };
 
         tracing::debug!(
-            "Processing message {} (delivery: {}, source: {:?})",
+            "Processing message {} (delivery: {}, carried: {}, source: {:?})",
             msg_id,
             delivery_count,
+            prior_deliveries,
             source,
         );
 
@@ -2428,7 +2487,7 @@ impl<T: Send + Sync + Serialize + DeserializeOwned + Clone + 'static> RedisStrea
                         queue_wait_ms = queue_wait_ms,
                         wait_target_p99_ms = wait_target_p99_ms,
                         processing_ms = duration_ms(processing_started.elapsed()),
-                        retry_count = delivery_count.saturating_sub(1),
+                        retry_count = effective_delivery_count.saturating_sub(1),
                         outcome = "success",
                         message_id = %msg_id,
                         "queue item processed"
@@ -2450,7 +2509,7 @@ impl<T: Send + Sync + Serialize + DeserializeOwned + Clone + 'static> RedisStrea
                             queue_wait_ms = queue_wait_ms,
                             wait_target_p99_ms = wait_target_p99_ms,
                             processing_ms = duration_ms(processing_started.elapsed()),
-                            retry_count = delivery_count.saturating_sub(1),
+                            retry_count = effective_delivery_count.saturating_sub(1),
                             outcome = "infrastructure_retry",
                             backoff_ms = duration_ms(backoff),
                             message_id = %msg_id,
@@ -2460,8 +2519,29 @@ impl<T: Send + Sync + Serialize + DeserializeOwned + Clone + 'static> RedisStrea
                     if !backoff.is_zero() {
                         tokio::time::sleep(backoff).await;
                     }
-                    self.requeue_msg_for_infrastructure_retry(&msg_id, &payload, reason)
-                        .await?;
+                    // Requeues that opt in (via the reason token) carry the
+                    // cumulative delivery count into the fresh entry so a
+                    // deterministic failure escalates to the DLQ instead of
+                    // requeueing forever. Everything else — notably healthy
+                    // running-task deferrals — never consumes retry budget,
+                    // but an accrued count is never LOST either: an opted-out
+                    // requeue carries the existing `prior_deliveries` forward
+                    // unchanged, so alternating counted and uncounted failure
+                    // reasons cannot reset the escalation budget (the memory
+                    // backend's `RetryItem.retry_count` behaves the same way).
+                    let carry_prior_deliveries =
+                        if infrastructure_requeue_preserves_delivery_count(&reason) {
+                            effective_delivery_count
+                        } else {
+                            prior_deliveries
+                        };
+                    self.requeue_msg_for_infrastructure_retry(
+                        &msg_id,
+                        &payload,
+                        reason,
+                        carry_prior_deliveries,
+                    )
+                    .await?;
                     return Err(Box::new(QueueProcessingError::QueueError(e)));
                 }
                 if queue_timing_enabled() {
@@ -2473,7 +2553,7 @@ impl<T: Send + Sync + Serialize + DeserializeOwned + Clone + 'static> RedisStrea
                         queue_wait_ms = queue_wait_ms,
                         wait_target_p99_ms = wait_target_p99_ms,
                         processing_ms = duration_ms(processing_started.elapsed()),
-                        retry_count = delivery_count.saturating_sub(1),
+                        retry_count = effective_delivery_count.saturating_sub(1),
                         outcome = "worker_error",
                         message_id = %msg_id,
                         "queue item processing failed"
@@ -2492,7 +2572,7 @@ impl<T: Send + Sync + Serialize + DeserializeOwned + Clone + 'static> RedisStrea
                 tracing::debug!(
                     "Worker failed for message {} (attempt {}/{}): {}. Will retry.",
                     msg_id,
-                    delivery_count,
+                    effective_delivery_count,
                     MAX_PROCESSING_RETRIES,
                     e
                 );
@@ -2504,23 +2584,28 @@ impl<T: Send + Sync + Serialize + DeserializeOwned + Clone + 'static> RedisStrea
     /// Copy the payload to a fresh stream entry and ACK the current pending
     /// entry. This is for infrastructure failures where the work item is still
     /// healthy, but the worker could not make a conclusive ownership decision.
+    ///
+    /// The fresh entry resets the Redis delivery counter. When
+    /// `carry_prior_deliveries` is non-zero, the entry is stamped with a
+    /// `prior_deliveries` field carrying that value so the DLQ gate in
+    /// `process_one` sees the cumulative total and a repeat offender
+    /// eventually escalates instead of requeueing forever. The caller passes
+    /// the running total plus this entry's deliveries for opted-in requeues
+    /// (see [`PRESERVE_DELIVERY_COUNT_TOKEN`]) and the unchanged running
+    /// total for opted-out ones, so an accrued count is never lost. Zero —
+    /// a never-counted message — keeps the historical reset behavior.
     async fn requeue_msg_for_infrastructure_retry(
         &self,
         msg_id: &str,
         payload: &[u8],
         reason: String,
+        carry_prior_deliveries: usize,
     ) -> Result<(), StreamsQueueError> {
         let mut guard = self.get_connection().await?;
         let conn = guard.as_mut().unwrap();
 
         let script = r#"
-            local new_id = redis.call(
-                'XADD',
-                KEYS[1],
-                'MAXLEN',
-                '~',
-                ARGV[3],
-                '*',
+            local fields = {
                 'payload',
                 ARGV[4],
                 'retry_reason',
@@ -2529,6 +2614,19 @@ impl<T: Send + Sync + Serialize + DeserializeOwned + Clone + 'static> RedisStrea
                 ARGV[2],
                 'timestamp',
                 ARGV[6]
+            }
+            if ARGV[7] ~= '' then
+                fields[#fields + 1] = 'prior_deliveries'
+                fields[#fields + 1] = ARGV[7]
+            end
+            local new_id = redis.call(
+                'XADD',
+                KEYS[1],
+                'MAXLEN',
+                '~',
+                ARGV[3],
+                '*',
+                unpack(fields)
             )
             local acked = redis.call('XACK', KEYS[1], ARGV[1], ARGV[2])
             if acked ~= 1 then
@@ -2537,6 +2635,16 @@ impl<T: Send + Sync + Serialize + DeserializeOwned + Clone + 'static> RedisStrea
             end
             return new_id
         "#;
+
+        // An empty ARGV[7] means "do not stamp the field" — requeues of
+        // never-counted messages stay byte-identical to the previous format.
+        // Any carried value > 0 is stamped, even for opted-out reasons, so
+        // the accrued count survives the requeue.
+        let carry_arg = if carry_prior_deliveries > 0 {
+            carry_prior_deliveries.to_string()
+        } else {
+            String::new()
+        };
 
         let _: String = conn
             .cmd(
@@ -2550,6 +2658,7 @@ impl<T: Send + Sync + Serialize + DeserializeOwned + Clone + 'static> RedisStrea
                     .arg(payload)
                     .arg(&reason)
                     .arg(chrono::Utc::now().timestamp())
+                    .arg(&carry_arg)
                     .clone(),
             )
             .await
@@ -2635,6 +2744,9 @@ where
     payload: Option<Vec<u8>>,
     source: FetchSource,
     redelivered: bool,
+    /// Cumulative delivery count carried across opted-in infrastructure
+    /// requeues (`prior_deliveries` entry field); 0 when absent.
+    prior_deliveries: usize,
     claimed_at: chrono::DateTime<chrono::Utc>,
     enqueued_at: Option<chrono::DateTime<chrono::Utc>>,
     queue_wait: Duration,
@@ -2684,7 +2796,13 @@ where
             .expect("redis queue lease already completed");
         let result = self
             .queue
-            .process_one(msg_id.clone(), payload, self.source, worker)
+            .process_one(
+                msg_id.clone(),
+                payload,
+                self.source,
+                self.prior_deliveries,
+                worker,
+            )
             .await;
         self.queue.in_flight.lock().await.remove(&msg_id);
         self.queue.lease_completed.notify_one();
@@ -2794,16 +2912,18 @@ fn parse_stream_message(result: &redis::Value) -> Option<(String, Vec<u8>)> {
     parse_stream_messages(result)
         .into_iter()
         .next()
-        .map(|(msg_id, payload, _)| (msg_id, payload))
+        .map(|(msg_id, payload, _, _)| (msg_id, payload))
 }
 
 /// Parse all messages from an XREADGROUP result.
 ///
 /// Shape: `[[stream-name, [[id, [field, value, ...]], ...]]]` or nil.
-/// We extract every `(id, payload, redelivered)` tuple, in order. Messages without a
-/// `payload` field are silently skipped — the consumer group still has
-/// them in its PEL until ACKed.
-fn parse_stream_messages(result: &redis::Value) -> Vec<(String, Vec<u8>, bool)> {
+/// We extract every `(id, payload, redelivered, prior_deliveries)` tuple, in
+/// order. Messages without a `payload` field are silently skipped — the
+/// consumer group still has them in its PEL until ACKed. A missing or
+/// malformed `prior_deliveries` field reads as 0, so entries written before
+/// the field existed (and opted-out requeues) are unaffected.
+fn parse_stream_messages(result: &redis::Value) -> Vec<(String, Vec<u8>, bool, usize)> {
     if matches!(result, redis::Value::Nil) {
         return Vec::new();
     }
@@ -2844,6 +2964,7 @@ fn parse_stream_messages(result: &redis::Value) -> Vec<(String, Vec<u8>, bool)> 
             };
             let mut payload: Option<Vec<u8>> = None;
             let mut redelivered = false;
+            let mut prior_deliveries = 0usize;
             let mut i = 0;
             while i + 1 < fields.len() {
                 let name: String = redis::from_redis_value_ref(&fields[i]).unwrap_or_default();
@@ -2855,11 +2976,15 @@ fn parse_stream_messages(result: &redis::Value) -> Vec<(String, Vec<u8>, bool)> 
                     let original_id: String =
                         redis::from_redis_value_ref(&fields[i + 1]).unwrap_or_default();
                     redelivered = !original_id.is_empty();
+                } else if name == "prior_deliveries" {
+                    let raw: String =
+                        redis::from_redis_value_ref(&fields[i + 1]).unwrap_or_default();
+                    prior_deliveries = raw.parse().unwrap_or(0);
                 }
                 i += 2;
             }
             if let Some(p) = payload {
-                out.push((msg_id, p, redelivered));
+                out.push((msg_id, p, redelivered, prior_deliveries));
             }
         }
     }
@@ -2893,6 +3018,40 @@ mod tests {
         }
     }
 
+    /// Fields of the newest entry in `stream` as (name, value) pairs, with
+    /// values lossily decoded to strings (binary payloads decode to ""; the
+    /// callers only inspect metadata fields such as `prior_deliveries`).
+    async fn latest_entry_fields(client: &redis::Client, stream: &str) -> Vec<(String, String)> {
+        let mut conn = client.get_multiplexed_async_connection().await.unwrap();
+        let result: redis::Value = redis::cmd("XREVRANGE")
+            .arg(stream)
+            .arg("+")
+            .arg("-")
+            .arg("COUNT")
+            .arg(1)
+            .query_async(&mut conn)
+            .await
+            .expect("XREVRANGE should succeed");
+        let entries: Vec<redis::Value> = redis::from_redis_value_ref(&result).unwrap_or_default();
+        let Some(first) = entries.first() else {
+            return Vec::new();
+        };
+        let entry: Vec<redis::Value> = redis::from_redis_value_ref(first).unwrap_or_default();
+        if entry.len() < 2 {
+            return Vec::new();
+        }
+        let fields: Vec<redis::Value> = redis::from_redis_value_ref(&entry[1]).unwrap_or_default();
+        let mut out = Vec::new();
+        let mut i = 0;
+        while i + 1 < fields.len() {
+            let name: String = redis::from_redis_value_ref(&fields[i]).unwrap_or_default();
+            let value: String = redis::from_redis_value_ref(&fields[i + 1]).unwrap_or_default();
+            out.push((name, value));
+            i += 2;
+        }
+        out
+    }
+
     #[test]
     fn parser_marks_infrastructure_requeues_as_redelivered() {
         let bulk = |value: &str| redis::Value::BulkString(value.as_bytes().to_vec());
@@ -2912,8 +3071,86 @@ mod tests {
         let messages = parse_stream_messages(&result);
         assert_eq!(
             messages,
-            vec![("1712345678901-0".to_string(), vec![1, 2, 3], true)]
+            vec![("1712345678901-0".to_string(), vec![1, 2, 3], true, 0)]
         );
+    }
+
+    #[test]
+    fn parser_reads_carried_prior_deliveries_and_defaults_to_zero() {
+        let bulk = |value: &str| redis::Value::BulkString(value.as_bytes().to_vec());
+        let entry = |id: &str, fields: Vec<redis::Value>| {
+            redis::Value::Array(vec![bulk(id), redis::Value::Array(fields)])
+        };
+        let result = redis::Value::Array(vec![redis::Value::Array(vec![
+            bulk("{test-stream}"),
+            redis::Value::Array(vec![
+                // Opted-in requeue: carried count is parsed.
+                entry(
+                    "1712345678901-0",
+                    vec![
+                        bulk("payload"),
+                        redis::Value::BulkString(vec![1]),
+                        bulk("original_id"),
+                        bulk("1712345678000-0"),
+                        bulk("prior_deliveries"),
+                        bulk("2"),
+                    ],
+                ),
+                // Pre-existing entry without the field: reads as 0.
+                entry(
+                    "1712345678902-0",
+                    vec![bulk("payload"), redis::Value::BulkString(vec![2])],
+                ),
+                // Malformed field value must degrade to 0, never error.
+                entry(
+                    "1712345678903-0",
+                    vec![
+                        bulk("payload"),
+                        redis::Value::BulkString(vec![3]),
+                        bulk("prior_deliveries"),
+                        bulk("not-a-number"),
+                    ],
+                ),
+            ]),
+        ])]);
+
+        let messages = parse_stream_messages(&result);
+        assert_eq!(
+            messages,
+            vec![
+                ("1712345678901-0".to_string(), vec![1], true, 2),
+                ("1712345678902-0".to_string(), vec![2], false, 0),
+                ("1712345678903-0".to_string(), vec![3], false, 0),
+            ]
+        );
+    }
+
+    #[test]
+    fn dlq_gate_counts_deliveries_carried_across_infra_requeues() {
+        // Plain deliveries: budget is consumed only past MAX_PROCESSING_RETRIES.
+        assert!(!exceeded_processing_retries(1, 0));
+        assert!(!exceeded_processing_retries(MAX_PROCESSING_RETRIES, 0));
+        assert!(exceeded_processing_retries(MAX_PROCESSING_RETRIES + 1, 0));
+
+        // Carried counts make fresh requeued entries (delivery_count == 1)
+        // reach the gate: this is exactly the reset the opt-in closes.
+        assert!(!exceeded_processing_retries(1, MAX_PROCESSING_RETRIES - 1));
+        assert!(exceeded_processing_retries(1, MAX_PROCESSING_RETRIES));
+
+        // Saturating arithmetic: absurd values must gate, not overflow.
+        assert!(exceeded_processing_retries(usize::MAX, usize::MAX));
+    }
+
+    #[test]
+    fn preserve_delivery_count_token_is_matched_in_reasons() {
+        assert!(infrastructure_requeue_preserves_delivery_count(&format!(
+            "[event-setup-timeout] Timed out after 30s {}",
+            PRESERVE_DELIVERY_COUNT_TOKEN
+        )));
+        // Opt-out default: ordinary infrastructure reasons never carry.
+        assert!(!infrastructure_requeue_preserves_delivery_count(
+            "task running-redelivery deferred while the task executes"
+        ));
     }
 
     #[test]
@@ -3118,6 +3355,7 @@ mod tests {
             payload: Some(Vec::new()),
             source: FetchSource::Fresh,
             redelivered: false,
+            prior_deliveries: 0,
             claimed_at: chrono::Utc::now(),
             enqueued_at: None,
             queue_wait: Duration::ZERO,
@@ -3794,6 +4032,19 @@ mod tests {
                 .await;
             assert!(res.is_err(), "infrastructure retry should be observable");
             queue.prefetched.lock().await.clear();
+
+            // Opted-out requeues (no reason token) of a NEVER-counted
+            // message must keep resetting the delivery counter: the fresh
+            // entry carries no prior_deliveries and stays byte-identical to
+            // the pre-field format. (A previously-counted message keeps its
+            // accrued value instead — see
+            // `test_opted_out_requeue_preserves_accrued_delivery_count`.)
+            let fields = latest_entry_fields(&client, &stream_key).await;
+            assert!(
+                fields.iter().all(|(name, _)| name != "prior_deliveries"),
+                "opted-out requeue of a never-counted message must not stamp prior_deliveries: {:?}",
+                fields
+            );
         }
 
         let lease = queue
@@ -3826,6 +4077,234 @@ mod tests {
             xpending_count(&client, &stream_key, DEFAULT_CONSUMER_GROUP).await,
             0,
             "successful final processing should ACK the remaining delivery"
+        );
+
+        cleanup(&client, &queue_name).await;
+    }
+
+    /// An infrastructure requeue that opts in via
+    /// `PRESERVE_DELIVERY_COUNT_TOKEN` stamps the cumulative delivery count
+    /// into every fresh entry, so a deterministic repeat offender (e.g. an
+    /// event-handler setup that can never finish inside its watchdog)
+    /// escalates to the DLQ — exactly once, via the atomic mover — instead
+    /// of requeueing forever on a perpetually reset counter.
+    #[tokio::test]
+    async fn test_counted_infrastructure_requeue_escalates_to_dlq() {
+        let Some(client) = try_client().await else {
+            eprintln!("skipping: Redis not available");
+            return;
+        };
+        let queue_name = format!("test_stream_counted_infra_{}", Uuid::new_v4());
+        let stream_key = format!("{{{}}}", queue_name);
+        let queue = RedisStreamQueue::<String>::new(client.clone(), queue_name.clone());
+
+        queue.enqueue("stuck-setup".to_string()).await.unwrap();
+
+        for expected_carry in 1..=MAX_PROCESSING_RETRIES {
+            let res = queue
+                .dequeue_and_work(|_: String| async move {
+                    Err::<(), Box<dyn Error + Send + Sync>>(Box::new(
+                        QueueInfrastructureError::new(
+                            format!(
+                                "deterministic setup failure {}",
+                                PRESERVE_DELIVERY_COUNT_TOKEN
+                            ),
+                            std::time::Duration::ZERO,
+                        ),
+                    ))
+                })
+                .await;
+            assert!(res.is_err(), "counted infrastructure retry should surface");
+            queue.prefetched.lock().await.clear();
+
+            // Each opted-in requeue must carry the cumulative delivery
+            // count into the fresh entry (the Redis counter alone resets).
+            let fields = latest_entry_fields(&client, &stream_key).await;
+            let carried = fields
+                .iter()
+                .find(|(name, _)| name == "prior_deliveries")
+                .map(|(_, value)| value.clone());
+            assert_eq!(
+                carried,
+                Some(expected_carry.to_string()),
+                "requeue {} must stamp the cumulative delivery count",
+                expected_carry
+            );
+        }
+
+        // Budget exhausted: the next claim must route to the DLQ without
+        // handing the item to the worker again.
+        let res = queue
+            .dequeue_and_work(|_: String| async move {
+                Err::<(), Box<dyn Error + Send + Sync>>(
+                    "retry-exhausted delivery must not reach the worker".into(),
+                )
+            })
+            .await;
+        match res {
+            Err(e) => {
+                let msg = e.to_string();
+                assert!(
+                    msg.contains("Retry limit exceeded"),
+                    "unexpected error: {}",
+                    msg
+                );
+            }
+            Ok(_) => panic!("expected RetryLimitExceeded after exhausting the carried budget"),
+        }
+
+        let mut conn = client.get_multiplexed_async_connection().await.unwrap();
+        let dlq_key = format!("{{{}}}:deadletter", queue_name);
+        let dlq_len: i64 = redis::cmd("XLEN")
+            .arg(&dlq_key)
+            .query_async(&mut conn)
+            .await
+            .unwrap_or(0);
+        assert_eq!(
+            dlq_len, 1,
+            "the repeat offender must land in the DLQ exactly once"
+        );
+        assert_eq!(
+            xpending_count(&client, &stream_key, DEFAULT_CONSUMER_GROUP).await,
+            0,
+            "the atomic DLQ move must ACK the source entry"
+        );
+
+        // The DLQ copy is the only survivor — nothing further is delivered.
+        queue.prefetched.lock().await.clear();
+        let res = queue
+            .dequeue_and_work(|_: String| async move {
+                Err::<(), Box<dyn Error + Send + Sync>>(
+                    "nothing should remain deliverable after the DLQ move".into(),
+                )
+            })
+            .await
+            .unwrap();
+        assert!(res.is_none(), "no further deliveries after the DLQ move");
+
+        cleanup(&client, &queue_name).await;
+    }
+
+    /// An opted-out requeue of a PREVIOUSLY-counted message preserves the
+    /// accrued `prior_deliveries` value unchanged: it consumes no retry
+    /// budget but does not reset it either. A deterministic stall that
+    /// alternates counted and uncounted failure reasons therefore still
+    /// exhausts the cumulative budget and escalates to the DLQ.
+    #[tokio::test]
+    async fn test_opted_out_requeue_preserves_accrued_delivery_count() {
+        let Some(client) = try_client().await else {
+            eprintln!("skipping: Redis not available");
+            return;
+        };
+        let queue_name = format!("test_stream_alternating_infra_{}", Uuid::new_v4());
+        let stream_key = format!("{{{}}}", queue_name);
+        let queue = RedisStreamQueue::<String>::new(client.clone(), queue_name.clone());
+
+        queue
+            .enqueue("alternating-stall".to_string())
+            .await
+            .unwrap();
+
+        let carried_stamp = |fields: &[(String, String)]| {
+            fields
+                .iter()
+                .find(|(name, _)| name == "prior_deliveries")
+                .map(|(_, value)| value.clone())
+        };
+
+        for accrued in 1..=MAX_PROCESSING_RETRIES {
+            // Counted failure: accrual resumes from the carried value even
+            // when an uncounted requeue happened in between.
+            let res = queue
+                .dequeue_and_work(|_: String| async move {
+                    Err::<(), Box<dyn Error + Send + Sync>>(Box::new(
+                        QueueInfrastructureError::new(
+                            format!(
+                                "deterministic setup failure {}",
+                                PRESERVE_DELIVERY_COUNT_TOKEN
+                            ),
+                            std::time::Duration::ZERO,
+                        ),
+                    ))
+                })
+                .await;
+            assert!(res.is_err(), "counted infrastructure retry should surface");
+            queue.prefetched.lock().await.clear();
+            let fields = latest_entry_fields(&client, &stream_key).await;
+            assert_eq!(
+                carried_stamp(&fields),
+                Some(accrued.to_string()),
+                "counted requeue {} must stamp the cumulative delivery count",
+                accrued
+            );
+
+            // Interleaved opted-out failure (no reason token): must carry
+            // the accrued value forward unchanged — stamping nothing here
+            // would reset the escalation budget and stall forever. Skip the
+            // final round: with the budget exhausted, the next claim routes
+            // to the DLQ before any worker runs.
+            if accrued < MAX_PROCESSING_RETRIES {
+                let res = queue
+                    .dequeue_and_work(|_: String| async move {
+                        Err::<(), Box<dyn Error + Send + Sync>>(Box::new(
+                            QueueInfrastructureError::new(
+                                "transient deployment deferral",
+                                std::time::Duration::ZERO,
+                            ),
+                        ))
+                    })
+                    .await;
+                assert!(
+                    res.is_err(),
+                    "opted-out infrastructure retry should surface"
+                );
+                queue.prefetched.lock().await.clear();
+                let fields = latest_entry_fields(&client, &stream_key).await;
+                assert_eq!(
+                    carried_stamp(&fields),
+                    Some(accrued.to_string()),
+                    "opted-out requeue must preserve the accrued value {} unchanged",
+                    accrued
+                );
+            }
+        }
+
+        // Budget exhausted despite the alternation: the next claim must
+        // route to the DLQ without handing the item to the worker again.
+        let res = queue
+            .dequeue_and_work(|_: String| async move {
+                Err::<(), Box<dyn Error + Send + Sync>>(
+                    "retry-exhausted delivery must not reach the worker".into(),
+                )
+            })
+            .await;
+        match res {
+            Err(e) => {
+                let msg = e.to_string();
+                assert!(
+                    msg.contains("Retry limit exceeded"),
+                    "unexpected error: {}",
+                    msg
+                );
+            }
+            Ok(_) => panic!("expected RetryLimitExceeded despite alternating failure reasons"),
+        }
+
+        let mut conn = client.get_multiplexed_async_connection().await.unwrap();
+        let dlq_key = format!("{{{}}}:deadletter", queue_name);
+        let dlq_len: i64 = redis::cmd("XLEN")
+            .arg(&dlq_key)
+            .query_async(&mut conn)
+            .await
+            .unwrap_or(0);
+        assert_eq!(
+            dlq_len, 1,
+            "the alternating repeat offender must land in the DLQ exactly once"
+        );
+        assert_eq!(
+            xpending_count(&client, &stream_key, DEFAULT_CONSUMER_GROUP).await,
+            0,
+            "the atomic DLQ move must ACK the source entry"
         );
 
         cleanup(&client, &queue_name).await;
