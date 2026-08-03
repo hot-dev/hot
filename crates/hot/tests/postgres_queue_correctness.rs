@@ -5,7 +5,7 @@
 //! e.g. `postgres://hot:hot@127.0.0.1:55432/hot`.
 
 use hot::data::serialization::Serialization;
-use hot::db::{self, DatabasePool, Task, TaskStatus};
+use hot::db::{self, DatabasePool, InfraRetryFinalizeOutcome, Task, TaskStatus};
 use hot::lang::emitter::{DatabaseEngineEventEmitter, EngineEvent, EngineEventEmitter};
 use hot::lang::event::{ExecutionContext, QueueExecutionTiming};
 use hot::lang::hot::task::TaskRequest;
@@ -595,6 +595,105 @@ async fn postgres_task_lifecycle_smoke() {
             .await
             .expect("probe table should drop");
     }
+
+    drop_schema(&db, &schema).await;
+}
+
+#[tokio::test]
+async fn postgres_shutdown_finalize_is_atomic_with_retry_child() {
+    let Some((db, schema)) = postgres_db().await else {
+        return;
+    };
+    let test_data = db::insert_test_data(&db)
+        .await
+        .expect("test data should insert");
+    let retry_error = serde_json::json!({"msg": "retry durable"});
+    let exhausted_error = serde_json::json!({"msg": "retry exhausted"});
+
+    let task_id = Uuid::now_v7();
+    Task::insert(
+        &db,
+        &task_id,
+        &test_data.env_id,
+        &test_data.stream_id,
+        &test_data.build_id,
+        None,
+        "::test/atomic-finalize",
+        None,
+        None,
+        "code",
+        60_000,
+        Some(&test_data.user_id),
+    )
+    .await
+    .unwrap();
+    assert!(Task::mark_running(&db, &task_id).await.unwrap());
+    let child_id = Uuid::now_v7();
+    let outcome = Task::finalize_with_infra_retry(
+        &db,
+        &task_id,
+        &child_id,
+        3,
+        &retry_error,
+        &exhausted_error,
+        chrono::Utc::now(),
+    )
+    .await
+    .unwrap();
+    assert!(matches!(
+        outcome,
+        InfraRetryFinalizeOutcome::RetryReady {
+            retry_task_id,
+            should_enqueue: true,
+            ..
+        } if retry_task_id == child_id
+    ));
+    assert_eq!(
+        Task::get(&db, &task_id).await.unwrap().task_status_id,
+        TaskStatus::Failed.as_id()
+    );
+    assert_eq!(
+        Task::get(&db, &child_id).await.unwrap().parent_task_id,
+        Some(task_id)
+    );
+
+    let rollback_id = Uuid::now_v7();
+    Task::insert(
+        &db,
+        &rollback_id,
+        &test_data.env_id,
+        &test_data.stream_id,
+        &test_data.build_id,
+        None,
+        "::test/atomic-rollback",
+        None,
+        None,
+        "code",
+        60_000,
+        Some(&test_data.user_id),
+    )
+    .await
+    .unwrap();
+    assert!(Task::mark_running(&db, &rollback_id).await.unwrap());
+    assert!(
+        Task::finalize_with_infra_retry(
+            &db,
+            &rollback_id,
+            &rollback_id,
+            3,
+            &retry_error,
+            &exhausted_error,
+            chrono::Utc::now(),
+        )
+        .await
+        .is_err(),
+        "retry primary-key failure must abort the transaction"
+    );
+    assert_eq!(
+        Task::get(&db, &rollback_id).await.unwrap().task_status_id,
+        TaskStatus::Running.as_id(),
+        "terminal write must roll back with the failed child insert"
+    );
 
     drop_schema(&db, &schema).await;
 }

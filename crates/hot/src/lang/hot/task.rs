@@ -19,6 +19,17 @@ use uuid::Uuid;
 const TASK_NATIVE_IO_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 const PARENT_COMPLETION_RESERVE: std::time::Duration = std::time::Duration::from_secs(5);
 
+fn initial_await_lookup_budget(
+    execution_context: Option<&crate::lang::event::ExecutionContext>,
+) -> Option<std::time::Duration> {
+    match execution_context {
+        Some(context) => {
+            context.cap_wait_to_deadline(TASK_NATIVE_IO_TIMEOUT, PARENT_COMPLETION_RESERVE)
+        }
+        None => Some(TASK_NATIVE_IO_TIMEOUT),
+    }
+}
+
 fn err_val(msg: String) -> Val {
     Val::err(Val::from(msg))
 }
@@ -634,10 +645,21 @@ pub fn await_task(vm: &mut VirtualMachine, args: &[Val]) -> HotResult<Val> {
     let task = tokio::runtime::Handle::current().block_on(async {
         const MAX_TIMEOUT_MS: i64 = 24 * 60 * 60 * 1000; // 24 hours
 
+        // Preserve the finalization reserve during the initial lookup too. A
+        // fixed five-second read here could otherwise consume the entire
+        // reserve before the polling loop even began.
+        let lookup_budget = match initial_await_lookup_budget(execution_context.as_ref()) {
+            Some(budget) => budget,
+            None => {
+                return Err(err_val(
+                    "::hot::task/await: parent execution deadline is too close to look up task"
+                        .to_string(),
+                ));
+            }
+        };
+
         let task =
-            match tokio::time::timeout(TASK_NATIVE_IO_TIMEOUT, crate::db::Task::get(&db, &task_id))
-                .await
-            {
+            match tokio::time::timeout(lookup_budget, crate::db::Task::get(&db, &task_id)).await {
                 Ok(Ok(t)) => t,
                 Ok(Err(crate::db::TaskError::NotFound)) => {
                     return Err(err_val(format!(
@@ -653,8 +675,8 @@ pub fn await_task(vm: &mut VirtualMachine, args: &[Val]) -> HotResult<Val> {
                 }
                 Err(_) => {
                     return Err(err_val(format!(
-                        "::hot::task/await: database read timed out after {}s",
-                        TASK_NATIVE_IO_TIMEOUT.as_secs()
+                        "::hot::task/await: database read timed out after {}ms",
+                        lookup_budget.as_millis()
                     )));
                 }
             };
@@ -1361,6 +1383,34 @@ mod tests {
         assert_eq!(
             backoff_sleep_slice_ms(5000, 250, std::time::Duration::from_micros(500)),
             0
+        );
+    }
+
+    #[test]
+    fn initial_task_lookup_preserves_parent_completion_reserve() {
+        let context = crate::lang::event::ExecutionContext::new(
+            Uuid::now_v7(),
+            Uuid::now_v7(),
+            crate::db::run::RunType::Task.as_id(),
+            None,
+            None,
+            None,
+            None,
+        )
+        .with_deadline(Some(
+            chrono::Utc::now()
+                + chrono::Duration::from_std(
+                    PARENT_COMPLETION_RESERVE + std::time::Duration::from_secs(1),
+                )
+                .unwrap(),
+        ));
+
+        let budget = initial_await_lookup_budget(Some(&context)).unwrap();
+        assert!(budget <= std::time::Duration::from_secs(1));
+        assert!(budget > std::time::Duration::ZERO);
+        assert_eq!(
+            initial_await_lookup_budget(None),
+            Some(TASK_NATIVE_IO_TIMEOUT)
         );
     }
 

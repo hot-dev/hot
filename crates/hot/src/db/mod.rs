@@ -184,7 +184,7 @@ pub use stream::{Stream, StreamError, StreamSummary};
 pub use subscription::{
     BillingPeriod, OrgPlan, OrgPlanStatus, OrgUsage, OrgUsageStats, Plan, PlanError,
 };
-pub use task::{Task, TaskError, TaskStatus};
+pub use task::{InfraRetryFinalizeOutcome, Task, TaskError, TaskStatus};
 pub use team::{Team, TeamError, TeamUser, TeamUserWithRole};
 pub use user::{User, UserAuth, UserError};
 pub use webhook::{Webhook, WebhookError, WebhookServiceSummary, WebhookWithProject};

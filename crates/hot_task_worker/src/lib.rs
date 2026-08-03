@@ -152,6 +152,11 @@ const TASK_COMPLETION_ATTEMPTS: usize = 3;
 /// background reaper is responsible for finishing the cleanup.
 const CONTAINER_KILL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 const CONTAINER_LOGS_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+/// Data-volume provisioning happens before the durable task claim, but still
+/// holds queue/task leases and worker admission. Bound it well below the
+/// lease TTL so a wedged mount helper defers the delivery instead of pinning
+/// the worker indefinitely.
+const DATA_VOLUME_CREATE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
 
 /// Outer backstop for the multi-step Kata timeout cleanup.
 /// `cleanup_after_timeout` sweeps every setup-retry container id and, for
@@ -291,7 +296,7 @@ where
     tokio::time::timeout(deadline, cleanup).await.is_ok()
 }
 
-async fn await_container_setup<F>(
+async fn await_claimed_task_deadline<F>(
     deadline: tokio::time::Instant,
     setup: F,
 ) -> Result<F::Output, tokio::time::error::Elapsed>
@@ -299,6 +304,16 @@ where
     F: std::future::Future,
 {
     tokio::time::timeout_at(deadline, setup).await
+}
+
+async fn await_data_volume_create<F>(
+    timeout: std::time::Duration,
+    create: F,
+) -> Result<F::Output, tokio::time::error::Elapsed>
+where
+    F: std::future::Future,
+{
+    tokio::time::timeout(timeout, create).await
 }
 
 /// Bounded data-volume cleanup. When `cleanup()` completes it defuses the
@@ -2157,16 +2172,10 @@ async fn process_task(
                     return Err(Box::new(e) as Box<dyn std::error::Error + Send + Sync>);
                 }
             }
-
-            emit_task_started(
-                &stream_publisher,
-                task_id,
-                env_id,
-                stream_id,
-                &request.function_name,
-                &request.task_type,
-            )
-            .await;
+            // One claim-anchored wall-clock deadline covers every subsequent
+            // setup step and the VM execution itself.
+            let task_deadline =
+                tokio::time::Instant::now() + std::time::Duration::from_millis(timeout_ms);
 
             process_code_task(
                 request,
@@ -2186,6 +2195,7 @@ async fn process_task(
                 capacity_wait_ms,
                 worker_id.clone(),
                 blocking_execution_permit,
+                task_deadline,
             )
             .await
         }
@@ -2645,15 +2655,14 @@ async fn process_container_task(
         .min(i64::MAX as u128) as i64;
 
     // -- Create data volume for /data/ --
-    let data_volume = match data_volume::DataVolume::create(
-        &data_vol_base,
-        &task_id.to_string(),
-        limits.disk_size_mb,
+    let data_volume = match await_data_volume_create(
+        DATA_VOLUME_CREATE_TIMEOUT,
+        data_volume::DataVolume::create(&data_vol_base, &task_id.to_string(), limits.disk_size_mb),
     )
     .await
     {
-        Ok(vol) => Some(vol),
-        Err(e) => {
+        Ok(Ok(vol)) => Some(vol),
+        Ok(Err(e)) => {
             tracing::error!(task_id = %task_id, "Data volume creation failed: {}", e);
             let error = task_failure_json(
                 &format!("Requested /data volume could not be provisioned: {e}"),
@@ -2678,6 +2687,22 @@ async fn process_container_task(
             }
             drop(resource_guard);
             return Ok(());
+        }
+        Err(_) => {
+            tracing::warn!(
+                task_id = %task_id,
+                timeout_secs = DATA_VOLUME_CREATE_TIMEOUT.as_secs(),
+                backoff_ms = infra_retry_backoff_ms,
+                "Data volume creation timed out; deferring queue message"
+            );
+            drop(resource_guard);
+            return Err(Box::new(QueueInfrastructureError::new(
+                format!(
+                    "data volume creation timed out after {}s",
+                    DATA_VOLUME_CREATE_TIMEOUT.as_secs()
+                ),
+                std::time::Duration::from_millis(infra_retry_backoff_ms),
+            )));
         }
     };
 
@@ -2764,7 +2789,7 @@ async fn process_container_task(
             tracing::warn!(task_id = %task_id, run_id = %run_id, "Failed to set container task run_id: {}", e);
         }
     };
-    if await_container_setup(task_deadline, durable_setup)
+    if await_claimed_task_deadline(task_deadline, durable_setup)
         .await
         .is_err()
     {
@@ -2800,7 +2825,7 @@ async fn process_container_task(
     };
 
     let file_server_handle = if !is_kata {
-        match await_container_setup(
+        match await_claimed_task_deadline(
             task_deadline,
             start_file_server_for_task(
                 &task_id,
@@ -2944,7 +2969,7 @@ async fn process_container_task(
         // (load_bytecode_bundle's path is shared via ensure_bundle_extracted).
         let extract_dir = match org_id {
             Some(oid) => {
-                match await_container_setup(
+                match await_claimed_task_deadline(
                     task_deadline,
                     ensure_bundle_extracted(&build_id, &oid, &env_id, &worker_conf),
                 )
@@ -3206,7 +3231,7 @@ async fn process_container_task(
                 return Ok(());
             }
         };
-        let fs_storage = match await_container_setup(
+        let fs_storage = match await_claimed_task_deadline(
             task_deadline,
             hot::file_storage::file_storage_from_config(&worker_conf),
         )
@@ -4190,6 +4215,7 @@ async fn process_code_task(
     capacity_wait_ms: i64,
     worker_id: String,
     blocking_execution_permit: tokio::sync::OwnedSemaphorePermit,
+    task_deadline: tokio::time::Instant,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let function_name = request.function_name.clone();
     let task_type = request.task_type.clone();
@@ -4198,13 +4224,64 @@ async fn process_code_task(
         .as_deref()
         .and_then(|s| Uuid::parse_str(s).ok());
 
-    let cached =
-        match load_bytecode(&build_id, &bytecode_cache, Some(&db), Some(&worker_conf)).await {
-            Ok(c) => c,
-            Err(e) => {
-                let error = task_failure_json(&format!("Build load failed: {}", e), None);
-                // Code tasks are claimed before this function runs, so every
-                // terminal write below is fenced with this worker's id.
+    let setup = async {
+        emit_task_started(
+            &stream_publisher,
+            task_id,
+            env_id,
+            stream_id,
+            &function_name,
+            &task_type,
+        )
+        .await;
+
+        let (cached, blocking_execution_permit) = load_bytecode(
+            &build_id,
+            Arc::clone(&bytecode_cache),
+            Some(&db),
+            Some(&worker_conf),
+            blocking_execution_permit,
+        )
+        .await?;
+
+        let store: Option<Arc<dyn hot::store::Store>> = match hot::store::store_from_config_with_db(
+            &worker_conf,
+            Some(Arc::clone(&db)),
+            org_id,
+            Some(env_id),
+        )
+        .await
+        {
+            Ok(store) => Some(Arc::from(store)),
+            Err(error) => {
+                tracing::warn!(task_id = %task_id, "Store not available for task: {error}");
+                None
+            }
+        };
+        let embedding_provider: Option<Arc<dyn hot::store::embedding::EmbeddingProvider>> =
+            hot::store::embedding::embedding_provider_from_config(&worker_conf).map(Arc::from);
+        let file_storage: Option<Arc<dyn hot::file_storage::FileStorage>> =
+            match hot::file_storage::file_storage_from_config(&worker_conf).await {
+                Ok(storage) => Some(Arc::from(storage)),
+                Err(error) => {
+                    tracing::warn!(task_id = %task_id, "File storage not available for task: {error}");
+                    None
+                }
+            };
+
+        Ok::<_, String>((
+            cached,
+            blocking_execution_permit,
+            store,
+            embedding_provider,
+            file_storage,
+        ))
+    };
+    let (cached, blocking_execution_permit, store, embedding_provider, file_storage) =
+        match await_claimed_task_deadline(task_deadline, setup).await {
+            Ok(Ok(setup)) => setup,
+            Ok(Err(error_message)) => {
+                let error = task_failure_json(&format!("Build load failed: {error_message}"), None);
                 if complete_task_with_event(
                     &db,
                     &stream_publisher,
@@ -4222,7 +4299,30 @@ async fn process_code_task(
                 {
                     publish_task_alert(&db, org_id, env_id, &task_id, "task:failed", &error).await;
                 }
-                return Err(e.into());
+                return Err(error_message.into());
+            }
+            Err(_) => {
+                let error = task_failure_json("Task timed out during setup", None);
+                if complete_task_with_event(
+                    &db,
+                    &stream_publisher,
+                    &task_id,
+                    env_id,
+                    stream_id,
+                    &function_name,
+                    &task_type,
+                    TaskStatus::TimedOut,
+                    Some(&error),
+                    None,
+                    Some(&worker_id),
+                )
+                .await
+                {
+                    publish_task_alert(&db, org_id, env_id, &task_id, "task:failed", &error).await;
+                    maybe_retry_task(&db, &task_queue, &task_id, &request).await;
+                }
+                tracing::warn!(task_id = %task_id, timeout_ms, "Task timed out during setup");
+                return Ok(());
             }
         };
 
@@ -4303,9 +4403,11 @@ async fn process_code_task(
         access_id: None,
         agent_type: None,
         queue_timing: None,
-        deadline_at: chrono::Duration::from_std(std::time::Duration::from_millis(timeout_ms))
-            .ok()
-            .map(|duration| chrono::Utc::now() + duration),
+        deadline_at: chrono::Duration::from_std(
+            task_deadline.saturating_duration_since(tokio::time::Instant::now()),
+        )
+        .ok()
+        .map(|duration| chrono::Utc::now() + duration),
     };
 
     let origin_run_id = execution_context.origin_run_id;
@@ -4324,32 +4426,6 @@ async fn process_code_task(
 
     // Register the cancel token so the shutdown coordinator can signal this VM
     coordinator.set_cancel_token(&task_id, Arc::clone(&vm_cancel_token));
-
-    let store: Option<Arc<dyn hot::store::Store>> = match hot::store::store_from_config_with_db(
-        &worker_conf,
-        Some(Arc::clone(&db)),
-        org_id,
-        Some(env_id),
-    )
-    .await
-    {
-        Ok(s) => Some(Arc::from(s)),
-        Err(e) => {
-            tracing::warn!(task_id = %task_id, "Store not available for task: {}", e);
-            None
-        }
-    };
-    let embedding_provider: Option<Arc<dyn hot::store::embedding::EmbeddingProvider>> =
-        hot::store::embedding::embedding_provider_from_config(&worker_conf).map(Arc::from);
-
-    let file_storage: Option<Arc<dyn hot::file_storage::FileStorage>> =
-        match hot::file_storage::file_storage_from_config(&worker_conf).await {
-            Ok(s) => Some(Arc::from(s)),
-            Err(e) => {
-                tracing::warn!(task_id = %task_id, "File storage not available for task: {}", e);
-                None
-            }
-        };
 
     let panic_label = format!("task_worker:{}:{}", fn_name_exec, task_id);
     let resource_registry_for_task = hot::lang::hot::resource::get_build_registry(&build_id);
@@ -4411,20 +4487,24 @@ async fn process_code_task(
             }
         }
     });
-    record_task_workload_start(
-        &db,
-        &task_id,
-        claimed_at,
-        workload_started_at,
-        capacity_wait_ms,
-        0,
-        0,
-    )
-    .await;
+    // Timing is diagnostic; do not delay arming the claim-anchored execution
+    // timeout behind its DB write. The write has its own short ceiling.
+    let timing_db = Arc::clone(&db);
+    tokio::spawn(async move {
+        record_task_workload_start(
+            &timing_db,
+            &task_id,
+            claimed_at,
+            workload_started_at,
+            capacity_wait_ms,
+            0,
+            0,
+        )
+        .await;
+    });
 
-    let timeout_dur = std::time::Duration::from_millis(timeout_ms);
     let execution_result = tokio::select! {
-        result = tokio::time::timeout(timeout_dur, task_handle) => result,
+        result = await_claimed_task_deadline(task_deadline, task_handle) => result,
         _ = cancel_notify.notified() => {
             tracing::info!(task_id = %task_id, "Task cancelled via $cancel message — signalling VM");
             vm_cancel_token.store(true, std::sync::atomic::Ordering::Relaxed);
@@ -5375,18 +5455,35 @@ async fn maybe_retry_task(
     }
 }
 
+/// Run blocking setup while transferring ownership of the execution permit
+/// into the closure. If the awaiting task is cancelled at its deadline, the
+/// detached closure retains the permit until it actually exits.
+async fn run_blocking_with_execution_permit<T, F>(
+    permit: tokio::sync::OwnedSemaphorePermit,
+    operation: F,
+) -> Result<(T, tokio::sync::OwnedSemaphorePermit), String>
+where
+    T: Send + 'static,
+    F: FnOnce() -> T + Send + 'static,
+{
+    tokio::task::spawn_blocking(move || (operation(), permit))
+        .await
+        .map_err(|error| format!("Blocking setup task failed: {error}"))
+}
+
 async fn load_bytecode(
     build_id: &Uuid,
-    cache: &BytecodeCache,
+    cache: Arc<BytecodeCache>,
     db: Option<&DatabasePool>,
     worker_conf: Option<&Val>,
-) -> Result<Arc<CachedBytecode>, String> {
+    blocking_execution_permit: tokio::sync::OwnedSemaphorePermit,
+) -> Result<(Arc<CachedBytecode>, tokio::sync::OwnedSemaphorePermit), String> {
     let cache_key = build_id.to_string();
 
     // Fast path: bytecode already in local cache
     if let Ok(cached) = cache.load(&cache_key) {
         tracing::debug!(build_id = %build_id, "Bytecode cache hit");
-        return Ok(cached);
+        return Ok((cached, blocking_execution_permit));
     }
 
     let (db, conf) = match (db, worker_conf) {
@@ -5408,9 +5505,33 @@ async fn load_bytecode(
         .map_err(|e| format!("Failed to fetch project: {}", e))?;
 
     if build.is_live() {
-        load_bytecode_live(build_id, &cache_key, cache, &build, &project, conf)
+        let build_id = *build_id;
+        let cache_for_task = Arc::clone(&cache);
+        let conf = conf.clone();
+        let (loaded, permit) =
+            run_blocking_with_execution_permit(blocking_execution_permit, move || {
+                load_bytecode_live(
+                    &build_id,
+                    &cache_key,
+                    &cache_for_task,
+                    &build,
+                    &project,
+                    &conf,
+                )
+            })
+            .await?;
+        Ok((loaded?, permit))
     } else {
-        load_bytecode_bundle(build_id, &cache_key, cache, &build, &project, db, conf).await
+        load_bytecode_bundle(
+            build_id,
+            cache_key,
+            cache,
+            &project,
+            db,
+            conf,
+            blocking_execution_permit,
+        )
+        .await
     }
 }
 
@@ -5625,15 +5746,16 @@ fn extract_bundle_to_dir(build_data: &[u8], extract_dir: &std::path::Path) -> Re
 /// from storage if needed. Idempotent — if the extract dir already contains
 /// `manifest.hot` we assume a previous worker invocation extracted it and
 /// reuse the on-disk copy. Returns the extract directory.
-async fn ensure_bundle_extracted(
+async fn ensure_bundle_extracted_with_permit(
     build_id: &Uuid,
     org_id: &Uuid,
     env_id: &Uuid,
     conf: &Val,
-) -> Result<std::path::PathBuf, String> {
+    blocking_execution_permit: tokio::sync::OwnedSemaphorePermit,
+) -> Result<(std::path::PathBuf, tokio::sync::OwnedSemaphorePermit), String> {
     let extract_dir = bundle_extract_dir(build_id);
     if bundle_extract_is_complete(&extract_dir) {
-        return Ok(extract_dir);
+        return Ok((extract_dir, blocking_execution_permit));
     }
 
     // Per-build single-flight: concurrent local attempts download and
@@ -5642,7 +5764,7 @@ async fn ensure_bundle_extracted(
     let flight = bundle_extract_lock(*build_id).await;
     let _guard = flight.lock().await;
     if bundle_extract_is_complete(&extract_dir) {
-        return Ok(extract_dir);
+        return Ok((extract_dir, blocking_execution_permit));
     }
 
     let storage = hot::storage::build_storage_from_config(conf)
@@ -5653,30 +5775,88 @@ async fn ensure_bundle_extracted(
         .await
         .map_err(|e| format!("Failed to retrieve build data: {}", e))?;
     let extract_dir_for_task = extract_dir.clone();
-    tokio::task::spawn_blocking(move || extract_bundle_to_dir(&build_data, &extract_dir_for_task))
+    let (extracted, blocking_execution_permit) =
+        run_blocking_with_execution_permit(blocking_execution_permit, move || {
+            extract_bundle_to_dir(&build_data, &extract_dir_for_task)
+        })
+        .await?;
+    extracted?;
+    Ok((extract_dir, blocking_execution_permit))
+}
+
+/// Container-task compatibility wrapper. Container admission is already
+/// bounded separately; code tasks use the permit-carrying variant directly
+/// so timed-out compilation/extraction remains counted as a live VM slot.
+async fn ensure_bundle_extracted(
+    build_id: &Uuid,
+    org_id: &Uuid,
+    env_id: &Uuid,
+    conf: &Val,
+) -> Result<std::path::PathBuf, String> {
+    let permit = Arc::new(tokio::sync::Semaphore::new(1))
+        .acquire_owned()
         .await
-        .map_err(|e| format!("Bundle extraction task failed: {}", e))??;
-    Ok(extract_dir)
+        .map_err(|error| format!("Failed to acquire extraction permit: {error}"))?;
+    let (path, _permit) =
+        ensure_bundle_extracted_with_permit(build_id, org_id, env_id, conf, permit).await?;
+    Ok(path)
 }
 
 /// Load bytecode for a bundle build by fetching the zip from storage, extracting, and compiling.
 async fn load_bytecode_bundle(
     build_id: &Uuid,
-    cache_key: &str,
-    cache: &BytecodeCache,
-    _build: &hot::db::Build,
+    cache_key: String,
+    cache: Arc<BytecodeCache>,
     project: &hot::db::Project,
     db: &DatabasePool,
     conf: &Val,
-) -> Result<Arc<CachedBytecode>, String> {
+    blocking_execution_permit: tokio::sync::OwnedSemaphorePermit,
+) -> Result<(Arc<CachedBytecode>, tokio::sync::OwnedSemaphorePermit), String> {
     tracing::debug!(build_id = %build_id, "Bytecode cache miss — fetching bundle build from storage");
 
     let env = hot::db::Env::get_env(db, &project.env_id)
         .await
         .map_err(|e| format!("Failed to fetch env: {}", e))?;
 
-    let extract_dir = ensure_bundle_extracted(build_id, &env.org_id, &project.env_id, conf).await?;
+    let (extract_dir, blocking_execution_permit) = ensure_bundle_extracted_with_permit(
+        build_id,
+        &env.org_id,
+        &project.env_id,
+        conf,
+        blocking_execution_permit,
+    )
+    .await?;
 
+    let build_id = *build_id;
+    let project = project.clone();
+    let conf = conf.clone();
+    let cache_for_task = Arc::clone(&cache);
+    let (loaded, permit) =
+        run_blocking_with_execution_permit(blocking_execution_permit, move || {
+            compile_bundle_bytecode(
+                build_id,
+                cache_key,
+                cache_for_task,
+                project,
+                conf,
+                extract_dir,
+            )
+        })
+        .await?;
+    Ok((loaded?, permit))
+}
+
+/// Blocking resource discovery and compilation for an already-extracted
+/// bundle. Kept out of async runtime threads and charged to the same permit
+/// that later protects VM execution.
+fn compile_bundle_bytecode(
+    build_id: Uuid,
+    cache_key: String,
+    cache: Arc<BytecodeCache>,
+    project: hot::db::Project,
+    conf: Val,
+    extract_dir: std::path::PathBuf,
+) -> Result<Arc<CachedBytecode>, String> {
     // Build a per-build resource registry from the manifest and cache it so
     // task threads can install it as a thread-local override during
     // `::hot::resource/*` calls. We do this once per bundle build (idempotent
@@ -5697,7 +5877,7 @@ async fn load_bytecode_bundle(
                 resource_count = registry.entries.len(),
                 "Installed per-build resource registry"
             );
-            hot::lang::hot::resource::set_build_registry(*build_id, registry);
+            hot::lang::hot::resource::set_build_registry(build_id, registry);
         }
         Err(e) => {
             tracing::warn!(
@@ -5731,18 +5911,18 @@ async fn load_bytecode_bundle(
         &src_paths,
         &bundle_cache,
         &project.name,
-        Some(cache_key),
+        Some(&cache_key),
         None,
-        Some(conf),
+        Some(&conf),
     )
     .map_err(|e| format!("Failed to compile build: {}", e))?;
 
     // Also save to the primary cache for future hits. The
     // tool/skill spec registries were already populated when the
     // bundle cache was written, so we just round-trip them.
-    if let Ok(compiled) = bundle_cache.load(cache_key)
+    if let Ok(compiled) = bundle_cache.load(&cache_key)
         && let Err(e) = cache.save(
-            cache_key,
+            &cache_key,
             &compiled.program,
             compiled.metadata.clone(),
             &compiled.function_mapping,
@@ -5758,7 +5938,7 @@ async fn load_bytecode_bundle(
     }
 
     cache
-        .load(cache_key)
+        .load(&cache_key)
         .map_err(|e| format!("Failed to load compiled bytecode: {}", e))
 }
 
@@ -8456,12 +8636,24 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn claimed_container_setup_obeys_shared_task_deadline() {
+    async fn claimed_task_setup_obeys_shared_task_deadline() {
         let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(20);
-        let result = await_container_setup(deadline, std::future::pending::<()>()).await;
+        let result = await_claimed_task_deadline(deadline, std::future::pending::<()>()).await;
         assert!(
             result.is_err(),
             "post-claim setup must not outlive the task's wall-clock deadline"
+        );
+    }
+
+    #[tokio::test]
+    async fn data_volume_creation_has_a_wall_clock_ceiling() {
+        assert!(
+            await_data_volume_create(
+                std::time::Duration::from_millis(20),
+                std::future::pending::<()>(),
+            )
+            .await
+            .is_err()
         );
     }
 
@@ -8535,6 +8727,47 @@ mod tests {
             .recv_timeout(std::time::Duration::from_secs(5))
             .unwrap();
         assert_eq!(slots.available_permits(), 1);
+    }
+
+    #[tokio::test]
+    async fn cancelled_blocking_setup_retains_execution_permit_until_real_exit() {
+        let slots = Arc::new(Semaphore::new(1));
+        let permit = slots.clone().acquire_owned().await.unwrap();
+        let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let (exited_tx, exited_rx) = tokio::sync::oneshot::channel();
+
+        let setup = run_blocking_with_execution_permit(permit, move || {
+            entered_tx.send(()).unwrap();
+            release_rx.recv().unwrap();
+            exited_tx.send(()).unwrap();
+        });
+        let timed_out = tokio::spawn(async move {
+            tokio::time::timeout(std::time::Duration::from_millis(20), setup).await
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(5), entered_rx)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(timed_out.await.unwrap().is_err());
+        assert_eq!(
+            slots.available_permits(),
+            0,
+            "cancelled compilation must remain counted while its thread lives"
+        );
+
+        release_tx.send(()).unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(5), exited_rx)
+            .await
+            .unwrap()
+            .unwrap();
+        for _ in 0..50 {
+            if slots.available_permits() == 1 {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        panic!("blocking setup permit was not released after the thread exited");
     }
 
     #[tokio::test]

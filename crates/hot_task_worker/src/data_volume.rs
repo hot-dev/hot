@@ -32,8 +32,30 @@
 //! The nonce keeps each invocation's `/data/` fully independent.
 
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use uuid::Uuid;
+
+/// A wedged kernel unmount can park a cleanup thread forever. Bound the
+/// number of such detached threads; excess cleanup is intentionally left for
+/// startup recovery instead of exhausting the process/thread limit.
+const MAX_DETACHED_CLEANUPS: usize = 16;
+static ACTIVE_DETACHED_CLEANUPS: AtomicUsize = AtomicUsize::new(0);
+
+fn try_reserve_detached_cleanup(counter: &AtomicUsize, limit: usize) -> bool {
+    counter
+        .fetch_update(Ordering::AcqRel, Ordering::Acquire, |active| {
+            (active < limit).then_some(active + 1)
+        })
+        .is_ok()
+}
+
+struct DetachedCleanupSlot;
+
+impl Drop for DetachedCleanupSlot {
+    fn drop(&mut self) {
+        ACTIVE_DETACHED_CLEANUPS.fetch_sub(1, Ordering::AcqRel);
+    }
+}
 
 #[derive(Debug)]
 pub struct DataVolume {
@@ -129,129 +151,10 @@ impl DataVolume {
 
         let backing_file = vol_dir.join("data.img");
         let mount_point = vol_dir.join("mnt");
-        tokio::fs::create_dir_all(&mount_point).await.map_err(|e| {
-            DataVolumeError::Io(format!("create mount {}: {}", mount_point.display(), e))
-        })?;
-
-        // Create sparse file
-        let size_bytes = size_mb * 1024 * 1024;
-        let output = tokio::process::Command::new("fallocate")
-            .args([
-                "-l",
-                &size_bytes.to_string(),
-                backing_file.to_string_lossy().as_ref(),
-            ])
-            .output()
-            .await;
-
-        if !output.as_ref().is_ok_and(|output| output.status.success()) {
-            // Fallback: truncate for systems without fallocate
-            let output = match tokio::process::Command::new("truncate")
-                .args([
-                    "-s",
-                    &size_bytes.to_string(),
-                    backing_file.to_string_lossy().as_ref(),
-                ])
-                .output()
-                .await
-            {
-                Ok(output) => output,
-                Err(e) => {
-                    let _ = tokio::fs::remove_dir_all(&vol_dir).await;
-                    return Err(DataVolumeError::Io(format!("truncate: {e}")));
-                }
-            };
-
-            if !output.status.success() {
-                let _ = tokio::fs::remove_dir_all(&vol_dir).await;
-                return Err(DataVolumeError::Io(format!(
-                    "failed to create backing file: {}",
-                    String::from_utf8_lossy(&output.stderr)
-                )));
-            }
-        }
-
-        // Format as ext4 (quiet, no journaling for perf)
-        let output = match tokio::process::Command::new("mkfs.ext4")
-            .args([
-                "-q",
-                "-O",
-                "^has_journal",
-                "-F",
-                backing_file.to_string_lossy().as_ref(),
-            ])
-            .output()
-            .await
-        {
-            Ok(output) => output,
-            Err(e) => {
-                let _ = tokio::fs::remove_dir_all(&vol_dir).await;
-                return Err(DataVolumeError::Format(e.to_string()));
-            }
-        };
-
-        if !output.status.success() {
-            let _ = tokio::fs::remove_dir_all(&vol_dir).await;
-            return Err(DataVolumeError::Format(
-                String::from_utf8_lossy(&output.stderr).to_string(),
-            ));
-        }
-
-        // Mount via loop device
-        let output = match tokio::process::Command::new("mount")
-            .args([
-                "-o",
-                "loop,nosuid,nodev,noexec",
-                backing_file.to_string_lossy().as_ref(),
-                mount_point.to_string_lossy().as_ref(),
-            ])
-            .output()
-            .await
-        {
-            Ok(output) => output,
-            Err(e) => {
-                let _ = tokio::fs::remove_dir_all(&vol_dir).await;
-                return Err(DataVolumeError::Mount(e.to_string()));
-            }
-        };
-
-        if !output.status.success() {
-            let _ = tokio::fs::remove_dir_all(&vol_dir).await;
-            return Err(DataVolumeError::Mount(
-                String::from_utf8_lossy(&output.stderr).to_string(),
-            ));
-        }
-
-        // Make writable by container user (nobody = 65534)
-        let output = match tokio::process::Command::new("chown")
-            .args(["65534:65534", mount_point.to_string_lossy().as_ref()])
-            .output()
-            .await
-        {
-            Ok(output) => output,
-            Err(e) => {
-                let _ = tokio::process::Command::new("umount")
-                    .arg(&mount_point)
-                    .output()
-                    .await;
-                let _ = tokio::fs::remove_dir_all(&vol_dir).await;
-                return Err(DataVolumeError::Io(format!("chown data volume: {e}")));
-            }
-        };
-
-        if !output.status.success() {
-            let _ = tokio::process::Command::new("umount")
-                .arg(&mount_point)
-                .output()
-                .await;
-            let _ = tokio::fs::remove_dir_all(&vol_dir).await;
-            return Err(DataVolumeError::Io(format!(
-                "chown data volume failed: {}",
-                String::from_utf8_lossy(&output.stderr)
-            )));
-        }
-
-        Ok(Self {
+        // Take ownership of cleanup as soon as the top-level directory
+        // exists. Every error return and cancellation after this point drops
+        // the guard and schedules removal of any partially-created resource.
+        let volume = Self {
             mount_point,
             backing_file,
             is_loop_mount: true,
@@ -260,7 +163,118 @@ impl DataVolume {
             drop_thread: None,
             #[cfg(test)]
             drop_join: None,
-        })
+        };
+        tokio::fs::create_dir_all(&volume.mount_point)
+            .await
+            .map_err(|e| {
+                DataVolumeError::Io(format!(
+                    "create mount {}: {}",
+                    volume.mount_point.display(),
+                    e
+                ))
+            })?;
+
+        // Create sparse file
+        let size_bytes = size_mb * 1024 * 1024;
+        let output = Self::killable_command("fallocate")
+            .args([
+                "-l",
+                &size_bytes.to_string(),
+                volume.backing_file.to_string_lossy().as_ref(),
+            ])
+            .output()
+            .await;
+
+        if !output.as_ref().is_ok_and(|output| output.status.success()) {
+            // Fallback: truncate for systems without fallocate
+            let output = match Self::killable_command("truncate")
+                .args([
+                    "-s",
+                    &size_bytes.to_string(),
+                    volume.backing_file.to_string_lossy().as_ref(),
+                ])
+                .output()
+                .await
+            {
+                Ok(output) => output,
+                Err(e) => return Err(DataVolumeError::Io(format!("truncate: {e}"))),
+            };
+
+            if !output.status.success() {
+                return Err(DataVolumeError::Io(format!(
+                    "failed to create backing file: {}",
+                    String::from_utf8_lossy(&output.stderr)
+                )));
+            }
+        }
+
+        // Format as ext4 (quiet, no journaling for perf)
+        let output = match Self::killable_command("mkfs.ext4")
+            .args([
+                "-q",
+                "-O",
+                "^has_journal",
+                "-F",
+                volume.backing_file.to_string_lossy().as_ref(),
+            ])
+            .output()
+            .await
+        {
+            Ok(output) => output,
+            Err(e) => return Err(DataVolumeError::Format(e.to_string())),
+        };
+
+        if !output.status.success() {
+            return Err(DataVolumeError::Format(
+                String::from_utf8_lossy(&output.stderr).to_string(),
+            ));
+        }
+
+        // Mount via loop device
+        let output = match Self::killable_command("mount")
+            .args([
+                "-o",
+                "loop,nosuid,nodev,noexec",
+                volume.backing_file.to_string_lossy().as_ref(),
+                volume.mount_point.to_string_lossy().as_ref(),
+            ])
+            .output()
+            .await
+        {
+            Ok(output) => output,
+            Err(e) => return Err(DataVolumeError::Mount(e.to_string())),
+        };
+
+        if !output.status.success() {
+            return Err(DataVolumeError::Mount(
+                String::from_utf8_lossy(&output.stderr).to_string(),
+            ));
+        }
+
+        // Make writable by container user (nobody = 65534)
+        let output = match Self::killable_command("chown")
+            .args(["65534:65534", volume.mount_point.to_string_lossy().as_ref()])
+            .output()
+            .await
+        {
+            Ok(output) => output,
+            Err(e) => return Err(DataVolumeError::Io(format!("chown data volume: {e}"))),
+        };
+
+        if !output.status.success() {
+            return Err(DataVolumeError::Io(format!(
+                "chown data volume failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            )));
+        }
+
+        Ok(volume)
+    }
+
+    fn killable_command(program: &str) -> tokio::process::Command {
+        let mut command = tokio::process::Command::new(program);
+        command.kill_on_drop(true);
+        command
     }
 
     /// Get the host-side mount point path (for bind-mounting into containers).
@@ -271,13 +285,13 @@ impl DataVolume {
     /// Explicitly clean up the volume.
     pub async fn cleanup(&self) {
         if self.is_loop_mount {
-            let unmounted = tokio::process::Command::new("umount")
+            let unmounted = Self::killable_command("umount")
                 .arg(self.mount_point.to_string_lossy().to_string())
                 .output()
                 .await
                 .is_ok_and(|output| output.status.success());
             if !unmounted {
-                let _ = tokio::process::Command::new("umount")
+                let _ = Self::killable_command("umount")
                     .args(["-l", self.mount_point.to_string_lossy().as_ref()])
                     .output()
                     .await;
@@ -339,9 +353,20 @@ impl DataVolume {
         >,
     ) -> Option<std::thread::JoinHandle<()>> {
         let mount_display = mount_point.display().to_string();
+        if !try_reserve_detached_cleanup(&ACTIVE_DETACHED_CLEANUPS, MAX_DETACHED_CLEANUPS) {
+            tracing::error!(
+                mount_point = %mount_display,
+                active_cleanups = ACTIVE_DETACHED_CLEANUPS.load(Ordering::Acquire),
+                max_cleanups = MAX_DETACHED_CLEANUPS,
+                "Detached data-volume cleanup limit reached; leaking mount until worker restart"
+            );
+            return None;
+        }
+        let slot = DetachedCleanupSlot;
         match std::thread::Builder::new()
             .name("hot-datavol-drop".to_string())
             .spawn(move || {
+                let _slot = slot;
                 #[cfg(test)]
                 if let Some(probe) = &drop_thread {
                     *probe.lock().unwrap() = Some(std::thread::current().id());
@@ -463,6 +488,17 @@ mod tests {
             drop_join: Some(std::sync::Arc::new(std::sync::Mutex::new(None))),
         };
         (mount_point, volume)
+    }
+
+    #[test]
+    fn detached_cleanup_reservations_are_bounded() {
+        let counter = AtomicUsize::new(0);
+        assert!(try_reserve_detached_cleanup(&counter, 2));
+        assert!(try_reserve_detached_cleanup(&counter, 2));
+        assert!(!try_reserve_detached_cleanup(&counter, 2));
+        assert_eq!(counter.load(Ordering::Acquire), 2);
+        counter.fetch_sub(1, Ordering::AcqRel);
+        assert!(try_reserve_detached_cleanup(&counter, 2));
     }
 
     #[tokio::test]

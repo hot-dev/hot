@@ -2786,9 +2786,14 @@ where
         Fut: Future<Output = Result<R, Box<dyn Error + Send + Sync>>> + Send,
         R: Send + Sync,
     {
+        // Leave the message id on the lease until processing and in-flight
+        // cleanup have both completed. Cancellation then runs `Drop`, which
+        // clears the local marker and leaves the stream entry pending for a
+        // later redelivery.
         let msg_id = self
             .msg_id
-            .take()
+            .as_ref()
+            .cloned()
             .expect("redis queue lease already completed");
         let payload = self
             .payload
@@ -2806,6 +2811,7 @@ where
             .await;
         self.queue.in_flight.lock().await.remove(&msg_id);
         self.queue.lease_completed.notify_one();
+        self.msg_id.take();
         self.completed = true;
         result
     }
@@ -3376,6 +3382,54 @@ mod tests {
         })
         .await
         .expect("dropped lease should clear in-flight marker");
+    }
+
+    #[tokio::test]
+    async fn cancelling_redis_lease_processing_clears_in_flight_marker() {
+        // This exercises cancellation after the lease has entered the worker,
+        // without requiring a live Redis server. No Redis command is issued
+        // until the worker returns.
+        let client = redis::Client::open("redis://127.0.0.1/").unwrap();
+        let queue_name = format!("test_stream_cancel_{}", Uuid::new_v4());
+        let queue = RedisStreamQueue::<i64>::new(client, queue_name);
+        let msg_id = "1-0".to_string();
+        queue.in_flight.lock().await.insert(msg_id.clone());
+        let lease = RedisQueueLease {
+            queue: queue.clone_for_lease(),
+            msg_id: Some(msg_id.clone()),
+            payload: Some(serialize(&7_i64, queue.serialization).unwrap()),
+            source: FetchSource::Fresh,
+            redelivered: false,
+            prior_deliveries: 0,
+            claimed_at: chrono::Utc::now(),
+            enqueued_at: None,
+            queue_wait: Duration::ZERO,
+            completed: false,
+        };
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+
+        let processing = tokio::spawn(async move {
+            lease
+                .process(|_| async move {
+                    let _ = started_tx.send(());
+                    std::future::pending::<Result<(), Box<dyn Error + Send + Sync>>>().await
+                })
+                .await
+        });
+        started_rx.await.unwrap();
+        processing.abort();
+        let _ = processing.await;
+
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                if !queue.in_flight.lock().await.contains(&msg_id) {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("cancelled lease should clear its in-flight marker");
     }
 
     #[tokio::test]

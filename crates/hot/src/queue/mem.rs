@@ -321,9 +321,14 @@ where
         Fut: Future<Output = Result<R, Box<dyn Error + Send + Sync>>> + Send,
         R: Send + Sync,
     {
+        // Keep the original delivery in the lease until processing reaches a
+        // terminal queue action. If this future is cancelled while the worker
+        // is running (or while a retry is being re-enqueued), `Drop` can then
+        // restore the delivery instead of silently losing it.
         let retry_item = self
             .retry_item
-            .take()
+            .as_ref()
+            .cloned()
             .expect("memory queue lease already completed");
         let item_for_worker = retry_item.item.clone();
         let next_retry_count = retry_item.retry_count + 1;
@@ -450,6 +455,7 @@ where
             }
         };
 
+        self.retry_item.take();
         self.completed = true;
         result
     }
@@ -1053,6 +1059,32 @@ mod tests {
             .unwrap();
 
         assert_eq!(got, Some(123));
+    }
+
+    #[tokio::test]
+    async fn cancelling_lease_processing_restores_item() {
+        let queue = MemQueue::<i32>::new(unique_name("tq")).unwrap();
+        queue.enqueue(456).await.unwrap();
+        let lease = queue.claim_blocking().await.unwrap();
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+
+        let processing = tokio::spawn(async move {
+            lease
+                .process(|_| async move {
+                    let _ = started_tx.send(());
+                    std::future::pending::<Result<(), Box<dyn Error + Send + Sync>>>().await
+                })
+                .await
+        });
+        started_rx.await.unwrap();
+        processing.abort();
+        let _ = processing.await;
+
+        let got = tokio::time::timeout(Duration::from_secs(1), queue.claim_blocking())
+            .await
+            .expect("cancelled delivery should be restored")
+            .unwrap();
+        assert_eq!(got.retry_item.as_ref().unwrap().item, 456);
     }
 
     #[tokio::test]

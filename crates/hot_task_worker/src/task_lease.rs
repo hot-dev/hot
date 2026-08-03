@@ -69,7 +69,7 @@ use std::fmt;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
-use tokio::sync::{Mutex, Notify};
+use tokio::sync::{Mutex, MutexGuard, Notify};
 use tokio::task::JoinHandle;
 use uuid::Uuid;
 
@@ -360,6 +360,9 @@ struct RedisLeaseInner {
     conn: Mutex<Option<RedisLeaseConn>>,
     /// Heartbeat cadence. Exposed for tests to drive sub-second.
     heartbeat_interval: Duration,
+    /// End-to-end ceiling for connection admission, connection creation,
+    /// and the Redis command itself.
+    command_timeout: Duration,
     /// Compiled Lua scripts (cached per process — `Script` interns the
     /// SHA1 and routes through `EVALSHA` with `EVAL` fallback automatically).
     extend_script: Script,
@@ -373,7 +376,44 @@ impl fmt::Debug for RedisLeaseInner {
             .field("worker_id", &self.worker_id)
             .field("key_prefix", &self.key_prefix)
             .field("heartbeat_interval", &self.heartbeat_interval)
+            .field("command_timeout", &self.command_timeout)
             .finish()
+    }
+}
+
+/// Clears a cached connection when a Redis operation fails or its enclosing
+/// timeout cancels the future. This is deliberately armed while the command is
+/// in flight: dropping a multiplexed command future leaves its server-side
+/// outcome unknown, so the connection must not be reused as if it were healthy.
+struct RedisLeaseConnectionGuard<'a> {
+    inner: MutexGuard<'a, Option<RedisLeaseConn>>,
+    clear_on_drop: bool,
+}
+
+impl<'a> RedisLeaseConnectionGuard<'a> {
+    fn new(inner: MutexGuard<'a, Option<RedisLeaseConn>>) -> Self {
+        Self {
+            inner,
+            clear_on_drop: true,
+        }
+    }
+
+    fn connection(&mut self) -> Result<&mut RedisLeaseConn, LeaseError> {
+        self.inner
+            .as_mut()
+            .ok_or_else(|| LeaseError::Redis("lease connection is unavailable".to_string()))
+    }
+
+    fn preserve(mut self) {
+        self.clear_on_drop = false;
+    }
+}
+
+impl Drop for RedisLeaseConnectionGuard<'_> {
+    fn drop(&mut self) {
+        if self.clear_on_drop {
+            *self.inner = None;
+        }
     }
 }
 
@@ -386,56 +426,55 @@ impl RedisLeaseInner {
         format!("{}:{}", self.worker_id, Uuid::new_v4())
     }
 
-    /// Get-or-establish the cached connection.
-    async fn ensure_connection(&self) -> Result<(), LeaseError> {
-        let mut guard = self.conn.lock().await;
-        if guard.is_some() {
-            return Ok(());
-        }
-        let new = tokio::time::timeout(REDIS_COMMAND_TIMEOUT, async {
-            Ok::<RedisLeaseConn, LeaseError>(match &self.client {
-                RedisLeaseClient::Standalone(c) => {
-                    // Disable redis-rs 1.x's 500ms default response timeout so a
-                    // lease `SET NX` / extend script isn't clipped under load and
-                    // spuriously deferred (which feeds the queue's retry budget).
-                    // See `hot::redis::standalone_async_config` for the rationale.
-                    let mc = c
-                        .get_multiplexed_async_connection_with_config(
-                            &hot::redis::standalone_async_config(),
-                        )
-                        .await?;
-                    RedisLeaseConn::Standalone(mc)
-                }
-                RedisLeaseClient::Cluster(c) => {
-                    let cc = c.get_async_connection().await?;
-                    RedisLeaseConn::Cluster(cc)
-                }
-            })
+    async fn connect(&self) -> Result<RedisLeaseConn, LeaseError> {
+        Ok(match &self.client {
+            RedisLeaseClient::Standalone(c) => {
+                // Disable redis-rs 1.x's 500ms default response timeout so a
+                // lease `SET NX` / extend script isn't clipped under load and
+                // spuriously deferred (which feeds the queue's retry budget).
+                // The outer operation timeout still bounds this connection.
+                let mc = c
+                    .get_multiplexed_async_connection_with_config(
+                        &hot::redis::standalone_async_config(),
+                    )
+                    .await?;
+                RedisLeaseConn::Standalone(mc)
+            }
+            RedisLeaseClient::Cluster(c) => {
+                let cc = c.get_async_connection().await?;
+                RedisLeaseConn::Cluster(cc)
+            }
         })
-        .await
-        .map_err(|_| LeaseError::Redis("connection timed out after 10s".to_string()))??;
-        *guard = Some(new);
-        Ok(())
     }
 
     async fn run_cmd(&self, cmd: &Cmd) -> Result<redis::Value, LeaseError> {
-        self.ensure_connection().await?;
-        let mut guard = self.conn.lock().await;
-        let conn = guard.as_mut().ok_or_else(|| {
-            LeaseError::Redis("connection vanished after ensure_connection".to_string())
-        })?;
-        match tokio::time::timeout(REDIS_COMMAND_TIMEOUT, conn.run_cmd(cmd)).await {
-            Err(_) => {
-                *guard = None;
-                Err(LeaseError::Redis("command timed out after 10s".to_string()))
+        let operation = async {
+            let mut guard = self.conn.lock().await;
+            if guard.is_none() {
+                *guard = Some(self.connect().await?);
             }
-            Ok(Ok(v)) => Ok(v),
-            Ok(Err(e)) => {
-                tracing::debug!(error = %e, "Lease Redis command failed; clearing cached connection");
-                *guard = None;
-                Err(e)
+            let mut guarded = RedisLeaseConnectionGuard::new(guard);
+            let result = guarded.connection()?.run_cmd(cmd).await;
+            match result {
+                Ok(value) => {
+                    guarded.preserve();
+                    Ok(value)
+                }
+                Err(error) => {
+                    tracing::debug!(error = %error, "Lease Redis command failed; clearing cached connection");
+                    Err(error)
+                }
             }
-        }
+        };
+
+        tokio::time::timeout(self.command_timeout, operation)
+            .await
+            .map_err(|_| {
+                LeaseError::Redis(format!(
+                    "Redis lease operation timed out after {}ms",
+                    self.command_timeout.as_millis()
+                ))
+            })?
     }
 
     async fn run_script(
@@ -444,24 +483,33 @@ impl RedisLeaseInner {
         keys: &[String],
         args: &[Vec<u8>],
     ) -> Result<redis::Value, LeaseError> {
-        self.ensure_connection().await?;
-        let mut guard = self.conn.lock().await;
-        let conn = guard.as_mut().ok_or_else(|| {
-            LeaseError::Redis("connection vanished after ensure_connection".to_string())
-        })?;
-        match tokio::time::timeout(REDIS_COMMAND_TIMEOUT, conn.run_script(script, keys, args)).await
-        {
-            Err(_) => {
-                *guard = None;
-                Err(LeaseError::Redis("script timed out after 10s".to_string()))
+        let operation = async {
+            let mut guard = self.conn.lock().await;
+            if guard.is_none() {
+                *guard = Some(self.connect().await?);
             }
-            Ok(Ok(v)) => Ok(v),
-            Ok(Err(e)) => {
-                tracing::debug!(error = %e, "Lease Redis script failed; clearing cached connection");
-                *guard = None;
-                Err(e)
+            let mut guarded = RedisLeaseConnectionGuard::new(guard);
+            let result = guarded.connection()?.run_script(script, keys, args).await;
+            match result {
+                Ok(value) => {
+                    guarded.preserve();
+                    Ok(value)
+                }
+                Err(error) => {
+                    tracing::debug!(error = %error, "Lease Redis script failed; clearing cached connection");
+                    Err(error)
+                }
             }
-        }
+        };
+
+        tokio::time::timeout(self.command_timeout, operation)
+            .await
+            .map_err(|_| {
+                LeaseError::Redis(format!(
+                    "Redis lease operation timed out after {}ms",
+                    self.command_timeout.as_millis()
+                ))
+            })?
     }
 
     /// Token-matched release. `Ok(true)` if we owned and deleted,
@@ -510,6 +558,7 @@ impl RedisTaskLease {
                 key_prefix: "hot:task:lease:".to_string(),
                 conn: Mutex::new(None),
                 heartbeat_interval: DEFAULT_HEARTBEAT_INTERVAL,
+                command_timeout: REDIS_COMMAND_TIMEOUT,
                 extend_script: Script::new(EXTEND_SCRIPT),
                 release_script: Script::new(RELEASE_SCRIPT),
             }),
@@ -526,6 +575,7 @@ impl RedisTaskLease {
                 key_prefix: "{hot:task}:lease:".to_string(),
                 conn: Mutex::new(None),
                 heartbeat_interval: DEFAULT_HEARTBEAT_INTERVAL,
+                command_timeout: REDIS_COMMAND_TIMEOUT,
                 extend_script: Script::new(EXTEND_SCRIPT),
                 release_script: Script::new(RELEASE_SCRIPT),
             }),
@@ -557,6 +607,15 @@ impl RedisTaskLease {
         let inner =
             Arc::get_mut(&mut self.inner).expect("with_heartbeat_interval before any clone/spawn");
         inner.heartbeat_interval = interval;
+        self
+    }
+
+    /// Override the end-to-end Redis operation timeout (test hook).
+    #[cfg(test)]
+    pub(crate) fn with_command_timeout(mut self, timeout: Duration) -> Self {
+        let inner =
+            Arc::get_mut(&mut self.inner).expect("with_command_timeout before any clone/spawn");
+        inner.command_timeout = timeout;
         self
     }
 
@@ -697,6 +756,29 @@ mod tests {
     async fn cleanup_key(lease: &RedisTaskLease, task_id: &Uuid) {
         let key = lease.inner.key_for(task_id);
         let _ = lease.inner.run_cmd(redis::cmd("DEL").arg(&key)).await;
+    }
+
+    #[tokio::test]
+    async fn redis_operation_timeout_includes_connection_mutex_wait() {
+        // No live Redis is needed: deliberately hold the shared connection
+        // mutex and verify admission to it is covered by the operation ceiling.
+        let client = redis::Client::open("redis://127.0.0.1/").unwrap();
+        let lease = RedisTaskLease::standalone(client, "timeout-test".to_string())
+            .with_command_timeout(Duration::from_millis(30));
+        let _held = lease.inner.conn.lock().await;
+
+        let started = tokio::time::Instant::now();
+        let error = lease
+            .inner
+            .run_cmd(&redis::cmd("PING"))
+            .await
+            .expect_err("mutex contention must time out");
+
+        assert!(
+            started.elapsed() < Duration::from_millis(250),
+            "mutex wait escaped the Redis operation ceiling"
+        );
+        assert!(error.to_string().contains("timed out after 30ms"));
     }
 
     #[tokio::test]

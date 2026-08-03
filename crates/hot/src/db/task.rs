@@ -139,6 +139,26 @@ pub struct Task {
     pub origin_run_fn: Option<String>,
 }
 
+/// Result of atomically terminalizing an infrastructure-interrupted task and
+/// making its recovery durable in the same database transaction.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum InfraRetryFinalizeOutcome {
+    RetryReady {
+        retry_task_id: Uuid,
+        retry_attempt: i16,
+        infra_retry_count: i16,
+        /// True only for the transaction that inserted this child. A false
+        /// value means a prior writer already made it durable; the queued-row
+        /// reconciler owns recovery and callers must not duplicate its XADD.
+        should_enqueue: bool,
+        duration_ms: Option<i64>,
+    },
+    Exhausted {
+        duration_ms: Option<i64>,
+    },
+    AlreadyTerminal,
+}
+
 const TASK_ORIGIN_FN_PG: &str = "\
     COALESCE(\
         origin_e.event_data->>'fn', \
@@ -360,6 +380,240 @@ impl Task {
             }
         };
         Ok(rows_affected == 1)
+    }
+
+    /// Atomically fail an interrupted queued/running task and either create
+    /// its budget-exempt retry child or persist an honest exhausted result.
+    ///
+    /// The retry row is inserted before the original becomes terminal, in the
+    /// same transaction. Therefore a child-insert failure rolls back the
+    /// terminal write, while an ambiguous client timeout can only leave one
+    /// of two recoverable states: neither write committed, or both committed
+    /// (with the queued-row reconciler able to enqueue the durable child).
+    #[allow(clippy::too_many_arguments)]
+    pub async fn finalize_with_infra_retry(
+        db: &crate::db::DatabasePool,
+        task_id: &Uuid,
+        new_task_id: &Uuid,
+        max_generations: i16,
+        retry_error: &serde_json::Value,
+        exhausted_error: &serde_json::Value,
+        next_retry_at: DateTime<Utc>,
+    ) -> Result<InfraRetryFinalizeOutcome, TaskError> {
+        let queued_id = TaskStatus::Queued.as_id();
+        let running_id = TaskStatus::Running.as_id();
+        let failed_id = TaskStatus::Failed.as_id();
+        let now = Utc::now();
+
+        match db {
+            crate::db::DatabasePool::Postgres(pool) => {
+                let mut tx = pool.begin().await?;
+                let row = sqlx::query_as::<_, (i16, i16, i16)>(
+                    "SELECT task_status_id, retry_attempt, infra_retry_count FROM task WHERE task_id = $1 FOR UPDATE",
+                )
+                .bind(task_id)
+                .fetch_optional(&mut *tx)
+                .await?
+                .ok_or(TaskError::NotFound)?;
+                if row.0 != queued_id && row.0 != running_id {
+                    tx.rollback().await?;
+                    return Ok(InfraRetryFinalizeOutcome::AlreadyTerminal);
+                }
+
+                if row.2 >= max_generations {
+                    let duration_ms = sqlx::query_scalar::<_, Option<i64>>(
+                        r#"UPDATE task SET
+                               task_status_id = $1,
+                               stop_time = $2,
+                               duration_ms = COALESCE((EXTRACT(EPOCH FROM ($2 - start_time)) * 1000)::bigint, 0),
+                               result = $3
+                           WHERE task_id = $4 AND task_status_id IN ($5, $6)
+                           RETURNING duration_ms"#,
+                    )
+                    .bind(failed_id)
+                    .bind(now)
+                    .bind(exhausted_error)
+                    .bind(task_id)
+                    .bind(queued_id)
+                    .bind(running_id)
+                    .fetch_one(&mut *tx)
+                    .await?;
+                    tx.commit().await?;
+                    return Ok(InfraRetryFinalizeOutcome::Exhausted { duration_ms });
+                }
+
+                let next_count = row.2.saturating_add(1);
+                let inserted = sqlx::query_scalar::<_, Uuid>(
+                    r#"INSERT INTO task (
+                           task_id, env_id, stream_id, build_id, origin_run_id,
+                           parent_task_id, task_status_id, function_name, args,
+                           options, task_type, timeout_ms, retry_attempt,
+                           infra_retry_count, next_retry_at, by_user_id
+                       )
+                       SELECT $1, env_id, stream_id, build_id, origin_run_id,
+                              task_id, $2, function_name, args, options,
+                              task_type, timeout_ms, retry_attempt, $3, $4, by_user_id
+                       FROM task WHERE task_id = $5
+                       ON CONFLICT (parent_task_id, retry_attempt)
+                           WHERE parent_task_id IS NOT NULL DO NOTHING
+                       RETURNING task_id"#,
+                )
+                .bind(new_task_id)
+                .bind(queued_id)
+                .bind(next_count)
+                .bind(next_retry_at)
+                .bind(task_id)
+                .fetch_optional(&mut *tx)
+                .await?;
+                let should_enqueue = inserted.is_some();
+                let retry_task_id = match inserted {
+                    Some(id) => id,
+                    None => sqlx::query_scalar::<_, Uuid>(
+                        "SELECT task_id FROM task WHERE parent_task_id = $1 AND retry_attempt = $2",
+                    )
+                    .bind(task_id)
+                    .bind(row.1)
+                    .fetch_one(&mut *tx)
+                    .await?,
+                };
+                let duration_ms = sqlx::query_scalar::<_, Option<i64>>(
+                    r#"UPDATE task SET
+                           task_status_id = $1,
+                           stop_time = $2,
+                           duration_ms = COALESCE((EXTRACT(EPOCH FROM ($2 - start_time)) * 1000)::bigint, 0),
+                           result = $3
+                       WHERE task_id = $4 AND task_status_id IN ($5, $6)
+                       RETURNING duration_ms"#,
+                )
+                .bind(failed_id)
+                .bind(now)
+                .bind(retry_error)
+                .bind(task_id)
+                .bind(queued_id)
+                .bind(running_id)
+                .fetch_one(&mut *tx)
+                .await?;
+                tx.commit().await?;
+                Ok(InfraRetryFinalizeOutcome::RetryReady {
+                    retry_task_id,
+                    retry_attempt: row.1,
+                    infra_retry_count: next_count,
+                    should_enqueue,
+                    duration_ms,
+                })
+            }
+            crate::db::DatabasePool::Sqlite(pool) => {
+                let mut tx = pool.begin().await?;
+                let row = sqlx::query_as::<_, (i16, i16, i16)>(
+                    "SELECT task_status_id, retry_attempt, infra_retry_count FROM task WHERE task_id = ?",
+                )
+                .bind(task_id)
+                .fetch_optional(&mut *tx)
+                .await?
+                .ok_or(TaskError::NotFound)?;
+                if row.0 != queued_id && row.0 != running_id {
+                    tx.rollback().await?;
+                    return Ok(InfraRetryFinalizeOutcome::AlreadyTerminal);
+                }
+
+                let retry_error = serde_json::to_string(retry_error).unwrap_or_default();
+                let exhausted_error = serde_json::to_string(exhausted_error).unwrap_or_default();
+                if row.2 >= max_generations {
+                    sqlx::query(
+                        r#"UPDATE task SET
+                               task_status_id = ?, stop_time = ?,
+                               duration_ms = COALESCE(CAST((julianday(?) - julianday(start_time)) * 86400000 AS INTEGER), 0),
+                               result = ?
+                           WHERE task_id = ? AND task_status_id IN (?, ?)"#,
+                    )
+                    .bind(failed_id)
+                    .bind(now)
+                    .bind(now)
+                    .bind(exhausted_error)
+                    .bind(task_id)
+                    .bind(queued_id)
+                    .bind(running_id)
+                    .execute(&mut *tx)
+                    .await?;
+                    let duration_ms = sqlx::query_scalar::<_, Option<i64>>(
+                        "SELECT duration_ms FROM task WHERE task_id = ?",
+                    )
+                    .bind(task_id)
+                    .fetch_one(&mut *tx)
+                    .await?;
+                    tx.commit().await?;
+                    return Ok(InfraRetryFinalizeOutcome::Exhausted { duration_ms });
+                }
+
+                let next_count = row.2.saturating_add(1);
+                let created_at = Utc::now();
+                let inserted = sqlx::query(
+                    r#"INSERT INTO task (
+                           task_id, env_id, stream_id, build_id, origin_run_id,
+                           parent_task_id, task_status_id, function_name, args,
+                           options, task_type, timeout_ms, retry_attempt,
+                           infra_retry_count, next_retry_at, by_user_id, created_at
+                       )
+                       SELECT ?, env_id, stream_id, build_id, origin_run_id,
+                              task_id, ?, function_name, args, options,
+                              task_type, timeout_ms, retry_attempt, ?, ?, by_user_id, ?
+                       FROM task WHERE task_id = ?
+                       ON CONFLICT (parent_task_id, retry_attempt)
+                           WHERE parent_task_id IS NOT NULL DO NOTHING"#,
+                )
+                .bind(new_task_id)
+                .bind(queued_id)
+                .bind(next_count)
+                .bind(next_retry_at)
+                .bind(created_at)
+                .bind(task_id)
+                .execute(&mut *tx)
+                .await?
+                .rows_affected()
+                    == 1;
+                let retry_task_id = if inserted {
+                    *new_task_id
+                } else {
+                    sqlx::query_scalar::<_, Uuid>(
+                        "SELECT task_id FROM task WHERE parent_task_id = ? AND retry_attempt = ?",
+                    )
+                    .bind(task_id)
+                    .bind(row.1)
+                    .fetch_one(&mut *tx)
+                    .await?
+                };
+                sqlx::query(
+                    r#"UPDATE task SET
+                           task_status_id = ?, stop_time = ?,
+                           duration_ms = COALESCE(CAST((julianday(?) - julianday(start_time)) * 86400000 AS INTEGER), 0),
+                           result = ?
+                       WHERE task_id = ? AND task_status_id IN (?, ?)"#,
+                )
+                .bind(failed_id)
+                .bind(now)
+                .bind(now)
+                .bind(retry_error)
+                .bind(task_id)
+                .bind(queued_id)
+                .bind(running_id)
+                .execute(&mut *tx)
+                .await?;
+                let duration_ms = sqlx::query_scalar::<_, Option<i64>>(
+                    "SELECT duration_ms FROM task WHERE task_id = ?",
+                )
+                .bind(task_id)
+                .fetch_one(&mut *tx)
+                .await?;
+                tx.commit().await?;
+                Ok(InfraRetryFinalizeOutcome::RetryReady {
+                    retry_task_id,
+                    retry_attempt: row.1,
+                    infra_retry_count: next_count,
+                    should_enqueue: inserted,
+                    duration_ms,
+                })
+            }
+        }
     }
 
     /// Mark a task as running and set start_time.
@@ -3470,6 +3724,80 @@ mod tests {
             Task::get_count_by_env(&db, &parent.env_id).await.unwrap(),
             2
         );
+    }
+
+    #[tokio::test]
+    async fn finalize_with_infra_retry_rolls_back_terminal_write_when_child_insert_fails() {
+        let db = crate::db::test_db().await;
+        let parent = insert_parent_task(&db).await;
+        assert!(Task::mark_running(&db, &parent.task_id).await.unwrap());
+        let retry_error = serde_json::json!({"msg": "will retry"});
+        let exhausted_error = serde_json::json!({"msg": "exhausted"});
+
+        // Reusing the parent's id forces the retry INSERT to violate the task
+        // primary key. The original must remain running because both writes
+        // belong to one transaction.
+        assert!(
+            Task::finalize_with_infra_retry(
+                &db,
+                &parent.task_id,
+                &parent.task_id,
+                3,
+                &retry_error,
+                &exhausted_error,
+                Utc::now(),
+            )
+            .await
+            .is_err()
+        );
+
+        let unchanged = Task::get(&db, &parent.task_id).await.unwrap();
+        assert_eq!(unchanged.task_status_id, TaskStatus::Running.as_id());
+        assert!(unchanged.result.is_none());
+        assert_eq!(
+            Task::get_count_by_env(&db, &parent.env_id).await.unwrap(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn finalize_with_infra_retry_commits_terminal_and_child_together() {
+        let db = crate::db::test_db().await;
+        let parent = insert_parent_task(&db).await;
+        assert!(Task::mark_running(&db, &parent.task_id).await.unwrap());
+        let child_id = Uuid::now_v7();
+        let retry_error = serde_json::json!({"msg": "will retry"});
+        let exhausted_error = serde_json::json!({"msg": "exhausted"});
+
+        let outcome = Task::finalize_with_infra_retry(
+            &db,
+            &parent.task_id,
+            &child_id,
+            3,
+            &retry_error,
+            &exhausted_error,
+            Utc::now(),
+        )
+        .await
+        .unwrap();
+        assert!(matches!(
+            outcome,
+            InfraRetryFinalizeOutcome::RetryReady {
+                retry_task_id,
+                should_enqueue: true,
+                ..
+            } if retry_task_id == child_id
+        ));
+        assert_eq!(
+            Task::get(&db, &parent.task_id)
+                .await
+                .unwrap()
+                .task_status_id,
+            TaskStatus::Failed.as_id()
+        );
+        let child = Task::get(&db, &child_id).await.unwrap();
+        assert_eq!(child.parent_task_id, Some(parent.task_id));
+        assert_eq!(child.infra_retry_count, 1);
     }
 
     #[tokio::test]
