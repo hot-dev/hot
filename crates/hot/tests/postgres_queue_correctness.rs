@@ -15,6 +15,11 @@ use sqlx::Executor;
 use std::error::Error;
 use uuid::Uuid;
 
+// The Postgres tests intentionally exercise destructive schema reset and
+// teardown against one dedicated database. Rust runs tests in this binary in
+// parallel by default, so serialize the tests that share that schema.
+static POSTGRES_SCHEMA_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 async fn external_schema_dependencies(pool: &sqlx::PgPool, schema: &str) -> Vec<String> {
     sqlx::query_scalar(
         "WITH dependency_objects AS ( \
@@ -247,6 +252,7 @@ async fn cleanup_redis_queue(client: &redis::Client, queue_name: &str) {
 
 #[tokio::test]
 async fn postgres_task_lifecycle_smoke() {
+    let _schema_guard = POSTGRES_SCHEMA_TEST_LOCK.lock().await;
     let Some((db, schema)) = postgres_db().await else {
         return;
     };
@@ -601,6 +607,7 @@ async fn postgres_task_lifecycle_smoke() {
 
 #[tokio::test]
 async fn postgres_shutdown_finalize_is_atomic_with_retry_child() {
+    let _schema_guard = POSTGRES_SCHEMA_TEST_LOCK.lock().await;
     let Some((db, schema)) = postgres_db().await else {
         return;
     };
