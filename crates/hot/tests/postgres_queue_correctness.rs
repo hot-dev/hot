@@ -15,6 +15,83 @@ use sqlx::Executor;
 use std::error::Error;
 use uuid::Uuid;
 
+async fn external_schema_dependencies(pool: &sqlx::PgPool, schema: &str) -> Vec<String> {
+    sqlx::query_scalar(
+        "WITH dependency_objects AS ( \
+             SELECT d.classid, d.objid, dependent.type, \
+                    dependent.schema AS dependent_schema, dependent.identity, \
+                    referenced.schema AS referenced_schema \
+             FROM pg_depend AS d \
+             CROSS JOIN LATERAL pg_identify_object(\
+                 d.refclassid, d.refobjid, d.refobjsubid\
+             ) AS referenced \
+             CROSS JOIN LATERAL pg_identify_object(\
+                 d.classid, d.objid, d.objsubid\
+             ) AS dependent \
+         ) \
+         SELECT identity FROM dependency_objects \
+          WHERE referenced_schema = $1 \
+            AND dependent_schema IS NOT NULL \
+            AND dependent_schema <> $1 \
+            AND dependent_schema <> 'information_schema' \
+            AND dependent_schema NOT LIKE 'pg_%' \
+         UNION \
+         SELECT dependency_objects.identity \
+           FROM dependency_objects \
+           JOIN pg_rewrite ON dependency_objects.classid = 'pg_rewrite'::regclass \
+                          AND dependency_objects.objid = pg_rewrite.oid \
+           JOIN pg_class owner_class ON owner_class.oid = pg_rewrite.ev_class \
+           JOIN pg_namespace owner_namespace ON owner_namespace.oid = owner_class.relnamespace \
+          WHERE dependency_objects.referenced_schema = $1 \
+            AND owner_namespace.nspname <> $1 \
+            AND owner_namespace.nspname NOT LIKE 'pg_%' \
+         UNION \
+         SELECT dependency_objects.identity \
+           FROM dependency_objects \
+           JOIN pg_attrdef ON dependency_objects.classid = 'pg_attrdef'::regclass \
+                          AND dependency_objects.objid = pg_attrdef.oid \
+           JOIN pg_class owner_class ON owner_class.oid = pg_attrdef.adrelid \
+           JOIN pg_namespace owner_namespace ON owner_namespace.oid = owner_class.relnamespace \
+          WHERE dependency_objects.referenced_schema = $1 \
+            AND owner_namespace.nspname <> $1 \
+            AND owner_namespace.nspname NOT LIKE 'pg_%' \
+         UNION \
+         SELECT dependency_objects.identity \
+           FROM dependency_objects \
+           JOIN pg_trigger ON dependency_objects.classid = 'pg_trigger'::regclass \
+                          AND dependency_objects.objid = pg_trigger.oid \
+           JOIN pg_class owner_class ON owner_class.oid = pg_trigger.tgrelid \
+           JOIN pg_namespace owner_namespace ON owner_namespace.oid = owner_class.relnamespace \
+          WHERE dependency_objects.referenced_schema = $1 \
+            AND owner_namespace.nspname <> $1 \
+            AND owner_namespace.nspname NOT LIKE 'pg_%' \
+         UNION \
+         SELECT dependency_objects.identity \
+           FROM dependency_objects \
+           JOIN pg_policy ON dependency_objects.classid = 'pg_policy'::regclass \
+                         AND dependency_objects.objid = pg_policy.oid \
+           JOIN pg_class owner_class ON owner_class.oid = pg_policy.polrelid \
+           JOIN pg_namespace owner_namespace ON owner_namespace.oid = owner_class.relnamespace \
+          WHERE dependency_objects.referenced_schema = $1 \
+            AND owner_namespace.nspname <> $1 \
+            AND owner_namespace.nspname NOT LIKE 'pg_%' \
+         ORDER BY 1",
+    )
+    .bind(schema)
+    .fetch_all(pool)
+    .await
+    .expect("cross-schema dependencies should be queryable")
+}
+
+async fn assert_schema_drop_isolated(pool: &sqlx::PgPool, schema: &str) {
+    let dependencies = external_schema_dependencies(pool, schema).await;
+    assert!(
+        dependencies.is_empty(),
+        "refusing to DROP SCHEMA `{schema}` CASCADE because objects outside the schema depend on it: {}",
+        dependencies.join(", ")
+    );
+}
+
 async fn reset_schema_if_requested(uri: &str, schema: &str) {
     if std::env::var("HOT_TEST_POSTGRES_RESET_SCHEMA").as_deref() != Ok("1") {
         return;
@@ -59,35 +136,11 @@ async fn reset_schema_if_requested(uri: &str, schema: &str) {
         }
     }
 
-    // Even when the extensions live inside the test schema, dropping it would
-    // cascade onto any column elsewhere in the database that uses an
-    // extension-owned type (e.g. a `vector` column on a `public` table). That
-    // happens when a pre-fix harness relocated shared extensions into the test
-    // schema. Refuse rather than destroy those columns.
-    let dependent_columns: i64 = sqlx::query_scalar(
-        "SELECT count(*) FROM pg_attribute a \
-         JOIN pg_class c ON c.oid = a.attrelid \
-         JOIN pg_namespace cn ON cn.oid = c.relnamespace \
-         JOIN pg_type t ON t.oid = a.atttypid \
-         JOIN pg_depend d ON d.objid = t.oid AND d.deptype = 'e' \
-         JOIN pg_extension e ON e.oid = d.refobjid \
-         WHERE e.extname IN ('vector', 'pg_trgm') \
-           AND cn.nspname <> $1 \
-           AND a.attnum > 0 \
-           AND NOT a.attisdropped",
-    )
-    .bind(schema)
-    .fetch_one(&pool)
-    .await
-    .expect("extension-dependent columns should be queryable");
-    if dependent_columns > 0 {
-        panic!(
-            "{} column(s) outside the test schema `{}` use types owned by the `vector`/`pg_trgm` \
-             extensions; `DROP SCHEMA {} CASCADE` would drop those columns along with the \
-             extensions. This test needs a dedicated database. Refusing to reset a shared one.",
-            dependent_columns, schema, schema
-        );
-    }
+    // Check the complete catalog dependency graph, not just extension-owned
+    // column types. Views, foreign keys, functions, and indexes using an
+    // extension operator class can all live outside this schema yet be
+    // cascade-dropped with it.
+    assert_schema_drop_isolated(&pool, schema).await;
 
     pool.execute(sqlx::AssertSqlSafe(format!(
         "drop schema if exists {} cascade",
@@ -141,6 +194,7 @@ async fn drop_schema(db: &DatabasePool, schema: &str) {
     }
 
     if let DatabasePool::Postgres(pool) = db {
+        assert_schema_drop_isolated(pool, schema).await;
         let _ = pool
             .execute(sqlx::AssertSqlSafe(format!(
                 "drop schema if exists {} cascade",
@@ -440,6 +494,42 @@ async fn postgres_task_lifecycle_smoke() {
         assert!(task.stop_time.is_some());
 
         cleanup_redis_queue(&redis_client, &queue_name).await;
+    }
+
+    if let DatabasePool::Postgres(pool) = &db {
+        pool.execute("CREATE VIEW public.hot_reset_guard_view AS SELECT task_id FROM hot.task")
+            .await
+            .expect("cross-schema probe view should create");
+        pool.execute("CREATE TABLE public.hot_reset_guard_text (value text)")
+            .await
+            .expect("cross-schema probe table should create");
+        pool.execute(
+            "CREATE INDEX hot_reset_guard_trgm_idx ON public.hot_reset_guard_text \
+             USING gin (value hot.gin_trgm_ops)",
+        )
+        .await
+        .expect("cross-schema pg_trgm probe index should create");
+
+        let dependencies = external_schema_dependencies(pool, &schema).await;
+        assert!(
+            dependencies
+                .iter()
+                .any(|identity| identity.contains("hot_reset_guard_view")),
+            "the reset guard must detect a public view depending on hot: {dependencies:?}"
+        );
+        assert!(
+            dependencies
+                .iter()
+                .any(|identity| identity.contains("hot_reset_guard_trgm_idx")),
+            "the reset guard must detect a public index using hot.gin_trgm_ops: {dependencies:?}"
+        );
+
+        pool.execute("DROP VIEW public.hot_reset_guard_view")
+            .await
+            .expect("probe view should drop");
+        pool.execute("DROP TABLE public.hot_reset_guard_text")
+            .await
+            .expect("probe table should drop");
     }
 
     drop_schema(&db, &schema).await;

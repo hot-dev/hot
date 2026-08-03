@@ -264,6 +264,35 @@ async fn remove_container_with_timeout(
     }
 }
 
+/// Run best-effort cleanup behind a hard wall-clock ceiling. Cleanup talks to
+/// the same runtime services that may have caused the execution timeout, so it
+/// must never become an unbounded second wait after the primary deadline.
+async fn bounded_cleanup<F>(deadline: std::time::Duration, cleanup: F) -> bool
+where
+    F: std::future::Future<Output = ()>,
+{
+    tokio::time::timeout(deadline, cleanup).await.is_ok()
+}
+
+async fn await_container_setup<F>(
+    deadline: tokio::time::Instant,
+    setup: F,
+) -> Result<F::Output, tokio::time::error::Elapsed>
+where
+    F: std::future::Future,
+{
+    tokio::time::timeout_at(deadline, setup).await
+}
+
+async fn cleanup_data_volume_with_timeout(task_id: &Uuid, volume: data_volume::DataVolume) {
+    if tokio::time::timeout(CONTAINER_KILL_TIMEOUT, volume.cleanup())
+        .await
+        .is_err()
+    {
+        tracing::error!(task_id = %task_id, "data volume cleanup timed out — backing file may leak");
+    }
+}
+
 /// Ensure a Linux hotbox binary is available for bind-mounting into Docker
 /// containers. On non-Linux local development hosts, this cross-compiles
 /// `hotbox` automatically when the binary is missing or stale.
@@ -2206,6 +2235,60 @@ async fn process_task(
     result
 }
 
+#[allow(clippy::too_many_arguments)]
+async fn finish_container_setup_timeout<G: Send>(
+    db: &DatabasePool,
+    stream_publisher: &StreamPubSub,
+    task_id: &Uuid,
+    env_id: Uuid,
+    stream_id: Uuid,
+    org_id: Option<Uuid>,
+    function_name: &str,
+    task_type: &str,
+    worker_id: &str,
+    phase: &str,
+    file_server_handle: Option<file_server::FileServerHandle>,
+    data_volume: Option<data_volume::DataVolume>,
+    resource_guard: G,
+) {
+    // Release shared admission capacity before doing best-effort persistence
+    // and cleanup so a slow dependency cannot amplify the timeout into
+    // process-wide head-of-line blocking.
+    drop(resource_guard);
+
+    let error = task_failure_json(
+        &format!("Container task timed out during {phase}"),
+        Some(serde_json::json!({"phase": phase})),
+    );
+    let persisted = complete_task_with_event(
+        db,
+        stream_publisher,
+        task_id,
+        env_id,
+        stream_id,
+        function_name,
+        task_type,
+        TaskStatus::TimedOut,
+        Some(&error),
+        Some(worker_id),
+    )
+    .await;
+    if persisted {
+        publish_task_alert(db, org_id, env_id, task_id, "task:failed", &error).await;
+    }
+
+    if let Some(handle) = file_server_handle
+        && tokio::time::timeout(CONTAINER_KILL_TIMEOUT, handle.shutdown())
+            .await
+            .is_err()
+    {
+        tracing::warn!(task_id = %task_id, "file_server shutdown timed out after setup deadline");
+    }
+    if let Some(volume) = data_volume {
+        cleanup_data_volume_with_timeout(task_id, volume).await;
+    }
+}
+
 /// Execute a container task (task_type == "container").
 /// Resolves limits, performs quota checks, acquires resources, then dispatches.
 #[allow(clippy::too_many_arguments)]
@@ -2574,15 +2657,13 @@ async fn process_container_task(
         }
     }
 
-    emit_task_started(
-        &stream_publisher,
-        task_id,
-        env_id,
-        stream_id,
-        &function_name,
-        &request.task_type,
-    )
-    .await;
+    // The user-visible timeout starts once this worker owns the task. Every
+    // post-claim setup operation and the container runtime share this one
+    // deadline, so storage/file-server preparation cannot pin a running row
+    // outside the advertised task budget.
+    let total_timeout = std::time::Duration::from_millis(timeout_ms);
+    let start = std::time::Instant::now();
+    let task_deadline = tokio::time::Instant::now() + total_timeout;
 
     let trace_id = request.task_id.clone();
 
@@ -2599,24 +2680,59 @@ async fn process_container_task(
         .as_deref()
         .and_then(|s| Uuid::parse_str(s).ok());
 
-    if let Err(e) = hot::db::run::Run::ensure_run_exists(
-        &db,
-        &run_id,
-        &env_id,
-        &stream_id,
-        Some(&build_id),
-        hot::db::run::RunType::Task.as_id(),
-        origin_run_id.as_ref(),
-        &user_id,
-        org_id.as_ref(),
-    )
-    .await
-    {
-        tracing::warn!(task_id = %task_id, run_id = %run_id, "Failed to ensure container task run exists: {}", e);
-    }
+    let durable_setup = async {
+        emit_task_started(
+            &stream_publisher,
+            task_id,
+            env_id,
+            stream_id,
+            &function_name,
+            &request.task_type,
+        )
+        .await;
 
-    if let Err(e) = Task::set_run_id(&db, &task_id, &run_id).await {
-        tracing::warn!(task_id = %task_id, run_id = %run_id, "Failed to set container task run_id: {}", e);
+        if let Err(e) = hot::db::run::Run::ensure_run_exists(
+            &db,
+            &run_id,
+            &env_id,
+            &stream_id,
+            Some(&build_id),
+            hot::db::run::RunType::Task.as_id(),
+            origin_run_id.as_ref(),
+            &user_id,
+            org_id.as_ref(),
+        )
+        .await
+        {
+            tracing::warn!(task_id = %task_id, run_id = %run_id, "Failed to ensure container task run exists: {}", e);
+        }
+
+        if let Err(e) = Task::set_run_id(&db, &task_id, &run_id).await {
+            tracing::warn!(task_id = %task_id, run_id = %run_id, "Failed to set container task run_id: {}", e);
+        }
+    };
+    if await_container_setup(task_deadline, durable_setup)
+        .await
+        .is_err()
+    {
+        tracing::error!(task_id = %task_id, "Container task setup timed out while creating its run record");
+        finish_container_setup_timeout(
+            &db,
+            &stream_publisher,
+            &task_id,
+            env_id,
+            stream_id,
+            org_id,
+            &function_name,
+            &request.task_type,
+            &worker_id,
+            "durable run setup",
+            None,
+            data_volume,
+            resource_guard,
+        )
+        .await;
+        return Ok(());
     }
 
     // -- Start per-task file server for hotbox CLI access --
@@ -2629,21 +2745,24 @@ async fn process_container_task(
     };
 
     let file_server_handle = if !is_kata {
-        match start_file_server_for_task(
-            &task_id,
-            &data_vol_base,
-            org_id,
-            env_id,
-            user_id,
-            Some(run_id),
-            &db,
-            &worker_conf,
-            executor.backend(),
+        match await_container_setup(
+            task_deadline,
+            start_file_server_for_task(
+                &task_id,
+                &data_vol_base,
+                org_id,
+                env_id,
+                user_id,
+                Some(run_id),
+                &db,
+                &worker_conf,
+                executor.backend(),
+            ),
         )
         .await
         {
-            Ok(handle) => Some(handle),
-            Err(e) => {
+            Ok(Ok(handle)) => Some(handle),
+            Ok(Err(e)) => {
                 tracing::error!("File server start failed: {}", e);
                 let error = task_failure_json(
                     "File server failed to start — container cannot access hot:// storage",
@@ -2669,8 +2788,28 @@ async fn process_container_task(
                 }
                 drop(resource_guard);
                 if let Some(vol) = data_volume {
-                    vol.cleanup().await;
+                    cleanup_data_volume_with_timeout(&task_id, vol).await;
                 }
+                return Ok(());
+            }
+            Err(_) => {
+                tracing::error!(task_id = %task_id, "Container task setup timed out while starting file storage/server");
+                finish_container_setup_timeout(
+                    &db,
+                    &stream_publisher,
+                    &task_id,
+                    env_id,
+                    stream_id,
+                    org_id,
+                    &function_name,
+                    &request.task_type,
+                    &worker_id,
+                    "file-server setup",
+                    None,
+                    data_volume,
+                    resource_guard,
+                )
+                .await;
                 return Ok(());
             }
         }
@@ -2735,7 +2874,7 @@ async fn process_container_task(
             }
             drop(resource_guard);
             if let Some(vol) = data_volume {
-                vol.cleanup().await;
+                cleanup_data_volume_with_timeout(&task_id, vol).await;
             }
             return Ok(());
         }
@@ -2746,9 +2885,14 @@ async fn process_container_task(
         // (load_bytecode_bundle's path is shared via ensure_bundle_extracted).
         let extract_dir = match org_id {
             Some(oid) => {
-                match ensure_bundle_extracted(&build_id, &oid, &env_id, &worker_conf).await {
-                    Ok(p) => p,
-                    Err(e) => {
+                match await_container_setup(
+                    task_deadline,
+                    ensure_bundle_extracted(&build_id, &oid, &env_id, &worker_conf),
+                )
+                .await
+                {
+                    Ok(Ok(p)) => p,
+                    Ok(Err(e)) => {
                         let error = task_failure_json(
                             &format!("failed to extract bundle for mounts: {}", e),
                             None,
@@ -2779,8 +2923,28 @@ async fn process_container_task(
                         }
                         drop(resource_guard);
                         if let Some(vol) = data_volume {
-                            vol.cleanup().await;
+                            cleanup_data_volume_with_timeout(&task_id, vol).await;
                         }
+                        return Ok(());
+                    }
+                    Err(_) => {
+                        tracing::error!(task_id = %task_id, "Container task setup timed out while retrieving/extracting mount bundle");
+                        finish_container_setup_timeout(
+                            &db,
+                            &stream_publisher,
+                            &task_id,
+                            env_id,
+                            stream_id,
+                            org_id,
+                            &function_name,
+                            &request.task_type,
+                            &worker_id,
+                            "bundle mount preparation",
+                            file_server_handle,
+                            data_volume,
+                            resource_guard,
+                        )
+                        .await;
                         return Ok(());
                     }
                 }
@@ -2808,7 +2972,7 @@ async fn process_container_task(
                 }
                 drop(resource_guard);
                 if let Some(vol) = data_volume {
-                    vol.cleanup().await;
+                    cleanup_data_volume_with_timeout(&task_id, vol).await;
                 }
                 return Ok(());
             }
@@ -2894,7 +3058,7 @@ async fn process_container_task(
             }
             drop(resource_guard);
             if let Some(vol) = data_volume {
-                vol.cleanup().await;
+                cleanup_data_volume_with_timeout(&task_id, vol).await;
             }
             return Ok(());
         }
@@ -2933,7 +3097,7 @@ async fn process_container_task(
                     .await;
                     drop(resource_guard);
                     if let Some(vol) = data_volume {
-                        vol.cleanup().await;
+                        cleanup_data_volume_with_timeout(&task_id, vol).await;
                     }
                     return Ok(());
                 }
@@ -2971,14 +3135,19 @@ async fn process_container_task(
                 .await;
                 drop(resource_guard);
                 if let Some(vol) = data_volume {
-                    vol.cleanup().await;
+                    cleanup_data_volume_with_timeout(&task_id, vol).await;
                 }
                 return Ok(());
             }
         };
-        let fs_storage = match hot::file_storage::file_storage_from_config(&worker_conf).await {
-            Ok(s) => Arc::from(s),
-            Err(e) => {
+        let fs_storage = match await_container_setup(
+            task_deadline,
+            hot::file_storage::file_storage_from_config(&worker_conf),
+        )
+        .await
+        {
+            Ok(Ok(s)) => Arc::from(s),
+            Ok(Err(e)) => {
                 tracing::error!("File server storage init failed: {}", e);
                 let error =
                     task_failure_json("File server failed to start — storage init failed", None);
@@ -2997,8 +3166,28 @@ async fn process_container_task(
                 .await;
                 drop(resource_guard);
                 if let Some(vol) = data_volume {
-                    vol.cleanup().await;
+                    cleanup_data_volume_with_timeout(&task_id, vol).await;
                 }
+                return Ok(());
+            }
+            Err(_) => {
+                tracing::error!(task_id = %task_id, "Container task setup timed out while initializing Kata file storage");
+                finish_container_setup_timeout(
+                    &db,
+                    &stream_publisher,
+                    &task_id,
+                    env_id,
+                    stream_id,
+                    org_id,
+                    &function_name,
+                    &request.task_type,
+                    &worker_id,
+                    "Kata file-storage setup",
+                    None,
+                    data_volume,
+                    resource_guard,
+                )
+                .await;
                 return Ok(());
             }
         };
@@ -3067,10 +3256,6 @@ async fn process_container_task(
         backend = %executor.backend(),
         "Starting container command"
     );
-
-    let total_timeout = std::time::Duration::from_millis(timeout_ms);
-    let start = std::time::Instant::now();
-    let task_deadline = tokio::time::Instant::now() + total_timeout;
 
     let extras_ref = if extras.binds.is_empty()
         && extras.extra_env.is_empty()
@@ -3245,8 +3430,8 @@ async fn process_container_task(
         }
     } else {
         // Kata: use atomic execute_with_extras (phased not supported)
-        let result = tokio::time::timeout(
-            total_timeout,
+        let result = tokio::time::timeout_at(
+            task_deadline,
             executor.execute_with_extras(
                 &image,
                 cmd,
@@ -3270,9 +3455,18 @@ async fn process_container_task(
                 timeout_ms,
                 "Kata execution cancelled by outer timeout — cleaning up leaked VM state"
             );
-            executor
-                .cleanup_after_timeout(&trace_id, limits.network)
-                .await;
+            if !bounded_cleanup(
+                CONTAINER_KILL_TIMEOUT,
+                executor.cleanup_after_timeout(&trace_id, limits.network),
+            )
+            .await
+            {
+                tracing::error!(
+                    task_id = %task_id,
+                    timeout_secs = CONTAINER_KILL_TIMEOUT.as_secs(),
+                    "Kata timeout cleanup also timed out; startup orphan cleanup will retry"
+                );
+            }
         }
         result
     };
@@ -5014,8 +5208,13 @@ async fn ensure_bundle_extracted(
         .retrieve_build(build_id, org_id, env_id)
         .await
         .map_err(|e| format!("Failed to retrieve build data: {}", e))?;
-    hot::bundle::extract_bundle_from_bytes(&build_data, &extract_dir)
-        .map_err(|e| format!("Failed to extract bundle: {}", e))?;
+    let extract_dir_for_task = extract_dir.clone();
+    tokio::task::spawn_blocking(move || {
+        hot::bundle::extract_bundle_from_bytes(&build_data, &extract_dir_for_task)
+    })
+    .await
+    .map_err(|e| format!("Bundle extraction task failed: {}", e))?
+    .map_err(|e| format!("Failed to extract bundle: {}", e))?;
     Ok(extract_dir)
 }
 
@@ -6164,6 +6363,7 @@ mod tests {
             timing: None,
             timeout_ms: request.timeout_ms as i64,
             retry_attempt: 0,
+            infra_retry_count: 0,
             next_retry_at: None,
             parent_task_id: None,
             created_at: now,
@@ -7174,6 +7374,25 @@ mod tests {
         );
         // Must never panic at startup for any configured value.
         let _ = Semaphore::new(blocking_execution_capacity(4, i64::MAX));
+    }
+
+    #[tokio::test]
+    async fn timeout_cleanup_is_itself_wall_clock_bounded() {
+        let cleanup = std::future::pending::<()>();
+        assert!(
+            !bounded_cleanup(std::time::Duration::from_millis(20), cleanup).await,
+            "a wedged runtime cleanup must return control at its own deadline"
+        );
+    }
+
+    #[tokio::test]
+    async fn claimed_container_setup_obeys_shared_task_deadline() {
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(20);
+        let result = await_container_setup(deadline, std::future::pending::<()>()).await;
+        assert!(
+            result.is_err(),
+            "post-claim setup must not outlive the task's wall-clock deadline"
+        );
     }
 
     #[tokio::test]

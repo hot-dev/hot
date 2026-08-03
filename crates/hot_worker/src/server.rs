@@ -880,6 +880,73 @@ impl BuildPathCache {
     }
 }
 
+struct PreparedEventBundle {
+    src_paths: Vec<String>,
+    extract_dir: std::path::PathBuf,
+    manifest: Option<hot::bundle::BundleManifest>,
+}
+
+/// Perform bundle extraction and pre-compilation away from the Tokio runtime.
+/// The caller moves a blocking-execution permit into this function's
+/// spawn_blocking closure, so a timed-out setup cannot accumulate unlimited
+/// detached filesystem/compiler work.
+fn extract_and_precompile_event_bundle(
+    build_data: Vec<u8>,
+    extract_dir: std::path::PathBuf,
+    build_id: Uuid,
+    fallback_project_name: String,
+) -> Result<PreparedEventBundle, String> {
+    hot::bundle::extract_bundle_from_bytes(&build_data, &extract_dir)?;
+
+    let manifest = hot::bundle::read_bundle_manifest(&extract_dir);
+    let build_src_path = extract_dir.join("hot/src");
+    let build_pkg_path = extract_dir.join("hot/pkg");
+    let mut src_paths = vec![build_src_path.to_string_lossy().to_string()];
+    if build_pkg_path.exists() {
+        src_paths.push(build_pkg_path.to_string_lossy().to_string());
+    }
+
+    let bundle_cache_dir = extract_dir.join(".hot").join("cache");
+    if bundle_cache_dir.exists()
+        && let Ok(entries) = std::fs::read_dir(&bundle_cache_dir)
+    {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.to_string_lossy().ends_with(".bc.zst")
+                && let Err(error) = std::fs::remove_file(&path)
+            {
+                tracing::warn!(?path, %error, "Failed to remove stale bundle cache file");
+            }
+        }
+    }
+
+    let bundle_cache = hot::lang::cache::bytecode_cache::BytecodeCache::new(bundle_cache_dir);
+    let (project_name, cache_key, file_hashes) = match &manifest {
+        Ok(manifest) => (
+            manifest.bundle_name.clone(),
+            manifest.cache_key.clone(),
+            Some(manifest.file_hashes.clone()),
+        ),
+        Err(_) => (fallback_project_name, None, None),
+    };
+    hot::lang::engine::Engine::compile_to_cache(
+        &src_paths,
+        &bundle_cache,
+        &project_name,
+        cache_key.as_deref(),
+        file_hashes,
+        None,
+    )
+    .map_err(|error| format!("Failed to pre-compile bundle {build_id}: {error}"))?;
+
+    BuildPathCache::mark_extraction_complete(&extract_dir);
+    Ok(PreparedEventBundle {
+        src_paths,
+        extract_dir,
+        manifest: manifest.ok(),
+    })
+}
+
 // Request message type for hot:request queue
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RequestMessage {
@@ -1091,6 +1158,10 @@ pub const RUN_TIMEOUT_HARD_GRACE: std::time::Duration = std::time::Duration::fro
 /// Persisting the timeout/result is best-effort after VM execution. It must not
 /// contradict the hard-timeout guarantee by pinning the executor slot forever.
 pub const RUN_RESULT_FLUSH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+/// Wall-clock ceiling for handler preparation before user code is admitted to
+/// the blocking executor. This covers tenant lookups, build retrieval, cache
+/// preparation, context loading, stores, and blocking-slot admission.
+pub const EVENT_SETUP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 pub const DEFAULT_QUEUE_TYPE: QueueType = QueueType::Memory;
 pub const DEFAULT_SERIALIZATION: Serialization = Serialization::ZstdJson; // must match Serialization's #[default]
 
@@ -1128,9 +1199,15 @@ pub const BLOCKING_SLOT_ACQUIRE_TIMEOUT: std::time::Duration = std::time::Durati
 /// happens to start the same way. Only this constant may contain the token.
 const BLOCKING_SLOT_TIMEOUT_ERROR: &str =
     "[blocking-slot-admission-timeout] Timed out waiting for a blocking execution slot";
+const EVENT_SETUP_TIMEOUT_ERROR: &str =
+    "[event-setup-timeout] Timed out preparing an event handler for execution";
 
 fn is_blocking_slot_timeout_error(error: &str) -> bool {
     error.contains("[blocking-slot-admission-timeout]")
+}
+
+fn is_event_setup_timeout_error(error: &str) -> bool {
+    error.contains("[event-setup-timeout]")
 }
 
 /// Whether a failed handler execution should leave the event un-ACKed for
@@ -1139,7 +1216,37 @@ fn is_blocking_slot_timeout_error(error: &str) -> bool {
 /// for the same event already started a run — redelivering after a run
 /// started would duplicate its side effects.
 fn should_redeliver_event_after_handler_error(error: &str, started_any_handler: bool) -> bool {
-    is_blocking_slot_timeout_error(error) && !started_any_handler
+    (is_blocking_slot_timeout_error(error) || is_event_setup_timeout_error(error))
+        && !started_any_handler
+}
+
+async fn await_event_handler_setup<F>(
+    execution: F,
+    mut setup_complete: tokio::sync::oneshot::Receiver<()>,
+    setup_timeout: std::time::Duration,
+) -> Result<(), String>
+where
+    F: std::future::Future<Output = Result<(), String>>,
+{
+    tokio::pin!(execution);
+    tokio::select! {
+        biased;
+        result = &mut execution => result,
+        setup = &mut setup_complete => {
+            // A closed channel means the execution returned through an early
+            // error path before setup completed; await it to surface that
+            // original error instead of misclassifying it as a timeout.
+            let _ = setup;
+            execution.await
+        }
+        _ = tokio::time::sleep(setup_timeout) => {
+            Err(format!(
+                "{} after {}s",
+                EVENT_SETUP_TIMEOUT_ERROR,
+                setup_timeout.as_secs_f64(),
+            ))
+        }
+    }
 }
 
 /// Acquire a blocking-execution permit, bounded by `acquire_timeout`
@@ -1177,8 +1284,8 @@ async fn acquire_blocking_execution_slot(
 /// Floor for the hot:event orphan-reclaim idle threshold.
 ///
 /// A handler that claimed an event may legally spend up to
-/// `BLOCKING_SLOT_ACQUIRE_TIMEOUT` waiting for blocking-slot admission
-/// (outside its run budget), then `run-timeout` plus `RUN_TIMEOUT_HARD_GRACE`
+/// `EVENT_SETUP_TIMEOUT` in preparation (including blocking-slot admission),
+/// then `run-timeout` plus `RUN_TIMEOUT_HARD_GRACE`
 /// executing, before the worker gives up — and the event is only ACKed after
 /// that. For a SINGLE-handler event, reclaiming below this floor would
 /// XAUTOCLAIM an un-ACKed event whose handler is still legally live and start
@@ -1201,7 +1308,7 @@ async fn acquire_blocking_execution_slot(
 /// though it remains available for a wider reclaim margin.
 fn min_event_orphan_idle_floor_ms(run_timeout: std::time::Duration) -> u64 {
     run_timeout
-        .saturating_add(BLOCKING_SLOT_ACQUIRE_TIMEOUT)
+        .saturating_add(EVENT_SETUP_TIMEOUT)
         .saturating_add(RUN_TIMEOUT_HARD_GRACE)
         .saturating_add(std::time::Duration::from_secs(5))
         .as_millis()
@@ -3473,6 +3580,53 @@ async fn find_build_for_function(
 async fn execute_single_event_handler(
     db: &DatabasePool,
     build: &Build,
+    env_id: &Uuid,
+    worker_conf: &Val,
+    event_handler: &EventHandler,
+    event_message: &EventMessage,
+    emitter: Option<std::sync::Arc<dyn EngineEventEmitter>>,
+    event_publisher: Option<std::sync::Arc<dyn EventPublisher>>,
+    encryption: Option<Arc<ContextEncryption>>,
+    cache: Arc<hot::lang::cache::bytecode_cache::BytecodeCache>,
+    shutdown_coordinator: Arc<ShutdownCoordinator>,
+    run_id: Uuid,
+    build_path_cache: Arc<BuildPathCache>,
+    dev_context_storage: Option<DevContextStorage>,
+    stream_publisher: Option<Arc<StreamPubSub>>,
+    task_queue: Arc<ProcessingQueue<TaskRequest>>,
+    execution_services: Arc<WorkerExecutionServices>,
+    blocking_execution_slots: Arc<Semaphore>,
+) -> Result<(), String> {
+    let (setup_complete_tx, setup_complete_rx) = tokio::sync::oneshot::channel();
+    let execution = execute_single_event_handler_inner(
+        db,
+        build,
+        env_id,
+        worker_conf,
+        event_handler,
+        event_message,
+        emitter,
+        event_publisher,
+        encryption,
+        cache,
+        shutdown_coordinator,
+        run_id,
+        build_path_cache,
+        dev_context_storage,
+        stream_publisher,
+        task_queue,
+        execution_services,
+        blocking_execution_slots,
+        setup_complete_tx,
+    );
+
+    await_event_handler_setup(execution, setup_complete_rx, EVENT_SETUP_TIMEOUT).await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn execute_single_event_handler_inner(
+    db: &DatabasePool,
+    build: &Build,
     _env_id: &Uuid,
     worker_conf: &Val,
     event_handler: &EventHandler,
@@ -3489,6 +3643,7 @@ async fn execute_single_event_handler(
     task_queue: Arc<ProcessingQueue<TaskRequest>>,
     execution_services: Arc<WorkerExecutionServices>,
     blocking_execution_slots: Arc<Semaphore>,
+    setup_complete: tokio::sync::oneshot::Sender<()>,
 ) -> Result<(), String> {
     // The caller already registered `run_id`; from here this guard owns
     // unregistration on every exit path (see `RunRegistration` docs).
@@ -3796,159 +3951,55 @@ async fn execute_single_event_handler(
                                             build.build_id,
                                             build_data.len()
                                         );
-
-                                        match hot::bundle::extract_bundle_from_bytes(
-                                            &build_data,
-                                            &extract_dir,
-                                        ) {
-                                            Ok(()) => {
-                                                debug!(
-                                                    "Successfully extracted build {} to {}",
+                                        let prep_permit = acquire_blocking_execution_slot(
+                                            Arc::clone(&blocking_execution_slots),
+                                            run_id,
+                                            BLOCKING_SLOT_ACQUIRE_TIMEOUT,
+                                        )
+                                        .await?;
+                                        let prep_extract_dir = extract_dir.clone();
+                                        let prep_build_id = build.build_id;
+                                        let prep_project_name = project.name.clone();
+                                        match tokio::task::spawn_blocking(move || {
+                                            let _prep_permit = prep_permit;
+                                            extract_and_precompile_event_bundle(
+                                                build_data,
+                                                prep_extract_dir,
+                                                prep_build_id,
+                                                prep_project_name,
+                                            )
+                                        })
+                                        .await
+                                        {
+                                            Ok(Ok(prepared)) => {
+                                                build_path_cache.insert(
                                                     build.build_id,
-                                                    extract_dir.display()
+                                                    prepared.extract_dir.clone(),
                                                 );
-
-                                                // Read the bundle manifest for metadata
-                                                let manifest =
-                                                    hot::bundle::read_bundle_manifest(&extract_dir);
-                                                if let Ok(ref m) = manifest {
-                                                    debug!(
-                                                        "Bundle manifest: name={}, cache_key={:?}, files={}",
-                                                        m.bundle_name,
-                                                        m.cache_key,
-                                                        m.file_hashes.len()
-                                                    );
-                                                }
-
-                                                // Use the extracted paths for both src and pkg (dependencies)
-                                                let build_src_path = extract_dir.join("hot/src");
-                                                let build_pkg_path = extract_dir.join("hot/pkg");
-                                                let mut paths = vec![
-                                                    build_src_path.to_string_lossy().to_string(),
-                                                ];
-                                                // Include pkg path if it exists (bundled dependencies)
-                                                if build_pkg_path.exists() {
-                                                    paths.push(
-                                                        build_pkg_path
-                                                            .to_string_lossy()
-                                                            .to_string(),
-                                                    );
-                                                }
-
-                                                // Pre-compile the bundle to generate bytecode cache
-                                                // This ensures routing can find functions immediately after extraction
-                                                let bundle_cache_dir =
-                                                    extract_dir.join(".hot").join("cache");
-
-                                                // Clear any stale embedded cache files from the bundle
-                                                // Bundles may contain pre-compiled cache from an older Hot version
-                                                if bundle_cache_dir.exists()
-                                                    && let Ok(entries) =
-                                                        std::fs::read_dir(&bundle_cache_dir)
-                                                {
-                                                    for entry in entries.flatten() {
-                                                        let path = entry.path();
-                                                        if path
-                                                            .to_string_lossy()
-                                                            .ends_with(".bc.zst")
-                                                        {
-                                                            if let Err(e) =
-                                                                std::fs::remove_file(&path)
-                                                            {
-                                                                tracing::warn!(
-                                                                    "Failed to remove stale cache file {:?}: {}",
-                                                                    path,
-                                                                    e
-                                                                );
-                                                            } else {
-                                                                tracing::debug!(
-                                                                    "Removed stale embedded cache file {:?}",
-                                                                    path
-                                                                );
-                                                            }
-                                                        }
-                                                    }
-                                                }
-
-                                                let bundle_cache =
-                                                    hot::lang::cache::bytecode_cache::BytecodeCache::new(
-                                                        bundle_cache_dir,
-                                                    );
-
-                                                // Get project name and cache key from manifest for correct cache key
-                                                let (project_name, cache_key, file_hashes) =
-                                                    match &manifest {
-                                                        Ok(m) => (
-                                                            m.bundle_name.clone(),
-                                                            m.cache_key.clone(),
-                                                            Some(m.file_hashes.clone()),
-                                                        ),
-                                                        Err(_) => {
-                                                            (project.name.clone(), None, None)
-                                                        }
-                                                    };
-
-                                                debug!(
-                                                    "Pre-compiling bundle {} to generate bytecode cache",
-                                                    build.build_id
-                                                );
-                                                match hot::lang::engine::Engine::compile_to_cache(
-                                                    &paths,
-                                                    &bundle_cache,
-                                                    &project_name,
-                                                    cache_key.as_deref(),
-                                                    file_hashes,
-                                                    None, // Bundle builds have deps pre-bundled
-                                                ) {
-                                                    Ok(()) => {
-                                                        debug!(
-                                                            "Bundle {} pre-compiled successfully",
-                                                            build.build_id
-                                                        );
-
-                                                        // Mark extraction complete AFTER bytecode is generated.
-                                                        // This ensures routing won't find the bundle until it's fully ready.
-                                                        BuildPathCache::mark_extraction_complete(
-                                                            &extract_dir,
-                                                        );
-
-                                                        // Store in cache for future use
-                                                        build_path_cache.insert(
-                                                            build.build_id,
-                                                            extract_dir.clone(),
-                                                        );
-
-                                                        (
-                                                            paths,
-                                                            true,
-                                                            Some(extract_dir.clone()),
-                                                            manifest.ok(),
-                                                        )
-                                                        // This is a bundle build
-                                                    }
-                                                    Err(e) => {
-                                                        error!(
-                                                            "Failed to pre-compile bundle {}: {}. Falling back to config paths",
-                                                            build.build_id, e
-                                                        );
-                                                        (
-                                                            hot::project::get_project_src_paths(
-                                                                worker_conf,
-                                                                &project.name,
-                                                            ),
-                                                            false,
-                                                            None,
-                                                            None,
-                                                        )
-                                                    }
-                                                }
+                                                (
+                                                    prepared.src_paths,
+                                                    true,
+                                                    Some(prepared.extract_dir),
+                                                    prepared.manifest,
+                                                )
+                                            }
+                                            Ok(Err(e)) => {
+                                                error!("{}. Falling back to config paths", e);
+                                                (
+                                                    hot::project::get_project_src_paths(
+                                                        worker_conf,
+                                                        &project.name,
+                                                    ),
+                                                    false,
+                                                    None,
+                                                    None,
+                                                )
                                             }
                                             Err(e) => {
                                                 error!(
-                                                    "Failed to extract build {} from storage: {}. Falling back to config paths",
+                                                    "Bundle preparation task failed for {}: {}. Falling back to config paths",
                                                     build.build_id, e
                                                 );
-                                                // Fall back to config paths (not a bundle)
                                                 (
                                                     hot::project::get_project_src_paths(
                                                         worker_conf,
@@ -4347,6 +4398,11 @@ async fn execute_single_event_handler(
         .store_for(worker_conf, org_id, project.env_id)
         .await;
     let embedding_provider = execution_services.embedding_provider.clone();
+
+    // From this point onward all potentially blocking user-code compilation
+    // and execution runs in spawn_blocking behind its owned permit. Disarm the
+    // setup watchdog immediately before starting the independent run budget.
+    let _ = setup_complete.send(());
 
     // Align the propagated parent deadline with the timeout clock that starts
     // immediately below. Time spent queued behind detached blocking work is
@@ -8177,6 +8233,7 @@ mod tests {
     #[test]
     fn slot_admission_timeout_redelivers_only_side_effect_free_events() {
         let timeout_error = format!("{} after 30s", BLOCKING_SLOT_TIMEOUT_ERROR);
+        let setup_timeout_error = format!("{} after 30s", EVENT_SETUP_TIMEOUT_ERROR);
 
         // No handler started a run yet: safe to leave the event un-ACKed.
         assert!(should_redeliver_event_after_handler_error(
@@ -8200,13 +8257,50 @@ mod tests {
             "Timed out waiting for a blocking execution slot in the engine",
             false
         ));
+        assert!(should_redeliver_event_after_handler_error(
+            &setup_timeout_error,
+            false
+        ));
+        assert!(!should_redeliver_event_after_handler_error(
+            &setup_timeout_error,
+            true
+        ));
+    }
+
+    #[tokio::test]
+    async fn event_setup_watchdog_bounds_pending_preparation() {
+        let (setup_tx, setup_rx) = tokio::sync::oneshot::channel();
+        let execution = async move {
+            let _keep_sender_alive = setup_tx;
+            std::future::pending::<Result<(), String>>().await
+        };
+
+        let err =
+            await_event_handler_setup(execution, setup_rx, std::time::Duration::from_millis(20))
+                .await
+                .expect_err("pending setup must hit its wall-clock ceiling");
+        assert!(is_event_setup_timeout_error(&err));
+    }
+
+    #[tokio::test]
+    async fn event_setup_watchdog_disarms_for_vm_execution() {
+        let (setup_tx, setup_rx) = tokio::sync::oneshot::channel();
+        let execution = async move {
+            setup_tx.send(()).unwrap();
+            tokio::time::sleep(std::time::Duration::from_millis(40)).await;
+            Ok(())
+        };
+
+        await_event_handler_setup(execution, setup_rx, std::time::Duration::from_millis(10))
+            .await
+            .expect("the setup ceiling must be disabled once VM execution starts");
     }
 
     #[test]
     fn event_orphan_reclaim_floor_covers_slot_admission_wait() {
         let run_timeout = std::time::Duration::from_secs(DEFAULT_RUN_TIMEOUT_SECONDS);
         let legal_lifetime_ms = run_timeout
-            .saturating_add(BLOCKING_SLOT_ACQUIRE_TIMEOUT)
+            .saturating_add(EVENT_SETUP_TIMEOUT)
             .saturating_add(RUN_TIMEOUT_HARD_GRACE)
             .as_millis() as u64;
 

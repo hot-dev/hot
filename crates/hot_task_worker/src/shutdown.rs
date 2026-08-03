@@ -82,6 +82,11 @@ const CANCEL_GRACE_SECS: u64 = 3;
 /// DB call can't push the whole drain past the ECS stopTimeout window.
 const SHUTDOWN_OP_TIMEOUT_SECS: u64 = 5;
 
+/// Maximum number of budget-exempt shutdown retries in one task lineage.
+/// Each retry is a fresh queue entry, so Redis delivery counts cannot enforce
+/// this policy across generations; the count is persisted on the task row.
+const MAX_INFRA_RETRY_GENERATIONS: i16 = 3;
+
 /// Reason string written to the original task's failure result and to the
 /// task:complete stream event. Distinct from user-error reasons so dashboards
 /// and retry analytics can separate "infra interruption" from "user bug".
@@ -442,9 +447,9 @@ impl TaskShutdownCoordinator {
 
         // 3. Enqueue an infra-retry. We re-enqueue regardless of the user's
         // `retry` meta — this isn't a user-error retry, it's a system-
-        // initiated re-run. We DO still cap effective replay via the queue's
-        // own MAX_PROCESSING_RETRIES (delivery count) to prevent infinite
-        // shutdown-driven loops if a task somehow keeps getting interrupted.
+        // initiated re-run. A persisted lineage counter caps repeated
+        // shutdown-driven generations; a fresh queue entry starts with a fresh
+        // delivery count and therefore cannot be bounded by Redis alone.
         // Safe even when an unknown terminal write later turns out to have
         // committed: the retry is a fresh task row, and the original queue
         // message resolves against the (then terminal) original row.
@@ -483,6 +488,16 @@ impl TaskShutdownCoordinator {
             }
         };
 
+        if task_row.infra_retry_count >= MAX_INFRA_RETRY_GENERATIONS {
+            tracing::error!(
+                task_id = %task.task_id,
+                infra_retry_count = task_row.infra_retry_count,
+                max_infra_retries = MAX_INFRA_RETRY_GENERATIONS,
+                "Shutdown: infra-retry lineage limit reached — not creating another generation"
+            );
+            return;
+        }
+
         // Carry the same retry_attempt as the original. Use the user's
         // configured retry delay for backoff if they set one, otherwise
         // re-enqueue immediately (infra interrupt isn't an error to back
@@ -494,7 +509,7 @@ impl TaskShutdownCoordinator {
 
         match timeout(
             op_timeout,
-            Task::insert_retry(db, &new_task_id, &task_row, next_attempt, next_retry_at),
+            Task::insert_infra_retry(db, &new_task_id, &task_row, next_retry_at),
         )
         .await
         {
@@ -544,6 +559,7 @@ impl TaskShutdownCoordinator {
                     task_id = %task.task_id,
                     new_task_id = %new_task_id,
                     attempt = next_attempt,
+                    infra_retry_count = task_row.infra_retry_count + 1,
                     user_max_retries = retry_config.max_retries,
                     "Shutdown: enqueued infra-retry for interrupted task"
                 );
@@ -907,6 +923,49 @@ mod tests {
             Task::get_count_by_env(&db, &active.env_id).await.unwrap(),
             2,
             "no second retry row may be created"
+        );
+    }
+
+    #[tokio::test]
+    async fn infra_retry_lineage_stops_at_persisted_generation_limit() {
+        let db = hot::db::test_db().await;
+        let task_queue = memory_task_queue();
+        let root_active = dummy_active_task(Uuid::now_v7());
+        insert_running_task(&db, &root_active).await;
+
+        let mut row = Task::get(&db, &root_active.task_id).await.unwrap();
+        for expected_count in 1..=MAX_INFRA_RETRY_GENERATIONS {
+            let child_id = Uuid::now_v7();
+            assert!(
+                Task::insert_infra_retry(&db, &child_id, &row, chrono::Utc::now())
+                    .await
+                    .unwrap()
+            );
+            row = Task::get(&db, &child_id).await.unwrap();
+            assert_eq!(row.infra_retry_count, expected_count);
+        }
+
+        let mut capped_active = dummy_active_task(row.task_id);
+        capped_active.env_id = row.env_id;
+        capped_active.stream_id = row.stream_id;
+        capped_active.original_request.env_id = row.env_id.to_string();
+        capped_active.original_request.stream_id = row.stream_id.to_string();
+        capped_active.original_request.build_id = row.build_id.to_string();
+
+        TaskShutdownCoordinator::enqueue_infra_retry(&db, &task_queue, &capped_active).await;
+
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), task_queue.claim_blocking())
+                .await
+                .is_err(),
+            "a task at the persisted infra retry limit must not create a fresh queue entry"
+        );
+        assert_eq!(
+            Task::get_count_by_env(&db, &root_active.env_id)
+                .await
+                .unwrap(),
+            i64::from(MAX_INFRA_RETRY_GENERATIONS) + 1,
+            "no generation beyond the cap may be inserted"
         );
     }
 }

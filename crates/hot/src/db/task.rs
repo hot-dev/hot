@@ -118,6 +118,10 @@ pub struct Task {
     pub timing: Option<serde_json::Value>,
     pub timeout_ms: i64,
     pub retry_attempt: i16,
+    /// Number of budget-exempt infrastructure retries in this task's current
+    /// lineage. User-policy retries reset this counter to zero.
+    #[sqlx(default)]
+    pub infra_retry_count: i16,
     pub next_retry_at: Option<DateTime<Utc>>,
     /// The task this row retries, when the row was created by
     /// [`Task::insert_retry`]. `None` for first-run tasks and for retry rows
@@ -255,10 +259,50 @@ impl Task {
         retry_attempt: i16,
         next_retry_at: DateTime<Utc>,
     ) -> Result<bool, TaskError> {
+        Self::insert_retry_with_infra_count(
+            db,
+            new_task_id,
+            original,
+            retry_attempt,
+            0,
+            next_retry_at,
+        )
+        .await
+    }
+
+    /// Insert a budget-exempt infrastructure retry while carrying a persisted
+    /// lineage counter. Callers enforce their policy cap before invoking this
+    /// method; database uniqueness still makes a repeated insertion for the
+    /// same parent/attempt idempotent.
+    pub async fn insert_infra_retry(
+        db: &crate::db::DatabasePool,
+        new_task_id: &Uuid,
+        original: &Task,
+        next_retry_at: DateTime<Utc>,
+    ) -> Result<bool, TaskError> {
+        Self::insert_retry_with_infra_count(
+            db,
+            new_task_id,
+            original,
+            original.retry_attempt,
+            original.infra_retry_count.saturating_add(1),
+            next_retry_at,
+        )
+        .await
+    }
+
+    async fn insert_retry_with_infra_count(
+        db: &crate::db::DatabasePool,
+        new_task_id: &Uuid,
+        original: &Task,
+        retry_attempt: i16,
+        infra_retry_count: i16,
+        next_retry_at: DateTime<Utc>,
+    ) -> Result<bool, TaskError> {
         let rows_affected = match db {
             crate::db::DatabasePool::Postgres(pg_pool) => {
                 sqlx::query(
-                    "INSERT INTO task (task_id, env_id, stream_id, build_id, origin_run_id, parent_task_id, task_status_id, function_name, args, options, task_type, timeout_ms, retry_attempt, next_retry_at, by_user_id) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15) ON CONFLICT (parent_task_id, retry_attempt) WHERE parent_task_id IS NOT NULL DO NOTHING",
+                    "INSERT INTO task (task_id, env_id, stream_id, build_id, origin_run_id, parent_task_id, task_status_id, function_name, args, options, task_type, timeout_ms, retry_attempt, infra_retry_count, next_retry_at, by_user_id) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16) ON CONFLICT (parent_task_id, retry_attempt) WHERE parent_task_id IS NOT NULL DO NOTHING",
                 )
                 .bind(new_task_id)
                 .bind(original.env_id)
@@ -273,6 +317,7 @@ impl Task {
                 .bind(&original.task_type)
                 .bind(original.timeout_ms)
                 .bind(retry_attempt)
+                .bind(infra_retry_count)
                 .bind(next_retry_at)
                 .bind(original.by_user_id)
                 .execute(pg_pool)
@@ -290,7 +335,7 @@ impl Task {
                     .as_ref()
                     .map(|o| serde_json::to_string(o).unwrap_or_default());
                 sqlx::query(
-                    "INSERT INTO task (task_id, env_id, stream_id, build_id, origin_run_id, parent_task_id, task_status_id, function_name, args, options, task_type, timeout_ms, retry_attempt, next_retry_at, by_user_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT (parent_task_id, retry_attempt) WHERE parent_task_id IS NOT NULL DO NOTHING",
+                    "INSERT INTO task (task_id, env_id, stream_id, build_id, origin_run_id, parent_task_id, task_status_id, function_name, args, options, task_type, timeout_ms, retry_attempt, infra_retry_count, next_retry_at, by_user_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT (parent_task_id, retry_attempt) WHERE parent_task_id IS NOT NULL DO NOTHING",
                 )
                 .bind(new_task_id)
                 .bind(original.env_id)
@@ -305,6 +350,7 @@ impl Task {
                 .bind(&original.task_type)
                 .bind(original.timeout_ms)
                 .bind(retry_attempt)
+                .bind(infra_retry_count)
                 .bind(next_retry_at)
                 .bind(original.by_user_id)
                 .bind(created_at)
@@ -3187,6 +3233,7 @@ mod tests {
         let child = Task::get(&db, &first_id).await.unwrap();
         assert_eq!(child.parent_task_id, Some(parent.task_id));
         assert_eq!(child.retry_attempt, 1);
+        assert_eq!(child.infra_retry_count, 0);
         assert!(matches!(
             Task::get(&db, &second_id).await,
             Err(TaskError::NotFound)
@@ -3202,10 +3249,9 @@ mod tests {
         // Infra retries (shutdown drain) preserve the parent's attempt number
         // while budget retries increment it, so the two kinds must never
         // collide with each other — only with a duplicate of their own kind.
-        let infra_attempt = parent.retry_attempt;
         let budget_attempt = parent.retry_attempt + 1;
         assert!(
-            Task::insert_retry(&db, &Uuid::now_v7(), &parent, infra_attempt, at)
+            Task::insert_infra_retry(&db, &Uuid::now_v7(), &parent, at)
                 .await
                 .unwrap(),
             "the first infra retry must insert"
@@ -3217,7 +3263,7 @@ mod tests {
             "a budget retry must not collide with the parent's infra retry"
         );
         assert!(
-            !Task::insert_retry(&db, &Uuid::now_v7(), &parent, infra_attempt, at)
+            !Task::insert_infra_retry(&db, &Uuid::now_v7(), &parent, at)
                 .await
                 .unwrap(),
             "a second infra retry of the same parent must collide"
@@ -3232,6 +3278,48 @@ mod tests {
             Task::get_count_by_env(&db, &parent.env_id).await.unwrap(),
             3,
             "parent + one infra retry + one budget retry"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_infra_retry_count_carries_across_generations_and_budget_retry_resets_it() {
+        let db = crate::db::test_db().await;
+        let parent = insert_parent_task(&db).await;
+        let first_id = Uuid::now_v7();
+        assert!(
+            Task::insert_infra_retry(&db, &first_id, &parent, Utc::now())
+                .await
+                .unwrap()
+        );
+        let first = Task::get(&db, &first_id).await.unwrap();
+        assert_eq!(first.infra_retry_count, 1);
+
+        let second_id = Uuid::now_v7();
+        assert!(
+            Task::insert_infra_retry(&db, &second_id, &first, Utc::now())
+                .await
+                .unwrap()
+        );
+        let second = Task::get(&db, &second_id).await.unwrap();
+        assert_eq!(second.infra_retry_count, 2);
+        assert_eq!(second.parent_task_id, Some(first_id));
+
+        let budget_id = Uuid::now_v7();
+        assert!(
+            Task::insert_retry(
+                &db,
+                &budget_id,
+                &second,
+                second.retry_attempt + 1,
+                Utc::now(),
+            )
+            .await
+            .unwrap()
+        );
+        assert_eq!(
+            Task::get(&db, &budget_id).await.unwrap().infra_retry_count,
+            0,
+            "a user-policy retry starts a fresh infrastructure retry budget"
         );
     }
 
