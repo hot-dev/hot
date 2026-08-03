@@ -3354,7 +3354,7 @@ async fn process_container_task(
     // KATA_TIMEOUT_CLEANUP_ENVELOPE after a Kata timeout) is never billed
     // as user compute. See `bill_before_cleanup`.
     let is_docker = matches!(executor.backend(), executor::Backend::Docker);
-    let (execution_result, duration_ms) = if is_docker {
+    let (execution_result, raw_window_ms, timings) = if is_docker {
         let mut timings = executor::ContainerTimings::default();
         match tokio::time::timeout_at(
             task_deadline,
@@ -3489,12 +3489,9 @@ async fn process_container_task(
                 })
                 .await;
 
-                (Ok(Ok((output, timings))), duration_ms)
+                (Ok(Ok(output)), duration_ms, timings)
             }
-            Ok(Err(e)) => (
-                Ok(Err((e, timings))),
-                billable_execution_ms(execution_start),
-            ),
+            Ok(Err(e)) => (Ok(Err(e)), billable_execution_ms(execution_start), timings),
             Err(elapsed) => {
                 tracing::warn!(
                     task_id = %task_id,
@@ -3517,11 +3514,18 @@ async fn process_container_task(
                     }
                 })
                 .await;
-                (Err(elapsed), duration_ms)
+                // `timings` keeps whatever create_and_start stamped before
+                // the deadline dropped it (e.g. an in-flight pull start),
+                // so the platform-phase deduction below still applies.
+                (Err(elapsed), duration_ms, timings)
             }
         }
     } else {
-        // Kata: use atomic execute_with_extras (phased not supported)
+        // Kata: use atomic execute_with_extras (phased not supported).
+        // Timings are owned HERE, not inside the executor, so the phase
+        // stamps made before a cancellation point (slot wait, image pull)
+        // survive when the outer deadline drops the future mid-flight.
+        let mut timings = executor::ContainerTimings::default();
         let result = tokio::time::timeout_at(
             task_deadline,
             executor.execute_with_extras(
@@ -3529,6 +3533,7 @@ async fn process_container_task(
                 cmd,
                 env,
                 limits.timeout_secs,
+                &mut timings,
                 Some(&trace_id),
                 Some(&limits),
                 extras_ref,
@@ -3546,10 +3551,7 @@ async fn process_container_task(
         // returning, so a post-await snapshot alone would bill that teardown.
         // The snapshot below remains the fallback for paths that never stamp
         // it (outer-timeout cancellation, setup failures).
-        let workload_ended_at = match &result {
-            Ok(Ok((_, timings))) | Ok(Err((_, timings))) => timings.workload_ended_at,
-            Err(_) => None,
-        };
+        let workload_ended_at = timings.workload_ended_at;
         let (fallback_ms, ()) = bill_before_cleanup(execution_start, async {
             if result.is_err() {
                 // The executor's internal timeout starts counting only once
@@ -3579,8 +3581,18 @@ async fn process_container_task(
         .await;
         let duration_ms =
             billable_ms_preferring_executor_window(execution_start, workload_ended_at, fallback_ms);
-        (result, duration_ms)
+        (result, duration_ms, timings)
     };
+
+    // SINGLE BILLING SEAM — deduct the platform-owned phases (slot wait +
+    // image pull) from the raw execution window. Every billing consumer
+    // below receives this deducted value: both CUS computations
+    // (`limits.size.compute_units`), the success/error JSON `duration-ms`,
+    // the `duration_ms_override` persisted through `Task::complete` (which
+    // feeds the TaskComplete event and the task-minutes quota), and the
+    // finish-log telemetry. The per-phase timing JSON fields
+    // (`slot-wait-ms`, `image-pull-ms`, `runtime-start-ms`, ...) stay raw.
+    let duration_ms = billed_ms_excluding_platform_phases(execution_start, raw_window_ms, &timings);
 
     // Clean up file server (Docker: direct handle; Kata: via oneshot channel).
     // A wedged listener (e.g. blocked on a stuck client connection) must not
@@ -3613,7 +3625,7 @@ async fn process_container_task(
     drop(resource_guard);
 
     match execution_result {
-        Ok(Ok((output, timings))) => {
+        Ok(Ok(output)) => {
             persist_container_timings(
                 &db,
                 &task_id,
@@ -3724,7 +3736,7 @@ async fn process_container_task(
                 "Container task finished"
             );
         }
-        Ok(Err((e, timings))) => {
+        Ok(Err(e)) => {
             // Some backend errors can occur after the container has started
             // (for example while waiting for it or collecting its result).
             // Preserve that boundary so the elapsed workload time is not
@@ -3894,6 +3906,87 @@ fn billable_ms_preferring_executor_window(
     workload_ended_at.map_or(fallback_ms, |ended_at| {
         billable_execution_ms_at(execution_start, ended_at)
     })
+}
+
+/// BILLING POLICY for container tasks ("RunPod-shaped split", decided
+/// after market research): the billed window EXCLUDES the two
+/// platform-owned phases — execution-slot wait and container image pull —
+/// while container/VM boot and runtime init REMAIN billed. Rationale:
+/// slot availability and image-cache warmth are platform capacity and
+/// placement concerns the user cannot influence, whereas boot/init cost
+/// is a direct function of the image and size the user chose. The task
+/// DEADLINE stays anchored at claim and is deliberately unaffected, and
+/// the observability timing JSON keeps reporting every phase raw
+/// (undeducted): `billed_ms = window_ms - in-window(slot_wait + pull)`,
+/// saturating at zero.
+///
+/// Phase-vs-anchor layout, verified against both executors so nothing is
+/// double-subtracted:
+/// - Docker container tasks (phased `create_and_start`): the image pull
+///   runs INSIDE the call, strictly after `execution_start`. There is no
+///   in-window slot wait to subtract — the phased path has no
+///   executor-internal semaphore (`execute_with_limits`' semaphore is not
+///   on this path), and the worker's own concurrency gate, the resource
+///   budget, is acquired in `process_container_task` BEFORE claim and
+///   before `execution_start`, so its wait never overlaps the billed
+///   window (it is reported separately as `capacity_wait_ms`).
+/// - Kata (`execute_with_extras`): both the VM-slot semaphore wait and
+///   the image pull (which also covers devmapper disk admission) run
+///   inside the executor, strictly after `execution_start`.
+///
+/// The overlap computation additionally clamps each phase to
+/// [`execution_start`, window end], so a phase that somehow began before
+/// the anchor could still never be subtracted twice or beyond its
+/// in-window share.
+///
+/// Partial phases are resolved in the user's favor: a phase that started
+/// but never closed inside the window — pull failed midway, or the outer
+/// deadline cancelled the executor future mid-phase — counts as
+/// unbillable from its start to the end of the window, because from that
+/// point until the billing snapshot the worker was doing platform work,
+/// never running user code.
+fn billed_ms_excluding_platform_phases(
+    execution_start: std::time::Instant,
+    window_ms: i64,
+    timings: &executor::ContainerTimings,
+) -> i64 {
+    let window_end = execution_start + std::time::Duration::from_millis(window_ms.max(0) as u64);
+    let unbillable_ms = platform_phase_overlap_ms(
+        timings.slot_wait_started_at,
+        timings.slot_wait_ended_at,
+        execution_start,
+        window_end,
+    )
+    .saturating_add(platform_phase_overlap_ms(
+        timings.image_pull_started_at,
+        timings.image_pull_ended_at,
+        execution_start,
+        window_end,
+    ));
+    window_ms.max(0).saturating_sub(unbillable_ms)
+}
+
+/// Overlap of one platform-owned phase with the billed window
+/// [`window_start`, `window_end`], in ms. A stamped start with
+/// `ended_at == None` means the phase was still in flight when the window
+/// closed (failed or cancelled midway): it is treated as running to the
+/// end of the window — conservative in the user's favor. A phase that
+/// never started contributes zero.
+fn platform_phase_overlap_ms(
+    started_at: Option<std::time::Instant>,
+    ended_at: Option<std::time::Instant>,
+    window_start: std::time::Instant,
+    window_end: std::time::Instant,
+) -> i64 {
+    let Some(started_at) = started_at else {
+        return 0;
+    };
+    ended_at
+        .unwrap_or(window_end)
+        .min(window_end)
+        .saturating_duration_since(started_at.max(window_start))
+        .as_millis()
+        .min(i64::MAX as u128) as i64
 }
 
 /// Snapshot the billable execution window at the moment execution ends,
@@ -7954,6 +8047,199 @@ mod tests {
         );
     }
 
+    /// A monotonic anchor far enough in the past that phase instants can be
+    /// placed freely on either side of it.
+    fn billing_anchor() -> std::time::Instant {
+        std::time::Instant::now()
+            .checked_sub(std::time::Duration::from_secs(60))
+            .expect("monotonic clock is past process start")
+    }
+
+    fn ms(v: u64) -> std::time::Duration {
+        std::time::Duration::from_millis(v)
+    }
+
+    #[test]
+    fn container_billing_excludes_slot_wait_and_pull_kata_shape() {
+        // Kata shape: both platform phases — VM-slot semaphore wait and
+        // image pull — fall inside the [execution_start, snapshot] window.
+        // Policy: they are platform-owned and unbillable; VM boot and
+        // runtime init (the rest of the window) remain billed.
+        let execution_start = billing_anchor();
+        let timings = executor::ContainerTimings {
+            slot_wait_ms: 100,
+            image_pull_ms: 300,
+            slot_wait_started_at: Some(execution_start + ms(5)),
+            slot_wait_ended_at: Some(execution_start + ms(105)),
+            image_pull_started_at: Some(execution_start + ms(105)),
+            image_pull_ended_at: Some(execution_start + ms(405)),
+            ..Default::default()
+        };
+        assert_eq!(
+            billed_ms_excluding_platform_phases(execution_start, 2_000, &timings),
+            1_600,
+            "slot wait (100ms) and pull (300ms) must be deducted; boot/init/workload billed"
+        );
+    }
+
+    #[test]
+    fn container_billing_excludes_pull_docker_shape() {
+        // Docker shape: the phased create_and_start path has no
+        // executor-internal slot wait (the worker's concurrency gate is the
+        // resource budget, acquired before claim and before the anchor), so
+        // only the pull is deducted and the slot fields stay unset.
+        let execution_start = billing_anchor();
+        let timings = executor::ContainerTimings {
+            image_pull_ms: 200,
+            image_pull_started_at: Some(execution_start + ms(50)),
+            image_pull_ended_at: Some(execution_start + ms(250)),
+            ..Default::default()
+        };
+        assert_eq!(
+            billed_ms_excluding_platform_phases(execution_start, 1_000, &timings),
+            800,
+            "only the in-window pull must be deducted on the Docker shape"
+        );
+    }
+
+    #[test]
+    fn container_billing_bills_full_window_when_phases_absent_or_zero() {
+        let execution_start = billing_anchor();
+
+        // Absent phases (never started — e.g. cached image path that
+        // stamped nothing, or the code-task shape): full window billed.
+        assert_eq!(
+            billed_ms_excluding_platform_phases(
+                execution_start,
+                1_234,
+                &executor::ContainerTimings::default()
+            ),
+            1_234,
+            "absent phases must leave the window unchanged"
+        );
+
+        // Zero-length phases (instant slot grant, warm image cache).
+        let instant_phases = executor::ContainerTimings {
+            slot_wait_started_at: Some(execution_start + ms(1)),
+            slot_wait_ended_at: Some(execution_start + ms(1)),
+            image_pull_started_at: Some(execution_start + ms(2)),
+            image_pull_ended_at: Some(execution_start + ms(2)),
+            ..Default::default()
+        };
+        assert_eq!(
+            billed_ms_excluding_platform_phases(execution_start, 1_234, &instant_phases),
+            1_234,
+            "zero-length phases must leave the window unchanged"
+        );
+    }
+
+    #[test]
+    fn container_billing_saturates_at_zero_when_phases_exceed_window() {
+        // Clock-skew / degenerate shape: measured phases longer than the
+        // window itself must clamp the bill to zero, never go negative —
+        // and phase ends beyond the window must not "overdraw" it.
+        let execution_start = billing_anchor();
+        let timings = executor::ContainerTimings {
+            slot_wait_started_at: Some(execution_start),
+            slot_wait_ended_at: Some(execution_start + ms(80)),
+            image_pull_started_at: Some(execution_start + ms(80)),
+            image_pull_ended_at: Some(execution_start + ms(240)),
+            ..Default::default()
+        };
+        assert_eq!(
+            billed_ms_excluding_platform_phases(execution_start, 100, &timings),
+            0,
+            "phases exceeding the window must saturate the bill at zero"
+        );
+    }
+
+    #[test]
+    fn container_billing_treats_open_ended_phase_as_unbillable_to_window_end() {
+        // A pull that started but never closed inside the window — it
+        // failed midway or the outer deadline cancelled the executor future
+        // mid-pull. The partial pull time measured so far is still
+        // platform-owned: the open phase is attributed up to the end of the
+        // window, in the user's favor.
+        let execution_start = billing_anchor();
+        let timings = executor::ContainerTimings {
+            image_pull_started_at: Some(execution_start + ms(100)),
+            image_pull_ended_at: None,
+            ..Default::default()
+        };
+        assert_eq!(
+            billed_ms_excluding_platform_phases(execution_start, 1_000, &timings),
+            100,
+            "an open-ended pull must be unbillable from its start to the window end"
+        );
+    }
+
+    #[test]
+    fn container_billing_clamps_phase_to_window_never_double_subtracts() {
+        // Defensive clamp: on both executors the phases start strictly
+        // after `execution_start` (verified at the seam's doc comment), but
+        // a phase that somehow began before the anchor must only have its
+        // in-window share deducted — pre-anchor time was never billed in
+        // the first place.
+        let execution_start = billing_anchor();
+        let pre_anchor_start = execution_start
+            .checked_sub(ms(200))
+            .expect("anchor has headroom");
+        let timings = executor::ContainerTimings {
+            image_pull_started_at: Some(pre_anchor_start),
+            image_pull_ended_at: Some(execution_start + ms(100)),
+            ..Default::default()
+        };
+        assert_eq!(
+            billed_ms_excluding_platform_phases(execution_start, 1_000, &timings),
+            900,
+            "only the in-window 100ms of the pull may be deducted, not the pre-anchor 200ms"
+        );
+    }
+
+    #[tokio::test]
+    async fn container_terminal_persist_stores_deducted_billable_window() {
+        // End-to-end over the persistence seam: the value handed to
+        // `duration_ms_override` (and thus the row, the re-read
+        // TaskComplete event, and the task-minutes quota) must be the
+        // PLATFORM-PHASE-DEDUCTED window, not the raw execution window.
+        let db = hot::db::test_db().await;
+        let (_request, task, _, _, _) = make_task_request_and_row();
+        insert_test_task(&db, &task).await;
+        Task::mark_running(&db, &task.task_id).await.unwrap();
+
+        let execution_start = billing_anchor();
+        let timings = executor::ContainerTimings {
+            image_pull_ms: 200,
+            image_pull_started_at: Some(execution_start + ms(100)),
+            image_pull_ended_at: Some(execution_start + ms(300)),
+            ..Default::default()
+        };
+        let billed = billed_ms_excluding_platform_phases(execution_start, 500, &timings);
+        assert_eq!(billed, 300, "raw 500ms window minus the 200ms pull");
+
+        let result = serde_json::json!({"exit-code": 0, "duration-ms": billed});
+        assert!(
+            persist_terminal_task(
+                &db,
+                &task.task_id,
+                &TaskStatus::Completed,
+                Some(&result),
+                Some(billed),
+                None,
+                std::time::Duration::from_secs(1),
+                1,
+            )
+            .await
+        );
+
+        let row = Task::get(&db, &task.task_id).await.unwrap();
+        assert_eq!(
+            row.duration_ms,
+            Some(300),
+            "the persisted duration must be the deducted billable window"
+        );
+    }
+
     #[tokio::test]
     async fn container_terminal_persist_stores_billable_snapshot_not_claim_to_persist() {
         // `start_time` is stamped at CLAIM, so Task::complete's default
@@ -8396,7 +8682,7 @@ mod tests {
                 execution_ms: 40,
                 logs_collect_ms: 5,
                 workload_started_at: Some(workload_started_at),
-                workload_ended_at: None,
+                ..Default::default()
             },
         )
         .await;

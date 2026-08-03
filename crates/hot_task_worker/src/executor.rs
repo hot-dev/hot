@@ -104,6 +104,25 @@ pub struct ContainerTimings {
     pub runtime_start_ms: i64,
     pub execution_ms: i64,
     pub logs_collect_ms: i64,
+    /// Monotonic bounds of the execution-slot wait (the executor-internal
+    /// concurrency semaphore). `started_at` is stamped BEFORE the first
+    /// await of the phase and `ended_at` when the phase resolves — on
+    /// success AND on its own error paths (slot timeout, closed
+    /// semaphore) — so callers computing the billable window can subtract
+    /// the platform-owned wait even when it failed partway. A stamped
+    /// start with `ended_at == None` means the caller's outer deadline
+    /// cancelled the executor future mid-phase; billing treats such an
+    /// open phase as running until the billing snapshot (in the user's
+    /// favor). See `billed_ms_excluding_platform_phases` in lib.rs.
+    pub slot_wait_started_at: Option<std::time::Instant>,
+    pub slot_wait_ended_at: Option<std::time::Instant>,
+    /// Monotonic bounds of the image pull, with the same stamping contract
+    /// as the slot-wait pair above (start before the first await; end on
+    /// success and on pull failure; open-ended when cancelled mid-pull).
+    /// On Kata the pull phase also covers the devmapper disk-admission
+    /// wait, matching what `image_pull_ms` has always measured.
+    pub image_pull_started_at: Option<std::time::Instant>,
+    pub image_pull_ended_at: Option<std::time::Instant>,
     pub workload_started_at: Option<chrono::DateTime<chrono::Utc>>,
     /// Monotonic instant when the workload finished — the wait on the
     /// task/VM resolved (normally or with an error) or the executor-internal
@@ -301,6 +320,11 @@ impl BoxExecutor {
         }
     }
 
+    /// `timings` is caller-owned (rather than constructed here) so that
+    /// phase stamps made before a cancellation point survive when the
+    /// caller's outer deadline drops this future mid-flight — the partial
+    /// slot-wait/pull bounds are what let billing exclude those
+    /// platform-owned phases even on the cancellation path.
     #[allow(clippy::too_many_arguments)]
     pub async fn execute_with_extras(
         &self,
@@ -308,20 +332,20 @@ impl BoxExecutor {
         cmd: Option<Vec<String>>,
         env: Option<Vec<String>>,
         timeout_secs: u64,
+        timings: &mut ContainerTimings,
         trace_id: Option<&str>,
         limits: Option<&crate::box_limits::BoxLimits>,
         extras: Option<&ContainerExtras>,
         #[allow(unused_variables)] pre_start_hook: Option<PreStartHook>,
-    ) -> Result<(ContainerOutput, ContainerTimings), (ExecutorError, ContainerTimings)> {
-        let mut timings = ContainerTimings::default();
-        let result = match self {
+    ) -> ExecutorResult<ContainerOutput> {
+        match self {
             Self::Docker(e) => {
                 e.execute_with_limits(
                     image,
                     cmd,
                     env,
                     timeout_secs,
-                    &mut timings,
+                    timings,
                     trace_id,
                     limits,
                     extras,
@@ -335,7 +359,7 @@ impl BoxExecutor {
                     cmd,
                     env,
                     timeout_secs,
-                    &mut timings,
+                    timings,
                     trace_id,
                     limits,
                     extras,
@@ -343,10 +367,6 @@ impl BoxExecutor {
                 )
                 .await
             }
-        };
-        match result {
-            Ok(output) => Ok((output, timings)),
-            Err(error) => Err((error, timings)),
         }
     }
 
@@ -550,14 +570,20 @@ mod docker {
             }
 
             let slot_start = Instant::now();
-            let permit = match tokio::time::timeout(
+            timings.slot_wait_started_at = Some(slot_start);
+            let slot_result = tokio::time::timeout(
                 std::time::Duration::from_secs(self.slot_timeout_secs),
                 self.semaphore.acquire(),
             )
-            .await
-            {
+            .await;
+            // Stamp the phase end on every resolution — success, closed
+            // semaphore, and slot timeout alike — so the elapsed wait is
+            // measured at the source and billing can exclude it even when
+            // the task fails right here.
+            timings.slot_wait_ms = slot_start.elapsed().as_millis() as i64;
+            timings.slot_wait_ended_at = Some(Instant::now());
+            let permit = match slot_result {
                 Ok(Ok(permit)) => {
-                    timings.slot_wait_ms = slot_start.elapsed().as_millis() as i64;
                     tracing::debug!(
                         trace_id = trace_id,
                         image = %image,
@@ -609,22 +635,37 @@ mod docker {
                 return Err(ExecutorError::ImageNotAllowed(image.to_string()));
             }
 
+            // No slot-wait phase here: phased Docker execution has no
+            // executor-internal semaphore — the container-task path's only
+            // concurrency gate is the worker's resource budget, acquired in
+            // lib.rs before claim (and before the billing anchor), so the
+            // slot-wait timing fields stay unset by design.
             let pull_start = Instant::now();
+            timings.image_pull_started_at = Some(pull_start);
             let create_image_options = CreateImageOptionsBuilder::default()
                 .from_image(image)
                 .build();
             let mut pull_stream = self
                 .docker
                 .create_image(Some(create_image_options), None, None);
+            let mut pull_error = None;
             while let Some(pull_result) = pull_stream.next().await {
                 if let Err(e) = pull_result {
-                    return Err(ExecutorError::ImagePull(format!(
+                    pull_error = Some(ExecutorError::ImagePull(format!(
                         "Failed to pull image '{}': {}",
                         image, e
                     )));
+                    break;
                 }
             }
+            // Stamp the phase end on success and mid-pull failure alike:
+            // the time already spent pulling is platform-owned either way
+            // and must be measurable for the billing deduction.
             timings.image_pull_ms = pull_start.elapsed().as_millis() as i64;
+            timings.image_pull_ended_at = Some(Instant::now());
+            if let Some(e) = pull_error {
+                return Err(e);
+            }
             let runtime_start = Instant::now();
 
             let memory_bytes =
@@ -819,6 +860,7 @@ mod docker {
             extras: Option<&ContainerExtras>,
         ) -> ExecutorResult<ContainerOutput> {
             let pull_start = Instant::now();
+            timings.image_pull_started_at = Some(pull_start);
             tracing::debug!(trace_id = trace_id, image = %image, "box.image.pulling");
 
             let create_image_options = CreateImageOptionsBuilder::default()
@@ -829,16 +871,24 @@ mod docker {
                 .docker
                 .create_image(Some(create_image_options), None, None);
 
+            let mut pull_error = None;
             while let Some(pull_result) = pull_stream.next().await {
                 if let Err(e) = pull_result {
-                    return Err(ExecutorError::ImagePull(format!(
+                    pull_error = Some(ExecutorError::ImagePull(format!(
                         "Failed to pull image '{}': {}",
                         image, e
                     )));
+                    break;
                 }
             }
-
+            // Stamp the phase end on success and mid-pull failure alike:
+            // the time already spent pulling is platform-owned either way
+            // and must be measurable for the billing deduction.
             timings.image_pull_ms = pull_start.elapsed().as_millis() as i64;
+            timings.image_pull_ended_at = Some(Instant::now());
+            if let Some(e) = pull_error {
+                return Err(e);
+            }
             let runtime_start = Instant::now();
 
             let memory_bytes =
@@ -1506,14 +1556,20 @@ mod kata {
             }
 
             let slot_start = Instant::now();
-            let permit = match tokio::time::timeout(
+            timings.slot_wait_started_at = Some(slot_start);
+            let slot_result = tokio::time::timeout(
                 std::time::Duration::from_secs(self.slot_timeout_secs),
                 self.semaphore.acquire(),
             )
-            .await
-            {
+            .await;
+            // Stamp the phase end on every resolution — success, closed
+            // semaphore, and slot timeout alike — so the elapsed wait is
+            // measured at the source and billing can exclude it even when
+            // the task fails right here.
+            timings.slot_wait_ms = slot_start.elapsed().as_millis() as i64;
+            timings.slot_wait_ended_at = Some(Instant::now());
+            let permit = match slot_result {
                 Ok(Ok(permit)) => {
-                    timings.slot_wait_ms = slot_start.elapsed().as_millis() as i64;
                     tracing::debug!(
                         trace_id = trace_id,
                         image = %image,
@@ -1571,15 +1627,27 @@ mod kata {
             let mut content = ContentClient::new(self.channel.clone());
 
             let pull_start = Instant::now();
+            timings.image_pull_started_at = Some(pull_start);
             tracing::debug!(trace_id = trace_id, image = %image, "kata.image.pulling");
             let requested_disk_mb = limits
                 .map_or(crate::box_limits::BoxLimits::DEFAULT_DISK_SIZE_MB, |l| {
                     l.disk_size_mb
                 });
-            ensure_devmapper_capacity(crate::resource_budget::disk_admission_mb(requested_disk_mb))
-                .await?;
-            self.ensure_image(&mut images, image).await?;
+            let pull_result = match ensure_devmapper_capacity(
+                crate::resource_budget::disk_admission_mb(requested_disk_mb),
+            )
+            .await
+            {
+                Ok(()) => self.ensure_image(&mut images, image).await,
+                Err(e) => Err(e),
+            };
+            // Stamp the phase end on success and mid-pull failure alike
+            // (devmapper admission or the pull itself): the time already
+            // spent is platform-owned either way and must be measurable
+            // for the billing deduction.
             timings.image_pull_ms = pull_start.elapsed().as_millis() as i64;
+            timings.image_pull_ended_at = Some(Instant::now());
+            pull_result?;
             let runtime_start = Instant::now();
 
             let (chain_id, image_env) = self
