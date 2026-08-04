@@ -642,7 +642,7 @@ pub async fn org_users_list_handler(
                         &session.display_timezone,
                         "%Y-%m-%d %H:%M:%S"
                     ),
-                    &session.timezone_abbreviation
+                    session.timezone_abbreviation
                 ),
             })
             .collect::<Vec<_>>(),
@@ -693,7 +693,7 @@ pub async fn org_users_list_handler(
                                 &session.display_timezone,
                                 "%Y-%m-%d %H:%M:%S"
                             ),
-                            &session.timezone_abbreviation
+                            session.timezone_abbreviation
                         ),
                         expires_at_formatted: format!(
                             "{} {}",
@@ -702,7 +702,7 @@ pub async fn org_users_list_handler(
                                 &session.display_timezone,
                                 "%Y-%m-%d %H:%M:%S"
                             ),
-                            &session.timezone_abbreviation
+                            session.timezone_abbreviation
                         ),
                         is_expired,
                     }
@@ -1022,7 +1022,7 @@ pub async fn org_users_edit_handler(
                 &session.display_timezone,
                 "%Y-%m-%d %H:%M:%S"
             ),
-            &session.timezone_abbreviation
+            session.timezone_abbreviation
         ),
     };
 
@@ -1106,7 +1106,7 @@ pub async fn org_users_edit_post_handler(
                     &session.display_timezone,
                     "%Y-%m-%d %H:%M:%S"
                 ),
-                &session.timezone_abbreviation
+                session.timezone_abbreviation
             ),
         };
 
@@ -1151,7 +1151,7 @@ pub async fn org_users_edit_post_handler(
                         &session.display_timezone,
                         "%Y-%m-%d %H:%M:%S"
                     ),
-                    &session.timezone_abbreviation
+                    session.timezone_abbreviation
                 ),
             };
 

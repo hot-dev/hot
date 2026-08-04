@@ -242,7 +242,7 @@ pub async fn projects_detail_handler(
                     &session.display_timezone,
                     "%Y-%m-%d %H:%M:%S"
                 ),
-                &session.timezone_abbreviation
+                session.timezone_abbreviation
             ),
         ),
         Ok(None) => (

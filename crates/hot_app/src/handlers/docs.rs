@@ -117,7 +117,7 @@ pub async fn docs_index_handler(
                         &session.display_timezone,
                         "%Y-%m-%d %H:%M"
                     ),
-                    &session.timezone_abbreviation
+                    session.timezone_abbreviation
                 );
 
                 // Check if docs are currently being generated
@@ -313,7 +313,7 @@ pub async fn project_docs_index_handler(
                     &session.display_timezone,
                     "%Y-%m-%d %H:%M"
                 ),
-                &session.timezone_abbreviation
+                session.timezone_abbreviation
             );
 
             // Try to load docs from cache

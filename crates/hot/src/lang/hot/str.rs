@@ -129,7 +129,7 @@ pub fn contains(args: &[Val]) -> HotResult<Val> {
                 _ => {
                     return HotResult::Err(Val::from(format!(
                         "contains expects string as first argument, got {:?}",
-                        &args[0]
+                        args[0]
                     )));
                 }
             };

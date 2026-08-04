@@ -1276,7 +1276,7 @@ mod tests {
         let idle_timeout = Duration::from_secs(1);
         let (mut source_writer, mut source_reader) = tokio::io::duplex(1);
         let producer = tokio::spawn(async move {
-            for byte in [b'a', b'b'] {
+            for byte in *b"ab" {
                 tokio::time::sleep(Duration::from_millis(600)).await;
                 source_writer.write_all(&[byte]).await.unwrap();
             }
