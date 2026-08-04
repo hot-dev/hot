@@ -2631,13 +2631,23 @@ mod tests {
         let duration = task
             .duration_ms
             .expect("stop-start duration must still be computed when no override is given");
+        let start_time = task
+            .start_time
+            .expect("mark_running must persist the task start time");
+        let stop_time = task
+            .stop_time
+            .expect("complete must persist the task stop time");
+        let expected_duration = stop_time
+            .signed_duration_since(start_time)
+            .num_milliseconds();
+
+        // SQLite computes this through floating-point julianday values before
+        // truncating to an integer. It can therefore land one millisecond
+        // below Chrono's calculation from the persisted timestamps.
         assert!(
-            duration >= 20,
-            "duration must cover the running window (got {duration})"
-        );
-        assert!(
-            duration < 60_000,
-            "duration must be the computed span, not garbage (got {duration})"
+            (duration - expected_duration).abs() <= 1,
+            "duration must match stop_time - start_time within database rounding \
+             (got {duration}, expected {expected_duration})"
         );
     }
 
