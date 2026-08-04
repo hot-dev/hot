@@ -3152,9 +3152,11 @@ window.ObservabilityTabs = class ObservabilityTabs {
             ]);
 
             // Keep the phase rows mathematically consistent with their parent
-            // bucket. Any unmeasured remainder is shown explicitly instead of
-            // disappearing into the bar.
-            const reconcileBreakdown = (parts, parentTotal) => {
+            // bucket. Event waiting timestamps are independently truncated to
+            // whole microseconds, so their contiguous phases can sum a few
+            // microseconds short. Fold up to 5μs into the terminal
+            // phase; continue surfacing larger, genuinely unmeasured gaps.
+            const reconcileBreakdown = (parts, parentTotal, precisionRemainderUs = 0) => {
                 let remaining = Math.max(0, parentTotal);
                 const reconciled = [];
                 for (const part of parts) {
@@ -3163,12 +3165,20 @@ window.ObservabilityTabs = class ObservabilityTabs {
                     reconciled.push({ ...part, value });
                     remaining -= value;
                 }
+                if (remaining > 0 && remaining <= precisionRemainderUs && reconciled.length > 0) {
+                    reconciled[reconciled.length - 1].value += remaining;
+                    remaining = 0;
+                }
                 if (remaining > 0) {
                     reconciled.push({ label: 'Other / Unattributed', value: remaining });
                 }
                 return reconciled;
             };
-            const waitingBreakdown = reconcileBreakdown(waitingBreakdownCandidates, waitingTimeUs);
+            const waitingBreakdown = reconcileBreakdown(
+                waitingBreakdownCandidates,
+                waitingTimeUs,
+                isTaskTiming ? 0 : 5
+            );
             const executionBreakdown = reconcileBreakdown(executionBreakdownCandidates, execTimeUs);
 
             const renderBreakdownRows = parts => {
