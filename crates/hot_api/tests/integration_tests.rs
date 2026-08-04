@@ -7,6 +7,7 @@ use axum::{
     body::Body,
     http::{Method, Request, StatusCode},
 };
+use futures::StreamExt;
 use hot::db::build::Build;
 use hot::db::env::Env;
 use hot::db::event::Event;
@@ -1091,6 +1092,26 @@ async fn create_test_task(
     (task_id, stream_id)
 }
 
+fn task_test_app(db: &hot_api::ApiStateData) -> axum::Router {
+    let api_v1_routes = axum::Router::new()
+        .route(
+            "/v1/tasks/{task_id}",
+            axum::routing::get(hot_api::handlers::get_task),
+        )
+        .route(
+            "/v1/tasks/{task_id}/subscribe",
+            axum::routing::get(hot_api::handlers::subscribe_to_task),
+        )
+        .route_layer(axum::middleware::from_fn_with_state(
+            db.clone(),
+            hot_api::auth::api_key_auth_middleware,
+        ));
+
+    axum::Router::new()
+        .merge(api_v1_routes)
+        .with_state(db.clone())
+}
+
 #[tokio::test]
 async fn test_get_run() {
     let db = create_test_db().await;
@@ -1180,22 +1201,7 @@ async fn test_get_task_and_subscribe_to_completed_snapshot() {
     .await
     .unwrap();
 
-    let api_v1_routes = axum::Router::new()
-        .route(
-            "/v1/tasks/{task_id}",
-            axum::routing::get(hot_api::handlers::get_task),
-        )
-        .route(
-            "/v1/tasks/{task_id}/subscribe",
-            axum::routing::get(hot_api::handlers::subscribe_to_task),
-        )
-        .route_layer(axum::middleware::from_fn_with_state(
-            db.clone(),
-            hot_api::auth::api_key_auth_middleware,
-        ));
-    let app = axum::Router::new()
-        .merge(api_v1_routes)
-        .with_state(db.clone());
+    let app = task_test_app(&db);
 
     let uri = format!("/v1/tasks/{task_id}");
     let (status, response) = make_request(&app, Method::GET, &uri, &api_key, None).await;
@@ -1222,21 +1228,142 @@ async fn test_get_task_and_subscribe_to_completed_snapshot() {
 }
 
 #[tokio::test]
+async fn test_subscribe_to_task_streams_in_flight_transitions() {
+    let db = create_test_db().await;
+    let (_api_key_id, api_key) = create_test_api_key(&db.0).await;
+    let (_, user_id) = hot::db::get_default_org_and_user_ids(&db.0).await.unwrap();
+    let env = Env::get_default_env(&db.0).await.unwrap();
+    let project_id = create_test_project(&db.0, &env.env_id, &user_id).await;
+    let build_id = create_test_build(&db.0, &project_id, &user_id, false).await;
+    let (task_id, _) = create_test_task(&db.0, &env.env_id, &build_id, &user_id).await;
+    let app = task_test_app(&db);
+
+    let request = Request::builder()
+        .method(Method::GET)
+        .uri(format!("/v1/tasks/{task_id}/subscribe"))
+        .header("Authorization", format!("Bearer {api_key}"))
+        .body(Body::empty())
+        .unwrap();
+    let response = app.oneshot(request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let mut events = response.into_body().into_data_stream();
+
+    let queued = tokio::time::timeout(std::time::Duration::from_secs(2), events.next())
+        .await
+        .expect("queued task event timed out")
+        .expect("task stream ended before queued event")
+        .expect("queued task event body failed");
+    let queued = String::from_utf8(queued.to_vec()).unwrap();
+    assert!(queued.contains("event: task:update"));
+    assert!(queued.contains("\"status\":\"queued\""));
+
+    assert!(Task::mark_running(&db.0, &task_id).await.unwrap());
+    let running = tokio::time::timeout(std::time::Duration::from_secs(2), events.next())
+        .await
+        .expect("running task event timed out")
+        .expect("task stream ended before running event")
+        .expect("running task event body failed");
+    let running = String::from_utf8(running.to_vec()).unwrap();
+    assert!(running.contains("\"status\":\"running\""));
+
+    assert!(
+        Task::complete(
+            &db.0,
+            &task_id,
+            &TaskStatus::Completed,
+            Some(&json!({"answer": 42})),
+            None,
+            None,
+        )
+        .await
+        .unwrap()
+    );
+    let completed = tokio::time::timeout(std::time::Duration::from_secs(2), events.next())
+        .await
+        .expect("completed task event timed out")
+        .expect("task stream ended before completed event")
+        .expect("completed task event body failed");
+    let completed = String::from_utf8(completed.to_vec()).unwrap();
+    assert!(completed.contains("\"status\":\"completed\""));
+    assert!(completed.contains("\"answer\":42"));
+
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_secs(2), events.next())
+            .await
+            .expect("task stream did not close after terminal event")
+            .is_none()
+    );
+}
+
+#[tokio::test]
+async fn test_subscribe_to_task_returns_unsuccessful_terminal_snapshots() {
+    let db = create_test_db().await;
+    let (_api_key_id, api_key) = create_test_api_key(&db.0).await;
+    let (_, user_id) = hot::db::get_default_org_and_user_ids(&db.0).await.unwrap();
+    let env = Env::get_default_env(&db.0).await.unwrap();
+    let project_id = create_test_project(&db.0, &env.env_id, &user_id).await;
+    let build_id = create_test_build(&db.0, &project_id, &user_id, false).await;
+    let app = task_test_app(&db);
+
+    for expected_status in ["failed", "cancelled", "timed_out"] {
+        let (task_id, _) = create_test_task(&db.0, &env.env_id, &build_id, &user_id).await;
+        match expected_status {
+            "failed" => assert!(
+                Task::complete(
+                    &db.0,
+                    &task_id,
+                    &TaskStatus::Failed,
+                    Some(&json!({"error": "task failed"})),
+                    None,
+                    None,
+                )
+                .await
+                .unwrap()
+            ),
+            "cancelled" => assert!(Task::cancel(&db.0, &task_id).await.unwrap()),
+            "timed_out" => assert!(
+                Task::complete(
+                    &db.0,
+                    &task_id,
+                    &TaskStatus::TimedOut,
+                    Some(&json!({"error": "task timed out"})),
+                    None,
+                    None,
+                )
+                .await
+                .unwrap()
+            ),
+            _ => unreachable!(),
+        }
+
+        let request = Request::builder()
+            .method(Method::GET)
+            .uri(format!("/v1/tasks/{task_id}/subscribe"))
+            .header("Authorization", format!("Bearer {api_key}"))
+            .body(Body::empty())
+            .unwrap();
+        let response = app.clone().oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(response.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        let body = String::from_utf8(bytes.to_vec()).unwrap();
+        assert!(body.contains("event: task:update"));
+        assert!(body.contains(&format!("\"status\":\"{expected_status}\"")));
+        if expected_status == "failed" {
+            assert!(body.contains("\"error\":\"task failed\""));
+        }
+        if expected_status == "timed_out" {
+            assert!(body.contains("\"error\":\"task timed out\""));
+        }
+    }
+}
+
+#[tokio::test]
 async fn test_get_task_not_found() {
     let db = create_test_db().await;
     let (_api_key_id, api_key) = create_test_api_key(&db.0).await;
-    let api_v1_routes = axum::Router::new()
-        .route(
-            "/v1/tasks/{task_id}",
-            axum::routing::get(hot_api::handlers::get_task),
-        )
-        .route_layer(axum::middleware::from_fn_with_state(
-            db.clone(),
-            hot_api::auth::api_key_auth_middleware,
-        ));
-    let app = axum::Router::new()
-        .merge(api_v1_routes)
-        .with_state(db.clone());
+    let app = task_test_app(&db);
 
     let uri = format!("/v1/tasks/{}", Uuid::new_v4());
     let (status, _) = make_request(&app, Method::GET, &uri, &api_key, None).await;
