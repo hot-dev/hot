@@ -197,6 +197,10 @@ task that completed before it subscribed. The waiter reconnects when needed,
 returns the completed task record, and raises a structured task error for
 `failed`, `cancelled`, or `timed_out`.
 
+The task's existing stream also emits durable `task:update` snapshots. Subscribe
+to that stream when one client is coordinating several tasks; use the
+task-specific waiter when it only needs one task's terminal result.
+
 | Language | Wait method |
 |----------|-------------|
 | JavaScript / TypeScript | `await hot.tasks.wait(taskId)` |

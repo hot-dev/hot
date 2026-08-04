@@ -974,6 +974,29 @@ GET /v1/runs
 GET /v1/runs/{run_id}
 ```
 
+#### Subscribe to Run
+
+```http
+GET /v1/runs/{run_id}/subscribe
+Accept: text/event-stream
+```
+
+The response is an SSE stream of durable `run:update` snapshots. The first
+event is always the latest persisted run, so subscribing after completion is
+safe. The stream reports subsequent changes and closes after `succeeded`,
+`failed`, or `cancelled`; `pending_retry` remains non-terminal.
+
+```text
+event: run:update
+data: {"type":"run:update","run":{"run_id":"...","status":"running",...}}
+
+event: run:update
+data: {"type":"run:update","run":{"run_id":"...","status":"succeeded","result":{...},...}}
+```
+
+Clients should reconnect to this endpoint after an interrupted connection.
+Official SDK run waiters handle that automatically.
+
 #### Get Run Statistics
 
 ```http
@@ -1345,6 +1368,7 @@ Subscribe to an existing stream to receive real-time updates.
 | `run:stop` | A run completed successfully |
 | `run:fail` | A run failed |
 | `run:cancel` | A run was cancelled |
+| `task:update` | Latest persisted state of a task belonging to this stream |
 | `stream:data` | Real-time data from the run (e.g., AI tokens) |
 | `stream:complete` | Stream subscription ended — the stream completed or the subscription timed out (5 minute default) |
 
@@ -1359,7 +1383,16 @@ data: {"type":"stream:data","run_id":"...","data_type":"ai:delta","payload":{"te
 
 event: run:stop
 data: {"type":"run:stop","run":{"run_id":"...","status":"succeeded","result":"Hello world"}}
+
+event: task:update
+data: {"type":"task:update","task":{"task_id":"...","status":"running",...}}
 ```
+
+On connection, Hot sends the latest persisted snapshot for tasks already on
+the stream, then sends another `task:update` when a task changes. This makes a
+single stream subscription useful for coordinating several tasks. Use the
+task-specific subscription when the client only needs one task and wants the
+connection to close automatically at that task's terminal state.
 
 #### Subscribe with Event (Atomic)
 

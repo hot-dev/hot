@@ -47,7 +47,7 @@ fn task_is_terminal(task: &Task) -> bool {
     )
 }
 
-async fn task_to_response(
+pub(crate) async fn task_to_response(
     db: &hot::db::DatabasePool,
     blob_store: Option<&Arc<BlobStore>>,
     task: &Task,

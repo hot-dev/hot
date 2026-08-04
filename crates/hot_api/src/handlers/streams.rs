@@ -17,6 +17,7 @@ use hot::db::{
     api_key::ApiKey,
     run::Run,
     stream::{Stream as DbStream, StreamError, StreamSummary},
+    task::Task,
 };
 use hot::permission::actions;
 use hot::stream::{
@@ -112,6 +113,9 @@ pub enum StreamEvent {
     RunFail { run: RunResponse },
     #[serde(rename = "run:cancel")]
     RunCancel { run: RunResponse },
+    /// Durable task snapshot for a task associated with this stream.
+    #[serde(rename = "task:update")]
+    TaskUpdate { task: TaskResponse },
     /// User-emitted stream data (partial results, progress, SSE events, etc.)
     #[serde(rename = "stream:data")]
     StreamData {
@@ -126,6 +130,45 @@ pub enum StreamEvent {
     Keepalive,
 }
 
+#[derive(Clone, PartialEq)]
+struct TaskSnapshotVersion {
+    task_status_id: i16,
+    run_id: Option<Uuid>,
+    start_time: Option<chrono::DateTime<chrono::Utc>>,
+    stop_time: Option<chrono::DateTime<chrono::Utc>>,
+    duration_ms: Option<i64>,
+    result: Option<serde_json::Value>,
+    retry_attempt: i16,
+    next_retry_at: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+impl From<&Task> for TaskSnapshotVersion {
+    fn from(task: &Task) -> Self {
+        Self {
+            task_status_id: task.task_status_id,
+            run_id: task.run_id,
+            start_time: task.start_time,
+            stop_time: task.stop_time,
+            duration_ms: task.duration_ms,
+            result: task.result.clone(),
+            retry_attempt: task.retry_attempt,
+            next_retry_at: task.next_retry_at,
+        }
+    }
+}
+
+async fn task_update_sse(
+    db: &hot::db::DatabasePool,
+    blob_store: Option<&Arc<BlobStore>>,
+    task: &Task,
+) -> Option<SseEvent> {
+    let task = super::task_to_response(db, blob_store, task).await;
+    let event = StreamEvent::TaskUpdate { task };
+    serde_json::to_string(&event)
+        .ok()
+        .map(|json| SseEvent::default().event("task:update").data(json))
+}
+
 /// Subscribe to a stream via Server-Sent Events
 ///
 /// This endpoint provides real-time updates for all events and runs in a stream.
@@ -135,6 +178,7 @@ pub enum StreamEvent {
 /// - `run:start` - A new run has started
 /// - `run:stop` - A run completed successfully
 /// - `run:fail` - A run failed
+/// - `task:update` - A durable task snapshot changed
 /// - `stream:complete` - The stream has completed (no more updates expected)
 pub async fn subscribe_to_stream(
     State((db, _storage, conf, stream_pubsub)): State<ApiStateData>,
@@ -209,6 +253,7 @@ pub async fn subscribe_to_stream(
         let _connection_guard = connection_guard;
         let mut seen_run_ids: ahash::AHashSet<Uuid> = ahash::AHashSet::new();
         let mut completed_run_ids: ahash::AHashSet<Uuid> = ahash::AHashSet::new();
+        let mut task_versions: ahash::AHashMap<Uuid, TaskSnapshotVersion> = ahash::AHashMap::new();
 
         // Poll interval for run status updates (stream:data comes via Redis Streams push)
         let poll_interval = if subscriber.is_some() {
@@ -435,6 +480,24 @@ pub async fn subscribe_to_stream(
                             tracing::error!("Error polling runs for stream {}: {}", stream_id, e);
                         }
                     }
+                    match Task::get_by_stream(&db_clone, &stream_id, &env_id, Some(100)).await {
+                        Ok(tasks) => {
+                            for task in tasks {
+                                let version = TaskSnapshotVersion::from(&task);
+                                if task_versions.get(&task.task_id) == Some(&version) {
+                                    continue;
+                                }
+                                task_versions.insert(task.task_id, version);
+                                if let Some(event) = task_update_sse(&db_clone, blob_store_clone.as_ref(), &task).await {
+                                    tracing::debug!(task_id = %task.task_id, "SSE poll: task:update");
+                                    yield Ok(event);
+                                }
+                            }
+                        }
+                        Err(error) => {
+                            tracing::error!(%stream_id, %error, "Error polling tasks for stream");
+                        }
+                    }
                     // Note: stream:data events are delivered via Redis Streams push (not database polling)
                     // They are ephemeral and not persisted to the database
                 }
@@ -557,6 +620,7 @@ pub struct EventPublishedEvent {
 /// - `run:stop` - A run completed successfully
 /// - `run:fail` - A run failed
 /// - `run:cancel` - A run was cancelled
+/// - `task:update` - A durable task snapshot changed
 /// - `stream:complete` - The stream subscription timed out
 pub async fn subscribe_with_event(
     State((db, _storage, conf, stream_pubsub)): State<ApiStateData>,
@@ -706,6 +770,7 @@ pub async fn subscribe_with_event(
         // Now run the same subscription loop as subscribe_to_stream
         let mut seen_run_ids: ahash::AHashSet<Uuid> = ahash::AHashSet::new();
         let mut completed_run_ids: ahash::AHashSet<Uuid> = ahash::AHashSet::new();
+        let mut task_versions: ahash::AHashMap<Uuid, TaskSnapshotVersion> = ahash::AHashMap::new();
 
         // Poll interval for run status updates (stream:data comes via pub/sub push)
         let poll_interval = if subscriber.is_some() {
@@ -930,6 +995,24 @@ pub async fn subscribe_with_event(
                         }
                         Err(e) => {
                             tracing::error!("Error polling runs for stream {}: {}", stream_id, e);
+                        }
+                    }
+                    match Task::get_by_stream(&db_clone, &stream_id, &env_id, Some(100)).await {
+                        Ok(tasks) => {
+                            for task in tasks {
+                                let version = TaskSnapshotVersion::from(&task);
+                                if task_versions.get(&task.task_id) == Some(&version) {
+                                    continue;
+                                }
+                                task_versions.insert(task.task_id, version);
+                                if let Some(event) = task_update_sse(&db_clone, blob_store_clone.as_ref(), &task).await {
+                                    tracing::debug!(task_id = %task.task_id, "SSE poll: task:update");
+                                    yield Ok(event);
+                                }
+                            }
+                        }
+                        Err(error) => {
+                            tracing::error!(%stream_id, %error, "Error polling tasks for stream");
                         }
                     }
                     // Note: stream:data events are delivered via pub/sub push (not database polling)

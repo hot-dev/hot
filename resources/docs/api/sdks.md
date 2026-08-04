@@ -16,8 +16,8 @@ Official client libraries for the Hot API, released in lockstep versions:
 
 Every SDK covers the full API v1 surface: the thirteen resources ([Endpoints](api)),
 SSE run-stream subscriptions with automatic reconnection across the API's
-5-minute stream timeout, structured API errors, and escape hatches for
-endpoints that do not yet have a helper.
+5-minute stream timeout, durable run and task waiters, structured API errors,
+and escape hatches for endpoints that do not yet have a helper.
 
 Authenticated clients should run server-side. Browser apps and untrusted
 clients should call your own backend route instead of exposing a Hot API key
@@ -244,6 +244,26 @@ Object result = client.events().callHot("::myapp::math/add-nums", List.of(2, 3))
 ```
 <!-- tabs:end -->
 
+## Wait for a Run
+
+If another API response or stored record gives your client a run ID, wait on
+that run directly. The run subscription sends the latest persisted snapshot
+first, reconnects after transport interruptions, and closes after a terminal
+state. A failed or cancelled run raises a structured run error containing the
+terminal run record.
+
+| Language | Wait method |
+|----------|-------------|
+| JavaScript / TypeScript | `await hot.runs.wait(runId)` |
+| Python | `hot.runs.wait(run_id)` or `await async_hot.runs.wait(run_id)` |
+| Go | `client.Runs.Wait(ctx, runID, nil)` |
+| Rust | `client.runs().wait(run_id, RunWaitOptions::default()).await` |
+| Java | `client.runs().waitFor(runId)` |
+
+Use the stream subscription when you need live `stream:data` or several
+related runs. Use the run waiter when one run's durable terminal record is the
+only result you need.
+
 ## Wait for a Background Task
 
 When a Hot run starts a task for a client, return the task id immediately and
@@ -309,6 +329,50 @@ System.out.println(task.get("result"));
 Use `::hot::task/await` inside Hot only when later Hot code in that same
 execution depends on the task result. Keeping a run alive just so a client can
 wait defeats the task's asynchronous lifecycle.
+
+### Coordinate several tasks on one stream
+
+The stream that contains the originating run also emits durable `task:update`
+snapshots for every task on that stream. This keeps the event-handler result
+fully user-defined: it can return one task ID, two task IDs, or a nested domain
+object. The client interprets that result, then uses the same stream to follow
+all relevant tasks:
+
+```typescript
+let streamId: string | undefined;
+let taskIds: string[] = [];
+
+for await (const event of hot.streams.subscribeWithEvent({
+  event_type: "report:requested",
+  event_data: { report_id: "report_123" },
+})) {
+  if (event.type === "event:published") streamId = event.stream_id;
+
+  if (event.type === "run:stop") {
+    // `task_ids` is application-defined, not imposed by Hot.
+    const result = event.run?.result as { task_ids?: string[] } | undefined;
+    taskIds = result?.task_ids ?? [];
+    break;
+  }
+}
+
+const pending = new Set(taskIds);
+for await (const event of hot.streams.subscribe(streamId!)) {
+  if (event.type !== "task:update" || !pending.has(event.task.task_id)) continue;
+
+  if (["failed", "cancelled", "timed_out"].includes(event.task.status)) {
+    throw new Error(`Task ${event.task.task_id} ${event.task.status}`);
+  }
+  if (event.task.status === "completed") pending.delete(event.task.task_id);
+  if (pending.size === 0) break;
+}
+```
+
+Because the stream sends current persisted task snapshots when the client
+connects, this remains safe if one of the tasks finishes between the handler's
+`run:stop` and the second subscription. For a single task, `tasks.wait(taskId)`
+wraps the same durable lifecycle with reconnection, timeout, and structured
+failure handling.
 
 ## Errors
 
@@ -389,7 +453,11 @@ All five SDKs follow the same conventions:
   events by `run_id`, and ends after the terminal run correlated to the event
   it published. Unrelated runs on the same stream do not end the iterator. Use
   the plain `subscribe` when your app expects multiple independent runs on one
-  stream.
+  stream. A plain stream subscription also carries durable `task:update`
+  snapshots for tasks associated with that stream.
+- **Durable run waiting.** `runs.wait` (or the language-equivalent method)
+  reads `run:update` snapshots and reconnects without missing a run that became
+  terminal before subscription setup.
 - **Durable task waiting.** `tasks.wait` (or the language-equivalent method)
   reads `task:update` snapshots, reconnects across transport interruptions, and
   cannot miss a task that became terminal before subscription setup.

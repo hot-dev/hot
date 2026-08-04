@@ -9,7 +9,7 @@ use uuid::Uuid;
 use crate::handlers::{
     CreateDomainRequest, CreateServiceKeyRequest, CreateSessionRequest, DomainResponse,
     DomainVerifyResponse, EnvSseEvent, EventPublishedEvent, Limits, OrgUsageResponse, PlanInfo,
-    RevokeAllResponse, RevokeAllServiceKeysResponse, ServiceKeyResponse, SessionResponse,
+    RevokeAllResponse, RevokeAllServiceKeysResponse, RunEvent, ServiceKeyResponse, SessionResponse,
     StreamEvent, SubscribeWithEventRequest, TaskEvent, UsagePercent, UsageStats,
 };
 use crate::models::{
@@ -77,6 +77,7 @@ struct BinaryUploadBody {
         list_runs_doc,
         get_run_stats_doc,
         get_run_doc,
+        subscribe_to_run_doc,
         get_task_doc,
         subscribe_to_task_doc,
         publish_event_doc,
@@ -183,6 +184,7 @@ struct BinaryUploadBody {
         RevokeAllServiceKeysResponse,
         RunResponse,
         RunStatsResponse,
+        RunEvent,
         ScheduleResponse,
         ServiceKeyResponse,
         SessionResponse,
@@ -497,6 +499,16 @@ fn get_run_stats_doc() {}
     responses((status = 200, description = "Run", body = ApiResponse<RunResponse>), (status = "default", description = "Error", body = ApiErrorResponse))
 )]
 fn get_run_doc() {}
+
+#[utoipa::path(
+    get,
+    path = "/v1/runs/{run_id}/subscribe",
+    tag = "Runs",
+    params(("run_id" = Uuid, Path, description = "Run UUID")),
+    security(("bearer_auth" = [])),
+    responses((status = 200, description = "SSE run snapshots until terminal state", body = RunEvent, content_type = "text/event-stream"), (status = "default", description = "Error", body = ApiErrorResponse))
+)]
+fn subscribe_to_run_doc() {}
 
 #[utoipa::path(
     get,
@@ -911,6 +923,7 @@ mod tests {
             "/v1/projects",
             "/v1/builds",
             "/v1/runs/stats",
+            "/v1/runs/{run_id}/subscribe",
             "/v1/tasks/{task_id}",
             "/v1/tasks/{task_id}/subscribe",
             "/v1/events",
