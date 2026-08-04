@@ -28,6 +28,7 @@ use hot::blob::BlobStore;
 /// This MUST match the worker's event queue name ("hot:event").
 const API_EVENT_QUEUE_NAME: &str = "hot:event";
 const RESERVED_EVENT_PREFIX: &str = "hot:";
+const EXTERNAL_CALL_EVENT_TYPE: &str = "hot:call";
 
 static API_EVENT_QUEUE: OnceCell<Arc<hot::queue::ProcessingQueue<hot::data::msg::Message>>> =
     OnceCell::new();
@@ -81,7 +82,7 @@ pub struct PublishedEvent {
 pub(super) fn require_external_event_type(
     event_type: &str,
 ) -> Result<(), (StatusCode, Json<ApiErrorResponse>)> {
-    if event_type.starts_with(RESERVED_EVENT_PREFIX) {
+    if event_type.starts_with(RESERVED_EVENT_PREFIX) && event_type != EXTERNAL_CALL_EVENT_TYPE {
         return Err((
             StatusCode::FORBIDDEN,
             Json(ApiErrorResponse::new(
@@ -545,8 +546,10 @@ mod tests {
     }
 
     #[test]
-    fn external_event_types_reject_reserved_control_namespace() {
+    fn external_event_types_only_allow_public_hot_call() {
+        assert!(require_external_event_type("hot:call").is_ok());
         assert!(require_external_event_type("hot:rerun").is_err());
+        assert!(require_external_event_type("hot:schedule").is_err());
         assert!(require_external_event_type("hot:mcp:call").is_err());
         assert!(require_external_event_type("user:created").is_ok());
     }
