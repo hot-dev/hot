@@ -321,9 +321,14 @@ where
         Fut: Future<Output = Result<R, Box<dyn Error + Send + Sync>>> + Send,
         R: Send + Sync,
     {
+        // Keep the original delivery in the lease until processing reaches a
+        // terminal queue action. If this future is cancelled while the worker
+        // is running (or while a retry is being re-enqueued), `Drop` can then
+        // restore the delivery instead of silently losing it.
         let retry_item = self
             .retry_item
-            .take()
+            .as_ref()
+            .cloned()
             .expect("memory queue lease already completed");
         let item_for_worker = retry_item.item.clone();
         let next_retry_count = retry_item.retry_count + 1;
@@ -377,13 +382,29 @@ where
                     if !backoff.is_zero() {
                         tokio::time::sleep(backoff).await;
                     }
-                    let unchanged = RetryItem::from_parts(
+                    // Mirror of the Redis backend's opt-in escalation (see
+                    // `streams::PRESERVE_DELIVERY_COUNT_TOKEN`): a requeue
+                    // whose reason carries the token consumes retry budget,
+                    // so a deterministic failure (e.g. an event-handler
+                    // setup that can never finish inside its watchdog)
+                    // eventually reaches the DLQ via the claim-side gate.
+                    // All other infrastructure retries keep the counter
+                    // unchanged and never consume budget — healthy
+                    // running-task deferrals requeue indefinitely by design.
+                    let counted = super::streams::infrastructure_requeue_preserves_delivery_count(
+                        &infra.to_string(),
+                    );
+                    let requeued = RetryItem::from_parts(
                         retry_item.item,
-                        retry_item.retry_count,
+                        if counted {
+                            next_retry_count
+                        } else {
+                            retry_item.retry_count
+                        },
                         first_attempt,
                         true,
                     );
-                    if let Err(send_err) = self.queue.channels.tx.send(unchanged).await {
+                    if let Err(send_err) = self.queue.channels.tx.send(requeued).await {
                         tracing::warn!(
                             queue = self.queue.queue_name,
                             "Failed to re-enqueue infrastructure retry: {}",
@@ -434,6 +455,7 @@ where
             }
         };
 
+        self.retry_item.take();
         self.completed = true;
         result
     }
@@ -767,6 +789,142 @@ mod tests {
         assert!(queue.try_drain_dlq().is_empty());
     }
 
+    /// Mirror of the Redis backend's opt-in escalation: an infrastructure
+    /// retry whose reason carries `streams::PRESERVE_DELIVERY_COUNT_TOKEN`
+    /// consumes retry budget on every requeue, so a deterministic repeat
+    /// offender reaches the DLQ instead of requeueing forever.
+    #[tokio::test]
+    async fn test_counted_infrastructure_retry_escalates_to_dlq() {
+        let queue = MemQueue::<i32>::new(unique_name("tq")).unwrap();
+        queue.enqueue(7).await.unwrap();
+
+        for attempt in 1..=MAX_PROCESSING_RETRIES {
+            let result = queue
+                .dequeue_and_work(|_item| async move {
+                    Err::<i32, Box<dyn Error + Send + Sync>>(Box::new(
+                        QueueInfrastructureError::new(
+                            format!(
+                                "deterministic setup failure {}",
+                                crate::queue::streams::PRESERVE_DELIVERY_COUNT_TOKEN
+                            ),
+                            std::time::Duration::ZERO,
+                        ),
+                    ))
+                })
+                .await;
+            assert!(result.is_err(), "counted retry {} should surface", attempt);
+            assert!(
+                queue.try_drain_dlq().is_empty(),
+                "attempt {} is still within the retry budget",
+                attempt
+            );
+        }
+
+        // Budget exhausted: the claim-side gate routes the item to the DLQ
+        // without handing it to the worker again.
+        let result = queue
+            .dequeue_and_work(|_item| async move {
+                Err::<i32, Box<dyn Error + Send + Sync>>(
+                    "retry-exhausted item must not reach the worker".into(),
+                )
+            })
+            .await;
+        match result {
+            Err(e) => assert!(
+                e.to_string().contains("Retry limit exceeded"),
+                "unexpected error: {}",
+                e
+            ),
+            Ok(_) => panic!("expected RetryLimitExceeded after exhausting the counted budget"),
+        }
+        assert!(queue.is_empty().await.unwrap());
+        assert_eq!(queue.try_drain_dlq(), vec![7]);
+    }
+
+    /// Never-lose rule, memory backend: an opted-out infrastructure retry
+    /// of a previously-counted item carries the accrued `retry_count`
+    /// forward unchanged — it consumes no budget but does not reset it
+    /// either. A deterministic stall that alternates counted and uncounted
+    /// failure reasons therefore still escalates to the DLQ (mirrors the
+    /// Redis backend's `prior_deliveries` carry-forward).
+    #[tokio::test]
+    async fn test_opted_out_retry_preserves_accrued_counted_budget() {
+        let queue = MemQueue::<i32>::new(unique_name("tq")).unwrap();
+        queue.enqueue(11).await.unwrap();
+
+        for accrued in 1..=MAX_PROCESSING_RETRIES {
+            // Counted failure: consumes one unit of the retry budget.
+            let result = queue
+                .dequeue_and_work(|_item| async move {
+                    Err::<i32, Box<dyn Error + Send + Sync>>(Box::new(
+                        QueueInfrastructureError::new(
+                            format!(
+                                "deterministic setup failure {}",
+                                crate::queue::streams::PRESERVE_DELIVERY_COUNT_TOKEN
+                            ),
+                            std::time::Duration::ZERO,
+                        ),
+                    ))
+                })
+                .await;
+            assert!(result.is_err(), "counted retry {} should surface", accrued);
+            assert!(
+                queue.try_drain_dlq().is_empty(),
+                "counted attempt {} is still within the retry budget",
+                accrued
+            );
+
+            // Interleaved opted-out failure: must neither consume budget
+            // nor reset the accrued count. Skip the final round — with the
+            // budget exhausted, the claim-side gate fires before any
+            // worker runs.
+            if accrued < MAX_PROCESSING_RETRIES {
+                let result = queue
+                    .dequeue_and_work(|_item| async move {
+                        Err::<i32, Box<dyn Error + Send + Sync>>(Box::new(
+                            QueueInfrastructureError::new(
+                                "transient deployment deferral",
+                                std::time::Duration::ZERO,
+                            ),
+                        ))
+                    })
+                    .await;
+                assert!(
+                    result.is_err(),
+                    "opted-out retry after {} counted failures should surface",
+                    accrued
+                );
+                assert!(
+                    queue.try_drain_dlq().is_empty(),
+                    "opted-out retry must not consume budget (after {} counted)",
+                    accrued
+                );
+            }
+        }
+
+        // Budget exhausted despite the alternation: the claim-side gate
+        // routes the item to the DLQ without handing it to the worker. If
+        // the opted-out retries had reset the accrued count, this would
+        // requeue forever instead.
+        let result = queue
+            .dequeue_and_work(|_item| async move {
+                Err::<i32, Box<dyn Error + Send + Sync>>(
+                    "retry-exhausted item must not reach the worker".into(),
+                )
+            })
+            .await;
+        match result {
+            Err(e) => assert!(
+                e.to_string().contains("Retry limit exceeded"),
+                "unexpected error: {}",
+                e
+            ),
+            Ok(_) => panic!("expected RetryLimitExceeded despite alternating failure reasons"),
+        }
+        assert!(queue.is_empty().await.unwrap());
+        assert_eq!(queue.try_drain_dlq(), vec![11]);
+    }
+
     #[tokio::test]
     async fn test_dequeue_and_work_retry_limit_to_dlq() {
         let queue = MemQueue::<i32>::new(unique_name("tq")).unwrap();
@@ -901,6 +1059,32 @@ mod tests {
             .unwrap();
 
         assert_eq!(got, Some(123));
+    }
+
+    #[tokio::test]
+    async fn cancelling_lease_processing_restores_item() {
+        let queue = MemQueue::<i32>::new(unique_name("tq")).unwrap();
+        queue.enqueue(456).await.unwrap();
+        let lease = queue.claim_blocking().await.unwrap();
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+
+        let processing = tokio::spawn(async move {
+            lease
+                .process(|_| async move {
+                    let _ = started_tx.send(());
+                    std::future::pending::<Result<(), Box<dyn Error + Send + Sync>>>().await
+                })
+                .await
+        });
+        started_rx.await.unwrap();
+        processing.abort();
+        let _ = processing.await;
+
+        let got = tokio::time::timeout(Duration::from_secs(1), queue.claim_blocking())
+            .await
+            .expect("cancelled delivery should be restored")
+            .unwrap();
+        assert_eq!(got.retry_item.as_ref().unwrap().item, 456);
     }
 
     #[tokio::test]

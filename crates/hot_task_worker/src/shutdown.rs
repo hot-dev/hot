@@ -19,12 +19,12 @@
 //! T+33s  : grace window for cancellation to land
 //!
 //! T+33s..: for each task still registered:
-//!            1. enqueue an "infra retry" copy onto {hot:task} (immediate,
-//!               no delay, doesn't count against the user's max_retries
-//!               budget — this is a system-initiated re-run, not a failure
-//!               of the user's code)
-//!            2. mark the original task row failed in DB
-//!            3. publish task:complete event so consumers see the failure
+//!            1. in one DB transaction, create the queued infra-retry child
+//!               and mark the original failed (or persist an honest exhausted
+//!               result when MAX_INFRA_RETRY_GENERATIONS has been consumed)
+//!            2. publish task:complete from that durable outcome
+//!            3. enqueue the already-durable child onto {hot:task}; a crash or
+//!               timeout here is repaired by queued-task reconciliation
 //!
 //! T+~50s : If Redis reports that our consumer has no pending messages,
 //!          XGROUP DELCONSUMER our consumer name on {hot:task}. If pending
@@ -58,8 +58,7 @@
 //! fail the original. Most container tasks (`::box/start`) are designed to
 //! be idempotent; re-running on a fresh worker is the correct behavior.
 
-use hot::db::{DatabasePool, Task, TaskStatus};
-use hot::env::retry::RetryConfig;
+use hot::db::{DatabasePool, InfraRetryFinalizeOutcome, Task};
 use hot::lang::hot::task::TaskRequest;
 use hot::queue::{ConsumerLifecycle, ProcessingQueue, Queue};
 use hot::stream::{EnvEvent, EnvPublisher, StreamPubSub};
@@ -82,10 +81,29 @@ const CANCEL_GRACE_SECS: u64 = 3;
 /// DB call can't push the whole drain past the ECS stopTimeout window.
 const SHUTDOWN_OP_TIMEOUT_SECS: u64 = 5;
 
+/// Maximum number of budget-exempt shutdown retries in one task lineage.
+/// Each retry is a fresh queue entry, so Redis delivery counts cannot enforce
+/// this policy across generations; the count is persisted on the task row.
+const MAX_INFRA_RETRY_GENERATIONS: i16 = 3;
+
 /// Reason string written to the original task's failure result and to the
 /// task:complete stream event. Distinct from user-error reasons so dashboards
 /// and retry analytics can separate "infra interruption" from "user bug".
 const SHUTDOWN_REASON: &str = "Task interrupted by worker shutdown — re-enqueued for retry";
+
+/// Reason string for a lineage that has already consumed all
+/// [`MAX_INFRA_RETRY_GENERATIONS`] budget-exempt retries. Unlike
+/// [`SHUTDOWN_REASON`] this is a *permanent* failure — no fresh generation is
+/// enqueued — so the payload must not claim a re-run is coming: it carries
+/// `infra_interrupted: false` (alerting that suppresses transient
+/// interruptions must fire for a dead lineage) plus `infra_retry_exhausted:
+/// true` so event consumers can still tell exhaustion apart from a user bug.
+fn shutdown_exhausted_reason() -> String {
+    format!(
+        "Task interrupted by worker shutdown — infrastructure retry budget exhausted ({} generations); not re-enqueued",
+        MAX_INFRA_RETRY_GENERATIONS,
+    )
+}
 
 /// Metadata tracked for each active task during shutdown.
 ///
@@ -158,6 +176,14 @@ impl TaskShutdownCoordinator {
         if let Ok(mut tasks) = self.active_tasks.write() {
             tasks.retain(|t| &t.task_id != task_id);
         }
+    }
+
+    /// Return whether this process is still actively executing `task_id`.
+    pub fn is_task_active(&self, task_id: &Uuid) -> bool {
+        self.active_tasks
+            .read()
+            .map(|tasks| tasks.iter().any(|task| &task.task_id == task_id))
+            .unwrap_or(false)
     }
 
     pub fn is_shutting_down(&self) -> bool {
@@ -295,9 +321,9 @@ impl TaskShutdownCoordinator {
         .await;
     }
 
-    /// Fail the task in DB, publish the task:complete event, and enqueue an
-    /// infra-retry copy onto the queue. Each step is wrapped in its own
-    /// timeout so a slow DB or Redis can't stall the whole drain.
+    /// Atomically fail the task and make its retry child durable, then publish
+    /// and enqueue only from that committed result. A timeout can no longer
+    /// leave the original terminal without a durable recovery row.
     async fn finalize_interrupted_task(
         db: &DatabasePool,
         stream_publisher: &StreamPubSub,
@@ -305,8 +331,8 @@ impl TaskShutdownCoordinator {
         task: &ActiveTask,
     ) {
         let op_timeout = Duration::from_secs(SHUTDOWN_OP_TIMEOUT_SECS);
-
-        let error = serde_json::json!({
+        let new_task_id = Uuid::now_v7();
+        let retry_error = serde_json::json!({
             "$type": "::hot::task/Failure",
             "$val": {
                 "msg": SHUTDOWN_REASON,
@@ -314,35 +340,82 @@ impl TaskShutdownCoordinator {
                 "infra_interrupted": true,
             }
         });
+        let exhausted_error = serde_json::json!({
+            "$type": "::hot::task/Failure",
+            "$val": {
+                "msg": shutdown_exhausted_reason(),
+                "err": null,
+                "infra_interrupted": false,
+                "infra_retry_exhausted": true,
+            }
+        });
 
-        // 1. Mark the original task as failed.
-        match timeout(
+        let outcome = match timeout(
             op_timeout,
-            Task::complete(db, &task.task_id, &TaskStatus::Failed, Some(&error)),
+            Task::finalize_with_infra_retry(
+                db,
+                &task.task_id,
+                &new_task_id,
+                MAX_INFRA_RETRY_GENERATIONS,
+                &retry_error,
+                &exhausted_error,
+                chrono::Utc::now(),
+            ),
         )
         .await
         {
-            Ok(Ok(_)) => {}
-            Ok(Err(e)) => {
-                tracing::warn!(
+            Ok(Ok(outcome)) => outcome,
+            Ok(Err(error)) => {
+                tracing::error!(
                     task_id = %task.task_id,
-                    "Shutdown: Task::complete failed: {}", e
+                    "Shutdown: atomic terminal/retry transaction failed: {error}"
                 );
+                return;
             }
             Err(_) => {
                 tracing::error!(
                     task_id = %task.task_id,
-                    "Shutdown: Task::complete timed out after {}s",
+                    "Shutdown: atomic terminal/retry transaction timed out after {}s; suppressing event and enqueue (a committed retry row will be recovered by reconciliation)",
                     SHUTDOWN_OP_TIMEOUT_SECS,
                 );
+                return;
             }
-        }
-
-        // 2. Publish the task:complete event so subscribers see it.
-        let duration_ms = match timeout(op_timeout, Task::get(db, &task.task_id)).await {
-            Ok(Ok(t)) => t.duration_ms,
-            _ => None,
         };
+
+        let (error, duration_ms, retry) = match outcome {
+            InfraRetryFinalizeOutcome::AlreadyTerminal => {
+                tracing::info!(
+                    task_id = %task.task_id,
+                    "Shutdown: task was already terminal; skipping stale completion event and retry"
+                );
+                return;
+            }
+            InfraRetryFinalizeOutcome::Exhausted { duration_ms } => {
+                tracing::error!(
+                    task_id = %task.task_id,
+                    max_infra_retries = MAX_INFRA_RETRY_GENERATIONS,
+                    "Shutdown: infra-retry lineage limit reached — task failed permanently"
+                );
+                (&exhausted_error, duration_ms, None)
+            }
+            InfraRetryFinalizeOutcome::RetryReady {
+                retry_task_id,
+                retry_attempt,
+                infra_retry_count,
+                should_enqueue,
+                duration_ms,
+            } => (
+                &retry_error,
+                duration_ms,
+                Some((
+                    retry_task_id,
+                    retry_attempt,
+                    infra_retry_count,
+                    should_enqueue,
+                )),
+            ),
+        };
+
         let event = EnvEvent::TaskComplete {
             task_id: task.task_id,
             env_id: task.env_id,
@@ -352,117 +425,56 @@ impl TaskShutdownCoordinator {
             duration_ms,
             error: Some(error.clone()),
         };
-        if let Err(e) = stream_publisher.publish_env(event).await {
-            tracing::warn!(
+        match timeout(op_timeout, stream_publisher.publish_env(event)).await {
+            Ok(Ok(_)) => {}
+            Ok(Err(error)) => tracing::warn!(
                 task_id = %task.task_id,
-                "Shutdown: failed to publish task:complete: {}", e
-            );
+                "Shutdown: failed to publish task:complete: {error}"
+            ),
+            Err(_) => tracing::error!(
+                task_id = %task.task_id,
+                "Shutdown: publishing task:complete timed out after {}s",
+                SHUTDOWN_OP_TIMEOUT_SECS,
+            ),
         }
 
-        // 3. Enqueue an infra-retry. We re-enqueue regardless of the user's
-        // `retry` meta — this isn't a user-error retry, it's a system-
-        // initiated re-run. We DO still cap effective replay via the queue's
-        // own MAX_PROCESSING_RETRIES (delivery count) to prevent infinite
-        // shutdown-driven loops if a task somehow keeps getting interrupted.
-        Self::enqueue_infra_retry(db, task_queue, task).await;
-    }
-
-    /// Insert a retry task row + enqueue onto the queue. Distinct from the
-    /// user-error retry path (`maybe_retry_task` in lib.rs) in two ways:
-    ///   - bypasses the user's `max_retries` cap (infra retry is free),
-    ///   - keeps `retry_attempt` from the original (this isn't "the user's
-    ///     2nd try", it's "the infra's 1st re-attempt of the user's nth try").
-    async fn enqueue_infra_retry(
-        db: &DatabasePool,
-        task_queue: &ProcessingQueue<TaskRequest>,
-        task: &ActiveTask,
-    ) {
-        let op_timeout = Duration::from_secs(SHUTDOWN_OP_TIMEOUT_SECS);
-
-        // We need the task row to insert the retry — it carries env_id,
-        // stream_id, build_id, options, etc. that aren't all on TaskRequest.
-        let task_row = match timeout(op_timeout, Task::get(db, &task.task_id)).await {
-            Ok(Ok(t)) => t,
-            Ok(Err(e)) => {
-                tracing::warn!(
-                    task_id = %task.task_id,
-                    "Shutdown: Task::get failed (won't retry): {}", e
-                );
-                return;
-            }
-            Err(_) => {
-                tracing::error!(
-                    task_id = %task.task_id,
-                    "Shutdown: Task::get timed out — skipping retry"
-                );
-                return;
-            }
+        let Some((retry_task_id, retry_attempt, infra_retry_count, should_enqueue)) = retry else {
+            return;
         };
-
-        // Carry the same retry_attempt as the original. Use the user's
-        // configured retry delay for backoff if they set one, otherwise
-        // re-enqueue immediately (infra interrupt isn't an error to back
-        // off from).
-        let retry_config = RetryConfig::from_meta(task_row.options.as_ref());
-        let next_attempt = task_row.retry_attempt;
-        let next_retry_at = chrono::Utc::now();
-        let new_task_id = Uuid::now_v7();
-
-        match timeout(
-            op_timeout,
-            Task::insert_retry(db, &new_task_id, &task_row, next_attempt, next_retry_at),
-        )
-        .await
-        {
-            Ok(Ok(_)) => {}
-            Ok(Err(e)) => {
-                tracing::error!(
-                    task_id = %task.task_id,
-                    new_task_id = %new_task_id,
-                    "Shutdown: Task::insert_retry failed: {}", e
-                );
-                return;
-            }
-            Err(_) => {
-                tracing::error!(
-                    task_id = %task.task_id,
-                    new_task_id = %new_task_id,
-                    "Shutdown: Task::insert_retry timed out"
-                );
-                return;
-            }
+        if !should_enqueue {
+            tracing::info!(
+                task_id = %task.task_id,
+                retry_task_id = %retry_task_id,
+                "Shutdown: retry row already existed; queued-row reconciliation owns delivery"
+            );
+            return;
         }
 
         let mut retry_request = task.original_request.clone();
-        retry_request.task_id = new_task_id.to_string();
+        retry_request.task_id = retry_task_id.to_string();
         retry_request.created_at_unix_ms = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_millis() as u64;
-
         match timeout(op_timeout, task_queue.enqueue(retry_request)).await {
-            Ok(Ok(())) => {
-                tracing::info!(
-                    task_id = %task.task_id,
-                    new_task_id = %new_task_id,
-                    attempt = next_attempt,
-                    user_max_retries = retry_config.max_retries,
-                    "Shutdown: enqueued infra-retry for interrupted task"
-                );
-            }
-            Ok(Err(e)) => {
-                tracing::error!(
-                    task_id = %task.task_id,
-                    new_task_id = %new_task_id,
-                    "Shutdown: failed to enqueue infra-retry: {}", e
-                );
-            }
+            Ok(Ok(())) => tracing::info!(
+                task_id = %task.task_id,
+                retry_task_id = %retry_task_id,
+                retry_attempt,
+                infra_retry_count,
+                "Shutdown: enqueued durable infra retry"
+            ),
+            Ok(Err(error)) => tracing::error!(
+                task_id = %task.task_id,
+                retry_task_id = %retry_task_id,
+                "Shutdown: failed to enqueue durable infra retry (reconciler will recover it): {error}"
+            ),
             Err(_) => {
                 tracing::error!(
                     task_id = %task.task_id,
-                    new_task_id = %new_task_id,
-                    "Shutdown: enqueue infra-retry timed out"
-                );
+                    retry_task_id = %retry_task_id,
+                    "Shutdown: durable infra-retry enqueue timed out (reconciler will recover it)"
+                )
             }
         }
     }
@@ -517,6 +529,10 @@ impl Default for TaskShutdownCoordinator {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use hot::data::serialization::Serialization;
+    use hot::db::TaskStatus;
+    use hot::queue::QueueType;
+    use hot::stream::{EnvSubscriberFactory, StreamPubSubType};
 
     fn dummy_active_task(task_id: Uuid) -> ActiveTask {
         ActiveTask {
@@ -552,6 +568,7 @@ mod tests {
 
         assert!(coord.try_register_task(dummy_active_task(task_id)));
         assert_eq!(coord.active_count(), 1);
+        assert!(coord.is_task_active(&task_id));
 
         // Second dispatch of the same task_id is rejected — this is the
         // in-process dedup that prevents the data-volume bind-mount race.
@@ -562,6 +579,7 @@ mod tests {
         // (legitimate fresh redelivery once the original is done).
         coord.unregister_task(&task_id);
         assert_eq!(coord.active_count(), 0);
+        assert!(!coord.is_task_active(&task_id));
         assert!(coord.try_register_task(dummy_active_task(task_id)));
         assert_eq!(coord.active_count(), 1);
     }
@@ -573,5 +591,309 @@ mod tests {
         assert!(coord.try_register_task(dummy_active_task(Uuid::now_v7())));
         assert!(coord.try_register_task(dummy_active_task(Uuid::now_v7())));
         assert_eq!(coord.active_count(), 3);
+    }
+
+    fn memory_task_queue() -> ProcessingQueue<TaskRequest> {
+        ProcessingQueue::new(
+            QueueType::Memory,
+            format!("test-task-queue-{}", Uuid::now_v7()),
+            None,
+            Serialization::Json,
+        )
+        .expect("memory queue should construct")
+    }
+
+    fn memory_stream_pubsub() -> StreamPubSub {
+        StreamPubSub::new(StreamPubSubType::Memory, None, false)
+            .expect("memory pubsub should construct")
+    }
+
+    async fn insert_running_task(db: &DatabasePool, active: &ActiveTask) {
+        Task::insert(
+            db,
+            &active.task_id,
+            &active.env_id,
+            &active.stream_id,
+            &Uuid::parse_str(&active.original_request.build_id).unwrap(),
+            None,
+            &active.function_name,
+            None,
+            None,
+            &active.task_type,
+            active.original_request.timeout_ms as i64,
+            None,
+        )
+        .await
+        .unwrap();
+        Task::mark_running(db, &active.task_id).await.unwrap();
+    }
+
+    async fn claim_enqueued_request(task_queue: &ProcessingQueue<TaskRequest>) -> TaskRequest {
+        let lease = tokio::time::timeout(Duration::from_secs(1), task_queue.claim_blocking())
+            .await
+            .expect("an infra retry must be enqueued")
+            .unwrap()
+            .expect("memory queue claim should yield a lease");
+        lease
+            .process(
+                |request| async move { Ok::<_, Box<dyn std::error::Error + Send + Sync>>(request) },
+            )
+            .await
+            .unwrap()
+            .expect("memory lease should surface the claimed request")
+    }
+
+    #[tokio::test]
+    async fn already_terminal_task_publishes_nothing_and_enqueues_nothing() {
+        let db = hot::db::test_db().await;
+        let task_queue = memory_task_queue();
+        let stream_publisher = memory_stream_pubsub();
+        let active = dummy_active_task(Uuid::now_v7());
+        insert_running_task(&db, &active).await;
+        let mut env_events = stream_publisher.subscribe_env(active.env_id).await.unwrap();
+        assert!(
+            Task::complete(
+                &db,
+                &active.task_id,
+                &TaskStatus::Completed,
+                None,
+                None,
+                None,
+            )
+            .await
+            .unwrap()
+        );
+
+        TaskShutdownCoordinator::finalize_interrupted_task(
+            &db,
+            &stream_publisher,
+            &task_queue,
+            &active,
+        )
+        .await;
+
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), task_queue.claim_blocking())
+                .await
+                .is_err(),
+            "a task that lost the terminal race must not be re-enqueued"
+        );
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), env_events.next())
+                .await
+                .is_err(),
+            "a task that lost the terminal race must not publish a stale event"
+        );
+    }
+
+    #[tokio::test]
+    async fn interrupted_task_finalize_fails_row_publishes_event_and_enqueues_retry() {
+        let db = hot::db::test_db().await;
+        let task_queue = memory_task_queue();
+        let stream_publisher = memory_stream_pubsub();
+        let active = dummy_active_task(Uuid::now_v7());
+        insert_running_task(&db, &active).await;
+        let mut env_events = stream_publisher.subscribe_env(active.env_id).await.unwrap();
+
+        TaskShutdownCoordinator::finalize_interrupted_task(
+            &db,
+            &stream_publisher,
+            &task_queue,
+            &active,
+        )
+        .await;
+
+        let row = Task::get(&db, &active.task_id).await.unwrap();
+        assert_eq!(row.task_status_id, TaskStatus::Failed.as_id());
+
+        // Under the infra-retry cap the record keeps its historical shape:
+        // "re-enqueued for retry" with the alert-suppression marker set.
+        let result = row.result.expect("failure result should be set");
+        let val = result.get("$val").expect("result should be tagged Failure");
+        assert_eq!(
+            val.get("msg").and_then(|m| m.as_str()),
+            Some(SHUTDOWN_REASON)
+        );
+        assert_eq!(
+            val.get("infra_interrupted").and_then(|v| v.as_bool()),
+            Some(true),
+        );
+        assert!(
+            val.get("infra_retry_exhausted").is_none(),
+            "an under-cap interruption must not carry the exhaustion marker"
+        );
+
+        let event = tokio::time::timeout(Duration::from_secs(1), env_events.next())
+            .await
+            .expect("a durable terminal write must publish task:complete")
+            .expect("subscription should stay open");
+        match event {
+            EnvEvent::TaskComplete {
+                task_id, status, ..
+            } => {
+                assert_eq!(task_id, active.task_id);
+                assert_eq!(status, "failed");
+            }
+            other => panic!("expected TaskComplete, got {:?}", other),
+        }
+
+        let retry = claim_enqueued_request(&task_queue).await;
+        assert_ne!(retry.task_id, active.task_id.to_string());
+    }
+
+    #[tokio::test]
+    async fn infra_retry_skips_enqueue_when_retry_row_already_exists() {
+        let db = hot::db::test_db().await;
+        let task_queue = memory_task_queue();
+        let stream_publisher = memory_stream_pubsub();
+        let active = dummy_active_task(Uuid::now_v7());
+        insert_running_task(&db, &active).await;
+
+        // A previous drain of the same task (or a racing writer during a DB
+        // brownout) already created the infra retry for this parent +
+        // attempt, but never enqueued it. Infra retries preserve the
+        // parent's retry_attempt, so the duplicate targets the same slot.
+        let row = Task::get(&db, &active.task_id).await.unwrap();
+        assert!(
+            Task::insert_retry(
+                &db,
+                &Uuid::now_v7(),
+                &row,
+                row.retry_attempt,
+                chrono::Utc::now()
+            )
+            .await
+            .unwrap()
+        );
+
+        TaskShutdownCoordinator::finalize_interrupted_task(
+            &db,
+            &stream_publisher,
+            &task_queue,
+            &active,
+        )
+        .await;
+
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), task_queue.claim_blocking())
+                .await
+                .is_err(),
+            "a duplicate infra retry must not be enqueued — the existing row \
+             is recovered by reconcile_queued_tasks"
+        );
+        assert_eq!(
+            Task::get_count_by_env(&db, &active.env_id).await.unwrap(),
+            2,
+            "no second retry row may be created"
+        );
+    }
+
+    #[tokio::test]
+    async fn cap_blocked_finalize_writes_exhausted_record_and_skips_enqueue() {
+        let db = hot::db::test_db().await;
+        let task_queue = memory_task_queue();
+        let stream_publisher = memory_stream_pubsub();
+        let root_active = dummy_active_task(Uuid::now_v7());
+        insert_running_task(&db, &root_active).await;
+
+        // Walk the lineage to the persisted generation cap, then interrupt
+        // the last (running) generation.
+        let mut row = Task::get(&db, &root_active.task_id).await.unwrap();
+        for _ in 0..MAX_INFRA_RETRY_GENERATIONS {
+            let child_id = Uuid::now_v7();
+            assert!(
+                Task::insert_infra_retry(&db, &child_id, &row, chrono::Utc::now())
+                    .await
+                    .unwrap()
+            );
+            row = Task::get(&db, &child_id).await.unwrap();
+        }
+        Task::mark_running(&db, &row.task_id).await.unwrap();
+
+        let mut capped_active = dummy_active_task(row.task_id);
+        capped_active.env_id = row.env_id;
+        capped_active.stream_id = row.stream_id;
+        capped_active.original_request.env_id = row.env_id.to_string();
+        capped_active.original_request.stream_id = row.stream_id.to_string();
+        capped_active.original_request.build_id = row.build_id.to_string();
+
+        let mut env_events = stream_publisher
+            .subscribe_env(capped_active.env_id)
+            .await
+            .unwrap();
+
+        TaskShutdownCoordinator::finalize_interrupted_task(
+            &db,
+            &stream_publisher,
+            &task_queue,
+            &capped_active,
+        )
+        .await;
+
+        // The terminal record must be honest: budget exhausted, no re-run
+        // coming, and NOT flagged as a transient (alert-suppressed)
+        // interruption.
+        let failed = Task::get(&db, &row.task_id).await.unwrap();
+        assert_eq!(failed.task_status_id, TaskStatus::Failed.as_id());
+        let result = failed.result.expect("failure result should be set");
+        let val = result.get("$val").expect("result should be tagged Failure");
+        assert_eq!(
+            val.get("msg").and_then(|m| m.as_str()),
+            Some(shutdown_exhausted_reason().as_str()),
+        );
+        assert_eq!(
+            val.get("infra_interrupted").and_then(|v| v.as_bool()),
+            Some(false),
+            "a dead lineage must not carry the alert-suppression flag"
+        );
+        assert_eq!(
+            val.get("infra_retry_exhausted").and_then(|v| v.as_bool()),
+            Some(true),
+        );
+
+        // The published task:complete carries the same exhausted payload.
+        let event = tokio::time::timeout(Duration::from_secs(1), env_events.next())
+            .await
+            .expect("a durable terminal write must publish task:complete")
+            .expect("subscription should stay open");
+        match event {
+            EnvEvent::TaskComplete {
+                task_id,
+                status,
+                error,
+                ..
+            } => {
+                assert_eq!(task_id, row.task_id);
+                assert_eq!(status, "failed");
+                let error = error.expect("exhausted completion must carry the error payload");
+                let val = error
+                    .get("$val")
+                    .expect("event error should be tagged Failure");
+                assert_eq!(
+                    val.get("infra_retry_exhausted").and_then(|v| v.as_bool()),
+                    Some(true),
+                );
+                assert_eq!(
+                    val.get("infra_interrupted").and_then(|v| v.as_bool()),
+                    Some(false),
+                );
+            }
+            other => panic!("expected TaskComplete, got {:?}", other),
+        }
+
+        // No fresh queue entry and no generation beyond the cap.
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), task_queue.claim_blocking())
+                .await
+                .is_err(),
+            "a cap-blocked lineage must not be re-enqueued"
+        );
+        assert_eq!(
+            Task::get_count_by_env(&db, &root_active.env_id)
+                .await
+                .unwrap(),
+            i64::from(MAX_INFRA_RETRY_GENERATIONS) + 1,
+            "no generation beyond the cap may be inserted"
+        );
     }
 }

@@ -104,7 +104,37 @@ pub struct ContainerTimings {
     pub runtime_start_ms: i64,
     pub execution_ms: i64,
     pub logs_collect_ms: i64,
+    /// Monotonic bounds of the execution-slot wait (the executor-internal
+    /// concurrency semaphore). `started_at` is stamped BEFORE the first
+    /// await of the phase and `ended_at` when the phase resolves — on
+    /// success AND on its own error paths (slot timeout, closed
+    /// semaphore) — so callers computing the billable window can subtract
+    /// the platform-owned wait even when it failed partway. A stamped
+    /// start with `ended_at == None` means the caller's outer deadline
+    /// cancelled the executor future mid-phase; billing treats such an
+    /// open phase as running until the billing snapshot (in the user's
+    /// favor). See `billed_ms_excluding_platform_phases` in lib.rs.
+    pub slot_wait_started_at: Option<std::time::Instant>,
+    pub slot_wait_ended_at: Option<std::time::Instant>,
+    /// Monotonic bounds of the image pull, with the same stamping contract
+    /// as the slot-wait pair above (start before the first await; end on
+    /// success and on pull failure; open-ended when cancelled mid-pull).
+    /// On Kata the pull phase also covers the devmapper disk-admission
+    /// wait, matching what `image_pull_ms` has always measured.
+    pub image_pull_started_at: Option<std::time::Instant>,
+    pub image_pull_ended_at: Option<std::time::Instant>,
     pub workload_started_at: Option<chrono::DateTime<chrono::Utc>>,
+    /// Monotonic instant when the workload finished — the wait on the
+    /// task/VM resolved (normally or with an error) or the executor-internal
+    /// timeout fired — captured BEFORE any executor-internal teardown (log
+    /// finalize, kill/remove, VM/snapshot/netns cleanup). Callers billing an
+    /// execution window must prefer this over a post-return snapshot, which
+    /// would charge that teardown as user compute. Currently stamped by the
+    /// Kata executor only (Docker container tasks are polled from the
+    /// caller, which snapshots before its own teardown); `None` when the
+    /// workload never started or the path doesn't stamp it — callers fall
+    /// back to their own snapshot.
+    pub workload_ended_at: Option<std::time::Instant>,
 }
 
 /// Backend selection for container execution.
@@ -290,6 +320,11 @@ impl BoxExecutor {
         }
     }
 
+    /// `timings` is caller-owned (rather than constructed here) so that
+    /// phase stamps made before a cancellation point survive when the
+    /// caller's outer deadline drops this future mid-flight — the partial
+    /// slot-wait/pull bounds are what let billing exclude those
+    /// platform-owned phases even on the cancellation path.
     #[allow(clippy::too_many_arguments)]
     pub async fn execute_with_extras(
         &self,
@@ -297,20 +332,20 @@ impl BoxExecutor {
         cmd: Option<Vec<String>>,
         env: Option<Vec<String>>,
         timeout_secs: u64,
+        timings: &mut ContainerTimings,
         trace_id: Option<&str>,
         limits: Option<&crate::box_limits::BoxLimits>,
         extras: Option<&ContainerExtras>,
         #[allow(unused_variables)] pre_start_hook: Option<PreStartHook>,
-    ) -> Result<(ContainerOutput, ContainerTimings), (ExecutorError, ContainerTimings)> {
-        let mut timings = ContainerTimings::default();
-        let result = match self {
+    ) -> ExecutorResult<ContainerOutput> {
+        match self {
             Self::Docker(e) => {
                 e.execute_with_limits(
                     image,
                     cmd,
                     env,
                     timeout_secs,
-                    &mut timings,
+                    timings,
                     trace_id,
                     limits,
                     extras,
@@ -324,7 +359,7 @@ impl BoxExecutor {
                     cmd,
                     env,
                     timeout_secs,
-                    &mut timings,
+                    timings,
                     trace_id,
                     limits,
                     extras,
@@ -332,10 +367,6 @@ impl BoxExecutor {
                 )
                 .await
             }
-        };
-        match result {
-            Ok(output) => Ok((output, timings)),
-            Err(error) => Err((error, timings)),
         }
     }
 
@@ -466,6 +497,17 @@ impl BoxExecutor {
         }
     }
 
+    /// Best-effort cleanup for Docker setup futures cancelled before they
+    /// returned a container ID. The task label survives create/start races and
+    /// lets the caller remove any container that appeared at the deadline.
+    pub async fn cleanup_task_containers(&self, task_id: &str) {
+        match self {
+            Self::Docker(e) => e.cleanup_task_containers(task_id).await,
+            #[cfg(all(target_os = "linux", feature = "kata"))]
+            Self::Kata(_) => {}
+        }
+    }
+
     /// Force-cleanup an orphan container previously returned by
     /// `list_orphan_containers`. Best-effort; never returns an error.
     #[cfg_attr(not(all(target_os = "linux", feature = "kata")), allow(dead_code))]
@@ -487,7 +529,9 @@ mod docker {
     use crate::log_accumulator::LogAccumulator;
     use bollard::Docker;
     use bollard::models::{ContainerCreateBody, HostConfig};
-    use bollard::query_parameters::{CreateImageOptionsBuilder, WaitContainerOptionsBuilder};
+    use bollard::query_parameters::{
+        CreateImageOptionsBuilder, ListContainersOptionsBuilder, WaitContainerOptionsBuilder,
+    };
     use futures::stream::StreamExt;
     use std::collections::HashMap;
 
@@ -526,14 +570,20 @@ mod docker {
             }
 
             let slot_start = Instant::now();
-            let permit = match tokio::time::timeout(
+            timings.slot_wait_started_at = Some(slot_start);
+            let slot_result = tokio::time::timeout(
                 std::time::Duration::from_secs(self.slot_timeout_secs),
                 self.semaphore.acquire(),
             )
-            .await
-            {
+            .await;
+            // Stamp the phase end on every resolution — success, closed
+            // semaphore, and slot timeout alike — so the elapsed wait is
+            // measured at the source and billing can exclude it even when
+            // the task fails right here.
+            timings.slot_wait_ms = slot_start.elapsed().as_millis() as i64;
+            timings.slot_wait_ended_at = Some(Instant::now());
+            let permit = match slot_result {
                 Ok(Ok(permit)) => {
-                    timings.slot_wait_ms = slot_start.elapsed().as_millis() as i64;
                     tracing::debug!(
                         trace_id = trace_id,
                         image = %image,
@@ -585,22 +635,37 @@ mod docker {
                 return Err(ExecutorError::ImageNotAllowed(image.to_string()));
             }
 
+            // No slot-wait phase here: phased Docker execution has no
+            // executor-internal semaphore — the container-task path's only
+            // concurrency gate is the worker's resource budget, acquired in
+            // lib.rs before claim (and before the billing anchor), so the
+            // slot-wait timing fields stay unset by design.
             let pull_start = Instant::now();
+            timings.image_pull_started_at = Some(pull_start);
             let create_image_options = CreateImageOptionsBuilder::default()
                 .from_image(image)
                 .build();
             let mut pull_stream = self
                 .docker
                 .create_image(Some(create_image_options), None, None);
+            let mut pull_error = None;
             while let Some(pull_result) = pull_stream.next().await {
                 if let Err(e) = pull_result {
-                    return Err(ExecutorError::ImagePull(format!(
+                    pull_error = Some(ExecutorError::ImagePull(format!(
                         "Failed to pull image '{}': {}",
                         image, e
                     )));
+                    break;
                 }
             }
+            // Stamp the phase end on success and mid-pull failure alike:
+            // the time already spent pulling is platform-owned either way
+            // and must be measurable for the billing deduction.
             timings.image_pull_ms = pull_start.elapsed().as_millis() as i64;
+            timings.image_pull_ended_at = Some(Instant::now());
+            if let Some(e) = pull_error {
+                return Err(e);
+            }
             let runtime_start = Instant::now();
 
             let memory_bytes =
@@ -755,6 +820,33 @@ mod docker {
             self.docker.remove_container(container_id, None).await.ok();
         }
 
+        pub async fn cleanup_task_containers(&self, task_id: &str) {
+            let mut filters = HashMap::new();
+            filters.insert(
+                "label".to_string(),
+                vec![format!("hot.dev/task-id={}", task_id)],
+            );
+            let options = ListContainersOptionsBuilder::default()
+                .all(true)
+                .filters(&filters)
+                .build();
+            match self.docker.list_containers(Some(options)).await {
+                Ok(containers) => {
+                    for container_id in containers.into_iter().filter_map(|container| container.id)
+                    {
+                        self.kill_and_remove(&container_id).await;
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        task_id,
+                        "Failed to list Docker containers during timeout cleanup: {}",
+                        e
+                    );
+                }
+            }
+        }
+
         #[allow(clippy::too_many_arguments)]
         async fn execute_inner(
             &self,
@@ -768,6 +860,7 @@ mod docker {
             extras: Option<&ContainerExtras>,
         ) -> ExecutorResult<ContainerOutput> {
             let pull_start = Instant::now();
+            timings.image_pull_started_at = Some(pull_start);
             tracing::debug!(trace_id = trace_id, image = %image, "box.image.pulling");
 
             let create_image_options = CreateImageOptionsBuilder::default()
@@ -778,16 +871,24 @@ mod docker {
                 .docker
                 .create_image(Some(create_image_options), None, None);
 
+            let mut pull_error = None;
             while let Some(pull_result) = pull_stream.next().await {
                 if let Err(e) = pull_result {
-                    return Err(ExecutorError::ImagePull(format!(
+                    pull_error = Some(ExecutorError::ImagePull(format!(
                         "Failed to pull image '{}': {}",
                         image, e
                     )));
+                    break;
                 }
             }
-
+            // Stamp the phase end on success and mid-pull failure alike:
+            // the time already spent pulling is platform-owned either way
+            // and must be measurable for the billing deduction.
             timings.image_pull_ms = pull_start.elapsed().as_millis() as i64;
+            timings.image_pull_ended_at = Some(Instant::now());
+            if let Some(e) = pull_error {
+                return Err(e);
+            }
             let runtime_start = Instant::now();
 
             let memory_bytes =
@@ -1036,6 +1137,69 @@ pub(crate) fn retry_container_id(base: &str, attempt: u32) -> String {
     format!("{}r{:x}", &base[..base.len() - 2], attempt)
 }
 
+/// Retry the full setup (snapshot → container → task) with a fresh
+/// container ID on each attempt. The Kata Go shim has a known cgroup
+/// cleanup bug where stale sandbox state from a failed attempt cannot
+/// be removed because LoadResourceController and
+/// NewSandboxResourceController use incompatible cgroup types. Using
+/// a new ID sidesteps the stale state entirely.
+const MAX_SETUP_ATTEMPTS: u32 = 3;
+
+/// Per-step bound for the best-effort Kata cleanup sweeps
+/// (`KataExecutor::cleanup_orphan` / `cleanup_after_timeout`). Each step is
+/// one containerd gRPC call (kill task, delete task record, remove
+/// snapshot, delete container record), one IO-FIFO removal pass, or one CNI
+/// teardown. A healthy containerd answers these in milliseconds, so 5s is
+/// generous; a call still pending after that is wedged, and every extra
+/// second spent waiting on it starves the remaining steps of the sweep —
+/// the all-or-nothing failure that leaks devmapper snapshots and CNI IPs
+/// with no discovery key left (see `KATA_TIMEOUT_CLEANUP_ENVELOPE` in
+/// lib.rs). Sized so that even the worst case — every step of every sweep
+/// timing out — fits inside that 120s envelope with margin: 19 steps × 5s
+/// = 95s (see `kata_cleanup_worst_case` and the compile-time assertion
+/// below).
+const KATA_CLEANUP_STEP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Bounded steps in one `cleanup_orphan` sweep, in execution order. The
+/// devmapper snapshot and CNI network are reclaimed *before* the container
+/// record is deleted: startup recovery enumerates containerd Container
+/// records only (`list_orphan_containers`), so the record is the sole
+/// discovery key for retrying a partially failed sweep — it must outlive
+/// every reclamation attempt for the undiscoverable resources. The task
+/// kill/delete steps come first because the snapshot device stays busy
+/// while the task holds it.
+#[cfg_attr(not(all(target_os = "linux", feature = "kata")), allow(dead_code))]
+const KATA_CLEANUP_STEP_ORDER: [&str; 6] = [
+    "task-kill",
+    "task-record",
+    "devmapper-snapshot",
+    "cni-network",
+    "container-record",
+    "io-fifos",
+];
+
+/// Number of bounded steps in one `cleanup_orphan` sweep
+/// (`KATA_CLEANUP_STEP_ORDER.len()`, as a `u32` for const timeout math).
+const KATA_CLEANUP_STEPS_PER_SWEEP: u32 = 6;
+
+/// Worst-case wall clock for one full `cleanup_after_timeout` sweep when
+/// every single step times out: `MAX_SETUP_ATTEMPTS` per-container-id
+/// sweeps plus the final CNI teardown for network-enabled tasks.
+const fn kata_cleanup_worst_case() -> std::time::Duration {
+    KATA_CLEANUP_STEP_TIMEOUT.saturating_mul(MAX_SETUP_ATTEMPTS * KATA_CLEANUP_STEPS_PER_SWEEP + 1)
+}
+
+// If the worst-case sweep did not fit inside the caller's outer envelope
+// (lib.rs bounds `cleanup_after_timeout` with
+// `KATA_TIMEOUT_CLEANUP_ENVELOPE`), the envelope could cancel the sweep
+// mid-way and the steps past the cancellation point would never be
+// attempted — the exact all-or-nothing failure per-step bounding exists to
+// prevent. Keep at least 10s of margin for scheduling and logging overhead.
+const _: () = assert!(
+    kata_cleanup_worst_case().as_secs() + 10 <= crate::KATA_TIMEOUT_CLEANUP_ENVELOPE.as_secs(),
+    "kata cleanup worst case must fit inside KATA_TIMEOUT_CLEANUP_ENVELOPE with margin"
+);
+
 #[cfg(feature = "kata")]
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 fn kata_root_readonly(writable_rootfs: bool) -> bool {
@@ -1073,8 +1237,8 @@ pub(crate) fn compute_chain_id(diff_ids: &[String]) -> String {
 mod kata {
     use super::*;
     use crate::log_accumulator::LogAccumulator;
-    use containerd_client::tonic::Request;
     use containerd_client::tonic::transport::Channel;
+    use containerd_client::tonic::{Code, Request, Status};
     use containerd_client::{
         connect,
         services::v1::{
@@ -1099,13 +1263,51 @@ mod kata {
     const KATA_VC_DIR: &str = "/run/vc/firecracker";
     const DEVMAPPER_MIN_FREE_RESERVE_MB: u64 = 2_048;
 
-    /// Retry the full setup (snapshot → container → task) with a fresh
-    /// container ID on each attempt. The Kata Go shim has a known cgroup
-    /// cleanup bug where stale sandbox state from a failed attempt cannot
-    /// be removed because LoadResourceController and
-    /// NewSandboxResourceController use incompatible cgroup types. Using
-    /// a new ID sidesteps the stale state entirely.
-    const MAX_SETUP_ATTEMPTS: u32 = 3;
+    /// Run one best-effort cleanup step under `KATA_CLEANUP_STEP_TIMEOUT`.
+    ///
+    /// A wedged step (e.g. a containerd gRPC call that never completes) is
+    /// abandoned with a warning naming the resource class and container id
+    /// it may have leaked, and the caller continues with the remaining
+    /// steps — one stuck call must not consume the outer cleanup envelope
+    /// and abandon everything scheduled after it.
+    async fn bounded_cleanup_step<F>(container_id: &str, resource: &str, step: F)
+    where
+        F: std::future::Future<Output = ()>,
+    {
+        if tokio::time::timeout(KATA_CLEANUP_STEP_TIMEOUT, step)
+            .await
+            .is_err()
+        {
+            tracing::warn!(
+                container_id,
+                resource,
+                timeout_secs = KATA_CLEANUP_STEP_TIMEOUT.as_secs(),
+                "kata.cleanup.step_timeout — resource may be leaked until worker restart"
+            );
+        }
+    }
+
+    /// Log the outcome of one best-effort containerd cleanup call.
+    /// `NotFound` is the common, expected case — the timeout sweep also
+    /// probes setup-retry container ids that never existed — so it stays at
+    /// debug; any other error is a real failure naming the resource left
+    /// behind.
+    fn log_cleanup_outcome<T>(container_id: &str, resource: &str, result: Result<T, Status>) {
+        match result {
+            Ok(_) => {}
+            Err(status) if status.code() == Code::NotFound => {
+                tracing::debug!(container_id, resource, "kata.cleanup.not_found");
+            }
+            Err(status) => {
+                tracing::warn!(
+                    container_id,
+                    resource,
+                    error = %status,
+                    "kata.cleanup.step_failed — resource may be leaked until worker restart"
+                );
+            }
+        }
+    }
 
     pub struct KataExecutor {
         channel: Channel,
@@ -1218,33 +1420,84 @@ mod kata {
         }
 
         /// Force-clean a single container in the `hot-box` namespace:
-        /// best-effort kill its task, then delete the task record, the
-        /// container record, the snapshot, and any leftover IO FIFOs.
+        /// best-effort kill its task, then delete the task record, remove
+        /// the devmapper snapshot, tear down CNI, delete the container
+        /// record, and remove any leftover IO FIFOs.
         ///
         /// Safe to call on a container whose task has already exited or
         /// whose snapshot is missing — every step is best-effort and ignores
         /// "not found" errors.
+        ///
+        /// Each step is individually bounded by `KATA_CLEANUP_STEP_TIMEOUT`:
+        /// a step that wedges or fails logs the resource class it may have
+        /// leaked and the sweep continues, so one stuck containerd gRPC call
+        /// cannot consume the caller's outer envelope
+        /// (`KATA_TIMEOUT_CLEANUP_ENVELOPE` in lib.rs) and abandon the
+        /// remaining steps. Steps run in `KATA_CLEANUP_STEP_ORDER`: the
+        /// snapshot and CNI network — undiscoverable once the container
+        /// record is gone, since startup recovery enumerates Container
+        /// records only (`list_orphan_containers`) — are reclaimed before
+        /// the record (the discovery key) is deleted, so a partially failed
+        /// sweep can still be retried at the next worker startup.
         pub async fn cleanup_orphan(&self, container_id: &str) {
             let mut tasks = TasksClient::new(self.channel.clone());
             let mut containers = ContainersClient::new(self.channel.clone());
             let mut snapshots = SnapshotsClient::new(self.channel.clone());
 
+            let [kill, task_record, snapshot, cni, container_record, io_fifos] =
+                KATA_CLEANUP_STEP_ORDER;
+
             // Kill the task first if it's still alive — DeleteTask returns an
-            // error on a still-running task in some containerd versions.
-            let _ = self.kill_task(&mut tasks, container_id).await;
-
-            let stdout_fifo = format!("{}/{}-stdout.fifo", KATA_IO_DIR, container_id);
-            let stderr_fifo = format!("{}/{}-stderr.fifo", KATA_IO_DIR, container_id);
-
-            self.cleanup(
-                &mut tasks,
-                &mut containers,
-                &mut snapshots,
-                container_id,
-                Some((&stdout_fifo, &stderr_fifo)),
-            )
+            // error on a still-running task in some containerd versions, and
+            // the snapshot device stays busy while the task holds it.
+            bounded_cleanup_step(container_id, kill, async {
+                let _ = self.kill_task(&mut tasks, container_id).await;
+            })
             .await;
-            crate::cni::teardown(container_id).await;
+
+            bounded_cleanup_step(container_id, task_record, async {
+                let req = with_namespace!(
+                    DeleteTaskRequest {
+                        container_id: container_id.to_string(),
+                    },
+                    NAMESPACE
+                );
+                log_cleanup_outcome(container_id, task_record, tasks.delete(req).await);
+            })
+            .await;
+
+            bounded_cleanup_step(container_id, snapshot, async {
+                let req = with_namespace!(
+                    RemoveSnapshotRequest {
+                        snapshotter: SNAPSHOTTER.to_string(),
+                        key: container_id.to_string(),
+                    },
+                    NAMESPACE
+                );
+                log_cleanup_outcome(container_id, snapshot, snapshots.remove(req).await);
+            })
+            .await;
+
+            bounded_cleanup_step(container_id, cni, crate::cni::teardown(container_id)).await;
+
+            bounded_cleanup_step(container_id, container_record, async {
+                let req = with_namespace!(
+                    DeleteContainerRequest {
+                        id: container_id.to_string(),
+                    },
+                    NAMESPACE
+                );
+                log_cleanup_outcome(container_id, container_record, containers.delete(req).await);
+            })
+            .await;
+
+            bounded_cleanup_step(container_id, io_fifos, async {
+                let stdout_fifo = format!("{}/{}-stdout.fifo", KATA_IO_DIR, container_id);
+                let stderr_fifo = format!("{}/{}-stderr.fifo", KATA_IO_DIR, container_id);
+                let _ = tokio::fs::remove_file(&stdout_fifo).await;
+                let _ = tokio::fs::remove_file(&stderr_fifo).await;
+            })
+            .await;
         }
 
         /// Best-effort cleanup after the caller's wall-clock timeout
@@ -1257,6 +1510,15 @@ mod kata {
         /// The container ID is re-derived from the trace/task ID (see
         /// `container_id_for_trace`), and every setup-retry variant is
         /// swept since we can't know which attempt was in flight.
+        ///
+        /// Every step of every per-id sweep is bounded by
+        /// `KATA_CLEANUP_STEP_TIMEOUT` and continues past failures (see
+        /// `cleanup_orphan`), so the worst case — every step of every sweep
+        /// timing out — is `kata_cleanup_worst_case()` (95s), which fits
+        /// inside the caller's `KATA_TIMEOUT_CLEANUP_ENVELOPE` (120s) with
+        /// margin. Even a fully wedged containerd therefore cannot make the
+        /// envelope cancel this sweep before the leakiest steps (snapshot
+        /// removal, CNI teardown) have been attempted for every id.
         pub async fn cleanup_after_timeout(&self, trace_id: &str, needs_network: bool) {
             let base = container_id_for_trace(Some(trace_id));
             for attempt in 1..=MAX_SETUP_ATTEMPTS {
@@ -1268,7 +1530,11 @@ mod kata {
                 self.cleanup_orphan(&cid).await;
             }
             if needs_network {
-                crate::cni::teardown(&base).await;
+                // The network sandbox is keyed by the base id; sweep it once
+                // more in case the in-flight attempt had set up CNI but not
+                // yet created the container.
+                let [_, _, _, cni, _, _] = KATA_CLEANUP_STEP_ORDER;
+                bounded_cleanup_step(&base, cni, crate::cni::teardown(&base)).await;
             }
         }
 
@@ -1290,14 +1556,20 @@ mod kata {
             }
 
             let slot_start = Instant::now();
-            let permit = match tokio::time::timeout(
+            timings.slot_wait_started_at = Some(slot_start);
+            let slot_result = tokio::time::timeout(
                 std::time::Duration::from_secs(self.slot_timeout_secs),
                 self.semaphore.acquire(),
             )
-            .await
-            {
+            .await;
+            // Stamp the phase end on every resolution — success, closed
+            // semaphore, and slot timeout alike — so the elapsed wait is
+            // measured at the source and billing can exclude it even when
+            // the task fails right here.
+            timings.slot_wait_ms = slot_start.elapsed().as_millis() as i64;
+            timings.slot_wait_ended_at = Some(Instant::now());
+            let permit = match slot_result {
                 Ok(Ok(permit)) => {
-                    timings.slot_wait_ms = slot_start.elapsed().as_millis() as i64;
                     tracing::debug!(
                         trace_id = trace_id,
                         image = %image,
@@ -1355,15 +1627,27 @@ mod kata {
             let mut content = ContentClient::new(self.channel.clone());
 
             let pull_start = Instant::now();
+            timings.image_pull_started_at = Some(pull_start);
             tracing::debug!(trace_id = trace_id, image = %image, "kata.image.pulling");
             let requested_disk_mb = limits
                 .map_or(crate::box_limits::BoxLimits::DEFAULT_DISK_SIZE_MB, |l| {
                     l.disk_size_mb
                 });
-            ensure_devmapper_capacity(crate::resource_budget::disk_admission_mb(requested_disk_mb))
-                .await?;
-            self.ensure_image(&mut images, image).await?;
+            let pull_result = match ensure_devmapper_capacity(
+                crate::resource_budget::disk_admission_mb(requested_disk_mb),
+            )
+            .await
+            {
+                Ok(()) => self.ensure_image(&mut images, image).await,
+                Err(e) => Err(e),
+            };
+            // Stamp the phase end on success and mid-pull failure alike
+            // (devmapper admission or the pull itself): the time already
+            // spent is platform-owned either way and must be measurable
+            // for the billing deduction.
             timings.image_pull_ms = pull_start.elapsed().as_millis() as i64;
+            timings.image_pull_ended_at = Some(Instant::now());
+            pull_result?;
             let runtime_start = Instant::now();
 
             let (chain_id, image_env) = self
@@ -1693,12 +1977,18 @@ mod kata {
             )
             .await;
 
+            // Stamp the workload end the moment the wait resolves (or the
+            // internal timeout fires, below) — everything after this point
+            // (log finalize, kill, container/snapshot/CNI cleanup) is
+            // executor-internal teardown that must not be billed.
             let exit_code = match wait_result {
                 Ok(Ok(code)) => {
+                    timings.workload_ended_at = Some(Instant::now());
                     timings.execution_ms = exec_start.elapsed().as_millis() as i64;
                     code
                 }
                 Ok(Err(e)) => {
+                    timings.workload_ended_at = Some(Instant::now());
                     self.cleanup(
                         &mut tasks,
                         &mut containers,
@@ -1713,6 +2003,7 @@ mod kata {
                     return Err(e);
                 }
                 Err(_) => {
+                    timings.workload_ended_at = Some(Instant::now());
                     timings.execution_ms = exec_start.elapsed().as_millis() as i64;
                     let logs_start = Instant::now();
                     let (stdout, stderr) = accumulator.snapshot().await;
@@ -2509,6 +2800,91 @@ mod tests {
     #[test]
     fn test_backend_display() {
         assert_eq!(Backend::Docker.to_string(), "docker");
+    }
+
+    #[test]
+    fn test_kata_cleanup_step_budget_fits_outer_envelope() {
+        // `MAX_SETUP_ATTEMPTS` per-id sweeps of `KATA_CLEANUP_STEPS_PER_SWEEP`
+        // bounded steps each, plus the final CNI teardown for network tasks.
+        let steps = MAX_SETUP_ATTEMPTS * KATA_CLEANUP_STEPS_PER_SWEEP + 1;
+        assert_eq!(kata_cleanup_worst_case(), KATA_CLEANUP_STEP_TIMEOUT * steps);
+        // The worst case must leave real margin inside the outer envelope:
+        // otherwise the envelope cancels the sweep mid-way and every step
+        // past the cancellation point is never attempted — the exact
+        // all-or-nothing failure per-step bounding exists to prevent.
+        assert!(
+            kata_cleanup_worst_case() + std::time::Duration::from_secs(10)
+                <= crate::KATA_TIMEOUT_CLEANUP_ENVELOPE
+        );
+    }
+
+    #[test]
+    fn test_kata_cleanup_order_reclaims_leaky_resources_before_discovery_key() {
+        let pos = |name: &str| {
+            KATA_CLEANUP_STEP_ORDER
+                .iter()
+                .position(|r| *r == name)
+                .unwrap_or_else(|| panic!("step {name} missing from cleanup order"))
+        };
+        // The snapshot and CNI network are undiscoverable once the container
+        // record is gone (startup recovery enumerates containerd Container
+        // records only), so both must be attempted before the record — the
+        // sole discovery key for retrying a partial sweep — is deleted.
+        assert!(pos("devmapper-snapshot") < pos("container-record"));
+        assert!(pos("cni-network") < pos("container-record"));
+        // The task must be killed and its record deleted first: the snapshot
+        // device stays busy while the task holds it.
+        assert_eq!(pos("task-kill"), 0);
+        assert_eq!(pos("task-record"), 1);
+        // The timeout-math constant must track the real step list.
+        assert_eq!(
+            KATA_CLEANUP_STEP_ORDER.len(),
+            KATA_CLEANUP_STEPS_PER_SWEEP as usize
+        );
+    }
+
+    /// Exercises the cleanup path used when the task worker's outer deadline
+    /// cancels container setup/execution. Run explicitly on a Docker host with:
+    /// `cargo test -p hot_task_worker docker_outer_timeout_cleanup_removes_container -- --ignored`
+    #[tokio::test]
+    #[ignore = "requires a local Docker daemon and may pull alpine:3.21"]
+    async fn docker_outer_timeout_cleanup_removes_container() {
+        let executor = docker::DockerExecutor::new(1, 5).expect("connect to Docker");
+        let task_id = uuid::Uuid::now_v7().to_string();
+        let mut timings = ContainerTimings::default();
+        let container_id = tokio::time::timeout(
+            std::time::Duration::from_secs(60),
+            executor.create_and_start(
+                "alpine:3.21",
+                Some(vec![
+                    "/bin/sh".to_string(),
+                    "-c".to_string(),
+                    "sleep 60".to_string(),
+                ]),
+                None,
+                Some(&task_id),
+                None,
+                None,
+                &mut timings,
+            ),
+        )
+        .await
+        .expect("Docker setup exceeded test deadline")
+        .expect("start test container");
+
+        assert_eq!(executor.inspect_status(&container_id).await.unwrap(), None);
+
+        tokio::time::timeout(
+            std::time::Duration::from_secs(15),
+            executor.cleanup_task_containers(&task_id),
+        )
+        .await
+        .expect("timeout cleanup exceeded deadline");
+
+        assert!(matches!(
+            executor.inspect_status(&container_id).await,
+            Err(ExecutorError::ContainerNotFound(_))
+        ));
     }
 }
 

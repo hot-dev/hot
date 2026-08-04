@@ -52,6 +52,79 @@ use uuid::Uuid;
 type UsageStatsCache =
     Arc<Mutex<HashMap<Uuid, (std::time::Instant, hot::db::subscription::OrgUsageStats)>>>;
 
+static USAGE_STATS_LOCKS: std::sync::OnceLock<Mutex<HashMap<Uuid, std::sync::Weak<Mutex<()>>>>> =
+    std::sync::OnceLock::new();
+
+async fn usage_stats_org_lock(org_id: Uuid) -> Arc<Mutex<()>> {
+    let locks = USAGE_STATS_LOCKS.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut locks = locks.lock().await;
+    // The registry only coordinates currently active callers. Weak entries
+    // avoid retaining one mutex forever for every org a long-lived worker has
+    // ever observed.
+    locks.retain(|_, lock| lock.strong_count() > 0);
+    if let Some(lock) = locks.get(&org_id).and_then(std::sync::Weak::upgrade) {
+        return lock;
+    }
+    let lock = Arc::new(Mutex::new(()));
+    locks.insert(org_id, Arc::downgrade(&lock));
+    lock
+}
+
+async fn fresh_cached_usage(
+    cache: &UsageStatsCache,
+    org_id: &Uuid,
+) -> Option<hot::db::subscription::OrgUsageStats> {
+    let cache = cache.lock().await;
+    cache
+        .get(org_id)
+        .filter(|(ts, _)| ts.elapsed() < USAGE_STATS_CACHE_TTL)
+        .map(|(_, stats)| stats.clone())
+}
+
+async fn cached_usage_stats(
+    db: &DatabasePool,
+    org_id: Uuid,
+    period_start: chrono::DateTime<chrono::Utc>,
+    retention_days: i32,
+    cache: &UsageStatsCache,
+) -> Option<hot::db::subscription::OrgUsageStats> {
+    if let Some(stats) = fresh_cached_usage(cache, &org_id).await {
+        return Some(stats);
+    }
+
+    let org_lock = usage_stats_org_lock(org_id).await;
+    let _guard = org_lock.lock().await;
+    if let Some(stats) = fresh_cached_usage(cache, &org_id).await {
+        return Some(stats);
+    }
+
+    let stats = match tokio::time::timeout(
+        DB_CALL_TIMEOUT,
+        hot::db::subscription::OrgUsageStats::calculate(db, &org_id, period_start, retention_days),
+    )
+    .await
+    {
+        Ok(Ok(stats)) => stats,
+        Ok(Err(e)) => {
+            tracing::warn!(org_id = %org_id, "Failed to calculate org usage: {}", e);
+            return None;
+        }
+        Err(_) => {
+            tracing::warn!(
+                org_id = %org_id,
+                timeout_secs = DB_CALL_TIMEOUT.as_secs(),
+                "Org usage calculation timed out"
+            );
+            return None;
+        }
+    };
+    cache
+        .lock()
+        .await
+        .insert(org_id, (std::time::Instant::now(), stats.clone()));
+    Some(stats)
+}
+
 const USAGE_STATS_CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(60);
 
 /// Maximum time to spend on per-task post-execution cleanup (DB writes,
@@ -64,10 +137,43 @@ const POST_TASK_CLEANUP_TIMEOUT: std::time::Duration = std::time::Duration::from
 /// so we apply a tighter per-call ceiling.
 const DB_CALL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
 
+/// Timing data is diagnostic and must never materially delay task execution
+/// or completion. Keep this much tighter than ordinary state transitions.
+const TASK_TIMING_DB_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// Terminal state is retried briefly before the queue lease is released. The
+/// postcondition check in `process_task` still prevents ACK if every attempt
+/// fails.
+const TASK_COMPLETION_DB_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+const TASK_COMPLETION_ATTEMPTS: usize = 3;
+
 /// Maximum time to spend tearing down a container (Docker remove or Kata
 /// shim/VM kill). After this we log and move on; the executor itself or the
 /// background reaper is responsible for finishing the cleanup.
 const CONTAINER_KILL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+const CONTAINER_LOGS_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+/// Data-volume provisioning happens before the durable task claim, but still
+/// holds queue/task leases and worker admission. Bound it well below the
+/// lease TTL so a wedged mount helper defers the delivery instead of pinning
+/// the worker indefinitely.
+const DATA_VOLUME_CREATE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// Outer backstop for the multi-step Kata timeout cleanup.
+/// `cleanup_after_timeout` sweeps every setup-retry container id and, for
+/// each one, kills the task, deletes the task/container records, removes the
+/// devmapper snapshot and IO FIFOs, and tears down CNI. Bounding that whole
+/// sequence with the single-step `CONTAINER_KILL_TIMEOUT` can cancel it
+/// mid-way — e.g. after DeleteContainer but before RemoveSnapshot/CNI
+/// teardown — and a snapshot or netns that outlives its container record has
+/// no discovery key left: startup recovery enumerates containerd Container
+/// records (`list_orphan_containers`), so it can never rediscover the leak
+/// even though snapshot/FIFO/netns names are deterministically derived from
+/// the container id. Size the envelope for the sum of the per-id sweeps
+/// (`MAX_SETUP_ATTEMPTS` container ids plus the final CNI teardown) rather
+/// than a single step. Per-step bounding *inside* `cleanup_orphan` (so one
+/// wedged containerd call cannot starve the remaining steps) belongs to the
+/// executor and is flagged for the kata cross-check.
+const KATA_TIMEOUT_CLEANUP_ENVELOPE: std::time::Duration = std::time::Duration::from_secs(120);
 
 /// Worker-side heartbeat interval (the background heartbeat task ticks every
 /// 15s and bumps `last_heartbeat_at` on every task this worker owns).
@@ -87,6 +193,15 @@ const ZOMBIE_HEARTBEAT_STALE_SECS: i64 = 30;
 /// the row is leaked forever without a periodic re-check.
 const ZOMBIE_REAPER_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
 
+/// Bounded retry budget for the DB reads/writes that container adoption
+/// depends on. Adoption runs at worker startup, often against a database
+/// still riding out the same fault that killed the previous worker; a single
+/// transient error must not leave a LIVE container unmanaged, because the
+/// zombie reaper (startup pass + every `ZOMBIE_REAPER_INTERVAL`) would then
+/// fail the still-running row and enqueue a duplicate run.
+const ADOPTION_DB_ATTEMPTS: usize = 3;
+const ADOPTION_DB_RETRY_BACKOFF: std::time::Duration = std::time::Duration::from_millis(150);
+
 /// Maximum time a claimed code task will park waiting for a `code_semaphore`
 /// permit before releasing its queue lease and deferring the message back to the
 /// queue. The outer inflight cap is `max(code_max, container_max)`, so a burst of
@@ -95,6 +210,34 @@ const ZOMBIE_REAPER_INTERVAL: std::time::Duration = std::time::Duration::from_se
 /// blocking container claims. Kept well under the task lease orphan-idle window so
 /// we defer before any sibling can reclaim the message.
 const CODE_SLOT_ACQUIRE_GRACE: std::time::Duration = std::time::Duration::from_secs(30);
+const CONTAINER_SLOT_ACQUIRE_GRACE: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Maximum time a claimed code task will wait for a blocking-execution slot
+/// (the cap on TOTAL live VM threads, including detached ones whose task
+/// already timed out) before deferring the message back to the queue.
+/// Sequential with `CODE_SLOT_ACQUIRE_GRACE`, so the worst-case park is 60s —
+/// still well under the 120s task-lease TTL / orphan-idle floor.
+const BLOCKING_SLOT_ACQUIRE_GRACE: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Upper bound on concurrently *live* VM executions, counting detached
+/// `spawn_blocking` threads whose task already timed out. A timed-out code
+/// task frees its `code_semaphore` permit immediately, so that cap alone
+/// cannot stop admission while wedged VM threads accumulate toward the tokio
+/// blocking-pool ceiling. Mirrors hot_worker's `worker.max-blocking-executions`
+/// derivation: default 2× the code-task cap, floor = the cap itself (a
+/// configured value below the cap would deadlock admission), clamped to the
+/// largest legal semaphore size.
+fn blocking_execution_capacity(code_max: usize, configured_max: i64) -> usize {
+    let floor = code_max.max(1);
+    let capacity = if configured_max < 0 {
+        floor.saturating_mul(2)
+    } else {
+        usize::try_from(configured_max)
+            .unwrap_or(usize::MAX)
+            .max(floor)
+    };
+    capacity.min(Semaphore::MAX_PERMITS)
+}
 
 /// Kill and remove a container with a wall-clock ceiling. A wedged Kata shim
 /// or hung Docker daemon can otherwise pin the worker indefinitely on
@@ -118,6 +261,78 @@ async fn kill_and_remove_with_timeout(
             timeout_secs = CONTAINER_KILL_TIMEOUT.as_secs(),
             "kill_and_remove timed out — container may be leaked, will be cleaned up by orphan reaper"
         );
+    }
+}
+
+async fn remove_container_with_timeout(
+    executor: &executor::BoxExecutor,
+    container_id: &str,
+    task_id: &Uuid,
+) {
+    if tokio::time::timeout(
+        CONTAINER_KILL_TIMEOUT,
+        executor.remove_container(container_id),
+    )
+    .await
+    .is_err()
+    {
+        tracing::error!(
+            task_id = %task_id,
+            container_id = %container_id,
+            backend = %executor.backend(),
+            timeout_secs = CONTAINER_KILL_TIMEOUT.as_secs(),
+            "remove_container timed out — orphan reaper will retry cleanup"
+        );
+    }
+}
+
+/// Run best-effort cleanup behind a hard wall-clock ceiling. Cleanup talks to
+/// the same runtime services that may have caused the execution timeout, so it
+/// must never become an unbounded second wait after the primary deadline.
+async fn bounded_cleanup<F>(deadline: std::time::Duration, cleanup: F) -> bool
+where
+    F: std::future::Future<Output = ()>,
+{
+    tokio::time::timeout(deadline, cleanup).await.is_ok()
+}
+
+async fn await_claimed_task_deadline<F>(
+    deadline: tokio::time::Instant,
+    setup: F,
+) -> Result<F::Output, tokio::time::error::Elapsed>
+where
+    F: std::future::Future,
+{
+    tokio::time::timeout_at(deadline, setup).await
+}
+
+async fn await_data_volume_create<F>(
+    timeout: std::time::Duration,
+    create: F,
+) -> Result<F::Output, tokio::time::error::Elapsed>
+where
+    F: std::future::Future,
+{
+    tokio::time::timeout(timeout, create).await
+}
+
+/// Bounded data-volume cleanup. When `cleanup()` completes it defuses the
+/// volume's `Drop` (no double-umount); when it times out the volume is handed
+/// to a detached thread instead of being dropped here, because `Drop` re-runs
+/// the same umount SYNCHRONOUSLY and a hung (D-state) umount would pin this
+/// tokio worker thread forever — a handful of such tasks would stall the
+/// whole worker.
+async fn cleanup_data_volume_with_timeout(task_id: &Uuid, volume: data_volume::DataVolume) {
+    if tokio::time::timeout(CONTAINER_KILL_TIMEOUT, volume.cleanup())
+        .await
+        .is_err()
+    {
+        tracing::error!(
+            task_id = %task_id,
+            mount_point = %volume.mount_point().display(),
+            "data volume cleanup timed out — detaching the final unmount to a background thread; the mount and backing file may leak until it completes"
+        );
+        let _ = volume.drop_detached();
     }
 }
 
@@ -612,8 +827,25 @@ pub async fn run(config: TaskWorkerConfig) -> Result<(), Box<dyn std::error::Err
 
     let bytecode_cache = Arc::new(BytecodeCache::default_location());
 
-    // Split concurrency: high-limit semaphore for code tasks, resource budget for containers
+    // Split concurrency: task-count caps plus memory/disk admission for containers.
     let code_semaphore = Arc::new(Semaphore::new(code_max));
+    // Total live VM executions, including detached spawn_blocking threads
+    // from timed-out tasks. Each execution's owned permit rides inside its
+    // blocking closure, so a wedged thread keeps consuming capacity until it
+    // actually exits instead of admission continuing at full rate while
+    // leaked threads pile up to the tokio blocking-pool cap.
+    let configured_max_blocking = config
+        .worker_conf
+        .get_int_or_default("worker.max-blocking-executions", -1);
+    let max_blocking_executions = blocking_execution_capacity(code_max, configured_max_blocking);
+    let blocking_execution_slots = Arc::new(Semaphore::new(max_blocking_executions));
+    tracing::info!(
+        max_blocking_executions,
+        configured_max = configured_max_blocking,
+        code_max,
+        "Task worker blocking-execution ceiling configured"
+    );
+    let container_semaphore = Arc::new(Semaphore::new(container_max));
     let container_budget = resource_budget::ResourceBudget::new(
         container_budget.memory_budget_mb,
         container_budget.disk_budget_mb,
@@ -717,12 +949,15 @@ pub async fn run(config: TaskWorkerConfig) -> Result<(), Box<dyn std::error::Err
         &db,
         &stream_publisher,
         &task_queue_arc,
+        &coordinator,
         &worker_id,
     )
     .await;
 
-    // Reap zombie tasks (code tasks with stale heartbeat, or container tasks with no container)
-    reap_zombie_tasks(&db, &stream_publisher, &task_queue_arc).await;
+    // Reap zombie tasks (code tasks with stale heartbeat, or container tasks with no container).
+    // Runs after adoption so coordinator-registered adopted tasks are skipped
+    // even when their ownership repair is still pending.
+    reap_zombie_tasks(&db, &stream_publisher, &task_queue_arc, &coordinator).await;
 
     let reconcile_after_secs = config
         .worker_conf
@@ -783,18 +1018,20 @@ pub async fn run(config: TaskWorkerConfig) -> Result<(), Box<dyn std::error::Err
                 if reaper_coordinator.is_shutting_down() {
                     break;
                 }
-                reap_zombie_tasks(&reaper_db, &reaper_pub, &reaper_queue).await;
+                reap_zombie_tasks(&reaper_db, &reaper_pub, &reaper_queue, &reaper_coordinator)
+                    .await;
             }
         });
     }
 
     // Monitor any adopted containers in background poll tasks
-    for (adopted_task_id, adopted_container_id) in adopted {
+    for (adopted_task_id, adopted_container_id, adopted_ownership_resolved) in adopted {
         let db = Arc::clone(&db);
         let sp = Arc::clone(&stream_publisher);
         let tq = Arc::clone(&task_queue_arc);
         let ex = Arc::clone(&container_executor);
         let coord = Arc::clone(&coordinator);
+        let monitor_worker_id = worker_id.clone();
         tokio::spawn(async move {
             monitor_adopted_container(
                 adopted_task_id,
@@ -804,6 +1041,8 @@ pub async fn run(config: TaskWorkerConfig) -> Result<(), Box<dyn std::error::Err
                 &tq,
                 &ex,
                 &coord,
+                &monitor_worker_id,
+                adopted_ownership_resolved,
             )
             .await;
         });
@@ -921,6 +1160,8 @@ pub async fn run(config: TaskWorkerConfig) -> Result<(), Box<dyn std::error::Err
         let stream_pub_c = Arc::clone(&stream_publisher);
         let cache_c = Arc::clone(&bytecode_cache);
         let code_sem_c = Arc::clone(&code_semaphore);
+        let blocking_slots_c = Arc::clone(&blocking_execution_slots);
+        let container_sem_c = Arc::clone(&container_semaphore);
         let ctr_budget_c = Arc::clone(&container_budget);
         let conf_c = config.worker_conf.clone();
         let ep_c = event_publisher.clone();
@@ -956,6 +1197,8 @@ pub async fn run(config: TaskWorkerConfig) -> Result<(), Box<dyn std::error::Err
                                     let stream_pub = Arc::clone(&stream_pub_c);
                                     let cache = Arc::clone(&cache_c);
                                     let code_sem = Arc::clone(&code_sem_c);
+                                    let blocking_slots = Arc::clone(&blocking_slots_c);
+                                    let container_sem = Arc::clone(&container_sem_c);
                                     let ctr_budget = Arc::clone(&ctr_budget_c);
                                     let conf = conf_c.clone();
                                     let ep = ep_c.clone();
@@ -974,6 +1217,8 @@ pub async fn run(config: TaskWorkerConfig) -> Result<(), Box<dyn std::error::Err
                                             stream_pub,
                                             cache,
                                             code_sem,
+                                            blocking_slots,
+                                            container_sem,
                                             ctr_budget,
                                             conf,
                                             ep,
@@ -1086,8 +1331,9 @@ async fn reap_zombie_tasks(
     db: &DatabasePool,
     stream_publisher: &StreamPubSub,
     task_queue: &ProcessingQueue<TaskRequest>,
+    coordinator: &shutdown::TaskShutdownCoordinator,
 ) {
-    let zombies = match Task::find_zombie_tasks(db, ZOMBIE_HEARTBEAT_STALE_SECS).await {
+    let mut zombies = match Task::find_zombie_tasks(db, ZOMBIE_HEARTBEAT_STALE_SECS).await {
         Ok(tasks) => tasks,
         Err(e) => {
             tracing::warn!("Failed to query zombie tasks: {}", e);
@@ -1096,13 +1342,31 @@ async fn reap_zombie_tasks(
     };
 
     // Also check for legacy running tasks without any heartbeat (pre-migration)
-    let legacy = match Task::find_running_without_heartbeat(db).await {
+    let mut legacy = match Task::find_running_without_heartbeat(db).await {
         Ok(tasks) => tasks,
         Err(e) => {
             tracing::warn!("Failed to query legacy running tasks: {}", e);
             Vec::new()
         }
     };
+
+    // Tasks registered with this worker's coordinator are alive in-process
+    // even when their DB row looks stale — an adopted container whose
+    // `set_worker` ownership repair has not landed yet still carries the dead
+    // worker's id and heartbeat. Reaping one would fail a live execution and
+    // enqueue a duplicate run, so skip anything this worker actively manages.
+    let keep_inactive = |task_id: &Uuid| {
+        let active = coordinator.is_task_active(task_id);
+        if active {
+            tracing::info!(
+                task_id = %task_id,
+                "Skipping zombie candidate actively managed by this worker (adopted or in-flight)"
+            );
+        }
+        !active
+    };
+    zombies.retain(|task| keep_inactive(&task.task_id));
+    legacy.retain(|task| keep_inactive(&task.task_id));
 
     let total = zombies.len() + legacy.len();
     if total == 0 {
@@ -1127,11 +1391,25 @@ async fn reap_zombie_tasks(
             }
         });
 
-        if let Err(e) =
-            Task::complete(db, &task.task_id, &db::TaskStatus::Failed, Some(&error)).await
+        match Task::complete(
+            db,
+            &task.task_id,
+            &db::TaskStatus::Failed,
+            Some(&error),
+            None,
+            None,
+        )
+        .await
         {
-            tracing::error!(task_id = %task.task_id, "Failed to reap zombie task: {}", e);
-            continue;
+            Ok(true) => {}
+            Ok(false) => {
+                tracing::info!(task_id = %task.task_id, "Zombie task became terminal before reaper update; skipping stale event and retry");
+                continue;
+            }
+            Err(e) => {
+                tracing::error!(task_id = %task.task_id, "Failed to reap zombie task: {}", e);
+                continue;
+            }
         }
 
         let duration_ms = task.duration_ms;
@@ -1157,6 +1435,32 @@ async fn reap_zombie_tasks(
             worker_id = ?task.worker_id,
             "Reaped zombie task",
         );
+    }
+}
+
+/// Build a `TaskRequest` from the task row alone, with no further DB reads.
+/// Carries the full execution identity (function, args, env/stream/build,
+/// timeout) but no org/project enrichment — `task_request_from_db_row` layers
+/// that on top when the extra lookups succeed. Also the adoption fallback
+/// when those lookups keep failing: org/project context is best-effort
+/// (quota and feature resolution during container re-execution), while
+/// refusing adoption over it leaves a live container unmanaged.
+fn synthesize_task_request_from_row(task: &Task) -> TaskRequest {
+    TaskRequest {
+        task_id: task.task_id.to_string(),
+        function_name: task.function_name.clone(),
+        args: task.args.clone().unwrap_or(serde_json::Value::Null),
+        stream_id: task.stream_id.to_string(),
+        env_id: task.env_id.to_string(),
+        build_id: task.build_id.to_string(),
+        org_id: None,
+        user_id: task.by_user_id.map(|id| id.to_string()),
+        project_id: None,
+        project_name: None,
+        timeout_ms: task.timeout_ms.max(1_000) as u64,
+        task_type: task.task_type.clone(),
+        created_at_unix_ms: task.created_at.timestamp_millis().max(0) as u64,
+        origin_run_id: task.origin_run_id.map(|id| id.to_string()),
     }
 }
 
@@ -1191,22 +1495,11 @@ async fn task_request_from_db_row(
         }
     };
 
-    Ok(TaskRequest {
-        task_id: task.task_id.to_string(),
-        function_name: task.function_name.clone(),
-        args: task.args.clone().unwrap_or(serde_json::Value::Null),
-        stream_id: task.stream_id.to_string(),
-        env_id: task.env_id.to_string(),
-        build_id: task.build_id.to_string(),
-        org_id: Some(env.org_id.to_string()),
-        user_id: task.by_user_id.map(|id| id.to_string()),
-        project_id,
-        project_name,
-        timeout_ms: task.timeout_ms.max(1_000) as u64,
-        task_type: task.task_type.clone(),
-        created_at_unix_ms: task.created_at.timestamp_millis().max(0) as u64,
-        origin_run_id: task.origin_run_id.map(|id| id.to_string()),
-    })
+    let mut request = synthesize_task_request_from_row(task);
+    request.org_id = Some(env.org_id.to_string());
+    request.project_id = project_id;
+    request.project_name = project_name;
+    Ok(request)
 }
 
 async fn reconcile_queued_tasks(
@@ -1295,13 +1588,30 @@ async fn maybe_retry_zombie_task(
     let next_retry_at = chrono::Utc::now() + chrono::Duration::milliseconds(delay_ms);
     let new_task_id = Uuid::now_v7();
 
-    if let Err(e) = Task::insert_retry(db, &new_task_id, task, next_attempt, next_retry_at).await {
-        tracing::error!(
-            task_id = %task.task_id,
-            new_task_id = %new_task_id,
-            "Failed to insert retry for zombie task: {}", e,
-        );
-        return;
+    match Task::insert_retry(db, &new_task_id, task, next_attempt, next_retry_at).await {
+        Ok(true) => {}
+        Ok(false) => {
+            // The (parent, attempt) unique key says another writer — e.g. the
+            // failure path's maybe_retry_task, or a crashed earlier reap that
+            // got as far as insert_retry — already created this retry row.
+            // Skip the enqueue: the row's creator owns delivery, and if it
+            // crashed before enqueueing, reconcile_queued_tasks re-enqueues
+            // the stale queued row, so the retry cannot be stranded.
+            tracing::info!(
+                task_id = %task.task_id,
+                attempt = next_attempt,
+                "Zombie retry row already exists for this attempt — skipping duplicate retry"
+            );
+            return;
+        }
+        Err(e) => {
+            tracing::error!(
+                task_id = %task.task_id,
+                new_task_id = %new_task_id,
+                "Failed to insert retry for zombie task: {}", e,
+            );
+            return;
+        }
     }
 
     let org_id = match hot::db::Env::get_env(db, &task.env_id).await {
@@ -1397,6 +1707,155 @@ fn validate_task_request_matches_db(
     Ok(())
 }
 
+/// Decide whether a queue delivery is eligible to execute. Running rows must
+/// remain unacknowledged until a terminal state is durable. If this process
+/// owns a running row but no longer has it in flight, release ownership so the
+/// zombie reaper can reconcile it instead of letting the batch heartbeat keep
+/// it alive forever.
+async fn task_message_should_execute(
+    db: &DatabasePool,
+    task: &Task,
+    coordinator: &shutdown::TaskShutdownCoordinator,
+    worker_id: &str,
+    infra_retry_backoff_ms: u64,
+) -> Result<bool, QueueInfrastructureError> {
+    if task.task_status_id == TaskStatus::Queued.as_id() {
+        return Ok(true);
+    }
+    if task.task_status_id != TaskStatus::Running.as_id() {
+        return Ok(false);
+    }
+
+    if task.worker_id.as_deref() == Some(worker_id) && !coordinator.is_task_active(&task.task_id) {
+        match tokio::time::timeout(
+            DB_CALL_TIMEOUT,
+            Task::release_worker(db, &task.task_id, worker_id),
+        )
+        .await
+        {
+            Ok(Ok(true)) => {}
+            Ok(Ok(false)) => {
+                tracing::info!(task_id = %task.task_id, "Inactive task ownership changed concurrently; nothing to release");
+            }
+            Ok(Err(e)) => {
+                tracing::warn!(task_id = %task.task_id, "Failed to release inactive task ownership: {}", e);
+            }
+            Err(_) => {
+                tracing::warn!(task_id = %task.task_id, "Timed out releasing inactive task ownership");
+            }
+        }
+    }
+
+    Err(QueueInfrastructureError::new(
+        "task is still running",
+        std::time::Duration::from_millis(infra_retry_backoff_ms.max(5_000)),
+    ))
+}
+
+/// Load the task row before execution. `Ok(None)` means the row provably does
+/// not exist (`TaskError::NotFound`), which is the only outcome where ACKing
+/// the queue message and skipping is safe. Every other failure (transport
+/// error, closed/saturated pool, timeout) leaves the row's state unknown and
+/// must defer the delivery instead — a fast pool error would otherwise ACK a
+/// redelivery for a row this worker keeps alive with its batch heartbeat,
+/// leaving the task stuck in `running` forever.
+async fn load_task_for_execution(
+    db: &DatabasePool,
+    task_id: &Uuid,
+    infra_retry_backoff_ms: u64,
+) -> Result<Option<Task>, QueueInfrastructureError> {
+    match tokio::time::timeout(DB_CALL_TIMEOUT, Task::get(db, task_id)).await {
+        Ok(Ok(task)) => Ok(Some(task)),
+        Ok(Err(hot::db::TaskError::NotFound)) => Ok(None),
+        Ok(Err(e)) => Err(QueueInfrastructureError::new(
+            format!("failed to load task {} before execution: {}", task_id, e),
+            std::time::Duration::from_millis(infra_retry_backoff_ms),
+        )),
+        Err(_) => Err(QueueInfrastructureError::new(
+            format!("timed out loading task {} before execution", task_id),
+            std::time::Duration::from_millis(infra_retry_backoff_ms),
+        )),
+    }
+}
+
+async fn claim_task_for_execution(
+    db: &DatabasePool,
+    task_id: &Uuid,
+    worker_id: &str,
+    backoff: std::time::Duration,
+) -> Result<bool, QueueInfrastructureError> {
+    match tokio::time::timeout(
+        DB_CALL_TIMEOUT,
+        Task::claim_for_worker(db, task_id, worker_id),
+    )
+    .await
+    {
+        Ok(Ok(true)) => Ok(true),
+        Ok(Ok(false)) => Ok(false),
+        Ok(Err(e)) => Err(QueueInfrastructureError::new(
+            format!("failed to atomically claim task {}: {}", task_id, e),
+            backoff,
+        )),
+        Err(_) => Err(QueueInfrastructureError::new(
+            format!("timed out atomically claiming task {}", task_id),
+            backoff,
+        )),
+    }
+}
+
+async fn acquire_container_slot(
+    semaphore: Arc<Semaphore>,
+    grace: std::time::Duration,
+    backoff: std::time::Duration,
+) -> Result<tokio::sync::OwnedSemaphorePermit, QueueInfrastructureError> {
+    match tokio::time::timeout(grace, semaphore.acquire_owned()).await {
+        Ok(Ok(permit)) => Ok(permit),
+        Ok(Err(_)) => Err(QueueInfrastructureError::new(
+            "container task semaphore closed",
+            backoff,
+        )),
+        Err(_) => Err(QueueInfrastructureError::new(
+            "container task slot unavailable; deferring to free claim slot",
+            backoff,
+        )),
+    }
+}
+
+/// Acquire a slot against the total-live-VM-executions cap. The returned
+/// owned permit must be moved into the execution's `spawn_blocking` closure
+/// so a detached (timed-out) thread keeps holding it until the thread itself
+/// exits. Saturation defers the queue message for an infrastructure retry,
+/// exactly like the container cap's admission behavior.
+async fn acquire_blocking_execution_slot(
+    slots: Arc<Semaphore>,
+    grace: std::time::Duration,
+    backoff: std::time::Duration,
+) -> Result<tokio::sync::OwnedSemaphorePermit, QueueInfrastructureError> {
+    match tokio::time::timeout(grace, slots.acquire_owned()).await {
+        Ok(Ok(permit)) => Ok(permit),
+        Ok(Err(_)) => Err(QueueInfrastructureError::new(
+            "blocking execution limiter closed",
+            backoff,
+        )),
+        Err(_) => Err(QueueInfrastructureError::new(
+            "blocking execution slot unavailable; deferring to free claim slot",
+            backoff,
+        )),
+    }
+}
+
+fn task_status_is_terminal(status_id: i16) -> bool {
+    matches!(
+        TaskStatus::from_id(status_id),
+        Some(
+            TaskStatus::Completed
+                | TaskStatus::Failed
+                | TaskStatus::Cancelled
+                | TaskStatus::TimedOut
+        )
+    )
+}
+
 /// Process a single task request.
 #[allow(clippy::too_many_arguments)]
 async fn process_task(
@@ -1406,6 +1865,8 @@ async fn process_task(
     stream_publisher: Arc<StreamPubSub>,
     bytecode_cache: Arc<BytecodeCache>,
     code_semaphore: Arc<Semaphore>,
+    blocking_execution_slots: Arc<Semaphore>,
+    container_semaphore: Arc<Semaphore>,
     container_budget: Arc<resource_budget::ResourceBudget>,
     worker_conf: Val,
     event_publisher: Option<Arc<dyn EventPublisher>>,
@@ -1423,6 +1884,9 @@ async fn process_task(
     let env_id = Uuid::parse_str(&request.env_id)?;
     let build_id = Uuid::parse_str(&request.build_id)?;
     let timeout_ms = request.timeout_ms.max(1000);
+    let infra_retry_backoff_ms = worker_conf
+        .get_int_or_default("queue.infra-retry-backoff-ms", 1_000)
+        .max(0) as u64;
 
     tracing::info!(
         task_id = %task_id,
@@ -1431,24 +1895,45 @@ async fn process_task(
         "Processing task"
     );
 
-    let task = match Task::get(&db, &task_id).await {
-        Ok(task) => task,
-        Err(e) => {
+    let task = match load_task_for_execution(&db, &task_id, infra_retry_backoff_ms).await {
+        Ok(Some(task)) => task,
+        Ok(None) => {
             tracing::error!(
                 task_id = %task_id,
-                "Rejecting task queue message with no matching DB row: {}", e,
+                "Rejecting task queue message with no matching DB row",
             );
             return Ok(());
         }
+        Err(e) => {
+            tracing::warn!(
+                task_id = %task_id,
+                backoff_ms = infra_retry_backoff_ms,
+                "Failed to load task before execution; deferring queue message: {}", e,
+            );
+            return Err(Box::new(e));
+        }
     };
 
-    if task.task_status_id != TaskStatus::Queued.as_id() {
-        tracing::info!(
-            task_id = %task_id,
-            status = %task.status,
-            "Task is no longer queued, skipping duplicate queue message"
-        );
-        return Ok(());
+    match task_message_should_execute(&db, &task, &coordinator, &worker_id, infra_retry_backoff_ms)
+        .await
+    {
+        Ok(true) => {}
+        Err(e) => {
+            tracing::warn!(
+                task_id = %task_id,
+                owner = ?task.worker_id,
+                "Task is still running; withholding queue ACK until it is terminal"
+            );
+            return Err(Box::new(e));
+        }
+        Ok(false) => {
+            tracing::info!(
+                task_id = %task_id,
+                status = %task.status,
+                "Task is no longer queued, skipping duplicate queue message"
+            );
+            return Ok(());
+        }
     }
 
     if let Err(e) = validate_task_request_matches_db(&request, &task, env_id, stream_id, build_id) {
@@ -1475,8 +1960,19 @@ async fn process_task(
         "retry_queue_age_ms": if queue_timing.redelivered { Some(queue_wait_ms) } else { None },
         "redelivered": queue_timing.redelivered,
     });
-    if let Err(e) = Task::set_timing(&db, &task_id, &initial_timing).await {
-        tracing::warn!(task_id = %task_id, "Failed to persist task queue timing: {}", e);
+    match tokio::time::timeout(
+        TASK_TIMING_DB_TIMEOUT,
+        Task::set_timing(&db, &task_id, &initial_timing),
+    )
+    .await
+    {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => {
+            tracing::warn!(task_id = %task_id, "Failed to persist task queue timing: {}", e);
+        }
+        Err(_) => {
+            tracing::warn!(task_id = %task_id, "Task queue timing write timed out; continuing");
+        }
     }
 
     // Register with shutdown coordinator for graceful drain. We stash the
@@ -1527,9 +2023,6 @@ async fn process_task(
     //
     // The guard is bound for the rest of `process_task` — its `Drop`
     // releases the lease when the body returns (success, error, panic).
-    let infra_retry_backoff_ms = worker_conf
-        .get_int_or_default("queue.infra-retry-backoff-ms", 1_000)
-        .max(0) as u64;
     let lease_guard = match task_lease
         .try_acquire(task_id, task_lease::DEFAULT_LEASE_TTL)
         .await
@@ -1562,9 +2055,28 @@ async fn process_task(
     };
     let lease_lost_notify = lease_guard.lost_notify();
 
+    let terminal_state_db = Arc::clone(&db);
     let execute_task = async {
         if request.task_type == "container" {
-            // Container tasks use resource budget (memory + disk) instead of semaphore
+            // Keep the explicit/derived container max as a hard task count in
+            // addition to the per-task memory/disk admission budget.
+            let _permit = match acquire_container_slot(
+                Arc::clone(&container_semaphore),
+                CONTAINER_SLOT_ACQUIRE_GRACE,
+                std::time::Duration::from_millis(infra_retry_backoff_ms),
+            )
+            .await
+            {
+                Ok(permit) => permit,
+                Err(e) => {
+                    tracing::warn!(
+                        task_id = %task_id,
+                        backoff_ms = infra_retry_backoff_ms,
+                        "Container task slot unavailable within grace window; deferring queue message"
+                    );
+                    return Err(Box::new(e) as Box<dyn std::error::Error + Send + Sync>);
+                }
+            };
             process_container_task(
                 request,
                 task_id,
@@ -1582,7 +2094,7 @@ async fn process_task(
                 box_defaults,
                 usage_stats_cache,
                 queue_timing,
-                worker_id,
+                worker_id.clone(),
             )
             .await
         } else {
@@ -1613,27 +2125,57 @@ async fn process_task(
                         as Box<dyn std::error::Error + Send + Sync>);
                 }
             };
+            // Second admission gate: total live VM executions, including
+            // detached threads from previously timed-out tasks. The code
+            // permit above frees as soon as this task's future completes
+            // (even when its VM thread is still wedged), so it alone cannot
+            // stop admission while detached threads accumulate toward the
+            // tokio blocking-pool cap. This owned permit is moved into the
+            // spawn_blocking closure and only released when the thread
+            // itself exits. Acquired before the row is claimed so saturation
+            // defers a still-queued message instead of stranding a running
+            // row.
+            let blocking_execution_permit = match acquire_blocking_execution_slot(
+                Arc::clone(&blocking_execution_slots),
+                BLOCKING_SLOT_ACQUIRE_GRACE,
+                std::time::Duration::from_millis(infra_retry_backoff_ms),
+            )
+            .await
+            {
+                Ok(permit) => permit,
+                Err(e) => {
+                    tracing::warn!(
+                        task_id = %task_id,
+                        backoff_ms = infra_retry_backoff_ms,
+                        available_permits = blocking_execution_slots.available_permits(),
+                        "Blocking execution slot unavailable within grace window; detached timed-out VM threads are holding the permits — deferring queue message"
+                    );
+                    return Err(Box::new(e) as Box<dyn std::error::Error + Send + Sync>);
+                }
+            };
             let capacity_wait_ms = capacity_wait_started
                 .elapsed()
                 .as_millis()
                 .min(i64::MAX as u128) as i64;
 
-            if let Err(e) = Task::mark_running(&db, &task_id).await {
-                tracing::error!(task_id = %task_id, "Failed to mark task running: {}", e);
-            }
-            if let Err(e) = Task::set_worker(&db, &task_id, &worker_id).await {
-                tracing::error!(task_id = %task_id, "Failed to set worker_id: {}", e);
-            }
-
-            emit_task_started(
-                &stream_publisher,
-                task_id,
-                env_id,
-                stream_id,
-                &request.function_name,
-                &request.task_type,
+            match claim_task_for_execution(
+                &db,
+                &task_id,
+                &worker_id,
+                std::time::Duration::from_millis(infra_retry_backoff_ms),
             )
-            .await;
+            .await
+            {
+                Ok(true) => {}
+                Ok(false) => return Ok(()),
+                Err(e) => {
+                    return Err(Box::new(e) as Box<dyn std::error::Error + Send + Sync>);
+                }
+            }
+            // One claim-anchored wall-clock deadline covers every subsequent
+            // setup step and the VM execution itself.
+            let task_deadline =
+                tokio::time::Instant::now() + std::time::Duration::from_millis(timeout_ms);
 
             process_code_task(
                 request,
@@ -1651,6 +2193,9 @@ async fn process_task(
                 Arc::clone(&coordinator),
                 queue_timing.claimed_at,
                 capacity_wait_ms,
+                worker_id.clone(),
+                blocking_execution_permit,
+                task_deadline,
             )
             .await
         }
@@ -1693,7 +2238,102 @@ async fn process_task(
     };
 
     coordinator.unregister_task(&task_id);
+    if result.is_ok() {
+        let terminal_is_durable = matches!(
+            tokio::time::timeout(DB_CALL_TIMEOUT, Task::get(&terminal_state_db, &task_id)).await,
+            Ok(Ok(task)) if task_status_is_terminal(task.task_status_id)
+        );
+        if !terminal_is_durable {
+            tracing::error!(
+                task_id = %task_id,
+                "Task execution ended without a durable terminal DB state; withholding queue ACK"
+            );
+            match tokio::time::timeout(
+                DB_CALL_TIMEOUT,
+                Task::release_worker(&terminal_state_db, &task_id, &worker_id),
+            )
+            .await
+            {
+                Ok(Ok(true)) => {}
+                Ok(Ok(false)) => {
+                    tracing::info!(task_id = %task_id, "Task worker ownership changed concurrently; nothing to release");
+                }
+                Ok(Err(e)) => {
+                    tracing::warn!(task_id = %task_id, "Failed to release task worker ownership: {}", e);
+                }
+                Err(_) => {
+                    tracing::warn!(task_id = %task_id, "Timed out releasing task worker ownership");
+                }
+            }
+            return Err(Box::new(QueueInfrastructureError::new(
+                "task terminal state was not persisted",
+                std::time::Duration::from_millis(infra_retry_backoff_ms.max(5_000)),
+            )));
+        }
+    }
     result
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn finish_container_setup_timeout<G: Send>(
+    db: &DatabasePool,
+    stream_publisher: &StreamPubSub,
+    task_queue: &ProcessingQueue<TaskRequest>,
+    request: &TaskRequest,
+    task_id: &Uuid,
+    env_id: Uuid,
+    stream_id: Uuid,
+    org_id: Option<Uuid>,
+    function_name: &str,
+    task_type: &str,
+    worker_id: &str,
+    phase: &str,
+    file_server_handle: Option<file_server::FileServerHandle>,
+    data_volume: Option<data_volume::DataVolume>,
+    resource_guard: G,
+) {
+    // Release shared admission capacity before doing best-effort persistence
+    // and cleanup so a slow dependency cannot amplify the timeout into
+    // process-wide head-of-line blocking.
+    drop(resource_guard);
+
+    let error = task_failure_json(
+        &format!("Container task timed out during {phase}"),
+        Some(serde_json::json!({"phase": phase})),
+    );
+    let persisted = complete_task_with_event(
+        db,
+        stream_publisher,
+        task_id,
+        env_id,
+        stream_id,
+        function_name,
+        task_type,
+        TaskStatus::TimedOut,
+        Some(&error),
+        None,
+        Some(worker_id),
+    )
+    .await;
+    if persisted {
+        publish_task_alert(db, org_id, env_id, task_id, "task:failed", &error).await;
+        // A setup timeout is a terminal failure of THIS attempt exactly like
+        // the runtime failure/timeout arms one await later: honor the user's
+        // retry budget through the same gate, strictly after the fenced
+        // terminal write persisted (persist-before-retry).
+        maybe_retry_task(db, task_queue, task_id, request).await;
+    }
+
+    if let Some(handle) = file_server_handle
+        && tokio::time::timeout(CONTAINER_KILL_TIMEOUT, handle.shutdown())
+            .await
+            .is_err()
+    {
+        tracing::warn!(task_id = %task_id, "file_server shutdown timed out after setup deadline");
+    }
+    if let Some(volume) = data_volume {
+        cleanup_data_volume_with_timeout(task_id, volume).await;
+    }
 }
 
 /// Execute a container task (task_type == "container").
@@ -1735,7 +2375,9 @@ async fn process_container_task(
 
     if image.is_empty() {
         let error = task_failure_json("Missing 'image' in container task args", None);
-        complete_task_with_event(
+        // Pre-claim failure: the row was never claimed by this worker, so no
+        // ownership fence applies here (or at the other pre-claim sites).
+        if complete_task_with_event(
             &db,
             &stream_publisher,
             &task_id,
@@ -1745,9 +2387,13 @@ async fn process_container_task(
             &request.task_type,
             TaskStatus::Failed,
             Some(&error),
+            None,
+            None,
         )
-        .await;
-        publish_task_alert(&db, org_id, env_id, &task_id, "task:failed", &error).await;
+        .await
+        {
+            publish_task_alert(&db, org_id, env_id, &task_id, "task:failed", &error).await;
+        }
         return Ok(());
     }
 
@@ -1835,7 +2481,7 @@ async fn process_container_task(
                         running, concurrent_limit
                     );
                     let error = task_failure_json(&msg, None);
-                    complete_task_with_event(
+                    if complete_task_with_event(
                         &db,
                         &stream_publisher,
                         &task_id,
@@ -1845,9 +2491,14 @@ async fn process_container_task(
                         &request.task_type,
                         TaskStatus::Failed,
                         Some(&error),
+                        None,
+                        None,
                     )
-                    .await;
-                    publish_task_alert(&db, org_id, env_id, &task_id, "task:failed", &error).await;
+                    .await
+                    {
+                        publish_task_alert(&db, org_id, env_id, &task_id, "task:failed", &error)
+                            .await;
+                    }
                     return Ok(());
                 }
                 Err(e) => {
@@ -1867,30 +2518,15 @@ async fn process_container_task(
                 .current_period_start
                 .unwrap_or_else(chrono::Utc::now);
 
-            let cached_usage = {
-                let cache = usage_stats_cache.lock().await;
-                cache
-                    .get(oid)
-                    .filter(|(ts, _)| ts.elapsed() < USAGE_STATS_CACHE_TTL)
-                    .map(|(_, stats)| stats.clone())
-            };
-            let usage_result = if let Some(stats) = cached_usage {
-                Ok(stats)
-            } else {
-                let result = hot::db::subscription::OrgUsageStats::calculate(
-                    &db,
-                    oid,
-                    period_start,
-                    features.call_retention_days(),
-                )
-                .await;
-                if let Ok(ref stats) = result {
-                    let mut cache = usage_stats_cache.lock().await;
-                    cache.insert(*oid, (std::time::Instant::now(), stats.clone()));
-                }
-                result
-            };
-            if let Ok(usage) = usage_result {
+            if let Some(usage) = cached_usage_stats(
+                &db,
+                *oid,
+                period_start,
+                features.call_retention_days(),
+                &usage_stats_cache,
+            )
+            .await
+            {
                 // CUS (compute units) per month — hard gate for free plans
                 let cus_limit = features.compute_units_per_month();
                 if cus_limit > 0 && usage.compute_units >= cus_limit && is_free {
@@ -1899,7 +2535,7 @@ async fn process_container_task(
                         usage.compute_units, cus_limit
                     );
                     let error = task_failure_json(&msg, None);
-                    complete_task_with_event(
+                    if complete_task_with_event(
                         &db,
                         &stream_publisher,
                         &task_id,
@@ -1909,9 +2545,14 @@ async fn process_container_task(
                         &request.task_type,
                         TaskStatus::Failed,
                         Some(&error),
+                        None,
+                        None,
                     )
-                    .await;
-                    publish_task_alert(&db, org_id, env_id, &task_id, "task:failed", &error).await;
+                    .await
+                    {
+                        publish_task_alert(&db, org_id, env_id, &task_id, "task:failed", &error)
+                            .await;
+                    }
                     return Ok(());
                 }
 
@@ -1925,7 +2566,7 @@ async fn process_container_task(
                             minutes_used, minutes_limit
                         );
                         let error = task_failure_json(&msg, None);
-                        complete_task_with_event(
+                        if complete_task_with_event(
                             &db,
                             &stream_publisher,
                             &task_id,
@@ -1935,10 +2576,21 @@ async fn process_container_task(
                             &request.task_type,
                             TaskStatus::Failed,
                             Some(&error),
+                            None,
+                            None,
                         )
-                        .await;
-                        publish_task_alert(&db, org_id, env_id, &task_id, "task:failed", &error)
+                        .await
+                        {
+                            publish_task_alert(
+                                &db,
+                                org_id,
+                                env_id,
+                                &task_id,
+                                "task:failed",
+                                &error,
+                            )
                             .await;
+                        }
                         return Ok(());
                     }
                 }
@@ -1977,7 +2629,7 @@ async fn process_container_task(
         }
         Err(e) => {
             let error = task_failure_json(&e.to_string(), None);
-            complete_task_with_event(
+            if complete_task_with_event(
                 &db,
                 &stream_publisher,
                 &task_id,
@@ -1987,9 +2639,13 @@ async fn process_container_task(
                 &request.task_type,
                 TaskStatus::Failed,
                 Some(&error),
+                None,
+                None,
             )
-            .await;
-            publish_task_alert(&db, org_id, env_id, &task_id, "task:failed", &error).await;
+            .await
+            {
+                publish_task_alert(&db, org_id, env_id, &task_id, "task:failed", &error).await;
+            }
             return Ok(());
         }
     };
@@ -1999,21 +2655,20 @@ async fn process_container_task(
         .min(i64::MAX as u128) as i64;
 
     // -- Create data volume for /data/ --
-    let data_volume = match data_volume::DataVolume::create(
-        &data_vol_base,
-        &task_id.to_string(),
-        limits.disk_size_mb,
+    let data_volume = match await_data_volume_create(
+        DATA_VOLUME_CREATE_TIMEOUT,
+        data_volume::DataVolume::create(&data_vol_base, &task_id.to_string(), limits.disk_size_mb),
     )
     .await
     {
-        Ok(vol) => Some(vol),
-        Err(e) => {
+        Ok(Ok(vol)) => Some(vol),
+        Ok(Err(e)) => {
             tracing::error!(task_id = %task_id, "Data volume creation failed: {}", e);
             let error = task_failure_json(
                 &format!("Requested /data volume could not be provisioned: {e}"),
                 None,
             );
-            complete_task_with_event(
+            if complete_task_with_event(
                 &db,
                 &stream_publisher,
                 &task_id,
@@ -2023,30 +2678,70 @@ async fn process_container_task(
                 &request.task_type,
                 TaskStatus::Failed,
                 Some(&error),
+                None,
+                None,
             )
-            .await;
-            publish_task_alert(&db, org_id, env_id, &task_id, "task:failed", &error).await;
+            .await
+            {
+                publish_task_alert(&db, org_id, env_id, &task_id, "task:failed", &error).await;
+            }
             drop(resource_guard);
             return Ok(());
         }
+        Err(_) => {
+            tracing::warn!(
+                task_id = %task_id,
+                timeout_secs = DATA_VOLUME_CREATE_TIMEOUT.as_secs(),
+                backoff_ms = infra_retry_backoff_ms,
+                "Data volume creation timed out; deferring queue message"
+            );
+            drop(resource_guard);
+            return Err(Box::new(QueueInfrastructureError::new(
+                format!(
+                    "data volume creation timed out after {}s",
+                    DATA_VOLUME_CREATE_TIMEOUT.as_secs()
+                ),
+                std::time::Duration::from_millis(infra_retry_backoff_ms),
+            )));
+        }
     };
 
-    if let Err(e) = Task::mark_running(&db, &task_id).await {
-        tracing::error!(task_id = %task_id, "Failed to mark task running: {}", e);
-    }
-    if let Err(e) = Task::set_worker(&db, &task_id, &worker_id).await {
-        tracing::error!(task_id = %task_id, "Failed to set worker_id for container task: {}", e);
+    match claim_task_for_execution(
+        &db,
+        &task_id,
+        &worker_id,
+        std::time::Duration::from_millis(
+            worker_conf
+                .get_int_or_default("queue.infra-retry-backoff-ms", 1_000)
+                .max(0) as u64,
+        ),
+    )
+    .await
+    {
+        Ok(true) => {}
+        Ok(false) => {
+            // Not ours to run: clean the just-created volume via the bounded
+            // helper rather than an implicit (synchronous) Drop.
+            if let Some(vol) = data_volume {
+                cleanup_data_volume_with_timeout(&task_id, vol).await;
+            }
+            return Ok(());
+        }
+        Err(e) => {
+            if let Some(vol) = data_volume {
+                cleanup_data_volume_with_timeout(&task_id, vol).await;
+            }
+            return Err(Box::new(e));
+        }
     }
 
-    emit_task_started(
-        &stream_publisher,
-        task_id,
-        env_id,
-        stream_id,
-        &function_name,
-        &request.task_type,
-    )
-    .await;
+    // The user-visible TIMEOUT budget starts once this worker owns the task.
+    // Every post-claim setup operation and the container runtime share this
+    // one deadline, so storage/file-server preparation cannot pin a running
+    // row outside the advertised task budget. Billing deliberately does NOT
+    // share this anchor — see `execution_start` below.
+    let total_timeout = std::time::Duration::from_millis(timeout_ms);
+    let task_deadline = tokio::time::Instant::now() + total_timeout;
 
     let trace_id = request.task_id.clone();
 
@@ -2063,24 +2758,61 @@ async fn process_container_task(
         .as_deref()
         .and_then(|s| Uuid::parse_str(s).ok());
 
-    if let Err(e) = hot::db::run::Run::ensure_run_exists(
-        &db,
-        &run_id,
-        &env_id,
-        &stream_id,
-        Some(&build_id),
-        hot::db::run::RunType::Task.as_id(),
-        origin_run_id.as_ref(),
-        &user_id,
-        org_id.as_ref(),
-    )
-    .await
-    {
-        tracing::warn!(task_id = %task_id, run_id = %run_id, "Failed to ensure container task run exists: {}", e);
-    }
+    let durable_setup = async {
+        emit_task_started(
+            &stream_publisher,
+            task_id,
+            env_id,
+            stream_id,
+            &function_name,
+            &request.task_type,
+        )
+        .await;
 
-    if let Err(e) = Task::set_run_id(&db, &task_id, &run_id).await {
-        tracing::warn!(task_id = %task_id, run_id = %run_id, "Failed to set container task run_id: {}", e);
+        if let Err(e) = hot::db::run::Run::ensure_run_exists(
+            &db,
+            &run_id,
+            &env_id,
+            &stream_id,
+            Some(&build_id),
+            hot::db::run::RunType::Task.as_id(),
+            origin_run_id.as_ref(),
+            &user_id,
+            org_id.as_ref(),
+        )
+        .await
+        {
+            tracing::warn!(task_id = %task_id, run_id = %run_id, "Failed to ensure container task run exists: {}", e);
+        }
+
+        if let Err(e) = Task::set_run_id(&db, &task_id, &run_id).await {
+            tracing::warn!(task_id = %task_id, run_id = %run_id, "Failed to set container task run_id: {}", e);
+        }
+    };
+    if await_claimed_task_deadline(task_deadline, durable_setup)
+        .await
+        .is_err()
+    {
+        tracing::error!(task_id = %task_id, "Container task setup timed out while creating its run record");
+        finish_container_setup_timeout(
+            &db,
+            &stream_publisher,
+            &task_queue,
+            &request,
+            &task_id,
+            env_id,
+            stream_id,
+            org_id,
+            &function_name,
+            &request.task_type,
+            &worker_id,
+            "durable run setup",
+            None,
+            data_volume,
+            resource_guard,
+        )
+        .await;
+        return Ok(());
     }
 
     // -- Start per-task file server for hotbox CLI access --
@@ -2093,27 +2825,32 @@ async fn process_container_task(
     };
 
     let file_server_handle = if !is_kata {
-        match start_file_server_for_task(
-            &task_id,
-            &data_vol_base,
-            org_id,
-            env_id,
-            user_id,
-            Some(run_id),
-            &db,
-            &worker_conf,
-            executor.backend(),
+        match await_claimed_task_deadline(
+            task_deadline,
+            start_file_server_for_task(
+                &task_id,
+                &data_vol_base,
+                org_id,
+                env_id,
+                user_id,
+                Some(run_id),
+                &db,
+                &worker_conf,
+                executor.backend(),
+            ),
         )
         .await
         {
-            Ok(handle) => Some(handle),
-            Err(e) => {
+            Ok(Ok(handle)) => Some(handle),
+            Ok(Err(e)) => {
                 tracing::error!("File server start failed: {}", e);
                 let error = task_failure_json(
                     "File server failed to start — container cannot access hot:// storage",
                     None,
                 );
-                complete_task_with_event(
+                // Post-claim: this worker owns the row, so fence the terminal
+                // write with its id (likewise at the later sites below).
+                if complete_task_with_event(
                     &db,
                     &stream_publisher,
                     &task_id,
@@ -2123,13 +2860,39 @@ async fn process_container_task(
                     &request.task_type,
                     TaskStatus::Failed,
                     Some(&error),
+                    None,
+                    Some(&worker_id),
                 )
-                .await;
-                publish_task_alert(&db, org_id, env_id, &task_id, "task:failed", &error).await;
+                .await
+                {
+                    publish_task_alert(&db, org_id, env_id, &task_id, "task:failed", &error).await;
+                }
                 drop(resource_guard);
                 if let Some(vol) = data_volume {
-                    vol.cleanup().await;
+                    cleanup_data_volume_with_timeout(&task_id, vol).await;
                 }
+                return Ok(());
+            }
+            Err(_) => {
+                tracing::error!(task_id = %task_id, "Container task setup timed out while starting file storage/server");
+                finish_container_setup_timeout(
+                    &db,
+                    &stream_publisher,
+                    &task_queue,
+                    &request,
+                    &task_id,
+                    env_id,
+                    stream_id,
+                    org_id,
+                    &function_name,
+                    &request.task_type,
+                    &worker_id,
+                    "file-server setup",
+                    None,
+                    data_volume,
+                    resource_guard,
+                )
+                .await;
                 return Ok(());
             }
         }
@@ -2176,7 +2939,7 @@ async fn process_container_task(
                  Kata support is in progress",
                 None,
             );
-            complete_task_with_event(
+            if complete_task_with_event(
                 &db,
                 &stream_publisher,
                 &task_id,
@@ -2186,12 +2949,16 @@ async fn process_container_task(
                 &request.task_type,
                 TaskStatus::Failed,
                 Some(&error),
+                None,
+                Some(&worker_id),
             )
-            .await;
-            publish_task_alert(&db, org_id, env_id, &task_id, "task:failed", &error).await;
+            .await
+            {
+                publish_task_alert(&db, org_id, env_id, &task_id, "task:failed", &error).await;
+            }
             drop(resource_guard);
             if let Some(vol) = data_volume {
-                vol.cleanup().await;
+                cleanup_data_volume_with_timeout(&task_id, vol).await;
             }
             return Ok(());
         }
@@ -2202,14 +2969,19 @@ async fn process_container_task(
         // (load_bytecode_bundle's path is shared via ensure_bundle_extracted).
         let extract_dir = match org_id {
             Some(oid) => {
-                match ensure_bundle_extracted(&build_id, &oid, &env_id, &worker_conf).await {
-                    Ok(p) => p,
-                    Err(e) => {
+                match await_claimed_task_deadline(
+                    task_deadline,
+                    ensure_bundle_extracted(&build_id, &oid, &env_id, &worker_conf),
+                )
+                .await
+                {
+                    Ok(Ok(p)) => p,
+                    Ok(Err(e)) => {
                         let error = task_failure_json(
                             &format!("failed to extract bundle for mounts: {}", e),
                             None,
                         );
-                        complete_task_with_event(
+                        if complete_task_with_event(
                             &db,
                             &stream_publisher,
                             &task_id,
@@ -2219,14 +2991,47 @@ async fn process_container_task(
                             &request.task_type,
                             TaskStatus::Failed,
                             Some(&error),
+                            None,
+                            Some(&worker_id),
                         )
-                        .await;
-                        publish_task_alert(&db, org_id, env_id, &task_id, "task:failed", &error)
+                        .await
+                        {
+                            publish_task_alert(
+                                &db,
+                                org_id,
+                                env_id,
+                                &task_id,
+                                "task:failed",
+                                &error,
+                            )
                             .await;
+                        }
                         drop(resource_guard);
                         if let Some(vol) = data_volume {
-                            vol.cleanup().await;
+                            cleanup_data_volume_with_timeout(&task_id, vol).await;
                         }
+                        return Ok(());
+                    }
+                    Err(_) => {
+                        tracing::error!(task_id = %task_id, "Container task setup timed out while retrieving/extracting mount bundle");
+                        finish_container_setup_timeout(
+                            &db,
+                            &stream_publisher,
+                            &task_queue,
+                            &request,
+                            &task_id,
+                            env_id,
+                            stream_id,
+                            org_id,
+                            &function_name,
+                            &request.task_type,
+                            &worker_id,
+                            "bundle mount preparation",
+                            file_server_handle,
+                            data_volume,
+                            resource_guard,
+                        )
+                        .await;
                         return Ok(());
                     }
                 }
@@ -2236,7 +3041,7 @@ async fn process_container_task(
                     "container 'mounts' requires an org_id on the task request",
                     None,
                 );
-                complete_task_with_event(
+                if complete_task_with_event(
                     &db,
                     &stream_publisher,
                     &task_id,
@@ -2246,12 +3051,16 @@ async fn process_container_task(
                     &request.task_type,
                     TaskStatus::Failed,
                     Some(&error),
+                    None,
+                    Some(&worker_id),
                 )
-                .await;
-                publish_task_alert(&db, org_id, env_id, &task_id, "task:failed", &error).await;
+                .await
+                {
+                    publish_task_alert(&db, org_id, env_id, &task_id, "task:failed", &error).await;
+                }
                 drop(resource_guard);
                 if let Some(vol) = data_volume {
-                    vol.cleanup().await;
+                    cleanup_data_volume_with_timeout(&task_id, vol).await;
                 }
                 return Ok(());
             }
@@ -2319,7 +3128,7 @@ async fn process_container_task(
 
         if let Some(err_msg) = mount_error {
             let error = task_failure_json(&err_msg, None);
-            complete_task_with_event(
+            if complete_task_with_event(
                 &db,
                 &stream_publisher,
                 &task_id,
@@ -2329,12 +3138,16 @@ async fn process_container_task(
                 &request.task_type,
                 TaskStatus::Failed,
                 Some(&error),
+                None,
+                Some(&worker_id),
             )
-            .await;
-            publish_task_alert(&db, org_id, env_id, &task_id, "task:failed", &error).await;
+            .await
+            {
+                publish_task_alert(&db, org_id, env_id, &task_id, "task:failed", &error).await;
+            }
             drop(resource_guard);
             if let Some(vol) = data_volume {
-                vol.cleanup().await;
+                cleanup_data_volume_with_timeout(&task_id, vol).await;
             }
             return Ok(());
         }
@@ -2368,11 +3181,13 @@ async fn process_container_task(
                         &request.task_type,
                         TaskStatus::Failed,
                         Some(&error),
+                        None,
+                        Some(&worker_id),
                     )
                     .await;
                     drop(resource_guard);
                     if let Some(vol) = data_volume {
-                        vol.cleanup().await;
+                        cleanup_data_volume_with_timeout(&task_id, vol).await;
                     }
                     return Ok(());
                 }
@@ -2405,18 +3220,25 @@ async fn process_container_task(
                     &request.task_type,
                     TaskStatus::Failed,
                     Some(&error),
+                    None,
+                    Some(&worker_id),
                 )
                 .await;
                 drop(resource_guard);
                 if let Some(vol) = data_volume {
-                    vol.cleanup().await;
+                    cleanup_data_volume_with_timeout(&task_id, vol).await;
                 }
                 return Ok(());
             }
         };
-        let fs_storage = match hot::file_storage::file_storage_from_config(&worker_conf).await {
-            Ok(s) => Arc::from(s),
-            Err(e) => {
+        let fs_storage = match await_claimed_task_deadline(
+            task_deadline,
+            hot::file_storage::file_storage_from_config(&worker_conf),
+        )
+        .await
+        {
+            Ok(Ok(s)) => Arc::from(s),
+            Ok(Err(e)) => {
                 tracing::error!("File server storage init failed: {}", e);
                 let error =
                     task_failure_json("File server failed to start — storage init failed", None);
@@ -2430,12 +3252,36 @@ async fn process_container_task(
                     &request.task_type,
                     TaskStatus::Failed,
                     Some(&error),
+                    None,
+                    Some(&worker_id),
                 )
                 .await;
                 drop(resource_guard);
                 if let Some(vol) = data_volume {
-                    vol.cleanup().await;
+                    cleanup_data_volume_with_timeout(&task_id, vol).await;
                 }
+                return Ok(());
+            }
+            Err(_) => {
+                tracing::error!(task_id = %task_id, "Container task setup timed out while initializing Kata file storage");
+                finish_container_setup_timeout(
+                    &db,
+                    &stream_publisher,
+                    &task_queue,
+                    &request,
+                    &task_id,
+                    env_id,
+                    stream_id,
+                    org_id,
+                    &function_name,
+                    &request.task_type,
+                    &worker_id,
+                    "Kata file-storage setup",
+                    None,
+                    data_volume,
+                    resource_guard,
+                )
+                .await;
                 return Ok(());
             }
         };
@@ -2505,8 +3351,13 @@ async fn process_container_task(
         "Starting container command"
     );
 
-    let total_timeout = std::time::Duration::from_millis(timeout_ms);
-    let start = std::time::Instant::now();
+    // Billing/duration clock: CUS and the user-visible `duration-ms` measure
+    // the workload execution window only. Everything before this point (run
+    // record, file server, bundle download/extract for mounts, Kata storage
+    // init) is worker-side infrastructure time — it counts against the
+    // claim-anchored `task_deadline` above, but must never be billed as user
+    // compute or inflate the reported duration.
+    let execution_start = std::time::Instant::now();
 
     let extras_ref = if extras.binds.is_empty()
         && extras.extra_env.is_empty()
@@ -2521,10 +3372,18 @@ async fn process_container_task(
 
     // Use phased execution for Docker: create, store container_id, poll.
     // Kata still uses atomic execute_with_extras.
-    let execution_result = if matches!(executor.backend(), executor::Backend::Docker) {
+    //
+    // Every arm snapshots `duration_ms` at the moment execution ends —
+    // before log collection and container/VM teardown — so cleanup time
+    // (which runs behind its own bounded envelopes, up to
+    // KATA_TIMEOUT_CLEANUP_ENVELOPE after a Kata timeout) is never billed
+    // as user compute. See `bill_before_cleanup`.
+    let is_docker = matches!(executor.backend(), executor::Backend::Docker);
+    let (execution_result, raw_window_ms, timings) = if is_docker {
         let mut timings = executor::ContainerTimings::default();
-        match executor
-            .create_and_start(
+        match tokio::time::timeout_at(
+            task_deadline,
+            executor.create_and_start(
                 &image,
                 cmd,
                 env,
@@ -2532,29 +3391,49 @@ async fn process_container_task(
                 Some(&limits),
                 extras_ref,
                 &mut timings,
-            )
-            .await
+            ),
+        )
+        .await
         {
-            Ok(container_id) => {
+            Ok(Ok(container_id)) => {
                 // Persist container_id so a new worker can adopt it
-                if let Err(e) = Task::set_container_id(&db, &task_id, &container_id).await {
-                    tracing::warn!(task_id = %task_id, "Failed to store container_id: {}", e);
+                match tokio::time::timeout_at(
+                    task_deadline.min(tokio::time::Instant::now() + DB_CALL_TIMEOUT),
+                    Task::set_container_id(&db, &task_id, &container_id),
+                )
+                .await
+                {
+                    Ok(Ok(())) => {}
+                    Ok(Err(e)) => {
+                        tracing::warn!(task_id = %task_id, "Failed to store container_id: {}", e);
+                    }
+                    Err(_) => {
+                        tracing::warn!(task_id = %task_id, "Storing container_id timed out");
+                    }
                 }
                 let workload_execution_started = std::time::Instant::now();
 
                 // Poll-based monitoring loop
-                let deadline = tokio::time::Instant::now() + total_timeout;
                 let poll_interval = std::time::Duration::from_secs(2);
                 let exit_code = loop {
-                    tokio::time::sleep(poll_interval).await;
-                    match executor.inspect_status(&container_id).await {
-                        Ok(Some(code)) => break Some(code),
-                        Ok(None) => {
-                            if tokio::time::Instant::now() >= deadline {
+                    let now = tokio::time::Instant::now();
+                    if now >= task_deadline {
+                        break None;
+                    }
+                    tokio::time::sleep(poll_interval.min(task_deadline - now)).await;
+                    match tokio::time::timeout_at(
+                        task_deadline,
+                        executor.inspect_status(&container_id),
+                    )
+                    .await
+                    {
+                        Ok(Ok(Some(code))) => break Some(code),
+                        Ok(Ok(None)) => {
+                            if tokio::time::Instant::now() >= task_deadline {
                                 break None; // timed out
                             }
                         }
-                        Err(e) => {
+                        Ok(Err(e)) => {
                             if matches!(e, executor::ExecutorError::ContainerNotFound(_)) {
                                 tracing::warn!(
                                     task_id = %task_id,
@@ -2568,10 +3447,11 @@ async fn process_container_task(
                                 container_id = %container_id,
                                 "Poll inspect failed: {}", e
                             );
-                            if tokio::time::Instant::now() >= deadline {
+                            if tokio::time::Instant::now() >= task_deadline {
                                 break None;
                             }
                         }
+                        Err(_) => break None,
                     }
                 };
                 timings.execution_ms = workload_execution_started
@@ -2579,17 +3459,24 @@ async fn process_container_task(
                     .as_millis()
                     .min(i64::MAX as u128) as i64;
 
-                match exit_code {
-                    Some(code) => {
-                        let logs_start = std::time::Instant::now();
-                        let (stdout, stderr) = executor
-                            .collect_logs(&container_id)
+                // Execution has ended (exit observed or wall-clock deadline
+                // hit): everything below — log collection, kill/remove — is
+                // worker teardown, so snapshot the billable window first.
+                let (duration_ms, output) = bill_before_cleanup(execution_start, async {
+                    match exit_code {
+                        Some(code) => {
+                            let logs_start = std::time::Instant::now();
+                            let (stdout, stderr) = tokio::time::timeout(
+                                CONTAINER_LOGS_TIMEOUT,
+                                executor.collect_logs(&container_id),
+                            )
                             .await
+                            .ok()
+                            .and_then(Result::ok)
                             .unwrap_or_default();
-                        timings.logs_collect_ms = logs_start.elapsed().as_millis() as i64;
-                        executor.remove_container(&container_id).await;
+                            timings.logs_collect_ms = logs_start.elapsed().as_millis() as i64;
+                            remove_container_with_timeout(&executor, &container_id, &task_id).await;
 
-                        Ok(Ok((
                             executor::ContainerOutput {
                                 exit_code: code,
                                 stdout,
@@ -2597,22 +3484,23 @@ async fn process_container_task(
                                 container_id,
                                 timed_out: false,
                                 oom_killed: code == 137,
-                            },
-                            timings,
-                        )))
-                    }
-                    None => {
-                        // Timed out
-                        let logs_start = std::time::Instant::now();
-                        let (stdout, stderr) = executor
-                            .collect_logs(&container_id)
+                            }
+                        }
+                        None => {
+                            // Timed out
+                            let logs_start = std::time::Instant::now();
+                            let (stdout, stderr) = tokio::time::timeout(
+                                CONTAINER_LOGS_TIMEOUT,
+                                executor.collect_logs(&container_id),
+                            )
                             .await
+                            .ok()
+                            .and_then(Result::ok)
                             .unwrap_or_default();
-                        timings.logs_collect_ms = logs_start.elapsed().as_millis() as i64;
-                        kill_and_remove_with_timeout(&executor, &container_id, Some(&task_id))
-                            .await;
+                            timings.logs_collect_ms = logs_start.elapsed().as_millis() as i64;
+                            kill_and_remove_with_timeout(&executor, &container_id, Some(&task_id))
+                                .await;
 
-                        Ok(Ok((
                             executor::ContainerOutput {
                                 exit_code: -1,
                                 stdout,
@@ -2620,23 +3508,57 @@ async fn process_container_task(
                                 container_id,
                                 timed_out: true,
                                 oom_killed: false,
-                            },
-                            timings,
-                        )))
+                            }
+                        }
                     }
-                }
+                })
+                .await;
+
+                (Ok(Ok(output)), duration_ms, timings)
             }
-            Err(e) => Ok(Err((e, timings))),
+            Ok(Err(e)) => (Ok(Err(e)), billable_execution_ms(execution_start), timings),
+            Err(elapsed) => {
+                tracing::warn!(
+                    task_id = %task_id,
+                    image = %image,
+                    timeout_ms,
+                    "Docker image pull/create/start exceeded the task wall-clock timeout"
+                );
+                let (duration_ms, ()) = bill_before_cleanup(execution_start, async {
+                    if tokio::time::timeout(
+                        CONTAINER_KILL_TIMEOUT,
+                        executor.cleanup_task_containers(&trace_id),
+                    )
+                    .await
+                    .is_err()
+                    {
+                        tracing::error!(
+                            task_id = %task_id,
+                            "Docker setup-timeout cleanup also timed out; orphan cleanup will retry on restart"
+                        );
+                    }
+                })
+                .await;
+                // `timings` keeps whatever create_and_start stamped before
+                // the deadline dropped it (e.g. an in-flight pull start),
+                // so the platform-phase deduction below still applies.
+                (Err(elapsed), duration_ms, timings)
+            }
         }
     } else {
-        // Kata: use atomic execute_with_extras (phased not supported)
-        let result = tokio::time::timeout(
-            total_timeout,
+        // Kata: use atomic execute_with_extras (phased not supported).
+        // Timings are owned HERE, not inside the executor, so the phase
+        // stamps made before a cancellation point (slot wait, image pull)
+        // survive when the outer deadline drops the future mid-flight.
+        let mut timings = executor::ContainerTimings::default();
+        let result = tokio::time::timeout_at(
+            task_deadline,
             executor.execute_with_extras(
                 &image,
                 cmd,
                 env,
                 limits.timeout_secs,
+                &mut timings,
                 Some(&trace_id),
                 Some(&limits),
                 extras_ref,
@@ -2644,25 +3566,58 @@ async fn process_container_task(
             ),
         )
         .await;
-        if result.is_err() {
-            // The executor's internal timeout starts counting only once the
-            // VM is booted, so this outer wall-clock timeout (which also
-            // covers slot wait, image pull, and boot) fires first — dropping
-            // the execute future before its own cleanup can run. Reap the
-            // leaked VM, snapshot, FIFOs, and netns here.
-            tracing::warn!(
-                task_id = %task_id,
-                timeout_ms,
-                "Kata execution cancelled by outer timeout — cleaning up leaked VM state"
-            );
-            executor
-                .cleanup_after_timeout(&trace_id, limits.network)
-                .await;
-        }
-        result
+        // Execution has ended (result returned or the outer timeout fired):
+        // determine the billable window before the leaked-VM reaping below,
+        // whose bounded envelope (up to KATA_TIMEOUT_CLEANUP_ENVELOPE) is
+        // infrastructure teardown, not user compute. Prefer the workload-end
+        // instant the executor stamped before its own internal teardown
+        // (FIFO/log finalize, kill, VM/snapshot/CNI cleanup): on every path
+        // that completed inside the deadline the executor tears down BEFORE
+        // returning, so a post-await snapshot alone would bill that teardown.
+        // The snapshot below remains the fallback for paths that never stamp
+        // it (outer-timeout cancellation, setup failures).
+        let workload_ended_at = timings.workload_ended_at;
+        let (fallback_ms, ()) = bill_before_cleanup(execution_start, async {
+            if result.is_err() {
+                // The executor's internal timeout starts counting only once
+                // the VM is booted, so this outer wall-clock timeout (which
+                // also covers slot wait, image pull, and boot) fires first —
+                // dropping the execute future before its own cleanup can run.
+                // Reap the leaked VM, snapshot, FIFOs, and netns here.
+                tracing::warn!(
+                    task_id = %task_id,
+                    timeout_ms,
+                    "Kata execution cancelled by outer timeout — cleaning up leaked VM state"
+                );
+                if !bounded_cleanup(
+                    KATA_TIMEOUT_CLEANUP_ENVELOPE,
+                    executor.cleanup_after_timeout(&trace_id, limits.network),
+                )
+                .await
+                {
+                    tracing::error!(
+                        task_id = %task_id,
+                        timeout_secs = KATA_TIMEOUT_CLEANUP_ENVELOPE.as_secs(),
+                        "Kata timeout cleanup also timed out; startup orphan cleanup can only recover ids that still have containerd container records — snapshots/netns past DeleteContainer may leak"
+                    );
+                }
+            }
+        })
+        .await;
+        let duration_ms =
+            billable_ms_preferring_executor_window(execution_start, workload_ended_at, fallback_ms);
+        (result, duration_ms, timings)
     };
 
-    let duration_ms = start.elapsed().as_millis() as i64;
+    // SINGLE BILLING SEAM — deduct the platform-owned phases (slot wait +
+    // image pull) from the raw execution window. Every billing consumer
+    // below receives this deducted value: both CUS computations
+    // (`limits.size.compute_units`), the success/error JSON `duration-ms`,
+    // the `duration_ms_override` persisted through `Task::complete` (which
+    // feeds the TaskComplete event and the task-minutes quota), and the
+    // finish-log telemetry. The per-phase timing JSON fields
+    // (`slot-wait-ms`, `image-pull-ms`, `runtime-start-ms`, ...) stay raw.
+    let duration_ms = billed_ms_excluding_platform_phases(execution_start, raw_window_ms, &timings);
 
     // Clean up file server (Docker: direct handle; Kata: via oneshot channel).
     // A wedged listener (e.g. blocked on a stuck client connection) must not
@@ -2685,20 +3640,17 @@ async fn process_container_task(
     }
 
     // Clean up data volume (unmount + remove backing file). A hung loop
-    // unmount can pin the task worker, so apply the same wall-clock cap.
-    if let Some(vol) = data_volume
-        && tokio::time::timeout(CONTAINER_KILL_TIMEOUT, vol.cleanup())
-            .await
-            .is_err()
-    {
-        tracing::error!(task_id = %task_id, "data_volume cleanup timed out — backing file may leak");
+    // unmount can pin the task worker, so apply the shared wall-clock cap
+    // and detached-drop fallback used by every other cleanup site.
+    if let Some(vol) = data_volume {
+        cleanup_data_volume_with_timeout(&task_id, vol).await;
     }
 
     // Release resource budget
     drop(resource_guard);
 
     match execution_result {
-        Ok(Ok((output, timings))) => {
+        Ok(Ok(output)) => {
             persist_container_timings(
                 &db,
                 &task_id,
@@ -2774,7 +3726,7 @@ async fn process_container_task(
                 task_failure_json(&msg, Some(err_json))
             };
 
-            complete_task_with_event(
+            let persisted = complete_task_with_event(
                 &db,
                 &stream_publisher,
                 &task_id,
@@ -2784,10 +3736,12 @@ async fn process_container_task(
                 &request.task_type,
                 status.clone(),
                 Some(&result_json),
+                Some(duration_ms),
+                Some(&worker_id),
             )
             .await;
 
-            if status == TaskStatus::Failed || status == TaskStatus::TimedOut {
+            if persisted && (status == TaskStatus::Failed || status == TaskStatus::TimedOut) {
                 publish_task_alert(&db, org_id, env_id, &task_id, "task:failed", &result_json)
                     .await;
             }
@@ -2807,7 +3761,7 @@ async fn process_container_task(
                 "Container task finished"
             );
         }
-        Ok(Err((e, timings))) => {
+        Ok(Err(e)) => {
             // Some backend errors can occur after the container has started
             // (for example while waiting for it or collecting its result).
             // Preserve that boundary so the elapsed workload time is not
@@ -2857,7 +3811,7 @@ async fn process_container_task(
                     "infra-failure": is_infra_failure,
                 })),
             );
-            complete_task_with_event(
+            let persisted = complete_task_with_event(
                 &db,
                 &stream_publisher,
                 &task_id,
@@ -2867,13 +3821,19 @@ async fn process_container_task(
                 &request.task_type,
                 TaskStatus::Failed,
                 Some(&error),
+                Some(duration_ms),
+                Some(&worker_id),
             )
             .await;
-            publish_task_alert(&db, org_id, env_id, &task_id, "task:failed", &error).await;
+            if persisted {
+                publish_task_alert(&db, org_id, env_id, &task_id, "task:failed", &error).await;
+            }
             if compute_units > 0 {
                 check_cus_thresholds(&db, org_id, env_id, &usage_stats_cache).await;
             }
-            maybe_retry_task(&db, &task_queue, &task_id, &request).await;
+            if persisted {
+                maybe_retry_task(&db, &task_queue, &task_id, &request).await;
+            }
             tracing::error!(
                 task_id = %task_id,
                 image = %image,
@@ -2892,7 +3852,7 @@ async fn process_container_task(
                     "compute-units": compute_units,
                 })),
             );
-            complete_task_with_event(
+            let persisted = complete_task_with_event(
                 &db,
                 &stream_publisher,
                 &task_id,
@@ -2902,13 +3862,19 @@ async fn process_container_task(
                 &request.task_type,
                 TaskStatus::TimedOut,
                 Some(&error),
+                Some(duration_ms),
+                Some(&worker_id),
             )
             .await;
-            publish_task_alert(&db, org_id, env_id, &task_id, "task:failed", &error).await;
+            if persisted {
+                publish_task_alert(&db, org_id, env_id, &task_id, "task:failed", &error).await;
+            }
             if compute_units > 0 {
                 check_cus_thresholds(&db, org_id, env_id, &usage_stats_cache).await;
             }
-            maybe_retry_task(&db, &task_queue, &task_id, &request).await;
+            if persisted {
+                maybe_retry_task(&db, &task_queue, &task_id, &request).await;
+            }
             tracing::warn!(
                 task_id = %task_id,
                 image = %image,
@@ -2920,6 +3886,146 @@ async fn process_container_task(
     }
 
     Ok(())
+}
+
+/// Elapsed billable milliseconds for a container task, measured from the
+/// point the worker actually dispatched the workload (post-setup) — never
+/// from claim. The task DEADLINE is anchored at claim so setup and runtime
+/// share one wall-clock budget, but billing CUS = ceil(duration ×
+/// multiplier) and the user-visible `duration-ms` must only cover the
+/// execution window: worker-side setup (bundle download/extract,
+/// file-server start) is infrastructure time, not user compute.
+///
+/// The same boundary applies on the way out: snapshot at the moment
+/// execution ends (result returned / timeout fired / error surfaced),
+/// never after teardown — see `bill_before_cleanup`.
+fn billable_execution_ms(execution_start: std::time::Instant) -> i64 {
+    billable_execution_ms_at(execution_start, std::time::Instant::now())
+}
+
+/// Billable window ending at an explicit instant instead of "now". Used
+/// when the executor itself reports when the workload finished (see
+/// `ContainerTimings::workload_ended_at`), which is always at or before
+/// the caller's own post-await snapshot.
+fn billable_execution_ms_at(
+    execution_start: std::time::Instant,
+    workload_end: std::time::Instant,
+) -> i64 {
+    workload_end
+        .saturating_duration_since(execution_start)
+        .as_millis()
+        .min(i64::MAX as u128) as i64
+}
+
+/// Billable window for the atomic (Kata) arm: prefer the workload-end
+/// instant the executor stamped BEFORE its internal teardown (FIFO/log
+/// finalize, kill, VM/snapshot/netns cleanup) — a post-await snapshot alone
+/// would bill that teardown as user compute. `fallback_ms` is the caller's
+/// own pre-cleanup snapshot, used for paths that never stamp the instant
+/// (outer-timeout cancellation, setup failures).
+fn billable_ms_preferring_executor_window(
+    execution_start: std::time::Instant,
+    workload_ended_at: Option<std::time::Instant>,
+    fallback_ms: i64,
+) -> i64 {
+    workload_ended_at.map_or(fallback_ms, |ended_at| {
+        billable_execution_ms_at(execution_start, ended_at)
+    })
+}
+
+/// BILLING POLICY for container tasks ("RunPod-shaped split", decided
+/// after market research): the billed window EXCLUDES the two
+/// platform-owned phases — execution-slot wait and container image pull —
+/// while container/VM boot and runtime init REMAIN billed. Rationale:
+/// slot availability and image-cache warmth are platform capacity and
+/// placement concerns the user cannot influence, whereas boot/init cost
+/// is a direct function of the image and size the user chose. The task
+/// DEADLINE stays anchored at claim and is deliberately unaffected, and
+/// the observability timing JSON keeps reporting every phase raw
+/// (undeducted): `billed_ms = window_ms - in-window(slot_wait + pull)`,
+/// saturating at zero.
+///
+/// Phase-vs-anchor layout, verified against both executors so nothing is
+/// double-subtracted:
+/// - Docker container tasks (phased `create_and_start`): the image pull
+///   runs INSIDE the call, strictly after `execution_start`. There is no
+///   in-window slot wait to subtract — the phased path has no
+///   executor-internal semaphore (`execute_with_limits`' semaphore is not
+///   on this path), and the worker's own concurrency gate, the resource
+///   budget, is acquired in `process_container_task` BEFORE claim and
+///   before `execution_start`, so its wait never overlaps the billed
+///   window (it is reported separately as `capacity_wait_ms`).
+/// - Kata (`execute_with_extras`): both the VM-slot semaphore wait and
+///   the image pull (which also covers devmapper disk admission) run
+///   inside the executor, strictly after `execution_start`.
+///
+/// The overlap computation additionally clamps each phase to
+/// [`execution_start`, window end], so a phase that somehow began before
+/// the anchor could still never be subtracted twice or beyond its
+/// in-window share.
+///
+/// Partial phases are resolved in the user's favor: a phase that started
+/// but never closed inside the window — pull failed midway, or the outer
+/// deadline cancelled the executor future mid-phase — counts as
+/// unbillable from its start to the end of the window, because from that
+/// point until the billing snapshot the worker was doing platform work,
+/// never running user code.
+fn billed_ms_excluding_platform_phases(
+    execution_start: std::time::Instant,
+    window_ms: i64,
+    timings: &executor::ContainerTimings,
+) -> i64 {
+    let window_end = execution_start + std::time::Duration::from_millis(window_ms.max(0) as u64);
+    let unbillable_ms = platform_phase_overlap_ms(
+        timings.slot_wait_started_at,
+        timings.slot_wait_ended_at,
+        execution_start,
+        window_end,
+    )
+    .saturating_add(platform_phase_overlap_ms(
+        timings.image_pull_started_at,
+        timings.image_pull_ended_at,
+        execution_start,
+        window_end,
+    ));
+    window_ms.max(0).saturating_sub(unbillable_ms)
+}
+
+/// Overlap of one platform-owned phase with the billed window
+/// [`window_start`, `window_end`], in ms. A stamped start with
+/// `ended_at == None` means the phase was still in flight when the window
+/// closed (failed or cancelled midway): it is treated as running to the
+/// end of the window — conservative in the user's favor. A phase that
+/// never started contributes zero.
+fn platform_phase_overlap_ms(
+    started_at: Option<std::time::Instant>,
+    ended_at: Option<std::time::Instant>,
+    window_start: std::time::Instant,
+    window_end: std::time::Instant,
+) -> i64 {
+    let Some(started_at) = started_at else {
+        return 0;
+    };
+    ended_at
+        .unwrap_or(window_end)
+        .min(window_end)
+        .saturating_duration_since(started_at.max(window_start))
+        .as_millis()
+        .min(i64::MAX as u128) as i64
+}
+
+/// Snapshot the billable execution window at the moment execution ends,
+/// THEN run `cleanup`. Teardown — log collection, container kill/remove,
+/// leaked-VM reaping — runs behind its own bounded envelopes (up to
+/// `KATA_TIMEOUT_CLEANUP_ENVELOPE` after a Kata timeout) and is worker
+/// infrastructure time: letting it precede the snapshot would inflate both
+/// the CUS charge and the user-visible `duration-ms`.
+async fn bill_before_cleanup<F>(execution_start: std::time::Instant, cleanup: F) -> (i64, F::Output)
+where
+    F: std::future::Future,
+{
+    let duration_ms = billable_execution_ms(execution_start);
+    (duration_ms, cleanup.await)
 }
 
 /// Persist the point where user workload code actually begins, plus the
@@ -2949,8 +4055,19 @@ async fn record_task_workload_start(
         "runtime_start_ms": runtime_start_ms.max(0),
         "worker_preparation_ms": worker_preparation_ms,
     });
-    if let Err(e) = Task::merge_timing(db, task_id, &patch).await {
-        tracing::warn!(task_id = %task_id, "Failed to persist task workload timing: {}", e);
+    match tokio::time::timeout(
+        TASK_TIMING_DB_TIMEOUT,
+        Task::merge_timing(db, task_id, &patch),
+    )
+    .await
+    {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => {
+            tracing::warn!(task_id = %task_id, "Failed to persist task workload timing: {}", e);
+        }
+        Err(_) => {
+            tracing::warn!(task_id = %task_id, "Task workload timing write timed out; continuing");
+        }
     }
 }
 
@@ -2975,17 +4092,26 @@ async fn persist_container_timings(
         timings.runtime_start_ms,
     )
     .await;
-    if let Err(e) = Task::merge_timing(
-        db,
-        task_id,
-        &serde_json::json!({
-            "workload_execution_ms": timings.execution_ms.max(0),
-            "logs_collect_ms": timings.logs_collect_ms.max(0),
-        }),
+    match tokio::time::timeout(
+        TASK_TIMING_DB_TIMEOUT,
+        Task::merge_timing(
+            db,
+            task_id,
+            &serde_json::json!({
+                "workload_execution_ms": timings.execution_ms.max(0),
+                "logs_collect_ms": timings.logs_collect_ms.max(0),
+            }),
+        ),
     )
     .await
     {
-        tracing::warn!(task_id = %task_id, "Failed to persist task execution timing: {}", e);
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => {
+            tracing::warn!(task_id = %task_id, "Failed to persist task execution timing: {}", e);
+        }
+        Err(_) => {
+            tracing::warn!(task_id = %task_id, "Task execution timing write timed out; continuing");
+        }
     }
 }
 
@@ -3087,6 +4213,9 @@ async fn process_code_task(
     coordinator: Arc<shutdown::TaskShutdownCoordinator>,
     claimed_at: chrono::DateTime<chrono::Utc>,
     capacity_wait_ms: i64,
+    worker_id: String,
+    blocking_execution_permit: tokio::sync::OwnedSemaphorePermit,
+    task_deadline: tokio::time::Instant,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let function_name = request.function_name.clone();
     let task_type = request.task_type.clone();
@@ -3095,12 +4224,65 @@ async fn process_code_task(
         .as_deref()
         .and_then(|s| Uuid::parse_str(s).ok());
 
-    let cached =
-        match load_bytecode(&build_id, &bytecode_cache, Some(&db), Some(&worker_conf)).await {
-            Ok(c) => c,
-            Err(e) => {
-                let error = task_failure_json(&format!("Build load failed: {}", e), None);
-                complete_task_with_event(
+    let setup = async {
+        emit_task_started(
+            &stream_publisher,
+            task_id,
+            env_id,
+            stream_id,
+            &function_name,
+            &task_type,
+        )
+        .await;
+
+        let (cached, blocking_execution_permit) = load_bytecode(
+            &build_id,
+            Arc::clone(&bytecode_cache),
+            Some(&db),
+            Some(&worker_conf),
+            blocking_execution_permit,
+        )
+        .await?;
+
+        let store: Option<Arc<dyn hot::store::Store>> = match hot::store::store_from_config_with_db(
+            &worker_conf,
+            Some(Arc::clone(&db)),
+            org_id,
+            Some(env_id),
+        )
+        .await
+        {
+            Ok(store) => Some(Arc::from(store)),
+            Err(error) => {
+                tracing::warn!(task_id = %task_id, "Store not available for task: {error}");
+                None
+            }
+        };
+        let embedding_provider: Option<Arc<dyn hot::store::embedding::EmbeddingProvider>> =
+            hot::store::embedding::embedding_provider_from_config(&worker_conf).map(Arc::from);
+        let file_storage: Option<Arc<dyn hot::file_storage::FileStorage>> =
+            match hot::file_storage::file_storage_from_config(&worker_conf).await {
+                Ok(storage) => Some(Arc::from(storage)),
+                Err(error) => {
+                    tracing::warn!(task_id = %task_id, "File storage not available for task: {error}");
+                    None
+                }
+            };
+
+        Ok::<_, String>((
+            cached,
+            blocking_execution_permit,
+            store,
+            embedding_provider,
+            file_storage,
+        ))
+    };
+    let (cached, blocking_execution_permit, store, embedding_provider, file_storage) =
+        match await_claimed_task_deadline(task_deadline, setup).await {
+            Ok(Ok(setup)) => setup,
+            Ok(Err(error_message)) => {
+                let error = task_failure_json(&format!("Build load failed: {error_message}"), None);
+                if complete_task_with_event(
                     &db,
                     &stream_publisher,
                     &task_id,
@@ -3110,10 +4292,37 @@ async fn process_code_task(
                     &task_type,
                     TaskStatus::Failed,
                     Some(&error),
+                    None,
+                    Some(&worker_id),
                 )
-                .await;
-                publish_task_alert(&db, org_id, env_id, &task_id, "task:failed", &error).await;
-                return Err(e.into());
+                .await
+                {
+                    publish_task_alert(&db, org_id, env_id, &task_id, "task:failed", &error).await;
+                }
+                return Err(error_message.into());
+            }
+            Err(_) => {
+                let error = task_failure_json("Task timed out during setup", None);
+                if complete_task_with_event(
+                    &db,
+                    &stream_publisher,
+                    &task_id,
+                    env_id,
+                    stream_id,
+                    &function_name,
+                    &task_type,
+                    TaskStatus::TimedOut,
+                    Some(&error),
+                    None,
+                    Some(&worker_id),
+                )
+                .await
+                {
+                    publish_task_alert(&db, org_id, env_id, &task_id, "task:failed", &error).await;
+                    maybe_retry_task(&db, &task_queue, &task_id, &request).await;
+                }
+                tracing::warn!(task_id = %task_id, timeout_ms, "Task timed out during setup");
+                return Ok(());
             }
         };
 
@@ -3194,6 +4403,11 @@ async fn process_code_task(
         access_id: None,
         agent_type: None,
         queue_timing: None,
+        deadline_at: chrono::Duration::from_std(
+            task_deadline.saturating_duration_since(tokio::time::Instant::now()),
+        )
+        .ok()
+        .map(|duration| chrono::Utc::now() + duration),
     };
 
     let origin_run_id = execution_context.origin_run_id;
@@ -3213,36 +4427,15 @@ async fn process_code_task(
     // Register the cancel token so the shutdown coordinator can signal this VM
     coordinator.set_cancel_token(&task_id, Arc::clone(&vm_cancel_token));
 
-    let store: Option<Arc<dyn hot::store::Store>> = match hot::store::store_from_config_with_db(
-        &worker_conf,
-        Some(Arc::clone(&db)),
-        org_id,
-        Some(env_id),
-    )
-    .await
-    {
-        Ok(s) => Some(Arc::from(s)),
-        Err(e) => {
-            tracing::warn!(task_id = %task_id, "Store not available for task: {}", e);
-            None
-        }
-    };
-    let embedding_provider: Option<Arc<dyn hot::store::embedding::EmbeddingProvider>> =
-        hot::store::embedding::embedding_provider_from_config(&worker_conf).map(Arc::from);
-
-    let file_storage: Option<Arc<dyn hot::file_storage::FileStorage>> =
-        match hot::file_storage::file_storage_from_config(&worker_conf).await {
-            Ok(s) => Some(Arc::from(s)),
-            Err(e) => {
-                tracing::warn!(task_id = %task_id, "File storage not available for task: {}", e);
-                None
-            }
-        };
-
     let panic_label = format!("task_worker:{}:{}", fn_name_exec, task_id);
     let resource_registry_for_task = hot::lang::hot::resource::get_build_registry(&build_id);
     let workload_started_at = chrono::Utc::now();
     let task_handle = tokio::task::spawn_blocking(move || {
+        // Hold the blocking-execution slot for the lifetime of the THREAD,
+        // not the JoinHandle: when the timeout arm drops the handle, this
+        // detached thread keeps consuming a permit until the closure returns,
+        // so admission backpressure reflects wedged VM threads.
+        let _blocking_execution_permit = blocking_execution_permit;
         // Scope this task's view of `::hot::resource/*` to the bundle that
         // produced its bytecode. The guard installs the per-build registry
         // as a thread-local before user code runs and restores the prior
@@ -3294,20 +4487,24 @@ async fn process_code_task(
             }
         }
     });
-    record_task_workload_start(
-        &db,
-        &task_id,
-        claimed_at,
-        workload_started_at,
-        capacity_wait_ms,
-        0,
-        0,
-    )
-    .await;
+    // Timing is diagnostic; do not delay arming the claim-anchored execution
+    // timeout behind its DB write. The write has its own short ceiling.
+    let timing_db = Arc::clone(&db);
+    tokio::spawn(async move {
+        record_task_workload_start(
+            &timing_db,
+            &task_id,
+            claimed_at,
+            workload_started_at,
+            capacity_wait_ms,
+            0,
+            0,
+        )
+        .await;
+    });
 
-    let timeout_dur = std::time::Duration::from_millis(timeout_ms);
     let execution_result = tokio::select! {
-        result = tokio::time::timeout(timeout_dur, task_handle) => result,
+        result = await_claimed_task_deadline(task_deadline, task_handle) => result,
         _ = cancel_notify.notified() => {
             tracing::info!(task_id = %task_id, "Task cancelled via $cancel message — signalling VM");
             vm_cancel_token.store(true, std::sync::atomic::Ordering::Relaxed);
@@ -3322,8 +4519,9 @@ async fn process_code_task(
             if let Err(e) = hot::db::Task::set_run_id(&db, &task_id, &run_id).await {
                 tracing::warn!(task_id = %task_id, run_id = %run_id, "Failed to set task run_id: {}", e);
             }
-            complete_task_with_event(&db, &stream_publisher, &task_id, env_id, stream_id, &function_name, &task_type, TaskStatus::Cancelled, Some(&cancellation)).await;
-            publish_task_alert(&db, org_id, env_id, &task_id, "task:cancelled", &cancellation).await;
+            if complete_task_with_event(&db, &stream_publisher, &task_id, env_id, stream_id, &function_name, &task_type, TaskStatus::Cancelled, Some(&cancellation), None, Some(&worker_id)).await {
+                publish_task_alert(&db, org_id, env_id, &task_id, "task:cancelled", &cancellation).await;
+            }
             drop(inbox_tx);
             inbox_forwarder.abort();
             return Ok(());
@@ -3361,7 +4559,7 @@ async fn process_code_task(
             if let Some((status, result_json, alert_name)) =
                 classify_task_terminal_result(&result_val)
             {
-                complete_task_with_event(
+                if complete_task_with_event(
                     &db,
                     &stream_publisher,
                     &task_id,
@@ -3371,11 +4569,16 @@ async fn process_code_task(
                     &task_type,
                     status.clone(),
                     Some(&result_json),
+                    None,
+                    Some(&worker_id),
                 )
-                .await;
-                publish_task_alert(&db, org_id, env_id, &task_id, alert_name, &result_json).await;
-                if status == TaskStatus::Failed {
-                    maybe_retry_task(&db, &task_queue, &task_id, &request).await;
+                .await
+                {
+                    publish_task_alert(&db, org_id, env_id, &task_id, alert_name, &result_json)
+                        .await;
+                    if status == TaskStatus::Failed {
+                        maybe_retry_task(&db, &task_queue, &task_id, &request).await;
+                    }
                 }
                 tracing::info!(
                     task_id = %task_id,
@@ -3395,6 +4598,8 @@ async fn process_code_task(
                     &task_type,
                     TaskStatus::Completed,
                     Some(&result_json),
+                    None,
+                    Some(&worker_id),
                 )
                 .await;
                 tracing::info!(task_id = %task_id, status = "completed", "Task finished");
@@ -3402,7 +4607,7 @@ async fn process_code_task(
         }
         Ok(Ok(Err(e))) => {
             let error = task_failure_json(&e, None);
-            complete_task_with_event(
+            if complete_task_with_event(
                 &db,
                 &stream_publisher,
                 &task_id,
@@ -3412,15 +4617,19 @@ async fn process_code_task(
                 &task_type,
                 TaskStatus::Failed,
                 Some(&error),
+                None,
+                Some(&worker_id),
             )
-            .await;
-            publish_task_alert(&db, org_id, env_id, &task_id, "task:failed", &error).await;
-            maybe_retry_task(&db, &task_queue, &task_id, &request).await;
+            .await
+            {
+                publish_task_alert(&db, org_id, env_id, &task_id, "task:failed", &error).await;
+                maybe_retry_task(&db, &task_queue, &task_id, &request).await;
+            }
             tracing::error!(task_id = %task_id, "Task execution error: {}", e);
         }
         Ok(Err(e)) => {
             let error = task_failure_json(&format!("Task panicked: {}", e), None);
-            complete_task_with_event(
+            if complete_task_with_event(
                 &db,
                 &stream_publisher,
                 &task_id,
@@ -3430,10 +4639,14 @@ async fn process_code_task(
                 &task_type,
                 TaskStatus::Failed,
                 Some(&error),
+                None,
+                Some(&worker_id),
             )
-            .await;
-            publish_task_alert(&db, org_id, env_id, &task_id, "task:failed", &error).await;
-            maybe_retry_task(&db, &task_queue, &task_id, &request).await;
+            .await
+            {
+                publish_task_alert(&db, org_id, env_id, &task_id, "task:failed", &error).await;
+                maybe_retry_task(&db, &task_queue, &task_id, &request).await;
+            }
             tracing::error!(task_id = %task_id, "Task panicked: {}", e);
         }
         Err(_) => {
@@ -3448,7 +4661,12 @@ async fn process_code_task(
             vm_cancel_token.store(true, std::sync::atomic::Ordering::Relaxed);
 
             let error = task_failure_json("Task timed out", None);
-            complete_task_with_event(
+            // Fenced with this worker's id: if the zombie reaper (or any other
+            // actor) already made the row terminal, this write affects zero
+            // rows, `complete_task_with_event` reports not-persisted, and the
+            // alert + retry below are suppressed — the winning writer already
+            // published its own event and retry.
+            if complete_task_with_event(
                 &db,
                 &stream_publisher,
                 &task_id,
@@ -3458,10 +4676,14 @@ async fn process_code_task(
                 &task_type,
                 TaskStatus::TimedOut,
                 Some(&error),
+                None,
+                Some(&worker_id),
             )
-            .await;
-            publish_task_alert(&db, org_id, env_id, &task_id, "task:failed", &error).await;
-            maybe_retry_task(&db, &task_queue, &task_id, &request).await;
+            .await
+            {
+                publish_task_alert(&db, org_id, env_id, &task_id, "task:failed", &error).await;
+                maybe_retry_task(&db, &task_queue, &task_id, &request).await;
+            }
             tracing::warn!(task_id = %task_id, timeout_ms, "Task timed out — VM cancel signalled");
         }
     }
@@ -3568,7 +4790,243 @@ async fn emit_task_started(
     }
 }
 
+/// Compare two JSON trees for semantic equality, treating numbers as equal
+/// whenever they denote the same numeric value regardless of serde_json's
+/// internal variant (e.g. `1e16` parsed as `Number::Float` vs
+/// `10000000000000000` parsed as `Number::PosInt`). Postgres jsonb
+/// normalizes numeric text on storage, so a payload we wrote can round-trip
+/// with a different `Number` variant than the one we hold in memory;
+/// variant-sensitive `PartialEq` then yields a false negative, and the
+/// payload-authorship check below would wrongly suppress a real completion
+/// event. Integer-vs-integer comparisons stay exact (no precision loss for
+/// values beyond 2^53); the f64 path only decides mixed-variant cases.
+fn json_numeric_tolerant_eq(a: &serde_json::Value, b: &serde_json::Value) -> bool {
+    use serde_json::Value;
+    match (a, b) {
+        (Value::Number(x), Value::Number(y)) => {
+            if x == y {
+                return true;
+            }
+            if let (Some(xi), Some(yi)) = (x.as_i64(), y.as_i64()) {
+                return xi == yi;
+            }
+            if let (Some(xu), Some(yu)) = (x.as_u64(), y.as_u64()) {
+                return xu == yu;
+            }
+            match (x.as_f64(), y.as_f64()) {
+                (Some(xf), Some(yf)) => xf == yf,
+                _ => false,
+            }
+        }
+        (Value::Array(xs), Value::Array(ys)) => {
+            xs.len() == ys.len()
+                && xs
+                    .iter()
+                    .zip(ys)
+                    .all(|(x, y)| json_numeric_tolerant_eq(x, y))
+        }
+        (Value::Object(xm), Value::Object(ym)) => {
+            xm.len() == ym.len()
+                && xm
+                    .iter()
+                    .all(|(k, v)| ym.get(k).is_some_and(|w| json_numeric_tolerant_eq(v, w)))
+        }
+        _ => a == b,
+    }
+}
+
+/// `duration_ms_override` is threaded verbatim to [`Task::complete`]:
+/// container tasks pass their billable execution-window snapshot so the
+/// row's `duration_ms` doesn't degrade to the claim-to-persist stop-start
+/// span (which would fold setup and teardown into billing reads); all other
+/// callers pass `None` for the historical computed duration.
+#[allow(clippy::too_many_arguments)]
+async fn persist_terminal_task(
+    db: &DatabasePool,
+    task_id: &Uuid,
+    status: &TaskStatus,
+    result: Option<&serde_json::Value>,
+    duration_ms_override: Option<i64>,
+    fence_worker: Option<&str>,
+    attempt_timeout: std::time::Duration,
+    max_attempts: usize,
+) -> bool {
+    let mut persisted = false;
+    for attempt in 1..=max_attempts {
+        match tokio::time::timeout(
+            attempt_timeout,
+            Task::complete(
+                db,
+                task_id,
+                status,
+                result,
+                duration_ms_override,
+                fence_worker,
+            ),
+        )
+        .await
+        {
+            Ok(Ok(true)) => {
+                persisted = true;
+                break;
+            }
+            Ok(Ok(false)) => {
+                // A zero-row update means another actor won the terminal-state
+                // race (most commonly cancellation), or — when fenced — that
+                // this worker no longer owns the row. Treat a replay of our
+                // own earlier write as idempotent success, but never publish
+                // our completion for a write somebody else made.
+                match tokio::time::timeout(DB_CALL_TIMEOUT, Task::get(db, task_id)).await {
+                    Ok(Ok(task)) if task.task_status_id == status.as_id() => {
+                        // A pre-existing Cancelled row is never a competing
+                        // completion. The only writers of `cancelled` are
+                        // (1) the user-initiated `::hot::task/cancel` flow
+                        // (`Task::cancel`), which flips the row — leaving a
+                        // NULL result — BEFORE publishing the `$cancel`
+                        // message and never emits completion events itself,
+                        // and (2) this worker's own cancellation paths. The
+                        // worker owns event emission for cooperative
+                        // cancellation, so finding the row already
+                        // `cancelled` while persisting `cancelled` is
+                        // idempotent success; comparing our cancellation
+                        // payload against the row's NULL result would
+                        // wrongly suppress task:complete / RunStop /
+                        // task:cancelled for every cooperative cancel.
+                        if *status == TaskStatus::Cancelled {
+                            persisted = true;
+                            break;
+                        }
+                        // A matching terminal status is NOT proof our write
+                        // landed: the zombie reaper also writes `failed`, and
+                        // neither `Task::complete` nor the reaper touches
+                        // `worker_id`, so ownership cannot tell the writers
+                        // apart. The stored result payload can: each writer
+                        // persists its own payload (the reaper its
+                        // "interrupted by worker crash" failure), so only a
+                        // payload equal to ours is evidence that an earlier
+                        // attempt of OURS committed. Equality must be
+                        // numeric-tolerant: Postgres jsonb normalizes number
+                        // text, so the stored tree can differ from ours in
+                        // serde_json Number variant while denoting the same
+                        // payload.
+                        let payload_is_ours = match (task.result.as_ref(), result) {
+                            (Some(stored), Some(ours)) => json_numeric_tolerant_eq(stored, ours),
+                            (None, None) => true,
+                            _ => false,
+                        };
+                        if payload_is_ours {
+                            persisted = true;
+                            break;
+                        }
+                        tracing::info!(
+                            task_id = %task_id,
+                            requested_status = status.as_id(),
+                            "Terminal task transition lost a race to a same-status write by another actor; suppressing duplicate completion"
+                        );
+                        return false;
+                    }
+                    Ok(Ok(task))
+                        if !matches!(
+                            task.task_status_id,
+                            id if id == TaskStatus::Queued.as_id()
+                                || id == TaskStatus::Running.as_id()
+                        ) =>
+                    {
+                        tracing::info!(
+                            task_id = %task_id,
+                            requested_status = status.as_id(),
+                            actual_status = task.task_status_id,
+                            "Terminal task transition lost a race; suppressing stale completion"
+                        );
+                        return false;
+                    }
+                    Ok(Ok(task)) => {
+                        // Row still active. When fenced, a changed owner means
+                        // the update can never apply — release/steal took the
+                        // row from us — so retrying is futile and the write
+                        // must be suppressed instead.
+                        if let Some(fence) = fence_worker
+                            && task.worker_id.as_deref() != Some(fence)
+                        {
+                            tracing::warn!(
+                                task_id = %task_id,
+                                owner = ?task.worker_id,
+                                fence_worker = fence,
+                                "Terminal task transition fenced out; task ownership changed while completing"
+                            );
+                            return false;
+                        }
+                        tracing::warn!(
+                            task_id = %task_id,
+                            attempt,
+                            max_attempts,
+                            "Terminal task transition affected no rows while task remains active"
+                        );
+                    }
+                    Ok(Err(e)) => {
+                        tracing::warn!(
+                            task_id = %task_id,
+                            attempt,
+                            max_attempts,
+                            "Failed to inspect zero-row terminal task transition: {}",
+                            e
+                        );
+                    }
+                    Err(_) => {
+                        tracing::warn!(
+                            task_id = %task_id,
+                            attempt,
+                            max_attempts,
+                            "Timed out inspecting zero-row terminal task transition"
+                        );
+                    }
+                }
+            }
+            Ok(Err(e)) => {
+                tracing::warn!(
+                    task_id = %task_id,
+                    attempt,
+                    max_attempts,
+                    "Task::complete failed: {}",
+                    e
+                );
+            }
+            Err(_) => {
+                tracing::error!(
+                    task_id = %task_id,
+                    attempt,
+                    max_attempts,
+                    timeout_ms = attempt_timeout.as_millis(),
+                    "Task::complete timed out"
+                );
+            }
+        }
+        if attempt < max_attempts {
+            tokio::time::sleep(std::time::Duration::from_millis(100 * attempt as u64)).await;
+        }
+    }
+    persisted
+}
+
 /// Complete a task in the DB and emit a `task:complete` env event.
+///
+/// `duration_ms_override`: container terminal writes pass the billable
+/// execution-window snapshot so the persisted `duration_ms` (and therefore
+/// the re-read event payload and the task-minutes quota) reflects the
+/// window the user was billed for instead of the claim-to-persist span;
+/// every other caller passes `None` for the stop-start computation.
+///
+/// `fence_worker` is threaded to `Task::complete`: pass this worker's id when
+/// the row was claimed by this worker so a write cannot land after ownership
+/// was released or taken over; pass `None` for rows this worker never claimed
+/// (pre-claim failures, orphan/adopted reconciliation).
+///
+/// Returns whether OUR terminal state is durable. `false` means another actor
+/// won the terminal race (or persistence failed outright): the caller must
+/// suppress every follow-up keyed to the outcome — `publish_task_alert` and
+/// `maybe_retry_task`/`maybe_retry_zombie_task` — because the winning writer
+/// publishes its own, and retrying an un-persisted (or cancelled) failure
+/// double-runs the task.
 #[allow(clippy::too_many_arguments)]
 async fn complete_task_with_event(
     db: &DatabasePool,
@@ -3580,31 +5038,39 @@ async fn complete_task_with_event(
     task_type: &str,
     status: TaskStatus,
     result: Option<&serde_json::Value>,
-) {
-    // Persist to DB. Wrap each call so a stuck DB pool can't pin the worker
-    // here forever; the periodic zombie cleanup will reconcile timed-out writes.
-    match tokio::time::timeout(
-        DB_CALL_TIMEOUT,
-        Task::complete(db, task_id, &status, result),
+    duration_ms_override: Option<i64>,
+    fence_worker: Option<&str>,
+) -> bool {
+    // A task:complete event is only truthful after the terminal row is
+    // durable. Retry briefly, then leave the row non-terminal; process_task's
+    // postcondition will withhold the queue ACK and release heartbeat ownership
+    // so the zombie reaper can reconcile it.
+    let persisted = persist_terminal_task(
+        db,
+        task_id,
+        &status,
+        result,
+        duration_ms_override,
+        fence_worker,
+        TASK_COMPLETION_DB_TIMEOUT,
+        TASK_COMPLETION_ATTEMPTS,
     )
-    .await
-    {
-        Ok(Ok(_)) => {}
-        Ok(Err(e)) => {
-            tracing::warn!(task_id = %task_id, "Task::complete failed: {}", e);
-        }
-        Err(_) => {
-            tracing::error!(
-                task_id = %task_id,
-                timeout_secs = DB_CALL_TIMEOUT.as_secs(),
-                "Task::complete timed out — moving on (run will be reaped by zombie cleanup)"
-            );
-        }
+    .await;
+    if !persisted {
+        tracing::error!(
+            task_id = %task_id,
+            "Terminal task state was not persisted; suppressing completion events, alerts, and retries"
+        );
+        return false;
     }
 
     finalize_task_timing(db, task_id).await;
 
-    // Re-read to get computed duration_ms (best-effort; null on timeout/error).
+    // Re-read the row's duration_ms for the event (best-effort; null on
+    // timeout/error). For container tasks the row carries the billable
+    // execution-window snapshot persisted via `duration_ms_override` above,
+    // so the event reports the same window the user was billed for; for all
+    // other tasks it is the stop-start computation from `Task::complete`.
     let duration_ms = match tokio::time::timeout(DB_CALL_TIMEOUT, Task::get(db, task_id)).await {
         Ok(Ok(t)) => t.duration_ms,
         Ok(Err(_)) => None,
@@ -3672,6 +5138,8 @@ async fn complete_task_with_event(
             }
         }
     }
+
+    true
 }
 
 /// Publish a `task:failed` or `task:cancelled` alert.
@@ -3756,31 +5224,16 @@ async fn check_cus_thresholds_inner(
         .and_then(|s| s.current_period_start)
         .unwrap_or_else(chrono::Utc::now);
 
-    let cached = {
-        let cache = usage_stats_cache.lock().await;
-        cache
-            .get(&org_id)
-            .filter(|(ts, _)| ts.elapsed() < USAGE_STATS_CACHE_TTL)
-            .map(|(_, stats)| stats.clone())
-    };
-    let usage = if let Some(stats) = cached {
-        stats
-    } else {
-        match hot::db::subscription::OrgUsageStats::calculate(
-            db,
-            &org_id,
-            period_start,
-            features.call_retention_days(),
-        )
-        .await
-        {
-            Ok(u) => {
-                let mut cache = usage_stats_cache.lock().await;
-                cache.insert(org_id, (std::time::Instant::now(), u.clone()));
-                u
-            }
-            Err(_) => return,
-        }
+    let Some(usage) = cached_usage_stats(
+        db,
+        org_id,
+        period_start,
+        features.call_retention_days(),
+        usage_stats_cache,
+    )
+    .await
+    else {
+        return;
     };
 
     let pct = (usage.compute_units as f64 / cus_limit as f64) * 100.0;
@@ -3844,20 +5297,73 @@ async fn maybe_retry_task(
     failed_task_id: &Uuid,
     original_request: &TaskRequest,
 ) {
-    let task = match tokio::time::timeout(DB_CALL_TIMEOUT, Task::get(db, failed_task_id)).await {
-        Ok(Ok(t)) => t,
-        Ok(Err(e)) => {
-            tracing::warn!(task_id = %failed_task_id, "Retry check: couldn't load task: {}", e);
-            return;
+    // This re-read is defence in depth behind the call-site persistence
+    // gates AND the only source of the retry budget (`options` lives on the
+    // row, not on the queue request). The caller only reaches here after the
+    // terminal failure was durably persisted, so a transient transport
+    // error/timeout must not silently drop the owed retry — retry the read
+    // briefly. Only a row that provably should not retry may skip: a missing
+    // row (NotFound) or one whose status is not a terminal failure.
+    const RETRY_CHECK_READ_ATTEMPTS: usize = 3;
+    let mut loaded = None;
+    for attempt in 1..=RETRY_CHECK_READ_ATTEMPTS {
+        match tokio::time::timeout(DB_CALL_TIMEOUT, Task::get(db, failed_task_id)).await {
+            Ok(Ok(t)) => {
+                loaded = Some(t);
+                break;
+            }
+            Ok(Err(db::TaskError::NotFound)) => {
+                tracing::info!(
+                    task_id = %failed_task_id,
+                    "Retry check: task row no longer exists; skipping retry"
+                );
+                return;
+            }
+            Ok(Err(e)) => {
+                tracing::warn!(
+                    task_id = %failed_task_id,
+                    attempt,
+                    "Retry check: couldn't load task: {}", e
+                );
+            }
+            Err(_) => {
+                tracing::warn!(
+                    task_id = %failed_task_id,
+                    attempt,
+                    "Retry check: Task::get timed out"
+                );
+            }
         }
-        Err(_) => {
-            tracing::error!(
-                task_id = %failed_task_id,
-                "Retry check: Task::get timed out — skipping retry"
-            );
-            return;
+        if attempt < RETRY_CHECK_READ_ATTEMPTS {
+            tokio::time::sleep(std::time::Duration::from_millis(100 * attempt as u64)).await;
         }
+    }
+    let Some(task) = loaded else {
+        // Proceeding blindly is not an option: without the row we cannot see
+        // whether retries are configured at all, or how much budget is left.
+        tracing::error!(
+            task_id = %failed_task_id,
+            "Retry check: task row unreadable after {} attempts — DROPPING the owed retry because its retry budget (options) cannot be loaded",
+            RETRY_CHECK_READ_ATTEMPTS,
+        );
+        return;
     };
+
+    // Defence in depth behind the call-site persistence gates: only a row
+    // that actually shows a terminal failure may spawn a retry. A Cancelled
+    // row (cancellation won the terminal race), a still-active row (our
+    // terminal write never landed), or a Completed row must never be re-run.
+    if !matches!(
+        TaskStatus::from_id(task.task_status_id),
+        Some(TaskStatus::Failed | TaskStatus::TimedOut)
+    ) {
+        tracing::info!(
+            task_id = %failed_task_id,
+            status = task.task_status_id,
+            "Retry check: task row is not a terminal failure; skipping retry"
+        );
+        return;
+    }
 
     let options = match &task.options {
         Some(opts) => opts,
@@ -3891,7 +5397,21 @@ async fn maybe_retry_task(
     )
     .await
     {
-        Ok(Ok(_)) => {}
+        Ok(Ok(true)) => {}
+        Ok(Ok(false)) => {
+            // The (parent, attempt) unique key says another writer — e.g. the
+            // zombie reaper, or a crashed earlier attempt that got as far as
+            // insert_retry — already created this retry row. Skip the
+            // enqueue: the row's creator owns delivery, and if it crashed
+            // before enqueueing, reconcile_queued_tasks re-enqueues the stale
+            // queued row, so the retry cannot be stranded.
+            tracing::info!(
+                task_id = %failed_task_id,
+                attempt = next_attempt,
+                "Retry row already exists for this attempt — skipping duplicate retry"
+            );
+            return;
+        }
         Ok(Err(e)) => {
             tracing::error!(
                 task_id = %failed_task_id,
@@ -3935,18 +5455,35 @@ async fn maybe_retry_task(
     }
 }
 
+/// Run blocking setup while transferring ownership of the execution permit
+/// into the closure. If the awaiting task is cancelled at its deadline, the
+/// detached closure retains the permit until it actually exits.
+async fn run_blocking_with_execution_permit<T, F>(
+    permit: tokio::sync::OwnedSemaphorePermit,
+    operation: F,
+) -> Result<(T, tokio::sync::OwnedSemaphorePermit), String>
+where
+    T: Send + 'static,
+    F: FnOnce() -> T + Send + 'static,
+{
+    tokio::task::spawn_blocking(move || (operation(), permit))
+        .await
+        .map_err(|error| format!("Blocking setup task failed: {error}"))
+}
+
 async fn load_bytecode(
     build_id: &Uuid,
-    cache: &BytecodeCache,
+    cache: Arc<BytecodeCache>,
     db: Option<&DatabasePool>,
     worker_conf: Option<&Val>,
-) -> Result<Arc<CachedBytecode>, String> {
+    blocking_execution_permit: tokio::sync::OwnedSemaphorePermit,
+) -> Result<(Arc<CachedBytecode>, tokio::sync::OwnedSemaphorePermit), String> {
     let cache_key = build_id.to_string();
 
     // Fast path: bytecode already in local cache
     if let Ok(cached) = cache.load(&cache_key) {
         tracing::debug!(build_id = %build_id, "Bytecode cache hit");
-        return Ok(cached);
+        return Ok((cached, blocking_execution_permit));
     }
 
     let (db, conf) = match (db, worker_conf) {
@@ -3968,9 +5505,33 @@ async fn load_bytecode(
         .map_err(|e| format!("Failed to fetch project: {}", e))?;
 
     if build.is_live() {
-        load_bytecode_live(build_id, &cache_key, cache, &build, &project, conf)
+        let build_id = *build_id;
+        let cache_for_task = Arc::clone(&cache);
+        let conf = conf.clone();
+        let (loaded, permit) =
+            run_blocking_with_execution_permit(blocking_execution_permit, move || {
+                load_bytecode_live(
+                    &build_id,
+                    &cache_key,
+                    &cache_for_task,
+                    &build,
+                    &project,
+                    &conf,
+                )
+            })
+            .await?;
+        Ok((loaded?, permit))
     } else {
-        load_bytecode_bundle(build_id, &cache_key, cache, &build, &project, db, conf).await
+        load_bytecode_bundle(
+            build_id,
+            cache_key,
+            cache,
+            &project,
+            db,
+            conf,
+            blocking_execution_permit,
+        )
+        .await
     }
 }
 
@@ -4039,19 +5600,171 @@ fn bundle_extract_dir(build_id: &Uuid) -> std::path::PathBuf {
     std::path::PathBuf::from(format!(".hot/task-worker/build-{}", build_id.simple()))
 }
 
+/// Prefix of the unique per-attempt temp dirs extraction writes into before
+/// atomically renaming over the final `build-{id}` path. The final directory
+/// can therefore only ever be observed fully formed.
+const BUNDLE_EXTRACT_TEMP_PREFIX: &str = ".tmp-";
+
+/// Any in-flight extraction finishes well inside this window; a temp dir
+/// older than it belongs to an attempt whose process died mid-extract and
+/// would otherwise accumulate on disk forever.
+const BUNDLE_EXTRACT_TEMP_MAX_AGE: std::time::Duration = std::time::Duration::from_secs(60 * 60);
+
+static BUNDLE_EXTRACT_LOCKS: std::sync::OnceLock<Mutex<HashMap<Uuid, std::sync::Weak<Mutex<()>>>>> =
+    std::sync::OnceLock::new();
+
+/// Per-build single-flight for local bundle extraction (same weak-registry
+/// pattern as `usage_stats_org_lock`): two concurrent local attempts for the
+/// same build — e.g. a retry racing the detached blocking writer of a
+/// cancelled attempt — must not download and extract twice, nor race each
+/// other's install into the final path.
+async fn bundle_extract_lock(build_id: Uuid) -> Arc<Mutex<()>> {
+    let locks = BUNDLE_EXTRACT_LOCKS.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut locks = locks.lock().await;
+    locks.retain(|_, lock| lock.strong_count() > 0);
+    if let Some(lock) = locks.get(&build_id).and_then(std::sync::Weak::upgrade) {
+        return lock;
+    }
+    let lock = Arc::new(Mutex::new(()));
+    locks.insert(build_id, Arc::downgrade(&lock));
+    lock
+}
+
+/// A build's extract dir counts as complete only when it holds
+/// `manifest.hot` — the pre-existing marker every consumer already relies
+/// on. With atomic installs the final directory's existence implies
+/// completeness; the marker check additionally heals directories left
+/// half-written by older workers that extracted straight into the final
+/// path.
+fn bundle_extract_is_complete(extract_dir: &std::path::Path) -> bool {
+    extract_dir.join("manifest.hot").exists()
+}
+
+/// Age-based sweep of orphaned extraction temp dirs (a process death
+/// mid-extract leaves one behind; a merely cancelled attempt's detached
+/// writer cleans up after itself). Runs whenever an extraction prepares its
+/// own temp dir in the same parent. Best-effort.
+fn sweep_stale_bundle_extract_temps(parent: &std::path::Path, max_age: std::time::Duration) {
+    let Ok(entries) = std::fs::read_dir(parent) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            continue;
+        };
+        if !name.starts_with(BUNDLE_EXTRACT_TEMP_PREFIX) {
+            continue;
+        }
+        let stale = entry
+            .metadata()
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|t| t.elapsed().ok())
+            .is_some_and(|age| age >= max_age);
+        if stale {
+            tracing::warn!(
+                path = %entry.path().display(),
+                "Removing stale bundle extraction temp dir left by a dead attempt"
+            );
+            let _ = std::fs::remove_dir_all(entry.path());
+        }
+    }
+}
+
+/// Atomically install a fully extracted temp dir at its final path. The
+/// winner renames into place; a loser (the final dir was installed first)
+/// removes its own temp dir and succeeds iff the final dir is complete.
+fn install_extracted_bundle(
+    temp_dir: &std::path::Path,
+    extract_dir: &std::path::Path,
+) -> Result<(), String> {
+    // Heal a partial dir left by an older worker that extracted directly
+    // into the final path (pre-atomic-install layout): it would otherwise
+    // both fail the rename below and poison every future attempt.
+    if extract_dir.exists() && !bundle_extract_is_complete(extract_dir) {
+        let _ = std::fs::remove_dir_all(extract_dir);
+    }
+    match std::fs::rename(temp_dir, extract_dir) {
+        Ok(()) => Ok(()),
+        Err(rename_err) => {
+            // Another attempt (a concurrent worker process, or a cancelled
+            // attempt's detached extraction) installed first. Its rename was
+            // atomic, so a complete final dir means our work is done.
+            let _ = std::fs::remove_dir_all(temp_dir);
+            if bundle_extract_is_complete(extract_dir) {
+                Ok(())
+            } else {
+                Err(format!(
+                    "Failed to install extracted bundle at {}: {}",
+                    extract_dir.display(),
+                    rename_err
+                ))
+            }
+        }
+    }
+}
+
+/// Blocking half of `ensure_bundle_extracted`: sweep stale temps, extract
+/// into a fresh per-attempt temp dir NEXT TO the final path (same
+/// filesystem, so the install rename is atomic), then rename into place. A
+/// cancelled attempt's detached blocking task keeps writing only into its
+/// own temp dir, never the shared final path, so a retry can never collide
+/// with it ('File exists') or observe its partial files.
+fn extract_bundle_to_dir(build_data: &[u8], extract_dir: &std::path::Path) -> Result<(), String> {
+    let parent = extract_dir
+        .parent()
+        .map(std::path::Path::to_path_buf)
+        .unwrap_or_else(|| std::path::PathBuf::from("."));
+    std::fs::create_dir_all(&parent).map_err(|e| {
+        format!(
+            "Failed to create bundle extract parent dir {}: {}",
+            parent.display(),
+            e
+        )
+    })?;
+    sweep_stale_bundle_extract_temps(&parent, BUNDLE_EXTRACT_TEMP_MAX_AGE);
+
+    let dir_name = extract_dir
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("bundle");
+    let temp_dir = parent.join(format!(
+        "{}{}-{}",
+        BUNDLE_EXTRACT_TEMP_PREFIX,
+        dir_name,
+        Uuid::new_v4().simple()
+    ));
+    if let Err(e) = hot::bundle::extract_bundle_from_bytes(build_data, &temp_dir) {
+        let _ = std::fs::remove_dir_all(&temp_dir);
+        return Err(format!("Failed to extract bundle: {}", e));
+    }
+    install_extracted_bundle(&temp_dir, extract_dir)
+}
+
 /// Ensure a bundle build is extracted to its local cache dir, downloading
 /// from storage if needed. Idempotent — if the extract dir already contains
 /// `manifest.hot` we assume a previous worker invocation extracted it and
 /// reuse the on-disk copy. Returns the extract directory.
-async fn ensure_bundle_extracted(
+async fn ensure_bundle_extracted_with_permit(
     build_id: &Uuid,
     org_id: &Uuid,
     env_id: &Uuid,
     conf: &Val,
-) -> Result<std::path::PathBuf, String> {
+    blocking_execution_permit: tokio::sync::OwnedSemaphorePermit,
+) -> Result<(std::path::PathBuf, tokio::sync::OwnedSemaphorePermit), String> {
     let extract_dir = bundle_extract_dir(build_id);
-    if extract_dir.join("manifest.hot").exists() {
-        return Ok(extract_dir);
+    if bundle_extract_is_complete(&extract_dir) {
+        return Ok((extract_dir, blocking_execution_permit));
+    }
+
+    // Per-build single-flight: concurrent local attempts download and
+    // extract once, not N times. A cancelled holder releases the lock on
+    // drop; its detached blocking writer below keeps to its own temp dir.
+    let flight = bundle_extract_lock(*build_id).await;
+    let _guard = flight.lock().await;
+    if bundle_extract_is_complete(&extract_dir) {
+        return Ok((extract_dir, blocking_execution_permit));
     }
 
     let storage = hot::storage::build_storage_from_config(conf)
@@ -4061,29 +5774,89 @@ async fn ensure_bundle_extracted(
         .retrieve_build(build_id, org_id, env_id)
         .await
         .map_err(|e| format!("Failed to retrieve build data: {}", e))?;
-    hot::bundle::extract_bundle_from_bytes(&build_data, &extract_dir)
-        .map_err(|e| format!("Failed to extract bundle: {}", e))?;
-    Ok(extract_dir)
+    let extract_dir_for_task = extract_dir.clone();
+    let (extracted, blocking_execution_permit) =
+        run_blocking_with_execution_permit(blocking_execution_permit, move || {
+            extract_bundle_to_dir(&build_data, &extract_dir_for_task)
+        })
+        .await?;
+    extracted?;
+    Ok((extract_dir, blocking_execution_permit))
+}
+
+/// Container-task compatibility wrapper. Container admission is already
+/// bounded separately; code tasks use the permit-carrying variant directly
+/// so timed-out compilation/extraction remains counted as a live VM slot.
+async fn ensure_bundle_extracted(
+    build_id: &Uuid,
+    org_id: &Uuid,
+    env_id: &Uuid,
+    conf: &Val,
+) -> Result<std::path::PathBuf, String> {
+    let permit = Arc::new(tokio::sync::Semaphore::new(1))
+        .acquire_owned()
+        .await
+        .map_err(|error| format!("Failed to acquire extraction permit: {error}"))?;
+    let (path, _permit) =
+        ensure_bundle_extracted_with_permit(build_id, org_id, env_id, conf, permit).await?;
+    Ok(path)
 }
 
 /// Load bytecode for a bundle build by fetching the zip from storage, extracting, and compiling.
 async fn load_bytecode_bundle(
     build_id: &Uuid,
-    cache_key: &str,
-    cache: &BytecodeCache,
-    _build: &hot::db::Build,
+    cache_key: String,
+    cache: Arc<BytecodeCache>,
     project: &hot::db::Project,
     db: &DatabasePool,
     conf: &Val,
-) -> Result<Arc<CachedBytecode>, String> {
+    blocking_execution_permit: tokio::sync::OwnedSemaphorePermit,
+) -> Result<(Arc<CachedBytecode>, tokio::sync::OwnedSemaphorePermit), String> {
     tracing::debug!(build_id = %build_id, "Bytecode cache miss — fetching bundle build from storage");
 
     let env = hot::db::Env::get_env(db, &project.env_id)
         .await
         .map_err(|e| format!("Failed to fetch env: {}", e))?;
 
-    let extract_dir = ensure_bundle_extracted(build_id, &env.org_id, &project.env_id, conf).await?;
+    let (extract_dir, blocking_execution_permit) = ensure_bundle_extracted_with_permit(
+        build_id,
+        &env.org_id,
+        &project.env_id,
+        conf,
+        blocking_execution_permit,
+    )
+    .await?;
 
+    let build_id = *build_id;
+    let project = project.clone();
+    let conf = conf.clone();
+    let cache_for_task = Arc::clone(&cache);
+    let (loaded, permit) =
+        run_blocking_with_execution_permit(blocking_execution_permit, move || {
+            compile_bundle_bytecode(
+                build_id,
+                cache_key,
+                cache_for_task,
+                project,
+                conf,
+                extract_dir,
+            )
+        })
+        .await?;
+    Ok((loaded?, permit))
+}
+
+/// Blocking resource discovery and compilation for an already-extracted
+/// bundle. Kept out of async runtime threads and charged to the same permit
+/// that later protects VM execution.
+fn compile_bundle_bytecode(
+    build_id: Uuid,
+    cache_key: String,
+    cache: Arc<BytecodeCache>,
+    project: hot::db::Project,
+    conf: Val,
+    extract_dir: std::path::PathBuf,
+) -> Result<Arc<CachedBytecode>, String> {
     // Build a per-build resource registry from the manifest and cache it so
     // task threads can install it as a thread-local override during
     // `::hot::resource/*` calls. We do this once per bundle build (idempotent
@@ -4104,7 +5877,7 @@ async fn load_bytecode_bundle(
                 resource_count = registry.entries.len(),
                 "Installed per-build resource registry"
             );
-            hot::lang::hot::resource::set_build_registry(*build_id, registry);
+            hot::lang::hot::resource::set_build_registry(build_id, registry);
         }
         Err(e) => {
             tracing::warn!(
@@ -4138,18 +5911,18 @@ async fn load_bytecode_bundle(
         &src_paths,
         &bundle_cache,
         &project.name,
-        Some(cache_key),
+        Some(&cache_key),
         None,
-        Some(conf),
+        Some(&conf),
     )
     .map_err(|e| format!("Failed to compile build: {}", e))?;
 
     // Also save to the primary cache for future hits. The
     // tool/skill spec registries were already populated when the
     // bundle cache was written, so we just round-trip them.
-    if let Ok(compiled) = bundle_cache.load(cache_key)
+    if let Ok(compiled) = bundle_cache.load(&cache_key)
         && let Err(e) = cache.save(
-            cache_key,
+            &cache_key,
             &compiled.program,
             compiled.metadata.clone(),
             &compiled.function_mapping,
@@ -4165,8 +5938,127 @@ async fn load_bytecode_bundle(
     }
 
     cache
-        .load(cache_key)
+        .load(&cache_key)
         .map_err(|e| format!("Failed to load compiled bytecode: {}", e))
+}
+
+/// Run a fallible async operation up to `attempts` times, sleeping a
+/// linearly growing backoff between attempts. Returns the first `Ok` or the
+/// last `Err`. `attempts` must be at least 1.
+async fn retry_with_backoff<T, E, F, Fut>(
+    attempts: usize,
+    backoff: std::time::Duration,
+    mut op: F,
+) -> Result<T, E>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Result<T, E>>,
+{
+    let mut last_err = None;
+    for attempt in 1..=attempts {
+        match op().await {
+            Ok(value) => return Ok(value),
+            Err(e) => last_err = Some(e),
+        }
+        if attempt < attempts {
+            tokio::time::sleep(backoff * attempt as u32).await;
+        }
+    }
+    Err(last_err.expect("retry_with_backoff requires at least one attempt"))
+}
+
+/// Attempt to (re)take DB ownership of an adopted task. Returns `true` when
+/// no further attempts are needed: either the ownership UPDATE landed (so
+/// the batch heartbeat now covers the row) or the row is no longer
+/// `running` and can never be owned again. Returns `false` on a transport
+/// error, in which case the caller must try again — an adopted row without
+/// ownership has a frozen heartbeat, and once it crosses
+/// `ZOMBIE_HEARTBEAT_STALE_SECS` the reaper fails the live task and
+/// enqueues a duplicate run.
+async fn try_adopt_task_ownership(db: &DatabasePool, task_id: &Uuid, worker_id: &str) -> bool {
+    match Task::set_worker(db, task_id, worker_id).await {
+        Ok(true) => {
+            tracing::debug!(
+                task_id = %task_id,
+                "Adopted task ownership established (worker_id + heartbeat current)"
+            );
+            true
+        }
+        Ok(false) => {
+            // Deliberate: the row left `running` between the adoption read
+            // and this write (e.g. a user cancel raced us). Ownership can
+            // never be taken now, so stop trying; the container monitor
+            // still finishes the container out, and `persist_terminal_task`
+            // suppresses our terminal write if another actor won the row.
+            tracing::warn!(
+                task_id = %task_id,
+                "Adopted task row is no longer running; ownership cannot be taken. \
+                 The container monitor will finish the container out and any stale terminal write will be suppressed."
+            );
+            true
+        }
+        Err(e) => {
+            tracing::error!(
+                task_id = %task_id,
+                "Failed to take ownership of adopted task; its heartbeat stays stale and the zombie reaper will double-run it if this persists: {}",
+                e
+            );
+            false
+        }
+    }
+}
+
+/// Register an adopted container task with the shutdown coordinator so it is
+/// tracked exactly like a task dispatched through `process_task`. Without
+/// this, the redelivery of the dead worker's un-ACKed queue message observes
+/// running + owned-by-us + `!is_task_active` and releases ownership, after
+/// which the zombie reaper fails the live container task and enqueues a
+/// duplicate retry.
+///
+/// The registered request has exactly two consumers: coordinator activity
+/// checks (`is_task_active` / drain accounting), which only need the task
+/// identity, and the shutdown-time infra retry (`enqueue_infra_retry`),
+/// which re-reads the task ROW for `Task::insert_retry` and uses the request
+/// as the queue payload. A request synthesized from the row alone satisfies
+/// both (org/project enrichment there is best-effort context), so when
+/// reconstruction keeps failing after bounded retries we fall back to the
+/// synthesized request instead of refusing adoption — refusal would leave a
+/// LIVE container unmanaged and double-run via the zombie reaper.
+///
+/// Returns `false` (refusing adoption) only for a genuine duplicate: the
+/// task is already in flight on this worker.
+async fn register_adopted_task(
+    coordinator: &shutdown::TaskShutdownCoordinator,
+    db: &DatabasePool,
+    task: &Task,
+) -> bool {
+    let original_request = match retry_with_backoff(
+        ADOPTION_DB_ATTEMPTS,
+        ADOPTION_DB_RETRY_BACKOFF,
+        || task_request_from_db_row(db, task),
+    )
+    .await
+    {
+        Ok(request) => request,
+        Err(e) => {
+            tracing::error!(
+                task_id = %task.task_id,
+                "Failed to reconstruct adopted task request after {} attempts; registering with a row-synthesized request (a shutdown-time infra retry would lack org/project context): {}",
+                ADOPTION_DB_ATTEMPTS,
+                e,
+            );
+            synthesize_task_request_from_row(task)
+        }
+    };
+    coordinator.try_register_task(shutdown::ActiveTask {
+        task_id: task.task_id,
+        env_id: task.env_id,
+        stream_id: task.stream_id,
+        function_name: task.function_name.clone(),
+        task_type: task.task_type.clone(),
+        cancel_token: None,
+        original_request,
+    })
 }
 
 /// Adopt orphaned containers from a previous worker crash.
@@ -4182,15 +6074,20 @@ async fn load_bytecode_bundle(
 ///   fail with a clear "container lost during worker restart" message).
 /// - If the task is already terminal: just remove the container.
 ///
-/// Returns a list of `(task_id, container_id)` pairs for containers that
-/// were adopted and need continued monitoring.
+/// Returns a list of `(task_id, container_id, ownership_resolved)` triples
+/// for containers that were adopted and need continued monitoring.
+/// `ownership_resolved` is `false` when the adoption-time `Task::set_worker`
+/// kept failing on transport errors; the monitor must then repair ownership
+/// from its poll loop so heartbeat coverage lands as soon as the DB
+/// recovers, ahead of the reaper's staleness horizon.
 async fn adopt_orphaned_containers(
     executor: &executor::BoxExecutor,
     db: &DatabasePool,
     stream_publisher: &StreamPubSub,
     task_queue: &ProcessingQueue<TaskRequest>,
+    coordinator: &shutdown::TaskShutdownCoordinator,
     worker_id: &str,
-) -> Vec<(Uuid, String)> {
+) -> Vec<(Uuid, String, bool)> {
     let mut adopted = Vec::new();
 
     #[cfg(all(target_os = "linux", feature = "kata"))]
@@ -4285,16 +6182,50 @@ async fn adopt_orphaned_containers(
         // Task is running in DB — check if container is actually alive
         match executor.inspect_status(&container_id).await {
             Ok(None) => {
-                // Container is still running — adopt it
+                // Container is still running — adopt it. Register with the
+                // shutdown coordinator BEFORE taking DB ownership: the dead
+                // worker's un-ACKed queue message will be XAUTOCLAIMed and
+                // redelivered, and `task_message_should_execute` must see the
+                // adopted task as active (withhold ACK, defer) instead of
+                // releasing ownership out from under the live container.
+                if !register_adopted_task(coordinator, db, &task).await {
+                    tracing::warn!(
+                        task_id = %task_id,
+                        container_id = %container_id,
+                        "Skipping container adoption; task could not be registered as active"
+                    );
+                    continue;
+                }
                 tracing::debug!(
                     task_id = %task_id,
                     container_id = %container_id,
                     "Adopting running container (updating worker_id)"
                 );
-                if let Err(e) = Task::set_worker(db, &task_id, worker_id).await {
-                    tracing::warn!(task_id = %task_id, "Failed to update worker_id during adoption: {}", e);
+                // Ownership (worker_id + fresh heartbeat) is required so the
+                // batch heartbeat covers the adopted row, but it is
+                // repairable: a transient DB fault here must not abandon the
+                // live container. Retry briefly, then hand repair to the
+                // monitor's poll loop (every 2s — well inside the reaper's
+                // ZOMBIE_HEARTBEAT_STALE_SECS horizon once the DB recovers).
+                let mut ownership_resolved = false;
+                for attempt in 1..=ADOPTION_DB_ATTEMPTS {
+                    ownership_resolved = try_adopt_task_ownership(db, &task_id, worker_id).await;
+                    if ownership_resolved {
+                        break;
+                    }
+                    if attempt < ADOPTION_DB_ATTEMPTS {
+                        tokio::time::sleep(ADOPTION_DB_RETRY_BACKOFF * attempt as u32).await;
+                    }
                 }
-                adopted.push((task_id, container_id));
+                if !ownership_resolved {
+                    tracing::error!(
+                        task_id = %task_id,
+                        container_id = %container_id,
+                        "Adoption could not take DB ownership after {} attempts; keeping the container managed and repairing ownership from the monitor loop. Until repair lands, the row's heartbeat stays stale and the zombie reaper may double-run the task.",
+                        ADOPTION_DB_ATTEMPTS,
+                    );
+                }
+                adopted.push((task_id, container_id, ownership_resolved));
             }
             Ok(Some(exit_code)) => {
                 // Container stopped — complete the task
@@ -4321,7 +6252,9 @@ async fn adopt_orphaned_containers(
                     "stderr": stderr,
                     "adopted": true,
                 });
-                complete_task_with_event(
+                // Not fenced: the row is still owned by the dead worker at
+                // this point (the container was never adopted).
+                let persisted = complete_task_with_event(
                     db,
                     stream_publisher,
                     &task_id,
@@ -4331,9 +6264,11 @@ async fn adopt_orphaned_containers(
                     &task.task_type,
                     status.clone(),
                     Some(&result_json),
+                    None,
+                    None,
                 )
                 .await;
-                if status == TaskStatus::Failed {
+                if persisted && status == TaskStatus::Failed {
                     maybe_retry_zombie_task(db, &task, task_queue).await;
                 }
             }
@@ -4346,7 +6281,7 @@ async fn adopt_orphaned_containers(
                 );
                 tracing::error!(task_id = %task_id, "Container lost during adoption: {}", e);
                 let error = task_failure_json("Container lost during worker restart", None);
-                complete_task_with_event(
+                if complete_task_with_event(
                     db,
                     stream_publisher,
                     &task_id,
@@ -4356,9 +6291,13 @@ async fn adopt_orphaned_containers(
                     &task.task_type,
                     TaskStatus::Failed,
                     Some(&error),
+                    None,
+                    None,
                 )
-                .await;
-                maybe_retry_zombie_task(db, &task, task_queue).await;
+                .await
+                {
+                    maybe_retry_zombie_task(db, &task, task_queue).await;
+                }
             }
         }
     }
@@ -4465,7 +6404,7 @@ async fn cleanup_kata_orphans(
             "Container lost during worker restart (kata orphan cleanup)",
             None,
         );
-        complete_task_with_event(
+        if complete_task_with_event(
             db,
             stream_publisher,
             &task_id,
@@ -4475,14 +6414,41 @@ async fn cleanup_kata_orphans(
             &task.task_type,
             TaskStatus::Failed,
             Some(&error),
+            None,
+            None,
         )
-        .await;
-        maybe_retry_zombie_task(db, &task, task_queue).await;
+        .await
+        {
+            maybe_retry_zombie_task(db, &task, task_queue).await;
+        }
+    }
+}
+
+/// Unregisters an adopted task from the shutdown coordinator when its monitor
+/// exits, whatever the exit path (completion, timeout, disappearance,
+/// shutdown, failed initial load, panic). A task that stayed registered after
+/// its monitor died would block shutdown drain; one that was unregistered
+/// while its monitor lives would be zombified by its own redelivered queue
+/// message.
+struct AdoptedTaskRegistration<'a> {
+    coordinator: &'a shutdown::TaskShutdownCoordinator,
+    task_id: Uuid,
+}
+
+impl Drop for AdoptedTaskRegistration<'_> {
+    fn drop(&mut self) {
+        self.coordinator.unregister_task(&self.task_id);
     }
 }
 
 /// Monitor an adopted container until completion.
 /// Runs as a background task, polls container status, and completes the task when done.
+///
+/// `ownership_resolved` mirrors the adoption-time `try_adopt_task_ownership`
+/// outcome: while `false`, the poll loop keeps re-attempting the idempotent
+/// `Task::set_worker` so worker ownership and heartbeat coverage land as
+/// soon as the DB recovers — ahead of the reaper's 30s staleness horizon.
+#[allow(clippy::too_many_arguments)]
 async fn monitor_adopted_container(
     task_id: Uuid,
     container_id: String,
@@ -4491,11 +6457,32 @@ async fn monitor_adopted_container(
     task_queue: &ProcessingQueue<TaskRequest>,
     executor: &executor::BoxExecutor,
     coordinator: &shutdown::TaskShutdownCoordinator,
+    worker_id: &str,
+    mut ownership_resolved: bool,
 ) {
-    let task = match Task::get(db, &task_id).await {
+    // Adoption registered the task (see `register_adopted_task`); this guard
+    // is the matching unregister on every exit of the monitor.
+    let _registration = AdoptedTaskRegistration {
+        coordinator,
+        task_id,
+    };
+
+    // Bounded retry: a transient DB error here would otherwise abandon the
+    // monitor, unregister the task, and leave the live container unmanaged.
+    let task = match retry_with_backoff(ADOPTION_DB_ATTEMPTS, ADOPTION_DB_RETRY_BACKOFF, || {
+        Task::get(db, &task_id)
+    })
+    .await
+    {
         Ok(t) => t,
         Err(e) => {
-            tracing::error!(task_id = %task_id, "Failed to load adopted task: {}", e);
+            tracing::error!(
+                task_id = %task_id,
+                container_id = %container_id,
+                "Failed to load adopted task after {} attempts — abandoning monitor; the live container is now UNMANAGED and the zombie reaper will fail its task and enqueue a duplicate run: {}",
+                ADOPTION_DB_ATTEMPTS,
+                e,
+            );
             return;
         }
     };
@@ -4519,6 +6506,16 @@ async fn monitor_adopted_container(
 
         tokio::time::sleep(poll_interval).await;
 
+        // Ownership repair: adoption may not have persisted worker_id (see
+        // `adopt_orphaned_containers`). `Task::set_worker` is an idempotent
+        // UPDATE, so keep re-attempting until it lands or the row provably
+        // leaves `running`; without it the row's heartbeat stays frozen and
+        // the zombie reaper double-runs the task once it crosses
+        // ZOMBIE_HEARTBEAT_STALE_SECS.
+        if !ownership_resolved {
+            ownership_resolved = try_adopt_task_ownership(db, &task_id, worker_id).await;
+        }
+
         match executor.inspect_status(&container_id).await {
             Ok(Some(exit_code)) => {
                 // Container finished
@@ -4539,7 +6536,11 @@ async fn monitor_adopted_container(
                     "stderr": stderr,
                     "adopted": true,
                 });
-                complete_task_with_event(
+                // Not fenced: adoption-time ownership can lag (repair
+                // happens in this poll loop), so the row may still carry the
+                // dead worker's id; the payload comparison in
+                // `persist_terminal_task` still suppresses duplicate events.
+                let persisted = complete_task_with_event(
                     db,
                     stream_publisher,
                     &task_id,
@@ -4549,10 +6550,12 @@ async fn monitor_adopted_container(
                     &task.task_type,
                     status.clone(),
                     Some(&result_json),
+                    None,
+                    None,
                 )
                 .await;
 
-                if status == TaskStatus::Failed {
+                if persisted && status == TaskStatus::Failed {
                     maybe_retry_zombie_task(db, &task, task_queue).await;
                 }
 
@@ -4586,7 +6589,7 @@ async fn monitor_adopted_container(
                             "adopted": true,
                         })),
                     );
-                    complete_task_with_event(
+                    if complete_task_with_event(
                         db,
                         stream_publisher,
                         &task_id,
@@ -4596,9 +6599,13 @@ async fn monitor_adopted_container(
                         &task.task_type,
                         TaskStatus::TimedOut,
                         Some(&error),
+                        None,
+                        None,
                     )
-                    .await;
-                    maybe_retry_zombie_task(db, &task, task_queue).await;
+                    .await
+                    {
+                        maybe_retry_zombie_task(db, &task, task_queue).await;
+                    }
                     return;
                 }
             }
@@ -4615,7 +6622,7 @@ async fn monitor_adopted_container(
                             "adopted": true,
                         })),
                     );
-                    complete_task_with_event(
+                    if complete_task_with_event(
                         db,
                         stream_publisher,
                         &task_id,
@@ -4625,9 +6632,13 @@ async fn monitor_adopted_container(
                         &task.task_type,
                         TaskStatus::Failed,
                         Some(&error),
+                        None,
+                        None,
                     )
-                    .await;
-                    maybe_retry_zombie_task(db, &task, task_queue).await;
+                    .await
+                    {
+                        maybe_retry_zombie_task(db, &task, task_queue).await;
+                    }
                     return;
                 }
                 tracing::warn!(
@@ -4932,6 +6943,7 @@ fn create_event_publisher(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use hot::stream::EnvSubscriberFactory;
     use hot::val;
 
     fn make_task_request_and_row() -> (TaskRequest, Task, Uuid, Uuid, Uuid) {
@@ -4978,7 +6990,9 @@ mod tests {
             timing: None,
             timeout_ms: request.timeout_ms as i64,
             retry_attempt: 0,
+            infra_retry_count: 0,
             next_retry_at: None,
+            parent_task_id: None,
             created_at: now,
             by_user_id: None,
             run_id: None,
@@ -4991,12 +7005,1857 @@ mod tests {
         (request, task, env_id, stream_id, build_id)
     }
 
+    async fn insert_test_task(db: &DatabasePool, task: &Task) {
+        Task::insert(
+            db,
+            &task.task_id,
+            &task.env_id,
+            &task.stream_id,
+            &task.build_id,
+            task.origin_run_id.as_ref(),
+            &task.function_name,
+            task.args.as_ref(),
+            task.options.as_ref(),
+            &task.task_type,
+            task.timeout_ms,
+            task.by_user_id.as_ref(),
+        )
+        .await
+        .unwrap();
+    }
+
     #[test]
     fn test_validate_task_request_accepts_matching_db_row() {
         let (request, task, env_id, stream_id, build_id) = make_task_request_and_row();
 
         assert!(
             validate_task_request_matches_db(&request, &task, env_id, stream_id, build_id).is_ok()
+        );
+    }
+
+    #[tokio::test]
+    async fn running_redelivery_withholds_ack_and_releases_inactive_owner() {
+        let db = hot::db::test_db().await;
+        let (_request, task, _, _, _) = make_task_request_and_row();
+        insert_test_task(&db, &task).await;
+        Task::mark_running(&db, &task.task_id).await.unwrap();
+        Task::set_worker(&db, &task.task_id, "worker-a")
+            .await
+            .unwrap();
+        let running = Task::get(&db, &task.task_id).await.unwrap();
+        let coordinator = shutdown::TaskShutdownCoordinator::new();
+
+        let err = task_message_should_execute(&db, &running, &coordinator, "worker-a", 10)
+            .await
+            .expect_err("a running task must keep its queue delivery pending");
+
+        assert_eq!(err.backoff(), std::time::Duration::from_secs(5));
+        let released = Task::get(&db, &task.task_id).await.unwrap();
+        assert!(released.worker_id.is_none());
+        assert!(
+            Task::find_zombie_tasks(&db, 30)
+                .await
+                .unwrap()
+                .iter()
+                .any(|candidate| candidate.task_id == task.task_id)
+        );
+    }
+
+    #[tokio::test]
+    async fn running_redelivery_does_not_release_an_active_owner() {
+        let db = hot::db::test_db().await;
+        let (request, task, _, _, _) = make_task_request_and_row();
+        insert_test_task(&db, &task).await;
+        Task::mark_running(&db, &task.task_id).await.unwrap();
+        Task::set_worker(&db, &task.task_id, "worker-a")
+            .await
+            .unwrap();
+        let running = Task::get(&db, &task.task_id).await.unwrap();
+        let coordinator = shutdown::TaskShutdownCoordinator::new();
+        assert!(coordinator.try_register_task(shutdown::ActiveTask {
+            task_id: task.task_id,
+            env_id: task.env_id,
+            stream_id: task.stream_id,
+            function_name: task.function_name.clone(),
+            task_type: task.task_type.clone(),
+            cancel_token: None,
+            original_request: request,
+        }));
+
+        task_message_should_execute(&db, &running, &coordinator, "worker-a", 10)
+            .await
+            .expect_err("an active running task must keep its queue delivery pending");
+
+        let still_owned = Task::get(&db, &task.task_id).await.unwrap();
+        assert_eq!(still_owned.worker_id.as_deref(), Some("worker-a"));
+    }
+
+    #[tokio::test]
+    async fn adopted_task_redelivery_does_not_release_ownership() {
+        let db = hot::db::test_db().await;
+        let (_request, task, _, _, _) = make_task_request_and_row();
+        // Adoption registration reconstructs the original request from the DB
+        // row, which requires the env row to exist.
+        Env::insert_env(
+            &db,
+            &task.env_id,
+            &Uuid::now_v7(),
+            "test-env",
+            &Uuid::now_v7(),
+        )
+        .await
+        .unwrap();
+        insert_test_task(&db, &task).await;
+        Task::mark_running(&db, &task.task_id).await.unwrap();
+        Task::set_worker(&db, &task.task_id, "worker-a")
+            .await
+            .unwrap();
+        let running = Task::get(&db, &task.task_id).await.unwrap();
+        let coordinator = shutdown::TaskShutdownCoordinator::new();
+
+        assert!(register_adopted_task(&coordinator, &db, &running).await);
+        assert!(coordinator.is_task_active(&task.task_id));
+
+        // The dead worker's un-ACKed queue message is XAUTOCLAIMed and
+        // redelivered. The adopted task is registered, so the redelivery must
+        // be withheld (deferred) instead of releasing ownership out from
+        // under the live container.
+        task_message_should_execute(&db, &running, &coordinator, "worker-a", 10)
+            .await
+            .expect_err("an adopted running task must keep its queue delivery pending");
+
+        let still_owned = Task::get(&db, &task.task_id).await.unwrap();
+        assert_eq!(still_owned.worker_id.as_deref(), Some("worker-a"));
+
+        // Duplicate adoption of an in-flight task is refused.
+        assert!(!register_adopted_task(&coordinator, &db, &running).await);
+
+        coordinator.unregister_task(&task.task_id);
+        assert!(!coordinator.is_task_active(&task.task_id));
+    }
+
+    #[tokio::test]
+    async fn adoption_registration_falls_back_when_request_reconstruction_fails() {
+        let db = hot::db::test_db().await;
+        let (_request, task, _, _, _) = make_task_request_and_row();
+        // No env row: `task_request_from_db_row` fails on every attempt.
+        // Refusing adoption here would leave a live container unmanaged and
+        // double-run via the zombie reaper, so registration must fall back
+        // to a request synthesized from the task row alone.
+        insert_test_task(&db, &task).await;
+        Task::mark_running(&db, &task.task_id).await.unwrap();
+        let running = Task::get(&db, &task.task_id).await.unwrap();
+        let coordinator = shutdown::TaskShutdownCoordinator::new();
+
+        assert!(register_adopted_task(&coordinator, &db, &running).await);
+        assert!(coordinator.is_task_active(&task.task_id));
+
+        // Refusal remains only for genuine duplicates.
+        assert!(!register_adopted_task(&coordinator, &db, &running).await);
+    }
+
+    #[test]
+    fn row_synthesized_request_carries_the_execution_identity() {
+        let (_request, mut task, env_id, stream_id, build_id) = make_task_request_and_row();
+        task.args = Some(serde_json::json!({"input": "ok"}));
+
+        let request = synthesize_task_request_from_row(&task);
+
+        assert_eq!(request.task_id, task.task_id.to_string());
+        assert_eq!(request.function_name, task.function_name);
+        assert_eq!(request.args, serde_json::json!({"input": "ok"}));
+        assert_eq!(request.env_id, env_id.to_string());
+        assert_eq!(request.stream_id, stream_id.to_string());
+        assert_eq!(request.build_id, build_id.to_string());
+        assert_eq!(request.timeout_ms, task.timeout_ms as u64);
+        assert_eq!(request.task_type, task.task_type);
+        // Enrichment is unavailable without DB lookups — explicitly absent,
+        // not fabricated.
+        assert_eq!(request.org_id, None);
+        assert_eq!(request.project_id, None);
+        assert_eq!(request.project_name, None);
+    }
+
+    #[tokio::test]
+    async fn retry_with_backoff_returns_first_success_and_last_error() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let calls = AtomicUsize::new(0);
+        let result = retry_with_backoff(3, std::time::Duration::from_millis(1), || {
+            let attempt = calls.fetch_add(1, Ordering::SeqCst) + 1;
+            async move {
+                if attempt < 3 {
+                    Err(format!("transient {}", attempt))
+                } else {
+                    Ok(attempt)
+                }
+            }
+        })
+        .await;
+        assert_eq!(result, Ok(3), "a late success within budget must win");
+        assert_eq!(calls.load(Ordering::SeqCst), 3);
+
+        let calls = AtomicUsize::new(0);
+        let result: Result<usize, String> =
+            retry_with_backoff(3, std::time::Duration::from_millis(1), || {
+                let attempt = calls.fetch_add(1, Ordering::SeqCst) + 1;
+                async move { Err(format!("persistent {}", attempt)) }
+            })
+            .await;
+        assert_eq!(result, Err("persistent 3".to_string()));
+        assert_eq!(calls.load(Ordering::SeqCst), 3, "budget must be bounded");
+    }
+
+    #[tokio::test]
+    async fn adopted_ownership_repair_stops_on_success_or_unownable_row() {
+        let db = hot::db::test_db().await;
+
+        // Running row: ownership lands and repair stops.
+        let (_request, task, _, _, _) = make_task_request_and_row();
+        insert_test_task(&db, &task).await;
+        Task::mark_running(&db, &task.task_id).await.unwrap();
+        assert!(try_adopt_task_ownership(&db, &task.task_id, "worker-b").await);
+        let owned = Task::get(&db, &task.task_id).await.unwrap();
+        assert_eq!(owned.worker_id.as_deref(), Some("worker-b"));
+        assert!(
+            owned.last_heartbeat_at.is_some(),
+            "ownership must refresh the heartbeat so the reaper backs off"
+        );
+
+        // Terminal row: unownable, so repair must stop (true) without
+        // rewriting ownership.
+        let (_request, done, _, _, _) = make_task_request_and_row();
+        insert_test_task(&db, &done).await;
+        Task::mark_running(&db, &done.task_id).await.unwrap();
+        assert!(
+            Task::complete(&db, &done.task_id, &TaskStatus::Completed, None, None, None)
+                .await
+                .unwrap()
+        );
+        assert!(try_adopt_task_ownership(&db, &done.task_id, "worker-b").await);
+        assert_eq!(
+            Task::get(&db, &done.task_id).await.unwrap().worker_id,
+            None,
+            "a terminal row must not be re-owned"
+        );
+
+        // Transport error: repair must report not-resolved so the caller
+        // (adoption retry loop / monitor poll loop) keeps trying.
+        let closed_db = hot::db::test_db().await;
+        if let DatabasePool::Sqlite(pool) = &closed_db {
+            pool.close().await;
+        }
+        assert!(!try_adopt_task_ownership(&closed_db, &task.task_id, "worker-b").await);
+    }
+
+    #[tokio::test]
+    async fn preflight_load_acks_only_a_genuinely_missing_task_row() {
+        let db = hot::db::test_db().await;
+
+        // A provably missing row is the only safe ACK-and-skip outcome.
+        assert!(
+            load_task_for_execution(&db, &Uuid::now_v7(), 25)
+                .await
+                .unwrap()
+                .is_none()
+        );
+
+        let (_request, task, _, _, _) = make_task_request_and_row();
+        insert_test_task(&db, &task).await;
+        let loaded = load_task_for_execution(&db, &task.task_id, 25)
+            .await
+            .unwrap()
+            .expect("an existing row must be loaded for execution");
+        assert_eq!(loaded.task_id, task.task_id);
+    }
+
+    #[tokio::test]
+    async fn preflight_load_defers_on_transport_error_instead_of_acking() {
+        let closed_db = hot::db::test_db().await;
+        if let DatabasePool::Sqlite(pool) = &closed_db {
+            pool.close().await;
+        }
+
+        // Pool errors surface fast (well under DB_CALL_TIMEOUT); they must
+        // defer the delivery for an infrastructure retry, never ACK it.
+        let err = load_task_for_execution(&closed_db, &Uuid::now_v7(), 25)
+            .await
+            .expect_err("an unknown row state must defer the queue message");
+        assert_eq!(err.backoff(), std::time::Duration::from_millis(25));
+    }
+
+    #[test]
+    fn only_terminal_task_states_are_ack_eligible() {
+        for status in [
+            TaskStatus::Completed,
+            TaskStatus::Failed,
+            TaskStatus::Cancelled,
+            TaskStatus::TimedOut,
+        ] {
+            assert!(task_status_is_terminal(status.as_id()));
+        }
+        assert!(!task_status_is_terminal(TaskStatus::Queued.as_id()));
+        assert!(!task_status_is_terminal(TaskStatus::Running.as_id()));
+        assert!(!task_status_is_terminal(i16::MAX));
+    }
+
+    #[tokio::test]
+    async fn terminal_persistence_reports_success_and_database_failure() {
+        let db = hot::db::test_db().await;
+        let (_request, task, _, _, _) = make_task_request_and_row();
+        insert_test_task(&db, &task).await;
+        Task::mark_running(&db, &task.task_id).await.unwrap();
+
+        assert!(
+            persist_terminal_task(
+                &db,
+                &task.task_id,
+                &TaskStatus::Completed,
+                None,
+                None,
+                None,
+                std::time::Duration::from_secs(1),
+                2,
+            )
+            .await
+        );
+        assert_eq!(
+            Task::get(&db, &task.task_id).await.unwrap().task_status_id,
+            TaskStatus::Completed.as_id()
+        );
+
+        let (_request, cancelled_task, _, _, _) = make_task_request_and_row();
+        insert_test_task(&db, &cancelled_task).await;
+        assert!(Task::cancel(&db, &cancelled_task.task_id).await.unwrap());
+        assert!(
+            !persist_terminal_task(
+                &db,
+                &cancelled_task.task_id,
+                &TaskStatus::Failed,
+                None,
+                None,
+                None,
+                std::time::Duration::from_secs(1),
+                2,
+            )
+            .await,
+            "a cancellation that wins the race must suppress stale completion"
+        );
+        assert_eq!(
+            Task::get(&db, &cancelled_task.task_id)
+                .await
+                .unwrap()
+                .task_status_id,
+            TaskStatus::Cancelled.as_id()
+        );
+
+        let closed_db = hot::db::test_db().await;
+        if let DatabasePool::Sqlite(pool) = &closed_db {
+            pool.close().await;
+        }
+        assert!(
+            !persist_terminal_task(
+                &closed_db,
+                &Uuid::now_v7(),
+                &TaskStatus::Failed,
+                None,
+                None,
+                None,
+                std::time::Duration::from_millis(20),
+                2,
+            )
+            .await
+        );
+    }
+
+    #[tokio::test]
+    async fn same_status_write_by_another_actor_is_not_mistaken_for_ours() {
+        let db = hot::db::test_db().await;
+        let (_request, task, _, _, _) = make_task_request_and_row();
+        insert_test_task(&db, &task).await;
+        Task::mark_running(&db, &task.task_id).await.unwrap();
+        assert!(
+            Task::set_worker(&db, &task.task_id, "worker-a")
+                .await
+                .unwrap()
+        );
+
+        // The zombie reaper wins the terminal race with the SAME status but
+        // its own payload. `Task::complete` never modifies `worker_id`, so
+        // the row still carries worker-a's ownership — status and ownership
+        // alone cannot identify the writer.
+        let reaper_error =
+            task_failure_json("Task interrupted by worker crash (zombie reaper)", None);
+        assert!(
+            Task::complete(
+                &db,
+                &task.task_id,
+                &TaskStatus::Failed,
+                Some(&reaper_error),
+                None,
+                None,
+            )
+            .await
+            .unwrap()
+        );
+
+        let our_error = task_failure_json("Task execution error: boom", None);
+        assert!(
+            !persist_terminal_task(
+                &db,
+                &task.task_id,
+                &TaskStatus::Failed,
+                Some(&our_error),
+                None,
+                Some("worker-a"),
+                std::time::Duration::from_secs(1),
+                2,
+            )
+            .await,
+            "a same-status write by another actor must not count as our own persisted write"
+        );
+        let row = Task::get(&db, &task.task_id).await.unwrap();
+        assert_eq!(
+            row.result,
+            Some(reaper_error),
+            "the winner's payload must survive"
+        );
+    }
+
+    #[tokio::test]
+    async fn idempotent_replay_of_our_own_terminal_write_reports_persisted() {
+        let db = hot::db::test_db().await;
+        let (_request, task, _, _, _) = make_task_request_and_row();
+        insert_test_task(&db, &task).await;
+        Task::mark_running(&db, &task.task_id).await.unwrap();
+        assert!(
+            Task::set_worker(&db, &task.task_id, "worker-a")
+                .await
+                .unwrap()
+        );
+
+        // First attempt committed server-side but the client saw a timeout.
+        let our_error = task_failure_json("Task timed out", None);
+        assert!(
+            Task::complete(
+                &db,
+                &task.task_id,
+                &TaskStatus::TimedOut,
+                Some(&our_error),
+                None,
+                Some("worker-a"),
+            )
+            .await
+            .unwrap()
+        );
+
+        // The replay hits zero rows but the stored payload proves the earlier
+        // write was ours, so the completion must still be reported durable.
+        assert!(
+            persist_terminal_task(
+                &db,
+                &task.task_id,
+                &TaskStatus::TimedOut,
+                Some(&our_error),
+                None,
+                Some("worker-a"),
+                std::time::Duration::from_secs(1),
+                2,
+            )
+            .await,
+            "a replay of our own committed write must report persisted"
+        );
+    }
+
+    #[test]
+    fn json_equality_is_tolerant_of_number_variants_but_not_of_values() {
+        // Postgres jsonb normalizes `1e16` to `10000000000000000`: the same
+        // numeric value round-trips as a different serde_json Number variant.
+        let ours = serde_json::json!({
+            "$type": "::hot::task/Failure",
+            "$val": {"msg": "boom", "elapsed": 1e16, "codes": [1e16, 2.5, 7]}
+        });
+        let stored = serde_json::json!({
+            "$type": "::hot::task/Failure",
+            "$val": {"msg": "boom", "elapsed": 10000000000000000u64, "codes": [10000000000000000u64, 2.5, 7]}
+        });
+        assert_ne!(ours, stored, "PartialEq is variant-sensitive (the bug)");
+        assert!(json_numeric_tolerant_eq(&ours, &stored));
+        assert!(json_numeric_tolerant_eq(&stored, &ours));
+
+        // Negative integers across variants.
+        assert!(json_numeric_tolerant_eq(
+            &serde_json::json!(-4.0),
+            &serde_json::json!(-4)
+        ));
+
+        // Same-variant integers beyond 2^53 must stay exact: the f64 path
+        // would collapse adjacent values.
+        assert!(!json_numeric_tolerant_eq(
+            &serde_json::json!(u64::MAX),
+            &serde_json::json!(u64::MAX - 1)
+        ));
+
+        // Genuinely different payloads must still differ.
+        let other = serde_json::json!({
+            "$type": "::hot::task/Failure",
+            "$val": {"msg": "different", "elapsed": 1e16, "codes": [1e16, 2.5, 7]}
+        });
+        assert!(!json_numeric_tolerant_eq(&ours, &other));
+        assert!(!json_numeric_tolerant_eq(
+            &serde_json::json!({"a": 1}),
+            &serde_json::json!({"a": 1, "b": 2})
+        ));
+        assert!(!json_numeric_tolerant_eq(
+            &serde_json::json!([1, 2]),
+            &serde_json::json!([1, 2, 3])
+        ));
+        assert!(!json_numeric_tolerant_eq(
+            &serde_json::json!(1),
+            &serde_json::json!("1")
+        ));
+    }
+
+    #[tokio::test]
+    async fn idempotent_replay_matches_despite_jsonb_number_normalization() {
+        let db = hot::db::test_db().await;
+        let (_request, task, _, _, _) = make_task_request_and_row();
+        insert_test_task(&db, &task).await;
+        Task::mark_running(&db, &task.task_id).await.unwrap();
+        assert!(
+            Task::set_worker(&db, &task.task_id, "worker-a")
+                .await
+                .unwrap()
+        );
+
+        // The earlier committed write stored the integer form (as Postgres
+        // jsonb would after normalizing `1e16` text)...
+        let stored_form = serde_json::json!({
+            "$type": "::hot::task/Failure",
+            "$val": {"msg": "boom", "elapsed_ns": 10000000000000000u64}
+        });
+        assert!(
+            Task::complete(
+                &db,
+                &task.task_id,
+                &TaskStatus::Failed,
+                Some(&stored_form),
+                None,
+                Some("worker-a"),
+            )
+            .await
+            .unwrap()
+        );
+
+        // ...while the in-memory payload we replay with holds the float
+        // variant. The variant difference must not be mistaken for another
+        // actor's write — that suppresses the real completion events.
+        let our_form = serde_json::json!({
+            "$type": "::hot::task/Failure",
+            "$val": {"msg": "boom", "elapsed_ns": 1e16}
+        });
+        assert!(
+            persist_terminal_task(
+                &db,
+                &task.task_id,
+                &TaskStatus::Failed,
+                Some(&our_form),
+                None,
+                Some("worker-a"),
+                std::time::Duration::from_secs(1),
+                2,
+            )
+            .await,
+            "a replay differing only in JSON number variant must count as ours"
+        );
+    }
+
+    #[tokio::test]
+    async fn cooperative_cancel_persists_over_the_row_task_cancel_left_behind() {
+        let db = hot::db::test_db().await;
+        let (_request, task, _, _, _) = make_task_request_and_row();
+        insert_test_task(&db, &task).await;
+        Task::mark_running(&db, &task.task_id).await.unwrap();
+        assert!(
+            Task::set_worker(&db, &task.task_id, "worker-a")
+                .await
+                .unwrap()
+        );
+
+        // ::hot::task/cancel flips the row to Cancelled (result NULL) BEFORE
+        // publishing the $cancel message, so the worker's cancel branch
+        // always finds the row already Cancelled.
+        assert!(Task::cancel(&db, &task.task_id).await.unwrap());
+        assert!(
+            Task::get(&db, &task.task_id)
+                .await
+                .unwrap()
+                .result
+                .is_none()
+        );
+
+        // The worker's cancellation persist must report durable success:
+        // Task::cancel publishes no completion events, so persisted=false
+        // here would suppress task:complete / RunStop / task:cancelled for
+        // every cooperative cancellation.
+        let cancellation = task_cancellation_json("Task cancelled via $cancel message", None);
+        assert!(
+            persist_terminal_task(
+                &db,
+                &task.task_id,
+                &TaskStatus::Cancelled,
+                Some(&cancellation),
+                None,
+                Some("worker-a"),
+                std::time::Duration::from_secs(1),
+                2,
+            )
+            .await,
+            "a pre-Cancelled row is idempotent success for the worker's cancellation write"
+        );
+
+        // End to end: complete_task_with_event must publish the completion.
+        let publisher =
+            StreamPubSub::new(hot::stream::StreamPubSubType::Memory, None, false).unwrap();
+        let mut env_events = publisher.subscribe_env(task.env_id).await.unwrap();
+        assert!(
+            complete_task_with_event(
+                &db,
+                &publisher,
+                &task.task_id,
+                task.env_id,
+                task.stream_id,
+                &task.function_name,
+                &task.task_type,
+                TaskStatus::Cancelled,
+                Some(&cancellation),
+                None,
+                Some("worker-a"),
+            )
+            .await,
+            "cooperative cancellation must emit its completion events"
+        );
+        let event = tokio::time::timeout(std::time::Duration::from_secs(1), env_events.next())
+            .await
+            .expect("a cooperative cancellation must publish task:complete")
+            .expect("subscription should stay open");
+        match event {
+            EnvEvent::TaskComplete {
+                task_id, status, ..
+            } => {
+                assert_eq!(task_id, task.task_id);
+                assert_eq!(status, "cancelled");
+            }
+            other => panic!("expected TaskComplete, got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn fenced_terminal_write_is_suppressed_after_ownership_loss() {
+        let db = hot::db::test_db().await;
+        let (_request, task, _, _, _) = make_task_request_and_row();
+        insert_test_task(&db, &task).await;
+        Task::mark_running(&db, &task.task_id).await.unwrap();
+        assert!(
+            Task::set_worker(&db, &task.task_id, "worker-a")
+                .await
+                .unwrap()
+        );
+        assert!(
+            Task::release_worker(&db, &task.task_id, "worker-a")
+                .await
+                .unwrap()
+        );
+
+        let our_error = task_failure_json("Task timed out", None);
+        assert!(
+            !persist_terminal_task(
+                &db,
+                &task.task_id,
+                &TaskStatus::TimedOut,
+                Some(&our_error),
+                None,
+                Some("worker-a"),
+                std::time::Duration::from_secs(1),
+                2,
+            )
+            .await,
+            "a fenced write must not land after ownership was released"
+        );
+        let row = Task::get(&db, &task.task_id).await.unwrap();
+        assert_eq!(row.task_status_id, TaskStatus::Running.as_id());
+        assert_eq!(row.result, None);
+    }
+
+    #[tokio::test]
+    async fn unpersisted_completion_returns_false_so_alerts_and_retries_are_suppressed() {
+        let db = hot::db::test_db().await;
+        let publisher =
+            StreamPubSub::new(hot::stream::StreamPubSubType::Memory, None, false).unwrap();
+
+        // Cancellation already won the terminal race: the failure completion
+        // must report not-persisted, which is the callers' signal to skip
+        // publish_task_alert and maybe_retry_task.
+        let (_request, task, _, _, _) = make_task_request_and_row();
+        insert_test_task(&db, &task).await;
+        assert!(Task::cancel(&db, &task.task_id).await.unwrap());
+        let error = task_failure_json("boom", None);
+        assert!(
+            !complete_task_with_event(
+                &db,
+                &publisher,
+                &task.task_id,
+                task.env_id,
+                task.stream_id,
+                &task.function_name,
+                &task.task_type,
+                TaskStatus::Failed,
+                Some(&error),
+                None,
+                None,
+            )
+            .await,
+            "a lost terminal race must tell callers to suppress alerts and retries"
+        );
+        assert_eq!(
+            Task::get(&db, &task.task_id).await.unwrap().task_status_id,
+            TaskStatus::Cancelled.as_id()
+        );
+
+        // Positive control: an owned running row persists and reports true.
+        let (_request, owned, _, _, _) = make_task_request_and_row();
+        insert_test_task(&db, &owned).await;
+        Task::mark_running(&db, &owned.task_id).await.unwrap();
+        assert!(
+            Task::set_worker(&db, &owned.task_id, "worker-a")
+                .await
+                .unwrap()
+        );
+        assert!(
+            complete_task_with_event(
+                &db,
+                &publisher,
+                &owned.task_id,
+                owned.env_id,
+                owned.stream_id,
+                &owned.function_name,
+                &owned.task_type,
+                TaskStatus::Failed,
+                Some(&error),
+                None,
+                Some("worker-a"),
+            )
+            .await
+        );
+    }
+
+    #[tokio::test]
+    async fn reaper_skips_zombie_candidates_actively_managed_by_this_worker() {
+        let db = hot::db::test_db().await;
+        let publisher =
+            StreamPubSub::new(hot::stream::StreamPubSubType::Memory, None, false).unwrap();
+        let queue_name = format!("{{hot:task}}-reaper-skip-{}", Uuid::now_v7());
+        let queue = ProcessingQueue::<TaskRequest>::new(
+            QueueType::Memory,
+            queue_name,
+            None,
+            Serialization::Json,
+        )
+        .unwrap();
+
+        // Adopted-container shape: a running row whose heartbeat is a day
+        // stale (ownership repair has not landed yet) but which this worker
+        // actively manages in-process.
+        let (request, task, _, _, _) = make_task_request_and_row();
+        insert_test_task(&db, &task).await;
+        Task::mark_running(&db, &task.task_id).await.unwrap();
+        assert!(
+            Task::set_worker(&db, &task.task_id, "dead-worker")
+                .await
+                .unwrap()
+        );
+        assert!(
+            Task::release_worker(&db, &task.task_id, "dead-worker")
+                .await
+                .unwrap()
+        );
+        assert!(
+            Task::find_zombie_tasks(&db, ZOMBIE_HEARTBEAT_STALE_SECS)
+                .await
+                .unwrap()
+                .iter()
+                .any(|candidate| candidate.task_id == task.task_id),
+            "precondition: the stale running row must be a zombie candidate"
+        );
+
+        let coordinator = shutdown::TaskShutdownCoordinator::new();
+        assert!(coordinator.try_register_task(shutdown::ActiveTask {
+            task_id: task.task_id,
+            env_id: task.env_id,
+            stream_id: task.stream_id,
+            function_name: task.function_name.clone(),
+            task_type: task.task_type.clone(),
+            cancel_token: None,
+            original_request: request,
+        }));
+
+        reap_zombie_tasks(&db, &publisher, &queue, &coordinator).await;
+        let row = Task::get(&db, &task.task_id).await.unwrap();
+        assert_eq!(
+            row.task_status_id,
+            TaskStatus::Running.as_id(),
+            "a coordinator-active task must not be reaped even with a stale heartbeat"
+        );
+
+        coordinator.unregister_task(&task.task_id);
+        reap_zombie_tasks(&db, &publisher, &queue, &coordinator).await;
+        let row = Task::get(&db, &task.task_id).await.unwrap();
+        assert_eq!(
+            row.task_status_id,
+            TaskStatus::Failed.as_id(),
+            "once unmanaged, the same stale row must be reaped"
+        );
+    }
+
+    #[tokio::test]
+    async fn retry_check_skips_rows_that_are_not_terminal_failures() {
+        let db = hot::db::test_db().await;
+        let queue_name = format!("{{hot:task}}-retry-guard-{}", Uuid::now_v7());
+        let queue = ProcessingQueue::<TaskRequest>::new(
+            QueueType::Memory,
+            queue_name,
+            None,
+            Serialization::Json,
+        )
+        .unwrap();
+        let retry_options = serde_json::json!({"retry": {"attempts": 2, "delay": 100}});
+
+        // A Cancelled row must never spawn a retry, even with retry config —
+        // the call-site gate can be bypassed by a stale caller, so
+        // maybe_retry_task re-reads the row itself.
+        let (request, mut task, _, _, _) = make_task_request_and_row();
+        task.options = Some(retry_options.clone());
+        insert_test_task(&db, &task).await;
+        Task::mark_running(&db, &task.task_id).await.unwrap();
+        assert!(Task::cancel(&db, &task.task_id).await.unwrap());
+        maybe_retry_task(&db, &queue, &task.task_id, &request).await;
+        assert_eq!(
+            Task::get_count_by_env(&db, &task.env_id).await.unwrap(),
+            1,
+            "a cancelled row must not insert a retry task"
+        );
+
+        // Positive control: a Failed row with retry budget inserts exactly
+        // one retry row.
+        let (request, mut failed, _, _, _) = make_task_request_and_row();
+        failed.options = Some(retry_options);
+        insert_test_task(&db, &failed).await;
+        Task::mark_running(&db, &failed.task_id).await.unwrap();
+        let error = task_failure_json("boom", None);
+        assert!(
+            Task::complete(
+                &db,
+                &failed.task_id,
+                &TaskStatus::Failed,
+                Some(&error),
+                None,
+                None
+            )
+            .await
+            .unwrap()
+        );
+        maybe_retry_task(&db, &queue, &failed.task_id, &request).await;
+        assert_eq!(
+            Task::get_count_by_env(&db, &failed.env_id).await.unwrap(),
+            2,
+            "a terminal failure with retry budget must insert its retry task"
+        );
+    }
+
+    #[tokio::test]
+    async fn retry_skips_enqueue_when_retry_row_already_exists() {
+        let db = hot::db::test_db().await;
+        let queue_name = format!("{{hot:task}}-retry-dup-{}", Uuid::now_v7());
+        let queue = ProcessingQueue::<TaskRequest>::new(
+            QueueType::Memory,
+            queue_name,
+            None,
+            Serialization::Json,
+        )
+        .unwrap();
+        let retry_options = serde_json::json!({"retry": {"attempts": 2, "delay": 0}});
+
+        let (request, mut task, _, _, _) = make_task_request_and_row();
+        task.options = Some(retry_options.clone());
+        insert_test_task(&db, &task).await;
+        Task::mark_running(&db, &task.task_id).await.unwrap();
+        let error = task_failure_json("boom", None);
+        assert!(
+            Task::complete(
+                &db,
+                &task.task_id,
+                &TaskStatus::Failed,
+                Some(&error),
+                None,
+                None
+            )
+            .await
+            .unwrap()
+        );
+
+        // Another writer (e.g. the zombie reaper, or a crashed earlier
+        // attempt) already created the retry row for attempt 1 but never
+        // enqueued it.
+        let row = Task::get(&db, &task.task_id).await.unwrap();
+        assert!(
+            Task::insert_retry(&db, &Uuid::now_v7(), &row, 1, chrono::Utc::now())
+                .await
+                .unwrap()
+        );
+
+        // maybe_retry_task must treat the duplicate insert as already-retried
+        // and skip its enqueue — the existing row is recovered by
+        // reconcile_queued_tasks, never by a second retry row.
+        maybe_retry_task(&db, &queue, &task.task_id, &request).await;
+        // Sleep past the (clamped, 100ms min) retry delay so a buggy delayed
+        // enqueue would have landed before the assertion.
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        assert_eq!(
+            queue.len().await.unwrap(),
+            0,
+            "a duplicate retry must not be enqueued"
+        );
+        assert_eq!(
+            Task::get_count_by_env(&db, &task.env_id).await.unwrap(),
+            2,
+            "no second retry row may be created"
+        );
+
+        // Positive control: with no pre-existing retry row the same path
+        // inserts the retry row and enqueues exactly one request.
+        let (request, mut fresh, _, _, _) = make_task_request_and_row();
+        fresh.options = Some(retry_options);
+        insert_test_task(&db, &fresh).await;
+        Task::mark_running(&db, &fresh.task_id).await.unwrap();
+        assert!(
+            Task::complete(
+                &db,
+                &fresh.task_id,
+                &TaskStatus::Failed,
+                Some(&error),
+                None,
+                None
+            )
+            .await
+            .unwrap()
+        );
+        maybe_retry_task(&db, &queue, &fresh.task_id, &request).await;
+        assert_eq!(Task::get_count_by_env(&db, &fresh.env_id).await.unwrap(), 2);
+        tokio::time::timeout(std::time::Duration::from_secs(2), queue.claim_blocking())
+            .await
+            .expect("a fresh failure with budget must enqueue its retry")
+            .unwrap()
+            .expect("memory queue claim should yield the enqueued retry");
+    }
+
+    #[tokio::test]
+    async fn zombie_retry_skips_enqueue_when_retry_row_already_exists() {
+        let db = hot::db::test_db().await;
+        let queue_name = format!("{{hot:task}}-zombie-dup-{}", Uuid::now_v7());
+        let queue = ProcessingQueue::<TaskRequest>::new(
+            QueueType::Memory,
+            queue_name,
+            None,
+            Serialization::Json,
+        )
+        .unwrap();
+        let retry_options = serde_json::json!({"retry": {"attempts": 2, "delay": 0}});
+
+        let (_request, mut task, _, _, _) = make_task_request_and_row();
+        task.options = Some(retry_options.clone());
+        insert_test_task(&db, &task).await;
+        let row = Task::get(&db, &task.task_id).await.unwrap();
+
+        // The failure path already created the budget retry for attempt 1
+        // (row.retry_attempt + 1) — the reaper racing it must not double it.
+        assert!(
+            Task::insert_retry(
+                &db,
+                &Uuid::now_v7(),
+                &row,
+                row.retry_attempt + 1,
+                chrono::Utc::now()
+            )
+            .await
+            .unwrap()
+        );
+
+        maybe_retry_zombie_task(&db, &row, &queue).await;
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        assert_eq!(
+            queue.len().await.unwrap(),
+            0,
+            "a duplicate zombie retry must not be enqueued"
+        );
+        assert_eq!(
+            Task::get_count_by_env(&db, &task.env_id).await.unwrap(),
+            2,
+            "no second retry row may be created"
+        );
+
+        // Positive control: a fresh zombie with budget inserts + enqueues.
+        let (_request, mut fresh, _, _, _) = make_task_request_and_row();
+        fresh.options = Some(retry_options);
+        insert_test_task(&db, &fresh).await;
+        let fresh_row = Task::get(&db, &fresh.task_id).await.unwrap();
+        maybe_retry_zombie_task(&db, &fresh_row, &queue).await;
+        assert_eq!(Task::get_count_by_env(&db, &fresh.env_id).await.unwrap(), 2);
+        tokio::time::timeout(std::time::Duration::from_secs(2), queue.claim_blocking())
+            .await
+            .expect("a fresh zombie with budget must enqueue its retry")
+            .unwrap()
+            .expect("memory queue claim should yield the enqueued retry");
+    }
+
+    #[tokio::test]
+    async fn container_setup_timeout_honors_user_retry_budget() {
+        let db = hot::db::test_db().await;
+        let publisher =
+            StreamPubSub::new(hot::stream::StreamPubSubType::Memory, None, false).unwrap();
+        let queue_name = format!("{{hot:task}}-setup-timeout-retry-{}", Uuid::now_v7());
+        let queue = ProcessingQueue::<TaskRequest>::new(
+            QueueType::Memory,
+            queue_name,
+            None,
+            Serialization::Json,
+        )
+        .unwrap();
+
+        // With retry budget: a timeout during SETUP (e.g. bundle mounts) is a
+        // terminal failure of this attempt and must spawn exactly one retry
+        // row, the same as a timeout one await later in the runtime arms.
+        let (request, mut task, _, _, _) = make_task_request_and_row();
+        task.options = Some(serde_json::json!({"retry": {"attempts": 2, "delay": 0}}));
+        insert_test_task(&db, &task).await;
+        Task::mark_running(&db, &task.task_id).await.unwrap();
+        assert!(
+            Task::set_worker(&db, &task.task_id, "worker-a")
+                .await
+                .unwrap()
+        );
+        finish_container_setup_timeout(
+            &db,
+            &publisher,
+            &queue,
+            &request,
+            &task.task_id,
+            task.env_id,
+            task.stream_id,
+            None,
+            &task.function_name,
+            &task.task_type,
+            "worker-a",
+            "bundle mount preparation",
+            None,
+            None,
+            (),
+        )
+        .await;
+        let row = Task::get(&db, &task.task_id).await.unwrap();
+        assert_eq!(
+            row.task_status_id,
+            TaskStatus::TimedOut.as_id(),
+            "the fenced TimedOut write must persist before any retry"
+        );
+        assert_eq!(
+            Task::get_count_by_env(&db, &task.env_id).await.unwrap(),
+            2,
+            "a setup timeout with retry budget must insert exactly one retry row"
+        );
+
+        // Without budget: terminal TimedOut only, no retry row.
+        let (request, no_budget, _, _, _) = make_task_request_and_row();
+        insert_test_task(&db, &no_budget).await;
+        Task::mark_running(&db, &no_budget.task_id).await.unwrap();
+        assert!(
+            Task::set_worker(&db, &no_budget.task_id, "worker-a")
+                .await
+                .unwrap()
+        );
+        finish_container_setup_timeout(
+            &db,
+            &publisher,
+            &queue,
+            &request,
+            &no_budget.task_id,
+            no_budget.env_id,
+            no_budget.stream_id,
+            None,
+            &no_budget.function_name,
+            &no_budget.task_type,
+            "worker-a",
+            "file-server setup",
+            None,
+            None,
+            (),
+        )
+        .await;
+        assert_eq!(
+            Task::get_count_by_env(&db, &no_budget.env_id)
+                .await
+                .unwrap(),
+            1,
+            "a setup timeout without retry budget must not spawn retries"
+        );
+    }
+
+    #[test]
+    fn container_billing_measures_execution_window_not_setup_gap() {
+        // A task that spent ~5s in worker-side setup (bundle download and
+        // extract, file-server start) before dispatching a ~0.5s workload:
+        // the billing clock must anchor at dispatch, not at claim.
+        let now = std::time::Instant::now();
+        let claimed_at = now
+            .checked_sub(std::time::Duration::from_millis(5_500))
+            .expect("monotonic clock is past process start");
+        let execution_start = now
+            .checked_sub(std::time::Duration::from_millis(500))
+            .expect("monotonic clock is past process start");
+
+        let billed = billable_execution_ms(execution_start);
+        assert!(
+            billed >= 500,
+            "the workload window itself must be billed (got {billed})"
+        );
+        assert!(
+            billed < 5_000,
+            "worker-side setup before dispatch must not be billed as user compute (got {billed})"
+        );
+        // The DEADLINE stays anchored at claim (covered by
+        // claimed_container_setup_obeys_shared_task_deadline); this only
+        // pins that the two anchors are genuinely distinct clocks.
+        assert!(claimed_at.elapsed() >= std::time::Duration::from_millis(5_500));
+    }
+
+    #[tokio::test]
+    async fn timed_out_container_bills_pre_cleanup_window_only() {
+        // A workload that ran ~200ms before its timeout fired, followed by a
+        // slow infrastructure teardown (log collection, kill/remove; the Kata
+        // arm's leaked-VM reaping can burn up to KATA_TIMEOUT_CLEANUP_ENVELOPE
+        // = 120s): every execution arm snapshots the billable window via
+        // bill_before_cleanup the moment execution ends, so teardown time is
+        // never charged as user compute or reported in `duration-ms`.
+        let execution_start = std::time::Instant::now()
+            .checked_sub(std::time::Duration::from_millis(200))
+            .expect("monotonic clock is past process start");
+
+        let cleanup_ran = std::sync::atomic::AtomicBool::new(false);
+        let (billed, ()) = bill_before_cleanup(execution_start, async {
+            // Simulated slow teardown, strictly after the snapshot.
+            tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+            cleanup_ran.store(true, std::sync::atomic::Ordering::SeqCst);
+        })
+        .await;
+
+        assert!(
+            cleanup_ran.load(std::sync::atomic::Ordering::SeqCst),
+            "cleanup must still run to completion after the snapshot"
+        );
+        assert!(
+            billed >= 200,
+            "the pre-timeout workload window must be billed (got {billed})"
+        );
+        let after_cleanup = billable_execution_ms(execution_start);
+        assert!(
+            after_cleanup >= billed + 150,
+            "the clock kept running through the ~150ms cleanup (billed={billed}, \
+             after={after_cleanup}); the snapshot preceding it is what keeps \
+             teardown out of the charge"
+        );
+    }
+
+    #[test]
+    fn kata_billing_prefers_executor_reported_workload_end_over_fallback() {
+        // The Kata executor stamps `workload_ended_at` the moment the in-VM
+        // wait resolves (or its internal timeout fires), BEFORE its internal
+        // teardown (log finalize, kill, VM/snapshot/CNI cleanup). The lib.rs
+        // arm's own post-await snapshot only lands after that teardown, so
+        // billing must prefer the executor-reported instant. The Kata
+        // runtime path itself is cfg-gated (linux + kata); this exercises
+        // the portable selection plumbing.
+        let now = std::time::Instant::now();
+        let execution_start = now
+            .checked_sub(std::time::Duration::from_millis(300))
+            .expect("monotonic clock is past process start");
+        // Workload finished 100ms in; the remaining ~200ms up to `now` play
+        // the role of executor-internal teardown.
+        let workload_ended_at = execution_start + std::time::Duration::from_millis(100);
+        // The fallback snapshot was taken after that teardown.
+        let fallback_ms = billable_execution_ms(execution_start);
+        assert!(
+            fallback_ms >= 300,
+            "fallback covers teardown (got {fallback_ms})"
+        );
+
+        let billed = billable_ms_preferring_executor_window(
+            execution_start,
+            Some(workload_ended_at),
+            fallback_ms,
+        );
+        assert_eq!(
+            billed, 100,
+            "the executor-reported window must win over the post-teardown fallback"
+        );
+
+        // No executor-reported end (outer-timeout cancellation, setup
+        // failure): the fallback snapshot is used verbatim.
+        assert_eq!(
+            billable_ms_preferring_executor_window(execution_start, None, fallback_ms),
+            fallback_ms,
+            "without an executor-reported end the fallback must be used unchanged"
+        );
+
+        // A (theoretical) end before the start saturates to zero rather
+        // than going negative.
+        let before_start = execution_start
+            .checked_sub(std::time::Duration::from_millis(50))
+            .expect("monotonic clock is past process start");
+        assert_eq!(
+            billable_ms_preferring_executor_window(execution_start, Some(before_start), 999),
+            0,
+            "an end before the start must saturate to zero"
+        );
+    }
+
+    /// A monotonic anchor far enough in the past that phase instants can be
+    /// placed freely on either side of it.
+    fn billing_anchor() -> std::time::Instant {
+        std::time::Instant::now()
+            .checked_sub(std::time::Duration::from_secs(60))
+            .expect("monotonic clock is past process start")
+    }
+
+    fn ms(v: u64) -> std::time::Duration {
+        std::time::Duration::from_millis(v)
+    }
+
+    #[test]
+    fn container_billing_excludes_slot_wait_and_pull_kata_shape() {
+        // Kata shape: both platform phases — VM-slot semaphore wait and
+        // image pull — fall inside the [execution_start, snapshot] window.
+        // Policy: they are platform-owned and unbillable; VM boot and
+        // runtime init (the rest of the window) remain billed.
+        let execution_start = billing_anchor();
+        let timings = executor::ContainerTimings {
+            slot_wait_ms: 100,
+            image_pull_ms: 300,
+            slot_wait_started_at: Some(execution_start + ms(5)),
+            slot_wait_ended_at: Some(execution_start + ms(105)),
+            image_pull_started_at: Some(execution_start + ms(105)),
+            image_pull_ended_at: Some(execution_start + ms(405)),
+            ..Default::default()
+        };
+        assert_eq!(
+            billed_ms_excluding_platform_phases(execution_start, 2_000, &timings),
+            1_600,
+            "slot wait (100ms) and pull (300ms) must be deducted; boot/init/workload billed"
+        );
+    }
+
+    #[test]
+    fn container_billing_excludes_pull_docker_shape() {
+        // Docker shape: the phased create_and_start path has no
+        // executor-internal slot wait (the worker's concurrency gate is the
+        // resource budget, acquired before claim and before the anchor), so
+        // only the pull is deducted and the slot fields stay unset.
+        let execution_start = billing_anchor();
+        let timings = executor::ContainerTimings {
+            image_pull_ms: 200,
+            image_pull_started_at: Some(execution_start + ms(50)),
+            image_pull_ended_at: Some(execution_start + ms(250)),
+            ..Default::default()
+        };
+        assert_eq!(
+            billed_ms_excluding_platform_phases(execution_start, 1_000, &timings),
+            800,
+            "only the in-window pull must be deducted on the Docker shape"
+        );
+    }
+
+    #[test]
+    fn container_billing_bills_full_window_when_phases_absent_or_zero() {
+        let execution_start = billing_anchor();
+
+        // Absent phases (never started — e.g. cached image path that
+        // stamped nothing, or the code-task shape): full window billed.
+        assert_eq!(
+            billed_ms_excluding_platform_phases(
+                execution_start,
+                1_234,
+                &executor::ContainerTimings::default()
+            ),
+            1_234,
+            "absent phases must leave the window unchanged"
+        );
+
+        // Zero-length phases (instant slot grant, warm image cache).
+        let instant_phases = executor::ContainerTimings {
+            slot_wait_started_at: Some(execution_start + ms(1)),
+            slot_wait_ended_at: Some(execution_start + ms(1)),
+            image_pull_started_at: Some(execution_start + ms(2)),
+            image_pull_ended_at: Some(execution_start + ms(2)),
+            ..Default::default()
+        };
+        assert_eq!(
+            billed_ms_excluding_platform_phases(execution_start, 1_234, &instant_phases),
+            1_234,
+            "zero-length phases must leave the window unchanged"
+        );
+    }
+
+    #[test]
+    fn container_billing_saturates_at_zero_when_phases_exceed_window() {
+        // Clock-skew / degenerate shape: measured phases longer than the
+        // window itself must clamp the bill to zero, never go negative —
+        // and phase ends beyond the window must not "overdraw" it.
+        let execution_start = billing_anchor();
+        let timings = executor::ContainerTimings {
+            slot_wait_started_at: Some(execution_start),
+            slot_wait_ended_at: Some(execution_start + ms(80)),
+            image_pull_started_at: Some(execution_start + ms(80)),
+            image_pull_ended_at: Some(execution_start + ms(240)),
+            ..Default::default()
+        };
+        assert_eq!(
+            billed_ms_excluding_platform_phases(execution_start, 100, &timings),
+            0,
+            "phases exceeding the window must saturate the bill at zero"
+        );
+    }
+
+    #[test]
+    fn container_billing_treats_open_ended_phase_as_unbillable_to_window_end() {
+        // A pull that started but never closed inside the window — it
+        // failed midway or the outer deadline cancelled the executor future
+        // mid-pull. The partial pull time measured so far is still
+        // platform-owned: the open phase is attributed up to the end of the
+        // window, in the user's favor.
+        let execution_start = billing_anchor();
+        let timings = executor::ContainerTimings {
+            image_pull_started_at: Some(execution_start + ms(100)),
+            image_pull_ended_at: None,
+            ..Default::default()
+        };
+        assert_eq!(
+            billed_ms_excluding_platform_phases(execution_start, 1_000, &timings),
+            100,
+            "an open-ended pull must be unbillable from its start to the window end"
+        );
+    }
+
+    #[test]
+    fn container_billing_clamps_phase_to_window_never_double_subtracts() {
+        // Defensive clamp: on both executors the phases start strictly
+        // after `execution_start` (verified at the seam's doc comment), but
+        // a phase that somehow began before the anchor must only have its
+        // in-window share deducted — pre-anchor time was never billed in
+        // the first place.
+        let execution_start = billing_anchor();
+        let pre_anchor_start = execution_start
+            .checked_sub(ms(200))
+            .expect("anchor has headroom");
+        let timings = executor::ContainerTimings {
+            image_pull_started_at: Some(pre_anchor_start),
+            image_pull_ended_at: Some(execution_start + ms(100)),
+            ..Default::default()
+        };
+        assert_eq!(
+            billed_ms_excluding_platform_phases(execution_start, 1_000, &timings),
+            900,
+            "only the in-window 100ms of the pull may be deducted, not the pre-anchor 200ms"
+        );
+    }
+
+    #[tokio::test]
+    async fn container_terminal_persist_stores_deducted_billable_window() {
+        // End-to-end over the persistence seam: the value handed to
+        // `duration_ms_override` (and thus the row, the re-read
+        // TaskComplete event, and the task-minutes quota) must be the
+        // PLATFORM-PHASE-DEDUCTED window, not the raw execution window.
+        let db = hot::db::test_db().await;
+        let (_request, task, _, _, _) = make_task_request_and_row();
+        insert_test_task(&db, &task).await;
+        Task::mark_running(&db, &task.task_id).await.unwrap();
+
+        let execution_start = billing_anchor();
+        let timings = executor::ContainerTimings {
+            image_pull_ms: 200,
+            image_pull_started_at: Some(execution_start + ms(100)),
+            image_pull_ended_at: Some(execution_start + ms(300)),
+            ..Default::default()
+        };
+        let billed = billed_ms_excluding_platform_phases(execution_start, 500, &timings);
+        assert_eq!(billed, 300, "raw 500ms window minus the 200ms pull");
+
+        let result = serde_json::json!({"exit-code": 0, "duration-ms": billed});
+        assert!(
+            persist_terminal_task(
+                &db,
+                &task.task_id,
+                &TaskStatus::Completed,
+                Some(&result),
+                Some(billed),
+                None,
+                std::time::Duration::from_secs(1),
+                1,
+            )
+            .await
+        );
+
+        let row = Task::get(&db, &task.task_id).await.unwrap();
+        assert_eq!(
+            row.duration_ms,
+            Some(300),
+            "the persisted duration must be the deducted billable window"
+        );
+    }
+
+    #[tokio::test]
+    async fn container_terminal_persist_stores_billable_snapshot_not_claim_to_persist() {
+        // `start_time` is stamped at CLAIM, so Task::complete's default
+        // stop-start duration folds worker-side setup and teardown into the
+        // row's `duration_ms` — which feeds the re-read `task:complete`
+        // event and the task-minutes quota. Container terminal writes must
+        // instead persist the billable execution-window snapshot verbatim.
+        let db = hot::db::test_db().await;
+        let (_request, task, _, _, _) = make_task_request_and_row();
+        insert_test_task(&db, &task).await;
+        Task::mark_running(&db, &task.task_id).await.unwrap();
+
+        // Let a measurable claim-to-persist gap accrue so the stop-start
+        // computation could not coincidentally equal the snapshot below.
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+
+        let snapshot_ms = 123_456i64;
+        let result = serde_json::json!({"exit-code": 0, "duration-ms": snapshot_ms});
+        assert!(
+            persist_terminal_task(
+                &db,
+                &task.task_id,
+                &TaskStatus::Completed,
+                Some(&result),
+                Some(snapshot_ms),
+                None,
+                std::time::Duration::from_secs(1),
+                1,
+            )
+            .await
+        );
+
+        let row = Task::get(&db, &task.task_id).await.unwrap();
+        assert_eq!(
+            row.duration_ms,
+            Some(snapshot_ms),
+            "the persisted duration must be the billable snapshot, not the \
+             claim-to-persist stop-start span"
+        );
+    }
+
+    fn bundle_test_parent(label: &str) -> std::path::PathBuf {
+        let parent = std::env::temp_dir().join(format!(
+            "hot-bundle-test-{}-{}",
+            label,
+            Uuid::new_v4().simple()
+        ));
+        std::fs::create_dir_all(&parent).unwrap();
+        parent
+    }
+
+    fn make_complete_temp_dir(parent: &std::path::Path, name: &str) -> std::path::PathBuf {
+        let dir = parent.join(format!("{}{}", BUNDLE_EXTRACT_TEMP_PREFIX, name));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("manifest.hot"), b"{}").unwrap();
+        dir
+    }
+
+    #[test]
+    fn bundle_install_rename_race_leaves_exactly_one_valid_dir() {
+        let parent = bundle_test_parent("race");
+        let final_dir = parent.join("build-race");
+        let winner = make_complete_temp_dir(&parent, "build-race-a");
+        let loser = make_complete_temp_dir(&parent, "build-race-b");
+
+        // While attempts are still writing (temp dirs exist), the final path
+        // must not exist — it can only appear via the atomic rename, so a
+        // partial dir is never observable at the final path.
+        assert!(!final_dir.exists());
+
+        install_extracted_bundle(&winner, &final_dir).unwrap();
+        assert!(bundle_extract_is_complete(&final_dir));
+
+        // The loser's rename hits the installed dir; it must clean up its
+        // own temp dir and treat the complete final dir as success.
+        install_extracted_bundle(&loser, &final_dir).unwrap();
+        assert!(
+            !loser.exists(),
+            "the losing attempt must remove its temp dir"
+        );
+        assert!(bundle_extract_is_complete(&final_dir));
+
+        let leftovers: Vec<String> = std::fs::read_dir(&parent)
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(
+            leftovers,
+            vec!["build-race".to_string()],
+            "exactly one valid dir must remain after the race"
+        );
+        std::fs::remove_dir_all(&parent).unwrap();
+    }
+
+    #[test]
+    fn bundle_install_heals_legacy_partial_final_dir() {
+        let parent = bundle_test_parent("heal");
+        let final_dir = parent.join("build-poisoned");
+        // Older workers extracted straight into the final path; a process
+        // death mid-extract left a partial dir with no manifest.hot marker.
+        std::fs::create_dir_all(final_dir.join("hot/src")).unwrap();
+        std::fs::write(final_dir.join("hot/src/partial.hot"), b"x").unwrap();
+        assert!(!bundle_extract_is_complete(&final_dir));
+
+        let temp = make_complete_temp_dir(&parent, "build-poisoned-fresh");
+        install_extracted_bundle(&temp, &final_dir).unwrap();
+        assert!(bundle_extract_is_complete(&final_dir));
+        assert!(
+            !final_dir.join("hot/src/partial.hot").exists(),
+            "the poisoned partial content must be replaced, not merged into"
+        );
+        std::fs::remove_dir_all(&parent).unwrap();
+    }
+
+    #[test]
+    fn stale_bundle_extract_temps_swept_only_past_max_age() {
+        let parent = bundle_test_parent("sweep");
+        let stale = make_complete_temp_dir(&parent, "build-old");
+        let installed = parent.join("build-live");
+        std::fs::create_dir_all(&installed).unwrap();
+        std::fs::write(installed.join("manifest.hot"), b"{}").unwrap();
+
+        // Zero max age: every temp counts as stale; installed final dirs are
+        // never swept regardless.
+        sweep_stale_bundle_extract_temps(&parent, std::time::Duration::ZERO);
+        assert!(!stale.exists(), "an expired temp dir must be swept");
+        assert!(installed.exists(), "final build dirs must never be swept");
+
+        // A fresh temp under the real max age survives (in-flight extract).
+        let fresh = make_complete_temp_dir(&parent, "build-inflight");
+        sweep_stale_bundle_extract_temps(&parent, BUNDLE_EXTRACT_TEMP_MAX_AGE);
+        assert!(fresh.exists(), "an in-flight temp dir must not be swept");
+        std::fs::remove_dir_all(&parent).unwrap();
+    }
+
+    #[test]
+    fn failed_bundle_extraction_leaves_no_temp_or_final_dir() {
+        let parent = bundle_test_parent("badzip");
+        let final_dir = parent.join("build-bad");
+
+        let err = extract_bundle_to_dir(b"not a zip archive", &final_dir).unwrap_err();
+        assert!(err.contains("Failed to extract bundle"), "got: {err}");
+        assert!(!final_dir.exists(), "a failed extraction must not install");
+        let temps: Vec<String> = std::fs::read_dir(&parent)
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.starts_with(BUNDLE_EXTRACT_TEMP_PREFIX))
+            .collect();
+        assert!(
+            temps.is_empty(),
+            "a failed extraction must remove its temp dir, found {temps:?}"
+        );
+        std::fs::remove_dir_all(&parent).unwrap();
+    }
+
+    #[tokio::test]
+    async fn bundle_extraction_lock_is_single_flight_per_build() {
+        let build_a = Uuid::now_v7();
+        let first = bundle_extract_lock(build_a).await;
+        let same_build = bundle_extract_lock(build_a).await;
+        let other_build = bundle_extract_lock(Uuid::now_v7()).await;
+
+        assert!(Arc::ptr_eq(&first, &same_build));
+        assert!(!Arc::ptr_eq(&first, &other_build));
+
+        let guard = first.lock().await;
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(20), same_build.lock())
+                .await
+                .is_err(),
+            "a second local attempt for the same build must wait for the in-flight extraction"
+        );
+        drop(guard);
+        let follower =
+            tokio::time::timeout(std::time::Duration::from_millis(100), same_build.lock())
+                .await
+                .expect("the follower must proceed once the first extraction completes");
+        drop(follower);
+
+        drop(first);
+        drop(same_build);
+        let _trigger_cleanup = bundle_extract_lock(Uuid::now_v7()).await;
+        let locks = BUNDLE_EXTRACT_LOCKS.get().unwrap().lock().await;
+        assert!(
+            !locks.contains_key(&build_a),
+            "inactive build locks must not accumulate for the worker lifetime"
+        );
+    }
+
+    #[test]
+    fn blocking_execution_capacity_bounds_detached_vm_threads() {
+        assert_eq!(blocking_execution_capacity(0, -1), 2);
+        assert_eq!(blocking_execution_capacity(4, -1), 8);
+        assert_eq!(blocking_execution_capacity(4, 0), 4);
+        assert_eq!(blocking_execution_capacity(4, 2), 4);
+        assert_eq!(blocking_execution_capacity(4, 6), 6);
+        assert_eq!(
+            blocking_execution_capacity(4, i64::MAX),
+            Semaphore::MAX_PERMITS
+        );
+        // Must never panic at startup for any configured value.
+        let _ = Semaphore::new(blocking_execution_capacity(4, i64::MAX));
+    }
+
+    #[tokio::test]
+    async fn timeout_cleanup_is_itself_wall_clock_bounded() {
+        let cleanup = std::future::pending::<()>();
+        assert!(
+            !bounded_cleanup(std::time::Duration::from_millis(20), cleanup).await,
+            "a wedged runtime cleanup must return control at its own deadline"
+        );
+    }
+
+    #[tokio::test]
+    async fn claimed_task_setup_obeys_shared_task_deadline() {
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(20);
+        let result = await_claimed_task_deadline(deadline, std::future::pending::<()>()).await;
+        assert!(
+            result.is_err(),
+            "post-claim setup must not outlive the task's wall-clock deadline"
+        );
+    }
+
+    #[tokio::test]
+    async fn data_volume_creation_has_a_wall_clock_ceiling() {
+        assert!(
+            await_data_volume_create(
+                std::time::Duration::from_millis(20),
+                std::future::pending::<()>(),
+            )
+            .await
+            .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn blocking_slot_saturation_defers_the_queue_message() {
+        let slots = Arc::new(Semaphore::new(1));
+        let _held = acquire_blocking_execution_slot(
+            Arc::clone(&slots),
+            std::time::Duration::from_secs(1),
+            std::time::Duration::from_millis(9),
+        )
+        .await
+        .unwrap();
+
+        let err = acquire_blocking_execution_slot(
+            Arc::clone(&slots),
+            std::time::Duration::from_millis(20),
+            std::time::Duration::from_millis(9),
+        )
+        .await
+        .expect_err("a saturated blocking-execution cap must defer the queue delivery");
+
+        assert_eq!(err.backoff(), std::time::Duration::from_millis(9));
+    }
+
+    #[tokio::test]
+    async fn detached_execution_holds_its_blocking_slot_until_the_thread_exits() {
+        let slots = Arc::new(Semaphore::new(1));
+        let permit = acquire_blocking_execution_slot(
+            Arc::clone(&slots),
+            std::time::Duration::from_secs(1),
+            std::time::Duration::from_millis(1),
+        )
+        .await
+        .unwrap();
+
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel::<()>();
+        let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+        let (exited_tx, exited_rx) = std::sync::mpsc::channel::<()>();
+        let handle = tokio::task::spawn_blocking(move || {
+            // Mirrors process_code_task: the permit lives inside the blocking
+            // closure, so its lifetime is the THREAD's, not the JoinHandle's.
+            let blocking_execution_permit = permit;
+            entered_tx.send(()).unwrap();
+            release_rx.recv().unwrap(); // wedged VM standing in
+            drop(blocking_execution_permit);
+            exited_tx.send(()).unwrap();
+        });
+        entered_rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .unwrap();
+
+        // The timeout arm drops the JoinHandle; the detached thread must keep
+        // the slot occupied so admission observes the wedged execution.
+        drop(handle);
+        assert_eq!(slots.available_permits(), 0);
+        assert!(
+            acquire_blocking_execution_slot(
+                Arc::clone(&slots),
+                std::time::Duration::from_millis(20),
+                std::time::Duration::from_millis(1),
+            )
+            .await
+            .is_err(),
+            "a detached thread must still count against the execution cap"
+        );
+
+        // Once the thread actually exits, the slot frees.
+        release_tx.send(()).unwrap();
+        exited_rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .unwrap();
+        assert_eq!(slots.available_permits(), 1);
+    }
+
+    #[tokio::test]
+    async fn cancelled_blocking_setup_retains_execution_permit_until_real_exit() {
+        let slots = Arc::new(Semaphore::new(1));
+        let permit = slots.clone().acquire_owned().await.unwrap();
+        let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let (exited_tx, exited_rx) = tokio::sync::oneshot::channel();
+
+        let setup = run_blocking_with_execution_permit(permit, move || {
+            entered_tx.send(()).unwrap();
+            release_rx.recv().unwrap();
+            exited_tx.send(()).unwrap();
+        });
+        let timed_out = tokio::spawn(async move {
+            tokio::time::timeout(std::time::Duration::from_millis(20), setup).await
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(5), entered_rx)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(timed_out.await.unwrap().is_err());
+        assert_eq!(
+            slots.available_permits(),
+            0,
+            "cancelled compilation must remain counted while its thread lives"
+        );
+
+        release_tx.send(()).unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(5), exited_rx)
+            .await
+            .unwrap()
+            .unwrap();
+        for _ in 0..50 {
+            if slots.available_permits() == 1 {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        panic!("blocking setup permit was not released after the thread exited");
+    }
+
+    #[tokio::test]
+    async fn container_slot_helper_enforces_configured_peak_concurrency() {
+        let semaphore = Arc::new(Semaphore::new(2));
+        let active = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let peak = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let mut handles = Vec::new();
+
+        for _ in 0..8 {
+            let semaphore = Arc::clone(&semaphore);
+            let active = Arc::clone(&active);
+            let peak = Arc::clone(&peak);
+            handles.push(tokio::spawn(async move {
+                let _permit = acquire_container_slot(
+                    semaphore,
+                    std::time::Duration::from_secs(1),
+                    std::time::Duration::from_millis(1),
+                )
+                .await
+                .unwrap();
+                let now = active.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+                peak.fetch_max(now, std::sync::atomic::Ordering::SeqCst);
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                active.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+            }));
+        }
+        for handle in handles {
+            handle.await.unwrap();
+        }
+
+        assert_eq!(peak.load(std::sync::atomic::Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn container_slot_timeout_returns_infrastructure_retry() {
+        let semaphore = Arc::new(Semaphore::new(1));
+        let _held = acquire_container_slot(
+            Arc::clone(&semaphore),
+            std::time::Duration::from_secs(1),
+            std::time::Duration::from_millis(7),
+        )
+        .await
+        .unwrap();
+
+        let err = acquire_container_slot(
+            semaphore,
+            std::time::Duration::from_millis(20),
+            std::time::Duration::from_millis(7),
+        )
+        .await
+        .expect_err("a saturated container cap must defer the queue delivery");
+
+        assert_eq!(err.backoff(), std::time::Duration::from_millis(7));
+    }
+
+    #[tokio::test]
+    async fn usage_calculation_lock_is_single_flight_per_org() {
+        let org_a = Uuid::now_v7();
+        let org_b = Uuid::now_v7();
+        let first = usage_stats_org_lock(org_a).await;
+        let same_org = usage_stats_org_lock(org_a).await;
+        let other_org = usage_stats_org_lock(org_b).await;
+
+        assert!(Arc::ptr_eq(&first, &same_org));
+        assert!(!Arc::ptr_eq(&first, &other_org));
+
+        let guard = first.lock().await;
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(20), same_org.lock())
+                .await
+                .is_err(),
+            "a follower for the same org must wait for the in-flight calculation"
+        );
+        drop(guard);
+        let follower_guard =
+            tokio::time::timeout(std::time::Duration::from_millis(100), same_org.lock())
+                .await
+                .expect("follower should proceed once the first calculation completes");
+        drop(follower_guard);
+
+        drop(first);
+        drop(same_org);
+        let _trigger_cleanup = usage_stats_org_lock(Uuid::now_v7()).await;
+        let locks = USAGE_STATS_LOCKS.get().unwrap().lock().await;
+        assert!(
+            !locks.contains_key(&org_a),
+            "inactive org locks must not accumulate for the worker lifetime"
         );
     }
 
@@ -5056,10 +8915,11 @@ mod tests {
                 execution_ms: 40,
                 logs_collect_ms: 5,
                 workload_started_at: Some(workload_started_at),
+                ..Default::default()
             },
         )
         .await;
-        Task::complete(&db, &task_id, &TaskStatus::Completed, None)
+        Task::complete(&db, &task_id, &TaskStatus::Completed, None, None, None)
             .await
             .unwrap();
         finalize_task_timing(&db, &task_id).await;

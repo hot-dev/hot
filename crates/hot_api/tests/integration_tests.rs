@@ -1174,6 +1174,8 @@ async fn test_get_task_and_subscribe_to_completed_snapshot() {
         &task_id,
         &TaskStatus::Completed,
         Some(&json!({"answer": 42})),
+        None,
+        None,
     )
     .await
     .unwrap();

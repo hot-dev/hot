@@ -625,6 +625,7 @@ impl TryFrom<Message> for EventMessage {
                     None
                 }
             }),
+            deadline_at: None,
             queue_timing: None,
         };
 

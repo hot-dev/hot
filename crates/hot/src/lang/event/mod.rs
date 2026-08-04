@@ -114,6 +114,11 @@ pub struct ExecutionContext {
     /// propagated to run:start for phase-level observability.
     #[serde(default)]
     pub queue_timing: Option<QueueExecutionTiming>,
+    /// Wall-clock deadline for the current execution. Native operations that
+    /// wait on child work use this to leave time for the parent to unwind and
+    /// persist its terminal state before the worker hard timeout.
+    #[serde(default)]
+    pub deadline_at: Option<DateTime<Utc>>,
 }
 
 impl ExecutionContext {
@@ -148,6 +153,7 @@ impl ExecutionContext {
             access_id: None,
             agent_type: None,
             queue_timing: None,
+            deadline_at: None,
         }
     }
 
@@ -184,6 +190,7 @@ impl ExecutionContext {
             access_id: None,
             agent_type: None,
             queue_timing: None,
+            deadline_at: None,
         }
     }
 
@@ -224,6 +231,7 @@ impl ExecutionContext {
             access_id: None,
             agent_type: None,
             queue_timing: None,
+            deadline_at: None,
         }
     }
 
@@ -249,6 +257,7 @@ impl ExecutionContext {
             access_id: None,
             agent_type: None,
             queue_timing: None,
+            deadline_at: None,
         }
     }
 
@@ -305,6 +314,30 @@ impl ExecutionContext {
         self.queue_timing = Some(queue_timing);
         self
     }
+
+    pub fn with_deadline(mut self, deadline_at: Option<DateTime<Utc>>) -> Self {
+        self.deadline_at = deadline_at;
+        self
+    }
+
+    /// Cap a child wait to this execution's remaining budget after reserving
+    /// time for cancellation, run finalization, and queue acknowledgement.
+    pub fn cap_wait_to_deadline(
+        &self,
+        requested: std::time::Duration,
+        reserve: std::time::Duration,
+    ) -> Option<std::time::Duration> {
+        let Some(deadline_at) = self.deadline_at else {
+            return Some(requested);
+        };
+        let remaining = (deadline_at - Utc::now()).to_std().unwrap_or_default();
+        let available = remaining.saturating_sub(reserve);
+        if available.is_zero() {
+            None
+        } else {
+            Some(requested.min(available))
+        }
+    }
 }
 
 pub trait EventPublisher: Send + Sync {
@@ -322,3 +355,45 @@ pub use queue::{
     MaintenanceMessageBody, QueueAndDatabaseEventPublisher, QueueEventPublisher,
     enqueue_deployment_message, enqueue_redeploy_for_project_reactivation,
 };
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn child_wait_is_capped_before_parent_deadline() {
+        let context = ExecutionContext::minimal(Uuid::now_v7(), Uuid::now_v7(), 1)
+            .with_deadline(Some(Utc::now() + chrono::Duration::seconds(5)));
+        let capped = context
+            .cap_wait_to_deadline(
+                std::time::Duration::from_secs(30),
+                std::time::Duration::from_secs(1),
+            )
+            .expect("deadline should have usable budget");
+        assert!(capped >= std::time::Duration::from_secs(3));
+        assert!(capped <= std::time::Duration::from_secs(4));
+    }
+
+    #[test]
+    fn child_wait_rejects_exhausted_parent_budget() {
+        let context = ExecutionContext::minimal(Uuid::now_v7(), Uuid::now_v7(), 1)
+            .with_deadline(Some(Utc::now() + chrono::Duration::milliseconds(50)));
+        assert!(
+            context
+                .cap_wait_to_deadline(
+                    std::time::Duration::from_secs(1),
+                    std::time::Duration::from_millis(100),
+                )
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn old_execution_context_payloads_default_to_no_deadline() {
+        let context = ExecutionContext::minimal(Uuid::now_v7(), Uuid::now_v7(), 1);
+        let mut json = serde_json::to_value(&context).unwrap();
+        json.as_object_mut().unwrap().remove("deadline_at");
+        let decoded: ExecutionContext = serde_json::from_value(json).unwrap();
+        assert!(decoded.deadline_at.is_none());
+    }
+}

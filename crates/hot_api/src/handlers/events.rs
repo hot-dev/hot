@@ -28,6 +28,7 @@ use hot::blob::BlobStore;
 /// This MUST match the worker's event queue name ("hot:event").
 const API_EVENT_QUEUE_NAME: &str = "hot:event";
 const RESERVED_EVENT_PREFIX: &str = "hot:";
+const EXTERNAL_CALL_EVENT_TYPE: &str = "hot:call";
 
 static API_EVENT_QUEUE: OnceCell<Arc<hot::queue::ProcessingQueue<hot::data::msg::Message>>> =
     OnceCell::new();
@@ -81,7 +82,7 @@ pub struct PublishedEvent {
 pub(super) fn require_external_event_type(
     event_type: &str,
 ) -> Result<(), (StatusCode, Json<ApiErrorResponse>)> {
-    if event_type.starts_with(RESERVED_EVENT_PREFIX) {
+    if event_type.starts_with(RESERVED_EVENT_PREFIX) && event_type != EXTERNAL_CALL_EVENT_TYPE {
         return Err((
             StatusCode::FORBIDDEN,
             Json(ApiErrorResponse::new(
@@ -169,6 +170,8 @@ pub async fn publish_event_internal(
         access_id,
         agent_type: None,
         queue_timing: None,
+        // Enqueue-only producer context; the worker stamps deadline_at at admission
+        deadline_at: None,
     };
 
     // Create the event message
@@ -543,9 +546,84 @@ mod tests {
     }
 
     #[test]
-    fn external_event_types_reject_reserved_control_namespace() {
+    fn external_event_types_only_allow_public_hot_call() {
+        assert!(require_external_event_type("hot:call").is_ok());
         assert!(require_external_event_type("hot:rerun").is_err());
+        assert!(require_external_event_type("hot:schedule").is_err());
         assert!(require_external_event_type("hot:mcp:call").is_err());
         assert!(require_external_event_type("user:created").is_ok());
+    }
+
+    #[tokio::test]
+    async fn published_event_context_carries_no_deadline() {
+        use hot::queue::Queue;
+
+        let db = hot::db::test_db().await;
+        let data = hot::db::insert_test_data(&db).await.unwrap();
+
+        let conf = val!({
+            "queue": {
+                "type": "memory",
+            },
+            "serialization": {
+                "type": "json",
+            },
+        });
+
+        let now = chrono::Utc::now();
+        let api_key = ApiKey {
+            api_key_id: Uuid::now_v7(),
+            env_id: data.env_id,
+            description: "test".to_string(),
+            key_data: serde_json::json!({"hash": "test"}),
+            active: true,
+            created_by_user_id: data.user_id,
+            created_at: now,
+            updated_at: now,
+            updated_by_user_id: None,
+            active_toggle_at: None,
+            active_toggle_by_user_id: None,
+            permissions: serde_json::Value::Null,
+        };
+
+        let published = publish_event_internal(
+            &db,
+            &conf,
+            &api_key,
+            "order:created",
+            &serde_json::json!({"answer": 42}),
+            Uuid::now_v7(),
+            None,
+        )
+        .await
+        .expect("publish_event_internal should succeed");
+
+        // The "hot:event" memory channels are process-wide, so other tests in
+        // this binary may have enqueued messages too. Ours must be present
+        // because the enqueue above completed; skip any that are not ours.
+        let queue = get_event_queue(&conf).expect("event queue");
+        let mut published_message = None;
+        while let Some(message) = queue.dequeue().await.expect("dequeue should not fail") {
+            if message.id == published.event_id {
+                published_message = Some(message);
+                break;
+            }
+        }
+        let message = published_message.expect("published event should be in the queue");
+
+        let event_message = hot::lang::event::EventMessage::try_from(message)
+            .expect("queued message should decode as EventMessage");
+        assert!(
+            event_message.body.execution_context.deadline_at.is_none(),
+            "producer contexts must not carry a deadline; the worker stamps it at admission"
+        );
+        assert_eq!(
+            event_message.body.execution_context.run_type_id,
+            hot::db::run::RunType::Event.as_id()
+        );
+        assert_eq!(
+            event_message.body.execution_context.event_id,
+            Some(published.event_id)
+        );
     }
 }

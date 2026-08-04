@@ -12,7 +12,7 @@
 //! - Resource limits resolved via 5-tier hierarchy (BoxLimits)
 //! - All Linux capabilities dropped, runs as `nobody`
 
-use crate::lang::hot::task::TaskRequest;
+use crate::lang::hot::task::{TaskRequest, fail_task_after_enqueue_error};
 use crate::lang::hot::r#type::HotResult;
 use crate::queue::Queue;
 use crate::val::Val;
@@ -23,6 +23,13 @@ use bollard::query_parameters::{
     CreateImageOptionsBuilder, LogsOptionsBuilder, WaitContainerOptionsBuilder,
 };
 use futures::stream::StreamExt;
+
+/// `box/start` executes on a blocking VM thread. Bound every async bridge so
+/// a slow database or Redis connection cannot outlive the parent run timeout.
+const BOX_START_IO_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+/// Quota calculation is intentionally allowed a little longer than a single
+/// write because it aggregates usage across several tables.
+const BOX_QUOTA_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
 
 // =============================================================================
 // Image Denylist
@@ -109,10 +116,18 @@ pub fn start(vm: &mut crate::lang::runtime::vm::VirtualMachine, args: &[Val]) ->
 
     // CUS quota enforcement
     if let Some(org_id) = ctx.org_id {
-        let enforcement_result = tokio::runtime::Handle::current()
-            .block_on(async { enforce_cus_quota(&db, &org_id).await });
-        if let Err(msg) = enforcement_result {
-            return HotResult::Err(Val::from(msg));
+        let enforcement_result = tokio::runtime::Handle::current().block_on(async {
+            tokio::time::timeout(BOX_QUOTA_TIMEOUT, enforce_cus_quota(&db, &org_id)).await
+        });
+        match enforcement_result {
+            Ok(Ok(())) => {}
+            Ok(Err(msg)) => return HotResult::Err(Val::from(msg)),
+            Err(_) => {
+                return HotResult::Err(Val::from(format!(
+                    "::hot::box/start: quota check timed out after {}s",
+                    BOX_QUOTA_TIMEOUT.as_secs()
+                )));
+            }
         }
     }
 
@@ -172,55 +187,107 @@ pub fn start(vm: &mut crate::lang::runtime::vm::VirtualMachine, args: &[Val]) ->
         origin_run_id: Some(ctx.run_id.to_string()),
     };
 
-    // Ensure the origin run record exists before inserting the task (prevents FK violation)
-    tokio::runtime::Handle::current().block_on(async {
-        if let Err(e) = crate::db::run::Run::ensure_run_exists(
-            &db,
-            &ctx.run_id,
-            &env_id,
-            &stream_id,
-            Some(&build_id),
-            ctx.run_type_id,
-            None,
-            &ctx.user_id.unwrap_or(uuid::Uuid::nil()),
-            ctx.org_id.as_ref(),
+    let start_result = tokio::runtime::Handle::current().block_on(async {
+        match tokio::time::timeout(
+            BOX_START_IO_TIMEOUT,
+            crate::db::run::Run::ensure_run_exists(
+                &db,
+                &ctx.run_id,
+                &env_id,
+                &stream_id,
+                Some(&build_id),
+                ctx.run_type_id,
+                None,
+                &ctx.user_id.unwrap_or(uuid::Uuid::nil()),
+                ctx.org_id.as_ref(),
+            ),
         )
         .await
         {
-            tracing::warn!(task_id = %task_id, "::hot::box/start: failed to ensure origin run exists: {}", e);
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => {
+                return Err(format!(
+                    "::hot::box/start: failed to create origin run: {}",
+                    e
+                ));
+            }
+            Err(_) => {
+                return Err(format!(
+                    "::hot::box/start: origin run write timed out after {}s",
+                    BOX_START_IO_TIMEOUT.as_secs()
+                ));
+            }
         }
-    });
 
-    // Insert task row and enqueue
-    tokio::runtime::Handle::current().block_on(async {
         let args_opt = if args_json.is_null() {
             None
         } else {
             Some(&args_json)
         };
-        if let Err(e) = crate::db::Task::insert(
-            &db,
-            &task_id,
-            &env_id,
-            &stream_id,
-            &build_id,
-            Some(&ctx.run_id),
-            "::hot::box/start",
-            args_opt,
-            None,
-            "container",
-            timeout_ms as i64,
-            ctx.user_id.as_ref(),
+        match tokio::time::timeout(
+            BOX_START_IO_TIMEOUT,
+            crate::db::Task::insert(
+                &db,
+                &task_id,
+                &env_id,
+                &stream_id,
+                &build_id,
+                Some(&ctx.run_id),
+                "::hot::box/start",
+                args_opt,
+                None,
+                "container",
+                timeout_ms as i64,
+                ctx.user_id.as_ref(),
+            ),
         )
         .await
         {
-            tracing::error!(task_id = %task_id, "::hot::box/start: failed to insert task: {}", e);
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => {
+                return Err(format!("::hot::box/start: failed to insert task: {}", e));
+            }
+            Err(_) => {
+                return Err(format!(
+                    "::hot::box/start: task insert timed out after {}s",
+                    BOX_START_IO_TIMEOUT.as_secs()
+                ));
+            }
         }
 
-        if let Err(e) = task_queue.enqueue(request).await {
-            tracing::error!(task_id = %task_id, "::hot::box/start: failed to enqueue task: {}", e);
-        }
+        let enqueue_error =
+            match tokio::time::timeout(BOX_START_IO_TIMEOUT, task_queue.enqueue(request)).await {
+                Ok(Ok(())) => return Ok(()),
+                Ok(Err(e)) => format!("failed to enqueue task: {}", e),
+                Err(_) => format!(
+                    "queue write timed out after {}s",
+                    BOX_START_IO_TIMEOUT.as_secs()
+                ),
+            };
+
+        // The task row is already visible. Make the enqueue failure terminal
+        // so callers never receive an ID that can remain queued forever —
+        // but only while the row is still queued: the enqueue may have
+        // landed server-side despite the client-side failure, and a worker
+        // that already claimed the task must not be clobbered.
+        let failure = serde_json::json!({
+            "$type": "::hot::run/Failure",
+            "$val": {"msg": enqueue_error.clone()}
+        });
+        fail_task_after_enqueue_error(
+            &db,
+            &task_id,
+            "::hot::box/start",
+            &failure,
+            BOX_START_IO_TIMEOUT,
+        )
+        .await;
+        Err(format!("::hot::box/start: {}", enqueue_error))
     });
+    if let Err(e) = start_result {
+        tracing::error!(task_id = %task_id, "{}", e);
+        return HotResult::Err(Val::from(e));
+    }
 
     tracing::debug!(
         task_id = %task_id,
@@ -566,6 +633,9 @@ fn validate_resource_path(p: &str) -> Result<String, String> {
 static CUS_QUOTA_CACHE: std::sync::OnceLock<
     parking_lot::Mutex<ahash::AHashMap<uuid::Uuid, CachedQuotaDecision>>,
 > = std::sync::OnceLock::new();
+static CUS_QUOTA_LOCKS: std::sync::OnceLock<
+    tokio::sync::Mutex<ahash::AHashMap<uuid::Uuid, std::sync::Weak<tokio::sync::Mutex<()>>>>,
+> = std::sync::OnceLock::new();
 
 const CUS_QUOTA_CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(30);
 const CUS_QUOTA_DENY_CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(5);
@@ -579,6 +649,23 @@ struct CachedQuotaDecision {
 fn cus_quota_cache() -> &'static parking_lot::Mutex<ahash::AHashMap<uuid::Uuid, CachedQuotaDecision>>
 {
     CUS_QUOTA_CACHE.get_or_init(|| parking_lot::Mutex::new(ahash::AHashMap::new()))
+}
+
+fn cus_quota_locks()
+-> &'static tokio::sync::Mutex<ahash::AHashMap<uuid::Uuid, std::sync::Weak<tokio::sync::Mutex<()>>>>
+{
+    CUS_QUOTA_LOCKS.get_or_init(|| tokio::sync::Mutex::new(ahash::AHashMap::new()))
+}
+
+async fn cus_quota_org_lock(org_id: uuid::Uuid) -> std::sync::Arc<tokio::sync::Mutex<()>> {
+    let mut locks = cus_quota_locks().lock().await;
+    locks.retain(|_, lock| lock.strong_count() > 0);
+    if let Some(lock) = locks.get(&org_id).and_then(std::sync::Weak::upgrade) {
+        return lock;
+    }
+    let lock = std::sync::Arc::new(tokio::sync::Mutex::new(()));
+    locks.insert(org_id, std::sync::Arc::downgrade(&lock));
+    lock
 }
 
 fn cached_quota_decision(org_id: &uuid::Uuid) -> Option<Result<(), String>> {
@@ -620,6 +707,15 @@ async fn enforce_cus_quota(
     db: &crate::db::DatabasePool,
     org_id: &uuid::Uuid,
 ) -> Result<(), String> {
+    if let Some(cached) = cached_quota_decision(org_id) {
+        return cached;
+    }
+
+    // A cold cache can be hit by several parallel box starts from the same
+    // handler. Coalesce those misses per org so only one multi-query usage
+    // aggregation runs; followers consume the decision it stores below.
+    let org_lock = cus_quota_org_lock(*org_id).await;
+    let _guard = org_lock.lock().await;
     if let Some(cached) = cached_quota_decision(org_id) {
         return cached;
     }
@@ -958,115 +1054,124 @@ pub fn quota(vm: &mut crate::lang::runtime::vm::VirtualMachine, args: &[Val]) ->
     };
 
     let result = tokio::runtime::Handle::current().block_on(async {
-        let features = crate::db::features::Features::resolve_for_org(&db, &org_id).await;
+        tokio::time::timeout(BOX_QUOTA_TIMEOUT, async {
+            let features = crate::db::features::Features::resolve_for_org(&db, &org_id).await;
 
-        let subscription = crate::db::subscription::OrgPlan::get_by_org_id(&db, &org_id).await;
+            let subscription = crate::db::subscription::OrgPlan::get_by_org_id(&db, &org_id).await;
 
-        let is_free = match subscription.as_ref() {
-            Ok(subscription) => {
-                crate::db::subscription::Plan::get_by_id(&db, &subscription.plan_uuid)
+            let is_free = match subscription.as_ref() {
+                Ok(subscription) => {
+                    crate::db::subscription::Plan::get_by_id(&db, &subscription.plan_uuid)
+                        .await
+                        .map(|plan| plan.is_free_plan())
+                        .unwrap_or(false)
+                }
+                Err(_) => false,
+            };
+
+            let period_start = subscription
+                .as_ref()
+                .ok()
+                .and_then(|s| s.current_period_start)
+                .unwrap_or_else(chrono::Utc::now);
+
+            let usage = crate::db::subscription::OrgUsageStats::calculate(
+                &db,
+                &org_id,
+                period_start,
+                features.call_retention_days(),
+            )
+            .await
+            .ok();
+
+            let minutes_remaining = {
+                let limit = features.task_minutes_per_month();
+                if limit < 0 {
+                    -1i64
+                } else {
+                    let used_ms = usage.as_ref().map(|u| u.task_duration_ms).unwrap_or(0);
+                    let used_min = used_ms / 60_000;
+                    if is_free {
+                        (limit as i64).saturating_sub(used_min).max(0)
+                    } else {
+                        // Paid plans: can go negative (overage)
+                        (limit as i64) - used_min
+                    }
+                }
+            };
+
+            let concurrent_remaining = {
+                let limit = features.box_concurrent_tasks();
+                if limit < 0 {
+                    -1i64
+                } else {
+                    // Heartbeat-aware count: matches the worker-side enforcement
+                    // in `hot_task_worker::process_task` so the UI doesn't show
+                    // "0 remaining" while the periodic reaper is still cleaning
+                    // up zombies from a dead worker.
+                    let running = crate::db::Task::count_running_containers_for_org(
+                        &db,
+                        &org_id,
+                        crate::db::task::QUOTA_HEARTBEAT_FRESH_SECS,
+                    )
                     .await
-                    .map(|plan| plan.is_free_plan())
-                    .unwrap_or(false)
-            }
-            Err(_) => false,
-        };
+                    .unwrap_or(0);
+                    (limit).saturating_sub(running).max(0)
+                }
+            };
 
-        let period_start = subscription
-            .as_ref()
-            .ok()
-            .and_then(|s| s.current_period_start)
-            .unwrap_or_else(chrono::Utc::now);
+            let compute_units_used = usage.as_ref().map(|u| u.compute_units).unwrap_or(0);
 
-        let usage = crate::db::subscription::OrgUsageStats::calculate(
-            &db,
-            &org_id,
-            period_start,
-            features.call_retention_days(),
-        )
+            let compute_units_remaining = {
+                let limit = features.compute_units_per_month();
+                if limit < 0 {
+                    -1i64
+                } else {
+                    let remaining = limit.saturating_sub(compute_units_used);
+                    if is_free {
+                        remaining.max(0)
+                    } else {
+                        limit - compute_units_used
+                    }
+                }
+            };
+
+            let overage = if is_free {
+                false
+            } else {
+                minutes_remaining < 0 || compute_units_remaining < 0
+            };
+
+            let mut map = indexmap::IndexMap::new();
+            map.insert(Val::from("$type"), Val::from("::hot::box/BoxQuota"));
+            let mut val_map = indexmap::IndexMap::new();
+            val_map.insert(Val::from("minutes-remaining"), Val::Int(minutes_remaining));
+            val_map.insert(
+                Val::from("compute-units-remaining"),
+                Val::Int(compute_units_remaining),
+            );
+            val_map.insert(
+                Val::from("compute-units-used"),
+                Val::Int(compute_units_used),
+            );
+            val_map.insert(
+                Val::from("concurrent-remaining"),
+                Val::Int(concurrent_remaining),
+            );
+            val_map.insert(Val::from("overage"), Val::Bool(overage));
+            map.insert(Val::from("$val"), Val::Map(Box::new(val_map)));
+            Val::Map(Box::new(map))
+        })
         .await
-        .ok();
-
-        let minutes_remaining = {
-            let limit = features.task_minutes_per_month();
-            if limit < 0 {
-                -1i64
-            } else {
-                let used_ms = usage.as_ref().map(|u| u.task_duration_ms).unwrap_or(0);
-                let used_min = used_ms / 60_000;
-                if is_free {
-                    (limit as i64).saturating_sub(used_min).max(0)
-                } else {
-                    // Paid plans: can go negative (overage)
-                    (limit as i64) - used_min
-                }
-            }
-        };
-
-        let concurrent_remaining = {
-            let limit = features.box_concurrent_tasks();
-            if limit < 0 {
-                -1i64
-            } else {
-                // Heartbeat-aware count: matches the worker-side enforcement
-                // in `hot_task_worker::process_task` so the UI doesn't show
-                // "0 remaining" while the periodic reaper is still cleaning
-                // up zombies from a dead worker.
-                let running = crate::db::Task::count_running_containers_for_org(
-                    &db,
-                    &org_id,
-                    crate::db::task::QUOTA_HEARTBEAT_FRESH_SECS,
-                )
-                .await
-                .unwrap_or(0);
-                (limit).saturating_sub(running).max(0)
-            }
-        };
-
-        let compute_units_used = usage.as_ref().map(|u| u.compute_units).unwrap_or(0);
-
-        let compute_units_remaining = {
-            let limit = features.compute_units_per_month();
-            if limit < 0 {
-                -1i64
-            } else {
-                let remaining = limit.saturating_sub(compute_units_used);
-                if is_free {
-                    remaining.max(0)
-                } else {
-                    limit - compute_units_used
-                }
-            }
-        };
-
-        let overage = if is_free {
-            false
-        } else {
-            minutes_remaining < 0 || compute_units_remaining < 0
-        };
-
-        let mut map = indexmap::IndexMap::new();
-        map.insert(Val::from("$type"), Val::from("::hot::box/BoxQuota"));
-        let mut val_map = indexmap::IndexMap::new();
-        val_map.insert(Val::from("minutes-remaining"), Val::Int(minutes_remaining));
-        val_map.insert(
-            Val::from("compute-units-remaining"),
-            Val::Int(compute_units_remaining),
-        );
-        val_map.insert(
-            Val::from("compute-units-used"),
-            Val::Int(compute_units_used),
-        );
-        val_map.insert(
-            Val::from("concurrent-remaining"),
-            Val::Int(concurrent_remaining),
-        );
-        val_map.insert(Val::from("overage"), Val::Bool(overage));
-        map.insert(Val::from("$val"), Val::Map(Box::new(val_map)));
-        Val::Map(Box::new(map))
     });
 
-    HotResult::Ok(result)
+    match result {
+        Ok(result) => HotResult::Ok(result),
+        Err(_) => HotResult::Err(Val::from(format!(
+            "::hot::box/quota: query timed out after {}s",
+            BOX_QUOTA_TIMEOUT.as_secs()
+        ))),
+    }
 }
 
 /// Get the resolved container resource limits for the current org's plan.
@@ -1095,37 +1200,46 @@ pub fn limits(vm: &mut crate::lang::runtime::vm::VirtualMachine, args: &[Val]) -
     };
 
     let result = tokio::runtime::Handle::current().block_on(async {
-        let features = crate::db::features::Features::resolve_for_org(&db, &org_id).await;
+        tokio::time::timeout(BOX_START_IO_TIMEOUT, async {
+            let features = crate::db::features::Features::resolve_for_org(&db, &org_id).await;
 
-        let memory_mb = features.box_memory_mb();
-        let cpu_quota = features.box_cpu_quota();
-        let tmp_size_mb = features.box_tmp_size_mb();
-        let disk_size_mb = features.box_disk_size_mb();
-        let timeout_secs = features.box_timeout_secs();
-        let network = features.box_network_allowed();
+            let memory_mb = features.box_memory_mb();
+            let cpu_quota = features.box_cpu_quota();
+            let tmp_size_mb = features.box_tmp_size_mb();
+            let disk_size_mb = features.box_disk_size_mb();
+            let timeout_secs = features.box_timeout_secs();
+            let network = features.box_network_allowed();
 
-        // Convert cpu_quota (Docker microseconds per 100ms period) to percentage
-        // 100_000 = 100%, 50_000 = 50%, 10_000 = 10%
-        let cpu_pct = if cpu_quota < 0 {
-            100i64 // unlimited = 100%
-        } else {
-            (cpu_quota / 1000).min(100)
-        };
+            // Convert cpu_quota (Docker microseconds per 100ms period) to percentage
+            // 100_000 = 100%, 50_000 = 50%, 10_000 = 10%
+            let cpu_pct = if cpu_quota < 0 {
+                100i64 // unlimited = 100%
+            } else {
+                (cpu_quota / 1000).min(100)
+            };
 
-        let mut map = indexmap::IndexMap::new();
-        map.insert(Val::from("$type"), Val::from("::hot::box/BoxLimits"));
-        let mut val_map = indexmap::IndexMap::new();
-        val_map.insert(Val::from("memory-mb"), Val::Int(memory_mb));
-        val_map.insert(Val::from("cpu-pct"), Val::Int(cpu_pct));
-        val_map.insert(Val::from("tmp-mb"), Val::Int(tmp_size_mb));
-        val_map.insert(Val::from("disk-mb"), Val::Int(disk_size_mb));
-        val_map.insert(Val::from("timeout-secs"), Val::Int(timeout_secs));
-        val_map.insert(Val::from("network"), Val::Bool(network));
-        map.insert(Val::from("$val"), Val::Map(Box::new(val_map)));
-        Val::Map(Box::new(map))
+            let mut map = indexmap::IndexMap::new();
+            map.insert(Val::from("$type"), Val::from("::hot::box/BoxLimits"));
+            let mut val_map = indexmap::IndexMap::new();
+            val_map.insert(Val::from("memory-mb"), Val::Int(memory_mb));
+            val_map.insert(Val::from("cpu-pct"), Val::Int(cpu_pct));
+            val_map.insert(Val::from("tmp-mb"), Val::Int(tmp_size_mb));
+            val_map.insert(Val::from("disk-mb"), Val::Int(disk_size_mb));
+            val_map.insert(Val::from("timeout-secs"), Val::Int(timeout_secs));
+            val_map.insert(Val::from("network"), Val::Bool(network));
+            map.insert(Val::from("$val"), Val::Map(Box::new(val_map)));
+            Val::Map(Box::new(map))
+        })
+        .await
     });
 
-    HotResult::Ok(result)
+    match result {
+        Ok(result) => HotResult::Ok(result),
+        Err(_) => HotResult::Err(Val::from(format!(
+            "::hot::box/limits: query timed out after {}s",
+            BOX_START_IO_TIMEOUT.as_secs()
+        ))),
+    }
 }
 
 // =============================================================================
@@ -1474,6 +1588,35 @@ mod tests {
             }
             _ => panic!("Expected Ok(Map)"),
         }
+    }
+
+    #[tokio::test]
+    async fn quota_lock_coalesces_parallel_starts_for_the_same_org() {
+        let org_id = uuid::Uuid::now_v7();
+        let other_org_id = uuid::Uuid::now_v7();
+        let first = cus_quota_org_lock(org_id).await;
+        let same_org = cus_quota_org_lock(org_id).await;
+        let other_org = cus_quota_org_lock(other_org_id).await;
+
+        assert!(std::sync::Arc::ptr_eq(&first, &same_org));
+        assert!(!std::sync::Arc::ptr_eq(&first, &other_org));
+
+        let guard = first.lock().await;
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(20), same_org.lock())
+                .await
+                .is_err()
+        );
+        drop(guard);
+
+        drop(first);
+        drop(same_org);
+        let stale_org_id = org_id;
+        let _trigger_cleanup = cus_quota_org_lock(uuid::Uuid::now_v7()).await;
+        assert!(
+            !cus_quota_locks().lock().await.contains_key(&stale_org_id),
+            "inactive org locks must not accumulate for the worker lifetime"
+        );
     }
 
     // stats(), quota(), limits() require VM access with execution context and DB —

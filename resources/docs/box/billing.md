@@ -14,11 +14,31 @@ CUS measure container resource usage for billing. The formula:
 CUS = ceil(wall_clock_seconds × size_multiplier)
 ```
 
-- **wall_clock_seconds** — Actual execution time
+- **wall_clock_seconds** — Billable execution time (see [What Counts as Billable Time](#what-counts-as-billable-time))
 - **size_multiplier** — Multiplier from the container size preset
 - **ceil** — Rounds up (e.g. 0.5 seconds at 1x = 1 CUS)
 
 A 10-second run at `small` (1.0x) consumes 10 CUS. The same run at `nano` (0.25x) consumes 3 CUS.
+
+## What Counts as Billable Time
+
+Billable time measures your workload's execution window, not the platform's overhead. The clock starts when your container begins booting and stops when your command exits.
+
+**Billed:**
+
+- Container boot and runtime initialization
+- Your command's execution, from entrypoint to exit
+
+**Never billed:**
+
+- **Image pull** — transferring your image to the worker, even on a cold worker that has never seen it. Identical tasks cost the same whether or not the worker that picked them up already had the image cached.
+- **Capacity waits** — time spent queued for an execution slot.
+- **Platform cleanup** — log collection and container removal after your command exits.
+- **Preparation** — bundle download and extraction for `mounts` entries, and other worker-side setup.
+
+The `duration-ms` field on task results and completion events reflects billable time. The timing breakdown on each result reports every phase separately — `image-pull-ms`, `slot-wait-ms`, `runtime-start-ms`, `execution-ms`, `logs-collect-ms` — so you can see exactly what was excluded.
+
+**Timeouts are separate from billing.** A container task's `timeout` budget is measured from when a worker claims the task, so it covers preparation phases as well as execution: a slow image pull consumes your task's time budget, but never your CUS.
 
 ## CUS Multiplier by Size
 
