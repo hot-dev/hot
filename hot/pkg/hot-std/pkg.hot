@@ -2,8 +2,8 @@
 
 hot.pkg.hot-std {
   name: "hot.dev/hot-std",
-  version: "2.6.7",
-  hot-min-version: "2.6.7",
+  version: "2.6.8",
+  hot-min-version: "2.6.8",
   description: "The Hot Standard Library",
   author: "Hot Dev",
   email: "hi@hot.dev",
