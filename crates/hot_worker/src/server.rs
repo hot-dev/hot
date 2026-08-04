@@ -5,7 +5,7 @@ use hot::data::serialization::Serialization;
 use hot::lang::event::EventMessage;
 use hot::queue::{
     ConsumerLifecycle, ProcessingQueue, ProcessingQueueLease, Queue, QueueInfrastructureError,
-    QueueType,
+    QueueType, streams::PRESERVE_DELIVERY_COUNT_TOKEN,
 };
 use hot::val;
 use hot::val::Val;
@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::str::FromStr;
 use std::sync::{Arc, OnceLock, RwLock};
-use tokio::sync::{Mutex, mpsc, watch};
+use tokio::sync::{Mutex, Semaphore, mpsc, watch};
 use tokio::task::JoinHandle;
 use tracing::{debug, error, info, warn};
 use uuid::Uuid;
@@ -309,6 +309,21 @@ fn worker_handoff_capacity(worker_count: usize) -> usize {
     worker_count.max(1)
 }
 
+fn blocking_execution_capacity(worker_count: usize, configured_max: i64) -> usize {
+    let workers = worker_count.max(1);
+    let capacity = if configured_max < 0 {
+        workers.saturating_mul(2)
+    } else {
+        usize::try_from(configured_max)
+            .unwrap_or(usize::MAX)
+            .max(workers)
+    };
+    // Semaphore::new panics above MAX_PERMITS, so an oversized configured
+    // value must degrade to the largest legal ceiling instead of crashing
+    // the worker at startup.
+    capacity.min(Semaphore::MAX_PERMITS)
+}
+
 fn duration_ms(duration: std::time::Duration) -> u64 {
     duration.as_millis().min(u128::from(u64::MAX)) as u64
 }
@@ -330,6 +345,29 @@ fn worker_infrastructure_retry_error(message: impl Into<String>, backoff_ms: u64
         message,
         std::time::Duration::from_millis(backoff_ms),
     ))
+}
+
+/// Infrastructure-retry error for setup/admission-timeout redeliveries,
+/// which opt IN to cumulative delivery counting.
+///
+/// These redeliveries flow through `requeue_msg_for_infrastructure_retry`,
+/// which XADDs a FRESH stream entry and thereby resets the Redis delivery
+/// counter — so without the opt-in a deterministically failing setup (e.g.
+/// a bundle that can never finish downloading) would requeue forever. The
+/// token makes the queue carry the cumulative count across requeues so
+/// repeat offenders eventually reach the DLQ.
+///
+/// Only the `[event-setup-timeout]` and `[blocking-slot-admission-timeout]`
+/// redeliveries may use this helper. Every other infrastructure retry —
+/// especially the healthy running-task redelivery deferrals, which
+/// legitimately requeue dozens of times while an hours-long task executes —
+/// must keep the default reset behavior via
+/// `worker_infrastructure_retry_error`.
+fn worker_counted_redelivery_error(message: impl Into<String>, backoff_ms: u64) -> WorkerError {
+    worker_infrastructure_retry_error(
+        format!("{} {}", message.into(), PRESERVE_DELIVERY_COUNT_TOKEN),
+        backoff_ms,
+    )
 }
 
 fn validate_worker_semantics_conf(conf: &Val) -> Result<(), WorkerError> {
@@ -709,9 +747,44 @@ mod graceful_shutdown {
             Ok(failed_count)
         }
     }
+
+    /// RAII guard that unregisters a run from the `ShutdownCoordinator` when
+    /// dropped. `execute_single_event_handler` arms one as its first action so
+    /// every exit path — success, VM/join errors, blocking-slot admission
+    /// failure, early `?` returns, and the hard-timeout backstop — releases
+    /// the caller's `register_run` entry. Without it, error exits leak
+    /// `active_runs`/`active_cancel_tokens` entries forever, so
+    /// `active_run_count()` never returns to zero and every graceful shutdown
+    /// waits out the full drain timeout.
+    ///
+    /// Deliberately held by the async function and NOT moved into the blocking
+    /// VM closure: on hard timeout the async function returns while the
+    /// detached VM thread keeps running, and the run must stop counting as
+    /// active the moment the executor slot is freed — not when the thread
+    /// eventually dies. `unregister_run` is idempotent, so overlapping cleanup
+    /// (e.g. `fail_active_runs` during shutdown) stays harmless.
+    pub struct RunRegistration {
+        coordinator: Arc<ShutdownCoordinator>,
+        run_id: Uuid,
+    }
+
+    impl RunRegistration {
+        pub fn new(coordinator: Arc<ShutdownCoordinator>, run_id: Uuid) -> Self {
+            Self {
+                coordinator,
+                run_id,
+            }
+        }
+    }
+
+    impl Drop for RunRegistration {
+        fn drop(&mut self) {
+            self.coordinator.unregister_run(&self.run_id);
+        }
+    }
 }
 
-use graceful_shutdown::ShutdownCoordinator;
+use graceful_shutdown::{RunRegistration, ShutdownCoordinator};
 
 /// Cache for extracted build paths
 /// Maps build_id -> extracted directory path
@@ -828,6 +901,73 @@ impl BuildPathCache {
 
         Ok(fd_lock::RwLock::new(file))
     }
+}
+
+struct PreparedEventBundle {
+    src_paths: Vec<String>,
+    extract_dir: std::path::PathBuf,
+    manifest: Option<hot::bundle::BundleManifest>,
+}
+
+/// Perform bundle extraction and pre-compilation away from the Tokio runtime.
+/// The caller moves a blocking-execution permit into this function's
+/// spawn_blocking closure, so a timed-out setup cannot accumulate unlimited
+/// detached filesystem/compiler work.
+fn extract_and_precompile_event_bundle(
+    build_data: Vec<u8>,
+    extract_dir: std::path::PathBuf,
+    build_id: Uuid,
+    fallback_project_name: String,
+) -> Result<PreparedEventBundle, String> {
+    hot::bundle::extract_bundle_from_bytes(&build_data, &extract_dir)?;
+
+    let manifest = hot::bundle::read_bundle_manifest(&extract_dir);
+    let build_src_path = extract_dir.join("hot/src");
+    let build_pkg_path = extract_dir.join("hot/pkg");
+    let mut src_paths = vec![build_src_path.to_string_lossy().to_string()];
+    if build_pkg_path.exists() {
+        src_paths.push(build_pkg_path.to_string_lossy().to_string());
+    }
+
+    let bundle_cache_dir = extract_dir.join(".hot").join("cache");
+    if bundle_cache_dir.exists()
+        && let Ok(entries) = std::fs::read_dir(&bundle_cache_dir)
+    {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.to_string_lossy().ends_with(".bc.zst")
+                && let Err(error) = std::fs::remove_file(&path)
+            {
+                tracing::warn!(?path, %error, "Failed to remove stale bundle cache file");
+            }
+        }
+    }
+
+    let bundle_cache = hot::lang::cache::bytecode_cache::BytecodeCache::new(bundle_cache_dir);
+    let (project_name, cache_key, file_hashes) = match &manifest {
+        Ok(manifest) => (
+            manifest.bundle_name.clone(),
+            manifest.cache_key.clone(),
+            Some(manifest.file_hashes.clone()),
+        ),
+        Err(_) => (fallback_project_name, None, None),
+    };
+    hot::lang::engine::Engine::compile_to_cache(
+        &src_paths,
+        &bundle_cache,
+        &project_name,
+        cache_key.as_deref(),
+        file_hashes,
+        None,
+    )
+    .map_err(|error| format!("Failed to pre-compile bundle {build_id}: {error}"))?;
+
+    BuildPathCache::mark_extraction_complete(&extract_dir);
+    Ok(PreparedEventBundle {
+        src_paths,
+        extract_dir,
+        manifest: manifest.ok(),
+    })
 }
 
 // Request message type for hot:request queue
@@ -1038,8 +1178,342 @@ pub const DEFAULT_RUN_TIMEOUT_SECONDS: u64 = 300; // 5 minutes
 /// VM to unwind before the worker hard-detaches the blocking thread and frees the
 /// executor slot. Only applied when `worker.cancel-on-timeout` is enabled.
 pub const RUN_TIMEOUT_HARD_GRACE: std::time::Duration = std::time::Duration::from_secs(5);
+/// Persisting the timeout/result is best-effort after VM execution. It must not
+/// contradict the hard-timeout guarantee by pinning the executor slot forever.
+pub const RUN_RESULT_FLUSH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+/// Wall-clock ceiling for the post-retrieval half of handler preparation:
+/// bytecode-cache work, context loading, store creation, and blocking-slot
+/// admission. The watchdog window for this half starts once source
+/// resolution completes (see `await_event_handler_setup`); the resolution
+/// half — which may include a full bundle download — is bounded separately
+/// by `EVENT_SOURCE_RETRIEVAL_TIMEOUT`.
+pub const EVENT_SETUP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Wall-clock ceiling for the source-resolution phase of handler setup —
+/// tenant/build lookups plus, for cold bundle builds, retrieving the bundle
+/// from storage and extracting/precompiling it.
+///
+/// Storage retrieval needs a bigger budget than the rest of setup because it
+/// is plain async work with NO partial progress: a redelivery restarts the
+/// download from byte zero (extraction/compile at least self-heal across
+/// attempts via their on-disk completion marker). Under the flat 30s
+/// watchdog a bundle that deterministically takes longer to download would
+/// requeue forever — watchdog fires, the event requeues with a fresh
+/// delivery counter, and the next attempt starts the download over. 120s
+/// covers a 2 GB bundle at ~20 MB/s (~100s) with slack; before the setup
+/// watchdog existed this phase was unbounded. For warm builds (live or
+/// already-extracted) resolution completes in microseconds, so the
+/// effective setup bound stays `EVENT_SETUP_TIMEOUT`.
+pub const EVENT_SOURCE_RETRIEVAL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
 pub const DEFAULT_QUEUE_TYPE: QueueType = QueueType::Memory;
 pub const DEFAULT_SERIALIZATION: Serialization = Serialization::ZstdJson; // must match Serialization's #[default]
+
+async fn bounded_run_result_write<F, T>(
+    timeout: std::time::Duration,
+    write: F,
+) -> Result<T, tokio::time::error::Elapsed>
+where
+    F: std::future::Future<Output = T>,
+{
+    tokio::time::timeout(timeout, write).await
+}
+
+/// Ceiling on how long an admitted event handler may wait for a blocking
+/// execution slot.
+///
+/// The wait happens while the handler already holds one of the worker's
+/// executor slots and BEFORE its run budget starts (`deadline_at` is stamped
+/// only after admission), so an unbounded `acquire` here can pin every
+/// executor slot indefinitely once enough detached timed-out VM threads
+/// accumulate — each detached thread intentionally holds its permit until it
+/// actually exits. 30 seconds is long enough to ride out a burst of detached
+/// work draining, but short enough that the un-ACKed event goes back for
+/// redelivery promptly. `min_event_orphan_idle_floor_ms` includes this
+/// ceiling so orphan reclaim can never start a duplicate execution while a
+/// handler is still legally waiting at this gate.
+pub const BLOCKING_SLOT_ACQUIRE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Error message for blocking-slot admission timeouts. The event executor
+/// matches on it (via `is_blocking_slot_timeout_error`) to recognize that the
+/// handler produced no run side effects and the event is safe to leave
+/// un-ACKed for redelivery. The bracketed token exists solely for that
+/// classification: engine errors are propagated verbatim, so matching on
+/// human-readable words alone could misclassify a future engine error that
+/// happens to start the same way. Only this constant may contain the token.
+const BLOCKING_SLOT_TIMEOUT_ERROR: &str =
+    "[blocking-slot-admission-timeout] Timed out waiting for a blocking execution slot";
+const EVENT_SETUP_TIMEOUT_ERROR: &str =
+    "[event-setup-timeout] Timed out preparing an event handler for execution";
+
+fn is_blocking_slot_timeout_error(error: &str) -> bool {
+    error.contains("[blocking-slot-admission-timeout]")
+}
+
+fn is_event_setup_timeout_error(error: &str) -> bool {
+    error.contains("[event-setup-timeout]")
+}
+
+/// Whether a failed handler execution should leave the event un-ACKed for
+/// redelivery. Only safe when the failure is the blocking-slot admission
+/// timeout (the handler produced no run side effects) AND no earlier handler
+/// for the same event already started a run — redelivering after a run
+/// started would duplicate its side effects.
+fn should_redeliver_event_after_handler_error(error: &str, started_any_handler: bool) -> bool {
+    (is_blocking_slot_timeout_error(error) || is_event_setup_timeout_error(error))
+        && !started_any_handler
+}
+
+/// Watchdog for event-handler preparation, split into two sequential
+/// windows so a legitimate cold-bundle download is not confused with a hung
+/// setup:
+///
+/// 1. Source resolution (everything up to the `source_resolved` signal,
+///    which may include a full bundle retrieval from storage): bounded by
+///    `retrieval_timeout`.
+/// 2. Post-retrieval setup (bytecode cache, context loading, stores,
+///    blocking-slot admission — until `setup_complete`): a fresh
+///    `setup_timeout` that starts only when window 1 closes.
+///
+/// Builds that never touch storage pass the checkpoint immediately, so
+/// their effective bound remains `setup_timeout`. Both windows produce the
+/// same `[event-setup-timeout]` token: either way no run side effects have
+/// happened and the event is safe to leave un-ACKed for redelivery.
+async fn await_event_handler_setup<F>(
+    execution: F,
+    mut setup_complete: tokio::sync::oneshot::Receiver<()>,
+    mut source_resolved: tokio::sync::oneshot::Receiver<()>,
+    retrieval_timeout: std::time::Duration,
+    setup_timeout: std::time::Duration,
+) -> Result<(), String>
+where
+    F: std::future::Future<Output = Result<(), String>>,
+{
+    let watchdog = async {
+        // A closed channel counts as passing the checkpoint: the execution
+        // returned through an early error path, and the biased select below
+        // surfaces that original error before this watchdog can fire.
+        if tokio::time::timeout(retrieval_timeout, &mut source_resolved)
+            .await
+            .is_err()
+        {
+            return format!(
+                "{} after {}s resolving handler sources",
+                EVENT_SETUP_TIMEOUT_ERROR,
+                retrieval_timeout.as_secs_f64(),
+            );
+        }
+        tokio::time::sleep(setup_timeout).await;
+        format!(
+            "{} after {}s",
+            EVENT_SETUP_TIMEOUT_ERROR,
+            setup_timeout.as_secs_f64(),
+        )
+    };
+    tokio::pin!(execution);
+    tokio::pin!(watchdog);
+    tokio::select! {
+        biased;
+        result = &mut execution => result,
+        setup = &mut setup_complete => {
+            // A closed channel means the execution returned through an early
+            // error path before setup completed; await it to surface that
+            // original error instead of misclassifying it as a timeout.
+            let _ = setup;
+            execution.await
+        }
+        message = &mut watchdog => Err(message),
+    }
+}
+
+/// Acquire a blocking-execution permit, bounded by `acquire_timeout`
+/// (production passes `BLOCKING_SLOT_ACQUIRE_TIMEOUT`; tests pass a short
+/// duration to stay deterministic without waiting out the real ceiling).
+async fn acquire_blocking_execution_slot(
+    blocking_execution_slots: Arc<Semaphore>,
+    run_id: Uuid,
+    acquire_timeout: std::time::Duration,
+) -> Result<tokio::sync::OwnedSemaphorePermit, String> {
+    match tokio::time::timeout(
+        acquire_timeout,
+        Arc::clone(&blocking_execution_slots).acquire_owned(),
+    )
+    .await
+    {
+        Ok(Ok(permit)) => Ok(permit),
+        Ok(Err(_)) => Err("Blocking execution limiter closed".to_string()),
+        Err(_) => {
+            warn!(
+                run_id = %run_id,
+                timeout_secs = acquire_timeout.as_secs(),
+                available_permits = blocking_execution_slots.available_permits(),
+                "Blocking execution slot admission timed out; detached timed-out VM threads are holding the permits"
+            );
+            Err(format!(
+                "{} after {}s",
+                BLOCKING_SLOT_TIMEOUT_ERROR,
+                acquire_timeout.as_secs()
+            ))
+        }
+    }
+}
+
+/// Floor for the hot:event orphan-reclaim idle threshold.
+///
+/// A handler that claimed an event may legally spend up to
+/// `EVENT_SOURCE_RETRIEVAL_TIMEOUT` resolving sources (including a cold
+/// bundle download), plus `EVENT_SETUP_TIMEOUT` in post-retrieval
+/// preparation (including blocking-slot admission), then `run-timeout` plus
+/// `RUN_TIMEOUT_HARD_GRACE` executing, before the worker gives up — and the
+/// event is only ACKed after that. This floor budgets that FULL legal
+/// pre-ACK lifetime: for a SINGLE-handler event, reclaiming below it would
+/// XAUTOCLAIM an un-ACKed event whose handler is still legally live and start
+/// a duplicate execution on another worker. The extra 5s covers result-flush
+/// and scheduling slack.
+///
+/// In practice the retrieval window is already covered live by the
+/// PEL-touch keepalive, which starts at executor pickup — BEFORE handler
+/// setup begins (see the executor loop in `start_server`) — so this floor
+/// is backstop-only math for the case where the keepalive dies with its
+/// worker.
+///
+/// Multi-handler liveness: this floor budgets ONE full setup (retrieval,
+/// preparation, admission wait) plus ONE run budget, while an event with N
+/// matching handlers executes them serially — each with its own setup and
+/// run budget — before the
+/// single trailing ACK. That gap is closed by the PEL-touch keepalive
+/// (`spawn_event_lease_keepalive`): while an event is being processed, the
+/// executor periodically resets the delivery's PEL idle clock
+/// (ownership-guarded `XCLAIM ... JUSTID`, delivery counter untouched) so
+/// orphan reclaim keeps seeing it as live no matter how many handlers run.
+/// The floor remains the backstop for the keepalive itself: if the touch
+/// task dies with its worker, reclaim still waits out one full legal
+/// single-handler lifetime before redelivering. Raising
+/// `queue.event-orphan-idle-ms` (the configured value is only floored here,
+/// never lowered) is therefore no longer required for multi-handler events,
+/// though it remains available for a wider reclaim margin.
+fn min_event_orphan_idle_floor_ms(run_timeout: std::time::Duration) -> u64 {
+    run_timeout
+        .saturating_add(EVENT_SOURCE_RETRIEVAL_TIMEOUT)
+        .saturating_add(EVENT_SETUP_TIMEOUT)
+        .saturating_add(RUN_TIMEOUT_HARD_GRACE)
+        .saturating_add(std::time::Duration::from_secs(5))
+        .as_millis()
+        .min(u64::MAX as u128) as u64
+}
+
+/// Floor for the PEL-touch keepalive interval. Guards against a tiny
+/// (test-sized) orphan-idle configuration turning the keepalive into a
+/// Redis-hammering busy loop.
+const EVENT_KEEPALIVE_MIN_INTERVAL_MS: u64 = 5_000;
+
+/// Cadence of the PEL-touch keepalive for an executing event: one third of
+/// the effective orphan-reclaim idle threshold, floored at
+/// `EVENT_KEEPALIVE_MIN_INTERVAL_MS`. A live delivery gets at least two
+/// touch opportunities inside every reclaim window, and failed touches
+/// retry at half cadence, so a single missed or failed touch cannot let a
+/// sibling janitor XAUTOCLAIM it mid-execution even at small configured
+/// run-timeouts.
+fn event_keepalive_interval_ms(effective_orphan_idle_ms: u64) -> u64 {
+    (effective_orphan_idle_ms / 3).max(EVENT_KEEPALIVE_MIN_INTERVAL_MS)
+}
+
+/// Abort-on-drop guard around the keepalive task spawned by
+/// `spawn_event_lease_keepalive`. Dropping the guard aborts the touch loop,
+/// so it stops on EVERY processing exit path — ACK, handler error, executor
+/// panic — and can never keep refreshing an entry the worker is no longer
+/// working on.
+struct EventKeepaliveGuard(tokio::task::JoinHandle<()>);
+
+impl Drop for EventKeepaliveGuard {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
+/// Keep a claimed hot:event delivery visibly alive in the Redis PEL while
+/// its (possibly many) handlers execute serially.
+///
+/// `min_event_orphan_idle_floor_ms` budgets one full setup (source
+/// retrieval plus post-retrieval preparation including admission) plus one
+/// run budget, but an N-handler event pays the per-handler cost N times
+/// before the single trailing ACK. Instead of asking operators to
+/// over-provision the reclaim
+/// idle, the executor touches the delivery every
+/// `event_keepalive_interval_ms` (ownership-guarded `XCLAIM ... JUSTID`,
+/// which does not increment the delivery counter) so sibling janitors keep
+/// seeing it as live.
+///
+/// Returns `None` for memory queues (no PEL, no orphan reclaim — nothing to
+/// keep alive) and for already-consumed leases. The returned guard must live
+/// exactly as long as processing: dropping it aborts the touch task.
+///
+/// Coverage window: from executor pickup (the first touch fires
+/// immediately, resetting any idle accrued in the prefetch buffer or the
+/// claimer->executor handoff) through the trailing ACK. Time spent buffered
+/// BEFORE pickup is covered only by the orphan-idle floor, so under
+/// sustained executor saturation a still-buffered delivery can exceed the
+/// reclaim idle and be XAUTOCLAIMed — a pre-existing tail risk the
+/// keepalive narrows but does not close.
+fn spawn_event_lease_keepalive(
+    lease: &ProcessingQueueLease<Message>,
+    effective_orphan_idle_ms: u64,
+    worker_id: usize,
+) -> Option<EventKeepaliveGuard> {
+    let keepalive = match lease {
+        ProcessingQueueLease::Memory(_) => return None,
+        ProcessingQueueLease::Redis(lease) => lease.keepalive()?,
+    };
+    let interval =
+        std::time::Duration::from_millis(event_keepalive_interval_ms(effective_orphan_idle_ms));
+    let handle = tokio::spawn(async move {
+        // First touch immediately: the delivery may have accrued idle in the
+        // prefetch buffer or the claimer->executor handoff before this
+        // executor picked it up, so the reclaim window is reset at execution
+        // start rather than assumed fresh. (Time spent buffered BEFORE
+        // pickup is covered only by the orphan-idle floor; see the fn doc.)
+        let mut delay = std::time::Duration::ZERO;
+        loop {
+            tokio::time::sleep(delay).await;
+            match keepalive.touch().await {
+                Ok(true) => {
+                    debug!(
+                        "hot.dev: WORKER {} keepalive touched event delivery {}",
+                        worker_id,
+                        keepalive.msg_id()
+                    );
+                    delay = interval;
+                }
+                Ok(false) => {
+                    // ACKed concurrently or reclaimed by a sibling: this
+                    // consumer no longer owns the entry, so there is nothing
+                    // left to keep alive (and touching must never steal the
+                    // entry back).
+                    warn!(
+                        "hot.dev: WORKER {} keepalive stopping: event delivery {} is no longer pending for this consumer",
+                        worker_id,
+                        keepalive.msg_id()
+                    );
+                    break;
+                }
+                Err(e) => {
+                    // Transient Redis failure: retry at half cadence so a
+                    // single failed touch (worst case one command timeout
+                    // plus a reconnect) cannot stack a full extra interval
+                    // onto the gap between successful touches — this keeps
+                    // the margin at small configured run-timeouts too.
+                    debug!(
+                        "hot.dev: WORKER {} keepalive touch failed for event delivery {}: {}",
+                        worker_id,
+                        keepalive.msg_id(),
+                        e
+                    );
+                    delay = interval / 2;
+                }
+            }
+        }
+    });
+    Some(EventKeepaliveGuard(handle))
+}
 
 // Simplified approach: ensure proper build isolation without complex caching
 // Each build execution will be isolated by using fresh compilation contexts
@@ -3194,6 +3668,62 @@ async fn find_build_for_function(
 async fn execute_single_event_handler(
     db: &DatabasePool,
     build: &Build,
+    env_id: &Uuid,
+    worker_conf: &Val,
+    event_handler: &EventHandler,
+    event_message: &EventMessage,
+    emitter: Option<std::sync::Arc<dyn EngineEventEmitter>>,
+    event_publisher: Option<std::sync::Arc<dyn EventPublisher>>,
+    encryption: Option<Arc<ContextEncryption>>,
+    cache: Arc<hot::lang::cache::bytecode_cache::BytecodeCache>,
+    shutdown_coordinator: Arc<ShutdownCoordinator>,
+    run_id: Uuid,
+    build_path_cache: Arc<BuildPathCache>,
+    dev_context_storage: Option<DevContextStorage>,
+    stream_publisher: Option<Arc<StreamPubSub>>,
+    task_queue: Arc<ProcessingQueue<TaskRequest>>,
+    execution_services: Arc<WorkerExecutionServices>,
+    blocking_execution_slots: Arc<Semaphore>,
+) -> Result<(), String> {
+    let (setup_complete_tx, setup_complete_rx) = tokio::sync::oneshot::channel();
+    let (source_resolved_tx, source_resolved_rx) = tokio::sync::oneshot::channel();
+    let execution = execute_single_event_handler_inner(
+        db,
+        build,
+        env_id,
+        worker_conf,
+        event_handler,
+        event_message,
+        emitter,
+        event_publisher,
+        encryption,
+        cache,
+        shutdown_coordinator,
+        run_id,
+        build_path_cache,
+        dev_context_storage,
+        stream_publisher,
+        task_queue,
+        execution_services,
+        blocking_execution_slots,
+        source_resolved_tx,
+        setup_complete_tx,
+    );
+
+    await_event_handler_setup(
+        execution,
+        setup_complete_rx,
+        source_resolved_rx,
+        EVENT_SOURCE_RETRIEVAL_TIMEOUT,
+        EVENT_SETUP_TIMEOUT,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn execute_single_event_handler_inner(
+    db: &DatabasePool,
+    build: &Build,
     _env_id: &Uuid,
     worker_conf: &Val,
     event_handler: &EventHandler,
@@ -3209,7 +3739,14 @@ async fn execute_single_event_handler(
     stream_publisher: Option<Arc<StreamPubSub>>, // Stream pub/sub for real-time SSE updates
     task_queue: Arc<ProcessingQueue<TaskRequest>>,
     execution_services: Arc<WorkerExecutionServices>,
+    blocking_execution_slots: Arc<Semaphore>,
+    source_resolved: tokio::sync::oneshot::Sender<()>,
+    setup_complete: tokio::sync::oneshot::Sender<()>,
 ) -> Result<(), String> {
+    // The caller already registered `run_id`; from here this guard owns
+    // unregistration on every exit path (see `RunRegistration` docs).
+    let _run_registration = RunRegistration::new(Arc::clone(&shutdown_coordinator), run_id);
+
     // TIMING: Track execution phases
     let timing_start = std::time::Instant::now();
 
@@ -3355,6 +3892,8 @@ async fn execute_single_event_handler(
         // Normal (non-retry) scheduled events have retry_attempt = 0.
         event_message.body.execution_context.retry_attempt
     };
+
+    let run_timeout = get_run_timeout(worker_conf);
 
     let mut _execution_context = ExecutionContext::new_with_event_and_origin(
         run_id,
@@ -3510,159 +4049,55 @@ async fn execute_single_event_handler(
                                             build.build_id,
                                             build_data.len()
                                         );
-
-                                        match hot::bundle::extract_bundle_from_bytes(
-                                            &build_data,
-                                            &extract_dir,
-                                        ) {
-                                            Ok(()) => {
-                                                debug!(
-                                                    "Successfully extracted build {} to {}",
+                                        let prep_permit = acquire_blocking_execution_slot(
+                                            Arc::clone(&blocking_execution_slots),
+                                            run_id,
+                                            BLOCKING_SLOT_ACQUIRE_TIMEOUT,
+                                        )
+                                        .await?;
+                                        let prep_extract_dir = extract_dir.clone();
+                                        let prep_build_id = build.build_id;
+                                        let prep_project_name = project.name.clone();
+                                        match tokio::task::spawn_blocking(move || {
+                                            let _prep_permit = prep_permit;
+                                            extract_and_precompile_event_bundle(
+                                                build_data,
+                                                prep_extract_dir,
+                                                prep_build_id,
+                                                prep_project_name,
+                                            )
+                                        })
+                                        .await
+                                        {
+                                            Ok(Ok(prepared)) => {
+                                                build_path_cache.insert(
                                                     build.build_id,
-                                                    extract_dir.display()
+                                                    prepared.extract_dir.clone(),
                                                 );
-
-                                                // Read the bundle manifest for metadata
-                                                let manifest =
-                                                    hot::bundle::read_bundle_manifest(&extract_dir);
-                                                if let Ok(ref m) = manifest {
-                                                    debug!(
-                                                        "Bundle manifest: name={}, cache_key={:?}, files={}",
-                                                        m.bundle_name,
-                                                        m.cache_key,
-                                                        m.file_hashes.len()
-                                                    );
-                                                }
-
-                                                // Use the extracted paths for both src and pkg (dependencies)
-                                                let build_src_path = extract_dir.join("hot/src");
-                                                let build_pkg_path = extract_dir.join("hot/pkg");
-                                                let mut paths = vec![
-                                                    build_src_path.to_string_lossy().to_string(),
-                                                ];
-                                                // Include pkg path if it exists (bundled dependencies)
-                                                if build_pkg_path.exists() {
-                                                    paths.push(
-                                                        build_pkg_path
-                                                            .to_string_lossy()
-                                                            .to_string(),
-                                                    );
-                                                }
-
-                                                // Pre-compile the bundle to generate bytecode cache
-                                                // This ensures routing can find functions immediately after extraction
-                                                let bundle_cache_dir =
-                                                    extract_dir.join(".hot").join("cache");
-
-                                                // Clear any stale embedded cache files from the bundle
-                                                // Bundles may contain pre-compiled cache from an older Hot version
-                                                if bundle_cache_dir.exists()
-                                                    && let Ok(entries) =
-                                                        std::fs::read_dir(&bundle_cache_dir)
-                                                {
-                                                    for entry in entries.flatten() {
-                                                        let path = entry.path();
-                                                        if path
-                                                            .to_string_lossy()
-                                                            .ends_with(".bc.zst")
-                                                        {
-                                                            if let Err(e) =
-                                                                std::fs::remove_file(&path)
-                                                            {
-                                                                tracing::warn!(
-                                                                    "Failed to remove stale cache file {:?}: {}",
-                                                                    path,
-                                                                    e
-                                                                );
-                                                            } else {
-                                                                tracing::debug!(
-                                                                    "Removed stale embedded cache file {:?}",
-                                                                    path
-                                                                );
-                                                            }
-                                                        }
-                                                    }
-                                                }
-
-                                                let bundle_cache =
-                                                    hot::lang::cache::bytecode_cache::BytecodeCache::new(
-                                                        bundle_cache_dir,
-                                                    );
-
-                                                // Get project name and cache key from manifest for correct cache key
-                                                let (project_name, cache_key, file_hashes) =
-                                                    match &manifest {
-                                                        Ok(m) => (
-                                                            m.bundle_name.clone(),
-                                                            m.cache_key.clone(),
-                                                            Some(m.file_hashes.clone()),
-                                                        ),
-                                                        Err(_) => {
-                                                            (project.name.clone(), None, None)
-                                                        }
-                                                    };
-
-                                                debug!(
-                                                    "Pre-compiling bundle {} to generate bytecode cache",
-                                                    build.build_id
-                                                );
-                                                match hot::lang::engine::Engine::compile_to_cache(
-                                                    &paths,
-                                                    &bundle_cache,
-                                                    &project_name,
-                                                    cache_key.as_deref(),
-                                                    file_hashes,
-                                                    None, // Bundle builds have deps pre-bundled
-                                                ) {
-                                                    Ok(()) => {
-                                                        debug!(
-                                                            "Bundle {} pre-compiled successfully",
-                                                            build.build_id
-                                                        );
-
-                                                        // Mark extraction complete AFTER bytecode is generated.
-                                                        // This ensures routing won't find the bundle until it's fully ready.
-                                                        BuildPathCache::mark_extraction_complete(
-                                                            &extract_dir,
-                                                        );
-
-                                                        // Store in cache for future use
-                                                        build_path_cache.insert(
-                                                            build.build_id,
-                                                            extract_dir.clone(),
-                                                        );
-
-                                                        (
-                                                            paths,
-                                                            true,
-                                                            Some(extract_dir.clone()),
-                                                            manifest.ok(),
-                                                        )
-                                                        // This is a bundle build
-                                                    }
-                                                    Err(e) => {
-                                                        error!(
-                                                            "Failed to pre-compile bundle {}: {}. Falling back to config paths",
-                                                            build.build_id, e
-                                                        );
-                                                        (
-                                                            hot::project::get_project_src_paths(
-                                                                worker_conf,
-                                                                &project.name,
-                                                            ),
-                                                            false,
-                                                            None,
-                                                            None,
-                                                        )
-                                                    }
-                                                }
+                                                (
+                                                    prepared.src_paths,
+                                                    true,
+                                                    Some(prepared.extract_dir),
+                                                    prepared.manifest,
+                                                )
+                                            }
+                                            Ok(Err(e)) => {
+                                                error!("{}. Falling back to config paths", e);
+                                                (
+                                                    hot::project::get_project_src_paths(
+                                                        worker_conf,
+                                                        &project.name,
+                                                    ),
+                                                    false,
+                                                    None,
+                                                    None,
+                                                )
                                             }
                                             Err(e) => {
                                                 error!(
-                                                    "Failed to extract build {} from storage: {}. Falling back to config paths",
+                                                    "Bundle preparation task failed for {}: {}. Falling back to config paths",
                                                     build.build_id, e
                                                 );
-                                                // Fall back to config paths (not a bundle)
                                                 (
                                                     hot::project::get_project_src_paths(
                                                         worker_conf,
@@ -3734,6 +4169,13 @@ async fn execute_single_event_handler(
             } // Close the else block for marker file check
         } // Close the else block for in-memory cache check
     };
+
+    // Source resolution is done — every branch above (live paths, cached
+    // extraction, and the cold storage-retrieval path) has produced its
+    // src_paths. Hand the setup watchdog over from the roomy
+    // EVENT_SOURCE_RETRIEVAL_TIMEOUT window to the tight EVENT_SETUP_TIMEOUT
+    // window for the remaining preparation.
+    let _ = source_resolved.send(());
 
     let timing_after_build_path = timing_start.elapsed();
     debug!(
@@ -4003,9 +4445,6 @@ async fn execute_single_event_handler(
         }
     };
 
-    // Clone execution context (secret_value_hashes already populated by API handler)
-    let execution_context_for_events = _execution_context.clone();
-
     let timing_after_context = timing_start.elapsed();
     debug!(
         "TIMING [{}]: context_loading: {:?} (delta: {:?})",
@@ -4034,11 +4473,49 @@ async fn execute_single_event_handler(
         timing_before_spawn
     );
 
+    // A Tokio spawn_blocking task cannot be forcefully cancelled. Keep the
+    // permit inside the blocking closure so a timed-out, detached VM continues
+    // to count against the process-wide ceiling until it actually exits.
+    //
+    // The acquire is bounded by BLOCKING_SLOT_ACQUIRE_TIMEOUT: this await runs
+    // while the handler already holds an executor slot, so waiting forever here
+    // would let accumulated detached threads pin the whole worker. On timeout
+    // the error propagates to the event executor, which leaves the event
+    // un-ACKed for redelivery (no run side effects have happened yet).
+    let blocking_slot_wait_started = std::time::Instant::now();
+    let blocking_execution_permit = acquire_blocking_execution_slot(
+        blocking_execution_slots,
+        run_id,
+        BLOCKING_SLOT_ACQUIRE_TIMEOUT,
+    )
+    .await?;
+    let blocking_slot_wait = blocking_slot_wait_started.elapsed();
+    if blocking_slot_wait >= std::time::Duration::from_millis(100) {
+        warn!(
+            run_id = %run_id,
+            wait_ms = blocking_slot_wait.as_millis(),
+            "Event handler waited for a blocking execution slot; detached timed-out work is applying backpressure"
+        );
+    }
+
     let file_storage = execution_services.file_storage.clone();
     let store = execution_services
         .store_for(worker_conf, org_id, project.env_id)
         .await;
     let embedding_provider = execution_services.embedding_provider.clone();
+
+    // From this point onward all potentially blocking user-code compilation
+    // and execution runs in spawn_blocking behind its owned permit. Disarm the
+    // setup watchdog immediately before starting the independent run budget.
+    let _ = setup_complete.send(());
+
+    // Align the propagated parent deadline with the timeout clock that starts
+    // immediately below. Time spent queued behind detached blocking work is
+    // backpressure, not part of the newly admitted handler's run budget.
+    _execution_context.deadline_at = chrono::Duration::from_std(run_timeout)
+        .ok()
+        .map(|duration| chrono::Utc::now() + duration);
+    let execution_context_for_events = _execution_context.clone();
 
     let external_cancel = if worker_conf.get_bool_or_default("worker.cancel-on-timeout", true) {
         let token = Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -4049,7 +4526,7 @@ async fn execute_single_event_handler(
     };
     let cancel_timer = external_cancel.as_ref().map(|token| {
         let token = Arc::clone(token);
-        let timeout = get_run_timeout(worker_conf);
+        let timeout = run_timeout;
         tokio::spawn(async move {
             tokio::time::sleep(timeout).await;
             token.store(true, std::sync::atomic::Ordering::Relaxed);
@@ -4075,10 +4552,12 @@ async fn execute_single_event_handler(
         let file_storage = file_storage.clone();
         let run_id_for_timing = run_id;
         let external_cancel = external_cancel.clone();
+        let blocking_execution_permit = blocking_execution_permit;
 
         let panic_label = format!("worker:{}", function_name);
         let spawn_scheduled = std::time::Instant::now();
         tokio::task::spawn_blocking(move || {
+            let _blocking_execution_permit = blocking_execution_permit;
             let spawn_entered = std::time::Instant::now();
             debug!(
                 "TIMING [{}]: spawn_blocking entered",
@@ -4370,7 +4849,6 @@ async fn execute_single_event_handler(
     // non-cooperative orphan is still executing. Cooperative VMs unwind promptly
     // and avoid overlap; for non-cooperative ones the two can briefly run
     // concurrently, which is why event handlers must be idempotent.
-    let run_timeout = get_run_timeout(worker_conf);
     let hard_timeout = if external_cancel.is_some() {
         run_timeout.saturating_add(RUN_TIMEOUT_HARD_GRACE)
     } else {
@@ -4430,18 +4908,47 @@ async fn execute_single_event_handler(
                     failure,
                 ));
                 let flush_started = std::time::Instant::now();
-                if let Err(e) = em.flush_run(run_id).await {
-                    error!("Failed to flush timeout failure for run {}: {}", run_id, e);
+                match bounded_run_result_write(RUN_RESULT_FLUSH_TIMEOUT, em.flush_run(run_id)).await {
+                    Ok(Ok(())) => {}
+                    Ok(Err(e)) => {
+                        error!("Failed to flush timeout failure for run {}: {}", run_id, e);
+                    }
+                    Err(_) => {
+                        error!(
+                            run_id = %run_id,
+                            timeout_secs = RUN_RESULT_FLUSH_TIMEOUT.as_secs(),
+                            "Flushing timeout failure timed out; releasing executor slot"
+                        );
+                    }
                 }
                 debug!(
                     "TIMING [{}]: timeout_flush_run: {:?}",
                     run_id.as_simple(),
                     flush_started.elapsed()
                 );
-            } else if let Err(e) = hot::db::Run::fail_run(db, &run_id, &timeout_error).await {
-                error!("Failed to mark run {} as timed out: {}", run_id, e);
+            } else {
+                match bounded_run_result_write(
+                    RUN_RESULT_FLUSH_TIMEOUT,
+                    hot::db::Run::fail_run(db, &run_id, &timeout_error),
+                )
+                .await
+                {
+                    Ok(Ok(())) => {}
+                    Ok(Err(e)) => {
+                        error!("Failed to mark run {} as timed out: {}", run_id, e);
+                    }
+                    Err(_) => {
+                        error!(
+                            run_id = %run_id,
+                            timeout_secs = RUN_RESULT_FLUSH_TIMEOUT.as_secs(),
+                            "Marking timed-out run failed to finish before executor release"
+                        );
+                    }
+                }
             }
-            shutdown_coordinator.unregister_run(&run_id);
+            // The RunRegistration guard unregisters the run as this return
+            // unwinds — the run stops counting as active now, even though the
+            // detached VM thread may keep executing.
             return Err(timeout_error);
         }
     };
@@ -4493,8 +5000,18 @@ async fn execute_single_event_handler(
     // This guarantees the SSE handler can query the run from the database
     if let Some(ref em) = emitter {
         let flush_started = std::time::Instant::now();
-        if let Err(e) = em.flush_run(run_id).await {
-            tracing::warn!("Failed to flush emitter before stream publish: {}", e);
+        match bounded_run_result_write(RUN_RESULT_FLUSH_TIMEOUT, em.flush_run(run_id)).await {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => {
+                tracing::warn!("Failed to flush emitter before stream publish: {}", e);
+            }
+            Err(_) => {
+                tracing::warn!(
+                    run_id = %run_id,
+                    timeout_secs = RUN_RESULT_FLUSH_TIMEOUT.as_secs(),
+                    "Emitter flush timed out before stream publish"
+                );
+            }
         }
         debug!(
             "TIMING [{}]: flush_run: {:?}",
@@ -4623,8 +5140,7 @@ async fn execute_single_event_handler(
         });
     }
 
-    // Unregister run on successful completion (whether Ok or Err Result)
-    shutdown_coordinator.unregister_run(&run_id);
+    // The RunRegistration guard unregisters the run as this function returns.
     Ok(())
 }
 
@@ -4646,7 +5162,8 @@ pub fn get_resolved_conf(conf: Val) -> Val {
         "shared-process": false,
         "local-write-concurrency": 1i64,
         "startup-runtime-build-limit": 1_000i64,
-        "startup-runtime-repair": true
+        "startup-runtime-repair": true,
+        "max-blocking-executions": -1i64
     });
 
     // Merge with provided conf (the provided conf will override defaults)
@@ -4786,17 +5303,21 @@ pub async fn run_with_components_shared_context_and_db(
     let queue_orphan_idle_ms = worker_conf
         .get_int_or_default("queue.event-orphan-idle-ms", 60_000)
         .max(1) as u64;
-    let min_event_orphan_idle_ms = get_run_timeout(&worker_conf)
-        .saturating_add(RUN_TIMEOUT_HARD_GRACE)
-        .saturating_add(std::time::Duration::from_secs(5))
-        .as_millis()
-        .min(u64::MAX as u128) as u64;
+    // Invariant: reclaim idle must exceed the longest an un-ACKed
+    // single-handler event can legally be alive on a healthy worker —
+    // source retrieval plus post-retrieval setup (including blocking-slot
+    // admission) plus run budget plus hard grace. Events whose serial
+    // multi-handler execution outlives this window stay reclaim-safe via
+    // the PEL-touch keepalive (`spawn_event_lease_keepalive`), for which
+    // this floor is the crash backstop; see
+    // `min_event_orphan_idle_floor_ms`.
+    let min_event_orphan_idle_ms = min_event_orphan_idle_floor_ms(get_run_timeout(&worker_conf));
     let event_orphan_idle_ms = queue_orphan_idle_ms.max(min_event_orphan_idle_ms);
     if event_orphan_idle_ms != queue_orphan_idle_ms {
         tracing::warn!(
             configured_ms = queue_orphan_idle_ms,
             effective_ms = event_orphan_idle_ms,
-            "Raising hot:event orphan reclaim idle to stay beyond worker.run-timeout and avoid duplicate live handler execution"
+            "Raising hot:event orphan reclaim idle to stay beyond blocking-slot admission plus worker.run-timeout and avoid duplicate live handler execution"
         );
     }
 
@@ -5533,6 +6054,11 @@ pub async fn run_with_components_shared_context_and_db(
     let vm_budget =
         hot::runtime_budget::derive_worker_vm_concurrency(&worker_conf, requested_worker_count);
     let worker_count = vm_budget.resolved;
+    let configured_max_blocking_executions =
+        worker_conf.get_int_or_default("worker.max-blocking-executions", -1);
+    let max_blocking_executions =
+        blocking_execution_capacity(worker_count, configured_max_blocking_executions);
+    let blocking_execution_slots = Arc::new(Semaphore::new(max_blocking_executions));
 
     info!(
         "hot.dev: WORKER starting with {} concurrent workers (requested={}, cpu_limit={}, memory_limit={:?}, memory_limit_mb={:?}, explicit_vm_concurrency={}, shared_process={})",
@@ -5543,6 +6069,11 @@ pub async fn run_with_components_shared_context_and_db(
         vm_budget.memory_limit_mb,
         vm_budget.explicit,
         vm_budget.shared_process,
+    );
+    info!(
+        max_blocking_executions,
+        configured_max = configured_max_blocking_executions,
+        "hot.dev: WORKER bounded blocking VM executions"
     );
 
     // Create shared bytecode cache for all workers (in-memory LRU cache)
@@ -6005,6 +6536,7 @@ pub async fn run_with_components_shared_context_and_db(
         let stream_publisher_clone = stream_publisher.clone();
         let task_queue_clone = task_queue.clone();
         let execution_services_clone = execution_services.clone();
+        let blocking_execution_slots_clone = blocking_execution_slots.clone();
         // Per-worker captures of the admin consumer names so the daily
         // queue_cleanup handler (built inside the worker spawn) can pin its
         // queue handles to w0's identity. See comment on `admin_*_name`
@@ -6049,6 +6581,16 @@ pub async fn run_with_components_shared_context_and_db(
                         }
                         ClaimedWorkerQueue::Event(lease) => {
                             let queue_lease_timing = lease.timing();
+                            // Keep this delivery's PEL idle clock refreshed while
+                            // (possibly many) handlers execute serially, so orphan
+                            // reclaim never duplicates a live multi-handler event.
+                            // The guard aborts the touch task on every exit path
+                            // (ACK, error, panic); see spawn_event_lease_keepalive.
+                            let _keepalive_guard = spawn_event_lease_keepalive(
+                                &lease,
+                                event_orphan_idle_ms,
+                                worker_id,
+                            );
                             // Process ONE event message (atomic operation)
                             match lease.process(|message| {
                                 let db_ref = db_clone.clone();
@@ -6064,6 +6606,7 @@ pub async fn run_with_components_shared_context_and_db(
                                 let stream_publisher_ref = stream_publisher_clone.clone();
                                 let task_queue_ref = task_queue_clone.clone();
                                 let execution_services_ref = execution_services_clone.clone();
+                                let blocking_execution_slots_ref = blocking_execution_slots_clone.clone();
                                 // Daily queue_cleanup admin handles. Each is pinned to w0's
                                 // stable consumer name so any XAUTOCLAIM done by
                                 // cleanup_stale_consumers (when draining a stale consumer that
@@ -6384,13 +6927,13 @@ pub async fn run_with_components_shared_context_and_db(
                                                                 {
                                                                     timing.handler_dispatched_at = Some(chrono::Utc::now());
                                                                 }
-                                                                started_any_handler = true;
-                                                                let execution_future = execute_single_event_handler(db, &handler_build, &env_id, &worker_conf_ref, &event_handler, &handler_event_message, _emitter_ref.clone(), _event_publisher_ref.clone(), encryption_ref.clone(), cache_ref.clone(), shutdown_coord_ref.clone(), run_id, build_path_cache_ref.clone(), dev_context_storage_ref.clone(), stream_publisher_ref.clone(), task_queue_ref.clone(), execution_services_ref.clone());
+                                                                let execution_future = execute_single_event_handler(db, &handler_build, &env_id, &worker_conf_ref, &event_handler, &handler_event_message, _emitter_ref.clone(), _event_publisher_ref.clone(), encryption_ref.clone(), cache_ref.clone(), shutdown_coord_ref.clone(), run_id, build_path_cache_ref.clone(), dev_context_storage_ref.clone(), stream_publisher_ref.clone(), task_queue_ref.clone(), execution_services_ref.clone(), blocking_execution_slots_ref.clone());
 
                                                                                             match execution_future.await {
                                                                                                 Ok(()) => {
+                                                                                                    started_any_handler = true;
                                                                                                     debug!("Successfully executed event handler: {}", event_handler.event_handler_id);
-                                                                                                    // Run is already unregistered by execute_single_event_handler
+                                                                                                    // Run is unregistered by execute_single_event_handler's RAII guard on every exit path
 
                                                                                                     // Update run info with routing warning if this is the first handler
                                                                                                     // and a tie-breaker was used (routing_warning is set)
@@ -6400,10 +6943,26 @@ pub async fn run_with_components_shared_context_and_db(
                                                                                                                 warn!("hot.dev: WORKER {} failed to update run {} info with routing warning: {}", worker_id, run_id, e);
                                                                                                             }
                                                                                                 }
+                                                                                                Err(e) if should_redeliver_event_after_handler_error(&e, started_any_handler) => {
+                                                                                                    // Setup or blocking-slot admission timed out before any run side
+                                                                                                    // effects for this event: leave it un-ACKed via the standard
+                                                                                                    // infrastructure-retry path so it is redelivered once detached
+                                                                                                    // blocking work frees capacity. (If an earlier handler already
+                                                                                                    // started a run, the arm below applies instead: redelivering the
+                                                                                                    // whole event would duplicate that run's side effects.)
+                                                                                                    //
+                                                                                                    // These redeliveries opt into cumulative delivery counting: the
+                                                                                                    // infra requeue otherwise resets the delivery counter, and a
+                                                                                                    // deterministically failing setup would loop forever instead of
+                                                                                                    // escalating to the DLQ.
+                                                                                                    warn!("hot.dev: WORKER {} deferring event '{}' for redelivery: {}", worker_id, event_message.body.event.event_type, e);
+                                                                                                    return Err(worker_counted_redelivery_error(e, infra_retry_backoff_ms));
+                                                                                                }
                                                                                                 Err(e) => {
+                                                                                                    started_any_handler = true;
                                                                                                     error!("Failed to execute event handler {}: {}", event_handler.event_handler_id, e);
                                                                                                     all_success = false;
-                                                                                                    // Run is already unregistered by execute_single_event_handler
+                                                                                                    // Run is unregistered by execute_single_event_handler's RAII guard on every exit path
 
                                                                                                     // Still update run info with routing warning even on failure
                                                                                                     if is_first_handler
@@ -7441,6 +8000,28 @@ mod tests {
     use super::*;
     use hot::val;
 
+    #[tokio::test]
+    async fn run_result_write_timeout_bounds_a_stuck_flush() {
+        let started = std::time::Instant::now();
+        let result = bounded_run_result_write(
+            std::time::Duration::from_millis(20),
+            std::future::pending::<Result<(), String>>(),
+        )
+        .await;
+
+        assert!(result.is_err());
+        assert!(started.elapsed() < std::time::Duration::from_secs(1));
+        assert_eq!(
+            bounded_run_result_write(
+                std::time::Duration::from_secs(1),
+                std::future::ready(Ok::<_, String>(())),
+            )
+            .await
+            .unwrap(),
+            Ok(())
+        );
+    }
+
     #[test]
     fn duplicate_function_routing_honors_exact_endpoint_build() {
         let first = Uuid::now_v7();
@@ -7706,6 +8287,489 @@ mod tests {
     fn worker_handoff_capacity_never_drops_to_zero() {
         assert_eq!(worker_handoff_capacity(0), 1);
         assert_eq!(worker_handoff_capacity(4), 4);
+    }
+
+    #[test]
+    fn blocking_execution_capacity_bounds_detached_work() {
+        assert_eq!(blocking_execution_capacity(0, -1), 2);
+        assert_eq!(blocking_execution_capacity(4, -1), 8);
+        assert_eq!(blocking_execution_capacity(4, 0), 4);
+        assert_eq!(blocking_execution_capacity(4, 2), 4);
+        assert_eq!(blocking_execution_capacity(4, 6), 6);
+    }
+
+    #[test]
+    fn blocking_execution_capacity_clamps_to_semaphore_limit() {
+        // Semaphore::new panics above MAX_PERMITS; oversized config must
+        // degrade to the largest legal ceiling instead of crashing startup.
+        assert_eq!(
+            blocking_execution_capacity(4, i64::MAX),
+            Semaphore::MAX_PERMITS
+        );
+        let _ = Semaphore::new(blocking_execution_capacity(4, i64::MAX));
+    }
+
+    #[tokio::test]
+    async fn blocking_slot_admission_times_out_instead_of_pinning_executor() {
+        let slots = Arc::new(Semaphore::new(1));
+        // Simulate a detached timed-out VM thread that still holds its permit.
+        let held = Arc::clone(&slots)
+            .acquire_owned()
+            .await
+            .expect("permit should be available");
+
+        let err = acquire_blocking_execution_slot(
+            Arc::clone(&slots),
+            Uuid::now_v7(),
+            std::time::Duration::from_millis(20),
+        )
+        .await
+        .expect_err("admission must time out while all permits are held");
+        assert!(
+            is_blocking_slot_timeout_error(&err),
+            "unexpected admission error: {err}"
+        );
+
+        drop(held);
+        let permit = acquire_blocking_execution_slot(
+            slots,
+            Uuid::now_v7(),
+            std::time::Duration::from_millis(20),
+        )
+        .await
+        .expect("freed capacity must admit immediately");
+        drop(permit);
+    }
+
+    #[test]
+    fn slot_admission_timeout_redelivers_only_side_effect_free_events() {
+        let timeout_error = format!("{} after 30s", BLOCKING_SLOT_TIMEOUT_ERROR);
+        let setup_timeout_error = format!("{} after 30s", EVENT_SETUP_TIMEOUT_ERROR);
+
+        // No handler started a run yet: safe to leave the event un-ACKed.
+        assert!(should_redeliver_event_after_handler_error(
+            &timeout_error,
+            false
+        ));
+        // An earlier handler already ran: redelivery would duplicate its run.
+        assert!(!should_redeliver_event_after_handler_error(
+            &timeout_error,
+            true
+        ));
+        // Any other handler failure keeps the existing ACK-and-continue path.
+        assert!(!should_redeliver_event_after_handler_error(
+            "Event handler panicked: boom",
+            false
+        ));
+        // An engine error that merely starts with the same human-readable
+        // words must NOT be classified as side-effect-free: only the unique
+        // bracketed token marks the admission timeout.
+        assert!(!should_redeliver_event_after_handler_error(
+            "Timed out waiting for a blocking execution slot in the engine",
+            false
+        ));
+        assert!(should_redeliver_event_after_handler_error(
+            &setup_timeout_error,
+            false
+        ));
+        assert!(!should_redeliver_event_after_handler_error(
+            &setup_timeout_error,
+            true
+        ));
+    }
+
+    /// Pins the escalation contract: the setup-timeout and blocking-slot
+    /// admission-timeout redeliveries opt INTO cumulative delivery counting
+    /// (their infra requeues would otherwise reset the delivery counter and
+    /// loop forever on a deterministic failure), while ordinary
+    /// infrastructure retries — the shape used by healthy running-task
+    /// deferrals — stay opted out.
+    #[test]
+    fn setup_and_admission_timeout_redeliveries_opt_into_delivery_counting() {
+        for timeout_error in [
+            format!("{} after 30s", EVENT_SETUP_TIMEOUT_ERROR),
+            format!(
+                "{} after 120s resolving handler sources",
+                EVENT_SETUP_TIMEOUT_ERROR
+            ),
+            format!("{} after 30s", BLOCKING_SLOT_TIMEOUT_ERROR),
+        ] {
+            // Sanity: these are exactly the errors routed through the
+            // counted-redelivery arm of the event executor.
+            assert!(should_redeliver_event_after_handler_error(
+                &timeout_error,
+                false
+            ));
+
+            let err = worker_counted_redelivery_error(timeout_error.clone(), 0);
+            let infra = err
+                .downcast_ref::<QueueInfrastructureError>()
+                .expect("counted redelivery must remain an infrastructure retry");
+            assert!(
+                hot::queue::streams::infrastructure_requeue_preserves_delivery_count(
+                    &infra.to_string()
+                ),
+                "redelivery for '{timeout_error}' must opt into delivery counting"
+            );
+        }
+
+        // The default constructor — used by every other infra retry,
+        // including running-task deferrals — must NOT carry the counter.
+        let err = worker_infrastructure_retry_error("transient database error", 0);
+        let infra = err
+            .downcast_ref::<QueueInfrastructureError>()
+            .expect("plain infrastructure retry");
+        assert!(
+            !hot::queue::streams::infrastructure_requeue_preserves_delivery_count(
+                &infra.to_string()
+            ),
+            "plain infrastructure retries must keep the reset-on-requeue behavior"
+        );
+    }
+
+    #[tokio::test]
+    async fn event_setup_watchdog_bounds_pending_preparation() {
+        let (setup_tx, setup_rx) = tokio::sync::oneshot::channel();
+        let (source_tx, source_rx) = tokio::sync::oneshot::channel();
+        let execution = async move {
+            let _keep_senders_alive = (setup_tx, source_tx);
+            std::future::pending::<Result<(), String>>().await
+        };
+
+        // Neither checkpoint fires: the source-resolution window bounds the
+        // whole preparation.
+        let err = await_event_handler_setup(
+            execution,
+            setup_rx,
+            source_rx,
+            std::time::Duration::from_millis(20),
+            std::time::Duration::from_secs(3600),
+        )
+        .await
+        .expect_err("pending setup must hit its wall-clock ceiling");
+        assert!(is_event_setup_timeout_error(&err));
+        assert!(
+            err.contains("resolving handler sources"),
+            "a pre-checkpoint hang must be attributed to source resolution: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn event_setup_watchdog_rearms_after_source_resolution() {
+        let (setup_tx, setup_rx) = tokio::sync::oneshot::channel();
+        let (source_tx, source_rx) = tokio::sync::oneshot::channel();
+        let execution = async move {
+            let _keep_sender_alive = setup_tx;
+            source_tx.send(()).unwrap();
+            std::future::pending::<Result<(), String>>().await
+        };
+
+        // The checkpoint fires immediately, so the post-retrieval window is
+        // the binding one even though the retrieval window is enormous.
+        let err = await_event_handler_setup(
+            execution,
+            setup_rx,
+            source_rx,
+            std::time::Duration::from_secs(3600),
+            std::time::Duration::from_millis(20),
+        )
+        .await
+        .expect_err("post-retrieval setup must hit its own wall-clock ceiling");
+        assert!(is_event_setup_timeout_error(&err));
+        assert!(
+            !err.contains("resolving handler sources"),
+            "a post-checkpoint hang must not be attributed to source resolution: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn event_setup_watchdog_gives_source_retrieval_its_own_budget() {
+        let (setup_tx, setup_rx) = tokio::sync::oneshot::channel();
+        let (source_tx, source_rx) = tokio::sync::oneshot::channel();
+        let execution = async move {
+            // Simulate a storage retrieval that legitimately outlives the
+            // post-retrieval setup window.
+            tokio::time::sleep(std::time::Duration::from_millis(60)).await;
+            source_tx.send(()).unwrap();
+            setup_tx.send(()).unwrap();
+            Ok(())
+        };
+
+        await_event_handler_setup(
+            execution,
+            setup_rx,
+            source_rx,
+            std::time::Duration::from_millis(500),
+            std::time::Duration::from_millis(20),
+        )
+        .await
+        .expect("a slow retrieval within its own budget must not trip the setup watchdog");
+    }
+
+    #[tokio::test]
+    async fn event_setup_watchdog_disarms_for_vm_execution() {
+        let (setup_tx, setup_rx) = tokio::sync::oneshot::channel();
+        let (source_tx, source_rx) = tokio::sync::oneshot::channel();
+        let execution = async move {
+            source_tx.send(()).unwrap();
+            setup_tx.send(()).unwrap();
+            tokio::time::sleep(std::time::Duration::from_millis(40)).await;
+            Ok(())
+        };
+
+        await_event_handler_setup(
+            execution,
+            setup_rx,
+            source_rx,
+            std::time::Duration::from_millis(10),
+            std::time::Duration::from_millis(10),
+        )
+        .await
+        .expect("the setup ceiling must be disabled once VM execution starts");
+    }
+
+    #[test]
+    fn event_orphan_reclaim_floor_covers_slot_admission_wait() {
+        let run_timeout = std::time::Duration::from_secs(DEFAULT_RUN_TIMEOUT_SECONDS);
+        let legal_lifetime_ms = run_timeout
+            .saturating_add(EVENT_SOURCE_RETRIEVAL_TIMEOUT)
+            .saturating_add(EVENT_SETUP_TIMEOUT)
+            .saturating_add(RUN_TIMEOUT_HARD_GRACE)
+            .as_millis() as u64;
+
+        // The floor must exceed the longest an un-ACKed SINGLE-handler event
+        // can legally be alive on a healthy worker (source retrieval +
+        // post-retrieval setup incl. admission wait + run budget + hard
+        // grace), or reclaim would start a duplicate live execution.
+        // Multi-handler events can legally exceed the floor; the PEL-touch
+        // keepalive keeps those visibly alive, with this floor as its crash
+        // backstop — see `min_event_orphan_idle_floor_ms` docs.
+        assert!(min_event_orphan_idle_floor_ms(run_timeout) > legal_lifetime_ms);
+        assert!(min_event_orphan_idle_floor_ms(std::time::Duration::MAX) > 0);
+    }
+
+    #[test]
+    fn event_keepalive_cadence_gives_multiple_touches_per_reclaim_window() {
+        // Exactly one third of the effective reclaim idle once above the floor.
+        assert_eq!(event_keepalive_interval_ms(3 * 340_000), 340_000);
+        // Tiny (test-sized) configurations are floored so the touch loop
+        // cannot become a Redis-hammering busy loop.
+        assert_eq!(
+            event_keepalive_interval_ms(0),
+            EVENT_KEEPALIVE_MIN_INTERVAL_MS
+        );
+        assert_eq!(
+            event_keepalive_interval_ms(EVENT_KEEPALIVE_MIN_INTERVAL_MS),
+            EVENT_KEEPALIVE_MIN_INTERVAL_MS
+        );
+        // At the default effective orphan idle (>= the floor), a delivery
+        // gets at least two touch opportunities per reclaim window, so one
+        // missed/failed touch cannot orphan it.
+        let floor = min_event_orphan_idle_floor_ms(std::time::Duration::from_secs(
+            DEFAULT_RUN_TIMEOUT_SECONDS,
+        ));
+        assert!(event_keepalive_interval_ms(floor) * 3 <= floor);
+    }
+
+    #[tokio::test]
+    async fn event_keepalive_guard_aborts_touch_task_on_drop() {
+        struct SignalOnDrop(Option<tokio::sync::oneshot::Sender<()>>);
+        impl Drop for SignalOnDrop {
+            fn drop(&mut self) {
+                if let Some(tx) = self.0.take() {
+                    let _ = tx.send(());
+                }
+            }
+        }
+
+        let (dropped_tx, dropped_rx) = tokio::sync::oneshot::channel::<()>();
+        // Construct the drop signal OUTSIDE the async block so it is owned by
+        // the future itself: whether the abort lands before or after the
+        // task's first poll, dropping the future runs the destructor.
+        let signal = SignalOnDrop(Some(dropped_tx));
+        let guard = EventKeepaliveGuard(tokio::spawn(async move {
+            let _signal = signal;
+            std::future::pending::<()>().await;
+        }));
+        drop(guard);
+
+        tokio::time::timeout(std::time::Duration::from_secs(5), dropped_rx)
+            .await
+            .expect("dropping the guard must abort the keepalive task")
+            .expect("the aborted task must run its destructors");
+    }
+
+    #[tokio::test]
+    async fn memory_event_lease_spawns_no_keepalive() {
+        let queue = ProcessingQueue::<Message>::new(
+            QueueType::Memory,
+            "hot:event-keepalive-test".to_string(),
+            None,
+            Serialization::Json,
+        )
+        .expect("memory queue should build");
+        queue
+            .enqueue(Message {
+                id: Uuid::now_v7(),
+                head: Val::map_empty(),
+                body: Val::map_empty(),
+            })
+            .await
+            .expect("enqueue should succeed");
+        let lease = queue
+            .claim_blocking()
+            .await
+            .expect("claim should succeed")
+            .expect("memory claim always yields a lease");
+
+        assert!(
+            spawn_event_lease_keepalive(&lease, 60_000, 0).is_none(),
+            "memory backend has no PEL / orphan reclaim: keepalive must be a no-op"
+        );
+
+        // Drain the lease so the memory queue does not re-enqueue on drop.
+        lease
+            .process(|_message| async move { Ok::<(), WorkerError>(()) })
+            .await
+            .expect("processing the drained lease should succeed");
+    }
+
+    #[test]
+    fn run_registration_guard_unregisters_run_on_drop() {
+        let coordinator = Arc::new(ShutdownCoordinator::new(1));
+        let run_id = Uuid::now_v7();
+        coordinator.register_run(run_id);
+        coordinator
+            .register_cancel_token(run_id, Arc::new(std::sync::atomic::AtomicBool::new(false)));
+
+        let guard = RunRegistration::new(Arc::clone(&coordinator), run_id);
+        assert_eq!(coordinator.active_run_count(), 1);
+        drop(guard);
+        assert_eq!(coordinator.active_run_count(), 0);
+
+        // unregister_run is idempotent, so explicit cleanup racing the guard
+        // (e.g. fail_active_runs during shutdown) stays harmless.
+        coordinator.unregister_run(&run_id);
+        assert_eq!(coordinator.active_run_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn error_exit_from_event_handler_unregisters_active_run() {
+        let (db, db_path) = migrated_sqlite_file_db().await;
+        let test_data = hot::db::insert_test_data(&db)
+            .await
+            .expect("test data should insert");
+        let build = Build::get_build(&db, &test_data.build_id)
+            .await
+            .expect("test build should exist");
+
+        // An event env that differs from the build's project env forces the
+        // early error exit in execute_single_event_handler, before any VM
+        // execution or run side effects.
+        let mismatched_env_id = Uuid::now_v7();
+        let event_id = Uuid::now_v7();
+        let stream_id = Uuid::now_v7();
+        let event_message = EventMessage {
+            id: event_id,
+            head: AHashMap::new(),
+            body: hot::lang::event::queue::EventMessageBody {
+                event: hot::lang::event::Event {
+                    event_id,
+                    env_id: mismatched_env_id,
+                    stream_id,
+                    event_type: "hot:call".to_string(),
+                    event_data: val!({
+                        "fn": "demo/handler",
+                        "args": [],
+                    }),
+                    event_time: chrono::Utc::now(),
+                    target_project_id: None,
+                    target_project_name: None,
+                },
+                execution_context: ExecutionContext::new(
+                    Uuid::now_v7(),
+                    stream_id,
+                    hot::db::run::RunType::Call.as_id(),
+                    Some(mismatched_env_id),
+                    Some(test_data.user_id),
+                    Some(test_data.org_id),
+                    None,
+                ),
+            },
+        };
+        let event_handler = EventHandler {
+            event_handler_id: Uuid::now_v7(),
+            build_id: build.build_id,
+            event_type: "hot:call".to_string(),
+            ns: "demo".to_string(),
+            var: "handler".to_string(),
+            meta: None,
+            value: None,
+            file: None,
+            line: None,
+            column: None,
+            position: None,
+        };
+
+        let worker_conf = get_resolved_conf(val!({}));
+        let cache_dir =
+            std::env::temp_dir().join(format!("hot-worker-test-cache-{}", Uuid::new_v4()));
+        let cache = Arc::new(hot::lang::cache::bytecode_cache::BytecodeCache::new(
+            cache_dir.clone(),
+        ));
+        let task_queue = Arc::new(
+            ProcessingQueue::<TaskRequest>::new(
+                QueueType::Memory,
+                format!("worker-run-unregister-test-{}", Uuid::new_v4()),
+                None,
+                Serialization::Json,
+            )
+            .expect("task queue should build"),
+        );
+        let execution_services =
+            Arc::new(WorkerExecutionServices::new(Arc::new(db.clone()), &worker_conf).await);
+
+        // Mirror the event executor: the caller registers the run, then hands
+        // unregistration responsibility to execute_single_event_handler.
+        let shutdown_coordinator = Arc::new(ShutdownCoordinator::new(1));
+        let run_id = Uuid::now_v7();
+        shutdown_coordinator.register_run(run_id);
+        assert_eq!(shutdown_coordinator.active_run_count(), 1);
+
+        let result = execute_single_event_handler(
+            &db,
+            &build,
+            &mismatched_env_id,
+            &worker_conf,
+            &event_handler,
+            &event_message,
+            None,
+            None,
+            None,
+            cache,
+            Arc::clone(&shutdown_coordinator),
+            run_id,
+            Arc::new(BuildPathCache::new()),
+            None,
+            None,
+            task_queue,
+            execution_services,
+            Arc::new(Semaphore::new(1)),
+        )
+        .await;
+
+        assert!(result.is_err(), "env mismatch must fail the handler");
+        assert_eq!(
+            shutdown_coordinator.active_run_count(),
+            0,
+            "an error exit must unregister the run so shutdown does not hang"
+        );
+
+        if let DatabasePool::Sqlite(pool) = &db {
+            pool.close().await;
+        }
+        let _ = std::fs::remove_file(db_path);
+        let _ = std::fs::remove_dir_all(cache_dir);
     }
 
     #[test]

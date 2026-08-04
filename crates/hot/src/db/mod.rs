@@ -184,7 +184,7 @@ pub use stream::{Stream, StreamError, StreamSummary};
 pub use subscription::{
     BillingPeriod, OrgPlan, OrgPlanStatus, OrgUsage, OrgUsageStats, Plan, PlanError,
 };
-pub use task::{Task, TaskError, TaskStatus};
+pub use task::{InfraRetryFinalizeOutcome, Task, TaskError, TaskStatus};
 pub use team::{Team, TeamError, TeamUser, TeamUserWithRole};
 pub use user::{User, UserAuth, UserError};
 pub use webhook::{Webhook, WebhookError, WebhookServiceSummary, WebhookWithProject};
@@ -380,6 +380,8 @@ pub fn get_resolved_conf(conf: Val) -> Val {
     let db_defaults = crate::val!({
         "uri": default_db_uri,
         "schema": DEFAULT_DB_SCHEMA,
+        "statement-timeout-ms": 30_000i64,
+        "lock-timeout-ms": 5_000i64,
     });
 
     // Extract db-specific configuration from the full config
@@ -507,6 +509,19 @@ pub async fn create_db_pool(conf: &Val) -> Result<DatabasePool, DatabaseError> {
             };
             tracing::debug!("Using Postgres schema: {}", schema);
 
+            let statement_timeout_ms = conf
+                .get_int_or_default(
+                    "db.statement-timeout-ms",
+                    conf.get_int_or_default("statement-timeout-ms", 30_000),
+                )
+                .clamp(0, i64::from(i32::MAX));
+            let lock_timeout_ms = conf
+                .get_int_or_default(
+                    "db.lock-timeout-ms",
+                    conf.get_int_or_default("lock-timeout-ms", 5_000),
+                )
+                .clamp(0, i64::from(i32::MAX));
+
             let max_connections = crate::runtime_budget::derive_postgres_pool_connections(conf);
             tracing::debug!(
                 "Postgres pool max_connections={} from derived local execution budget",
@@ -525,6 +540,16 @@ pub async fn create_db_pool(conf: &Val) -> Result<DatabasePool, DatabaseError> {
                         conn.execute(sqlx::AssertSqlSafe(format!(
                             "set search_path = '{}', 'public'",
                             schema
+                        )))
+                        .await?;
+                        conn.execute(sqlx::AssertSqlSafe(format!(
+                            "set statement_timeout = {}",
+                            statement_timeout_ms
+                        )))
+                        .await?;
+                        conn.execute(sqlx::AssertSqlSafe(format!(
+                            "set lock_timeout = {}",
+                            lock_timeout_ms
                         )))
                         .await?;
                         Ok(())

@@ -857,6 +857,8 @@ async fn create_scheduled_job(
                 access_id: None, // Scheduler-initiated, no API access log
                 agent_type: None,
                 queue_timing: None,
+                // Enqueue-only producer context; the worker stamps deadline_at at admission
+                deadline_at: None,
             };
 
             // Create the event data for the generic schedule-event-handler
@@ -1238,6 +1240,8 @@ async fn queue_schedule_execution(
         access_id: None, // Scheduler-initiated, no API access log
         agent_type: None,
         queue_timing: None,
+        // Enqueue-only producer context; the worker stamps deadline_at at admission
+        deadline_at: None,
     };
 
     // Create the event data
@@ -1472,6 +1476,8 @@ async fn process_pending_retries(
             access_id: run.access_id, // Propagate from original run if available
             agent_type: None,
             queue_timing: None,
+            // Enqueue-only producer context; the worker stamps deadline_at at admission
+            deadline_at: None,
         };
 
         // Create the event
@@ -1707,5 +1713,116 @@ mod tests {
         }
 
         println!("✅ Environment ID lookup function call path verified");
+    }
+
+    #[tokio::test]
+    async fn queued_schedule_execution_context_carries_no_deadline() {
+        let db = Arc::new(hot::db::test_db().await);
+        let data = hot::db::insert_test_data(&db).await.unwrap();
+
+        // Unique queue name so this test never sees other tests' messages.
+        let queue: Arc<dyn Queue<Message>> = Arc::new(
+            MemQueue::new(format!("test:schedule-deadline:{}", Uuid::now_v7()))
+                .expect("memory queue"),
+        );
+
+        let schedule = Schedule {
+            schedule_id: Uuid::now_v7(),
+            build_id: data.build_id,
+            cron: "0 0 * * * *".to_string(),
+            ns: "test".to_string(),
+            var: "tick".to_string(),
+            meta: None,
+            value: None,
+            file: None,
+            line: None,
+            column: None,
+            position: None,
+            active: true,
+            created_at: None,
+            deactivated_at: None,
+        };
+
+        queue_schedule_execution(&db, &queue, &schedule, Utc::now(), false)
+            .await
+            .expect("queue_schedule_execution should succeed");
+
+        let message = queue
+            .dequeue()
+            .await
+            .expect("dequeue should not fail")
+            .expect("schedule execution should be enqueued");
+        let event_message =
+            EventMessage::try_from(message).expect("queued message should decode as EventMessage");
+        assert!(
+            event_message.body.execution_context.deadline_at.is_none(),
+            "scheduler producer contexts must not carry a deadline; the worker stamps it at admission"
+        );
+        assert_eq!(
+            event_message.body.execution_context.run_type_id,
+            hot::db::run::RunType::Schedule.as_id()
+        );
+    }
+
+    #[tokio::test]
+    async fn requeued_retry_context_carries_no_deadline() {
+        let db = Arc::new(hot::db::test_db().await);
+        let data = hot::db::insert_test_data(&db).await.unwrap();
+
+        // Give the fixture run an original event to retry from.
+        let event_id = Uuid::now_v7();
+        hot::db::event::Event::insert_event(
+            &db,
+            &event_id,
+            &data.env_id,
+            &data.stream_id,
+            "order:created",
+            &serde_json::json!({"fn": "test/handler"}),
+            Utc::now(),
+            &data.user_id,
+            None,
+        )
+        .await
+        .expect("insert original event");
+
+        // Mark the fixture run as pending retry with a next_retry_at already due.
+        let hot::db::DatabasePool::Sqlite(pool) = db.as_ref() else {
+            panic!("test_db should be SQLite");
+        };
+        sqlx::query(
+            "UPDATE run SET status_id = ?, retry_attempt = 1, next_retry_at = ?, event_id = ? WHERE run_id = ?",
+        )
+        .bind(hot::db::run::RunStatus::PendingRetry.as_id())
+        .bind(Utc::now() - chrono::Duration::seconds(60))
+        .bind(event_id)
+        .bind(data.run_id)
+        .execute(pool)
+        .await
+        .expect("mark run pending retry");
+
+        let queue: Arc<dyn Queue<Message>> = Arc::new(
+            MemQueue::new(format!("test:retry-deadline:{}", Uuid::now_v7())).expect("memory queue"),
+        );
+
+        process_pending_retries(&db, &queue)
+            .await
+            .expect("process_pending_retries should succeed");
+
+        let message = queue
+            .dequeue()
+            .await
+            .expect("dequeue should not fail")
+            .expect("retry should be enqueued");
+        let event_message =
+            EventMessage::try_from(message).expect("queued message should decode as EventMessage");
+        assert!(
+            event_message.body.execution_context.deadline_at.is_none(),
+            "retry producer contexts must not carry a deadline; the worker stamps it at admission"
+        );
+        assert_eq!(
+            event_message.body.execution_context.origin_run_id,
+            Some(data.run_id)
+        );
+        assert_eq!(event_message.body.execution_context.retry_attempt, 1);
     }
 }

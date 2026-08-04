@@ -118,7 +118,17 @@ pub struct Task {
     pub timing: Option<serde_json::Value>,
     pub timeout_ms: i64,
     pub retry_attempt: i16,
+    /// Number of budget-exempt infrastructure retries in this task's current
+    /// lineage. User-policy retries reset this counter to zero.
+    #[sqlx(default)]
+    pub infra_retry_count: i16,
     pub next_retry_at: Option<DateTime<Utc>>,
+    /// The task this row retries, when the row was created by
+    /// [`Task::insert_retry`]. `None` for first-run tasks and for retry rows
+    /// created before lineage tracking existed. A partial unique index on
+    /// `(parent_task_id, retry_attempt)` makes retry creation idempotent.
+    #[sqlx(default)]
+    pub parent_task_id: Option<Uuid>,
     pub created_at: DateTime<Utc>,
     pub by_user_id: Option<Uuid>,
     pub run_id: Option<Uuid>,
@@ -127,6 +137,26 @@ pub struct Task {
     pub container_id: Option<String>,
     #[sqlx(default)]
     pub origin_run_fn: Option<String>,
+}
+
+/// Result of atomically terminalizing an infrastructure-interrupted task and
+/// making its recovery durable in the same database transaction.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum InfraRetryFinalizeOutcome {
+    RetryReady {
+        retry_task_id: Uuid,
+        retry_attempt: i16,
+        infra_retry_count: i16,
+        /// True only for the transaction that inserted this child. A false
+        /// value means a prior writer already made it durable; the queued-row
+        /// reconciler owns recovery and callers must not duplicate its XADD.
+        should_enqueue: bool,
+        duration_ms: Option<i64>,
+    },
+    Exhausted {
+        duration_ms: Option<i64>,
+    },
+    AlreadyTerminal,
 }
 
 const TASK_ORIGIN_FN_PG: &str = "\
@@ -231,7 +261,16 @@ impl Task {
         Ok(())
     }
 
-    /// Insert a retry task — copies fields from the original but with a new ID and incremented attempt.
+    /// Insert a retry task — copies fields from the original but with a new ID
+    /// and the caller's attempt number, recording `original` as the parent.
+    ///
+    /// Idempotent at the database level: the partial unique index on
+    /// `(parent_task_id, retry_attempt)` turns a duplicate insert for the same
+    /// parent + attempt into a no-op (`ON CONFLICT DO NOTHING`). Returns `true`
+    /// when this call created the retry row, `false` when another writer (or a
+    /// crashed earlier attempt) already created it — callers must then skip
+    /// their enqueue, because the existing row's creator owns delivery and the
+    /// queued-task reconciler re-enqueues it if that creator crashed first.
     #[allow(clippy::too_many_arguments)]
     pub async fn insert_retry(
         db: &crate::db::DatabasePool,
@@ -239,17 +278,58 @@ impl Task {
         original: &Task,
         retry_attempt: i16,
         next_retry_at: DateTime<Utc>,
-    ) -> Result<(), TaskError> {
-        match db {
+    ) -> Result<bool, TaskError> {
+        Self::insert_retry_with_infra_count(
+            db,
+            new_task_id,
+            original,
+            retry_attempt,
+            0,
+            next_retry_at,
+        )
+        .await
+    }
+
+    /// Insert a budget-exempt infrastructure retry while carrying a persisted
+    /// lineage counter. Callers enforce their policy cap before invoking this
+    /// method; database uniqueness still makes a repeated insertion for the
+    /// same parent/attempt idempotent.
+    pub async fn insert_infra_retry(
+        db: &crate::db::DatabasePool,
+        new_task_id: &Uuid,
+        original: &Task,
+        next_retry_at: DateTime<Utc>,
+    ) -> Result<bool, TaskError> {
+        Self::insert_retry_with_infra_count(
+            db,
+            new_task_id,
+            original,
+            original.retry_attempt,
+            original.infra_retry_count.saturating_add(1),
+            next_retry_at,
+        )
+        .await
+    }
+
+    async fn insert_retry_with_infra_count(
+        db: &crate::db::DatabasePool,
+        new_task_id: &Uuid,
+        original: &Task,
+        retry_attempt: i16,
+        infra_retry_count: i16,
+        next_retry_at: DateTime<Utc>,
+    ) -> Result<bool, TaskError> {
+        let rows_affected = match db {
             crate::db::DatabasePool::Postgres(pg_pool) => {
                 sqlx::query(
-                    "INSERT INTO task (task_id, env_id, stream_id, build_id, origin_run_id, task_status_id, function_name, args, options, task_type, timeout_ms, retry_attempt, next_retry_at, by_user_id) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)",
+                    "INSERT INTO task (task_id, env_id, stream_id, build_id, origin_run_id, parent_task_id, task_status_id, function_name, args, options, task_type, timeout_ms, retry_attempt, infra_retry_count, next_retry_at, by_user_id) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16) ON CONFLICT (parent_task_id, retry_attempt) WHERE parent_task_id IS NOT NULL DO NOTHING",
                 )
                 .bind(new_task_id)
                 .bind(original.env_id)
                 .bind(original.stream_id)
                 .bind(original.build_id)
                 .bind(original.origin_run_id)
+                .bind(original.task_id)
                 .bind(TaskStatus::Queued.as_id())
                 .bind(&original.function_name)
                 .bind(&original.args)
@@ -257,10 +337,12 @@ impl Task {
                 .bind(&original.task_type)
                 .bind(original.timeout_ms)
                 .bind(retry_attempt)
+                .bind(infra_retry_count)
                 .bind(next_retry_at)
                 .bind(original.by_user_id)
                 .execute(pg_pool)
-                .await?;
+                .await?
+                .rows_affected()
             }
             crate::db::DatabasePool::Sqlite(sqlite_pool) => {
                 let created_at = Utc::now();
@@ -273,13 +355,14 @@ impl Task {
                     .as_ref()
                     .map(|o| serde_json::to_string(o).unwrap_or_default());
                 sqlx::query(
-                    "INSERT INTO task (task_id, env_id, stream_id, build_id, origin_run_id, task_status_id, function_name, args, options, task_type, timeout_ms, retry_attempt, next_retry_at, by_user_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    "INSERT INTO task (task_id, env_id, stream_id, build_id, origin_run_id, parent_task_id, task_status_id, function_name, args, options, task_type, timeout_ms, retry_attempt, infra_retry_count, next_retry_at, by_user_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT (parent_task_id, retry_attempt) WHERE parent_task_id IS NOT NULL DO NOTHING",
                 )
                 .bind(new_task_id)
                 .bind(original.env_id)
                 .bind(original.stream_id)
                 .bind(original.build_id)
                 .bind(original.origin_run_id)
+                .bind(original.task_id)
                 .bind(TaskStatus::Queued.as_id())
                 .bind(&original.function_name)
                 .bind(args_str)
@@ -287,43 +370,322 @@ impl Task {
                 .bind(&original.task_type)
                 .bind(original.timeout_ms)
                 .bind(retry_attempt)
+                .bind(infra_retry_count)
                 .bind(next_retry_at)
                 .bind(original.by_user_id)
                 .bind(created_at)
                 .execute(sqlite_pool)
+                .await?
+                .rows_affected()
+            }
+        };
+        Ok(rows_affected == 1)
+    }
+
+    /// Atomically fail an interrupted queued/running task and either create
+    /// its budget-exempt retry child or persist an honest exhausted result.
+    ///
+    /// The retry row is inserted before the original becomes terminal, in the
+    /// same transaction. Therefore a child-insert failure rolls back the
+    /// terminal write, while an ambiguous client timeout can only leave one
+    /// of two recoverable states: neither write committed, or both committed
+    /// (with the queued-row reconciler able to enqueue the durable child).
+    #[allow(clippy::too_many_arguments)]
+    pub async fn finalize_with_infra_retry(
+        db: &crate::db::DatabasePool,
+        task_id: &Uuid,
+        new_task_id: &Uuid,
+        max_generations: i16,
+        retry_error: &serde_json::Value,
+        exhausted_error: &serde_json::Value,
+        next_retry_at: DateTime<Utc>,
+    ) -> Result<InfraRetryFinalizeOutcome, TaskError> {
+        let queued_id = TaskStatus::Queued.as_id();
+        let running_id = TaskStatus::Running.as_id();
+        let failed_id = TaskStatus::Failed.as_id();
+        let now = Utc::now();
+
+        match db {
+            crate::db::DatabasePool::Postgres(pool) => {
+                let mut tx = pool.begin().await?;
+                let row = sqlx::query_as::<_, (i16, i16, i16)>(
+                    "SELECT task_status_id, retry_attempt, infra_retry_count FROM task WHERE task_id = $1 FOR UPDATE",
+                )
+                .bind(task_id)
+                .fetch_optional(&mut *tx)
+                .await?
+                .ok_or(TaskError::NotFound)?;
+                if row.0 != queued_id && row.0 != running_id {
+                    tx.rollback().await?;
+                    return Ok(InfraRetryFinalizeOutcome::AlreadyTerminal);
+                }
+
+                if row.2 >= max_generations {
+                    let duration_ms = sqlx::query_scalar::<_, Option<i64>>(
+                        r#"UPDATE task SET
+                               task_status_id = $1,
+                               stop_time = $2,
+                               duration_ms = COALESCE((EXTRACT(EPOCH FROM ($2 - start_time)) * 1000)::bigint, 0),
+                               result = $3
+                           WHERE task_id = $4 AND task_status_id IN ($5, $6)
+                           RETURNING duration_ms"#,
+                    )
+                    .bind(failed_id)
+                    .bind(now)
+                    .bind(exhausted_error)
+                    .bind(task_id)
+                    .bind(queued_id)
+                    .bind(running_id)
+                    .fetch_one(&mut *tx)
+                    .await?;
+                    tx.commit().await?;
+                    return Ok(InfraRetryFinalizeOutcome::Exhausted { duration_ms });
+                }
+
+                let next_count = row.2.saturating_add(1);
+                let inserted = sqlx::query_scalar::<_, Uuid>(
+                    r#"INSERT INTO task (
+                           task_id, env_id, stream_id, build_id, origin_run_id,
+                           parent_task_id, task_status_id, function_name, args,
+                           options, task_type, timeout_ms, retry_attempt,
+                           infra_retry_count, next_retry_at, by_user_id
+                       )
+                       SELECT $1, env_id, stream_id, build_id, origin_run_id,
+                              task_id, $2, function_name, args, options,
+                              task_type, timeout_ms, retry_attempt, $3, $4, by_user_id
+                       FROM task WHERE task_id = $5
+                       ON CONFLICT (parent_task_id, retry_attempt)
+                           WHERE parent_task_id IS NOT NULL DO NOTHING
+                       RETURNING task_id"#,
+                )
+                .bind(new_task_id)
+                .bind(queued_id)
+                .bind(next_count)
+                .bind(next_retry_at)
+                .bind(task_id)
+                .fetch_optional(&mut *tx)
                 .await?;
+                let should_enqueue = inserted.is_some();
+                let retry_task_id = match inserted {
+                    Some(id) => id,
+                    None => sqlx::query_scalar::<_, Uuid>(
+                        "SELECT task_id FROM task WHERE parent_task_id = $1 AND retry_attempt = $2",
+                    )
+                    .bind(task_id)
+                    .bind(row.1)
+                    .fetch_one(&mut *tx)
+                    .await?,
+                };
+                let duration_ms = sqlx::query_scalar::<_, Option<i64>>(
+                    r#"UPDATE task SET
+                           task_status_id = $1,
+                           stop_time = $2,
+                           duration_ms = COALESCE((EXTRACT(EPOCH FROM ($2 - start_time)) * 1000)::bigint, 0),
+                           result = $3
+                       WHERE task_id = $4 AND task_status_id IN ($5, $6)
+                       RETURNING duration_ms"#,
+                )
+                .bind(failed_id)
+                .bind(now)
+                .bind(retry_error)
+                .bind(task_id)
+                .bind(queued_id)
+                .bind(running_id)
+                .fetch_one(&mut *tx)
+                .await?;
+                tx.commit().await?;
+                Ok(InfraRetryFinalizeOutcome::RetryReady {
+                    retry_task_id,
+                    retry_attempt: row.1,
+                    infra_retry_count: next_count,
+                    should_enqueue,
+                    duration_ms,
+                })
+            }
+            crate::db::DatabasePool::Sqlite(pool) => {
+                let mut tx = pool.begin().await?;
+                let row = sqlx::query_as::<_, (i16, i16, i16)>(
+                    "SELECT task_status_id, retry_attempt, infra_retry_count FROM task WHERE task_id = ?",
+                )
+                .bind(task_id)
+                .fetch_optional(&mut *tx)
+                .await?
+                .ok_or(TaskError::NotFound)?;
+                if row.0 != queued_id && row.0 != running_id {
+                    tx.rollback().await?;
+                    return Ok(InfraRetryFinalizeOutcome::AlreadyTerminal);
+                }
+
+                let retry_error = serde_json::to_string(retry_error).unwrap_or_default();
+                let exhausted_error = serde_json::to_string(exhausted_error).unwrap_or_default();
+                if row.2 >= max_generations {
+                    sqlx::query(
+                        r#"UPDATE task SET
+                               task_status_id = ?, stop_time = ?,
+                               duration_ms = COALESCE(CAST((julianday(?) - julianday(start_time)) * 86400000 AS INTEGER), 0),
+                               result = ?
+                           WHERE task_id = ? AND task_status_id IN (?, ?)"#,
+                    )
+                    .bind(failed_id)
+                    .bind(now)
+                    .bind(now)
+                    .bind(exhausted_error)
+                    .bind(task_id)
+                    .bind(queued_id)
+                    .bind(running_id)
+                    .execute(&mut *tx)
+                    .await?;
+                    let duration_ms = sqlx::query_scalar::<_, Option<i64>>(
+                        "SELECT duration_ms FROM task WHERE task_id = ?",
+                    )
+                    .bind(task_id)
+                    .fetch_one(&mut *tx)
+                    .await?;
+                    tx.commit().await?;
+                    return Ok(InfraRetryFinalizeOutcome::Exhausted { duration_ms });
+                }
+
+                let next_count = row.2.saturating_add(1);
+                let created_at = Utc::now();
+                let inserted = sqlx::query(
+                    r#"INSERT INTO task (
+                           task_id, env_id, stream_id, build_id, origin_run_id,
+                           parent_task_id, task_status_id, function_name, args,
+                           options, task_type, timeout_ms, retry_attempt,
+                           infra_retry_count, next_retry_at, by_user_id, created_at
+                       )
+                       SELECT ?, env_id, stream_id, build_id, origin_run_id,
+                              task_id, ?, function_name, args, options,
+                              task_type, timeout_ms, retry_attempt, ?, ?, by_user_id, ?
+                       FROM task WHERE task_id = ?
+                       ON CONFLICT (parent_task_id, retry_attempt)
+                           WHERE parent_task_id IS NOT NULL DO NOTHING"#,
+                )
+                .bind(new_task_id)
+                .bind(queued_id)
+                .bind(next_count)
+                .bind(next_retry_at)
+                .bind(created_at)
+                .bind(task_id)
+                .execute(&mut *tx)
+                .await?
+                .rows_affected()
+                    == 1;
+                let retry_task_id = if inserted {
+                    *new_task_id
+                } else {
+                    sqlx::query_scalar::<_, Uuid>(
+                        "SELECT task_id FROM task WHERE parent_task_id = ? AND retry_attempt = ?",
+                    )
+                    .bind(task_id)
+                    .bind(row.1)
+                    .fetch_one(&mut *tx)
+                    .await?
+                };
+                sqlx::query(
+                    r#"UPDATE task SET
+                           task_status_id = ?, stop_time = ?,
+                           duration_ms = COALESCE(CAST((julianday(?) - julianday(start_time)) * 86400000 AS INTEGER), 0),
+                           result = ?
+                       WHERE task_id = ? AND task_status_id IN (?, ?)"#,
+                )
+                .bind(failed_id)
+                .bind(now)
+                .bind(now)
+                .bind(retry_error)
+                .bind(task_id)
+                .bind(queued_id)
+                .bind(running_id)
+                .execute(&mut *tx)
+                .await?;
+                let duration_ms = sqlx::query_scalar::<_, Option<i64>>(
+                    "SELECT duration_ms FROM task WHERE task_id = ?",
+                )
+                .bind(task_id)
+                .fetch_one(&mut *tx)
+                .await?;
+                tx.commit().await?;
+                Ok(InfraRetryFinalizeOutcome::RetryReady {
+                    retry_task_id,
+                    retry_attempt: row.1,
+                    infra_retry_count: next_count,
+                    should_enqueue: inserted,
+                    duration_ms,
+                })
             }
         }
-        Ok(())
     }
 
     /// Mark a task as running and set start_time.
     pub async fn mark_running(
         db: &crate::db::DatabasePool,
         task_id: &Uuid,
-    ) -> Result<(), TaskError> {
+    ) -> Result<bool, TaskError> {
         let now = Utc::now();
-        match db {
+        let rows_affected = match db {
             crate::db::DatabasePool::Postgres(pg_pool) => {
                 sqlx::query(
-                    "UPDATE task SET task_status_id = $1, start_time = $2 WHERE task_id = $3",
+                    "UPDATE task SET task_status_id = $1, start_time = $2 WHERE task_id = $3 AND task_status_id = $4",
                 )
                 .bind(TaskStatus::Running.as_id())
                 .bind(now)
                 .bind(task_id)
+                .bind(TaskStatus::Queued.as_id())
                 .execute(pg_pool)
-                .await?;
+                .await?
+                .rows_affected()
             }
             crate::db::DatabasePool::Sqlite(sqlite_pool) => {
-                sqlx::query("UPDATE task SET task_status_id = ?, start_time = ? WHERE task_id = ?")
-                    .bind(TaskStatus::Running.as_id())
-                    .bind(now)
-                    .bind(task_id)
-                    .execute(sqlite_pool)
-                    .await?;
+                sqlx::query(
+                    "UPDATE task SET task_status_id = ?, start_time = ? WHERE task_id = ? AND task_status_id = ?",
+                )
+                .bind(TaskStatus::Running.as_id())
+                .bind(now)
+                .bind(task_id)
+                .bind(TaskStatus::Queued.as_id())
+                .execute(sqlite_pool)
+                .await?
+                .rows_affected()
             }
-        }
-        Ok(())
+        };
+        Ok(rows_affected == 1)
+    }
+
+    /// Atomically claim a queued task and persist its worker ownership.
+    /// A concurrent cancellation or another worker's claim wins by making the
+    /// guarded update affect zero rows.
+    pub async fn claim_for_worker(
+        db: &crate::db::DatabasePool,
+        task_id: &Uuid,
+        worker_id: &str,
+    ) -> Result<bool, TaskError> {
+        let now = Utc::now();
+        let rows_affected = match db {
+            crate::db::DatabasePool::Postgres(pg_pool) => sqlx::query(
+                "UPDATE task SET task_status_id = $1, start_time = $2, worker_id = $3, last_heartbeat_at = $2 WHERE task_id = $4 AND task_status_id = $5",
+            )
+            .bind(TaskStatus::Running.as_id())
+            .bind(now)
+            .bind(worker_id)
+            .bind(task_id)
+            .bind(TaskStatus::Queued.as_id())
+            .execute(pg_pool)
+            .await?
+            .rows_affected(),
+            crate::db::DatabasePool::Sqlite(sqlite_pool) => sqlx::query(
+                "UPDATE task SET task_status_id = ?, start_time = ?, worker_id = ?, last_heartbeat_at = ? WHERE task_id = ? AND task_status_id = ?",
+            )
+            .bind(TaskStatus::Running.as_id())
+            .bind(now)
+            .bind(worker_id)
+            .bind(now)
+            .bind(task_id)
+            .bind(TaskStatus::Queued.as_id())
+            .execute(sqlite_pool)
+            .await?
+            .rows_affected(),
+        };
+        Ok(rows_affected == 1)
     }
 
     /// Cancel a task. Only affects tasks in queued or running state.
@@ -367,58 +729,144 @@ impl Task {
     }
 
     /// Complete a task with a final status, result, and computed duration.
+    ///
+    /// `duration_ms_override` persists an explicitly measured billable
+    /// duration instead of the default `stop_time - start_time` computation.
+    /// `start_time` is stamped at CLAIM, so the stop-start span covers
+    /// worker-side setup and teardown too; container tasks pass their
+    /// execution-window snapshot here so the row's `duration_ms` (read back
+    /// for `task:complete` events and summed into the task-minutes quota)
+    /// matches what the user was actually billed. `None` preserves the
+    /// historical stop-start computation unchanged.
+    ///
+    /// `fence_worker` is an optional ownership fence: when `Some(worker_id)`
+    /// the update additionally requires the row's `worker_id` to match, so a
+    /// worker's terminal write cannot land on a row whose ownership has been
+    /// taken away (e.g. after `release_worker` or a reaper takeover).
+    /// `complete` never modifies `worker_id` itself, so the fence stays
+    /// meaningful across repeated attempts. `None` preserves the historical
+    /// unfenced behavior.
     pub async fn complete(
         db: &crate::db::DatabasePool,
         task_id: &Uuid,
         status: &TaskStatus,
         result: Option<&serde_json::Value>,
-    ) -> Result<(), TaskError> {
+        duration_ms_override: Option<i64>,
+        fence_worker: Option<&str>,
+    ) -> Result<bool, TaskError> {
         let now = Utc::now();
         let queued_id = TaskStatus::Queued.as_id();
         let running_id = TaskStatus::Running.as_id();
-        match db {
-            crate::db::DatabasePool::Postgres(pg_pool) => {
-                sqlx::query(
-                    r#"UPDATE task SET
+        let rows_affected = match db {
+            crate::db::DatabasePool::Postgres(pg_pool) => sqlx::query(
+                r#"UPDATE task SET
                         task_status_id = $1,
                         stop_time = $2,
-                        duration_ms = EXTRACT(EPOCH FROM ($2 - start_time)) * 1000,
+                        duration_ms = COALESCE($8::bigint, EXTRACT(EPOCH FROM ($2 - start_time)) * 1000),
                         result = $3
                     WHERE task_id = $4
-                      AND task_status_id IN ($5, $6)"#,
-                )
-                .bind(status.as_id())
-                .bind(now)
-                .bind(result)
-                .bind(task_id)
-                .bind(queued_id)
-                .bind(running_id)
-                .execute(pg_pool)
-                .await?;
-            }
+                      AND task_status_id IN ($5, $6)
+                      AND ($7::text IS NULL OR worker_id = $7)"#,
+            )
+            .bind(status.as_id())
+            .bind(now)
+            .bind(result)
+            .bind(task_id)
+            .bind(queued_id)
+            .bind(running_id)
+            .bind(fence_worker)
+            .bind(duration_ms_override)
+            .execute(pg_pool)
+            .await?
+            .rows_affected(),
             crate::db::DatabasePool::Sqlite(sqlite_pool) => {
                 let result_str = result.map(|r| serde_json::to_string(r).unwrap_or_default());
                 sqlx::query(
                     r#"UPDATE task SET
                         task_status_id = ?,
                         stop_time = ?,
-                        duration_ms = CAST((julianday(?) - julianday(start_time)) * 86400000 AS INTEGER),
+                        duration_ms = COALESCE(?, CAST((julianday(?) - julianday(start_time)) * 86400000 AS INTEGER)),
                         result = ?
                     WHERE task_id = ?
-                      AND task_status_id IN (?, ?)"#,
+                      AND task_status_id IN (?, ?)
+                      AND (? IS NULL OR worker_id = ?)"#,
                 )
                 .bind(status.as_id())
                 .bind(now)
+                .bind(duration_ms_override)
                 .bind(now)
                 .bind(result_str)
                 .bind(task_id)
                 .bind(queued_id)
                 .bind(running_id)
+                .bind(fence_worker)
+                .bind(fence_worker)
                 .execute(sqlite_pool)
-                .await?;
+                .await?
+                .rows_affected()
             }
-        }
-        Ok(())
+        };
+        Ok(rows_affected == 1)
+    }
+
+    /// Terminally fail a task only while it is still `queued`.
+    ///
+    /// Compensation for enqueue failures after the task row was inserted: a
+    /// client-side enqueue error or timeout does not prove the queue entry
+    /// never landed server-side, so once a worker has claimed the task
+    /// (queued -> running) this write must affect zero rows instead of
+    /// clobbering a legitimately executing task and suppressing its real
+    /// result. Returns true when the row was flipped to `failed`, false when
+    /// the task was no longer queued.
+    pub async fn fail_if_queued(
+        db: &crate::db::DatabasePool,
+        task_id: &Uuid,
+        error: Option<&serde_json::Value>,
+    ) -> Result<bool, TaskError> {
+        let now = Utc::now();
+        let failed_id = TaskStatus::Failed.as_id();
+        let queued_id = TaskStatus::Queued.as_id();
+        // Queued rows have never started, so duration is always 0.
+        let rows_affected = match db {
+            crate::db::DatabasePool::Postgres(pg_pool) => sqlx::query(
+                r#"UPDATE task SET
+                        task_status_id = $1,
+                        stop_time = $2,
+                        duration_ms = 0,
+                        result = $3
+                    WHERE task_id = $4
+                      AND task_status_id = $5"#,
+            )
+            .bind(failed_id)
+            .bind(now)
+            .bind(error)
+            .bind(task_id)
+            .bind(queued_id)
+            .execute(pg_pool)
+            .await?
+            .rows_affected(),
+            crate::db::DatabasePool::Sqlite(sqlite_pool) => {
+                let error_str = error.map(|e| serde_json::to_string(e).unwrap_or_default());
+                sqlx::query(
+                    r#"UPDATE task SET
+                        task_status_id = ?,
+                        stop_time = ?,
+                        duration_ms = 0,
+                        result = ?
+                    WHERE task_id = ?
+                      AND task_status_id = ?"#,
+                )
+                .bind(failed_id)
+                .bind(now)
+                .bind(error_str)
+                .bind(task_id)
+                .bind(queued_id)
+                .execute(sqlite_pool)
+                .await?
+                .rows_affected()
+            }
+        };
+        Ok(rows_affected == 1)
     }
 
     /// Link a task to its execution run (the task-type run created by the task worker).
@@ -517,6 +965,12 @@ impl Task {
     }
 
     /// Get a task by ID with status name.
+    ///
+    /// Returns `TaskError::NotFound` when no row exists for `task_id`; every
+    /// other failure (pool exhaustion/closure, connectivity, auth, ...)
+    /// surfaces as `TaskError::Database`, so callers can tell "the row is
+    /// gone" apart from "the database could not be reached" and must not
+    /// treat a transport error as proof the task does not exist.
     pub async fn get(db: &crate::db::DatabasePool, task_id: &Uuid) -> Result<Task, TaskError> {
         match db {
             crate::db::DatabasePool::Postgres(pg_pool) => {
@@ -527,9 +981,9 @@ impl Task {
                 );
                 let task = sqlx::query_as::<_, Task>(sqlx::AssertSqlSafe(q.as_str()))
                     .bind(task_id)
-                    .fetch_one(pg_pool)
+                    .fetch_optional(pg_pool)
                     .await?;
-                Ok(task)
+                task.ok_or(TaskError::NotFound)
             }
             crate::db::DatabasePool::Sqlite(sqlite_pool) => {
                 let q = format!(
@@ -539,9 +993,9 @@ impl Task {
                 );
                 let task = sqlx::query_as::<_, Task>(sqlx::AssertSqlSafe(q.as_str()))
                     .bind(task_id)
-                    .fetch_one(sqlite_pool)
+                    .fetch_optional(sqlite_pool)
                     .await?;
-                Ok(task)
+                task.ok_or(TaskError::NotFound)
             }
         }
     }
@@ -1463,31 +1917,80 @@ impl Task {
         db: &crate::db::DatabasePool,
         task_id: &Uuid,
         worker_id: &str,
-    ) -> Result<(), TaskError> {
+    ) -> Result<bool, TaskError> {
         let now = Utc::now();
-        match db {
+        let rows_affected = match db {
             crate::db::DatabasePool::Postgres(pg_pool) => {
                 sqlx::query(
-                    "UPDATE task SET worker_id = $1, last_heartbeat_at = $2 WHERE task_id = $3",
+                    "UPDATE task SET worker_id = $1, last_heartbeat_at = $2 WHERE task_id = $3 AND task_status_id = $4",
                 )
                 .bind(worker_id)
                 .bind(now)
                 .bind(task_id)
+                .bind(TaskStatus::Running.as_id())
                 .execute(pg_pool)
-                .await?;
+                .await?
+                .rows_affected()
             }
             crate::db::DatabasePool::Sqlite(sqlite_pool) => {
                 sqlx::query(
-                    "UPDATE task SET worker_id = ?, last_heartbeat_at = ? WHERE task_id = ?",
+                    "UPDATE task SET worker_id = ?, last_heartbeat_at = ? WHERE task_id = ? AND task_status_id = ?",
                 )
                 .bind(worker_id)
                 .bind(now)
                 .bind(task_id)
+                .bind(TaskStatus::Running.as_id())
                 .execute(sqlite_pool)
-                .await?;
+                .await?
+                .rows_affected()
             }
-        }
-        Ok(())
+        };
+        Ok(rows_affected == 1)
+    }
+
+    /// Release ownership of a task whose terminal state could not be
+    /// persisted. Aging the heartbeat lets the next zombie-reaper pass
+    /// reconcile it, and clearing ownership prevents this live worker's batch
+    /// heartbeat from keeping the row in `running` after execution has ended.
+    ///
+    /// `expected_worker` is an ownership fence: the release only applies
+    /// while the row is still owned by that worker, so a stale release can
+    /// never strip ownership from a task another worker has since claimed.
+    /// Returns true when the row was released.
+    pub async fn release_worker(
+        db: &crate::db::DatabasePool,
+        task_id: &Uuid,
+        expected_worker: &str,
+    ) -> Result<bool, TaskError> {
+        let running_id = TaskStatus::Running.as_id();
+        let stale_heartbeat = Utc::now() - chrono::Duration::days(1);
+        let rows_affected = match db {
+            crate::db::DatabasePool::Postgres(pg_pool) => {
+                sqlx::query(
+                    "UPDATE task SET worker_id = NULL, last_heartbeat_at = $1 WHERE task_id = $2 AND task_status_id = $3 AND worker_id = $4",
+                )
+                .bind(stale_heartbeat)
+                .bind(task_id)
+                .bind(running_id)
+                .bind(expected_worker)
+                .execute(pg_pool)
+                .await?
+                .rows_affected()
+            }
+            crate::db::DatabasePool::Sqlite(sqlite_pool) => {
+                sqlx::query(
+                    "UPDATE task SET worker_id = NULL, last_heartbeat_at = ? WHERE task_id = ? AND task_status_id = ? AND worker_id = ?",
+                )
+                .bind(stale_heartbeat)
+                .bind(task_id)
+                .bind(running_id)
+                .bind(expected_worker)
+                .execute(sqlite_pool)
+                .await?
+                .rows_affected()
+            }
+        };
+        Ok(rows_affected == 1)
     }
 
     /// Batch-update heartbeats for all tasks owned by this worker that are still running.
@@ -2008,7 +2511,7 @@ mod tests {
         .await
         .unwrap();
 
-        Task::mark_running(&db, &task_id).await.unwrap();
+        assert!(Task::mark_running(&db, &task_id).await.unwrap());
 
         let task = Task::get(&db, &task_id).await.unwrap();
         assert_eq!(task.status, "running");
@@ -2028,15 +2531,24 @@ mod tests {
         .await
         .unwrap();
 
-        Task::mark_running(&db, &task_id).await.unwrap();
+        assert!(Task::mark_running(&db, &task_id).await.unwrap());
 
         // Small delay to ensure measurable duration
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
 
         let result = serde_json::json!({"output": "done"});
-        Task::complete(&db, &task_id, &TaskStatus::Completed, Some(&result))
+        assert!(
+            Task::complete(
+                &db,
+                &task_id,
+                &TaskStatus::Completed,
+                Some(&result),
+                None,
+                None
+            )
             .await
-            .unwrap();
+            .unwrap()
+        );
 
         let task = Task::get(&db, &task_id).await.unwrap();
         assert_eq!(task.status, "completed");
@@ -2044,6 +2556,119 @@ mod tests {
         assert!(task.stop_time.is_some());
         assert!(task.duration_ms.is_some());
         assert!(task.duration_ms.unwrap() >= 0);
+    }
+
+    #[tokio::test]
+    async fn test_complete_duration_override_persists_verbatim() {
+        // `start_time` is stamped at claim, so the default stop-start
+        // duration covers worker-side setup and teardown too. A caller that
+        // measured the billable window itself (container tasks) passes it
+        // as `duration_ms_override` and the row must store it verbatim.
+        let db = crate::db::test_db().await;
+        let (task_id, env_id, stream_id, build_id, _, _) = test_ids();
+
+        Task::insert(
+            &db, &task_id, &env_id, &stream_id, &build_id, None, "::app/fn", None, None, "code",
+            60_000, None,
+        )
+        .await
+        .unwrap();
+        assert!(Task::mark_running(&db, &task_id).await.unwrap());
+
+        // Accrue a real claim-to-persist gap so the stop-start computation
+        // could not coincidentally equal the override.
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+
+        let result = serde_json::json!({"exit-code": 0});
+        assert!(
+            Task::complete(
+                &db,
+                &task_id,
+                &TaskStatus::Completed,
+                Some(&result),
+                Some(543_210),
+                None,
+            )
+            .await
+            .unwrap()
+        );
+
+        let task = Task::get(&db, &task_id).await.unwrap();
+        assert_eq!(task.task_status_id, TaskStatus::Completed.as_id());
+        assert!(task.stop_time.is_some());
+        assert_eq!(
+            task.duration_ms,
+            Some(543_210),
+            "an explicit override must be persisted verbatim, not the \
+             stop-start computation"
+        );
+        assert_eq!(task.result.unwrap(), result, "result payload unaffected");
+    }
+
+    #[tokio::test]
+    async fn test_complete_without_override_keeps_stop_start_duration() {
+        // `None` must preserve the historical behavior: duration_ms is the
+        // stop-start computation from the claim-stamped start_time.
+        let db = crate::db::test_db().await;
+        let (task_id, env_id, stream_id, build_id, _, _) = test_ids();
+
+        Task::insert(
+            &db, &task_id, &env_id, &stream_id, &build_id, None, "::app/fn", None, None, "code",
+            60_000, None,
+        )
+        .await
+        .unwrap();
+        assert!(Task::mark_running(&db, &task_id).await.unwrap());
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+
+        assert!(
+            Task::complete(&db, &task_id, &TaskStatus::Completed, None, None, None)
+                .await
+                .unwrap()
+        );
+
+        let task = Task::get(&db, &task_id).await.unwrap();
+        let duration = task
+            .duration_ms
+            .expect("stop-start duration must still be computed when no override is given");
+        assert!(
+            duration >= 20,
+            "duration must cover the running window (got {duration})"
+        );
+        assert!(
+            duration < 60_000,
+            "duration must be the computed span, not garbage (got {duration})"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_claim_for_worker_sets_running_state_and_owner_together() {
+        let db = crate::db::test_db().await;
+        let (task_id, env_id, stream_id, build_id, _, _) = test_ids();
+
+        Task::insert(
+            &db, &task_id, &env_id, &stream_id, &build_id, None, "::app/fn", None, None, "code",
+            60_000, None,
+        )
+        .await
+        .unwrap();
+
+        assert!(
+            Task::claim_for_worker(&db, &task_id, "worker-atomic")
+                .await
+                .unwrap()
+        );
+        assert!(
+            !Task::claim_for_worker(&db, &task_id, "worker-late")
+                .await
+                .unwrap()
+        );
+
+        let task = Task::get(&db, &task_id).await.unwrap();
+        assert_eq!(task.task_status_id, TaskStatus::Running.as_id());
+        assert_eq!(task.worker_id.as_deref(), Some("worker-atomic"));
+        assert!(task.start_time.is_some());
+        assert!(task.last_heartbeat_at.is_some());
     }
 
     #[tokio::test]
@@ -2057,17 +2682,28 @@ mod tests {
         )
         .await
         .unwrap();
-        Task::mark_running(&db, &task_id).await.unwrap();
+        assert!(Task::mark_running(&db, &task_id).await.unwrap());
 
         let first = serde_json::json!({"output": "done"});
-        Task::complete(&db, &task_id, &TaskStatus::Completed, Some(&first))
+        assert!(
+            Task::complete(
+                &db,
+                &task_id,
+                &TaskStatus::Completed,
+                Some(&first),
+                None,
+                None
+            )
             .await
-            .unwrap();
+            .unwrap()
+        );
 
         let stale = serde_json::json!({"error": "late stale write"});
-        Task::complete(&db, &task_id, &TaskStatus::Failed, Some(&stale))
-            .await
-            .unwrap();
+        assert!(
+            !Task::complete(&db, &task_id, &TaskStatus::Failed, Some(&stale), None, None)
+                .await
+                .unwrap()
+        );
 
         let task = Task::get(&db, &task_id).await.unwrap();
         assert_eq!(task.status, "completed");
@@ -2089,13 +2725,57 @@ mod tests {
         Task::mark_running(&db, &task_id).await.unwrap();
 
         let error = serde_json::json!({"error": "something broke"});
-        Task::complete(&db, &task_id, &TaskStatus::Failed, Some(&error))
+        Task::complete(&db, &task_id, &TaskStatus::Failed, Some(&error), None, None)
             .await
             .unwrap();
 
         let task = Task::get(&db, &task_id).await.unwrap();
         assert_eq!(task.status, "failed");
         assert!(task.stop_time.is_some());
+    }
+
+    #[tokio::test]
+    async fn test_cancelled_task_cannot_be_claimed_or_completed() {
+        let db = crate::db::test_db().await;
+        let (task_id, env_id, stream_id, build_id, _, _) = test_ids();
+
+        Task::insert(
+            &db, &task_id, &env_id, &stream_id, &build_id, None, "::app/fn", None, None, "code",
+            60_000, None,
+        )
+        .await
+        .unwrap();
+        assert!(Task::cancel(&db, &task_id).await.unwrap());
+
+        assert!(
+            !Task::claim_for_worker(&db, &task_id, "late-worker")
+                .await
+                .unwrap()
+        );
+        assert!(!Task::mark_running(&db, &task_id).await.unwrap());
+        assert!(
+            !Task::set_worker(&db, &task_id, "late-worker")
+                .await
+                .unwrap()
+        );
+        let stale = serde_json::json!({"output": "late"});
+        assert!(
+            !Task::complete(
+                &db,
+                &task_id,
+                &TaskStatus::Completed,
+                Some(&stale),
+                None,
+                None
+            )
+            .await
+            .unwrap()
+        );
+
+        let task = Task::get(&db, &task_id).await.unwrap();
+        assert_eq!(task.task_status_id, TaskStatus::Cancelled.as_id());
+        assert!(task.worker_id.is_none());
+        assert!(task.result.is_none());
     }
 
     #[tokio::test]
@@ -2111,7 +2791,7 @@ mod tests {
         .unwrap();
         Task::mark_running(&db, &task_id).await.unwrap();
 
-        Task::complete(&db, &task_id, &TaskStatus::TimedOut, None)
+        Task::complete(&db, &task_id, &TaskStatus::TimedOut, None, None, None)
             .await
             .unwrap();
 
@@ -2121,11 +2801,264 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_complete_fenced_with_matching_worker_succeeds() {
+        let db = crate::db::test_db().await;
+        let (task_id, env_id, stream_id, build_id, _, _) = test_ids();
+
+        Task::insert(
+            &db, &task_id, &env_id, &stream_id, &build_id, None, "::app/fn", None, None, "code",
+            60_000, None,
+        )
+        .await
+        .unwrap();
+        assert!(
+            Task::claim_for_worker(&db, &task_id, "worker-fence")
+                .await
+                .unwrap()
+        );
+
+        let result = serde_json::json!({"output": "done"});
+        assert!(
+            Task::complete(
+                &db,
+                &task_id,
+                &TaskStatus::Completed,
+                Some(&result),
+                None,
+                Some("worker-fence"),
+            )
+            .await
+            .unwrap()
+        );
+
+        let task = Task::get(&db, &task_id).await.unwrap();
+        assert_eq!(task.task_status_id, TaskStatus::Completed.as_id());
+        assert_eq!(task.result.unwrap(), result);
+        // complete never modifies worker_id, so the fence stays meaningful.
+        assert_eq!(task.worker_id.as_deref(), Some("worker-fence"));
+    }
+
+    #[tokio::test]
+    async fn test_complete_fenced_with_mismatched_worker_is_noop() {
+        let db = crate::db::test_db().await;
+        let (task_id, env_id, stream_id, build_id, _, _) = test_ids();
+
+        Task::insert(
+            &db, &task_id, &env_id, &stream_id, &build_id, None, "::app/fn", None, None, "code",
+            60_000, None,
+        )
+        .await
+        .unwrap();
+        assert!(
+            Task::claim_for_worker(&db, &task_id, "worker-owner")
+                .await
+                .unwrap()
+        );
+
+        let stale = serde_json::json!({"error": "stale timed-out write"});
+        assert!(
+            !Task::complete(
+                &db,
+                &task_id,
+                &TaskStatus::TimedOut,
+                Some(&stale),
+                None,
+                Some("worker-other"),
+            )
+            .await
+            .unwrap()
+        );
+
+        let task = Task::get(&db, &task_id).await.unwrap();
+        assert_eq!(task.task_status_id, TaskStatus::Running.as_id());
+        assert_eq!(task.worker_id.as_deref(), Some("worker-owner"));
+        assert!(task.result.is_none());
+        assert!(task.stop_time.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_complete_fenced_after_release_is_noop() {
+        let db = crate::db::test_db().await;
+        let (task_id, env_id, stream_id, build_id, _, _) = test_ids();
+
+        Task::insert(
+            &db, &task_id, &env_id, &stream_id, &build_id, None, "::app/fn", None, None, "code",
+            60_000, None,
+        )
+        .await
+        .unwrap();
+        assert!(
+            Task::claim_for_worker(&db, &task_id, "worker-orig")
+                .await
+                .unwrap()
+        );
+        assert!(
+            Task::release_worker(&db, &task_id, "worker-orig")
+                .await
+                .unwrap()
+        );
+
+        // Ownership was released: the original worker's fenced write must not
+        // land, while an unfenced write (e.g. the zombie reaper) still can.
+        assert!(
+            !Task::complete(
+                &db,
+                &task_id,
+                &TaskStatus::TimedOut,
+                None,
+                None,
+                Some("worker-orig")
+            )
+            .await
+            .unwrap()
+        );
+        assert!(
+            Task::complete(&db, &task_id, &TaskStatus::Failed, None, None, None)
+                .await
+                .unwrap()
+        );
+
+        let task = Task::get(&db, &task_id).await.unwrap();
+        assert_eq!(task.task_status_id, TaskStatus::Failed.as_id());
+    }
+
+    // -----------------------------------------------------------------------
+    // Enqueue-failure compensation tests
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_fail_if_queued_flips_queued_task() {
+        let db = crate::db::test_db().await;
+        let (task_id, env_id, stream_id, build_id, _, _) = test_ids();
+
+        Task::insert(
+            &db, &task_id, &env_id, &stream_id, &build_id, None, "::app/fn", None, None, "code",
+            60_000, None,
+        )
+        .await
+        .unwrap();
+
+        let failure = serde_json::json!({"error": "enqueue failed"});
+        assert!(
+            Task::fail_if_queued(&db, &task_id, Some(&failure))
+                .await
+                .unwrap()
+        );
+
+        let task = Task::get(&db, &task_id).await.unwrap();
+        assert_eq!(task.status, "failed");
+        assert_eq!(task.task_status_id, TaskStatus::Failed.as_id());
+        assert_eq!(task.result.unwrap(), failure);
+        assert!(task.stop_time.is_some());
+        assert_eq!(task.duration_ms, Some(0));
+    }
+
+    #[tokio::test]
+    async fn test_fail_if_queued_does_not_clobber_claimed_task() {
+        let db = crate::db::test_db().await;
+        let (task_id, env_id, stream_id, build_id, _, _) = test_ids();
+
+        Task::insert(
+            &db, &task_id, &env_id, &stream_id, &build_id, None, "::app/fn", None, None, "code",
+            60_000, None,
+        )
+        .await
+        .unwrap();
+        // A worker won the race and claimed the task before compensation ran.
+        assert!(
+            Task::claim_for_worker(&db, &task_id, "worker-claimed")
+                .await
+                .unwrap()
+        );
+
+        let failure = serde_json::json!({"error": "enqueue failed"});
+        assert!(
+            !Task::fail_if_queued(&db, &task_id, Some(&failure))
+                .await
+                .unwrap()
+        );
+
+        let task = Task::get(&db, &task_id).await.unwrap();
+        assert_eq!(task.task_status_id, TaskStatus::Running.as_id());
+        assert_eq!(task.worker_id.as_deref(), Some("worker-claimed"));
+        assert!(task.result.is_none());
+        assert!(task.stop_time.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_fail_if_queued_does_not_touch_terminal_task() {
+        let db = crate::db::test_db().await;
+        let (task_id, env_id, stream_id, build_id, _, _) = test_ids();
+
+        Task::insert(
+            &db, &task_id, &env_id, &stream_id, &build_id, None, "::app/fn", None, None, "code",
+            60_000, None,
+        )
+        .await
+        .unwrap();
+        assert!(Task::mark_running(&db, &task_id).await.unwrap());
+        let real = serde_json::json!({"output": "done"});
+        assert!(
+            Task::complete(
+                &db,
+                &task_id,
+                &TaskStatus::Completed,
+                Some(&real),
+                None,
+                None
+            )
+            .await
+            .unwrap()
+        );
+
+        let failure = serde_json::json!({"error": "late compensation"});
+        assert!(
+            !Task::fail_if_queued(&db, &task_id, Some(&failure))
+                .await
+                .unwrap()
+        );
+
+        let task = Task::get(&db, &task_id).await.unwrap();
+        assert_eq!(task.status, "completed");
+        assert_eq!(task.result.unwrap(), real);
+    }
+
+    #[tokio::test]
     async fn test_get_not_found() {
         let db = crate::db::test_db().await;
         let random_id = Uuid::now_v7();
         let result = Task::get(&db, &random_id).await;
-        assert!(result.is_err());
+        assert!(
+            matches!(result, Err(TaskError::NotFound)),
+            "a missing row must map to TaskError::NotFound, got: {:?}",
+            result
+        );
+    }
+
+    #[tokio::test]
+    async fn test_get_closed_pool_error_is_not_not_found() {
+        let db = crate::db::test_db().await;
+        let (task_id, env_id, stream_id, build_id, _, _) = test_ids();
+        Task::insert(
+            &db, &task_id, &env_id, &stream_id, &build_id, None, "::app/fn", None, None, "code",
+            60_000, None,
+        )
+        .await
+        .unwrap();
+
+        let crate::db::DatabasePool::Sqlite(pool) = &db else {
+            panic!("test_db should return SQLite");
+        };
+        pool.close().await;
+
+        // The row exists but the database is unreachable: this must surface
+        // as a transport error, never as NotFound.
+        let result = Task::get(&db, &task_id).await;
+        assert!(
+            matches!(result, Err(TaskError::Database(_))),
+            "a transport failure must not be reported as NotFound, got: {:?}",
+            result
+        );
     }
 
     #[tokio::test]
@@ -2266,7 +3199,8 @@ mod tests {
         .await
         .unwrap();
 
-        Task::set_worker(&db, &task_id, "worker-abc").await.unwrap();
+        assert!(Task::mark_running(&db, &task_id).await.unwrap());
+        assert!(Task::set_worker(&db, &task_id, "worker-abc").await.unwrap());
 
         let task = Task::get(&db, &task_id).await.unwrap();
         assert_eq!(task.worker_id.as_deref(), Some("worker-abc"));
@@ -2301,6 +3235,81 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_release_worker_stops_heartbeat_for_unfinished_task() {
+        let db = crate::db::test_db().await;
+        let (task_id, env_id, stream_id, build_id, _, _) = test_ids();
+
+        Task::insert(
+            &db, &task_id, &env_id, &stream_id, &build_id, None, "::app/fn", None, None, "code",
+            60_000, None,
+        )
+        .await
+        .unwrap();
+        Task::mark_running(&db, &task_id).await.unwrap();
+        Task::set_worker(&db, &task_id, "worker-release")
+            .await
+            .unwrap();
+
+        assert!(
+            Task::release_worker(&db, &task_id, "worker-release")
+                .await
+                .unwrap()
+        );
+
+        let released = Task::get(&db, &task_id).await.unwrap();
+        assert_eq!(released.task_status_id, TaskStatus::Running.as_id());
+        assert!(released.worker_id.is_none());
+        assert!(released.last_heartbeat_at.is_some());
+        assert_eq!(Task::heartbeat(&db, "worker-release").await.unwrap(), 0);
+        assert!(
+            Task::find_zombie_tasks(&db, 30)
+                .await
+                .unwrap()
+                .iter()
+                .any(|task| task.task_id == task_id)
+        );
+    }
+
+    #[tokio::test]
+    async fn test_release_worker_requires_matching_owner() {
+        let db = crate::db::test_db().await;
+        let (task_id, env_id, stream_id, build_id, _, _) = test_ids();
+
+        Task::insert(
+            &db, &task_id, &env_id, &stream_id, &build_id, None, "::app/fn", None, None, "code",
+            60_000, None,
+        )
+        .await
+        .unwrap();
+        assert!(
+            Task::claim_for_worker(&db, &task_id, "worker-owner")
+                .await
+                .unwrap()
+        );
+        let before = Task::get(&db, &task_id).await.unwrap();
+
+        // A stale release from a different worker must leave the row untouched.
+        assert!(
+            !Task::release_worker(&db, &task_id, "worker-imposter")
+                .await
+                .unwrap()
+        );
+
+        let after = Task::get(&db, &task_id).await.unwrap();
+        assert_eq!(after.task_status_id, TaskStatus::Running.as_id());
+        assert_eq!(after.worker_id.as_deref(), Some("worker-owner"));
+        assert_eq!(after.last_heartbeat_at, before.last_heartbeat_at);
+
+        assert!(
+            Task::release_worker(&db, &task_id, "worker-owner")
+                .await
+                .unwrap()
+        );
+        let released = Task::get(&db, &task_id).await.unwrap();
+        assert!(released.worker_id.is_none());
+    }
+
+    #[tokio::test]
     async fn test_heartbeat_only_updates_running_tasks() {
         let db = crate::db::test_db().await;
         let (task_id, env_id, stream_id, build_id, _, _) = test_ids();
@@ -2313,7 +3322,7 @@ mod tests {
         .unwrap();
 
         // Task is still queued, not running
-        Task::set_worker(&db, &task_id, "worker-hb2").await.unwrap();
+        assert!(!Task::set_worker(&db, &task_id, "worker-hb2").await.unwrap());
 
         let rows = Task::heartbeat(&db, "worker-hb2").await.unwrap();
         assert_eq!(rows, 0);
@@ -2545,5 +3554,261 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(disabled, unfiltered);
+    }
+
+    // -----------------------------------------------------------------------
+    // insert_retry idempotency (partial unique index on parent + attempt)
+    // -----------------------------------------------------------------------
+
+    async fn insert_parent_task(db: &crate::db::DatabasePool) -> Task {
+        let (task_id, env_id, stream_id, build_id, _, _) = test_ids();
+        Task::insert(
+            db,
+            &task_id,
+            &env_id,
+            &stream_id,
+            &build_id,
+            None,
+            "::app/retried",
+            None,
+            None,
+            "code",
+            60_000,
+            None,
+        )
+        .await
+        .unwrap();
+        Task::get(db, &task_id).await.unwrap()
+    }
+
+    #[tokio::test]
+    async fn test_insert_retry_duplicate_parent_attempt_is_noop() {
+        let db = crate::db::test_db().await;
+        let parent = insert_parent_task(&db).await;
+        assert_eq!(
+            parent.parent_task_id, None,
+            "first-run rows carry no lineage"
+        );
+
+        let first_id = Uuid::now_v7();
+        let second_id = Uuid::now_v7();
+        let at = Utc::now();
+        assert!(
+            Task::insert_retry(&db, &first_id, &parent, 1, at)
+                .await
+                .unwrap()
+        );
+        assert!(
+            !Task::insert_retry(&db, &second_id, &parent, 1, at)
+                .await
+                .unwrap(),
+            "a second retry insert for the same parent + attempt must report not-inserted"
+        );
+
+        // Exactly one retry row exists, and it is the first writer's.
+        assert_eq!(
+            Task::get_count_by_env(&db, &parent.env_id).await.unwrap(),
+            2
+        );
+        let child = Task::get(&db, &first_id).await.unwrap();
+        assert_eq!(child.parent_task_id, Some(parent.task_id));
+        assert_eq!(child.retry_attempt, 1);
+        assert_eq!(child.infra_retry_count, 0);
+        assert!(matches!(
+            Task::get(&db, &second_id).await,
+            Err(TaskError::NotFound)
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_insert_retry_infra_and_budget_attempts_occupy_distinct_slots() {
+        let db = crate::db::test_db().await;
+        let parent = insert_parent_task(&db).await;
+        let at = Utc::now();
+
+        // Infra retries (shutdown drain) preserve the parent's attempt number
+        // while budget retries increment it, so the two kinds must never
+        // collide with each other — only with a duplicate of their own kind.
+        let budget_attempt = parent.retry_attempt + 1;
+        assert!(
+            Task::insert_infra_retry(&db, &Uuid::now_v7(), &parent, at)
+                .await
+                .unwrap(),
+            "the first infra retry must insert"
+        );
+        assert!(
+            Task::insert_retry(&db, &Uuid::now_v7(), &parent, budget_attempt, at)
+                .await
+                .unwrap(),
+            "a budget retry must not collide with the parent's infra retry"
+        );
+        assert!(
+            !Task::insert_infra_retry(&db, &Uuid::now_v7(), &parent, at)
+                .await
+                .unwrap(),
+            "a second infra retry of the same parent must collide"
+        );
+        assert!(
+            !Task::insert_retry(&db, &Uuid::now_v7(), &parent, budget_attempt, at)
+                .await
+                .unwrap(),
+            "a second budget retry of the same parent must collide"
+        );
+        assert_eq!(
+            Task::get_count_by_env(&db, &parent.env_id).await.unwrap(),
+            3,
+            "parent + one infra retry + one budget retry"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_infra_retry_count_carries_across_generations_and_budget_retry_resets_it() {
+        let db = crate::db::test_db().await;
+        let parent = insert_parent_task(&db).await;
+        let first_id = Uuid::now_v7();
+        assert!(
+            Task::insert_infra_retry(&db, &first_id, &parent, Utc::now())
+                .await
+                .unwrap()
+        );
+        let first = Task::get(&db, &first_id).await.unwrap();
+        assert_eq!(first.infra_retry_count, 1);
+
+        let second_id = Uuid::now_v7();
+        assert!(
+            Task::insert_infra_retry(&db, &second_id, &first, Utc::now())
+                .await
+                .unwrap()
+        );
+        let second = Task::get(&db, &second_id).await.unwrap();
+        assert_eq!(second.infra_retry_count, 2);
+        assert_eq!(second.parent_task_id, Some(first_id));
+
+        let budget_id = Uuid::now_v7();
+        assert!(
+            Task::insert_retry(
+                &db,
+                &budget_id,
+                &second,
+                second.retry_attempt + 1,
+                Utc::now(),
+            )
+            .await
+            .unwrap()
+        );
+        assert_eq!(
+            Task::get(&db, &budget_id).await.unwrap().infra_retry_count,
+            0,
+            "a user-policy retry starts a fresh infrastructure retry budget"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_insert_retry_concurrent_racers_create_exactly_one_row() {
+        let db = crate::db::test_db().await;
+        let parent = insert_parent_task(&db).await;
+        let at = Utc::now();
+
+        let first_id = Uuid::now_v7();
+        let second_id = Uuid::now_v7();
+        let (a, b) = tokio::join!(
+            Task::insert_retry(&db, &first_id, &parent, 1, at),
+            Task::insert_retry(&db, &second_id, &parent, 1, at),
+        );
+        let (a, b) = (a.unwrap(), b.unwrap());
+        assert!(
+            a ^ b,
+            "exactly one racer may create the retry row (got {a} and {b})"
+        );
+        assert_eq!(
+            Task::get_count_by_env(&db, &parent.env_id).await.unwrap(),
+            2
+        );
+    }
+
+    #[tokio::test]
+    async fn finalize_with_infra_retry_rolls_back_terminal_write_when_child_insert_fails() {
+        let db = crate::db::test_db().await;
+        let parent = insert_parent_task(&db).await;
+        assert!(Task::mark_running(&db, &parent.task_id).await.unwrap());
+        let retry_error = serde_json::json!({"msg": "will retry"});
+        let exhausted_error = serde_json::json!({"msg": "exhausted"});
+
+        // Reusing the parent's id forces the retry INSERT to violate the task
+        // primary key. The original must remain running because both writes
+        // belong to one transaction.
+        assert!(
+            Task::finalize_with_infra_retry(
+                &db,
+                &parent.task_id,
+                &parent.task_id,
+                3,
+                &retry_error,
+                &exhausted_error,
+                Utc::now(),
+            )
+            .await
+            .is_err()
+        );
+
+        let unchanged = Task::get(&db, &parent.task_id).await.unwrap();
+        assert_eq!(unchanged.task_status_id, TaskStatus::Running.as_id());
+        assert!(unchanged.result.is_none());
+        assert_eq!(
+            Task::get_count_by_env(&db, &parent.env_id).await.unwrap(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn finalize_with_infra_retry_commits_terminal_and_child_together() {
+        let db = crate::db::test_db().await;
+        let parent = insert_parent_task(&db).await;
+        assert!(Task::mark_running(&db, &parent.task_id).await.unwrap());
+        let child_id = Uuid::now_v7();
+        let retry_error = serde_json::json!({"msg": "will retry"});
+        let exhausted_error = serde_json::json!({"msg": "exhausted"});
+
+        let outcome = Task::finalize_with_infra_retry(
+            &db,
+            &parent.task_id,
+            &child_id,
+            3,
+            &retry_error,
+            &exhausted_error,
+            Utc::now(),
+        )
+        .await
+        .unwrap();
+        assert!(matches!(
+            outcome,
+            InfraRetryFinalizeOutcome::RetryReady {
+                retry_task_id,
+                should_enqueue: true,
+                ..
+            } if retry_task_id == child_id
+        ));
+        assert_eq!(
+            Task::get(&db, &parent.task_id)
+                .await
+                .unwrap()
+                .task_status_id,
+            TaskStatus::Failed.as_id()
+        );
+        let child = Task::get(&db, &child_id).await.unwrap();
+        assert_eq!(child.parent_task_id, Some(parent.task_id));
+        assert_eq!(child.infra_retry_count, 1);
+    }
+
+    #[tokio::test]
+    async fn test_first_run_rows_with_null_parent_never_collide() {
+        let db = crate::db::test_db().await;
+
+        // Pre-migration rows and every first-run task share NULL parent and
+        // retry_attempt 0; the partial index must exempt them all.
+        let p1 = insert_parent_task(&db).await;
+        let p2 = insert_parent_task(&db).await;
+        assert_eq!((p1.parent_task_id, p1.retry_attempt), (None, 0));
+        assert_eq!((p2.parent_task_id, p2.retry_attempt), (None, 0));
     }
 }

@@ -705,6 +705,8 @@ async fn run_action_handler(
         access_id: None, // Dashboard-initiated, no API access log
         agent_type: None,
         queue_timing: None,
+        // Enqueue-only producer context; the worker stamps deadline_at at admission
+        deadline_at: None,
     };
 
     // Create event message

@@ -66,6 +66,8 @@ hot.project.{{PROJECT_NAME}}.ignore.excludes []
 // SQLite: "sqlite:path/to/database.db"
 hot.db.uri ::env/get("HOT_DB_URI", "sqlite:./.hot/db/hot.sqlite.db")
 hot.db.schema "hot"
+hot.db.statement-timeout-ms Int(::env/get("HOT_DB_STATEMENT_TIMEOUT_MS", "30000"))
+hot.db.lock-timeout-ms Int(::env/get("HOT_DB_LOCK_TIMEOUT_MS", "5000"))
 
 // Local dev call data retention (days). Set to -1 to disable cleanup.
 // Automatically trims call/trace data older than this in local development.
@@ -314,6 +316,7 @@ hot.watch.with-tests false
 
 // Worker Configuration
 hot.worker.run-timeout Int(::env/get("HOT_WORKER_RUN_TIMEOUT", "300"))
+hot.worker.max-blocking-executions Int(::env/get("HOT_WORKER_MAX_BLOCKING_EXECUTIONS", "-1"))
 hot.worker.shutdown-timeout Int(::env/get("HOT_WORKER_SHUTDOWN_TIMEOUT", "60"))
 hot.worker.threads Int(::env/get("HOT_WORKER_THREADS", "2"))
 hot.worker.vm-concurrency ::env/get("HOT_WORKER_VM_CONCURRENCY", "auto")
