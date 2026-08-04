@@ -34,7 +34,7 @@ and verify the resulting lockfile. Do not require a clone of an SDK repository.
 
 Every SDK mirrors the Hot API v1 resources:
 
-- events, streams, and runs;
+- events, streams, runs, and tasks;
 - files, projects, and builds;
 - context, domains, sessions, and service keys;
 - organization and environment.
@@ -65,13 +65,40 @@ Recognize these stream events:
 - `stream:data`: application payload under `data_type` and `payload`;
 - `run:stop`, `run:fail`, or `run:cancel`: inspect `run.result` or the SDK's
   structured run failure;
+- `run:update`: a durable run snapshot from a run-specific subscription;
 - `stream:complete`: the current SSE connection ended.
+- `task:update`: a durable task snapshot. `completed`, `failed`, `cancelled`,
+  and `timed_out` are terminal task states.
 
 ## Choose a Stream Lifecycle
 
 For one request and one matching run, use `subscribe-with-event`. It atomically
 opens the stream and publishes, reconnects across the server's connection cap
-in current SDKs, and stops after the first terminal run event.
+in current SDKs, and stops after the terminal run correlated to the published
+event. Unrelated runs on the same stream do not end the iterator.
+
+When code already has a run id and only needs its terminal record, call the
+SDK run waiter. It receives the latest persisted `run:update` first, reconnects
+when necessary, and cannot miss completion that happened before subscription.
+Successful waits return the terminal run; failed or cancelled runs raise a
+structured run error containing that record.
+
+When that run starts a long-lived task, return the task id to the client and
+call the SDK task waiter. The waiter subscribes to the task endpoint, receives
+the current persisted snapshot first, reconnects when necessary, and therefore
+cannot miss completion that happened before subscription setup. Successful
+waits return the terminal task record; failed, cancelled, and timed-out tasks
+raise a structured task error containing that record.
+
+The parent stream also emits current and changing `task:update` snapshots for
+its tasks. Use one stream subscription when coordinating several tasks, and a
+task-specific waiter when only one task's terminal result matters. The run's
+result remains application-defined and may return one task id, several task
+ids, or a nested domain object for the client to interpret.
+
+Use Hot-side `::hot::task/await` only when later Hot code in the same execution
+depends on the result. Client-owned waiting belongs in the SDK so the
+originating run can finish promptly.
 
 For a multi-turn browser session:
 
@@ -84,14 +111,26 @@ For a multi-turn browser session:
    replay missed data.
 
 The high-level `subscribeWithEvent` / `subscribe_with_event` helpers are
-one-run iterators: they stop after the first terminal run event. A persistent
-multi-turn UI should consume the raw BFF subscribe-with-event response for its
-first connection, publish later turns separately, and reattach through the
-existing-stream subscribe endpoint.
+one-run iterators: they stop after their published event's terminal run. A
+persistent multi-turn UI should consume the raw BFF subscribe-with-event
+response for its first connection, publish later turns separately, and
+reattach through the existing-stream subscribe endpoint.
 
 Two simultaneous subscribers can cause the same reply to render twice.
 Closing the subscription after one `reply:end` can miss later workflow output,
 including approval-resume results.
+
+Durable waiter names are:
+
+| Language | Wait for run | Wait for task |
+| --- | --- | --- |
+| JavaScript/TypeScript | `await hot.runs.wait(runId)` | `await hot.tasks.wait(taskId)` |
+| Python | `hot.runs.wait(run_id)` | `hot.tasks.wait(task_id)` |
+| Go | `client.Runs.Wait(ctx, runID, nil)` | `client.Tasks.Wait(ctx, taskID, nil)` |
+| Rust | `client.runs().wait(run_id, RunWaitOptions::default()).await` | `client.tasks().wait(task_id, TaskWaitOptions::default()).await` |
+| Java | `client.runs().waitFor(runId)` | `client.tasks().waitFor(taskId)` |
+
+Python's `AsyncHotClient` exposes async versions of both waiters.
 
 ## JavaScript and TypeScript
 
@@ -290,6 +329,10 @@ Close `StreamEvents` and avoid whole-request timeouts on SSE.
 - Maintain one subscriber per multi-turn stream.
 - Correlate messages with stable session and message ids.
 - Handle every terminal run event and structured run failure.
+- Use the run waiter when only a known run's durable terminal record matters.
+- Return task ids from asynchronous runs and use the SDK task waiter.
+- Treat the first `task:update` as the durable source of truth after reconnect.
+- Use one stream subscription to coordinate multiple tasks on that stream.
 - Handle the server's SSE connection cap and cancellation.
 - Do not assume reconnect replays data.
 - Render structured state events independently from reply text.

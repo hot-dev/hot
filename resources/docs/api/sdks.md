@@ -14,10 +14,10 @@ Official client libraries for the Hot API, released in lockstep versions:
 | Rust | [`hot-dev`](https://crates.io/crates/hot-dev) (crates.io) | [hot-dev/hot-rust](https://github.com/hot-dev/hot-rust) | [docs.rs](https://docs.rs/hot-dev) |
 | Java | `dev.hot:hot-sdk` (Maven Central) | [hot-dev/hot-java](https://github.com/hot-dev/hot-java) | [javadoc.io](https://javadoc.io/doc/dev.hot/hot-sdk) |
 
-Every SDK covers the full API v1 surface: the twelve resources ([Endpoints](api)),
+Every SDK covers the full API v1 surface: the thirteen resources ([Endpoints](api)),
 SSE run-stream subscriptions with automatic reconnection across the API's
-5-minute stream timeout, structured API errors, and escape hatches for
-endpoints that do not yet have a helper.
+5-minute stream timeout, durable run and task waiters, structured API errors,
+and escape hatches for endpoints that do not yet have a helper.
 
 Authenticated clients should run server-side. Browser apps and untrusted
 clients should call your own backend route instead of exposing a Hot API key
@@ -200,7 +200,9 @@ try (StreamEvents events = client.streams().subscribeWithEvent(Map.of(
 
 ## Call a Hot Function
 
-Every SDK wraps the publish-and-wait flow for `hot:call` events:
+Every SDK wraps the publish-and-wait flow for `hot:call` events. The helper
+publishes through the atomic subscribe-with-event endpoint, correlates the
+terminal run to the published event, and reconnects without publishing twice:
 
 <!-- tabs:start -->
 #### **JavaScript**
@@ -241,6 +243,136 @@ Object result = client.events().callHot("::myapp::math/add-nums", List.of(2, 3))
 // result equals 5
 ```
 <!-- tabs:end -->
+
+## Wait for a Run
+
+If another API response or stored record gives your client a run ID, wait on
+that run directly. The run subscription sends the latest persisted snapshot
+first, reconnects after transport interruptions, and closes after a terminal
+state. A failed or cancelled run raises a structured run error containing the
+terminal run record.
+
+| Language | Wait method |
+|----------|-------------|
+| JavaScript / TypeScript | `await hot.runs.wait(runId)` |
+| Python | `hot.runs.wait(run_id)` or `await async_hot.runs.wait(run_id)` |
+| Go | `client.Runs.Wait(ctx, runID, nil)` |
+| Rust | `client.runs().wait(run_id, RunWaitOptions::default()).await` |
+| Java | `client.runs().waitFor(runId)` |
+
+Use the stream subscription when you need live `stream:data` or several
+related runs. Use the run waiter when one run's durable terminal record is the
+only result you need.
+
+## Wait for a Background Task
+
+When a Hot run starts a task for a client, return the task id immediately and
+let the SDK wait for its durable result. The task subscription sends the latest
+persisted snapshot first, including a terminal snapshot when the task completed
+before the client subscribed. Waiters reconnect automatically and return the
+completed task record. Failed, cancelled, and timed-out tasks raise a structured
+task error containing that record.
+
+<!-- tabs:start -->
+#### **JavaScript**
+
+```javascript
+const task = await hot.tasks.wait(taskId, { timeoutMs: 300_000 });
+console.log(task.result);
+```
+
+#### **Python**
+
+```python
+task = hot.tasks.wait(task_id, timeout=300)
+print(task["result"])
+
+# AsyncHotClient exposes the same resource:
+task = await async_hot.tasks.wait(task_id, timeout=300)
+```
+
+#### **Go**
+
+```go
+task, err := client.Tasks.Wait(ctx, taskID, &hot.WaitForTaskOptions{
+	Timeout: 5 * time.Minute,
+})
+if err != nil {
+	log.Fatal(err)
+}
+fmt.Println(task["result"])
+```
+
+#### **Rust**
+
+```rust
+let task = client
+    .tasks()
+    .wait(task_id, TaskWaitOptions {
+        timeout: Duration::from_secs(300),
+        ..TaskWaitOptions::default()
+    })
+    .await?;
+println!("{:?}", task.get("result"));
+```
+
+#### **Java**
+
+```java
+Map<String, Object> task = client.tasks().waitFor(
+    taskId,
+    new TaskWaitOptions().timeout(Duration.ofMinutes(5)));
+System.out.println(task.get("result"));
+```
+<!-- tabs:end -->
+
+Use `::hot::task/await` inside Hot only when later Hot code in that same
+execution depends on the task result. Keeping a run alive just so a client can
+wait defeats the task's asynchronous lifecycle.
+
+### Coordinate several tasks on one stream
+
+The stream that contains the originating run also emits durable `task:update`
+snapshots for every task on that stream. This keeps the event-handler result
+fully user-defined: it can return one task ID, two task IDs, or a nested domain
+object. The client interprets that result, then uses the same stream to follow
+all relevant tasks:
+
+```typescript
+let streamId: string | undefined;
+let taskIds: string[] = [];
+
+for await (const event of hot.streams.subscribeWithEvent({
+  event_type: "report:requested",
+  event_data: { report_id: "report_123" },
+})) {
+  if (event.type === "event:published") streamId = event.stream_id;
+
+  if (event.type === "run:stop") {
+    // `task_ids` is application-defined, not imposed by Hot.
+    const result = event.run?.result as { task_ids?: string[] } | undefined;
+    taskIds = result?.task_ids ?? [];
+    break;
+  }
+}
+
+const pending = new Set(taskIds);
+for await (const event of hot.streams.subscribe(streamId!)) {
+  if (event.type !== "task:update" || !pending.has(event.task.task_id)) continue;
+
+  if (["failed", "cancelled", "timed_out"].includes(event.task.status)) {
+    throw new Error(`Task ${event.task.task_id} ${event.task.status}`);
+  }
+  if (event.task.status === "completed") pending.delete(event.task.task_id);
+  if (pending.size === 0) break;
+}
+```
+
+Because the stream sends current persisted task snapshots when the client
+connects, this remains safe if one of the tasks finishes between the handler's
+`run:stop` and the second subscription. For a single task, `tasks.wait(taskId)`
+wraps the same durable lifecycle with reconnection, timeout, and structured
+failure handling.
 
 ## Errors
 
@@ -318,9 +450,17 @@ All five SDKs follow the same conventions:
   responds 429 with a `retry_after`. Streaming and raw requests never retry.
 - **Streaming reconnection.** `subscribeWithEvent` resubscribes across the
   API's 5-minute SSE timeout, dedupes replayed `run:start` and terminal
-  events by `run_id`, and ends after the first terminal `run:*` event. Use
-  the plain `subscribe` when your app expects multiple independent runs on
-  one stream.
+  events by `run_id`, and ends after the terminal run correlated to the event
+  it published. Unrelated runs on the same stream do not end the iterator. Use
+  the plain `subscribe` when your app expects multiple independent runs on one
+  stream. A plain stream subscription also carries durable `task:update`
+  snapshots for tasks associated with that stream.
+- **Durable run waiting.** `runs.wait` (or the language-equivalent method)
+  reads `run:update` snapshots and reconnects without missing a run that became
+  terminal before subscription setup.
+- **Durable task waiting.** `tasks.wait` (or the language-equivalent method)
+  reads `task:update` snapshots, reconnects across transport interruptions, and
+  cannot miss a task that became terminal before subscription setup.
 - **Identification.** Each SDK sends `User-Agent: hot-sdk-<lang>/<version>`.
 - **Escape hatches.** A `request(...)` method (plus a raw-response variant)
   covers endpoints that do not yet have a resource helper.

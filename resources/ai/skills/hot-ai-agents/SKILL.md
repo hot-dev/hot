@@ -83,6 +83,14 @@ a backend-for-frontend route.
 - Use atomic subscribe-with-event for the first event so publishing cannot
   race subscription setup.
 - For a one-run request, consume the SDK's subscribe-with-event iterator.
+- When only a known run's terminal record matters, use the SDK's run waiter
+  instead of keeping or reconstructing its full stream subscription.
+- When a run starts a background task for a client, return the task id and let
+  the SDK's task waiter follow its durable lifecycle. Do not keep the
+  originating Hot run open with `::hot::task/await` merely to satisfy a client
+  request.
+- When one client coordinates several tasks on the same stream, consume their
+  durable `task:update` snapshots through that existing stream subscription.
 - For a multi-turn UI, allocate one stream id, keep one subscription, publish
   later turns into that stream, and reconnect to the same stream when the
   connection closes.
@@ -102,8 +110,9 @@ Validate in layers:
 2. Run focused Hot tests for the package or app.
 3. Test provider adapters with deterministic fixtures before credentialed
    integration tests.
-4. Test duplicate delivery, retry, partial failure, approval waits, and
-   reconnect behavior.
+4. Test duplicate delivery, retry, partial failure, approval waits, reconnect
+   behavior, run or task completion before the client subscribes, and several
+   task lifecycles multiplexed on one stream.
 5. Run the target SDK's typecheck and test commands.
 6. Verify the browser bundle contains no Hot API key or provider secret.
 

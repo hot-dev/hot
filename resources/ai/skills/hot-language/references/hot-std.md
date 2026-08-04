@@ -660,8 +660,7 @@ start fn (task-fn: Fn): TaskInfo                         // Start a task with no
 start fn (task-fn: Fn, args: Any): TaskInfo              // Start with args
 start fn (task-fn: Fn, args: Any, options: TaskOptions): TaskInfo // Start with options
 cancel fn (task-id: Str): Bool                           // Cancel a queued/running task
-await fn (task-id: Str): TaskResult                      // Wait for task to complete
-await fn (task-id: Str, opts: Map): TaskResult           // Wait with options ({poll-ms, timeout-ms})
+await fn (task-id: Str): TaskResult                      // Wait only when this Hot execution depends on completion
 
 // Messaging (code tasks only)
 send fn (task-id: Str, data: Any): Bool                  // Send data to a running task

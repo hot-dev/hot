@@ -47,6 +47,7 @@ use crate::handlers::{
     get_run,
     get_run_stats,
     get_service_key,
+    get_task,
     initiate_upload,
     list_builds,
     list_builds_by_env,
@@ -74,8 +75,10 @@ use crate::handlers::{
     root_handler,
     status_handler,
     subscribe_to_env,
+    subscribe_to_run,
     subscribe_to_stream,
     subscribe_to_stream_post,
+    subscribe_to_task,
     subscribe_with_event,
     update_context_variable,
     update_project,
@@ -340,6 +343,10 @@ pub async fn run_with_stream_pubsub(conf: Val, shared_stream_pubsub: Option<Arc<
         .route("/v1/runs", get(list_runs))
         .route("/v1/runs/stats", get(get_run_stats))
         .route("/v1/runs/{run_id}", get(get_run))
+        .route("/v1/runs/{run_id}/subscribe", get(subscribe_to_run))
+        // Tasks
+        .route("/v1/tasks/{task_id}", get(get_task))
+        .route("/v1/tasks/{task_id}/subscribe", get(subscribe_to_task))
         // Events
         .route(
             "/v1/events",

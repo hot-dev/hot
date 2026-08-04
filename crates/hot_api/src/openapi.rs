@@ -9,8 +9,8 @@ use uuid::Uuid;
 use crate::handlers::{
     CreateDomainRequest, CreateServiceKeyRequest, CreateSessionRequest, DomainResponse,
     DomainVerifyResponse, EnvSseEvent, EventPublishedEvent, Limits, OrgUsageResponse, PlanInfo,
-    RevokeAllResponse, RevokeAllServiceKeysResponse, ServiceKeyResponse, SessionResponse,
-    StreamEvent, SubscribeWithEventRequest, UsagePercent, UsageStats,
+    RevokeAllResponse, RevokeAllServiceKeysResponse, RunEvent, ServiceKeyResponse, SessionResponse,
+    StreamEvent, SubscribeWithEventRequest, TaskEvent, UsagePercent, UsageStats,
 };
 use crate::models::{
     ApiError, ApiErrorResponse, ApiListResponse, ApiResponse, BuildResponse, BuildUploadResponse,
@@ -18,7 +18,8 @@ use crate::models::{
     CreateProjectRequest, EnvironmentResponse, EventHandlerResponse, EventResponse, FileResponse,
     InitiateUploadRequest, InitiateUploadResponse, PaginationMeta, ProjectActivateResponse,
     ProjectResponse, PublishEventRequest, ResponseMeta, RunResponse, RunStatsResponse,
-    ScheduleResponse, UpdateContextVariableRequest, UpdateProjectRequest, UploadPartResponse,
+    ScheduleResponse, TaskResponse, UpdateContextVariableRequest, UpdateProjectRequest,
+    UploadPartResponse,
 };
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -76,6 +77,9 @@ struct BinaryUploadBody {
         list_runs_doc,
         get_run_stats_doc,
         get_run_doc,
+        subscribe_to_run_doc,
+        get_task_doc,
+        subscribe_to_task_doc,
         publish_event_doc,
         list_events_doc,
         get_event_doc,
@@ -135,6 +139,7 @@ struct BinaryUploadBody {
         ApiResponse<ContextVariableResponse>,
         ApiResponse<RunResponse>,
         ApiResponse<RunStatsResponse>,
+        ApiResponse<TaskResponse>,
         ApiResponse<EventResponse>,
         ApiResponse<SessionResponse>,
         ApiResponse<RevokeAllResponse>,
@@ -179,12 +184,15 @@ struct BinaryUploadBody {
         RevokeAllServiceKeysResponse,
         RunResponse,
         RunStatsResponse,
+        RunEvent,
         ScheduleResponse,
         ServiceKeyResponse,
         SessionResponse,
         StatusResponse,
         StreamEvent,
         SubscribeWithEventRequest,
+        TaskEvent,
+        TaskResponse,
         UpdateContextVariableRequest,
         UpdateProjectRequest,
         UploadBuildMultipart,
@@ -199,6 +207,7 @@ struct BinaryUploadBody {
         (name = "Builds", description = "Build listing, upload, download, and deployment"),
         (name = "Context", description = "Encrypted project context variables"),
         (name = "Runs", description = "Run tracking and observability"),
+        (name = "Tasks", description = "Asynchronous task status and completion"),
         (name = "Events", description = "Event publishing and lookup"),
         (name = "Sessions", description = "Short-lived scoped access tokens"),
         (name = "Service Keys", description = "Long-lived scoped service credentials"),
@@ -490,6 +499,36 @@ fn get_run_stats_doc() {}
     responses((status = 200, description = "Run", body = ApiResponse<RunResponse>), (status = "default", description = "Error", body = ApiErrorResponse))
 )]
 fn get_run_doc() {}
+
+#[utoipa::path(
+    get,
+    path = "/v1/runs/{run_id}/subscribe",
+    tag = "Runs",
+    params(("run_id" = Uuid, Path, description = "Run UUID")),
+    security(("bearer_auth" = [])),
+    responses((status = 200, description = "SSE run snapshots until terminal state", body = RunEvent, content_type = "text/event-stream"), (status = "default", description = "Error", body = ApiErrorResponse))
+)]
+fn subscribe_to_run_doc() {}
+
+#[utoipa::path(
+    get,
+    path = "/v1/tasks/{task_id}",
+    tag = "Tasks",
+    params(("task_id" = Uuid, Path, description = "Task UUID")),
+    security(("bearer_auth" = [])),
+    responses((status = 200, description = "Task snapshot", body = ApiResponse<TaskResponse>), (status = "default", description = "Error", body = ApiErrorResponse))
+)]
+fn get_task_doc() {}
+
+#[utoipa::path(
+    get,
+    path = "/v1/tasks/{task_id}/subscribe",
+    tag = "Tasks",
+    params(("task_id" = Uuid, Path, description = "Task UUID")),
+    security(("bearer_auth" = [])),
+    responses((status = 200, description = "SSE task snapshots until terminal state", body = TaskEvent, content_type = "text/event-stream"), (status = "default", description = "Error", body = ApiErrorResponse))
+)]
+fn subscribe_to_task_doc() {}
 
 #[utoipa::path(
     post,
@@ -884,6 +923,9 @@ mod tests {
             "/v1/projects",
             "/v1/builds",
             "/v1/runs/stats",
+            "/v1/runs/{run_id}/subscribe",
+            "/v1/tasks/{task_id}",
+            "/v1/tasks/{task_id}/subscribe",
             "/v1/events",
             "/v1/sessions",
             "/v1/service-keys",

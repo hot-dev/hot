@@ -230,6 +230,33 @@ pub struct RunStatsResponse {
 }
 
 // ============================================================================
+// Task DTOs
+// ============================================================================
+
+#[derive(Debug, Clone, Serialize, ToSchema)]
+pub struct TaskResponse {
+    pub task_id: Uuid,
+    pub env_id: Uuid,
+    pub stream_id: Uuid,
+    pub build_id: Uuid,
+    pub run_id: Option<Uuid>,
+    pub origin_run_id: Option<Uuid>,
+    pub function_name: String,
+    pub task_type: String,
+    pub status: String,
+    pub start_time: Option<DateTime<Utc>>,
+    pub stop_time: Option<DateTime<Utc>>,
+    pub duration_ms: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub result: Option<serde_json::Value>,
+    pub timeout_ms: i64,
+    pub retry_attempt: i16,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_retry_at: Option<DateTime<Utc>>,
+    pub created_at: DateTime<Utc>,
+}
+
+// ============================================================================
 // Event DTOs
 // ============================================================================
 

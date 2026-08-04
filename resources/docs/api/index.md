@@ -1,10 +1,10 @@
 ---
-description: "REST API reference for Hot projects, builds, runs, events, streams, files, secrets, agents, MCP services, and API keys."
+description: "REST API reference for Hot projects, builds, runs, tasks, events, streams, files, secrets, agents, MCP services, and API keys."
 ---
 
 # HOT API
 
-The Hot API provides programmatic access to manage projects, builds, runs, events, and more.
+The Hot API provides programmatic access to manage projects, builds, runs, tasks, events, and more.
 
 > **Official SDKs** are available for JavaScript/TypeScript, Python, Go, Rust,
 > and Java — see [SDKs](api/sdks). The examples on this page show the raw
@@ -974,6 +974,29 @@ GET /v1/runs
 GET /v1/runs/{run_id}
 ```
 
+#### Subscribe to Run
+
+```http
+GET /v1/runs/{run_id}/subscribe
+Accept: text/event-stream
+```
+
+The response is an SSE stream of durable `run:update` snapshots. The first
+event is always the latest persisted run, so subscribing after completion is
+safe. The stream reports subsequent changes and closes after `succeeded`,
+`failed`, or `cancelled`; `pending_retry` remains non-terminal.
+
+```text
+event: run:update
+data: {"type":"run:update","run":{"run_id":"...","status":"running",...}}
+
+event: run:update
+data: {"type":"run:update","run":{"run_id":"...","status":"succeeded","result":{...},...}}
+```
+
+Clients should reconnect to this endpoint after an interrupted connection.
+Official SDK run waiters handle that automatically.
+
 #### Get Run Statistics
 
 ```http
@@ -994,6 +1017,72 @@ GET /v1/runs/stats
   "meta": {...}
 }
 ```
+
+---
+
+### Tasks
+
+Tasks are asynchronous code or container executions. Use the task endpoints
+when a run returns a task id and the client needs to follow that work without
+keeping the originating run open.
+
+#### Get Task
+
+```http
+GET /v1/tasks/{task_id}
+```
+
+Returns the latest persisted task snapshot. Task status is one of `queued`,
+`running`, `completed`, `failed`, `cancelled`, or `timed_out`.
+
+```json
+{
+  "data": {
+    "task_id": "550e8400-e29b-41d4-a716-446655440000",
+    "env_id": "660e8400-e29b-41d4-a716-446655440000",
+    "stream_id": "770e8400-e29b-41d4-a716-446655440000",
+    "build_id": "880e8400-e29b-41d4-a716-446655440000",
+    "run_id": null,
+    "origin_run_id": "990e8400-e29b-41d4-a716-446655440000",
+    "function_name": "::myapp::jobs/render",
+    "task_type": "code",
+    "status": "completed",
+    "start_time": "2024-01-15T10:30:00Z",
+    "stop_time": "2024-01-15T10:31:20Z",
+    "duration_ms": 80000,
+    "result": {"asset_id": "asset_123"},
+    "timeout_ms": 3600000,
+    "retry_attempt": 0,
+    "next_retry_at": null,
+    "created_at": "2024-01-15T10:29:59Z"
+  },
+  "meta": {...}
+}
+```
+
+#### Subscribe to Task
+
+```http
+GET /v1/tasks/{task_id}/subscribe
+Accept: text/event-stream
+```
+
+The response is an SSE stream of `task:update` events. The first event is
+always the latest persisted task snapshot, even if the task was already
+terminal before the connection opened. Subsequent events report state changes,
+and the stream closes after a terminal snapshot.
+
+```text
+event: task:update
+data: {"type":"task:update","task":{"task_id":"...","status":"running",...}}
+
+event: task:update
+data: {"type":"task:update","task":{"task_id":"...","status":"completed","result":{...},...}}
+```
+
+Clients should reconnect to the same endpoint after an interrupted connection;
+the persisted first snapshot makes reconnection race-free. The official SDK
+task waiters implement this behavior.
 
 ---
 
@@ -1279,6 +1368,7 @@ Subscribe to an existing stream to receive real-time updates.
 | `run:stop` | A run completed successfully |
 | `run:fail` | A run failed |
 | `run:cancel` | A run was cancelled |
+| `task:update` | Latest persisted state of a task belonging to this stream |
 | `stream:data` | Real-time data from the run (e.g., AI tokens) |
 | `stream:complete` | Stream subscription ended — the stream completed or the subscription timed out (5 minute default) |
 
@@ -1293,7 +1383,16 @@ data: {"type":"stream:data","run_id":"...","data_type":"ai:delta","payload":{"te
 
 event: run:stop
 data: {"type":"run:stop","run":{"run_id":"...","status":"succeeded","result":"Hello world"}}
+
+event: task:update
+data: {"type":"task:update","task":{"task_id":"...","status":"running",...}}
 ```
+
+On connection, Hot sends the latest persisted snapshot for tasks already on
+the stream, then sends another `task:update` when a task changes. This makes a
+single stream subscription useful for coordinating several tasks. Use the
+task-specific subscription when the client only needs one task and wants the
+connection to close automatically at that task's terminal state.
 
 #### Subscribe with Event (Atomic)
 

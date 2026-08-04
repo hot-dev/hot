@@ -181,6 +181,37 @@ Both `::hot::task/start` and `::hot::box/start` return a `TaskInfo` with:
 
 For code tasks, `TaskInfo` also includes `stream` (the full stream object) and `origin-run` (the run that spawned the task).
 
+## Waiting for Completion
+
+Choose where to wait based on who needs the result:
+
+- If later Hot code in the same execution depends on the result, call
+  `::hot::task/await(info.id)`.
+- If a client needs the result, return `info.id` from the run and use the
+  official SDK task waiter. This lets the originating run finish while the task
+  continues asynchronously.
+
+All SDK waiters subscribe to `/v1/tasks/{task_id}/subscribe`. The first
+`task:update` is always the latest persisted state, so the client cannot miss a
+task that completed before it subscribed. The waiter reconnects when needed,
+returns the completed task record, and raises a structured task error for
+`failed`, `cancelled`, or `timed_out`.
+
+The task's existing stream also emits durable `task:update` snapshots. Subscribe
+to that stream when one client is coordinating several tasks; use the
+task-specific waiter when it only needs one task's terminal result.
+
+| Language | Wait method |
+|----------|-------------|
+| JavaScript / TypeScript | `await hot.tasks.wait(taskId)` |
+| Python | `hot.tasks.wait(task_id)` or `await async_hot.tasks.wait(task_id)` |
+| Go | `client.Tasks.Wait(ctx, taskID, nil)` |
+| Rust | `client.tasks().wait(task_id, TaskWaitOptions::default()).await` |
+| Java | `client.tasks().waitFor(taskId)` |
+
+See [SDKs](/docs/api/sdks#wait-for-a-background-task) for timeout examples and
+language-specific failure types.
+
 ## Cancellation
 
 Cancel a queued or running task with `::hot::task/cancel`:
