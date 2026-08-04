@@ -293,7 +293,7 @@ pub async fn subscribe_to_stream(
                         StreamNext::Event(event) => {
                         // Convert pub/sub event to SSE event
                         match event {
-                            PubSubEvent::RunStart { run_id, stream_id: event_stream_id, event_id: _, .. } => {
+                            PubSubEvent::RunStart { run_id, stream_id: event_stream_id, .. } => {
                                 if event_stream_id != stream_id {
                                     continue;
                                 }
@@ -321,7 +321,7 @@ pub async fn subscribe_to_stream(
                                         }
                                     }
                             }
-                            PubSubEvent::RunStop { run_id, stream_id: event_stream_id, event_id: _, result: _, .. } => {
+                            PubSubEvent::RunStop { run_id, stream_id: event_stream_id, .. } => {
                                 if event_stream_id != stream_id {
                                     continue;
                                 }
@@ -348,7 +348,7 @@ pub async fn subscribe_to_stream(
                                         }
                                     }
                             }
-                            PubSubEvent::RunFail { run_id, stream_id: event_stream_id, event_id: _, error: _, .. } => {
+                            PubSubEvent::RunFail { run_id, stream_id: event_stream_id, .. } => {
                                 if event_stream_id != stream_id {
                                     continue;
                                 }
@@ -375,7 +375,7 @@ pub async fn subscribe_to_stream(
                                         }
                                     }
                             }
-                            PubSubEvent::RunCancel { run_id, stream_id: event_stream_id, event_id: _, reason: _, .. } => {
+                            PubSubEvent::RunCancel { run_id, stream_id: event_stream_id, .. } => {
                                 if event_stream_id != stream_id {
                                     continue;
                                 }
@@ -810,7 +810,7 @@ pub async fn subscribe_with_event(
                         StreamNext::Event(event) => {
                         // Convert pub/sub event to SSE event
                         match event {
-                            PubSubEvent::RunStart { run_id, stream_id: event_stream_id, event_id: _, .. } => {
+                            PubSubEvent::RunStart { run_id, stream_id: event_stream_id, .. } => {
                                 if event_stream_id != stream_id {
                                     continue;
                                 }
@@ -838,7 +838,7 @@ pub async fn subscribe_with_event(
                                         }
                                     }
                             }
-                            PubSubEvent::RunStop { run_id, stream_id: event_stream_id, event_id: _, result: _, .. } => {
+                            PubSubEvent::RunStop { run_id, stream_id: event_stream_id, .. } => {
                                 if event_stream_id != stream_id {
                                     continue;
                                 }
@@ -865,7 +865,7 @@ pub async fn subscribe_with_event(
                                         }
                                     }
                             }
-                            PubSubEvent::RunFail { run_id, stream_id: event_stream_id, event_id: _, error: _, .. } => {
+                            PubSubEvent::RunFail { run_id, stream_id: event_stream_id, .. } => {
                                 if event_stream_id != stream_id {
                                     continue;
                                 }
@@ -892,7 +892,7 @@ pub async fn subscribe_with_event(
                                         }
                                     }
                             }
-                            PubSubEvent::RunCancel { run_id, stream_id: event_stream_id, event_id: _, reason: _, .. } => {
+                            PubSubEvent::RunCancel { run_id, stream_id: event_stream_id, .. } => {
                                 if event_stream_id != stream_id {
                                     continue;
                                 }

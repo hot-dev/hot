@@ -376,7 +376,7 @@ pub async fn team_users_edit_handler(
                                     &session.display_timezone,
                                     "%Y-%m-%d %H:%M:%S"
                                 ),
-                                &session.timezone_abbreviation
+                                session.timezone_abbreviation
                             ),
                         };
 
@@ -779,7 +779,7 @@ pub async fn team_users_edit_post_handler(
                 &session.display_timezone,
                 "%Y-%m-%d %H:%M:%S"
             ),
-            &session.timezone_abbreviation
+            session.timezone_abbreviation
         ),
     };
 

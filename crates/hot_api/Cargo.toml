@@ -31,7 +31,7 @@ utoipa = { workspace = true }
 utoipa-swagger-ui = { workspace = true }
 url = { workspace = true }
 jsonschema = { workspace = true }
-ipnet = "2.12.0"
+ipnet = { workspace = true }
 
 [dev-dependencies]
 hot = { workspace = true, features = ["s3-storage", "test-utils"] }

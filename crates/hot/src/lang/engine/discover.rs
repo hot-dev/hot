@@ -671,9 +671,9 @@ pub(super) fn parse_units_with_cache(
     )> = Vec::new();
 
     for result in parsed_results {
-        match result {
-            Ok(data) => parsed_units.push(data),
-            Err(e) => return Err(e),
+        {
+            let data = result?;
+            parsed_units.push(data)
         }
     }
 

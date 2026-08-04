@@ -1,5 +1,5 @@
 # Multi-stage build for Windows targets using cross-compilation
-FROM rustlang/rust:nightly as builder
+FROM rust:1.97.1 as builder
 
 ARG TAILWIND_VERSION=v4.3.0
 
