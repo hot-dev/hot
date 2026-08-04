@@ -4,7 +4,7 @@ mirror_repo = "https://github.com/hot-dev/hot-skills"
 [skills."hot-ai-agents"]
 source_path = "resources/ai/skills/hot-ai-agents"
 mirror_path = "skills/hot-ai-agents"
-tree_hash = "dfe9b9ebb5d60891b6917c41dd28bc04bf8a7f51f13f2ed88aafdb38071c2de3"
+tree_hash = "891eced027dd728021e8897185a8c88eb9ce4ef9b827c22a2fb3f7e74b471b34"
 
 [skills."hot-language"]
 source_path = "resources/ai/skills/hot-language"
