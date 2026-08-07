@@ -58,6 +58,8 @@
         }
     </style>
     <script src="{{ page_context.asset("js/htmx.min.js") }}" defer></script>
+    <!-- Install the session-expiry fetch guard before Alpine or page scripts can issue requests. -->
+    <script src="{{ page_context.asset("js/app-refresh.js") }}"></script>
     <script src="{{ page_context.asset("js/alpine.min.js") }}" defer></script>
     <script src="{{ page_context.asset("js/echarts.min.js") }}" defer></script>
 
@@ -796,8 +798,6 @@
 
     <!-- Core App Utilities -->
     <script src="{{ page_context.asset("js/app.js") }}" defer></script>
-    <!-- Auto-Refresh Foundation (registry + scheduler + request lifecycle) -->
-    <script src="{{ page_context.asset("js/app-refresh.js") }}" defer></script>
     <script>
         // Initialize modal format from page context
         if (typeof initModalFormat === 'function') {

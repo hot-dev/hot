@@ -231,7 +231,15 @@ function isCancelledDashboardRefresh(error, context) {
 }
 
 async function dashboardFetch(url, context) {
-    const response = await fetch(url, context ? { signal: context.signal } : undefined);
+    const response = await fetch(url, {
+        credentials: 'same-origin',
+        cache: 'no-store',
+        headers: {
+            'HX-Request': 'true',
+            'X-Requested-With': 'fetch'
+        },
+        ...(context ? { signal: context.signal } : {})
+    });
     if (context && context.generation !== dashboardRefreshGeneration) {
         throw new DOMException('Superseded dashboard refresh', 'AbortError');
     }

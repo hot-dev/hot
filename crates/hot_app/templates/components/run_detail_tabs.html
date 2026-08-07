@@ -265,13 +265,6 @@
     border-left-color: rgba(17, 24, 39, 0.75);
 }
 
-.run-summary-details {
-    display: grid;
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-    gap: 12px;
-    margin-top: 10px;
-}
-
 .run-summary-detail-group {
     min-width: 0;
     padding: 10px 12px;
@@ -428,7 +421,6 @@
         grid-column: 1 / -1;
     }
 
-    .run-summary-details,
     .timing-breakdown-popover-columns {
         grid-template-columns: minmax(0, 1fr);
     }
@@ -3252,10 +3244,6 @@ window.ObservabilityTabs = class ObservabilityTabs {
             html += renderDetailGroup('execution', 'Execution', execTimeUs, executionDescription, executionBreakdown);
             html += '  </div>';
             html += '</div>';
-            html += '</div>';
-            html += '<div class="run-summary-details">';
-            html += renderDetailGroup('waiting', 'Waiting', waitingTimeUs, waitingDescription, waitingBreakdown);
-            html += renderDetailGroup('execution', 'Execution', execTimeUs, executionDescription, executionBreakdown);
             html += '</div>';
             html += '</div>';
         }
