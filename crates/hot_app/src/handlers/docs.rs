@@ -451,8 +451,8 @@ fn render_docs_error_with_back(
     <title>{} - Hot Documentation</title>
     <style>
         body {{ font-family: system-ui, sans-serif; max-width: 600px; margin: 4rem auto; padding: 2rem; }}
-        h1 {{ color: #cf2425; }}
-        a {{ color: #cf2425; }}
+        h1 {{ color: #c01f1f; }}
+        a {{ color: #c01f1f; }}
     </style>
 </head>
 <body>
