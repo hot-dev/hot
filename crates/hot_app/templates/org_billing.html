@@ -19,7 +19,7 @@
 
     {% if page_context.show_cloud_upsells %}
         <!-- Local Development Plan -->
-        <div class="bg-white dark:bg-gray-900 rounded-lg border border-gray-200 dark:border-gray-800 p-6 mb-6">
+        <div class="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 p-6 mb-6">
             <div class="flex items-start justify-between mb-6">
                 <div>
                     <h2 class="text-lg font-semibold text-gray-900 dark:text-white mb-2">Current Plan</h2>
@@ -39,7 +39,7 @@
         </div>
 
         <!-- Try Hot Cloud (local dev only) -->
-        <div class="bg-white dark:bg-gray-900 rounded-lg border border-gray-200 dark:border-gray-800 p-6">
+        <div class="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 p-6">
             <div class="flex items-start justify-between gap-4 flex-wrap">
                 <div>
                     <h3 class="text-base font-semibold text-gray-900 dark:text-white mb-1">Try Hot Cloud</h3>
@@ -55,7 +55,7 @@
 
     {% else if page_context.is_self_host %}
         <!-- Self-hosted Plan -->
-        <div class="bg-white dark:bg-gray-900 rounded-lg border border-gray-200 dark:border-gray-800 p-6 mb-6">
+        <div class="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 p-6 mb-6">
             <div class="flex items-start justify-between mb-6">
                 <div>
                     <h2 class="text-lg font-semibold text-gray-900 dark:text-white mb-2">Current Plan</h2>
@@ -117,7 +117,7 @@
                 {% endif %}
 
                 {% if let Some(plan) = plan %}
-                <div class="bg-white dark:bg-gray-900 rounded-lg border border-gray-200 dark:border-gray-800 p-6 mb-6">
+                <div class="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 p-6 mb-6">
                     <div class="flex items-start justify-between mb-6">
                         <div>
                             <h2 class="text-lg font-semibold text-gray-900 dark:text-white mb-2">Current Plan</h2>
@@ -185,7 +185,7 @@
 
             {% else %}
                 <!-- No subscription found -->
-                <div class="bg-white dark:bg-gray-900 rounded-lg border border-gray-200 dark:border-gray-800 p-6">
+                <div class="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 p-6">
                     {% if success_message == "processing" %}
                         <!-- Payment succeeded but subscription not yet visible - likely processing -->
                         <div class="flex items-center mb-4">
@@ -211,7 +211,7 @@
             {% endif %}
 
             <!-- Payment History -->
-            <div class="bg-white dark:bg-gray-900 rounded-lg border border-gray-200 dark:border-gray-800 p-6">
+            <div class="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 p-6">
                 <h3 class="text-lg font-semibold text-gray-900 dark:text-white mb-4">Payment History</h3>
                 <p class="text-sm text-gray-600 dark:text-gray-400">
                     For detailed invoices and receipts, check your email or contact support.

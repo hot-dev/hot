@@ -5,7 +5,7 @@
     {% if !service_cards.is_empty() %}
     <div x-data="mcpServicesFilter"
          data-search="{{ search_query }}"
-         class="mb-6 p-3 bg-white dark:bg-gray-900 rounded-lg border border-gray-200 dark:border-gray-800">
+         class="mb-6 p-3 bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700">
         <div class="relative">
             <div class="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none">
                 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" class="w-5 h-5 text-gray-400">
@@ -36,7 +36,7 @@
         <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
             {% for card in service_cards %}
             <a href="/mcp/{{ card.service }}"
-               class="group block rounded-lg border border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-900 p-5 hover:border-purple-300 dark:hover:border-purple-700 transition-all duration-200">
+               class="group block rounded-lg border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 p-5 hover:border-purple-300 dark:hover:border-purple-700 transition-all duration-200">
                 <!-- Service name -->
                 <div class="flex items-center gap-2 mb-3">
                     <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-5 h-5 text-purple-500 dark:text-purple-400 flex-shrink-0">

@@ -310,8 +310,8 @@ pre,
   }
 
   .dark .empty-state-icon {
-    background: var(--color-gray-800);
-    color: var(--color-gray-500);
+    background: var(--color-gray-700);
+    color: var(--color-gray-400);
   }
 
   .empty-state-title {
@@ -767,7 +767,7 @@ pre,
    =================================================================== */
 
 .dark .ag-node {
-  background: var(--color-gray-800);
+  background: var(--color-gray-900);
   border-color: var(--color-gray-700);
 }
 
@@ -785,11 +785,11 @@ pre,
   box-shadow: 0 0 0 1.5px rgba(148,163,184,0.15);
 }
 
-.dark .ag-node-handler { background: var(--color-gray-800); border-color: var(--color-gray-700); }
+.dark .ag-node-handler { background: var(--color-gray-900); border-color: var(--color-gray-700); }
 .dark .ag-node-event_type { background: var(--color-gray-950); border-color: var(--color-gray-700); }
 .dark .ag-node-schedule,
 .dark .ag-node-webhook,
-.dark .ag-node-mcp_tool { background: var(--color-gray-800); border-color: var(--color-gray-700); }
+.dark .ag-node-mcp_tool { background: var(--color-gray-900); border-color: var(--color-gray-700); }
 
 .dark .ag-node-handler .ag-node-icon,
 .dark .ag-node-mcp_tool .ag-node-icon { color: #60a5fa; }
@@ -812,7 +812,7 @@ pre,
 .dark .ag-arrow-triggers { fill: #475569; }
 
 .dark .ag-tooltip {
-  background: var(--color-gray-800);
+  background: var(--color-gray-900);
   border-color: var(--color-gray-700);
   color: #e5e7eb;
   box-shadow: 0 4px 12px rgba(0,0,0,0.4);

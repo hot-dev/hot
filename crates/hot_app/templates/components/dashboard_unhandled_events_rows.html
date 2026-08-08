@@ -12,7 +12,7 @@
                 <th scope="col" class="px-3 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">Stream ID</th>
             </tr>
         </thead>
-        <tbody class="bg-white dark:bg-gray-900 divide-y divide-gray-200 dark:divide-gray-700">
+        <tbody class="bg-white dark:bg-gray-800 divide-y divide-gray-200 dark:divide-gray-700">
             {% for event in events %}
             <tr class="hover:bg-gray-100 dark:hover:bg-gray-700 transition-colors">
                 <td class="px-3 py-2 whitespace-nowrap">
@@ -73,7 +73,7 @@
 <!-- Mobile Card View -->
 <div class="md:hidden space-y-3">
     {% for event in events %}
-    <div class="mobile-card backdrop-blur-sm border border-red-200 dark:border-red-800 rounded-lg bg-white dark:bg-gray-900 text-gray-800 dark:text-white p-4">
+    <div class="mobile-card backdrop-blur-sm border border-red-200 dark:border-red-800 rounded-lg bg-white dark:bg-gray-800 text-gray-800 dark:text-white p-4">
         <div class="flex justify-between items-start mb-3">
             <div class="text-sm font-medium text-gray-900 dark:text-white min-w-0 flex-1">
                 Event <div class="uuid-container inline-flex items-center gap-1">
@@ -117,7 +117,7 @@
             </div>
         </div>
 
-        <div class="mt-4 pt-3 border-t border-gray-100 dark:border-gray-800">
+        <div class="mt-4 pt-3 border-t border-gray-100 dark:border-gray-700">
             <a href="/events/{{ event.event_id }}" class="link transition-all duration-200 font-medium text-sm">View Details</a>
         </div>
     </div>

@@ -14,7 +14,7 @@
          hx-trigger="refresh"
          hx-select="#stream-detail-header"
          hx-swap="outerHTML"
-         class="rounded-lg backdrop-blur-sm border border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-900 text-gray-800 dark:text-white p-6">
+         class="rounded-lg backdrop-blur-sm border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 text-gray-800 dark:text-white p-6">
         <h2 class="text-lg font-semibold text-gray-900 dark:text-white mb-4">Stream Details</h2>
         <dl class="grid grid-cols-1 md:grid-cols-2 gap-4">
             <div>
@@ -59,7 +59,7 @@
     <script type="application/json" id="stream-graph-data">{{ graph_data_json|safe }}</script>
 
     <!-- Tabbed Content Area -->
-    <div class="w-full rounded-lg backdrop-blur-sm border border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-900 text-gray-800 dark:text-white flex flex-col" style="min-height: 500px;">
+    <div class="w-full rounded-lg backdrop-blur-sm border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 text-gray-800 dark:text-white flex flex-col" style="min-height: 500px;">
         {% include "components/stream_detail_tabs.html" %}
     </div>
 </div>

@@ -68,7 +68,7 @@
 
     {% if env_contexts.len() > 0 %}
     <!-- Environment Context Variables List -->
-    <div class="bg-white dark:bg-gray-900 rounded-lg border border-gray-200 dark:border-gray-800 overflow-hidden">
+    <div class="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 overflow-hidden">
         <div class="overflow-x-auto">
             <table class="min-w-full divide-y divide-gray-200 dark:divide-gray-700">
                 <thead class="bg-gray-50 dark:bg-gray-900">
@@ -82,7 +82,7 @@
                         {% endif %}
                     </tr>
                 </thead>
-                <tbody class="bg-white dark:bg-gray-900 divide-y divide-gray-200 dark:divide-gray-700">
+                <tbody class="bg-white dark:bg-gray-800 divide-y divide-gray-200 dark:divide-gray-700">
                     {% for context in env_contexts %}
                     <tr class="hover:bg-gray-100 dark:hover:bg-gray-700 transition-colors duration-150">
                         <td class="px-6 py-4 whitespace-nowrap">
@@ -120,7 +120,7 @@
     </div>
     {% else %}
     <!-- Empty State for Environment -->
-    <div class="bg-white dark:bg-gray-900 rounded-lg border border-gray-200 dark:border-gray-800">
+    <div class="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700">
         <div class="empty-state">
             <div class="empty-state-icon">
                 <svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6 text-gray-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
@@ -147,7 +147,7 @@
     <!-- Project Tab Content -->
     {% if active_tab == "project" %}
     <!-- Project Selector -->
-    <div class="mb-6 p-4 bg-white dark:bg-gray-900 rounded-lg border border-gray-200 dark:border-gray-800">
+    <div class="mb-6 p-4 bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700">
         <div class="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
             <div class="w-full sm:w-64">
                 <div x-data="{ open: false }" class="relative">
@@ -202,7 +202,7 @@
 
     {% if selected_project.is_none() %}
     <!-- No project selected state -->
-    <div class="bg-white dark:bg-gray-900 rounded-lg border border-gray-200 dark:border-gray-800">
+    <div class="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700">
         <div class="empty-state">
             <div class="empty-state-icon">
                 <svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6 text-gray-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
@@ -250,7 +250,7 @@
 
         {% if project_contexts.len() > 0 %}
         <!-- Project Context Variables List -->
-        <div class="bg-white dark:bg-gray-900 rounded-lg border border-gray-200 dark:border-gray-800 overflow-hidden">
+        <div class="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 overflow-hidden">
             <div class="overflow-x-auto">
                 <table class="min-w-full divide-y divide-gray-200 dark:divide-gray-700">
                     <thead class="bg-gray-50 dark:bg-gray-900">
@@ -264,7 +264,7 @@
                             {% endif %}
                         </tr>
                     </thead>
-                    <tbody class="bg-white dark:bg-gray-900 divide-y divide-gray-200 dark:divide-gray-700">
+                    <tbody class="bg-white dark:bg-gray-800 divide-y divide-gray-200 dark:divide-gray-700">
                         {% for context in project_contexts %}
                         <tr class="hover:bg-gray-100 dark:hover:bg-gray-700 transition-colors duration-150">
                             <td class="px-6 py-4 whitespace-nowrap">
@@ -302,7 +302,7 @@
         </div>
         {% else %}
         <!-- Empty State for Project -->
-        <div class="bg-white dark:bg-gray-900 rounded-lg border border-gray-200 dark:border-gray-800">
+        <div class="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700">
             <div class="empty-state">
                 <div class="empty-state-icon">
                     <svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6 text-gray-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">

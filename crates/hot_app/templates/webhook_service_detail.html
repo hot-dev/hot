@@ -3,7 +3,7 @@
 {% block content %}
 <div x-data="webhookBaseUrl()">
     <!-- Service Header -->
-    <div class="mb-6 p-5 bg-white dark:bg-gray-900 rounded-lg border border-gray-200 dark:border-gray-800">
+    <div class="mb-6 p-5 bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700">
         <div class="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
             <div class="flex items-center gap-3">
                 <svg xmlns="http://www.w3.org/2000/svg" viewBox="-65 -57 1144 1144" fill="currentColor" class="w-6 h-6 text-green-600 dark:text-green-400 flex-shrink-0">
@@ -51,7 +51,7 @@
     <div x-data="webhookServiceDetailFilter"
          data-search="{{ search_query }}"
          data-service="{{ service }}"
-         class="mb-6 p-3 bg-white dark:bg-gray-900 rounded-lg border border-gray-200 dark:border-gray-800">
+         class="mb-6 p-3 bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700">
         <div class="relative">
             <div class="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none">
                 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" class="w-5 h-5 text-gray-400">
@@ -85,7 +85,7 @@
     {% else %}
         <!-- Desktop Table View -->
         <div class="hidden md:block">
-            <div class="rounded-lg backdrop-blur-sm border border-gray-200 dark:border-gray-800 transition-all duration-300 overflow-hidden bg-white dark:bg-gray-900 text-gray-800 dark:text-white">
+            <div class="rounded-lg backdrop-blur-sm border border-gray-200 dark:border-gray-700 transition-all duration-300 overflow-hidden bg-white dark:bg-gray-800 text-gray-800 dark:text-white">
                 <div class="responsive-table">
                     <table class="w-full divide-y divide-gray-200 dark:divide-gray-700">
                         <thead class="bg-gray-100 dark:bg-gray-800">
@@ -151,7 +151,7 @@
 
             <!-- Pagination (Desktop) -->
             {% if has_prev_page || has_next_page %}
-            <div class="mt-4 px-6 py-4 bg-white dark:bg-gray-900 rounded-lg border border-gray-200 dark:border-gray-800">
+            <div class="mt-4 px-6 py-4 bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700">
                 {% let pag_prefix = "/webhooks/{}?p="|format(service) %}
                 {% let pag_suffix = "&search={}"|format(search_query) %}
                 {% call ui::pagination(pag_prefix, pag_suffix, current_page_num, start_page, end_page, has_prev_page, has_next_page, endpoints.len(), total_endpoints, "endpoints") %}{% endcall %}
@@ -162,7 +162,7 @@
         <!-- Mobile Card View -->
         <div class="md:hidden space-y-3">
             {% for ep in endpoints %}
-            <div class="mobile-card backdrop-blur-sm border border-gray-200 dark:border-gray-800 rounded-lg bg-white dark:bg-gray-900 text-gray-800 dark:text-white p-4">
+            <div class="mobile-card backdrop-blur-sm border border-gray-200 dark:border-gray-700 rounded-lg bg-white dark:bg-gray-800 text-gray-800 dark:text-white p-4">
                 <div class="flex justify-between items-start mb-3">
                     <div class="flex items-center gap-2">
                         <code class="bg-blue-100 dark:bg-blue-900 text-blue-800 dark:text-blue-200 px-2 py-0.5 rounded text-xs font-semibold">{{ ep.method }}</code>
@@ -219,13 +219,13 @@
             {% if has_prev_page || has_next_page %}
             <div class="flex justify-between items-center pt-4">
                 {% if has_prev_page %}
-                <a href="/webhooks/{{ service }}?p={{ current_page_num - 1 }}{% if !search_query.is_empty() %}&search={{ search_query }}{% endif %}" class="relative inline-flex items-center px-3 py-2 border border-gray-300 dark:border-gray-800 text-xs font-medium rounded-md text-gray-700 dark:text-gray-300 bg-white dark:bg-gray-800 hover:bg-gray-100 dark:hover:bg-gray-700">Previous</a>
+                <a href="/webhooks/{{ service }}?p={{ current_page_num - 1 }}{% if !search_query.is_empty() %}&search={{ search_query }}{% endif %}" class="relative inline-flex items-center px-3 py-2 border border-gray-300 dark:border-gray-700 text-xs font-medium rounded-md text-gray-700 dark:text-gray-300 bg-white dark:bg-gray-800 hover:bg-gray-100 dark:hover:bg-gray-700">Previous</a>
                 {% else %}
                 <div></div>
                 {% endif %}
                 <span class="text-sm text-gray-700 dark:text-gray-300">Page {{ current_page_num }}</span>
                 {% if has_next_page %}
-                <a href="/webhooks/{{ service }}?p={{ current_page_num + 1 }}{% if !search_query.is_empty() %}&search={{ search_query }}{% endif %}" class="relative inline-flex items-center px-3 py-2 border border-gray-300 dark:border-gray-800 text-xs font-medium rounded-md text-gray-700 dark:text-gray-300 bg-white dark:bg-gray-800 hover:bg-gray-100 dark:hover:bg-gray-700">Next</a>
+                <a href="/webhooks/{{ service }}?p={{ current_page_num + 1 }}{% if !search_query.is_empty() %}&search={{ search_query }}{% endif %}" class="relative inline-flex items-center px-3 py-2 border border-gray-300 dark:border-gray-700 text-xs font-medium rounded-md text-gray-700 dark:text-gray-300 bg-white dark:bg-gray-800 hover:bg-gray-100 dark:hover:bg-gray-700">Next</a>
                 {% else %}
                 <div></div>
                 {% endif %}

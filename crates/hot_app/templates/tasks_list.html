@@ -15,7 +15,7 @@
          data-selected-time-range="{{ selected_time_range }}"
          data-search-query="{{ search_query }}"
          data-current-page="{{ current_page_num }}"
-         class="mb-6 p-3 bg-white dark:bg-gray-900 rounded-lg border border-gray-200 dark:border-gray-800">
+         class="mb-6 p-3 bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700">
         <!-- First Row: Search -->
         <div class="mb-3">
             <div class="relative">
@@ -207,7 +207,7 @@
     </div>
 
     <!-- Desktop Table View -->
-    <div class="hidden md:block rounded-lg backdrop-blur-sm border border-gray-200 dark:border-gray-800 transition-all duration-300 overflow-hidden bg-white dark:bg-gray-900 text-gray-800 dark:text-white">
+    <div class="hidden md:block rounded-lg backdrop-blur-sm border border-gray-200 dark:border-gray-700 transition-all duration-300 overflow-hidden bg-white dark:bg-gray-800 text-gray-800 dark:text-white">
         <div id="tasks-table-content" class="responsive-table overflow-auto">
             {% include "components/tasks_table_content.html" %}
         </div>
@@ -217,7 +217,7 @@
     <div class="md:hidden">
         <div id="tasks-mobile-content" class="space-y-4">
         {% for task in tasks %}
-        <div class="backdrop-blur-sm border border-gray-200 dark:border-gray-800 rounded-lg bg-white dark:bg-gray-900 text-gray-800 dark:text-white p-4">
+        <div class="backdrop-blur-sm border border-gray-200 dark:border-gray-700 rounded-lg bg-white dark:bg-gray-800 text-gray-800 dark:text-white p-4">
             <div class="flex justify-between items-start mb-3">
                 <div class="text-sm font-medium text-gray-900 dark:text-white">
                     Task <div class="uuid-container inline-flex items-center gap-1">
@@ -297,7 +297,7 @@
                 </div>
             </div>
 
-            <div class="mt-4 pt-3 border-t border-gray-100 dark:border-gray-800">
+            <div class="mt-4 pt-3 border-t border-gray-100 dark:border-gray-700">
                 <a href="/tasks/{{ task.task_id }}" class="link transition-all duration-200 font-medium">View Details</a>
             </div>
         </div>

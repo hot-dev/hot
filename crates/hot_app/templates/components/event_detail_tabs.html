@@ -368,7 +368,7 @@
         <div class="md:hidden p-4 overflow-auto">
             <div class="space-y-4">
                 {% for run in event_runs %}
-                <div class="mobile-card backdrop-blur-sm border border-gray-200 dark:border-gray-800 rounded-lg bg-white dark:bg-gray-900 text-gray-800 dark:text-white p-4">
+                <div class="mobile-card backdrop-blur-sm border border-gray-200 dark:border-gray-700 rounded-lg bg-white dark:bg-gray-800 text-gray-800 dark:text-white p-4">
                     <div class="flex justify-between items-start mb-3">
                         <div class="text-sm font-medium text-gray-900 dark:text-white">
                             Run <div class="uuid-container inline-flex items-center gap-1">
@@ -440,7 +440,7 @@
                         {% endmatch %}
                     </div>
 
-                    <div class="mt-4 pt-3 border-t border-gray-100 dark:border-gray-800">
+                    <div class="mt-4 pt-3 border-t border-gray-100 dark:border-gray-700">
                         <a href="/runs/{{ run.run_id }}" class="link transition-all duration-200 font-medium">View Details</a>
                     </div>
                 </div>
@@ -456,10 +456,10 @@
     </div>
 
     <!-- Value Inspector Panel - Sticky container -->
-    <div id="event-value-inspector-panel" class="hidden w-2/5 flex-shrink-0 border-l border-gray-200 dark:border-gray-800 flex flex-col relative" style="min-width: 20rem;">
+    <div id="event-value-inspector-panel" class="hidden w-2/5 flex-shrink-0 border-l border-gray-200 dark:border-gray-700 flex flex-col relative" style="min-width: 20rem;">
         <!-- Sticky inner wrapper that stays in view -->
-        <div class="sticky top-0 flex flex-col bg-white dark:bg-gray-900" style="max-height: calc(100vh - 120px);">
-            <div class="bg-gray-100 dark:bg-gray-700 flex-shrink-0 border-b border-gray-200 dark:border-gray-800">
+        <div class="sticky top-0 flex flex-col bg-white dark:bg-gray-800" style="max-height: calc(100vh - 120px);">
+            <div class="bg-gray-100 dark:bg-gray-700 flex-shrink-0 border-b border-gray-200 dark:border-gray-700">
                 <div class="px-3 py-2 flex items-center justify-between" style="min-width: 18rem;">
                     <div class="text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider truncate" style="max-width: 12rem;">
                         Value Inspector
@@ -1036,7 +1036,7 @@ function showRichEventInspectorModal(nodeType, id, fullData) {
     };
 
     modalOverlay.innerHTML = `
-        <div class="bg-white dark:bg-gray-900 rounded-lg border border-gray-200 dark:border-gray-700 shadow-xl max-w-lg w-full max-h-[90vh] flex flex-col">
+        <div class="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 shadow-xl max-w-lg w-full max-h-[90vh] flex flex-col">
             <div class="flex items-center justify-between p-4 border-b border-gray-200 dark:border-gray-700">
                 <h3 class="text-lg font-semibold text-gray-900 dark:text-white">Inspector</h3>
                 <button onclick="document.getElementById('event-inspector-modal-overlay').remove()" class="p-1 text-gray-400 hover:text-gray-600 dark:text-gray-500 dark:hover:text-gray-300 transition-colors rounded">

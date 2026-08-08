@@ -14,7 +14,7 @@
     </p>
 
     <!-- Project Selector -->
-    <div class="mb-6 p-4 bg-white dark:bg-gray-900 rounded-lg border border-gray-200 dark:border-gray-800">
+    <div class="mb-6 p-4 bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700">
         <div class="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
             <div class="w-full sm:w-64">
                 <div x-data="{ open: false }" class="relative">
@@ -66,7 +66,7 @@
 
     {% if selected_project.is_none() %}
     <!-- No project selected state -->
-    <div class="bg-white dark:bg-gray-900 rounded-lg border border-gray-200 dark:border-gray-800">
+    <div class="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700">
         <div class="empty-state">
             <div class="empty-state-icon">
                 <svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6 text-gray-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
@@ -104,11 +104,11 @@
             <div class="mb-6">
                 <h2 class="text-xl font-semibold text-gray-900 dark:text-gray-100 mb-4">Project Namespaces</h2>
                 {% if project_namespaces.is_empty() && !docs_generating %}
-                    <div class="text-center py-8 text-gray-500 dark:text-gray-400 bg-white dark:bg-gray-900 rounded-lg border border-gray-200 dark:border-gray-800">
+                    <div class="text-center py-8 text-gray-500 dark:text-gray-400 bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700">
                         No documentation found for this project's own source code.
                     </div>
                 {% else if project_namespaces.is_empty() && docs_generating %}
-                    <div class="text-center py-8 text-gray-400 dark:text-gray-500 bg-white dark:bg-gray-900 rounded-lg border border-gray-200 dark:border-gray-800">
+                    <div class="text-center py-8 text-gray-400 dark:text-gray-500 bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700">
                         <div class="flex items-center justify-center">
                             <svg class="animate-spin h-5 w-5 mr-2" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
                                 <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
@@ -120,7 +120,7 @@
                 {% else %}
                     <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
                         {% for ns in project_namespaces %}
-                            <a href="/docs/{{ selected_project.as_ref().unwrap().name }}/project/{{ ns.path }}" class="block bg-white dark:bg-gray-900 rounded-lg border border-gray-200 dark:border-gray-800 p-6 hover:border-gray-300 dark:hover:border-gray-600 transition-colors duration-200">
+                            <a href="/docs/{{ selected_project.as_ref().unwrap().name }}/project/{{ ns.path }}" class="block bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 p-6 hover:border-gray-300 dark:hover:border-gray-600 transition-colors duration-200">
                                 <h3 class="text-lg font-semibold text-gray-900 dark:text-gray-100 mb-2">{{ ns.name }}</h3>
                                 {% if ns.description.is_some() %}
                                     <p class="text-sm text-gray-600 dark:text-gray-400 mb-3 line-clamp-2">{{ ns.description.as_ref().unwrap() }}</p>
@@ -152,7 +152,7 @@
                     {% endif %}
                 </h2>
                 {% if dependencies.is_empty() && docs_generating %}
-                    <div class="text-center py-8 text-gray-400 dark:text-gray-500 bg-white dark:bg-gray-900 rounded-lg border border-gray-200 dark:border-gray-800">
+                    <div class="text-center py-8 text-gray-400 dark:text-gray-500 bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700">
                         <div class="flex items-center justify-center">
                             <svg class="animate-spin h-5 w-5 mr-2" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
                                 <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
@@ -162,13 +162,13 @@
                         </div>
                     </div>
                 {% else if dependencies.is_empty() %}
-                    <div class="text-center py-8 text-gray-500 dark:text-gray-400 bg-white dark:bg-gray-900 rounded-lg border border-gray-200 dark:border-gray-800">
+                    <div class="text-center py-8 text-gray-500 dark:text-gray-400 bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700">
                         No documented packages found for this project.
                     </div>
                 {% else %}
                     <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
                         {% for dep in dependencies %}
-                            <a href="/docs/{{ selected_project.as_ref().unwrap().name }}/pkg/{{ dep.name }}" class="block bg-white dark:bg-gray-900 rounded-lg border border-gray-200 dark:border-gray-800 p-6 hover:border-gray-300 dark:hover:border-gray-600 transition-colors duration-200">
+                            <a href="/docs/{{ selected_project.as_ref().unwrap().name }}/pkg/{{ dep.name }}" class="block bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 p-6 hover:border-gray-300 dark:hover:border-gray-600 transition-colors duration-200">
                                 <h3 class="text-lg font-semibold text-gray-900 dark:text-gray-100 mb-2">{{ dep.display_name }} <span class="text-sm font-normal text-gray-500 dark:text-gray-400">v{{ dep.version }}</span></h3>
                                 {% if dep.description.is_some() %}
                                     <p class="text-sm text-gray-600 dark:text-gray-400 mb-3 line-clamp-2">{{ dep.description.as_ref().unwrap() }}</p>
@@ -192,7 +192,7 @@
             {% endif %}
 
         {% else %}
-            <div class="empty-state bg-white dark:bg-gray-900 rounded-lg border border-gray-200 dark:border-gray-800">
+            <div class="empty-state bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700">
                 <svg class="mx-auto h-12 w-12 text-gray-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                     <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
                 </svg>

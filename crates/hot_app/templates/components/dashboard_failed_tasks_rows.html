@@ -10,7 +10,7 @@
                 <th scope="col" class="px-3 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">Duration</th>
             </tr>
         </thead>
-        <tbody class="bg-white dark:bg-gray-900 divide-y divide-gray-200 dark:divide-gray-700">
+        <tbody class="bg-white dark:bg-gray-800 divide-y divide-gray-200 dark:divide-gray-700">
             {% for task in tasks %}
             <tr class="hover:bg-gray-100 dark:hover:bg-gray-700 transition-colors cursor-pointer" onclick="window.location.href='/tasks/{{ task.task_id }}'">
                 <td class="px-3 py-2 whitespace-nowrap">
@@ -61,7 +61,7 @@
 <!-- Mobile Card View -->
 <div class="md:hidden space-y-3">
     {% for task in tasks %}
-    <div class="mobile-card backdrop-blur-sm border border-gray-200 dark:border-gray-800 rounded-lg bg-white dark:bg-gray-900 text-gray-800 dark:text-white p-3">
+    <div class="mobile-card backdrop-blur-sm border border-gray-200 dark:border-gray-700 rounded-lg bg-white dark:bg-gray-800 text-gray-800 dark:text-white p-3">
         <div class="flex justify-between items-center mb-2">
             <div class="uuid-container inline-flex items-center gap-1">
                 <a href="/tasks/{{ task.task_id }}" class="uuid-display uuid-link link font-mono text-xs" data-full-uuid="{{ task.task_id }}" title="{{ task.task_id }}">{{ task.task_id|shortuuid }}</a>

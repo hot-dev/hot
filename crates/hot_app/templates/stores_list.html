@@ -4,7 +4,7 @@
     <!-- Filter card -->
     <div x-data="storesListFilters"
          data-search-query="{{ search_query }}"
-         class="mb-6 p-3 bg-white dark:bg-gray-900 rounded-lg border border-gray-200 dark:border-gray-800">
+         class="mb-6 p-3 bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700">
         <div class="relative">
             <div class="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none">
                 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" class="w-5 h-5 text-gray-400">
@@ -27,7 +27,7 @@
     {% endmatch %}
 
     <!-- Desktop table view -->
-    <div class="hidden md:flex flex-col rounded-lg backdrop-blur-sm border border-gray-200 dark:border-gray-800 transition-all duration-300 overflow-hidden bg-white dark:bg-gray-900 text-gray-800 dark:text-white">
+    <div class="hidden md:flex flex-col rounded-lg backdrop-blur-sm border border-gray-200 dark:border-gray-700 transition-all duration-300 overflow-hidden bg-white dark:bg-gray-800 text-gray-800 dark:text-white">
         {% if stores.len() > 0 %}
         <div class="overflow-auto scrollbar-always">
             <table class="w-full table-auto divide-y divide-gray-200 dark:divide-gray-700">
@@ -73,7 +73,7 @@
                 </tbody>
             </table>
         </div>
-        <div class="flex-shrink-0 p-4 border-t border-gray-200 dark:border-gray-800 text-sm text-gray-700 dark:text-gray-300">
+        <div class="flex-shrink-0 p-4 border-t border-gray-200 dark:border-gray-700 text-sm text-gray-700 dark:text-gray-300">
             Showing <span class="font-medium">{{ stores.len() }}</span> store{% if stores.len() != 1 %}s{% endif %}
             <span class="ml-2 text-xs text-gray-400 dark:text-gray-500">backend: {{ storage_type }}</span>
         </div>
@@ -97,7 +97,7 @@
     <div class="md:hidden">
         <div class="space-y-3">
             {% for store in stores %}
-            <a href="/stores/{{ store.name_url }}" class="block backdrop-blur-sm border border-gray-200 dark:border-gray-800 rounded-lg bg-white dark:bg-gray-900 text-gray-800 dark:text-white p-4 hover:border-blue-400 dark:hover:border-blue-600 transition-colors">
+            <a href="/stores/{{ store.name_url }}" class="block backdrop-blur-sm border border-gray-200 dark:border-gray-700 rounded-lg bg-white dark:bg-gray-800 text-gray-800 dark:text-white p-4 hover:border-blue-400 dark:hover:border-blue-600 transition-colors">
                 <div class="flex items-center justify-between mb-2">
                     <span class="link font-mono text-sm truncate">{{ store.name }}</span>
                     <span class="px-2 py-0.5 text-xs rounded-full bg-gray-100 text-gray-800 dark:bg-gray-800 dark:text-gray-200">{{ store.entry_count }} entries</span>

@@ -3,7 +3,7 @@
 {% block content %}
 <div class="py-6">
     <div class="max-w-2xl mx-auto">
-        <div class="bg-white dark:bg-gray-900 rounded-lg border border-gray-200 dark:border-gray-800 p-6">
+        <div class="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 p-6">
             <h2 class="text-lg font-semibold text-gray-900 dark:text-white mb-6">Add Custom Domain</h2>
 
             {% if !error_message.is_empty() %}
@@ -16,7 +16,7 @@
                 <div>
                     <label for="domain" class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">Domain</label>
                     <input type="text" name="domain" id="domain" required placeholder="mcp.example.com"
-                        class="block w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-md shadow-sm placeholder-gray-500 dark:placeholder-gray-400 focus:outline-none focus:ring-hot-red-500 focus:border-hot-red-500 sm:text-sm bg-white dark:bg-gray-900 text-gray-900 dark:text-white font-mono" />
+                        class="block w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-md shadow-sm placeholder-gray-500 dark:placeholder-gray-400 focus:outline-none focus:ring-hot-red-500 focus:border-hot-red-500 sm:text-sm bg-white dark:bg-gray-800 text-gray-900 dark:text-white font-mono" />
                     <p class="mt-1 text-sm text-gray-500 dark:text-gray-400">
                         Enter a subdomain of a domain you own. We'll provision a TLS certificate and CDN distribution for it.
                     </p>

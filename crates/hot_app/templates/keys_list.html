@@ -37,7 +37,7 @@
 
     {% if api_keys.len() > 0 %}
     <!-- API Keys List - Desktop Table -->
-    <div class="hidden md:block bg-white dark:bg-gray-900 rounded-lg border border-gray-200 dark:border-gray-800 overflow-hidden">
+    <div class="hidden md:block bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 overflow-hidden">
         <div class="overflow-x-auto">
             <table class="min-w-full divide-y divide-gray-200 dark:divide-gray-700">
                 <thead class="bg-gray-50 dark:bg-gray-900">
@@ -64,7 +64,7 @@
                         {% endif %}
                     </tr>
                 </thead>
-                <tbody class="bg-white dark:bg-gray-900 divide-y divide-gray-200 dark:divide-gray-700">
+                <tbody class="bg-white dark:bg-gray-800 divide-y divide-gray-200 dark:divide-gray-700">
                     {% for api_key in api_keys %}
                     <tr class="hover:bg-gray-100 dark:hover:bg-gray-700 transition-colors duration-150">
                         <td class="px-4 lg:px-6 py-4">
@@ -129,7 +129,7 @@
     <!-- API Keys List - Mobile Cards -->
     <div class="md:hidden space-y-3">
         {% for api_key in api_keys %}
-        <div class="bg-white dark:bg-gray-900 rounded-lg border border-gray-200 dark:border-gray-800 p-4">
+        <div class="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 p-4">
             <div class="flex items-start justify-between mb-3">
                 <div class="flex-1 min-w-0">
                     <h3 class="text-sm font-semibold text-gray-900 dark:text-white truncate">{{ api_key.description }}</h3>
@@ -184,7 +184,7 @@
     </div>
     {% else %}
     <!-- Empty State -->
-    <div class="bg-white dark:bg-gray-900 rounded-lg border border-gray-200 dark:border-gray-800 p-6 sm:p-8">
+    <div class="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 p-6 sm:p-8">
         <div class="empty-state">
             <div class="empty-state-icon">
                 <svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6 text-gray-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
@@ -226,7 +226,7 @@
         {% if api_keys.len() > 0 %}
     <!-- Pagination -->
     {% if has_prev_page || has_next_page %}
-    <div class="bg-white dark:bg-gray-900 rounded-lg border border-gray-200 dark:border-gray-800 mt-4">
+    <div class="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 mt-4">
         <div class="px-3 sm:px-4 md:px-6 py-3 sm:py-4">
             {% call ui::pagination("/keys?p=", "", current_page_num, start_page, end_page, has_prev_page, has_next_page, api_keys.len(), total_keys, "API keys") %}{% endcall %}
         </div>

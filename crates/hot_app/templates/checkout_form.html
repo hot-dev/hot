@@ -8,7 +8,7 @@
     </div>
 
     {% if let Some(plan) = plan %}
-    <div class="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-800 p-6 shadow-lg">
+    <div class="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 p-6 shadow-lg">
       <div class="text-center mb-6">
         <h2 class="text-lg font-semibold text-gray-900 dark:text-white">{{ plan.plan_name }}</h2>
         <div class="text-4xl font-bold text-gray-900 dark:text-white mt-2">
@@ -41,7 +41,7 @@
       </p>
     </div>
     {% else %}
-    <div class="bg-white dark:bg-gray-900 rounded-lg border border-gray-200 dark:border-gray-800 p-6 text-center">
+    <div class="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 p-6 text-center">
       <p class="text-gray-600 dark:text-gray-400">Plan not found. Please try again or contact support.</p>
       <a href="/" class="inline-block mt-4 link hover:underline">← Go to Dashboard</a>
     </div>

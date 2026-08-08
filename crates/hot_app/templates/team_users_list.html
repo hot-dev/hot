@@ -43,7 +43,7 @@
 
             {% if team_users.len() > 0 %}
             <!-- Team Users List -->
-            <div class="bg-white dark:bg-gray-900 rounded-lg border border-gray-200 dark:border-gray-800 overflow-hidden">
+            <div class="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 overflow-hidden">
                 <div class="overflow-x-auto">
                     <table class="min-w-full divide-y divide-gray-200 dark:divide-gray-700">
                         <thead class="bg-gray-50 dark:bg-gray-900">
@@ -62,7 +62,7 @@
                                 </th>
                             </tr>
                         </thead>
-                        <tbody class="bg-white dark:bg-gray-900 divide-y divide-gray-200 dark:divide-gray-700">
+                        <tbody class="bg-white dark:bg-gray-800 divide-y divide-gray-200 dark:divide-gray-700">
                             {% for team_user in team_users %}
                             <tr class="hover:bg-gray-100 dark:hover:bg-gray-700 transition-colors duration-150">
                                 <td class="px-6 py-4 whitespace-nowrap">
@@ -116,7 +116,7 @@
 
                                 <!-- Pagination -->
                 {% if has_prev_page || has_next_page %}
-                <div class="px-3 md:px-6 py-4 border-t border-gray-200 dark:border-gray-800">
+                <div class="px-3 md:px-6 py-4 border-t border-gray-200 dark:border-gray-700">
                     {% match page_context.current_org %}
                     {% when Some with (org) %}
                     {% let pag_prefix = "/@{}/teams/{}/users?p="|format(org.slug, team.team_id) %}
@@ -128,7 +128,7 @@
             </div>
             {% else %}
             <!-- Empty State -->
-            <div class="bg-white dark:bg-gray-900 rounded-lg border border-gray-200 dark:border-gray-800 p-8">
+            <div class="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 p-8">
                 <div class="empty-state">
                     <div class="empty-state-icon">
                         <svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6 text-gray-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">

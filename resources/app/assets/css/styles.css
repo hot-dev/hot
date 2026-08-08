@@ -4742,8 +4742,8 @@ html {
     height: 1.5rem;
   }
   .dark .empty-state-icon {
-    background: var(--color-gray-800);
-    color: var(--color-gray-500);
+    background: var(--color-gray-700);
+    color: var(--color-gray-400);
   }
   .empty-state-title {
     font-size: 1rem;
@@ -5110,7 +5110,7 @@ html {
   font-size: 0.6875rem;
 }
 .dark .ag-node {
-  background: var(--color-gray-800);
+  background: var(--color-gray-900);
   border-color: var(--color-gray-700);
 }
 .dark .ag-node:hover {
@@ -5125,7 +5125,7 @@ html {
   box-shadow: 0 0 0 1.5px rgba(148,163,184,0.15);
 }
 .dark .ag-node-handler {
-  background: var(--color-gray-800);
+  background: var(--color-gray-900);
   border-color: var(--color-gray-700);
 }
 .dark .ag-node-event_type {
@@ -5133,7 +5133,7 @@ html {
   border-color: var(--color-gray-700);
 }
 .dark .ag-node-schedule, .dark .ag-node-webhook, .dark .ag-node-mcp_tool {
-  background: var(--color-gray-800);
+  background: var(--color-gray-900);
   border-color: var(--color-gray-700);
 }
 .dark .ag-node-handler .ag-node-icon, .dark .ag-node-mcp_tool .ag-node-icon {
@@ -5173,7 +5173,7 @@ html {
   fill: #475569;
 }
 .dark .ag-tooltip {
-  background: var(--color-gray-800);
+  background: var(--color-gray-900);
   border-color: var(--color-gray-700);
   color: #e5e7eb;
   box-shadow: 0 4px 12px rgba(0,0,0,0.4);
