@@ -44,7 +44,7 @@
 
             <!-- Footer / Actions -->
             <div class="bg-gray-50 dark:bg-gray-900 px-6 py-4 flex items-center justify-end gap-3">
-                <button type="button" id="confirm-modal-cancel" onclick="closeConfirmModal(false)" class="px-4 py-2 text-sm font-medium text-gray-700 dark:text-gray-300 hover:text-gray-900 dark:hover:text-white bg-white dark:bg-gray-800 border border-gray-300 dark:border-gray-600 rounded-md hover:bg-gray-100 dark:hover:bg-gray-700 transition-colors">
+                <button type="button" id="confirm-modal-cancel" onclick="closeConfirmModal(false)" class="btn btn-secondary">
                     Cancel
                 </button>
                 <button type="button" id="confirm-modal-confirm" onclick="closeConfirmModal(true)" class="btn btn-primary">
@@ -164,34 +164,35 @@
         // Reset icon container classes
         iconContainer.className = 'flex-shrink-0 w-10 h-10 rounded-full flex items-center justify-center';
 
-        // Reset button classes
-        confirmBtn.className = 'px-4 py-2 text-sm font-medium text-white rounded-md transition-colors';
+        // Reset button to the design-system base; type only picks the variant.
+        // Destructive confirms use the outline danger style — never filled red.
+        confirmBtn.className = 'btn';
 
         switch (type) {
             case 'error':
                 iconContainer.classList.add('bg-red-100', 'dark:bg-red-900/30');
                 iconContainer.querySelector('.error-icon').classList.remove('hidden');
                 iconContainer.querySelector('.error-icon').classList.add('text-red-600', 'dark:text-red-400');
-                confirmBtn.classList.add('bg-red-600', 'hover:bg-red-700');
+                confirmBtn.classList.add('btn-danger');
                 break;
             case 'success':
                 iconContainer.classList.add('bg-green-100', 'dark:bg-green-900/30');
                 iconContainer.querySelector('.success-icon').classList.remove('hidden');
                 iconContainer.querySelector('.success-icon').classList.add('text-green-600', 'dark:text-green-400');
-                confirmBtn.classList.add('bg-green-600', 'hover:bg-green-700');
+                confirmBtn.classList.add('btn-primary');
                 break;
             case 'info':
                 iconContainer.classList.add('bg-blue-100', 'dark:bg-blue-900/30');
                 iconContainer.querySelector('.info-icon').classList.remove('hidden');
                 iconContainer.querySelector('.info-icon').classList.add('text-blue-600', 'dark:text-blue-400');
-                confirmBtn.classList.add('bg-blue-600', 'hover:bg-blue-700');
+                confirmBtn.classList.add('btn-primary');
                 break;
             case 'warning':
             default:
                 iconContainer.classList.add('bg-red-100', 'dark:bg-red-900/30');
                 iconContainer.querySelector('.confirm-icon').classList.remove('hidden');
                 iconContainer.querySelector('.confirm-icon').classList.add('text-red-600', 'dark:text-red-400');
-                confirmBtn.classList.add('bg-hot-red-500', 'hover:bg-hot-red-600');
+                confirmBtn.classList.add('btn-primary');
                 break;
         }
     }
