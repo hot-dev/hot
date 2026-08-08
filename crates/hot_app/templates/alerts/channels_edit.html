@@ -1,9 +1,9 @@
 {% extends "private_layout.html" %}
 
 {% block content %}
-<div class="py-2">
+<div class="py-6">
     <div class="max-w-2xl mx-auto">
-        <div class="bg-white dark:bg-gray-800 rounded-lg shadow-md p-6">
+        <div class="bg-white dark:bg-gray-900 rounded-lg border border-gray-200 dark:border-gray-800 p-6">
             <h2 class="text-lg font-semibold text-gray-900 dark:text-white mb-6">Edit Alert Channel</h2>
             
             <form action="/settings/alerts/channels/{{ channel.alert_channel_id }}" method="POST" class="space-y-6">
@@ -41,7 +41,7 @@
                 <div class="flex items-center">
                     <input type="checkbox" name="env_specific" id="env_specific" value="true"
                            {% if channel.env_id.is_some() %}checked{% endif %}
-                           class="h-4 w-4 text-hot-red-500 focus:ring-hot-red-500 border-gray-300 rounded">
+                           class="h-4 w-4 text-hot-red-600 focus:ring-hot-red-500 border-gray-300 dark:border-gray-600 rounded">
                     <label for="env_specific" class="ml-2 block text-sm text-gray-700 dark:text-gray-300">
                         Environment-specific (only applies to current environment)
                     </label>
@@ -50,7 +50,7 @@
                 <div class="flex items-center">
                     <input type="checkbox" name="enabled" id="enabled" value="true"
                            {% if channel.enabled %}checked{% endif %}
-                           class="h-4 w-4 text-hot-red-500 focus:ring-hot-red-500 border-gray-300 rounded">
+                           class="h-4 w-4 text-hot-red-600 focus:ring-hot-red-500 border-gray-300 dark:border-gray-600 rounded">
                     <label for="enabled" class="ml-2 block text-sm text-gray-700 dark:text-gray-300">
                         Enabled
                     </label>
@@ -58,17 +58,16 @@
 
                 <div class="flex items-center justify-between pt-4 border-t border-gray-200 dark:border-gray-700">
                     <button type="button" id="delete-btn"
-                        class="px-4 py-2 border border-red-300 dark:border-red-600 rounded-md text-sm font-medium 
-                               text-red-700 dark:text-red-300 hover:bg-red-50 dark:hover:bg-red-900/20">
+                        class="btn btn-danger">
                         Delete
                     </button>
                     <div class="flex space-x-3">
-                        <a href="/settings/alerts/channels" 
-                           class="px-4 py-2 text-sm font-medium text-gray-700 dark:text-gray-300 hover:text-gray-900 dark:hover:text-white">
+                        <a href="/settings/alerts/channels"
+                           class="btn btn-secondary">
                             Cancel
                         </a>
-                        <button type="submit" 
-                                class="px-4 py-2 border border-transparent text-sm font-medium rounded-md text-white bg-hot-red-500 hover:bg-hot-red-600 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-hot-red-500">
+                        <button type="submit"
+                                class="btn btn-primary">
                             Update Channel
                         </button>
                     </div>
