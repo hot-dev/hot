@@ -1,9 +1,9 @@
 {% extends "private_layout.html" %}
 
 {% block content %}
-<div class="py-2 sm:py-4 px-2 sm:px-0">
+<div class="py-6">
     <div class="max-w-3xl mx-auto">
-        <div class="bg-white dark:bg-gray-800 rounded-lg shadow-md p-4 sm:p-6">
+        <div class="bg-white dark:bg-gray-900 rounded-lg border border-gray-200 dark:border-gray-800 p-6">
             {% if error_message != "" %}
             <div class="mb-4 sm:mb-6 p-3 bg-red-100 dark:bg-red-900/20 border border-red-500 dark:border-red-700 text-xs sm:text-sm text-red-700 dark:text-red-300 rounded-md">
                 {{ error_message }}
@@ -56,7 +56,7 @@
             <form method="POST" action="/keys/{{ api_key.api_key_id }}/edit">
                 <div class="space-y-4 sm:space-y-6">
                     <div>
-                        <label for="description" class="block text-xs sm:text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
+                        <label for="description" class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
                             Description <span class="text-red-500">*</span>
                         </label>
                         <input
@@ -68,15 +68,15 @@
                             class="w-full px-3 py-2 border border-gray-300 dark:border-gray-800 rounded-md shadow-sm text-sm focus:ring-hot-red-500 focus:border-hot-red-500 dark:bg-gray-900 dark:text-white"
                             placeholder="e.g., Production CI/CD Pipeline"
                         >
-                        <p class="mt-1 text-xs sm:text-sm text-gray-500 dark:text-gray-400">
+                        <p class="mt-1 text-sm text-gray-500 dark:text-gray-400">
                             Update the description to help identify this API key's purpose.
                         </p>
                     </div>
 
                     <div>
                         <fieldset>
-                            <legend class="text-xs sm:text-sm font-medium text-gray-700 dark:text-gray-300">Status</legend>
-                            <p class="text-xs sm:text-sm text-gray-500 dark:text-gray-400 mb-3 sm:mb-4">
+                            <legend class="text-sm font-medium text-gray-700 dark:text-gray-300">Status</legend>
+                            <p class="text-sm text-gray-500 dark:text-gray-400 mb-3 sm:mb-4">
                                 Inactive API keys cannot be used for authentication.
                             </p>
                             <div class="space-y-3 sm:space-y-4">
@@ -87,11 +87,11 @@
                                         type="radio"
                                         value="true"
                                         {% if api_key.active %}checked{% endif %}
-                                        class="focus:ring-hot-red-500 h-4 w-4 text-red-600 border-gray-300 dark:border-gray-600 dark:bg-gray-900"
+                                        class="focus:ring-hot-red-500 h-4 w-4 text-hot-red-600 border-gray-300 dark:border-gray-600 dark:bg-gray-900"
                                     >
-                                    <label for="active-true" class="ml-3 block text-xs sm:text-sm font-medium text-gray-700 dark:text-gray-300">
+                                    <label for="active-true" class="ml-3 block text-sm font-medium text-gray-700 dark:text-gray-300">
                                         Active
-                                        <span class="block text-xs sm:text-sm text-gray-500 dark:text-gray-400">API key can be used for authentication</span>
+                                        <span class="block text-xs text-gray-500 dark:text-gray-400">API key can be used for authentication</span>
                                     </label>
                                 </div>
                                 <div class="flex items-center">
@@ -101,11 +101,11 @@
                                         type="radio"
                                         value="false"
                                         {% if !api_key.active %}checked{% endif %}
-                                        class="focus:ring-hot-red-500 h-4 w-4 text-red-600 border-gray-300 dark:border-gray-600 dark:bg-gray-900"
+                                        class="focus:ring-hot-red-500 h-4 w-4 text-hot-red-600 border-gray-300 dark:border-gray-600 dark:bg-gray-900"
                                     >
-                                    <label for="active-false" class="ml-3 block text-xs sm:text-sm font-medium text-gray-700 dark:text-gray-300">
+                                    <label for="active-false" class="ml-3 block text-sm font-medium text-gray-700 dark:text-gray-300">
                                         Inactive
-                                        <span class="block text-xs sm:text-sm text-gray-500 dark:text-gray-400">API key cannot be used for authentication</span>
+                                        <span class="block text-xs text-gray-500 dark:text-gray-400">API key cannot be used for authentication</span>
                                     </label>
                                 </div>
                             </div>
@@ -115,13 +115,13 @@
                     <!-- Access Level with Permissions Builder -->
                     <div x-data="permissionBuilder()">
                         <fieldset>
-                            <legend class="text-xs sm:text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">Access Level</legend>
+                            <legend class="text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">Access Level</legend>
                             <div class="space-y-3">
                                 <div class="flex items-center">
                                     <input id="access-full" name="access_level" type="radio" value="full"
                                         x-model="accessLevel"
-                                        class="focus:ring-hot-red-500 h-4 w-4 text-red-600 border-gray-300 dark:border-gray-600 dark:bg-gray-900">
-                                    <label for="access-full" class="ml-3 block text-xs sm:text-sm font-medium text-gray-700 dark:text-gray-300">
+                                        class="focus:ring-hot-red-500 h-4 w-4 text-hot-red-600 border-gray-300 dark:border-gray-600 dark:bg-gray-900">
+                                    <label for="access-full" class="ml-3 block text-sm font-medium text-gray-700 dark:text-gray-300">
                                         Full Access
                                         <span class="block text-xs text-gray-500 dark:text-gray-400">Unrestricted access to all API endpoints</span>
                                     </label>
@@ -129,8 +129,8 @@
                                 <div class="flex items-center">
                                     <input id="access-restricted" name="access_level" type="radio" value="restricted"
                                         x-model="accessLevel"
-                                        class="focus:ring-hot-red-500 h-4 w-4 text-red-600 border-gray-300 dark:border-gray-600 dark:bg-gray-900">
-                                    <label for="access-restricted" class="ml-3 block text-xs sm:text-sm font-medium text-gray-700 dark:text-gray-300">
+                                        class="focus:ring-hot-red-500 h-4 w-4 text-hot-red-600 border-gray-300 dark:border-gray-600 dark:bg-gray-900">
+                                    <label for="access-restricted" class="ml-3 block text-sm font-medium text-gray-700 dark:text-gray-300">
                                         Restricted
                                         <span class="block text-xs text-gray-500 dark:text-gray-400">Limit access to specific resources and actions</span>
                                     </label>
@@ -145,23 +145,23 @@
                             <!-- Presets -->
                             <div class="mb-3">
                                 <div class="flex items-center justify-between mb-1.5">
-                                    <label class="block text-xs font-medium text-gray-500 dark:text-gray-400">Quick Presets</label>
+                                    <label class="block text-xs font-medium text-gray-500 dark:text-gray-400 mb-1">Quick Presets</label>
                                     <button type="button" @click="rules = []" x-show="rules.length > 0" class="text-xs font-medium text-gray-400 dark:text-gray-500 hover:text-red-500 dark:hover:text-red-400 transition-colors">Clear</button>
                                 </div>
                                 <div class="flex flex-wrap gap-1.5">
-                                    <button type="button" @click="applyPreset('read-only')" class="text-xs px-2.5 py-1 rounded-full border border-gray-300 dark:border-gray-600 text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700 transition-colors">Read Only</button>
-                                    <button type="button" @click="applyPreset('mcp')" class="text-xs px-2.5 py-1 rounded-full border border-gray-300 dark:border-gray-600 text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700 transition-colors">MCP Tools</button>
-                                    <button type="button" @click="applyPreset('webhooks')" class="text-xs px-2.5 py-1 rounded-full border border-gray-300 dark:border-gray-600 text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700 transition-colors">Webhooks</button>
-                                    <button type="button" @click="applyPreset('streams')" class="text-xs px-2.5 py-1 rounded-full border border-gray-300 dark:border-gray-600 text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700 transition-colors">Streams</button>
-                                    <button type="button" @click="applyPreset('events')" class="text-xs px-2.5 py-1 rounded-full border border-gray-300 dark:border-gray-600 text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700 transition-colors">Events</button>
-                                    <button type="button" @click="applyPreset('runs')" class="text-xs px-2.5 py-1 rounded-full border border-gray-300 dark:border-gray-600 text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700 transition-colors">Runs</button>
-                                    <button type="button" @click="applyPreset('build-deploy')" class="text-xs px-2.5 py-1 rounded-full border border-gray-300 dark:border-gray-600 text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700 transition-colors">Build/Deploy</button>
+                                    <button type="button" @click="applyPreset('read-only')" class="chip">Read Only</button>
+                                    <button type="button" @click="applyPreset('mcp')" class="chip">MCP Tools</button>
+                                    <button type="button" @click="applyPreset('webhooks')" class="chip">Webhooks</button>
+                                    <button type="button" @click="applyPreset('streams')" class="chip">Streams</button>
+                                    <button type="button" @click="applyPreset('events')" class="chip">Events</button>
+                                    <button type="button" @click="applyPreset('runs')" class="chip">Runs</button>
+                                    <button type="button" @click="applyPreset('build-deploy')" class="chip">Build/Deploy</button>
                                 </div>
                             </div>
 
                             <!-- Rule Builder -->
                             <div class="flex items-center justify-between mb-1">
-                                <label class="block text-xs font-medium text-gray-500 dark:text-gray-400">Permission Rules</label>
+                                <label class="block text-xs font-medium text-gray-500 dark:text-gray-400 mb-1">Permission Rules</label>
                                 <button type="button" @click="addRule()" class="inline-flex items-center gap-1 text-xs font-medium text-hot-red-600 dark:text-hot-red-400 hover:text-hot-red-700 dark:hover:text-hot-red-300 transition-colors">
                                     <svg xmlns="http://www.w3.org/2000/svg" class="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
                                         <path stroke-linecap="round" stroke-linejoin="round" d="M12 4v16m8-8H4" />
@@ -214,19 +214,19 @@
                                                     </select>
                                                 </template>
                                                 <template x-if="!pathOptions(rule.type)">
-                                                    <input type="text" x-model="rule.path" placeholder="*" :disabled="rule.type === '*'" :class="rule.type === '*' && 'opacity-50 cursor-not-allowed'" class="block w-full px-2 py-1.5 text-sm border border-gray-300 dark:border-gray-600 rounded bg-white dark:bg-gray-800 text-gray-900 dark:text-white placeholder-gray-400 dark:placeholder-gray-500 font-mono focus:outline-none focus:ring-1 focus:ring-hot-red-500 focus:border-hot-red-500">
+                                                    <input type="text" x-model="rule.path" placeholder="*" :disabled="rule.type === '*'" :class="rule.type === '*' && 'opacity-50 cursor-not-allowed'" class="block w-full px-2 py-1.5 text-sm border border-gray-300 dark:border-gray-600 rounded bg-white dark:bg-gray-800 text-gray-900 dark:text-white placeholder-gray-500 dark:placeholder-gray-400 font-mono focus:outline-none focus:ring-1 focus:ring-hot-red-500 focus:border-hot-red-500">
                                                 </template>
                                             </div>
                                             <div class="flex-1 min-w-0">
                                                 <label x-show="idx === 0" class="block text-xs font-medium text-gray-500 dark:text-gray-400 mb-1">Actions</label>
                                                 <div class="flex flex-wrap items-center gap-x-3 gap-y-1 pt-0.5">
                                                     <label class="inline-flex items-center gap-1.5 text-sm text-gray-700 dark:text-gray-300 cursor-pointer">
-                                                        <input type="checkbox" :checked="rule.actions.includes('*')" @change="toggleAllActions(rule, $event.target.checked)" class="rounded border-gray-300 dark:border-gray-600 text-hot-red-500 focus:ring-hot-red-500 h-3.5 w-3.5">
+                                                        <input type="checkbox" :checked="rule.actions.includes('*')" @change="toggleAllActions(rule, $event.target.checked)" class="rounded border-gray-300 dark:border-gray-600 text-hot-red-600 focus:ring-hot-red-500 h-3.5 w-3.5">
                                                         <span class="text-xs font-medium">All</span>
                                                     </label>
                                                     <template x-for="action in validActions(rule.type)" :key="action">
                                                         <label class="inline-flex items-center gap-1.5 text-sm text-gray-700 dark:text-gray-300 cursor-pointer">
-                                                            <input type="checkbox" :checked="rule.actions.includes(action) || rule.actions.includes('*')" :disabled="rule.actions.includes('*')" @change="toggleAction(rule, action, $event.target.checked)" class="rounded border-gray-300 dark:border-gray-600 text-hot-red-500 focus:ring-hot-red-500 h-3.5 w-3.5">
+                                                            <input type="checkbox" :checked="rule.actions.includes(action) || rule.actions.includes('*')" :disabled="rule.actions.includes('*')" @change="toggleAction(rule, action, $event.target.checked)" class="rounded border-gray-300 dark:border-gray-600 text-hot-red-600 focus:ring-hot-red-500 h-3.5 w-3.5">
                                                             <span class="text-xs" x-text="action"></span>
                                                         </label>
                                                     </template>
@@ -245,12 +245,12 @@
                                 </div>
                             </template>
                             <template x-if="rules.some(r => r.actions.length === 0)">
-                                <p class="mt-1 text-xs text-amber-600 dark:text-amber-400">
+                                <p class="mt-1 text-xs text-amber-700 dark:text-amber-400">
                                     Rules with no actions selected will be ignored.
                                 </p>
                             </template>
 
-                            <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">
+                            <p class="mt-1 text-sm text-gray-500 dark:text-gray-400">
                                 Empty means no access. Use <code class="bg-gray-100 dark:bg-gray-700 px-1 rounded">*</code> in path for wildcard matching.
                             </p>
                         </div>
@@ -260,7 +260,7 @@
                     <div class="bg-yellow-50 dark:bg-yellow-900/20 border border-yellow-200 dark:border-yellow-700 rounded-md p-3 sm:p-4">
                         <div class="flex">
                             <div class="flex-shrink-0">
-                                <svg class="h-5 w-5 text-yellow-400" fill="currentColor" viewBox="0 0 20 20">
+                                <svg class="h-5 w-5 text-amber-600 dark:text-amber-400" fill="currentColor" viewBox="0 0 20 20">
                                     <path fill-rule="evenodd" d="M8.257 3.099c.765-1.36 2.722-1.36 3.486 0l5.58 9.92c.75 1.334-.213 2.98-1.742 2.98H4.42c-1.53 0-2.493-1.646-1.743-2.98l5.58-9.92zM11 13a1 1 0 11-2 0 1 1 0 012 0zm-1-8a1 1 0 00-1 1v3a1 1 0 002 0V6a1 1 0 00-1-1z" clip-rule="evenodd"></path>
                                 </svg>
                             </div>
@@ -275,7 +275,7 @@
                     {% endif %}
 
                     <div class="flex flex-col-reverse sm:flex-row items-stretch sm:items-center justify-between gap-3">
-                        <a href="/keys" class="inline-flex items-center justify-center px-4 py-2 border border-gray-300 dark:border-gray-800 text-xs sm:text-sm font-medium rounded-md text-gray-700 dark:text-gray-300 bg-white dark:bg-gray-900 hover:bg-gray-50 dark:hover:bg-gray-600 transition-all duration-200">
+                        <a href="/keys" class="btn btn-secondary">
                             Cancel
                         </a>
                         <button type="submit" class="btn btn-primary">

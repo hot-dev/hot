@@ -2,7 +2,7 @@
 {%- import "components/ui_macros.html" as ui -%}
 
 {% block content %}
-<div class="py-2">
+<div class="py-6">
     <div class="flex items-center justify-end mb-6">
         {% if is_admin %}
             {% if page_context.is_local_dev %}
@@ -23,7 +23,7 @@
         {% endif %}
     </div>
 
-    <div class="bg-white dark:bg-gray-800 rounded-lg shadow-md overflow-hidden">
+    <div class="bg-white dark:bg-gray-900 rounded-lg border border-gray-200 dark:border-gray-800 overflow-hidden">
         {% if envs.len() > 0 %}
         <div class="overflow-x-auto">
             <table class="w-full divide-y divide-gray-200 dark:divide-gray-700">
@@ -43,7 +43,7 @@
                         </th>
                     </tr>
                 </thead>
-                <tbody class="bg-white dark:bg-gray-800 divide-y divide-gray-200 dark:divide-gray-700">
+                <tbody class="bg-white dark:bg-gray-900 divide-y divide-gray-200 dark:divide-gray-700">
                     {% for env in envs %}
                     <tr class="hover:bg-gray-100 dark:hover:bg-gray-700 transition-colors duration-150">
                         <td class="px-6 py-4 whitespace-nowrap">
@@ -89,7 +89,7 @@
                                         Switch
                                     </button>
                                 </form>
-                                <span class="text-gray-300 dark:text-gray-600">|</span>
+                                <span class="text-gray-300 dark:text-gray-700">|</span>
                                 {% endif %}
                                 {% if is_admin %}
                                 <a href="/envs/{{ env.env_id }}/edit" class="link">

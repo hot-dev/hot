@@ -2,7 +2,7 @@
 {%- import "components/ui_macros.html" as ui -%}
 
 {% block content %}
-<div class="py-2 px-2 sm:px-0">
+<div class="py-6">
     <!-- Header -->
     {% if api_keys.len() > 0 %}
     <div class="flex items-center justify-end mb-4 sm:mb-6">
@@ -22,7 +22,7 @@
     <div class="mb-4 sm:mb-6 bg-yellow-50 dark:bg-yellow-900/20 border border-yellow-200 dark:border-yellow-700 rounded-md p-3 sm:p-4">
         <div class="flex">
             <div class="flex-shrink-0">
-                <svg class="h-5 w-5 text-yellow-400" fill="currentColor" viewBox="0 0 20 20">
+                <svg class="h-5 w-5 text-amber-600 dark:text-amber-400" fill="currentColor" viewBox="0 0 20 20">
                     <path fill-rule="evenodd" d="M8.257 3.099c.765-1.36 2.722-1.36 3.486 0l5.58 9.92c.75 1.334-.213 2.98-1.742 2.98H4.42c-1.53 0-2.493-1.646-1.743-2.98l5.58-9.92zM11 13a1 1 0 11-2 0 1 1 0 012 0zm-1-8a1 1 0 00-1 1v3a1 1 0 002 0V6a1 1 0 00-1-1z" clip-rule="evenodd"></path>
                 </svg>
             </div>
@@ -37,24 +37,24 @@
 
     {% if api_keys.len() > 0 %}
     <!-- API Keys List - Desktop Table -->
-    <div class="hidden md:block bg-white dark:bg-gray-800 rounded-lg shadow-md overflow-hidden">
+    <div class="hidden md:block bg-white dark:bg-gray-900 rounded-lg border border-gray-200 dark:border-gray-800 overflow-hidden">
         <div class="overflow-x-auto">
             <table class="min-w-full divide-y divide-gray-200 dark:divide-gray-700">
                 <thead class="bg-gray-50 dark:bg-gray-900">
                     <tr>
-                        <th scope="col" class="px-4 lg:px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase tracking-wider">
+                        <th scope="col" class="px-4 lg:px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">
                             Description
                         </th>
-                        <th scope="col" class="px-4 lg:px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase tracking-wider">
+                        <th scope="col" class="px-4 lg:px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">
                             Access
                         </th>
-                        <th scope="col" class="px-4 lg:px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase tracking-wider">
+                        <th scope="col" class="px-4 lg:px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">
                             Status
                         </th>
-                        <th scope="col" class="hidden lg:table-cell px-4 lg:px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase tracking-wider">
+                        <th scope="col" class="hidden lg:table-cell px-4 lg:px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">
                             Created
                         </th>
-                        <th scope="col" class="hidden lg:table-cell px-4 lg:px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase tracking-wider">
+                        <th scope="col" class="hidden lg:table-cell px-4 lg:px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">
                             Last Updated
                         </th>
                         {% if is_admin %}
@@ -64,7 +64,7 @@
                         {% endif %}
                     </tr>
                 </thead>
-                <tbody class="bg-white dark:bg-gray-800 divide-y divide-gray-200 dark:divide-gray-700">
+                <tbody class="bg-white dark:bg-gray-900 divide-y divide-gray-200 dark:divide-gray-700">
                     {% for api_key in api_keys %}
                     <tr class="hover:bg-gray-100 dark:hover:bg-gray-700 transition-colors duration-150">
                         <td class="px-4 lg:px-6 py-4">
@@ -129,7 +129,7 @@
     <!-- API Keys List - Mobile Cards -->
     <div class="md:hidden space-y-3">
         {% for api_key in api_keys %}
-        <div class="bg-white dark:bg-gray-800 rounded-lg shadow-md p-4">
+        <div class="bg-white dark:bg-gray-900 rounded-lg border border-gray-200 dark:border-gray-800 p-4">
             <div class="flex items-start justify-between mb-3">
                 <div class="flex-1 min-w-0">
                     <h3 class="text-sm font-semibold text-gray-900 dark:text-white truncate">{{ api_key.description }}</h3>
@@ -184,7 +184,7 @@
     </div>
     {% else %}
     <!-- Empty State -->
-    <div class="bg-white dark:bg-gray-800 rounded-lg shadow-md p-6 sm:p-8">
+    <div class="bg-white dark:bg-gray-900 rounded-lg border border-gray-200 dark:border-gray-800 p-6 sm:p-8">
         <div class="empty-state">
             <div class="empty-state-icon">
                 <svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6 text-gray-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
@@ -208,15 +208,15 @@
     {% endif %}
 
     <!-- Info Note -->
-    <div class="mt-4 sm:mt-6 mb-4 sm:mb-6 bg-cyan-50 dark:bg-cyan-900/20 border border-cyan-200 dark:border-cyan-700 rounded-md p-3 sm:p-4">
+    <div class="mt-4 sm:mt-6 mb-4 sm:mb-6 bg-blue-50 dark:bg-blue-900/20 border border-blue-200 dark:border-blue-700 rounded-md p-3 sm:p-4">
         <div class="flex">
             <div class="flex-shrink-0">
-                <svg class="h-5 w-5 text-cyan-500 dark:text-cyan-400" fill="currentColor" viewBox="0 0 20 20">
+                <svg class="h-5 w-5 text-blue-500 dark:text-blue-400" fill="currentColor" viewBox="0 0 20 20">
                     <path fill-rule="evenodd" d="M18 10a8 8 0 11-16 0 8 8 0 0116 0zm-7-4a1 1 0 11-2 0 1 1 0 012 0zM9 9a1 1 0 000 2v3a1 1 0 001 1h1a1 1 0 100-2v-3a1 1 0 00-1-1H9z" clip-rule="evenodd"></path>
                 </svg>
             </div>
             <div class="ml-3">
-                <p class="text-xs sm:text-sm text-cyan-800 dark:text-cyan-200">
+                <p class="text-xs sm:text-sm text-blue-800 dark:text-blue-200">
                     API Keys are scoped to the Organization and Environment.
                 </p>
             </div>
@@ -226,7 +226,7 @@
         {% if api_keys.len() > 0 %}
     <!-- Pagination -->
     {% if has_prev_page || has_next_page %}
-    <div class="bg-white dark:bg-gray-800 rounded-lg shadow-md mt-4">
+    <div class="bg-white dark:bg-gray-900 rounded-lg border border-gray-200 dark:border-gray-800 mt-4">
         <div class="px-3 sm:px-4 md:px-6 py-3 sm:py-4">
             {% call ui::pagination("/keys?p=", "", current_page_num, start_page, end_page, has_prev_page, has_next_page, api_keys.len(), total_keys, "API keys") %}{% endcall %}
         </div>

@@ -2,7 +2,7 @@
 {%- import "components/ui_macros.html" as ui -%}
 
 {% block content %}
-<div class="py-2 px-2 sm:px-0">
+<div class="py-6">
     <div class="flex items-center justify-end mb-4 sm:mb-6">
         {% if page_context.is_local_dev %}
         <button type="button" data-local-dev-restricted class="btn btn-primary">
@@ -25,7 +25,7 @@
 
     {% if orgs.len() > 0 %}
     <!-- Desktop Table View -->
-    <div class="hidden md:block bg-white dark:bg-gray-800 rounded-lg shadow-md overflow-hidden">
+    <div class="hidden md:block bg-white dark:bg-gray-900 rounded-lg border border-gray-200 dark:border-gray-800 overflow-hidden">
         <div class="overflow-x-auto">
             <table class="w-full divide-y divide-gray-200 dark:divide-gray-700">
                 <thead class="bg-gray-100 dark:bg-gray-900">
@@ -44,7 +44,7 @@
                         </th>
                     </tr>
                 </thead>
-                <tbody class="bg-white dark:bg-gray-800 divide-y divide-gray-200 dark:divide-gray-700">
+                <tbody class="bg-white dark:bg-gray-900 divide-y divide-gray-200 dark:divide-gray-700">
                     {% for org in orgs %}
                     <tr class="hover:bg-gray-100 dark:hover:bg-gray-700 transition-colors duration-150">
                         <td class="px-4 lg:px-6 py-4 whitespace-nowrap">
@@ -53,7 +53,7 @@
                                     {{ org.name }}
                                 </a>
                                 {% if org.is_individual() %}
-                                <span class="ml-1 inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-medium bg-gray-100 dark:bg-gray-700 text-gray-600 dark:text-gray-300 align-middle">Individual</span>
+                                <span class="ml-1 inline-flex items-center px-1.5 py-0.5 rounded text-xs font-medium bg-gray-100 dark:bg-gray-700 text-gray-600 dark:text-gray-300 align-middle">Individual</span>
                                 {% endif %}
                             </div>
                         </td>
@@ -72,7 +72,7 @@
                                 <a href="/@{{ org.slug }}" class="link">
                                     View
                                 </a>
-                                <span class="text-gray-300 dark:text-gray-600">|</span>
+                                <span class="text-gray-300 dark:text-gray-700">|</span>
                                 <a href="/@{{ org.slug }}/edit" class="link">
                                     Edit
                                 </a>
@@ -97,7 +97,7 @@
     <!-- Mobile Card View -->
     <div class="md:hidden space-y-3">
         {% for org in orgs %}
-        <div class="bg-white dark:bg-gray-800 rounded-lg shadow-md p-4">
+        <div class="bg-white dark:bg-gray-900 rounded-lg border border-gray-200 dark:border-gray-800 p-4">
             <div class="flex items-start justify-between mb-3">
                 <div class="flex-1 min-w-0">
                     <h3 class="text-sm font-semibold text-gray-900 dark:text-white mb-1">
@@ -105,7 +105,7 @@
                             {{ org.name }}
                         </a>
                         {% if org.is_individual() %}
-                        <span class="ml-1 inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-medium bg-gray-100 dark:bg-gray-700 text-gray-600 dark:text-gray-300 align-middle">Individual</span>
+                        <span class="ml-1 inline-flex items-center px-1.5 py-0.5 rounded text-xs font-medium bg-gray-100 dark:bg-gray-700 text-gray-600 dark:text-gray-300 align-middle">Individual</span>
                         {% endif %}
                     </h3>
                     <p class="text-xs text-gray-500 dark:text-gray-400 font-mono">@{{ org.slug }}</p>
@@ -114,7 +114,7 @@
                     <a href="/@{{ org.slug }}" class="link text-xs font-medium">
                         View
                     </a>
-                    <span class="text-gray-300 dark:text-gray-600">|</span>
+                    <span class="text-gray-300 dark:text-gray-700">|</span>
                     <a href="/@{{ org.slug }}/edit" class="link text-xs font-medium">
                         Edit
                     </a>
@@ -127,7 +127,7 @@
         {% endfor %}
     </div>
     {% else %}
-    <div class="bg-white dark:bg-gray-800 rounded-lg shadow-md p-6 sm:p-12">
+    <div class="bg-white dark:bg-gray-900 rounded-lg border border-gray-200 dark:border-gray-800 p-6 sm:p-12">
         <div class="empty-state">
             <div class="empty-state-icon">
                 <svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6 text-gray-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">

@@ -1,7 +1,7 @@
 {% extends "private_layout.html" %}
 
 {% block content %}
-<div class="max-w-7xl mx-auto px-4 py-6 sm:px-6 lg:px-8">
+<div class="max-w-7xl mx-auto py-6">
     <!-- Tabs -->
     <div class="mb-6 border-b border-gray-200 dark:border-gray-700">
         <ul class="flex flex-wrap -mb-px text-sm font-medium text-center">
@@ -35,7 +35,7 @@
     <div class="mb-6 bg-yellow-50 dark:bg-yellow-900/20 border border-yellow-200 dark:border-yellow-700 rounded-md p-4">
         <div class="flex">
             <div class="flex-shrink-0">
-                <svg class="h-5 w-5 text-yellow-400" fill="currentColor" viewBox="0 0 20 20">
+                <svg class="h-5 w-5 text-amber-600 dark:text-amber-400" fill="currentColor" viewBox="0 0 20 20">
                     <path fill-rule="evenodd" d="M8.257 3.099c.765-1.36 2.722-1.36 3.486 0l5.58 9.92c.75 1.334-.213 2.98-1.742 2.98H4.42c-1.53 0-2.493-1.646-1.743-2.98l5.58-9.92zM11 13a1 1 0 11-2 0 1 1 0 012 0zm-1-8a1 1 0 00-1 1v3a1 1 0 002 0V6a1 1 0 00-1-1z" clip-rule="evenodd"></path>
                 </svg>
             </div>
@@ -68,21 +68,21 @@
 
     {% if env_contexts.len() > 0 %}
     <!-- Environment Context Variables List -->
-    <div class="bg-white dark:bg-gray-800 rounded-lg shadow-md overflow-hidden">
+    <div class="bg-white dark:bg-gray-900 rounded-lg border border-gray-200 dark:border-gray-800 overflow-hidden">
         <div class="overflow-x-auto">
             <table class="min-w-full divide-y divide-gray-200 dark:divide-gray-700">
                 <thead class="bg-gray-50 dark:bg-gray-900">
                     <tr>
-                        <th scope="col" class="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase tracking-wider">Key</th>
-                        <th scope="col" class="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase tracking-wider">Description</th>
-                        <th scope="col" class="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase tracking-wider">Status</th>
-                        <th scope="col" class="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase tracking-wider">Last Updated</th>
+                        <th scope="col" class="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">Key</th>
+                        <th scope="col" class="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">Description</th>
+                        <th scope="col" class="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">Status</th>
+                        <th scope="col" class="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">Last Updated</th>
                         {% if is_admin %}
                         <th scope="col" class="relative px-6 py-3"><span class="sr-only">Actions</span></th>
                         {% endif %}
                     </tr>
                 </thead>
-                <tbody class="bg-white dark:bg-gray-800 divide-y divide-gray-200 dark:divide-gray-700">
+                <tbody class="bg-white dark:bg-gray-900 divide-y divide-gray-200 dark:divide-gray-700">
                     {% for context in env_contexts %}
                     <tr class="hover:bg-gray-100 dark:hover:bg-gray-700 transition-colors duration-150">
                         <td class="px-6 py-4 whitespace-nowrap">
@@ -108,7 +108,7 @@
                         <td class="px-6 py-4 whitespace-nowrap text-right text-xs font-medium">
                             <a href="/contexts/env/{{ context.context_id }}/edit" class="link transition-all mr-3">Edit</a>
                             <form id="delete-env-context-{{ context.context_id }}" action="/contexts/env/{{ context.context_id }}/delete" method="post" class="inline">
-                                <button type="button" onclick="confirmDeleteContext('env', '{{ context.context_id }}')" class="text-red-600 hover:text-red-800 dark:text-red-500 dark:hover:text-red-300 transition-all">Delete</button>
+                                <button type="button" onclick="confirmDeleteContext('env', '{{ context.context_id }}')" class="text-red-700 hover:text-red-800 dark:text-red-400 dark:hover:text-red-300 transition-all">Delete</button>
                             </form>
                         </td>
                         {% endif %}
@@ -120,15 +120,15 @@
     </div>
     {% else %}
     <!-- Empty State for Environment -->
-    <div class="bg-white dark:bg-gray-800 rounded-lg shadow-md p-8">
-        <div class="text-center">
-            <div class="mx-auto flex items-center justify-center h-12 w-12 rounded-full bg-gray-100 dark:bg-gray-900 mb-4">
+    <div class="bg-white dark:bg-gray-900 rounded-lg border border-gray-200 dark:border-gray-800">
+        <div class="empty-state">
+            <div class="empty-state-icon">
                 <svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6 text-gray-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                     <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15.75 5.25a3 3 0 0 1 3 3m3 0a6 6 0 0 1-7.029 5.912c-.563-.097-1.159.026-1.563.43L10.5 17.25H8.25v2.25H6v2.25H2.25v-2.818c0-.597.237-1.17.659-1.591l6.499-6.499c.404-.404.527-1 .43-1.563A6 6 0 1 1 21.75 8.25Z" />
                 </svg>
             </div>
-            <h3 class="text-lg font-medium text-gray-900 dark:text-white mb-2">No environment context variables</h3>
-            <p class="text-gray-500 dark:text-gray-400 mb-4">
+            <h3 class="empty-state-title">No environment context variables</h3>
+            <p class="empty-state-message">
                 Environment-level variables are shared across all projects in this environment.
             </p>
             {% if is_admin %}
@@ -147,12 +147,12 @@
     <!-- Project Tab Content -->
     {% if active_tab == "project" %}
     <!-- Project Selector -->
-    <div class="mb-6 p-4 bg-white dark:bg-gray-800 rounded-lg shadow">
+    <div class="mb-6 p-4 bg-white dark:bg-gray-900 rounded-lg border border-gray-200 dark:border-gray-800">
         <div class="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
             <div class="w-full sm:w-64">
                 <div x-data="{ open: false }" class="relative">
                     <button @click="open = !open" :aria-expanded="open" aria-haspopup="true" type="button"
-                            class="w-full text-gray-900 bg-white border border-gray-300 focus:outline-none hover:bg-gray-100 focus:ring-4 focus:ring-gray-100 font-medium rounded-lg text-sm px-2.5 py-1.5 text-left inline-flex items-center justify-between dark:bg-gray-800 dark:text-white dark:border-gray-600 dark:hover:bg-gray-600 dark:focus:ring-gray-700">
+                            class="w-full text-gray-900 bg-white border border-gray-300 focus-ring hover:bg-gray-100 font-medium rounded-lg text-sm px-2.5 py-1.5 text-left inline-flex items-center justify-between dark:bg-gray-800 dark:text-white dark:border-gray-600 dark:hover:bg-gray-700">
                         <div class="flex items-center space-x-2">
                             <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" class="size-5">
                                 <path fill-rule="evenodd" d="M2.25 6a3 3 0 0 1 3-3h13.5a3 3 0 0 1 3 3v12a3 3 0 0 1-3 3H5.25a3 3 0 0 1-3-3V6Zm18 3H3.75v9a1.5 1.5 0 0 0 1.5 1.5h13.5a1.5 1.5 0 0 0 1.5-1.5V9Zm-15-3.75A.75.75 0 0 0 4.5 6v.008c0 .414.336.75.75.75h.008a.75.75 0 0 0 .75-.75V6a.75.75 0 0 0-.75-.75H5.25Zm1.5.75a.75.75 0 0 1 .75-.75h.008a.75.75 0 0 1 .75.75v.008a.75.75 0 0 1-.75.75H7.5a.75.75 0 0 1-.75-.75V6Zm3-.75A.75.75 0 0 0 9 6v.008c0 .414.336.75.75.75h.008a.75.75 0 0 0 .75-.75V6a.75.75 0 0 0-.75-.75H9.75Z" clip-rule="evenodd" />
@@ -165,7 +165,7 @@
                     </button>
 
                     <div x-cloak x-show="open" @click.away="open = false" @keydown.escape.window="open = false" x-transition
-                         class="absolute z-10 w-full mt-1 bg-white rounded-lg shadow-lg border border-gray-200 dark:bg-gray-800 dark:border-gray-600 max-h-60 overflow-y-auto">
+                         class="absolute z-50 w-full mt-1 bg-white rounded-lg shadow-lg border border-gray-200 dark:bg-gray-800 dark:border-gray-700 max-h-60 overflow-y-auto">
                         <div class="py-1">
                             {% for project in projects %}
                             <a href="/contexts?tab=project&project={{ project.name }}" class="block px-4 py-2 text-sm text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-600 transition-colors duration-200 cursor-pointer">
@@ -202,15 +202,15 @@
 
     {% if selected_project.is_none() %}
     <!-- No project selected state -->
-    <div class="bg-white dark:bg-gray-800 rounded-lg shadow-md p-8">
-        <div class="text-center">
-            <div class="mx-auto flex items-center justify-center h-12 w-12 rounded-full bg-gray-100 dark:bg-gray-900 mb-4">
+    <div class="bg-white dark:bg-gray-900 rounded-lg border border-gray-200 dark:border-gray-800">
+        <div class="empty-state">
+            <div class="empty-state-icon">
                 <svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6 text-gray-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                     <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15.75 5.25a3 3 0 0 1 3 3m3 0a6 6 0 0 1-7.029 5.912c-.563-.097-1.159.026-1.563.43L10.5 17.25H8.25v2.25H6v2.25H2.25v-2.818c0-.597.237-1.17.659-1.591l6.499-6.499c.404-.404.527-1 .43-1.563A6 6 0 1 1 21.75 8.25Z" />
                 </svg>
             </div>
-            <h3 class="text-lg font-medium text-gray-900 dark:text-white mb-2">Select a project</h3>
-            <p class="text-gray-500 dark:text-gray-400">
+            <h3 class="empty-state-title">Select a project</h3>
+            <p class="empty-state-message">
                 Choose a project from the dropdown above to view and manage its project-specific context variables.
             </p>
         </div>
@@ -234,7 +234,7 @@
                         {% for req in required_ctx_vars %}
                         {% if !req.is_set %}
                         <a href="/contexts/{{ selected_project.as_ref().unwrap().name }}/new?key={{ req.key }}"
-                           class="inline-flex items-center px-2.5 py-1 rounded-md text-xs font-medium bg-red-100 dark:bg-red-800 text-red-800 dark:text-red-100 hover:bg-red-200 dark:hover:bg-red-700 transition-colors">
+                           class="btn btn-danger btn-sm">
                             <svg xmlns="http://www.w3.org/2000/svg" class="h-3 w-3 mr-1" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                                 <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 6v6m0 0v6m0-6h6m-6 0H6" />
                             </svg>
@@ -250,21 +250,21 @@
 
         {% if project_contexts.len() > 0 %}
         <!-- Project Context Variables List -->
-        <div class="bg-white dark:bg-gray-800 rounded-lg shadow-md overflow-hidden">
+        <div class="bg-white dark:bg-gray-900 rounded-lg border border-gray-200 dark:border-gray-800 overflow-hidden">
             <div class="overflow-x-auto">
                 <table class="min-w-full divide-y divide-gray-200 dark:divide-gray-700">
                     <thead class="bg-gray-50 dark:bg-gray-900">
                         <tr>
-                            <th scope="col" class="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase tracking-wider">Key</th>
-                            <th scope="col" class="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase tracking-wider">Description</th>
-                            <th scope="col" class="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase tracking-wider">Status</th>
-                            <th scope="col" class="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase tracking-wider">Last Updated</th>
+                            <th scope="col" class="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">Key</th>
+                            <th scope="col" class="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">Description</th>
+                            <th scope="col" class="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">Status</th>
+                            <th scope="col" class="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">Last Updated</th>
                             {% if is_admin %}
                             <th scope="col" class="relative px-6 py-3"><span class="sr-only">Actions</span></th>
                             {% endif %}
                         </tr>
                     </thead>
-                    <tbody class="bg-white dark:bg-gray-800 divide-y divide-gray-200 dark:divide-gray-700">
+                    <tbody class="bg-white dark:bg-gray-900 divide-y divide-gray-200 dark:divide-gray-700">
                         {% for context in project_contexts %}
                         <tr class="hover:bg-gray-100 dark:hover:bg-gray-700 transition-colors duration-150">
                             <td class="px-6 py-4 whitespace-nowrap">
@@ -290,7 +290,7 @@
                             <td class="px-6 py-4 whitespace-nowrap text-right text-xs font-medium">
                                 <a href="/contexts/{{ selected_project.as_ref().unwrap().name }}/{{ context.context_id }}/edit" class="link transition-all mr-3">Edit</a>
                                 <form id="delete-project-context-{{ context.context_id }}" action="/contexts/{{ selected_project.as_ref().unwrap().name }}/{{ context.context_id }}/delete" method="post" class="inline">
-                                    <button type="button" onclick="confirmDeleteContext('project', '{{ context.context_id }}')" class="text-red-600 hover:text-red-800 dark:text-red-500 dark:hover:text-red-300 transition-all">Delete</button>
+                                    <button type="button" onclick="confirmDeleteContext('project', '{{ context.context_id }}')" class="text-red-700 hover:text-red-800 dark:text-red-400 dark:hover:text-red-300 transition-all">Delete</button>
                                 </form>
                             </td>
                             {% endif %}
@@ -302,15 +302,15 @@
         </div>
         {% else %}
         <!-- Empty State for Project -->
-        <div class="bg-white dark:bg-gray-800 rounded-lg shadow-md p-8">
-            <div class="text-center">
-                <div class="mx-auto flex items-center justify-center h-12 w-12 rounded-full bg-gray-100 dark:bg-gray-900 mb-4">
+        <div class="bg-white dark:bg-gray-900 rounded-lg border border-gray-200 dark:border-gray-800">
+            <div class="empty-state">
+                <div class="empty-state-icon">
                     <svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6 text-gray-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 21a4 4 0 01-4-4V5a2 2 0 012-2h4a2 2 0 012 2v12a4 4 0 01-4 4zm0 0h12a2 2 0 002-2v-4a2 2 0 00-2-2h-2.343M11 7.343l1.657-1.657a2 2 0 012.828 0l2.829 2.829a2 2 0 010 2.828l-8.486 8.485M7 17h.01"></path>
                     </svg>
                 </div>
-                <h3 class="text-lg font-medium text-gray-900 dark:text-white mb-2">No project-specific context variables</h3>
-                <p class="text-gray-500 dark:text-gray-400 mb-4">
+                <h3 class="empty-state-title">No project-specific context variables</h3>
+                <p class="empty-state-message">
                     Project-level variables override environment variables for this specific project.
                 </p>
                 {% if is_admin %}

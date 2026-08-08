@@ -1,7 +1,7 @@
 {% extends "private_layout.html" %}
 
 {% block content %}
-<div class="max-w-7xl mx-auto px-4 py-6 sm:px-6 lg:px-8">
+<div class="max-w-7xl mx-auto py-6">
     <!-- Info: project docs vs general docs -->
     <p class="mb-4 text-xs text-gray-500 dark:text-gray-400">
         Docs for your project's code and dependencies. For platform and language docs, see
@@ -14,12 +14,12 @@
     </p>
 
     <!-- Project Selector -->
-    <div class="mb-6 p-4 bg-white dark:bg-gray-800 rounded-lg shadow">
+    <div class="mb-6 p-4 bg-white dark:bg-gray-900 rounded-lg border border-gray-200 dark:border-gray-800">
         <div class="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
             <div class="w-full sm:w-64">
                 <div x-data="{ open: false }" class="relative">
                     <button @click="open = !open" :aria-expanded="open" aria-haspopup="true" type="button"
-                            class="w-full text-gray-900 bg-white border border-gray-300 focus:outline-none hover:bg-gray-100 focus:ring-4 focus:ring-gray-100 font-medium rounded-lg text-sm px-2.5 py-1.5 text-left inline-flex items-center justify-between dark:bg-gray-800 dark:text-white dark:border-gray-600 dark:hover:bg-gray-600 dark:focus:ring-gray-700">
+                            class="w-full text-gray-900 bg-white border border-gray-300 focus-ring hover:bg-gray-100 font-medium rounded-lg text-sm px-2.5 py-1.5 text-left inline-flex items-center justify-between dark:bg-gray-800 dark:text-white dark:border-gray-600 dark:hover:bg-gray-700">
                         <div class="flex items-center space-x-2">
                             <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" class="size-5">
                                 <path fill-rule="evenodd" d="M2.25 6a3 3 0 0 1 3-3h13.5a3 3 0 0 1 3 3v12a3 3 0 0 1-3 3H5.25a3 3 0 0 1-3-3V6Zm18 3H3.75v9a1.5 1.5 0 0 0 1.5 1.5h13.5a1.5 1.5 0 0 0 1.5-1.5V9Zm-15-3.75A.75.75 0 0 0 4.5 6v.008c0 .414.336.75.75.75h.008a.75.75 0 0 0 .75-.75V6a.75.75 0 0 0-.75-.75H5.25Zm1.5.75a.75.75 0 0 1 .75-.75h.008a.75.75 0 0 1 .75.75v.008a.75.75 0 0 1-.75.75H7.5a.75.75 0 0 1-.75-.75V6Zm3-.75A.75.75 0 0 0 9 6v.008c0 .414.336.75.75.75h.008a.75.75 0 0 0 .75-.75V6a.75.75 0 0 0-.75-.75H9.75Z" clip-rule="evenodd" />
@@ -32,7 +32,7 @@
                     </button>
 
                     <div x-cloak x-show="open" @click.away="open = false" @keydown.escape.window="open = false" x-transition
-                         class="absolute z-10 w-full mt-1 bg-white rounded-lg shadow-lg border border-gray-200 dark:bg-gray-800 dark:border-gray-600 max-h-60 overflow-y-auto">
+                         class="absolute z-50 w-full mt-1 bg-white rounded-lg shadow-lg border border-gray-200 dark:bg-gray-800 dark:border-gray-700 max-h-60 overflow-y-auto">
                         <div class="py-1">
                             {% for project in projects %}
                             <a href="/docs?project={{ project.name }}" class="block px-4 py-2 text-sm text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-600 transition-colors duration-200 cursor-pointer">
@@ -66,15 +66,15 @@
 
     {% if selected_project.is_none() %}
     <!-- No project selected state -->
-    <div class="bg-white dark:bg-gray-800 rounded-lg shadow-md p-8">
-        <div class="text-center">
-            <div class="mx-auto flex items-center justify-center h-12 w-12 rounded-full bg-gray-100 dark:bg-gray-900 mb-4">
+    <div class="bg-white dark:bg-gray-900 rounded-lg border border-gray-200 dark:border-gray-800">
+        <div class="empty-state">
+            <div class="empty-state-icon">
                 <svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6 text-gray-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                     <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 6.042A8.967 8.967 0 0 0 6 3.75c-1.052 0-2.062.18-3 .512v14.25A8.987 8.987 0 0 1 6 18c2.305 0 4.408.867 6 2.292m0-14.25a8.966 8.966 0 0 1 6-2.292c1.052 0 2.062.18 3 .512v14.25A8.987 8.987 0 0 0 18 18a8.967 8.967 0 0 0-6 2.292m0-14.25v14.25" />
                 </svg>
             </div>
-            <h3 class="text-lg font-medium text-gray-900 dark:text-white mb-2">Select a project</h3>
-            <p class="text-gray-500 dark:text-gray-400">
+            <h3 class="empty-state-title">Select a project</h3>
+            <p class="empty-state-message">
                 Choose a project from the dropdown above to view its documentation.
             </p>
         </div>
@@ -104,11 +104,11 @@
             <div class="mb-6">
                 <h2 class="text-xl font-semibold text-gray-900 dark:text-gray-100 mb-4">Project Namespaces</h2>
                 {% if project_namespaces.is_empty() && !docs_generating %}
-                    <div class="text-center py-8 text-gray-500 dark:text-gray-400 bg-white dark:bg-gray-800 rounded-lg shadow">
+                    <div class="text-center py-8 text-gray-500 dark:text-gray-400 bg-white dark:bg-gray-900 rounded-lg border border-gray-200 dark:border-gray-800">
                         No documentation found for this project's own source code.
                     </div>
                 {% else if project_namespaces.is_empty() && docs_generating %}
-                    <div class="text-center py-8 text-gray-400 dark:text-gray-500 bg-white dark:bg-gray-800 rounded-lg shadow">
+                    <div class="text-center py-8 text-gray-400 dark:text-gray-500 bg-white dark:bg-gray-900 rounded-lg border border-gray-200 dark:border-gray-800">
                         <div class="flex items-center justify-center">
                             <svg class="animate-spin h-5 w-5 mr-2" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
                                 <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
@@ -120,7 +120,7 @@
                 {% else %}
                     <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
                         {% for ns in project_namespaces %}
-                            <a href="/docs/{{ selected_project.as_ref().unwrap().name }}/project/{{ ns.path }}" class="block bg-white dark:bg-gray-800 shadow-sm rounded-lg p-6 hover:shadow-md transition-shadow duration-200">
+                            <a href="/docs/{{ selected_project.as_ref().unwrap().name }}/project/{{ ns.path }}" class="block bg-white dark:bg-gray-900 rounded-lg border border-gray-200 dark:border-gray-800 p-6 hover:border-gray-300 dark:hover:border-gray-600 transition-colors duration-200">
                                 <h3 class="text-lg font-semibold text-gray-900 dark:text-gray-100 mb-2">{{ ns.name }}</h3>
                                 {% if ns.description.is_some() %}
                                     <p class="text-sm text-gray-600 dark:text-gray-400 mb-3 line-clamp-2">{{ ns.description.as_ref().unwrap() }}</p>
@@ -152,7 +152,7 @@
                     {% endif %}
                 </h2>
                 {% if dependencies.is_empty() && docs_generating %}
-                    <div class="text-center py-8 text-gray-400 dark:text-gray-500 bg-white dark:bg-gray-800 rounded-lg shadow">
+                    <div class="text-center py-8 text-gray-400 dark:text-gray-500 bg-white dark:bg-gray-900 rounded-lg border border-gray-200 dark:border-gray-800">
                         <div class="flex items-center justify-center">
                             <svg class="animate-spin h-5 w-5 mr-2" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
                                 <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
@@ -162,13 +162,13 @@
                         </div>
                     </div>
                 {% else if dependencies.is_empty() %}
-                    <div class="text-center py-8 text-gray-500 dark:text-gray-400 bg-white dark:bg-gray-800 rounded-lg shadow">
+                    <div class="text-center py-8 text-gray-500 dark:text-gray-400 bg-white dark:bg-gray-900 rounded-lg border border-gray-200 dark:border-gray-800">
                         No documented packages found for this project.
                     </div>
                 {% else %}
                     <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
                         {% for dep in dependencies %}
-                            <a href="/docs/{{ selected_project.as_ref().unwrap().name }}/pkg/{{ dep.name }}" class="block bg-white dark:bg-gray-800 shadow-sm rounded-lg p-6 hover:shadow-md transition-shadow duration-200">
+                            <a href="/docs/{{ selected_project.as_ref().unwrap().name }}/pkg/{{ dep.name }}" class="block bg-white dark:bg-gray-900 rounded-lg border border-gray-200 dark:border-gray-800 p-6 hover:border-gray-300 dark:hover:border-gray-600 transition-colors duration-200">
                                 <h3 class="text-lg font-semibold text-gray-900 dark:text-gray-100 mb-2">{{ dep.display_name }} <span class="text-sm font-normal text-gray-500 dark:text-gray-400">v{{ dep.version }}</span></h3>
                                 {% if dep.description.is_some() %}
                                     <p class="text-sm text-gray-600 dark:text-gray-400 mb-3 line-clamp-2">{{ dep.description.as_ref().unwrap() }}</p>
@@ -192,7 +192,7 @@
             {% endif %}
 
         {% else %}
-            <div class="empty-state bg-white dark:bg-gray-800 shadow-sm rounded-lg">
+            <div class="empty-state bg-white dark:bg-gray-900 rounded-lg border border-gray-200 dark:border-gray-800">
                 <svg class="mx-auto h-12 w-12 text-gray-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                     <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
                 </svg>
