@@ -15,7 +15,7 @@
     {% endmatch %}
 
     <!-- Summary card -->
-    <div class="mb-6 p-5 bg-white dark:bg-gray-900 rounded-lg shadow border border-gray-200 dark:border-gray-800">
+    <div class="mb-6 p-5 bg-white dark:bg-gray-900 rounded-lg border border-gray-200 dark:border-gray-800">
         <div class="flex flex-wrap items-center justify-between gap-3 mb-4">
             <h1 class="text-xl sm:text-2xl font-bold leading-6 text-gray-900 dark:text-gray-100 font-mono break-all">{{ store.name }}</h1>
             <div class="flex items-center gap-2 text-xs">
@@ -31,24 +31,24 @@
         </div>
         <dl class="grid grid-cols-2 sm:grid-cols-4 gap-4 text-sm">
             <div>
-                <dt class="text-xs uppercase tracking-wider text-gray-500 dark:text-gray-400">Entries</dt>
+                <dt class="text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">Entries</dt>
                 <dd class="mt-1 text-gray-900 dark:text-white">{{ store.entry_count }}</dd>
             </div>
             <div>
-                <dt class="text-xs uppercase tracking-wider text-gray-500 dark:text-gray-400">Size</dt>
+                <dt class="text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">Size</dt>
                 <dd class="mt-1 text-gray-900 dark:text-white">{{ store.storage_bytes_formatted }}</dd>
             </div>
             <div>
-                <dt class="text-xs uppercase tracking-wider text-gray-500 dark:text-gray-400">Embedding Field</dt>
+                <dt class="text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">Embedding Field</dt>
                 <dd class="mt-1 text-gray-900 dark:text-white">
-                    {% match store.embedding_field %}{% when Some with (f) %}<span class="font-mono">{{ f }}</span>{% when None %}<span class="text-gray-400 italic">none</span>{% endmatch %}
+                    {% match store.embedding_field %}{% when Some with (f) %}<span class="font-mono">{{ f }}</span>{% when None %}<span class="text-gray-500 dark:text-gray-400 italic">none</span>{% endmatch %}
                 </dd>
             </div>
             <div>
-                <dt class="text-xs uppercase tracking-wider text-gray-500 dark:text-gray-400">Created</dt>
+                <dt class="text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">Created</dt>
                 <dd class="mt-1 text-gray-900 dark:text-white">
                     {{ store.created_at|tzf(page_context.display_timezone, "%Y-%m-%d") }}
-                    <span class="text-xs text-gray-400">{{ store.created_at|tz(page_context.display_timezone, page_context.timezone_abbreviation, "%H:%M:%S") }}</span>
+                    <span class="text-xs text-gray-500 dark:text-gray-400">{{ store.created_at|tz(page_context.display_timezone, page_context.timezone_abbreviation, "%H:%M:%S") }}</span>
                 </dd>
             </div>
         </dl>
@@ -58,7 +58,7 @@
     <div x-data="storeDetailFilters"
          data-search-query="{{ search_query }}"
          data-store-url="/stores/{{ store.name_url }}"
-         class="mb-6 p-3 bg-white dark:bg-gray-800 rounded-lg shadow">
+         class="mb-6 p-3 bg-white dark:bg-gray-900 rounded-lg border border-gray-200 dark:border-gray-800">
         <div class="relative">
             <div class="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none">
                 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" class="w-5 h-5 text-gray-400">

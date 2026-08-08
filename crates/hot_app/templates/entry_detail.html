@@ -2,7 +2,7 @@
 {% block content %}
 <div class="flex flex-col gap-6">
     <!-- Summary card -->
-    <div class="p-5 bg-white dark:bg-gray-900 rounded-lg shadow border border-gray-200 dark:border-gray-800">
+    <div class="p-5 bg-white dark:bg-gray-900 rounded-lg border border-gray-200 dark:border-gray-800">
         <div class="flex flex-wrap items-start justify-between gap-3 mb-4">
             <div>
                 <h1 class="text-xl sm:text-2xl font-bold leading-6 text-gray-900 dark:text-gray-100">Store Entry</h1>
@@ -29,41 +29,41 @@
 
         <dl class="grid grid-cols-2 sm:grid-cols-4 gap-4 text-sm">
             <div>
-                <dt class="text-xs uppercase tracking-wider text-gray-500 dark:text-gray-400">Sequence</dt>
+                <dt class="text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">Sequence</dt>
                 <dd class="mt-1 text-gray-900 dark:text-white font-mono">{{ entry.seq }}</dd>
             </div>
             <div>
-                <dt class="text-xs uppercase tracking-wider text-gray-500 dark:text-gray-400">Embedding</dt>
+                <dt class="text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">Embedding</dt>
                 <dd class="mt-1 text-gray-900 dark:text-white">
                     {% if entry.has_embedding %}
                         {% match entry.embedding_dimensions %}
                         {% when Some with (d) %}<span class="px-2 py-0.5 text-xs rounded-full bg-blue-100 text-blue-800 dark:bg-blue-900 dark:text-blue-200">{{ d }} dims</span>{% when None %}<span class="px-2 py-0.5 text-xs rounded-full bg-blue-100 text-blue-800 dark:bg-blue-900 dark:text-blue-200">present</span>{% endmatch %}
                     {% else %}
-                        <span class="text-gray-400 italic">none</span>
+                        <span class="text-gray-500 dark:text-gray-400 italic">none</span>
                     {% endif %}
                 </dd>
             </div>
             <div>
-                <dt class="text-xs uppercase tracking-wider text-gray-500 dark:text-gray-400">Created</dt>
+                <dt class="text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">Created</dt>
                 <dd class="mt-1 text-gray-900 dark:text-white">
                     {{ entry.created_at|tzf(page_context.display_timezone, "%Y-%m-%d") }}
-                    <span class="text-xs text-gray-400">{{ entry.created_at|tz(page_context.display_timezone, page_context.timezone_abbreviation, "%H:%M:%S") }}</span>
+                    <span class="text-xs text-gray-500 dark:text-gray-400">{{ entry.created_at|tz(page_context.display_timezone, page_context.timezone_abbreviation, "%H:%M:%S") }}</span>
                 </dd>
             </div>
             <div>
-                <dt class="text-xs uppercase tracking-wider text-gray-500 dark:text-gray-400">Updated</dt>
+                <dt class="text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">Updated</dt>
                 <dd class="mt-1 text-gray-900 dark:text-white">
                     {{ entry.updated_at|tzf(page_context.display_timezone, "%Y-%m-%d") }}
-                    <span class="text-xs text-gray-400">{{ entry.updated_at|tz(page_context.display_timezone, page_context.timezone_abbreviation, "%H:%M:%S") }}</span>
+                    <span class="text-xs text-gray-500 dark:text-gray-400">{{ entry.updated_at|tz(page_context.display_timezone, page_context.timezone_abbreviation, "%H:%M:%S") }}</span>
                 </dd>
             </div>
         </dl>
     </div>
 
     <!-- Key panel -->
-    <div class="bg-white dark:bg-gray-900 rounded-lg shadow border border-gray-200 dark:border-gray-800 overflow-hidden">
+    <div class="bg-white dark:bg-gray-900 rounded-lg border border-gray-200 dark:border-gray-800 overflow-hidden">
         <div class="px-4 py-3 border-b border-gray-200 dark:border-gray-800 flex items-center justify-between">
-            <h2 class="text-sm font-semibold text-gray-900 dark:text-white">Key</h2>
+            <h2 class="text-lg font-semibold text-gray-900 dark:text-white">Key</h2>
             <button type="button"
                     onclick="openContentModalWithFormats('Entry Key', decodeStoreSection('entry-key-hot'), decodeStoreSection('entry-key-json'))"
                     class="text-gray-400 hover:text-gray-600 dark:text-gray-500 dark:hover:text-gray-300 transition-colors p-0.5 flex-shrink-0"
@@ -82,9 +82,9 @@
     </div>
 
     <!-- Value panel -->
-    <div id="entry-value-panel" class="bg-white dark:bg-gray-900 rounded-lg shadow border border-gray-200 dark:border-gray-800 overflow-hidden">
+    <div id="entry-value-panel" class="bg-white dark:bg-gray-900 rounded-lg border border-gray-200 dark:border-gray-800 overflow-hidden">
         <div class="px-4 py-3 border-b border-gray-200 dark:border-gray-800 flex items-center justify-between">
-            <h2 class="text-sm font-semibold text-gray-900 dark:text-white">Value</h2>
+            <h2 class="text-lg font-semibold text-gray-900 dark:text-white">Value</h2>
         </div>
         <div class="p-6">
             {% if is_admin %}

@@ -1,4 +1,4 @@
-<div id="source-browser-modal" role="dialog" aria-modal="true" aria-labelledby="source-browser-title" class="hidden fixed inset-0 z-50 overflow-hidden bg-black/50 dark:bg-neutral-500/35 p-4" onclick="closeSourceBrowser(event)">
+<div id="source-browser-modal" role="dialog" aria-modal="true" aria-labelledby="source-browser-title" class="hidden fixed inset-0 z-50 overflow-hidden bg-black/50 dark:bg-black/60 p-4" onclick="closeSourceBrowser(event)">
     <div class="bg-white dark:bg-gray-900 rounded-lg shadow-xl dark:shadow-2xl dark:shadow-black/70 w-full h-full max-w-7xl mx-auto flex flex-col border border-gray-200 dark:border-gray-800" onclick="event.stopPropagation()">
         <div class="flex items-center justify-between gap-4 px-4 py-3 border-b border-gray-200 dark:border-gray-800">
             <div class="min-w-0">
@@ -24,8 +24,8 @@
                 </div>
                 <div class="p-3 border-b border-gray-200 dark:border-gray-800">
                     <div class="flex items-center rounded-md border border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-900 focus-within:ring-2 focus-within:ring-hot-red-500 focus-within:border-hot-red-500">
-                        <input id="source-browser-search" type="search" placeholder="Search" oninput="searchSourceBrowserFiles()" class="min-w-0 flex-1 bg-transparent px-3 py-2 text-sm text-gray-900 dark:text-gray-100 placeholder:text-gray-400 dark:placeholder:text-gray-600 focus:outline-none">
-                        <button id="source-browser-case-toggle" type="button" onclick="toggleSourceBrowserCaseSensitive()" class="mr-0.5 inline-flex h-6 min-w-6 items-center justify-center rounded px-1.5 text-[10px] leading-none text-gray-500 dark:text-gray-400 hover:text-gray-900 dark:hover:text-gray-100" title="Match Case">Aa</button>
+                        <input id="source-browser-search" type="search" placeholder="Search" oninput="searchSourceBrowserFiles()" class="min-w-0 flex-1 bg-transparent px-3 py-2 text-sm text-gray-900 dark:text-gray-100 placeholder:text-gray-400 dark:placeholder:text-gray-500 focus:outline-none focus:ring-2 focus:ring-hot-red-500">
+                        <button id="source-browser-case-toggle" type="button" onclick="toggleSourceBrowserCaseSensitive()" class="mr-0.5 inline-flex h-6 min-w-6 items-center justify-center rounded px-1.5 text-xs leading-none text-gray-500 dark:text-gray-400 hover:text-gray-900 dark:hover:text-gray-100" title="Match Case">Aa</button>
                         <button id="source-browser-regex-toggle" type="button" onclick="toggleSourceBrowserRegex()" class="mr-1 inline-flex h-6 min-w-6 items-center justify-center rounded px-1.5 text-xs leading-none text-gray-500 dark:text-gray-400 hover:text-gray-900 dark:hover:text-gray-100" title="Use Regular Expression">.*</button>
                     </div>
                     <div id="source-browser-search-message" class="hidden mt-1 text-xs text-gray-500 dark:text-gray-400"></div>

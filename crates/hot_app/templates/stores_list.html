@@ -4,7 +4,7 @@
     <!-- Filter card -->
     <div x-data="storesListFilters"
          data-search-query="{{ search_query }}"
-         class="mb-6 p-3 bg-white dark:bg-gray-800 rounded-lg shadow">
+         class="mb-6 p-3 bg-white dark:bg-gray-900 rounded-lg border border-gray-200 dark:border-gray-800">
         <div class="relative">
             <div class="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none">
                 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" class="w-5 h-5 text-gray-400">
@@ -78,19 +78,17 @@
             <span class="ml-2 text-xs text-gray-400 dark:text-gray-500">backend: {{ storage_type }}</span>
         </div>
         {% else %}
-        <div class="flex items-center justify-center py-12">
-            <div class="text-center py-8 max-w-md">
-                <div class="mx-auto flex items-center justify-center h-12 w-12 rounded-full bg-gray-100 dark:bg-gray-800 mb-4">
-                    <svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6 text-gray-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M20.25 6.375c0 2.278-3.694 4.125-8.25 4.125S3.75 8.653 3.75 6.375m16.5 0c0-2.278-3.694-4.125-8.25-4.125S3.75 4.097 3.75 6.375m16.5 0v11.25c0 2.278-3.694 4.125-8.25 4.125s-8.25-1.847-8.25-4.125V6.375" />
-                    </svg>
-                </div>
-                <h3 class="text-lg font-medium text-gray-900 dark:text-white mb-2">No Stores Yet</h3>
-                <p class="text-gray-500 dark:text-gray-400 text-sm">
-                    Stores are created on first <code class="bg-gray-100 dark:bg-gray-700 px-1 py-0.5 rounded text-xs">::hot::store/Map</code> use in your Hot code.
-                    They appear here once your code has run in this environment.
-                </p>
+        <div class="empty-state">
+            <div class="empty-state-icon">
+                <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M20.25 6.375c0 2.278-3.694 4.125-8.25 4.125S3.75 8.653 3.75 6.375m16.5 0c0-2.278-3.694-4.125-8.25-4.125S3.75 4.097 3.75 6.375m16.5 0v11.25c0 2.278-3.694 4.125-8.25 4.125s-8.25-1.847-8.25-4.125V6.375" />
+                </svg>
             </div>
+            <h3 class="empty-state-title">No Stores Yet</h3>
+            <p class="empty-state-message">
+                Stores are created on first <code class="bg-gray-100 dark:bg-gray-700 px-1 py-0.5 rounded text-xs">::hot::store/Map</code> use in your Hot code.
+                They appear here once your code has run in this environment.
+            </p>
         </div>
         {% endif %}
     </div>
@@ -101,7 +99,7 @@
             {% for store in stores %}
             <a href="/stores/{{ store.name_url }}" class="block backdrop-blur-sm border border-gray-200 dark:border-gray-800 rounded-lg bg-white dark:bg-gray-900 text-gray-800 dark:text-white p-4 hover:border-blue-400 dark:hover:border-blue-600 transition-colors">
                 <div class="flex items-center justify-between mb-2">
-                    <span class="font-mono text-sm text-blue-600 dark:text-blue-400 truncate">{{ store.name }}</span>
+                    <span class="link font-mono text-sm truncate">{{ store.name }}</span>
                     <span class="px-2 py-0.5 text-xs rounded-full bg-gray-100 text-gray-800 dark:bg-gray-800 dark:text-gray-200">{{ store.entry_count }} entries</span>
                 </div>
                 <div class="flex justify-between text-xs text-gray-500 dark:text-gray-400">
