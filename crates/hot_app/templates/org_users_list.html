@@ -1,8 +1,8 @@
 {% extends "private_layout.html" %}
 {%- import "components/ui_macros.html" as ui -%}
 {% block content %}
-<div class="max-w-7xl mx-auto px-2 sm:px-4 py-4 sm:py-6 lg:px-8">
-    <div class="pb-5 mb-6">
+<div class="max-w-7xl mx-auto py-6">
+    <div class="mb-6">
         <h1 class="text-xl sm:text-2xl font-bold leading-6 text-gray-900 dark:text-gray-100">{{ org.name }}</h1>
         <p class="mt-2 max-w-4xl text-xs sm:text-sm text-gray-500 dark:text-gray-400">
             Manage organization users and permissions
@@ -99,7 +99,7 @@
                                 <td class="px-6 py-4 whitespace-nowrap">
                                     <div class="flex items-center">
                                         <div class="flex-shrink-0 h-10 w-10">
-                                            <div class="h-10 w-10 rounded-full bg-hot-red-500 flex items-center justify-center text-white font-semibold text-sm">
+                                            <div class="h-10 w-10 rounded-full bg-hot-red-700 flex items-center justify-center text-white font-semibold text-sm">
                                                 {% match user.name %}
                                                     {% when Some with (name) %}
                                                         {{ name.chars().take(2).collect::<String>().to_uppercase() }}
@@ -153,8 +153,8 @@
                             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4.354a4 4 0 110 5.292M15 21H3v-1a6 6 0 0112 0v1zm0 0h6v-1a6 6 0 00-9-5.197m13.5-9a2.5 2.5 0 11-5 0 2.5 2.5 0 015 0z" />
                         </svg>
                     </div>
-                    <h3 class="text-lg font-medium text-gray-900 dark:text-white mb-2">No Users</h3>
-                    <p class="text-gray-500 dark:text-gray-400 mb-4">
+                    <h3 class="empty-state-title">No Users</h3>
+                    <p class="empty-state-message">
                         This organization doesn't have any users yet.
                     </p>
                     {% if is_admin && !team_members_at_limit %}
@@ -170,11 +170,11 @@
             <div class="md:hidden space-y-3">
                 {% if org_users.len() > 0 %}
                     {% for user in org_users %}
-                    <div class="bg-white dark:bg-gray-900 rounded-lg border border-gray-200 dark:border-gray-800 p-4 hover:shadow-md transition-shadow">
+                    <div class="bg-white dark:bg-gray-900 rounded-lg border border-gray-200 dark:border-gray-800 p-4 hover:border-gray-300 dark:hover:border-gray-600 transition-colors">
                         <div class="flex items-center justify-between mb-3">
                             <div class="flex items-center">
                                 <div class="flex-shrink-0 h-10 w-10">
-                                    <div class="h-10 w-10 rounded-full bg-hot-red-500 flex items-center justify-center text-white font-semibold text-sm">
+                                    <div class="h-10 w-10 rounded-full bg-hot-red-700 flex items-center justify-center text-white font-semibold text-sm">
                                         {% match user.name %}
                                             {% when Some with (name) %}
                                                 {{ name.chars().take(2).collect::<String>().to_uppercase() }}
@@ -234,8 +234,8 @@
                             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4.354a4 4 0 110 5.292M15 21H3v-1a6 6 0 0112 0v1zm0 0h6v-1a6 6 0 00-9-5.197m13.5-9a2.5 2.5 0 11-5 0 2.5 2.5 0 015 0z" />
                         </svg>
                     </div>
-                    <h3 class="text-base font-medium text-gray-900 dark:text-white mb-2">No Users</h3>
-                    <p class="text-sm text-gray-500 dark:text-gray-400 mb-4">
+                    <h3 class="empty-state-title">No Users</h3>
+                    <p class="empty-state-message">
                         This organization doesn't have any users yet.
                     </p>
                     {% if is_admin && !team_members_at_limit %}

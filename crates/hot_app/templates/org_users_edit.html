@@ -1,7 +1,7 @@
 {% extends "private_layout.html" %}
 {% block content %}
-<div class="max-w-7xl mx-auto px-2 sm:px-4 py-4 sm:py-6 lg:px-8">
-    <div class="pb-5 mb-6">
+<div class="max-w-7xl mx-auto py-6">
+    <div class="mb-6">
         <h1 class="text-xl sm:text-2xl font-bold leading-6 text-gray-900 dark:text-gray-100">{{ org.name }}</h1>
         <p class="mt-2 max-w-4xl text-xs sm:text-sm text-gray-500 dark:text-gray-400">
             Manage organization users and permissions
@@ -16,7 +16,7 @@
                         <div class="mb-6 p-4 bg-gray-50 dark:bg-gray-800 rounded-lg">
                             <div class="flex items-center">
                                 <div class="flex-shrink-0 h-12 w-12">
-                                    <div class="h-12 w-12 rounded-full bg-hot-red-500 flex items-center justify-center text-white font-semibold">
+                                    <div class="h-12 w-12 rounded-full bg-hot-red-700 flex items-center justify-center text-white font-semibold">
                                         {% match org_user.name %}
                                             {% when Some with (name) %}
                                                 {{ name.chars().take(2).collect::<String>().to_uppercase() }}
@@ -72,7 +72,7 @@
                                                name="active"
                                                value="true"
                                                {% if org_user.active %}checked{% endif %}
-                                               class="h-4 w-4 text-red-600 focus:ring-hot-red-500 border-gray-300">
+                                               class="h-4 w-4 text-hot-red-600 focus:ring-hot-red-500 border-gray-300 dark:border-gray-600 rounded">
                                         <label for="active" class="ml-2 text-sm text-gray-900 dark:text-white">
                                             Active - User can access the organization
                                         </label>
@@ -83,7 +83,7 @@
                                                name="active"
                                                value="false"
                                                {% if !org_user.active %}checked{% endif %}
-                                               class="h-4 w-4 text-red-600 focus:ring-hot-red-500 border-gray-300">
+                                               class="h-4 w-4 text-hot-red-600 focus:ring-hot-red-500 border-gray-300 dark:border-gray-600 rounded">
                                         <label for="inactive" class="ml-2 text-sm text-gray-900 dark:text-white">
                                             Inactive - User cannot access the organization
                                         </label>

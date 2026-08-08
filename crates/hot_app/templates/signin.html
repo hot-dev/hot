@@ -28,7 +28,7 @@
             <input type="hidden" name="next" value="/billing/create-checkout-form?plan={{ plan }}{% if billing != "" %}&billing={{ billing }}{% endif %}" />
             {% endif %}
             <div class="mb-6">
-                <label for="email" class="block text-sm font-medium mb-2">Email</label>
+                <label for="email" class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">Email</label>
                 <div class="relative">
                     <div class="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none text-gray-500">
                         <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" viewBox="0 0 20 20" fill="currentColor">
@@ -42,7 +42,7 @@
 
             <div class="mb-6">
                 <div class="flex items-center justify-between mb-2">
-                    <label for="password" class="block text-sm font-medium">Password</label>
+                    <label for="password" class="block text-sm font-medium text-gray-700 dark:text-gray-300">Password</label>
                     <a href="#" class="text-sm link">Forgot password?</a>
                 </div>
                 <div class="relative">
@@ -56,7 +56,7 @@
             </div>
 
             <div class="flex items-center mb-6">
-                <input type="checkbox" id="remember" name="remember" class="h-4 w-4 rounded border-gray-300 dark:border-gray-700 text-red-500 focus:ring-hot-red-500" />
+                <input type="checkbox" id="remember" name="remember" class="h-4 w-4 text-hot-red-600 focus:ring-hot-red-500 border-gray-300 dark:border-gray-600 rounded" />
                 <label for="remember" class="ml-2 block text-sm">Remember me</label>
             </div>
 

@@ -2,11 +2,11 @@
 {%- import "components/ui_macros.html" as ui -%}
 
 {% block content %}
-<div class="max-w-7xl mx-auto px-2 sm:px-4 py-4 sm:py-6 lg:px-8">
-    <div class="pb-5 mb-6">
+<div class="max-w-7xl mx-auto py-6">
+    <div class="mb-6">
         {% match page_context.current_org %}
         {% when Some with (org) %}
-        <h1 class="text-xl sm:text-2xl font-bold leading-6 text-gray-900 dark:text-gray-100">{{ org.name }}</h1>
+        <div class="text-xl sm:text-2xl font-bold leading-6 text-gray-900 dark:text-gray-100">{{ org.name }}</div>
         <p class="mt-2 max-w-4xl text-xs sm:text-sm text-gray-500 dark:text-gray-400">
             Manage organization teams
         </p>
@@ -17,7 +17,7 @@
 
             <!-- Header -->
             <div class="flex justify-between items-center mb-6">
-                <h1 class="text-2xl font-bold text-gray-900 dark:text-white">Team Users: {{ team.name }}</h1>
+                <h1 class="text-xl sm:text-2xl font-bold leading-6 text-gray-900 dark:text-gray-100">Team Users: {{ team.name }}</h1>
                 {% if can_manage %}
                 {% match page_context.current_org %}
                 {% when Some with (org) %}
@@ -43,7 +43,7 @@
 
             {% if team_users.len() > 0 %}
             <!-- Team Users List -->
-            <div class="bg-white dark:bg-gray-800 rounded-lg shadow-md overflow-hidden">
+            <div class="bg-white dark:bg-gray-900 rounded-lg border border-gray-200 dark:border-gray-800 overflow-hidden">
                 <div class="overflow-x-auto">
                     <table class="min-w-full divide-y divide-gray-200 dark:divide-gray-700">
                         <thead class="bg-gray-50 dark:bg-gray-900">
@@ -62,7 +62,7 @@
                                 </th>
                             </tr>
                         </thead>
-                        <tbody class="bg-white dark:bg-gray-800 divide-y divide-gray-200 dark:divide-gray-700">
+                        <tbody class="bg-white dark:bg-gray-900 divide-y divide-gray-200 dark:divide-gray-700">
                             {% for team_user in team_users %}
                             <tr class="hover:bg-gray-100 dark:hover:bg-gray-700 transition-colors duration-150">
                                 <td class="px-6 py-4 whitespace-nowrap">
@@ -128,7 +128,7 @@
             </div>
             {% else %}
             <!-- Empty State -->
-            <div class="bg-white dark:bg-gray-800 rounded-lg shadow-md p-8">
+            <div class="bg-white dark:bg-gray-900 rounded-lg border border-gray-200 dark:border-gray-800 p-8">
                 <div class="empty-state">
                     <div class="empty-state-icon">
                         <svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6 text-gray-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
