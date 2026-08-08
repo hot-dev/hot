@@ -13,11 +13,11 @@
         <div class="border-b border-gray-200 dark:border-gray-700">
             <nav class="-mb-px flex gap-6" aria-label="Tabs">
                 <a href="?tab=all"
-                   class="whitespace-nowrap border-b-2 py-3 px-1 text-sm font-medium {% if active_tab == "all" %}border-purple-500 text-purple-600 dark:text-purple-400{% else %}border-transparent text-gray-500 hover:border-gray-300 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-300{% endif %}">
+                   class="whitespace-nowrap border-b-2 py-3 px-1 text-sm font-medium {% if active_tab == "all" %}border-hot-red-500 text-hot-red-700 dark:text-hot-red-400{% else %}border-transparent text-gray-500 hover:border-gray-300 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-300{% endif %}">
                     All Workflows <span class="ml-1 rounded-full bg-gray-100 dark:bg-gray-800 px-2 py-0.5 text-xs">{{ workflow_cards.len() }}</span>
                 </a>
                 <a href="?tab=graph"
-                   class="whitespace-nowrap border-b-2 py-3 px-1 text-sm font-medium {% if active_tab == "graph" %}border-purple-500 text-purple-600 dark:text-purple-400{% else %}border-transparent text-gray-500 hover:border-gray-300 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-300{% endif %}">
+                   class="whitespace-nowrap border-b-2 py-3 px-1 text-sm font-medium {% if active_tab == "graph" %}border-hot-red-500 text-hot-red-700 dark:text-hot-red-400{% else %}border-transparent text-gray-500 hover:border-gray-300 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-300{% endif %}">
                     Graph
                 </a>
             </nav>
@@ -55,30 +55,32 @@
     {% endif %}
 
     {% if workflow_cards.is_empty() %}
-    <div class="text-center py-12">
-        <svg class="mx-auto h-12 w-12 text-gray-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
-            <path stroke-linecap="round" stroke-linejoin="round" d="M13.5 5H16.5a2.5 2.5 0 012.5 2.5v9a2.5 2.5 0 01-2.5 2.5h-3" />
-            <path stroke-linecap="round" stroke-linejoin="round" d="M10.5 19H7.5A2.5 2.5 0 015 16.5v-9A2.5 2.5 0 017.5 5h3" />
-            <path stroke-linecap="round" stroke-linejoin="round" d="M10.5 2.5L13.5 5l-3 2.5" />
-            <path stroke-linecap="round" stroke-linejoin="round" d="M13.5 16.5L10.5 19l3 2.5" />
-            <path stroke-linecap="round" d="M5 9H2M5 12H2M5 15H2M19 9h3M19 12h3M19 15h3" />
-        </svg>
+    <div class="empty-state">
+        <div class="empty-state-icon">
+            <svg fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
+                <path stroke-linecap="round" stroke-linejoin="round" d="M13.5 5H16.5a2.5 2.5 0 012.5 2.5v9a2.5 2.5 0 01-2.5 2.5h-3" />
+                <path stroke-linecap="round" stroke-linejoin="round" d="M10.5 19H7.5A2.5 2.5 0 015 16.5v-9A2.5 2.5 0 017.5 5h3" />
+                <path stroke-linecap="round" stroke-linejoin="round" d="M10.5 2.5L13.5 5l-3 2.5" />
+                <path stroke-linecap="round" stroke-linejoin="round" d="M13.5 16.5L10.5 19l3 2.5" />
+                <path stroke-linecap="round" d="M5 9H2M5 12H2M5 15H2M19 9h3M19 12h3M19 15h3" />
+            </svg>
+        </div>
         {% if !search_query.is_empty() || status_filter != "all" %}
-        <h3 class="mt-2 text-sm font-medium text-gray-900 dark:text-gray-100">No matches</h3>
-        <p class="mt-1 text-sm text-gray-500 dark:text-gray-400">No workflows or agents match the current search or status filter.</p>
+        <h3 class="empty-state-title">No matches</h3>
+        <p class="empty-state-message">No workflows or agents match the current search or status filter.</p>
         {% else %}
-        <h3 class="mt-2 text-sm font-medium text-gray-900 dark:text-gray-100">No workflows deployed</h3>
-        <p class="mt-1 text-sm text-gray-500 dark:text-gray-400">Deploy a project with handlers, workflow definitions, or agent definitions to see them here.</p>
+        <h3 class="empty-state-title">No workflows deployed</h3>
+        <p class="empty-state-message">Deploy a project with handlers, workflow definitions, or agent definitions to see them here.</p>
         {% endif %}
     </div>
     {% else %}
     <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
         {% for card in workflow_cards %}
         <a href="{{ card.url }}"
-           class="group block rounded-xl border border-gray-200 dark:border-gray-700 bg-white dark:bg-black p-5 hover:border-purple-400 dark:hover:border-purple-500 hover:shadow-md transition-all duration-200">
+           class="group block rounded-lg border border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-900 p-5 hover:border-hot-red-300 dark:hover:border-hot-red-500 transition-all duration-200">
             <div class="flex items-center gap-2 mb-2">
                 {% if card.kind == "workflow" %}
-                <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-5 h-5 text-emerald-500 dark:text-emerald-400 flex-shrink-0">
+                <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-5 h-5 text-green-600 dark:text-green-400 flex-shrink-0">
                     <path stroke-linecap="round" stroke-linejoin="round" d="M3.75 6.75h4.5v4.5h-4.5v-4.5ZM15.75 6.75h4.5v4.5h-4.5v-4.5ZM9.75 16.5h4.5V21h-4.5v-4.5Z" />
                     <path stroke-linecap="round" stroke-linejoin="round" d="M8.25 9h7.5M12 11.25v5.25" />
                 </svg>
@@ -96,7 +98,7 @@
                     <path stroke-linecap="round" d="M5 9H2M5 12H2M5 15H2M19 9h3M19 12h3M19 15h3" />
                 </svg>
                 {% endif %}
-                <span class="text-base font-semibold text-gray-900 dark:text-white group-hover:text-purple-600 dark:group-hover:text-purple-400 transition-colors">{{ card.display_name }}</span>
+                <span class="text-base font-semibold text-gray-900 dark:text-white group-hover:text-hot-red-700 dark:group-hover:text-hot-red-400 transition-colors">{{ card.display_name }}</span>
                 <span class="ml-auto inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-gray-100 dark:bg-gray-800 text-gray-700 dark:text-gray-300">{{ card.kind_label }}</span>
             </div>
 
@@ -143,7 +145,7 @@
             </div>
 
             <div class="mt-3 flex justify-end">
-                <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-4 h-4 text-gray-400 group-hover:text-purple-500 dark:group-hover:text-purple-400 group-hover:translate-x-0.5 transition-all">
+                <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-4 h-4 text-gray-400 group-hover:text-hot-red-700 dark:group-hover:text-hot-red-400 group-hover:translate-x-0.5 transition-all">
                     <path stroke-linecap="round" stroke-linejoin="round" d="M8.25 4.5l7.5 7.5-7.5 7.5" />
                 </svg>
             </div>
@@ -387,7 +389,7 @@
                 <div class="p-4">
                     <!-- Close button -->
                     <div class="flex items-center justify-between mb-3">
-                        <span class="text-xs font-medium uppercase tracking-wider text-gray-400 dark:text-gray-500"
+                        <span class="text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider"
                               x-text="({'handler':'Function','event_type':'Event','schedule':'Schedule','webhook':'Webhook','mcp_tool':'MCP Tool'})[inspectorData.node.node_type] || inspectorData.node.node_type"></span>
                     </div>
 
@@ -431,7 +433,7 @@
 
                             <template x-if="inspectorData.triggeredBy && inspectorData.triggeredBy.length > 0">
                                 <div class="mt-3">
-                                    <div class="text-xs font-medium uppercase tracking-wider text-gray-400 dark:text-gray-500 mb-1.5">Triggered by</div>
+                                    <div class="text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider mb-1">Triggered by</div>
                                     <template x-for="t in inspectorData.triggeredBy" :key="t.node.id">
                                         <button @click="selectNode(t.node.id)"
                                                 class="block w-full text-left px-2 py-1 rounded text-amber-700 dark:text-amber-400 bg-amber-50 dark:bg-amber-900/20 hover:bg-amber-100 dark:hover:bg-amber-900/40 mb-1 font-mono text-xs transition-colors"
@@ -442,7 +444,7 @@
 
                             <template x-if="inspectorData.handles.length > 0">
                                 <div class="mt-3">
-                                    <div class="text-xs font-medium uppercase tracking-wider text-gray-400 dark:text-gray-500 mb-1.5">Handles</div>
+                                    <div class="text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider mb-1">Handles</div>
                                     <template x-for="h in inspectorData.handles" :key="h.node.id">
                                         <button @click="selectNode(h.node.id)"
                                                 class="block w-full text-left px-2 py-1 rounded text-green-700 dark:text-green-400 bg-green-50 dark:bg-green-900/20 hover:bg-green-100 dark:hover:bg-green-900/40 mb-1 font-mono text-xs transition-colors"
@@ -453,7 +455,7 @@
 
                             <template x-if="inspectorData.sends.length > 0">
                                 <div class="mt-3">
-                                    <div class="text-xs font-medium uppercase tracking-wider text-gray-400 dark:text-gray-500 mb-1.5">Sends</div>
+                                    <div class="text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider mb-1">Sends</div>
                                     <template x-for="s in inspectorData.sends" :key="s.node.id">
                                         <div class="mb-1">
                                             <button @click="selectNode(s.node.id)"
@@ -469,7 +471,7 @@
 
                             <template x-if="inspectorData.node.description">
                                 <div class="mt-3">
-                                    <div class="text-xs font-medium uppercase tracking-wider text-gray-400 dark:text-gray-500 mb-1">Description</div>
+                                    <div class="text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider mb-1">Description</div>
                                     <p class="text-sm text-gray-600 dark:text-gray-300" x-text="inspectorData.node.description"></p>
                                 </div>
                             </template>
@@ -482,7 +484,7 @@
                             <!-- Handled by -->
                             <template x-if="inspectorData.handledBy.length > 0">
                                 <div class="mt-3">
-                                    <div class="text-xs font-medium uppercase tracking-wider text-gray-400 dark:text-gray-500 mb-1.5">Handled by</div>
+                                    <div class="text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider mb-1">Handled by</div>
                                     <template x-for="fn in inspectorData.handledBy" :key="fn.id">
                                         <button @click="selectNode(fn.id)"
                                                 class="block w-full text-left px-2 py-1 rounded text-sm text-gray-700 dark:text-gray-300 bg-gray-50 dark:bg-gray-800 hover:bg-gray-100 dark:hover:bg-gray-700 mb-1 transition-colors">
@@ -498,7 +500,7 @@
                             <!-- Sent by -->
                             <template x-if="inspectorData.sentBy.length > 0">
                                 <div class="mt-3">
-                                    <div class="text-xs font-medium uppercase tracking-wider text-gray-400 dark:text-gray-500 mb-1.5">Sent by</div>
+                                    <div class="text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider mb-1">Sent by</div>
                                     <template x-for="fn in inspectorData.sentBy" :key="fn.id">
                                         <button @click="selectNode(fn.id)"
                                                 class="block w-full text-left px-2 py-1 rounded text-sm text-gray-700 dark:text-gray-300 bg-gray-50 dark:bg-gray-800 hover:bg-gray-100 dark:hover:bg-gray-700 mb-1 transition-colors">
@@ -551,7 +553,7 @@
 
                             <template x-if="inspectorData.triggers && inspectorData.triggers.length > 0">
                                 <div class="mt-3">
-                                    <div class="text-xs font-medium uppercase tracking-wider text-gray-400 dark:text-gray-500 mb-1.5">Triggers</div>
+                                    <div class="text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider mb-1">Triggers</div>
                                     <template x-for="fn in inspectorData.triggers" :key="fn.id">
                                         <button @click="selectNode(fn.id)"
                                                 class="block w-full text-left px-2 py-1 rounded text-sm text-gray-700 dark:text-gray-300 bg-gray-50 dark:bg-gray-800 hover:bg-gray-100 dark:hover:bg-gray-700 mb-1 transition-colors">

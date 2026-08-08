@@ -33,16 +33,16 @@
         <div>
             <h3 class="text-xs font-medium text-gray-500 dark:text-gray-400 mb-1 uppercase tracking-wider">Status</h3>
             {% if task.status == "completed" %}
-                <span class="px-2 py-1 text-xs font-semibold rounded-full bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-200">{{ task.status }}</span>
+                <span class="badge badge-success">{{ task.status }}</span>
             {% else if task.status == "running" %}
-                <span class="px-2 py-1 text-xs font-semibold rounded-full bg-amber-100 text-amber-800 dark:bg-amber-900 dark:text-amber-200">{{ task.status }}</span>
+                <span class="badge badge-running">{{ task.status }}</span>
             {% else if task.status == "failed" || task.status == "timed_out" %}
-                <span class="px-2 py-1 text-xs font-semibold rounded-full bg-red-100 text-red-800 dark:bg-red-900 dark:text-red-200">{{ task.status }}</span>
+                <span class="badge badge-failure">{{ task.status }}</span>
             {% else %}
-                <span class="px-2 py-1 text-xs font-semibold rounded-full bg-gray-100 text-gray-800 dark:bg-gray-800 dark:text-gray-200">{{ task.status }}</span>
+                <span class="badge badge-neutral">{{ task.status }}</span>
             {% endif %}
             {% if task.redelivered %}
-                <span class="ml-1 px-2 py-1 text-xs font-semibold rounded-full bg-amber-100 text-amber-800 dark:bg-amber-900 dark:text-amber-200" title="This task was reclaimed or re-enqueued after an earlier delivery">retry delivery</span>
+                <span class="badge badge-pending ml-1" title="This task was reclaimed or re-enqueued after an earlier delivery">retry delivery</span>
             {% endif %}
         </div>
         <div>

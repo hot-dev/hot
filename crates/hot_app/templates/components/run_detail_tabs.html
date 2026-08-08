@@ -9,7 +9,7 @@
 }
 
 .dark .observability-tabs {
-    background: #111111;
+    background: var(--color-gray-800);
     border-bottom-color: rgba(64, 64, 64, 1);
 }
 
@@ -577,7 +577,7 @@
 }
 
 .dark .timeline-bar {
-    background: #0a0a0a;
+    background: var(--color-gray-900);
     border-color: rgba(64, 64, 64, 1);
 }
 
@@ -664,7 +664,7 @@
 
 .dark .hierarchy-controls-tab {
     border-bottom-color: rgba(64, 64, 64, 1);
-    background: #111111;
+    background: var(--color-gray-800);
 }
 
 .hierarchy-tree-tab {
@@ -688,7 +688,7 @@
 }
 
 .dark .value-inspector-panel {
-    background: #111111;
+    background: var(--color-gray-800);
 }
 
 .value-inspector-panel.open {
@@ -733,7 +733,7 @@
 
 .dark .inspector-header {
     border-bottom-color: rgba(64, 64, 64, 1);
-    background: #0a0a0a;
+    background: var(--color-gray-900);
 }
 
 .inspector-title {
@@ -787,7 +787,7 @@
 }
 
 .dark .inspector-value {
-    background: #0a0a0a;
+    background: var(--color-gray-900);
     border-color: rgba(64, 64, 64, 1);
     color: rgba(229, 231, 235, 1);
 }
@@ -1057,7 +1057,7 @@
 
 .dark .timeline-controls-tab {
     border-bottom-color: rgba(64, 64, 64, 1);
-    background: #111111;
+    background: var(--color-gray-800);
 }
 
 .stream-graph-controls-tab {
@@ -1072,7 +1072,7 @@
 
 .dark .stream-graph-controls-tab {
     border-bottom-color: rgba(64, 64, 64, 1);
-    background: #111111;
+    background: var(--color-gray-800);
 }
 
 /* Hidden class for filtered items */
@@ -2262,7 +2262,7 @@ window.ObservabilityTabs = class ObservabilityTabs {
         // Create modal overlay
         const modalOverlay = document.createElement('div');
         modalOverlay.id = 'inspector-modal-overlay';
-        modalOverlay.className = 'fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4';
+        modalOverlay.className = 'fixed inset-0 bg-gray-900/75 backdrop-blur-sm z-50 flex items-center justify-center p-4';
         modalOverlay.onclick = (e) => {
             if (e.target === modalOverlay) {
                 modalOverlay.remove();
@@ -2271,7 +2271,7 @@ window.ObservabilityTabs = class ObservabilityTabs {
 
         // Create modal content
         modalOverlay.innerHTML = `
-            <div class="bg-white dark:bg-gray-900 rounded-lg shadow-xl max-w-lg w-full max-h-[90vh] flex flex-col">
+            <div class="bg-white dark:bg-gray-900 rounded-lg border border-gray-200 dark:border-gray-700 shadow-xl max-w-lg w-full max-h-[90vh] flex flex-col">
                 <div class="flex items-center justify-between p-4 border-b border-gray-200 dark:border-gray-700">
                     <h3 class="text-lg font-semibold text-gray-900 dark:text-white">${this.escapeHtml(title)}</h3>
                     <button onclick="document.getElementById('inspector-modal-overlay').remove()" class="p-1 text-gray-400 hover:text-gray-600 dark:text-gray-500 dark:hover:text-gray-300 transition-colors rounded">
@@ -2490,11 +2490,13 @@ window.ObservabilityTabs = class ObservabilityTabs {
             if (data.status) {
                 html += '<div class="inspector-section-title mt-4">Status</div>';
                 html += '<div class="inspector-value text-xs">';
-                const statusClass = data.status === 'succeeded' ? 'bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-200' :
-                                   data.status === 'failed' ? 'bg-red-100 text-red-800 dark:bg-red-900 dark:text-red-200' :
-                                   'bg-gray-100 text-gray-800 dark:bg-gray-800 dark:text-gray-200';
+                const statusClass = data.status === 'succeeded' ? 'badge badge-success' :
+                                   data.status === 'failed' ? 'badge badge-failure' :
+                                   data.status === 'running' ? 'badge badge-running' :
+                                   data.status === 'pending_retry' ? 'badge badge-pending' :
+                                   'badge badge-neutral';
                 const escapedStatus = this.escapeHtml(data.status);
-                html += `<span class="px-2 py-1 rounded-full ${statusClass}">${escapedStatus}</span>`;
+                html += `<span class="${statusClass}">${escapedStatus}</span>`;
                 html += '</div>';
             }
 
@@ -3019,7 +3021,7 @@ window.ObservabilityTabs = class ObservabilityTabs {
                 <tr class="hover:bg-gray-100 dark:hover:bg-gray-700 transition-colors duration-150">
                     <td class="px-4 py-3 text-xs font-medium text-gray-900 dark:text-white">
                         <div class="inline-flex items-center gap-2">
-                            <a href="/files/${file.file_id}/download" class="text-gray-400 hover:text-hot-red-600 dark:text-gray-500 dark:hover:text-hot-red-400 transition-colors" title="Download">
+                            <a href="/files/${file.file_id}/download" class="text-gray-400 hover:text-hot-red-700 dark:text-gray-500 dark:hover:text-hot-red-400 transition-colors" title="Download">
                                 <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-4 h-4">
                                     <path stroke-linecap="round" stroke-linejoin="round" d="M3 16.5v2.25A2.25 2.25 0 005.25 21h13.5A2.25 2.25 0 0021 18.75V16.5M16.5 12L12 16.5m0 0L7.5 12m4.5 4.5V3" />
                                 </svg>
