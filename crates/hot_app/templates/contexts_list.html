@@ -180,7 +180,7 @@ function confirmDeleteContext(contextId) {
         'Delete Context Variable',
         'Are you sure you want to delete this context variable?',
         () => document.getElementById('delete-context-' + contextId).submit(),
-        { confirmText: 'Delete', type: 'warning' }
+        { confirmText: 'Delete', type: 'warning', destructive: true }
     );
 }
 </script>

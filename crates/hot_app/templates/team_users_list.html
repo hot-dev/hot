@@ -165,7 +165,7 @@ function confirmRemoveUser(userId) {
         'Remove User',
         'Are you sure you want to remove this user from the team?',
         () => document.getElementById('remove-user-' + userId).submit(),
-        { confirmText: 'Remove', type: 'warning' }
+        { confirmText: 'Remove', type: 'warning', destructive: true }
     );
 }
 </script>

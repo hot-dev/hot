@@ -147,7 +147,7 @@
                             {% if ch.org_id.is_some() %}
                             <a href="/settings/alerts/channels/{{ ch.alert_channel_id }}/edit" class="link mr-4">Edit</a>
                             <form id="delete-channel-{{ ch.alert_channel_id }}" action="/settings/alerts/channels/{{ ch.alert_channel_id }}/delete" method="POST" class="inline">
-                                <button type="button" onclick="showConfirm('Delete Channel', 'Are you sure you want to delete this channel?', () => document.getElementById('delete-channel-{{ ch.alert_channel_id }}').submit(), { confirmText: 'Delete', type: 'warning' })" class="text-red-600 hover:text-red-900 dark:text-red-400 dark:hover:text-red-300">Delete</button>
+                                <button type="button" onclick="showConfirm('Delete Channel', 'Are you sure you want to delete this channel?', () => document.getElementById('delete-channel-{{ ch.alert_channel_id }}').submit(), { confirmText: 'Delete', type: 'warning', destructive: true })" class="text-red-600 hover:text-red-900 dark:text-red-400 dark:hover:text-red-300">Delete</button>
                             </form>
                             {% else %}
                             <span class="text-gray-400 dark:text-gray-500 text-xs">System channel</span>

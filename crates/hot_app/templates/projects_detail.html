@@ -173,7 +173,7 @@ function confirmDeactivateProject() {
         'Deactivate Project',
         'Are you sure you want to deactivate this project?',
         () => document.getElementById('deactivate-project-form').submit(),
-        { confirmText: 'Deactivate', type: 'warning' }
+        { confirmText: 'Deactivate', type: 'warning', destructive: true }
     );
 }
 </script>

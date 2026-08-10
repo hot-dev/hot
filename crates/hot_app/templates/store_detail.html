@@ -152,7 +152,7 @@ function confirmDeleteStoreEntry(button) {
         'Delete Store Entry',
         'Permanently delete entry with key ' + keyPreview + '? This cannot be undone.',
         function () { document.getElementById('delete-entry-' + keyEncoded).submit(); },
-        { confirmText: 'Delete', type: 'warning' }
+        { confirmText: 'Delete', type: 'warning', destructive: true }
     );
 }
 function confirmDeleteStoreEntryMobile(button) {
@@ -162,7 +162,7 @@ function confirmDeleteStoreEntryMobile(button) {
         'Delete Store Entry',
         'Permanently delete entry with key ' + keyPreview + '? This cannot be undone.',
         function () { document.getElementById('m-delete-entry-' + keyEncoded).submit(); },
-        { confirmText: 'Delete', type: 'warning' }
+        { confirmText: 'Delete', type: 'warning', destructive: true }
     );
 }
 {% if is_admin %}

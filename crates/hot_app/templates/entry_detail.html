@@ -124,7 +124,7 @@ function confirmDeleteThisEntry(button) {
         'Delete Store Entry',
         'Permanently delete this entry from ' + storeName + '? This cannot be undone.',
         function () { document.getElementById('delete-this-entry').submit(); },
-        { confirmText: 'Delete', type: 'warning' }
+        { confirmText: 'Delete', type: 'warning', destructive: true }
     );
 }
 {% endif %}

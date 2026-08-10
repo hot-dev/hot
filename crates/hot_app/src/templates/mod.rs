@@ -4143,6 +4143,72 @@ pub struct AgentHealthCard {
 mod tests {
     use super::*;
 
+    fn run_display_for_status(status: RunStatus, completed: bool) -> RunDisplay {
+        let start_time = chrono::Utc::now();
+        let run = Run {
+            run_id: Uuid::new_v4(),
+            env_id: Uuid::new_v4(),
+            stream_id: Uuid::new_v4(),
+            build_id: None,
+            run_type_id: 1,
+            run_type: "call".to_string(),
+            origin_run_id: None,
+            event_id: Some(Uuid::new_v4()),
+            start_time,
+            stop_time: completed.then_some(start_time),
+            status_id: status.as_id(),
+            status: status.as_str().to_string(),
+            by_user_id: None,
+            result: None,
+            info: None,
+            project_id: None,
+            project_name: None,
+            event_fn: Some("test".to_string()),
+            retry_attempt: 0,
+            next_retry_at: None,
+            queued_at: None,
+            access_id: None,
+            agent_type: None,
+        };
+
+        RunDisplay::from_with_timezone(&run, "UTC", "UTC")
+    }
+
+    #[test]
+    fn event_detail_run_badges_follow_status() {
+        let cases = [
+            (RunStatus::Succeeded, true, "badge-success", "succeeded"),
+            (RunStatus::Failed, true, "badge-failure", "failed"),
+            (RunStatus::Cancelled, true, "badge-neutral", "cancelled"),
+            (
+                RunStatus::PendingRetry,
+                true,
+                "badge-pending",
+                "pending retry",
+            ),
+            (RunStatus::Running, false, "badge-running", "running"),
+        ];
+
+        for (status, completed, badge_class, label) in cases {
+            let template = EventDetailTable {
+                event_id: Uuid::new_v4(),
+                event_runs: vec![run_display_for_status(status, completed)],
+                current_page_num: 1,
+                total_pages: 1,
+                start_page: 1,
+                end_page: 1,
+                has_next_page: false,
+                has_prev_page: false,
+            };
+            let html = template.render().expect("event detail table renders");
+
+            assert!(
+                html.contains(&format!("badge {badge_class}\">{label}</span>")),
+                "expected {badge_class} for {label}: {html}"
+            );
+        }
+    }
+
     #[test]
     fn script_safe_json_cannot_close_script_element() {
         let json = script_safe_json(

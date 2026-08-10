@@ -10,7 +10,7 @@
                     Create a new destination for receiving alerts.
                 </p>
             </div>
-            
+
             {% if !error_message.is_empty() %}
             <div class="mx-6 mt-4 rounded-md bg-yellow-50 dark:bg-yellow-900/20 border border-yellow-200 dark:border-yellow-800 p-4">
                 <div class="flex">
@@ -32,7 +32,7 @@
                         Name
                     </label>
                     <input type="text" name="name" id="name" required
-                        class="block w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-md shadow-sm 
+                        class="block w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-md shadow-sm
                                bg-white dark:bg-gray-700 text-gray-900 dark:text-white
                                focus:outline-none focus:ring-hot-red-500 focus:border-hot-red-500"
                         placeholder="e.g., Team Slack Channel">
@@ -43,7 +43,7 @@
                         Destination Type
                     </label>
                     <select name="destination_type" id="destination_type" required
-                        class="block w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-md shadow-sm 
+                        class="block w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-md shadow-sm
                                bg-white dark:bg-gray-700 text-gray-900 dark:text-white
                                focus:outline-none focus:ring-hot-red-500 focus:border-hot-red-500"
                         onchange="updateConfigFields()">
@@ -61,7 +61,7 @@
                             Send To
                         </label>
                         <select name="email_target" id="email_target"
-                            class="block w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-md shadow-sm 
+                            class="block w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-md shadow-sm
                                    bg-white dark:bg-gray-700 text-gray-900 dark:text-white
                                    focus:outline-none focus:ring-hot-red-500 focus:border-hot-red-500"
                             onchange="updateEmailTargetFields()">
@@ -78,7 +78,7 @@
                             Email Address
                         </label>
                         <input type="email" name="email_address" id="email_address"
-                            class="block w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-md shadow-sm 
+                            class="block w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-md shadow-sm
                                    bg-white dark:bg-gray-700 text-gray-900 dark:text-white
                                    focus:outline-none focus:ring-hot-red-500 focus:border-hot-red-500"
                             placeholder="alerts@example.com">
@@ -101,7 +101,7 @@
                             Team
                         </label>
                         <select name="email_team_id" id="email_team_id"
-                            class="block w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-md shadow-sm 
+                            class="block w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-md shadow-sm
                                    bg-white dark:bg-gray-700 text-gray-900 dark:text-white
                                    focus:outline-none focus:ring-hot-red-500 focus:border-hot-red-500">
                             <option value="">Select a team...</option>
@@ -120,7 +120,7 @@
                             User
                         </label>
                         <select name="email_user_id" id="email_user_id"
-                            class="block w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-md shadow-sm 
+                            class="block w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-md shadow-sm
                                    bg-white dark:bg-gray-700 text-gray-900 dark:text-white
                                    focus:outline-none focus:ring-hot-red-500 focus:border-hot-red-500">
                             <option value="">Select a user...</option>
@@ -141,7 +141,7 @@
                             Webhook URL
                         </label>
                         <input type="url" name="slack_webhook_url" id="slack_webhook_url"
-                            class="block w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-md shadow-sm 
+                            class="block w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-md shadow-sm
                                    bg-white dark:bg-gray-700 text-gray-900 dark:text-white
                                    focus:outline-none focus:ring-hot-red-500 focus:border-hot-red-500"
                             placeholder="https://hooks.slack.com/services/...">
@@ -154,7 +154,7 @@
                             Channel Override <span class="text-gray-500 dark:text-gray-400 font-normal">(optional)</span>
                         </label>
                         <input type="text" name="slack_channel" id="slack_channel"
-                            class="block w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-md shadow-sm 
+                            class="block w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-md shadow-sm
                                    bg-white dark:bg-gray-700 text-gray-900 dark:text-white
                                    focus:outline-none focus:ring-hot-red-500 focus:border-hot-red-500"
                             placeholder="#alerts">
@@ -171,7 +171,7 @@
                             Routing Key (Integration Key)
                         </label>
                         <input type="text" name="pagerduty_routing_key" id="pagerduty_routing_key"
-                            class="block w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-md shadow-sm 
+                            class="block w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-md shadow-sm
                                    bg-white dark:bg-gray-700 text-gray-900 dark:text-white
                                    focus:outline-none focus:ring-hot-red-500 focus:border-hot-red-500"
                             placeholder="your-integration-key">
@@ -184,7 +184,7 @@
                             Severity
                         </label>
                         <select name="pagerduty_severity" id="pagerduty_severity"
-                            class="block w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-md shadow-sm 
+                            class="block w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-md shadow-sm
                                    bg-white dark:bg-gray-700 text-gray-900 dark:text-white
                                    focus:outline-none focus:ring-hot-red-500 focus:border-hot-red-500">
                             <option value="critical">Critical</option>
@@ -202,7 +202,7 @@
                             Webhook URL
                         </label>
                         <input type="url" name="webhook_url" id="webhook_url"
-                            class="block w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-md shadow-sm 
+                            class="block w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-md shadow-sm
                                    bg-white dark:bg-gray-700 text-gray-900 dark:text-white
                                    focus:outline-none focus:ring-hot-red-500 focus:border-hot-red-500"
                             placeholder="https://api.example.com/webhook/alerts">
@@ -212,7 +212,7 @@
                             Custom Headers <span class="text-gray-500 dark:text-gray-400 font-normal">(optional, JSON)</span>
                         </label>
                         <textarea name="webhook_headers" id="webhook_headers" rows="3"
-                            class="block w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-md shadow-sm 
+                            class="block w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-md shadow-sm
                                    bg-white dark:bg-gray-700 text-gray-900 dark:text-white font-mono text-sm
                                    focus:outline-none focus:ring-hot-red-500 focus:border-hot-red-500"
                             placeholder='{"Authorization": "Bearer your-token"}'></textarea>
@@ -244,12 +244,12 @@
 <script>
 function updateConfigFields() {
     const type = document.getElementById('destination_type').value;
-    
+
     // Hide all config sections
     document.querySelectorAll('.config-section').forEach(el => {
         el.classList.add('hidden');
     });
-    
+
     // Show the selected type's config section
     const section = document.getElementById('config-' + type);
     if (section) {
@@ -264,12 +264,12 @@ function updateConfigFields() {
 
 function updateEmailTargetFields() {
     const target = document.getElementById('email_target').value;
-    
+
     // Hide all email target sections
     document.querySelectorAll('.email-target-section').forEach(el => {
         el.classList.add('hidden');
     });
-    
+
     // Show the selected target's section
     const section = document.getElementById('email-target-' + target);
     if (section) {

@@ -46,7 +46,13 @@
                     </div>
                 </td>
                 <td class="px-3 md:px-6 py-4 whitespace-nowrap">
-                    {% if run.is_completed %}
+                    {% if run.status == "failed" %}
+                        <span class="badge badge-failure">{{ run.status }}</span>
+                    {% else if run.status == "pending_retry" %}
+                        <span class="badge badge-pending">pending retry</span>
+                    {% else if run.status == "cancelled" %}
+                        <span class="badge badge-neutral">{{ run.status }}</span>
+                    {% else if run.is_completed %}
                         <span class="badge badge-success">{{ run.status }}</span>
                     {% else %}
                         <span class="badge badge-running">{{ run.status }}</span>
