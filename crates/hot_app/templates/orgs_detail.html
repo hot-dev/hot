@@ -1,8 +1,8 @@
 {% extends "private_layout.html" %}
 
 {% block content %}
-<div class="max-w-7xl mx-auto px-2 sm:px-4 py-4 sm:py-6 lg:px-8">
-    <div class="pb-5 mb-6">
+<div class="max-w-7xl mx-auto py-6">
+    <div class="mb-6">
         <h1 class="text-xl sm:text-2xl font-bold leading-6 text-gray-900 dark:text-gray-100">
             {{ org.name }}
             {% if org.is_individual() %}
@@ -18,7 +18,7 @@
 
     <div class="space-y-4 sm:space-y-6">
         <!-- Organization Information -->
-        <div class="bg-white dark:bg-gray-800 rounded-lg shadow-md p-4 sm:p-6">
+        <div class="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 p-4 sm:p-6">
             <div class="flex flex-col sm:flex-row items-start sm:items-center justify-between mb-4 gap-3">
                 <h2 class="text-base sm:text-lg font-semibold text-gray-900 dark:text-white">
                     Organization Information

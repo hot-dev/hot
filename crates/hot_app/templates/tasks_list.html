@@ -15,7 +15,7 @@
          data-selected-time-range="{{ selected_time_range }}"
          data-search-query="{{ search_query }}"
          data-current-page="{{ current_page_num }}"
-         class="mb-6 p-3 bg-white dark:bg-gray-800 rounded-lg shadow">
+         class="mb-6 p-3 bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700">
         <!-- First Row: Search -->
         <div class="mb-3">
             <div class="relative">
@@ -38,7 +38,7 @@
             <div class="w-full">
                 <div x-data="{ open: false }" class="relative">
                     <button @click="open = !open" :aria-expanded="open" aria-haspopup="true" type="button"
-                            class="w-full text-gray-900 bg-white border border-gray-300 focus:outline-none hover:bg-gray-100 focus:ring-4 focus:ring-gray-100 font-medium rounded-lg text-sm px-2.5 py-1.5 text-left inline-flex items-center justify-between dark:bg-gray-800 dark:text-white dark:border-gray-600 dark:hover:bg-gray-600 dark:focus:ring-gray-700">
+                            class="w-full text-gray-900 bg-white border border-gray-300 hover:bg-gray-100 focus-ring font-medium rounded-lg text-sm px-2.5 py-1.5 text-left inline-flex items-center justify-between dark:bg-gray-800 dark:text-white dark:border-gray-600 dark:hover:bg-gray-700">
                         <div class="flex items-center space-x-2">
                             <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" class="size-5">
                                 <path fill-rule="evenodd" d="M2.25 13.5a8.25 8.25 0 0 1 8.25-8.25.75.75 0 0 1 .75.75v6.75H18a.75.75 0 0 1 .75.75 8.25 8.25 0 0 1-16.5 0Z" clip-rule="evenodd" />
@@ -52,7 +52,7 @@
                     </button>
 
                     <div x-cloak x-show="open" @click.away="open = false" @keydown.escape.window="open = false" x-transition
-                         class="absolute z-10 w-full mt-1 bg-white rounded-lg shadow-lg border border-gray-200 dark:bg-gray-800 dark:border-gray-600">
+                         class="absolute z-50 w-full mt-1 bg-white rounded-lg shadow-lg border border-gray-200 dark:bg-gray-800 dark:border-gray-700">
                         <div class="py-1">
                             <button type="button" @click="toggleStatus('queued')" class="block w-full text-left px-4 py-2 text-sm text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-600 transition-colors duration-200 cursor-pointer">
                                 <div class="flex items-center justify-between">
@@ -103,7 +103,7 @@
             <div class="w-full">
                 <div x-data="{ open: false }" class="relative">
                     <button @click="open = !open" :aria-expanded="open" aria-haspopup="true" type="button"
-                            class="w-full text-gray-900 bg-white border border-gray-300 focus:outline-none hover:bg-gray-100 focus:ring-4 focus:ring-gray-100 font-medium rounded-lg text-sm px-2.5 py-1.5 text-left inline-flex items-center justify-between dark:bg-gray-800 dark:text-white dark:border-gray-600 dark:hover:bg-gray-600 dark:focus:ring-gray-700">
+                            class="w-full text-gray-900 bg-white border border-gray-300 hover:bg-gray-100 focus-ring font-medium rounded-lg text-sm px-2.5 py-1.5 text-left inline-flex items-center justify-between dark:bg-gray-800 dark:text-white dark:border-gray-600 dark:hover:bg-gray-700">
                         <div class="flex items-center space-x-2">
                             <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" class="size-5">
                                 <path fill-rule="evenodd" d="M3 6a3 3 0 0 1 3-3h2.25a3 3 0 0 1 3 3v2.25a3 3 0 0 1-3 3H6a3 3 0 0 1-3-3V6Zm9.75 0a3 3 0 0 1 3-3H18a3 3 0 0 1 3 3v2.25a3 3 0 0 1-3 3h-2.25a3 3 0 0 1-3-3V6ZM3 15.75a3 3 0 0 1 3-3h2.25a3 3 0 0 1 3 3V18a3 3 0 0 1-3 3H6a3 3 0 0 1-3-3v-2.25Zm9.75 0a3 3 0 0 1 3-3H18a3 3 0 0 1 3 3V18a3 3 0 0 1-3 3h-2.25a3 3 0 0 1-3-3v-2.25Z" clip-rule="evenodd"/>
@@ -116,7 +116,7 @@
                     </button>
 
                     <div x-cloak x-show="open" @click.away="open = false" @keydown.escape.window="open = false" x-transition
-                         class="absolute z-10 w-full mt-1 bg-white rounded-lg shadow-lg border border-gray-200 dark:bg-gray-800 dark:border-gray-600">
+                         class="absolute z-50 w-full mt-1 bg-white rounded-lg shadow-lg border border-gray-200 dark:bg-gray-800 dark:border-gray-700">
                         <div class="py-1">
                             <button type="button" @click="toggleTaskType('code')" class="block w-full text-left px-4 py-2 text-sm text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-600 transition-colors duration-200 cursor-pointer">
                                 <div class="flex items-center justify-between">
@@ -143,7 +143,7 @@
             <div class="w-full">
                 <div x-data="{ open: false }" class="relative">
                     <button @click="open = !open" :aria-expanded="open" aria-haspopup="true" type="button"
-                            class="w-full text-gray-900 bg-white border border-gray-300 focus:outline-none hover:bg-gray-100 focus:ring-4 focus:ring-gray-100 font-medium rounded-lg text-sm px-2.5 py-1.5 text-left inline-flex items-center justify-between dark:bg-gray-800 dark:text-white dark:border-gray-600 dark:hover:bg-gray-600 dark:focus:ring-gray-700">
+                            class="w-full text-gray-900 bg-white border border-gray-300 hover:bg-gray-100 focus-ring font-medium rounded-lg text-sm px-2.5 py-1.5 text-left inline-flex items-center justify-between dark:bg-gray-800 dark:text-white dark:border-gray-600 dark:hover:bg-gray-700">
                         <div class="flex items-center space-x-2">
                             <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" class="size-5">
                                 <path d="M12.75 12.75a.75.75 0 1 1-1.5 0 .75.75 0 0 1 1.5 0ZM7.5 15.75a.75.75 0 1 0 0-1.5.75.75 0 0 0 0 1.5ZM8.25 17.25a.75.75 0 1 1-1.5 0 .75.75 0 0 1 1.5 0ZM9.75 15.75a.75.75 0 1 0 0-1.5.75.75 0 0 0 0 1.5ZM10.5 17.25a.75.75 0 1 1-1.5 0 .75.75 0 0 1 1.5 0ZM12 15.75a.75.75 0 1 0 0-1.5.75.75 0 0 0 0 1.5ZM12.75 17.25a.75.75 0 1 1-1.5 0 .75.75 0 0 1 1.5 0ZM14.25 15.75a.75.75 0 1 0 0-1.5.75.75 0 0 0 0 1.5ZM15 17.25a.75.75 0 1 1-1.5 0 .75.75 0 0 1 1.5 0ZM16.5 15.75a.75.75 0 1 0 0-1.5.75.75 0 0 0 0 1.5ZM15 12.75a.75.75 0 1 1-1.5 0 .75.75 0 0 1 1.5 0ZM16.5 13.5a.75.75 0 1 0 0-1.5.75.75 0 0 0 0 1.5Z"/>
@@ -157,7 +157,7 @@
                     </button>
 
                     <div x-cloak x-show="open" @click.away="open = false" @keydown.escape.window="open = false" x-transition
-                         class="absolute z-10 w-full mt-1 bg-white rounded-lg shadow-lg border border-gray-200 dark:bg-gray-800 dark:border-gray-600">
+                         class="absolute z-50 w-full mt-1 bg-white rounded-lg shadow-lg border border-gray-200 dark:bg-gray-800 dark:border-gray-700">
                         <div class="py-1">
                             <button type="button" @click="timeRange = 'all'; open = false" class="block w-full text-left px-4 py-2 text-sm text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-600 transition-colors duration-200 cursor-pointer">
                                 <div class="flex items-center justify-between">
@@ -207,7 +207,7 @@
     </div>
 
     <!-- Desktop Table View -->
-    <div class="hidden md:block rounded-lg backdrop-blur-sm border border-gray-200 dark:border-gray-800 transition-all duration-300 overflow-hidden bg-white dark:bg-gray-900 text-gray-800 dark:text-white">
+    <div class="hidden md:block rounded-lg backdrop-blur-sm border border-gray-200 dark:border-gray-700 transition-all duration-300 overflow-hidden bg-white dark:bg-gray-800 text-gray-800 dark:text-white">
         <div id="tasks-table-content" class="responsive-table overflow-auto">
             {% include "components/tasks_table_content.html" %}
         </div>
@@ -217,7 +217,7 @@
     <div class="md:hidden">
         <div id="tasks-mobile-content" class="space-y-4">
         {% for task in tasks %}
-        <div class="backdrop-blur-sm border border-gray-200 dark:border-gray-800 rounded-lg bg-white dark:bg-gray-900 text-gray-800 dark:text-white p-4">
+        <div class="backdrop-blur-sm border border-gray-200 dark:border-gray-700 rounded-lg bg-white dark:bg-gray-800 text-gray-800 dark:text-white p-4">
             <div class="flex justify-between items-start mb-3">
                 <div class="text-sm font-medium text-gray-900 dark:text-white">
                     Task <div class="uuid-container inline-flex items-center gap-1">
@@ -230,15 +230,15 @@
                     </div>
                 </div>
                 {% if task.status == "completed" %}
-                    <span class="px-2 inline-flex text-xs leading-5 font-semibold rounded-full bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-200">{{ task.status }}</span>
+                    <span class="badge badge-success">{{ task.status }}</span>
                 {% else if task.status == "running" %}
-                    <span class="px-2 inline-flex text-xs leading-5 font-semibold rounded-full bg-amber-100 text-amber-800 dark:bg-amber-900 dark:text-amber-200">{{ task.status }}</span>
+                    <span class="badge badge-running">{{ task.status }}</span>
                 {% else if task.status == "failed" || task.status == "timed_out" %}
-                    <span class="px-2 inline-flex text-xs leading-5 font-semibold rounded-full bg-red-100 text-red-800 dark:bg-red-900 dark:text-red-200">{{ task.status }}</span>
+                    <span class="badge badge-failure">{{ task.status }}</span>
                 {% else if task.status == "queued" %}
-                    <span class="px-2 inline-flex text-xs leading-5 font-semibold rounded-full bg-blue-100 text-blue-800 dark:bg-blue-900 dark:text-blue-200">{{ task.status }}</span>
+                    <span class="badge badge-pending">{{ task.status }}</span>
                 {% else %}
-                    <span class="px-2 inline-flex text-xs leading-5 font-semibold rounded-full bg-gray-100 text-gray-800 dark:bg-gray-800 dark:text-gray-300">{{ task.status }}</span>
+                    <span class="badge badge-neutral">{{ task.status }}</span>
                 {% endif %}
             </div>
 
@@ -297,7 +297,7 @@
                 </div>
             </div>
 
-            <div class="mt-4 pt-3 border-t border-gray-100 dark:border-gray-800">
+            <div class="mt-4 pt-3 border-t border-gray-100 dark:border-gray-700">
                 <a href="/tasks/{{ task.task_id }}" class="link transition-all duration-200 font-medium">View Details</a>
             </div>
         </div>

@@ -74,21 +74,21 @@
                         <div class="flex items-center gap-1">
                             <span class="px-2 py-1 text-xs font-semibold rounded-full bg-gray-100 text-gray-800 dark:bg-gray-800 dark:text-gray-200">{{ run.run_type }}</span>
                             {% if run.is_retry %}
-                                <span class="px-1.5 py-0.5 text-xs font-medium rounded bg-red-100 text-red-700 dark:bg-red-900 dark:text-red-300">↻{{ run.retry_attempt }}</span>
+                                <span class="badge badge-pending">↻{{ run.retry_attempt }}</span>
                             {% endif %}
                         </div>
                     </td>
                     <td class="px-3 md:px-6 py-4 whitespace-nowrap">
                         {% if run.status == "failed" %}
-                            <span class="px-2 py-1 text-xs font-semibold rounded-full bg-red-100 text-red-800 dark:bg-red-900 dark:text-red-200">{{ run.status }}</span>
+                            <span class="badge badge-failure">{{ run.status }}</span>
                         {% else if run.status == "pending_retry" %}
-                            <span class="px-2 py-1 text-xs font-semibold rounded-full bg-red-100 text-red-800 dark:bg-red-900 dark:text-red-200">pending retry</span>
+                            <span class="badge badge-pending">pending retry</span>
                         {% else if run.status == "cancelled" %}
-                            <span class="px-2 py-1 text-xs font-semibold rounded-full bg-gray-100 text-gray-800 dark:bg-gray-700 dark:text-gray-300">{{ run.status }}</span>
+                            <span class="badge badge-neutral">{{ run.status }}</span>
                         {% else if run.is_completed %}
-                            <span class="px-2 py-1 text-xs font-semibold rounded-full bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-200">{{ run.status }}</span>
+                            <span class="badge badge-success">{{ run.status }}</span>
                         {% else %}
-                            <span class="px-2 py-1 text-xs font-semibold rounded-full bg-blue-100 text-blue-800 dark:bg-blue-900 dark:text-blue-200">{{ run.status }}</span>
+                            <span class="badge badge-running">{{ run.status }}</span>
                         {% endif %}
                     </td>
                     <td class="px-3 md:px-6 py-4 whitespace-nowrap text-xs text-gray-700 dark:text-gray-300">
@@ -98,7 +98,7 @@
                         {% if run.is_completed %}
                             {{ run.stop_time_formatted }}
                         {% else %}
-                            <span class="text-blue-600 dark:text-blue-400">Running</span>
+                            <span class="badge badge-running">Running</span>
                         {% endif %}
                     </td>
                     <td class="px-3 md:px-6 py-4 whitespace-nowrap text-xs text-gray-500 dark:text-gray-400">
@@ -162,14 +162,14 @@
 
 <!-- Pagination -->
 {% if has_prev_page || has_next_page %}
-<div class="px-3 md:px-6 py-4 border-t border-gray-200 dark:border-gray-800">
+<div class="px-3 md:px-6 py-4 border-t border-gray-200 dark:border-gray-700">
     <div class="flex items-center justify-between">
         <div class="flex-1 flex justify-between sm:hidden">
             {% if has_prev_page %}
-            <button onclick="window.runsListComponent && window.runsListComponent.goToPage({{ current_page_num - 1 }})" class="relative inline-flex items-center px-4 py-2 border border-gray-300 dark:border-gray-800 text-sm font-medium rounded-md text-gray-700 dark:text-gray-300 bg-white dark:bg-gray-700 hover:bg-gray-100 dark:hover:bg-gray-700">Previous</button>
+            <button onclick="window.runsListComponent && window.runsListComponent.goToPage({{ current_page_num - 1 }})" class="relative inline-flex items-center px-3 py-2 border border-gray-300 dark:border-gray-700 text-xs font-medium rounded-md text-gray-700 dark:text-gray-300 bg-white dark:bg-gray-800 hover:bg-gray-100 dark:hover:bg-gray-700">Previous</button>
             {% endif %}
             {% if has_next_page %}
-            <button onclick="window.runsListComponent && window.runsListComponent.goToPage({{ current_page_num + 1 }})" class="ml-3 relative inline-flex items-center px-4 py-2 border border-gray-300 dark:border-gray-800 text-sm font-medium rounded-md text-gray-700 dark:text-gray-300 bg-white dark:bg-gray-700 hover:bg-gray-100 dark:hover:bg-gray-700">Next</button>
+            <button onclick="window.runsListComponent && window.runsListComponent.goToPage({{ current_page_num + 1 }})" class="ml-3 relative inline-flex items-center px-3 py-2 border border-gray-300 dark:border-gray-700 text-xs font-medium rounded-md text-gray-700 dark:text-gray-300 bg-white dark:bg-gray-800 hover:bg-gray-100 dark:hover:bg-gray-700">Next</button>
             {% endif %}
         </div>
         <div class="hidden sm:flex-1 sm:flex sm:items-center sm:justify-between">
@@ -181,7 +181,7 @@
             <div>
                 <nav class="relative z-0 inline-flex rounded-md shadow-sm -space-x-px" aria-label="Pagination">
                     {% if has_prev_page %}
-                    <button onclick="window.runsListComponent && window.runsListComponent.goToPage({{ current_page_num - 1 }})" class="relative inline-flex items-center px-2 py-2 rounded-l-md border border-gray-300 dark:border-gray-800 bg-white dark:bg-gray-700 text-sm font-medium text-gray-500 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700">
+                    <button onclick="window.runsListComponent && window.runsListComponent.goToPage({{ current_page_num - 1 }})" class="relative inline-flex items-center px-2 py-2 rounded-l-md border border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-800 text-sm font-medium text-gray-500 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700">
                         <span class="sr-only">Previous</span>
                         <svg class="h-5 w-5" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor">
                             <path fill-rule="evenodd" d="M12.707 5.293a1 1 0 010 1.414L9.414 10l3.293 3.293a1 1 0 01-1.414 1.414l-4-4a1 1 0 010-1.414l4-4a1 1 0 011.414 0z" clip-rule="evenodd" />
@@ -191,14 +191,14 @@
 
                     {% for page_num in start_page..=end_page %}
                     {% if page_num == current_page_num %}
-                    <span class="relative inline-flex items-center px-4 py-2 border border-gray-300 dark:border-gray-800 bg-hot-red-500 text-sm font-medium text-white">{{ page_num }}</span>
+                    <span aria-current="page" class="relative inline-flex items-center px-3 sm:px-4 py-2 border border-gray-300 dark:border-gray-700 bg-hot-red-700 text-xs sm:text-sm font-medium text-white">{{ page_num }}</span>
                     {% else %}
-                    <button onclick="window.runsListComponent && window.runsListComponent.goToPage({{ page_num }})" class="relative inline-flex items-center px-4 py-2 border border-gray-300 dark:border-gray-800 bg-white dark:bg-gray-700 text-sm font-medium text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700">{{ page_num }}</button>
+                    <button onclick="window.runsListComponent && window.runsListComponent.goToPage({{ page_num }})" class="relative inline-flex items-center px-3 sm:px-4 py-2 border border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-800 text-xs sm:text-sm font-medium text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700">{{ page_num }}</button>
                     {% endif %}
                     {% endfor %}
 
                     {% if has_next_page %}
-                    <button onclick="window.runsListComponent && window.runsListComponent.goToPage({{ current_page_num + 1 }})" class="relative inline-flex items-center px-2 py-2 rounded-r-md border border-gray-300 dark:border-gray-800 bg-white dark:bg-gray-700 text-sm font-medium text-gray-500 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700">
+                    <button onclick="window.runsListComponent && window.runsListComponent.goToPage({{ current_page_num + 1 }})" class="relative inline-flex items-center px-2 py-2 rounded-r-md border border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-800 text-sm font-medium text-gray-500 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700">
                         <span class="sr-only">Next</span>
                         <svg class="h-5 w-5" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor">
                             <path fill-rule="evenodd" d="M7.293 14.707a1 1 0 010-1.414L10.586 10 7.293 6.707a1 1 0 011.414-1.414l4 4a1 1 0 010 1.414l-4 4a1 1 0 01-1.414 0z" clip-rule="evenodd" />

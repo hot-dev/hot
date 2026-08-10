@@ -17,7 +17,7 @@
     {% when Some with (r) %}
     <!-- Single Header Bar with all run info - polls when running -->
     <div id="run-detail-header"
-         class="rounded-t-lg p-4 sm:p-6 backdrop-blur-sm border border-b-0 border-gray-200 dark:border-gray-800 transition-all duration-300 bg-white dark:bg-gray-900 text-gray-800 dark:text-white"
+         class="rounded-t-lg p-4 sm:p-6 backdrop-blur-sm border border-b-0 border-gray-200 dark:border-gray-700 transition-all duration-300 bg-white dark:bg-gray-800 text-gray-800 dark:text-white"
          {% if !r.is_completed %}
          hx-get="/runs/{{ r.run_id }}"
          hx-trigger="refresh"
@@ -61,9 +61,9 @@
             <div>
                 <h3 class="text-xs font-medium text-gray-500 dark:text-gray-400 mb-1 uppercase tracking-wider">Type</h3>
                 <div class="flex items-center gap-2">
-                    <span class="px-2 py-1 text-xs font-semibold rounded-full bg-gray-100 text-gray-800 dark:bg-gray-800 dark:text-gray-200">{{ r.run_type }}</span>
+                    <span class="badge badge-neutral">{{ r.run_type }}</span>
                     {% if r.is_retry %}
-                        <span class="px-2 py-1 text-xs font-semibold rounded-full bg-red-100 text-red-800 dark:bg-red-900 dark:text-red-200">retry #{{ r.retry_attempt }}</span>
+                        <span class="badge badge-pending">retry #{{ r.retry_attempt }}</span>
                     {% endif %}
                 </div>
             </div>
@@ -73,20 +73,24 @@
                 <h3 class="text-xs font-medium text-gray-500 dark:text-gray-400 mb-1 uppercase tracking-wider">Status</h3>
                 <div class="flex items-center gap-2">
                     {% if r.status == "pending_retry" %}
-                        <span class="px-2 py-1 text-xs font-semibold rounded-full bg-red-100 text-red-800 dark:bg-red-900 dark:text-red-200">pending_retry</span>
+                        <span class="badge badge-pending">pending_retry</span>
                         <span class="text-xs text-gray-500 dark:text-gray-400">(attempt {{ r.retry_attempt }})</span>
                     {% else if r.status == "running" %}
-                        <span class="inline-flex items-center gap-1.5 px-2 py-1 text-xs font-semibold rounded-full bg-blue-100 text-blue-800 dark:bg-blue-900 dark:text-blue-200">
+                        <span class="badge badge-running">
                             <span class="relative flex h-2 w-2">
                                 <span class="animate-ping absolute inline-flex h-full w-full rounded-full bg-green-400 opacity-75"></span>
                                 <span class="relative inline-flex rounded-full h-2 w-2 bg-green-500"></span>
                             </span>
                             running
                         </span>
-                    {% else if r.is_completed %}
-                        <span class="px-2 py-1 text-xs font-semibold rounded-full bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-200">{{ r.status }}</span>
+                    {% else if r.status == "succeeded" %}
+                        <span class="badge badge-success">{{ r.status }}</span>
+                    {% else if r.status == "failed" %}
+                        <span class="badge badge-failure">{{ r.status }}</span>
+                    {% else if r.status == "cancelled" %}
+                        <span class="badge badge-neutral">{{ r.status }}</span>
                     {% else %}
-                        <span class="px-2 py-1 text-xs font-semibold rounded-full bg-gray-100 text-gray-800 dark:bg-gray-700 dark:text-gray-200">{{ r.status }}</span>
+                        <span class="badge badge-neutral">{{ r.status }}</span>
                     {% endif %}
                     {% if r.retry_attempt > 0 && r.status != "pending_retry" %}
                         <span class="text-xs text-gray-500 dark:text-gray-400">(retry attempt {{ r.retry_attempt }})</span>
@@ -177,7 +181,7 @@
             {% if r.status == "failed" %}
             <button
                 onclick="retryRun('{{ r.run_id }}')"
-                class="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg bg-red-100 text-red-700 hover:bg-red-200 dark:bg-red-900 dark:text-red-300 dark:hover:bg-red-800 transition-colors"
+                class="btn btn-secondary btn-sm inline-flex items-center gap-1.5"
                 title="Retry this failed run in the same stream">
                 <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                     <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
@@ -187,7 +191,7 @@
             {% endif %}
             <button
                 onclick="rerunRun('{{ r.run_id }}')"
-                class="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg bg-blue-100 text-blue-700 hover:bg-blue-200 dark:bg-blue-900 dark:text-blue-300 dark:hover:bg-blue-800 transition-colors"
+                class="btn btn-secondary btn-sm inline-flex items-center gap-1.5"
                 title="Re-run this function in a new stream">
                 <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                     <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M14.752 11.168l-3.197-2.132A1 1 0 0010 9.87v4.263a1 1 0 001.555.832l3.197-2.132a1 1 0 000-1.664z" />
@@ -265,7 +269,7 @@
     </div>
 
     {% if let Some(task_id) = associated_task_id %}
-    <div class="border-x border-gray-200 dark:border-gray-800 bg-amber-50 dark:bg-amber-900/20 px-4 py-3">
+    <div class="border-x border-gray-200 dark:border-gray-700 bg-amber-50 dark:bg-amber-900/20 px-4 py-3">
         <div class="flex items-center gap-2 text-sm text-amber-800 dark:text-amber-200">
             <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" class="w-4 h-4 flex-shrink-0">
                 <path fill-rule="evenodd" d="M18 10a8 8 0 1 1-16 0 8 8 0 0 1 16 0Zm-7-4a1 1 0 1 1-2 0 1 1 0 0 1 2 0ZM9 9a.75.75 0 0 0 0 1.5h.253a.25.25 0 0 1 .244.304l-.459 2.066A1.75 1.75 0 0 0 10.747 15H11a.75.75 0 0 0 0-1.5h-.253a.25.25 0 0 1-.244-.304l.459-2.066A1.75 1.75 0 0 0 9.253 9H9Z" clip-rule="evenodd" />
@@ -287,15 +291,15 @@
     <script type="application/json" id="graph-data">{{ graph_data_json|safe }}</script>
 
     <!-- Main Content Area with integrated Value Inspector -->
-    <div class="w-full rounded-b-lg backdrop-blur-sm border border-t-0 border-gray-200 dark:border-gray-800 transition-all duration-300 bg-white dark:bg-gray-900 text-gray-800 dark:text-white flex flex-col">
+    <div class="w-full rounded-b-lg backdrop-blur-sm border border-t-0 border-gray-200 dark:border-gray-700 transition-all duration-300 bg-white dark:bg-gray-800 text-gray-800 dark:text-white flex flex-col">
         <!-- Content area with tabs and inspector -->
         {% include "components/run_detail_tabs.html" %}
 
         <!-- Note: Value Inspector is now integrated in run_detail_tabs.html -->
         <div style="display: none;">
             <!-- Old Value Inspector (kept for reference during migration) -->
-            <div id="value-inspector-old" class="hidden flex-shrink-0 border-l border-gray-200 dark:border-gray-800 flex flex-col" style="min-width: 20rem; width: 33%;">
-                <div class="bg-gray-100 dark:bg-gray-700 flex-shrink-0 border-b border-gray-200 dark:border-gray-800">
+            <div id="value-inspector-old" class="hidden flex-shrink-0 border-l border-gray-200 dark:border-gray-700 flex flex-col" style="min-width: 20rem; width: 33%;">
+                <div class="bg-gray-100 dark:bg-gray-700 flex-shrink-0 border-b border-gray-200 dark:border-gray-700">
                     <div class="px-3 py-2 flex items-center justify-between" style="min-width: 18rem;">
                         <div class="text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider truncate" style="max-width: 8rem;">
                             Value Inspector
@@ -319,15 +323,15 @@
 
     {% when None %}
     <!-- Run Not Found -->
-    <div class="rounded-lg backdrop-blur-sm border border-gray-200 dark:border-gray-800 transition-all duration-300 bg-white dark:bg-gray-900 text-gray-800 dark:text-white">
-        <div class="p-6 text-center">
+    <div class="rounded-lg backdrop-blur-sm border border-gray-200 dark:border-gray-700 transition-all duration-300 bg-white dark:bg-gray-800 text-gray-800 dark:text-white">
+        <div class="empty-state">
             <div class="mx-auto flex items-center justify-center h-12 w-12 rounded-full bg-red-100 dark:bg-red-900 mb-4">
                 <svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6 text-red-600 dark:text-red-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                     <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-2.5L13.732 4c-.77-.833-1.964-.833-2.732 0L3.732 16.5c-.77.833.192 2.5 1.732 2.5z" />
                 </svg>
             </div>
-            <h3 class="text-lg font-medium text-gray-900 dark:text-white mb-2">Run Not Found</h3>
-            <p class="text-gray-500 dark:text-gray-400 mb-4">
+            <h3 class="empty-state-title">Run Not Found</h3>
+            <p class="empty-state-message">
                 The requested run could not be found. It may have been deleted or the ID is incorrect.
             </p>
             <a href="/runs" class="btn btn-primary">
@@ -525,7 +529,7 @@ thead th {
 }
 
 .dark thead th {
-    background-color: #2a2a2a;
+    background-color: var(--color-gray-700);
 }
 
 /* Ellipsis at the start instead of end */

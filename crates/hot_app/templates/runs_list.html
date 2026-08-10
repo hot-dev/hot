@@ -14,7 +14,7 @@
          data-selected-types="{% for run_type in selected_run_types %}{{ run_type }}{% if !loop.last %},{% endif %}{% endfor %}"
          data-time-range="{{ selected_time_range }}"
          data-selected-project="{{ selected_project }}"
-         class="mb-6 p-3 bg-white dark:bg-gray-800 rounded-lg shadow">
+         class="mb-6 p-3 bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700">
         <!-- First Row: Search -->
         <div class="mb-3">
             <div class="relative">
@@ -38,7 +38,7 @@
                 <div x-data="{ open: false }" class="relative">
                     <!-- Dropdown Button -->
                     <button @click="open = !open" :aria-expanded="open" aria-haspopup="true" type="button"
-                            class="w-full text-gray-900 bg-white border border-gray-300 focus:outline-none hover:bg-gray-100 focus:ring-4 focus:ring-gray-100 font-medium rounded-lg text-sm px-2.5 py-1.5 text-left inline-flex items-center justify-between dark:bg-gray-800 dark:text-white dark:border-gray-600 dark:hover:bg-gray-600 dark:focus:ring-gray-700">
+                            class="w-full text-gray-900 bg-white border border-gray-300 hover:bg-gray-100 focus-ring font-medium rounded-lg text-sm px-2.5 py-1.5 text-left inline-flex items-center justify-between dark:bg-gray-800 dark:text-white dark:border-gray-600 dark:hover:bg-gray-700">
                         <div class="flex items-center space-x-2">
                             <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" class="size-5">
                                 <path fill-rule="evenodd" d="M2.25 6a3 3 0 0 1 3-3h13.5a3 3 0 0 1 3 3v12a3 3 0 0 1-3 3H5.25a3 3 0 0 1-3-3V6Zm18 3H3.75v9a1.5 1.5 0 0 0 1.5 1.5h13.5a1.5 1.5 0 0 0 1.5-1.5V9Zm-15-3.75A.75.75 0 0 0 4.5 6v.008c0 .414.336.75.75.75h.008a.75.75 0 0 0 .75-.75V6a.75.75 0 0 0-.75-.75H5.25Zm1.5.75a.75.75 0 0 1 .75-.75h.008a.75.75 0 0 1 .75.75v.008a.75.75 0 0 1-.75.75H7.5a.75.75 0 0 1-.75-.75V6Zm3-.75A.75.75 0 0 0 9 6v.008c0 .414.336.75.75.75h.008a.75.75 0 0 0 .75-.75V6a.75.75 0 0 0-.75-.75H9.75Z" clip-rule="evenodd" />
@@ -52,7 +52,7 @@
 
                     <!-- Dropdown Menu -->
                     <div x-cloak x-show="open" @click.away="open = false" @keydown.escape.window="open = false" x-transition
-                         class="absolute z-10 w-full mt-1 bg-white rounded-lg shadow-lg border border-gray-200 dark:bg-gray-800 dark:border-gray-600">
+                         class="absolute z-50 w-full mt-1 bg-white rounded-lg shadow-lg border border-gray-200 dark:bg-gray-800 dark:border-gray-700">
                         <div class="py-1">
                             <button type="button" @click="setProject(''); open = false;" class="block w-full text-left px-4 py-2 text-sm text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-600 transition-colors duration-200 cursor-pointer">
                                 <div class="flex items-center justify-between">
@@ -82,7 +82,7 @@
                 <div x-data="{ open: false }" class="relative">
                     <!-- Dropdown Button -->
                     <button @click="open = !open" :aria-expanded="open" aria-haspopup="true" type="button"
-                            class="w-full text-gray-900 bg-white border border-gray-300 focus:outline-none hover:bg-gray-100 focus:ring-4 focus:ring-gray-100 font-medium rounded-lg text-sm px-2.5 py-1.5 text-left inline-flex items-center justify-between dark:bg-gray-800 dark:text-white dark:border-gray-600 dark:hover:bg-gray-600 dark:focus:ring-gray-700">
+                            class="w-full text-gray-900 bg-white border border-gray-300 hover:bg-gray-100 focus-ring font-medium rounded-lg text-sm px-2.5 py-1.5 text-left inline-flex items-center justify-between dark:bg-gray-800 dark:text-white dark:border-gray-600 dark:hover:bg-gray-700">
                         <div class="flex items-center space-x-2">
                             <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" class="size-5">
                                 <path fill-rule="evenodd" d="M2.25 13.5a8.25 8.25 0 0 1 8.25-8.25.75.75 0 0 1 .75.75v6.75H18a.75.75 0 0 1 .75.75 8.25 8.25 0 0 1-16.5 0Z" clip-rule="evenodd" />
@@ -97,7 +97,7 @@
 
                     <!-- Dropdown Menu -->
                     <div x-cloak x-show="open" @click.away="open = false" @keydown.escape.window="open = false" x-transition
-                         class="absolute z-10 w-full mt-1 bg-white rounded-lg shadow-lg border border-gray-200 dark:bg-gray-800 dark:border-gray-600">
+                         class="absolute z-50 w-full mt-1 bg-white rounded-lg shadow-lg border border-gray-200 dark:bg-gray-800 dark:border-gray-700">
                         <div class="py-1">
                             <button type="button" @click="toggleStatus('running')" class="block w-full text-left px-4 py-2 text-sm text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-600 transition-colors duration-200 cursor-pointer">
                                 <div class="flex items-center justify-between">
@@ -149,7 +149,7 @@
                 <div x-data="{ open: false }" class="relative">
                     <!-- Dropdown Button -->
                     <button @click="open = !open" :aria-expanded="open" aria-haspopup="true" type="button"
-                            class="w-full text-gray-900 bg-white border border-gray-300 focus:outline-none hover:bg-gray-100 focus:ring-4 focus:ring-gray-100 font-medium rounded-lg text-sm px-2.5 py-1.5 text-left inline-flex items-center justify-between dark:bg-gray-800 dark:text-white dark:border-gray-600 dark:hover:bg-gray-600 dark:focus:ring-gray-700">
+                            class="w-full text-gray-900 bg-white border border-gray-300 hover:bg-gray-100 focus-ring font-medium rounded-lg text-sm px-2.5 py-1.5 text-left inline-flex items-center justify-between dark:bg-gray-800 dark:text-white dark:border-gray-600 dark:hover:bg-gray-700">
                         <div class="flex items-center space-x-2">
                             <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" class="size-5">
                                 <path fill-rule="evenodd" d="M3 6a3 3 0 0 1 3-3h2.25a3 3 0 0 1 3 3v2.25a3 3 0 0 1-3 3H6a3 3 0 0 1-3-3V6Zm9.75 0a3 3 0 0 1 3-3H18a3 3 0 0 1 3 3v2.25a3 3 0 0 1-3 3h-2.25a3 3 0 0 1-3-3V6ZM3 15.75a3 3 0 0 1 3-3h2.25a3 3 0 0 1 3 3V18a3 3 0 0 1-3 3H6a3 3 0 0 1-3-3v-2.25Zm9.75 0a3 3 0 0 1 3-3H18a3 3 0 0 1 3 3V18a3 3 0 0 1-3 3h-2.25a3 3 0 0 1-3-3v-2.25Z" clip-rule="evenodd"/>
@@ -163,7 +163,7 @@
 
                     <!-- Dropdown Menu -->
                     <div x-cloak x-show="open" @click.away="open = false" @keydown.escape.window="open = false" x-transition
-                         class="absolute z-10 w-full mt-1 bg-white rounded-lg shadow-lg border border-gray-200 dark:bg-gray-800 dark:border-gray-600">
+                         class="absolute z-50 w-full mt-1 bg-white rounded-lg shadow-lg border border-gray-200 dark:bg-gray-800 dark:border-gray-700">
                         <div class="py-1">
                             <button type="button" @click="toggleType('call')" class="block w-full text-left px-4 py-2 text-sm text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-600 transition-colors duration-200 cursor-pointer">
                                 <div class="flex items-center justify-between">
@@ -222,7 +222,7 @@
             <div class="w-full">
                 <div x-data="{ open: false, selectedText: getTimeRangeText() }" class="relative">
                     <button @click="open = !open" :aria-expanded="open" aria-haspopup="true" type="button"
-                            class="w-full text-gray-900 bg-white border border-gray-300 focus:outline-none hover:bg-gray-100 focus:ring-4 focus:ring-gray-100 font-medium rounded-lg text-sm px-2.5 py-1.5 text-left inline-flex items-center justify-between dark:bg-gray-800 dark:text-white dark:border-gray-600 dark:hover:bg-gray-600 dark:focus:ring-gray-700">
+                            class="w-full text-gray-900 bg-white border border-gray-300 hover:bg-gray-100 focus-ring font-medium rounded-lg text-sm px-2.5 py-1.5 text-left inline-flex items-center justify-between dark:bg-gray-800 dark:text-white dark:border-gray-600 dark:hover:bg-gray-700">
                         <div class="flex items-center space-x-2">
                             <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" class="size-5">
                                 <path d="M12.75 12.75a.75.75 0 1 1-1.5 0 .75.75 0 0 1 1.5 0ZM7.5 15.75a.75.75 0 1 0 0-1.5.75.75 0 0 0 0 1.5ZM8.25 17.25a.75.75 0 1 1-1.5 0 .75.75 0 0 1 1.5 0ZM9.75 15.75a.75.75 0 1 0 0-1.5.75.75 0 0 0 0 1.5ZM10.5 17.25a.75.75 0 1 1-1.5 0 .75.75 0 0 1 1.5 0ZM12 15.75a.75.75 0 1 0 0-1.5.75.75 0 0 0 0 1.5ZM12.75 17.25a.75.75 0 1 1-1.5 0 .75.75 0 0 1 1.5 0ZM14.25 15.75a.75.75 0 1 0 0-1.5.75.75 0 0 0 0 1.5ZM15 17.25a.75.75 0 1 1-1.5 0 .75.75 0 0 1 1.5 0ZM16.5 15.75a.75.75 0 1 0 0-1.5.75.75 0 0 0 0 1.5ZM15 12.75a.75.75 0 1 1-1.5 0 .75.75 0 0 1 1.5 0ZM16.5 13.5a.75.75 0 1 0 0-1.5.75.75 0 0 0 0 1.5Z"/>
@@ -236,7 +236,7 @@
                     </button>
 
                     <div x-cloak x-show="open" @click.away="open = false" @keydown.escape.window="open = false" x-transition
-                         class="absolute z-10 w-full mt-1 bg-white rounded-lg shadow-lg border border-gray-200 dark:bg-gray-800 dark:border-gray-600">
+                         class="absolute z-50 w-full mt-1 bg-white rounded-lg shadow-lg border border-gray-200 dark:bg-gray-800 dark:border-gray-700">
                         <div class="py-1">
                             <button type="button" @click="setTimeRange('all', 'All Time'); open = false" class="block w-full text-left px-4 py-2 text-sm text-gray-700 dark:text-gray-200 hover:bg-gray-100 dark:hover:bg-gray-600 transition-colors duration-200 cursor-pointer">
                                 <div class="flex items-center justify-between">
@@ -302,7 +302,7 @@
     </div>
 
     <!-- Desktop Table View with Value Inspector -->
-    <div class="hidden md:flex flex-col rounded-lg backdrop-blur-sm border border-gray-200 dark:border-gray-800 transition-all duration-300 overflow-hidden bg-white dark:bg-gray-900 text-gray-800 dark:text-white">
+    <div class="hidden md:flex flex-col rounded-lg backdrop-blur-sm border border-gray-200 dark:border-gray-700 transition-all duration-300 overflow-hidden bg-white dark:bg-gray-800 text-gray-800 dark:text-white">
         <!-- Header with Inspector Toggle -->
         <div class="bg-gray-50 dark:bg-gray-800 border-b border-gray-200 dark:border-gray-700 px-3 py-2 flex justify-end">
             <button id="inspector-toggle-btn" class="inline-flex items-center p-1.5 text-sm font-medium text-gray-700 dark:text-gray-300 bg-white dark:bg-gray-800 border border-gray-300 dark:border-gray-600 rounded hover:bg-gray-50 dark:hover:bg-gray-600 transition-colors" title="Value Inspector ON/OFF">
@@ -398,21 +398,21 @@
                                 <div class="flex items-center gap-1">
                                     <span class="px-2 py-1 text-xs font-semibold rounded-full bg-gray-100 text-gray-800 dark:bg-gray-800 dark:text-gray-200">{{ run.run_type }}</span>
                                     {% if run.is_retry %}
-                                        <span class="px-1.5 py-0.5 text-xs font-medium rounded bg-red-100 text-red-700 dark:bg-red-900 dark:text-red-300">↻{{ run.retry_attempt }}</span>
+                                        <span class="badge badge-pending">↻{{ run.retry_attempt }}</span>
                                     {% endif %}
                                 </div>
                             </td>
                             <td class="px-3 md:px-6 py-4 whitespace-nowrap">
                                 {% if run.status == "failed" %}
-                                    <span class="px-2 py-1 text-xs font-semibold rounded-full bg-red-100 text-red-800 dark:bg-red-900 dark:text-red-200">{{ run.status }}</span>
+                                    <span class="badge badge-failure">{{ run.status }}</span>
                                 {% else if run.status == "pending_retry" %}
-                                    <span class="px-2 py-1 text-xs font-semibold rounded-full bg-red-100 text-red-800 dark:bg-red-900 dark:text-red-200">pending retry</span>
+                                    <span class="badge badge-pending">pending retry</span>
                                 {% else if run.status == "cancelled" %}
-                                    <span class="px-2 py-1 text-xs font-semibold rounded-full bg-gray-100 text-gray-800 dark:bg-gray-800 dark:text-gray-300">{{ run.status }}</span>
+                                    <span class="badge badge-neutral">{{ run.status }}</span>
                                 {% else if run.is_completed %}
-                                    <span class="px-2 py-1 text-xs font-semibold rounded-full bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-200">{{ run.status }}</span>
+                                    <span class="badge badge-success">{{ run.status }}</span>
                                 {% else %}
-                                    <span class="px-2 py-1 text-xs font-semibold rounded-full bg-blue-100 text-blue-800 dark:bg-blue-900 dark:text-blue-200">{{ run.status }}</span>
+                                    <span class="badge badge-running">{{ run.status }}</span>
                                 {% endif %}
                             </td>
                             <td class="px-3 md:px-6 py-4 whitespace-nowrap text-xs text-gray-700 dark:text-gray-300">
@@ -422,7 +422,7 @@
                                 {% if run.is_completed %}
                                     {{ run.stop_time_formatted }}
                                 {% else %}
-                                    <span class="text-blue-600 dark:text-blue-400">Running</span>
+                                    <span class="badge badge-running">Running</span>
                                 {% endif %}
                             </td>
                             <td class="px-3 md:px-6 py-4 whitespace-nowrap text-xs text-gray-500 dark:text-gray-400">
@@ -485,14 +485,14 @@
 
         <!-- Pagination -->
         {% if has_prev_page || has_next_page %}
-        <div class="px-3 md:px-6 py-4 border-t border-gray-200 dark:border-gray-800">
+        <div class="px-3 md:px-6 py-4 border-t border-gray-200 dark:border-gray-700">
             <div class="flex items-center justify-between">
                 <div class="flex-1 flex justify-between sm:hidden">
                     {% if has_prev_page %}
-                    <button onclick="window.runsListComponent && window.runsListComponent.goToPage({{ current_page_num - 1 }})" class="relative inline-flex items-center px-4 py-2 border border-gray-300 dark:border-gray-800 text-sm font-medium rounded-md text-gray-700 dark:text-gray-300 bg-white dark:bg-gray-800 hover:bg-gray-100 dark:hover:bg-gray-700">Previous</button>
+                    <button onclick="window.runsListComponent && window.runsListComponent.goToPage({{ current_page_num - 1 }})" class="relative inline-flex items-center px-3 py-2 border border-gray-300 dark:border-gray-700 text-xs font-medium rounded-md text-gray-700 dark:text-gray-300 bg-white dark:bg-gray-800 hover:bg-gray-100 dark:hover:bg-gray-700">Previous</button>
                     {% endif %}
                     {% if has_next_page %}
-                    <button onclick="window.runsListComponent && window.runsListComponent.goToPage({{ current_page_num + 1 }})" class="ml-3 relative inline-flex items-center px-4 py-2 border border-gray-300 dark:border-gray-800 text-sm font-medium rounded-md text-gray-700 dark:text-gray-300 bg-white dark:bg-gray-800 hover:bg-gray-100 dark:hover:bg-gray-700">Next</button>
+                    <button onclick="window.runsListComponent && window.runsListComponent.goToPage({{ current_page_num + 1 }})" class="ml-3 relative inline-flex items-center px-3 py-2 border border-gray-300 dark:border-gray-700 text-xs font-medium rounded-md text-gray-700 dark:text-gray-300 bg-white dark:bg-gray-800 hover:bg-gray-100 dark:hover:bg-gray-700">Next</button>
                     {% endif %}
                 </div>
                 <div class="hidden sm:flex-1 sm:flex sm:items-center sm:justify-between">
@@ -504,7 +504,7 @@
                     <div>
                         <nav class="relative z-0 inline-flex rounded-md shadow-sm -space-x-px" aria-label="Pagination">
                             {% if has_prev_page %}
-                            <button onclick="window.runsListComponent && window.runsListComponent.goToPage({{ current_page_num - 1 }})" class="relative inline-flex items-center px-2 py-2 rounded-l-md border border-gray-300 dark:border-gray-800 bg-white dark:bg-gray-800 text-sm font-medium text-gray-500 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700">
+                            <button onclick="window.runsListComponent && window.runsListComponent.goToPage({{ current_page_num - 1 }})" class="relative inline-flex items-center px-2 py-2 rounded-l-md border border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-800 text-sm font-medium text-gray-500 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700">
                                 <span class="sr-only">Previous</span>
                                 <svg class="h-5 w-5" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor">
                                     <path fill-rule="evenodd" d="M12.707 5.293a1 1 0 010 1.414L9.414 10l3.293 3.293a1 1 0 01-1.414 1.414l-4-4a1 1 0 010-1.414l4-4a1 1 0 011.414 0z" clip-rule="evenodd" />
@@ -514,14 +514,14 @@
 
                             {% for page_num in start_page..=end_page %}
                             {% if page_num == current_page_num %}
-                            <span class="relative inline-flex items-center px-4 py-2 border border-gray-300 dark:border-gray-800 bg-hot-red-500 text-sm font-medium text-white">{{ page_num }}</span>
+                            <span aria-current="page" class="relative inline-flex items-center px-3 sm:px-4 py-2 border border-gray-300 dark:border-gray-700 bg-hot-red-700 text-xs sm:text-sm font-medium text-white">{{ page_num }}</span>
                             {% else %}
-                            <button onclick="window.runsListComponent && window.runsListComponent.goToPage({{ page_num }})" class="relative inline-flex items-center px-4 py-2 border border-gray-300 dark:border-gray-800 bg-white dark:bg-gray-800 text-sm font-medium text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700">{{ page_num }}</button>
+                            <button onclick="window.runsListComponent && window.runsListComponent.goToPage({{ page_num }})" class="relative inline-flex items-center px-3 sm:px-4 py-2 border border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-800 text-xs sm:text-sm font-medium text-gray-700 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700">{{ page_num }}</button>
                             {% endif %}
                             {% endfor %}
 
                             {% if has_next_page %}
-                            <button onclick="window.runsListComponent && window.runsListComponent.goToPage({{ current_page_num + 1 }})" class="relative inline-flex items-center px-2 py-2 rounded-r-md border border-gray-300 dark:border-gray-800 bg-white dark:bg-gray-800 text-sm font-medium text-gray-500 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700">
+                            <button onclick="window.runsListComponent && window.runsListComponent.goToPage({{ current_page_num + 1 }})" class="relative inline-flex items-center px-2 py-2 rounded-r-md border border-gray-300 dark:border-gray-700 bg-white dark:bg-gray-800 text-sm font-medium text-gray-500 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-700">
                                 <span class="sr-only">Next</span>
                                 <svg class="h-5 w-5" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor">
                                     <path fill-rule="evenodd" d="M7.293 14.707a1 1 0 010-1.414L10.586 10 7.293 6.707a1 1 0 011.414-1.414l4 4a1 1 0 010 1.414l-4 4a1 1 0 01-1.414 0z" clip-rule="evenodd" />
@@ -538,8 +538,8 @@
         </div>
 
         <!-- Value Inspector Panel (initially hidden) -->
-        <div id="value-inspector-panel" class="hidden w-2/5 flex-shrink-0 border-l border-gray-200 dark:border-gray-800 flex flex-col" style="min-width: 20rem;">
-            <div class="bg-gray-100 dark:bg-gray-800 flex-shrink-0 border-b border-gray-200 dark:border-gray-800">
+        <div id="value-inspector-panel" class="hidden w-2/5 flex-shrink-0 border-l border-gray-200 dark:border-gray-700 flex flex-col" style="min-width: 20rem;">
+            <div class="bg-gray-100 dark:bg-gray-800 flex-shrink-0 border-b border-gray-200 dark:border-gray-700">
                 <div class="px-3 py-2 flex items-center justify-between" style="min-width: 18rem;">
                     <div class="text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider truncate" style="max-width: 12rem;">
                         Value Inspector
@@ -575,7 +575,7 @@
     <div class="md:hidden p-4 overflow-auto">
         <div class="space-y-4">
         {% for run in runs %}
-        <div class="mobile-card backdrop-blur-sm border border-gray-200 dark:border-gray-800 rounded-lg bg-white dark:bg-gray-900 text-gray-800 dark:text-white p-4">
+        <div class="mobile-card backdrop-blur-sm border border-gray-200 dark:border-gray-700 rounded-lg bg-white dark:bg-gray-800 text-gray-800 dark:text-white p-4">
             <div class="flex justify-between items-start mb-3">
                 <div class="text-sm font-medium text-gray-900 dark:text-white">
                     Run <div class="uuid-container inline-flex items-center gap-1">
@@ -588,15 +588,15 @@
                     </div>
                 </div>
                 {% if run.status == "failed" %}
-                    <span class="px-2 inline-flex text-xs leading-5 font-semibold rounded-full bg-red-100 text-red-800 dark:bg-red-900 dark:text-red-200">{{ run.status }}</span>
+                    <span class="badge badge-failure">{{ run.status }}</span>
                 {% else if run.status == "pending_retry" %}
-                    <span class="px-2 inline-flex text-xs leading-5 font-semibold rounded-full bg-red-100 text-red-800 dark:bg-red-900 dark:text-red-200">pending retry</span>
+                    <span class="badge badge-pending">pending retry</span>
                 {% else if run.status == "cancelled" %}
-                    <span class="px-2 inline-flex text-xs leading-5 font-semibold rounded-full bg-gray-100 text-gray-800 dark:bg-gray-800 dark:text-gray-300">{{ run.status }}</span>
+                    <span class="badge badge-neutral">{{ run.status }}</span>
                 {% else if run.is_completed %}
-                    <span class="px-2 inline-flex text-xs leading-5 font-semibold rounded-full bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-200">{{ run.status }}</span>
+                    <span class="badge badge-success">{{ run.status }}</span>
                 {% else %}
-                    <span class="px-2 inline-flex text-xs leading-5 font-semibold rounded-full bg-blue-100 text-blue-800 dark:bg-blue-900 dark:text-blue-200">{{ run.status }}</span>
+                    <span class="badge badge-running">{{ run.status }}</span>
                 {% endif %}
             </div>
 
@@ -606,7 +606,7 @@
                     <div class="flex items-center gap-1">
                         <span class="px-2 py-1 text-xs font-semibold rounded-full bg-gray-100 text-gray-800 dark:bg-gray-800 dark:text-gray-200">{{ run.run_type }}</span>
                         {% if run.is_retry %}
-                            <span class="px-1.5 py-0.5 text-xs font-medium rounded bg-red-100 text-red-700 dark:bg-red-900 dark:text-red-300">↻{{ run.retry_attempt }}</span>
+                            <span class="badge badge-pending">↻{{ run.retry_attempt }}</span>
                         {% endif %}
                     </div>
                 </div>
@@ -648,7 +648,7 @@
                 {% endmatch %}
             </div>
 
-            <div class="mt-4 pt-3 border-t border-gray-100 dark:border-gray-800">
+            <div class="mt-4 pt-3 border-t border-gray-100 dark:border-gray-700">
                 <a href="/runs/{{ run.run_id }}" class="link transition-all duration-200 font-medium">View Details</a>
             </div>
         </div>
@@ -768,9 +768,9 @@ function showRunInInspector(row) {
     if (runType) {
         let typeHtml = `<span class="px-2 py-1 rounded-full bg-gray-200 text-gray-800 dark:bg-gray-800 dark:text-gray-200">${escapeHtml(runType)}</span>`;
         if (retriesExhausted) {
-            typeHtml += ` <span class="px-1.5 py-0.5 text-xs font-medium rounded bg-red-100 text-red-700 dark:bg-red-900 dark:text-red-300">↻✗</span>`;
+            typeHtml += ` <span class="badge badge-pending">↻✗</span>`;
         } else if (isRetry) {
-            typeHtml += ` <span class="px-1.5 py-0.5 text-xs font-medium rounded bg-red-100 text-red-700 dark:bg-red-900 dark:text-red-300">↻${retryAttempt}</span>`;
+            typeHtml += ` <span class="badge badge-pending">↻${retryAttempt}</span>`;
         }
         html += `
             <div>
@@ -782,16 +782,16 @@ function showRunInInspector(row) {
 
     // Status
     if (status) {
-        const statusClass = status === 'succeeded' ? 'bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-200' :
-                           status === 'failed' ? 'bg-red-100 text-red-800 dark:bg-red-900 dark:text-red-200' :
-                           status === 'cancelled' ? 'bg-gray-200 text-gray-800 dark:bg-gray-800 dark:text-gray-300' :
-                           status === 'pending_retry' ? 'bg-red-100 text-red-800 dark:bg-red-900 dark:text-red-200' :
-                           'bg-blue-100 text-blue-800 dark:bg-blue-900 dark:text-blue-200';
+        const statusClass = status === 'succeeded' ? 'badge badge-success' :
+                           status === 'failed' ? 'badge badge-failure' :
+                           status === 'cancelled' ? 'badge badge-neutral' :
+                           status === 'pending_retry' ? 'badge badge-pending' :
+                           'badge badge-running';
         html += `
             <div>
                 <div class="text-xs font-medium text-gray-500 dark:text-gray-400 uppercase mb-1">Status</div>
                 <div class="bg-gray-100 dark:bg-gray-800 rounded px-2 py-1.5 text-xs">
-                    <span class="px-2 py-1 rounded-full ${statusClass}">${escapeHtml(status)}</span>
+                    <span class="${statusClass}">${escapeHtml(status)}</span>
                 </div>
             </div>
         `;

@@ -338,7 +338,7 @@
 
         if (!hotBtn || !jsonBtn) return;
 
-        var activeClass = 'bg-hot-red-500 text-white';
+        var activeClass = 'bg-hot-red-700 text-white';
         var inactiveClass = 'bg-gray-200 dark:bg-gray-700 text-gray-700 dark:text-gray-300 hover:bg-gray-300 dark:hover:bg-gray-600';
 
         hotBtn.className = 'px-2 py-1 text-xs rounded transition-colors ' + (activeFormat === 'hot' ? activeClass : inactiveClass);
@@ -717,7 +717,7 @@
         }
 
         var label = 'TXT';
-        var color = '#888888';
+        var color = '#767676';
         if (lower.endsWith('.skill.md')) {
             label = 'SK';
             color = '#a78bfa';
@@ -910,7 +910,7 @@
                 line.className = 'flex gap-2 min-w-0 font-mono';
 
                 var number = document.createElement('span');
-                number.className = 'text-gray-400 dark:text-gray-600 flex-shrink-0';
+                number.className = 'text-gray-400 dark:text-gray-500 flex-shrink-0';
                 number.textContent = String(match.line);
 
                 var text = document.createElement('span');
@@ -1002,7 +1002,7 @@
             row.className = lineNumber === targetLine ? 'bg-hot-red-50 dark:bg-hot-red-900/20' : '';
 
             var gutter = document.createElement('td');
-            gutter.className = 'select-none text-right text-gray-400 dark:text-gray-600 pr-4 pl-3 py-0 align-top border-r border-gray-200 dark:border-gray-800 w-1';
+            gutter.className = 'select-none text-right text-gray-400 dark:text-gray-500 pr-4 pl-3 py-0 align-top border-r border-gray-200 dark:border-gray-800 w-1';
             gutter.textContent = String(lineNumber);
 
             var codeCell = document.createElement('td');
@@ -1289,11 +1289,11 @@
                 // Visual feedback
                 var originalTitle = button.title;
                 button.title = 'Copied!';
-                button.classList.add('text-green-600', 'dark:text-green-400');
+                button.classList.add('text-green-700', 'dark:text-green-400');
 
                 setTimeout(function() {
                     button.title = originalTitle;
-                    button.classList.remove('text-green-600', 'dark:text-green-400');
+                    button.classList.remove('text-green-700', 'dark:text-green-400');
                 }, 1000);
             }
         }

@@ -1,9 +1,9 @@
 {% extends "private_layout.html" %}
 
 {% block content %}
-<div class="max-w-7xl mx-auto px-4 py-6 sm:px-6 lg:px-8">
-    <div class="pb-5 mb-6">
-        <h1 class="text-2xl font-bold leading-6 text-gray-900 dark:text-gray-100">New Context Variable</h1>
+<div class="max-w-7xl mx-auto py-6">
+    <div class="mb-6">
+        <h1 class="text-xl sm:text-2xl font-bold leading-6 text-gray-900 dark:text-gray-100">New Context Variable</h1>
         <p class="mt-2 max-w-4xl text-sm text-gray-500 dark:text-gray-400">
             Create new context variable for <span class="font-medium">{{ scope_display }}</span>
         </p>
@@ -40,7 +40,7 @@
                 </svg>
                 Environment Level
             </span>
-            <p class="mt-2 text-sm text-gray-500 dark:text-gray-400">This variable will be available to all projects in this environment.</p>
+            <p class="mt-1 text-sm text-gray-500 dark:text-gray-400">This variable will be available to all projects in this environment.</p>
             {% else %}
             <span class="inline-flex items-center rounded-full bg-purple-100 dark:bg-purple-900/30 px-3 py-1 text-sm font-medium text-purple-800 dark:text-purple-300">
                 <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4 mr-1.5" viewBox="0 0 24 24" fill="currentColor">
@@ -48,12 +48,12 @@
                 </svg>
                 Project: {{ scope }}
             </span>
-            <p class="mt-2 text-sm text-gray-500 dark:text-gray-400">This variable will only be available to this specific project and will override any environment variable with the same key.</p>
+            <p class="mt-1 text-sm text-gray-500 dark:text-gray-400">This variable will only be available to this specific project and will override any environment variable with the same key.</p>
             {% endif %}
         </div>
 
         <!-- Form Card -->
-        <div class="bg-white dark:bg-gray-800 rounded-lg shadow-md p-6">
+        <div class="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 p-6">
             <form method="post" action="/contexts/{{ scope }}/new">
                 <!-- Key Field -->
                 <div class="mb-6">
@@ -69,7 +69,7 @@
                         value="{{ key }}"
                         class="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-md focus:outline-none focus:ring-2 focus:ring-hot-red-500 dark:bg-gray-700 dark:text-white font-mono"
                     />
-                    <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">
+                    <p class="mt-1 text-sm text-gray-500 dark:text-gray-400">
                         A unique identifier for this context variable (e.g., API_KEY, DATABASE_URL)
                     </p>
                 </div>
@@ -87,7 +87,7 @@
                         placeholder='"your-secret-value"'
                         class="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-md focus:outline-none focus:ring-2 focus:ring-hot-red-500 dark:bg-gray-700 dark:text-white font-mono text-sm"
                     >{{ value }}</textarea>
-                    <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">
+                    <p class="mt-1 text-sm text-gray-500 dark:text-gray-400">
                         Must be valid Hot code. Examples: <code class="bg-gray-100 dark:bg-gray-700 px-1 rounded">"string value"</code>, <code class="bg-gray-100 dark:bg-gray-700 px-1 rounded">42</code>, <code class="bg-gray-100 dark:bg-gray-700 px-1 rounded">{"key": "value"}</code>
                     </p>
                 </div>
@@ -104,7 +104,7 @@
                         placeholder="A brief description of what this context variable is used for"
                         class="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-md focus:outline-none focus:ring-2 focus:ring-hot-red-500 dark:bg-gray-700 dark:text-white"
                     >{{ description }}</textarea>
-                    <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">
+                    <p class="mt-1 text-sm text-gray-500 dark:text-gray-400">
                         Optional: Help your team understand the purpose of this variable
                     </p>
                 </div>
@@ -129,7 +129,7 @@
                 <div class="flex items-center justify-end space-x-3">
                     <a
                         href="{% if scope == "env" %}/contexts?tab=env{% else %}/contexts?tab=project&project={{ scope }}{% endif %}"
-                        class="px-4 py-2 border border-gray-300 dark:border-gray-600 rounded-md text-sm font-medium text-gray-700 dark:text-gray-300 bg-white dark:bg-gray-700 hover:bg-gray-50 dark:hover:bg-gray-600 transition-all"
+                        class="btn btn-secondary"
                     >
                         Cancel
                     </a>

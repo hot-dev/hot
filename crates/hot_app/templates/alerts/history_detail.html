@@ -1,7 +1,7 @@
 {% extends "private_layout.html" %}
 
 {% block content %}
-<div class="py-2">
+<div class="py-6">
     <div class="mb-6 border-b border-gray-200 dark:border-gray-700">
         <nav class="-mb-px flex space-x-4 sm:space-x-8" aria-label="Tabs">
             <a href="/settings/alerts/destinations"
@@ -24,7 +24,7 @@
     </div>
 
     <!-- Alert Info -->
-    <div class="bg-white dark:bg-gray-800 rounded-lg shadow-md p-6 mb-6">
+    <div class="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 p-6 mb-6">
         <h2 class="text-lg font-semibold text-gray-900 dark:text-white mb-4">Alert Information</h2>
         <dl class="grid grid-cols-1 gap-x-4 gap-y-4 sm:grid-cols-2">
             <div>
@@ -49,7 +49,7 @@
     </div>
 
     <!-- Alert Data -->
-    <div class="bg-white dark:bg-gray-800 rounded-lg shadow-md p-6 mb-6">
+    <div class="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 p-6 mb-6">
         <h2 class="text-lg font-semibold text-gray-900 dark:text-white mb-4">Alert Data</h2>
         <div class="relative bg-gray-50 dark:bg-gray-900 rounded-lg p-3 border border-gray-200 dark:border-gray-700" style="max-height: 12rem; overflow-y: auto;">
             <button onclick="openAlertDataWithFormats()" class="absolute top-2 right-2 text-gray-400 hover:text-gray-600 dark:text-gray-500 dark:hover:text-gray-300 transition-colors p-1 rounded bg-gray-100 dark:bg-gray-800" title="View full data">
@@ -71,7 +71,7 @@
     </div>
 
     <!-- Deliveries -->
-    <div class="bg-white dark:bg-gray-800 rounded-lg shadow-md overflow-hidden">
+    <div class="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 overflow-hidden">
         <div class="px-6 py-4 border-b border-gray-200 dark:border-gray-700">
             <h2 class="text-lg font-semibold text-gray-900 dark:text-white">Deliveries ({{ delivery_details.len() }})</h2>
         </div>
@@ -80,32 +80,32 @@
             <table class="w-full divide-y divide-gray-200 dark:divide-gray-700">
                 <thead class="bg-gray-100 dark:bg-gray-900">
                     <tr>
-                        <th scope="col" class="px-6 py-3 text-left text-xs font-medium text-gray-700 dark:text-gray-300 uppercase tracking-wider">
+                        <th scope="col" class="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">
                             Destination
                         </th>
-                        <th scope="col" class="px-6 py-3 text-left text-xs font-medium text-gray-700 dark:text-gray-300 uppercase tracking-wider">
+                        <th scope="col" class="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">
                             Type
                         </th>
-                        <th scope="col" class="px-6 py-3 text-left text-xs font-medium text-gray-700 dark:text-gray-300 uppercase tracking-wider">
+                        <th scope="col" class="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">
                             Status
                         </th>
-                        <th scope="col" class="px-6 py-3 text-left text-xs font-medium text-gray-700 dark:text-gray-300 uppercase tracking-wider">
+                        <th scope="col" class="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">
                             Attempts
                         </th>
-                        <th scope="col" class="px-6 py-3 text-left text-xs font-medium text-gray-700 dark:text-gray-300 uppercase tracking-wider">
+                        <th scope="col" class="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">
                             Sent At
                         </th>
                     </tr>
                 </thead>
                 <tbody class="bg-white dark:bg-gray-800 divide-y divide-gray-200 dark:divide-gray-700">
                     {% for detail in delivery_details %}
-                    <tr class="hover:bg-gray-100 dark:hover:bg-[#222] transition-colors duration-150">
+                    <tr class="hover:bg-gray-100 dark:hover:bg-gray-700 transition-colors duration-150">
                         <td class="px-6 py-4 whitespace-nowrap">
                             <div class="text-sm font-medium text-gray-900 dark:text-white">
                                 {% if let Some(dest) = &detail.destination %}
                                 {{ dest.name }}
                                 {% else %}
-                                <span class="text-gray-400">Unknown</span>
+                                <span class="text-gray-500 dark:text-gray-400">Unknown</span>
                                 {% endif %}
                             </div>
                             {% if let Some(email) = &detail.resolved_user_email %}
@@ -133,41 +133,41 @@
                                 {% endmatch %}
                             </span>
                             {% else %}
-                            <span class="text-gray-400">-</span>
+                            <span class="text-gray-500 dark:text-gray-400">-</span>
                             {% endif %}
                         </td>
                         <td class="px-6 py-4 whitespace-nowrap">
                             {% match detail.delivery.status_id %}
                                 {% when 1 %}
-                                <span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-yellow-100 text-yellow-800 dark:bg-yellow-900 dark:text-yellow-300">
-                                    <svg class="w-2 h-2 mr-1 animate-pulse" fill="currentColor" viewBox="0 0 8 8">
+                                <span class="badge badge-pending">
+                                    <svg class="w-2 h-2 animate-pulse" fill="currentColor" viewBox="0 0 8 8">
                                         <circle cx="4" cy="4" r="3" />
                                     </svg>
                                     Pending
                                 </span>
                                 {% when 2 %}
-                                <span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-300">
-                                    <svg class="w-2 h-2 mr-1" fill="currentColor" viewBox="0 0 8 8">
+                                <span class="badge badge-success">
+                                    <svg class="w-2 h-2" fill="currentColor" viewBox="0 0 8 8">
                                         <circle cx="4" cy="4" r="3" />
                                     </svg>
                                     Sent
                                 </span>
                                 {% when 3 %}
-                                <span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-red-100 text-red-800 dark:bg-red-900 dark:text-red-300">
-                                    <svg class="w-2 h-2 mr-1" fill="currentColor" viewBox="0 0 8 8">
+                                <span class="badge badge-failure">
+                                    <svg class="w-2 h-2" fill="currentColor" viewBox="0 0 8 8">
                                         <circle cx="4" cy="4" r="3" />
                                     </svg>
                                     Failed
                                 </span>
                                 {% when 4 %}
-                                <span class="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-orange-100 text-orange-800 dark:bg-orange-900 dark:text-orange-300">
-                                    <svg class="w-2 h-2 mr-1 animate-pulse" fill="currentColor" viewBox="0 0 8 8">
+                                <span class="badge badge-pending">
+                                    <svg class="w-2 h-2 animate-pulse" fill="currentColor" viewBox="0 0 8 8">
                                         <circle cx="4" cy="4" r="3" />
                                     </svg>
                                     Retrying
                                 </span>
                                 {% when _ %}
-                                <span class="text-gray-400">Unknown</span>
+                                <span class="text-gray-500 dark:text-gray-400">Unknown</span>
                             {% endmatch %}
                         </td>
                         <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500 dark:text-gray-400">
@@ -177,7 +177,7 @@
                             {% if let Some(sent_at) = detail.delivery.sent_at %}
                             {{ sent_at|tz(page_context.display_timezone, page_context.timezone_abbreviation, "%Y-%m-%d %H:%M:%S") }}
                             {% else %}
-                            <span class="text-gray-400">-</span>
+                            <span class="text-gray-500 dark:text-gray-400">-</span>
                             {% endif %}
                         </td>
                     </tr>
@@ -205,7 +205,7 @@
 
     <!-- Back link -->
     <div class="mt-6">
-        <a href="/settings/alerts/history" class="text-hot-red-500 hover:text-hot-red-600">
+        <a href="/settings/alerts/history" class="link">
             &larr; Back to Alert History
         </a>
     </div>

@@ -1,9 +1,9 @@
 {% extends "private_layout.html" %}
 
 {% block content %}
-<div class="py-2 px-2 sm:px-0">
+<div class="py-6">
     <div class="max-w-2xl mx-auto">
-        <div class="bg-white dark:bg-gray-800 rounded-lg shadow-md p-6">
+        <div class="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 p-6">
             <!-- Header -->
             <div class="flex items-center justify-between mb-6">
                 <div>
@@ -102,7 +102,7 @@
                     <dt class="text-sm font-medium text-gray-500 dark:text-gray-400 mb-2">Metadata</dt>
                     <dd>
                         <pre class="text-xs bg-gray-50 dark:bg-gray-900 border border-gray-200 dark:border-gray-700 rounded-md px-3 py-2 overflow-x-auto text-gray-900 dark:text-white font-mono">{{ meta }}</pre>
-                        <p class="mt-1 text-xs text-gray-500 dark:text-gray-400">
+                        <p class="mt-1 text-sm text-gray-500 dark:text-gray-400">
                             Available at runtime as <code class="bg-gray-100 dark:bg-gray-700 px-1 rounded">req.auth.service-key.meta</code>
                         </p>
                     </dd>
@@ -114,7 +114,7 @@
             {% if service_key.revoked_at.is_none() %}
             <div class="mt-6 pt-4 border-t border-gray-200 dark:border-gray-700">
                 <form id="revoke-key-form" method="POST" action="/service-keys/{{ service_key.service_key_id }}/revoke">
-                    <button type="button" onclick="showConfirm('Revoke Service Key', 'Are you sure you want to revoke this service key? This action cannot be undone.', () => document.getElementById('revoke-key-form').submit(), { confirmText: 'Revoke', type: 'warning' })" class="btn btn-danger">
+                    <button type="button" onclick="showConfirm('Revoke Service Key', 'Are you sure you want to revoke this service key? This action cannot be undone.', () => document.getElementById('revoke-key-form').submit(), { confirmText: 'Revoke', type: 'warning', destructive: true })" class="btn btn-danger">
                         <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4 mr-2" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M18.364 18.364A9 9 0 005.636 5.636m12.728 12.728A9 9 0 015.636 5.636m12.728 12.728L5.636 5.636" />
                         </svg>

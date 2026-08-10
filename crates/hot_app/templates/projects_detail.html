@@ -1,9 +1,9 @@
 {% extends "private_layout.html" %}
 
 {% block content %}
-<div class="max-w-7xl mx-auto px-4 py-6 sm:px-6 lg:px-8">
-    <div class="pb-5 mb-6">
-        <h1 class="text-2xl font-bold leading-6 text-gray-900 dark:text-gray-100">{{ project.name }}</h1>
+<div class="max-w-7xl mx-auto py-6">
+    <div class="mb-6">
+        <h1 class="text-xl sm:text-2xl font-bold leading-6 text-gray-900 dark:text-gray-100">{{ project.name }}</h1>
         <p class="mt-2 max-w-4xl text-sm text-gray-500 dark:text-gray-400">
             Project overview and details
         </p>
@@ -25,9 +25,9 @@
 
     <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
         <!-- Project Information -->
-        <div class="bg-white dark:bg-gray-800 shadow overflow-hidden sm:rounded-lg">
+        <div class="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 overflow-hidden">
             <div class="px-4 py-5 sm:p-6">
-                <h3 class="text-lg leading-6 font-medium text-gray-900 dark:text-gray-100 mb-4">Project Information</h3>
+                <h3 class="text-lg font-semibold text-gray-900 dark:text-white mb-4">Project Information</h3>
                 <dl class="grid grid-cols-1 gap-x-4 gap-y-6 sm:grid-cols-2">
                     <div>
                         <dt class="text-sm font-medium text-gray-500 dark:text-gray-400">Project ID</dt>
@@ -63,7 +63,7 @@
                                     Active
                                 </span>
                                 <form id="deactivate-project-form" method="post" action="/projects/{{ project.name }}/toggle-active" class="inline">
-                                    <button type="button" class="inline-flex items-center px-2.5 py-1 border border-gray-300 dark:border-gray-600 text-xs font-medium rounded-md text-gray-700 dark:text-gray-300 bg-white dark:bg-gray-700 hover:bg-red-50 hover:border-red-300 hover:text-red-700 dark:hover:bg-red-900/20 dark:hover:border-red-700 dark:hover:text-red-400 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-hot-red-500 transition-colors" onclick="confirmDeactivateProject()">
+                                    <button type="button" class="inline-flex items-center px-2.5 py-1 border border-gray-300 dark:border-gray-600 text-xs font-medium rounded-md text-gray-700 dark:text-gray-300 bg-white dark:bg-gray-700 hover:bg-red-50 hover:border-red-300 hover:text-red-700 dark:hover:bg-red-900/20 dark:hover:border-red-700 dark:hover:text-red-400 focus-ring transition-colors" onclick="confirmDeactivateProject()">
                                         Deactivate
                                     </button>
                                 </form>
@@ -72,7 +72,7 @@
                                     Inactive
                                 </span>
                                 <form method="post" action="/projects/{{ project.name }}/toggle-active" class="inline">
-                                    <button type="submit" class="inline-flex items-center px-2.5 py-1 border border-transparent text-xs font-medium rounded-md text-white bg-green-600 hover:bg-green-700 dark:bg-green-700 dark:hover:bg-green-600 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-hot-red-500 transition-colors">
+                                    <button type="submit" class="inline-flex items-center px-2.5 py-1 border border-transparent text-xs font-medium rounded-md text-white bg-green-700 hover:bg-green-800 dark:bg-green-700 dark:hover:bg-green-800 focus-ring transition-colors">
                                         Activate
                                     </button>
                                 </form>
@@ -92,10 +92,10 @@
         </div>
 
         <!-- Deployed Build -->
-        <div class="bg-white dark:bg-gray-800 shadow overflow-hidden sm:rounded-lg">
+        <div class="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 overflow-hidden">
             <div class="px-4 py-5 sm:p-6">
                 <div class="flex items-center justify-between mb-4">
-                    <h3 class="text-lg leading-6 font-medium text-gray-900 dark:text-gray-100">Deployed Build</h3>
+                    <h3 class="text-lg font-semibold text-gray-900 dark:text-white">Deployed Build</h3>
                     <a href="/projects/{{ project.name }}/builds" class="text-sm link">
                         View All Builds →
                     </a>
@@ -173,7 +173,7 @@ function confirmDeactivateProject() {
         'Deactivate Project',
         'Are you sure you want to deactivate this project?',
         () => document.getElementById('deactivate-project-form').submit(),
-        { confirmText: 'Deactivate', type: 'warning' }
+        { confirmText: 'Deactivate', type: 'warning', destructive: true }
     );
 }
 </script>

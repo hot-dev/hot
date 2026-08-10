@@ -14,11 +14,11 @@
          hx-trigger="refresh"
          hx-select="#stream-detail-header"
          hx-swap="outerHTML"
-         class="rounded-lg backdrop-blur-sm border border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-900 text-gray-800 dark:text-white p-6">
-        <h2 class="text-xl font-semibold mb-4">Stream Details</h2>
+         class="rounded-lg backdrop-blur-sm border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 text-gray-800 dark:text-white p-6">
+        <h2 class="text-lg font-semibold text-gray-900 dark:text-white mb-4">Stream Details</h2>
         <dl class="grid grid-cols-1 md:grid-cols-2 gap-4">
             <div>
-                <dt class="text-sm font-medium text-gray-500 dark:text-gray-400">Stream ID</dt>
+                <dt class="text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">Stream ID</dt>
                 <dd class="mt-1 text-sm text-gray-900 dark:text-white">
                     <div class="uuid-container inline-flex items-center gap-1">
                         <span class="uuid-display font-mono font-semibold" data-full-uuid="{{ stream.stream_id }}" title="{{ stream.stream_id }}">{{ stream.stream_id|shortuuid }}</span>
@@ -31,25 +31,25 @@
                 </dd>
             </div>
             <div>
-                <dt class="text-sm font-medium text-gray-500 dark:text-gray-400">Last Activity</dt>
+                <dt class="text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">Last Activity</dt>
                 <dd class="mt-1 text-xs text-gray-900 dark:text-white">{{ stream.last_activity_at }}</dd>
             </div>
             <div>
-                <dt class="text-sm font-medium text-gray-500 dark:text-gray-400">Start Time</dt>
+                <dt class="text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">Start Time</dt>
                 <dd class="mt-1 text-xs text-gray-900 dark:text-white">{{ stream.start_time }}</dd>
             </div>
             <div>
-                <dt class="text-sm font-medium text-gray-500 dark:text-gray-400">Duration</dt>
+                <dt class="text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">Duration</dt>
                 <dd class="mt-1 text-sm text-gray-900 dark:text-white">
                     {{ stream.duration_ms }} ms
                 </dd>
             </div>
             <div>
-                <dt class="text-sm font-medium text-gray-500 dark:text-gray-400">Total Runs</dt>
+                <dt class="text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">Total Runs</dt>
                 <dd class="mt-1 text-sm text-gray-900 dark:text-white">{{ stream.total_runs|commafy }}</dd>
             </div>
             <div>
-                <dt class="text-sm font-medium text-gray-500 dark:text-gray-400">Total Events</dt>
+                <dt class="text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">Total Events</dt>
                 <dd class="mt-1 text-sm text-gray-900 dark:text-white">{{ stream.total_events|commafy }}</dd>
             </div>
         </dl>
@@ -59,7 +59,7 @@
     <script type="application/json" id="stream-graph-data">{{ graph_data_json|safe }}</script>
 
     <!-- Tabbed Content Area -->
-    <div class="w-full rounded-lg backdrop-blur-sm border border-gray-200 dark:border-gray-800 bg-white dark:bg-gray-900 text-gray-800 dark:text-white flex flex-col" style="min-height: 500px;">
+    <div class="w-full rounded-lg backdrop-blur-sm border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 text-gray-800 dark:text-white flex flex-col" style="min-height: 500px;">
         {% include "components/stream_detail_tabs.html" %}
     </div>
 </div>

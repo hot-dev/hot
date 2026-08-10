@@ -2,7 +2,7 @@
 {% block content %}
 <div class="space-y-6">
     <!-- File Header -->
-    <div class="rounded-lg p-4 sm:p-6 backdrop-blur-sm border border-gray-200 dark:border-gray-800 transition-all duration-300 bg-white dark:bg-gray-900 text-gray-800 dark:text-white">
+    <div class="rounded-lg p-4 sm:p-6 backdrop-blur-sm border border-gray-200 dark:border-gray-700 transition-all duration-300 bg-white dark:bg-gray-800 text-gray-800 dark:text-white">
         <div class="flex flex-col md:flex-row md:items-start md:justify-between gap-4">
             <div class="flex-1">
                 <h2 class="text-xl font-semibold text-gray-900 dark:text-white font-mono break-all">{{ file.path }}</h2>
@@ -17,7 +17,7 @@
                 </div>
             </div>
             <div class="flex-shrink-0">
-                <a href="/files/{{ file.file_id }}/download" class="inline-flex items-center gap-2 px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white font-medium rounded-lg transition-colors">
+                <a href="/files/{{ file.file_id }}/download" class="btn btn-primary inline-flex items-center gap-2">
                     <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="w-5 h-5">
                         <path stroke-linecap="round" stroke-linejoin="round" d="M3 16.5v2.25A2.25 2.25 0 005.25 21h13.5A2.25 2.25 0 0021 18.75V16.5M16.5 12L12 16.5m0 0L7.5 12m4.5 4.5V3" />
                     </svg>
@@ -28,7 +28,7 @@
     </div>
 
     <!-- File Details -->
-    <div class="rounded-lg backdrop-blur-sm border border-gray-200 dark:border-gray-800 transition-all duration-300 bg-white dark:bg-gray-900 text-gray-800 dark:text-white">
+    <div class="rounded-lg backdrop-blur-sm border border-gray-200 dark:border-gray-700 transition-all duration-300 bg-white dark:bg-gray-800 text-gray-800 dark:text-white">
         <div class="p-4 sm:p-6">
             <h3 class="text-lg font-semibold text-gray-900 dark:text-white mb-4">File Details</h3>
             <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
@@ -60,7 +60,7 @@
                         <h4 class="text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider mb-1">Content Type</h4>
                         <p class="text-sm text-gray-900 dark:text-white">
                             {% match file.content_type %}
-                            {% when Some with (ct) %}{{ ct }}{% when None %}<span class="text-gray-400 italic">Not specified</span>{% endmatch %}
+                            {% when Some with (ct) %}{{ ct }}{% when None %}<span class="text-gray-500 dark:text-gray-400 italic">Not specified</span>{% endmatch %}
                         </p>
                     </div>
                 </div>
@@ -87,7 +87,7 @@
     </div>
 
     <!-- Run References -->
-    <div class="rounded-lg backdrop-blur-sm border border-gray-200 dark:border-gray-800 transition-all duration-300 bg-white dark:bg-gray-900 text-gray-800 dark:text-white">
+    <div class="rounded-lg backdrop-blur-sm border border-gray-200 dark:border-gray-700 transition-all duration-300 bg-white dark:bg-gray-800 text-gray-800 dark:text-white">
         <div class="p-4 sm:p-6">
             <h3 class="text-lg font-semibold text-gray-900 dark:text-white mb-4">Run References</h3>
             <div class="grid grid-cols-1 md:grid-cols-2 gap-6">

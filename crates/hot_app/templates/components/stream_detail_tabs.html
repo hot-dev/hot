@@ -9,7 +9,7 @@
 }
 
 .dark .stream-tabs {
-    background: #111111;
+    background: var(--color-gray-800);
     border-bottom-color: rgba(64, 64, 64, 1);
 }
 
@@ -102,7 +102,7 @@
 }
 
 .dark .stream-graph-search-controls {
-    background: #111111;
+    background: var(--color-gray-800);
     border-bottom-color: rgba(64, 64, 64, 1) !important;
 }
 
@@ -121,7 +121,7 @@
 }
 
 .dark .filter-help-tooltip {
-    background: #111111 !important;
+    background: var(--color-gray-800) !important;
     border-color: rgba(64, 64, 64, 1) !important;
     color: rgba(229, 231, 235, 1) !important;
 }
@@ -242,19 +242,19 @@
                         </td>
                         <td class="px-6 py-4 whitespace-nowrap text-xs">
                             <div class="flex items-center gap-1">
-                                <span class="px-2 py-1 text-xs font-semibold rounded-full bg-gray-100 text-gray-800 dark:bg-gray-800 dark:text-gray-200">{{ run.run_type }}</span>
+                                <span class="badge badge-neutral">{{ run.run_type }}</span>
                                 {% if run.is_retry %}
-                                    <span class="px-1.5 py-0.5 text-xs font-medium rounded bg-red-100 text-red-700 dark:bg-red-900 dark:text-red-300">↻{{ run.retry_attempt }}</span>
+                                    <span class="badge badge-pending">↻{{ run.retry_attempt }}</span>
                                 {% endif %}
                             </div>
                         </td>
                         <td class="px-6 py-4 whitespace-nowrap text-xs">
                             {% if run.status == "succeeded" %}
-                                <span class="px-2 py-1 text-xs font-semibold rounded-full bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-200">{{ run.status }}</span>
+                                <span class="badge badge-success">{{ run.status }}</span>
                             {% else if run.status == "failed" %}
-                                <span class="px-2 py-1 text-xs font-semibold rounded-full bg-red-100 text-red-800 dark:bg-red-900 dark:text-red-200">{{ run.status }}</span>
+                                <span class="badge badge-failure">{{ run.status }}</span>
                             {% else %}
-                                <span class="px-2 py-1 text-xs font-semibold rounded-full bg-gray-100 text-gray-800 dark:bg-gray-800 dark:text-gray-200">{{ run.status }}</span>
+                                <span class="badge badge-neutral">{{ run.status }}</span>
                             {% endif %}
                         </td>
                         <td class="px-6 py-4 whitespace-nowrap text-xs text-gray-700 dark:text-gray-300">
@@ -299,7 +299,7 @@
         <div class="md:hidden p-4 overflow-auto">
             <div class="space-y-4 max-w-full">
                 {% for run in runs %}
-                <div class="mobile-card backdrop-blur-sm border border-gray-200 dark:border-gray-800 rounded-lg bg-white dark:bg-gray-900 text-gray-800 dark:text-white p-4 max-w-full">
+                <div class="mobile-card backdrop-blur-sm border border-gray-200 dark:border-gray-700 rounded-lg bg-white dark:bg-gray-800 text-gray-800 dark:text-white p-4 max-w-full">
                     <div class="flex justify-between items-start mb-3">
                         <div class="text-sm font-medium text-gray-900 dark:text-white min-w-0 flex-1">
                             Run <div class="uuid-container inline-flex items-center gap-1">
@@ -319,7 +319,7 @@
                             <div class="flex items-center gap-1">
                                 <span class="text-gray-700 dark:text-gray-300">{{ run.run_type }}</span>
                                 {% if run.is_retry %}
-                                    <span class="px-1.5 py-0.5 text-xs font-medium rounded bg-red-100 text-red-700 dark:bg-red-900 dark:text-red-300">↻{{ run.retry_attempt }}</span>
+                                    <span class="badge badge-pending">↻{{ run.retry_attempt }}</span>
                                 {% endif %}
                             </div>
                         </div>
@@ -327,11 +327,11 @@
                             <span class="text-gray-600 dark:text-gray-400">Status:</span>
                             <span class="text-gray-700 dark:text-gray-300">
                                 {% if run.status == "succeeded" %}
-                                    <span class="px-2 py-1 text-xs font-semibold rounded-full bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-200">{{ run.status }}</span>
+                                    <span class="badge badge-success">{{ run.status }}</span>
                                 {% else if run.status == "failed" %}
-                                    <span class="px-2 py-1 text-xs font-semibold rounded-full bg-red-100 text-red-800 dark:bg-red-900 dark:text-red-200">{{ run.status }}</span>
+                                    <span class="badge badge-failure">{{ run.status }}</span>
                                 {% else %}
-                                    <span class="px-2 py-1 text-xs font-semibold rounded-full bg-gray-100 text-gray-800 dark:bg-gray-800 dark:text-gray-200">{{ run.status }}</span>
+                                    <span class="badge badge-neutral">{{ run.status }}</span>
                                 {% endif %}
                             </span>
                         </div>
@@ -371,7 +371,7 @@
                         {% endmatch %}
                     </div>
 
-                    <div class="mt-4 pt-3 border-t border-gray-100 dark:border-gray-800">
+                    <div class="mt-4 pt-3 border-t border-gray-100 dark:border-gray-700">
                         <a href="/runs/{{ run.run_id }}" class="link transition-all duration-200 font-medium">View Details</a>
                     </div>
                 </div>
@@ -462,7 +462,7 @@
         <div class="md:hidden p-4 overflow-auto">
             <div class="space-y-4 max-w-full">
                 {% for event in events %}
-                <div class="mobile-card backdrop-blur-sm border border-gray-200 dark:border-gray-800 rounded-lg bg-white dark:bg-gray-900 text-gray-800 dark:text-white p-4 max-w-full">
+                <div class="mobile-card backdrop-blur-sm border border-gray-200 dark:border-gray-700 rounded-lg bg-white dark:bg-gray-800 text-gray-800 dark:text-white p-4 max-w-full">
                     <div class="flex justify-between items-start mb-3">
                         <div class="text-sm font-medium text-gray-900 dark:text-white min-w-0 flex-1">
                             Event <div class="uuid-container inline-flex items-center gap-1">
@@ -511,7 +511,7 @@
                         </div>
                     </div>
 
-                    <div class="mt-4 pt-3 border-t border-gray-100 dark:border-gray-800">
+                    <div class="mt-4 pt-3 border-t border-gray-100 dark:border-gray-700">
                         <a href="/events/{{ event.event_id }}" class="link transition-all duration-200 font-medium">View Details</a>
                     </div>
                 </div>
@@ -564,13 +564,13 @@
                         </td>
                         <td class="px-6 py-4 whitespace-nowrap text-xs">
                             {% if task.status == "completed" %}
-                                <span class="px-2 inline-flex text-xs leading-5 font-semibold rounded-full bg-amber-100 text-amber-800 dark:bg-amber-900 dark:text-amber-200">{{ task.status }}</span>
+                                <span class="badge badge-success">{{ task.status }}</span>
                             {% else if task.status == "running" %}
-                                <span class="px-2 inline-flex text-xs leading-5 font-semibold rounded-full bg-amber-100 text-amber-800 dark:bg-amber-900 dark:text-amber-200">{{ task.status }}</span>
+                                <span class="badge badge-running">{{ task.status }}</span>
                             {% else if task.status == "failed" || task.status == "timed_out" %}
-                                <span class="px-2 inline-flex text-xs leading-5 font-semibold rounded-full bg-red-100 text-red-800 dark:bg-red-900 dark:text-red-200">{{ task.status }}</span>
+                                <span class="badge badge-failure">{{ task.status }}</span>
                             {% else %}
-                                <span class="px-2 inline-flex text-xs leading-5 font-semibold rounded-full bg-gray-100 text-gray-800 dark:bg-gray-800 dark:text-gray-200">{{ task.status }}</span>
+                                <span class="badge badge-neutral">{{ task.status }}</span>
                             {% endif %}
                         </td>
                         <td class="px-6 py-4 whitespace-nowrap text-xs text-gray-700 dark:text-gray-300">
@@ -603,17 +603,19 @@
         <div class="md:hidden p-4 overflow-auto">
             <div class="space-y-4 max-w-full">
                 {% for task in tasks %}
-                <div class="mobile-card backdrop-blur-sm border border-gray-200 dark:border-gray-800 rounded-lg bg-white dark:bg-gray-900 text-gray-800 dark:text-white p-4 max-w-full">
+                <div class="mobile-card backdrop-blur-sm border border-gray-200 dark:border-gray-700 rounded-lg bg-white dark:bg-gray-800 text-gray-800 dark:text-white p-4 max-w-full">
                     <div class="flex justify-between items-start mb-3">
                         <div class="text-sm font-medium text-gray-900 dark:text-white min-w-0 flex-1">
                             Task <span class="uuid-display font-mono font-semibold truncate" data-full-uuid="{{ task.task_id }}" title="{{ task.task_id }}">{{ task.task_id|shortuuid }}</span>
                         </div>
-                        {% if task.status == "completed" || task.status == "running" %}
-                            <span class="px-2 inline-flex text-xs leading-5 font-semibold rounded-full bg-amber-100 text-amber-800 dark:bg-amber-900 dark:text-amber-200 flex-shrink-0">{{ task.status }}</span>
+                        {% if task.status == "completed" %}
+                            <span class="badge badge-success flex-shrink-0">{{ task.status }}</span>
+                        {% else if task.status == "running" %}
+                            <span class="badge badge-running flex-shrink-0">{{ task.status }}</span>
                         {% else if task.status == "failed" || task.status == "timed_out" %}
-                            <span class="px-2 inline-flex text-xs leading-5 font-semibold rounded-full bg-red-100 text-red-800 dark:bg-red-900 dark:text-red-200 flex-shrink-0">{{ task.status }}</span>
+                            <span class="badge badge-failure flex-shrink-0">{{ task.status }}</span>
                         {% else %}
-                            <span class="px-2 inline-flex text-xs leading-5 font-semibold rounded-full bg-gray-100 text-gray-800 dark:bg-gray-800 dark:text-gray-200 flex-shrink-0">{{ task.status }}</span>
+                            <span class="badge badge-neutral flex-shrink-0">{{ task.status }}</span>
                         {% endif %}
                     </div>
                     <div class="space-y-2 text-sm">
@@ -642,7 +644,7 @@
                             <span class="text-gray-700 dark:text-gray-300">{% match task.compute_units %}{% when Some with (cus) %}{{ cus }}{% when None %}-{% endmatch %}</span>
                         </div>
                     </div>
-                    <div class="mt-4 pt-3 border-t border-gray-100 dark:border-gray-800">
+                    <div class="mt-4 pt-3 border-t border-gray-100 dark:border-gray-700">
                         <a href="/tasks/{{ task.task_id }}" class="text-amber-600 dark:text-amber-400 hover:text-amber-700 dark:hover:text-amber-300 transition-all duration-200 font-medium">View Details</a>
                     </div>
                 </div>
@@ -654,10 +656,10 @@
     </div>
 
     <!-- Value Inspector Panel - Sticky container -->
-    <div id="stream-inspector-panel" class="hidden w-2/5 flex-shrink-0 border-l border-gray-200 dark:border-gray-800 flex flex-col relative" style="min-width: 20rem;">
+    <div id="stream-inspector-panel" class="hidden w-2/5 flex-shrink-0 border-l border-gray-200 dark:border-gray-700 flex flex-col relative" style="min-width: 20rem;">
         <!-- Sticky inner wrapper that stays in view -->
-        <div class="sticky top-0 flex flex-col bg-white dark:bg-neutral-900" style="max-height: calc(100vh - 120px);">
-            <div class="bg-gray-100 dark:bg-gray-700 flex-shrink-0 border-b border-gray-200 dark:border-gray-800">
+        <div class="sticky top-0 flex flex-col bg-white dark:bg-gray-800" style="max-height: calc(100vh - 120px);">
+            <div class="bg-gray-100 dark:bg-gray-700 flex-shrink-0 border-b border-gray-200 dark:border-gray-700">
                 <div class="px-3 py-2 flex items-center justify-between" style="min-width: 18rem;">
                     <div class="text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider truncate" style="max-width: 12rem;">
                         Value Inspector
@@ -915,15 +917,17 @@ function displayInspectorContent(data) {
 
         // Status
         if (data.status) {
-            const statusClass = data.status === 'succeeded' ? 'bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-200' :
-                               data.status === 'failed' ? 'bg-red-100 text-red-800 dark:bg-red-900 dark:text-red-200' :
-                               'bg-gray-100 text-gray-800 dark:bg-gray-800 dark:text-gray-200';
+            const statusClass = data.status === 'succeeded' ? 'badge badge-success' :
+                               data.status === 'failed' ? 'badge badge-failure' :
+                               data.status === 'running' ? 'badge badge-running' :
+                               data.status === 'pending_retry' ? 'badge badge-pending' :
+                               'badge badge-neutral';
             const escapedStatus = escapeHtml(data.status);
             html += `
                 <div>
                     <div class="text-xs font-medium text-gray-500 dark:text-gray-400 uppercase mb-1">Status</div>
                     <div class="bg-gray-100 dark:bg-gray-800 rounded px-2 py-1.5 text-xs">
-                        <span class="px-2 py-1 rounded-full ${statusClass}">${escapedStatus}</span>
+                        <span class="${statusClass}">${escapedStatus}</span>
                     </div>
                 </div>
             `;
@@ -1286,7 +1290,7 @@ function showRichStreamInspectorModal(nodeType, id, fullData) {
     // Create and show modal
     const modalOverlay = document.createElement('div');
     modalOverlay.id = 'stream-inspector-modal-overlay';
-    modalOverlay.className = 'fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4';
+    modalOverlay.className = 'fixed inset-0 bg-gray-900/75 backdrop-blur-sm z-50 flex items-center justify-center p-4';
     modalOverlay.onclick = (e) => {
         if (e.target === modalOverlay) {
             modalOverlay.remove();
@@ -1294,7 +1298,7 @@ function showRichStreamInspectorModal(nodeType, id, fullData) {
     };
 
     modalOverlay.innerHTML = `
-        <div class="bg-white dark:bg-gray-900 rounded-lg shadow-xl max-w-lg w-full max-h-[90vh] flex flex-col">
+        <div class="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 shadow-xl max-w-lg w-full max-h-[90vh] flex flex-col">
             <div class="flex items-center justify-between p-4 border-b border-gray-200 dark:border-gray-700">
                 <h3 class="text-lg font-semibold text-gray-900 dark:text-white">Inspector</h3>
                 <button onclick="document.getElementById('stream-inspector-modal-overlay').remove()" class="p-1 text-gray-400 hover:text-gray-600 dark:text-gray-500 dark:hover:text-gray-300 transition-colors rounded">

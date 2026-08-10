@@ -1,7 +1,7 @@
 {% extends "private_layout.html" %}
 {% block content %}
-<div class="max-w-7xl mx-auto px-2 sm:px-4 py-4 sm:py-6 lg:px-8">
-    <div class="pb-5 mb-6">
+<div class="max-w-7xl mx-auto py-6">
+    <div class="mb-6">
         <h1 class="text-xl sm:text-2xl font-bold leading-6 text-gray-900 dark:text-gray-100">{{ org.name }}</h1>
         <p class="mt-2 max-w-4xl text-xs sm:text-sm text-gray-500 dark:text-gray-400">
             Manage subscription and billing
@@ -22,7 +22,7 @@
         <div class="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 p-6 mb-6">
             <div class="flex items-start justify-between mb-6">
                 <div>
-                    <h2 class="text-xl font-semibold text-gray-900 dark:text-white mb-2">Current Plan</h2>
+                    <h2 class="text-lg font-semibold text-gray-900 dark:text-white mb-2">Current Plan</h2>
                     <p class="text-3xl font-bold text-gray-900 dark:text-white mb-1">Local Development</p>
                     <p class="text-gray-600 dark:text-gray-400">Free - Self-hosted</p>
                 </div>
@@ -58,7 +58,7 @@
         <div class="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 p-6 mb-6">
             <div class="flex items-start justify-between mb-6">
                 <div>
-                    <h2 class="text-xl font-semibold text-gray-900 dark:text-white mb-2">Current Plan</h2>
+                    <h2 class="text-lg font-semibold text-gray-900 dark:text-white mb-2">Current Plan</h2>
                     <p class="text-3xl font-bold text-gray-900 dark:text-white mb-1">Self-hosted</p>
                     <p class="text-gray-600 dark:text-gray-400">Billing is not managed by this instance.</p>
                 </div>
@@ -81,24 +81,24 @@
                 {% if !sub.is_active() %}
                 <div class="bg-yellow-50 dark:bg-yellow-900/20 border border-yellow-400 dark:border-yellow-600 rounded-lg p-6 mb-6">
                     <div class="flex items-start">
-                        <svg class="h-6 w-6 text-yellow-400 dark:text-yellow-500 mr-3 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                        <svg class="h-6 w-6 text-amber-600 dark:text-amber-400 mr-3 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
                         </svg>
                         <div class="flex-1">
                             {% if let Some(plan) = plan %}
                                 {% if plan.is_free_plan() %}
-                            <h3 class="text-lg font-semibold text-yellow-800 dark:text-yellow-200 mb-1">Finish Activating Your Free Plan</h3>
+                            <h3 class="text-sm font-semibold text-yellow-800 dark:text-yellow-200 mb-1">Finish Activating Your Free Plan</h3>
                             <p class="text-sm text-yellow-700 dark:text-yellow-300 mb-4">
                                 Your organization is set up, but card verification is required to activate your subscription and access all features.
                             </p>
                                 {% else %}
-                            <h3 class="text-lg font-semibold text-yellow-800 dark:text-yellow-200 mb-1">Complete Your Subscription</h3>
+                            <h3 class="text-sm font-semibold text-yellow-800 dark:text-yellow-200 mb-1">Complete Your Subscription</h3>
                             <p class="text-sm text-yellow-700 dark:text-yellow-300 mb-4">
                                 Your organization is set up, but payment is required to activate your subscription and access all features.
                             </p>
                                 {% endif %}
                             <a href="/@{{ org.slug }}/billing/checkout?plan={{ plan.plan_id.as_deref().unwrap_or("") }}&billing={{ sub.billing_period }}"
-                               class="inline-flex items-center px-4 py-2 bg-yellow-500 hover:bg-yellow-600 text-white font-medium rounded-md transition-colors shadow-sm">
+                               class="btn btn-primary">
                                 {% if plan.is_free_plan() %}
                                 Verify Card
                                 {% else %}
@@ -106,7 +106,7 @@
                                 {% endif %}
                             </a>
                             {% else %}
-                            <h3 class="text-lg font-semibold text-yellow-800 dark:text-yellow-200 mb-1">Complete Your Subscription</h3>
+                            <h3 class="text-sm font-semibold text-yellow-800 dark:text-yellow-200 mb-1">Complete Your Subscription</h3>
                             <p class="text-sm text-yellow-700 dark:text-yellow-300 mb-4">
                                 Your organization is set up, but your subscription still needs to be activated before you can access all features.
                             </p>
@@ -120,7 +120,7 @@
                 <div class="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 p-6 mb-6">
                     <div class="flex items-start justify-between mb-6">
                         <div>
-                            <h2 class="text-xl font-semibold text-gray-900 dark:text-white mb-2">Current Plan</h2>
+                            <h2 class="text-lg font-semibold text-gray-900 dark:text-white mb-2">Current Plan</h2>
                             <p class="text-3xl font-bold text-gray-900 dark:text-white mb-1">{{ plan.plan_name }}</p>
                             <p class="text-gray-600 dark:text-gray-400">
                                 ${{ plan.monthly_price_dollars() }}{% if sub.billing_period == "monthly" %}/month{% else %}/year{% endif %}
@@ -140,7 +140,7 @@
 
                     <!-- Plan Details -->
                     <div class="mb-6">
-                        <h3 class="font-semibold text-gray-900 dark:text-white mb-3">Subscription Details</h3>
+                        <h3 class="text-lg font-semibold text-gray-900 dark:text-white mb-3">Subscription Details</h3>
                         <div class="space-y-2 text-sm text-gray-700 dark:text-gray-300">
                             <p><span class="font-medium">Organization:</span> {{ org.name }}</p>
                             <p><span class="font-medium">Plan:</span> {{ plan.plan_name }}</p>
@@ -212,7 +212,7 @@
 
             <!-- Payment History -->
             <div class="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 p-6">
-                <h3 class="font-semibold text-gray-900 dark:text-white mb-4">Payment History</h3>
+                <h3 class="text-lg font-semibold text-gray-900 dark:text-white mb-4">Payment History</h3>
                 <p class="text-sm text-gray-600 dark:text-gray-400">
                     For detailed invoices and receipts, check your email or contact support.
                 </p>
@@ -221,7 +221,7 @@
         {% else %}
             <!-- Payment processing not configured -->
             <div class="bg-yellow-50 dark:bg-yellow-900/20 border border-yellow-200 dark:border-yellow-800 rounded-lg p-6">
-                <h3 class="font-semibold text-yellow-900 dark:text-yellow-200 mb-2">Billing Not Available</h3>
+                <h3 class="text-sm font-semibold text-yellow-800 dark:text-yellow-200 mb-2">Billing Not Available</h3>
                 <p class="text-sm text-yellow-800 dark:text-yellow-300">
                     Payment processing is not currently configured. Please contact support for assistance.
                 </p>

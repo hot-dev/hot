@@ -19,34 +19,34 @@
 
     <div class="grid grid-cols-2 lg:grid-cols-5 gap-3 mt-4">
         <div>
-            <div class="text-[11px] uppercase tracking-wide text-gray-500 dark:text-gray-400">Waiting p50</div>
+            <div class="text-xs uppercase tracking-wider text-gray-500 dark:text-gray-400">Waiting p50</div>
             <div id="run-latency-wait-p50" class="text-lg font-semibold text-amber-600 dark:text-amber-400">—</div>
         </div>
         <div>
-            <div class="text-[11px] uppercase tracking-wide text-gray-500 dark:text-gray-400">Execution p50</div>
+            <div class="text-xs uppercase tracking-wider text-gray-500 dark:text-gray-400">Execution p50</div>
             <div id="run-latency-exec-p50" class="text-lg font-semibold text-green-600 dark:text-green-400">—</div>
         </div>
         <div>
-            <div class="text-[11px] uppercase tracking-wide text-gray-500 dark:text-gray-400">Waiting p95</div>
+            <div class="text-xs uppercase tracking-wider text-gray-500 dark:text-gray-400">Waiting p95</div>
             <div id="run-latency-wait-p95" class="text-lg font-semibold text-amber-600 dark:text-amber-400">—</div>
         </div>
         <div>
-            <div class="text-[11px] uppercase tracking-wide text-gray-500 dark:text-gray-400">Execution p95</div>
+            <div class="text-xs uppercase tracking-wider text-gray-500 dark:text-gray-400">Execution p95</div>
             <div id="run-latency-exec-p95" class="text-lg font-semibold text-green-600 dark:text-green-400">—</div>
         </div>
         <div>
-            <div class="text-[11px] uppercase tracking-wide text-gray-500 dark:text-gray-400">Samples</div>
+            <div class="text-xs uppercase tracking-wider text-gray-500 dark:text-gray-400">Samples</div>
             <div id="run-latency-samples" class="text-lg font-semibold text-gray-800 dark:text-gray-200">—</div>
-            <div id="run-latency-coverage" class="text-[11px] text-gray-500 dark:text-gray-400" title="Share of samples using direct creation, workload-start, and completion timestamps instead of legacy fallbacks">Precision coverage</div>
+            <div id="run-latency-coverage" class="text-xs text-gray-500 dark:text-gray-400" title="Share of samples using direct creation, workload-start, and completion timestamps instead of legacy fallbacks">Precision coverage</div>
         </div>
     </div>
 
     <div class="flex items-center justify-between mt-4 mb-1">
         <span class="text-xs text-gray-500 dark:text-gray-400" title="The headline tiles remain fixed at their labeled p50 and p95 values">Chart percentile</span>
         <div class="inline-flex rounded-md border border-gray-200 dark:border-gray-700 p-0.5" role="group" aria-label="Run latency percentile">
-            <button id="run-latency-p50-button" aria-pressed="false" onclick="setLatencyPercentile('run', 'p50')" class="latency-percentile-button px-2 py-0.5 rounded text-xs text-gray-500 dark:text-gray-400">p50</button>
-            <button id="run-latency-p95-button" aria-pressed="true" onclick="setLatencyPercentile('run', 'p95')" class="latency-percentile-button px-2 py-0.5 rounded text-xs bg-gray-100 dark:bg-gray-700 text-gray-900 dark:text-white font-medium">p95</button>
-            <button id="run-latency-p99-button" aria-pressed="false" onclick="setLatencyPercentile('run', 'p99')" class="latency-percentile-button px-2 py-0.5 rounded text-xs text-gray-500 dark:text-gray-400">p99</button>
+            <button id="run-latency-p50-button" aria-pressed="false" onclick="setLatencyPercentile('run', 'p50')" class="js-latency-percentile btn btn-secondary btn-sm text-gray-500 dark:text-gray-400">p50</button>
+            <button id="run-latency-p95-button" aria-pressed="true" onclick="setLatencyPercentile('run', 'p95')" class="js-latency-percentile btn btn-secondary btn-sm bg-gray-100 dark:bg-gray-700 text-gray-900 dark:text-white font-medium">p95</button>
+            <button id="run-latency-p99-button" aria-pressed="false" onclick="setLatencyPercentile('run', 'p99')" class="js-latency-percentile btn btn-secondary btn-sm text-gray-500 dark:text-gray-400">p99</button>
         </div>
     </div>
     <div class="relative" style="height: 260px;">

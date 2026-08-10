@@ -22,6 +22,10 @@
 (function () {
     'use strict';
 
+    // Keep a reference to the browser implementation so the guard below can
+    // cover every private-page fetch without recursively calling itself.
+    var browserFetch = window.fetch.bind(window);
+
     // Debounce window: collapse short bursts of triggers into one refresh.
     var DEBOUNCE_MS = 400;
     // Throttle floor: never run full refresh cycles closer together than this.
@@ -173,22 +177,60 @@
      * swaps login HTML into a data region.
      * @returns {boolean} true if a redirect was handled (caller should stop).
      */
+    function authUrlForCurrentPage(authUrl) {
+        var parsed = new URL(authUrl, window.location.href);
+        var currentPath = window.location.pathname + window.location.search + window.location.hash;
+        if (currentPath === '/' || /^\/sign(in|up)\b/.test(window.location.pathname)) {
+            parsed.searchParams.delete('next');
+        } else {
+            parsed.searchParams.set('next', currentPath);
+        }
+        return parsed.pathname + parsed.search + parsed.hash;
+    }
+
+    function isSigninUrl(url) {
+        try {
+            var parsed = new URL(url, window.location.href);
+            return parsed.origin === window.location.origin && /^\/sign(in|up)\b/.test(parsed.pathname);
+        } catch (e) {
+            return false;
+        }
+    }
+
     function handleAuthRedirect(resp) {
         var hxRedirect = resp.headers.get('HX-Redirect');
         if (hxRedirect) {
-            window.location.href = hxRedirect;
+            // A fragment request describes the fragment URL to the server, not
+            // the page the user was viewing. Preserve the visible page as the
+            // post-signin destination instead of returning to a bare partial.
+            window.location.href = isSigninUrl(hxRedirect)
+                ? authUrlForCurrentPage(hxRedirect)
+                : hxRedirect;
             return true;
         }
-        if (resp.redirected && /\/sign(in|up)\b/.test(resp.url)) {
-            window.location.href = resp.url;
+        if (resp.redirected && isSigninUrl(resp.url)) {
+            window.location.href = authUrlForCurrentPage(resp.url);
             return true;
         }
         if (resp.status === 401) {
-            window.location.href = '/signin';
+            window.location.href = authUrlForCurrentPage('/signin');
             return true;
         }
         return false;
     }
+
+    // Native fetch follows a 302 and exposes the final sign-in document as a
+    // successful response. Guard all private-page fetches so that document can
+    // never be inserted into a widget, table cell, modal, or graph. Leave the
+    // promise pending while the top-level navigation unloads the page.
+    window.fetch = function () {
+        return browserFetch.apply(null, arguments).then(function (resp) {
+            if (handleAuthRedirect(resp)) {
+                return new Promise(function () {});
+            }
+            return resp;
+        });
+    };
 
     function applyFormattingSafe(el) {
         if (typeof window.applyFormatting === 'function') {
@@ -287,6 +329,7 @@
         refreshNow: refreshNow,
         refreshHtmlTarget: refreshHtmlTarget,
         fetchJson: fetchJson,
+        handleAuthRedirect: handleAuthRedirect,
         // Tuning knobs exposed for tests/diagnostics.
         _config: { debounceMs: DEBOUNCE_MS, throttleMs: THROTTLE_MS },
     };

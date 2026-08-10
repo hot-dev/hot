@@ -2,7 +2,7 @@
 
 {% block content %}
 <div class="max-w-md mx-auto mt-16">
-    <div class="bg-white dark:bg-gray-800 rounded-lg shadow-md overflow-hidden">
+    <div class="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 overflow-hidden">
         <div class="px-6 py-8 text-center">
             {% if success %}
             <div class="mx-auto flex items-center justify-center h-12 w-12 rounded-full bg-green-100 dark:bg-green-900 mb-4">
@@ -25,7 +25,7 @@
                 <a href="/signin" class="btn btn-primary">
                     Sign in to Hot Dev
                 </a>
-                <a href="{{ page_context.web_url }}" class="inline-flex items-center px-4 py-2 border border-gray-300 dark:border-gray-600 text-sm font-medium rounded-md text-gray-700 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-700 transition-all duration-200">
+                <a href="{{ page_context.web_url }}" class="btn btn-secondary">
                     Learn more about Hot Dev
                 </a>
             </div>

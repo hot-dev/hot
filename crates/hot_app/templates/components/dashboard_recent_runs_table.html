@@ -19,7 +19,7 @@
                 <th scope="col" class="px-3 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">Project</th>
             </tr>
         </thead>
-        <tbody class="bg-white dark:bg-gray-900 divide-y divide-gray-200 dark:divide-gray-700">
+        <tbody class="bg-white dark:bg-gray-800 divide-y divide-gray-200 dark:divide-gray-700">
             {% for run in recent_runs %}
             <tr class="hover:bg-gray-100 dark:hover:bg-gray-700 transition-colors">
                 <td class="px-3 py-2 whitespace-nowrap">
@@ -52,25 +52,25 @@
                     <div class="flex items-center gap-1">
                         {{ run.run_type }}
                         {% if run.is_retry %}
-                            <span class="px-1 py-0.5 text-xs font-medium rounded bg-red-100 text-red-700 dark:bg-red-900 dark:text-red-300">↻{{ run.retry_attempt }}</span>
+                            <span class="badge badge-pending">↻{{ run.retry_attempt }}</span>
                         {% endif %}
                     </div>
                 </td>
                 <td class="px-3 py-2 whitespace-nowrap">
                     {% if run.status == "running" %}
-                    <span class="px-2 inline-flex text-xs leading-5 font-semibold rounded-full bg-blue-100 text-blue-800 dark:bg-blue-900 dark:text-blue-300">
+                    <span class="badge badge-running">
                         {{ run.status }}
                     </span>
                     {% elif run.status == "succeeded" %}
-                    <span class="px-2 inline-flex text-xs leading-5 font-semibold rounded-full bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-300">
+                    <span class="badge badge-success">
                         {{ run.status }}
                     </span>
                     {% elif run.status == "failed" %}
-                    <span class="px-2 inline-flex text-xs leading-5 font-semibold rounded-full bg-red-100 text-red-800 dark:bg-red-900 dark:text-red-300">
+                    <span class="badge badge-failure">
                         {{ run.status }}
                     </span>
                     {% else %}
-                    <span class="px-2 inline-flex text-xs leading-5 font-semibold rounded-full bg-gray-100 text-gray-800 dark:bg-gray-700 dark:text-gray-300">
+                    <span class="badge badge-neutral">
                         {{ run.status }}
                     </span>
                     {% endif %}
@@ -146,7 +146,7 @@
 <!-- Mobile Card View -->
 <div class="md:hidden space-y-3">
     {% for run in recent_runs %}
-    <div class="mobile-card backdrop-blur-sm border border-gray-200 dark:border-gray-800 rounded-lg bg-white dark:bg-gray-900 text-gray-800 dark:text-white p-4">
+    <div class="mobile-card backdrop-blur-sm border border-gray-200 dark:border-gray-700 rounded-lg bg-white dark:bg-gray-800 text-gray-800 dark:text-white p-4">
         <div class="flex justify-between items-start mb-3">
             <div class="text-sm font-medium text-gray-900 dark:text-white min-w-0 flex-1">
                 Run <div class="uuid-container inline-flex items-center gap-1">
@@ -188,7 +188,7 @@
                 <div class="flex items-center gap-1">
                     <span class="text-gray-700 dark:text-gray-300 text-xs">{{ run.run_type }}</span>
                     {% if run.is_retry %}
-                        <span class="px-1 py-0.5 text-xs font-medium rounded bg-red-100 text-red-700 dark:bg-red-900 dark:text-red-300">↻{{ run.retry_attempt }}</span>
+                        <span class="badge badge-pending">↻{{ run.retry_attempt }}</span>
                     {% endif %}
                 </div>
             </div>
@@ -196,13 +196,13 @@
                 <span class="text-gray-600 dark:text-gray-400">Status:</span>
                 <span class="text-gray-700 dark:text-gray-300">
                     {% if run.status == "running" %}
-                    <span class="px-2 py-1 text-xs font-semibold rounded-full bg-blue-100 text-blue-800 dark:bg-blue-900 dark:text-blue-200">{{ run.status }}</span>
+                    <span class="badge badge-running">{{ run.status }}</span>
                     {% elif run.status == "succeeded" %}
-                    <span class="px-2 py-1 text-xs font-semibold rounded-full bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-200">{{ run.status }}</span>
+                    <span class="badge badge-success">{{ run.status }}</span>
                     {% elif run.status == "failed" %}
-                    <span class="px-2 py-1 text-xs font-semibold rounded-full bg-red-100 text-red-800 dark:bg-red-900 dark:text-red-200">{{ run.status }}</span>
+                    <span class="badge badge-failure">{{ run.status }}</span>
                     {% else %}
-                    <span class="px-2 py-1 text-xs font-semibold rounded-full bg-gray-100 text-gray-800 dark:bg-gray-800 dark:text-gray-200">{{ run.status }}</span>
+                    <span class="badge badge-neutral">{{ run.status }}</span>
                     {% endif %}
                 </span>
             </div>
@@ -273,7 +273,7 @@
             </div>
         </div>
 
-        <div class="mt-4 pt-3 border-t border-gray-100 dark:border-gray-800">
+        <div class="mt-4 pt-3 border-t border-gray-100 dark:border-gray-700">
             <a href="/runs/{{ run.run_id }}" class="link transition-all duration-200 font-medium text-sm">View Details</a>
         </div>
     </div>

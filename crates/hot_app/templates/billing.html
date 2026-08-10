@@ -1,8 +1,8 @@
 {% extends "private_layout.html" %}
 {% block content %}
 <div class="max-w-6xl mx-auto py-6">
-  <div class="pb-5 mb-6">
-    <h1 class="text-2xl font-bold leading-6 text-gray-900 dark:text-gray-100">Account</h1>
+  <div class="mb-6">
+    <h1 class="text-xl sm:text-2xl font-bold leading-6 text-gray-900 dark:text-gray-100">Account</h1>
     <p class="mt-2 max-w-4xl text-sm text-gray-500 dark:text-gray-400">
       Manage your account settings and preferences
     </p>
@@ -30,7 +30,7 @@
 
   <!-- Billing Overview -->
   <div class="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 p-6 mb-6">
-    <h2 class="text-xl font-semibold text-gray-900 dark:text-white mb-4">Organization Billing</h2>
+    <h2 class="text-lg font-semibold text-gray-900 dark:text-white mb-4">Organization Billing</h2>
     <p class="text-sm text-gray-600 dark:text-gray-400 mb-4">
       Billing is managed per organization. Select an organization below to view or manage its subscription.
     </p>
@@ -42,13 +42,13 @@
            class="block p-4 border border-gray-200 dark:border-gray-700 rounded-lg hover:bg-gray-50 dark:hover:bg-gray-750 transition-colors">
           <div class="flex items-center justify-between">
             <div class="flex-1">
-              <h3 class="font-semibold text-gray-900 dark:text-white">{{ org_info.org.name }} <span class="text-sm font-normal text-gray-500 dark:text-gray-400 font-mono">@{{ org_info.org.slug }}</span></h3>
+              <h3 class="text-lg font-semibold text-gray-900 dark:text-white">{{ org_info.org.name }} <span class="text-sm font-normal text-gray-500 dark:text-gray-400 font-mono">@{{ org_info.org.slug }}</span></h3>
               <p class="text-sm text-gray-600 dark:text-gray-400 mt-1">
                 {% if let Some(sub) = org_info.subscription %}
                   {% if let Some(plan) = org_info.plan %}
                     {{ plan.plan_name }} -
                     {% if sub.is_active() %}
-                      <span class="text-green-600 dark:text-green-400">Active</span>
+                      <span class="text-green-700 dark:text-green-400">Active</span>
                     {% else %}
                       <span class="text-gray-500">Inactive</span>
                     {% endif %}

@@ -2,10 +2,10 @@
 {%- import "components/ui_macros.html" as ui -%}
 
 {% block content %}
-<div class="max-w-7xl mx-auto px-2 sm:px-4 py-4 sm:py-6 lg:px-8">
+<div class="max-w-7xl mx-auto py-6">
     {% match page_context.current_org %}
     {% when Some with (org) %}
-    <div class="pb-5 mb-6">
+    <div class="mb-6">
         <h1 class="text-xl sm:text-2xl font-bold leading-6 text-gray-900 dark:text-gray-100">{{ org.name }}</h1>
         <p class="mt-2 max-w-4xl text-xs sm:text-sm text-gray-500 dark:text-gray-400">
             Manage organization teams
@@ -39,7 +39,7 @@
 
             {% if teams.len() > 0 %}
                 <!-- Desktop Table View -->
-                <div class="hidden md:block bg-white dark:bg-gray-800 rounded-lg shadow-md overflow-hidden mb-6">
+                <div class="hidden md:block bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 overflow-hidden mb-6">
                     <div class="overflow-x-auto">
                         <table class="min-w-full divide-y divide-gray-200 dark:divide-gray-700">
                             <thead class="bg-gray-50 dark:bg-gray-900">
@@ -89,7 +89,7 @@
 
                                         <!-- Pagination -->
                     {% if has_prev_page || has_next_page %}
-                    <div class="px-3 md:px-6 py-4 border-t border-gray-200 dark:border-gray-800">
+                    <div class="px-3 md:px-6 py-4 border-t border-gray-200 dark:border-gray-700">
                         {% let pag_prefix = "/@{}/teams?p="|format(org.slug) %}
                         {% call ui::pagination(pag_prefix, "", current_page_num, start_page, end_page, has_prev_page, has_next_page, teams.len(), total_teams, "teams") %}{% endcall %}
                     </div>
@@ -99,7 +99,7 @@
                 <!-- Mobile Cards View -->
                 <div class="md:hidden space-y-3 mb-6">
                     {% for team in teams %}
-                    <div class="bg-white dark:bg-gray-800 rounded-lg shadow-md p-4 hover:shadow-lg transition-shadow">
+                    <div class="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 p-4 hover:border-gray-300 dark:hover:border-gray-600 transition-colors">
                         <div class="flex items-center justify-between mb-2">
                             <div class="flex items-center">
                                 <div class="h-10 w-10 rounded-full bg-gray-200 dark:bg-gray-600 flex items-center justify-center mr-3">
@@ -127,7 +127,7 @@
                 </div>
                 {% else %}
                 <!-- Empty State -->
-                <div class="bg-white dark:bg-gray-800 rounded-lg shadow-md p-8">
+                <div class="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 p-8">
                     <div class="text-center">
                         <div class="mx-auto flex items-center justify-center h-12 w-12 rounded-full bg-gray-100 dark:bg-gray-900 mb-4">
                             <svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6 text-gray-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
@@ -164,7 +164,7 @@
                  {% endif %}
     {% when None %}
     <!-- No Organization Selected -->
-    <div class="bg-white dark:bg-gray-800 rounded-lg shadow-md p-8">
+    <div class="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 p-8">
         <div class="empty-state">
             <div class="empty-state-icon">
                 <svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6 text-gray-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">

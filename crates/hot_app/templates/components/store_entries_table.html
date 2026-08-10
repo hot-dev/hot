@@ -8,7 +8,7 @@
 {% endif %}
 
 <!-- Desktop entries panel -->
-<div class="hidden md:flex flex-col rounded-lg border border-gray-200 dark:border-gray-800 overflow-hidden bg-white dark:bg-gray-900 text-gray-800 dark:text-white">
+<div class="hidden md:flex flex-col rounded-lg border border-gray-200 dark:border-gray-700 overflow-hidden bg-white dark:bg-gray-800 text-gray-800 dark:text-white">
     {% if entries.len() > 0 %}
     <div class="overflow-auto scrollbar-always">
         <table class="w-full table-auto divide-y divide-gray-200 dark:divide-gray-700">
@@ -53,7 +53,7 @@
                     </td>
                     <td class="px-3 md:px-6 py-3 whitespace-nowrap text-xs text-gray-500 dark:text-gray-400">
                         <div>{{ entry.updated_at|tzf(page_context.display_timezone, "%Y-%m-%d") }}</div>
-                        <div class="text-xs text-gray-400">{{ entry.updated_at|tz(page_context.display_timezone, page_context.timezone_abbreviation, "%H:%M:%S") }}</div>
+                        <div class="text-xs text-gray-500 dark:text-gray-400">{{ entry.updated_at|tz(page_context.display_timezone, page_context.timezone_abbreviation, "%H:%M:%S") }}</div>
                     </td>
                     <td class="px-3 md:px-6 py-3 whitespace-nowrap text-right text-xs">
                         <a href="/stores/{{ store.name_url }}/entries/{{ entry.key_encoded }}" class="link mr-3">View</a>
@@ -76,7 +76,7 @@
     </div>
 
     {% if has_prev_page || has_next_page %}
-    <div class="flex-shrink-0 p-4 border-t border-gray-200 dark:border-gray-800">
+    <div class="flex-shrink-0 p-4 border-t border-gray-200 dark:border-gray-700">
         {% let pag_prefix = "/stores/{}?p="|format(store.name_url) %}
         {% call ui::pagination(pag_prefix, pagination_search_suffix, current_page_num, start_page, end_page, has_prev_page, has_next_page, entries.len(), total_entries, "entries") %}{% endcall %}
     </div>
@@ -98,10 +98,10 @@
 <!-- Mobile card view -->
 <div class="md:hidden space-y-3">
     {% for entry in entries %}
-    <div class="backdrop-blur-sm border border-gray-200 dark:border-gray-800 rounded-lg bg-white dark:bg-gray-900 text-gray-800 dark:text-white p-4">
+    <div class="backdrop-blur-sm border border-gray-200 dark:border-gray-700 rounded-lg bg-white dark:bg-gray-800 text-gray-800 dark:text-white p-4">
         <div class="flex items-center justify-between mb-2">
             <a href="/stores/{{ store.name_url }}/entries/{{ entry.key_encoded }}" class="text-sm font-mono link truncate">{{ entry.key_preview }}</a>
-            <span class="text-xs text-gray-400 ml-2">#{{ entry.seq }}</span>
+            <span class="text-xs text-gray-500 dark:text-gray-400 ml-2">#{{ entry.seq }}</span>
         </div>
         {# Hidden state markup is mirrored in templates/store_entry_value_hidden_cell.html (view=mobile-cell). #}
         {# Keep in sync; the column toggle re-fetches that fragment to restore this state. #}

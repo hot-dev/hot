@@ -2,7 +2,7 @@
 
 {% block content %}
 <div class="accent-aura flex justify-center items-center mt-10">
-    <div class="relative z-10 glass rounded-lg backdrop-blur-md p-8 border border-gray-200 dark:border-gray-800 bg-white/70 dark:bg-gray-800/70 max-w-md w-full shadow-lg">
+    <div class="relative z-10 glass rounded-lg backdrop-blur-md p-8 border border-gray-200 dark:border-gray-700 bg-white/70 dark:bg-gray-800/70 max-w-md w-full shadow-lg">
         <div class="mb-8 text-center">
             <h1 class="text-xl font-bold flex items-center justify-center">
                 {% if plan != "" %}
@@ -46,7 +46,7 @@
             <input type="hidden" name="form_token" value="{{ form_token }}" />
 
             <div class="mb-6">
-                <label for="email" class="block text-sm font-medium mb-2">Email</label>
+                <label for="email" class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">Email</label>
                 <div class="relative">
                     <div class="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none text-gray-500">
                         <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" viewBox="0 0 20 20" fill="currentColor">
@@ -59,7 +59,7 @@
             </div>
 
             <div class="mb-6">
-                <label for="name" class="block text-sm font-medium mb-2">Full name</label>
+                <label for="name" class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">Full name</label>
                 <div class="relative">
                     <div class="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none text-gray-500">
                         <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" viewBox="0 0 20 20" fill="currentColor">
@@ -71,7 +71,7 @@
             </div>
 
             <div class="mb-6">
-                <label for="password" class="block text-sm font-medium mb-2">Password</label>
+                <label for="password" class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">Password</label>
                 <div class="relative">
                     <div class="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none text-gray-500">
                         <svg xmlns="http://www.w3.org/2000/svg" class="h-5 w-5" viewBox="0 0 20 20" fill="currentColor">
@@ -136,7 +136,7 @@
         </div>
         {% endif %}
 
-        <div class="mt-6 pt-6 border-t border-gray-200 dark:border-gray-800 text-center">
+        <div class="mt-6 pt-6 border-t border-gray-200 dark:border-gray-700 text-center">
             <p class="text-sm text-gray-600 dark:text-gray-400">
                 Already have an account? <a href="/signin?{% if invite_code != "" %}invite_code={{ invite_code }}&{% endif %}{% if plan != "" %}plan={{ plan }}&{% endif %}{% if billing != "" %}billing={{ billing }}{% endif %}" class="link">Sign in</a>
             </p>

@@ -1,8 +1,8 @@
 {% extends "private_layout.html" %}
 {% block content %}
 <div class="max-w-6xl mx-auto py-6">
-    <div class="pb-5 mb-6">
-        <h1 class="text-2xl font-bold leading-6 text-gray-900 dark:text-gray-100">Account</h1>
+    <div class="mb-6">
+        <h1 class="text-xl sm:text-2xl font-bold leading-6 text-gray-900 dark:text-gray-100">Account</h1>
         <p class="mt-2 max-w-4xl text-sm text-gray-500 dark:text-gray-400">
             Manage your account settings and preferences
         </p>
@@ -29,9 +29,9 @@
     <!-- Notification Preferences Content -->
     <div class="space-y-6">
         <form method="post" action="/account/notifications">
-            <div class="bg-white dark:bg-gray-800 shadow overflow-hidden sm:rounded-lg mb-6">
+            <div class="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 overflow-hidden mb-6">
                 <div class="px-4 py-5 sm:px-6 border-b border-gray-200 dark:border-gray-700">
-                    <h3 class="text-lg leading-6 font-medium text-gray-900 dark:text-gray-100">
+                    <h3 class="text-lg font-semibold text-gray-900 dark:text-white">
                         Notification Preferences
                     </h3>
                     <p class="mt-1 max-w-2xl text-sm text-gray-500 dark:text-gray-400">
@@ -46,7 +46,7 @@
                                     type="checkbox"
                                     id="newsletter"
                                     name="newsletter"
-                                    class="focus:ring-hot-red-500 h-4 w-4 text-red-600 border-gray-300 dark:border-gray-600 rounded"
+                                    class="h-4 w-4 text-hot-red-600 focus:ring-hot-red-500 border-gray-300 dark:border-gray-600 rounded"
                                     {% if notification_prefs.newsletter %}checked{% endif %}
                                 >
                             </div>
@@ -66,7 +66,7 @@
                                     type="checkbox"
                                     id="product_updates"
                                     name="product_updates"
-                                    class="focus:ring-hot-red-500 h-4 w-4 text-red-600 border-gray-300 dark:border-gray-600 rounded"
+                                    class="h-4 w-4 text-hot-red-600 focus:ring-hot-red-500 border-gray-300 dark:border-gray-600 rounded"
                                     {% if notification_prefs.product_updates %}checked{% endif %}
                                 >
                             </div>
@@ -90,7 +90,7 @@
                                     type="checkbox"
                                     id="alerts"
                                     name="alerts"
-                                    class="focus:ring-hot-red-500 h-4 w-4 text-red-600 border-gray-300 dark:border-gray-600 rounded"
+                                    class="h-4 w-4 text-hot-red-600 focus:ring-hot-red-500 border-gray-300 dark:border-gray-600 rounded"
                                     {% if notification_prefs.alerts %}checked{% endif %}
                                 >
                             </div>
@@ -117,7 +117,7 @@
                     }
                     .animate-fade-out { animation: fade-out 3s ease forwards; }
                 </style>
-                <span class="text-sm text-green-600 dark:text-green-400 flex items-center gap-1 animate-fade-out">
+                <span class="text-sm text-green-700 dark:text-green-400 flex items-center gap-1 animate-fade-out">
                     <svg class="h-4 w-4" viewBox="0 0 20 20" fill="currentColor">
                         <path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.857-9.809a.75.75 0 00-1.214-.882l-3.483 4.79-1.88-1.88a.75.75 0 10-1.06 1.061l2.5 2.5a.75.75 0 001.137-.089l4-5.5z" clip-rule="evenodd" />
                     </svg>

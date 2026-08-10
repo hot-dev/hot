@@ -1,33 +1,33 @@
 {% extends "private_layout.html" %}
 
 {% block content %}
-<div class="py-2">
+<div class="py-6">
     <div class="max-w-2xl mx-auto">
-        <div class="bg-white dark:bg-gray-800 rounded-lg shadow-md overflow-hidden">
+        <div class="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 overflow-hidden">
             <div class="px-6 py-4 border-b border-gray-200 dark:border-gray-700">
                 <h2 class="text-lg font-semibold text-gray-900 dark:text-white">Edit Alert Destination</h2>
                 <p class="mt-1 text-sm text-gray-500 dark:text-gray-400">
                     Update the destination configuration.
                 </p>
             </div>
-            
-            <form action="/settings/alerts/destinations/{{ destination.alert_destination_id }}" method="POST" class="px-6 py-4 space-y-6">
+
+            <form action="/settings/alerts/destinations/{{ destination.alert_destination_id }}" method="POST" class="p-6 space-y-6">
                 <div>
-                    <label for="name" class="block text-sm font-medium text-gray-700 dark:text-gray-300">
+                    <label for="name" class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
                         Name
                     </label>
                     <input type="text" name="name" id="name" required
                         value="{{ destination.name }}"
-                        class="mt-1 block w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-md shadow-sm 
+                        class="block w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-md shadow-sm
                                bg-white dark:bg-gray-700 text-gray-900 dark:text-white
                                focus:outline-none focus:ring-hot-red-500 focus:border-hot-red-500">
                 </div>
 
                 <div>
-                    <label class="block text-sm font-medium text-gray-700 dark:text-gray-300">
+                    <label class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
                         Destination Type
                     </label>
-                    <div class="mt-1 block w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-md 
+                    <div class="block w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-md
                                 bg-gray-100 dark:bg-gray-600 text-gray-900 dark:text-white">
                         {% match destination.destination_type_id %}
                             {% when 1 %}Email
@@ -44,11 +44,11 @@
                 {% if destination.destination_type_id == 1 %}
                 <div class="space-y-4">
                     <div>
-                        <label for="email_target" class="block text-sm font-medium text-gray-700 dark:text-gray-300">
+                        <label for="email_target" class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
                             Send To
                         </label>
                         <select name="email_target" id="email_target"
-                            class="mt-1 block w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-md shadow-sm 
+                            class="block w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-md shadow-sm
                                    bg-white dark:bg-gray-700 text-gray-900 dark:text-white
                                    focus:outline-none focus:ring-hot-red-500 focus:border-hot-red-500"
                             onchange="updateEmailTargetFields()">
@@ -61,12 +61,12 @@
 
                     <!-- Email Address (for "address" target) -->
                     <div id="email-target-address" class="email-target-section {% if config_fields.email_target != "address" %}hidden{% endif %}">
-                        <label for="email_address" class="block text-sm font-medium text-gray-700 dark:text-gray-300">
+                        <label for="email_address" class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
                             Email Address
                         </label>
                         <input type="email" name="email_address" id="email_address"
                             value="{{ config_fields.email_address }}"
-                            class="mt-1 block w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-md shadow-sm 
+                            class="block w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-md shadow-sm
                                    bg-white dark:bg-gray-700 text-gray-900 dark:text-white
                                    focus:outline-none focus:ring-hot-red-500 focus:border-hot-red-500"
                             placeholder="alerts@example.com">
@@ -85,11 +85,11 @@
 
                     <!-- Team selector (for "team" target) -->
                     <div id="email-target-team" class="email-target-section {% if config_fields.email_target != "team" %}hidden{% endif %}">
-                        <label for="email_team_id" class="block text-sm font-medium text-gray-700 dark:text-gray-300">
+                        <label for="email_team_id" class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
                             Team
                         </label>
                         <select name="email_team_id" id="email_team_id"
-                            class="mt-1 block w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-md shadow-sm 
+                            class="block w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-md shadow-sm
                                    bg-white dark:bg-gray-700 text-gray-900 dark:text-white
                                    focus:outline-none focus:ring-hot-red-500 focus:border-hot-red-500">
                             <option value="">Select a team...</option>
@@ -104,11 +104,11 @@
 
                     <!-- User selector (for "user" target) -->
                     <div id="email-target-user" class="email-target-section {% if config_fields.email_target != "user" %}hidden{% endif %}">
-                        <label for="email_user_id" class="block text-sm font-medium text-gray-700 dark:text-gray-300">
+                        <label for="email_user_id" class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
                             User
                         </label>
                         <select name="email_user_id" id="email_user_id"
-                            class="mt-1 block w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-md shadow-sm 
+                            class="block w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-md shadow-sm
                                    bg-white dark:bg-gray-700 text-gray-900 dark:text-white
                                    focus:outline-none focus:ring-hot-red-500 focus:border-hot-red-500">
                             <option value="">Select a user...</option>
@@ -140,26 +140,26 @@
                 {% if destination.destination_type_id == 2 %}
                 <div class="space-y-4">
                     <div>
-                        <label for="slack_webhook_url" class="block text-sm font-medium text-gray-700 dark:text-gray-300">
+                        <label for="slack_webhook_url" class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
                             Webhook URL
                         </label>
                         <input type="url" name="slack_webhook_url" id="slack_webhook_url"
                             value="{{ config_fields.slack_webhook_url }}"
-                            class="mt-1 block w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-md shadow-sm 
+                            class="block w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-md shadow-sm
                                    bg-white dark:bg-gray-700 text-gray-900 dark:text-white
                                    focus:outline-none focus:ring-hot-red-500 focus:border-hot-red-500"
                             placeholder="https://hooks.slack.com/services/...">
                         <p class="mt-1 text-sm text-gray-500 dark:text-gray-400">
-                            Create an <a href="https://api.slack.com/messaging/webhooks" target="_blank" class="text-hot-red-500 hover:text-hot-red-600">Incoming Webhook</a> in your Slack workspace.
+                            Create an <a href="https://api.slack.com/messaging/webhooks" target="_blank" class="link">Incoming Webhook</a> in your Slack workspace.
                         </p>
                     </div>
                     <div>
-                        <label for="slack_channel" class="block text-sm font-medium text-gray-700 dark:text-gray-300">
-                            Channel Override <span class="text-gray-400 font-normal">(optional)</span>
+                        <label for="slack_channel" class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
+                            Channel Override <span class="text-gray-500 dark:text-gray-400 font-normal">(optional)</span>
                         </label>
                         <input type="text" name="slack_channel" id="slack_channel"
                             value="{{ config_fields.slack_channel }}"
-                            class="mt-1 block w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-md shadow-sm 
+                            class="block w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-md shadow-sm
                                    bg-white dark:bg-gray-700 text-gray-900 dark:text-white
                                    focus:outline-none focus:ring-hot-red-500 focus:border-hot-red-500"
                             placeholder="#alerts">
@@ -174,12 +174,12 @@
                 {% if destination.destination_type_id == 3 %}
                 <div class="space-y-4">
                     <div>
-                        <label for="pagerduty_routing_key" class="block text-sm font-medium text-gray-700 dark:text-gray-300">
+                        <label for="pagerduty_routing_key" class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
                             Routing Key (Integration Key)
                         </label>
                         <input type="text" name="pagerduty_routing_key" id="pagerduty_routing_key"
                             value="{{ config_fields.pagerduty_routing_key }}"
-                            class="mt-1 block w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-md shadow-sm 
+                            class="block w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-md shadow-sm
                                    bg-white dark:bg-gray-700 text-gray-900 dark:text-white
                                    focus:outline-none focus:ring-hot-red-500 focus:border-hot-red-500"
                             placeholder="your-integration-key">
@@ -188,11 +188,11 @@
                         </p>
                     </div>
                     <div>
-                        <label for="pagerduty_severity" class="block text-sm font-medium text-gray-700 dark:text-gray-300">
+                        <label for="pagerduty_severity" class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
                             Severity
                         </label>
                         <select name="pagerduty_severity" id="pagerduty_severity"
-                            class="mt-1 block w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-md shadow-sm 
+                            class="block w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-md shadow-sm
                                    bg-white dark:bg-gray-700 text-gray-900 dark:text-white
                                    focus:outline-none focus:ring-hot-red-500 focus:border-hot-red-500">
                             <option value="critical" {% if config_fields.pagerduty_severity == "critical" %}selected{% endif %}>Critical</option>
@@ -208,22 +208,22 @@
                 {% if destination.destination_type_id == 4 %}
                 <div class="space-y-4">
                     <div>
-                        <label for="webhook_url" class="block text-sm font-medium text-gray-700 dark:text-gray-300">
+                        <label for="webhook_url" class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
                             Webhook URL
                         </label>
                         <input type="url" name="webhook_url" id="webhook_url"
                             value="{{ config_fields.webhook_url }}"
-                            class="mt-1 block w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-md shadow-sm 
+                            class="block w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-md shadow-sm
                                    bg-white dark:bg-gray-700 text-gray-900 dark:text-white
                                    focus:outline-none focus:ring-hot-red-500 focus:border-hot-red-500"
                             placeholder="https://api.example.com/webhook/alerts">
                     </div>
                     <div>
-                        <label for="webhook_headers" class="block text-sm font-medium text-gray-700 dark:text-gray-300">
-                            Custom Headers <span class="text-gray-400 font-normal">(optional, JSON)</span>
+                        <label for="webhook_headers" class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2">
+                            Custom Headers <span class="text-gray-500 dark:text-gray-400 font-normal">(optional, JSON)</span>
                         </label>
                         <textarea name="webhook_headers" id="webhook_headers" rows="3"
-                            class="mt-1 block w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-md shadow-sm 
+                            class="block w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-md shadow-sm
                                    bg-white dark:bg-gray-700 text-gray-900 dark:text-white font-mono text-sm
                                    focus:outline-none focus:ring-hot-red-500 focus:border-hot-red-500"
                             placeholder='{"Authorization": "Bearer your-token"}'>{{ config_fields.webhook_headers }}</textarea>
@@ -234,7 +234,7 @@
                 <div class="flex items-center">
                     <input type="checkbox" name="enabled" id="enabled" value="true"
                         {% if destination.enabled %}checked{% endif %}
-                        class="h-4 w-4 text-hot-red-500 focus:ring-hot-red-500 border-gray-300 dark:border-gray-600 rounded">
+                        class="h-4 w-4 text-hot-red-600 focus:ring-hot-red-500 border-gray-300 dark:border-gray-600 rounded">
                     <label for="enabled" class="ml-2 block text-sm text-gray-700 dark:text-gray-300">
                         Enabled
                     </label>
@@ -242,20 +242,16 @@
 
                 <div class="flex items-center justify-between pt-4 border-t border-gray-200 dark:border-gray-700">
                     <button type="button" id="delete-btn"
-                        class="px-4 py-2 border border-red-300 dark:border-red-600 rounded-md text-sm font-medium 
-                               text-red-700 dark:text-red-300 hover:bg-red-50 dark:hover:bg-red-900/20">
+                        class="btn btn-danger">
                         Delete
                     </button>
                     <div class="flex space-x-3">
-                        <a href="/settings/alerts/destinations" 
-                           class="px-4 py-2 border border-gray-300 dark:border-gray-600 rounded-md text-sm font-medium 
-                                  text-gray-700 dark:text-gray-300 hover:bg-gray-50 dark:hover:bg-gray-700">
+                        <a href="/settings/alerts/destinations"
+                           class="btn btn-secondary">
                             Cancel
                         </a>
                         <button type="submit"
-                            class="px-4 py-2 border border-transparent rounded-md shadow-sm text-sm font-medium 
-                                   text-white bg-hot-red-500 hover:bg-hot-red-600 focus:outline-none focus:ring-2 
-                                   focus:ring-offset-2 focus:ring-hot-red-500">
+                            class="btn btn-primary">
                             Save Changes
                         </button>
                     </div>
@@ -271,7 +267,7 @@
                         'Delete Destination',
                         'Are you sure you want to delete this destination? Any subscriptions using it will no longer deliver to it.',
                         () => document.getElementById('delete-form').submit(),
-                        { confirmText: 'Delete', type: 'warning' }
+                        { confirmText: 'Delete', type: 'warning', destructive: true }
                     );
                 });
             </script>

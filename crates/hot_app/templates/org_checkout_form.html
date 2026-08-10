@@ -4,11 +4,11 @@
   <div class="max-w-lg w-full mx-4">
     <div class="text-center mb-8">
       {% if plan.base_price_monthly_cents == 0 %}
-      <h1 class="text-2xl font-bold text-gray-900 dark:text-white">Activate Your Free Plan</h1>
+      <h1 class="text-xl sm:text-2xl font-bold leading-6 text-gray-900 dark:text-gray-100">Activate Your Free Plan</h1>
       <p class="text-gray-600 dark:text-gray-400 mt-2">Verify your card to activate <strong>{{ org.name }}</strong></p>
       <p class="text-xs text-gray-500 dark:text-gray-500 mt-1">No charge &mdash; card verification only</p>
       {% else %}
-      <h1 class="text-2xl font-bold text-gray-900 dark:text-white">Complete Your Subscription</h1>
+      <h1 class="text-xl sm:text-2xl font-bold leading-6 text-gray-900 dark:text-gray-100">Complete Your Subscription</h1>
       <p class="text-gray-600 dark:text-gray-400 mt-2">Activate <strong>{{ org.name }}</strong> with Hot Cloud</p>
       {% endif %}
     </div>
@@ -21,17 +21,17 @@
           <div class="flex gap-4">
             <label class="flex items-center cursor-pointer">
               <input type="radio" name="billing_period" value="monthly"
-                     class="h-4 w-4 text-red-600 dark:text-red-400 border-gray-300 focus:ring-hot-red-500"
+                     class="h-4 w-4 text-hot-red-600 focus:ring-hot-red-500 border-gray-300 dark:border-gray-600 rounded"
                      {% if billing_period != "annual" %}checked{% endif %}
                      onchange="updatePrices()">
               <span class="ml-2 text-sm text-gray-700 dark:text-gray-300">Monthly</span>
             </label>
             <label class="flex items-center cursor-pointer">
               <input type="radio" name="billing_period" value="annual"
-                     class="h-4 w-4 text-red-600 dark:text-red-400 border-gray-300 focus:ring-hot-red-500"
+                     class="h-4 w-4 text-hot-red-600 focus:ring-hot-red-500 border-gray-300 dark:border-gray-600 rounded"
                      {% if billing_period == "annual" %}checked{% endif %}
                      onchange="updatePrices()">
-              <span class="ml-2 text-sm text-gray-700 dark:text-gray-300">Annual <span class="text-green-600">(Save ~17%)</span></span>
+              <span class="ml-2 text-sm text-gray-700 dark:text-gray-300">Annual <span class="text-green-700 dark:text-green-400">(Save ~17%)</span></span>
             </label>
           </div>
         </div>
@@ -49,7 +49,7 @@
                    data-annual-price="{{ p.annual_price_dollars() }}"
                    data-annual-savings="{{ p.annual_savings_percent() as i32 }}">
               <input type="radio" name="plan_id" value="{{ pid }}"
-                     class="h-4 w-4 text-red-600 dark:text-red-400 border-gray-300 focus:ring-hot-red-500"
+                     class="h-4 w-4 text-hot-red-600 focus:ring-hot-red-500 border-gray-300 dark:border-gray-600 rounded"
                      {% if plan.plan_id.as_deref() == Some(pid.as_str()) %}checked{% endif %}
                      onchange="updateSelection(this)">
               <div class="ml-3 flex-1">
@@ -85,7 +85,7 @@
               ${{ plan.monthly_price_dollars() }}<span class="text-base font-normal text-gray-500">/month</span>
             {% endif %}
           </div>
-          <div id="summary-savings" class="text-sm text-green-600 font-medium mt-1 {% if billing_period != "annual" %}hidden{% endif %}">
+          <div id="summary-savings" class="text-sm text-green-700 dark:text-green-400 font-medium mt-1 {% if billing_period != "annual" %}hidden{% endif %}">
             Save {{ plan.annual_savings_percent() as i32 }}% vs monthly
           </div>
         </div>

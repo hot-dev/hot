@@ -1,9 +1,9 @@
 {% extends "private_layout.html" %}
 
 {% block content %}
-<div class="max-w-7xl mx-auto px-4 py-6 sm:px-6 lg:px-8">
-    <div class="pb-5 mb-6">
-        <h1 class="text-2xl font-bold leading-6 text-gray-900 dark:text-gray-100">Context Variables</h1>
+<div class="max-w-7xl mx-auto py-6">
+    <div class="mb-6">
+        <h1 class="text-xl sm:text-2xl font-bold leading-6 text-gray-900 dark:text-gray-100">Context Variables</h1>
         <p class="mt-2 max-w-4xl text-sm text-gray-500 dark:text-gray-400">
             Encrypted configuration variables for <span class="font-medium">{{ project_name }}</span>
         </p>
@@ -27,7 +27,7 @@
     <div class="mb-6 bg-yellow-50 dark:bg-yellow-900/20 border border-yellow-200 dark:border-yellow-700 rounded-md p-4">
         <div class="flex">
             <div class="flex-shrink-0">
-                <svg class="h-5 w-5 text-yellow-400" fill="currentColor" viewBox="0 0 20 20">
+                <svg class="h-5 w-5 text-amber-600 dark:text-amber-400" fill="currentColor" viewBox="0 0 20 20">
                     <path fill-rule="evenodd" d="M8.257 3.099c.765-1.36 2.722-1.36 3.486 0l5.58 9.92c.75 1.334-.213 2.98-1.742 2.98H4.42c-1.53 0-2.493-1.646-1.743-2.98l5.58-9.92zM11 13a1 1 0 11-2 0 1 1 0 012 0zm-1-8a1 1 0 00-1 1v3a1 1 0 002 0V6a1 1 0 00-1-1z" clip-rule="evenodd"></path>
                 </svg>
             </div>
@@ -42,24 +42,24 @@
 
     {% if contexts.len() > 0 %}
     <!-- Context Variables List -->
-    <div class="bg-white dark:bg-gray-800 rounded-lg shadow-md overflow-hidden">
+    <div class="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 overflow-hidden">
         <div class="overflow-x-auto">
             <table class="min-w-full divide-y divide-gray-200 dark:divide-gray-700">
                 <thead class="bg-gray-50 dark:bg-gray-900">
                     <tr>
-                        <th scope="col" class="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase tracking-wider">
+                        <th scope="col" class="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">
                             Key
                         </th>
-                        <th scope="col" class="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase tracking-wider">
+                        <th scope="col" class="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">
                             Description
                         </th>
-                        <th scope="col" class="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase tracking-wider">
+                        <th scope="col" class="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">
                             Status
                         </th>
-                        <th scope="col" class="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase tracking-wider">
+                        <th scope="col" class="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">
                             Created
                         </th>
-                        <th scope="col" class="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-300 uppercase tracking-wider">
+                        <th scope="col" class="px-6 py-3 text-left text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wider">
                             Last Updated
                         </th>
                         {% if is_admin %}
@@ -110,7 +110,7 @@
                                 Edit<span class="sr-only">, {{ context.key }}</span>
                             </a>
                             <form id="delete-context-{{ context.context_id }}" action="/contexts/{{ project_name }}/{{ context.context_id }}/delete" method="post" class="inline">
-                                <button type="button" onclick="confirmDeleteContext('{{ context.context_id }}')" class="text-red-600 hover:text-red-800 dark:text-red-500 dark:hover:text-red-300 transition-all">
+                                <button type="button" onclick="confirmDeleteContext('{{ context.context_id }}')" class="text-red-700 hover:text-red-800 dark:text-red-400 dark:hover:text-red-300 transition-all">
                                     Delete<span class="sr-only">, {{ context.key }}</span>
                                 </button>
                             </form>
@@ -124,15 +124,15 @@
     </div>
     {% else %}
     <!-- Empty State -->
-    <div class="bg-white dark:bg-gray-800 rounded-lg shadow-md p-8">
-        <div class="text-center">
-            <div class="mx-auto flex items-center justify-center h-12 w-12 rounded-full bg-gray-100 dark:bg-gray-900 mb-4">
+    <div class="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700">
+        <div class="empty-state">
+            <div class="empty-state-icon">
                 <svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6 text-gray-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                     <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 21a4 4 0 01-4-4V5a2 2 0 012-2h4a2 2 0 012 2v12a4 4 0 01-4 4zm0 0h12a2 2 0 002-2v-4a2 2 0 00-2-2h-2.343M11 7.343l1.657-1.657a2 2 0 012.828 0l2.829 2.829a2 2 0 010 2.828l-8.486 8.485M7 17h.01"></path>
                 </svg>
             </div>
-            <h3 class="text-lg font-medium text-gray-900 dark:text-white mb-2">No context variables</h3>
-            <p class="text-gray-500 dark:text-gray-400 mb-4">
+            <h3 class="empty-state-title">No context variables</h3>
+            <p class="empty-state-message">
                 Context variables allow you to store encrypted configuration values that are available to your Hot code at runtime.
             </p>
             {% if is_admin %}
@@ -180,7 +180,7 @@ function confirmDeleteContext(contextId) {
         'Delete Context Variable',
         'Are you sure you want to delete this context variable?',
         () => document.getElementById('delete-context-' + contextId).submit(),
-        { confirmText: 'Delete', type: 'warning' }
+        { confirmText: 'Delete', type: 'warning', destructive: true }
     );
 }
 </script>
