@@ -1,5 +1,5 @@
 ---
-description: "Use the Hot App dashboard to inspect projects, runs, events, traces, streams, logs, agents, and deployment state."
+description: "Use the Hot App to inspect projects, workflows, agents, runs, tasks, events, streams, stores, files, and deployment state."
 ---
 
 # Hot App
@@ -13,12 +13,12 @@ The Hot App is a web-based management and observability platform for your Hot pr
 
 ## Navigation & Scope
 
-The sidebar provides navigation to all features of the Hot App. At the top are two key selectors:
+The sidebar provides navigation to the environment-scoped features of the Hot App. A sticky header above the page content contains two key selectors:
 
 - **Organization** - Select which organization to view
 - **Environment** - Select which environment within that organization (e.g., development, staging, production)
 
-**These selectors control the scope of everything below.** When you select an organization and environment, all data throughout the app—runs, events, streams, projects, files, and more—is filtered to that specific context.
+**These selectors control the scope of operational pages.** When you select an organization and environment, runs, tasks, events, streams, projects, files, stores, and other environment data are filtered to that context. Account, organization, team, and billing pages are not environment-scoped.
 
 From each selector dropdown, you can also access management screens:
 
@@ -31,9 +31,10 @@ This scoping model keeps your data organized and allows you to easily switch bet
 
 The **Dashboard** is your home screen, providing an at-a-glance overview of your Hot environment:
 
-- **Issues banner** - A compact alert bar linking directly to failed runs, failed tasks, and unhandled events
+- **Issues banner** - A compact alert bar linking directly to failed runs, failed tasks, unhandled events, build version warnings, and failing agents
 - **Hero metrics** - Four cards showing totals and status breakdowns for Runs, Tasks (including CUS), Events, and Streams
-- **Activity charts** - A scrollable grid of charts: run activity, run type distribution, task activity, CUS over time, event activity, event type distribution, stream activity, and stream composition
+- **Agent Health** - A rollup of healthy, degraded, failing, and idle agents, followed by up to five agents that need attention
+- **Activity charts** - A scrollable grid covering run activity and types, run waiting versus execution latency, task activity and CUS, task waiting versus execution latency, event activity and types, and stream activity and composition
 - **Issues** - Expanded tables for failed runs, failed tasks, and unhandled events
 
 Use the filters at the top (project, time range, granularity) to scope the data. The dashboard auto-refreshes via server-sent events (SSE), and all charts and metrics update when filters change.
@@ -123,13 +124,14 @@ Events are the primary way to trigger Hot functions. See [Events & Handlers](/do
 
 Streams are especially useful for tracing complex workflows that span multiple function calls and events.
 
-## Agents
+## Workflows & Agents {#agents}
 
-The **Agents** view shows all deployed [agents](/docs/agents) in your environment. Agents are typed groups of event handlers, schedules, and webhooks that share identity.
+The **Workflows & Agents** view brings together named workflows, [agents](/docs/agents), and project-level workflows inferred from deployed handlers, triggers, and sends.
 
-- **Agents list** — Card grid showing each agent's name, namespace, description, tags, handler count, and project. Search by name, namespace, or project. A topology graph spanning all agents is shown at the top of the page.
-- **Agent Dashboard** — Click an agent to open its dashboard. The default **Graph** tab shows an interactive topology visualization of the agent's handlers, triggers, and event sends. Click any node to open an inspector sidebar with full details (namespace, source location, description, retry config, handled/sent events). Use the toolbar to toggle horizontal/vertical layout, open/close the inspector, zoom, or download the graph as a PNG. Additional tabs show **Handlers** (all linked handlers with trigger details), **Runs** (paginated run history), and **Streams** (related streams).
-- **Dashboard health widget** — The main Dashboard shows an Agent Health section with a health indicator per agent (green >95%, yellow 80–95%, red <80% success rate) and agent vs. non-agent run breakdown.
+- **All Workflows** — Cards identify each item as a workflow, agent, or unnamed workflow group and show its name, namespace, description, tags, handler count, project, and recent health when applicable. Search by name, namespace, or project, or filter agents by health status.
+- **Graph** — The separate Graph tab shows topology across workflows and agents. Filter by workflow, agent, project, or tag, search for nodes, change the graph direction, and open the inspector.
+- **Agent details** — Click an agent to open its default **Graph** tab, an interactive topology visualization of the agent's handlers, triggers, and event sends. Click a node to inspect its namespace, source location, description, retry configuration, and handled or sent events. Additional tabs show **Handlers**, **Runs**, and **Streams**.
+- **Dashboard health widget** — The main Dashboard summarizes healthy, degraded, failing, and idle agents for the selected window and lists up to five degraded or failing agents.
 
 Agents are defined using `agent` metadata on types and `meta {agent: TypeName}` on handler functions. See [Agents](/docs/agents) for the full definition and patterns.
 
@@ -143,13 +145,23 @@ The **Files** view lets you browse and download files stored by your Hot functio
 
 Files can be created in your Hot code using functions in the [`::hot::file`](https://hot.dev/pkg/hot.dev/hot-std/hot/file) namespace.
 
+## Stores
+
+The **Stores** view lets you inspect persistent maps created with [`::hot::store`](https://hot.dev/pkg/hot.dev/hot-std/hot/store):
+
+- Search stores by name and view entry count, size, creation time, embedding configuration, and text-search support
+- Open a store to search its keys and values and inspect individual entries
+- Administrators can reveal values, which are hidden by default, and delete entries
+
+Stores are scoped to the selected organization and environment. They are created automatically when Hot code first uses a `::hot::store/Map`.
+
 ## Scheduled Runs
 
 The **Scheduled Runs** view shows all functions with schedule metadata:
 
-- **Schedule** - Cron expression defining when the function runs
-- **Next run** - When the function will next execute
-- **Recent runs** - History of scheduled executions
+- **Function and schedule** - The scheduled function and cron expression
+- **Configuration** - Schedule type, retry policy, source location, and active status
+- **Execution log** - Recent scheduled executions with scheduled and actual execution times, event and stream links, and backfill status
 
 See [Schedules](/docs/schedules) for more on defining scheduled functions.
 
@@ -163,7 +175,7 @@ The **Event Handlers** view lists all functions that handle events:
 
 ## MCP Services
 
-The **MCP Services** view lists all functions exposed as [Model Context Protocol](/docs/mcp) tools. Tools are grouped by **service**, showing tool name, description, file location, and project. Use the service filter to narrow the list.
+The **MCP Services** view groups functions exposed as [Model Context Protocol](/docs/mcp) tools into service cards. Search the overview by service name or project, then open a service to see its endpoint and a searchable table of tools, including project, tool and function names, authentication, description, and source location.
 
 MCP tools are driven by `mcp` metadata in your source code — they're automatically registered on deploy and unregistered when removed. See [MCP Services](/docs/mcp) for how to define tools and configure the MCP endpoint.
 
@@ -181,11 +193,13 @@ See [Alerts](/docs/alerts) for the full documentation on channels, destinations,
 
 ## Projects
 
-**Projects** represent deployed Hot applications. Each project shows:
+**Projects** represent deployed Hot applications. The project list and detail pages show:
 
 - **Active status** - Whether the project is currently active
+- **Overview** - Project identifiers, current deployed build, timestamps, and activation controls
 - **Builds** - Deployment history with the ability to deploy previous builds
-- **Documentation** - Auto-generated docs from your Hot code
+
+Use the global **Docs** page to browse auto-generated documentation for deployed projects.
 
 ## Context Variables
 

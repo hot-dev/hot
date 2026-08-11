@@ -6,22 +6,21 @@
   </picture>
 </p>
 
-<p align="left"><strong>Open source platform for backend workflows and AI agents</strong></p>
+<p align="left"><strong>Language, runtime, and services for backend workflows and AI agents</strong></p>
 
 # Hot Dev
 
-Hot Dev is an open source platform for backend workflows: events, schedules,
-AI agents, MCP tools, long-running tasks, and service orchestration. It includes
-execution tracing, a local dev runtime, and single-command deploys.
+Hot Dev is an open source language, runtime, and set of services for event
+handlers, schedules, AI agents, MCP tools, and long-running tasks. It includes
+execution tracing, a local development runtime, and deployment through
+`hot deploy`.
 
-Hot is the language and runtime at its core. This repo contains the Hot
-compiler, VM, and standard library, plus the platform built on top: the `hot`
-CLI, API, web app, scheduler, event worker, task worker, and LSP server. Public
-Hot packages live under `hot/pkg`, including `hot-std` and provider/tool
-integrations.
+This repository contains the Hot compiler, VM, standard library, `hot` CLI,
+API, web app, scheduler, event worker, task worker, and LSP server. Public Hot
+packages are under `hot/pkg`, including `hot-std` and provider/tool integrations.
 
-Hot Dev Cloud is the hosted offering; its deployment infrastructure and private
-operational tooling live outside this repository.
+Hot Dev Cloud hosts Hot deployments. Its deployment infrastructure and private
+operational tooling are outside this repository.
 
 - Website: [hot.dev](https://hot.dev)
 - Download: [hot.dev/download](https://hot.dev/download)
@@ -42,7 +41,6 @@ the same `meta` mechanism:
 on-signup
 meta {
     webhook: {service: "leads", path: "/signup"},
-    on-event: "lead:new",
 }
 fn (request) {
     send("lead:new", request.body)
