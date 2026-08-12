@@ -270,10 +270,16 @@ hot.jit.threshold Int(::env/get("HOT_JIT_THRESHOLD", "100"))
 hot.jit.hof.fusion Bool(::env/get("HOT_JIT_HOF_FUSION", "true"))
 
 // Queue Configuration
-// Type: "memory", "redis", or "none" (disabled)
-// Default when unset: "memory" for runtime commands inside a project,
+// Type: "sqlite" (managed project-local default), "memory" (one process),
+// "redis" (distributed), or "none" (disabled)
+// SQLite queue files and their private schema live under .hot/db/queue/.
+// hot dev exclusively locks the project queue session, marks interrupted work
+// failed, then clears its startup snapshot. Standalone SQLite services share a
+// lock with each other and recover durable work, but cannot overlap hot dev.
+// Integration-mode hot test forces the isolated in-process memory queue.
+// Default when unset: "sqlite" for runtime commands inside a project,
 // "none" otherwise
-hot.queue.type ::env/get("HOT_QUEUE_TYPE", "memory")
+hot.queue.type ::env/get("HOT_QUEUE_TYPE", "sqlite")
 hot.queue.event-orphan-idle-ms Int(::env/get("HOT_QUEUE_EVENT_ORPHAN_IDLE_MS", "60000"))
 hot.queue.task-orphan-idle-ms Int(::env/get("HOT_QUEUE_TASK_ORPHAN_IDLE_MS", "120000"))
 hot.queue.infra-retry-backoff-ms Int(::env/get("HOT_QUEUE_INFRA_RETRY_BACKOFF_MS", "1000"))

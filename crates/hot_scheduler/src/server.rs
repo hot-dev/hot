@@ -6,7 +6,7 @@ use hot::data::serialization::Serialization;
 use hot::db::{DatabasePool, Schedule, ScheduleLog, SchedulePolicy, SchedulerState};
 use hot::env::is_local_dev;
 use hot::lang::event::{Event, EventMessage, EventMessageBody, ExecutionContext};
-use hot::queue::{Queue, QueueType, mem::MemQueue, streams::RedisStreamQueue};
+use hot::queue::{Queue, QueueType, mem::MemQueue, sqlite::SqliteQueue, streams::RedisStreamQueue};
 use hot::val;
 use hot::val::Val;
 use std::str::FromStr;
@@ -65,7 +65,7 @@ struct ScheduledJobInfo {
     pub build_id: Uuid,
 }
 
-pub const DEFAULT_QUEUE_TYPE: QueueType = QueueType::Memory;
+pub const DEFAULT_QUEUE_TYPE: QueueType = QueueType::Sqlite;
 pub const DEFAULT_SERIALIZATION: Serialization = Serialization::ZstdJson; // must match Serialization's #[default]
 pub const DEFAULT_REDIS_URL: &str = "redis://localhost:6379";
 pub const DEFAULT_SYNC_INTERVAL_SECONDS: u64 = 30; // Sync with database every 30 seconds
@@ -149,6 +149,11 @@ pub async fn run(
                 .with_serialization(serialization);
             Arc::new(queue)
         }
+        QueueType::Sqlite => {
+            let queue = SqliteQueue::<Message>::new("hot:event".to_string())?
+                .with_serialization(serialization);
+            Arc::new(queue)
+        }
         QueueType::Redis => {
             let redis_uri = redis_uri.ok_or("Redis URL is required for Redis queue type")?;
 
@@ -183,15 +188,23 @@ pub async fn run(
         QueueType::Memory => {
             debug!("hot.dev: SCHEDULER using in-memory queue (no connectivity check needed)");
         }
-        QueueType::Redis => {
-            // Test Redis connection with a simple operation
+        QueueType::Sqlite | QueueType::Redis => {
+            // Force schema/bootstrap or remote connectivity before starting.
             match event_queue.is_empty().await {
                 Ok(_) => {
-                    debug!("hot.dev: SCHEDULER successfully connected to Redis queue");
+                    debug!(
+                        "hot.dev: SCHEDULER successfully connected to {} queue",
+                        queue_type
+                    );
                 }
                 Err(e) => {
-                    error!("hot.dev: SCHEDULER failed to connect to Redis queue: {}", e);
-                    return Err(format!("Redis queue connectivity check failed: {}", e).into());
+                    error!(
+                        "hot.dev: SCHEDULER failed to connect to {} queue: {}",
+                        queue_type, e
+                    );
+                    return Err(
+                        format!("{} queue connectivity check failed: {}", queue_type, e).into(),
+                    );
                 }
             }
         }

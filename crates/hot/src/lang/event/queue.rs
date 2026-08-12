@@ -124,7 +124,7 @@ pub async fn enqueue_deployment_message(conf: &Val, build_id: Uuid) -> Result<()
     };
     let message: Message = deployment_message.into();
 
-    let queue_type_str = conf.get_str_or_default("queue.type", "memory");
+    let queue_type_str = conf.get_str_or_default("queue.type", "sqlite");
     let queue_type = QueueType::from_str(&queue_type_str).unwrap_or(QueueType::Memory);
 
     let redis_uri_str = conf.get_str_or_default("redis.uri", "");
@@ -643,12 +643,20 @@ impl TryFrom<Message> for EventMessage {
 /// Event queue interface - simplified wrapper around the hot queue system
 ///
 /// Event publisher that sends events to a queue
+type PendingEnqueue = tokio::task::JoinHandle<Result<(), String>>;
+type PendingEnqueues = Arc<std::sync::Mutex<Vec<PendingEnqueue>>>;
+
 pub struct QueueEventPublisher {
     // ProcessingQueue::clone creates independent Redis consumer state and a
     // fresh connection cache. Publishers only produce, so all publisher
     // clones should share one queue/connection instead.
     queue: Arc<ProcessingQueue<Message>>,
     queue_name: String,
+    /// Queue writes are spawned because `EventPublisher::publish` is a sync
+    /// interface invoked by the VM. One-shot CLI commands call `shutdown`,
+    /// which drains these handles so a durable SQLite/Redis enqueue cannot be
+    /// lost when the process exits immediately after `send()`.
+    pending_enqueues: PendingEnqueues,
 }
 
 impl QueueEventPublisher {
@@ -658,7 +666,7 @@ impl QueueEventPublisher {
         queue_name: String,
         redis_uri: Option<String>,
         serialization: Serialization,
-    ) -> Self {
+    ) -> Result<Self, String> {
         Self::new_with_cluster(queue_type, queue_name, redis_uri, false, serialization)
     }
 
@@ -669,7 +677,7 @@ impl QueueEventPublisher {
         redis_uri: Option<String>,
         redis_cluster: bool,
         serialization: Serialization,
-    ) -> Self {
+    ) -> Result<Self, String> {
         // Create the actual queue using the hot queue system with cluster support
         let queue = Arc::new(
             ProcessingQueue::<Message>::new_with_cluster(
@@ -679,16 +687,20 @@ impl QueueEventPublisher {
                 redis_cluster,
                 serialization,
             )
-            .expect("Failed to create event queue"),
+            .map_err(|error| format!("Failed to create event queue '{queue_name}': {error}"))?,
         );
 
-        Self { queue, queue_name }
+        Ok(Self {
+            queue,
+            queue_name,
+            pending_enqueues: Arc::new(std::sync::Mutex::new(Vec::new())),
+        })
     }
 
     /// Create a QueueEventPublisher with default settings for the "hot:event" queue
-    pub fn new_default() -> Self {
+    pub fn new_default() -> Result<Self, String> {
         Self::new(
-            QueueType::Memory,
+            QueueType::default(),
             "hot:event".to_string(),
             None,
             Serialization::Json,
@@ -697,9 +709,35 @@ impl QueueEventPublisher {
 
     /// Shutdown implementation
     async fn shutdown_impl(&self) -> Result<(), String> {
-        // For ProcessingQueue, there's no background processing to shut down
-        // The queue itself handles its own lifecycle
-        Ok(())
+        let pending = {
+            let mut guard = self
+                .pending_enqueues
+                .lock()
+                .map_err(|_| "Queue enqueue tracker mutex poisoned".to_string())?;
+            std::mem::take(&mut *guard)
+        };
+        if pending.is_empty() {
+            return Ok(());
+        }
+
+        let drain = async move {
+            let mut errors = Vec::new();
+            for result in futures::future::join_all(pending).await {
+                match result {
+                    Ok(Ok(())) => {}
+                    Ok(Err(error)) => errors.push(error),
+                    Err(error) => errors.push(format!("Queue enqueue task failed: {error}")),
+                }
+            }
+            if errors.is_empty() {
+                Ok(())
+            } else {
+                Err(errors.join("; "))
+            }
+        };
+        tokio::time::timeout(std::time::Duration::from_secs(5), drain)
+            .await
+            .map_err(|_| "Timed out draining pending queue enqueues after 5s".to_string())?
     }
 }
 
@@ -736,11 +774,19 @@ impl EventPublisher for QueueEventPublisher {
 
         // Send to queue (fire and forget)
         let queue = self.queue.clone();
-        tokio::spawn(async move {
-            if let Err(e) = queue.enqueue(message).await {
-                tracing::error!("QueueEventPublisher: Failed to enqueue event: {}", e);
-            }
+        let handle = tokio::spawn(async move {
+            queue.enqueue(message).await.map_err(|error| {
+                let error = format!("QueueEventPublisher: Failed to enqueue event: {error}");
+                tracing::error!("{}", error);
+                error
+            })
         });
+        let mut pending = self
+            .pending_enqueues
+            .lock()
+            .expect("queue enqueue tracker mutex poisoned");
+        pending.retain(|task| !task.is_finished());
+        pending.push(handle);
     }
 
     fn shutdown(
@@ -755,6 +801,7 @@ impl Clone for QueueEventPublisher {
         Self {
             queue: Arc::clone(&self.queue),
             queue_name: self.queue_name.clone(),
+            pending_enqueues: Arc::clone(&self.pending_enqueues),
         }
     }
 }
@@ -778,9 +825,11 @@ impl QueueAndDatabaseEventPublisher {
     }
 
     /// Create a QueueAndDatabaseEventPublisher with default queue settings
-    pub fn new_with_database(database_publisher: super::database::DatabaseEventPublisher) -> Self {
-        let queue_publisher = QueueEventPublisher::new_default();
-        Self::new(queue_publisher, database_publisher)
+    pub fn new_with_database(
+        database_publisher: super::database::DatabaseEventPublisher,
+    ) -> Result<Self, String> {
+        let queue_publisher = QueueEventPublisher::new_default()?;
+        Ok(Self::new(queue_publisher, database_publisher))
     }
 
     /// Shutdown implementation that shuts down both publishers
@@ -1069,9 +1118,36 @@ mod tests {
     use super::*;
     use uuid::Uuid;
 
+    fn test_queue_publisher() -> QueueEventPublisher {
+        QueueEventPublisher::new(
+            QueueType::Memory,
+            format!("hot:event:test:{}", Uuid::now_v7()),
+            None,
+            Serialization::Json,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn default_publisher_uses_managed_sqlite_queue() {
+        let publisher = QueueEventPublisher::new_default().unwrap();
+        assert!(matches!(&*publisher.queue, ProcessingQueue::Sqlite(_)));
+    }
+
+    #[test]
+    fn invalid_queue_configuration_returns_error_instead_of_panicking() {
+        let result = QueueEventPublisher::new(
+            QueueType::Redis,
+            "hot:event".to_string(),
+            Some("not-a-redis-uri".to_string()),
+            Serialization::Json,
+        );
+        assert!(result.is_err());
+    }
+
     #[tokio::test]
     async fn test_queue_event_publisher_creation() {
-        let publisher = QueueEventPublisher::new_default();
+        let publisher = test_queue_publisher();
         let publisher_clone = publisher.clone();
         assert!(
             Arc::ptr_eq(&publisher.queue, &publisher_clone.queue),
@@ -1100,11 +1176,16 @@ mod tests {
 
         // Test shutdown
         assert!(publisher.shutdown().await.is_ok());
+        assert_eq!(
+            publisher.queue.len().await.unwrap(),
+            1,
+            "shutdown must wait until the spawned enqueue is durable"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn test_queue_and_database_event_publisher() {
-        let queue_publisher = QueueEventPublisher::new_default();
+        let queue_publisher = test_queue_publisher();
         let database_publisher = DatabaseEventPublisher::new("sqlite::memory:".to_string());
         let combined_publisher =
             QueueAndDatabaseEventPublisher::new(queue_publisher, database_publisher);
@@ -1139,7 +1220,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn test_queue_and_database_event_publisher_from_spawn_blocking() {
-        let queue_publisher = QueueEventPublisher::new_default();
+        let queue_publisher = test_queue_publisher();
         let database_publisher = DatabaseEventPublisher::new("sqlite::memory:".to_string());
         let combined_publisher =
             QueueAndDatabaseEventPublisher::new(queue_publisher, database_publisher);

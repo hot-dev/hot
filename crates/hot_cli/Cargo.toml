@@ -45,6 +45,7 @@ dirs = { workspace = true }
 open = { workspace = true }
 sha2 = { workspace = true }
 siphasher = { workspace = true }
+fd-lock = { workspace = true }
 
 # ONNX Runtime (used by fastembed) has no prebuilt binaries for Windows ARM64
 # or macOS Intel when using the downloaded-binaries backend.
@@ -59,6 +60,7 @@ winres = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
+hot = { workspace = true, features = ["test-utils"] }
 
 [package.metadata.bundle]
 name = "hot"

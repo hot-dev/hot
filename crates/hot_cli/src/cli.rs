@@ -251,7 +251,7 @@ pub(crate) struct QueueOptions {
     #[arg(
         long = "queue.type",
         value_name = "TYPE",
-        help = "Queue type: memory, redis"
+        help = "Queue type: memory, sqlite, redis"
     )]
     pub(crate) queue_type: Option<String>,
 

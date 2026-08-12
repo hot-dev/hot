@@ -444,7 +444,7 @@ fn spawn_worker_queue_claimer(
             }
 
             let lease = match &queue {
-                ProcessingQueue::Memory(_) => {
+                ProcessingQueue::Memory(_) | ProcessingQueue::Sqlite(_) => {
                     tokio::select! {
                         biased;
 
@@ -1205,7 +1205,7 @@ pub const EVENT_SETUP_TIMEOUT: std::time::Duration = std::time::Duration::from_s
 /// already-extracted) resolution completes in microseconds, so the
 /// effective setup bound stays `EVENT_SETUP_TIMEOUT`.
 pub const EVENT_SOURCE_RETRIEVAL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
-pub const DEFAULT_QUEUE_TYPE: QueueType = QueueType::Memory;
+pub const DEFAULT_QUEUE_TYPE: QueueType = QueueType::Sqlite;
 pub const DEFAULT_SERIALIZATION: Serialization = Serialization::ZstdJson; // must match Serialization's #[default]
 
 async fn bounded_run_result_write<F, T>(
@@ -1461,6 +1461,9 @@ fn spawn_event_lease_keepalive(
 ) -> Option<EventKeepaliveGuard> {
     let keepalive = match lease {
         ProcessingQueueLease::Memory(_) => return None,
+        // SQLite leases renew inside `SqliteQueueLease::process`; the durable
+        // lease itself is also the handoff backstop before processing starts.
+        ProcessingQueueLease::Sqlite(_) => return None,
         ProcessingQueueLease::Redis(lease) => lease.keepalive()?,
     };
     let interval =
@@ -1612,7 +1615,7 @@ async fn create_event_publisher(
         redis_uri,
         redis_cluster,
         serialization,
-    );
+    )?;
 
     // Create combined publisher
     let combined_publisher =
@@ -5448,9 +5451,10 @@ pub async fn run_with_components_shared_context_and_db(
     let stream_publisher: Option<Arc<StreamPubSub>> = if stream_publisher.is_some() {
         stream_publisher
     } else {
-        // Create stream publisher matching the queue type (Memory or Redis)
+        // SQLite queues use process-local pub/sub for live UI updates; Redis
+        // retains distributed pub/sub.
         let pubsub_type = match queue_type {
-            QueueType::Memory => StreamPubSubType::Memory,
+            QueueType::Memory | QueueType::Sqlite => StreamPubSubType::Memory,
             QueueType::Redis => StreamPubSubType::Redis,
         };
 
@@ -5633,15 +5637,23 @@ pub async fn run_with_components_shared_context_and_db(
         QueueType::Memory => {
             debug!("hot.dev: WORKER using in-memory queue (no connectivity check needed)");
         }
-        QueueType::Redis => {
-            // Test Redis connection with a simple PING command
+        QueueType::Sqlite | QueueType::Redis => {
+            // Force SQLite bootstrap or Redis connectivity before worker startup.
             match event_queue.is_empty().await {
                 Ok(_) => {
-                    debug!("hot.dev: WORKER successfully connected to Redis queue");
+                    debug!(
+                        "hot.dev: WORKER successfully connected to {} queue",
+                        queue_type
+                    );
                 }
                 Err(e) => {
-                    error!("hot.dev: WORKER failed to connect to Redis queue: {}", e);
-                    return Err(format!("Redis queue connectivity check failed: {}", e).into());
+                    error!(
+                        "hot.dev: WORKER failed to connect to {} queue: {}",
+                        queue_type, e
+                    );
+                    return Err(
+                        format!("{} queue connectivity check failed: {}", queue_type, e).into(),
+                    );
                 }
             }
         }

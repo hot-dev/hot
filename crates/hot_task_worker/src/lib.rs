@@ -625,13 +625,24 @@ pub async fn run(config: TaskWorkerConfig) -> Result<(), Box<dyn std::error::Err
         QueueType::Memory => {
             tracing::debug!("Task worker using in-memory queue (no connectivity check needed)");
         }
-        QueueType::Redis => match task_queue.is_empty().await {
+        QueueType::Sqlite | QueueType::Redis => match task_queue.is_empty().await {
             Ok(_) => {
-                tracing::debug!("Task worker successfully connected to Redis queue");
+                tracing::debug!(
+                    "Task worker successfully connected to {} queue",
+                    config.queue_type
+                );
             }
             Err(e) => {
-                tracing::error!("Task worker failed to connect to Redis queue: {}", e);
-                return Err(format!("Redis queue connectivity check failed: {}", e).into());
+                tracing::error!(
+                    "Task worker failed to connect to {} queue: {}",
+                    config.queue_type,
+                    e
+                );
+                return Err(format!(
+                    "{} queue connectivity check failed: {}",
+                    config.queue_type, e
+                )
+                .into());
             }
         },
     }
@@ -816,7 +827,7 @@ pub async fn run(config: TaskWorkerConfig) -> Result<(), Box<dyn std::error::Err
     hot::notification_queue::init_alert_queue(Arc::new(alert_queue));
 
     let pubsub_type = match config.queue_type {
-        QueueType::Memory => hot::stream::StreamPubSubType::Memory,
+        QueueType::Memory | QueueType::Sqlite => hot::stream::StreamPubSubType::Memory,
         QueueType::Redis => hot::stream::StreamPubSubType::Redis,
     };
     let stream_publisher = Arc::new(StreamPubSub::new(
@@ -868,7 +879,7 @@ pub async fn run(config: TaskWorkerConfig) -> Result<(), Box<dyn std::error::Err
         .unwrap_or_else(|| "/tmp/hot-data-volumes".to_string());
     let data_vol_base = Arc::new(std::path::PathBuf::from(data_vol_base));
 
-    let event_publisher: Option<Arc<dyn EventPublisher>> = create_event_publisher(&config, &db);
+    let event_publisher: Option<Arc<dyn EventPublisher>> = create_event_publisher(&config, &db)?;
 
     let usage_stats_cache: UsageStatsCache = Arc::new(Mutex::new(HashMap::new()));
 
@@ -888,7 +899,9 @@ pub async fn run(config: TaskWorkerConfig) -> Result<(), Box<dyn std::error::Err
     // single-delivery semantics already guarantee no in-process
     // duplication, and there is no other process to race with.
     let task_lease: Arc<dyn task_lease::TaskLease> = match config.queue_type {
-        QueueType::Memory => Arc::new(task_lease::NoopTaskLease),
+        // SQLite queue leases are ownership-guarded and renewed by the queue
+        // backend, so they provide the same local mutual exclusion here.
+        QueueType::Memory | QueueType::Sqlite => Arc::new(task_lease::NoopTaskLease),
         QueueType::Redis => {
             let uri = config
                 .redis_uri
@@ -6924,7 +6937,7 @@ fn create_emitter(db: &DatabasePool) -> Option<Arc<dyn EngineEventEmitter>> {
 fn create_event_publisher(
     config: &TaskWorkerConfig,
     db: &DatabasePool,
-) -> Option<Arc<dyn EventPublisher>> {
+) -> Result<Option<Arc<dyn EventPublisher>>, Box<dyn std::error::Error + Send + Sync>> {
     let database_publisher = hot::lang::event::DatabaseEventPublisher::new_with_pool(db.clone());
 
     let queue_publisher = hot::lang::event::QueueEventPublisher::new_with_cluster(
@@ -6933,11 +6946,11 @@ fn create_event_publisher(
         config.redis_uri.clone(),
         config.redis_cluster,
         config.serialization,
-    );
+    )?;
 
-    Some(Arc::new(
+    Ok(Some(Arc::new(
         hot::lang::event::QueueAndDatabaseEventPublisher::new(queue_publisher, database_publisher),
-    ))
+    )))
 }
 
 #[cfg(test)]

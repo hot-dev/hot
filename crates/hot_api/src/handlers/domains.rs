@@ -135,7 +135,7 @@ async fn enqueue_maintenance_task_inner(conf: &hot::val::Val, task: &str) -> Res
     use hot::queue::Queue;
     use std::str::FromStr;
 
-    let queue_type_str = conf.get_str_or_default("queue.type", "memory");
+    let queue_type_str = conf.get_str_or_default("queue.type", "sqlite");
     let queue_type =
         hot::queue::QueueType::from_str(&queue_type_str).unwrap_or(hot::queue::QueueType::Memory);
 

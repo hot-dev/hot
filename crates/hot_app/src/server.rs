@@ -166,13 +166,14 @@ pub async fn run_with_stream_pubsub(conf: Val, shared_stream_pubsub: Option<Arc<
 
     debug!("hot.dev: Database connection established");
 
-    // Initialize stream pub/sub for real-time SSE updates (dashboard)
-    // Use the shared instance if provided (for hot dev mode), otherwise create a new one
+    // Initialize stream pub/sub for real-time SSE updates (dashboard). SQLite
+    // queue mode keeps these transient notifications process-local.
+    // Use the shared instance if provided (for hot dev mode), otherwise create a new one.
     let stream_pubsub: Option<Arc<StreamPubSub>> = if let Some(pubsub) = shared_stream_pubsub {
         debug!("hot.dev: APP using shared stream pub/sub instance");
         Some(pubsub)
     } else {
-        let queue_type_str = conf.get_str_or_default("queue.type", "memory");
+        let queue_type_str = conf.get_str_or_default("queue.type", "sqlite");
         let pubsub_type = match queue_type_str.as_str() {
             "redis" => StreamPubSubType::Redis,
             _ => StreamPubSubType::Memory,
@@ -208,11 +209,10 @@ pub async fn run_with_stream_pubsub(conf: Val, shared_stream_pubsub: Option<Arc<
     // Initialize the email queue for enqueuing app emails to the worker
     // This allows the app process to push emails to hot:email queue
     {
-        let queue_type_str = conf.get_str_or_default("queue.type", "memory");
-        let queue_type = match queue_type_str.as_str() {
-            "redis" => hot::queue::QueueType::Redis,
-            _ => hot::queue::QueueType::Memory,
-        };
+        let queue_type = conf
+            .get_str_or_default("queue.type", "sqlite")
+            .parse::<hot::queue::QueueType>()
+            .unwrap_or(hot::queue::QueueType::Memory);
         let redis_uri_str = conf.get_str_or_default("redis.uri", "");
         let redis_uri = if redis_uri_str.is_empty() {
             None

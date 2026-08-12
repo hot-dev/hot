@@ -8,6 +8,20 @@ use crate::conf::{
     create_emitter, create_event_publisher, get_merged_src_paths, get_merged_test_paths,
 };
 
+pub(crate) fn combine_execution_and_publisher_results(
+    execution: Result<(), String>,
+    publisher_error: Option<String>,
+) -> Result<(), String> {
+    match (execution, publisher_error) {
+        (Ok(()), None) => Ok(()),
+        (Ok(()), Some(error)) => Err(format!("Failed to durably enqueue sent event: {error}")),
+        (Err(error), None) => Err(error),
+        (Err(error), Some(publisher_error)) => Err(format!(
+            "{error}; additionally failed to durably enqueue sent event: {publisher_error}"
+        )),
+    }
+}
+
 pub(crate) async fn run_run(
     file_path: &str,
     conf: &Val,
@@ -352,9 +366,38 @@ pub(crate) async fn run_run(
     if let Some(emitter) = emitter {
         let _ = emitter.shutdown().await;
     }
-    if let Some(event_publisher) = event_publisher {
-        let _ = event_publisher.shutdown().await;
+    let publisher_error = if let Some(event_publisher) = event_publisher {
+        event_publisher.shutdown().await.err()
+    } else {
+        None
+    };
+
+    combine_execution_and_publisher_results(result.map(|_| ()), publisher_error)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::combine_execution_and_publisher_results;
+
+    #[test]
+    fn durable_send_failure_is_never_silenced() {
+        let error = combine_execution_and_publisher_results(
+            Ok(()),
+            Some("queue directory is not writable".to_string()),
+        )
+        .unwrap_err();
+        assert!(error.contains("Failed to durably enqueue sent event"));
+        assert!(error.contains("not writable"));
     }
 
-    result.map(|_| ())
+    #[test]
+    fn execution_and_durable_send_failures_are_both_reported() {
+        let error = combine_execution_and_publisher_results(
+            Err("handler failed".to_string()),
+            Some("enqueue failed".to_string()),
+        )
+        .unwrap_err();
+        assert!(error.contains("handler failed"));
+        assert!(error.contains("enqueue failed"));
+    }
 }

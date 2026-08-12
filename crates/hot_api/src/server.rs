@@ -203,9 +203,9 @@ pub async fn run_with_stream_pubsub(conf: Val, shared_stream_pubsub: Option<Arc<
         debug!("hot.dev: API using shared stream pub/sub");
         shared_stream_pubsub
     } else {
-        // Initialize stream pub/sub for real-time SSE updates
-        // Use the same backend type as the queue (Memory or Redis)
-        let queue_type_str = conf.get_str_or_default("queue.type", "memory");
+        // Initialize stream pub/sub for real-time SSE updates. SQLite queue
+        // mode keeps these transient notifications process-local.
+        let queue_type_str = conf.get_str_or_default("queue.type", "sqlite");
 
         let pubsub_type = match queue_type_str.as_str() {
             "redis" => StreamPubSubType::Redis,

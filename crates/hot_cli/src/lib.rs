@@ -58,6 +58,9 @@ use hot::queue::QueueType;
 use hot::val::Val;
 
 use std::fs;
+use std::fs::{File, OpenOptions};
+use std::future::Future;
+use std::io;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use tracing::{error, info};
@@ -76,39 +79,93 @@ pub struct RunContext {
 /// split-brain where the scheduler enqueues into one process's heap and
 /// the worker reads from a different, empty heap.
 ///
-/// `hot dev` is the only command that legitimately uses memory mode
-/// because every service runs in the same process under one runtime.
+/// `hot dev` and integration-mode `hot test` legitimately use memory mode
+/// because their services run in one process. Project-local multi-process
+/// work should use the managed SQLite queue; distributed work should use Redis.
 ///
 /// On violation: print an actionable message and exit with code 1 so
 /// orchestrators (systemd, k8s, supervisord, foreman) treat it as a
 /// configuration failure rather than a silent no-op.
-fn enforce_redis_queue_for_standalone_service(service_name: &str, conf: &Val) {
-    let queue_type_str = conf.get_str_or_default("queue.type", "memory");
+fn enforce_persistent_queue_for_standalone_service(service_name: &str, conf: &Val) {
+    let queue_type_str = conf.get_str_or_default("queue.type", "sqlite");
     let queue_type = QueueType::from_str(&queue_type_str).unwrap_or(QueueType::Memory);
 
     if matches!(queue_type, QueueType::Memory) {
         eprintln!(
-            "error: `hot {service}` requires `queue.type = \"redis\"` because\n\
+            "error: `hot {service}` requires `queue.type = \"sqlite\"` or `\"redis\"` because\n\
              it is a separate process from other hot services (worker, scheduler,\n\
              api, app, task-worker). The `memory` queue is in-process only and\n\
              cannot be shared across processes — using it here would silently\n\
              drop messages between producers and consumers.\n\
              \n\
              To fix:\n\
-               • Set `hot.queue.type \"redis\"` in your hot.hot config, OR\n\
-               • Pass `--queue.type=redis` on the CLI, OR\n\
-               • Set `HOT_QUEUE_TYPE=redis` in the environment\n\
+               • Use the default project-local SQLite queue, OR\n\
+               • Set `hot.queue.type \"sqlite\"` or `\"redis\"` in hot.hot, OR\n\
+               • Pass `--queue.type=sqlite` (or redis) on the CLI\n\
              \n\
-             Make sure `hot.redis.uri` (or `HOT_REDIS_URI`) points at a running\n\
-             Redis instance (e.g. `redis://localhost:6379`).\n\
+             SQLite queue files are managed automatically in `.hot/db/queue/`.\n\
+             Redis additionally requires `hot.redis.uri` (or `HOT_REDIS_URI`).\n\
              \n\
              If you want a single-process dev setup with all services bundled,\n\
-             use `hot dev` instead — it runs everything in one process and is\n\
-             the only command that supports the in-memory queue.",
+             use `hot dev` instead — it runs everything in one process.\n\
+             Integration tests use an isolated in-process queue automatically.",
             service = service_name,
         );
         std::process::exit(1);
     }
+}
+
+pub(crate) const PROJECT_QUEUE_SESSION_LOCK_PATH: &str = ".hot/run/queue-session.lock";
+
+pub(crate) fn open_project_queue_session_lock(path: &Path) -> io::Result<fd_lock::RwLock<File>> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(path)?;
+    Ok(fd_lock::RwLock::new(file))
+}
+
+async fn run_standalone_service<F>(service_name: &str, conf: &Val, service: F)
+where
+    F: Future<Output = ()>,
+{
+    enforce_persistent_queue_for_standalone_service(service_name, conf);
+    let queue_type = QueueType::from_str(&conf.get_str_or_default("queue.type", "sqlite"))
+        .unwrap_or(QueueType::Memory);
+    if queue_type != QueueType::Sqlite {
+        service.await;
+        return;
+    }
+
+    // Standalone SQLite services coexist under shared access. `hot dev`
+    // requires exclusive access because its startup deliberately resets the
+    // project queue session.
+    let lock = match open_project_queue_session_lock(Path::new(PROJECT_QUEUE_SESSION_LOCK_PATH)) {
+        Ok(lock) => lock,
+        Err(error) => {
+            eprintln!("error: failed to open the project queue-session lock: {error}");
+            std::process::exit(1);
+        }
+    };
+    let _guard = match lock.try_read() {
+        Ok(guard) => guard,
+        Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+            eprintln!(
+                "error: cannot start `hot {service_name}` while `hot dev` owns this project's SQLite queue session"
+            );
+            std::process::exit(1);
+        }
+        Err(error) => {
+            eprintln!("error: failed to acquire the project queue-session lock: {error}");
+            std::process::exit(1);
+        }
+    };
+    service.await;
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -630,11 +687,12 @@ async fn async_main(providers: CliProviders) {
     conf = conf.set("emitter", resolved_emitter_conf);
 
     // Apply queue defaults AFTER configuration files are loaded
-    // For run/eval/repl in a project: type defaults to "memory" (enables send())
+    // For run/eval/repl in a project: type defaults to managed SQLite (enables
+    // durable send() across sibling local processes).
     //
     // Note: Similar to emitter, create_default_conf() doesn't set queue.type, so the type
     // is only set if user explicitly provided it. get_resolved_conf will use context-based
-    // default (memory for in-project, none otherwise) if type is not set.
+    // default (sqlite for in-project, none otherwise) if type is not set.
     let queue_conf_from_user = conf.get("queue").unwrap_or_else(Val::map_empty);
     let resolved_queue_conf =
         hot::queue::get_resolved_conf(queue_conf_from_user, in_project_runtime);
@@ -858,24 +916,29 @@ async fn async_main(providers: CliProviders) {
             .await
         }
         Some(Command::Api { .. }) => {
-            enforce_redis_queue_for_standalone_service("api", &conf);
-            run_api(Env::Production, conf.clone()).await
+            run_standalone_service("api", &conf, run_api(Env::Production, conf.clone())).await
         }
         Some(Command::App { .. }) => {
-            enforce_redis_queue_for_standalone_service("app", &conf);
-            run_app(Env::Production, conf.clone(), None).await
+            run_standalone_service("app", &conf, run_app(Env::Production, conf.clone(), None)).await
         }
         Some(Command::Worker { .. }) => {
-            enforce_redis_queue_for_standalone_service("worker", &conf);
-            run_worker(Env::Production, conf.clone(), None).await
+            run_standalone_service(
+                "worker",
+                &conf,
+                run_worker(Env::Production, conf.clone(), None),
+            )
+            .await
         }
         Some(Command::TaskWorker { .. }) => {
-            enforce_redis_queue_for_standalone_service("task-worker", &conf);
-            run_task_worker(conf.clone()).await
+            run_standalone_service("task-worker", &conf, run_task_worker(conf.clone())).await
         }
         Some(Command::Scheduler { .. }) => {
-            enforce_redis_queue_for_standalone_service("scheduler", &conf);
-            run_scheduler(Env::Production, conf.clone()).await
+            run_standalone_service(
+                "scheduler",
+                &conf,
+                run_scheduler(Env::Production, conf.clone()),
+            )
+            .await
         }
         Some(Command::Completions { .. }) => unreachable!(),
         Some(Command::Run {
@@ -1706,6 +1769,26 @@ fn format_size(bytes: u64) -> String {
 #[cfg(test)]
 mod migration_failure_tests {
     use super::*;
+
+    #[test]
+    fn standalone_queue_locks_coexist_and_exclude_dev_reset() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("queue-session.lock");
+        let first = open_project_queue_session_lock(&path).unwrap();
+        let first_guard = first.try_read().unwrap();
+        let second = open_project_queue_session_lock(&path).unwrap();
+        let second_guard = second.try_read().unwrap();
+
+        let mut dev = open_project_queue_session_lock(&path).unwrap();
+        assert_eq!(
+            dev.try_write().unwrap_err().kind(),
+            io::ErrorKind::WouldBlock
+        );
+
+        drop(first_guard);
+        drop(second_guard);
+        let _dev_guard = dev.try_write().unwrap();
+    }
 
     #[test]
     fn splits_primary_and_hint_on_blank_line() {
