@@ -71,9 +71,10 @@ async fn reconcile_discarded_queue_messages(
 
     for snapshot in messages {
         if is_queue(&snapshot.queue_name, "hot:event") {
-            // Ready events have not started a Run. Only a leased event can
-            // identify execution interrupted by the previous process.
-            if snapshot.state != SqliteQueueMessageState::Leased {
+            // Ready events have not started a Run. Leased and dead-lettered
+            // events can both identify execution abandoned by the previous
+            // process; the latter may have exhausted while recovering a lease.
+            if snapshot.state == SqliteQueueMessageState::Ready {
                 continue;
             }
             let message = snapshot.decode::<Message>().map_err(|error| {
@@ -1144,18 +1145,20 @@ mod tests {
                 .unwrap()
                 .with_serialization(Serialization::Json);
         event_queue
-            .enqueue(Message {
-                id: uuid::Uuid::now_v7(),
-                head: Val::map_empty(),
-                body: hot::val!({
-                    "execution_context": {
-                        "stream_id": data.stream_id.to_string()
-                    }
-                }),
-            })
+            .move_to_dead_letter_queue(
+                Message {
+                    id: uuid::Uuid::now_v7(),
+                    head: Val::map_empty(),
+                    body: hot::val!({
+                        "execution_context": {
+                            "stream_id": data.stream_id.to_string()
+                        }
+                    }),
+                },
+                "lease expired after retry limit".to_string(),
+            )
             .await
             .unwrap();
-        let _event_lease = event_queue.claim_now().await.unwrap().unwrap();
 
         let task_id = uuid::Uuid::now_v7();
         Task::insert(

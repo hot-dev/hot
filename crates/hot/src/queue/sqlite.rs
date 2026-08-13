@@ -8,8 +8,9 @@
 //! database migrations.
 
 use super::{
-    Queue, QueueInfrastructureError, QueueProcessingError, QueueProcessor, QueueStatus,
-    QueueStatusSummary, queue_timing_enabled, queue_wait_target_p99_ms,
+    OrphanRecovery, Queue, QueueInfrastructureError, QueueProcessingError, QueueProcessor,
+    QueueStatus, QueueStatusSummary, RecoveredQueueMessage, queue_timing_enabled,
+    queue_wait_target_p99_ms,
 };
 use crate::data::serialization::Serialization;
 use async_trait::async_trait;
@@ -451,62 +452,82 @@ impl<T> SqliteQueue<T> {
     }
 
     pub async fn recover_orphaned_items(&self) -> Result<usize, SqliteQueueError> {
-        Ok(self.recover_orphaned_items_with_data().await?.0)
+        Ok(self.recover_orphaned_items_with_data().await?.total_count())
     }
 
     pub async fn recover_orphaned_items_with_data(
         &self,
-    ) -> Result<(usize, Vec<Vec<u8>>), SqliteQueueError> {
+    ) -> Result<OrphanRecovery, SqliteQueueError> {
         self.shared.ensure_initialized().await?;
         let current_ms = now_ms();
-        sqlx::query(
+        let mut tx = self.shared.pool().begin().await?;
+        let dead_lettered: Vec<(Vec<u8>, i64)> = sqlx::query_as(
             "UPDATE queue_message SET state = 2, retry_count = retry_count + 1, \
              redelivered = 1, last_error = COALESCE(last_error, 'lease expired after retry limit'), \
              lease_owner = NULL, lease_token = NULL, lease_until_ms = NULL \
-             WHERE state = 1 AND lease_until_ms <= ? AND retry_count + 1 >= ?",
+             WHERE state = 1 AND lease_until_ms <= ? AND retry_count + 1 >= ? \
+             RETURNING payload, serialization",
         )
         .bind(current_ms)
         .bind(MAX_PROCESSING_RETRIES)
-        .execute(self.shared.pool())
+        .fetch_all(&mut *tx)
         .await?;
-        let rows: Vec<(String, Vec<u8>)> = sqlx::query_as(
+        let requeued: Vec<(String, Vec<u8>, i64)> = sqlx::query_as(
             "UPDATE queue_message SET state = 0, retry_count = retry_count + 1, redelivered = 1, \
              available_at_ms = ?, lease_owner = NULL, lease_token = NULL, lease_until_ms = NULL \
              WHERE state = 1 AND lease_until_ms <= ? AND retry_count + 1 < ? \
-             RETURNING message_id, payload",
+             RETURNING message_id, payload, serialization",
         )
         .bind(current_ms)
         .bind(current_ms)
         .bind(MAX_PROCESSING_RETRIES)
-        .fetch_all(self.shared.pool())
+        .fetch_all(&mut *tx)
         .await?;
-        for (message_id, _) in &rows {
+        tx.commit().await?;
+        for (message_id, _, _) in &requeued {
             self.shared.notify(message_id.clone());
         }
         self.trim_dead_letters().await?;
-        let payloads = rows
+
+        let requeued_messages = requeued
             .into_iter()
-            .map(|(_, payload)| payload)
-            .collect::<Vec<_>>();
-        Ok((payloads.len(), payloads))
+            .map(|(_, payload, serialization)| {
+                Ok(RecoveredQueueMessage::new(
+                    payload,
+                    serialization_from_id(serialization)?,
+                ))
+            })
+            .collect::<Result<Vec<_>, SqliteQueueError>>()?;
+        let dead_lettered_messages = dead_lettered
+            .into_iter()
+            .map(|(payload, serialization)| {
+                Ok(RecoveredQueueMessage::new(
+                    payload,
+                    serialization_from_id(serialization)?,
+                ))
+            })
+            .collect::<Result<Vec<_>, SqliteQueueError>>()?;
+        Ok(OrphanRecovery {
+            requeued_count: requeued_messages.len(),
+            requeued_messages,
+            dead_lettered_messages,
+        })
     }
 
-    pub async fn purge_old_pending(&self, max_age_ms: u64) -> Result<usize, SqliteQueueError> {
+    pub async fn purge_old_pending(&self, _max_age_ms: u64) -> Result<usize, SqliteQueueError> {
         self.shared.ensure_initialized().await?;
-        let cutoff = now_ms().saturating_sub(max_age_ms.min(i64::MAX as u64) as i64);
-        let result =
-            sqlx::query("DELETE FROM queue_message WHERE state IN (0, 1) AND created_at_ms < ?")
-                .bind(cutoff)
-                .execute(self.shared.pool())
-                .await?;
-        Ok(result.rows_affected() as usize)
+        // Redis uses this API to discard stale stream/PEL backlog. SQLite is
+        // the authoritative copy of standalone work, so age alone must never
+        // delete a ready row or another worker's active lease.
+        Ok(0)
     }
 
     pub async fn fast_forward_if_stale(&self) -> Result<usize, SqliteQueueError> {
-        match self.startup_window {
-            Some(window) => self.purge_old_pending(duration_ms(window)).await,
-            None => Ok(0),
-        }
+        self.shared.ensure_initialized().await?;
+        // A Redis consumer cursor can skip old stream history without deleting
+        // the stream's sole copy. SQLite has no independent cursor, so its
+        // durable rows remain claimable regardless of the startup window.
+        Ok(0)
     }
 
     pub async fn consumer_has_pending(&self) -> Result<bool, SqliteQueueError> {
@@ -548,20 +569,6 @@ where
     ) -> Result<Option<SqliteQueueLease<T>>, SqliteQueueError> {
         self.shared.ensure_initialized().await?;
         let current_ms = now_ms();
-
-        // A lease that expired after exhausting its retry allowance moves to
-        // the DLQ before another worker can acquire it.
-        sqlx::query(
-            "UPDATE queue_message SET state = ?, last_error = COALESCE(last_error, 'lease expired after retry limit'), \
-             lease_owner = NULL, lease_token = NULL, lease_until_ms = NULL \
-             WHERE state = ? AND lease_until_ms <= ? AND retry_count + 1 >= ?",
-        )
-        .bind(STATE_DEAD_LETTER)
-        .bind(STATE_LEASED)
-        .bind(current_ms)
-        .bind(MAX_PROCESSING_RETRIES)
-        .execute(self.shared.pool())
-        .await?;
 
         let lease_token = Uuid::now_v7().to_string();
         let row = if let Some(message_id) = message_id {
@@ -1677,6 +1684,77 @@ mod tests {
         let (left, right) = tokio::join!(queue.claim_now(), queue.claim_now());
         let claims = usize::from(left.unwrap().is_some()) + usize::from(right.unwrap().is_some());
         assert_eq!(claims, 1);
+    }
+
+    #[tokio::test]
+    async fn startup_retention_apis_do_not_delete_durable_sqlite_work() {
+        let temp = tempfile::tempdir().unwrap();
+        let queue = test_queue::<String>(temp.path(), "durable-startup")
+            .with_startup_window(Duration::from_secs(60));
+        queue.enqueue("leased".to_string()).await.unwrap();
+        queue.enqueue("ready".to_string()).await.unwrap();
+        let mut lease = queue.claim_now().await.unwrap().unwrap();
+        lease.completed = true;
+
+        sqlx::query("UPDATE queue_message SET created_at_ms = ?")
+            .bind(now_ms() - 2 * 60 * 60 * 1000)
+            .execute(queue.shared.pool())
+            .await
+            .unwrap();
+
+        assert_eq!(queue.purge_old_pending(60 * 60 * 1000).await.unwrap(), 0);
+        assert_eq!(queue.fast_forward_if_stale().await.unwrap(), 0);
+        let states: Vec<(i64,)> = sqlx::query_as("SELECT state FROM queue_message ORDER BY state")
+            .fetch_all(queue.shared.pool())
+            .await
+            .unwrap();
+        assert_eq!(states, vec![(STATE_READY,), (STATE_LEASED,)]);
+    }
+
+    #[tokio::test]
+    async fn expired_lease_dead_letter_is_reported_before_claiming_more_work() {
+        let temp = tempfile::tempdir().unwrap();
+        let queue = test_queue::<String>(temp.path(), "expired-dlq-report");
+        queue.enqueue("poison".to_string()).await.unwrap();
+        let mut lease = queue.claim_now().await.unwrap().unwrap();
+        let message_id = lease.message_id.clone().unwrap();
+        lease.completed = true;
+
+        sqlx::query(
+            "UPDATE queue_message SET retry_count = ?, lease_until_ms = ? WHERE message_id = ?",
+        )
+        .bind(MAX_PROCESSING_RETRIES - 1)
+        .bind(now_ms() - 1)
+        .bind(&message_id)
+        .execute(queue.shared.pool())
+        .await
+        .unwrap();
+
+        assert!(queue.claim_now().await.unwrap().is_none());
+        let state_before_recovery: i64 =
+            sqlx::query_scalar("SELECT state FROM queue_message WHERE message_id = ?")
+                .bind(&message_id)
+                .fetch_one(queue.shared.pool())
+                .await
+                .unwrap();
+        assert_eq!(state_before_recovery, STATE_LEASED);
+
+        let recovery = queue.recover_orphaned_items_with_data().await.unwrap();
+        assert_eq!(recovery.requeued_count, 0);
+        assert_eq!(recovery.dead_lettered_messages.len(), 1);
+        assert_eq!(
+            recovery.dead_lettered_messages[0]
+                .decode::<String>()
+                .unwrap(),
+            "poison"
+        );
+        let row: (i64, i64) =
+            sqlx::query_as("SELECT state, retry_count FROM queue_message WHERE message_id = ?")
+                .bind(&message_id)
+                .fetch_one(queue.shared.pool())
+                .await
+                .unwrap();
+        assert_eq!(row, (STATE_DEAD_LETTER, MAX_PROCESSING_RETRIES));
     }
 
     #[tokio::test]

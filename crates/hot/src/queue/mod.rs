@@ -4,6 +4,7 @@ use async_trait::async_trait;
 use std::error::Error;
 use std::fmt;
 use std::future::Future;
+use std::io::Read;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -38,6 +39,59 @@ pub enum QueueType {
     #[default]
     Sqlite, // Project-local durable queue with in-process fast notifications
     Redis,  // Redis-backed queue (multi-process / production)
+}
+
+/// A persisted queue message returned while recovering expired leases.
+#[derive(Debug, Clone)]
+pub struct RecoveredQueueMessage {
+    payload: Vec<u8>,
+    serialization: Serialization,
+}
+
+impl RecoveredQueueMessage {
+    pub(crate) fn new(payload: Vec<u8>, serialization: Serialization) -> Self {
+        Self {
+            payload,
+            serialization,
+        }
+    }
+
+    pub fn decode<T: serde::de::DeserializeOwned>(&self) -> Result<T, String> {
+        match self.serialization {
+            Serialization::Json => {
+                serde_json::from_slice(&self.payload).map_err(|error| error.to_string())
+            }
+            Serialization::ZstdJson => {
+                let mut json = Vec::new();
+                zstd::Decoder::new(self.payload.as_slice())
+                    .map_err(|error| error.to_string())?
+                    .read_to_end(&mut json)
+                    .map_err(|error| error.to_string())?;
+                serde_json::from_slice(&json).map_err(|error| error.to_string())
+            }
+        }
+    }
+
+    pub fn payload(&self) -> &[u8] {
+        &self.payload
+    }
+}
+
+/// Result of recovering queue messages whose processing leases expired.
+#[derive(Debug, Default)]
+pub struct OrphanRecovery {
+    /// Number of messages made available for another processing attempt.
+    pub requeued_count: usize,
+    /// Requeued messages available to backends that can return their payloads.
+    pub requeued_messages: Vec<RecoveredQueueMessage>,
+    /// Messages moved to the durable dead-letter state during this recovery.
+    pub dead_lettered_messages: Vec<RecoveredQueueMessage>,
+}
+
+impl OrphanRecovery {
+    pub fn total_count(&self) -> usize {
+        self.requeued_count + self.dead_lettered_messages.len()
+    }
 }
 
 impl fmt::Display for QueueType {
@@ -462,9 +516,9 @@ impl<T> ProcessingQueue<T> {
         }
     }
 
-    /// Fast-forward the consumer group's last-delivered-id past any backlog
-    /// older than the configured startup window, so a worker coming back from
-    /// a long outage doesn't drain a stale 4-day flood.
+    /// Fast-forward a Redis consumer group's last-delivered-id past backlog
+    /// older than the configured startup window. SQLite deliberately no-ops:
+    /// its rows are the authoritative copy and remain durable until processed.
     ///
     /// Returns the number of stream entries skipped (lower bound — capped at
     /// 10k to keep the count cheap). `Ok(0)` if no window was configured, the
@@ -500,11 +554,11 @@ impl<T> ProcessingQueue<T> {
         }
     }
 
-    /// Recover orphaned items from processing keys (Redis only)
+    /// Recover orphaned items after a worker lease expires.
     ///
-    /// This method scans for orphaned processing keys (items that were being processed
-    /// when the worker crashed) and moves them back to the main queue. Should be called
-    /// on worker startup to prevent data loss.
+    /// This method requeues recoverable Redis/SQLite items. SQLite items that
+    /// exhausted their retry allowance enter the durable DLQ; callers that own
+    /// associated application state should use `recover_orphaned_items_with_data`.
     ///
     /// For Memory queues, this is a no-op (returns Ok(0)).
     pub async fn recover_orphaned_items(&self) -> Result<usize, Box<dyn Error + Send + Sync>> {
@@ -524,9 +578,9 @@ impl<T> ProcessingQueue<T> {
         }
     }
 
-    /// ACK and discard all pending messages older than `max_age_ms`.
+    /// ACK and discard Redis messages older than `max_age_ms`.
     /// Returns the number of messages purged.
-    /// For Memory queues, this is a no-op (returns Ok(0)).
+    /// Memory and authoritative SQLite queues are no-ops (return Ok(0)).
     pub async fn purge_old_pending(
         &self,
         max_age_ms: u64,
@@ -599,21 +653,22 @@ impl<T> ProcessingQueue<T> {
         }
     }
 
-    /// Recover orphaned items and return the raw bytes of each recovered item.
+    /// Recover orphaned items and return payloads when the backend supports it.
     ///
     /// This is useful when you need to inspect the recovered items (e.g., to extract
     /// event_ids and mark associated runs as failed due to worker crash).
     ///
-    /// Returns (count, Vec<raw_bytes>) - the raw bytes can be deserialized by the caller.
-    ///
-    /// For Memory queues, this is a no-op (returns Ok((0, vec![]))).
+    /// SQLite distinguishes messages requeued for another attempt from messages
+    /// that exhausted their retry allowance and entered the durable DLQ. Redis
+    /// reports only a requeue count because XAUTOCLAIM leaves payload delivery
+    /// to the normal consumer flow.
     pub async fn recover_orphaned_items_with_data(
         &self,
-    ) -> Result<(usize, Vec<Vec<u8>>), Box<dyn Error + Send + Sync>> {
+    ) -> Result<OrphanRecovery, Box<dyn Error + Send + Sync>> {
         match self {
             ProcessingQueue::Memory(_) => {
                 // Memory queues don't persist across restarts, so no orphaned items
-                Ok((0, vec![]))
+                Ok(OrphanRecovery::default())
             }
             ProcessingQueue::Sqlite(q) => q
                 .recover_orphaned_items_with_data()
