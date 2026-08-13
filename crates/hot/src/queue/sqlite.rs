@@ -40,6 +40,11 @@ const MIN_LEASE_DURATION: Duration = Duration::from_secs(1);
 const MAX_PROCESSING_RETRIES: i64 = 3;
 const DLQ_MAX_MESSAGES: i64 = 10_000;
 const DROPPED_LEASE_BACKOFF: Duration = Duration::from_millis(100);
+const SCHEMA_INIT_MAX_ATTEMPTS: usize = 5;
+const SCHEMA_INIT_RETRY_DELAY: Duration = Duration::from_millis(25);
+const FILE_REMOVE_MAX_ATTEMPTS: usize = 20;
+const FILE_REMOVE_RETRY_DELAY: Duration = Duration::from_millis(10);
+const FILE_REMOVE_MAX_RETRY_DELAY: Duration = Duration::from_millis(100);
 
 const STATE_READY: i64 = 0;
 const STATE_LEASED: i64 = 1;
@@ -77,6 +82,17 @@ fn duration_ms(duration: Duration) -> u64 {
 
 fn now_ms() -> i64 {
     chrono::Utc::now().timestamp_millis()
+}
+
+fn is_transient_database_lock(error: &SqliteQueueError) -> bool {
+    let SqliteQueueError::Database(sqlx::Error::Database(database)) = error else {
+        return false;
+    };
+    database
+        .code()
+        .as_deref()
+        .and_then(|code| code.parse::<i32>().ok())
+        .is_some_and(|code| matches!(code & 0xff, 5 | 6))
 }
 
 fn serialization_id(serialization: Serialization) -> i64 {
@@ -254,33 +270,52 @@ impl SharedQueue {
         let pool = self.ensure_pool().await;
         self.initialized
             .get_or_try_init(|| async {
-                // Keep bootstrap atomic. A process killed during schema setup
-                // leaves either the complete schema or an empty SQLite file,
-                // both of which the next process can safely open.
-                let mut tx = pool.begin().await?;
-                let version: i64 = sqlx::query_scalar("PRAGMA user_version")
-                    .fetch_one(&mut *tx)
-                    .await?;
-                if version > SCHEMA_VERSION {
-                    return Err(SqliteQueueError::UnsupportedSchema {
-                        path: self.path.display().to_string(),
-                        found: version,
-                        supported: SCHEMA_VERSION,
-                    });
+                for attempt in 0..SCHEMA_INIT_MAX_ATTEMPTS {
+                    match self.initialize_schema(pool).await {
+                        Ok(()) => return Ok(()),
+                        Err(error)
+                            if is_transient_database_lock(&error)
+                                && attempt + 1 < SCHEMA_INIT_MAX_ATTEMPTS =>
+                        {
+                            tokio::time::sleep(SCHEMA_INIT_RETRY_DELAY).await;
+                        }
+                        Err(error) => return Err(error),
+                    }
                 }
+                unreachable!("schema initialization retry loop always returns")
+            })
+            .await
+            .map(|_| ())
+    }
 
-                sqlx::query(
-                    "CREATE TABLE IF NOT EXISTS queue_metadata (\
+    async fn initialize_schema(&self, pool: &SqlitePool) -> Result<(), SqliteQueueError> {
+        // Acquire the write reservation before reading schema state. A deferred
+        // transaction can deadlock with another process when both readers try
+        // to upgrade during first-use bootstrap.
+        let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
+        let version: i64 = sqlx::query_scalar("PRAGMA user_version")
+            .fetch_one(&mut *tx)
+            .await?;
+        if version > SCHEMA_VERSION {
+            return Err(SqliteQueueError::UnsupportedSchema {
+                path: self.path.display().to_string(),
+                found: version,
+                supported: SCHEMA_VERSION,
+            });
+        }
+
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS queue_metadata (\
                         singleton INTEGER PRIMARY KEY CHECK (singleton = 1),\
                         queue_name TEXT NOT NULL,\
                         schema_version INTEGER NOT NULL,\
                         created_at_ms INTEGER NOT NULL\
                     )",
-                )
-                .execute(&mut *tx)
-                .await?;
-                sqlx::query(
-                    "CREATE TABLE IF NOT EXISTS queue_message (\
+        )
+        .execute(&mut *tx)
+        .await?;
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS queue_message (\
                         message_id TEXT PRIMARY KEY NOT NULL,\
                         payload BLOB NOT NULL,\
                         serialization INTEGER NOT NULL,\
@@ -294,56 +329,53 @@ impl SharedQueue {
                         lease_until_ms INTEGER,\
                         last_error TEXT\
                     )",
-                )
-                .execute(&mut *tx)
-                .await?;
-                sqlx::query(
-                    "CREATE INDEX IF NOT EXISTS queue_message_ready_idx \
+        )
+        .execute(&mut *tx)
+        .await?;
+        sqlx::query(
+            "CREATE INDEX IF NOT EXISTS queue_message_ready_idx \
                      ON queue_message (state, available_at_ms, created_at_ms, message_id)",
-                )
-                .execute(&mut *tx)
-                .await?;
-                sqlx::query(
-                    "CREATE INDEX IF NOT EXISTS queue_message_lease_idx \
+        )
+        .execute(&mut *tx)
+        .await?;
+        sqlx::query(
+            "CREATE INDEX IF NOT EXISTS queue_message_lease_idx \
                      ON queue_message (state, lease_until_ms)",
-                )
-                .execute(&mut *tx)
-                .await?;
-                sqlx::query(
-                    "CREATE INDEX IF NOT EXISTS queue_message_dlq_idx \
+        )
+        .execute(&mut *tx)
+        .await?;
+        sqlx::query(
+            "CREATE INDEX IF NOT EXISTS queue_message_dlq_idx \
                      ON queue_message (state, created_at_ms)",
-                )
-                .execute(&mut *tx)
-                .await?;
+        )
+        .execute(&mut *tx)
+        .await?;
 
-                sqlx::query(
-                    "INSERT OR IGNORE INTO queue_metadata \
+        sqlx::query(
+            "INSERT OR IGNORE INTO queue_metadata \
                      (singleton, queue_name, schema_version, created_at_ms) VALUES (1, ?, ?, ?)",
-                )
-                .bind(&self.queue_name)
-                .bind(SCHEMA_VERSION)
-                .bind(now_ms())
-                .execute(&mut *tx)
+        )
+        .bind(&self.queue_name)
+        .bind(SCHEMA_VERSION)
+        .bind(now_ms())
+        .execute(&mut *tx)
+        .await?;
+        let stored_name: String =
+            sqlx::query_scalar("SELECT queue_name FROM queue_metadata WHERE singleton = 1")
+                .fetch_one(&mut *tx)
                 .await?;
-                let stored_name: String =
-                    sqlx::query_scalar("SELECT queue_name FROM queue_metadata WHERE singleton = 1")
-                        .fetch_one(&mut *tx)
-                        .await?;
-                if stored_name != self.queue_name {
-                    return Err(SqliteQueueError::QueueNameMismatch {
-                        path: self.path.display().to_string(),
-                        expected: self.queue_name.clone(),
-                        found: stored_name,
-                    });
-                }
-                sqlx::query("PRAGMA user_version = 1")
-                    .execute(&mut *tx)
-                    .await?;
-                tx.commit().await?;
-                Ok(())
-            })
-            .await
-            .map(|_| ())
+        if stored_name != self.queue_name {
+            return Err(SqliteQueueError::QueueNameMismatch {
+                path: self.path.display().to_string(),
+                expected: self.queue_name.clone(),
+                found: stored_name,
+            });
+        }
+        sqlx::query("PRAGMA user_version = 1")
+            .execute(&mut *tx)
+            .await?;
+        tx.commit().await?;
+        Ok(())
     }
 
     fn notify(&self, message_id: String) {
@@ -1175,16 +1207,33 @@ impl SqliteQueueAdmin {
         )
     }
 
-    fn remove_queue_file(path: &Path) -> Result<(), SqliteQueueError> {
+    fn is_transient_file_lock(error: &std::io::Error) -> bool {
+        matches!(
+            error.kind(),
+            std::io::ErrorKind::PermissionDenied | std::io::ErrorKind::WouldBlock
+        ) || matches!(error.raw_os_error(), Some(32 | 33))
+    }
+
+    async fn remove_queue_file(path: &Path) -> Result<(), SqliteQueueError> {
         for candidate in [
             path.to_path_buf(),
             PathBuf::from(format!("{}-wal", path.display())),
             PathBuf::from(format!("{}-shm", path.display())),
         ] {
-            match std::fs::remove_file(candidate) {
-                Ok(()) => {}
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-                Err(error) => return Err(error.into()),
+            let mut delay = FILE_REMOVE_RETRY_DELAY;
+            for attempt in 0..FILE_REMOVE_MAX_ATTEMPTS {
+                match std::fs::remove_file(&candidate) {
+                    Ok(()) => break,
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => break,
+                    Err(error)
+                        if Self::is_transient_file_lock(&error)
+                            && attempt + 1 < FILE_REMOVE_MAX_ATTEMPTS =>
+                    {
+                        tokio::time::sleep(delay).await;
+                        delay = delay.saturating_mul(2).min(FILE_REMOVE_MAX_RETRY_DELAY);
+                    }
+                    Err(error) => return Err(error.into()),
+                }
             }
         }
         Ok(())
@@ -1285,7 +1334,7 @@ impl SqliteQueueAdmin {
         let pool = match Self::open_existing(path).await {
             Ok(pool) => pool,
             Err(error) if Self::is_resettable_database_error(&error) => {
-                Self::remove_queue_file(path)?;
+                Self::remove_queue_file(path).await?;
                 return Ok(None);
             }
             Err(error) => return Err(error),
@@ -1298,7 +1347,8 @@ impl SqliteQueueAdmin {
             }
             Err(error) if Self::is_resettable_database_error(&error) => {
                 pool.close().await;
-                Self::remove_queue_file(path)?;
+                drop(pool);
+                Self::remove_queue_file(path).await?;
                 Ok(None)
             }
             Err(error) => {
