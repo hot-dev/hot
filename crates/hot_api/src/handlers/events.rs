@@ -37,7 +37,7 @@ fn get_event_queue(
     conf: &Val,
 ) -> Result<&'static Arc<hot::queue::ProcessingQueue<hot::data::msg::Message>>, String> {
     API_EVENT_QUEUE.get_or_try_init(|| {
-        let queue_type_str = conf.get_str_or_default("queue.type", "memory");
+        let queue_type_str = conf.get_str_or_default("queue.type", "sqlite");
         let queue_type = hot::queue::QueueType::from_str(&queue_type_str)
             .unwrap_or(hot::queue::QueueType::Memory);
 

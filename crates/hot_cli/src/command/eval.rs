@@ -141,32 +141,36 @@ pub(crate) async fn run_eval(
                         .await
                         .map_err(|e| format!("Failed to resolve profile: {}", e))?;
 
-                // For eval commands, we need a build_id due to database constraints
-                // Get the most recent build to satisfy the constraint, and also get project/hash info
-                let (build_id, build_hash, project_id): (
-                    Option<uuid::Uuid>,
-                    Option<String>,
-                    Option<uuid::Uuid>,
-                ) = match hot::db::build::Build::get_recent_builds(&db, Some(1)).await {
-                    Ok(builds) if !builds.is_empty() => {
-                        let build = &builds[0];
-                        (
-                            Some(build.build_id),
-                            Some(build.hash.clone()),
-                            Some(build.project_id),
-                        )
-                    }
-                    Ok(_) => {
-                        tracing::warn!(
-                            "No builds found, eval command may fail due to database constraints"
-                        );
-                        (None, None, None)
-                    }
-                    Err(e) => {
-                        tracing::warn!("Failed to get recent builds: {}, using None", e);
-                        (None, None, None)
-                    }
-                };
+                // Bind eval to this project's live build. A global "latest
+                // build" can belong to another project in a shared profile,
+                // corrupting event routing metadata for cross-process sends.
+                let project =
+                    hot::db::Project::get_project_by_env_and_name(&db, &env_id, &project_name)
+                        .await
+                        .map_err(|e| {
+                            format!("Failed to resolve project '{}': {}", project_name, e)
+                        })?
+                        .ok_or_else(|| {
+                            format!(
+                                "Project '{}' was not found after live-build setup",
+                                project_name
+                            )
+                        })?;
+                let build =
+                    hot::db::build::Build::get_live_build_by_project(&db, &project.project_id)
+                        .await
+                        .map_err(|e| {
+                            format!("Failed to resolve live build for '{}': {}", project_name, e)
+                        })?
+                        .ok_or_else(|| {
+                            format!(
+                                "No live build exists for project '{}' after live-build setup",
+                                project_name
+                            )
+                        })?;
+                let build_id = Some(build.build_id);
+                let build_hash = Some(build.hash);
+                let project_id = Some(project.project_id);
 
                 let stream_id = uuid::Uuid::now_v7(); // CLI runs start new streams
                 let execution_context = hot::lang::event::ExecutionContext::new(
@@ -238,11 +242,13 @@ pub(crate) async fn run_eval(
     if let Some(emitter) = &emitter {
         let _ = emitter.shutdown().await;
     }
-    if let Some(event_publisher) = &event_publisher {
-        let _ = event_publisher.shutdown().await;
-    }
+    let publisher_error = if let Some(event_publisher) = &event_publisher {
+        event_publisher.shutdown().await.err()
+    } else {
+        None
+    };
 
-    match result {
+    let result = match result {
         Ok(result) => {
             // Print the final result if it's not null
             if !matches!(result, hot::val::Val::Null) {
@@ -257,5 +263,6 @@ pub(crate) async fn run_eval(
             Ok(())
         }
         Err(e) => Err(format!("Evaluation error: {}", e)),
-    }
+    };
+    crate::command::run::combine_execution_and_publisher_results(result, publisher_error)
 }

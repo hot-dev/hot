@@ -169,7 +169,7 @@ pub(crate) fn create_default_conf() -> Val {
     });
     // Queue type "" is sentinel for "not yet set" - will be resolved later
     let queue_conf = val!({
-        "type": ""  // Sentinel: will be resolved to "memory" (in-project) or "none" (outside)
+        "type": ""  // Sentinel: resolved to "sqlite" (in-project) or "none" (outside)
     });
     let redis_conf = hot::redis::get_resolved_conf(Val::map_empty());
     let serialization_conf = hot::data::serialization::get_resolved_conf(Val::map_empty());
@@ -1063,7 +1063,7 @@ pub(crate) fn reload_conf_after_init(base_conf: &Val) -> Result<Val, String> {
 
     // Apply queue defaults (in project context since this runs after init)
     // Note: Similar to emitter, create_default_conf() doesn't set queue.type, so the type
-    // is only set if user explicitly provided it. get_resolved_conf will use "memory" as
+    // is only set if user explicitly provided it. get_resolved_conf will use "sqlite" as
     // the default since we're in a project (in_project=true).
     let queue_conf_from_user = conf.get("queue").unwrap_or_else(Val::map_empty);
     let resolved_queue_conf = hot::queue::get_resolved_conf(queue_conf_from_user, true);
@@ -1605,7 +1605,7 @@ pub(crate) async fn create_event_publisher(
     db_pool: &hot::db::DatabasePool,
 ) -> Result<Option<std::sync::Arc<dyn hot::lang::event::EventPublisher>>, String> {
     // Extract queue configuration
-    let queue_type_str = conf.get_str_or_default("queue.type", "memory");
+    let queue_type_str = conf.get_str_or_default("queue.type", "sqlite");
     let queue_type = QueueType::from_str(&queue_type_str).unwrap_or(QueueType::Memory);
 
     let redis_uri_str = conf.get_str("redis.uri");
@@ -1647,7 +1647,7 @@ pub(crate) async fn create_event_publisher(
         redis_uri,
         redis_cluster,
         serialization,
-    );
+    )?;
 
     // Create combined publisher
     let combined_publisher =

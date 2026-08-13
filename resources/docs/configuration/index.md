@@ -123,6 +123,37 @@ This is useful for:
 
 When `log.target` is set to `file`, logs are written to the configured directory with automatic rotation and cleanup based on the retention setting.
 
+## Queue Configuration
+
+| Setting | Description | Default |
+|---------|-------------|---------|
+| `hot.queue.type` | Queue backend: `sqlite`, `memory`, `redis`, or `none` | `sqlite` in a project |
+
+The default `sqlite` backend is a durable local queue that works across Hot
+processes without another service. Hot owns its files, schema, tables, and indexes
+under `.hot/db/queue/`; it is separate from `hot.db.uri` and application database
+migrations. Use `memory` only when every producer and consumer runs in the same
+process, or `redis` for distributed deployments.
+
+SQLite queues are durable across process restarts for standalone Hot services.
+`hot dev` intentionally starts a fresh queue session and clears its managed SQLite
+queues before launching services, preserving the session-scoped behavior of the
+former in-memory default and preventing interrupted local handlers from replaying.
+Before clearing queue rows, startup marks associated in-progress Runs and Tasks
+failed so they are not left in a misleading `running` state. The reset removes
+only messages present at the startup snapshot; a sibling producer that enqueues
+after that boundary is preserved.
+
+`hot dev` takes exclusive ownership of the project's SQLite queue session.
+Standalone `hot api`, `hot app`, `hot worker`, `hot task-worker`, and
+`hot scheduler` processes share a compatible lock with one another, but cannot
+run against that queue while `hot dev` owns it. This prevents a dev restart from
+clearing a standalone worker's live lease. `hot run` and `hot eval` remain able to
+publish into a running dev session.
+
+Integration-mode `hot test` runs all requested services in one process and forces
+the memory queue, isolating tests from both `hot dev` and durable project queues.
+
 ## Trusted Proxy Client IPs
 
 Client IP forwarding stays in compatibility mode by default: the API uses the

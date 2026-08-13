@@ -739,7 +739,7 @@ async fn run_action_handler(
     // Enqueue event to worker queue
     let message: hot::data::msg::Message = event_message.into();
 
-    let queue_type_str = conf.get_str_or_default("queue.type", "memory");
+    let queue_type_str = conf.get_str_or_default("queue.type", "sqlite");
     let queue_type =
         hot::queue::QueueType::from_str(&queue_type_str).unwrap_or(hot::queue::QueueType::Memory);
 

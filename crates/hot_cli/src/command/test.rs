@@ -17,6 +17,10 @@ use crate::command::scheduler::run_scheduler;
 use crate::command::worker::{run_task_worker, run_worker_with_stream_pubsub};
 use crate::conf::{get_merged_src_paths, get_merged_test_paths, load_conf};
 
+fn isolate_integration_queue(conf: Val) -> Val {
+    conf.set_str("queue.type", Some("memory".to_string()), "")
+}
+
 pub(crate) async fn run_test(
     pattern: Option<&str>,
     capture_output: bool,
@@ -189,7 +193,10 @@ async fn run_integration_test(
 
     let integration_conf_val = load_conf(std::slice::from_ref(&integration_conf_path), src_paths)?;
     // Merge: base conf (hot.hot) + integration.hot overrides
-    let merged_conf = conf.merge(&integration_conf_val);
+    // Integration services all run in this process and share their queue
+    // handles directly. Force memory isolation so `hot test` can never race a
+    // sibling `hot dev` through the project-local durable event queue.
+    let merged_conf = isolate_integration_queue(conf.merge(&integration_conf_val));
 
     // 2. Check Docker availability if task-worker or box is needed
     let services = parse_integration_services(&merged_conf);
@@ -236,19 +243,21 @@ async fn run_integration_test(
     info!("hot.test: Using queue name: {}", unique_queue_name);
     let merged_conf = merged_conf.set("queue.name", Val::Str(unique_queue_name.clone().into()));
 
-    // 6. Create shared in-memory queue infrastructure
-    let queue_type_str = merged_conf.get_str_or_default("queue.type", "memory");
-    let shared_stream_pubsub: Option<Arc<StreamPubSub>> = if queue_type_str == "memory" {
-        match StreamPubSub::new(StreamPubSubType::Memory, None, false) {
-            Ok(pubsub) => Some(Arc::new(pubsub)),
-            Err(e) => {
-                warn!("hot.test: Failed to create shared stream pub/sub: {}", e);
-                None
+    // 6. Create shared in-process pub/sub infrastructure. SQLite persists
+    // queues, while live test-stream notifications remain process-local.
+    let queue_type = QueueType::Memory;
+    let shared_stream_pubsub: Option<Arc<StreamPubSub>> =
+        if matches!(queue_type, QueueType::Memory | QueueType::Sqlite) {
+            match StreamPubSub::new(StreamPubSubType::Memory, None, false) {
+                Ok(pubsub) => Some(Arc::new(pubsub)),
+                Err(e) => {
+                    warn!("hot.test: Failed to create shared stream pub/sub: {}", e);
+                    None
+                }
             }
-        }
-    } else {
-        None
-    };
+        } else {
+            None
+        };
 
     // 7. Spawn requested services
     let mut service_handles: Vec<tokio::task::JoinHandle<()>> = Vec::new();
@@ -256,9 +265,6 @@ async fn run_integration_test(
     // Create the task queue that will be shared between the task worker and the test VM
     let task_queue: Option<Arc<hot::queue::ProcessingQueue<hot::lang::hot::task::TaskRequest>>> =
         if services.contains(&"task-worker".to_string()) {
-            let queue_type =
-                QueueType::from_str(&merged_conf.get_str_or_default("queue.type", "memory"))
-                    .unwrap_or(QueueType::Memory);
             let redis_uri_str = merged_conf.get_str("redis.uri");
             let redis_uri = if redis_uri_str.is_empty() || redis_uri_str == "null" {
                 None
@@ -414,6 +420,12 @@ mod tests {
     #[test]
     fn empty_test_run_fails_by_default() {
         assert_eq!(empty_run_exit_code(&Val::Null, "demo"), NO_TESTS_EXIT_CODE);
+    }
+
+    #[test]
+    fn integration_services_always_use_isolated_memory_queue() {
+        let conf = isolate_integration_queue(hot::val!({"queue": {"type": "sqlite"}}));
+        assert_eq!(conf.get_str("queue.type"), "memory");
     }
 
     #[test]

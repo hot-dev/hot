@@ -8,7 +8,7 @@ use crate::cli::QueueAction;
 pub(crate) async fn run_queue(action: &QueueAction, conf: &Val) -> Result<(), String> {
     use std::str::FromStr;
 
-    let queue_type_str = conf.get_str_or_default("queue.type", "memory");
+    let queue_type_str = conf.get_str_or_default("queue.type", "sqlite");
     let queue_type =
         hot::queue::QueueType::from_str(&queue_type_str).unwrap_or(hot::queue::QueueType::Memory);
 
@@ -20,9 +20,18 @@ pub(crate) async fn run_queue(action: &QueueAction, conf: &Val) -> Result<(), St
                 println!(
                     "Memory queues are in-process only — nothing to clear from the CLI.\n\
                          Stop the running `hot dev` / `hot worker` to drop all queued items,\n\
-                         or set `queue.type = \"redis\"` (or HOT_QUEUE_TYPE=redis) for a\n\
-                         persistent multi-process queue."
+                         or use `queue.type = \"sqlite\"` for project-local persistence or\n\
+                         `queue.type = \"redis\"` for a distributed queue."
                 );
+            }
+            hot::queue::QueueType::Sqlite => {
+                info!("Clearing managed SQLite queues in .hot/db/queue/...");
+                let admin = hot::queue::sqlite::SqliteQueueAdmin::default();
+                let cleared = admin.clear_all().await.map_err(|e| e.to_string())?;
+                for queue in &cleared {
+                    info!("  Cleared: {}", queue);
+                }
+                println!("SQLite queues cleared.");
             }
             hot::queue::QueueType::Redis => {
                 let redis_uri = conf.get_str_or_default("redis.uri", "redis://127.0.0.1/");
@@ -59,9 +68,17 @@ pub(crate) async fn run_queue(action: &QueueAction, conf: &Val) -> Result<(), St
                     println!(
                         "\n  Memory queues live inside the running process and cannot be\n\
                          inspected from a separate CLI invocation.\n\
-                         For introspectable queues, set `queue.type = \"redis\"` (or\n\
-                         HOT_QUEUE_TYPE=redis)."
+                         For introspectable queues, use `queue.type = \"sqlite\"` or\n\
+                         `queue.type = \"redis\"`."
                     );
+                }
+                hot::queue::QueueType::Sqlite => {
+                    println!("  Backend: Managed SQLite (.hot/db/queue/)");
+                    let admin = hot::queue::sqlite::SqliteQueueAdmin::default();
+                    match admin.status().await {
+                        Ok(summary) => print_summary(&summary),
+                        Err(error) => println!("\n  Query failed: {}", error),
+                    }
                 }
                 hot::queue::QueueType::Redis => {
                     let redis_uri = conf.get_str_or_default("redis.uri", "redis://127.0.0.1/");
@@ -80,24 +97,7 @@ pub(crate) async fn run_queue(action: &QueueAction, conf: &Val) -> Result<(), St
 
                     match admin.status() {
                         Ok(summary) => {
-                            println!("\nQueues:");
-                            println!(
-                                "  {:<20} {:>8} {:>10} {:>10}",
-                                "Name", "Pending", "Processing", "DeadLetter"
-                            );
-                            println!("  {:-<20} {:->8} {:->10} {:->10}", "", "", "", "");
-
-                            for queue in &summary.queues {
-                                println!(
-                                    "  {:<20} {:>8} {:>10} {:>10}",
-                                    queue.name, queue.pending, queue.processing, queue.deadletter
-                                );
-                            }
-
-                            println!("\nSummary:");
-                            println!("  Total pending:    {}", summary.total_pending);
-                            println!("  Total processing: {}", summary.total_processing);
-                            println!("  Total deadletter: {}", summary.total_deadletter);
+                            print_summary(&summary);
                         }
                         Err(e) => {
                             println!("\n  Query failed: {}", e);
@@ -109,4 +109,23 @@ pub(crate) async fn run_queue(action: &QueueAction, conf: &Val) -> Result<(), St
     }
 
     Ok(())
+}
+
+fn print_summary(summary: &hot::queue::QueueStatusSummary) {
+    println!("\nQueues:");
+    println!(
+        "  {:<20} {:>8} {:>10} {:>10}",
+        "Name", "Pending", "Processing", "DeadLetter"
+    );
+    println!("  {:-<20} {:->8} {:->10} {:->10}", "", "", "", "");
+    for queue in &summary.queues {
+        println!(
+            "  {:<20} {:>8} {:>10} {:>10}",
+            queue.name, queue.pending, queue.processing, queue.deadletter
+        );
+    }
+    println!("\nSummary:");
+    println!("  Total pending:    {}", summary.total_pending);
+    println!("  Total processing: {}", summary.total_processing);
+    println!("  Total deadletter: {}", summary.total_deadletter);
 }

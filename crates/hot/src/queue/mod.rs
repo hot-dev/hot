@@ -4,12 +4,14 @@ use async_trait::async_trait;
 use std::error::Error;
 use std::fmt;
 use std::future::Future;
+use std::io::Read;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 
 pub mod mem;
+pub mod sqlite;
 pub mod streams;
 
 static QUEUE_METRICS_ENABLED: AtomicBool = AtomicBool::new(true);
@@ -33,15 +35,70 @@ pub(crate) fn queue_wait_target_p99_ms() -> u64 {
 
 #[derive(Debug, PartialEq, Clone, Copy, Default)]
 pub enum QueueType {
-    #[default]
     Memory, // In-process channel-backed queue (single process only)
-    Redis, // Redis-backed queue (multi-process / production)
+    #[default]
+    Sqlite, // Project-local durable queue with in-process fast notifications
+    Redis,  // Redis-backed queue (multi-process / production)
+}
+
+/// A persisted queue message returned while recovering expired leases.
+#[derive(Debug, Clone)]
+pub struct RecoveredQueueMessage {
+    payload: Vec<u8>,
+    serialization: Serialization,
+}
+
+impl RecoveredQueueMessage {
+    pub(crate) fn new(payload: Vec<u8>, serialization: Serialization) -> Self {
+        Self {
+            payload,
+            serialization,
+        }
+    }
+
+    pub fn decode<T: serde::de::DeserializeOwned>(&self) -> Result<T, String> {
+        match self.serialization {
+            Serialization::Json => {
+                serde_json::from_slice(&self.payload).map_err(|error| error.to_string())
+            }
+            Serialization::ZstdJson => {
+                let mut json = Vec::new();
+                zstd::Decoder::new(self.payload.as_slice())
+                    .map_err(|error| error.to_string())?
+                    .read_to_end(&mut json)
+                    .map_err(|error| error.to_string())?;
+                serde_json::from_slice(&json).map_err(|error| error.to_string())
+            }
+        }
+    }
+
+    pub fn payload(&self) -> &[u8] {
+        &self.payload
+    }
+}
+
+/// Result of recovering queue messages whose processing leases expired.
+#[derive(Debug, Default)]
+pub struct OrphanRecovery {
+    /// Number of messages made available for another processing attempt.
+    pub requeued_count: usize,
+    /// Requeued messages available to backends that can return their payloads.
+    pub requeued_messages: Vec<RecoveredQueueMessage>,
+    /// Messages moved to the durable dead-letter state during this recovery.
+    pub dead_lettered_messages: Vec<RecoveredQueueMessage>,
+}
+
+impl OrphanRecovery {
+    pub fn total_count(&self) -> usize {
+        self.requeued_count + self.dead_lettered_messages.len()
+    }
 }
 
 impl fmt::Display for QueueType {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             QueueType::Memory => write!(f, "memory"),
+            QueueType::Sqlite => write!(f, "sqlite"),
             QueueType::Redis => write!(f, "redis"),
         }
     }
@@ -53,6 +110,7 @@ impl FromStr for QueueType {
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s.to_lowercase().as_str() {
             "memory" | "mem" => Ok(QueueType::Memory),
+            "sqlite" => Ok(QueueType::Sqlite),
             "redis" => Ok(QueueType::Redis),
             _ => Err(format!("Invalid queue type: {}", s)),
         }
@@ -170,7 +228,7 @@ pub trait QueueProcessor<T>: Queue<T> {
 /// Helper function to create a Queue that uses a specific queue type
 ///
 /// # Arguments
-/// * `queue_type` - The type of queue to create (Memory or Redis)
+/// * `queue_type` - The type of queue to create (Memory, SQLite, or Redis)
 /// * `queue_name` - The name of the queue
 /// * `redis_uri` - Optional Redis URL (only used for Redis queue type)
 /// * `redis_cluster` - Whether to use Redis cluster mode (default: false)
@@ -193,7 +251,7 @@ where
 /// Helper function to create a Queue with optional cluster mode support
 ///
 /// # Arguments
-/// * `queue_type` - The type of queue to create (Memory or Redis)
+/// * `queue_type` - The type of queue to create (Memory, SQLite, or Redis)
 /// * `queue_name` - The name of the queue
 /// * `redis_uri` - Optional Redis URL (only used for Redis queue type)
 /// * `redis_cluster` - Whether to use Redis cluster mode (default: false)
@@ -214,6 +272,11 @@ where
     match queue_type {
         QueueType::Memory => {
             let queue = mem::MemQueue::<T>::new(queue_name)?.with_serialization(serialization);
+            Ok(Arc::new(queue))
+        }
+        QueueType::Sqlite => {
+            let queue =
+                sqlite::SqliteQueue::<T>::new(queue_name)?.with_serialization(serialization);
             Ok(Arc::new(queue))
         }
         QueueType::Redis => {
@@ -252,7 +315,7 @@ where
 /// cannot be turned into a trait object due to its generic methods.
 ///
 /// # Arguments
-/// * `queue_type` - The type of queue to create (Memory or Redis)
+/// * `queue_type` - The type of queue to create (Memory, SQLite, or Redis)
 /// * `queue_name` - The name of the queue
 /// * `redis_uri` - Optional Redis URL (only used for Redis queue type)
 /// * `serialization` - Serialization format to use
@@ -261,6 +324,7 @@ where
 /// * A specific queue implementation that implements QueueProcessor
 pub enum ProcessingQueue<T> {
     Memory(mem::MemQueue<T>),
+    Sqlite(sqlite::SqliteQueue<T>),
     Redis(Box<streams::RedisStreamQueue<T>>),
 }
 
@@ -269,6 +333,7 @@ where
     T: Send + Sync + serde::Serialize + serde::de::DeserializeOwned + Clone + 'static,
 {
     Memory(mem::MemQueueLease<T>),
+    Sqlite(sqlite::SqliteQueueLease<T>),
     Redis(Box<streams::RedisQueueLease<T>>),
 }
 
@@ -293,6 +358,7 @@ where
     pub fn timing(&self) -> QueueLeaseTiming {
         match self {
             ProcessingQueueLease::Memory(lease) => lease.timing(),
+            ProcessingQueueLease::Sqlite(lease) => lease.timing(),
             ProcessingQueueLease::Redis(lease) => lease.timing(),
         }
     }
@@ -308,6 +374,7 @@ where
     {
         match self {
             ProcessingQueueLease::Memory(lease) => lease.process(worker).await,
+            ProcessingQueueLease::Sqlite(lease) => lease.process(worker).await,
             ProcessingQueueLease::Redis(lease) => lease.process(worker).await,
         }
     }
@@ -317,6 +384,7 @@ impl<T: Clone> Clone for ProcessingQueue<T> {
     fn clone(&self) -> Self {
         match self {
             ProcessingQueue::Memory(q) => ProcessingQueue::Memory(q.clone()),
+            ProcessingQueue::Sqlite(q) => ProcessingQueue::Sqlite(q.clone()),
             ProcessingQueue::Redis(q) => ProcessingQueue::Redis(Box::new((**q).clone())),
         }
     }
@@ -351,6 +419,11 @@ impl<T> ProcessingQueue<T> {
             QueueType::Memory => {
                 let queue = mem::MemQueue::<T>::new(queue_name)?.with_serialization(serialization);
                 Ok(ProcessingQueue::Memory(queue))
+            }
+            QueueType::Sqlite => {
+                let queue =
+                    sqlite::SqliteQueue::<T>::new(queue_name)?.with_serialization(serialization);
+                Ok(ProcessingQueue::Sqlite(queue))
             }
             QueueType::Redis => {
                 let url = redis_uri.unwrap_or_else(|| "redis://127.0.0.1/".to_string());
@@ -396,6 +469,7 @@ impl<T> ProcessingQueue<T> {
     pub fn with_consumer_name(self, name: String) -> Self {
         match self {
             ProcessingQueue::Memory(q) => ProcessingQueue::Memory(q),
+            ProcessingQueue::Sqlite(q) => ProcessingQueue::Sqlite(q.with_consumer_name(name)),
             ProcessingQueue::Redis(q) => {
                 ProcessingQueue::Redis(Box::new((*q).with_consumer_name(name)))
             }
@@ -408,6 +482,7 @@ impl<T> ProcessingQueue<T> {
     pub fn with_startup_window(self, window: std::time::Duration) -> Self {
         match self {
             ProcessingQueue::Memory(q) => ProcessingQueue::Memory(q),
+            ProcessingQueue::Sqlite(q) => ProcessingQueue::Sqlite(q.with_startup_window(window)),
             ProcessingQueue::Redis(q) => {
                 ProcessingQueue::Redis(Box::new((*q).with_startup_window(window)))
             }
@@ -421,6 +496,7 @@ impl<T> ProcessingQueue<T> {
     pub fn with_read_batch_size(self, size: usize) -> Self {
         match self {
             ProcessingQueue::Memory(q) => ProcessingQueue::Memory(q),
+            ProcessingQueue::Sqlite(q) => ProcessingQueue::Sqlite(q),
             ProcessingQueue::Redis(q) => {
                 ProcessingQueue::Redis(Box::new((*q).with_read_batch_size(size)))
             }
@@ -431,15 +507,18 @@ impl<T> ProcessingQueue<T> {
     pub fn with_orphan_idle_ms(self, orphan_idle_ms: u64) -> Self {
         match self {
             ProcessingQueue::Memory(q) => ProcessingQueue::Memory(q),
+            ProcessingQueue::Sqlite(q) => {
+                ProcessingQueue::Sqlite(q.with_orphan_idle_ms(orphan_idle_ms))
+            }
             ProcessingQueue::Redis(q) => {
                 ProcessingQueue::Redis(Box::new((*q).with_orphan_idle_ms(orphan_idle_ms)))
             }
         }
     }
 
-    /// Fast-forward the consumer group's last-delivered-id past any backlog
-    /// older than the configured startup window, so a worker coming back from
-    /// a long outage doesn't drain a stale 4-day flood.
+    /// Fast-forward a Redis consumer group's last-delivered-id past backlog
+    /// older than the configured startup window. SQLite deliberately no-ops:
+    /// its rows are the authoritative copy and remain durable until processed.
     ///
     /// Returns the number of stream entries skipped (lower bound — capped at
     /// 10k to keep the count cheap). `Ok(0)` if no window was configured, the
@@ -450,6 +529,10 @@ impl<T> ProcessingQueue<T> {
     pub async fn fast_forward_if_stale(&self) -> Result<usize, Box<dyn Error + Send + Sync>> {
         match self {
             ProcessingQueue::Memory(_) => Ok(0),
+            ProcessingQueue::Sqlite(q) => q
+                .fast_forward_if_stale()
+                .await
+                .map_err(|e| Box::new(e) as Box<dyn Error + Send + Sync>),
             ProcessingQueue::Redis(q) => q
                 .fast_forward_if_stale()
                 .await
@@ -460,6 +543,10 @@ impl<T> ProcessingQueue<T> {
     pub async fn consumer_has_pending(&self) -> Result<bool, Box<dyn Error + Send + Sync>> {
         match self {
             ProcessingQueue::Memory(_) => Ok(false),
+            ProcessingQueue::Sqlite(q) => q
+                .consumer_has_pending()
+                .await
+                .map_err(|e| Box::new(e) as Box<dyn Error + Send + Sync>),
             ProcessingQueue::Redis(q) => q
                 .consumer_has_pending()
                 .await
@@ -467,11 +554,11 @@ impl<T> ProcessingQueue<T> {
         }
     }
 
-    /// Recover orphaned items from processing keys (Redis only)
+    /// Recover orphaned items after a worker lease expires.
     ///
-    /// This method scans for orphaned processing keys (items that were being processed
-    /// when the worker crashed) and moves them back to the main queue. Should be called
-    /// on worker startup to prevent data loss.
+    /// This method requeues recoverable Redis/SQLite items. SQLite items that
+    /// exhausted their retry allowance enter the durable DLQ; callers that own
+    /// associated application state should use `recover_orphaned_items_with_data`.
     ///
     /// For Memory queues, this is a no-op (returns Ok(0)).
     pub async fn recover_orphaned_items(&self) -> Result<usize, Box<dyn Error + Send + Sync>> {
@@ -480,6 +567,10 @@ impl<T> ProcessingQueue<T> {
                 // Memory queues don't persist across restarts, so no orphaned items
                 Ok(0)
             }
+            ProcessingQueue::Sqlite(q) => q
+                .recover_orphaned_items()
+                .await
+                .map_err(|e| Box::new(e) as Box<dyn Error + Send + Sync>),
             ProcessingQueue::Redis(q) => q
                 .recover_orphaned_items()
                 .await
@@ -487,15 +578,19 @@ impl<T> ProcessingQueue<T> {
         }
     }
 
-    /// ACK and discard all pending messages older than `max_age_ms`.
+    /// ACK and discard Redis messages older than `max_age_ms`.
     /// Returns the number of messages purged.
-    /// For Memory queues, this is a no-op (returns Ok(0)).
+    /// Memory and authoritative SQLite queues are no-ops (return Ok(0)).
     pub async fn purge_old_pending(
         &self,
         max_age_ms: u64,
     ) -> Result<usize, Box<dyn Error + Send + Sync>> {
         match self {
             ProcessingQueue::Memory(_) => Ok(0),
+            ProcessingQueue::Sqlite(q) => q
+                .purge_old_pending(max_age_ms)
+                .await
+                .map_err(|e| Box::new(e) as Box<dyn Error + Send + Sync>),
             ProcessingQueue::Redis(q) => q
                 .purge_old_pending(max_age_ms)
                 .await
@@ -518,6 +613,11 @@ impl<T> ProcessingQueue<T> {
             ProcessingQueue::Memory(q) => Ok(Some(ProcessingQueueLease::Memory(
                 q.claim_blocking().await?,
             ))),
+            ProcessingQueue::Sqlite(q) => Ok(q
+                .claim_blocking()
+                .await
+                .map_err(|e| Box::new(e) as Box<dyn Error + Send + Sync>)?
+                .map(ProcessingQueueLease::Sqlite)),
             ProcessingQueue::Redis(q) => Ok(q
                 .claim_blocking()
                 .await
@@ -548,26 +648,32 @@ impl<T> ProcessingQueue<T> {
     {
         match self {
             ProcessingQueue::Memory(q) => q.process_blocking(worker).await,
+            ProcessingQueue::Sqlite(q) => q.process_blocking(worker).await,
             ProcessingQueue::Redis(q) => q.process_blocking(worker).await,
         }
     }
 
-    /// Recover orphaned items and return the raw bytes of each recovered item.
+    /// Recover orphaned items and return payloads when the backend supports it.
     ///
     /// This is useful when you need to inspect the recovered items (e.g., to extract
     /// event_ids and mark associated runs as failed due to worker crash).
     ///
-    /// Returns (count, Vec<raw_bytes>) - the raw bytes can be deserialized by the caller.
-    ///
-    /// For Memory queues, this is a no-op (returns Ok((0, vec![]))).
+    /// SQLite distinguishes messages requeued for another attempt from messages
+    /// that exhausted their retry allowance and entered the durable DLQ. Redis
+    /// reports only a requeue count because XAUTOCLAIM leaves payload delivery
+    /// to the normal consumer flow.
     pub async fn recover_orphaned_items_with_data(
         &self,
-    ) -> Result<(usize, Vec<Vec<u8>>), Box<dyn Error + Send + Sync>> {
+    ) -> Result<OrphanRecovery, Box<dyn Error + Send + Sync>> {
         match self {
             ProcessingQueue::Memory(_) => {
                 // Memory queues don't persist across restarts, so no orphaned items
-                Ok((0, vec![]))
+                Ok(OrphanRecovery::default())
             }
+            ProcessingQueue::Sqlite(q) => q
+                .recover_orphaned_items_with_data()
+                .await
+                .map_err(|e| Box::new(e) as Box<dyn Error + Send + Sync>),
             ProcessingQueue::Redis(q) => q
                 .recover_orphaned_items_with_data()
                 .await
@@ -577,10 +683,14 @@ impl<T> ProcessingQueue<T> {
 }
 
 #[async_trait]
-impl<T: Send + Sync> StreamCleanup for ProcessingQueue<T> {
+impl<T> StreamCleanup for ProcessingQueue<T>
+where
+    T: Clone + Send + Sync + serde::Serialize + serde::de::DeserializeOwned + 'static,
+{
     async fn cleanup_streams(&self) -> Result<(usize, usize), Box<dyn Error + Send + Sync>> {
         match self {
             ProcessingQueue::Memory(_) => Ok((0, 0)),
+            ProcessingQueue::Sqlite(_) => Ok((0, 0)),
             ProcessingQueue::Redis(q) => {
                 let consumers_removed = q
                     .cleanup_stale_consumers()
@@ -598,6 +708,10 @@ impl<T: Send + Sync> StreamCleanup for ProcessingQueue<T> {
     async fn reclaim_orphans(&self) -> Result<usize, Box<dyn Error + Send + Sync>> {
         match self {
             ProcessingQueue::Memory(_) => Ok(0),
+            ProcessingQueue::Sqlite(q) => q
+                .recover_orphaned_items()
+                .await
+                .map_err(|e| Box::new(e) as Box<dyn Error + Send + Sync>),
             ProcessingQueue::Redis(q) => q
                 .recover_orphaned_items()
                 .await
@@ -607,10 +721,17 @@ impl<T: Send + Sync> StreamCleanup for ProcessingQueue<T> {
 }
 
 #[async_trait]
-impl<T: Send + Sync> ConsumerLifecycle for ProcessingQueue<T> {
+impl<T> ConsumerLifecycle for ProcessingQueue<T>
+where
+    T: Clone + Send + Sync + serde::Serialize + serde::de::DeserializeOwned + 'static,
+{
     async fn unregister_consumer(&self) -> Result<(), Box<dyn Error + Send + Sync>> {
         match self {
             ProcessingQueue::Memory(_) => Ok(()),
+            ProcessingQueue::Sqlite(q) => q
+                .unregister_consumer()
+                .await
+                .map_err(|e| Box::new(e) as Box<dyn Error + Send + Sync>),
             ProcessingQueue::Redis(q) => q
                 .unregister_consumer()
                 .await
@@ -626,6 +747,7 @@ impl<T: Send + Sync + serde::Serialize + serde::de::DeserializeOwned + Clone + '
     async fn enqueue(&self, item: T) -> Result<(), Box<dyn Error + Send + Sync>> {
         match self {
             ProcessingQueue::Memory(q) => q.enqueue(item).await,
+            ProcessingQueue::Sqlite(q) => q.enqueue(item).await,
             ProcessingQueue::Redis(q) => q.enqueue(item).await,
         }
     }
@@ -633,6 +755,7 @@ impl<T: Send + Sync + serde::Serialize + serde::de::DeserializeOwned + Clone + '
     async fn dequeue(&self) -> Result<Option<T>, Box<dyn Error + Send + Sync>> {
         match self {
             ProcessingQueue::Memory(q) => q.dequeue().await,
+            ProcessingQueue::Sqlite(q) => q.dequeue().await,
             ProcessingQueue::Redis(q) => q.dequeue().await,
         }
     }
@@ -640,6 +763,7 @@ impl<T: Send + Sync + serde::Serialize + serde::de::DeserializeOwned + Clone + '
     async fn len(&self) -> Result<usize, Box<dyn Error + Send + Sync>> {
         match self {
             ProcessingQueue::Memory(q) => q.len().await,
+            ProcessingQueue::Sqlite(q) => q.len().await,
             ProcessingQueue::Redis(q) => q.len().await,
         }
     }
@@ -651,6 +775,7 @@ impl<T: Send + Sync + serde::Serialize + serde::de::DeserializeOwned + Clone + '
     ) -> Result<(), Box<dyn Error + Send + Sync>> {
         match self {
             ProcessingQueue::Memory(q) => q.move_to_dead_letter_queue(item, reason).await,
+            ProcessingQueue::Sqlite(q) => q.move_to_dead_letter_queue(item, reason).await,
             ProcessingQueue::Redis(q) => q.move_to_dead_letter_queue(item, reason).await,
         }
     }
@@ -671,6 +796,7 @@ impl<T: Send + Sync + serde::Serialize + serde::de::DeserializeOwned + Clone + '
     {
         match self {
             ProcessingQueue::Memory(q) => q.dequeue_and_work(worker).await,
+            ProcessingQueue::Sqlite(q) => q.dequeue_and_work(worker).await,
             ProcessingQueue::Redis(q) => q.dequeue_and_work(worker).await,
         }
     }
@@ -712,9 +838,10 @@ impl<T: Send + Sync + serde::Serialize + serde::de::DeserializeOwned + Clone + '
 ///
 /// Type resolution order (highest priority wins):
 /// 1. User-provided type (from env var HOT_QUEUE_TYPE, hot.hot, or CLI --queue.type)
-/// 2. Context default: "memory" when `in_project` is true, "none" otherwise
+/// 2. Context default: "sqlite" when `in_project` is true, "none" otherwise
 ///
-/// When `in_project` is true (hot.hot exists), defaults to "memory" for local event publishing.
+/// When `in_project` is true (hot.hot exists), defaults to the project-local
+/// SQLite queue for durable, cross-process local delivery.
 /// When `in_project` is false, defaults to "none" (queue disabled).
 pub fn get_resolved_conf(conf: Val, in_project: bool) -> Val {
     let default_conf = val!({
@@ -732,13 +859,13 @@ pub fn get_resolved_conf(conf: Val, in_project: bool) -> Val {
     let user_explicitly_set_type = !user_type.is_empty();
 
     // Default type depends on context:
-    // - In project: "memory" enables send() for local event publishing
+    // - In project: "sqlite" enables durable local event publishing
     // - Outside project: "none" disables queue
     // But if user explicitly set a type, use that
     let queue_type = if user_explicitly_set_type {
         user_type
     } else if in_project {
-        "memory".to_string()
+        "sqlite".to_string()
     } else {
         "none".to_string()
     };
@@ -1103,5 +1230,29 @@ impl RedisQueueAdmin {
     /// Get the Redis URI
     pub fn uri(&self) -> &str {
         &self.uri
+    }
+}
+
+#[cfg(test)]
+mod config_tests {
+    use super::*;
+
+    #[test]
+    fn sqlite_is_default_queue_type() {
+        assert_eq!(QueueType::default(), QueueType::Sqlite);
+        assert_eq!(QueueType::from_str("sqlite").unwrap(), QueueType::Sqlite);
+        assert!(QueueType::from_str("sqlite3").is_err());
+    }
+
+    #[test]
+    fn in_project_configuration_defaults_to_sqlite() {
+        let conf = get_resolved_conf(Val::map_empty(), true);
+        assert_eq!(conf.get_str("type"), "sqlite");
+    }
+
+    #[test]
+    fn explicit_memory_configuration_is_preserved() {
+        let conf = get_resolved_conf(val!({"type": "memory"}), true);
+        assert_eq!(conf.get_str("type"), "memory");
     }
 }

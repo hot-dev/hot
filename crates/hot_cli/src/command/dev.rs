@@ -1,9 +1,16 @@
 //! `hot dev` — file-watching local development server. Spins up the API,
 //! worker, scheduler, and watcher in a single process.
 
+use std::io;
 use std::path::Path;
+use std::str::FromStr;
 
+use hot::data::msg::Message;
+use hot::db::{DatabasePool, Run, Task, TaskError, TaskStatus};
+use hot::lang::hot::task::TaskRequest;
 use hot::log::LogTarget;
+use hot::queue::QueueType;
+use hot::queue::sqlite::{SqliteQueueAdmin, SqliteQueueMessageSnapshot, SqliteQueueMessageState};
 use hot::stream::{StreamPubSub, StreamPubSubType};
 use hot::val::Val;
 use tracing::{Level, debug, error, info, warn};
@@ -21,9 +28,141 @@ use crate::conf::{
     apply_env_vars, create_default_conf, get_merged_src_paths, get_merged_test_paths, load_ctx,
     reload_conf_after_init, reload_dotenv_files,
 };
+use crate::{PROJECT_QUEUE_SESSION_LOCK_PATH, open_project_queue_session_lock};
 
 const HOT_DEV_WORKER_SHUTDOWN_TIMEOUT_SECONDS: i64 = 1;
 const HOT_DEV_TASK_SHUTDOWN_DRAIN_SECONDS: i64 = 5;
+const DEV_RESTART_RUN_ERROR: &str = "Run abandoned when the local dev session restarted";
+
+fn message_stream_id(message: &Message) -> Option<uuid::Uuid> {
+    for path in ["execution_context", "event"] {
+        if let Some(container) = message.body.get(path)
+            && let Some(value) = container.get("stream_id")
+            && let Ok(id) = uuid::Uuid::parse_str(&value.get_str(""))
+        {
+            return Some(id);
+        }
+    }
+    None
+}
+
+fn is_queue(queue_name: &str, expected: &str) -> bool {
+    queue_name == expected
+        || queue_name
+            .strip_prefix('{')
+            .and_then(|name| name.strip_suffix('}'))
+            .is_some_and(|name| name == expected)
+}
+
+#[derive(Debug, Default, PartialEq, Eq)]
+struct DevQueueReconciliation {
+    failed_runs: u64,
+    failed_tasks: usize,
+}
+
+async fn reconcile_discarded_queue_messages(
+    db: &DatabasePool,
+    messages: &[SqliteQueueMessageSnapshot],
+    configured_task_queue: Option<&str>,
+) -> Result<DevQueueReconciliation, String> {
+    let mut stream_ids = ahash::AHashSet::new();
+    let mut event_ids = ahash::AHashSet::new();
+    let mut task_ids = ahash::AHashSet::new();
+
+    for snapshot in messages {
+        if is_queue(&snapshot.queue_name, "hot:event") {
+            // Ready events have not started a Run. Leased and dead-lettered
+            // events can both identify execution abandoned by the previous
+            // process; the latter may have exhausted while recovering a lease.
+            if snapshot.state == SqliteQueueMessageState::Ready {
+                continue;
+            }
+            let message = snapshot.decode::<Message>().map_err(|error| {
+                format!(
+                    "could not inspect an interrupted event in queue '{}': {error}",
+                    snapshot.queue_name
+                )
+            })?;
+            if let Some(stream_id) = message_stream_id(&message) {
+                stream_ids.insert(stream_id);
+            } else {
+                event_ids.insert(message.id);
+            }
+            continue;
+        }
+
+        let is_task_queue = is_queue(&snapshot.queue_name, "hot:task")
+            || configured_task_queue.is_some_and(|name| is_queue(&snapshot.queue_name, name));
+        if is_task_queue {
+            let request = snapshot.decode::<TaskRequest>().map_err(|error| {
+                format!(
+                    "could not inspect an interrupted task in queue '{}': {error}",
+                    snapshot.queue_name
+                )
+            })?;
+            let task_id = uuid::Uuid::parse_str(&request.task_id).map_err(|error| {
+                format!(
+                    "could not parse interrupted task ID '{}' in queue '{}': {error}",
+                    request.task_id, snapshot.queue_name
+                )
+            })?;
+            task_ids.insert(task_id);
+        }
+    }
+
+    let mut result = DevQueueReconciliation::default();
+    for stream_id in stream_ids {
+        result.failed_runs +=
+            Run::fail_orphaned_runs_by_stream_id(db, &stream_id, DEV_RESTART_RUN_ERROR)
+                .await
+                .map_err(|error| {
+                    format!("failed to reconcile runs in stream {stream_id}: {error}")
+                })?;
+    }
+    for event_id in event_ids {
+        result.failed_runs +=
+            Run::fail_orphaned_runs_by_event_id(db, &event_id, DEV_RESTART_RUN_ERROR)
+                .await
+                .map_err(|error| {
+                    format!("failed to reconcile runs for event {event_id}: {error}")
+                })?;
+    }
+
+    let task_error = serde_json::json!({
+        "$type": "::hot::task/Failure",
+        "$val": {
+            "msg": "Task abandoned when the local dev session restarted",
+            "err": serde_json::Value::Null,
+        }
+    });
+    for task_id in task_ids {
+        let task = match Task::get(db, &task_id).await {
+            Ok(task) => task,
+            Err(TaskError::NotFound) => continue,
+            Err(error) => {
+                return Err(format!(
+                    "failed to load interrupted task {task_id}: {error}"
+                ));
+            }
+        };
+        let duration_override = (task.task_status_id == TaskStatus::Queued.as_id()).then_some(0);
+        if Task::complete(
+            db,
+            &task_id,
+            &TaskStatus::Failed,
+            Some(&task_error),
+            duration_override,
+            None,
+        )
+        .await
+        .map_err(|error| format!("failed to reconcile interrupted task {task_id}: {error}"))?
+        {
+            result.failed_tasks += 1;
+        }
+    }
+
+    Ok(result)
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DevDiagnosticDestination {
@@ -165,6 +304,38 @@ pub(crate) async fn run_dev(
         conf
     };
     let conf = apply_hot_dev_shutdown_defaults(conf, &conf_files);
+    let queue_type = QueueType::from_str(&conf.get_str_or_default("queue.type", "sqlite"))
+        .unwrap_or(QueueType::Memory);
+
+    // Hold this advisory lock for the entire dev session. Acquiring it before
+    // any queue mutation prevents a second `hot dev` from clearing work owned
+    // by the first process before it later discovers occupied service ports.
+    let mut dev_instance_lock = if queue_type == QueueType::Sqlite {
+        match open_project_queue_session_lock(Path::new(PROJECT_QUEUE_SESSION_LOCK_PATH)) {
+            Ok(lock) => Some(lock),
+            Err(error) => {
+                error!("hot.dev: Failed to open project dev lock: {}", error);
+                std::process::exit(1);
+            }
+        }
+    } else {
+        None
+    };
+    let _dev_instance_guard = match dev_instance_lock.as_mut() {
+        Some(lock) => match lock.try_write() {
+            Ok(guard) => Some(guard),
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                error!("hot.dev: This project's SQLite queue session is already in use");
+                error!("Stop the other hot dev or standalone Hot services before starting hot dev");
+                std::process::exit(1);
+            }
+            Err(error) => {
+                error!("hot.dev: Failed to acquire project dev lock: {}", error);
+                std::process::exit(1);
+            }
+        },
+        None => None,
+    };
     let diagnostic_output = DevDiagnosticOutput::from_conf(&conf);
 
     // Create or update live build for development
@@ -232,6 +403,81 @@ pub(crate) async fn run_dev(
         }
     }
 
+    // `hot dev` keeps the historical session-scoped queue lifecycle even
+    // when SQLite is the backend. Reset at startup (rather than shutdown) so
+    // hard kills cannot leave work that unexpectedly replays next time.
+    // Before deleting queue rows, use their durable payloads to mark Runs and
+    // Tasks from the interrupted session terminal in the application DB.
+    // Standalone SQLite services retain normal durable recovery semantics.
+    if queue_type == QueueType::Sqlite {
+        info!("hot.dev: Starting a new SQLite queue session");
+        let admin = SqliteQueueAdmin::default();
+        let snapshots = match admin.message_snapshots().await {
+            Ok(messages) => messages,
+            Err(error) => {
+                error!(
+                    "hot.dev: Failed to inspect managed SQLite queues before startup: {}",
+                    error
+                );
+                error!(
+                    "Cannot start a new dev session safely; inspect the queue files in .hot/db/queue/"
+                );
+                std::process::exit(1);
+            }
+        };
+
+        if !snapshots.is_empty() && !conf.get_str("db.uri").is_empty() {
+            let db = match hot::db::create_db_pool(&conf).await {
+                Ok(db) => db,
+                Err(error) => {
+                    error!(
+                        "hot.dev: Failed to connect to the database while reconciling the previous dev session: {}",
+                        error
+                    );
+                    error!("Queue rows were preserved; fix the database error and restart");
+                    std::process::exit(1);
+                }
+            };
+            let configured_task_queue = conf.get_str_or_default("queue.name", "");
+            let configured_task_queue =
+                (!configured_task_queue.is_empty()).then_some(configured_task_queue.as_str());
+            match reconcile_discarded_queue_messages(&db, &snapshots, configured_task_queue).await {
+                Ok(reconciled) => debug!(
+                    failed_runs = reconciled.failed_runs,
+                    failed_tasks = reconciled.failed_tasks,
+                    "hot.dev: Reconciled work interrupted in the previous dev session"
+                ),
+                Err(error) => {
+                    error!(
+                        "hot.dev: Failed to reconcile the previous dev session: {}",
+                        error
+                    );
+                    error!("Queue rows were preserved; fix the database error and restart");
+                    std::process::exit(1);
+                }
+            }
+        }
+
+        match admin.clear_snapshots(&snapshots).await {
+            Ok(cleared) => {
+                debug!(
+                    queues = ?cleared,
+                    "hot.dev: Cleared managed SQLite queues from the previous dev session"
+                );
+            }
+            Err(error) => {
+                error!(
+                    "hot.dev: Failed to clear managed SQLite queues before startup: {}",
+                    error
+                );
+                error!(
+                    "Cannot start a new dev session safely; inspect the queue files in .hot/db/queue/"
+                );
+                std::process::exit(1);
+            }
+        }
+    }
+
     // CRITICAL: Wait for live build to complete before starting any services
     // This ensures event handlers and schedules are ready before worker processes events
     info!("hot.dev: Setting up live build and extracting event handlers...");
@@ -252,8 +498,10 @@ pub(crate) async fn run_dev(
 
     // Create a shared stream pub/sub for development mode
     // This ensures API and Worker share the same in-memory pub/sub
-    let queue_type_str = conf.get_str_or_default("queue.type", "memory");
-    let shared_stream_pubsub: Option<std::sync::Arc<StreamPubSub>> = if queue_type_str == "memory" {
+    let shared_stream_pubsub: Option<std::sync::Arc<StreamPubSub>> = if matches!(
+        queue_type,
+        QueueType::Memory | QueueType::Sqlite
+    ) {
         // In-memory mode requires shared pub/sub instance
         match StreamPubSub::new(StreamPubSubType::Memory, None, false) {
             Ok(pubsub) => {
@@ -835,7 +1083,151 @@ pub(crate) async fn run_dev_file_watcher(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use hot::data::serialization::Serialization;
     use hot::lang::parser::{ErrorLocation, ParseError};
+    use hot::queue::Queue;
+    use hot::queue::sqlite::SqliteQueue;
+
+    #[test]
+    fn project_dev_lock_excludes_a_second_holder() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("hot-dev.lock");
+        let mut first = open_project_queue_session_lock(&path).unwrap();
+        let first_guard = first.try_write().unwrap();
+
+        let mut second = open_project_queue_session_lock(&path).unwrap();
+        let error = second.try_write().unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::WouldBlock);
+
+        drop(first_guard);
+        let _second_guard = second.try_write().unwrap();
+    }
+
+    #[test]
+    fn interrupted_event_stream_id_is_extracted_from_both_supported_shapes() {
+        let execution_context = Message {
+            id: uuid::Uuid::now_v7(),
+            head: Val::map_empty(),
+            body: hot::val!({
+                "execution_context": {
+                    "stream_id": "019cf469-d4d4-7000-8000-000000000001"
+                }
+            }),
+        };
+        assert_eq!(
+            message_stream_id(&execution_context).unwrap().to_string(),
+            "019cf469-d4d4-7000-8000-000000000001"
+        );
+
+        let event = Message {
+            id: uuid::Uuid::now_v7(),
+            head: Val::map_empty(),
+            body: hot::val!({
+                "event": {
+                    "stream_id": "019cf469-d4d4-7000-8000-000000000002"
+                }
+            }),
+        };
+        assert_eq!(
+            message_stream_id(&event).unwrap().to_string(),
+            "019cf469-d4d4-7000-8000-000000000002"
+        );
+    }
+
+    #[tokio::test]
+    async fn dev_queue_reset_reconciles_interrupted_runs_and_tasks() {
+        let db = hot::db::test_db().await;
+        let data = hot::db::insert_test_data(&db).await.unwrap();
+        let queue_dir = tempfile::tempdir().unwrap();
+
+        let event_queue =
+            SqliteQueue::<Message>::new_at("hot:event".to_string(), queue_dir.path().to_path_buf())
+                .unwrap()
+                .with_serialization(Serialization::Json);
+        event_queue
+            .move_to_dead_letter_queue(
+                Message {
+                    id: uuid::Uuid::now_v7(),
+                    head: Val::map_empty(),
+                    body: hot::val!({
+                        "execution_context": {
+                            "stream_id": data.stream_id.to_string()
+                        }
+                    }),
+                },
+                "lease expired after retry limit".to_string(),
+            )
+            .await
+            .unwrap();
+
+        let task_id = uuid::Uuid::now_v7();
+        Task::insert(
+            &db,
+            &task_id,
+            &data.env_id,
+            &data.stream_id,
+            &data.build_id,
+            Some(&data.run_id),
+            "::app/background",
+            None,
+            None,
+            "code",
+            60_000,
+            Some(&data.user_id),
+        )
+        .await
+        .unwrap();
+        let task_queue = SqliteQueue::<TaskRequest>::new_at(
+            "hot:task".to_string(),
+            queue_dir.path().to_path_buf(),
+        )
+        .unwrap()
+        .with_serialization(Serialization::Json);
+        task_queue
+            .enqueue(TaskRequest {
+                task_id: task_id.to_string(),
+                function_name: "::app/background".to_string(),
+                args: serde_json::Value::Null,
+                stream_id: data.stream_id.to_string(),
+                env_id: data.env_id.to_string(),
+                build_id: data.build_id.to_string(),
+                org_id: Some(data.org_id.to_string()),
+                user_id: Some(data.user_id.to_string()),
+                project_id: Some(data.project_id.to_string()),
+                project_name: Some("test-project".to_string()),
+                timeout_ms: 60_000,
+                task_type: "code".to_string(),
+                created_at_unix_ms: 0,
+                origin_run_id: Some(data.run_id.to_string()),
+            })
+            .await
+            .unwrap();
+
+        let admin = SqliteQueueAdmin::new(queue_dir.path().to_path_buf());
+        let snapshots = admin.message_snapshots().await.unwrap();
+        let result = reconcile_discarded_queue_messages(&db, &snapshots, None)
+            .await
+            .unwrap();
+        assert_eq!(
+            result,
+            DevQueueReconciliation {
+                failed_runs: 1,
+                failed_tasks: 1,
+            }
+        );
+        assert_eq!(
+            Run::get_run(&db, &data.run_id).await.unwrap().status_id,
+            hot::db::RunStatus::Failed.as_id()
+        );
+        let task = Task::get(&db, &task_id).await.unwrap();
+        assert_eq!(task.task_status_id, TaskStatus::Failed.as_id());
+        assert_eq!(task.duration_ms, Some(0));
+
+        admin.clear_all().await.unwrap();
+        let status = admin.status().await.unwrap();
+        assert_eq!(status.total_pending, 0);
+        assert_eq!(status.total_processing, 0);
+    }
 
     #[test]
     fn hot_dev_diagnostic_output_is_target_aware() {

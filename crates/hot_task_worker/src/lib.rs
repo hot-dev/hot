@@ -35,8 +35,8 @@ use hot::lang::emitter::EngineEventEmitter;
 use hot::lang::event::{EventPublisher, ExecutionContext};
 use hot::lang::hot::task::TaskRequest;
 use hot::queue::{
-    ConsumerLifecycle, ProcessingQueue, Queue, QueueInfrastructureError, QueueLeaseTiming,
-    QueueType,
+    ConsumerLifecycle, OrphanRecovery, ProcessingQueue, Queue, QueueInfrastructureError,
+    QueueLeaseTiming, QueueType, RecoveredQueueMessage,
 };
 use hot::stream::{
     EnvEvent, EnvPublisher, StreamEvent, StreamNext, StreamPubSub, StreamPublisher,
@@ -498,6 +498,88 @@ fn validate_task_orphan_idle_ms(
     Ok(())
 }
 
+async fn reconcile_dead_lettered_tasks(
+    db: &DatabasePool,
+    publisher: &StreamPubSub,
+    messages: &[RecoveredQueueMessage],
+) -> usize {
+    let mut failed = 0;
+    for message in messages {
+        let request = match message.decode::<TaskRequest>() {
+            Ok(request) => request,
+            Err(error) => {
+                tracing::warn!(
+                    "Could not decode dead-lettered task queue message: {}",
+                    error
+                );
+                continue;
+            }
+        };
+        if reconcile_dead_lettered_task_request(db, publisher, &request).await {
+            failed += 1;
+        }
+    }
+    failed
+}
+
+async fn reconcile_dead_lettered_task_request(
+    db: &DatabasePool,
+    publisher: &StreamPubSub,
+    request: &TaskRequest,
+) -> bool {
+    let failure = task_failure_json(
+        "Task worker lease expired and the queue retry limit was exhausted",
+        None,
+    );
+    let Ok(task_id) = Uuid::parse_str(&request.task_id) else {
+        tracing::warn!(
+            task_id = request.task_id,
+            "Dead-lettered task message has an invalid task ID"
+        );
+        return false;
+    };
+    let Ok(env_id) = Uuid::parse_str(&request.env_id) else {
+        tracing::warn!(task_id = %task_id, env_id = request.env_id, "Dead-lettered task message has an invalid env ID");
+        return false;
+    };
+    let Ok(stream_id) = Uuid::parse_str(&request.stream_id) else {
+        tracing::warn!(task_id = %task_id, stream_id = request.stream_id, "Dead-lettered task message has an invalid stream ID");
+        return false;
+    };
+    let duration_override = match Task::get(db, &task_id).await {
+        Ok(task) if task.task_status_id == TaskStatus::Queued.as_id() => Some(0),
+        Ok(_) => None,
+        Err(hot::db::TaskError::NotFound) => return false,
+        Err(error) => {
+            tracing::warn!(task_id = %task_id, "Could not inspect dead-lettered task: {}", error);
+            return false;
+        }
+    };
+    if !complete_task_with_event(
+        db,
+        publisher,
+        &task_id,
+        env_id,
+        stream_id,
+        &request.function_name,
+        &request.task_type,
+        TaskStatus::Failed,
+        Some(&failure),
+        duration_override,
+        None,
+    )
+    .await
+    {
+        return false;
+    }
+    let org_id = request
+        .org_id
+        .as_deref()
+        .and_then(|id| Uuid::parse_str(id).ok());
+    publish_task_alert(db, org_id, env_id, &task_id, "task:failed", &failure).await;
+    true
+}
+
 const CONTAINER_SCRIPT_PRELUDE: &str = "#!/bin/sh\nset -e\nmkdir -p /data\n";
 const CONTAINER_SHELL_FLAGS: &str = "-ec";
 
@@ -625,13 +707,24 @@ pub async fn run(config: TaskWorkerConfig) -> Result<(), Box<dyn std::error::Err
         QueueType::Memory => {
             tracing::debug!("Task worker using in-memory queue (no connectivity check needed)");
         }
-        QueueType::Redis => match task_queue.is_empty().await {
+        QueueType::Sqlite | QueueType::Redis => match task_queue.is_empty().await {
             Ok(_) => {
-                tracing::debug!("Task worker successfully connected to Redis queue");
+                tracing::debug!(
+                    "Task worker successfully connected to {} queue",
+                    config.queue_type
+                );
             }
             Err(e) => {
-                tracing::error!("Task worker failed to connect to Redis queue: {}", e);
-                return Err(format!("Redis queue connectivity check failed: {}", e).into());
+                tracing::error!(
+                    "Task worker failed to connect to {} queue: {}",
+                    config.queue_type,
+                    e
+                );
+                return Err(format!(
+                    "{} queue connectivity check failed: {}",
+                    config.queue_type, e
+                )
+                .into());
             }
         },
     }
@@ -644,36 +737,48 @@ pub async fn run(config: TaskWorkerConfig) -> Result<(), Box<dyn std::error::Err
     let recovery_result = tokio::select! {
         result = tokio::time::timeout(
             recovery_timeout,
-            task_queue.recover_orphaned_items(),
+            task_queue.recover_orphaned_items_with_data(),
         ) => result,
         _ = hot::signal::shutdown_signal() => {
             tracing::info!("Task worker received shutdown signal during orphaned item recovery");
             return Ok(());
         }
     };
-    match recovery_result {
-        Ok(Ok(count)) if count > 0 => {
-            tracing::info!(
-                "Task worker recovered {} orphaned item(s) — these will be reprocessed",
-                count
-            );
+    let startup_orphan_recovery = match recovery_result {
+        Ok(Ok(recovery)) if recovery.total_count() > 0 => {
+            if recovery.requeued_count > 0 {
+                tracing::info!(
+                    "Task worker recovered {} orphaned item(s) — these will be reprocessed",
+                    recovery.requeued_count
+                );
+            }
+            if !recovery.dead_lettered_messages.is_empty() {
+                tracing::warn!(
+                    "Task worker moved {} expired orphaned item(s) to the dead-letter queue",
+                    recovery.dead_lettered_messages.len()
+                );
+            }
+            recovery
         }
-        Ok(Ok(_)) => {
+        Ok(Ok(recovery)) => {
             tracing::debug!("Task worker no orphaned items found");
+            recovery
         }
         Ok(Err(e)) => {
             tracing::warn!(
                 "Task worker failed to recover orphaned items: {} (continuing)",
                 e
             );
+            OrphanRecovery::default()
         }
         Err(_) => {
             tracing::warn!(
                 "Task worker orphaned item recovery timed out after {}s (continuing)",
                 recovery_timeout.as_secs()
             );
+            OrphanRecovery::default()
         }
-    }
+    };
 
     // In local dev, purge messages older than 1 hour before the rest of
     // startup. Old messages from previous local sessions cause a "catch-up
@@ -816,7 +921,7 @@ pub async fn run(config: TaskWorkerConfig) -> Result<(), Box<dyn std::error::Err
     hot::notification_queue::init_alert_queue(Arc::new(alert_queue));
 
     let pubsub_type = match config.queue_type {
-        QueueType::Memory => hot::stream::StreamPubSubType::Memory,
+        QueueType::Memory | QueueType::Sqlite => hot::stream::StreamPubSubType::Memory,
         QueueType::Redis => hot::stream::StreamPubSubType::Redis,
     };
     let stream_publisher = Arc::new(StreamPubSub::new(
@@ -824,6 +929,21 @@ pub async fn run(config: TaskWorkerConfig) -> Result<(), Box<dyn std::error::Err
         config.redis_uri.clone(),
         config.redis_cluster,
     )?);
+
+    if !startup_orphan_recovery.dead_lettered_messages.is_empty() {
+        let failed = reconcile_dead_lettered_tasks(
+            &db,
+            &stream_publisher,
+            &startup_orphan_recovery.dead_lettered_messages,
+        )
+        .await;
+        if failed > 0 {
+            tracing::warn!(
+                "Task worker marked {} task(s) failed after queue retry exhaustion",
+                failed
+            );
+        }
+    }
 
     let bytecode_cache = Arc::new(BytecodeCache::default_location());
 
@@ -868,7 +988,7 @@ pub async fn run(config: TaskWorkerConfig) -> Result<(), Box<dyn std::error::Err
         .unwrap_or_else(|| "/tmp/hot-data-volumes".to_string());
     let data_vol_base = Arc::new(std::path::PathBuf::from(data_vol_base));
 
-    let event_publisher: Option<Arc<dyn EventPublisher>> = create_event_publisher(&config, &db);
+    let event_publisher: Option<Arc<dyn EventPublisher>> = create_event_publisher(&config, &db)?;
 
     let usage_stats_cache: UsageStatsCache = Arc::new(Mutex::new(HashMap::new()));
 
@@ -888,7 +1008,9 @@ pub async fn run(config: TaskWorkerConfig) -> Result<(), Box<dyn std::error::Err
     // single-delivery semantics already guarantee no in-process
     // duplication, and there is no other process to race with.
     let task_lease: Arc<dyn task_lease::TaskLease> = match config.queue_type {
-        QueueType::Memory => Arc::new(task_lease::NoopTaskLease),
+        // SQLite queue leases are ownership-guarded and renewed by the queue
+        // backend, so they provide the same local mutual exclusion here.
+        QueueType::Memory | QueueType::Sqlite => Arc::new(task_lease::NoopTaskLease),
         QueueType::Redis => {
             let uri = config
                 .redis_uri
@@ -1132,6 +1254,47 @@ pub async fn run(config: TaskWorkerConfig) -> Result<(), Box<dyn std::error::Err
                             );
                         }
                     }
+                }
+            }
+        });
+    } else if matches!(config.queue_type, QueueType::Sqlite) {
+        let janitor_queue = Arc::clone(&task_queue_arc);
+        let janitor_db = Arc::clone(&db);
+        let janitor_publisher = Arc::clone(&stream_publisher);
+        let janitor_coordinator = Arc::clone(&coordinator);
+        tokio::spawn(async move {
+            const TICK: std::time::Duration = std::time::Duration::from_secs(60);
+            loop {
+                tokio::time::sleep(TICK).await;
+                if janitor_coordinator.is_shutting_down() {
+                    tracing::debug!("Task worker SQLite queue janitor shutting down");
+                    break;
+                }
+                match janitor_queue.recover_orphaned_items_with_data().await {
+                    Ok(recovery) => {
+                        if recovery.total_count() > 0 {
+                            tracing::info!(
+                                "Task worker SQLite janitor handled {} orphaned message(s) on hot:task",
+                                recovery.total_count()
+                            );
+                        }
+                        let failed = reconcile_dead_lettered_tasks(
+                            &janitor_db,
+                            &janitor_publisher,
+                            &recovery.dead_lettered_messages,
+                        )
+                        .await;
+                        if failed > 0 {
+                            tracing::warn!(
+                                "Task worker SQLite janitor marked {} task(s) failed after queue retry exhaustion",
+                                failed
+                            );
+                        }
+                    }
+                    Err(error) => tracing::debug!(
+                        "Task worker SQLite janitor recovery failed on hot:task: {}",
+                        error
+                    ),
                 }
             }
         });
@@ -6924,7 +7087,7 @@ fn create_emitter(db: &DatabasePool) -> Option<Arc<dyn EngineEventEmitter>> {
 fn create_event_publisher(
     config: &TaskWorkerConfig,
     db: &DatabasePool,
-) -> Option<Arc<dyn EventPublisher>> {
+) -> Result<Option<Arc<dyn EventPublisher>>, Box<dyn std::error::Error + Send + Sync>> {
     let database_publisher = hot::lang::event::DatabaseEventPublisher::new_with_pool(db.clone());
 
     let queue_publisher = hot::lang::event::QueueEventPublisher::new_with_cluster(
@@ -6933,11 +7096,11 @@ fn create_event_publisher(
         config.redis_uri.clone(),
         config.redis_cluster,
         config.serialization,
-    );
+    )?;
 
-    Some(Arc::new(
+    Ok(Some(Arc::new(
         hot::lang::event::QueueAndDatabaseEventPublisher::new(queue_publisher, database_publisher),
-    ))
+    )))
 }
 
 #[cfg(test)]
@@ -7022,6 +7185,26 @@ mod tests {
         )
         .await
         .unwrap();
+    }
+
+    #[tokio::test]
+    async fn dead_lettered_queue_request_terminally_fails_running_task() {
+        let db = hot::db::test_db().await;
+        let (request, task, _, _, _) = make_task_request_and_row();
+        insert_test_task(&db, &task).await;
+        Task::mark_running(&db, &task.task_id).await.unwrap();
+        let publisher =
+            StreamPubSub::new(hot::stream::StreamPubSubType::Memory, None, false).unwrap();
+
+        assert!(reconcile_dead_lettered_task_request(&db, &publisher, &request).await);
+        let failed = Task::get(&db, &task.task_id).await.unwrap();
+        assert_eq!(failed.task_status_id, TaskStatus::Failed.as_id());
+        assert!(
+            failed
+                .result
+                .as_ref()
+                .is_some_and(|result| result.to_string().contains("queue retry limit"))
+        );
     }
 
     #[test]

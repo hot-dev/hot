@@ -2959,6 +2959,7 @@ dependencies = [
  "clap_complete",
  "dirs",
  "dotenvy",
+ "fd-lock",
  "futures",
  "hot",
  "hot_api",

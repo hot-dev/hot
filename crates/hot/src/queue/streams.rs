@@ -11,8 +11,8 @@
 //! - Connection caching to minimize Redis connection overhead
 
 use super::{
-    Queue, QueueInfrastructureError, QueueProcessingError, QueueProcessor, queue_timing_enabled,
-    queue_wait_target_p99_ms,
+    OrphanRecovery, Queue, QueueInfrastructureError, QueueProcessingError, QueueProcessor,
+    queue_timing_enabled, queue_wait_target_p99_ms,
 };
 use crate::data::serialization::Serialization;
 use redis::cluster::ClusterClient;
@@ -1144,12 +1144,15 @@ impl<T> RedisStreamQueue<T> {
     /// via normal dequeue_and_work flow after XAUTOCLAIM
     pub async fn recover_orphaned_items_with_data(
         &self,
-    ) -> Result<(usize, Vec<Vec<u8>>), StreamsQueueError> {
+    ) -> Result<OrphanRecovery, StreamsQueueError> {
         let count = self.recover_orphaned_items().await?;
         // For streams, the messages are already in the pending list after XAUTOCLAIM
         // and will be returned by the next XREADGROUP call with "0" instead of ">"
         // We don't extract the data here - it flows through normal processing
-        Ok((count, vec![]))
+        Ok(OrphanRecovery {
+            requeued_count: count,
+            ..OrphanRecovery::default()
+        })
     }
 
     /// Fast-forward the consumer group's last-delivered-id to `<now - window>-0`

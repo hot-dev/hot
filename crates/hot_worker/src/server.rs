@@ -5,7 +5,7 @@ use hot::data::serialization::Serialization;
 use hot::lang::event::EventMessage;
 use hot::queue::{
     ConsumerLifecycle, ProcessingQueue, ProcessingQueueLease, Queue, QueueInfrastructureError,
-    QueueType, streams::PRESERVE_DELIVERY_COUNT_TOKEN,
+    QueueType, RecoveredQueueMessage, streams::PRESERVE_DELIVERY_COUNT_TOKEN,
 };
 use hot::val;
 use hot::val::Val;
@@ -444,7 +444,7 @@ fn spawn_worker_queue_claimer(
             }
 
             let lease = match &queue {
-                ProcessingQueue::Memory(_) => {
+                ProcessingQueue::Memory(_) | ProcessingQueue::Sqlite(_) => {
                     tokio::select! {
                         biased;
 
@@ -1205,7 +1205,7 @@ pub const EVENT_SETUP_TIMEOUT: std::time::Duration = std::time::Duration::from_s
 /// already-extracted) resolution completes in microseconds, so the
 /// effective setup bound stays `EVENT_SETUP_TIMEOUT`.
 pub const EVENT_SOURCE_RETRIEVAL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
-pub const DEFAULT_QUEUE_TYPE: QueueType = QueueType::Memory;
+pub const DEFAULT_QUEUE_TYPE: QueueType = QueueType::Sqlite;
 pub const DEFAULT_SERIALIZATION: Serialization = Serialization::ZstdJson; // must match Serialization's #[default]
 
 async fn bounded_run_result_write<F, T>(
@@ -1461,6 +1461,9 @@ fn spawn_event_lease_keepalive(
 ) -> Option<EventKeepaliveGuard> {
     let keepalive = match lease {
         ProcessingQueueLease::Memory(_) => return None,
+        // SQLite leases renew inside `SqliteQueueLease::process`; the durable
+        // lease itself is also the handoff backstop before processing starts.
+        ProcessingQueueLease::Sqlite(_) => return None,
         ProcessingQueueLease::Redis(lease) => lease.keepalive()?,
     };
     let interval =
@@ -1612,7 +1615,7 @@ async fn create_event_publisher(
         redis_uri,
         redis_cluster,
         serialization,
-    );
+    )?;
 
     // Create combined publisher
     let combined_publisher =
@@ -2209,6 +2212,52 @@ fn extract_ids_from_orphaned_data(raw_bytes: &[u8]) -> Option<OrphanedMessageIds
     // Could not extract IDs
     tracing::debug!("Could not extract IDs from orphaned data");
     None
+}
+
+async fn reconcile_orphaned_event_runs(
+    db: &DatabasePool,
+    messages: &[RecoveredQueueMessage],
+    reason: &str,
+) {
+    let mut stream_ids = ahash::AHashSet::new();
+    let mut event_ids = ahash::AHashSet::new();
+    for message in messages {
+        let Some(ids) = extract_ids_from_orphaned_data(message.payload()) else {
+            continue;
+        };
+        if let Some(stream_id) = ids.stream_id {
+            stream_ids.insert(stream_id);
+        } else {
+            event_ids.insert(ids.event_id);
+        }
+    }
+
+    for stream_id in stream_ids {
+        match hot::db::run::Run::fail_orphaned_runs_by_stream_id(db, &stream_id, reason).await {
+            Ok(failed) if failed > 0 => info!(
+                "hot.dev: WORKER marked {} orphaned run(s) as failed for stream {}",
+                failed, stream_id
+            ),
+            Ok(_) => {}
+            Err(error) => warn!(
+                "hot.dev: WORKER failed to mark orphaned runs as failed for stream {}: {}",
+                stream_id, error
+            ),
+        }
+    }
+    for event_id in event_ids {
+        match hot::db::run::Run::fail_orphaned_runs_by_event_id(db, &event_id, reason).await {
+            Ok(failed) if failed > 0 => info!(
+                "hot.dev: WORKER marked {} orphaned run(s) as failed for event {}",
+                failed, event_id
+            ),
+            Ok(_) => {}
+            Err(error) => warn!(
+                "hot.dev: WORKER failed to mark orphaned runs as failed for event {}: {}",
+                event_id, error
+            ),
+        }
+    }
 }
 
 /// Result of checking if a function exists in bytecode cache
@@ -5448,9 +5497,10 @@ pub async fn run_with_components_shared_context_and_db(
     let stream_publisher: Option<Arc<StreamPubSub>> = if stream_publisher.is_some() {
         stream_publisher
     } else {
-        // Create stream publisher matching the queue type (Memory or Redis)
+        // SQLite queues use process-local pub/sub for live UI updates; Redis
+        // retains distributed pub/sub.
         let pubsub_type = match queue_type {
-            QueueType::Memory => StreamPubSubType::Memory,
+            QueueType::Memory | QueueType::Sqlite => StreamPubSubType::Memory,
             QueueType::Redis => StreamPubSubType::Redis,
         };
 
@@ -5633,15 +5683,23 @@ pub async fn run_with_components_shared_context_and_db(
         QueueType::Memory => {
             debug!("hot.dev: WORKER using in-memory queue (no connectivity check needed)");
         }
-        QueueType::Redis => {
-            // Test Redis connection with a simple PING command
+        QueueType::Sqlite | QueueType::Redis => {
+            // Force SQLite bootstrap or Redis connectivity before worker startup.
             match event_queue.is_empty().await {
                 Ok(_) => {
-                    debug!("hot.dev: WORKER successfully connected to Redis queue");
+                    debug!(
+                        "hot.dev: WORKER successfully connected to {} queue",
+                        queue_type
+                    );
                 }
                 Err(e) => {
-                    error!("hot.dev: WORKER failed to connect to Redis queue: {}", e);
-                    return Err(format!("Redis queue connectivity check failed: {}", e).into());
+                    error!(
+                        "hot.dev: WORKER failed to connect to {} queue: {}",
+                        queue_type, e
+                    );
+                    return Err(
+                        format!("{} queue connectivity check failed: {}", queue_type, e).into(),
+                    );
                 }
             }
         }
@@ -5680,80 +5738,33 @@ pub async fn run_with_components_shared_context_and_db(
         }
     };
     match recovery_result {
-        Ok(Ok((count, recovered_data))) if count > 0 => {
-            info!(
-                "hot.dev: WORKER recovered {} orphaned items - these will be reprocessed",
-                count
-            );
+        Ok(Ok(recovery)) if recovery.total_count() > 0 => {
+            if recovery.requeued_count > 0 {
+                info!(
+                    "hot.dev: WORKER recovered {} orphaned items - these will be reprocessed",
+                    recovery.requeued_count
+                );
+            }
+            if !recovery.dead_lettered_messages.is_empty() {
+                warn!(
+                    "hot.dev: WORKER moved {} expired orphaned item(s) to the dead-letter queue",
+                    recovery.dead_lettered_messages.len()
+                );
+            }
 
-            // Mark any orphaned runs as failed (runs that were in progress when the worker crashed)
-            // We track stream_ids we've already processed to avoid duplicate work
             if let Some(ref db_pool) = db {
-                let mut processed_streams: ahash::AHashSet<uuid::Uuid> = ahash::AHashSet::new();
-
-                for raw_bytes in recovered_data {
-                    // Try to deserialize and extract event_id and stream_id
-                    if let Some(ids) = extract_ids_from_orphaned_data(&raw_bytes) {
-                        // If we have a stream_id, fail all runs in that stream
-                        // This handles the case where a parent run spawned child runs
-                        if let Some(stream_id) = ids.stream_id {
-                            // Skip if we've already processed this stream
-                            if processed_streams.contains(&stream_id) {
-                                continue;
-                            }
-                            processed_streams.insert(stream_id);
-
-                            match hot::db::run::Run::fail_orphaned_runs_by_stream_id(
-                                db_pool,
-                                &stream_id,
-                                "Worker crashed during event processing - event will be retried",
-                            )
-                            .await
-                            {
-                                Ok(failed_count) if failed_count > 0 => {
-                                    info!(
-                                        "hot.dev: WORKER marked {} orphaned run(s) as failed for stream {}",
-                                        failed_count, stream_id
-                                    );
-                                }
-                                Ok(_) => {
-                                    // No runs were in running state for this stream
-                                }
-                                Err(e) => {
-                                    warn!(
-                                        "hot.dev: WORKER failed to mark orphaned runs as failed for stream {}: {}",
-                                        stream_id, e
-                                    );
-                                }
-                            }
-                        } else {
-                            // No stream_id available, fall back to event_id
-                            match hot::db::run::Run::fail_orphaned_runs_by_event_id(
-                                db_pool,
-                                &ids.event_id,
-                                "Worker crashed during event processing - event will be retried",
-                            )
-                            .await
-                            {
-                                Ok(failed_count) if failed_count > 0 => {
-                                    info!(
-                                        "hot.dev: WORKER marked {} orphaned run(s) as failed for event {}",
-                                        failed_count, ids.event_id
-                                    );
-                                }
-                                Ok(_) => {
-                                    // No runs were in running state for this event
-                                }
-                                Err(e) => {
-                                    warn!(
-                                        "hot.dev: WORKER failed to mark orphaned runs as failed for event {}: {}",
-                                        ids.event_id, e
-                                    );
-                                }
-                            }
-                        }
-                    }
-                }
+                reconcile_orphaned_event_runs(
+                    db_pool,
+                    &recovery.requeued_messages,
+                    "Worker crashed during event processing - event will be retried",
+                )
+                .await;
+                reconcile_orphaned_event_runs(
+                    db_pool,
+                    &recovery.dead_lettered_messages,
+                    "Worker crashed during event processing and the event exhausted its queue retry limit",
+                )
+                .await;
             }
         }
         Ok(Ok(_)) => {
@@ -6238,6 +6249,74 @@ pub async fn run_with_components_shared_context_and_db(
                                         );
                                     }
                                 }
+                            }
+                        }
+                    }
+                }
+            }
+        });
+    } else if matches!(queue_type, QueueType::Sqlite) {
+        let event_q = event_queue.clone();
+        let other_queues = [
+            ("hot:request", request_queue.clone()),
+            ("hot:response", response_queue.clone()),
+            ("hot:alert", alert_queue.clone()),
+            ("hot:email", email_queue.clone()),
+        ];
+        let janitor_db = db.clone();
+        let mut janitor_shutdown_rx = shutdown_rx.clone();
+        tokio::spawn(async move {
+            const TICK: std::time::Duration = std::time::Duration::from_secs(60);
+            loop {
+                tokio::select! {
+                    biased;
+                    changed = janitor_shutdown_rx.changed() => {
+                        if changed.is_err() || *janitor_shutdown_rx.borrow() {
+                            debug!("hot.dev: WORKER SQLite queue janitor shutting down");
+                            break;
+                        }
+                    }
+                    _ = tokio::time::sleep(TICK) => {
+                        match event_q.recover_orphaned_items_with_data().await {
+                            Ok(recovery) => {
+                                if recovery.total_count() > 0 {
+                                    info!(
+                                        "hot.dev: WORKER SQLite janitor handled {} orphaned message(s) on hot:event",
+                                        recovery.total_count()
+                                    );
+                                }
+                                if let Some(ref db) = janitor_db {
+                                    reconcile_orphaned_event_runs(
+                                        db,
+                                        &recovery.requeued_messages,
+                                        "Worker lease expired during event processing - event will be retried",
+                                    )
+                                    .await;
+                                    reconcile_orphaned_event_runs(
+                                        db,
+                                        &recovery.dead_lettered_messages,
+                                        "Worker lease expired during event processing and the event exhausted its queue retry limit",
+                                    )
+                                    .await;
+                                }
+                            }
+                            Err(error) => debug!(
+                                "hot.dev: WORKER SQLite janitor recovery failed on hot:event: {}",
+                                error
+                            ),
+                        }
+
+                        for (name, queue) in &other_queues {
+                            match queue.recover_orphaned_items().await {
+                                Ok(0) => {}
+                                Ok(count) => info!(
+                                    "hot.dev: WORKER SQLite janitor handled {} orphaned message(s) on {}",
+                                    count, name
+                                ),
+                                Err(error) => debug!(
+                                    "hot.dev: WORKER SQLite janitor recovery failed on {}: {}",
+                                    name, error
+                                ),
                             }
                         }
                     }
