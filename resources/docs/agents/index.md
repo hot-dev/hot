@@ -301,15 +301,15 @@ support-agent SupportAgent({
 })
 ```
 
-Handlers reference the instance directly — `support-agent.model`, `support-agent.escalation-channel`. Config fields are visible in the Agent Dashboard's Overview tab.
+Handlers reference the instance directly — `support-agent.model`, `support-agent.escalation-channel`.
 
 ## Agent Runs
 
 When a handler with `meta {agent: TypeName}` executes, the run is automatically tagged with the agent's qualified name (e.g., `::acme::support/SupportAgent`). This tagging enables:
 
 - **Filtering** — view runs by agent in the Hot App
-- **Metrics** — per-agent success rate, average duration, and run count
-- **Health monitoring** — the Dashboard shows agent health with color-coded indicators
+- **Metrics** — per-agent success rate and run count
+- **Health monitoring** — the Dashboard summarizes agent health and highlights degraded or failing agents
 - **Attribution** — trace any run back to the agent that produced it
 
 No additional code is needed. The agent tagging happens at the runtime level when a handler declares `meta {agent: ...}`.
@@ -415,7 +415,7 @@ Agents are metadata-driven — they're discovered from your source code and regi
 1. **Define** — Add `agent` metadata to a type and `meta {agent: TypeName}` to handler functions
 2. **Deploy** — Run `hot deploy` (or `hot dev` for local development). The compiler scans types for `agent` metadata and registers agent definitions.
 3. **Execute** — When events arrive, schedules fire, or webhooks receive requests, handlers run with agent attribution. Each run is tagged with the agent's qualified name.
-4. **Observe** — View agent health, metrics, handlers, and runs in the [Hot App](/docs/app#agents)
+4. **Observe** — View agent health, metrics, handlers, and runs in the [Hot App's Workflows & Agents view](/docs/app#agents)
 
 When you redeploy, agent definitions are updated automatically. If a type's `agent` metadata is removed, the agent is unregistered. If handler functions remove their `agent` reference, those handlers still execute but are no longer attributed to the agent.
 
@@ -444,11 +444,13 @@ The `doc` field works on all handler types: event handlers, scheduled functions,
 
 ## Viewing Agents in the App
 
-The Hot App provides dedicated views for agents. See [Hot App > Agents](/docs/app#agents) for details.
+The Hot App provides dedicated workflow and agent views. See [Hot App > Workflows & Agents](/docs/app#agents) for details.
 
-### Agents List
+### Workflows & Agents
 
-The **Agents** page shows all deployed agents as a card grid. Each card displays the agent name, namespace, description, tags, handler count, and project. Use the search bar to filter by name, namespace, or project. A topology graph spanning all agents is available at the top of the page.
+The **All Workflows** tab shows named workflows, deployed agents, and project-level unnamed workflow groups as cards. Cards show the kind, name, namespace, description, tags, handler count, project, and recent health when applicable. Search by name, namespace, or project, or filter agents by health status.
+
+The separate **Graph** tab shows topology across workflows and agents. It can be filtered by workflow, agent, project, or tag and searched by node name.
 
 ### Agent Dashboard
 
@@ -472,19 +474,16 @@ Edges show the relationships: triggers connect to the handlers they invoke, and 
 
 **Layout** — Switch between horizontal (left-to-right) and vertical (top-to-bottom) layouts using the direction toggle in the toolbar.
 
-**Download** — Export the graph as a PNG image using the download button.
-
-**Zoom** — Use the zoom slider or mouse wheel to zoom in and out on large graphs.
-
 ### Dashboard Health Widget
 
-The main Dashboard includes an **Agent Health** widget showing each deployed agent with a health indicator:
+The main Dashboard includes an **Agent Health** widget with a rollup of agents in the selected time window:
 
-- **Green dot** — 95%+ success rate
-- **Yellow dot** — 80–95% success rate
-- **Red dot** — Below 80% success rate
+- **Healthy** — 95%+ success rate
+- **Degraded** — At least 80% but under 95% success rate
+- **Failing** — Below 80% success rate
+- **Idle** — No runs in the selected window
 
-The widget also shows agent vs. non-agent run counts, giving you a quick sense of how much of your workload is agent-driven.
+Below the rollup, the widget lists up to five degraded or failing agents with their success rate and run count. A link opens the full Workflows & Agents view when more agents need attention.
 
 ## Patterns
 

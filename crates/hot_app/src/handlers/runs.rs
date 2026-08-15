@@ -29,7 +29,13 @@ pub async fn runs_list_handler(
     breadcrumbs.push(templates::BreadcrumbItem::current("Runs".to_string()));
 
     const RUNS_PER_PAGE: i64 = 10;
-    const ALL_RUN_STATUSES: &[&str] = &["running", "succeeded", "failed", "cancelled"];
+    const ALL_RUN_STATUSES: &[&str] = &[
+        "running",
+        "succeeded",
+        "failed",
+        "cancelled",
+        "pending_retry",
+    ];
     const ALL_RUN_TYPES: &[&str] = &["call", "event", "schedule", "run", "eval", "repl"];
 
     let page = list_query::PageParams::parse(&params, RUNS_PER_PAGE);
