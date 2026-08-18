@@ -61,7 +61,7 @@ Async on tokio; TLS via rustls. Import as `hot_dev`.
 
 #### **Java**
 
-```kotlin
+```text
 // Gradle
 implementation("dev.hot:hot-sdk:1.1.3")
 ```

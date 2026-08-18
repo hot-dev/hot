@@ -1466,6 +1466,7 @@ fn layout(
     <a href="{}">GitHub</a>
   </footer>
   <script src="/assets/js/prism.js" defer></script>
+  <script src="/assets/js/prism-sdk.js" defer></script>
   <script src="/assets/js/prism-hot.js" defer></script>
   <script src="/assets/js/hot-docs.js" defer></script>
 </body>
@@ -1574,6 +1575,26 @@ mod tests {
         let (html, _) = markdown_to_html_with_toc("# Demo\n\n```hot\nmain fn () { null }\n```");
         assert!(html.contains(r#"class="language-hot""#));
         assert!(html.contains("main fn"));
+    }
+
+    #[test]
+    fn loads_prism_grammars_for_all_sdk_languages() {
+        let html = layout(
+            &DocsConfig::from_resources(),
+            "SDKs",
+            None,
+            "docs",
+            "<p>SDKs</p>",
+        );
+        assert!(html.contains(r#"src="/assets/js/prism-sdk.js""#));
+
+        let grammars = include_str!("../../../resources/app/assets/js/prism-sdk.js");
+        for language in ["go", "java", "rust"] {
+            assert!(
+                grammars.contains(&format!("languages.{language}")),
+                "missing Prism grammar for {language}"
+            );
+        }
     }
 
     #[test]
