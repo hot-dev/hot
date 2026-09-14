@@ -384,7 +384,7 @@ pub(crate) enum Command {
     },
 
     // ==================== Services (10-19) ====================
-    /// Run all services in development mode (api + app + worker + scheduler)
+    /// Run all services in development mode (api + app + worker + scheduler + task-worker)
     #[command(display_order = 10)]
     Dev {
         #[command(flatten)]
@@ -506,7 +506,7 @@ pub(crate) enum Command {
         #[arg(value_hint = ValueHint::AnyPath)]
         path: Option<String>,
     },
-    /// Watch for changes and continuously analyze the project (like `check --check.watch`)
+    /// Watch for changes and continuously analyze the project
     #[command(display_order = 22)]
     Watch {
         #[command(flatten)]
@@ -591,7 +591,7 @@ pub(crate) enum Command {
         /// Project name to compile (defaults to configured default project)
         project_name: Option<String>,
     },
-    /// Deploy a specific build by ID
+    /// Deploy current source, or a specific build by ID
     #[command(display_order = 33)]
     Deploy {
         #[command(flatten)]
@@ -700,7 +700,7 @@ pub(crate) enum Command {
         action: DepsAction,
     },
     /// Manage project context variables (encrypted key-value storage)
-    #[command(display_order = 44, hide = true, alias = "ctx")]
+    #[command(display_order = 44, alias = "ctx")]
     Context {
         #[command(flatten)]
         global: GlobalOptions,
@@ -714,7 +714,7 @@ pub(crate) enum Command {
     },
 
     /// Manage API keys in the local environment database
-    #[command(display_order = 46, hide = true)]
+    #[command(display_order = 46)]
     Key {
         #[command(flatten)]
         global: GlobalOptions,
@@ -813,7 +813,7 @@ pub(crate) enum Command {
     /// Display version information
     #[command(display_order = 70)]
     Version,
-    /// Check for available updates
+    /// Update Hot to the latest version, or install a specific version
     #[command(display_order = 71)]
     Update {
         /// Force re-download even if already on the latest version
@@ -826,8 +826,9 @@ pub(crate) enum Command {
     /// Display help information
     #[command(display_order = 72)]
     Help {
-        /// Command to get help for
-        command: Option<String>,
+        /// Command path to get help for (for example: deps, deps add)
+        #[arg(trailing_var_arg = true)]
+        command: Vec<String>,
     },
 
     // ==================== Hidden (internal/developer commands) ====================
@@ -1018,10 +1019,11 @@ pub(crate) const HELP_TEMPLATE: &str = "\
 
 Commands:
   Services:
-    dev          Run all services in development mode (api + app + worker + scheduler)
+    dev          Run all services in development mode (api + app + worker + scheduler + task-worker)
     api          Run the API server
     app          Run the web application server
     worker       Run the background worker
+    task-worker  Run the task worker (processes ::hot::task and ::hot::box tasks)
     scheduler    Run the job scheduler
 
   Running Code:
@@ -1039,7 +1041,7 @@ Commands:
     build        Create a build from current project's source and package files
     builds       List builds for the current environment
     compile      Compile project source and create/update live build
-    deploy       Deploy a specific build by ID
+    deploy       Deploy current source, or a specific build by ID
     cache        Manage bytecode and package caches
 
   Project Management:
@@ -1048,8 +1050,8 @@ Commands:
     projects     List projects in the current environment
     deps         Manage project dependencies
     context      Manage project context variables (encrypted key-value storage)
-    key          Create API keys in the local environment database
-    conf         Show configuration
+    key          Manage API keys in the local environment database
+    conf         Show or generate configuration
 
   Tooling:
     lsp          Start the LSP server
@@ -1058,7 +1060,7 @@ Commands:
 
   Info:
     version      Display version information
-    update       Check for available updates
+    update       Update Hot to the latest version, or install a specific version
     help         Display help information
 
 Options:
@@ -1071,8 +1073,39 @@ pub(crate) const HIDDEN_COMMANDS_HELP: &str = "
     upload       Upload a local build to remote environment
     extract      Extract a build to a directory
     docs         Generate documentation JSON for packages
+    db           Manage database
     queue        Manage event queues (clear, status)
 ";
+
+fn command_matches_name(cmd: &clap::Command, name: &str) -> bool {
+    cmd.get_name() == name || cmd.get_all_aliases().any(|alias| alias == name)
+}
+
+/// Walk clap's subcommand tree by name or alias (for example `ctx`, `deps add`).
+pub(crate) fn find_help_command<'a>(
+    root: &'a clap::Command,
+    path: &[String],
+) -> Result<&'a clap::Command, String> {
+    let mut current = root;
+    for name in path {
+        match current
+            .get_subcommands()
+            .find(|sub| command_matches_name(sub, name))
+        {
+            Some(sub) => current = sub,
+            None => return Err(name.clone()),
+        }
+    }
+    Ok(current)
+}
+
+pub(crate) fn print_top_level_help(cmd: &mut clap::Command) {
+    cmd.print_help().unwrap();
+    if std::env::var("HOT_FIRE").is_ok() {
+        print!("{}", HIDDEN_COMMANDS_HELP);
+    }
+    println!();
+}
 
 #[derive(ClapParser, Debug)]
 #[command(
@@ -1082,13 +1115,114 @@ pub(crate) const HIDDEN_COMMANDS_HELP: &str = "
     after_help = "Use 'hot version' for detailed version information.",
     help_template = HELP_TEMPLATE,
     disable_version_flag = true,
-    disable_help_flag = true,
     disable_help_subcommand = true
 )]
 pub(crate) struct Cli {
     #[command(subcommand)]
     pub(crate) command: Option<Command>,
 
+    /// Display version information
+    #[arg(short = 'V', long = "version")]
+    pub(crate) version: bool,
+
     #[command(flatten)]
     pub(crate) global: GlobalOptions,
+}
+
+#[cfg(test)]
+mod help_tests {
+    use super::*;
+    use clap::CommandFactory;
+
+    fn names(path: &[&str]) -> Vec<String> {
+        path.iter().map(|s| (*s).to_string()).collect()
+    }
+
+    #[test]
+    fn help_template_lists_public_commands() {
+        assert!(HELP_TEMPLATE.contains("    task-worker  "));
+        assert!(HELP_TEMPLATE.contains("    context      "));
+        assert!(HELP_TEMPLATE.contains("    key          "));
+        assert!(!HELP_TEMPLATE.contains("    db           "));
+        assert!(!HELP_TEMPLATE.contains("    upload       "));
+    }
+
+    #[test]
+    fn hidden_help_lists_internal_commands() {
+        for name in ["upload", "extract", "docs", "db", "queue"] {
+            assert!(
+                HIDDEN_COMMANDS_HELP.contains(name),
+                "HOT_FIRE help should list {name}"
+            );
+        }
+    }
+
+    #[test]
+    fn find_help_resolves_alias_and_nested_path() {
+        let cmd = Cli::command();
+        let ctx = find_help_command(&cmd, &names(&["ctx"])).unwrap();
+        assert_eq!(ctx.get_name(), "context");
+
+        let add = find_help_command(&cmd, &names(&["deps", "add"])).unwrap();
+        assert_eq!(add.get_name(), "add");
+
+        assert_eq!(
+            find_help_command(&cmd, &names(&["nope"])).unwrap_err(),
+            "nope"
+        );
+    }
+
+    #[test]
+    fn version_flag_is_root_only_and_does_not_steal_update_version() {
+        let update = Cli::try_parse_from(["hot", "update", "--version", "1.4.0"]).unwrap();
+        match update.command {
+            Some(Command::Update { version, .. }) => {
+                assert_eq!(version.as_deref(), Some("1.4.0"));
+            }
+            other => panic!("expected update, got {other:?}"),
+        }
+        assert!(!update.version);
+
+        let update_short = Cli::try_parse_from(["hot", "update", "-v", "1.4.0"]).unwrap();
+        match update_short.command {
+            Some(Command::Update { version, .. }) => {
+                assert_eq!(version.as_deref(), Some("1.4.0"));
+            }
+            other => panic!("expected update, got {other:?}"),
+        }
+
+        let root = Cli::try_parse_from(["hot", "--version"]).unwrap();
+        assert!(root.version);
+        assert!(root.command.is_none());
+
+        let root_short = Cli::try_parse_from(["hot", "-V"]).unwrap();
+        assert!(root_short.version);
+
+        assert!(
+            Cli::try_parse_from(["hot", "-v"]).is_err(),
+            "-v is not a root version flag"
+        );
+    }
+
+    #[test]
+    fn public_and_hidden_visibility() {
+        let cmd = Cli::command();
+        let visible = ["task-worker", "context", "key"];
+        for name in visible {
+            let sub = cmd
+                .get_subcommands()
+                .find(|c| c.get_name() == name)
+                .unwrap_or_else(|| panic!("missing {name}"));
+            assert!(!sub.is_hide_set(), "{name} should be visible");
+        }
+
+        let hidden = ["db", "upload", "extract", "docs", "queue"];
+        for name in hidden {
+            let sub = cmd
+                .get_subcommands()
+                .find(|c| c.get_name() == name)
+                .unwrap_or_else(|| panic!("missing {name}"));
+            assert!(sub.is_hide_set(), "{name} should stay hidden");
+        }
+    }
 }
