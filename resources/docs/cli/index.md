@@ -31,6 +31,7 @@ This starts:
 - **API** at `http://localhost:4681` — API for function calls and events
 - **App** at `http://localhost:4680` — Web dashboard for monitoring
 - **Worker** — Processes background jobs and event handlers
+- **Task worker** — Processes `::hot::task` and `::hot::box` tasks
 - **Scheduler** — Runs scheduled functions
 
 Common options:
@@ -71,6 +72,16 @@ Run just the background worker:
 hot worker
 hot worker --worker.threads 16
 ```
+
+### hot task-worker
+
+Run just the task worker (processes `::hot::task` and `::hot::box` tasks):
+
+```bash
+hot task-worker
+```
+
+Local `::hot::box` tasks need Docker. If Docker is not running, `hot task-worker` (and `hot dev`) will log a warning and box starts will fail.
 
 ### hot scheduler
 
@@ -374,6 +385,8 @@ Display version information:
 
 ```bash
 hot version
+hot --version
+hot -V
 ```
 
 ### hot update
