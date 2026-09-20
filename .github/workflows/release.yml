@@ -124,7 +124,7 @@ jobs:
     - name: Setup toolchain, cache, sccache, tailwind
       uses: ./.github/actions/rust-setup
       with:
-        rust-toolchain: 1.97.1
+        rust-toolchain: 1.98.1
         tailwind-version: ${{ env.TAILWIND_VERSION }}
 
     - name: Generate package docs
@@ -217,17 +217,8 @@ jobs:
     - name: Setup Rust
       uses: dtolnay/rust-toolchain@stable
       with:
+        toolchain: 1.98.1
         targets: ${{ matrix.target }}
-
-    # The repo pins a specific toolchain via rust-toolchain.toml. The
-    # dtolnay action above installs `targets` against the `stable` toolchain,
-    # but `cargo build` will transparently switch to the pinned channel
-    # (which only has the host target installed under `profile = "minimal"`).
-    # Re-add the matrix target against the pinned toolchain to avoid E0463
-    # ("can't find crate for `core`") when cross-compiling.
-    - name: Install matrix target for pinned toolchain
-      shell: bash
-      run: rustup target add ${{ matrix.target }}
 
     - name: Install TailwindCSS CLI (macOS/Linux)
       if: runner.os != 'Windows'
@@ -406,7 +397,7 @@ jobs:
           -f - \
           --output "type=local,dest=target/hotbox-musl-build" \
           . <<'DOCKERFILE'
-        FROM rust:1.97.1-slim AS builder
+        FROM rust:1.98.1-slim AS builder
         RUN apt-get update && apt-get install -y musl-tools && rm -rf /var/lib/apt/lists/*
         RUN rustup target add aarch64-unknown-linux-musl
         RUN apt-get update && apt-get install -y gcc-aarch64-linux-gnu && rm -rf /var/lib/apt/lists/*

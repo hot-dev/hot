@@ -293,8 +293,8 @@ impl TaskLease for NoopTaskLease {
 /// API. Mirrors the pattern in `crates/hot/src/queue/streams.rs`.
 #[derive(Clone)]
 enum RedisLeaseClient {
-    Standalone(Client),
-    Cluster(ClusterClient),
+    Standalone(Box<Client>),
+    Cluster(Box<ClusterClient>),
 }
 
 impl fmt::Debug for RedisLeaseClient {
@@ -553,7 +553,7 @@ impl RedisTaskLease {
     pub fn standalone(client: Client, worker_id: String) -> Self {
         Self {
             inner: Arc::new(RedisLeaseInner {
-                client: RedisLeaseClient::Standalone(client),
+                client: RedisLeaseClient::Standalone(Box::new(client)),
                 worker_id,
                 key_prefix: "hot:task:lease:".to_string(),
                 conn: Mutex::new(None),
@@ -570,7 +570,7 @@ impl RedisTaskLease {
     pub fn cluster(client: ClusterClient, worker_id: String) -> Self {
         Self {
             inner: Arc::new(RedisLeaseInner {
-                client: RedisLeaseClient::Cluster(client),
+                client: RedisLeaseClient::Cluster(Box::new(client)),
                 worker_id,
                 key_prefix: "{hot:task}:lease:".to_string(),
                 conn: Mutex::new(None),
