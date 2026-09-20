@@ -7,7 +7,8 @@ mod remote;
 mod update;
 
 use crate::cli::{
-    CacheAction, Cli, Command, ConfAction, DbAction, HIDDEN_COMMANDS_HELP, KeyAction,
+    CacheAction, Cli, Command, ConfAction, DbAction, KeyAction, find_help_command,
+    print_top_level_help,
 };
 use crate::command::ai::run_ai;
 use crate::command::api::run_api;
@@ -315,6 +316,16 @@ pub(crate) fn report_migration_failure(prefix: &str, failure: &MigrationFailure)
     }
 }
 
+fn print_version(providers: &CliProviders) {
+    let short_sha = build_info::git_sha_short();
+    println!(
+        "{} {} ({})",
+        providers.identity.display_name,
+        build_info::VERSION,
+        short_sha
+    );
+}
+
 fn indent_continuation(text: &str, continuation_indent: &str) -> String {
     let mut lines = text.lines();
     let first = lines.next().unwrap_or("");
@@ -345,42 +356,30 @@ async fn async_main(providers: CliProviders) {
         return;
     }
 
-    // Handle version command early (before conf processing)
-    if matches!(&cli.command, Some(Command::Version)) {
-        let short_sha = &build_info::GIT_SHA[..7.min(build_info::GIT_SHA.len())];
-        println!(
-            "{} {} ({})",
-            providers.identity.display_name,
-            build_info::VERSION,
-            short_sha
-        );
+    // Handle version command / -V / --version early (before conf processing)
+    if cli.version || matches!(&cli.command, Some(Command::Version)) {
+        print_version(&providers);
         return;
     }
 
     // Handle help command early (before conf processing)
     if let Some(Command::Help { command }) = &cli.command {
         let mut cmd = Cli::command();
-        if let Some(subcommand_name) = command {
-            // Find the subcommand and print its help
-            for sub in cmd.get_subcommands_mut() {
-                if sub.get_name() == subcommand_name {
-                    sub.print_help().unwrap();
-                    println!();
-                    return;
-                }
+        if command.is_empty() {
+            print_top_level_help(&mut cmd);
+            return;
+        }
+        match find_help_command(&cmd, command) {
+            Ok(sub) => {
+                let mut help_cmd = sub.clone();
+                help_cmd.print_help().unwrap();
+                println!();
             }
-            // If subcommand not found, print error and main help
-            eprintln!("error: Unknown command '{}'\n", subcommand_name);
-            cmd.print_help().unwrap();
-            println!();
-            std::process::exit(1);
-        } else {
-            cmd.print_help().unwrap();
-            // Show hidden commands when HOT_FIRE is set
-            if std::env::var("HOT_FIRE").is_ok() {
-                print!("{}", HIDDEN_COMMANDS_HELP);
+            Err(unknown) => {
+                eprintln!("error: Unknown command '{}'\n", unknown);
+                print_top_level_help(&mut cmd);
+                std::process::exit(1);
             }
-            println!();
         }
         return;
     }
@@ -1615,12 +1614,7 @@ async fn async_main(providers: CliProviders) {
 
             if io::stdin().is_terminal() {
                 // Interactive mode - show help instead of hanging
-                Cli::command().print_help().unwrap();
-                // Show hidden commands when HOT_FIRE is set
-                if std::env::var("HOT_FIRE").is_ok() {
-                    print!("{}", HIDDEN_COMMANDS_HELP);
-                }
-                println!();
+                print_top_level_help(&mut Cli::command());
                 return;
             }
 
