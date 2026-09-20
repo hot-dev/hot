@@ -139,6 +139,12 @@ mkdir -p "$PACKAGES_DIR"
 for TARGET in "${TARGETS[@]}"; do
     echo "Packaging for target: $TARGET"
 
+    # Explicit host architectures keep the Apple Silicon installer out of Rosetta.
+    case "$TARGET" in
+        aarch64-apple-darwin) HOST_ARCH="arm64" ;;
+        x86_64-apple-darwin) HOST_ARCH="x86_64" ;;
+    esac
+
     BINARY_PATH="target/$TARGET/release/hot"
 
     # Check if binary exists
@@ -297,7 +303,7 @@ EOF
 
     <pkg-ref id="dev.hot.hot.pkg"/>
 
-    <options customize="never" require-scripts="false"/>
+    <options customize="never" require-scripts="false" hostArchitectures="$HOST_ARCH"/>
     <choices-outline>
         <line choice="default">
             <line choice="dev.hot.hot.pkg"/>
