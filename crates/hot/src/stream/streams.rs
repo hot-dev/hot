@@ -49,11 +49,11 @@ fn mcp_sse_transport_session_key(transport_session_id: &Uuid) -> String {
 /// Connection pool that caches Redis connections to avoid expensive reconnections
 enum RedisConnectionPool {
     Standalone {
-        client: Client,
+        client: Box<Client>,
         cached_conn: Arc<Mutex<CachedConn<MultiplexedConnection>>>,
     },
     Cluster {
-        client: ClusterClient,
+        client: Box<ClusterClient>,
         cached_conn: Arc<Mutex<CachedConn<AsyncClusterConnection>>>,
     },
 }
@@ -118,14 +118,14 @@ async fn evict_slot<C>(cached_conn: &Mutex<CachedConn<C>>, generation: u64) {
 impl RedisConnectionPool {
     fn new_standalone(client: Client) -> Self {
         Self::Standalone {
-            client,
+            client: Box::new(client),
             cached_conn: Arc::new(Mutex::new(CachedConn::default())),
         }
     }
 
     fn new_cluster(client: ClusterClient) -> Self {
         Self::Cluster {
-            client,
+            client: Box::new(client),
             cached_conn: Arc::new(Mutex::new(CachedConn::default())),
         }
     }

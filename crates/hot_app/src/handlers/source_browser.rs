@@ -34,7 +34,7 @@ pub async fn source_tree_handler(
 ) -> impl IntoResponse {
     let build = match load_accessible_build(&db, &session, &build_id).await {
         Ok(build) => build,
-        Err(response) => return response,
+        Err(response) => return *response,
     };
 
     match crate::source_browser::list_source_files(&db, &conf, &build).await {
@@ -52,7 +52,7 @@ pub async fn source_file_handler(
 ) -> impl IntoResponse {
     let build = match load_accessible_build(&db, &session, &build_id).await {
         Ok(build) => build,
-        Err(response) => return response,
+        Err(response) => return *response,
     };
 
     match crate::source_browser::read_source_file(&db, &conf, &build, &query.path, query.line).await
@@ -71,7 +71,7 @@ pub async fn source_search_handler(
 ) -> impl IntoResponse {
     let build = match load_accessible_build(&db, &session, &build_id).await {
         Ok(build) => build,
-        Err(response) => return response,
+        Err(response) => return *response,
     };
 
     match crate::source_browser::search_source_files(
@@ -93,7 +93,7 @@ async fn load_accessible_build(
     db: &DatabasePool,
     session: &Session,
     build_id: &Uuid,
-) -> Result<Build, axum::response::Response> {
+) -> Result<Build, Box<axum::response::Response>> {
     let current_env_id = session
         .current_env_id()
         .ok_or_else(|| source_error(StatusCode::FORBIDDEN, "environment not selected"))?;
@@ -105,7 +105,10 @@ async fn load_accessible_build(
         .map_err(|_| source_error(StatusCode::NOT_FOUND, "project not found"))?;
 
     if project.env_id != current_env_id || !session.has_env_access(&project.env_id) {
-        return Err(source_error(StatusCode::FORBIDDEN, "access denied"));
+        return Err(Box::new(source_error(
+            StatusCode::FORBIDDEN,
+            "access denied",
+        )));
     }
 
     Ok(build)

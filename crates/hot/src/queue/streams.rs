@@ -281,8 +281,8 @@ fn deserialize<T: DeserializeOwned>(
 /// Redis client that can be cloned cheaply (for per-worker connections)
 #[derive(Clone)]
 enum RedisClient {
-    Standalone(Client),
-    Cluster(ClusterClient),
+    Standalone(Box<Client>),
+    Cluster(Box<ClusterClient>),
 }
 
 impl RedisClient {
@@ -648,7 +648,7 @@ impl<T> RedisStreamQueue<T> {
         let dlq_stream = format!("{}:deadletter", stream_name);
 
         Self {
-            client: RedisClient::Standalone(client),
+            client: RedisClient::Standalone(Box::new(client)),
             cached_conn: Arc::new(Mutex::new(None)),
             stream_name,
             consumer_group: DEFAULT_CONSUMER_GROUP.to_string(),
@@ -683,7 +683,7 @@ impl<T> RedisStreamQueue<T> {
         let dlq_stream = format!("{}:deadletter", stream_name);
 
         Self {
-            client: RedisClient::Cluster(cluster_client),
+            client: RedisClient::Cluster(Box::new(cluster_client)),
             cached_conn: Arc::new(Mutex::new(None)),
             stream_name,
             consumer_group: DEFAULT_CONSUMER_GROUP.to_string(),
