@@ -110,12 +110,12 @@ impl Session {
     /// Token format: `s_<session_id_hex_32>_<secret_hex_32>`
     /// The secret portion is hashed with SHA-256 for storage.
     pub fn generate_token(session_id: &Uuid) -> Result<(String, Vec<u8>), SessionError> {
-        use rand::RngCore;
+        use rand::Rng;
         use sha2::{Digest, Sha256};
 
         // Generate random secret
         let mut secret_bytes = [0u8; SECRET_BYTES];
-        rand::thread_rng().fill_bytes(&mut secret_bytes);
+        rand::rng().fill_bytes(&mut secret_bytes);
         let secret_hex = hex::encode(secret_bytes);
 
         // Hash the secret with SHA-256

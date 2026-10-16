@@ -608,8 +608,8 @@ impl ApiKey {
     pub fn generate_api_key(api_key_id: &Uuid) -> Result<(String, String), ApiKeyError> {
         // Generate 32 random bytes and convert to 64 hex characters
         let mut random_bytes = [0u8; 32];
-        use rand::RngCore;
-        rand::thread_rng().fill_bytes(&mut random_bytes);
+        use rand::Rng;
+        rand::rng().fill_bytes(&mut random_bytes);
 
         // Convert to hex string (64 characters)
         let random_hex = hex::encode(random_bytes);

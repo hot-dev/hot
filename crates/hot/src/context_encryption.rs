@@ -164,8 +164,8 @@ impl ContextEncryption {
 
         // Generate random nonce (96 bits for GCM)
         let mut nonce_bytes = [0u8; 12];
-        use rand::RngCore;
-        rand::thread_rng().fill_bytes(&mut nonce_bytes);
+        use rand::Rng;
+        rand::rng().fill_bytes(&mut nonce_bytes);
         let nonce = Nonce::from(nonce_bytes);
 
         // Encrypt
@@ -213,9 +213,9 @@ impl ContextEncryption {
 
     /// Generate a new random master key (for CLI command)
     pub fn generate_key() -> String {
-        use rand::RngCore;
+        use rand::Rng;
         let mut key = [0u8; 32];
-        rand::thread_rng().fill_bytes(&mut key);
+        rand::rng().fill_bytes(&mut key);
         hex::encode(key)
     }
 }
