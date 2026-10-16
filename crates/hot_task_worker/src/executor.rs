@@ -2979,9 +2979,11 @@ mod kata_tests {
     #[test]
     fn test_compute_chain_id_multi_layer() {
         let diff_ids = vec!["sha256:aaa".to_string(), "sha256:bbb".to_string()];
-        let result = super::compute_chain_id(&diff_ids);
-        assert!(result.starts_with("sha256:"));
-        assert_ne!(result, "sha256:aaa");
+        // ChainID(L1|L2) = "sha256:" + hex(SHA256(ChainID(L1) + " " + DiffID(L2)))
+        assert_eq!(
+            super::compute_chain_id(&diff_ids),
+            "sha256:56efb1d4f6c79b745d37d6eff87e3ed8dd2be28104e124ba73fd6e6c4892c792"
+        );
     }
 
     #[test]

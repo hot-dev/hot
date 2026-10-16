@@ -956,7 +956,17 @@ fn setup_agent_skill(global: bool, skill_name: &str) -> Result<(), String> {
 
 #[cfg(test)]
 mod skill_manifest_tests {
-    use super::{extract_skill_hash, strip_legacy_skill_hash};
+    use super::{extract_skill_hash, skill_content_hash, strip_legacy_skill_hash};
+
+    #[test]
+    fn skill_content_hash_is_lowercase_sha256_hex() {
+        // Stored in skill manifests. A format change would mark every
+        // installed skill as user-modified.
+        assert_eq!(
+            skill_content_hash(b"skill"),
+            "9c53c074d7ac6a2728b638ac1f376c5fa9eb8f71603017c3ea638c2fd40548df"
+        );
+    }
 
     const FRONTMATTER_SKILL: &str =
         "---\nname: hot-language\ndescription: >\n  Write Hot.\n---\n\n# Body\n";
