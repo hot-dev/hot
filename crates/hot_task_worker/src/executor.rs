@@ -1228,7 +1228,7 @@ pub(crate) fn compute_chain_id(diff_ids: &[String]) -> String {
     for diff_id in &diff_ids[1..] {
         let input = format!("{chain} {diff_id}");
         let hash = Sha256::digest(input.as_bytes());
-        chain = format!("sha256:{hash:x}");
+        chain = format!("sha256:{}", hex::encode(hash));
     }
     chain
 }

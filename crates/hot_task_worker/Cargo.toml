@@ -12,7 +12,7 @@ workspace = true
 
 [features]
 default = []
-kata = ["containerd-client", "tonic", "prost-types", "sha2", "tokio-vsock"]
+kata = ["containerd-client", "tonic", "prost-types", "sha2", "hex", "tokio-vsock"]
 
 [dependencies]
 async-trait = { workspace = true }
@@ -33,6 +33,7 @@ containerd-client = { workspace = true, optional = true }
 tonic = { workspace = true, optional = true }
 prost-types = { workspace = true, optional = true }
 sha2 = { workspace = true, optional = true }
+hex = { workspace = true, optional = true }
 tokio-vsock = { workspace = true, optional = true }
 
 # ONNX Runtime (used by fastembed) has no prebuilt binaries for Windows ARM64

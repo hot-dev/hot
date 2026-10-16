@@ -121,9 +121,9 @@ clap_complete = "4.6"
 hot_lsp = { path = "crates/hot_lsp" }
 notify = "8"
 yaml-rust2 = { version = "0.13", default-features = false }
-aes-gcm = "0.10"
-hkdf = "0.12"
-sha2 = "0.10"
+aes-gcm = "0.11"
+hkdf = "0.13"
+sha2 = "0.11"
 siphasher = "1.0"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "multipart", "stream"] }
 bytes = "1.12"
