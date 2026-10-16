@@ -801,6 +801,20 @@ pub struct ContainerRunResult {
     pub timed_out: bool,
 }
 
+/// Uses the daemon's API version when it is older than bollard's default, so
+/// older Docker Engines keep working. bollard puts its version in every request
+/// path, and a daemon rejects versions newer than it supports. If negotiation
+/// fails, the client keeps bollard's default version.
+pub async fn negotiate_docker_api_version(docker: Docker) -> Docker {
+    match docker.clone().negotiate_version().await {
+        Ok(negotiated) => negotiated,
+        Err(e) => {
+            tracing::debug!(error = %e, "Docker API version negotiation failed; using the default");
+            docker
+        }
+    }
+}
+
 /// Execute a Docker container. Called by `hot_task_worker` for container tasks.
 pub async fn run_container_async(
     image: &str,
@@ -808,7 +822,7 @@ pub async fn run_container_async(
     env: Option<Vec<String>>,
     timeout_secs: u64,
 ) -> Result<ContainerRunResult, Box<dyn std::error::Error + Send + Sync>> {
-    let docker = Docker::connect_with_local_defaults()?;
+    let docker = negotiate_docker_api_version(Docker::connect_with_local_defaults()?).await;
 
     // Pull image if not cached
     tracing::debug!(image = %image, "Pulling container image");

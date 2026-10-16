@@ -302,7 +302,9 @@ impl BoxExecutor {
     ) -> ExecutorResult<Self> {
         match backend {
             Backend::Docker => {
-                let executor = docker::DockerExecutor::new(max_concurrent, slot_timeout_secs)?;
+                let executor = docker::DockerExecutor::new(max_concurrent, slot_timeout_secs)?
+                    .negotiate_api_version()
+                    .await;
                 Ok(Self::Docker(executor))
             }
             #[cfg(all(target_os = "linux", feature = "kata"))]
@@ -551,6 +553,12 @@ mod docker {
                 semaphore: Arc::new(Semaphore::new(max_concurrent)),
                 slot_timeout_secs,
             })
+        }
+
+        /// See [`hot::lang::hot::r#box::negotiate_docker_api_version`].
+        pub async fn negotiate_api_version(mut self) -> Self {
+            self.docker = hot::lang::hot::r#box::negotiate_docker_api_version(self.docker).await;
+            self
         }
 
         #[allow(clippy::too_many_arguments)]
