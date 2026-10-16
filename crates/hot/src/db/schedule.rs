@@ -3,7 +3,6 @@ use chrono::{DateTime, Utc};
 use serde_json::Value as JsonValue;
 use sqlx::{FromRow, Pool, Postgres, Sqlite};
 use std::path::PathBuf;
-use std::str::FromStr;
 use thiserror::Error;
 use uuid::Uuid;
 
@@ -210,6 +209,16 @@ fn contains_unsupported_subsecond_unit(expr: &str) -> bool {
     })
 }
 
+/// Parses a cron expression the way croner 3 did. croner 4 rejects shortcut
+/// steps such as `0/5` unless `sloppy_ranges` is on, and saved schedules and
+/// english-to-cron output use them: "every 5 minutes" becomes `0 0/5 * * * ? *`.
+pub fn parse_cron(expr: &str) -> Result<croner::Cron, croner::errors::CronError> {
+    croner::parser::CronParser::builder()
+        .sloppy_ranges(true)
+        .build()
+        .parse(expr)
+}
+
 pub fn normalize_recurring_schedule_expression(expr: &str) -> Result<String, String> {
     let expr = expr.trim();
 
@@ -220,13 +229,13 @@ pub fn normalize_recurring_schedule_expression(expr: &str) -> Result<String, Str
         );
     }
 
-    if croner::Cron::from_str(expr).is_ok() {
+    if parse_cron(expr).is_ok() {
         return Ok(expr.to_string());
     }
 
     match english_to_cron::str_cron_syntax(expr) {
         Ok(converted_cron) => {
-            croner::Cron::from_str(&converted_cron).map_err(|e| {
+            parse_cron(&converted_cron).map_err(|e| {
                 format!(
                     "English expression '{}' converted to invalid cron '{}': {}",
                     expr, converted_cron, e
@@ -255,7 +264,7 @@ pub fn validate_recurring_schedule_interval(
         }
     })?;
 
-    let cron = croner::Cron::from_str(&normalized).map_err(|e| ScheduleIntervalValidation {
+    let cron = parse_cron(&normalized).map_err(|e| ScheduleIntervalValidation {
         original: expr.to_string(),
         normalized_cron: e.to_string(),
         observed_interval_secs: 0,
@@ -2220,6 +2229,24 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_cron_accepts_shortcut_steps() {
+        // croner 4 rejects these by default; croner 3 accepted them, and saved
+        // schedules may use them.
+        for expr in [
+            "5/5 * * * *",
+            "0/15 * * * *",
+            "0 0/2 * * *",
+            "0/30 * * * * *",
+        ] {
+            assert!(parse_cron(expr).is_ok(), "{}", expr);
+            assert_eq!(
+                normalize_recurring_schedule_expression(expr).as_deref(),
+                Ok(expr)
+            );
+        }
+    }
+
+    #[test]
     fn test_english_to_cron_conversion() {
         println!("\n=== Testing English-to-Cron Conversion ===");
 
@@ -2274,7 +2301,7 @@ mod tests {
                     println!("✅ '{}' -> '{}'", input, actual);
                     // Validate that the converted cron is valid
                     assert!(
-                        croner::Cron::from_str(&actual).is_ok(),
+                        parse_cron(&actual).is_ok(),
                         "Converted cron '{}' for '{}' should be valid",
                         actual,
                         input
@@ -2306,7 +2333,7 @@ mod tests {
                     println!("✅ '{}' -> '{}'", english, converted);
                     // Note: We validate that the result is a valid cron, but don't enforce exact format
                     // since the english-to-cron crate may use different but equivalent formats
-                    assert!(croner::Cron::from_str(&converted).is_ok());
+                    assert!(parse_cron(&converted).is_ok());
                 }
                 Err(err) => {
                     panic!("Failed to convert time expression '{}': {:?}", english, err);
@@ -2505,7 +2532,7 @@ mod tests {
                 println!("✅ 'every second' -> '{}'", converted);
 
                 // Test with croner
-                match croner::Cron::from_str(&converted) {
+                match parse_cron(&converted) {
                     Ok(_) => println!("✅ Converted cron '{}' is valid", converted),
                     Err(e) => println!("❌ Converted cron '{}' is invalid: {}", converted, e),
                 }
@@ -2516,7 +2543,7 @@ mod tests {
         }
 
         // Test with croner directly
-        match croner::Cron::from_str("every second") {
+        match parse_cron("every second") {
             Ok(_) => println!("✅ 'every second' is valid traditional cron"),
             Err(e) => println!("❌ 'every second' as traditional cron failed: {}", e),
         }

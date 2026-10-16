@@ -110,7 +110,7 @@ axum-extra = "0.12.6"
 jsonwebtoken = { version = "10.4.0", default-features = false, features = ["aws_lc_rs"] }
 jsonschema = { version = "0.59.0", default-features = false }
 time = "0.3.55"
-croner = "3.0"
+croner = "4.0"
 english-to-cron = "0.1.7"
 humantime = "2.4"
 smallvec = "1.16"
