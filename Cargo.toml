@@ -104,7 +104,7 @@ is-terminal = "0.4"
 tempfile = "3.27"
 url = "2.5"
 percent-encoding = "2.3"
-zip = "4.6"
+zip = "9.0"
 aws-lc-rs = "1.18.2"
 axum-extra = "0.12.6"
 jsonwebtoken = { version = "10.4.0", default-features = false, features = ["aws_lc_rs"] }

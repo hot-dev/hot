@@ -183,7 +183,10 @@ pub async fn search_source_files(
             let mut file = archive
                 .by_index(i)
                 .map_err(|e| format!("failed to read zip entry: {e}"))?;
-            let path = file.name().to_string();
+            let path = file
+                .name()
+                .map_err(|e| format!("failed to read zip entry name: {e}"))?
+                .into_owned();
             if !file.is_file() || !is_browsable_entry(&path, file.size()) {
                 continue;
             }
@@ -413,7 +416,10 @@ fn list_bundle_source_files(build_data: &[u8]) -> Result<Vec<SourceFileEntry>, S
         let file = archive
             .by_index(i)
             .map_err(|e| format!("failed to read zip entry: {e}"))?;
-        let name = file.name().to_string();
+        let name = file
+            .name()
+            .map_err(|e| format!("failed to read zip entry name: {e}"))?
+            .into_owned();
         if file.is_file() && is_browsable_entry(&name, file.size()) {
             files.push(SourceFileEntry {
                 name: file_name(&name),
