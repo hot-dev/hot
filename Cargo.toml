@@ -161,11 +161,11 @@ tokio-vsock = "0.7"
 # WebSocket client for ::hot::ws functions
 tokio-tungstenite = { version = "0.30", features = ["rustls-tls-webpki-roots"] }
 fastembed = { version = "5", default-features = false, features = ["hf-hub-rustls-tls", "ort-download-binaries-rustls-tls"] }
-cranelift-codegen = "0.132.3"
-cranelift-frontend = "0.132.3"
-cranelift-jit = "0.132.3"
-cranelift-module = "0.132.3"
-cranelift-native = "0.132.3"
+cranelift-codegen = "0.136.3"
+cranelift-frontend = "0.136.3"
+cranelift-jit = "0.136.3"
+cranelift-module = "0.136.3"
+cranelift-native = "0.136.3"
 # Non-poisoning Mutex/RwLock for shared state held across user-code execution.
 # Avoids std::sync poisoning if user code panics while a lock is held.
 parking_lot = "0.12"
