@@ -88,9 +88,9 @@ thiserror = "2.0.21"
 indexmap = "2.14.2"
 askama = "0.16.1"
 tower = "0.5"
-tower-http = "0.6.11"
-utoipa = { version = "5.5.0", features = ["chrono", "uuid"] }
-utoipa-swagger-ui = { version = "9.0.2", features = ["axum"] }
+tower-http = "0.7.1"
+utoipa = { version = "6.0.0", features = ["chrono", "uuid"] }
+utoipa-swagger-ui = { version = "10.0.1", features = ["axum"] }
 tower-lsp = "0.20"
 regex = "1.13.1"
 num-traits = "0.2"
@@ -108,7 +108,7 @@ percent-encoding = "2.3"
 zip = "9.0"
 aws-lc-rs = "1.18.2"
 axum-extra = "0.12.6"
-jsonwebtoken = { version = "10.4.0", default-features = false, features = ["aws_lc_rs"] }
+jsonwebtoken = { version = "11.1.0", default-features = false, features = ["aws_lc_rs"] }
 jsonschema = { version = "0.59.0", default-features = false }
 time = "0.3.55"
 croner = "4.0"
