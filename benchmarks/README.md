@@ -26,7 +26,7 @@ Build the local CLI:
 
 ```bash
 cd ..
-cargo build --release -p hot
+cargo build --release -p hot_cli
 cd benchmarks
 ./run-all.py
 ```
@@ -39,8 +39,12 @@ runtime services from `../hot.hot` are not enabled during benchmarks.
 ### Hot
 
 ```bash
-hot run --emitter.type none hot/src/benchmarks/bench.hot
+hot run --emitter.type none "$PWD/hot/src/benchmarks/bench.hot"
 ```
+
+Pass the file as an absolute path. `hot.hot` already loads `./hot/src`, so a
+relative path loads the same file a second time and fails with a duplicate
+definition error.
 
 ### Python
 
