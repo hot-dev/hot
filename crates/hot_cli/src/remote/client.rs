@@ -68,7 +68,7 @@ impl ApiClient {
         Ok(ApiClient {
             base_url: base_url.trim_end_matches('/').to_string(),
             api_key,
-            client: reqwest::Client::new(),
+            client: hot::outbound::client(),
         })
     }
 

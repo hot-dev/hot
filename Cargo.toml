@@ -76,6 +76,7 @@ rustls = { version = "0.23", default-features = false, features = ["aws-lc-rs", 
 rustls-pki-types = "1"
 tokio-rustls = { version = "0.26", default-features = false, features = ["aws-lc-rs", "tls12"] }
 webpki-roots = "1"
+webpki-root-certs = "1"
 chrono = "0.4.45"
 chrono-tz = "0.10"
 futures = "0.3.34"
@@ -125,12 +126,12 @@ aes-gcm = "0.11"
 hkdf = "0.13"
 sha2 = "0.11"
 siphasher = "1.0"
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "multipart", "stream"] }
+reqwest = { version = "0.13", default-features = false, features = ["rustls", "json", "multipart", "stream"] }
 bytes = "1.12"
 aws-config = { version = "1.12", default-features = false, features = ["behavior-version-latest", "credentials-process", "default-https-client", "rt-tokio", "sso"] }
 aws-runtime = "1.10"
 aws-sdk-s3 = { version = "1.152", default-features = false, features = ["behavior-version-latest", "default-https-client", "http-1x", "rt-tokio", "sigv4a"] }
-oauth2 = "5.0"
+oauth2 = { version = "5.0", default-features = false }
 md5 = "0.8"
 pulldown-cmark = "0.13"
 async-stream = "0.3"

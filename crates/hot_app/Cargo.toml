@@ -30,7 +30,7 @@ jsonwebtoken = { workspace = true }
 axum-extra = { workspace = true, features = ["cookie"] }
 time = { workspace = true }
 uuid = { workspace = true, features = ["v4"] }
-oauth2 = { workspace = true }  # Note: v5.0 requires reqwest 0.12 but has breaking API changes
+oauth2 = { workspace = true }  # reqwest feature off; oauth.rs supplies the HTTP client
 reqwest = { workspace = true }
 url = { workspace = true }
 sqlx = { workspace = true }

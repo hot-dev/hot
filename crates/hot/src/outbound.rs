@@ -1,8 +1,35 @@
-//! Shared outbound destination validation for user-controlled network clients.
+//! Shared outbound HTTP client setup and destination validation for
+//! user-controlled network clients.
 
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
+use std::sync::LazyLock;
 use std::time::Duration;
 use url::Url;
+
+/// A reqwest client builder that trusts the bundled Mozilla root certificates.
+/// reqwest 0.13 otherwise verifies against the OS trust store, which minimal
+/// containers may lack; this keeps reqwest 0.12's `rustls-tls` behavior.
+pub fn client_builder() -> reqwest::ClientBuilder {
+    reqwest::Client::builder().tls_certs_only(bundled_root_certificates().iter().cloned())
+}
+
+/// Like `reqwest::Client::new()`, with [`client_builder`]'s roots. Panics if the
+/// TLS backend cannot be initialized, as `Client::new()` does.
+pub fn client() -> reqwest::Client {
+    client_builder()
+        .build()
+        .expect("failed to build HTTP client with bundled root certificates")
+}
+
+fn bundled_root_certificates() -> &'static [reqwest::Certificate] {
+    static ROOTS: LazyLock<Vec<reqwest::Certificate>> = LazyLock::new(|| {
+        webpki_root_certs::TLS_SERVER_ROOT_CERTS
+            .iter()
+            .filter_map(|der| reqwest::Certificate::from_der(der.as_ref()).ok())
+            .collect()
+    });
+    &ROOTS
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DestinationPolicy {
@@ -89,7 +116,7 @@ impl DestinationPolicy {
             .ok_or_else(|| "outbound URL must include a host".to_string())?;
         let addrs = self.resolve_url(url).await?;
 
-        reqwest::Client::builder()
+        client_builder()
             .timeout(timeout)
             .connect_timeout(connect_timeout)
             .redirect(reqwest::redirect::Policy::none())
@@ -178,6 +205,13 @@ fn embedded_ipv4(ip: Ipv6Addr) -> Option<Ipv4Addr> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bundled_root_certificates_all_parse() {
+        let roots = bundled_root_certificates();
+        assert_eq!(roots.len(), webpki_root_certs::TLS_SERVER_ROOT_CERTS.len());
+        assert!(roots.len() > 100, "only {} roots", roots.len());
+    }
 
     #[test]
     fn public_only_blocks_internal_and_special_ranges() {
