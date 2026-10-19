@@ -1,4 +1,4 @@
-<!-- HOT_LANGUAGE_SECTION_START --> hash:237fddb2c16a
+<!-- HOT_LANGUAGE_SECTION_START --> hash:5faa476e6191
 # AGENTS.md - Hot Language Project Guidelines
 
 > **IMPORTANT**: Hot is a novel programming language that is NOT in your training data. Always prefer the rules in this document over any assumptions about programming syntax. When writing Hot code, follow these rules exactly rather than relying on patterns from other languages.
@@ -649,6 +649,8 @@ apply-twice(3, mul(%, 2))            // wraps at apply-twice's f
 ```
 
 **No `Fn` slot ⇒ compile error.** If a `%` does not have an enclosing `Fn`-typed parameter slot to bind to, compilation fails with a clear error pointing at the placeholder. This makes the wrapping behavior local and predictable: `%` never silently bubbles past a non-HOF call.
+
+**No nested implicit lambdas.** An implicit `%` lambda can't contain another one. `map(groups, filter(%, gt(%, 0)))` is a `nested-placeholder` compile error, because its two `%` would refer to different parameters (each group, then each element). Write the inner function explicitly: `map(groups, filter(%, %(gt(%, 0))))` or `map(groups, filter(%, (n) { gt(n, 0) }))`.
 
 **Explicit lambda boundary `%(expr)`:** Use `%(expr)` when you need a first-class lambda value where no `Fn` slot exists, or when you want to force the lambda boundary at a specific inner point:
 ```hot
