@@ -111,6 +111,46 @@ fn test_plain_annotation_takes_single_value_on_collect_all_flows() {
 }
 
 #[test]
+fn test_spaced_paren_in_function_body_binds_a_lambda() {
+    // `name (…)` with a space binds the parenthesized value in a function
+    // body, as it does at top level; `name(…)` stays a call.
+    let source = "g fn () {\n    h (x) { add(x, 1) }\n    k(2)\n    h(2)\n}";
+    let program = parse_hot(source).expect("parses");
+    let default_ns = &program.namespaces[&NsPath::new()];
+    let body = default_ns
+        .scope
+        .vars
+        .iter()
+        .find_map(|(var, value)| match value {
+            Value::Fn(defs) if var.sym.name() == "g" => Some(&defs[0].body),
+            _ => None,
+        })
+        .expect("g is a function");
+    let Value::Flow(flow) = body else {
+        panic!("expected a serial body, got {:?}", body)
+    };
+    match &flow.expressions[0] {
+        Value::MultipleValues(values) => {
+            assert!(matches!(&values[0], Value::Ref(Ref::Var(v)) if v.var.sym.name() == "h"));
+            assert!(
+                matches!(&values[1], Value::Lambda(_)),
+                "h should be bound to a lambda, got {:?}",
+                values[1]
+            );
+        }
+        other => panic!("expected `h (x) {{ … }}` to be a binding, got {:?}", other),
+    }
+    assert!(
+        matches!(&flow.expressions[1], Value::FnCall(_)),
+        "k(2) is a call"
+    );
+    assert!(
+        matches!(&flow.expressions[2], Value::FnCall(_)),
+        "h(2) is a call"
+    );
+}
+
+#[test]
 fn test_simple_variable() {
     let source = r#"x 42"#;
     let result = parse_hot(source);

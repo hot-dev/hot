@@ -5854,9 +5854,13 @@ impl Parser {
                                     true
                                 }
                             }
-                            // Direct function calls like function() should NOT be treated as assignments
-                            // Only patterns like: var_name function_name() should be assignments
-                            TokenType::LeftParen => false,
+                            // `name(…)` is a call. `name (…)` on the same line binds
+                            // the parenthesized value (a lambda `(x) { … }`, a flow,
+                            // or a tuple) to `name`, as it does at top level.
+                            TokenType::LeftParen => {
+                                next_token.line == token.line
+                                    && next_token.column > var_column + var_name_len as u32
+                            }
                             _ => false,
                         }
                     } else {
