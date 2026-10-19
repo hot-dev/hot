@@ -280,6 +280,30 @@ pub fn routes(
         .route("/orgs/{*rest}", get(legacy_org_redirect))
         .route("/@{org_slug}", get(orgs_detail_handler))
         .route(
+            "/@{org_slug}/lifecycle",
+            axum::routing::post(crate::handlers::sub_orgs::root_lifecycle),
+        )
+        .route(
+            "/@{org_slug}/children",
+            get(crate::handlers::sub_orgs::list).post(crate::handlers::sub_orgs::create),
+        )
+        .route(
+            "/@{org_slug}/children/{child_id}/lifecycle",
+            axum::routing::post(crate::handlers::sub_orgs::lifecycle),
+        )
+        .route(
+            "/@{org_slug}/children/{child_id}/access",
+            axum::routing::post(crate::handlers::sub_orgs::grant),
+        )
+        .route(
+            "/@{org_slug}/management-keys",
+            axum::routing::post(crate::handlers::sub_orgs::create_management_key),
+        )
+        .route(
+            "/@{org_slug}/management-keys/{key_id}/revoke",
+            axum::routing::post(crate::handlers::sub_orgs::revoke_management_key),
+        )
+        .route(
             "/@{org_slug}/edit",
             get(orgs_edit_handler).post(orgs_update_handler),
         )
@@ -508,6 +532,9 @@ pub fn routes(
         .route("/signup", get(signup_handler).post(signup_post_handler))
         .route("/signup/plans", get(signup_plans_handler))
         .layer(middleware::from_fn(guest_only_middleware))
+        .layer(middleware::from_fn(
+            crate::auth::onboarding_scope_middleware,
+        ))
         .with_state(app_state.clone());
 
     // Public routes - no authentication required
@@ -547,6 +574,9 @@ pub fn routes(
             "/auth/github/select-email",
             get(github_select_email_handler).post(github_select_email_post_handler),
         )
+        .layer(middleware::from_fn(
+            crate::auth::onboarding_scope_middleware,
+        ))
         .with_state(db.clone());
 
     // Webhook routes (no authentication required)

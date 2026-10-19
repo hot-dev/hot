@@ -399,7 +399,23 @@ async fn webhook_handler_inner(
     );
 
     let url_path = source.url_path(&endpoint_path);
-    let ctx = source.resolve(db, endpoint_path.clone()).await?;
+    let routing_db = db.with_scope(hot::db::DatabaseScope::Bootstrap(
+        hot::db::BootstrapOperation::Routing,
+    ));
+    let ctx = source.resolve(&routing_db, endpoint_path.clone()).await?;
+    let scope = crate::auth::runtime_database_scope(db, ctx.env.env_id)
+        .await
+        .map_err(|status| {
+            (
+                status,
+                Json(ApiErrorResponse::new(
+                    "forbidden",
+                    "Environment is not admitting requests",
+                )),
+            )
+        })?;
+    let scoped_db = Arc::new(db.with_scope(scope));
+    let db = &scoped_db;
 
     // Apply the org RPS limit before the endpoint query so random paths and
     // invalid tokens cannot turn the webhook table into an unbounded oracle.
@@ -787,6 +803,39 @@ async fn webhook_handler_inner(
         }
     }
 
+    // Response delivery is data access even when durable execution was already
+    // accepted. Do not return a result after revocation or org suspension.
+    crate::auth::runtime_database_scope(db, ctx.env.env_id)
+        .await
+        .map_err(|status| {
+            (
+                status,
+                Json(ApiErrorResponse::new(
+                    "forbidden",
+                    "Environment is not admitting requests",
+                )),
+            )
+        })?;
+    if let Some((auth, _)) = &auth_result {
+        let current = auth.revalidate(db).await.map_err(|status| {
+            (
+                status,
+                Json(ApiErrorResponse::new(
+                    "unauthorized",
+                    "Credential is no longer valid",
+                )),
+            )
+        })?;
+        if current.get_permissions() != auth.get_permissions() {
+            return Err((
+                StatusCode::FORBIDDEN,
+                Json(ApiErrorResponse::new(
+                    "forbidden",
+                    "Credential permissions changed",
+                )),
+            ));
+        }
+    }
     // Convert the outcome to an HTTP response
     match outcome {
         Some(Outcome::Stopped { result }) => build_webhook_response(result),

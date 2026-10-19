@@ -72,9 +72,7 @@ pub async fn list_source_files(
     build: &Build,
 ) -> Result<SourceTreeResponse, String> {
     if build.is_live() {
-        let project = Project::get_project(db, &build.project_id)
-            .await
-            .map_err(|e| format!("failed to load project: {e}"))?;
+        let project = crate::local_build::authorized_live_project(db, conf, build).await?;
         let files = discover_live_browsable_files(conf, &project)?
             .into_iter()
             .map(|entry| entry.public)
@@ -104,9 +102,7 @@ pub async fn read_source_file(
     line: Option<usize>,
 ) -> Result<SourceFileResponse, String> {
     if build.is_live() {
-        let project = Project::get_project(db, &build.project_id)
-            .await
-            .map_err(|e| format!("failed to load project: {e}"))?;
+        let project = crate::local_build::authorized_live_project(db, conf, build).await?;
         let files = discover_live_browsable_files(conf, &project)?;
         let entry = resolve_live_source_entry(&files, requested_path)
             .ok_or_else(|| "source file not found".to_string())?;
@@ -154,9 +150,7 @@ pub async fn search_source_files(
     let mut truncated = false;
 
     if build.is_live() {
-        let project = Project::get_project(db, &build.project_id)
-            .await
-            .map_err(|e| format!("failed to load project: {e}"))?;
+        let project = crate::local_build::authorized_live_project(db, conf, build).await?;
         let files = discover_live_browsable_files(conf, &project)?;
         for entry in files {
             let content = tokio::fs::read_to_string(&entry.abs_path)

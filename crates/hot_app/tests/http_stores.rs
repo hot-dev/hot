@@ -395,7 +395,10 @@ async fn admin_can_delete_store_entry() {
     let key_encoded = hot_app::templates::encode_entry_key(&json!("welcome"));
     let resp = client
         .post_form(
-            "/stores/settings/entries/delete",
+            &format!(
+                "/stores/settings/entries/delete?org_id={}&env_id={}",
+                test_data.org_id, test_data.env_id
+            ),
             &[("key_encoded", key_encoded.as_str()), ("origin", "store")],
         )
         .await;
@@ -456,7 +459,10 @@ async fn non_admin_cannot_delete_store_entry() {
 
     let resp = client
         .post_form(
-            "/stores/settings/entries/delete",
+            &format!(
+                "/stores/settings/entries/delete?org_id={}&env_id={}",
+                test_data.org_id, test_data.env_id
+            ),
             &[("key_encoded", key_encoded.as_str()), ("origin", "store")],
         )
         .await;

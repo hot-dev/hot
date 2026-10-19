@@ -15,19 +15,16 @@ use serde::Deserialize;
 use std::sync::Arc;
 
 /// Check if user is org admin (role_id 2 = admin)
-async fn is_org_admin(db: &DatabasePool, user_id: &uuid::Uuid, org_id: &uuid::Uuid) -> bool {
-    match OrgUser::get_org_user(db, org_id, user_id).await {
-        Ok(org_user) => org_user.org_user_role_id == 2, // 2 = admin role
-        Err(e) => {
-            tracing::error!(
-                "Failed to check org admin status for user {} in org {}: {}",
-                user_id,
-                org_id,
-                e
-            );
-            false
-        }
-    }
+pub(super) async fn is_org_admin(
+    db: &DatabasePool,
+    user_id: &uuid::Uuid,
+    org_id: &uuid::Uuid,
+) -> bool {
+    hot::db::Org::resolve_user_access(db, org_id, user_id)
+        .await
+        .ok()
+        .flatten()
+        .is_some_and(|access| access.can_manage_account && access.root_org_id == *org_id)
 }
 
 fn billing_unavailable() -> (StatusCode, String) {
@@ -112,6 +109,10 @@ pub async fn create_checkout_handler(
             "Only organization admins can manage billing".to_string(),
         ));
     }
+    let db = Arc::new(db.with_scope(hot::db::DatabaseScope::Maintenance {
+        operation: hot::db::MaintenanceOperation::Billing,
+        org_id: Some(org.org_id),
+    }));
 
     if let Err(retry_after) =
         crate::rate_limit::check_checkout(&conf, &session.user.user_id, &org.org_id, &form.plan_id)
@@ -219,6 +220,9 @@ pub async fn account_billing_handler(
     // For each org, get the subscription and plan
     let mut user_orgs = Vec::new();
     for org in user_orgs_data {
+        if org.is_child() || !is_org_admin(&db, &session.user.user_id, &org.org_id).await {
+            continue;
+        }
         let subscription = match OrgPlan::get_by_org_id(&db, &org.org_id).await {
             Ok(sub) => Some(sub),
             Err(e) => {
@@ -283,6 +287,10 @@ pub async fn view_billing_handler(
             "Only organization admins can view billing".to_string(),
         ));
     }
+    let db = Arc::new(db.with_scope(hot::db::DatabaseScope::Maintenance {
+        operation: hot::db::MaintenanceOperation::Billing,
+        org_id: Some(org.org_id),
+    }));
 
     // Get current subscription
     let subscription = match OrgPlan::get_by_org_id(&db, &org.org_id).await {
@@ -382,17 +390,25 @@ pub async fn view_usage_handler(
         Features::resolve_for_org(&db, &org.org_id).await
     };
 
-    // Use calendar month start for display
+    // Match the period used by run and compute admission. Unsubscribed local
+    // accounts use the calendar month.
     let now = Utc::now();
-    let month_start = now
+    let calendar_start = now
         .date_naive()
         .with_day(1)
         .and_then(|d: NaiveDate| d.and_hms_opt(0, 0, 0))
         .map(|dt| chrono::DateTime::<Utc>::from_naive_utc_and_offset(dt, Utc))
         .unwrap_or(now);
+    let month_start = subscription
+        .as_ref()
+        .and_then(|subscription| subscription.current_period_start)
+        .unwrap_or(calendar_start);
 
     // Determine if user can upgrade (false for Scale plan)
-    let can_upgrade = if hot::product::is_no_nag(&conf) {
+    let can_upgrade = if org.is_child()
+        || !is_org_admin(&db, &session.user.user_id, &org.org_id).await
+        || hot::product::is_no_nag(&conf)
+    {
         false
     } else if hot::product::billing_enabled(&conf) {
         plan.as_ref()
@@ -453,35 +469,55 @@ pub async fn usage_stats_handler(
         Features::resolve_for_org(&db, &org.org_id).await
     };
 
-    // Use calendar month start for run limits (runs_per_month resets on 1st of each month)
+    // Use the same account period as admission, including mid-month renewals.
     let now = Utc::now();
-    let month_start = now
+    let calendar_start = now
         .date_naive()
         .with_day(1)
         .and_then(|d: NaiveDate| d.and_hms_opt(0, 0, 0))
         .map(|dt| chrono::DateTime::<Utc>::from_naive_utc_and_offset(dt, Utc))
         .unwrap_or(now);
+    let month_start = subscription
+        .as_ref()
+        .and_then(|subscription| subscription.current_period_start)
+        .unwrap_or(calendar_start);
 
     // Get call retention days from features
     let retention_days = features.call_retention_days();
 
     // Calculate real-time usage stats
-    let usage = OrgUsageStats::calculate(&db, &org.org_id, month_start, retention_days)
-        .await
-        .map_err(|e| {
-            tracing::error!(
-                "Failed to calculate usage stats for org {}: {}",
-                org.org_id,
-                e
-            );
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "Failed to calculate usage".to_string(),
-            )
-        })?;
+    let usage_result =
+        if !org.is_child() && is_org_admin(&db, &session.user.user_id, &org.org_id).await {
+            OrgUsageStats::calculate_account(&db, &org.org_id, month_start, retention_days).await
+        } else {
+            let read = db.with_scope(hot::db::DatabaseScope::ReadSet {
+                org_ids: vec![org.org_id],
+                env_ids: session
+                    .current_org_envs
+                    .iter()
+                    .filter(|env| env.org_id == org.org_id)
+                    .map(|env| env.env_id)
+                    .collect(),
+            });
+            OrgUsageStats::calculate(&read, &org.org_id, month_start, retention_days).await
+        };
+    let usage = usage_result.map_err(|e| {
+        tracing::error!(
+            "Failed to calculate usage stats for org {}: {}",
+            org.org_id,
+            e
+        );
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Failed to calculate usage".to_string(),
+        )
+    })?;
 
     // Determine if user can upgrade (false for Scale plan and no-nag self-host).
-    let can_upgrade = if session.is_self_host_experience() {
+    let can_upgrade = if org.is_child()
+        || !is_org_admin(&db, &session.user.user_id, &org.org_id).await
+        || session.is_self_host_experience()
+    {
         false
     } else if session.billing_enabled {
         plan.as_ref()
@@ -529,6 +565,10 @@ pub async fn cancel_subscription_handler(
             "Only organization admins can manage billing".to_string(),
         ));
     }
+    let db = Arc::new(db.with_scope(hot::db::DatabaseScope::Maintenance {
+        operation: hot::db::MaintenanceOperation::Billing,
+        org_id: Some(org.org_id),
+    }));
 
     let subscription = OrgPlan::get_by_org_id(&db, &org.org_id)
         .await
@@ -601,6 +641,10 @@ pub async fn reactivate_subscription_handler(
             "Only organization admins can manage billing".to_string(),
         ));
     }
+    let db = Arc::new(db.with_scope(hot::db::DatabaseScope::Maintenance {
+        operation: hot::db::MaintenanceOperation::Billing,
+        org_id: Some(org.org_id),
+    }));
 
     let subscription = OrgPlan::get_by_org_id(&db, &org.org_id)
         .await

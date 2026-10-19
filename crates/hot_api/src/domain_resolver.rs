@@ -192,6 +192,9 @@ pub async fn domain_resolution_middleware(
     mut request: Request,
     next: Next,
 ) -> Result<Response, StatusCode> {
+    let db = Arc::new(db.with_scope(hot::db::DatabaseScope::Bootstrap(
+        hot::db::BootstrapOperation::Routing,
+    )));
     // Extract host header
     let host = request
         .headers()

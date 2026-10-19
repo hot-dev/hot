@@ -1585,16 +1585,31 @@ impl McpRouteSource {
         db: &hot::db::DatabasePool,
         auth: Option<(AuthContext, hot::db::api_key::ApiKey)>,
     ) -> Result<McpContext, (StatusCode, Json<ApiErrorResponse>)> {
-        match self {
+        let routing_db = db.with_scope(hot::db::DatabaseScope::Bootstrap(
+            hot::db::BootstrapOperation::Routing,
+        ));
+        let ctx = match self {
             McpRouteSource::Path {
                 org_slug,
                 env_name,
                 service,
-            } => resolve_mcp_context(db, auth, &org_slug, &env_name, service).await,
+            } => resolve_mcp_context(&routing_db, auth, &org_slug, &env_name, service).await,
             McpRouteSource::Domain { resolved, service } => {
-                resolve_mcp_context_from_domain(db, auth, &resolved, service).await
+                resolve_mcp_context_from_domain(&routing_db, auth, &resolved, service).await
             }
-        }
+        }?;
+        crate::auth::runtime_database_scope(db, ctx.env.env_id)
+            .await
+            .map_err(|status| {
+                (
+                    status,
+                    Json(ApiErrorResponse::new(
+                        "forbidden",
+                        "Environment is not admitting requests",
+                    )),
+                )
+            })?;
+        Ok(ctx)
     }
 }
 
@@ -1756,6 +1771,11 @@ async fn mcp_handler_inner(
         "server/discover" if protocol.is_modern() => {
             let auth = try_authenticate(db, headers).await?;
             let ctx = source.resolve(db, auth).await?;
+            let scoped_db = Arc::new(db.with_scope(hot::db::DatabaseScope::Environment {
+                org_id: ctx.org.org_id,
+                env_id: ctx.env.env_id,
+            }));
+            let db = &scoped_db;
             if let Err(exceeded) = rate_limit::check_org_rate_limit(
                 db,
                 &ctx.org.org_id,
@@ -1771,6 +1791,11 @@ async fn mcp_handler_inner(
         "tools/list" => {
             let auth = try_authenticate(db, headers).await?;
             let ctx = source.resolve(db, auth).await?;
+            let scoped_db = Arc::new(db.with_scope(hot::db::DatabaseScope::Environment {
+                org_id: ctx.org.org_id,
+                env_id: ctx.env.env_id,
+            }));
+            let db = &scoped_db;
             if let Err(exceeded) = rate_limit::check_org_rate_limit(
                 db,
                 &ctx.org.org_id,
@@ -1788,6 +1813,11 @@ async fn mcp_handler_inner(
         "tools/call" => {
             let auth = try_authenticate(db, headers).await?;
             let ctx = source.resolve(db, auth).await?;
+            let scoped_db = Arc::new(db.with_scope(hot::db::DatabaseScope::Environment {
+                org_id: ctx.org.org_id,
+                env_id: ctx.env.env_id,
+            }));
+            let db = &scoped_db;
             if let Err(exceeded) = rate_limit::check_org_rate_limit(
                 db,
                 &ctx.org.org_id,
@@ -2394,6 +2424,12 @@ async fn handle_tools_call_streaming(
         }
     });
 
+    let stream_scope = hot::db::DatabaseScope::Environment {
+        org_id: ctx.org.org_id,
+        env_id: ctx.env.env_id,
+    };
+    let stream_auth = ctx.auth.as_ref().map(|(auth, _)| auth.clone());
+    let stream_db = Arc::new(db.clone());
     let sse_stream = async_stream::stream! {
         use hot::stream::{StreamEvent, StreamNext};
 
@@ -2639,9 +2675,14 @@ async fn handle_tools_call_streaming(
     };
 
     // KeepAlive sends SSE comments to prevent ALB/proxy idle timeout
-    let mut response = Sse::new(sse_stream)
-        .keep_alive(KeepAlive::default())
-        .into_response();
+    let mut response = Sse::new(crate::auth::guard_stream(
+        sse_stream,
+        stream_db,
+        stream_auth,
+        stream_scope,
+    ))
+    .keep_alive(KeepAlive::default())
+    .into_response();
     response
         .headers_mut()
         .insert("x-accel-buffering", HeaderValue::from_static("no"));
@@ -2924,6 +2965,12 @@ async fn mcp_sse_handler_core(
     );
 
     let pubsub_for_cleanup = Arc::clone(&pubsub);
+    let stream_scope = hot::db::DatabaseScope::Environment {
+        org_id: ctx.org.org_id,
+        env_id: ctx.env.env_id,
+    };
+    let stream_auth = ctx.auth.as_ref().map(|(auth, _)| auth.clone());
+    let stream_db = db.clone();
     let stream = async_stream::stream! {
         use hot::stream::{StreamEvent, StreamNext};
 
@@ -2986,7 +3033,13 @@ async fn mcp_sse_handler_core(
         );
     };
 
-    Ok(Sse::new(stream).keep_alive(KeepAlive::default()))
+    Ok(Sse::new(crate::auth::guard_stream(
+        stream,
+        stream_db,
+        stream_auth,
+        stream_scope,
+    ))
+    .keep_alive(KeepAlive::default()))
 }
 
 /// POST /mcp/{org_slug}/{env_name}/{service}/messages?sessionId={id}
@@ -6051,7 +6104,7 @@ mod tests {
             "test",
             &key_data,
             &test_data.user_id,
-            &serde_json::Value::Null,
+            &serde_json::json!({"mcp:*": ["execute"]}),
         )
         .await
         .unwrap();

@@ -712,7 +712,7 @@ pub async fn org_users_list_handler(
         };
 
     // Check if user is admin
-    let is_admin = session.is_org_admin(&db, &org.org_id).await;
+    let is_admin = !org.is_child() && session.is_org_admin(&db, &org.org_id).await;
 
     // Resolve team_members plan limit and current seat usage so the
     // template can show "X / Y members" and swap the Invite button for
@@ -775,7 +775,7 @@ pub async fn org_users_invite_handler(
     };
 
     // Check if user is admin of this organization
-    if !session.is_org_admin(&db, &org.org_id).await {
+    if org.is_child() || !session.is_org_admin(&db, &org.org_id).await {
         return Redirect::to(&format!("/@{}/users", org_slug)).into_response();
     }
 
@@ -848,7 +848,7 @@ pub async fn org_users_invite_post_handler(
     };
 
     // Check if user is admin of this organization
-    if !session.is_org_admin(&db, &org.org_id).await {
+    if org.is_child() || !session.is_org_admin(&db, &org.org_id).await {
         return Ok(Redirect::to(&format!("/@{}/users", org_slug)));
     }
 
@@ -989,7 +989,7 @@ pub async fn org_users_edit_handler(
     };
 
     // Check if user is admin of this organization
-    if !session.is_org_admin(&db, &org.org_id).await {
+    if org.is_child() || !session.is_org_admin(&db, &org.org_id).await {
         return Redirect::to(&format!("/@{}/users", org_slug)).into_response();
     }
 
@@ -1071,7 +1071,7 @@ pub async fn org_users_edit_post_handler(
     };
 
     // Check if user is admin of this organization
-    if !session.is_org_admin(&db, &org.org_id).await {
+    if org.is_child() || !session.is_org_admin(&db, &org.org_id).await {
         return Ok(Redirect::to(&format!("/@{}/users", org_slug)));
     }
 

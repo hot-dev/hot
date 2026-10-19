@@ -6,6 +6,9 @@
            class="{% if page_context.current_page == "organization" %}border-red-500 text-red-600 dark:text-red-400{% else %}border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300 dark:text-gray-400 dark:hover:text-gray-300 dark:hover:border-gray-600{% endif %} whitespace-nowrap py-2 px-1 border-b-2 font-medium text-xs sm:text-sm">
             Overview
         </a>
+        {% if !org.is_child() && !org.is_individual() %}
+        <a href="/@{{ org.slug }}/children" class="whitespace-nowrap py-2 px-1 border-b-2 border-transparent font-medium text-xs sm:text-sm">Children</a>
+        {% endif %}
         <a href="/@{{ org.slug }}/users"
            class="{% if page_context.current_page == "users" %}border-red-500 text-red-600 dark:text-red-400{% else %}border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300 dark:text-gray-400 dark:hover:text-gray-300 dark:hover:border-gray-600{% endif %} whitespace-nowrap py-2 px-1 border-b-2 font-medium text-xs sm:text-sm">
             Users

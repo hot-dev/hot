@@ -9,6 +9,7 @@ mod event_handlers;
 mod events;
 mod files;
 mod health;
+pub mod management;
 mod mcp;
 mod org;
 mod projects;

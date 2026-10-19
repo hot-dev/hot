@@ -453,6 +453,8 @@ pub async fn run_with_stream_pubsub(conf: Val, shared_stream_pubsub: Option<Arc<
             api_key_auth_middleware,
         ));
 
+    let management_routes = crate::handlers::management::router(state.clone());
+
     // Domain resolution cache for custom domains (mcp.example.com, etc.)
     let domain_cache = DomainCache::new();
 
@@ -461,6 +463,7 @@ pub async fn run_with_stream_pubsub(conf: Val, shared_stream_pubsub: Option<Arc<
     let app = Router::new()
         .merge(public_routes)
         .merge(api_v1_routes)
+        .merge(management_routes)
         .layer(middleware::from_fn_with_state(
             client_ip_policy,
             client_ip_middleware,

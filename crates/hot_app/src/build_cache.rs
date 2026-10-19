@@ -45,12 +45,12 @@ pub enum LiveDocsStatus {
 pub struct BuildDocsCache {
     /// In-memory cache of recently accessed build docs
     memory_cache: RwLock<AHashMap<Uuid, CachedBuildDocs>>,
-    /// Cache for live builds (keyed by project name for easy invalidation)
-    live_docs_cache: RwLock<AHashMap<String, CachedBuildDocs>>,
+    /// Cache for live builds, keyed by immutable build identity.
+    live_docs_cache: RwLock<AHashMap<Uuid, CachedBuildDocs>>,
     /// Track which live docs are currently being generated
-    live_docs_generating: RwLock<AHashMap<String, bool>>,
+    live_docs_generating: RwLock<AHashMap<Uuid, bool>>,
     /// Track the build hash that live docs were generated from (for staleness detection)
-    live_docs_build_hash: RwLock<AHashMap<String, String>>,
+    live_docs_build_hash: RwLock<AHashMap<Uuid, String>>,
     /// Disk cache directory
     cache_dir: PathBuf,
     /// Build storage for retrieving build zip files
@@ -85,6 +85,11 @@ impl BuildDocsCache {
         db: &DatabasePool,
         build: &Build,
     ) -> Result<CachedBuildDocs, String> {
+        // A cached payload must never bypass the caller's database scope.
+        let current = Build::get_build(db, &build.build_id)
+            .await
+            .map_err(|e| format!("Build is not visible in the current scope: {e}"))?;
+        let build = &current;
         // For live builds, use the live docs cache
         if build.is_live() {
             return self.get_live_build_docs(db, build).await;
@@ -135,16 +140,14 @@ impl BuildDocsCache {
         db: &DatabasePool,
         build: &Build,
     ) -> Result<CachedBuildDocs, String> {
-        // Get project name for cache key
-        let project = Project::get_project(db, &build.project_id)
-            .await
-            .map_err(|e| format!("Failed to get project: {}", e))?;
+        let project = crate::local_build::authorized_live_project(db, &self.conf, build).await?;
         let project_name = project.name.clone();
+        let build_id = build.build_id;
 
         // Check if cached docs are stale (build hash changed since last generation)
         let is_stale = {
             let hashes = self.live_docs_build_hash.read().await;
-            match hashes.get(&project_name) {
+            match hashes.get(&build_id) {
                 Some(cached_hash) => cached_hash != &build.hash,
                 None => false, // No cached hash means first load, not stale
             }
@@ -153,7 +156,7 @@ impl BuildDocsCache {
         // Check in-memory cache first
         if !is_stale {
             let cache = self.live_docs_cache.read().await;
-            if let Some(cached) = cache.get(&project_name) {
+            if let Some(cached) = cache.get(&build_id) {
                 tracing::debug!(
                     "Live docs cache hit (memory) for '{}' (cached {} seconds ago)",
                     project_name,
@@ -169,14 +172,13 @@ impl BuildDocsCache {
             // Clear stale cache
             {
                 let mut cache = self.live_docs_cache.write().await;
-                cache.remove(&project_name);
+                cache.remove(&build_id);
             }
-            self.invalidate_live_disk_cache(&project_name).await;
+            self.invalidate_live_disk_cache(&build_id).await;
         }
 
         // Check disk cache before generating (skip if already known stale from memory)
-        if !is_stale && let Ok((cached, disk_hash)) = self.load_live_from_disk(&project_name).await
-        {
+        if !is_stale && let Ok((cached, disk_hash)) = self.load_live_from_disk(&build_id).await {
             // Verify disk cache freshness: compare stored hash against current build hash.
             // If the disk cache has no hash (written before staleness tracking), treat as stale
             // since we can't verify it matches the current build.
@@ -192,7 +194,7 @@ impl BuildDocsCache {
                     disk_hash,
                     build.hash
                 );
-                self.invalidate_live_disk_cache(&project_name).await;
+                self.invalidate_live_disk_cache(&build_id).await;
             } else {
                 tracing::debug!(
                     "Live docs cache hit (disk) for '{}' - {} project ns, {} deps",
@@ -203,11 +205,11 @@ impl BuildDocsCache {
                 // Add to memory cache and record build hash
                 {
                     let mut cache = self.live_docs_cache.write().await;
-                    cache.insert(project_name.clone(), cached.clone());
+                    cache.insert(build_id, cached.clone());
                 }
                 {
                     let mut hashes = self.live_docs_build_hash.write().await;
-                    hashes.insert(project_name.clone(), build.hash.clone());
+                    hashes.insert(build_id, build.hash.clone());
                 }
                 return Ok(cached);
             }
@@ -216,7 +218,7 @@ impl BuildDocsCache {
         // Check if already generating
         {
             let generating = self.live_docs_generating.read().await;
-            if generating.get(&project_name) == Some(&true) {
+            if generating.get(&build_id) == Some(&true) {
                 if is_stale {
                     // Build changed while generating -- update the hash so when
                     // the current generation finishes, the next page visit will
@@ -249,11 +251,11 @@ impl BuildDocsCache {
         // Mark as generating and record the build hash we're generating for
         {
             let mut generating = self.live_docs_generating.write().await;
-            generating.insert(project_name.clone(), true);
+            generating.insert(build_id, true);
         }
         {
             let mut hashes = self.live_docs_build_hash.write().await;
-            hashes.insert(project_name.clone(), build.hash.clone());
+            hashes.insert(build_id, build.hash.clone());
         }
 
         // Spawn background task to generate docs
@@ -262,7 +264,6 @@ impl BuildDocsCache {
             project_name
         );
 
-        let build_id = build.build_id;
         let project_name_clone = project_name.clone();
 
         // Clone the global cache reference for the background task
@@ -278,7 +279,7 @@ impl BuildDocsCache {
                 // Clear generating flag
                 {
                     let mut generating = cache.live_docs_generating.write().await;
-                    generating.remove(&project_name_clone);
+                    generating.remove(&build_id);
                 }
 
                 tracing::debug!(
@@ -303,29 +304,29 @@ impl BuildDocsCache {
     }
 
     /// Check if docs are currently being generated for a project
-    pub async fn is_generating(&self, project_name: &str) -> bool {
+    pub async fn is_generating(&self, build_id: &Uuid) -> bool {
         let generating = self.live_docs_generating.read().await;
-        generating.get(project_name) == Some(&true)
+        generating.get(build_id) == Some(&true)
     }
 
     /// Invalidate live docs cache for a project (call when files change)
     /// This clears both memory and disk cache
-    pub async fn invalidate_live_docs(&self, project_name: &str) {
+    pub async fn invalidate_live_docs(&self, build_id: &Uuid) {
         // Clear memory cache
         let mut cache = self.live_docs_cache.write().await;
-        if cache.remove(project_name).is_some() {
-            tracing::debug!("Invalidated live docs memory cache for '{}'", project_name);
+        if cache.remove(build_id).is_some() {
+            tracing::debug!("Invalidated live docs memory cache for {}", build_id);
         }
         drop(cache); // Release lock before async disk operation
 
         // Clear build hash so next access triggers regeneration
         {
             let mut hashes = self.live_docs_build_hash.write().await;
-            hashes.remove(project_name);
+            hashes.remove(build_id);
         }
 
         // Clear disk cache
-        self.invalidate_live_disk_cache(project_name).await;
+        self.invalidate_live_disk_cache(build_id).await;
     }
 
     /// Invalidate all live docs caches
@@ -353,18 +354,6 @@ impl BuildDocsCache {
             .await
             .map_err(|e| format!("Failed to get project: {}", e))?;
 
-        // For live builds or when build file doesn't exist, generate docs on-the-fly
-        if build.is_live() {
-            tracing::debug!(
-                "Generating docs on-the-fly for live build {} (project: {})",
-                build.build_id,
-                project.name
-            );
-            return self
-                .generate_docs_from_source(&build.build_id, &project.name)
-                .await;
-        }
-
         // Get env to get org_id
         let env = hot::db::Env::get_env(db, &project.env_id)
             .await
@@ -375,26 +364,11 @@ impl BuildDocsCache {
             .await
             .map_err(|e| format!("Failed to get build storage: {}", e))?;
 
-        // Try to retrieve build zip data
-        match storage
+        let build_data = storage
             .retrieve_build(&build.build_id, &env.org_id, &project.env_id)
             .await
-        {
-            Ok(build_data) => {
-                // Extract docs from zip
-                self.extract_docs_from_zip(&build.build_id, &build_data)
-            }
-            Err(e) => {
-                // Build file not found - try generating on-the-fly as fallback
-                tracing::warn!(
-                    "Build file not found for {}, generating docs on-the-fly: {}",
-                    build.build_id,
-                    e
-                );
-                self.generate_docs_from_source(&build.build_id, &project.name)
-                    .await
-            }
-        }
+            .map_err(|e| format!("Failed to retrieve scoped build documentation: {e}"))?;
+        self.extract_docs_from_zip(&build.build_id, &build_data)
     }
 
     /// Generate docs incrementally - project first, then dependencies one by one
@@ -463,7 +437,7 @@ impl BuildDocsCache {
         {
             let mut cache = self.live_docs_cache.write().await;
             cache.insert(
-                project_name.to_string(),
+                *build_id,
                 CachedBuildDocs {
                     build_id: *build_id,
                     project_docs: project_docs.clone(),
@@ -508,7 +482,7 @@ impl BuildDocsCache {
                 {
                     let mut cache = self.live_docs_cache.write().await;
                     cache.insert(
-                        project_name.to_string(),
+                        *build_id,
                         CachedBuildDocs {
                             build_id: *build_id,
                             project_docs: project_docs.clone(),
@@ -567,7 +541,7 @@ impl BuildDocsCache {
                     {
                         let mut cache = self.live_docs_cache.write().await;
                         cache.insert(
-                            project_name.to_string(),
+                            *build_id,
                             CachedBuildDocs {
                                 build_id: *build_id,
                                 project_docs: project_docs.clone(),
@@ -609,60 +583,13 @@ impl BuildDocsCache {
             dependency_docs,
             cached_at: std::time::Instant::now(),
         };
-        if let Err(e) = self.save_live_to_disk(project_name, &final_docs).await {
+        if let Err(e) = self.save_live_to_disk(build_id, &final_docs).await {
             tracing::warn!(
                 "Failed to save live docs to disk for '{}': {}",
                 project_name,
                 e
             );
         }
-    }
-
-    /// Generate docs on-the-fly from source files (all at once, for non-incremental use)
-    pub async fn generate_docs_from_source(
-        &self,
-        build_id: &Uuid,
-        project_name: &str,
-    ) -> Result<CachedBuildDocs, String> {
-        // Get project src paths from configuration
-        let src_paths = hot::project::get_project_src_paths(&self.conf, project_name);
-        if src_paths.is_empty() {
-            return Err(format!(
-                "Project '{}' not found or has no source paths",
-                project_name
-            ));
-        }
-
-        tracing::debug!(
-            "Generating docs on-the-fly for project '{}' from paths: {:?}",
-            project_name,
-            src_paths
-        );
-
-        // Get resolved dependencies
-        let resolved_deps =
-            hot::project::get_resolved_project_dependencies(&self.conf, project_name)
-                .unwrap_or_else(|e| {
-                    tracing::warn!("Failed to get project dependencies: {}", e);
-                    vec![]
-                });
-
-        // Generate docs (synchronous)
-        let build_docs =
-            hot::pkg::docs::generate_build_docs(project_name, &src_paths, &resolved_deps)
-                .map_err(|e| format!("Failed to generate docs: {}", e))?;
-
-        // Convert to cached format
-        Ok(CachedBuildDocs {
-            build_id: *build_id,
-            project_docs: build_docs.project.unwrap_or_else(|| ProjectDocs {
-                name: project_name.to_string(),
-                namespaces: vec![],
-                type_index: AHashMap::new(),
-            }),
-            dependency_docs: build_docs.deps,
-            cached_at: std::time::Instant::now(),
-        })
     }
 
     /// Extract docs from a build zip file in memory
@@ -732,7 +659,8 @@ impl BuildDocsCache {
 
     /// Get disk cache path for a build
     fn get_disk_cache_path(&self, build_id: &Uuid) -> PathBuf {
-        self.cache_dir.join(format!("{}.json", build_id.simple()))
+        self.cache_dir
+            .join(format!("bundle-v2-{}.json", build_id.simple()))
     }
 
     /// Load cached docs from disk
@@ -782,18 +710,19 @@ impl BuildDocsCache {
 
     // ========== Live Build Disk Cache ==========
 
-    /// Get disk cache path for live build docs (keyed by project name)
-    fn get_live_disk_cache_path(&self, project_name: &str) -> PathBuf {
-        self.cache_dir.join(format!("live-{}.json", project_name))
+    /// Get disk cache path for live build docs (keyed by build identity)
+    fn get_live_disk_cache_path(&self, build_id: &Uuid) -> PathBuf {
+        self.cache_dir
+            .join(format!("live-v2-{}.json", build_id.simple()))
     }
 
     /// Load live build docs from disk cache
     /// Returns (cached_docs, disk_build_hash) so the caller can verify freshness
     async fn load_live_from_disk(
         &self,
-        project_name: &str,
+        build_id: &Uuid,
     ) -> Result<(CachedBuildDocs, Option<String>), String> {
-        let path = self.get_live_disk_cache_path(project_name);
+        let path = self.get_live_disk_cache_path(build_id);
         if !path.exists() {
             return Err("Live disk cache not found".to_string());
         }
@@ -807,7 +736,7 @@ impl BuildDocsCache {
 
         tracing::debug!(
             "Loaded live docs from disk for '{}' ({} project ns, {} deps, hash: {:?})",
-            project_name,
+            build_id,
             disk_entry.project_docs.namespaces.len(),
             disk_entry.dependency_docs.len(),
             disk_entry.build_hash,
@@ -816,7 +745,7 @@ impl BuildDocsCache {
         let disk_hash = disk_entry.build_hash;
         Ok((
             CachedBuildDocs {
-                build_id: Uuid::nil(), // Live builds don't have a fixed build_id
+                build_id: *build_id,
                 project_docs: disk_entry.project_docs,
                 dependency_docs: disk_entry.dependency_docs,
                 cached_at: std::time::Instant::now(),
@@ -828,7 +757,7 @@ impl BuildDocsCache {
     /// Save live build docs to disk cache
     async fn save_live_to_disk(
         &self,
-        project_name: &str,
+        build_id: &Uuid,
         cached: &CachedBuildDocs,
     ) -> Result<(), String> {
         // Ensure cache directory exists
@@ -839,7 +768,7 @@ impl BuildDocsCache {
         // Get the build hash for this project to persist with the disk cache
         let build_hash = {
             let hashes = self.live_docs_build_hash.read().await;
-            hashes.get(project_name).cloned()
+            hashes.get(build_id).cloned()
         };
 
         let disk_entry = DiskCacheEntry {
@@ -851,14 +780,14 @@ impl BuildDocsCache {
         let content = serde_json::to_string_pretty(&disk_entry)
             .map_err(|e| format!("Failed to serialize live docs: {}", e))?;
 
-        let path = self.get_live_disk_cache_path(project_name);
+        let path = self.get_live_disk_cache_path(build_id);
         tokio::fs::write(&path, content)
             .await
             .map_err(|e| format!("Failed to write live disk cache: {}", e))?;
 
         tracing::debug!(
             "Saved live docs to disk for '{}' ({} project ns, {} deps)",
-            project_name,
+            build_id,
             cached.project_docs.namespaces.len(),
             cached.dependency_docs.len()
         );
@@ -867,17 +796,13 @@ impl BuildDocsCache {
     }
 
     /// Invalidate live disk cache for a project
-    pub async fn invalidate_live_disk_cache(&self, project_name: &str) {
-        let path = self.get_live_disk_cache_path(project_name);
+    pub async fn invalidate_live_disk_cache(&self, build_id: &Uuid) {
+        let path = self.get_live_disk_cache_path(build_id);
         if path.exists() {
             if let Err(e) = tokio::fs::remove_file(&path).await {
-                tracing::warn!(
-                    "Failed to remove live disk cache for '{}': {}",
-                    project_name,
-                    e
-                );
+                tracing::warn!("Failed to remove live disk cache for '{}': {}", build_id, e);
             } else {
-                tracing::debug!("Invalidated live disk cache for '{}'", project_name);
+                tracing::debug!("Invalidated live disk cache for '{}'", build_id);
             }
         }
     }
@@ -998,4 +923,148 @@ pub fn init_build_docs_cache(conf: hot::val::Val) {
 /// Get the global build docs cache
 pub fn get_build_docs_cache() -> Option<Arc<BuildDocsCache>> {
     BUILD_DOCS_CACHE.get().cloned()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn warm_live_docs_and_host_source_are_restricted_to_configured_environment() {
+        let db = hot::db::test_db().await;
+        let fixture = hot::db::insert_test_data(&db).await.unwrap();
+        let user = hot::db::User::get_user(&db, &fixture.user_id)
+            .await
+            .unwrap();
+        let org = hot::db::Org::get_org_uncached(&db, &fixture.org_id)
+            .await
+            .unwrap();
+        let env = hot::db::Env::get_env_uncached(&db, &fixture.env_id)
+            .await
+            .unwrap();
+        let project = Project::get_project(&db, &fixture.project_id)
+            .await
+            .unwrap();
+        let build = Build::get_build(&db, &fixture.build_id).await.unwrap();
+        let sibling_env = Uuid::new_v4();
+        let sibling_project = Uuid::new_v4();
+        let sibling_build = Uuid::new_v4();
+        hot::db::Env::insert_env(
+            &db,
+            &sibling_env,
+            &fixture.org_id,
+            "sibling",
+            &fixture.user_id,
+        )
+        .await
+        .unwrap();
+        Project::insert_project(
+            &db,
+            &sibling_project,
+            &sibling_env,
+            &project.name,
+            &fixture.user_id,
+        )
+        .await
+        .unwrap();
+        Build::insert_build(
+            &db,
+            &sibling_build,
+            &sibling_project,
+            &build.hash,
+            0,
+            Build::BUILD_TYPE_LIVE,
+            &fixture.user_id,
+        )
+        .await
+        .unwrap();
+        let sibling = Build::get_build(&db, &sibling_build).await.unwrap();
+        let sources = tempfile::tempdir().unwrap();
+        std::fs::write(
+            sources.path().join("private.hot"),
+            "::private ns\nsecret \"host-only\"\n",
+        )
+        .unwrap();
+        let name = project.name.clone();
+        let conf = hot::val!({
+            "set": {"profile": "selected"},
+            "profile": {"selected": {
+                "user": {"email": user.email}, "org": {"slug": org.slug}, "env": {"name": env.name}
+            }},
+            "project": {name.clone(): {"src": {"paths": [sources.path().to_string_lossy().to_string()]}}}
+        });
+        let disk = tempfile::tempdir().unwrap();
+        let mut cache = BuildDocsCache::new(conf.clone());
+        cache.cache_dir = disk.path().to_path_buf();
+        let cached = CachedBuildDocs {
+            build_id: build.build_id,
+            project_docs: ProjectDocs {
+                name: "selected-private-docs".into(),
+                namespaces: vec![],
+                type_index: AHashMap::new(),
+            },
+            dependency_docs: AHashMap::new(),
+            cached_at: std::time::Instant::now(),
+        };
+        cache
+            .live_docs_cache
+            .write()
+            .await
+            .insert(build.build_id, cached.clone());
+        cache
+            .live_docs_build_hash
+            .write()
+            .await
+            .insert(build.build_id, build.hash.clone());
+        cache
+            .save_live_to_disk(&build.build_id, &cached)
+            .await
+            .unwrap();
+        assert_eq!(
+            cache
+                .get_build_docs(&db, &build)
+                .await
+                .unwrap()
+                .project_docs
+                .name,
+            "selected-private-docs"
+        );
+        assert!(
+            cache
+                .get_build_docs(&db, &sibling)
+                .await
+                .unwrap_err()
+                .contains("selected environment")
+        );
+        assert_ne!(
+            cache.get_live_disk_cache_path(&build.build_id),
+            cache.get_live_disk_cache_path(&sibling.build_id)
+        );
+        // The same guard protects direct source browsing, not only docs cache hits.
+        assert!(
+            crate::source_browser::list_source_files(&db, &conf, &build)
+                .await
+                .is_ok()
+        );
+        assert!(
+            crate::source_browser::list_source_files(&db, &conf, &sibling)
+                .await
+                .is_err()
+        );
+        assert!(
+            crate::source_browser::read_source_file(&db, &conf, &sibling, "private.hot", None)
+                .await
+                .is_err()
+        );
+
+        // A pre-existing cache is not authority when the host profile is absent.
+        cache.conf = hot::val!({"project": {name.clone(): {"src": {"paths": [sources.path().to_string_lossy().to_string()]}}}});
+        assert!(
+            cache
+                .get_build_docs(&db, &build)
+                .await
+                .unwrap_err()
+                .contains("explicit local profile")
+        );
+    }
 }

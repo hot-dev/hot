@@ -4,7 +4,7 @@
     <div class="mb-6">
         <h1 class="text-xl sm:text-2xl font-bold leading-6 text-gray-900 dark:text-gray-100">{{ org.name }}</h1>
         <p class="mt-2 max-w-4xl text-xs sm:text-sm text-gray-500 dark:text-gray-400">
-            Organization usage and limits
+            {% if org.is_child() %}This workspace's usage. Limits are shared with the parent account.{% else %}Account usage and limits{% endif %}
         </p>
 
         {% include "org_tabs.html" %}
@@ -25,7 +25,7 @@
     <!-- Local Development -->
     <div class="bg-blue-50 dark:bg-blue-900/20 border border-blue-200 dark:border-blue-800 rounded-lg p-4 mb-6">
         <p class="text-sm text-blue-800 dark:text-blue-200">
-            <strong>Local Development Mode</strong> - Usage limits are not enforced in local development.
+            <strong>Local Development Mode</strong> - Unconfigured accounts have unlimited usage. Explicit account limits still apply.
         </p>
     </div>
     {% endif %}

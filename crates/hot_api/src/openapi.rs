@@ -55,6 +55,12 @@ struct BinaryUploadBody {
     ),
     paths(
         status_doc,
+        management_list_children_doc,
+        management_create_child_doc,
+        management_child_state_doc,
+        management_environment_doc,
+        management_runtime_key_doc,
+        management_usage_doc,
         list_projects_doc,
         create_project_doc,
         get_project_doc,
@@ -225,6 +231,15 @@ struct SecurityAddon;
 impl Modify for SecurityAddon {
     fn modify(&self, openapi: &mut utoipa::openapi::OpenApi) {
         if let Some(components) = openapi.components.as_mut() {
+            components.add_security_scheme(
+                "management_auth",
+                SecurityScheme::Http(
+                    HttpBuilder::new()
+                        .scheme(HttpAuthScheme::Bearer)
+                        .bearer_format("hm_ root management credential; runtime keys are rejected")
+                        .build(),
+                ),
+            );
             components.add_security_scheme(
                 "bearer_auth",
                 SecurityScheme::Http(
@@ -921,6 +936,11 @@ mod tests {
 
         for path in [
             "/v1/projects",
+            "/v1/management/children",
+            "/v1/management/children/{child_id}/state",
+            "/v1/management/children/{child_id}/environments",
+            "/v1/management/children/{child_id}/environments/{env_id}/api-keys",
+            "/v1/management/usage",
             "/v1/builds",
             "/v1/runs/stats",
             "/v1/runs/{run_id}/subscribe",
@@ -947,3 +967,34 @@ mod tests {
         );
     }
 }
+
+#[utoipa::path(get, path = "/v1/management/children", tag = "Management",
+    security(("management_auth" = [])),
+    params(("limit" = Option<i64>, Query), ("offset" = Option<i64>, Query)),
+    responses((status = 200, description = "Authorized children and total", body = serde_json::Value), (status = "default", body = ApiErrorResponse)))]
+fn management_list_children_doc() {}
+
+#[utoipa::path(post, path = "/v1/management/children", tag = "Management",
+    security(("management_auth" = [])), request_body = crate::handlers::management::CreateChildRequest,
+    responses((status = 201, description = "Child organization, default environment ID, and created flag", body = serde_json::Value), (status = "default", body = ApiErrorResponse)))]
+fn management_create_child_doc() {}
+
+#[utoipa::path(patch, path = "/v1/management/children/{child_id}/state", tag = "Management",
+    security(("management_auth" = [])), params(("child_id" = Uuid, Path)), request_body = crate::handlers::management::ChildStateRequest,
+    responses((status = 204, description = "Lifecycle updated"), (status = "default", body = ApiErrorResponse)))]
+fn management_child_state_doc() {}
+
+#[utoipa::path(post, path = "/v1/management/children/{child_id}/environments", tag = "Management",
+    security(("management_auth" = [])), params(("child_id" = Uuid, Path)), request_body = crate::handlers::management::CreateEnvironmentRequest,
+    responses((status = 201, description = "Environment created or existing exact-name environment returned", body = serde_json::Value), (status = "default", body = ApiErrorResponse)))]
+fn management_environment_doc() {}
+
+#[utoipa::path(post, path = "/v1/management/children/{child_id}/environments/{env_id}/api-keys", tag = "Management",
+    security(("management_auth" = [])), params(("child_id" = Uuid, Path), ("env_id" = Uuid, Path)), request_body = crate::handlers::management::IssueRuntimeKeyRequest,
+    responses((status = 201, description = "Child runtime API key; token returned once", body = serde_json::Value), (status = "default", body = ApiErrorResponse)))]
+fn management_runtime_key_doc() {}
+
+#[utoipa::path(get, path = "/v1/management/usage", tag = "Management",
+    security(("management_auth" = [])),
+    responses((status = 200, description = "Account aggregate usage", body = serde_json::Value), (status = "default", body = ApiErrorResponse)))]
+fn management_usage_doc() {}

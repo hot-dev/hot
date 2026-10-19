@@ -39,11 +39,12 @@
                 </div>
 
                 <div class="flex items-center">
-                    <input type="checkbox" name="env_specific" id="env_specific" value="true"
+                    {% if channel.env_id.is_some() %}<input type="hidden" name="env_specific" value="true">{% endif %}
+                    <input type="checkbox" disabled name="env_specific" id="env_specific" value="true"
                            {% if channel.env_id.is_some() %}checked{% endif %}
                            class="h-4 w-4 text-hot-red-600 focus:ring-hot-red-500 border-gray-300 dark:border-gray-600 rounded">
                     <label for="env_specific" class="ml-2 block text-sm text-gray-700 dark:text-gray-300">
-                        Environment-specific (only applies to current environment)
+                        Environment-specific (scope is fixed)
                     </label>
                 </div>
 

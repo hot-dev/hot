@@ -1,15 +1,18 @@
+mod route_permissions;
+
 use crate::ApiStateData;
 use crate::domain_resolver::ResolvedDomain;
 use axum::{
-    extract::{Request, State},
+    Json,
+    extract::{FromRequestParts, MatchedPath, RawPathParams, Request, State},
     http::StatusCode,
     middleware::Next,
-    response::Response,
+    response::{IntoResponse, Response},
 };
-use hot::db::DatabasePool;
 use hot::db::api_key::ApiKey;
 use hot::db::service_key::ServiceKey;
 use hot::db::session::Session;
+use hot::db::{BootstrapOperation, DatabasePool, DatabaseScope, with_database_scope};
 use hot::permission::Permissions;
 use std::sync::Arc;
 use tracing::{debug, error};
@@ -32,15 +35,83 @@ pub enum AuthContext {
         session: Session,
         /// The parent API key ID (for audit trail)
         api_key_id: Uuid,
+        /// Current issuer grants, loaded afresh during authentication.
+        issuer_permissions: Permissions,
     },
     ServiceKey {
         service_key: ServiceKey,
         /// The parent API key ID (for audit trail)
         api_key_id: Uuid,
+        /// Current issuer grants, loaded afresh during authentication.
+        issuer_permissions: Permissions,
     },
 }
 
 impl AuthContext {
+    /// Re-read a previously authenticated principal without retaining its secret.
+    /// Used by long-lived connections; scope and issuer lineage cannot change.
+    pub async fn revalidate(&self, db: &DatabasePool) -> Result<Self, StatusCode> {
+        let db = db.with_scope(DatabaseScope::Bootstrap(BootstrapOperation::Authentication));
+        let db = &db;
+        with_database_scope(
+            DatabaseScope::Bootstrap(BootstrapOperation::Authentication),
+            async {
+                let mut parent = ApiKey::get_api_key(db, &self.api_key_id())
+                    .await
+                    .map_err(|_| StatusCode::UNAUTHORIZED)?;
+                if !parent.active || parent.env_id != self.env_id() {
+                    return Err(StatusCode::UNAUTHORIZED);
+                }
+                let issuer_permissions =
+                    hot::db::management_key::ManagementKey::effective_runtime_permissions(
+                        db, &parent,
+                    )
+                    .await
+                    .map_err(|_| StatusCode::UNAUTHORIZED)?;
+                parent.permissions = issuer_permissions.to_json();
+                let current = match self {
+                    Self::ApiKey(_) => Self::ApiKey(parent),
+                    Self::Session { session, .. } => {
+                        let current = Session::get_session(db, &session.session_id)
+                            .await
+                            .map_err(|_| StatusCode::UNAUTHORIZED)?;
+                        if current.is_expired()
+                            || current.is_revoked()
+                            || current.env_id != self.env_id()
+                            || current.api_key_id != self.api_key_id()
+                        {
+                            return Err(StatusCode::UNAUTHORIZED);
+                        }
+                        Self::Session {
+                            session: current,
+                            api_key_id: parent.api_key_id,
+                            issuer_permissions,
+                        }
+                    }
+                    Self::ServiceKey { service_key, .. } => {
+                        let current = ServiceKey::get_service_key(db, &service_key.service_key_id)
+                            .await
+                            .map_err(|_| StatusCode::UNAUTHORIZED)?;
+                        if current.is_expired()
+                            || current.is_revoked()
+                            || current.env_id != self.env_id()
+                            || current.api_key_id != self.api_key_id()
+                        {
+                            return Err(StatusCode::UNAUTHORIZED);
+                        }
+                        Self::ServiceKey {
+                            service_key: current,
+                            api_key_id: parent.api_key_id,
+                            issuer_permissions,
+                        }
+                    }
+                };
+                runtime_database_scope(db, current.env_id()).await?;
+                Ok(current)
+            },
+        )
+        .await
+    }
     /// Get the environment ID for this principal.
     pub fn env_id(&self) -> Uuid {
         match self {
@@ -117,11 +188,29 @@ impl AuthContext {
 
     /// Get the permissions for this principal.
     /// All credential types now use the unified permissions model.
-    fn get_permissions(&self) -> Option<Permissions> {
+    pub fn get_permissions(&self) -> Option<Permissions> {
         match self {
             AuthContext::ApiKey(key) => key.get_permissions().ok(),
-            AuthContext::Session { session, .. } => session.get_permissions().ok(),
-            AuthContext::ServiceKey { service_key, .. } => service_key.get_permissions().ok(),
+            AuthContext::Session {
+                session,
+                issuer_permissions,
+                ..
+            } => Some(
+                session
+                    .get_permissions()
+                    .ok()?
+                    .intersection(issuer_permissions),
+            ),
+            AuthContext::ServiceKey {
+                service_key,
+                issuer_permissions,
+                ..
+            } => Some(
+                service_key
+                    .get_permissions()
+                    .ok()?
+                    .intersection(issuer_permissions),
+            ),
         }
     }
 
@@ -136,7 +225,9 @@ impl AuthContext {
     /// Extract service restrictions from permissions for a given prefix (e.g., "mcp:", "webhook:").
     /// Returns None if unrestricted, Some(vec) of specific service names if restricted.
     fn service_restrictions(&self, prefix: &str, action: &str) -> Option<Vec<String>> {
-        let perms = self.get_permissions()?;
+        let Some(perms) = self.get_permissions() else {
+            return Some(Vec::new());
+        };
         // Check if we have broad access (prefix + __any__)
         let any_resource = format!("{}__any__", prefix);
         if perms.has_permission(&any_resource, action) {
@@ -144,7 +235,11 @@ impl AuthContext {
         }
         // Collect specific service names from permissions
         let mut services = Vec::new();
-        for resource in perms.inner().keys() {
+        for resource in perms
+            .inner()
+            .keys()
+            .filter(|resource| perms.has_permission(resource, action))
+        {
             if let Some(rest) = resource.strip_prefix(prefix) {
                 let service = rest.split('/').next().unwrap_or(rest);
                 if service != "*" && !services.contains(&service.to_string()) {
@@ -152,11 +247,7 @@ impl AuthContext {
                 }
             }
         }
-        if services.is_empty() {
-            None
-        } else {
-            Some(services)
-        }
+        Some(services)
     }
 
     /// Get MCP service restrictions.
@@ -173,7 +264,9 @@ impl AuthContext {
     /// Get stream restrictions for this principal.
     /// Returns None if unrestricted, Some(vec) of specific stream IDs if restricted.
     pub fn stream_restrictions(&self) -> Option<Vec<String>> {
-        let perms = self.get_permissions()?;
+        let Some(perms) = self.get_permissions() else {
+            return Some(Vec::new());
+        };
         perms.stream_restrictions()
     }
 }
@@ -191,6 +284,89 @@ pub struct AuthenticatedToken {
     /// For API key tokens, this is the key itself.
     /// For sessions and service keys, this is the parent API key.
     pub api_key: ApiKey,
+    pub scope: DatabaseScope,
+}
+
+/// Resolve current ownership and admission without using entity caches.
+pub async fn runtime_database_scope(
+    db: &DatabasePool,
+    env_id: Uuid,
+) -> Result<DatabaseScope, StatusCode> {
+    let db = db.with_scope(DatabaseScope::Bootstrap(BootstrapOperation::Authentication));
+    let db = &db;
+    with_database_scope(
+        DatabaseScope::Bootstrap(BootstrapOperation::Authentication),
+        async {
+            let env = hot::db::Env::get_env_uncached(db, &env_id)
+                .await
+                .map_err(|_| StatusCode::FORBIDDEN)?;
+            let org = hot::db::Org::get_org_uncached(db, &env.org_id)
+                .await
+                .map_err(|_| StatusCode::FORBIDDEN)?;
+            if !env.active || !org.is_admitting() {
+                return Err(StatusCode::FORBIDDEN);
+            }
+            if let Some(root_id) = org.parent_org_id {
+                let root = hot::db::Org::get_org_uncached(db, &root_id)
+                    .await
+                    .map_err(|_| StatusCode::FORBIDDEN)?;
+                if !root.is_admitting() || root.parent_org_id.is_some() {
+                    return Err(StatusCode::FORBIDDEN);
+                }
+            }
+            Ok(DatabaseScope::Environment {
+                org_id: env.org_id,
+                env_id,
+            })
+        },
+    )
+    .await
+}
+
+/// Keep both database scope and revocation checks alive after HTTP middleware
+/// has returned the streaming body. A grant change closes the stream; reconnect
+/// performs the endpoint's full resource authorization against current grants.
+pub fn guard_stream<S, T>(
+    source: S,
+    db: Arc<DatabasePool>,
+    principal: Option<AuthContext>,
+    scope: DatabaseScope,
+) -> impl futures::Stream<Item = T>
+where
+    S: futures::Stream<Item = T> + Send,
+    T: Send,
+{
+    use futures::StreamExt;
+    async_stream::stream! {
+        futures::pin_mut!(source);
+        let expected = principal.as_ref().and_then(AuthContext::get_permissions);
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(30));
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            tokio::select! {
+                biased;
+                _ = interval.tick() => {
+                    let admitted = match &scope {
+                        DatabaseScope::Environment { env_id, .. } => runtime_database_scope(&db, *env_id).await.is_ok(),
+                        _ => false,
+                    };
+                    if !admitted { break; }
+                    if let Some(principal) = &principal {
+                        match principal.revalidate(&db).await {
+                            Ok(current) if current.get_permissions() == expected => {}
+                            _ => break,
+                        }
+                    }
+                }
+                next = with_database_scope(scope.clone(), source.next()) => {
+                    match next {
+                        Some(item) => yield item,
+                        None => break,
+                    }
+                }
+            }
+        }
+    }
 }
 
 /// Authenticate a bearer token against the database.
@@ -210,6 +386,53 @@ pub async fn authenticate_token(
     db: &Arc<DatabasePool>,
     token: &str,
 ) -> Result<AuthenticatedToken, StatusCode> {
+    let db = Arc::new(db.with_scope(DatabaseScope::Bootstrap(BootstrapOperation::Authentication)));
+    let db = &db;
+    with_database_scope(
+        DatabaseScope::Bootstrap(BootstrapOperation::Authentication),
+        async {
+            let (auth_ctx, mut api_key) = authenticate_token_inner(db, token).await?;
+            let scope = runtime_database_scope(db, auth_ctx.env_id()).await?;
+            // Compatibility extraction must never expose broader issuer permissions.
+            api_key.env_id = auth_ctx.env_id();
+            api_key.permissions = auth_ctx
+                .get_permissions()
+                .ok_or(StatusCode::UNAUTHORIZED)?
+                .to_json();
+            let touch_db = db.with_scope(scope.clone());
+            match &auth_ctx {
+                AuthContext::Session { session, .. } => {
+                    let id = session.session_id;
+                    tokio::spawn(async move {
+                        Session::touch(&touch_db, &id).await;
+                    });
+                }
+                AuthContext::ServiceKey { service_key, .. } => {
+                    let id = service_key.service_key_id;
+                    tokio::spawn(async move {
+                        ServiceKey::touch(&touch_db, &id).await;
+                    });
+                }
+                AuthContext::ApiKey(_) => {}
+            }
+            Ok(AuthenticatedToken {
+                auth_ctx,
+                api_key,
+                scope,
+            })
+        },
+    )
+    .await
+}
+
+async fn authenticate_token_inner(
+    db: &Arc<DatabasePool>,
+    token: &str,
+) -> Result<(AuthContext, ApiKey), StatusCode> {
+    // Management credentials are a separate control-plane principal.
+    if token.starts_with("hm_") {
+        return Err(StatusCode::UNAUTHORIZED);
+    }
     if Session::is_session_token(token) {
         // ================================================================
         // Session token flow
@@ -222,12 +445,12 @@ pub async fn authenticate_token(
         let api_key_id = session.api_key_id;
 
         // Verify parent API key is still active
-        let parent_key = ApiKey::get_api_key(db, &api_key_id).await.map_err(|e| {
+        let mut parent_key = ApiKey::get_api_key(db, &api_key_id).await.map_err(|e| {
             debug!("Parent API key not found for session: {:?}", e);
             StatusCode::UNAUTHORIZED
         })?;
 
-        if !parent_key.active {
+        if !parent_key.active || parent_key.env_id != session.env_id {
             debug!(
                 "Parent API key is inactive for session: {}",
                 session.session_id
@@ -240,36 +463,36 @@ pub async fn authenticate_token(
             session.env_id, session.session_id, api_key_id
         );
 
+        parent_key.permissions =
+            hot::db::management_key::ManagementKey::effective_runtime_permissions(db, &parent_key)
+                .await
+                .map_err(|_| StatusCode::UNAUTHORIZED)?
+                .to_json();
         let auth_ctx = AuthContext::Session {
             session: session.clone(),
             api_key_id,
+            issuer_permissions: parent_key
+                .get_permissions()
+                .map_err(|_| StatusCode::UNAUTHORIZED)?,
         };
 
-        // Fire-and-forget: update last_used_at
-        let db_clone = db.clone();
-        let sid = session.session_id;
-        tokio::spawn(async move {
-            Session::touch(&db_clone, &sid).await;
-        });
-
-        Ok(AuthenticatedToken {
-            auth_ctx,
-            api_key: parent_key,
-        })
+        Ok((auth_ctx, parent_key))
     } else if token.starts_with("hot_") {
         // ================================================================
         // API key flow
         // ================================================================
         match ApiKey::verify_api_key(db, token).await {
-            Ok(Some(key)) => {
+            Ok(Some(mut key)) => {
+                key.permissions =
+                    hot::db::management_key::ManagementKey::effective_runtime_permissions(db, &key)
+                        .await
+                        .map_err(|_| StatusCode::UNAUTHORIZED)?
+                        .to_json();
                 debug!("API key validated successfully for env: {}", key.env_id);
 
                 let auth_ctx = AuthContext::ApiKey(key.clone());
 
-                Ok(AuthenticatedToken {
-                    auth_ctx,
-                    api_key: key,
-                })
+                Ok((auth_ctx, key))
             }
             Ok(None) => {
                 debug!("API key not found or invalid");
@@ -292,12 +515,12 @@ pub async fn authenticate_token(
         let api_key_id = service_key.api_key_id;
 
         // Verify parent API key is still active
-        let parent_key = ApiKey::get_api_key(db, &api_key_id).await.map_err(|e| {
+        let mut parent_key = ApiKey::get_api_key(db, &api_key_id).await.map_err(|e| {
             debug!("Parent API key not found for service key: {:?}", e);
             StatusCode::UNAUTHORIZED
         })?;
 
-        if !parent_key.active {
+        if !parent_key.active || parent_key.env_id != service_key.env_id {
             debug!(
                 "Parent API key is inactive for service key: {}",
                 service_key.service_key_id
@@ -310,22 +533,20 @@ pub async fn authenticate_token(
             service_key.env_id, service_key.service_key_id, api_key_id
         );
 
+        parent_key.permissions =
+            hot::db::management_key::ManagementKey::effective_runtime_permissions(db, &parent_key)
+                .await
+                .map_err(|_| StatusCode::UNAUTHORIZED)?
+                .to_json();
         let auth_ctx = AuthContext::ServiceKey {
             service_key: service_key.clone(),
             api_key_id,
+            issuer_permissions: parent_key
+                .get_permissions()
+                .map_err(|_| StatusCode::UNAUTHORIZED)?,
         };
 
-        // Fire-and-forget: update last_used_at
-        let db_clone = db.clone();
-        let ckid = service_key.service_key_id;
-        tokio::spawn(async move {
-            ServiceKey::touch(&db_clone, &ckid).await;
-        });
-
-        Ok(AuthenticatedToken {
-            auth_ctx,
-            api_key: parent_key,
-        })
+        Ok((auth_ctx, parent_key))
     }
 }
 
@@ -389,11 +610,295 @@ pub async fn api_key_auth_middleware(
         return Err(StatusCode::FORBIDDEN);
     }
 
+    let scope = authenticated.scope;
+    if let DatabaseScope::Environment { org_id, env_id } = &scope {
+        for (name, value) in
+            url::form_urlencoded::parse(request.uri().query().unwrap_or("").as_bytes())
+        {
+            let expected = match name.as_ref() {
+                "org_id" => Some(*org_id),
+                "env_id" => Some(*env_id),
+                "tenant_id" => return Err(StatusCode::BAD_REQUEST),
+                _ => None,
+            };
+            if let Some(expected) = expected {
+                let supplied = Uuid::parse_str(&value).map_err(|_| StatusCode::BAD_REQUEST)?;
+                if supplied != expected {
+                    return Err(StatusCode::FORBIDDEN);
+                }
+            }
+        }
+    }
+    let (mut parts, body) = request.into_parts();
+    let route = parts
+        .extensions
+        .get::<MatchedPath>()
+        .ok_or(StatusCode::FORBIDDEN)?
+        .as_str()
+        .to_owned();
+    let params = RawPathParams::from_request_parts(&mut parts, &())
+        .await
+        .map_err(|_| StatusCode::BAD_REQUEST)?;
+    let params = params
+        .iter()
+        .map(|(key, value)| (key.to_owned(), value.to_owned()))
+        .collect();
+    if let Err(status) =
+        route_permissions::authorize(&authenticated.auth_ctx, &parts.method, &route, &params)
+    {
+        let error = if status == StatusCode::BAD_REQUEST {
+            crate::models::ApiErrorResponse::bad_request("Invalid route parameters")
+        } else {
+            crate::models::ApiErrorResponse::new(
+                "forbidden",
+                "Credential does not authorize this API action",
+            )
+        };
+        return Ok((status, Json(error)).into_response());
+    }
+    request = Request::from_parts(parts, body);
     // Insert AuthContext for new handlers
     request.extensions_mut().insert(authenticated.auth_ctx);
 
     // Also insert ApiKey for backward compatibility with existing handlers
     request.extensions_mut().insert(authenticated.api_key);
 
-    Ok(next.run(request).await)
+    Ok(with_database_scope(scope, next.run(request)).await)
+}
+
+#[cfg(test)]
+mod scope_tests {
+    use super::*;
+    use chrono::{Duration, Utc};
+    use serde_json::json;
+
+    fn session_context(child: serde_json::Value, issuer: serde_json::Value) -> AuthContext {
+        let api_key_id = Uuid::now_v7();
+        AuthContext::Session {
+            session: Session {
+                session_id: Uuid::now_v7(),
+                api_key_id,
+                env_id: Uuid::now_v7(),
+                secret_hash: Vec::new(),
+                permissions: child,
+                metadata: None,
+                expires_at: Utc::now() + Duration::hours(1),
+                revoked_at: None,
+                created_at: Utc::now(),
+                last_used_at: None,
+            },
+            api_key_id,
+            issuer_permissions: Permissions::from_json(&issuer).unwrap(),
+        }
+    }
+
+    #[test]
+    fn derived_principal_uses_current_issuer_for_actions_and_discovery() {
+        let auth = session_context(
+            json!({"mcp:*": ["execute"], "stream:*": ["read"]}),
+            json!({"mcp:weather/*": ["execute"], "stream:one": ["read"]}),
+        );
+        assert!(auth.has_permission("mcp:weather/forecast", "execute"));
+        assert!(!auth.has_permission("mcp:payments/send", "execute"));
+        assert_eq!(
+            auth.mcp_service_restrictions(),
+            Some(vec!["weather".to_string()])
+        );
+        assert_eq!(auth.stream_restrictions(), Some(vec!["one".to_string()]));
+    }
+
+    #[test]
+    fn missing_or_disjoint_issuer_permissions_fail_closed() {
+        let empty = session_context(json!({"mcp:*": ["execute"]}), json!({}));
+        assert!(!empty.has_permission("mcp:weather/forecast", "execute"));
+        assert_eq!(empty.mcp_service_restrictions(), Some(Vec::new()));
+        let invalid = session_context(json!(null), json!({"*:*": ["*"]}));
+        assert_eq!(invalid.mcp_service_restrictions(), Some(Vec::new()));
+        assert_eq!(invalid.stream_restrictions(), Some(Vec::new()));
+    }
+
+    #[test]
+    fn issuer_expansion_does_not_expand_derived_grants() {
+        let auth = session_context(json!({"mcp:weather/*": ["execute"]}), json!({"*:*": ["*"]}));
+        assert!(auth.has_permission("mcp:weather/forecast", "execute"));
+        assert!(!auth.has_permission("mcp:payments/send", "execute"));
+    }
+    #[tokio::test]
+    async fn authentication_reloads_issuer_and_rejects_cross_environment_lineage() {
+        let db = Arc::new(hot::db::test_db().await);
+        let data = hot::db::insert_test_data(&db).await.unwrap();
+        let api_key_id = Uuid::now_v7();
+        let (token, key_data) = ApiKey::generate_api_key(&api_key_id).unwrap();
+        ApiKey::insert_api_key(
+            &db,
+            &api_key_id,
+            &data.env_id,
+            "issuer",
+            &serde_json::from_str(&key_data).unwrap(),
+            &data.user_id,
+            &json!({"*:*": ["*"]}),
+        )
+        .await
+        .unwrap();
+        let (_, session_token) = Session::create(
+            &db,
+            &api_key_id,
+            &data.env_id,
+            &json!({"event:*": ["create", "read"]}),
+            None,
+            Some(3600),
+        )
+        .await
+        .unwrap();
+        assert!(
+            authenticate_token(&db, &session_token)
+                .await
+                .unwrap()
+                .auth_ctx
+                .has_permission("event:order", "read")
+        );
+        ApiKey::update_permissions(
+            &db,
+            &api_key_id,
+            &json!({"event:*": ["create"]}),
+            &data.user_id,
+        )
+        .await
+        .unwrap();
+        let authenticated = authenticate_token(&db, &session_token).await.unwrap();
+        assert!(
+            authenticated
+                .auth_ctx
+                .has_permission("event:order", "create")
+        );
+        assert!(!authenticated.auth_ctx.has_permission("event:order", "read"));
+        assert!(
+            !authenticated
+                .api_key
+                .get_permissions()
+                .unwrap()
+                .has_permission("event:order", "read")
+        );
+        let (_, mismatched_token) = Session::create(
+            &db,
+            &api_key_id,
+            &Uuid::now_v7(),
+            &json!({"event:*": ["create"]}),
+            None,
+            Some(3600),
+        )
+        .await
+        .unwrap();
+        assert!(authenticate_token(&db, &mismatched_token).await.is_err());
+        ApiKey::toggle_active(&db, &api_key_id, false, &data.user_id)
+            .await
+            .unwrap();
+        assert!(authenticated.auth_ctx.revalidate(&db).await.is_err());
+        assert!(authenticate_token(&db, &token).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn management_ancestor_limits_runtime_keys_and_grandchildren() {
+        use hot::db::management_key::{CreateManagementKey, ManagementKey};
+        use hot::db::org::{CreateChild, Org};
+        let db = Arc::new(hot::db::test_db().await);
+        let data = hot::db::insert_test_data(&db).await.unwrap();
+        let DatabasePool::Sqlite(pool) = db.as_ref() else {
+            panic!("sqlite fixture");
+        };
+        sqlx::query("UPDATE org SET org_type = 'organization' WHERE org_id = ?")
+            .bind(data.org_id)
+            .execute(pool)
+            .await
+            .unwrap();
+        let child = Org::create_child(
+            &db,
+            &data.org_id,
+            &data.user_id,
+            &CreateChild {
+                name: "Child".into(),
+                slug: "scope-child".into(),
+                external_id: None,
+                idempotency_key: "scope-child".into(),
+                hosted: false,
+            },
+        )
+        .await
+        .unwrap();
+        let (manager, manager_token) = ManagementKey::create_for_user(
+            &db,
+            data.org_id,
+            data.user_id,
+            &CreateManagementKey {
+                name: "issuer".into(),
+                capabilities: vec!["runtime-keys:create".into()],
+                target_org_ids: vec![child.org.org_id],
+                all_children: false,
+                delegation_permissions: Some(json!({"event:*": ["create", "read"]})),
+                expires_in_seconds: 3600,
+            },
+        )
+        .await
+        .unwrap();
+        assert!(authenticate_token(&db, &manager_token).await.is_err());
+        let (key_id, token) = manager
+            .issue_runtime_key(
+                &db,
+                child.org.org_id,
+                child.env_id,
+                "child key",
+                &json!({"event:*": ["create", "read"]}),
+            )
+            .await
+            .unwrap();
+        assert!(ManagementKey::verify_token(&db, &token).await.is_err());
+        let (_, session_token) = Session::create(
+            &db,
+            &key_id,
+            &child.env_id,
+            &json!({"event:*": ["create", "read"]}),
+            None,
+            Some(3600),
+        )
+        .await
+        .unwrap();
+        assert!(
+            authenticate_token(&db, &session_token)
+                .await
+                .unwrap()
+                .auth_ctx
+                .has_permission("event:order", "read")
+        );
+        sqlx::query(
+            "UPDATE management_key SET delegation_permissions = ? WHERE management_key_id = ?",
+        )
+        .bind(json!({"event:*": ["create"]}).to_string())
+        .bind(manager.management_key_id)
+        .execute(pool)
+        .await
+        .unwrap();
+        let narrowed = authenticate_token(&db, &session_token)
+            .await
+            .unwrap()
+            .auth_ctx;
+        assert!(narrowed.has_permission("event:order", "create"));
+        assert!(!narrowed.has_permission("event:order", "read"));
+        assert!(
+            manager
+                .issue_runtime_key(
+                    &db,
+                    data.org_id,
+                    data.env_id,
+                    "wrong target",
+                    &json!({"event:*": ["create"]})
+                )
+                .await
+                .is_err()
+        );
+        sqlx::query("UPDATE management_key SET expires_at = '2000-01-01T00:00:00Z' WHERE management_key_id = ?")
+            .bind(manager.management_key_id).execute(pool).await.unwrap();
+        assert!(authenticate_token(&db, &token).await.is_err());
+        assert!(authenticate_token(&db, &session_token).await.is_err());
+        assert!(narrowed.revalidate(&db).await.is_err());
+    }
 }

@@ -5,17 +5,57 @@ use crate::email::{AppEmailEnqueuer, AppEmailSender};
 use crate::templates;
 use askama::Template;
 use axum::extract::{Extension, Form, Path, Query, State};
+use axum::http::StatusCode;
 use axum::response::{Html, IntoResponse, Redirect};
 use chrono::Utc;
-use hot::db::DatabasePool;
 use hot::db::alert::{
     Alert, AlertChannel, AlertDelivery, AlertDestination, AlertSubscription, DeliveryStatus,
     DestinationType, EmailDestinationConfig, EmailTarget,
 };
+use hot::db::{DatabasePool, DatabaseScope};
 use hot::val::Val;
 use serde::Deserialize;
 use std::sync::Arc;
 use uuid::Uuid;
+
+// Account settings may read every environment of the selected organization,
+// never descendants or siblings. This read set is not a mutation capability.
+async fn settings_read_scope(
+    db: &DatabasePool,
+    session: &Session,
+) -> Result<DatabasePool, StatusCode> {
+    let org_id = session.current_org_id().ok_or(StatusCode::NOT_FOUND)?;
+    let owned = hot::db::Env::get_envs_by_org(db, &org_id)
+        .await
+        .map_err(|error| {
+            tracing::warn!(%error, "Unable to resolve alert settings scope");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+    Ok(db.with_scope(DatabaseScope::ReadSet {
+        org_ids: vec![org_id],
+        env_ids: owned
+            .into_iter()
+            .filter(|env| env.org_id == org_id)
+            .map(|env| env.env_id)
+            .collect(),
+    }))
+}
+
+fn settings_write_scope(
+    db: &DatabasePool,
+    session: &Session,
+    env_id: Option<Uuid>,
+) -> Result<DatabasePool, StatusCode> {
+    let org_id = session.current_org_id().ok_or(StatusCode::NOT_FOUND)?;
+    let scope = match env_id {
+        Some(env_id) if session.has_env_access(&env_id) => {
+            DatabaseScope::Environment { org_id, env_id }
+        }
+        Some(_) => return Err(StatusCode::NOT_FOUND),
+        None => DatabaseScope::Organization { org_id },
+    };
+    Ok(db.with_scope(scope))
+}
 
 // =============================================================================
 // Form Data Structures
@@ -518,14 +558,15 @@ fn parse_selected_ids(ids: &str) -> Option<Vec<Uuid>> {
 async fn subscription_resources_belong_to_org(
     db: &DatabasePool,
     org_id: &Uuid,
+    env_id: Option<Uuid>,
     channel_ids: &[Uuid],
     destination_ids: &[Uuid],
 ) -> bool {
     for channel_id in channel_ids {
-        if AlertChannel::get_by_id_for_org(db, channel_id, org_id)
-            .await
-            .is_err()
-        {
+        let Ok(channel) = AlertChannel::get_by_id_for_org(db, channel_id, org_id).await else {
+            return false;
+        };
+        if channel.env_id.is_some() && channel.env_id != env_id {
             return false;
         }
     }
@@ -926,6 +967,10 @@ pub async fn subscriptions_list_handler(
             return Redirect::to("/").into_response();
         }
     };
+    let db = match settings_read_scope(&db, &session).await {
+        Ok(read) => read,
+        Err(status) => return status.into_response(),
+    };
 
     let subscriptions = AlertSubscription::get_by_org(&db, &org_id)
         .await
@@ -1012,6 +1057,10 @@ pub async fn subscriptions_new_handler(
             return Redirect::to("/").into_response();
         }
     };
+    let db = match settings_read_scope(&db, &session).await {
+        Ok(read) => read,
+        Err(status) => return status.into_response(),
+    };
 
     let channels = AlertChannel::get_by_org(&db, &org_id)
         .await
@@ -1054,6 +1103,25 @@ pub async fn subscriptions_create_handler(
         }
     };
 
+    let read = match settings_read_scope(&db, &session).await {
+        Ok(read) => read,
+        Err(status) => return status.into_response(),
+    };
+
+    // Check env_specific to determine if env_id should be set
+    let env_id = if form.env_specific.is_some() {
+        session.current_env.as_ref().map(|e| e.env_id)
+    } else {
+        None
+    };
+    if form.env_specific.is_some() && env_id.is_none() {
+        return (
+            StatusCode::BAD_REQUEST,
+            "Select an environment for an environment-specific alert setting",
+        )
+            .into_response();
+    }
+
     // Parse channel IDs
     let Some(channel_ids) = parse_selected_ids(&form.channel_ids) else {
         return Redirect::to("/settings/alerts/subscriptions/new?error=missing_selection")
@@ -1063,16 +1131,16 @@ pub async fn subscriptions_create_handler(
         return Redirect::to("/settings/alerts/subscriptions/new?error=missing_selection")
             .into_response();
     };
-    if !subscription_resources_belong_to_org(&db, &org_id, &channel_ids, &destination_ids).await {
+    if !subscription_resources_belong_to_org(&read, &org_id, env_id, &channel_ids, &destination_ids)
+        .await
+    {
         return Redirect::to("/settings/alerts/subscriptions/new?error=invalid_selection")
             .into_response();
     }
 
-    // Check env_specific to determine if env_id should be set
-    let env_id = if form.env_specific.is_some() {
-        session.current_env.as_ref().map(|e| e.env_id)
-    } else {
-        None
+    let db = match settings_write_scope(&db, &session, env_id) {
+        Ok(write) => write,
+        Err(status) => return status.into_response(),
     };
 
     match AlertSubscription::create(
@@ -1111,6 +1179,10 @@ pub async fn subscriptions_edit_handler(
         None => {
             return Redirect::to("/").into_response();
         }
+    };
+    let db = match settings_read_scope(&db, &session).await {
+        Ok(read) => read,
+        Err(status) => return status.into_response(),
     };
 
     let subscription =
@@ -1169,13 +1241,18 @@ pub async fn subscriptions_update_handler(
         Some(org) => org.org_id,
         None => return Redirect::to("/").into_response(),
     };
-    match AlertSubscription::get_by_id_for_org(&db, &alert_subscription_id, &org_id).await {
-        Ok(_) => {}
-        _ => {
-            return Redirect::to("/settings/alerts/subscriptions?error=unauthorized")
-                .into_response();
-        }
-    }
+    let read = match settings_read_scope(&db, &session).await {
+        Ok(read) => read,
+        Err(status) => return status.into_response(),
+    };
+    let subscription =
+        match AlertSubscription::get_by_id_for_org(&read, &alert_subscription_id, &org_id).await {
+            Ok(subscription) => subscription,
+            _ => {
+                return Redirect::to("/settings/alerts/subscriptions?error=unauthorized")
+                    .into_response();
+            }
+        };
 
     // Parse channel IDs
     let Some(channel_ids) = parse_selected_ids(&form.channel_ids) else {
@@ -1192,7 +1269,15 @@ pub async fn subscriptions_update_handler(
         ))
         .into_response();
     };
-    if !subscription_resources_belong_to_org(&db, &org_id, &channel_ids, &destination_ids).await {
+    if !subscription_resources_belong_to_org(
+        &read,
+        &org_id,
+        subscription.env_id,
+        &channel_ids,
+        &destination_ids,
+    )
+    .await
+    {
         return Redirect::to(&format!(
             "/settings/alerts/subscriptions/{}/edit?error=invalid_selection",
             alert_subscription_id
@@ -1201,10 +1286,18 @@ pub async fn subscriptions_update_handler(
     }
 
     // Check env_specific to determine if env_id should be set
-    let env_id = if form.env_specific.is_some() {
-        session.current_env.as_ref().map(|e| e.env_id)
-    } else {
-        None
+    if form.env_specific.is_some() != subscription.env_id.is_some() {
+        return (
+            StatusCode::BAD_REQUEST,
+            "Alert ownership cannot change; create a new subscription for the desired scope",
+        )
+            .into_response();
+    }
+    let env_id = subscription.env_id;
+
+    let db = match settings_write_scope(&db, &session, subscription.env_id) {
+        Ok(write) => write,
+        Err(status) => return status.into_response(),
     };
 
     let enabled = form.enabled.is_some();
@@ -1248,13 +1341,23 @@ pub async fn subscriptions_delete_handler(
         Some(org) => org.org_id,
         None => return Redirect::to("/").into_response(),
     };
-    match AlertSubscription::get_by_id_for_org(&db, &alert_subscription_id, &org_id).await {
-        Ok(_) => {}
-        _ => {
-            return Redirect::to("/settings/alerts/subscriptions?error=unauthorized")
-                .into_response();
-        }
-    }
+    let read = match settings_read_scope(&db, &session).await {
+        Ok(read) => read,
+        Err(status) => return status.into_response(),
+    };
+    let subscription =
+        match AlertSubscription::get_by_id_for_org(&read, &alert_subscription_id, &org_id).await {
+            Ok(subscription) => subscription,
+            _ => {
+                return Redirect::to("/settings/alerts/subscriptions?error=unauthorized")
+                    .into_response();
+            }
+        };
+
+    let db = match settings_write_scope(&db, &session, subscription.env_id) {
+        Ok(write) => write,
+        Err(status) => return status.into_response(),
+    };
 
     match AlertSubscription::delete(&db, &alert_subscription_id).await {
         Ok(_) => Redirect::to("/settings/alerts/subscriptions").into_response(),
@@ -1284,6 +1387,10 @@ pub async fn channels_list_handler(
         None => {
             return Redirect::to("/").into_response();
         }
+    };
+    let db = match settings_read_scope(&db, &session).await {
+        Ok(read) => read,
+        Err(status) => return status.into_response(),
     };
 
     let channels = AlertChannel::get_by_org(&db, &org_id)
@@ -1365,6 +1472,17 @@ pub async fn channels_create_handler(
     } else {
         None
     };
+    if form.env_specific.is_some() && env_id.is_none() {
+        return (
+            StatusCode::BAD_REQUEST,
+            "Select an environment for an environment-specific alert setting",
+        )
+            .into_response();
+    }
+    let db = match settings_write_scope(&db, &session, env_id) {
+        Ok(write) => write,
+        Err(status) => return status.into_response(),
+    };
 
     // Validate pattern
     if let Err(e) = AlertChannel::validate_pattern(&form.pattern) {
@@ -1407,6 +1525,10 @@ pub async fn channels_edit_handler(
     let org_id = match &session.current_org {
         Some(org) => org.org_id,
         None => return Redirect::to("/").into_response(),
+    };
+    let db = match settings_read_scope(&db, &session).await {
+        Ok(read) => read,
+        Err(status) => return status.into_response(),
     };
 
     let channel = match AlertChannel::get_by_id_for_org(&db, &channel_id, &org_id).await {
@@ -1461,7 +1583,11 @@ pub async fn channels_update_handler(
         None => return Redirect::to("/").into_response(),
     };
 
-    let channel = match AlertChannel::get_by_id_for_org(&db, &channel_id, &org_id).await {
+    let read = match settings_read_scope(&db, &session).await {
+        Ok(read) => read,
+        Err(status) => return status.into_response(),
+    };
+    let channel = match AlertChannel::get_by_id_for_org(&read, &channel_id, &org_id).await {
         Ok(c) => c,
         Err(_) => {
             return Redirect::to("/settings/alerts/channels?error=not_found").into_response();
@@ -1474,11 +1600,14 @@ pub async fn channels_update_handler(
     }
 
     let user_id = session.user.user_id;
-    let env_id = if form.env_specific.is_some() {
-        session.current_env.as_ref().map(|e| e.env_id)
-    } else {
-        None
-    };
+    if form.env_specific.is_some() != channel.env_id.is_some() {
+        return (
+            StatusCode::BAD_REQUEST,
+            "Alert ownership cannot change; create a new channel for the desired scope",
+        )
+            .into_response();
+    }
+    let env_id = channel.env_id;
 
     // Validate pattern
     if let Err(e) = AlertChannel::validate_pattern(&form.pattern) {
@@ -1489,6 +1618,11 @@ pub async fn channels_update_handler(
         ))
         .into_response();
     }
+
+    let db = match settings_write_scope(&db, &session, channel.env_id) {
+        Ok(write) => write,
+        Err(status) => return status.into_response(),
+    };
 
     let enabled = form.enabled.is_some();
 
@@ -1527,7 +1661,11 @@ pub async fn channels_delete_handler(
         None => return Redirect::to("/").into_response(),
     };
 
-    let channel = match AlertChannel::get_by_id_for_org(&db, &channel_id, &org_id).await {
+    let read = match settings_read_scope(&db, &session).await {
+        Ok(read) => read,
+        Err(status) => return status.into_response(),
+    };
+    let channel = match AlertChannel::get_by_id_for_org(&read, &channel_id, &org_id).await {
         Ok(c) => c,
         Err(_) => {
             return Redirect::to("/settings/alerts/channels?error=not_found").into_response();
@@ -1538,6 +1676,11 @@ pub async fn channels_delete_handler(
     if channel.is_system() {
         return Redirect::to("/settings/alerts/channels?error=system_channel").into_response();
     }
+
+    let db = match settings_write_scope(&db, &session, channel.env_id) {
+        Ok(write) => write,
+        Err(status) => return status.into_response(),
+    };
 
     match AlertChannel::delete(&db, &channel_id).await {
         Ok(_) => Redirect::to("/settings/alerts/channels").into_response(),
@@ -1574,6 +1717,10 @@ pub async fn history_list_handler(
         None => {
             return Redirect::to("/").into_response();
         }
+    };
+    let db = match settings_read_scope(&db, &session).await {
+        Ok(read) => read,
+        Err(status) => return status.into_response(),
     };
 
     let page = params.page.unwrap_or(1).max(1);
@@ -1650,6 +1797,10 @@ pub async fn history_detail_handler(
     let org_id = match &session.current_org {
         Some(org) => org.org_id,
         None => return Redirect::to("/").into_response(),
+    };
+    let db = match settings_read_scope(&db, &session).await {
+        Ok(read) => read,
+        Err(status) => return status.into_response(),
     };
 
     let alert = match Alert::get_by_id(&db, &alert_id).await {
@@ -1946,6 +2097,7 @@ mod tests {
             subscription_resources_belong_to_org(
                 &db,
                 &org_id,
+                None,
                 &[channel.alert_channel_id],
                 &[destination.alert_destination_id],
             )
@@ -1955,8 +2107,39 @@ mod tests {
             !subscription_resources_belong_to_org(
                 &db,
                 &org_id,
+                None,
                 &[channel.alert_channel_id],
                 &[foreign_destination.alert_destination_id],
+            )
+            .await
+        );
+        let env_id = Uuid::now_v7();
+        let other_env_id = Uuid::now_v7();
+        hot::db::Env::insert_env(&db, &env_id, &org_id, "development", &user_id)
+            .await
+            .unwrap();
+        let scoped = AlertChannel::create(&db, &org_id, Some(&env_id), "Scoped", "^run:", &user_id)
+            .await
+            .unwrap();
+        for target in [None, Some(other_env_id)] {
+            assert!(
+                !subscription_resources_belong_to_org(
+                    &db,
+                    &org_id,
+                    target,
+                    &[scoped.alert_channel_id],
+                    &[destination.alert_destination_id]
+                )
+                .await
+            );
+        }
+        assert!(
+            subscription_resources_belong_to_org(
+                &db,
+                &org_id,
+                Some(env_id),
+                &[scoped.alert_channel_id],
+                &[destination.alert_destination_id]
             )
             .await
         );

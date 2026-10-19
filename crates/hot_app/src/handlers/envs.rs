@@ -226,14 +226,13 @@ pub async fn envs_create_handler(
         ));
     }
 
-    // Create the environment
-    let env_id = uuid::Uuid::now_v7();
-    match hot::db::Env::insert_env(
+    // Reserve any configured account environment limit under the billing root.
+    match hot::db::Org::provision_environment_authorized(
         &db,
-        &env_id,
         &current_org.org_id,
-        &form.name,
         &session.current_user_id(),
+        &name,
+        session.billing_enabled,
     )
     .await
     {
@@ -508,6 +507,15 @@ pub async fn env_subscribe_handler(
         }
     };
 
+    let org_id = session.current_org_id().ok_or((
+        axum::http::StatusCode::BAD_REQUEST,
+        "No organization selected".to_string(),
+    ))?;
+    let user_id = session.current_user_id();
+    let auth_db = app_state.db.with_scope(hot::db::DatabaseScope::Bootstrap(
+        hot::db::BootstrapOperation::Membership,
+    ));
+
     // Clone shutdown receiver for use in the stream
     let mut shutdown_rx = app_state.shutdown_rx.clone();
 
@@ -554,6 +562,7 @@ pub async fn env_subscribe_handler(
     // 3. The subscriber returns None (closed/error)
     let stream = async_stream::stream! {
         let mut subscriber = subscriber;
+        let mut revalidate = tokio::time::interval(std::time::Duration::from_secs(30));
         let stream_timeout = tokio::time::Duration::from_secs(300); // 5 minute timeout
         let start_time = tokio::time::Instant::now();
 
@@ -567,6 +576,12 @@ pub async fn env_subscribe_handler(
             // Receive push event from pub/sub, or shutdown signal
             if let Some(ref mut sub) = subscriber {
                 tokio::select! {
+                    _ = revalidate.tick() => {
+                        let allowed = hot::db::Org::resolve_user_access(&auth_db, &org_id, &user_id).await
+                            .ok().flatten().is_some_and(|access| access.runtime_allowed);
+                        let admitted = hot::db::Org::is_environment_admitted(&auth_db, &env_id).await.unwrap_or(false);
+                        if !allowed || !admitted { break; }
+                    }
                     // Check for shutdown signal
                     _ = shutdown_rx.changed() => {
                         if *shutdown_rx.borrow() {

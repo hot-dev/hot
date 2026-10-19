@@ -27,10 +27,10 @@
 <!-- Usage Cards Grid -->
 <div class="grid grid-cols-1 md:grid-cols-2 gap-6 mb-6">
 
-    <!-- Runs This Month -->
+    <!-- Runs in the account billing period -->
     <div class="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 p-6">
         <div class="flex items-center justify-between mb-4">
-            <h3 class="text-lg font-semibold text-gray-900 dark:text-white">Runs <span class="text-gray-500 dark:text-gray-400 font-normal">({{ month_start.format("%B %Y") }})</span></h3>
+            <h3 class="text-lg font-semibold text-gray-900 dark:text-white">Runs <span class="text-gray-500 dark:text-gray-400 font-normal">(since {{ month_start.format("%b %d, %Y") }})</span></h3>
             {% if usage.runs_pct(&features) > 90.0 %}
             <span class="text-yellow-500">⚠️</span>
             {% endif %}
@@ -223,7 +223,7 @@
     {% if features.compute_units_per_month() != 0 %}
     <div class="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 p-6">
         <div class="flex items-center justify-between mb-4">
-            <h3 class="text-lg font-semibold text-gray-900 dark:text-white">Compute Unit Seconds <span class="text-gray-500 dark:text-gray-400 font-normal">({{ month_start.format("%B %Y") }})</span></h3>
+            <h3 class="text-lg font-semibold text-gray-900 dark:text-white">Compute Unit Seconds <span class="text-gray-500 dark:text-gray-400 font-normal">(since {{ month_start.format("%b %d, %Y") }})</span></h3>
             {% if usage.compute_units_pct(&features) > 90.0 %}
             <span class="text-yellow-500">⚠️</span>
             {% endif %}

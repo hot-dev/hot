@@ -137,6 +137,19 @@ pub async fn subscribe_to_task(
 
     let db_clone = db.clone();
     let blob_store_clone = blob_store.clone();
+    let stream_scope = crate::auth::runtime_database_scope(&db, auth.env_id())
+        .await
+        .map_err(|status| {
+            (
+                status,
+                Json(ApiErrorResponse::new(
+                    "forbidden",
+                    "Environment is not admitting requests",
+                )),
+            )
+        })?;
+    let stream_auth = auth.clone();
+    let stream_db = db.clone();
     let stream = async_stream::stream! {
         let _connection_guard = connection_guard;
         let mut task = initial;
@@ -176,7 +189,13 @@ pub async fn subscribe_to_task(
         }
     };
 
-    Ok(Sse::new(stream).keep_alive(
+    Ok(Sse::new(crate::auth::guard_stream(
+        stream,
+        stream_db,
+        Some(stream_auth),
+        stream_scope,
+    ))
+    .keep_alive(
         KeepAlive::new()
             .interval(Duration::from_secs(15))
             .text("keepalive"),

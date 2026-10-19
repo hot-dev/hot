@@ -7,7 +7,7 @@ use axum::{
 };
 use axum_extra::extract::CookieJar;
 use chrono::{Duration, Utc};
-use hot::db::{DatabasePool, User};
+use hot::db::{BootstrapOperation, DatabasePool, DatabaseScope, User, with_database_scope};
 use hot::stream::StreamPubSub;
 use hot::val::Val;
 use jsonwebtoken::{Algorithm, DecodingKey, EncodingKey, Header, Validation, decode, encode};
@@ -118,10 +118,15 @@ impl Session {
         user_id: &Uuid,
         cookies: &CookieJar,
     ) -> Result<Self, String> {
+        let scoped_db = db.with_scope(DatabaseScope::Bootstrap(BootstrapOperation::Membership));
+        let db = &scoped_db;
         // Get user details
         let user = User::get_user(db, user_id)
             .await
             .map_err(|e| format!("Failed to get user: {}", e))?;
+        if !user.active {
+            return Err("User is inactive".to_string());
+        }
 
         // Extract initials from name or email
         let user_initials = if let Some(name) = &user.name {
@@ -144,7 +149,7 @@ impl Session {
         // Get all organizations for this user
         let user_orgs = hot::db::org::Org::get_orgs_by_user(db, user_id)
             .await
-            .unwrap_or_default();
+            .map_err(|error| format!("Unable to resolve organization membership: {error}"))?;
 
         // Get current organization from cookie or default to first org
         let current_org_id = get_current_org_id_from_cookies(cookies);
@@ -178,10 +183,11 @@ impl Session {
 
         // Check if user is admin of current organization
         let is_current_org_admin = if let Some(ref org) = current_org {
-            match hot::db::org::OrgUser::get_org_user(db, &org.org_id, user_id).await {
-                Ok(org_user) => org_user.org_user_role_id == 2, // 2 = admin role
-                Err(_) => false,
-            }
+            hot::db::Org::resolve_user_access(db, &org.org_id, user_id)
+                .await
+                .ok()
+                .flatten()
+                .is_some_and(|access| access.is_admin)
         } else {
             false
         };
@@ -190,7 +196,7 @@ impl Session {
         let current_org_envs = if let Some(ref org) = current_org {
             hot::db::env::Env::get_envs_by_org(db, &org.org_id)
                 .await
-                .unwrap_or_default()
+                .map_err(|error| format!("Unable to resolve environments: {error}"))?
         } else {
             Vec::new()
         };
@@ -245,7 +251,7 @@ impl Session {
             } else if let Some(ref org) = current_org {
                 // Try to get subscription and plan info
                 let (status, plan_name) =
-                    match hot::db::OrgPlan::get_by_org_id(db, &org.org_id).await {
+                    match hot::db::OrgPlan::get_by_org_id(db, &org.billing_owner_id()).await {
                         Ok(sub) => {
                             let status = sub.status();
                             let plan_name = sub.get_plan(db).await.ok().map(|p| p.plan_name);
@@ -319,10 +325,196 @@ impl Session {
 
     /// Check if user is admin of a specific organization (by string ID)
     pub async fn is_org_admin(&self, db: &DatabasePool, org_id: &Uuid) -> bool {
-        match hot::db::org::OrgUser::get_org_user(db, org_id, &self.user.user_id).await {
-            Ok(org_user) => org_user.org_user_role_id == 2, // 2 = admin role
-            Err(_) => false,
+        hot::db::Org::resolve_user_access(db, org_id, &self.user.user_id)
+            .await
+            .ok()
+            .flatten()
+            .is_some_and(|access| access.is_admin)
+    }
+
+    /// Account administration is inherited from the root, not from a child role.
+    pub async fn can_manage_account(&self, db: &DatabasePool, org_id: &Uuid) -> bool {
+        hot::db::Org::resolve_user_access(db, org_id, &self.user.user_id)
+            .await
+            .ok()
+            .flatten()
+            .is_some_and(|access| access.can_manage_account)
+    }
+
+    pub fn billing_org(&self) -> Option<&hot::db::Org> {
+        let org = self.current_org.as_ref()?;
+        let root_id = org.billing_owner_id();
+        self.user_orgs
+            .iter()
+            .find(|candidate| candidate.org_id == root_id)
+    }
+
+    /// A URL/header target belongs to this page; ambient cookies are only a
+    /// navigation default. Never turn an invalid explicit selector into a fallback.
+    fn select_request_scope<'a>(
+        &'a mut self,
+        db: &'a DatabasePool,
+        request: &Request,
+    ) -> impl std::future::Future<Output = Result<(), StatusCode>> + Send + 'a {
+        let uri = request.uri().clone();
+        let method = request.method().clone();
+        let headers = request.headers().clone();
+        async move {
+            let pairs = uri
+                .query()
+                .map(|query| {
+                    url::form_urlencoded::parse(query.as_bytes())
+                        .into_owned()
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+            for selector in ["org_id", "env_id"] {
+                if pairs.iter().filter(|(name, _)| name == selector).count() > 1 {
+                    return Err(StatusCode::BAD_REQUEST);
+                }
+            }
+            let params = uri
+                .query()
+                .map(|query| {
+                    url::form_urlencoded::parse(query.as_bytes())
+                        .into_owned()
+                        .collect::<AHashMap<String, String>>()
+                })
+                .unwrap_or_default();
+            let selector = |name: &str, header: &str| -> Result<Option<Uuid>, StatusCode> {
+                let query = params.get(name).map(String::as_str);
+                let header = headers
+                    .get(header)
+                    .map(|v| v.to_str().map_err(|_| StatusCode::BAD_REQUEST))
+                    .transpose()?;
+                if query.is_some() && header.is_some() && query != header {
+                    return Err(StatusCode::BAD_REQUEST);
+                }
+                query
+                    .or(header)
+                    .map(|s| Uuid::parse_str(s).map_err(|_| StatusCode::BAD_REQUEST))
+                    .transpose()
+            };
+            let requested_org = selector("org_id", "x-hot-org-id")?;
+            let requested_env = selector("env_id", "x-hot-env-id")?;
+            let path = uri.path();
+            let route_slug = path
+                .strip_prefix("/@")
+                .and_then(|tail| tail.split('/').next());
+            let org = if let Some(slug) = route_slug {
+                let org = self
+                    .user_orgs
+                    .iter()
+                    .find(|org| org.slug == slug)
+                    .cloned()
+                    .ok_or(StatusCode::NOT_FOUND)?;
+                if requested_org.is_some_and(|id| id != org.org_id) {
+                    return Err(StatusCode::BAD_REQUEST);
+                }
+                Some(org)
+            } else if let Some(id) = requested_org {
+                Some(
+                    self.user_orgs
+                        .iter()
+                        .find(|org| org.org_id == id)
+                        .cloned()
+                        .ok_or(StatusCode::NOT_FOUND)?,
+                )
+            } else {
+                self.current_org.clone()
+            };
+            let org_control = is_org_control_path(path);
+            if !matches!(method, axum::http::Method::GET | axum::http::Method::HEAD)
+                // Handle claiming is user onboarding. An already-member's
+                // stale form only redirects; it cannot mutate that org.
+                && path != "/claim-handle"
+                && !is_scope_selection_path(path)
+                && route_slug.is_none()
+                && self.current_org.is_some()
+                && (requested_org.is_none() || (!org_control && requested_env.is_none()))
+            {
+                return Err(StatusCode::BAD_REQUEST);
+            }
+            if let Some(org) = org {
+                self.select_org(db, org).await?;
+            }
+            if let Some(env_id) = requested_env {
+                self.current_env = Some(
+                    self.current_org_envs
+                        .iter()
+                        .find(|env| env.env_id == env_id)
+                        .cloned()
+                        .ok_or(StatusCode::NOT_FOUND)?,
+                );
+            }
+            if !org_control
+                && !is_scope_selection_path(path)
+                && self.current_env.as_ref().is_some_and(|env| !env.active)
+            {
+                return Err(StatusCode::FORBIDDEN);
+            }
+            if let Some(org) = &self.current_org {
+                let access = hot::db::Org::resolve_user_access(db, &org.org_id, &self.user.user_id)
+                    .await
+                    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+                    .ok_or(StatusCode::NOT_FOUND)?;
+                if !access.runtime_allowed
+                    && !(access.can_manage_account && is_recovery_path(path, &method))
+                {
+                    return Err(StatusCode::FORBIDDEN);
+                }
+            }
+            Ok(())
         }
+    }
+
+    fn database_scope(&self, path: &str) -> DatabaseScope {
+        if path == "/account" || path == "/account/notifications" {
+            return DatabaseScope::User {
+                user_id: self.current_user_id(),
+            };
+        }
+        if path == "/claim-handle" || path == "/orgs/new" || self.current_org.is_none() {
+            return DatabaseScope::Bootstrap(BootstrapOperation::Onboarding);
+        }
+        let org_id = self.current_org_id().expect("checked current organization");
+        if !is_org_control_path(path)
+            && !is_scope_selection_path(path)
+            && let Some(env_id) = self.current_env_id()
+        {
+            return DatabaseScope::Environment { org_id, env_id };
+        }
+        DatabaseScope::Organization { org_id }
+    }
+
+    async fn select_org(&mut self, db: &DatabasePool, org: hot::db::Org) -> Result<(), StatusCode> {
+        if self.current_org_id() == Some(org.org_id) {
+            return Ok(());
+        }
+        let access = hot::db::Org::resolve_user_access(db, &org.org_id, &self.user.user_id)
+            .await
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+            .ok_or(StatusCode::NOT_FOUND)?;
+        self.current_org_envs = hot::db::Env::get_envs_by_org(db, &org.org_id)
+            .await
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        self.current_env = self.current_org_envs.first().cloned();
+        self.is_current_org_admin = access.is_admin;
+        self.current_org_features = if self.billing_enabled {
+            hot::db::Features::resolve_for_hosted_org(db, &org.org_id).await
+        } else {
+            hot::db::Features::resolve_for_org(db, &org.org_id).await
+        };
+        let plan = hot::db::OrgPlan::get_by_org_id(db, &org.billing_owner_id())
+            .await
+            .ok();
+        self.current_org_subscription_status = plan.as_ref().and_then(|plan| plan.status());
+        self.current_org_plan_name = match plan {
+            Some(plan) => plan.get_plan(db).await.ok().map(|plan| plan.plan_name),
+            None => None,
+        };
+        self.current_org = Some(org);
+        Ok(())
     }
 
     /// Get the current organization ID, if any
@@ -607,11 +799,69 @@ fn onboarding_redirect(session: &Session, path: &str) -> Option<String> {
 
     match session.current_org.as_ref() {
         Some(org) if session.current_org_subscription_status.is_none() => {
-            Some(format!("/@{}/billing/checkout", org.slug))
+            let root = session.billing_org().unwrap_or(org);
+            Some(format!("/@{}/billing/checkout", root.slug))
         }
         None if session.user_orgs.is_empty() => Some("/claim-handle".to_string()),
         _ => None,
     }
+}
+
+fn is_scope_selection_path(path: &str) -> bool {
+    path.starts_with("/switch-org/")
+        || path.starts_with("/switch-env/")
+        || (path.starts_with("/envs/") && path.ends_with("/switch"))
+}
+
+fn is_recovery_path(path: &str, method: &axum::http::Method) -> bool {
+    if is_scope_selection_path(path) {
+        return true;
+    }
+    let read = *method == axum::http::Method::GET || *method == axum::http::Method::HEAD;
+    // A suspended account can still repair payment or choose a subscription.
+    // The middleware and billing handlers both require root administration.
+    if path.starts_with("/billing/")
+        && (read || (path == "/billing/create-checkout" && *method == axum::http::Method::POST))
+    {
+        return true;
+    }
+    if read && (path == "/orgs" || path == "/account" || path == "/account/billing") {
+        return true;
+    }
+    let Some(tail) = path.strip_prefix("/@") else {
+        return false;
+    };
+    let segments: Vec<_> = tail.split('/').collect();
+    if read {
+        return segments.len() == 1
+            || matches!(segments.get(1), Some(&"children" | &"billing" | &"usage"));
+    }
+    segments.last() == Some(&"lifecycle")
+        || (segments.get(1) == Some(&"management-keys") && segments.last() == Some(&"revoke"))
+        || (segments.get(1) == Some(&"billing")
+            && matches!(segments.last(), Some(&"cancel" | &"reactivate")))
+}
+
+fn is_org_control_path(path: &str) -> bool {
+    path.starts_with("/@")
+        || path == "/orgs"
+        || path.starts_with("/orgs/")
+        || path == "/envs"
+        || path.starts_with("/envs/")
+        || path == "/account"
+        || path.starts_with("/account/")
+        || path.starts_with("/settings/alerts")
+        || path.starts_with("/billing/")
+        || path == "/claim-handle"
+}
+
+/// Only attached to the known authentication/onboarding routers, never runtime routes.
+pub async fn onboarding_scope_middleware(request: Request, next: Next) -> Response {
+    with_database_scope(
+        DatabaseScope::Bootstrap(BootstrapOperation::Onboarding),
+        next.run(request),
+    )
+    .await
 }
 
 /// Middleware to check if user is authenticated
@@ -671,6 +921,7 @@ pub async fn session_middleware(
     mut request: Request,
     next: Next,
 ) -> Result<impl IntoResponse, StatusCode> {
+    let db = Arc::new(db.with_scope(DatabaseScope::Bootstrap(BootstrapOperation::Membership)));
     // Store whether this is an HTMX request for later use
     let is_htmx = is_htmx_request(&request);
 
@@ -678,7 +929,8 @@ pub async fn session_middleware(
     if let Some(user_id) = get_user_id_from_cookies(&cookies) {
         // Create session from user_id and cookies
         match Session::from_user_id(&db, &conf, &user_id, &cookies).await {
-            Ok(session) => {
+            Ok(mut session) => {
+                session.select_request_scope(&db, &request).await?;
                 // Check if we need to update cookies due to fallback
                 let mut updated_cookies = cookies.clone();
                 let mut cookies_changed = false;
@@ -732,11 +984,12 @@ pub async fn session_middleware(
                     return Ok((updated_cookies, response));
                 }
 
+                let scope = session.database_scope(request.uri().path());
                 // Add session to request extensions
                 request.extensions_mut().insert(session);
 
                 // Run the handler and get response
-                let response = next.run(request).await;
+                let response = with_database_scope(scope, next.run(request)).await;
 
                 // If cookies were updated, return response with updated cookies
                 if cookies_changed {
@@ -747,7 +1000,7 @@ pub async fn session_middleware(
                 return Ok((cookies, response));
             }
             Err(_) => {
-                // Failed to create session - fall through to local dev auto-login check
+                return Ok((cookies, create_redirect_response(&request, "/signin")));
             }
         }
     }
@@ -805,7 +1058,8 @@ pub async fn session_middleware(
                         )
                         .await
                         {
-                            Ok(session) => {
+                            Ok(mut session) => {
+                                session.select_request_scope(&db, &request).await?;
                                 if let Some(path) =
                                     onboarding_redirect(&session, request.uri().path())
                                 {
@@ -813,6 +1067,7 @@ pub async fn session_middleware(
                                     return Ok((cookies_with_defaults, response));
                                 }
 
+                                let scope = session.database_scope(request.uri().path());
                                 // Add session to request extensions
                                 request.extensions_mut().insert(session);
                                 tracing::debug!(
@@ -822,7 +1077,7 @@ pub async fn session_middleware(
                                 );
 
                                 // Run the request and get the response
-                                let response = next.run(request).await;
+                                let response = with_database_scope(scope, next.run(request)).await;
 
                                 // Return response with cookies
                                 return Ok((cookies_with_defaults, response));
@@ -899,5 +1154,165 @@ pub async fn guest_only_middleware(
     } else {
         // User is not authenticated, continue to the handler (signin page)
         Ok(next.run(request).await)
+    }
+}
+
+#[cfg(test)]
+mod scope_contract_tests {
+    use super::*;
+    use hot::db::org::{CreateChild, Org, OrgLifecycle};
+
+    async fn fixture() -> (DatabasePool, Session, Org, Uuid) {
+        let db = hot::db::test_db().await;
+        let data = hot::db::insert_test_data(&db).await.unwrap();
+        if let DatabasePool::Sqlite(pool) = &db {
+            sqlx::query("UPDATE org SET org_type = 'organization' WHERE org_id = ?")
+                .bind(data.org_id)
+                .execute(pool)
+                .await
+                .unwrap();
+        }
+        let child = Org::create_child(
+            &db,
+            &data.org_id,
+            &data.user_id,
+            &CreateChild {
+                name: "Customer".into(),
+                slug: "scope-child".into(),
+                external_id: None,
+                idempotency_key: "scope-child".into(),
+                hosted: false,
+            },
+        )
+        .await
+        .unwrap();
+        let cookies = CookieJar::new().add(build_cookie(
+            CURRENT_ORG_COOKIE_NAME,
+            data.org_id.to_string(),
+            time::Duration::days(1),
+        ));
+        let session = Session::from_user_id(&db, &hot::val!({}), &data.user_id, &cookies)
+            .await
+            .unwrap();
+        (db, session, child.org, child.env_id)
+    }
+
+    fn request(method: &str, uri: &str) -> Request {
+        Request::builder()
+            .method(method)
+            .uri(uri)
+            .body(axum::body::Body::empty())
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn explicit_page_scope_wins_over_cookie_and_rejects_wrong_env() {
+        let (db, mut session, child, env_id) = fixture().await;
+        let root_id = session.current_org_id().unwrap();
+        session
+            .select_request_scope(
+                &db,
+                &request(
+                    "POST",
+                    &format!("/keys?org_id={}&env_id={env_id}", child.org_id),
+                ),
+            )
+            .await
+            .unwrap();
+        assert_eq!(session.current_org_id(), Some(child.org_id));
+        assert_eq!(session.current_env_id(), Some(env_id));
+        assert_eq!(
+            session.database_scope("/keys"),
+            DatabaseScope::Environment {
+                org_id: child.org_id,
+                env_id
+            }
+        );
+        assert_eq!(
+            session
+                .select_request_scope(
+                    &db,
+                    &request("POST", &format!("/keys?org_id={root_id}&env_id={env_id}"))
+                )
+                .await,
+            Err(StatusCode::NOT_FOUND)
+        );
+    }
+
+    #[tokio::test]
+    async fn invalid_or_missing_mutation_scope_never_falls_back() {
+        let (db, mut session, child, _) = fixture().await;
+        assert_eq!(
+            session
+                .select_request_scope(&db, &request("POST", "/keys"))
+                .await,
+            Err(StatusCode::BAD_REQUEST)
+        );
+        assert_eq!(
+            session
+                .select_request_scope(&db, &request("GET", "/runs?org_id=invalid"))
+                .await,
+            Err(StatusCode::BAD_REQUEST)
+        );
+        assert_eq!(
+            session
+                .select_request_scope(
+                    &db,
+                    &request("GET", &format!("/runs?org_id={}", Uuid::new_v4()))
+                )
+                .await,
+            Err(StatusCode::NOT_FOUND)
+        );
+        session
+            .select_request_scope(&db, &request("GET", &format!("/@{}", child.slug)))
+            .await
+            .unwrap();
+        assert_eq!(session.current_org_id(), Some(child.org_id));
+        let conflicting = Request::builder()
+            .uri(format!("/runs?org_id={}", child.org_id))
+            .header("x-hot-org-id", Uuid::new_v4().to_string())
+            .body(axum::body::Body::empty())
+            .unwrap();
+        assert_eq!(
+            session.select_request_scope(&db, &conflicting).await,
+            Err(StatusCode::BAD_REQUEST)
+        );
+    }
+
+    #[tokio::test]
+    async fn suspended_child_allows_only_admin_recovery() {
+        let (db, mut session, child, env_id) = fixture().await;
+        Org::set_lifecycle(
+            &db,
+            &child.org_id,
+            &session.current_user_id(),
+            OrgLifecycle::Suspended,
+        )
+        .await
+        .unwrap();
+        let url = format!("/runs?org_id={}&env_id={env_id}", child.org_id);
+        assert_eq!(
+            session
+                .select_request_scope(&db, &request("GET", &url))
+                .await,
+            Err(StatusCode::FORBIDDEN)
+        );
+        assert!(is_recovery_path(
+            &format!("/@{}/lifecycle", child.slug),
+            &axum::http::Method::POST
+        ));
+        assert!(!is_recovery_path(
+            &format!("/@{}/users/invite", child.slug),
+            &axum::http::Method::POST
+        ));
+        assert!(!is_recovery_path("/envs/new", &axum::http::Method::POST));
+        assert!(is_recovery_path(
+            "/billing/create-checkout-form",
+            &axum::http::Method::GET
+        ));
+        assert!(is_recovery_path(
+            "/billing/create-checkout",
+            &axum::http::Method::POST
+        ));
     }
 }

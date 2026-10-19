@@ -29,6 +29,7 @@ pub mod source_browser;
 pub mod stores;
 pub mod stream_graph;
 pub mod streams;
+pub mod sub_orgs;
 pub mod tasks;
 pub mod teams;
 pub mod webhooks;
@@ -148,16 +149,13 @@ pub use webhooks::{webhook_service_detail_handler, webhook_services_list_handler
 
 // Common imports that remain in this file
 use crate::auth::Session;
-use ahash::AHashMap;
-use axum::extract::{Path, Query, State};
-use axum::http::HeaderMap;
+use axum::extract::{Path, State};
 use axum::response::{Html, Json, Redirect};
 use axum_extra::extract::CookieJar;
 use hot::db::{DatabasePool, User, UserAuth, UserError};
 use serde_json::Value as JsonValue;
 use std::sync::Arc;
 use time;
-use url::Url;
 use uuid::Uuid;
 
 /// Rehydrate spilled BlobRefs in a persisted JSON payload before rendering it
@@ -234,44 +232,6 @@ pub(crate) async fn rehydrate_events_for_display(
     for event in events {
         rehydrate_json_for_session(blob_store, session, &mut event.event_data).await;
     }
-}
-
-fn is_safe_relative_redirect(path: &str) -> bool {
-    path.starts_with('/') && !path.starts_with("//")
-}
-
-// Helper function to get redirect URL from referrer header
-fn get_redirect_url_from_referrer(headers: &HeaderMap) -> String {
-    let host = headers.get("host").and_then(|h| h.to_str().ok());
-
-    if let Some(referrer) = headers.get("referer").or_else(|| headers.get("referrer"))
-        && let Ok(referrer_str) = referrer.to_str()
-    {
-        if is_safe_relative_redirect(referrer_str) {
-            return referrer_str.to_string();
-        }
-
-        if let (Some(host), Ok(url)) = (host, Url::parse(referrer_str)) {
-            let referrer_host = match url.port() {
-                Some(port) => format!("{}:{}", url.host_str().unwrap_or_default(), port),
-                None => url.host_str().unwrap_or_default().to_string(),
-            };
-
-            if referrer_host.eq_ignore_ascii_case(host) {
-                let mut path = url.path().to_string();
-                if let Some(query) = url.query() {
-                    path.push('?');
-                    path.push_str(query);
-                }
-                if is_safe_relative_redirect(&path) {
-                    return path;
-                }
-            }
-        }
-    }
-
-    // Default to dashboard if no safe referrer
-    "/".to_string()
 }
 
 // Helper function to format value for display
@@ -632,76 +592,9 @@ pub async fn process_invite_code(
     user_id: &Uuid,
     invite_code: &str,
 ) -> Result<(), String> {
-    // Get invite by code
-    let invite = hot::db::invite::Invite::get_invite_by_code(db, invite_code)
+    hot::db::invite::Invite::accept_for_user(db, invite_code, *user_id)
         .await
-        .map_err(|_| "Invalid invite code")?;
-
-    // Check if invite is valid
-    invite
-        .is_valid()
-        .map_err(|e| format!("Invalid invite: {}", e))?;
-
-    // Invites are email-bound: the code alone must not grant org membership.
-    // Enforced here (not just on the /invite accept page) so the signup,
-    // signin, and OAuth invite_code paths all carry the same policy.
-    let user = User::get_user(db, user_id)
-        .await
-        .map_err(|e| format!("Failed to load user: {}", e))?;
-    if !user.email.eq_ignore_ascii_case(&invite.email) {
-        return Err(format!(
-            "This invite was sent to {}. Ask an organization admin to invite {} instead.",
-            invite.email, user.email
-        ));
-    }
-
-    // Check if user is already a member of the organization
-    if hot::db::org::OrgUser::get_org_user(db, &invite.org_id, user_id)
-        .await
-        .is_ok()
-    {
-        return Err("User is already a member of this organization".to_string());
-    }
-
-    // Enforce team_members plan limit
-    let features = hot::db::Features::resolve_for_org(db, &invite.org_id).await;
-    let max_members = features.team_members();
-    if max_members >= 0 {
-        let current_count = hot::db::org::OrgUser::count_active_members(db, &invite.org_id)
-            .await
-            .unwrap_or(0);
-        if current_count >= max_members as i64 {
-            return Err(format!(
-                "This organization has reached its plan limit of {} team members. An admin must upgrade the plan.",
-                max_members
-            ));
-        }
-    }
-
-    // Add user to organization
-    let org_user_id = uuid::Uuid::now_v7();
-    hot::db::org::OrgUser::insert_org_user(
-        db,
-        &org_user_id,
-        &invite.org_id,
-        user_id,
-        Some(invite.intended_org_user_role_id),
-        &invite.created_by_user_id,
-    )
-    .await
-    .map_err(|e| format!("Failed to add user to organization: {}", e))?;
-
-    // Update invite status to joined
-    hot::db::invite::Invite::update_invite_status(
-        db,
-        &invite.invite_id,
-        &hot::db::invite::InviteStatus::Joined,
-        Some(&invite.created_by_user_id),
-    )
-    .await
-    .map_err(|e| format!("Failed to update invite status: {}", e))?;
-
-    Ok(())
+        .map_err(|error| format!("Unable to accept invite: {error}"))
 }
 
 // Helper function to check if user is admin of an organization
@@ -806,45 +699,54 @@ pub fn remove_presence_cookie(cookies: CookieJar) -> CookieJar {
 // Switch handlers for organization and environment navigation
 pub async fn switch_org_handler(
     Path(org_id): Path<Uuid>,
-    State(_db): State<Arc<DatabasePool>>,
-    headers: HeaderMap,
+    State(db): State<Arc<DatabasePool>>,
     cookies: CookieJar,
     axum::extract::Extension(session): axum::extract::Extension<Session>,
 ) -> Result<(CookieJar, Redirect), Html<String>> {
-    // Check if the requested org ID is in the user's organizations
-    if !session.user_orgs.iter().any(|org| org.org_id == org_id) {
-        // User doesn't have access to this org, redirect to dashboard
-        return Ok((cookies, Redirect::to("/")));
-    }
-
-    // Set the current organization cookie
-    let mut cookie = axum_extra::extract::cookie::Cookie::new(
+    let org = session
+        .user_orgs
+        .iter()
+        .find(|org| org.org_id == org_id)
+        .ok_or_else(|| Html("Organization not found".to_string()))?;
+    let scoped = db.with_scope(hot::db::DatabaseScope::Organization { org_id });
+    let envs = hot::db::Env::get_envs_by_org(&scoped, &org_id)
+        .await
+        .map_err(|_| Html("Unable to select environment".to_string()))?;
+    let mut cookies = cookies.add(crate::auth::build_cookie(
         crate::auth::CURRENT_ORG_COOKIE_NAME,
         org_id.to_string(),
-    );
-    cookie.set_path("/");
-    cookie.set_max_age(time::Duration::days(30));
-    cookie.set_http_only(true);
-    cookie.set_same_site(axum_extra::extract::cookie::SameSite::Lax);
-    cookie.set_secure(!hot::env::is_local_dev());
-
-    let updated_cookies = cookies.add(cookie);
-
-    // Redirect back to the previous page or dashboard
-    let redirect_url = get_redirect_url_from_referrer(&headers);
-    Ok((updated_cookies, Redirect::to(&redirect_url)))
+        time::Duration::days(30),
+    ));
+    let redirect = if let Some(env) = envs.first().filter(|_| org.is_admitting()) {
+        cookies = cookies.add(crate::auth::build_cookie(
+            crate::auth::CURRENT_ENV_COOKIE_NAME,
+            env.env_id.to_string(),
+            time::Duration::days(30),
+        ));
+        format!("/dashboard?org_id={}&env_id={}", org_id, env.env_id)
+    } else {
+        cookies = cookies.remove(
+            axum_extra::extract::cookie::Cookie::build((crate::auth::CURRENT_ENV_COOKIE_NAME, ""))
+                .path("/")
+                .build(),
+        );
+        format!("/@{}", org.slug)
+    };
+    Ok((cookies, Redirect::to(&redirect)))
 }
 
 pub async fn switch_env_handler(
     Path(env_id): Path<Uuid>,
-    Query(params): Query<AHashMap<String, String>>,
     State(_db): State<Arc<DatabasePool>>,
-    headers: HeaderMap,
     axum::extract::Extension(session): axum::extract::Extension<Session>,
     cookies: CookieJar,
 ) -> Result<(CookieJar, Redirect), Html<String>> {
     // Check if user has access to this environment
-    if !session.has_env_access(&env_id) {
+    if !session
+        .current_org_envs
+        .iter()
+        .any(|env| env.env_id == env_id)
+    {
         return Err(Html(
             "You don't have access to this environment".to_string(),
         ));
@@ -864,13 +766,13 @@ pub async fn switch_env_handler(
         .build(),
     );
 
-    // Use explicit redirect param if provided (must start with /), otherwise use referrer
-    let redirect_url = params
-        .get("redirect")
-        .filter(|r| is_safe_relative_redirect(r))
-        .cloned()
-        .unwrap_or_else(|| get_redirect_url_from_referrer(&headers));
-    Ok((new_cookies, Redirect::to(&redirect_url)))
+    let org_id = session
+        .current_org_id()
+        .ok_or_else(|| Html("No organization selected".to_string()))?;
+    Ok((
+        new_cookies,
+        Redirect::to(&format!("/dashboard?org_id={org_id}&env_id={env_id}")),
+    ))
 }
 
 // Status handler for health checks
@@ -948,37 +850,4 @@ pub async fn build_permission_path_options(
     };
 
     (mcp_json, webhooks_json)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use axum::http::HeaderValue;
-
-    #[test]
-    fn test_referrer_redirect_accepts_same_host_path() {
-        let mut headers = HeaderMap::new();
-        headers.insert("host", HeaderValue::from_static("app.hot.dev"));
-        headers.insert(
-            "referer",
-            HeaderValue::from_static("https://app.hot.dev/runs?status=failed"),
-        );
-
-        assert_eq!(
-            get_redirect_url_from_referrer(&headers),
-            "/runs?status=failed"
-        );
-    }
-
-    #[test]
-    fn test_referrer_redirect_rejects_external_host() {
-        let mut headers = HeaderMap::new();
-        headers.insert("host", HeaderValue::from_static("app.hot.dev"));
-        headers.insert(
-            "referer",
-            HeaderValue::from_static("https://evil.example/runs"),
-        );
-
-        assert_eq!(get_redirect_url_from_referrer(&headers), "/");
-    }
 }

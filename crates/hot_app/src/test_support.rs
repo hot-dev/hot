@@ -77,6 +77,13 @@ impl TestApp {
 
     pub async fn spawn_with_conf(conf: Val) -> Self {
         let db = setup_db().await;
+        Self::spawn_with_db(db, conf).await
+    }
+
+    /// Exercise the production router against an already migrated database.
+    /// PostgreSQL callers must supply a qualified restricted runtime pool;
+    /// fixture setup and teardown remain outside the application connection.
+    pub async fn spawn_with_db(db: DatabasePool, conf: Val) -> Self {
         let db = Arc::new(db);
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
 
@@ -147,6 +154,13 @@ impl TestClient {
     pub async fn new_with_conf(conf: Val) -> Self {
         Self {
             app: TestApp::spawn_with_conf(conf).await,
+            cookies: CookieJar::default(),
+        }
+    }
+
+    pub async fn new_with_db(db: DatabasePool, conf: Val) -> Self {
+        Self {
+            app: TestApp::spawn_with_db(db, conf).await,
             cookies: CookieJar::default(),
         }
     }
