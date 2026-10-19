@@ -1,3 +1,6 @@
+mod hierarchy;
+pub use hierarchy::{ChildProvisioned, CreateChild, OrgAccess, OrgLifecycle};
+
 use chrono::{DateTime, Utc};
 use serde_json::Value as JsonValue;
 use sqlx::FromRow;
@@ -15,6 +18,12 @@ pub enum OrgError {
     Database(#[from] sqlx::Error),
     #[error("Organization not found")]
     NotFound,
+    #[error("Organization access denied")]
+    Forbidden,
+    #[error("Invalid organization operation: {0}")]
+    Invalid(String),
+    #[error("Organization limit reached")]
+    LimitReached,
 }
 
 /// Organization settings structure stored as JSON
@@ -34,9 +43,12 @@ pub enum OrgError {
 /// SELECT that pulls `org_type` without it, or every read of this struct
 /// will fail at runtime (and silently break flows like `is_available` and
 /// `get_org_by_slug`-based slug recovery in `create_org`).
-#[derive(Debug, Clone, FromRow)]
+#[derive(Debug, Clone, FromRow, serde::Serialize)]
 pub struct Org {
     pub org_id: Uuid,
+    pub parent_org_id: Option<Uuid>,
+    pub external_id: Option<String>,
+    pub lifecycle_state: String,
     pub name: String,
     pub slug: String,
     pub org_type: String,
@@ -89,14 +101,17 @@ pub struct OrgUserWithRole {
 impl Org {
     /// Get organization by ID
     pub async fn get_org(db: &crate::db::DatabasePool, org_id: &Uuid) -> Result<Org, OrgError> {
-        if let Some(org) = ORG_CACHE.get(org_id) {
+        // PostgreSQL reads must reach RLS even when an identity was cached by
+        // another request. SQLite keeps the local identity cache.
+        if matches!(db, crate::db::DatabasePool::Sqlite(_))
+            && let Some(org) = ORG_CACHE.get(org_id) {
             return Ok(org);
         }
 
         let org = match db {
             crate::db::DatabasePool::Postgres(pg_pool) => {
                 sqlx::query_as::<_, Org>(
-                    "SELECT org_id, name, slug, org_type::text AS org_type, settings, active, created_at, created_by_user_id, updated_at, updated_by_user_id, active_toggle_at, active_toggle_by_user_id FROM org WHERE org_id = $1",
+                    "SELECT org_id, parent_org_id, external_id, lifecycle_state, name, slug, org_type::text AS org_type, settings, active, created_at, created_by_user_id, updated_at, updated_by_user_id, active_toggle_at, active_toggle_by_user_id FROM org WHERE org_id = $1",
                 )
                 .bind(org_id)
                 .fetch_one(pg_pool)
@@ -104,7 +119,7 @@ impl Org {
             }
             crate::db::DatabasePool::Sqlite(sqlite_pool) => {
                 sqlx::query_as::<_, Org>(
-                    "SELECT org_id, name, slug, org_type, settings, active, created_at, created_by_user_id, updated_at, updated_by_user_id, active_toggle_at, active_toggle_by_user_id FROM org WHERE org_id = ?"
+                    "SELECT org_id, parent_org_id, external_id, lifecycle_state, name, slug, org_type, settings, active, created_at, created_by_user_id, updated_at, updated_by_user_id, active_toggle_at, active_toggle_by_user_id FROM org WHERE org_id = ?"
                 )
                 .bind(org_id)
                 .fetch_one(sqlite_pool)
@@ -147,7 +162,7 @@ impl Org {
         match db {
             crate::db::DatabasePool::Postgres(pg_pool) => {
                 let org = sqlx::query_as::<_, Org>(
-                    "SELECT org_id, name, slug, org_type::text AS org_type, settings, active, created_at, created_by_user_id, updated_at, updated_by_user_id, active_toggle_at, active_toggle_by_user_id FROM org ORDER BY created_at LIMIT 1"
+                    "SELECT org_id, parent_org_id, external_id, lifecycle_state, name, slug, org_type::text AS org_type, settings, active, created_at, created_by_user_id, updated_at, updated_by_user_id, active_toggle_at, active_toggle_by_user_id FROM org ORDER BY created_at LIMIT 1"
                 )
                 .fetch_one(pg_pool)
                 .await?;
@@ -155,7 +170,7 @@ impl Org {
             }
             crate::db::DatabasePool::Sqlite(sqlite_pool) => {
                 let org = sqlx::query_as::<_, Org>(
-                    "SELECT org_id, name, slug, org_type, settings, active, created_at, created_by_user_id, updated_at, updated_by_user_id, active_toggle_at, active_toggle_by_user_id FROM org ORDER BY created_at LIMIT 1"
+                    "SELECT org_id, parent_org_id, external_id, lifecycle_state, name, slug, org_type, settings, active, created_at, created_by_user_id, updated_at, updated_by_user_id, active_toggle_at, active_toggle_by_user_id FROM org ORDER BY created_at LIMIT 1"
                 )
                 .fetch_one(sqlite_pool)
                 .await?;
@@ -226,42 +241,42 @@ impl Org {
         Ok(())
     }
 
-    /// Get all organizations by user ID
+    /// Organizations visible to an active user, including inherited child access.
+    /// Root administrators retain administrative discovery for recovery even when
+    /// an organization is suspended. Callers must still check runtime admission.
     pub async fn get_orgs_by_user(
         db: &crate::db::DatabasePool,
         user_id: &Uuid,
     ) -> Result<Vec<Org>, OrgError> {
-        match db {
-            crate::db::DatabasePool::Postgres(pg_pool) => {
-                let orgs = sqlx::query_as::<_, Org>(
-                    r#"
-                    SELECT o.org_id, o.name, o.slug, o.org_type::text AS org_type, o.settings, o.active, o.created_at, o.created_by_user_id, o.updated_at, o.updated_by_user_id, o.active_toggle_at, o.active_toggle_by_user_id
-                    FROM org o
-                    INNER JOIN org_user ou ON o.org_id = ou.org_id
-                    WHERE ou.user_id = $1
-                    ORDER BY o.created_at
-                    "#,
-                )
-                .bind(user_id)
-                .fetch_all(pg_pool)
-                .await?;
-                Ok(orgs)
-            }
-            crate::db::DatabasePool::Sqlite(sqlite_pool) => {
-                let orgs = sqlx::query_as::<_, Org>(
-                    r#"
-                    SELECT o.org_id, o.name, o.slug, o.org_type, o.settings, o.active, o.created_at, o.created_by_user_id, o.updated_at, o.updated_by_user_id, o.active_toggle_at, o.active_toggle_by_user_id
-                    FROM org o
-                    INNER JOIN org_user ou ON o.org_id = ou.org_id
-                    WHERE ou.user_id = ?
-                    ORDER BY o.created_at
-                    "#,
-                )
-                .bind(user_id)
-                .fetch_all(sqlite_pool)
-                .await?;
-                Ok(orgs)
-            }
+        let db = db.with_scope(super::DatabaseScope::Bootstrap(super::BootstrapOperation::Membership));
+        match &db {
+            crate::db::DatabasePool::Postgres(pool) => Ok(sqlx::query_as::<_, Org>(
+                r#"SELECT o.org_id, o.parent_org_id, o.external_id, o.lifecycle_state, o.name, o.slug,
+                    o.org_type::text AS org_type, o.settings, o.active, o.created_at,
+                    o.created_by_user_id, o.updated_at, o.updated_by_user_id,
+                    o.active_toggle_at, o.active_toggle_by_user_id
+                FROM org o JOIN org root ON root.org_id = COALESCE(o.parent_org_id, o.org_id)
+                JOIN org_user ru ON ru.org_id = root.org_id AND ru.user_id = $1 AND ru.active = true
+                JOIN "user" u ON u.user_id = ru.user_id AND u.active = true
+                WHERE ru.org_user_role_id = 2 OR
+                    (root.active = true AND o.active = true AND (o.parent_org_id IS NULL OR EXISTS
+                        (SELECT 1 FROM org_user cu WHERE cu.org_id = o.org_id
+                         AND cu.user_id = $1 AND cu.active = true)))
+                ORDER BY root.created_at, o.parent_org_id NULLS FIRST, o.created_at"#
+            ).bind(user_id).fetch_all(pool).await?),
+            crate::db::DatabasePool::Sqlite(pool) => Ok(sqlx::query_as::<_, Org>(
+                r#"SELECT o.org_id, o.parent_org_id, o.external_id, o.lifecycle_state, o.name, o.slug,
+                    o.org_type, o.settings, o.active, o.created_at, o.created_by_user_id,
+                    o.updated_at, o.updated_by_user_id, o.active_toggle_at, o.active_toggle_by_user_id
+                FROM org o JOIN org root ON root.org_id = COALESCE(o.parent_org_id, o.org_id)
+                JOIN org_user ru ON ru.org_id = root.org_id AND ru.user_id = ?1 AND ru.active = 1
+                JOIN user u ON u.user_id = ru.user_id AND u.active = 1
+                WHERE ru.org_user_role_id = 2 OR
+                    (root.active = 1 AND o.active = 1 AND (o.parent_org_id IS NULL OR EXISTS
+                        (SELECT 1 FROM org_user cu WHERE cu.org_id = o.org_id
+                         AND cu.user_id = ?1 AND cu.active = 1)))
+                ORDER BY root.created_at, o.parent_org_id NULLS FIRST, o.created_at"#
+            ).bind(user_id).fetch_all(pool).await?),
         }
     }
 
@@ -274,10 +289,10 @@ impl Org {
             crate::db::DatabasePool::Postgres(pg_pool) => {
                 let org = sqlx::query_as::<_, Org>(
                     r#"
-                    SELECT o.org_id, o.name, o.slug, o.org_type::text AS org_type, o.settings, o.active, o.created_at, o.created_by_user_id, o.updated_at, o.updated_by_user_id, o.active_toggle_at, o.active_toggle_by_user_id
+                    SELECT o.org_id, o.parent_org_id, o.external_id, o.lifecycle_state, o.name, o.slug, o.org_type::text AS org_type, o.settings, o.active, o.created_at, o.created_by_user_id, o.updated_at, o.updated_by_user_id, o.active_toggle_at, o.active_toggle_by_user_id
                     FROM org o
                     INNER JOIN org_user ou ON o.org_id = ou.org_id
-                    WHERE ou.user_id = $1 AND o.org_type = 'individual'
+                    WHERE ou.user_id = $1 AND ou.active = true AND o.active = true AND o.org_type = 'individual'
                     LIMIT 1
                     "#,
                 )
@@ -289,10 +304,10 @@ impl Org {
             crate::db::DatabasePool::Sqlite(sqlite_pool) => {
                 let org = sqlx::query_as::<_, Org>(
                     r#"
-                    SELECT o.org_id, o.name, o.slug, o.org_type, o.settings, o.active, o.created_at, o.created_by_user_id, o.updated_at, o.updated_by_user_id, o.active_toggle_at, o.active_toggle_by_user_id
+                    SELECT o.org_id, o.parent_org_id, o.external_id, o.lifecycle_state, o.name, o.slug, o.org_type, o.settings, o.active, o.created_at, o.created_by_user_id, o.updated_at, o.updated_by_user_id, o.active_toggle_at, o.active_toggle_by_user_id
                     FROM org o
                     INNER JOIN org_user ou ON o.org_id = ou.org_id
-                    WHERE ou.user_id = ? AND o.org_type = 'individual'
+                    WHERE ou.user_id = ? AND ou.active = 1 AND o.active = 1 AND o.org_type = 'individual'
                     LIMIT 1
                     "#,
                 )
@@ -312,7 +327,7 @@ impl Org {
         match db {
             crate::db::DatabasePool::Postgres(pg_pool) => {
                 let org = sqlx::query_as::<_, Org>(
-                    "SELECT org_id, name, slug, org_type::text AS org_type, settings, active, created_at, created_by_user_id, updated_at, updated_by_user_id, active_toggle_at, active_toggle_by_user_id FROM org WHERE slug = $1",
+                    "SELECT org_id, parent_org_id, external_id, lifecycle_state, name, slug, org_type::text AS org_type, settings, active, created_at, created_by_user_id, updated_at, updated_by_user_id, active_toggle_at, active_toggle_by_user_id FROM org WHERE slug = $1",
                 )
                 .bind(slug)
                 .fetch_one(pg_pool)
@@ -321,7 +336,7 @@ impl Org {
             }
             crate::db::DatabasePool::Sqlite(sqlite_pool) => {
                 let org = sqlx::query_as::<_, Org>(
-                    "SELECT org_id, name, slug, org_type, settings, active, created_at, created_by_user_id, updated_at, updated_by_user_id, active_toggle_at, active_toggle_by_user_id FROM org WHERE slug = ?"
+                    "SELECT org_id, parent_org_id, external_id, lifecycle_state, name, slug, org_type, settings, active, created_at, created_by_user_id, updated_at, updated_by_user_id, active_toggle_at, active_toggle_by_user_id FROM org WHERE slug = ?"
                 )
                 .bind(slug)
                 .fetch_one(sqlite_pool)
@@ -343,7 +358,7 @@ impl Org {
         match db {
             crate::db::DatabasePool::Postgres(pg_pool) => {
                 let orgs = sqlx::query_as::<_, Org>(
-                    "SELECT org_id, name, slug, org_type::text AS org_type, settings, active, created_at, created_by_user_id, updated_at, updated_by_user_id, active_toggle_at, active_toggle_by_user_id FROM org ORDER BY created_at DESC LIMIT $1 OFFSET $2",
+                    "SELECT org_id, parent_org_id, external_id, lifecycle_state, name, slug, org_type::text AS org_type, settings, active, created_at, created_by_user_id, updated_at, updated_by_user_id, active_toggle_at, active_toggle_by_user_id FROM org ORDER BY created_at DESC LIMIT $1 OFFSET $2",
                 )
                 .bind(limit)
                 .bind(offset)
@@ -353,7 +368,7 @@ impl Org {
             }
             crate::db::DatabasePool::Sqlite(sqlite_pool) => {
                 let orgs = sqlx::query_as::<_, Org>(
-                    "SELECT org_id, name, slug, org_type, settings, active, created_at, created_by_user_id, updated_at, updated_by_user_id, active_toggle_at, active_toggle_by_user_id FROM org ORDER BY created_at DESC LIMIT ? OFFSET ?",
+                    "SELECT org_id, parent_org_id, external_id, lifecycle_state, name, slug, org_type, settings, active, created_at, created_by_user_id, updated_at, updated_by_user_id, active_toggle_at, active_toggle_by_user_id FROM org ORDER BY created_at DESC LIMIT ? OFFSET ?",
                 )
                 .bind(limit)
                 .bind(offset)
@@ -611,6 +626,11 @@ impl OrgUser {
         active: bool,
         updated_by_user_id: &Uuid,
     ) -> Result<(), OrgError> {
+        let root_id = Org::billing_owner_id_for(db, org_id).await?;
+        let db = db.with_scope(super::DatabaseScope::Maintenance {
+            operation: super::MaintenanceOperation::OrganizationProvisioning, org_id: Some(root_id),
+        });
+        let db = &db;
         match db {
             crate::db::DatabasePool::Postgres(pg_pool) => {
                 sqlx::query("UPDATE org_user SET org_user_role_id = $3, active = $4, updated_at = NOW(), updated_by_user_id = $5 WHERE org_id = $1 AND user_id = $2")
@@ -669,6 +689,11 @@ impl OrgUser {
         org_id: &Uuid,
         user_id: &Uuid,
     ) -> Result<(), OrgError> {
+        let root_id = Org::billing_owner_id_for(db, org_id).await?;
+        let db = db.with_scope(super::DatabaseScope::Maintenance {
+            operation: super::MaintenanceOperation::OrganizationProvisioning, org_id: Some(root_id),
+        });
+        let db = &db;
         match db {
             crate::db::DatabasePool::Postgres(pg_pool) => {
                 sqlx::query("DELETE FROM org_user WHERE org_id = $1 AND user_id = $2")

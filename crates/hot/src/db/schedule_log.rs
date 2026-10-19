@@ -1,5 +1,5 @@
 use chrono::{DateTime, Utc};
-use sqlx::{FromRow, Pool, Postgres, Sqlite};
+use sqlx::{FromRow, Pool, Sqlite};
 use thiserror::Error;
 use uuid::Uuid;
 
@@ -81,7 +81,7 @@ impl ScheduleLog {
     }
 
     async fn get_last_execution_time_postgres(
-        pool: &Pool<Postgres>,
+        pool: &crate::db::ScopedPgPool,
         schedule_id: &Uuid,
     ) -> Result<Option<DateTime<Utc>>, ScheduleLogError> {
         let result: Option<(DateTime<Utc>,)> = sqlx::query_as(

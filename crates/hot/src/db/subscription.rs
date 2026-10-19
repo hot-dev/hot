@@ -15,6 +15,8 @@ pub enum PlanError {
     NotFound,
     #[error("Invalid plan")]
     InvalidPlan,
+    #[error("Invalid organization: {0}")]
+    InvalidOrganization(String),
 }
 
 /// Subscription Plan
@@ -280,6 +282,13 @@ impl OrgPlan {
 
     /// Get subscription by organization ID
     pub async fn get_by_org_id(db: &DatabasePool, org_id: &Uuid) -> Result<Self, PlanError> {
+        let root_id = super::org::Org::billing_owner_id_for(db, org_id).await
+            .map_err(|error| PlanError::InvalidOrganization(error.to_string()))?;
+        let db = db.with_scope(super::DatabaseScope::Maintenance {
+            operation: super::MaintenanceOperation::Billing, org_id: Some(root_id),
+        });
+        let org_id = &root_id;
+        let db = &db;
         match db {
             DatabasePool::Postgres(pool) => {
                 let subscription =
@@ -310,6 +319,10 @@ impl OrgPlan {
         billing_period: BillingPeriod,
         created_by_user_id: &Uuid,
     ) -> Result<Self, PlanError> {
+        if super::org::Org::billing_owner_id_for(db, org_id).await
+            .map_err(|error| PlanError::InvalidOrganization(error.to_string()))? != *org_id {
+            return Err(PlanError::InvalidOrganization("child subscriptions are managed by the root".into()));
+        }
         let org_plan_id = Uuid::now_v7();
         let billing_period_str = billing_period.as_str();
 
@@ -652,6 +665,16 @@ impl OrgPlan {
 ///
 /// Returns -1 for unlimited (never delete).
 pub async fn call_deletion_days_for_org(db: &DatabasePool, org_id: &Uuid) -> i32 {
+    let root_id = match super::org::Org::billing_owner_id_for(db, org_id).await {
+        Ok(id) => id,
+        Err(_) => return 0,
+    };
+    let db = db.with_scope(super::DatabaseScope::Maintenance {
+        operation: super::MaintenanceOperation::Billing, org_id: Some(root_id),
+    });
+    let db = &db;
+    let org_id = &root_id;
+
     use super::features::keys;
 
     // Check for an explicit per-org override (not merged with plan)
@@ -844,6 +867,38 @@ pub struct OrgUsageStats {
 }
 
 impl OrgUsageStats {
+    /// Account usage for authorized billing and quota operations. Runtime data
+    /// remains attributed to its actual org; root directory seats are counted once.
+    pub async fn calculate_account(
+        db: &DatabasePool, org_id: &Uuid, period_start: DateTime<Utc>, retention_days: i32,
+    ) -> Result<Self, PlanError> {
+        let root_id = super::org::Org::billing_owner_id_for(db, org_id).await
+            .map_err(|error| PlanError::InvalidOrganization(error.to_string()))?;
+        let db = db.with_scope(super::DatabaseScope::Maintenance {
+            operation: super::MaintenanceOperation::Billing, org_id: Some(root_id),
+        });
+        let mut total = Self::calculate(&db, &root_id, period_start, retention_days).await?;
+        let children = super::org::Org::list_children(&db, &root_id).await
+            .map_err(|error| PlanError::InvalidOrganization(error.to_string()))?;
+        for child in children {
+            let usage = Self::calculate(&db, &child.org_id, period_start, retention_days).await?;
+            total.runs_this_period += usage.runs_this_period;
+            total.file_storage_bytes += usage.file_storage_bytes;
+            total.call_storage_bytes += usage.call_storage_bytes;
+            total.call_count += usage.call_count;
+            total.oldest_call_time = match (total.oldest_call_time, usage.oldest_call_time) {
+                (Some(a), Some(b)) => Some(a.min(b)), (a, b) => a.or(b),
+            };
+            total.store_storage_bytes += usage.store_storage_bytes;
+            total.blob_storage_bytes += usage.blob_storage_bytes;
+            total.tasks_this_period += usage.tasks_this_period;
+            total.task_duration_ms += usage.task_duration_ms;
+            total.compute_units += usage.compute_units;
+            total.active_schedules += usage.active_schedules;
+        }
+        Ok(total)
+    }
+
     /// Calculate real-time usage statistics for an organization
     pub async fn calculate(
         db: &DatabasePool,
@@ -862,7 +917,7 @@ impl OrgUsageStats {
     }
 
     async fn calculate_postgres(
-        pool: &sqlx::PgPool,
+        pool: &crate::db::ScopedPgPool,
         org_id: &Uuid,
         period_start: DateTime<Utc>,
         retention_days: i32,

@@ -1,5 +1,5 @@
 use chrono::{DateTime, Utc};
-use sqlx::{Pool, Postgres, Sqlite};
+use sqlx::{Pool, Sqlite};
 use thiserror::Error;
 
 #[derive(Error, Debug)]
@@ -26,7 +26,7 @@ impl SchedulerState {
     }
 
     async fn get_last_sync_time_postgres(
-        pool: &Pool<Postgres>,
+        pool: &crate::db::ScopedPgPool,
     ) -> Result<Option<DateTime<Utc>>, SchedulerStateError> {
         let result: Option<(DateTime<Utc>,)> = sqlx::query_as(
             "SELECT last_successful_sync_time 

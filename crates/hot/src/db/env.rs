@@ -55,10 +55,18 @@ impl Env {
 
     /// Get environment by ID
     pub async fn get_env(db: &crate::db::DatabasePool, env_id: &Uuid) -> Result<Env, EnvError> {
-        if let Some(env) = ENV_CACHE.get(env_id) {
+        if matches!(db, crate::db::DatabasePool::Sqlite(_))
+            && let Some(env) = ENV_CACHE.get(env_id) {
             return Ok(env);
         }
+        let env = Self::get_env_uncached(db, env_id).await?;
+        ENV_CACHE.insert(*env_id, env.clone());
+        Ok(env)
+    }
 
+    /// Authoritative environment metadata for admission and authorization.
+    /// Entity-cache entries must never extend access after suspension.
+    pub async fn get_env_uncached(db: &crate::db::DatabasePool, env_id: &Uuid) -> Result<Env, EnvError> {
         let env = match db {
             crate::db::DatabasePool::Postgres(pg_pool) => {
                 sqlx::query_as::<_, Env>(
@@ -78,7 +86,6 @@ impl Env {
             }
         };
 
-        ENV_CACHE.insert(*env_id, env.clone());
         Ok(env)
     }
 

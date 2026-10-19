@@ -1,6 +1,6 @@
 use ahash::AHashMap;
 use serde_json::Value as JsonValue;
-use sqlx::{FromRow, Pool, Postgres, Sqlite};
+use sqlx::{FromRow, Pool, Sqlite};
 use std::sync::{Arc, LazyLock, Mutex};
 use thiserror::Error;
 use uuid::Uuid;
@@ -112,7 +112,7 @@ impl EventHandler {
     }
 
     async fn get_event_handler_postgres(
-        db: &Pool<Postgres>,
+        db: &crate::db::ScopedPgPool,
         event_handler_id: &Uuid,
     ) -> Result<EventHandler, EventHandlerError> {
         let event_handler = sqlx::query_as::<_, EventHandler>(
@@ -162,7 +162,7 @@ impl EventHandler {
     }
 
     async fn get_event_handlers_by_build_postgres(
-        db: &Pool<Postgres>,
+        db: &crate::db::ScopedPgPool,
         build_id: &Uuid,
         limit: Option<i64>,
         offset: Option<i64>,
@@ -226,7 +226,7 @@ impl EventHandler {
     }
 
     async fn get_event_handlers_by_event_type_postgres(
-        db: &Pool<Postgres>,
+        db: &crate::db::ScopedPgPool,
         event_type: &str,
         limit: Option<i64>,
         offset: Option<i64>,
@@ -280,7 +280,8 @@ impl EventHandler {
         event_type: &str,
     ) -> Result<Vec<EventHandler>, EventHandlerError> {
         let cache_key = (*build_id, event_type.to_string());
-        if let Ok(cache) = BUILD_EVENT_HANDLER_CACHE.lock()
+        if matches!(db, crate::db::DatabasePool::Sqlite(_))
+            && let Ok(cache) = BUILD_EVENT_HANDLER_CACHE.lock()
             && let Some(cached) = cache.get(&cache_key)
             && cached.cached_at.elapsed() < EVENT_HANDLER_REVISION_RECHECK_INTERVAL
         {
@@ -363,7 +364,7 @@ impl EventHandler {
     }
 
     async fn get_runtime_visible_event_handlers_by_build_postgres(
-        db: &Pool<Postgres>,
+        db: &crate::db::ScopedPgPool,
         build_id: &Uuid,
         event_type: &str,
     ) -> Result<Vec<EventHandler>, EventHandlerError> {
@@ -413,7 +414,7 @@ impl EventHandler {
     }
 
     async fn get_event_handlers_by_build_and_event_type_postgres(
-        db: &Pool<Postgres>,
+        db: &crate::db::ScopedPgPool,
         build_id: &Uuid,
         event_type: &str,
         limit: Option<i64>,
@@ -450,7 +451,8 @@ impl EventHandler {
         // Local deployment paths invalidate this cache synchronously. For
         // cross-process deployments, re-check the authoritative revision on a
         // short interval instead of issuing one PostgreSQL query per event.
-        if let Ok(cache) = EVENT_HANDLER_CACHE.lock()
+        if matches!(db, crate::db::DatabasePool::Sqlite(_))
+            && let Ok(cache) = EVENT_HANDLER_CACHE.lock()
             && let Some(cached) = cache.get(&cache_key)
             && cached.cached_at.elapsed() < EVENT_HANDLER_REVISION_RECHECK_INTERVAL
         {
@@ -469,7 +471,8 @@ impl EventHandler {
             .map_err(|e| EventHandlerError::RuntimeRevision(e.to_string()))?;
 
         // Check cache first
-        if let Ok(mut cache) = EVENT_HANDLER_CACHE.lock()
+        if matches!(db, crate::db::DatabasePool::Sqlite(_))
+            && let Ok(mut cache) = EVENT_HANDLER_CACHE.lock()
             && let Some(cached) = cache.get_mut(&cache_key)
         {
             if cached.runtime_revision == runtime_revision {
@@ -622,7 +625,7 @@ impl EventHandler {
     }
 
     async fn get_event_handlers_by_env_and_event_type_postgres(
-        db: &Pool<Postgres>,
+        db: &crate::db::ScopedPgPool,
         env_id: &Uuid,
         event_type: &str,
     ) -> Result<Vec<EventHandler>, EventHandlerError> {
@@ -839,7 +842,7 @@ impl EventHandler {
 
     #[allow(clippy::too_many_arguments)]
     async fn insert_event_handler_postgres(
-        db: &Pool<Postgres>,
+        db: &crate::db::ScopedPgPool,
         event_handler_id: &Uuid,
         build_id: &Uuid,
         event_type: &str,

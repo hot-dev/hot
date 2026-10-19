@@ -1,5 +1,5 @@
 use serde_json::Value as JsonValue;
-use sqlx::{FromRow, Pool, Postgres, Sqlite};
+use sqlx::{FromRow, Pool, Sqlite};
 use thiserror::Error;
 use uuid::Uuid;
 
@@ -131,7 +131,7 @@ impl Webhook {
     }
 
     async fn get_webhook_postgres(
-        db: &Pool<Postgres>,
+        db: &crate::db::ScopedPgPool,
         webhook_id: &Uuid,
     ) -> Result<Webhook, WebhookError> {
         let endpoint = sqlx::query_as::<_, Webhook>(
@@ -213,7 +213,7 @@ impl Webhook {
     }
 
     async fn get_by_env_service_path_method_postgres(
-        db: &Pool<Postgres>,
+        db: &crate::db::ScopedPgPool,
         env_id: &Uuid,
         service: &str,
         path: &str,
@@ -290,7 +290,7 @@ impl Webhook {
     }
 
     async fn get_by_env_and_service_postgres(
-        db: &Pool<Postgres>,
+        db: &crate::db::ScopedPgPool,
         env_id: &Uuid,
         service: &str,
     ) -> Result<Vec<Webhook>, WebhookError> {
@@ -354,7 +354,7 @@ impl Webhook {
     }
 
     async fn get_by_env_postgres(
-        db: &Pool<Postgres>,
+        db: &crate::db::ScopedPgPool,
         env_id: &Uuid,
     ) -> Result<Vec<WebhookWithProject>, WebhookError> {
         let endpoints = sqlx::query_as::<_, WebhookWithProject>(
@@ -501,7 +501,7 @@ impl Webhook {
 
     #[allow(clippy::too_many_arguments)]
     async fn insert_webhook_postgres(
-        db: &Pool<Postgres>,
+        db: &crate::db::ScopedPgPool,
         webhook_id: &Uuid,
         build_id: &Uuid,
         service: &str,
@@ -687,7 +687,7 @@ impl Webhook {
     }
 
     async fn find_existing_webhook_id_postgres(
-        db: &Pool<Postgres>,
+        db: &crate::db::ScopedPgPool,
         build_id: &Uuid,
         service: &str,
         path: &str,

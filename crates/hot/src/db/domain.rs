@@ -8,7 +8,7 @@
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use sqlx::{FromRow, Pool, Postgres, Sqlite};
+use sqlx::{FromRow, Pool, Sqlite};
 use std::error::Error;
 use std::fmt;
 use uuid::Uuid;
@@ -344,7 +344,7 @@ impl Domain {
     }
 
     async fn insert_postgres(
-        db: &Pool<Postgres>,
+        db: &crate::db::ScopedPgPool,
         domain_id: &Uuid,
         env_id: &Uuid,
         domain: &str,
@@ -399,7 +399,7 @@ impl Domain {
     }
 
     async fn get_domain_postgres(
-        db: &Pool<Postgres>,
+        db: &crate::db::ScopedPgPool,
         domain_id: &Uuid,
     ) -> Result<Domain, DomainError> {
         let query = format!("SELECT {} FROM domain WHERE domain_id = $1", DOMAIN_COLUMNS);
@@ -449,7 +449,7 @@ impl Domain {
     }
 
     async fn get_by_domain_name_postgres(
-        db: &Pool<Postgres>,
+        db: &crate::db::ScopedPgPool,
         domain_name: &str,
     ) -> Result<Domain, DomainError> {
         let query = format!(
@@ -494,7 +494,7 @@ impl Domain {
     }
 
     async fn list_by_env_postgres(
-        db: &Pool<Postgres>,
+        db: &crate::db::ScopedPgPool,
         env_id: &Uuid,
     ) -> Result<Vec<Domain>, DomainError> {
         let query = format!(
@@ -529,7 +529,7 @@ impl Domain {
         )
     }
 
-    async fn list_unverified_postgres(db: &Pool<Postgres>) -> Result<Vec<Domain>, DomainError> {
+    async fn list_unverified_postgres(db: &crate::db::ScopedPgPool) -> Result<Vec<Domain>, DomainError> {
         let query = format!(
             "SELECT {} FROM domain WHERE verified_at IS NULL AND deleted_at IS NULL ORDER BY created_at ASC",
             DOMAIN_COLUMNS
@@ -686,7 +686,7 @@ impl Domain {
     }
 
     async fn mark_verified_postgres(
-        db: &Pool<Postgres>,
+        db: &crate::db::ScopedPgPool,
         domain_id: &Uuid,
     ) -> Result<(), DomainError> {
         sqlx::query("UPDATE domain SET verified_at = now() WHERE domain_id = $1")
@@ -723,7 +723,7 @@ impl Domain {
     }
 
     async fn mark_tls_provisioned_postgres(
-        db: &Pool<Postgres>,
+        db: &crate::db::ScopedPgPool,
         domain_id: &Uuid,
     ) -> Result<(), DomainError> {
         sqlx::query("UPDATE domain SET tls_provisioned_at = now() WHERE domain_id = $1")

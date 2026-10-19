@@ -1,5 +1,5 @@
 use serde_json::Value as JsonValue;
-use sqlx::{FromRow, Pool, Postgres, Sqlite};
+use sqlx::{FromRow, Pool, Sqlite};
 use thiserror::Error;
 use uuid::Uuid;
 
@@ -130,7 +130,7 @@ impl Agent {
 
     #[allow(clippy::too_many_arguments)]
     async fn insert_agent_postgres(
-        db: &Pool<Postgres>,
+        db: &crate::db::ScopedPgPool,
         agent_id: &Uuid,
         build_id: &Uuid,
         env_id: &Uuid,

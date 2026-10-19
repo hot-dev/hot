@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 use chrono::Utc;
-use sqlx::{PgPool, Row};
+use sqlx::Row;
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 use uuid::Uuid;
@@ -23,6 +23,7 @@ pub struct PgStore {
 
 impl PgStore {
     pub fn new(pool: Arc<DatabasePool>, org_id: Uuid, env_id: Uuid) -> Self {
+        let pool = Arc::new(pool.with_scope(crate::db::DatabaseScope::Environment { org_id, env_id }));
         Self {
             pool,
             org_id,
@@ -31,7 +32,7 @@ impl PgStore {
         }
     }
 
-    fn pg_pool(&self) -> Result<&PgPool, String> {
+    fn pg_pool(&self) -> Result<&crate::db::ScopedPgPool, String> {
         match self.pool.as_ref() {
             DatabasePool::Postgres(pg) => Ok(pg),
             _ => Err("PgStore requires a Postgres database pool".to_string()),
@@ -112,13 +113,7 @@ impl PgStore {
             .collect()
     }
 
-    fn quote_ident(identifier: &str) -> String {
-        format!("\"{}\"", identifier.replace('"', "\"\""))
-    }
 
-    fn quote_literal(value: &str) -> String {
-        format!("'{}'", value.replace('\'', "''"))
-    }
 }
 
 fn cosine_similarity(a: &[f32], b: &[f32]) -> f64 {
@@ -192,30 +187,8 @@ impl Store for PgStore {
             .map_err(|e| format!("Failed to update embedding_conf for '{}': {e}", config.name))?;
         }
 
-        // Create a per-store HNSW index for vector search if embeddings are enabled.
-        // The column is dimension-less `vector`, so the index is scoped per-store via
-        // a partial WHERE clause. This allows different stores to use different models.
-        if config.embedding_model.is_some() {
-            let hash =
-                blake3::hash(format!("{}:{}:{}", self.org_id, self.env_id, config.name).as_bytes());
-            let idx_name = format!("idx_sme_emb_{}", &hash.to_hex()[..24]);
-            let create_idx = format!(
-                "CREATE INDEX IF NOT EXISTS {} ON store_map_entry USING hnsw (embedding vector_cosine_ops) WHERE org_id = {}::uuid AND env_id = {}::uuid AND store_name = {} AND embedding IS NOT NULL",
-                Self::quote_ident(&idx_name),
-                Self::quote_literal(&self.org_id.to_string()),
-                Self::quote_literal(&self.env_id.to_string()),
-                Self::quote_literal(&config.name)
-            );
-            if let Err(e) = sqlx::query(sqlx::AssertSqlSafe(create_idx.as_str()))
-                .execute(pg)
-                .await
-            {
-                tracing::warn!(
-                    "Failed to create HNSW index for store '{}': {e}",
-                    config.name
-                );
-            }
-        }
+        // Index DDL is performed by the separately credentialed resource
+        // provisioner. Runtime connections must not own customer-data tables.
 
         self.ensured.lock().unwrap().insert(config.name.clone());
         Ok(())
@@ -646,15 +619,16 @@ impl Store for PgStore {
                 let qe = query_embedding.ok_or("Semantic search requires an embedding")?;
                 let vec_literal = Self::embedding_to_pgvector_literal(&qe);
 
-                let rows = sqlx::query(
-                    "SELECT key, value, seq, embedding::text as embedding_text, created_at, updated_at,
-                            1 - (embedding <=> $5::vector) as score
+                let dimensions = qe.len();
+                if dimensions == 0 { return Err("Semantic search requires a nonempty embedding".into()); }
+                let statement = format!("SELECT key, value, seq, embedding::text as embedding_text, created_at, updated_at,
+                            1 - (embedding::vector({dimensions}) <=> $5::vector({dimensions})) as score
                      FROM store_map_entry
                      WHERE org_id = $1 AND env_id = $2 AND store_name = $3
-                       AND embedding IS NOT NULL
-                     ORDER BY embedding <=> $5::vector
-                     LIMIT $4",
-                )
+                       AND embedding IS NOT NULL AND vector_dims(embedding) = {dimensions}
+                     ORDER BY embedding::vector({dimensions}) <=> $5::vector({dimensions})
+                     LIMIT $4");
+                let rows = sqlx::query(sqlx::AssertSqlSafe(statement.as_str()))
                 .bind(self.org_id)
                 .bind(self.env_id)
                 .bind(store_name)
@@ -712,15 +686,16 @@ impl Store for PgStore {
 
                 if let Some(qe) = &query_embedding {
                     let vec_literal = Self::embedding_to_pgvector_literal(qe);
-                    let sem_rows = sqlx::query(
-                        "SELECT key, value, seq, embedding::text as embedding_text, created_at, updated_at,
-                                1 - (embedding <=> $5::vector) as score
+                    let dimensions = qe.len();
+                    if dimensions == 0 { return Err("Semantic search requires a nonempty embedding".into()); }
+                    let statement = format!("SELECT key, value, seq, embedding::text as embedding_text, created_at, updated_at,
+                                1 - (embedding::vector({dimensions}) <=> $5::vector({dimensions})) as score
                          FROM store_map_entry
                          WHERE org_id = $1 AND env_id = $2 AND store_name = $3
-                           AND embedding IS NOT NULL
-                         ORDER BY embedding <=> $5::vector
-                         LIMIT $4",
-                    )
+                           AND embedding IS NOT NULL AND vector_dims(embedding) = {dimensions}
+                         ORDER BY embedding::vector({dimensions}) <=> $5::vector({dimensions})
+                         LIMIT $4");
+                    let sem_rows = sqlx::query(sqlx::AssertSqlSafe(statement.as_str()))
                     .bind(self.org_id)
                     .bind(self.env_id)
                     .bind(store_name)

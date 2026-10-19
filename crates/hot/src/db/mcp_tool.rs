@@ -1,5 +1,5 @@
 use serde_json::Value as JsonValue;
-use sqlx::{FromRow, Pool, Postgres, Sqlite};
+use sqlx::{FromRow, Pool, Sqlite};
 use thiserror::Error;
 use uuid::Uuid;
 
@@ -181,7 +181,7 @@ impl McpTool {
     }
 
     async fn get_mcp_tool_postgres(
-        db: &Pool<Postgres>,
+        db: &crate::db::ScopedPgPool,
         mcp_tool_id: &Uuid,
     ) -> Result<McpTool, McpToolError> {
         let tool = sqlx::query_as::<_, McpTool>(
@@ -238,7 +238,7 @@ impl McpTool {
     }
 
     async fn get_mcp_tools_by_build_postgres(
-        db: &Pool<Postgres>,
+        db: &crate::db::ScopedPgPool,
         build_id: &Uuid,
         limit: Option<i64>,
         offset: Option<i64>,
@@ -316,7 +316,7 @@ impl McpTool {
     }
 
     async fn get_mcp_tools_by_build_and_service_postgres(
-        db: &Pool<Postgres>,
+        db: &crate::db::ScopedPgPool,
         build_id: &Uuid,
         service: &str,
         limit: Option<i64>,
@@ -388,7 +388,7 @@ impl McpTool {
     }
 
     async fn get_mcp_tools_by_env_and_service_postgres(
-        db: &Pool<Postgres>,
+        db: &crate::db::ScopedPgPool,
         env_id: &Uuid,
         service: &str,
     ) -> Result<Vec<McpTool>, McpToolError> {
@@ -473,7 +473,7 @@ impl McpTool {
     }
 
     async fn get_mcp_tool_by_env_service_and_name_postgres(
-        db: &Pool<Postgres>,
+        db: &crate::db::ScopedPgPool,
         env_id: &Uuid,
         service: &str,
         name: &str,
@@ -649,7 +649,7 @@ impl McpTool {
 
     #[allow(clippy::too_many_arguments)]
     async fn insert_mcp_tool_postgres(
-        db: &Pool<Postgres>,
+        db: &crate::db::ScopedPgPool,
         mcp_tool_id: &Uuid,
         build_id: &Uuid,
         service: &str,

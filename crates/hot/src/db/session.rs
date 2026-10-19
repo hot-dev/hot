@@ -7,7 +7,7 @@
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use sqlx::{FromRow, Pool, Postgres, Sqlite};
+use sqlx::{FromRow, Pool, Sqlite};
 use std::error::Error;
 use std::fmt;
 use uuid::Uuid;
@@ -336,7 +336,7 @@ impl Session {
 
     #[allow(clippy::too_many_arguments)]
     async fn insert_postgres(
-        db: &Pool<Postgres>,
+        db: &crate::db::ScopedPgPool,
         session_id: &Uuid,
         api_key_id: &Uuid,
         env_id: &Uuid,
@@ -402,7 +402,7 @@ impl Session {
     }
 
     async fn get_session_postgres(
-        db: &Pool<Postgres>,
+        db: &crate::db::ScopedPgPool,
         session_id: &Uuid,
     ) -> Result<Session, SessionError> {
         let row = sqlx::query_as::<_, PostgresSessionRow>(
@@ -503,7 +503,7 @@ impl Session {
     }
 
     async fn list_by_api_key_postgres(
-        db: &Pool<Postgres>,
+        db: &crate::db::ScopedPgPool,
         api_key_id: &Uuid,
         limit: Option<i64>,
         offset: Option<i64>,
@@ -567,7 +567,7 @@ impl Session {
     }
 
     async fn count_active_by_api_key_postgres(
-        db: &Pool<Postgres>,
+        db: &crate::db::ScopedPgPool,
         api_key_id: &Uuid,
     ) -> Result<i64, SessionError> {
         let row: (i64,) = sqlx::query_as(
@@ -610,7 +610,7 @@ impl Session {
         Ok(())
     }
 
-    async fn revoke_postgres(db: &Pool<Postgres>, session_id: &Uuid) -> Result<(), SessionError> {
+    async fn revoke_postgres(db: &crate::db::ScopedPgPool, session_id: &Uuid) -> Result<(), SessionError> {
         sqlx::query(
             r#"
             UPDATE session SET revoked_at = now()
@@ -657,7 +657,7 @@ impl Session {
     }
 
     async fn revoke_all_by_api_key_postgres(
-        db: &Pool<Postgres>,
+        db: &crate::db::ScopedPgPool,
         api_key_id: &Uuid,
     ) -> Result<u64, SessionError> {
         let result = sqlx::query(

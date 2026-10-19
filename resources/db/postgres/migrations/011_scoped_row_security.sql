@@ -1,0 +1,609 @@
+-- Scope is set only by trusted backend executors, transaction-locally.
+-- This migration deliberately creates no login roles and grants no BYPASSRLS.
+-- Use resources/db/postgres/provision_runtime.sql to provision restricted roles.
+-- Runtime scope is not a defense against arbitrary SQL with backend credentials.
+SET row_security = on;
+
+CREATE FUNCTION hot.scope_mode() RETURNS text LANGUAGE sql STABLE AS $$
+    SELECT COALESCE(current_setting('hot.scope_mode', true), '')
+$$;
+CREATE FUNCTION hot.scope_org_id() RETURNS uuid LANGUAGE sql STABLE AS $$
+    SELECT NULLIF(current_setting('hot.scope_org', true), '')::uuid
+$$;
+CREATE FUNCTION hot.scope_bootstrap(operation text) RETURNS boolean LANGUAGE sql STABLE AS $$
+    SELECT hot.scope_mode() = 'bootstrap'
+       AND current_setting('hot.scope_operation', true) = operation
+$$;
+CREATE FUNCTION hot.scope_maintenance(operation text) RETURNS boolean LANGUAGE sql STABLE AS $$
+    SELECT hot.scope_mode() = 'maintenance'
+       AND current_setting('hot.scope_operation', true) = operation
+$$;
+CREATE FUNCTION hot.scope_org_allows(target uuid) RETURNS boolean LANGUAGE sql STABLE AS $$
+    SELECT COALESCE((hot.scope_mode() IN ('environment', 'organization') AND target = hot.scope_org_id())
+        OR (hot.scope_mode() = 'read_set' AND
+            COALESCE(NULLIF(current_setting('hot.scope_orgs', true), ''), '[]')::jsonb ? target::text), false)
+$$;
+CREATE FUNCTION hot.scope_org_writes(target uuid) RETURNS boolean LANGUAGE sql STABLE AS $$
+    SELECT hot.scope_mode() = 'organization' AND target = hot.scope_org_id()
+$$;
+-- This helper does not query env, so the env policy can use it without recursion.
+CREATE FUNCTION hot.scope_env_id_allows(target uuid) RETURNS boolean LANGUAGE sql STABLE AS $$
+    SELECT COALESCE((hot.scope_mode() = 'environment' AND target = NULLIF(current_setting('hot.scope_env', true), '')::uuid)
+        OR (hot.scope_mode() = 'read_set' AND
+            COALESCE(NULLIF(current_setting('hot.scope_envs', true), ''), '[]')::jsonb ? target::text), false)
+$$;
+CREATE FUNCTION hot.scope_env_allows(target uuid) RETURNS boolean LANGUAGE sql STABLE AS $$
+    SELECT hot.scope_env_id_allows(target) AND EXISTS
+        (SELECT 1 FROM hot.env e WHERE e.env_id = target AND hot.scope_org_allows(e.org_id))
+$$;
+CREATE FUNCTION hot.scope_env_writes(target uuid) RETURNS boolean LANGUAGE sql STABLE AS $$
+    SELECT hot.scope_mode() = 'environment' AND hot.scope_env_allows(target)
+$$;
+CREATE FUNCTION hot.scope_billing_org(target uuid) RETURNS boolean LANGUAGE sql STABLE AS $$
+    SELECT hot.scope_maintenance('billing') AND hot.scope_org_id() IS NOT NULL AND EXISTS
+        (SELECT 1 FROM hot.org o WHERE o.org_id = target
+         AND (o.org_id = hot.scope_org_id() OR o.parent_org_id = hot.scope_org_id()))
+$$;
+CREATE FUNCTION hot.scope_billing_env(target uuid) RETURNS boolean LANGUAGE sql STABLE AS $$
+    SELECT EXISTS (SELECT 1 FROM hot.env e WHERE e.env_id = target AND hot.scope_billing_org(e.org_id))
+$$;
+CREATE FUNCTION hot.scope_provisions_org(target uuid) RETURNS boolean LANGUAGE sql STABLE AS $$
+    SELECT hot.scope_maintenance('organization_provisioning') AND hot.scope_org_id() IS NOT NULL AND EXISTS
+        (SELECT 1 FROM hot.org o WHERE o.org_id = target
+         AND (o.org_id = hot.scope_org_id() OR o.parent_org_id = hot.scope_org_id()))
+$$;
+CREATE FUNCTION hot.scope_member_org(target uuid) RETURNS boolean LANGUAGE sql STABLE AS $$
+    SELECT hot.scope_org_writes(target) OR (hot.scope_mode() = 'organization' AND EXISTS
+        (SELECT 1 FROM hot.org o WHERE o.org_id = target AND o.parent_org_id = hot.scope_org_id()))
+$$;
+
+-- org: separate SELECT and mutation grants; a read set is never a write grant.
+ALTER TABLE hot."org" ENABLE ROW LEVEL SECURITY;
+ALTER TABLE hot."org" FORCE ROW LEVEL SECURITY;
+CREATE POLICY hot_scope_read ON hot."org" FOR SELECT USING ((hot.scope_org_allows(org_id)) OR (hot.scope_mode() = 'organization' AND parent_org_id = hot.scope_org_id()) OR (hot.scope_bootstrap('authentication') OR hot.scope_bootstrap('routing') OR hot.scope_bootstrap('membership') OR hot.scope_bootstrap('onboarding')) OR (hot.scope_maintenance('queue') OR hot.scope_maintenance('scheduler') OR hot.scope_maintenance('retention') OR hot.scope_maintenance('alerts')) OR ((hot.scope_maintenance('billing') OR hot.scope_maintenance('organization_provisioning')) AND (org_id = hot.scope_org_id() OR parent_org_id = hot.scope_org_id())));
+CREATE POLICY hot_scope_insert ON hot."org" FOR INSERT WITH CHECK ((hot.scope_org_writes(org_id)) OR (hot.scope_bootstrap('onboarding')) OR (hot.scope_maintenance('organization_provisioning') AND (org_id = hot.scope_org_id() OR parent_org_id = hot.scope_org_id())) OR (hot.scope_maintenance('billing') AND org_id = hot.scope_org_id()));
+CREATE POLICY hot_scope_update ON hot."org" FOR UPDATE USING ((hot.scope_org_writes(org_id)) OR (hot.scope_bootstrap('onboarding')) OR (hot.scope_maintenance('organization_provisioning') AND (org_id = hot.scope_org_id() OR parent_org_id = hot.scope_org_id())) OR (hot.scope_maintenance('billing') AND org_id = hot.scope_org_id())) WITH CHECK ((hot.scope_org_writes(org_id)) OR (hot.scope_bootstrap('onboarding')) OR (hot.scope_maintenance('organization_provisioning') AND (org_id = hot.scope_org_id() OR parent_org_id = hot.scope_org_id())) OR (hot.scope_maintenance('billing') AND org_id = hot.scope_org_id()));
+CREATE POLICY hot_scope_delete ON hot."org" FOR DELETE USING ((hot.scope_org_writes(org_id)) OR (hot.scope_bootstrap('onboarding')) OR (hot.scope_maintenance('organization_provisioning') AND (org_id = hot.scope_org_id() OR parent_org_id = hot.scope_org_id())) OR (hot.scope_maintenance('billing') AND org_id = hot.scope_org_id()));
+
+-- env: separate SELECT and mutation grants; a read set is never a write grant.
+ALTER TABLE hot."env" ENABLE ROW LEVEL SECURITY;
+ALTER TABLE hot."env" FORCE ROW LEVEL SECURITY;
+CREATE POLICY hot_scope_read ON hot."env" FOR SELECT USING (hot.scope_maintenance('blob_gc') OR ((hot.scope_env_id_allows(env_id) AND hot.scope_org_allows(org_id))) OR (hot.scope_mode() = 'organization' AND hot.scope_org_allows(org_id)) OR (hot.scope_bootstrap('authentication') OR hot.scope_bootstrap('routing') OR hot.scope_bootstrap('membership') OR hot.scope_bootstrap('onboarding')) OR (hot.scope_maintenance('queue') OR hot.scope_maintenance('scheduler') OR hot.scope_maintenance('retention') OR hot.scope_maintenance('alerts')) OR (hot.scope_billing_org(org_id)) OR (hot.scope_provisions_org(org_id)));
+CREATE POLICY hot_scope_insert ON hot."env" FOR INSERT WITH CHECK ((hot.scope_org_writes(org_id)) OR (hot.scope_env_writes(env_id)) OR (hot.scope_bootstrap('onboarding')) OR (hot.scope_provisions_org(org_id)));
+CREATE POLICY hot_scope_update ON hot."env" FOR UPDATE USING ((hot.scope_org_writes(org_id)) OR (hot.scope_env_writes(env_id)) OR (hot.scope_bootstrap('onboarding')) OR (hot.scope_provisions_org(org_id))) WITH CHECK ((hot.scope_org_writes(org_id)) OR (hot.scope_env_writes(env_id)) OR (hot.scope_bootstrap('onboarding')) OR (hot.scope_provisions_org(org_id)));
+CREATE POLICY hot_scope_delete ON hot."env" FOR DELETE USING ((hot.scope_org_writes(org_id)) OR (hot.scope_env_writes(env_id)) OR (hot.scope_bootstrap('onboarding')) OR (hot.scope_provisions_org(org_id)));
+
+-- org_note: separate SELECT and mutation grants; a read set is never a write grant.
+ALTER TABLE hot."org_note" ENABLE ROW LEVEL SECURITY;
+ALTER TABLE hot."org_note" FORCE ROW LEVEL SECURITY;
+CREATE POLICY hot_scope_read ON hot."org_note" FOR SELECT USING ((hot.scope_org_allows(org_id)) OR (hot.scope_bootstrap('membership')) OR (hot.scope_maintenance('alerts')) OR (hot.scope_provisions_org(org_id)));
+CREATE POLICY hot_scope_insert ON hot."org_note" FOR INSERT WITH CHECK ((hot.scope_org_writes(org_id)) OR (hot.scope_bootstrap('onboarding')) OR (hot.scope_provisions_org(org_id)));
+CREATE POLICY hot_scope_update ON hot."org_note" FOR UPDATE USING ((hot.scope_org_writes(org_id)) OR (hot.scope_bootstrap('onboarding')) OR (hot.scope_provisions_org(org_id))) WITH CHECK ((hot.scope_org_writes(org_id)) OR (hot.scope_bootstrap('onboarding')) OR (hot.scope_provisions_org(org_id)));
+CREATE POLICY hot_scope_delete ON hot."org_note" FOR DELETE USING ((hot.scope_org_writes(org_id)) OR (hot.scope_bootstrap('onboarding')) OR (hot.scope_provisions_org(org_id)));
+
+-- team: separate SELECT and mutation grants; a read set is never a write grant.
+ALTER TABLE hot."team" ENABLE ROW LEVEL SECURITY;
+ALTER TABLE hot."team" FORCE ROW LEVEL SECURITY;
+CREATE POLICY hot_scope_read ON hot."team" FOR SELECT USING ((hot.scope_org_allows(org_id)) OR (hot.scope_bootstrap('membership')) OR (hot.scope_maintenance('alerts')) OR (hot.scope_provisions_org(org_id)));
+CREATE POLICY hot_scope_insert ON hot."team" FOR INSERT WITH CHECK ((hot.scope_org_writes(org_id)) OR (hot.scope_bootstrap('onboarding')) OR (hot.scope_provisions_org(org_id)));
+CREATE POLICY hot_scope_update ON hot."team" FOR UPDATE USING ((hot.scope_org_writes(org_id)) OR (hot.scope_bootstrap('onboarding')) OR (hot.scope_provisions_org(org_id))) WITH CHECK ((hot.scope_org_writes(org_id)) OR (hot.scope_bootstrap('onboarding')) OR (hot.scope_provisions_org(org_id)));
+CREATE POLICY hot_scope_delete ON hot."team" FOR DELETE USING ((hot.scope_org_writes(org_id)) OR (hot.scope_bootstrap('onboarding')) OR (hot.scope_provisions_org(org_id)));
+
+-- invite: separate SELECT and mutation grants; a read set is never a write grant.
+ALTER TABLE hot."invite" ENABLE ROW LEVEL SECURITY;
+ALTER TABLE hot."invite" FORCE ROW LEVEL SECURITY;
+CREATE POLICY hot_scope_read ON hot."invite" FOR SELECT USING ((hot.scope_org_allows(org_id)) OR (hot.scope_bootstrap('membership')) OR (hot.scope_maintenance('alerts')) OR (hot.scope_provisions_org(org_id)));
+CREATE POLICY hot_scope_insert ON hot."invite" FOR INSERT WITH CHECK ((hot.scope_org_writes(org_id)) OR (hot.scope_bootstrap('onboarding')) OR (hot.scope_provisions_org(org_id)));
+CREATE POLICY hot_scope_update ON hot."invite" FOR UPDATE USING ((hot.scope_org_writes(org_id)) OR (hot.scope_bootstrap('onboarding')) OR (hot.scope_provisions_org(org_id))) WITH CHECK ((hot.scope_org_writes(org_id)) OR (hot.scope_bootstrap('onboarding')) OR (hot.scope_provisions_org(org_id)));
+CREATE POLICY hot_scope_delete ON hot."invite" FOR DELETE USING ((hot.scope_org_writes(org_id)) OR (hot.scope_bootstrap('onboarding')) OR (hot.scope_provisions_org(org_id)));
+
+-- org_user: separate SELECT and mutation grants; a read set is never a write grant.
+ALTER TABLE hot."org_user" ENABLE ROW LEVEL SECURITY;
+ALTER TABLE hot."org_user" FORCE ROW LEVEL SECURITY;
+CREATE POLICY hot_scope_read ON hot."org_user" FOR SELECT USING ((hot.scope_org_allows(org_id)) OR (hot.scope_bootstrap('authentication') OR hot.scope_bootstrap('membership') OR hot.scope_bootstrap('onboarding')) OR ((hot.scope_member_org(org_id) OR hot.scope_provisions_org(org_id))) OR (hot.scope_billing_org(org_id)));
+CREATE POLICY hot_scope_insert ON hot."org_user" FOR INSERT WITH CHECK (((hot.scope_member_org(org_id) OR hot.scope_provisions_org(org_id))) OR (hot.scope_bootstrap('onboarding')));
+CREATE POLICY hot_scope_update ON hot."org_user" FOR UPDATE USING (((hot.scope_member_org(org_id) OR hot.scope_provisions_org(org_id))) OR (hot.scope_bootstrap('onboarding'))) WITH CHECK (((hot.scope_member_org(org_id) OR hot.scope_provisions_org(org_id))) OR (hot.scope_bootstrap('onboarding')));
+CREATE POLICY hot_scope_delete ON hot."org_user" FOR DELETE USING (((hot.scope_member_org(org_id) OR hot.scope_provisions_org(org_id))) OR (hot.scope_bootstrap('onboarding')));
+
+-- org_usage: separate SELECT and mutation grants; a read set is never a write grant.
+ALTER TABLE hot."org_usage" ENABLE ROW LEVEL SECURITY;
+ALTER TABLE hot."org_usage" FORCE ROW LEVEL SECURITY;
+CREATE POLICY hot_scope_read ON hot."org_usage" FOR SELECT USING ((hot.scope_org_allows(org_id)) OR (hot.scope_billing_org(org_id)));
+CREATE POLICY hot_scope_insert ON hot."org_usage" FOR INSERT WITH CHECK ((hot.scope_org_writes(org_id)) OR (hot.scope_billing_org(org_id)));
+CREATE POLICY hot_scope_update ON hot."org_usage" FOR UPDATE USING ((hot.scope_org_writes(org_id)) OR (hot.scope_billing_org(org_id))) WITH CHECK ((hot.scope_org_writes(org_id)) OR (hot.scope_billing_org(org_id)));
+CREATE POLICY hot_scope_delete ON hot."org_usage" FOR DELETE USING ((hot.scope_org_writes(org_id)) OR (hot.scope_billing_org(org_id)));
+
+-- org_plan: separate SELECT and mutation grants; a read set is never a write grant.
+ALTER TABLE hot."org_plan" ENABLE ROW LEVEL SECURITY;
+ALTER TABLE hot."org_plan" FORCE ROW LEVEL SECURITY;
+CREATE POLICY hot_scope_read ON hot."org_plan" FOR SELECT USING (hot.scope_maintenance('retention') OR (hot.scope_org_allows(org_id)) OR (hot.scope_billing_org(org_id)));
+CREATE POLICY hot_scope_insert ON hot."org_plan" FOR INSERT WITH CHECK ((hot.scope_org_writes(org_id)) OR (hot.scope_billing_org(org_id)) OR (hot.scope_bootstrap('onboarding')));
+CREATE POLICY hot_scope_update ON hot."org_plan" FOR UPDATE USING ((hot.scope_org_writes(org_id)) OR (hot.scope_billing_org(org_id)) OR (hot.scope_bootstrap('onboarding'))) WITH CHECK ((hot.scope_org_writes(org_id)) OR (hot.scope_billing_org(org_id)) OR (hot.scope_bootstrap('onboarding')));
+CREATE POLICY hot_scope_delete ON hot."org_plan" FOR DELETE USING ((hot.scope_org_writes(org_id)) OR (hot.scope_billing_org(org_id)) OR (hot.scope_bootstrap('onboarding')));
+
+-- org_child_provisioning: separate SELECT and mutation grants; a read set is never a write grant.
+ALTER TABLE hot."org_child_provisioning" ENABLE ROW LEVEL SECURITY;
+ALTER TABLE hot."org_child_provisioning" FORCE ROW LEVEL SECURITY;
+CREATE POLICY hot_scope_read ON hot."org_child_provisioning" FOR SELECT USING ((hot.scope_org_allows(root_org_id)) OR (hot.scope_maintenance('organization_provisioning') AND root_org_id = hot.scope_org_id()));
+CREATE POLICY hot_scope_insert ON hot."org_child_provisioning" FOR INSERT WITH CHECK (hot.scope_maintenance('organization_provisioning') AND root_org_id = hot.scope_org_id());
+CREATE POLICY hot_scope_update ON hot."org_child_provisioning" FOR UPDATE USING (hot.scope_maintenance('organization_provisioning') AND root_org_id = hot.scope_org_id()) WITH CHECK (hot.scope_maintenance('organization_provisioning') AND root_org_id = hot.scope_org_id());
+CREATE POLICY hot_scope_delete ON hot."org_child_provisioning" FOR DELETE USING (hot.scope_maintenance('organization_provisioning') AND root_org_id = hot.scope_org_id());
+
+-- api_key: separate SELECT and mutation grants; a read set is never a write grant.
+ALTER TABLE hot."api_key" ENABLE ROW LEVEL SECURITY;
+ALTER TABLE hot."api_key" FORCE ROW LEVEL SECURITY;
+CREATE POLICY hot_scope_read ON hot."api_key" FOR SELECT USING ((hot.scope_env_allows(env_id)) OR ((hot.scope_bootstrap('authentication')) OR (hot.scope_provisions_org((SELECT e.org_id FROM hot.env e WHERE e.env_id = api_key.env_id)))));
+CREATE POLICY hot_scope_insert ON hot."api_key" FOR INSERT WITH CHECK ((hot.scope_env_writes(env_id)) OR ((hot.scope_bootstrap('onboarding'))));
+CREATE POLICY hot_scope_update ON hot."api_key" FOR UPDATE USING ((hot.scope_env_writes(env_id)) OR ((hot.scope_bootstrap('onboarding')))) WITH CHECK ((hot.scope_env_writes(env_id)) OR ((hot.scope_bootstrap('onboarding'))));
+CREATE POLICY hot_scope_delete ON hot."api_key" FOR DELETE USING ((hot.scope_env_writes(env_id)) OR ((hot.scope_bootstrap('onboarding'))));
+
+-- service_key: separate SELECT and mutation grants; a read set is never a write grant.
+ALTER TABLE hot."service_key" ENABLE ROW LEVEL SECURITY;
+ALTER TABLE hot."service_key" FORCE ROW LEVEL SECURITY;
+CREATE POLICY hot_scope_read ON hot."service_key" FOR SELECT USING ((hot.scope_env_allows(env_id)) OR ((hot.scope_bootstrap('authentication')) OR (hot.scope_provisions_org((SELECT e.org_id FROM hot.env e WHERE e.env_id = service_key.env_id)))));
+CREATE POLICY hot_scope_insert ON hot."service_key" FOR INSERT WITH CHECK ((hot.scope_env_writes(env_id)) OR ((hot.scope_bootstrap('authentication'))));
+CREATE POLICY hot_scope_update ON hot."service_key" FOR UPDATE USING ((hot.scope_env_writes(env_id)) OR ((hot.scope_bootstrap('authentication')))) WITH CHECK ((hot.scope_env_writes(env_id)) OR ((hot.scope_bootstrap('authentication'))));
+CREATE POLICY hot_scope_delete ON hot."service_key" FOR DELETE USING ((hot.scope_env_writes(env_id)) OR ((hot.scope_bootstrap('authentication'))));
+
+-- session: separate SELECT and mutation grants; a read set is never a write grant.
+ALTER TABLE hot."session" ENABLE ROW LEVEL SECURITY;
+ALTER TABLE hot."session" FORCE ROW LEVEL SECURITY;
+CREATE POLICY hot_scope_read ON hot."session" FOR SELECT USING (hot.scope_maintenance('retention') OR (hot.scope_env_allows(env_id)) OR ((hot.scope_bootstrap('authentication')) OR (hot.scope_provisions_org((SELECT e.org_id FROM hot.env e WHERE e.env_id = session.env_id)))));
+CREATE POLICY hot_scope_insert ON hot."session" FOR INSERT WITH CHECK ((hot.scope_env_writes(env_id)) OR ((hot.scope_bootstrap('authentication')) OR (hot.scope_maintenance('retention'))));
+CREATE POLICY hot_scope_update ON hot."session" FOR UPDATE USING ((hot.scope_env_writes(env_id)) OR ((hot.scope_bootstrap('authentication')) OR (hot.scope_maintenance('retention')))) WITH CHECK ((hot.scope_env_writes(env_id)) OR ((hot.scope_bootstrap('authentication')) OR (hot.scope_maintenance('retention'))));
+CREATE POLICY hot_scope_delete ON hot."session" FOR DELETE USING ((hot.scope_env_writes(env_id)) OR ((hot.scope_bootstrap('authentication')) OR (hot.scope_maintenance('retention'))));
+
+-- project: separate SELECT and mutation grants; a read set is never a write grant.
+ALTER TABLE hot."project" ENABLE ROW LEVEL SECURITY;
+ALTER TABLE hot."project" FORCE ROW LEVEL SECURITY;
+CREATE POLICY hot_scope_read ON hot."project" FOR SELECT USING ((hot.scope_env_allows(env_id)) OR ((hot.scope_bootstrap('routing')) OR (hot.scope_maintenance('queue') OR hot.scope_maintenance('scheduler') OR hot.scope_maintenance('retention') OR hot.scope_maintenance('alerts')) OR (hot.scope_billing_env(env_id)) OR (hot.scope_mode() = 'organization' AND EXISTS (SELECT 1 FROM hot.env e WHERE e.env_id = project.env_id AND hot.scope_org_allows(e.org_id)))));
+CREATE POLICY hot_scope_insert ON hot."project" FOR INSERT WITH CHECK ((hot.scope_env_writes(env_id)) OR ((hot.scope_bootstrap('onboarding')) OR (hot.scope_maintenance('queue'))));
+CREATE POLICY hot_scope_update ON hot."project" FOR UPDATE USING ((hot.scope_env_writes(env_id)) OR ((hot.scope_bootstrap('onboarding')) OR (hot.scope_maintenance('queue')))) WITH CHECK ((hot.scope_env_writes(env_id)) OR ((hot.scope_bootstrap('onboarding')) OR (hot.scope_maintenance('queue'))));
+CREATE POLICY hot_scope_delete ON hot."project" FOR DELETE USING ((hot.scope_env_writes(env_id)) OR ((hot.scope_bootstrap('onboarding')) OR (hot.scope_maintenance('queue'))));
+
+-- domain: separate SELECT and mutation grants; a read set is never a write grant.
+ALTER TABLE hot."domain" ENABLE ROW LEVEL SECURITY;
+ALTER TABLE hot."domain" FORCE ROW LEVEL SECURITY;
+CREATE POLICY hot_scope_read ON hot."domain" FOR SELECT USING ((hot.scope_env_allows(env_id)) OR ((hot.scope_bootstrap('routing')) OR (hot.scope_maintenance('queue')) OR (hot.scope_billing_env(env_id))));
+CREATE POLICY hot_scope_insert ON hot."domain" FOR INSERT WITH CHECK ((hot.scope_env_writes(env_id)) OR (hot.scope_maintenance('queue')));
+CREATE POLICY hot_scope_update ON hot."domain" FOR UPDATE USING ((hot.scope_env_writes(env_id)) OR (hot.scope_maintenance('queue'))) WITH CHECK ((hot.scope_env_writes(env_id)) OR (hot.scope_maintenance('queue')));
+CREATE POLICY hot_scope_delete ON hot."domain" FOR DELETE USING ((hot.scope_env_writes(env_id)) OR (hot.scope_maintenance('queue')));
+
+-- run: separate SELECT and mutation grants; a read set is never a write grant.
+ALTER TABLE hot."run" ENABLE ROW LEVEL SECURITY;
+ALTER TABLE hot."run" FORCE ROW LEVEL SECURITY;
+CREATE POLICY hot_scope_read ON hot."run" FOR SELECT USING ((hot.scope_env_allows(env_id)) OR ((hot.scope_maintenance('queue') OR hot.scope_maintenance('scheduler') OR hot.scope_maintenance('retention') OR hot.scope_maintenance('alerts')) OR (hot.scope_billing_env(env_id))));
+CREATE POLICY hot_scope_insert ON hot."run" FOR INSERT WITH CHECK ((hot.scope_env_writes(env_id)) OR (hot.scope_maintenance('queue') OR hot.scope_maintenance('scheduler') OR hot.scope_maintenance('retention') OR hot.scope_maintenance('alerts')));
+CREATE POLICY hot_scope_update ON hot."run" FOR UPDATE USING ((hot.scope_env_writes(env_id)) OR (hot.scope_maintenance('queue') OR hot.scope_maintenance('scheduler') OR hot.scope_maintenance('retention') OR hot.scope_maintenance('alerts'))) WITH CHECK ((hot.scope_env_writes(env_id)) OR (hot.scope_maintenance('queue') OR hot.scope_maintenance('scheduler') OR hot.scope_maintenance('retention') OR hot.scope_maintenance('alerts')));
+CREATE POLICY hot_scope_delete ON hot."run" FOR DELETE USING ((hot.scope_env_writes(env_id)) OR (hot.scope_maintenance('queue') OR hot.scope_maintenance('scheduler') OR hot.scope_maintenance('retention') OR hot.scope_maintenance('alerts')));
+
+-- task: separate SELECT and mutation grants; a read set is never a write grant.
+ALTER TABLE hot."task" ENABLE ROW LEVEL SECURITY;
+ALTER TABLE hot."task" FORCE ROW LEVEL SECURITY;
+CREATE POLICY hot_scope_read ON hot."task" FOR SELECT USING ((hot.scope_env_allows(env_id)) OR ((hot.scope_maintenance('queue') OR hot.scope_maintenance('scheduler') OR hot.scope_maintenance('retention') OR hot.scope_maintenance('alerts')) OR (hot.scope_billing_env(env_id))));
+CREATE POLICY hot_scope_insert ON hot."task" FOR INSERT WITH CHECK ((hot.scope_env_writes(env_id)) OR (hot.scope_maintenance('queue') OR hot.scope_maintenance('scheduler') OR hot.scope_maintenance('retention') OR hot.scope_maintenance('alerts')));
+CREATE POLICY hot_scope_update ON hot."task" FOR UPDATE USING ((hot.scope_env_writes(env_id)) OR (hot.scope_maintenance('queue') OR hot.scope_maintenance('scheduler') OR hot.scope_maintenance('retention') OR hot.scope_maintenance('alerts'))) WITH CHECK ((hot.scope_env_writes(env_id)) OR (hot.scope_maintenance('queue') OR hot.scope_maintenance('scheduler') OR hot.scope_maintenance('retention') OR hot.scope_maintenance('alerts')));
+CREATE POLICY hot_scope_delete ON hot."task" FOR DELETE USING ((hot.scope_env_writes(env_id)) OR (hot.scope_maintenance('queue') OR hot.scope_maintenance('scheduler') OR hot.scope_maintenance('retention') OR hot.scope_maintenance('alerts')));
+
+-- event: separate SELECT and mutation grants; a read set is never a write grant.
+ALTER TABLE hot."event" ENABLE ROW LEVEL SECURITY;
+ALTER TABLE hot."event" FORCE ROW LEVEL SECURITY;
+CREATE POLICY hot_scope_read ON hot."event" FOR SELECT USING ((hot.scope_env_allows(env_id)) OR ((hot.scope_maintenance('queue') OR hot.scope_maintenance('scheduler') OR hot.scope_maintenance('retention') OR hot.scope_maintenance('alerts')) OR (hot.scope_billing_env(env_id))));
+CREATE POLICY hot_scope_insert ON hot."event" FOR INSERT WITH CHECK ((hot.scope_env_writes(env_id)) OR (hot.scope_maintenance('queue') OR hot.scope_maintenance('scheduler') OR hot.scope_maintenance('retention') OR hot.scope_maintenance('alerts')));
+CREATE POLICY hot_scope_update ON hot."event" FOR UPDATE USING ((hot.scope_env_writes(env_id)) OR (hot.scope_maintenance('queue') OR hot.scope_maintenance('scheduler') OR hot.scope_maintenance('retention') OR hot.scope_maintenance('alerts'))) WITH CHECK ((hot.scope_env_writes(env_id)) OR (hot.scope_maintenance('queue') OR hot.scope_maintenance('scheduler') OR hot.scope_maintenance('retention') OR hot.scope_maintenance('alerts')));
+CREATE POLICY hot_scope_delete ON hot."event" FOR DELETE USING ((hot.scope_env_writes(env_id)) OR (hot.scope_maintenance('queue') OR hot.scope_maintenance('scheduler') OR hot.scope_maintenance('retention') OR hot.scope_maintenance('alerts')));
+
+-- stream: separate SELECT and mutation grants; a read set is never a write grant.
+ALTER TABLE hot."stream" ENABLE ROW LEVEL SECURITY;
+ALTER TABLE hot."stream" FORCE ROW LEVEL SECURITY;
+CREATE POLICY hot_scope_read ON hot."stream" FOR SELECT USING ((hot.scope_env_allows(env_id)) OR ((hot.scope_maintenance('queue') OR hot.scope_maintenance('scheduler') OR hot.scope_maintenance('retention') OR hot.scope_maintenance('alerts')) OR (hot.scope_billing_env(env_id))));
+CREATE POLICY hot_scope_insert ON hot."stream" FOR INSERT WITH CHECK ((hot.scope_env_writes(env_id)) OR (hot.scope_maintenance('queue') OR hot.scope_maintenance('scheduler') OR hot.scope_maintenance('retention') OR hot.scope_maintenance('alerts')));
+CREATE POLICY hot_scope_update ON hot."stream" FOR UPDATE USING ((hot.scope_env_writes(env_id)) OR (hot.scope_maintenance('queue') OR hot.scope_maintenance('scheduler') OR hot.scope_maintenance('retention') OR hot.scope_maintenance('alerts'))) WITH CHECK ((hot.scope_env_writes(env_id)) OR (hot.scope_maintenance('queue') OR hot.scope_maintenance('scheduler') OR hot.scope_maintenance('retention') OR hot.scope_maintenance('alerts')));
+CREATE POLICY hot_scope_delete ON hot."stream" FOR DELETE USING ((hot.scope_env_writes(env_id)) OR (hot.scope_maintenance('queue') OR hot.scope_maintenance('scheduler') OR hot.scope_maintenance('retention') OR hot.scope_maintenance('alerts')));
+
+-- access: separate SELECT and mutation grants; a read set is never a write grant.
+ALTER TABLE hot."access" ENABLE ROW LEVEL SECURITY;
+ALTER TABLE hot."access" FORCE ROW LEVEL SECURITY;
+CREATE POLICY hot_scope_read ON hot."access" FOR SELECT USING ((hot.scope_env_allows(env_id)) OR (hot.scope_maintenance('retention')));
+CREATE POLICY hot_scope_insert ON hot."access" FOR INSERT WITH CHECK ((hot.scope_env_writes(env_id)) OR (hot.scope_maintenance('retention')));
+CREATE POLICY hot_scope_update ON hot."access" FOR UPDATE USING ((hot.scope_env_writes(env_id)) OR (hot.scope_maintenance('retention'))) WITH CHECK ((hot.scope_env_writes(env_id)) OR (hot.scope_maintenance('retention')));
+CREATE POLICY hot_scope_delete ON hot."access" FOR DELETE USING ((hot.scope_env_writes(env_id)) OR (hot.scope_maintenance('retention')));
+
+-- agent: separate SELECT and mutation grants; a read set is never a write grant.
+ALTER TABLE hot."agent" ENABLE ROW LEVEL SECURITY;
+ALTER TABLE hot."agent" FORCE ROW LEVEL SECURITY;
+CREATE POLICY hot_scope_read ON hot."agent" FOR SELECT USING ((hot.scope_env_allows(env_id)) OR ((hot.scope_bootstrap('routing')) OR (hot.scope_maintenance('queue') OR hot.scope_maintenance('scheduler'))));
+CREATE POLICY hot_scope_insert ON hot."agent" FOR INSERT WITH CHECK ((hot.scope_env_writes(env_id)) OR (hot.scope_maintenance('queue')));
+CREATE POLICY hot_scope_update ON hot."agent" FOR UPDATE USING ((hot.scope_env_writes(env_id)) OR (hot.scope_maintenance('queue'))) WITH CHECK ((hot.scope_env_writes(env_id)) OR (hot.scope_maintenance('queue')));
+CREATE POLICY hot_scope_delete ON hot."agent" FOR DELETE USING ((hot.scope_env_writes(env_id)) OR (hot.scope_maintenance('queue')));
+
+-- workflow: separate SELECT and mutation grants; a read set is never a write grant.
+ALTER TABLE hot."workflow" ENABLE ROW LEVEL SECURITY;
+ALTER TABLE hot."workflow" FORCE ROW LEVEL SECURITY;
+CREATE POLICY hot_scope_read ON hot."workflow" FOR SELECT USING ((hot.scope_env_allows(env_id)) OR ((hot.scope_bootstrap('routing')) OR (hot.scope_maintenance('queue') OR hot.scope_maintenance('scheduler'))));
+CREATE POLICY hot_scope_insert ON hot."workflow" FOR INSERT WITH CHECK ((hot.scope_env_writes(env_id)) OR (hot.scope_maintenance('queue')));
+CREATE POLICY hot_scope_update ON hot."workflow" FOR UPDATE USING ((hot.scope_env_writes(env_id)) OR (hot.scope_maintenance('queue'))) WITH CHECK ((hot.scope_env_writes(env_id)) OR (hot.scope_maintenance('queue')));
+CREATE POLICY hot_scope_delete ON hot."workflow" FOR DELETE USING ((hot.scope_env_writes(env_id)) OR (hot.scope_maintenance('queue')));
+
+-- build: separate SELECT and mutation grants; a read set is never a write grant.
+ALTER TABLE hot."build" ENABLE ROW LEVEL SECURITY;
+ALTER TABLE hot."build" FORCE ROW LEVEL SECURITY;
+CREATE POLICY hot_scope_read ON hot."build" FOR SELECT USING (EXISTS (SELECT 1 FROM hot.project p WHERE p.project_id = build.project_id AND (hot.scope_env_allows(p.env_id) OR hot.scope_bootstrap('routing') OR hot.scope_maintenance('queue') OR hot.scope_maintenance('scheduler') OR hot.scope_maintenance('retention') OR hot.scope_maintenance('alerts') OR hot.scope_billing_env(p.env_id))));
+CREATE POLICY hot_scope_insert ON hot."build" FOR INSERT WITH CHECK ((EXISTS (SELECT 1 FROM hot.project p WHERE p.project_id = build.project_id)) AND (hot.scope_mode() = 'environment' OR hot.scope_maintenance('queue') OR hot.scope_maintenance('scheduler') OR hot.scope_maintenance('retention') OR hot.scope_maintenance('alerts')));
+CREATE POLICY hot_scope_update ON hot."build" FOR UPDATE USING ((EXISTS (SELECT 1 FROM hot.project p WHERE p.project_id = build.project_id)) AND (hot.scope_mode() = 'environment' OR hot.scope_maintenance('queue') OR hot.scope_maintenance('scheduler') OR hot.scope_maintenance('retention') OR hot.scope_maintenance('alerts'))) WITH CHECK ((EXISTS (SELECT 1 FROM hot.project p WHERE p.project_id = build.project_id)) AND (hot.scope_mode() = 'environment' OR hot.scope_maintenance('queue') OR hot.scope_maintenance('scheduler') OR hot.scope_maintenance('retention') OR hot.scope_maintenance('alerts')));
+CREATE POLICY hot_scope_delete ON hot."build" FOR DELETE USING ((EXISTS (SELECT 1 FROM hot.project p WHERE p.project_id = build.project_id)) AND (hot.scope_mode() = 'environment' OR hot.scope_maintenance('queue') OR hot.scope_maintenance('scheduler') OR hot.scope_maintenance('retention') OR hot.scope_maintenance('alerts')));
+
+-- call: separate SELECT and mutation grants; a read set is never a write grant.
+ALTER TABLE hot."call" ENABLE ROW LEVEL SECURITY;
+ALTER TABLE hot."call" FORCE ROW LEVEL SECURITY;
+CREATE POLICY hot_scope_read ON hot."call" FOR SELECT USING ((EXISTS (SELECT 1 FROM hot.run p WHERE p.run_id = call.run_id)) OR (hot.scope_maintenance('retention')));
+CREATE POLICY hot_scope_insert ON hot."call" FOR INSERT WITH CHECK (((EXISTS (SELECT 1 FROM hot.run p WHERE p.run_id = call.run_id)) AND (hot.scope_mode() = 'environment' OR hot.scope_maintenance('queue') OR hot.scope_maintenance('scheduler') OR hot.scope_maintenance('retention') OR hot.scope_maintenance('alerts'))) OR (hot.scope_maintenance('retention')));
+CREATE POLICY hot_scope_update ON hot."call" FOR UPDATE USING (((EXISTS (SELECT 1 FROM hot.run p WHERE p.run_id = call.run_id)) AND (hot.scope_mode() = 'environment' OR hot.scope_maintenance('queue') OR hot.scope_maintenance('scheduler') OR hot.scope_maintenance('retention') OR hot.scope_maintenance('alerts'))) OR (hot.scope_maintenance('retention'))) WITH CHECK (((EXISTS (SELECT 1 FROM hot.run p WHERE p.run_id = call.run_id)) AND (hot.scope_mode() = 'environment' OR hot.scope_maintenance('queue') OR hot.scope_maintenance('scheduler') OR hot.scope_maintenance('retention') OR hot.scope_maintenance('alerts'))) OR (hot.scope_maintenance('retention')));
+CREATE POLICY hot_scope_delete ON hot."call" FOR DELETE USING (((EXISTS (SELECT 1 FROM hot.run p WHERE p.run_id = call.run_id)) AND (hot.scope_mode() = 'environment' OR hot.scope_maintenance('queue') OR hot.scope_maintenance('scheduler') OR hot.scope_maintenance('retention') OR hot.scope_maintenance('alerts'))) OR (hot.scope_maintenance('retention')));
+
+-- event_handler: separate SELECT and mutation grants; a read set is never a write grant.
+ALTER TABLE hot."event_handler" ENABLE ROW LEVEL SECURITY;
+ALTER TABLE hot."event_handler" FORCE ROW LEVEL SECURITY;
+CREATE POLICY hot_scope_read ON hot."event_handler" FOR SELECT USING (EXISTS (SELECT 1 FROM hot.build p WHERE p.build_id = event_handler.build_id));
+CREATE POLICY hot_scope_insert ON hot."event_handler" FOR INSERT WITH CHECK ((EXISTS (SELECT 1 FROM hot.build p WHERE p.build_id = event_handler.build_id)) AND (hot.scope_mode() = 'environment' OR hot.scope_maintenance('queue') OR hot.scope_maintenance('scheduler') OR hot.scope_maintenance('retention') OR hot.scope_maintenance('alerts')));
+CREATE POLICY hot_scope_update ON hot."event_handler" FOR UPDATE USING ((EXISTS (SELECT 1 FROM hot.build p WHERE p.build_id = event_handler.build_id)) AND (hot.scope_mode() = 'environment' OR hot.scope_maintenance('queue') OR hot.scope_maintenance('scheduler') OR hot.scope_maintenance('retention') OR hot.scope_maintenance('alerts'))) WITH CHECK ((EXISTS (SELECT 1 FROM hot.build p WHERE p.build_id = event_handler.build_id)) AND (hot.scope_mode() = 'environment' OR hot.scope_maintenance('queue') OR hot.scope_maintenance('scheduler') OR hot.scope_maintenance('retention') OR hot.scope_maintenance('alerts')));
+CREATE POLICY hot_scope_delete ON hot."event_handler" FOR DELETE USING ((EXISTS (SELECT 1 FROM hot.build p WHERE p.build_id = event_handler.build_id)) AND (hot.scope_mode() = 'environment' OR hot.scope_maintenance('queue') OR hot.scope_maintenance('scheduler') OR hot.scope_maintenance('retention') OR hot.scope_maintenance('alerts')));
+
+-- mcp_tool: separate SELECT and mutation grants; a read set is never a write grant.
+ALTER TABLE hot."mcp_tool" ENABLE ROW LEVEL SECURITY;
+ALTER TABLE hot."mcp_tool" FORCE ROW LEVEL SECURITY;
+CREATE POLICY hot_scope_read ON hot."mcp_tool" FOR SELECT USING (EXISTS (SELECT 1 FROM hot.build p WHERE p.build_id = mcp_tool.build_id));
+CREATE POLICY hot_scope_insert ON hot."mcp_tool" FOR INSERT WITH CHECK ((EXISTS (SELECT 1 FROM hot.build p WHERE p.build_id = mcp_tool.build_id)) AND (hot.scope_mode() = 'environment' OR hot.scope_maintenance('queue') OR hot.scope_maintenance('scheduler') OR hot.scope_maintenance('retention') OR hot.scope_maintenance('alerts')));
+CREATE POLICY hot_scope_update ON hot."mcp_tool" FOR UPDATE USING ((EXISTS (SELECT 1 FROM hot.build p WHERE p.build_id = mcp_tool.build_id)) AND (hot.scope_mode() = 'environment' OR hot.scope_maintenance('queue') OR hot.scope_maintenance('scheduler') OR hot.scope_maintenance('retention') OR hot.scope_maintenance('alerts'))) WITH CHECK ((EXISTS (SELECT 1 FROM hot.build p WHERE p.build_id = mcp_tool.build_id)) AND (hot.scope_mode() = 'environment' OR hot.scope_maintenance('queue') OR hot.scope_maintenance('scheduler') OR hot.scope_maintenance('retention') OR hot.scope_maintenance('alerts')));
+CREATE POLICY hot_scope_delete ON hot."mcp_tool" FOR DELETE USING ((EXISTS (SELECT 1 FROM hot.build p WHERE p.build_id = mcp_tool.build_id)) AND (hot.scope_mode() = 'environment' OR hot.scope_maintenance('queue') OR hot.scope_maintenance('scheduler') OR hot.scope_maintenance('retention') OR hot.scope_maintenance('alerts')));
+
+-- webhook: separate SELECT and mutation grants; a read set is never a write grant.
+ALTER TABLE hot."webhook" ENABLE ROW LEVEL SECURITY;
+ALTER TABLE hot."webhook" FORCE ROW LEVEL SECURITY;
+CREATE POLICY hot_scope_read ON hot."webhook" FOR SELECT USING (EXISTS (SELECT 1 FROM hot.build p WHERE p.build_id = webhook.build_id));
+CREATE POLICY hot_scope_insert ON hot."webhook" FOR INSERT WITH CHECK ((EXISTS (SELECT 1 FROM hot.build p WHERE p.build_id = webhook.build_id)) AND (hot.scope_mode() = 'environment' OR hot.scope_maintenance('queue') OR hot.scope_maintenance('scheduler') OR hot.scope_maintenance('retention') OR hot.scope_maintenance('alerts')));
+CREATE POLICY hot_scope_update ON hot."webhook" FOR UPDATE USING ((EXISTS (SELECT 1 FROM hot.build p WHERE p.build_id = webhook.build_id)) AND (hot.scope_mode() = 'environment' OR hot.scope_maintenance('queue') OR hot.scope_maintenance('scheduler') OR hot.scope_maintenance('retention') OR hot.scope_maintenance('alerts'))) WITH CHECK ((EXISTS (SELECT 1 FROM hot.build p WHERE p.build_id = webhook.build_id)) AND (hot.scope_mode() = 'environment' OR hot.scope_maintenance('queue') OR hot.scope_maintenance('scheduler') OR hot.scope_maintenance('retention') OR hot.scope_maintenance('alerts')));
+CREATE POLICY hot_scope_delete ON hot."webhook" FOR DELETE USING ((EXISTS (SELECT 1 FROM hot.build p WHERE p.build_id = webhook.build_id)) AND (hot.scope_mode() = 'environment' OR hot.scope_maintenance('queue') OR hot.scope_maintenance('scheduler') OR hot.scope_maintenance('retention') OR hot.scope_maintenance('alerts')));
+
+-- schedule: separate SELECT and mutation grants; a read set is never a write grant.
+ALTER TABLE hot."schedule" ENABLE ROW LEVEL SECURITY;
+ALTER TABLE hot."schedule" FORCE ROW LEVEL SECURITY;
+CREATE POLICY hot_scope_read ON hot."schedule" FOR SELECT USING (EXISTS (SELECT 1 FROM hot.build p WHERE p.build_id = schedule.build_id));
+CREATE POLICY hot_scope_insert ON hot."schedule" FOR INSERT WITH CHECK ((EXISTS (SELECT 1 FROM hot.build p WHERE p.build_id = schedule.build_id)) AND (hot.scope_mode() = 'environment' OR hot.scope_maintenance('queue') OR hot.scope_maintenance('scheduler') OR hot.scope_maintenance('retention') OR hot.scope_maintenance('alerts')));
+CREATE POLICY hot_scope_update ON hot."schedule" FOR UPDATE USING ((EXISTS (SELECT 1 FROM hot.build p WHERE p.build_id = schedule.build_id)) AND (hot.scope_mode() = 'environment' OR hot.scope_maintenance('queue') OR hot.scope_maintenance('scheduler') OR hot.scope_maintenance('retention') OR hot.scope_maintenance('alerts'))) WITH CHECK ((EXISTS (SELECT 1 FROM hot.build p WHERE p.build_id = schedule.build_id)) AND (hot.scope_mode() = 'environment' OR hot.scope_maintenance('queue') OR hot.scope_maintenance('scheduler') OR hot.scope_maintenance('retention') OR hot.scope_maintenance('alerts')));
+CREATE POLICY hot_scope_delete ON hot."schedule" FOR DELETE USING ((EXISTS (SELECT 1 FROM hot.build p WHERE p.build_id = schedule.build_id)) AND (hot.scope_mode() = 'environment' OR hot.scope_maintenance('queue') OR hot.scope_maintenance('scheduler') OR hot.scope_maintenance('retention') OR hot.scope_maintenance('alerts')));
+
+-- schedule_log: separate SELECT and mutation grants; a read set is never a write grant.
+ALTER TABLE hot."schedule_log" ENABLE ROW LEVEL SECURITY;
+ALTER TABLE hot."schedule_log" FORCE ROW LEVEL SECURITY;
+CREATE POLICY hot_scope_read ON hot."schedule_log" FOR SELECT USING (EXISTS (SELECT 1 FROM hot.schedule p WHERE p.schedule_id = schedule_log.schedule_id));
+CREATE POLICY hot_scope_insert ON hot."schedule_log" FOR INSERT WITH CHECK ((EXISTS (SELECT 1 FROM hot.schedule p WHERE p.schedule_id = schedule_log.schedule_id)) AND (hot.scope_mode() = 'environment' OR hot.scope_maintenance('queue') OR hot.scope_maintenance('scheduler') OR hot.scope_maintenance('retention') OR hot.scope_maintenance('alerts')));
+CREATE POLICY hot_scope_update ON hot."schedule_log" FOR UPDATE USING ((EXISTS (SELECT 1 FROM hot.schedule p WHERE p.schedule_id = schedule_log.schedule_id)) AND (hot.scope_mode() = 'environment' OR hot.scope_maintenance('queue') OR hot.scope_maintenance('scheduler') OR hot.scope_maintenance('retention') OR hot.scope_maintenance('alerts'))) WITH CHECK ((EXISTS (SELECT 1 FROM hot.schedule p WHERE p.schedule_id = schedule_log.schedule_id)) AND (hot.scope_mode() = 'environment' OR hot.scope_maintenance('queue') OR hot.scope_maintenance('scheduler') OR hot.scope_maintenance('retention') OR hot.scope_maintenance('alerts')));
+CREATE POLICY hot_scope_delete ON hot."schedule_log" FOR DELETE USING ((EXISTS (SELECT 1 FROM hot.schedule p WHERE p.schedule_id = schedule_log.schedule_id)) AND (hot.scope_mode() = 'environment' OR hot.scope_maintenance('queue') OR hot.scope_maintenance('scheduler') OR hot.scope_maintenance('retention') OR hot.scope_maintenance('alerts')));
+
+-- team_user: separate SELECT and mutation grants; a read set is never a write grant.
+ALTER TABLE hot."team_user" ENABLE ROW LEVEL SECURITY;
+ALTER TABLE hot."team_user" FORCE ROW LEVEL SECURITY;
+CREATE POLICY hot_scope_read ON hot."team_user" FOR SELECT USING (EXISTS (SELECT 1 FROM hot.team p WHERE p.team_id = team_user.team_id));
+CREATE POLICY hot_scope_insert ON hot."team_user" FOR INSERT WITH CHECK ((EXISTS (SELECT 1 FROM hot.team p WHERE p.team_id = team_user.team_id)) AND hot.scope_mode() IN ('organization','maintenance'));
+CREATE POLICY hot_scope_update ON hot."team_user" FOR UPDATE USING ((EXISTS (SELECT 1 FROM hot.team p WHERE p.team_id = team_user.team_id)) AND hot.scope_mode() IN ('organization','maintenance')) WITH CHECK ((EXISTS (SELECT 1 FROM hot.team p WHERE p.team_id = team_user.team_id)) AND hot.scope_mode() IN ('organization','maintenance'));
+CREATE POLICY hot_scope_delete ON hot."team_user" FOR DELETE USING ((EXISTS (SELECT 1 FROM hot.team p WHERE p.team_id = team_user.team_id)) AND hot.scope_mode() IN ('organization','maintenance'));
+
+-- alert_delivery: separate SELECT and mutation grants; a read set is never a write grant.
+ALTER TABLE hot."alert_delivery" ENABLE ROW LEVEL SECURITY;
+ALTER TABLE hot."alert_delivery" FORCE ROW LEVEL SECURITY;
+CREATE POLICY hot_scope_read ON hot."alert_delivery" FOR SELECT USING (EXISTS (SELECT 1 FROM hot.alert p WHERE p.alert_id = alert_delivery.alert_id));
+CREATE POLICY hot_scope_insert ON hot."alert_delivery" FOR INSERT WITH CHECK ((EXISTS (SELECT 1 FROM hot.alert p WHERE p.alert_id = alert_delivery.alert_id)) AND (hot.scope_mode() = 'environment' OR hot.scope_maintenance('queue') OR hot.scope_maintenance('scheduler') OR hot.scope_maintenance('retention') OR hot.scope_maintenance('alerts')));
+CREATE POLICY hot_scope_update ON hot."alert_delivery" FOR UPDATE USING ((EXISTS (SELECT 1 FROM hot.alert p WHERE p.alert_id = alert_delivery.alert_id)) AND (hot.scope_mode() = 'environment' OR hot.scope_maintenance('queue') OR hot.scope_maintenance('scheduler') OR hot.scope_maintenance('retention') OR hot.scope_maintenance('alerts'))) WITH CHECK ((EXISTS (SELECT 1 FROM hot.alert p WHERE p.alert_id = alert_delivery.alert_id)) AND (hot.scope_mode() = 'environment' OR hot.scope_maintenance('queue') OR hot.scope_maintenance('scheduler') OR hot.scope_maintenance('retention') OR hot.scope_maintenance('alerts')));
+CREATE POLICY hot_scope_delete ON hot."alert_delivery" FOR DELETE USING ((EXISTS (SELECT 1 FROM hot.alert p WHERE p.alert_id = alert_delivery.alert_id)) AND (hot.scope_mode() = 'environment' OR hot.scope_maintenance('queue') OR hot.scope_maintenance('scheduler') OR hot.scope_maintenance('retention') OR hot.scope_maintenance('alerts')));
+
+-- alert_subscription_channel: separate SELECT and mutation grants; a read set is never a write grant.
+ALTER TABLE hot."alert_subscription_channel" ENABLE ROW LEVEL SECURITY;
+ALTER TABLE hot."alert_subscription_channel" FORCE ROW LEVEL SECURITY;
+CREATE POLICY hot_scope_read ON hot."alert_subscription_channel" FOR SELECT USING (EXISTS (SELECT 1 FROM hot.alert_subscription p WHERE p.alert_subscription_id = alert_subscription_channel.subscription_id));
+CREATE POLICY hot_scope_insert ON hot."alert_subscription_channel" FOR INSERT WITH CHECK ((EXISTS (SELECT 1 FROM hot.alert_subscription p WHERE p.alert_subscription_id = alert_subscription_channel.subscription_id)) AND hot.scope_mode() IN ('organization','maintenance'));
+CREATE POLICY hot_scope_update ON hot."alert_subscription_channel" FOR UPDATE USING ((EXISTS (SELECT 1 FROM hot.alert_subscription p WHERE p.alert_subscription_id = alert_subscription_channel.subscription_id)) AND hot.scope_mode() IN ('organization','maintenance')) WITH CHECK ((EXISTS (SELECT 1 FROM hot.alert_subscription p WHERE p.alert_subscription_id = alert_subscription_channel.subscription_id)) AND hot.scope_mode() IN ('organization','maintenance'));
+CREATE POLICY hot_scope_delete ON hot."alert_subscription_channel" FOR DELETE USING ((EXISTS (SELECT 1 FROM hot.alert_subscription p WHERE p.alert_subscription_id = alert_subscription_channel.subscription_id)) AND hot.scope_mode() IN ('organization','maintenance'));
+
+-- alert_subscription_destination: separate SELECT and mutation grants; a read set is never a write grant.
+ALTER TABLE hot."alert_subscription_destination" ENABLE ROW LEVEL SECURITY;
+ALTER TABLE hot."alert_subscription_destination" FORCE ROW LEVEL SECURITY;
+CREATE POLICY hot_scope_read ON hot."alert_subscription_destination" FOR SELECT USING (EXISTS (SELECT 1 FROM hot.alert_subscription p WHERE p.alert_subscription_id = alert_subscription_destination.subscription_id));
+CREATE POLICY hot_scope_insert ON hot."alert_subscription_destination" FOR INSERT WITH CHECK ((EXISTS (SELECT 1 FROM hot.alert_subscription p WHERE p.alert_subscription_id = alert_subscription_destination.subscription_id)) AND hot.scope_mode() IN ('organization','maintenance'));
+CREATE POLICY hot_scope_update ON hot."alert_subscription_destination" FOR UPDATE USING ((EXISTS (SELECT 1 FROM hot.alert_subscription p WHERE p.alert_subscription_id = alert_subscription_destination.subscription_id)) AND hot.scope_mode() IN ('organization','maintenance')) WITH CHECK ((EXISTS (SELECT 1 FROM hot.alert_subscription p WHERE p.alert_subscription_id = alert_subscription_destination.subscription_id)) AND hot.scope_mode() IN ('organization','maintenance'));
+CREATE POLICY hot_scope_delete ON hot."alert_subscription_destination" FOR DELETE USING ((EXISTS (SELECT 1 FROM hot.alert_subscription p WHERE p.alert_subscription_id = alert_subscription_destination.subscription_id)) AND hot.scope_mode() IN ('organization','maintenance'));
+
+-- file: separate SELECT and mutation grants; a read set is never a write grant.
+ALTER TABLE hot."file" ENABLE ROW LEVEL SECURITY;
+ALTER TABLE hot."file" FORCE ROW LEVEL SECURITY;
+CREATE POLICY hot_scope_read ON hot."file" FOR SELECT USING (((env_id IS NULL AND hot.scope_org_allows(org_id))) OR ((env_id IS NOT NULL AND hot.scope_env_allows(env_id) AND hot.scope_org_allows(org_id))) OR (hot.scope_billing_org(org_id)));
+CREATE POLICY hot_scope_insert ON hot."file" FOR INSERT WITH CHECK (((env_id IS NULL AND hot.scope_org_writes(org_id))) OR ((env_id IS NOT NULL AND hot.scope_env_writes(env_id) AND hot.scope_org_allows(org_id))));
+CREATE POLICY hot_scope_update ON hot."file" FOR UPDATE USING (((env_id IS NULL AND hot.scope_org_writes(org_id))) OR ((env_id IS NOT NULL AND hot.scope_env_writes(env_id) AND hot.scope_org_allows(org_id)))) WITH CHECK (((env_id IS NULL AND hot.scope_org_writes(org_id))) OR ((env_id IS NOT NULL AND hot.scope_env_writes(env_id) AND hot.scope_org_allows(org_id))));
+CREATE POLICY hot_scope_delete ON hot."file" FOR DELETE USING (((env_id IS NULL AND hot.scope_org_writes(org_id))) OR ((env_id IS NOT NULL AND hot.scope_env_writes(env_id) AND hot.scope_org_allows(org_id))));
+
+-- file_upload: separate SELECT and mutation grants; a read set is never a write grant.
+ALTER TABLE hot."file_upload" ENABLE ROW LEVEL SECURITY;
+ALTER TABLE hot."file_upload" FORCE ROW LEVEL SECURITY;
+CREATE POLICY hot_scope_read ON hot."file_upload" FOR SELECT USING (hot.scope_maintenance('retention') OR ((env_id IS NULL AND hot.scope_org_allows(org_id))) OR ((env_id IS NOT NULL AND hot.scope_env_allows(env_id) AND hot.scope_org_allows(org_id))) OR (hot.scope_billing_org(org_id)));
+CREATE POLICY hot_scope_insert ON hot."file_upload" FOR INSERT WITH CHECK (((env_id IS NULL AND hot.scope_org_writes(org_id))) OR ((env_id IS NOT NULL AND hot.scope_env_writes(env_id) AND hot.scope_org_allows(org_id))));
+CREATE POLICY hot_scope_update ON hot."file_upload" FOR UPDATE USING (hot.scope_maintenance('retention') OR ((env_id IS NULL AND hot.scope_org_writes(org_id))) OR ((env_id IS NOT NULL AND hot.scope_env_writes(env_id) AND hot.scope_org_allows(org_id)))) WITH CHECK (hot.scope_maintenance('retention') OR ((env_id IS NULL AND hot.scope_org_writes(org_id))) OR ((env_id IS NOT NULL AND hot.scope_env_writes(env_id) AND hot.scope_org_allows(org_id))));
+CREATE POLICY hot_scope_delete ON hot."file_upload" FOR DELETE USING (((env_id IS NULL AND hot.scope_org_writes(org_id))) OR ((env_id IS NOT NULL AND hot.scope_env_writes(env_id) AND hot.scope_org_allows(org_id))));
+
+-- blob_object: separate SELECT and mutation grants; a read set is never a write grant.
+ALTER TABLE hot."blob_object" ENABLE ROW LEVEL SECURITY;
+ALTER TABLE hot."blob_object" FORCE ROW LEVEL SECURITY;
+CREATE POLICY hot_scope_read ON hot."blob_object" FOR SELECT USING (((env_id IS NULL AND hot.scope_org_allows(org_id))) OR ((env_id IS NOT NULL AND hot.scope_env_allows(env_id) AND hot.scope_org_allows(org_id))) OR (hot.scope_billing_org(org_id)) OR (hot.scope_maintenance('blob_gc')));
+CREATE POLICY hot_scope_insert ON hot."blob_object" FOR INSERT WITH CHECK (((env_id IS NULL AND hot.scope_org_writes(org_id))) OR ((env_id IS NOT NULL AND hot.scope_env_writes(env_id) AND hot.scope_org_allows(org_id))) OR (hot.scope_maintenance('blob_gc')));
+CREATE POLICY hot_scope_update ON hot."blob_object" FOR UPDATE USING (((env_id IS NULL AND hot.scope_org_writes(org_id))) OR ((env_id IS NOT NULL AND hot.scope_env_writes(env_id) AND hot.scope_org_allows(org_id))) OR (hot.scope_maintenance('blob_gc'))) WITH CHECK (((env_id IS NULL AND hot.scope_org_writes(org_id))) OR ((env_id IS NOT NULL AND hot.scope_env_writes(env_id) AND hot.scope_org_allows(org_id))) OR (hot.scope_maintenance('blob_gc')));
+CREATE POLICY hot_scope_delete ON hot."blob_object" FOR DELETE USING (((env_id IS NULL AND hot.scope_org_writes(org_id))) OR ((env_id IS NOT NULL AND hot.scope_env_writes(env_id) AND hot.scope_org_allows(org_id))) OR (hot.scope_maintenance('blob_gc')));
+
+-- blob_ref: separate SELECT and mutation grants; a read set is never a write grant.
+ALTER TABLE hot."blob_ref" ENABLE ROW LEVEL SECURITY;
+ALTER TABLE hot."blob_ref" FORCE ROW LEVEL SECURITY;
+CREATE POLICY hot_scope_read ON hot."blob_ref" FOR SELECT USING (((env_id IS NULL AND hot.scope_org_allows(org_id))) OR ((env_id IS NOT NULL AND hot.scope_env_allows(env_id) AND hot.scope_org_allows(org_id))) OR (hot.scope_billing_org(org_id)) OR (hot.scope_maintenance('blob_gc')));
+CREATE POLICY hot_scope_insert ON hot."blob_ref" FOR INSERT WITH CHECK (((env_id IS NULL AND hot.scope_org_writes(org_id))) OR ((env_id IS NOT NULL AND hot.scope_env_writes(env_id) AND hot.scope_org_allows(org_id))) OR (hot.scope_maintenance('blob_gc')));
+CREATE POLICY hot_scope_update ON hot."blob_ref" FOR UPDATE USING (((env_id IS NULL AND hot.scope_org_writes(org_id))) OR ((env_id IS NOT NULL AND hot.scope_env_writes(env_id) AND hot.scope_org_allows(org_id))) OR (hot.scope_maintenance('blob_gc'))) WITH CHECK (((env_id IS NULL AND hot.scope_org_writes(org_id))) OR ((env_id IS NOT NULL AND hot.scope_env_writes(env_id) AND hot.scope_org_allows(org_id))) OR (hot.scope_maintenance('blob_gc')));
+CREATE POLICY hot_scope_delete ON hot."blob_ref" FOR DELETE USING (((env_id IS NULL AND hot.scope_org_writes(org_id))) OR ((env_id IS NOT NULL AND hot.scope_env_writes(env_id) AND hot.scope_org_allows(org_id))) OR (hot.scope_maintenance('blob_gc')));
+
+-- alert_subscription: separate SELECT and mutation grants; a read set is never a write grant.
+ALTER TABLE hot."alert_subscription" ENABLE ROW LEVEL SECURITY;
+ALTER TABLE hot."alert_subscription" FORCE ROW LEVEL SECURITY;
+CREATE POLICY hot_scope_read ON hot."alert_subscription" FOR SELECT USING (((env_id IS NULL AND hot.scope_org_allows(org_id))) OR ((env_id IS NOT NULL AND hot.scope_env_allows(env_id) AND hot.scope_org_allows(org_id))) OR (hot.scope_maintenance('alerts')));
+CREATE POLICY hot_scope_insert ON hot."alert_subscription" FOR INSERT WITH CHECK (((env_id IS NULL AND hot.scope_org_writes(org_id))) OR ((env_id IS NOT NULL AND hot.scope_env_writes(env_id) AND hot.scope_org_allows(org_id))) OR (hot.scope_maintenance('alerts')));
+CREATE POLICY hot_scope_update ON hot."alert_subscription" FOR UPDATE USING (((env_id IS NULL AND hot.scope_org_writes(org_id))) OR ((env_id IS NOT NULL AND hot.scope_env_writes(env_id) AND hot.scope_org_allows(org_id))) OR (hot.scope_maintenance('alerts'))) WITH CHECK (((env_id IS NULL AND hot.scope_org_writes(org_id))) OR ((env_id IS NOT NULL AND hot.scope_env_writes(env_id) AND hot.scope_org_allows(org_id))) OR (hot.scope_maintenance('alerts')));
+CREATE POLICY hot_scope_delete ON hot."alert_subscription" FOR DELETE USING (((env_id IS NULL AND hot.scope_org_writes(org_id))) OR ((env_id IS NOT NULL AND hot.scope_env_writes(env_id) AND hot.scope_org_allows(org_id))) OR (hot.scope_maintenance('alerts')));
+
+-- store_map: separate SELECT and mutation grants; a read set is never a write grant.
+ALTER TABLE hot."store_map" ENABLE ROW LEVEL SECURITY;
+ALTER TABLE hot."store_map" FORCE ROW LEVEL SECURITY;
+CREATE POLICY hot_scope_read ON hot."store_map" FOR SELECT USING (hot.scope_maintenance('store_provisioning') OR (hot.scope_env_allows(env_id) AND hot.scope_org_allows(org_id)) OR (hot.scope_billing_org(org_id)));
+CREATE POLICY hot_scope_insert ON hot."store_map" FOR INSERT WITH CHECK (hot.scope_env_writes(env_id) AND hot.scope_org_allows(org_id));
+CREATE POLICY hot_scope_update ON hot."store_map" FOR UPDATE USING (hot.scope_env_writes(env_id) AND hot.scope_org_allows(org_id)) WITH CHECK (hot.scope_env_writes(env_id) AND hot.scope_org_allows(org_id));
+CREATE POLICY hot_scope_delete ON hot."store_map" FOR DELETE USING (hot.scope_env_writes(env_id) AND hot.scope_org_allows(org_id));
+
+-- store_map_entry: separate SELECT and mutation grants; a read set is never a write grant.
+ALTER TABLE hot."store_map_entry" ENABLE ROW LEVEL SECURITY;
+ALTER TABLE hot."store_map_entry" FORCE ROW LEVEL SECURITY;
+CREATE POLICY hot_scope_read ON hot."store_map_entry" FOR SELECT USING ((hot.scope_env_allows(env_id) AND hot.scope_org_allows(org_id)) OR (hot.scope_billing_org(org_id)));
+CREATE POLICY hot_scope_insert ON hot."store_map_entry" FOR INSERT WITH CHECK (hot.scope_env_writes(env_id) AND hot.scope_org_allows(org_id));
+CREATE POLICY hot_scope_update ON hot."store_map_entry" FOR UPDATE USING (hot.scope_env_writes(env_id) AND hot.scope_org_allows(org_id)) WITH CHECK (hot.scope_env_writes(env_id) AND hot.scope_org_allows(org_id));
+CREATE POLICY hot_scope_delete ON hot."store_map_entry" FOR DELETE USING (hot.scope_env_writes(env_id) AND hot.scope_org_allows(org_id));
+
+-- context: separate SELECT and mutation grants; a read set is never a write grant.
+ALTER TABLE hot."context" ENABLE ROW LEVEL SECURITY;
+ALTER TABLE hot."context" FORCE ROW LEVEL SECURITY;
+CREATE POLICY hot_scope_read ON hot."context" FOR SELECT USING (((env_id IS NOT NULL AND hot.scope_env_allows(env_id))) OR ((project_id IS NOT NULL AND EXISTS (SELECT 1 FROM hot.project p WHERE p.project_id = context.project_id AND hot.scope_env_allows(p.env_id)))));
+CREATE POLICY hot_scope_insert ON hot."context" FOR INSERT WITH CHECK (((env_id IS NOT NULL AND hot.scope_env_writes(env_id))) OR ((project_id IS NOT NULL AND EXISTS (SELECT 1 FROM hot.project p WHERE p.project_id = context.project_id AND hot.scope_env_writes(p.env_id)))));
+CREATE POLICY hot_scope_update ON hot."context" FOR UPDATE USING (((env_id IS NOT NULL AND hot.scope_env_writes(env_id))) OR ((project_id IS NOT NULL AND EXISTS (SELECT 1 FROM hot.project p WHERE p.project_id = context.project_id AND hot.scope_env_writes(p.env_id))))) WITH CHECK (((env_id IS NOT NULL AND hot.scope_env_writes(env_id))) OR ((project_id IS NOT NULL AND EXISTS (SELECT 1 FROM hot.project p WHERE p.project_id = context.project_id AND hot.scope_env_writes(p.env_id)))));
+CREATE POLICY hot_scope_delete ON hot."context" FOR DELETE USING (((env_id IS NOT NULL AND hot.scope_env_writes(env_id))) OR ((project_id IS NOT NULL AND EXISTS (SELECT 1 FROM hot.project p WHERE p.project_id = context.project_id AND hot.scope_env_writes(p.env_id)))));
+
+-- alert: separate SELECT and mutation grants; a read set is never a write grant.
+ALTER TABLE hot."alert" ENABLE ROW LEVEL SECURITY;
+ALTER TABLE hot."alert" FORCE ROW LEVEL SECURITY;
+CREATE POLICY hot_scope_read ON hot."alert" FOR SELECT USING ((hot.scope_env_allows(env_id) AND hot.scope_org_allows(org_id)) OR (hot.scope_maintenance('alerts') OR hot.scope_maintenance('retention')));
+CREATE POLICY hot_scope_insert ON hot."alert" FOR INSERT WITH CHECK ((hot.scope_env_writes(env_id) AND hot.scope_org_allows(org_id)) OR (hot.scope_maintenance('alerts') OR hot.scope_maintenance('retention')));
+CREATE POLICY hot_scope_update ON hot."alert" FOR UPDATE USING ((hot.scope_env_writes(env_id) AND hot.scope_org_allows(org_id)) OR (hot.scope_maintenance('alerts') OR hot.scope_maintenance('retention'))) WITH CHECK ((hot.scope_env_writes(env_id) AND hot.scope_org_allows(org_id)) OR (hot.scope_maintenance('alerts') OR hot.scope_maintenance('retention')));
+CREATE POLICY hot_scope_delete ON hot."alert" FOR DELETE USING ((hot.scope_env_writes(env_id) AND hot.scope_org_allows(org_id)) OR (hot.scope_maintenance('alerts') OR hot.scope_maintenance('retention')));
+
+-- alert_destination: separate SELECT and mutation grants; a read set is never a write grant.
+ALTER TABLE hot."alert_destination" ENABLE ROW LEVEL SECURITY;
+ALTER TABLE hot."alert_destination" FORCE ROW LEVEL SECURITY;
+CREATE POLICY hot_scope_read ON hot."alert_destination" FOR SELECT USING ((hot.scope_org_allows(org_id)) OR (hot.scope_maintenance('alerts')));
+CREATE POLICY hot_scope_insert ON hot."alert_destination" FOR INSERT WITH CHECK ((hot.scope_org_writes(org_id)) OR (hot.scope_maintenance('alerts')));
+CREATE POLICY hot_scope_update ON hot."alert_destination" FOR UPDATE USING ((hot.scope_org_writes(org_id)) OR (hot.scope_maintenance('alerts'))) WITH CHECK ((hot.scope_org_writes(org_id)) OR (hot.scope_maintenance('alerts')));
+CREATE POLICY hot_scope_delete ON hot."alert_destination" FOR DELETE USING ((hot.scope_org_writes(org_id)) OR (hot.scope_maintenance('alerts')));
+
+-- alert_channel: separate SELECT and mutation grants; a read set is never a write grant.
+ALTER TABLE hot."alert_channel" ENABLE ROW LEVEL SECURITY;
+ALTER TABLE hot."alert_channel" FORCE ROW LEVEL SECURITY;
+CREATE POLICY hot_scope_read ON hot."alert_channel" FOR SELECT USING ((org_id IS NULL AND hot.scope_mode() <> '') OR (org_id IS NOT NULL AND hot.scope_org_allows(org_id) AND (env_id IS NULL OR hot.scope_env_allows(env_id))) OR (hot.scope_maintenance('alerts')));
+CREATE POLICY hot_scope_insert ON hot."alert_channel" FOR INSERT WITH CHECK ((org_id IS NOT NULL AND hot.scope_org_writes(org_id)) OR (hot.scope_maintenance('alerts')));
+CREATE POLICY hot_scope_update ON hot."alert_channel" FOR UPDATE USING ((org_id IS NOT NULL AND hot.scope_org_writes(org_id)) OR (hot.scope_maintenance('alerts'))) WITH CHECK ((org_id IS NOT NULL AND hot.scope_org_writes(org_id)) OR (hot.scope_maintenance('alerts')));
+CREATE POLICY hot_scope_delete ON hot."alert_channel" FOR DELETE USING ((org_id IS NOT NULL AND hot.scope_org_writes(org_id)) OR (hot.scope_maintenance('alerts')));
+
+-- user: separate SELECT and mutation grants; a read set is never a write grant.
+ALTER TABLE hot."user" ENABLE ROW LEVEL SECURITY;
+ALTER TABLE hot."user" FORCE ROW LEVEL SECURITY;
+CREATE POLICY hot_scope_read ON hot."user" FOR SELECT USING (hot.scope_bootstrap('authentication') OR hot.scope_bootstrap('membership') OR hot.scope_bootstrap('onboarding'));
+CREATE POLICY hot_scope_insert ON hot."user" FOR INSERT WITH CHECK (hot.scope_bootstrap('authentication') OR hot.scope_bootstrap('onboarding'));
+CREATE POLICY hot_scope_update ON hot."user" FOR UPDATE USING (hot.scope_bootstrap('authentication') OR hot.scope_bootstrap('onboarding')) WITH CHECK (hot.scope_bootstrap('authentication') OR hot.scope_bootstrap('onboarding'));
+CREATE POLICY hot_scope_delete ON hot."user" FOR DELETE USING (hot.scope_bootstrap('authentication') OR hot.scope_bootstrap('onboarding'));
+
+-- user_auth: separate SELECT and mutation grants; a read set is never a write grant.
+ALTER TABLE hot."user_auth" ENABLE ROW LEVEL SECURITY;
+ALTER TABLE hot."user_auth" FORCE ROW LEVEL SECURITY;
+CREATE POLICY hot_scope_read ON hot."user_auth" FOR SELECT USING (hot.scope_bootstrap('authentication') OR hot.scope_bootstrap('onboarding'));
+CREATE POLICY hot_scope_insert ON hot."user_auth" FOR INSERT WITH CHECK (hot.scope_bootstrap('authentication') OR hot.scope_bootstrap('onboarding'));
+CREATE POLICY hot_scope_update ON hot."user_auth" FOR UPDATE USING (hot.scope_bootstrap('authentication') OR hot.scope_bootstrap('onboarding')) WITH CHECK (hot.scope_bootstrap('authentication') OR hot.scope_bootstrap('onboarding'));
+CREATE POLICY hot_scope_delete ON hot."user_auth" FOR DELETE USING (hot.scope_bootstrap('authentication') OR hot.scope_bootstrap('onboarding'));
+
+-- email_verification: separate SELECT and mutation grants; a read set is never a write grant.
+ALTER TABLE hot."email_verification" ENABLE ROW LEVEL SECURITY;
+ALTER TABLE hot."email_verification" FORCE ROW LEVEL SECURITY;
+CREATE POLICY hot_scope_read ON hot."email_verification" FOR SELECT USING (hot.scope_bootstrap('authentication') OR hot.scope_bootstrap('onboarding'));
+CREATE POLICY hot_scope_insert ON hot."email_verification" FOR INSERT WITH CHECK (hot.scope_bootstrap('authentication') OR hot.scope_bootstrap('onboarding'));
+CREATE POLICY hot_scope_update ON hot."email_verification" FOR UPDATE USING (hot.scope_bootstrap('authentication') OR hot.scope_bootstrap('onboarding')) WITH CHECK (hot.scope_bootstrap('authentication') OR hot.scope_bootstrap('onboarding'));
+CREATE POLICY hot_scope_delete ON hot."email_verification" FOR DELETE USING (hot.scope_bootstrap('authentication') OR hot.scope_bootstrap('onboarding'));
+
+-- email_queue: separate SELECT and mutation grants; a read set is never a write grant.
+ALTER TABLE hot."email_queue" ENABLE ROW LEVEL SECURITY;
+ALTER TABLE hot."email_queue" FORCE ROW LEVEL SECURITY;
+CREATE POLICY hot_scope_read ON hot."email_queue" FOR SELECT USING ((hot.scope_bootstrap('onboarding')) OR (hot.scope_maintenance('email')));
+CREATE POLICY hot_scope_insert ON hot."email_queue" FOR INSERT WITH CHECK ((hot.scope_bootstrap('onboarding')) OR (hot.scope_maintenance('email')));
+CREATE POLICY hot_scope_update ON hot."email_queue" FOR UPDATE USING ((hot.scope_bootstrap('onboarding')) OR (hot.scope_maintenance('email'))) WITH CHECK ((hot.scope_bootstrap('onboarding')) OR (hot.scope_maintenance('email')));
+CREATE POLICY hot_scope_delete ON hot."email_queue" FOR DELETE USING ((hot.scope_bootstrap('onboarding')) OR (hot.scope_maintenance('email')));
+
+-- scheduler_state: separate SELECT and mutation grants; a read set is never a write grant.
+ALTER TABLE hot."scheduler_state" ENABLE ROW LEVEL SECURITY;
+ALTER TABLE hot."scheduler_state" FORCE ROW LEVEL SECURITY;
+CREATE POLICY hot_scope_read ON hot."scheduler_state" FOR SELECT USING (hot.scope_maintenance('scheduler'));
+CREATE POLICY hot_scope_insert ON hot."scheduler_state" FOR INSERT WITH CHECK (hot.scope_maintenance('scheduler'));
+CREATE POLICY hot_scope_update ON hot."scheduler_state" FOR UPDATE USING (hot.scope_maintenance('scheduler')) WITH CHECK (hot.scope_maintenance('scheduler'));
+CREATE POLICY hot_scope_delete ON hot."scheduler_state" FOR DELETE USING (hot.scope_maintenance('scheduler'));
+
+
+-- Account-rate admission is a root billing operation, never a child pool.
+ALTER TABLE hot.account_request_window ENABLE ROW LEVEL SECURITY;
+ALTER TABLE hot.account_request_window FORCE ROW LEVEL SECURITY;
+CREATE POLICY account_request_window_scope ON hot.account_request_window
+    USING (hot.scope_maintenance('billing') AND root_org_id = hot.scope_org_id())
+    WITH CHECK (hot.scope_maintenance('billing') AND root_org_id = hot.scope_org_id());
+
+-- Immutability prevents a permitted update from moving an existing resource
+-- between projects/scopes. RLS alone checks rows, not historical ownership.
+CREATE FUNCTION hot.prevent_scope_reassignment() RETURNS trigger LANGUAGE plpgsql AS $$
+DECLARE column_name text;
+BEGIN
+    FOREACH column_name IN ARRAY TG_ARGV LOOP
+        IF to_jsonb(NEW) -> column_name IS DISTINCT FROM to_jsonb(OLD) -> column_name THEN
+            RAISE EXCEPTION 'Resource ownership is immutable' USING ERRCODE = '42501';
+        END IF;
+    END LOOP;
+    RETURN NEW;
+END $$;
+CREATE TRIGGER immutable_resource_scope BEFORE UPDATE ON hot.env
+    FOR EACH ROW EXECUTE FUNCTION hot.prevent_scope_reassignment('org_id');
+CREATE TRIGGER immutable_resource_scope BEFORE UPDATE ON hot.project
+    FOR EACH ROW EXECUTE FUNCTION hot.prevent_scope_reassignment('env_id');
+CREATE TRIGGER immutable_resource_scope BEFORE UPDATE ON hot.build
+    FOR EACH ROW EXECUTE FUNCTION hot.prevent_scope_reassignment('project_id');
+CREATE TRIGGER immutable_resource_scope BEFORE UPDATE ON hot.run
+    FOR EACH ROW EXECUTE FUNCTION hot.prevent_scope_reassignment('env_id', 'build_id', 'stream_id');
+CREATE TRIGGER immutable_resource_scope BEFORE UPDATE ON hot.task
+    FOR EACH ROW EXECUTE FUNCTION hot.prevent_scope_reassignment('env_id', 'build_id', 'stream_id');
+CREATE TRIGGER immutable_resource_scope BEFORE UPDATE ON hot.event
+    FOR EACH ROW EXECUTE FUNCTION hot.prevent_scope_reassignment('env_id', 'stream_id');
+CREATE TRIGGER immutable_resource_scope BEFORE UPDATE ON hot.stream
+    FOR EACH ROW EXECUTE FUNCTION hot.prevent_scope_reassignment('env_id');
+CREATE TRIGGER immutable_resource_scope BEFORE UPDATE ON hot.api_key
+    FOR EACH ROW EXECUTE FUNCTION hot.prevent_scope_reassignment('env_id');
+CREATE TRIGGER immutable_resource_scope BEFORE UPDATE ON hot.service_key
+    FOR EACH ROW EXECUTE FUNCTION hot.prevent_scope_reassignment('env_id', 'api_key_id');
+CREATE TRIGGER immutable_resource_scope BEFORE UPDATE ON hot.session
+    FOR EACH ROW EXECUTE FUNCTION hot.prevent_scope_reassignment('env_id', 'api_key_id');
+CREATE TRIGGER immutable_resource_scope BEFORE UPDATE ON hot.agent
+    FOR EACH ROW EXECUTE FUNCTION hot.prevent_scope_reassignment('env_id', 'build_id');
+CREATE TRIGGER immutable_resource_scope BEFORE UPDATE ON hot.workflow
+    FOR EACH ROW EXECUTE FUNCTION hot.prevent_scope_reassignment('env_id', 'build_id');
+CREATE TRIGGER immutable_resource_scope BEFORE UPDATE ON hot.file
+    FOR EACH ROW EXECUTE FUNCTION hot.prevent_scope_reassignment('org_id', 'env_id');
+CREATE TRIGGER immutable_resource_scope BEFORE UPDATE ON hot.file_upload
+    FOR EACH ROW EXECUTE FUNCTION hot.prevent_scope_reassignment('org_id', 'env_id');
+CREATE TRIGGER immutable_resource_scope BEFORE UPDATE ON hot.blob_object
+    FOR EACH ROW EXECUTE FUNCTION hot.prevent_scope_reassignment('org_id', 'env_id');
+CREATE TRIGGER immutable_resource_scope BEFORE UPDATE ON hot.blob_ref
+    FOR EACH ROW EXECUTE FUNCTION hot.prevent_scope_reassignment('org_id', 'env_id', 'blob_object_id');
+CREATE TRIGGER immutable_resource_scope BEFORE UPDATE ON hot.store_map
+    FOR EACH ROW EXECUTE FUNCTION hot.prevent_scope_reassignment('org_id', 'env_id');
+CREATE TRIGGER immutable_resource_scope BEFORE UPDATE ON hot.store_map_entry
+    FOR EACH ROW EXECUTE FUNCTION hot.prevent_scope_reassignment('org_id', 'env_id');
+CREATE TRIGGER immutable_resource_scope BEFORE UPDATE ON hot.domain
+    FOR EACH ROW EXECUTE FUNCTION hot.prevent_scope_reassignment('env_id');
+CREATE TRIGGER immutable_resource_scope BEFORE UPDATE ON hot.schedule
+    FOR EACH ROW EXECUTE FUNCTION hot.prevent_scope_reassignment('build_id');
+CREATE TRIGGER immutable_resource_scope BEFORE UPDATE ON hot.webhook
+    FOR EACH ROW EXECUTE FUNCTION hot.prevent_scope_reassignment('build_id');
+CREATE TRIGGER immutable_resource_scope BEFORE UPDATE ON hot.mcp_tool
+    FOR EACH ROW EXECUTE FUNCTION hot.prevent_scope_reassignment('build_id');
+CREATE TRIGGER immutable_resource_scope BEFORE UPDATE ON hot.event_handler
+    FOR EACH ROW EXECUTE FUNCTION hot.prevent_scope_reassignment('build_id');
+CREATE TRIGGER immutable_resource_scope BEFORE UPDATE ON hot.context
+    FOR EACH ROW EXECUTE FUNCTION hot.prevent_scope_reassignment('env_id', 'project_id');
+CREATE TRIGGER immutable_resource_scope BEFORE UPDATE ON hot.alert
+    FOR EACH ROW EXECUTE FUNCTION hot.prevent_scope_reassignment('org_id', 'env_id');
+
+-- Validate cross-resource ownership on writes. PostgreSQL foreign-key checks
+-- intentionally bypass RLS, so FK existence alone is not an isolation check.
+CREATE FUNCTION hot.enforce_resource_scope() RETURNS trigger LANGUAGE plpgsql AS $$
+DECLARE r jsonb := to_jsonb(NEW);
+        resource_env uuid := NULLIF(r ->> 'env_id','')::uuid;
+        resource_org uuid := NULLIF(r ->> 'org_id','')::uuid;
+        linked uuid;
+BEGIN
+    IF resource_env IS NOT NULL AND resource_org IS NOT NULL AND NOT EXISTS
+        (SELECT 1 FROM hot.env e WHERE e.env_id = resource_env AND e.org_id = resource_org) THEN
+        RAISE EXCEPTION 'Environment ownership mismatch' USING ERRCODE = '42501';
+    END IF;
+    IF TG_TABLE_NAME IN ('run','task','agent','workflow') THEN
+        linked := (r ->> 'build_id')::uuid;
+        IF NOT EXISTS (SELECT 1 FROM hot.build b JOIN hot.project p ON p.project_id = b.project_id
+                       WHERE b.build_id = linked AND p.env_id = resource_env) THEN
+            RAISE EXCEPTION 'Build ownership mismatch' USING ERRCODE = '42501';
+        END IF;
+    END IF;
+    IF TG_TABLE_NAME IN ('run','task','event') THEN
+        linked := (r ->> 'stream_id')::uuid;
+        IF NOT EXISTS (SELECT 1 FROM hot.stream s WHERE s.stream_id = linked AND s.env_id = resource_env) THEN
+            RAISE EXCEPTION 'Stream ownership mismatch' USING ERRCODE = '42501';
+        END IF;
+        linked := NULLIF(r ->> 'origin_run_id','')::uuid;
+        IF linked IS NOT NULL AND NOT EXISTS
+            (SELECT 1 FROM hot.run p WHERE p.run_id = linked AND p.env_id = resource_env) THEN
+            RAISE EXCEPTION 'Origin run ownership mismatch' USING ERRCODE = '42501';
+        END IF;
+    END IF;
+    IF TG_TABLE_NAME = 'task' THEN
+        linked := NULLIF(r ->> 'run_id','')::uuid;
+        IF linked IS NOT NULL AND NOT EXISTS
+            (SELECT 1 FROM hot.run p WHERE p.run_id = linked AND p.env_id = resource_env) THEN
+            RAISE EXCEPTION 'Task run ownership mismatch' USING ERRCODE = '42501';
+        END IF;
+    END IF;
+    IF TG_TABLE_NAME = 'context' AND resource_env IS NOT NULL THEN
+        linked := NULLIF(r ->> 'project_id','')::uuid;
+        IF linked IS NOT NULL AND NOT EXISTS
+            (SELECT 1 FROM hot.project p WHERE p.project_id = linked AND p.env_id = resource_env) THEN
+            RAISE EXCEPTION 'Context project ownership mismatch' USING ERRCODE = '42501';
+        END IF;
+    END IF;
+    IF TG_TABLE_NAME = 'run' THEN
+        linked := NULLIF(r ->> 'event_id','')::uuid;
+        IF linked IS NOT NULL AND NOT EXISTS
+            (SELECT 1 FROM hot.event e WHERE e.event_id = linked AND e.env_id = resource_env) THEN
+            RAISE EXCEPTION 'Event ownership mismatch' USING ERRCODE = '42501';
+        END IF;
+    END IF;
+    IF TG_TABLE_NAME IN ('service_key','session') AND NOT EXISTS
+        (SELECT 1 FROM hot.api_key k WHERE k.api_key_id = (r ->> 'api_key_id')::uuid AND k.env_id = resource_env) THEN
+        RAISE EXCEPTION 'Credential ownership mismatch' USING ERRCODE = '42501';
+    END IF;
+    IF TG_TABLE_NAME = 'blob_ref' AND NOT EXISTS
+        (SELECT 1 FROM hot.blob_object b WHERE b.blob_object_id = (r ->> 'blob_object_id')::uuid
+            AND b.org_id = resource_org AND b.env_id IS NOT DISTINCT FROM resource_env) THEN
+        RAISE EXCEPTION 'Blob ownership mismatch' USING ERRCODE = '42501';
+    END IF;
+    RETURN NEW;
+END $$;
+CREATE TRIGGER resource_scope_integrity BEFORE INSERT OR UPDATE ON hot.run
+    FOR EACH ROW EXECUTE FUNCTION hot.enforce_resource_scope();
+CREATE TRIGGER resource_scope_integrity BEFORE INSERT OR UPDATE ON hot.task
+    FOR EACH ROW EXECUTE FUNCTION hot.enforce_resource_scope();
+CREATE TRIGGER resource_scope_integrity BEFORE INSERT OR UPDATE ON hot.event
+    FOR EACH ROW EXECUTE FUNCTION hot.enforce_resource_scope();
+CREATE TRIGGER resource_scope_integrity BEFORE INSERT OR UPDATE ON hot.agent
+    FOR EACH ROW EXECUTE FUNCTION hot.enforce_resource_scope();
+CREATE TRIGGER resource_scope_integrity BEFORE INSERT OR UPDATE ON hot.workflow
+    FOR EACH ROW EXECUTE FUNCTION hot.enforce_resource_scope();
+CREATE TRIGGER resource_scope_integrity BEFORE INSERT OR UPDATE ON hot.service_key
+    FOR EACH ROW EXECUTE FUNCTION hot.enforce_resource_scope();
+CREATE TRIGGER resource_scope_integrity BEFORE INSERT OR UPDATE ON hot.session
+    FOR EACH ROW EXECUTE FUNCTION hot.enforce_resource_scope();
+CREATE TRIGGER resource_scope_integrity BEFORE INSERT OR UPDATE ON hot.file
+    FOR EACH ROW EXECUTE FUNCTION hot.enforce_resource_scope();
+CREATE TRIGGER resource_scope_integrity BEFORE INSERT OR UPDATE ON hot.file_upload
+    FOR EACH ROW EXECUTE FUNCTION hot.enforce_resource_scope();
+CREATE TRIGGER resource_scope_integrity BEFORE INSERT OR UPDATE ON hot.blob_object
+    FOR EACH ROW EXECUTE FUNCTION hot.enforce_resource_scope();
+CREATE TRIGGER resource_scope_integrity BEFORE INSERT OR UPDATE ON hot.blob_ref
+    FOR EACH ROW EXECUTE FUNCTION hot.enforce_resource_scope();
+CREATE TRIGGER resource_scope_integrity BEFORE INSERT OR UPDATE ON hot.store_map
+    FOR EACH ROW EXECUTE FUNCTION hot.enforce_resource_scope();
+CREATE TRIGGER resource_scope_integrity BEFORE INSERT OR UPDATE ON hot.store_map_entry
+    FOR EACH ROW EXECUTE FUNCTION hot.enforce_resource_scope();
+CREATE TRIGGER resource_scope_integrity BEFORE INSERT OR UPDATE ON hot.alert
+    FOR EACH ROW EXECUTE FUNCTION hot.enforce_resource_scope();
+
+CREATE TRIGGER resource_scope_integrity BEFORE INSERT OR UPDATE ON hot.context
+    FOR EACH ROW EXECUTE FUNCTION hot.enforce_resource_scope();
+CREATE TRIGGER immutable_resource_scope BEFORE UPDATE ON hot.call
+    FOR EACH ROW EXECUTE FUNCTION hot.prevent_scope_reassignment('run_id');

@@ -130,14 +130,18 @@ pub mod file_upload;
 pub mod hierarchy;
 pub mod invite;
 pub mod mcp_tool;
+pub mod management_key;
 pub mod org;
 pub mod org_note;
 pub mod port;
 pub mod project;
 pub mod run;
+pub mod rls;
 pub mod schedule;
 pub mod schedule_log;
 pub mod scheduler_state;
+pub mod scope;
+pub mod scoped_postgres;
 pub(crate) mod search;
 pub mod service_key;
 pub mod session;
@@ -178,6 +182,8 @@ pub use schedule::{
 };
 pub use schedule_log::{ScheduleLog, ScheduleLogError};
 pub use scheduler_state::{SchedulerState, SchedulerStateError};
+pub use scope::{BootstrapOperation, DatabaseScope, MaintenanceOperation, current_database_scope, with_database_scope};
+pub use scoped_postgres::ScopedPgPool;
 pub use service_key::{ServiceKey, ServiceKeyError};
 pub use session::{Session, SessionError};
 pub use stream::{Stream, StreamError, StreamSummary};
@@ -250,7 +256,18 @@ pub enum DatabaseType {
 #[derive(Clone)]
 pub enum DatabasePool {
     Sqlite(Pool<Sqlite>),
-    Postgres(Pool<Postgres>),
+    Postgres(ScopedPgPool),
+}
+
+impl DatabasePool {
+    /// Bind trusted scope to a cloned handle for work crossing task boundaries.
+    /// SQLite repositories retain explicit application scope predicates.
+    pub fn with_scope(&self, scope: DatabaseScope) -> Self {
+        match self {
+            Self::Postgres(pool) => Self::Postgres(pool.with_scope(scope)),
+            Self::Sqlite(pool) => Self::Sqlite(pool.clone()),
+        }
+    }
 }
 
 /// A held cross-process coordination lock returned by [`try_acquire_advisory_lock`].
@@ -322,7 +339,7 @@ pub async fn try_acquire_advisory_lock(
 ) -> Result<Option<AdvisoryLock>, sqlx::Error> {
     match db {
         DatabasePool::Postgres(pool) => {
-            let mut conn = pool.acquire().await?;
+            let mut conn = pool.acquire_advisory_connection().await?;
             let acquired: bool = sqlx::query_scalar("SELECT pg_try_advisory_lock($1)")
                 .bind(lock_id)
                 .fetch_one(&mut *conn)
@@ -412,6 +429,13 @@ pub fn get_db_uri_from_conf(conf: &Val) -> String {
 
     // Default to SQLite if no URI is configured
     DEFAULT_DB_URI.to_string()
+}
+
+/// Production PostgreSQL is role-validated by default. Disabling this is only
+/// for explicit privileged fixtures/isolated development; scoped queries and
+/// database policies still apply. SQLite does not use PostgreSQL role checks.
+pub fn rls_enforcement_required(conf: &Val) -> bool {
+    conf.get_bool_or_default("db.rls.enforce", conf.get_bool_or_default("rls.enforce", true))
 }
 
 /// Redact password from database URI for safe display
@@ -508,6 +532,12 @@ pub async fn create_db_pool(conf: &Val) -> Result<DatabasePool, DatabaseError> {
                 }
             };
             tracing::debug!("Using Postgres schema: {}", schema);
+            if rls_enforcement_required(conf) && schema != DEFAULT_DB_SCHEMA {
+                return Err(DatabaseError::Migration(
+                    "The public PostgreSQL migration chain currently requires schema 'hot'; custom-schema RLS installations are not supported".into()
+                ));
+            }
+            let validation_schema = schema.clone();
 
             let statement_timeout_ms = conf
                 .get_int_or_default(
@@ -562,7 +592,12 @@ pub async fn create_db_pool(conf: &Val) -> Result<DatabasePool, DatabaseError> {
                     DatabaseError::Connection(e)
                 })?;
             tracing::debug!("Successfully connected to Postgres database");
-            Ok(DatabasePool::Postgres(db))
+            if rls_enforcement_required(conf) {
+                rls::validate_runtime_role(&db, &validation_schema).await?;
+            } else {
+                tracing::warn!("PostgreSQL runtime role validation is explicitly disabled; this connection is not qualified for production RLS isolation");
+            }
+            Ok(DatabasePool::Postgres(ScopedPgPool::new(db)))
         }
     }
 }
@@ -574,7 +609,8 @@ pub async fn test_connection(db: &DatabasePool) -> Result<(), DatabaseError> {
             let _row = sqlx::query("SELECT 1").fetch_one(db).await?;
         }
         DatabasePool::Postgres(db) => {
-            let _row = sqlx::query("SELECT 1").fetch_one(db).await?;
+            let health_db = db.with_scope(DatabaseScope::Bootstrap(BootstrapOperation::Health));
+            let _row = sqlx::query("SELECT 1").fetch_one(&health_db).await?;
         }
     }
     Ok(())
@@ -582,7 +618,17 @@ pub async fn test_connection(db: &DatabasePool) -> Result<(), DatabaseError> {
 
 /// Run database migrations
 pub async fn run_migrations(conf: &Val) -> Result<(), DatabaseError> {
-    let uri = get_db_uri_from_conf(conf);
+    let runtime_uri = get_db_uri_from_conf(conf);
+    let migration_uri = conf.get_str_or_default("db.migration-uri", &conf.get_str_or_default("migration-uri", ""));
+    let uri = if migration_uri.is_empty() {
+        if matches!(DatabaseType::from_uri(&runtime_uri)?, DatabaseType::Postgres)
+            && rls_enforcement_required(conf) {
+            return Err(DatabaseError::Migration("PostgreSQL requires a separate db.migration-uri for schema changes; runtime credentials must not own tables".into()));
+        }
+        runtime_uri
+    } else {
+        migration_uri
+    };
     let db_type = DatabaseType::from_uri(&uri)?;
     let migration_path = db_type.migration_dir()?;
 
@@ -774,6 +820,8 @@ fn translate_migrate_error(
 
 /// Check if there are any existing organizations and users in the database
 pub async fn check_default_data_exists(db: &DatabasePool) -> Result<(i64, i64), DatabaseError> {
+    let scoped = db.with_scope(DatabaseScope::Bootstrap(BootstrapOperation::Onboarding));
+    let db = &scoped;
     let org_count = Org::get_count(db).await?;
     let user_count = User::get_count(db).await?;
     Ok((org_count, user_count))
@@ -784,6 +832,9 @@ pub async fn insert_default_data(
     db: &DatabasePool,
 ) -> Result<(uuid::Uuid, uuid::Uuid, uuid::Uuid), DatabaseError> {
     use uuid::Uuid;
+
+    let scoped = db.with_scope(DatabaseScope::Bootstrap(BootstrapOperation::Onboarding));
+    let db = &scoped;
 
     // Generate new UUIDs
     let org_id = Uuid::now_v7();
@@ -879,9 +930,12 @@ pub async fn insert_test_data(db: &DatabasePool) -> Result<TestData, DatabaseErr
     // First insert the default data (user, org, env)
     let (org_id, user_id, _org_user_id) = insert_default_data(db).await?;
 
-    // Get the env that was created
-    let env = Env::get_default_env(db).await?;
+    // Resolve the fixture's own environment before switching to execution scope.
+    let metadata = db.with_scope(DatabaseScope::Organization { org_id });
+    let env = Env::get_default_env_by_org(&metadata, &org_id).await?;
     let env_id = env.env_id;
+    let scoped = db.with_scope(DatabaseScope::Environment { org_id, env_id });
+    let db = &scoped;
 
     // Create a test project
     let project_id = Uuid::now_v7();

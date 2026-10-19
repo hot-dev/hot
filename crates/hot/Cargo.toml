@@ -29,6 +29,7 @@ tracing = { workspace = true }
 tracing-subscriber = { workspace = true, features = ["env-filter"] }
 tracing-appender = { workspace = true }
 async-trait = { workspace = true }
+async-stream = { workspace = true }
 redis = { workspace = true }
 rustls = { workspace = true }
 rustls-pki-types = { workspace = true }

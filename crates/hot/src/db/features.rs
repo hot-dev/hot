@@ -37,6 +37,7 @@ pub mod keys {
     /// unlimited uploads impractical.
     pub const MAX_FILE_UPLOAD_BYTES: i64 = 50_i64 * 1024 * 1024 * 1024; // 50 GB
     pub const TEAM_MEMBERS: &str = "team_members";
+    pub const SUB_ORGS: &str = "sub_orgs";
     pub const CALL_RETENTION_DAYS: &str = "call_retention_days";
     pub const CALL_STORAGE_BYTES: &str = "call_storage_bytes";
     pub const STORE_STORAGE_BYTES: &str = "store_storage_bytes";
@@ -117,6 +118,7 @@ impl Features {
     /// Create unlimited features (for self-hosted / local dev).
     pub fn unlimited() -> Self {
         let mut inner = serde_json::Map::new();
+        inner.insert(keys::SUB_ORGS.to_string(), JsonValue::Number((-1).into()));
         inner.insert(
             keys::RUNS_PER_MONTH.to_string(),
             JsonValue::Number((-1).into()),
@@ -232,6 +234,7 @@ impl Features {
     /// - Boolean features default to false.
     fn cloud_defaults() -> serde_json::Map<String, JsonValue> {
         let mut m = serde_json::Map::new();
+        m.insert(keys::SUB_ORGS.to_string(), JsonValue::Number(0.into()));
         m.insert(
             keys::RUNS_PER_MONTH.to_string(),
             JsonValue::Number(0.into()),
@@ -350,6 +353,21 @@ impl Features {
     pub async fn resolve_for_org(db: &DatabasePool, org_id: &Uuid) -> Self {
         use super::subscription::OrgPlan;
 
+        // Hierarchy and feature errors must never turn an unknown child into an
+        // unlimited standalone account. Child feature JSON cannot expand root rights.
+        let root_id = match super::org::Org::billing_owner_id_for(db, org_id).await {
+            Ok(id) => id,
+            Err(error) => {
+                tracing::warn!(%org_id, %error, "Unable to resolve billing owner for features");
+                return Self::resolve(None, None);
+            }
+        };
+        let db = db.with_scope(super::DatabaseScope::Maintenance {
+            operation: super::MaintenanceOperation::Billing, org_id: Some(root_id),
+        });
+        let db = &db;
+        let org_id = &root_id;
+
         // Get plan features from the org's selected plan.
         let plan_features = match OrgPlan::get_by_org_id(db, org_id).await {
             Ok(subscription) => {
@@ -381,6 +399,21 @@ impl Features {
     /// read stays conservative.
     pub async fn resolve_for_hosted_org(db: &DatabasePool, org_id: &Uuid) -> Self {
         use super::subscription::OrgPlan;
+
+        // Hierarchy and feature errors must never turn an unknown child into an
+        // unlimited standalone account. Child feature JSON cannot expand root rights.
+        let root_id = match super::org::Org::billing_owner_id_for(db, org_id).await {
+            Ok(id) => id,
+            Err(error) => {
+                tracing::warn!(%org_id, %error, "Unable to resolve billing owner for features");
+                return Self::resolve(None, None);
+            }
+        };
+        let db = db.with_scope(super::DatabaseScope::Maintenance {
+            operation: super::MaintenanceOperation::Billing, org_id: Some(root_id),
+        });
+        let db = &db;
+        let org_id = &root_id;
 
         let plan_features = match OrgPlan::get_by_org_id(db, org_id).await {
             Ok(subscription) => {
@@ -472,6 +505,11 @@ impl Features {
 
     pub fn is_unlimited_file_upload(&self) -> bool {
         self.file_upload_max_bytes() == keys::MAX_FILE_UPLOAD_BYTES
+    }
+
+    /// Maximum direct child organizations; archived children also consume slots.
+    pub fn sub_orgs(&self) -> i64 {
+        self.get_i64_or(keys::SUB_ORGS, 0)
     }
 
     pub fn team_members(&self) -> i32 {

@@ -108,7 +108,8 @@ impl Build {
         db: &crate::db::DatabasePool,
         build_id: &Uuid,
     ) -> Result<Build, BuildError> {
-        if let Some(build) = BUILD_CACHE.get(build_id) {
+        if matches!(db, crate::db::DatabasePool::Sqlite(_))
+            && let Some(build) = BUILD_CACHE.get(build_id) {
             return Ok(build);
         }
 

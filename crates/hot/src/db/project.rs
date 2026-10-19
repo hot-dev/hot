@@ -1,5 +1,5 @@
 use chrono::{DateTime, Utc};
-use sqlx::{FromRow, Pool, Postgres, Sqlite};
+use sqlx::{FromRow, Pool, Sqlite};
 use std::sync::LazyLock;
 use thiserror::Error;
 use uuid::Uuid;
@@ -42,7 +42,8 @@ impl Project {
         db: &crate::db::DatabasePool,
         project_id: &Uuid,
     ) -> Result<Project, ProjectError> {
-        if let Some(project) = PROJECT_CACHE.get(project_id) {
+        if matches!(db, crate::db::DatabasePool::Sqlite(_))
+            && let Some(project) = PROJECT_CACHE.get(project_id) {
             return Ok(project);
         }
 
@@ -185,7 +186,7 @@ impl Project {
     }
 
     async fn get_project_postgres(
-        db: &Pool<Postgres>,
+        db: &crate::db::ScopedPgPool,
         project_id: &Uuid,
     ) -> Result<Project, ProjectError> {
         let row = sqlx::query_as::<_, Project>(
@@ -206,7 +207,7 @@ impl Project {
     }
 
     async fn get_project_including_inactive_postgres(
-        db: &Pool<Postgres>,
+        db: &crate::db::ScopedPgPool,
         project_id: &Uuid,
     ) -> Result<Project, ProjectError> {
         let row = sqlx::query_as::<_, Project>(
@@ -265,7 +266,7 @@ impl Project {
     }
 
     async fn get_project_by_env_and_name_postgres(
-        db: &Pool<Postgres>,
+        db: &crate::db::ScopedPgPool,
         env_id: &Uuid,
         name: &str,
     ) -> Result<Option<Project>, ProjectError> {
@@ -377,7 +378,7 @@ impl Project {
     }
 
     async fn get_projects_by_env_postgres(
-        db: &Pool<Postgres>,
+        db: &crate::db::ScopedPgPool,
         env_id: &Uuid,
         limit: Option<i64>,
         offset: Option<i64>,
@@ -486,7 +487,7 @@ impl Project {
     }
 
     async fn insert_project_postgres(
-        db: &Pool<Postgres>,
+        db: &crate::db::ScopedPgPool,
         project_id: &Uuid,
         env_id: &Uuid,
         name: &str,
@@ -552,7 +553,7 @@ impl Project {
     }
 
     async fn update_name_postgres(
-        db: &Pool<Postgres>,
+        db: &crate::db::ScopedPgPool,
         project_id: &Uuid,
         name: &str,
         updated_by_user_id: &Uuid,
@@ -683,7 +684,7 @@ impl Project {
     }
 
     async fn toggle_active_postgres(
-        db: &Pool<Postgres>,
+        db: &crate::db::ScopedPgPool,
         project_id: &Uuid,
         active: bool,
         toggled_by_user_id: &Uuid,

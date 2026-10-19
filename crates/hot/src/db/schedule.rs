@@ -1,7 +1,7 @@
 use ariadne::{ColorGenerator, Config, Label, Report, ReportKind, Source};
 use chrono::{DateTime, Utc};
 use serde_json::Value as JsonValue;
-use sqlx::{FromRow, Pool, Postgres, Sqlite};
+use sqlx::{FromRow, Pool, Sqlite};
 use std::path::PathBuf;
 use std::str::FromStr;
 use thiserror::Error;
@@ -464,7 +464,7 @@ impl ScheduleError {
     }
 }
 
-#[derive(Debug, FromRow)]
+#[derive(Clone, Debug, FromRow)]
 pub struct Schedule {
     pub schedule_id: Uuid,
     pub build_id: Uuid,
@@ -533,7 +533,7 @@ impl Schedule {
     }
 
     async fn get_schedule_postgres(
-        db: &Pool<Postgres>,
+        db: &crate::db::ScopedPgPool,
         schedule_id: &Uuid,
     ) -> Result<Schedule, ScheduleError> {
         let schedule = sqlx::query_as::<_, Schedule>(
@@ -580,7 +580,7 @@ impl Schedule {
     }
 
     async fn get_active_schedule_by_build_fn_postgres(
-        db: &Pool<Postgres>,
+        db: &crate::db::ScopedPgPool,
         build_id: &Uuid,
         ns: &str,
         var: &str,
@@ -634,7 +634,7 @@ impl Schedule {
     }
 
     async fn get_schedules_by_build_postgres(
-        db: &Pool<Postgres>,
+        db: &crate::db::ScopedPgPool,
         build_id: &Uuid,
         limit: Option<i64>,
         offset: Option<i64>,
@@ -691,7 +691,7 @@ impl Schedule {
     }
 
     async fn get_schedules_by_cron_postgres(
-        db: &Pool<Postgres>,
+        db: &crate::db::ScopedPgPool,
         cron: &str,
         limit: Option<i64>,
         offset: Option<i64>,
@@ -761,7 +761,7 @@ impl Schedule {
     }
 
     async fn get_schedules_by_build_and_cron_postgres(
-        db: &Pool<Postgres>,
+        db: &crate::db::ScopedPgPool,
         build_id: &Uuid,
         cron: &str,
         limit: Option<i64>,
@@ -951,7 +951,7 @@ impl Schedule {
 
     #[allow(clippy::too_many_arguments)]
     async fn insert_schedule_postgres(
-        db: &Pool<Postgres>,
+        db: &crate::db::ScopedPgPool,
         schedule_id: &Uuid,
         build_id: &Uuid,
         cron: &str,
