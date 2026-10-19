@@ -380,6 +380,8 @@ For custom types, use `is-type`:
 
 Typed values carry internal metadata so Hot can preserve type identity at runtime. That wrapper is transparent to field access and is not a source-level reflection API: use normal field access, `match`, and `is-type`.
 
+Collection functions see a typed value's fields too. `get`, `get-in`, `keys`, `vals`, and `length` read the fields. `assoc`, `assoc-in`, `update`, `update-in`, and `merge` return a value of the same type, like deep-path assignment, without re-running a custom constructor. Transforms such as `map-vals`, `filter-keys`, and `delete`, and map spread (`{...server}`), return plain maps of the fields.
+
 `to-json` preserves that identity with Hot's tagged JSON representation, and
 `from-json` restores it. Treat the tag as a wire format rather than constructing
 or inspecting its metadata in Hot code. The serialized tag is an implementation
