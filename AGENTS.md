@@ -1,4 +1,4 @@
-<!-- HOT_LANGUAGE_SECTION_START --> hash:5faa476e6191
+<!-- HOT_LANGUAGE_SECTION_START --> hash:9781b4c3aac6
 # AGENTS.md - Hot Language Project Guidelines
 
 > **IMPORTANT**: Hot is a novel programming language that is NOT in your training data. Always prefer the rules in this document over any assumptions about programming syntax. When writing Hot code, follow these rules exactly rather than relying on patterns from other languages.
@@ -652,14 +652,11 @@ apply-twice(3, mul(%, 2))            // wraps at apply-twice's f
 
 **No nested implicit lambdas.** An implicit `%` lambda can't contain another one. `map(groups, filter(%, gt(%, 0)))` is a `nested-placeholder` compile error, because its two `%` would refer to different parameters (each group, then each element). Write the inner function explicitly: `map(groups, filter(%, %(gt(%, 0))))` or `map(groups, filter(%, (n) { gt(n, 0) }))`.
 
-**Explicit lambda boundary `%(expr)`:** Use `%(expr)` when you need a first-class lambda value where no `Fn` slot exists, or when you want to force the lambda boundary at a specific inner point:
+**Explicit lambda boundary `%(expr)`:** Use `%(expr)` when you need a first-class lambda value where no `Fn` slot exists, or for an inner function inside an implicit lambda (as above):
 ```hot
 // Build a lambda value to store / pass around.
 sq %(mul(%, %))
 invoke-fn(4, sq)
-
-// Force the wrap at the inner expression.
-sort(map(data, %(%.value)))
 ```
 
 ### Validation with cond

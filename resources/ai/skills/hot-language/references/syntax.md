@@ -140,15 +140,25 @@ sum reduce(nums, add(%1, %2), 0)    // (a, b) { add(a, b) }
 users |> filter(gt(%.age, 18)) |> map(%.name)
 ```
 
-**Explicit lambda boundary `%(expr)`:** When `%` appears inside nested function calls (2+ levels), implicit wrapping may bind at the outermost call instead of the intended one. Use `%(expr)` to explicitly set where the lambda is created:
+**Where `%` binds:** A `%` binds to the nearest enclosing argument whose parameter is a function (`Fn`). A `%` with no such argument is a compile error. Calls without a function parameter are transparent, so these need no `%(...)`:
 
 ```hot
-// Nested: %(expr) controls the lambda boundary
-sort(map(items, %(%.value)))              // lambda wraps at map, not sort
-length(filter(items, %(gt(%, 3))))        // lambda wraps at filter, not length
+sort(map(items, %.value))                 // lambda wraps at map, not sort
+length(filter(items, gt(%, 3)))           // lambda wraps at filter, not length
+```
 
-// Simple cases don't need it — implicit wrapping is correct
-map(items, mul(%, 2))                     // only 1 level deep, works fine
+**No nested implicit lambdas:** An implicit `%` lambda can't contain another one. In `map(groups, filter(%, gt(%, 0)))` the first `%` would be each group and the second each element of a group, so Hot rejects it with a `nested-placeholder` compile error. Write the inner function explicitly:
+
+```hot
+map(groups, filter(%, %(gt(%, 0))))
+map(groups, filter(%, (n) { gt(n, 0) }))
+```
+
+**Explicit lambda boundary `%(expr)`:** `%(expr)` creates a lambda exactly where you write it, and every `%` inside it is that lambda's parameter. Use it for a lambda value where no argument takes a function, or for an inner function as above:
+
+```hot
+square %(mul(%, %))
+map([1, 2, 3], square)                    // [1, 4, 9]
 ```
 
 ### Optional Arguments
