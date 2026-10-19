@@ -41,6 +41,14 @@ pub(crate) struct GlobalOptions {
     pub(crate) project: Option<String>,
 
     #[arg(
+        long = "profile",
+        value_name = "NAME",
+        help = "Configured user/org/environment profile",
+        global = true
+    )]
+    pub(crate) profile: Option<String>,
+
+    #[arg(
         short = 's',
         long = "src.path",
         value_name = "DIRECTORY",
@@ -120,6 +128,14 @@ pub(crate) struct GlobalOptions {
         global = true
     )]
     pub(crate) db_uri: Option<String>,
+
+    #[arg(
+        long = "db.migration-uri",
+        value_name = "URI",
+        help = "Separate schema-owner URI for migration commands",
+        global = true
+    )]
+    pub(crate) db_migration_uri: Option<String>,
 
     #[arg(
         long = "log.level",
@@ -875,6 +891,8 @@ pub(crate) enum DbAction {
     Status,
     /// Run database migrations
     Migrate,
+    /// Provision PostgreSQL vector indexes with separate migration credentials
+    ProvisionStoreIndexes,
     /// Port a local Hot 1.x development database to the Hot 2.0 schema
     #[command(name = "port-v1-to-v2")]
     PortV1ToV2,
@@ -1201,6 +1219,24 @@ mod help_tests {
         assert!(
             Cli::try_parse_from(["hot", "-v"]).is_err(),
             "-v is not a root version flag"
+        );
+    }
+
+    #[test]
+    fn migration_and_profile_flags_work_after_a_nested_command() {
+        let cli = Cli::try_parse_from([
+            "hot",
+            "db",
+            "migrate",
+            "--profile",
+            "child",
+            "--db.migration-uri=postgres://owner/migrations",
+        ])
+        .unwrap();
+        assert_eq!(cli.global.profile.as_deref(), Some("child"));
+        assert_eq!(
+            cli.global.db_migration_uri.as_deref(),
+            Some("postgres://owner/migrations")
         );
     }
 

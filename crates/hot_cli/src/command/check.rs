@@ -36,8 +36,10 @@ async fn run_check_compilation(conf: &Val, global_options: &GlobalOptions) -> Re
         .clone()
         .unwrap_or_else(|| hot::project::get_default_project_name(conf));
 
-    // Create or update live build for development (consistent with run/eval/repl/test/check)
-    setup_live_build_for_dev(conf, global_options, &src_paths, &test_paths).await?;
+    // Static checks disable shared database writes by default.
+    if !hot::db::get_db_uri_from_conf(conf).is_empty() {
+        setup_live_build_for_dev(conf, global_options, &src_paths, &test_paths).await?;
+    }
 
     let color = hot::env::is_local_dev();
     let mut warnings = hot::lang::errors::CompilerErrors::new();
@@ -276,8 +278,9 @@ pub(crate) async fn run_check_with_raw(
         .clone()
         .unwrap_or_else(|| hot::project::get_default_project_name(conf));
 
-    // Create or update live build for development
-    setup_live_build_for_dev(conf, global_options, &src_paths, &test_paths).await?;
+    if !hot::db::get_db_uri_from_conf(conf).is_empty() {
+        setup_live_build_for_dev(conf, global_options, &src_paths, &test_paths).await?;
+    }
 
     let fmt = format.unwrap_or("pretty").to_lowercase();
     let json_mode = fmt == "json" || fmt == "json-min";

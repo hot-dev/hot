@@ -1,7 +1,64 @@
 # Sub organizations and PostgreSQL RLS implementation plan
 
-Status: implementation plan. Product direction selected on 2026-10-19.
+Status: implemented and locally validated on branch `codex/sub-orgs-rls`;
+deployment-specific Phase 6 gates remain below.
+Product direction selected on 2026-10-19. Shared deployments remain deferred.
 Source baseline: `4466aee` (Hot 2.6.10).
+
+## Implementation record
+
+The local branch implements the public repository portions of Phases 0–5:
+typed scopes and restricted runtime connections, forced PostgreSQL policies,
+direct-child organizations with independent environments/builds, inherited
+root administration and explicit child grants, account billing/quota resolution,
+management credentials and REST routes, runtime ingress and worker ownership,
+and the hierarchical UI. Migrations 010–015 preserve existing org identities and
+add ownership integrity, credential lineage, quota reservations, durable run
+admissions, and trace byte reconciliation. SQLite shares application authorization
+and quota semantics; PostgreSQL additionally enforces row policies.
+
+The implementation includes exact CLI profile selection, independent migration
+credentials, fail-closed live-source/cache access, and scoped integration test
+execution. Administrative API access must honor effective credential permissions
+as well as credential type and environment scope. An account-wide read view
+does not authorize cross-child mutations.
+
+Deployment instructions and qualification boundaries are maintained in
+[RLS setup](../../resources/db/postgres/RLS_SETUP.md), with the table inventory in
+[RLS coverage](../../resources/db/postgres/RLS_COVERAGE.md) and container recovery
+in [cancellation quota recovery](../../resources/db/postgres/CANCELLATION_QUOTA_RECOVERY.md).
+The public API contract is documented in
+[sub-organization management](../../resources/docs/api/management.md).
+
+Phase 6 is a release gate as well as a test implementation phase. Local tests
+cannot complete private cloud onboarding/plan seeding, production role and proxy
+qualification, provider billing reconciliation, remote S3/Kata deployment
+qualification, or backup/restore rehearsal. Enforced PostgreSQL currently requires
+schema `hot`. Hosted `sub_orgs` entitlement defaults to zero until the account's
+plan/override enables it; unconfigured local accounts retain local defaults.
+External SDK management helpers belong in their SDK repositories. Shared
+deployments and the other deferred product boundaries below remain deferred.
+
+### Local qualification — 2026-10-19
+
+| Check | Result |
+| --- | --- |
+| `cargo fmt --all -- --check` and workspace Clippy with `-D warnings` | Passed |
+| `cargo test --workspace --all-targets --locked --offline --no-fail-fast` | 2,522 passed, zero failed, nine ignored across 32 targets |
+| Service-backed fixtures | Dedicated PostgreSQL with pgvector and Valkey; restricted-login RLS, ownership, sibling quota races, migration 015 repair, and real app-router checks passed |
+| Docker cancellation regression, explicitly enabled | Passed; reservation held while running, released only after verified exit |
+| `scripts/hot-static-checks.sh check` | Passed project/package checks, formatting, documentation snippets, and bundled skill checks |
+| `hot init` and `hot test -c hot.test.hot --ctx hot/ci.ctx.hot` using isolated SQLite storage | Passed; 909 tests and 2,460 assertions |
+| `node --test scripts/test-app-scope.mjs` | Three browser scope regressions passed |
+| Fresh PostgreSQL CLI installation | Owner migrations, restricted-runtime grants, init, profile selection, and managed eval passed; eval persisted a succeeded terminal record with tracing disabled |
+| Standalone CLI / invalid explicit profile | Ad-hoc eval succeeded; invalid explicit scope failed without unmanaged fallback |
+| Repository checks | AGENTS source synchronization, workflow YAML parsing, and diff whitespace checks passed |
+
+The local offline Hot build used an existing ONNX Runtime library through
+`ORT_LIB_PATH`; this is a machine setup detail, not a repository dependency
+change. Default-ignored tests are not counted as passes; the explicit Docker
+regression is additional to the workspace total. These results do not replace
+the deployment-specific gates above or the Phase 6 rollout rehearsal below.
 
 Hot will support a parent organization with child organizations that each own
 their environments, projects, deployments, credentials, and runtime data.
@@ -59,7 +116,7 @@ repository source; the observations use the baseline described above.
 | Billing | Plans, features, usage, and onboarding currently resolve against one org | [features.rs](../../crates/hot/src/db/features.rs), [subscription.rs](../../crates/hot/src/db/subscription.rs), [billing_provider.rs](../../crates/hot_app/src/billing_provider.rs) |
 | Endpoint routing | Webhooks, MCP, and domains resolve to environments and deployed builds | [webhook.rs](../../crates/hot_api/src/handlers/webhook.rs), [mcp.rs](../../crates/hot_api/src/handlers/mcp.rs), [domain_resolver.rs](../../crates/hot_api/src/domain_resolver.rs) |
 
-The public schema migrations contain no platform RLS policy implementation.
+At the source baseline, public schema migrations contained no platform RLS policy implementation.
 The initial dump's `SET row_security = off` is not a policy or evidence of the
 deployed role configuration. Production role provisioning and private cloud
 integration must be verified as part of the rollout.

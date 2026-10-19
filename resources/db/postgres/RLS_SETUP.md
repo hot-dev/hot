@@ -17,7 +17,8 @@ metadata and never grants TRUNCATE.
 Configure runtime `db.uri` separately from `db.migration-uri`. Keep migration
 credentials out of long-running API, app and worker processes. Supply the
 migration URI only to the deployment migration command. Runtime startup checks
-privileged memberships, ownership, TRUNCATE and enabled/forced table coverage.
+privileged memberships, ownership, TRUNCATE, reference-table write grants,
+migration-metadata access and enabled/forced table coverage.
 The public migration chain currently hardcodes schema `hot`; enforced runtime
 startup rejects other schema configurations until the full migration chain has
 a supported schema-remapping upgrade strategy.
@@ -44,3 +45,117 @@ table's policies while an older service using that shared schema remains
 unconverted. Enforcement is database/schema-wide; use a separate database for
 a canary. Roll back only to a scope-capable application version, keeping RLS and
 ownership data intact. Diagnose a denied operation instead of bypassing it.
+
+Provision optional semantic-search indexes with `hot db provision-store-indexes`
+from an administrative deployment job that has `db.migration-uri`. This command
+reads only store configuration under its named provisioning operation, then
+creates per-org/env/store/dimension HNSW indexes concurrently as the schema
+owner. It is idempotent for valid indexes and reports interrupted invalid indexes
+for explicit repair. It currently supports pgvector vector indexes with 1–2000
+dimensions. Searches remain functional without these indexes; they use exact
+scans. Re-run after stores are created or embedding dimensions change. Runtime
+store creation never attempts DDL.
+
+Direct-database CLI commands resolve the configured profile's current human
+membership and active org/environment, then bind an exact environment handle.
+Inherited root-admin access may select a child profile. Without a profile the
+CLI accepts only an unambiguous single org/environment; it never silently picks
+a child or sibling. The canonical selector is `hot.set.profile` in a Hot
+configuration file, or `--profile NAME` on the CLI. Conflicting legacy
+`profile.set` selectors are rejected. `hot init` uses the resolved profile and
+seeds `local@hot.dev` / `local` / `development` only in a completely empty
+database. Other profiles must already have an active user, authorized org and
+existing environment; init does not grant membership or create a missing
+environment in an existing account. Init/fixture seeding uses the narrow
+onboarding operation. Pass `--db.migration-uri URI` to the administrative
+migration command independently of the runtime `--db.uri URI`.
+
+Live documentation and source browsing additionally require the configured
+local profile and current live build. Their cache keys include the build ID.
+A missing uploaded build never falls back to a similarly named host project.
+
+Migration 011 validates existing org/env, build/env, stream/env, credential/env,
+context/project and blob ownership before installing policies. Repair reported
+rows through a reviewed migration, then retry; it never reassigns ownership
+automatically. New writes also enforce those links and immutable owner columns.
+
+Authenticated profile and notification pages use `DatabaseScope::User` with an
+exact user UUID. This permits reading/updating only that identity, without
+organization or execution access. Organization directories can read identities
+only through an active membership in an explicitly authorized organization.
+All scope GUC fields, including the user UUID, are reset transaction-locally.
+
+## First installation and existing-database upgrades
+
+For a fresh installation, create the schema-owner and runtime roles separately,
+run the full migration chain as the owner, then run `provision_runtime.sql`.
+Only then start runtime services with the restricted login and enforcement
+enabled. The public CLI's bootstrap provider is a no-op; a private provider
+that seeds data must run after grants exist and use the explicit onboarding or
+billing operation appropriate to its rows. Rehearse that provider's ordering
+separately instead of supplying owner credentials to a runtime pool.
+
+For an existing database:
+
+1. Restore a recent backup into a separate database and rehearse migrations
+   010–015 with the intended owner/runtime roles. Check duplicate environment
+   names within each org before migration 010 adds its unique index. Inspect
+   migration 011's ownership preflight and resolve any reported mismatch in a
+   reviewed repair migration. Preserve original ownership evidence.
+2. Record row counts and account usage, including retained run history, before
+   the change. Migration 014 backfills the admission ledger from retained runs;
+   it cannot recover runs already deleted by retention. Reconcile any usage
+   missing from that history against an authoritative account usage source
+   before enforcing an existing paid account's monthly run cap.
+   Migration 015 reconciles retained trace sizes, including UTF-8 and error
+   payloads, before account trace-storage admission uses those totals.
+3. Drain work and stop every old process using the database, including workers,
+   scheduler, direct CLI sessions and private provider jobs. Take a recoverable
+   backup. Apply the additive migrations and rerun the grant script as the
+   owner. Do not mix older unscoped services with the new database policies.
+4. Start the scope-capable services with their restricted login. Verify startup
+   qualification, a permitted read/write, cross-child denial, queue execution,
+   an invite acceptance, and a retained-run ledger count. A successful health
+   check alone does not establish that useful work is authorized correctly.
+5. Resume traffic only after those checks pass. Monitor denied operations,
+   queue retries, writer failures and account quota rejections. Retain the
+   backup and migration logs for the agreed rollback window.
+
+Restart S3 multipart uploads begun by the older application: new upload tokens
+bind the staged object version, so an old in-flight token cannot complete an
+upload after this upgrade. Already committed files keep their existing paths.
+
+Cancelled containers retain compute and concurrency reservations until their
+runtime confirms termination. See [cancelled quota recovery](CANCELLATION_QUOTA_RECOVERY.md)
+for worker fencing, conservative charges, and recovery of unreachable runtimes.
+
+Account request-per-second admission is shared through PostgreSQL/SQLite.
+In-flight request and SSE connection guards remain per-process resource limits;
+they are additional safeguards, not distributed account concurrency counters.
+
+Store and trace storage admission serialize sibling writes on the account root
+and enforce recorded logical bytes. Trace-cap failure rolls back the trace
+batch and is reported by emitter flush/shutdown; run terminal state is committed
+separately. Diagnose the storage failure before replaying work, since workflow
+side effects may already have completed. These logical limits do not cap total
+database disk allocation or separately retained blob objects.
+
+Migration failure must stop rollout. SQLx rolls back the failed transactional
+migration, but earlier migrations in the chain may already be committed; inspect
+its migration state before retrying. After successful migration, an application
+rollback must keep the policies, immutable ownership and admission ledger.
+Use a previously verified scope-capable release or fix the denied operation
+forward. Restoring a database backup is a coordinated recovery operation that
+also needs queue/object-store reconciliation; it is not an automatic response
+to an RLS error.
+
+## Deployment verification outside this repository
+
+The public repository's local PostgreSQL and SQLite tests do not qualify private
+cloud bootstrap implementations, deployed database role inheritance, managed
+connection proxies, provider billing/usage reconciliation, remote object stores,
+or hosted queue variants. Those integrations remain deployment release gates.
+Run the same positive/negative scope and cancellation checks against each
+deployed connection path, and verify that private jobs use named operations and
+never inherit migration credentials. Shared deployments across child orgs remain
+deferred; each child currently owns its environments and deployments.

@@ -61,3 +61,34 @@ Reference tables deliberately have no RLS; runtime receives SELECT only:
 
 SQLx migration metadata is deployment control state and receives no runtime grants.
 Management credential tables introduced by migration 012 carry their own policies.
+
+| Added control table | Ownership and operation |
+| --- | --- |
+| `account_request_window` | Exact root; Billing only (011) |
+| `management_key` | Exact root Organization; Authentication read (012) |
+| `api_key_management_issuer` | API key environment; Authentication read; immutable issuer (012) |
+
+`StoreProvisioning` can read only `store_map` configuration; index DDL uses the
+separately supplied schema-owner credentials. `Retention` reads session/plan
+metadata and updates expired uploads. `BlobGc` reads env metadata so object
+integrity checks remain effective. Organization scope does not read build rows,
+even when project metadata is visible.
+
+The runtime startup coverage check rejects any new ordinary table that lacks
+both ENABLE and FORCE RLS unless it appears in the explicit reference-table
+allowlist in `db/rls.rs`.
+It also rejects runtime mutation privileges on those reference tables and any
+runtime access to SQLx migration metadata. The restricted-role test uses the
+same protected-table DML and reference-table SELECT grant rules as the deployment
+script, and checks that extra reference or migration grants fail qualification.
+
+| Admission extension | Coverage |
+| --- | --- |
+| `task.reserved_compute_units`, `task.reserved_duration_ms` (013) | Existing exact task policies; root-locked admission narrows to env before claiming |
+| `run_admission` (014) | Exact env or Billing root SELECT; Billing root INSERT validates org/env/root association; no runtime UPDATE/DELETE |
+
+Run-admission backfill enumerates metadata under Membership and reads each
+account under Billing, so a schema owner without BYPASSRLS retains existing
+usage. The restricted-login integration test exercises durable sibling-shared
+run limits and verifies that ordinary environment access cannot delete the
+ledger to reset capacity.

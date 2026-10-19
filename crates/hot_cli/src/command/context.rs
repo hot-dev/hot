@@ -20,7 +20,7 @@ pub(crate) async fn run_context(
 
     // Local context management implementation
     use hot::context_encryption::ContextEncryption;
-    use hot::db::{Context, Env, Org, Project, create_db_pool};
+    use hot::db::{Context, Env, Project};
 
     // Load encryption key (auto-generate for local dev if not configured)
     // For CLI, we default to "local-dev" profile to make development easier
@@ -32,46 +32,18 @@ pub(crate) async fn run_context(
     })?;
 
     // Get database connection
-    let db = create_db_pool(conf)
+    let db = crate::profile::create_cli_db_pool(conf)
         .await
         .map_err(|e| format!("Database connection failed: {}", e))?;
 
-    // Get default org and env for project lookup
-    let count = Org::get_count(&db)
+    let (user_id, env_id, org_id) = crate::profile::resolve_cli_identity(&db, conf).await?;
+    let env = Env::get_env_uncached(&db, &env_id)
         .await
-        .map_err(|e| format!("Failed to get org count: {}", e))?;
-    if count == 0 {
-        return Err("No organization found. Please run 'hot init' first.".to_string());
-    }
-
-    let orgs = Org::get_all_orgs(&db, Some(1), Some(0))
-        .await
-        .map_err(|e| format!("Failed to get organization: {}", e))?;
-
-    let org = orgs
-        .into_iter()
-        .next()
-        .ok_or_else(|| "No organization found".to_string())?;
-
-    let env = Env::get_default_env_by_org(&db, &org.org_id)
-        .await
-        .map_err(|e| format!("Failed to get environment: {}", e))?;
-
-    let org_id = org.org_id;
+        .map_err(|e| e.to_string())?;
 
     // Get project name from global options or default from config
     let default_project_name = hot::project::get_default_project_name(conf);
     let project_name = global.project.as_deref().unwrap_or(&default_project_name);
-
-    // Get a user_id for creating/updating context variables
-    // For CLI operations, we use the first user in the org
-    let users = hot::db::org::OrgUser::get_users_with_roles_by_org(&db, &org_id)
-        .await
-        .map_err(|e| format!("Failed to get users: {}", e))?;
-    let user_id = users
-        .first()
-        .ok_or_else(|| "No users found in organization".to_string())?
-        .user_id;
 
     match action {
         ContextAction::List => {

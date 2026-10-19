@@ -296,11 +296,12 @@ pub(crate) async fn run_migrations_with_bootstrap(
     hot::db::run_migrations(conf)
         .await
         .map_err(|e| MigrationFailure::from_message(e.to_string()))?;
-    providers
-        .database_bootstrap
-        .bootstrap(conf)
-        .await
-        .map_err(MigrationFailure::from_message)
+    hot::db::with_database_scope(
+        hot::db::DatabaseScope::Bootstrap(hot::db::BootstrapOperation::Onboarding),
+        providers.database_bootstrap.bootstrap(conf),
+    )
+    .await
+    .map_err(MigrationFailure::from_message)
 }
 
 /// Print a database migration failure to stderr in a layered way: the primary error
@@ -548,6 +549,12 @@ async fn async_main(providers: CliProviders) {
     if cli.global.db_uri.is_some() {
         global_options.db_uri = cli.global.db_uri.clone();
     }
+    if cli.global.db_migration_uri.is_some() {
+        global_options.db_migration_uri = cli.global.db_migration_uri.clone();
+    }
+    if cli.global.profile.is_some() {
+        global_options.profile = cli.global.profile.clone();
+    }
 
     // Check for hot.hot in current directory and merge with CLI options
     let mut all_conf_files = Vec::new();
@@ -645,6 +652,19 @@ async fn async_main(providers: CliProviders) {
         scheduler_options.as_ref(),
         test_options.as_ref(),
     );
+
+    // Resolved defaults contain a local profile even for a standalone eval.
+    // Preserve source provenance here: explicit scope must never become an
+    // ad-hoc fallback after a database/authorization failure.
+    let scope_env = std::env::vars_os()
+        .any(|(key, _)| conf::environment_configures_scope(&key.to_string_lossy()));
+    let ad_hoc = conf::implicit_local_scope_allowed(
+        all_conf_files.is_empty(),
+        &global_options,
+        &providers.default_conf,
+        scope_env,
+    );
+    conf = conf.set_bool("__host.ad-hoc-default-db", Some(ad_hoc), false);
 
     // 5. Resolve project configuration now that user configuration is loaded
     // This allows the project system to decide whether to create default projects
@@ -1131,6 +1151,7 @@ async fn async_main(providers: CliProviders) {
             let db_cmd = match action {
                 DbAction::Status => "status",
                 DbAction::Migrate => "migrate",
+                DbAction::ProvisionStoreIndexes => "provision-store-indexes",
                 DbAction::PortV1ToV2 => "port-v1-to-v2",
             };
 

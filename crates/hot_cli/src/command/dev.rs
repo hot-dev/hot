@@ -60,13 +60,73 @@ struct DevQueueReconciliation {
     failed_tasks: usize,
 }
 
+/// Keep other profiles' durable work intact when restarting this local host.
+/// Queue payloads are routing hints; the database row establishes ownership.
+async fn selected_dev_queue_messages(
+    db: &DatabasePool,
+    messages: &[SqliteQueueMessageSnapshot],
+    configured_task_queue: Option<&str>,
+    selected_env: &uuid::Uuid,
+) -> Result<Vec<SqliteQueueMessageSnapshot>, String> {
+    let metadata = db.with_scope(hot::db::DatabaseScope::Maintenance {
+        operation: hot::db::MaintenanceOperation::Queue,
+        org_id: None,
+    });
+    let mut selected = Vec::new();
+    for snapshot in messages {
+        let owner_env = if is_queue(&snapshot.queue_name, "hot:event") {
+            let message = snapshot.decode::<Message>().map_err(|e| e.to_string())?;
+            match hot::db::Event::get_event(&metadata, &message.id).await {
+                Ok(event) => Some(event.env_id),
+                Err(hot::db::EventError::NotFound) => {
+                    if let Some(stream_id) = message_stream_id(&message) {
+                        match hot::db::Stream::get_stream(&metadata, &stream_id).await {
+                            Ok(stream) => Some(stream.env_id),
+                            Err(hot::db::StreamError::NotFound) => None,
+                            Err(error) => return Err(error.to_string()),
+                        }
+                    } else {
+                        None
+                    }
+                }
+                Err(error) => return Err(error.to_string()),
+            }
+        } else if is_queue(&snapshot.queue_name, "hot:task")
+            || configured_task_queue.is_some_and(|name| is_queue(&snapshot.queue_name, name))
+        {
+            let request = snapshot
+                .decode::<TaskRequest>()
+                .map_err(|e| e.to_string())?;
+            let task_id = uuid::Uuid::parse_str(&request.task_id).map_err(|e| e.to_string())?;
+            match Task::get(&metadata, &task_id).await {
+                Ok(task) => Some(task.env_id),
+                Err(TaskError::NotFound) => None,
+                Err(error) => return Err(error.to_string()),
+            }
+        } else {
+            None
+        };
+        if owner_env == Some(*selected_env) {
+            selected.push(snapshot.clone());
+        }
+    }
+    Ok(selected)
+}
+
 async fn reconcile_discarded_queue_messages(
     db: &DatabasePool,
     messages: &[SqliteQueueMessageSnapshot],
     configured_task_queue: Option<&str>,
+    selected_env: &uuid::Uuid,
 ) -> Result<DevQueueReconciliation, String> {
+    // Validate the entire batch before the first mutation, including SQLite
+    // where a bound DatabasePool does not enforce row filtering.
+    let owned =
+        selected_dev_queue_messages(db, messages, configured_task_queue, selected_env).await?;
+    if owned.len() != messages.len() {
+        return Err("Dev recovery batch includes work outside the selected environment".into());
+    }
     let mut stream_ids = ahash::AHashSet::new();
-    let mut event_ids = ahash::AHashSet::new();
     let mut task_ids = ahash::AHashSet::new();
 
     for snapshot in messages {
@@ -83,10 +143,32 @@ async fn reconcile_discarded_queue_messages(
                     snapshot.queue_name
                 )
             })?;
-            if let Some(stream_id) = message_stream_id(&message) {
-                stream_ids.insert(stream_id);
-            } else {
-                event_ids.insert(message.id);
+            match hot::db::Event::get_event(db, &message.id).await {
+                Ok(event) => {
+                    if event.env_id != *selected_env {
+                        return Err("Interrupted event is outside the selected environment".into());
+                    }
+                    let stream = hot::db::Stream::get_stream(db, &event.stream_id)
+                        .await
+                        .map_err(|e| e.to_string())?;
+                    if stream.env_id != *selected_env {
+                        return Err("Interrupted event has an incompatible durable stream".into());
+                    }
+                    // Use the durable event's stream, never a payload's hint.
+                    stream_ids.insert(stream.stream_id);
+                }
+                Err(hot::db::EventError::NotFound) => {
+                    let stream_id = message_stream_id(&message)
+                        .ok_or_else(|| "Interrupted event has no durable owner".to_string())?;
+                    let stream = hot::db::Stream::get_stream(db, &stream_id)
+                        .await
+                        .map_err(|e| e.to_string())?;
+                    if stream.env_id != *selected_env {
+                        return Err("Interrupted stream is outside the selected environment".into());
+                    }
+                    stream_ids.insert(stream.stream_id);
+                }
+                Err(error) => return Err(error.to_string()),
             }
             continue;
         }
@@ -119,15 +201,6 @@ async fn reconcile_discarded_queue_messages(
                     format!("failed to reconcile runs in stream {stream_id}: {error}")
                 })?;
     }
-    for event_id in event_ids {
-        result.failed_runs +=
-            Run::fail_orphaned_runs_by_event_id(db, &event_id, DEV_RESTART_RUN_ERROR)
-                .await
-                .map_err(|error| {
-                    format!("failed to reconcile runs for event {event_id}: {error}")
-                })?;
-    }
-
     let task_error = serde_json::json!({
         "$type": "::hot::task/Failure",
         "$val": {
@@ -145,6 +218,9 @@ async fn reconcile_discarded_queue_messages(
                 ));
             }
         };
+        if task.env_id != *selected_env {
+            return Err("Interrupted task is outside the selected environment".into());
+        }
         let duration_override = (task.task_status_id == TaskStatus::Queued.as_id()).then_some(0);
         if Task::complete(
             db,
@@ -353,6 +429,8 @@ pub(crate) async fn run_dev(
         jit_threshold: None,
         jit_hof_fusion: None,
         db_uri: None,
+        db_migration_uri: None,
+        profile: None,
         log_level: None,
         log_target: None,
         log_dir: None,
@@ -412,7 +490,7 @@ pub(crate) async fn run_dev(
     if queue_type == QueueType::Sqlite {
         info!("hot.dev: Starting a new SQLite queue session");
         let admin = SqliteQueueAdmin::default();
-        let snapshots = match admin.message_snapshots().await {
+        let mut snapshots = match admin.message_snapshots().await {
             Ok(messages) => messages,
             Err(error) => {
                 error!(
@@ -427,7 +505,7 @@ pub(crate) async fn run_dev(
         };
 
         if !snapshots.is_empty() && !conf.get_str("db.uri").is_empty() {
-            let db = match hot::db::create_db_pool(&conf).await {
+            let db = match crate::profile::create_cli_db_pool(&conf).await {
                 Ok(db) => db,
                 Err(error) => {
                     error!(
@@ -441,7 +519,38 @@ pub(crate) async fn run_dev(
             let configured_task_queue = conf.get_str_or_default("queue.name", "");
             let configured_task_queue =
                 (!configured_task_queue.is_empty()).then_some(configured_task_queue.as_str());
-            match reconcile_discarded_queue_messages(&db, &snapshots, configured_task_queue).await {
+            let (_, selected_env, _) = match crate::profile::resolve_cli_identity(&db, &conf).await
+            {
+                Ok(identity) => identity,
+                Err(error) => {
+                    error!(
+                        "Cannot resolve dev recovery profile; queue rows were preserved: {error}"
+                    );
+                    std::process::exit(1);
+                }
+            };
+            snapshots = match selected_dev_queue_messages(
+                &db,
+                &snapshots,
+                configured_task_queue,
+                &selected_env,
+            )
+            .await
+            {
+                Ok(selected) => selected,
+                Err(error) => {
+                    error!("Cannot verify dev queue ownership; queue rows were preserved: {error}");
+                    std::process::exit(1);
+                }
+            };
+            match reconcile_discarded_queue_messages(
+                &db,
+                &snapshots,
+                configured_task_queue,
+                &selected_env,
+            )
+            .await
+            {
                 Ok(reconciled) => debug!(
                     failed_runs = reconciled.failed_runs,
                     failed_tasks = reconciled.failed_tasks,
@@ -456,6 +565,11 @@ pub(crate) async fn run_dev(
                     std::process::exit(1);
                 }
             }
+        } else if !snapshots.is_empty() {
+            error!(
+                "Cannot verify dev queue ownership without a database; queue rows were preserved"
+            );
+            std::process::exit(1);
         }
 
         match admin.clear_snapshots(&snapshots).await {
@@ -1203,9 +1317,74 @@ mod tests {
             .await
             .unwrap();
 
+        let sibling_env = uuid::Uuid::new_v4();
+        let sibling_stream = uuid::Uuid::new_v4();
+        let sibling_run = uuid::Uuid::new_v4();
+        hot::db::Env::insert_env(
+            &db,
+            &sibling_env,
+            &data.org_id,
+            "other-profile",
+            &data.user_id,
+        )
+        .await
+        .unwrap();
+        let sibling_project = uuid::Uuid::new_v4();
+        hot::db::Project::insert_project(
+            &db,
+            &sibling_project,
+            &sibling_env,
+            "other-profile",
+            &data.user_id,
+        )
+        .await
+        .unwrap();
+        let sibling_build = hot::db::Build::insert_or_update_live_build(
+            &db,
+            &sibling_project,
+            "sibling-build",
+            0,
+            &data.user_id,
+        )
+        .await
+        .unwrap();
+        Run::insert_run(
+            &db,
+            &sibling_run,
+            &sibling_env,
+            &sibling_stream,
+            Some(&sibling_build.build_id),
+            hot::db::run::RunType::Run.as_id(),
+            None,
+            &data.user_id,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        event_queue.move_to_dead_letter_queue(Message {
+            id: uuid::Uuid::now_v7(),
+            head: Val::map_empty(),
+            body: hot::val!({"execution_context": {"stream_id": sibling_stream.to_string()}}),
+        }, "another profile's interrupted execution".into()).await.unwrap();
+
         let admin = SqliteQueueAdmin::new(queue_dir.path().to_path_buf());
         let snapshots = admin.message_snapshots().await.unwrap();
-        let result = reconcile_discarded_queue_messages(&db, &snapshots, None)
+        assert_eq!(snapshots.len(), 3);
+        assert!(
+            reconcile_discarded_queue_messages(&db, &snapshots, None, &data.env_id)
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            Run::get_run(&db, &data.run_id).await.unwrap().status_id,
+            hot::db::RunStatus::Running.as_id()
+        );
+        let selected = selected_dev_queue_messages(&db, &snapshots, None, &data.env_id)
+            .await
+            .unwrap();
+        assert_eq!(selected.len(), 2);
+        let result = reconcile_discarded_queue_messages(&db, &selected, None, &data.env_id)
             .await
             .unwrap();
         assert_eq!(
@@ -1222,6 +1401,13 @@ mod tests {
         let task = Task::get(&db, &task_id).await.unwrap();
         assert_eq!(task.task_status_id, TaskStatus::Failed.as_id());
         assert_eq!(task.duration_ms, Some(0));
+
+        admin.clear_snapshots(&selected).await.unwrap();
+        assert_eq!(admin.message_snapshots().await.unwrap().len(), 1);
+        assert_eq!(
+            Run::get_run(&db, &sibling_run).await.unwrap().status_id,
+            hot::db::RunStatus::Running.as_id()
+        );
 
         admin.clear_all().await.unwrap();
         let status = admin.status().await.unwrap();
