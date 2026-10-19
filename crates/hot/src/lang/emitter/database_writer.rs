@@ -6,11 +6,11 @@
 /// - Handles both SQLite and PostgreSQL optimally
 /// - Provides backpressure visibility
 /// - Ensures graceful shutdown with full data persistence
-use crate::db::DatabasePool;
+use crate::db::{DatabasePool, DatabaseScope, current_database_scope};
 use crate::lang::emitter::postgres_safety::{sanitize_json_for_jsonb, sanitize_text_for_postgres};
 use crate::lang::event::ExecutionContext;
 use crate::val::Val;
-use ahash::AHashMap;
+use ahash::{AHashMap, AHashSet};
 use sqlx::Sqlite;
 use std::sync::{
     Arc, Mutex as StdMutex,
@@ -283,9 +283,14 @@ impl DatabaseWrite {
     }
 }
 
+struct ScopedWrite {
+    write: DatabaseWrite,
+    scope: Option<DatabaseScope>,
+}
+
 #[derive(Clone)]
 struct DatabaseWriterShard {
-    write_sender: mpsc::UnboundedSender<DatabaseWrite>,
+    write_sender: mpsc::UnboundedSender<ScopedWrite>,
     flush_sender: mpsc::UnboundedSender<oneshot::Sender<()>>,
     shutdown_sender: mpsc::UnboundedSender<oneshot::Sender<()>>,
 }
@@ -294,6 +299,8 @@ struct DatabaseWriterShard {
 #[derive(Clone)]
 pub struct DatabaseWriter {
     shards: Arc<Vec<DatabaseWriterShard>>,
+    run_scopes: Arc<StdMutex<AHashMap<Uuid, DatabaseScope>>>,
+    failed_runs: Arc<StdMutex<AHashSet<Uuid>>>,
     pressure_stats: Option<Arc<DatabaseWriterPressureStats>>,
 }
 
@@ -301,17 +308,20 @@ impl DatabaseWriter {
     /// Create a new database writer with the given database pool
     pub fn new(db: Arc<RwLock<Option<DatabasePool>>>) -> Self {
         let shard_count = Self::shard_count_for_db(&db);
+        let database_required = db.try_read().map(|state| state.is_some()).unwrap_or(true);
         let mut shards = Vec::with_capacity(shard_count);
         let pressure_stats = Self::pressure_stats_from_env();
+        let failed_runs = Arc::new(StdMutex::new(AHashSet::new()));
 
         for shard_idx in 0..shard_count {
-            let (write_sender, mut write_receiver) = mpsc::unbounded_channel::<DatabaseWrite>();
+            let (write_sender, mut write_receiver) = mpsc::unbounded_channel::<ScopedWrite>();
             let (flush_sender, mut flush_receiver) =
                 mpsc::unbounded_channel::<oneshot::Sender<()>>();
             let (shutdown_sender, mut shutdown_receiver) =
                 mpsc::unbounded_channel::<oneshot::Sender<()>>();
             let db = Arc::clone(&db);
             let pressure_stats_for_task = pressure_stats.clone();
+            let failed_runs = failed_runs.clone();
 
             // Spawn the dedicated writer shard task.
             tokio::spawn(async move {
@@ -350,7 +360,7 @@ impl DatabaseWriter {
                                     // shard affinity. They still flush promptly, but only this
                                     // shard is blocked; sibling runs drain on sibling shards.
                                     let has_run_write = pending_writes.iter().any(|w| {
-                                        matches!(w, DatabaseWrite::RunStart { .. } | DatabaseWrite::RunStop { .. } | DatabaseWrite::RunFail { .. } | DatabaseWrite::RunCancel { .. })
+                                        matches!(w.write, DatabaseWrite::RunStart { .. } | DatabaseWrite::RunStop { .. } | DatabaseWrite::RunFail { .. } | DatabaseWrite::RunCancel { .. })
                                     });
 
                                     let should_flush = has_run_write
@@ -380,6 +390,8 @@ impl DatabaseWriter {
                                             shard_idx,
                                             trigger,
                                             pressure_stats_for_task.as_deref(),
+                                        &failed_runs,
+                                        database_required,
                                         )
                                         .await;
                                     }
@@ -397,6 +409,8 @@ impl DatabaseWriter {
                                             shard_idx,
                                             DatabaseWriterFlushTrigger::ChannelClosed,
                                             pressure_stats_for_task.as_deref(),
+                                        &failed_runs,
+                                        database_required,
                                         )
                                         .await;
                                     }
@@ -426,6 +440,8 @@ impl DatabaseWriter {
                                         shard_idx,
                                         DatabaseWriterFlushTrigger::ExplicitFlush,
                                         pressure_stats_for_task.as_deref(),
+                                        &failed_runs,
+                                        database_required,
                                     )
                                     .await;
                                 }
@@ -452,6 +468,8 @@ impl DatabaseWriter {
                                         shard_idx,
                                         DatabaseWriterFlushTrigger::Shutdown,
                                         pressure_stats_for_task.as_deref(),
+                                        &failed_runs,
+                                        database_required,
                                     )
                                     .await;
                                 }
@@ -475,6 +493,8 @@ impl DatabaseWriter {
 
         Self {
             shards: Arc::new(shards),
+            run_scopes: Arc::new(StdMutex::new(AHashMap::new())),
+            failed_runs,
             pressure_stats,
         }
     }
@@ -484,8 +504,63 @@ impl DatabaseWriter {
         if let Some(stats) = &self.pressure_stats {
             stats.observe_enqueued(&write);
         }
-        let shard = self.shard_for_run(write.run_id());
-        if shard.write_sender.send(write).is_err() {
+        let run_id = write.run_id();
+        let context = match &write {
+            DatabaseWrite::RunStart {
+                execution_context, ..
+            } => Some(execution_context),
+            DatabaseWrite::Call {
+                execution_context, ..
+            } => Some(execution_context.as_ref()),
+            _ => None,
+        };
+        let provided_scope = context
+            .and_then(|context| {
+                Some(DatabaseScope::Environment {
+                    org_id: context.org_id?,
+                    env_id: context.env_id?,
+                })
+            })
+            .or_else(|| {
+                current_database_scope()
+                    .filter(|scope| matches!(scope, DatabaseScope::Environment { .. }))
+            });
+        let scope = {
+            let mut scopes = self
+                .run_scopes
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            if let Some(scope) = provided_scope {
+                if scopes
+                    .get(&run_id)
+                    .is_some_and(|existing| existing != &scope)
+                {
+                    self.failed_runs
+                        .lock()
+                        .unwrap_or_else(|error| error.into_inner())
+                        .insert(run_id);
+                    tracing::error!(%run_id, "DatabaseWriter rejected a changed execution scope");
+                    return;
+                }
+                scopes.insert(run_id, scope);
+            }
+            let scope = scopes.get(&run_id).cloned();
+            if matches!(
+                write,
+                DatabaseWrite::RunStop { .. }
+                    | DatabaseWrite::RunFail { .. }
+                    | DatabaseWrite::RunCancel { .. }
+            ) {
+                scopes.remove(&run_id);
+            }
+            scope
+        };
+        let shard = self.shard_for_run(run_id);
+        if shard
+            .write_sender
+            .send(ScopedWrite { write, scope })
+            .is_err()
+        {
             tracing::error!("DatabaseWriter: Failed to send write - writer task has shut down");
         }
     }
@@ -516,7 +591,7 @@ impl DatabaseWriter {
                 .await
                 .map_err(|_| "Flush acknowledgment was dropped".to_string())?;
         }
-        Ok(())
+        self.check_failures(None)
     }
 
     pub async fn flush_run(&self, run_id: Uuid) -> Result<(), String> {
@@ -529,7 +604,8 @@ impl DatabaseWriter {
 
         ack_receiver
             .await
-            .map_err(|_| "Flush acknowledgment was dropped".to_string())
+            .map_err(|_| "Flush acknowledgment was dropped".to_string())?;
+        self.check_failures(Some(run_id))
     }
 
     /// Gracefully shutdown the writer, ensuring all pending writes are flushed
@@ -549,7 +625,23 @@ impl DatabaseWriter {
                 .await
                 .map_err(|_| "Shutdown completion signal was dropped".to_string())?;
         }
-        Ok(())
+        self.check_failures(None)
+    }
+
+    fn check_failures(&self, run_id: Option<Uuid>) -> Result<(), String> {
+        let failed = self
+            .failed_runs
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let has_failure = match run_id {
+            Some(id) => failed.contains(&id),
+            None => !failed.is_empty(),
+        };
+        if has_failure {
+            Err("Database writer could not persist the execution; retry is required".into())
+        } else {
+            Ok(())
+        }
     }
 
     fn shard_count_for_db(db: &Arc<RwLock<Option<DatabasePool>>>) -> usize {
@@ -591,13 +683,84 @@ impl DatabaseWriter {
     /// Critical: Separates run writes from other writes to maintain foreign key ordering
     async fn process_batch(
         db: &Arc<RwLock<Option<DatabasePool>>>,
+        writes: &mut Vec<ScopedWrite>,
+        shard_idx: usize,
+        trigger: DatabaseWriterFlushTrigger,
+        pressure_stats: Option<&DatabaseWriterPressureStats>,
+        failed_runs: &StdMutex<AHashSet<Uuid>>,
+        database_required: bool,
+    ) {
+        // A shard is a scheduling optimization, not an authorization boundary.
+        // Preserve per-run ordering but never mix owners in a transaction.
+        let mut groups: Vec<(Option<DatabaseScope>, Vec<DatabaseWrite>)> = Vec::new();
+        for entry in std::mem::take(writes) {
+            if let Some((_, batch)) = groups.iter_mut().find(|(scope, _)| *scope == entry.scope) {
+                batch.push(entry.write);
+            } else {
+                groups.push((entry.scope, vec![entry.write]));
+            }
+        }
+        let pool = db.read().await.clone();
+        if database_required && pool.is_none() {
+            failed_runs
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .extend(
+                    groups
+                        .iter()
+                        .flat_map(|(_, batch)| batch.iter().map(DatabaseWrite::run_id)),
+                );
+            tracing::error!("Configured database disappeared before emitter flush");
+            return;
+        }
+        for (scope, mut batch) in groups {
+            let scoped_pool = match (&pool, scope) {
+                (Some(pool), Some(scope)) => Some(pool.with_scope(scope)),
+                // Local CLI evaluations may have no persisted organization. They
+                // cannot acquire PostgreSQL authority from a writer task.
+                (Some(DatabasePool::Postgres(_)), None) => {
+                    failed_runs
+                        .lock()
+                        .unwrap_or_else(|error| error.into_inner())
+                        .extend(batch.iter().map(DatabaseWrite::run_id));
+                    tracing::error!(
+                        writes = batch.len(),
+                        "DatabaseWriter rejected missing execution scope"
+                    );
+                    continue;
+                }
+                (pool, None) => pool.clone(),
+                (None, Some(_)) => None,
+            };
+            let scoped_db = Arc::new(RwLock::new(scoped_pool));
+            let run_ids: Vec<_> = batch.iter().map(DatabaseWrite::run_id).collect();
+            if !Self::process_scoped_batch(
+                &scoped_db,
+                &mut batch,
+                shard_idx,
+                trigger,
+                pressure_stats,
+            )
+            .await
+            {
+                failed_runs
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .extend(run_ids);
+            }
+        }
+    }
+
+    async fn process_scoped_batch(
+        db: &Arc<RwLock<Option<DatabasePool>>>,
         writes: &mut Vec<DatabaseWrite>,
         shard_idx: usize,
         trigger: DatabaseWriterFlushTrigger,
         pressure_stats: Option<&DatabaseWriterPressureStats>,
-    ) {
+    ) -> bool {
+        let mut batch_failed = false;
         if writes.is_empty() {
-            return;
+            return !batch_failed;
         }
 
         let batch_started = std::time::Instant::now();
@@ -627,7 +790,7 @@ impl DatabaseWriter {
                     stats.observe_batch(input_writes, 0, 0, 0, elapsed_ms(batch_started.elapsed()));
                     stats.maybe_log();
                 }
-                return;
+                return !batch_failed;
             }
         };
         let backend = match pool {
@@ -680,6 +843,7 @@ impl DatabaseWriter {
                         )
                         .await
                         {
+                            batch_failed = true;
                             tracing::error!(
                                 "DatabaseWriter: Coalesced run write failed for {}: {}",
                                 run_id,
@@ -689,6 +853,7 @@ impl DatabaseWriter {
                     } else if let Err(e) =
                         Self::write_run_stop(pool, run_id, event_time, &result).await
                     {
+                        batch_failed = true;
                         tracing::error!("DatabaseWriter: Critical run write failed: {}", e);
                     }
                 }
@@ -701,9 +866,11 @@ impl DatabaseWriter {
                         && let Err(e) =
                             Self::write_run_start(pool, &execution_context, start_time).await
                     {
+                        batch_failed = true;
                         tracing::error!("DatabaseWriter: Critical run:start write failed: {}", e);
                     }
                     if let Err(e) = Self::write_run_fail(pool, run_id, event_time, &failure).await {
+                        batch_failed = true;
                         tracing::error!("DatabaseWriter: Critical run write failed: {}", e);
                     }
                 }
@@ -716,11 +883,13 @@ impl DatabaseWriter {
                         && let Err(e) =
                             Self::write_run_start(pool, &execution_context, start_time).await
                     {
+                        batch_failed = true;
                         tracing::error!("DatabaseWriter: Critical run:start write failed: {}", e);
                     }
                     if let Err(e) =
                         Self::write_run_cancel(pool, run_id, event_time, &cancellation).await
                     {
+                        batch_failed = true;
                         tracing::error!("DatabaseWriter: Critical run write failed: {}", e);
                     }
                 }
@@ -730,6 +899,7 @@ impl DatabaseWriter {
 
         for (_, (execution_context, start_time)) in pending_starts {
             if let Err(e) = Self::write_run_start(pool, &execution_context, start_time).await {
+                batch_failed = true;
                 tracing::error!("DatabaseWriter: Critical run:start write failed: {}", e);
             }
         }
@@ -768,20 +938,33 @@ impl DatabaseWriter {
                 );
                 stats.maybe_log();
             }
-            return;
+            return !batch_failed;
         }
 
+        let (org_id, env_id) = match Self::trace_batch_scope(pool, &other_writes).await {
+            Ok(scope) => scope,
+            Err(error) => {
+                tracing::error!("DatabaseWriter: Rejected trace batch ownership: {error}");
+                return false;
+            }
+        };
         let other_write_started = Instant::now();
         match pool {
-            DatabasePool::Sqlite(sqlite_pool) => {
-                // Batch call writes in a single transaction so SQLite pays one
-                // commit/fsync per flush instead of one per row.
-                match sqlite_pool.begin().await {
-                    Ok(mut tx) => {
+            DatabasePool::Sqlite(_) => {
+                match crate::store::quota::begin_sqlite(
+                    pool,
+                    org_id,
+                    env_id,
+                    crate::store::quota::QuotaKind::Call,
+                )
+                .await
+                {
+                    Ok((mut tx, budget)) => {
                         let mut failed = false;
 
                         for write in &other_writes {
                             if let Err(e) = Self::execute_write_sqlite(&mut *tx, write).await {
+                                batch_failed = true;
                                 tracing::error!(
                                     "DatabaseWriter: SQLite write failed in transaction: {}",
                                     e
@@ -792,14 +975,24 @@ impl DatabaseWriter {
                             }
                         }
 
+                        if !failed && let Err(error) = budget.check_sqlite(&mut tx).await {
+                            tracing::error!(
+                                "DatabaseWriter: Trace storage quota rejected SQLite batch: {error}"
+                            );
+                            batch_failed = true;
+                            other_write_errors += 1;
+                            failed = true;
+                        }
                         if failed {
                             if let Err(e) = tx.rollback().await {
+                                batch_failed = true;
                                 tracing::error!("DatabaseWriter: SQLite rollback failed: {}", e);
                                 outcome = "rollback_failed";
                             } else {
                                 outcome = "rolled_back";
                             }
                         } else if let Err(e) = tx.commit().await {
+                            batch_failed = true;
                             tracing::error!("DatabaseWriter: SQLite commit failed: {}", e);
                             outcome = "commit_failed";
                         } else {
@@ -807,32 +1000,26 @@ impl DatabaseWriter {
                         }
                     }
                     Err(e) => {
+                        batch_failed = true;
                         tracing::error!(
                             "DatabaseWriter: Failed to begin SQLite transaction: {}",
                             e
                         );
-                        for write in other_writes {
-                            if let Err(e) = Self::execute_write(pool, &write).await {
-                                tracing::error!(
-                                    "DatabaseWriter: SQLite write failed (no transaction): {}",
-                                    e
-                                );
-                                other_write_errors += 1;
-                            }
-                        }
-                        outcome = if other_write_errors > 0 {
-                            "fallback_partial_failure"
-                        } else {
-                            "fallback_ok"
-                        };
+                        other_write_errors += other_write_count;
+                        outcome = "quota_transaction_failed";
                     }
                 }
             }
-            DatabasePool::Postgres(pg_pool) => {
-                // PostgreSQL: Use transaction for batch atomicity and performance
-                // Writes are already sorted (calls by depth, etc.) so we maintain order
-                match pg_pool.begin().await {
-                    Ok(mut tx) => {
+            DatabasePool::Postgres(_) => {
+                match crate::store::quota::begin_postgres(
+                    pool,
+                    org_id,
+                    env_id,
+                    crate::store::quota::QuotaKind::Call,
+                )
+                .await
+                {
+                    Ok((mut tx, budget)) => {
                         let mut failed = false;
 
                         // Execute writes IN ORDER within the transaction
@@ -863,10 +1050,6 @@ impl DatabaseWriter {
                                     stop_time,
                                     duration_us,
                                 } => {
-                                    let size: i64 = args.as_deref().map_or(0, |s| s.len() as i64)
-                                        + return_value.as_deref().map_or(0, |s| s.len() as i64)
-                                        + flow.as_deref().map_or(0, |s| s.len() as i64)
-                                        + 50;
                                     // Defense in depth: scrub Postgres-rejected
                                     // chars from `jsonb` columns (`args`,
                                     // `return_value`, `flow`) and the `text`
@@ -888,7 +1071,9 @@ impl DatabaseWriter {
                                     sqlx::query(
                                         "
 INSERT INTO hot.call (call_id, run_id, parent_call_id, function_name, static_scope, runtime_path, call_depth, args, return_value, error, flow, file, line, \"column\", position, start_time, stop_time, duration_us, size)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9::jsonb, $10, $11::jsonb, $12, $13, $14, $15, $16, $17, $18, $19)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9::jsonb, $10, $11::jsonb, $12, $13, $14, $15, $16, $17, $18,
+    COALESCE(octet_length(($8::jsonb)::text), 0) + COALESCE(octet_length(($9::jsonb)::text), 0) +
+    COALESCE(octet_length($10::text), 0) + COALESCE(octet_length(($11::jsonb)::text), 0) + 50)
 ON CONFLICT (call_id) DO UPDATE SET
     stop_time = COALESCE(EXCLUDED.stop_time, hot.call.stop_time),
     return_value = COALESCE(EXCLUDED.return_value, hot.call.return_value),
@@ -909,7 +1094,9 @@ ON CONFLICT (call_id) DO UPDATE SET
     position = COALESCE(EXCLUDED.position, hot.call.position),
     size = COALESCE(octet_length(COALESCE(EXCLUDED.args, hot.call.args)::text), 0) +
            COALESCE(octet_length(COALESCE(EXCLUDED.return_value, hot.call.return_value)::text), 0) +
-           COALESCE(octet_length(COALESCE(EXCLUDED.flow, hot.call.flow)::text), 0) + 50
+           COALESCE(octet_length(COALESCE(EXCLUDED.flow, hot.call.flow)::text), 0) +
+           COALESCE(octet_length(COALESCE(EXCLUDED.error, hot.call.error)), 0) + 50
+WHERE hot.call.run_id = EXCLUDED.run_id
 "
                                     )
                                     .bind(call_id)
@@ -930,9 +1117,12 @@ ON CONFLICT (call_id) DO UPDATE SET
                                     .bind(start_time)
                                     .bind(stop_time)
                                     .bind(duration_us)
-                                    .bind(size)
                                     .execute(&mut *tx)
                                     .await
+                                    .and_then(|result| {
+                                        if result.rows_affected() == 1 { Ok(result) }
+                                        else { Err(sqlx::Error::Protocol("Trace call ownership changed".into())) }
+                                    })
                                 }
                                 _ => {
                                     // Run events shouldn't be in other_writes, but handle gracefully
@@ -945,6 +1135,7 @@ ON CONFLICT (call_id) DO UPDATE SET
                             };
 
                             if let Err(e) = result {
+                                batch_failed = true;
                                 tracing::error!(
                                     "DatabaseWriter: Write failed in transaction: {}",
                                     e
@@ -955,9 +1146,18 @@ ON CONFLICT (call_id) DO UPDATE SET
                             }
                         }
 
+                        if !failed && let Err(error) = budget.check_postgres(&mut tx).await {
+                            tracing::error!(
+                                "DatabaseWriter: Trace storage quota rejected PostgreSQL batch: {error}"
+                            );
+                            batch_failed = true;
+                            other_write_errors += 1;
+                            failed = true;
+                        }
                         if failed {
                             // Rollback on failure
                             if let Err(e) = tx.rollback().await {
+                                batch_failed = true;
                                 tracing::error!("DatabaseWriter: Rollback failed: {}", e);
                                 outcome = "rollback_failed";
                             } else {
@@ -966,6 +1166,7 @@ ON CONFLICT (call_id) DO UPDATE SET
                         } else {
                             // Commit on success
                             if let Err(e) = tx.commit().await {
+                                batch_failed = true;
                                 tracing::error!("DatabaseWriter: Commit failed: {}", e);
                                 outcome = "commit_failed";
                             } else {
@@ -974,22 +1175,10 @@ ON CONFLICT (call_id) DO UPDATE SET
                         }
                     }
                     Err(e) => {
+                        batch_failed = true;
                         tracing::error!("DatabaseWriter: Failed to begin transaction: {}", e);
-                        // Fallback: Process writes individually without transaction
-                        for write in other_writes {
-                            if let Err(e) = Self::execute_write(pool, &write).await {
-                                tracing::error!(
-                                    "DatabaseWriter: Write failed (no transaction): {}",
-                                    e
-                                );
-                                other_write_errors += 1;
-                            }
-                        }
-                        outcome = if other_write_errors > 0 {
-                            "fallback_partial_failure"
-                        } else {
-                            "fallback_ok"
-                        };
+                        other_write_errors += other_write_count;
+                        outcome = "quota_transaction_failed";
                     }
                 }
             }
@@ -1021,81 +1210,94 @@ ON CONFLICT (call_id) DO UPDATE SET
             );
             stats.maybe_log();
         }
+        !batch_failed
     }
 
-    /// Execute a single write operation
-    async fn execute_write(pool: &DatabasePool, write: &DatabaseWrite) -> Result<(), sqlx::Error> {
-        match write {
-            DatabaseWrite::RunStart {
+    /// Verify trace authority using the original scope before acquiring the
+    /// account-wide billing lock. SQLite needs these explicit owner checks too.
+    async fn trace_batch_scope(
+        pool: &DatabasePool,
+        writes: &[DatabaseWrite],
+    ) -> Result<(Uuid, Uuid), String> {
+        let mut scope = None;
+        let mut run_ids = AHashSet::new();
+        let mut call_owners = AHashMap::new();
+        for write in writes {
+            let DatabaseWrite::Call {
                 execution_context,
-                event_time,
-            } => Self::write_run_start(pool, execution_context, *event_time).await,
-
-            DatabaseWrite::RunStop {
-                run_id,
-                event_time,
-                result,
-            } => Self::write_run_stop(pool, *run_id, *event_time, result).await,
-
-            DatabaseWrite::RunFail {
-                run_id,
-                event_time,
-                failure,
-            } => Self::write_run_fail(pool, *run_id, *event_time, failure).await,
-
-            DatabaseWrite::RunCancel {
-                run_id,
-                event_time,
-                cancellation,
-            } => Self::write_run_cancel(pool, *run_id, *event_time, cancellation).await,
-
-            DatabaseWrite::Call {
+                call_id,
+                ..
+            } = write
+            else {
+                return Err("Unexpected non-call write in trace batch".into());
+            };
+            let (Some(org), Some(env)) = (execution_context.org_id, execution_context.env_id)
+            else {
+                return Err(
+                    "Trace persistence requires an exact organization and environment".into(),
+                );
+            };
+            if org.is_nil() || env.is_nil() || scope.is_some_and(|owner| owner != (org, env)) {
+                return Err("Trace batch contains incompatible execution scopes".into());
+            }
+            scope = Some((org, env));
+            run_ids.insert(execution_context.run_id);
+            if call_owners
+                .insert(*call_id, execution_context.run_id)
+                .is_some_and(|run| run != execution_context.run_id)
+            {
+                return Err("Trace call identity changed run ownership".into());
+            }
+        }
+        let (org_id, env_id) = scope.ok_or("Empty trace batch")?;
+        if let DatabasePool::Postgres(pg) = pool
+            && !matches!(pg.scope().map_err(|e| e.to_string())?, DatabaseScope::Environment { org_id: org, env_id: env } if org == org_id && env == env_id)
+        {
+            return Err("Trace writes require their exact environment scope".into());
+        }
+        for run_id in run_ids {
+            let owner: Option<Uuid> = match pool {
+                DatabasePool::Postgres(pg) => {
+                    sqlx::query_scalar("SELECT env_id FROM run WHERE run_id=$1")
+                        .bind(run_id)
+                        .fetch_optional(pg)
+                        .await
+                }
+                DatabasePool::Sqlite(sqlite) => {
+                    sqlx::query_scalar("SELECT env_id FROM run WHERE run_id=$1")
+                        .bind(run_id)
+                        .fetch_optional(sqlite)
+                        .await
+                }
+            }
+            .map_err(|e| e.to_string())?;
+            if owner != Some(env_id) {
+                return Err("Trace context does not own its durable run".into());
+            }
+        }
+        for write in writes {
+            let DatabaseWrite::Call {
                 execution_context,
                 call_id,
                 parent_call_id,
-                function_name,
-                static_scope,
-                runtime_path,
-                call_depth,
-                args,
-                return_value,
-                error,
-                flow,
-                file,
-                line,
-                column,
-                position,
-                start_time,
-                stop_time,
-                duration_us,
-            } => {
-                Self::write_call(
-                    pool,
-                    execution_context,
-                    *call_id,
-                    *parent_call_id,
-                    function_name,
-                    static_scope,
-                    runtime_path,
-                    *call_depth,
-                    args.as_deref(),
-                    return_value.as_deref(),
-                    error.as_deref(),
-                    flow.as_deref(),
-                    file.as_deref(),
-                    *line,
-                    *column,
-                    *position,
-                    *start_time,
-                    *stop_time,
-                    *duration_us,
-                )
-                .await
+                ..
+            } = write
+            else {
+                unreachable!("validated call batch");
+            };
+            for id in std::iter::once(call_id).chain(parent_call_id.iter()) {
+                if call_owners
+                    .get(id)
+                    .is_some_and(|run| *run != execution_context.run_id)
+                {
+                    return Err("Trace parent belongs to a different run".into());
+                }
             }
         }
+        Ok((org_id, env_id))
     }
 
-    /// Execute a call write on a SQLite executor (pool connection or transaction).
+    /// Execute a call write inside the admitted SQLite transaction.
     async fn execute_write_sqlite<'e, E>(
         executor: E,
         write: &DatabaseWrite,
@@ -1619,8 +1821,34 @@ ON CONFLICT (call_id) DO UPDATE SET
 
         if rows_affected > 0 {
             Self::record_run_finished(pool, run_id).await?;
+        } else {
+            Self::require_visible_terminal_run(pool, run_id).await?;
         }
         Ok(())
+    }
+
+    async fn require_visible_terminal_run(
+        pool: &DatabasePool,
+        run_id: Uuid,
+    ) -> Result<(), sqlx::Error> {
+        let status: Option<i16> = match pool {
+            DatabasePool::Postgres(pool) => {
+                sqlx::query_scalar("SELECT status_id FROM run WHERE run_id=$1")
+                    .bind(run_id)
+                    .fetch_optional(pool)
+                    .await?
+            }
+            DatabasePool::Sqlite(pool) => {
+                sqlx::query_scalar("SELECT status_id FROM run WHERE run_id=?")
+                    .bind(run_id)
+                    .fetch_optional(pool)
+                    .await?
+            }
+        };
+        match status {
+            Some(status) if status != 1 => Ok(()),
+            _ => Err(sqlx::Error::RowNotFound),
+        }
     }
 
     /// Write a run:fail record
@@ -1657,14 +1885,7 @@ ON CONFLICT (call_id) DO UPDATE SET
 
         let Some((run_type_id, build_id, event_id, env_id, retry_attempt, status_id)) = run_info
         else {
-            // Run not found - just mark as failed without retry
-            tracing::warn!("Run {} not found when processing failure", run_id);
-            let updated =
-                Self::update_run_failed(pool, run_id, event_time, &result_json, None, None).await?;
-            if updated {
-                Self::record_run_finished(pool, run_id).await?;
-            }
-            return Ok(());
+            return Err(sqlx::Error::RowNotFound);
         };
 
         if status_id != 1 {
@@ -2131,6 +2352,7 @@ ON CONFLICT (call_id) DO UPDATE SET
         };
 
         if rows_affected == 0 {
+            Self::require_visible_terminal_run(pool, run_id).await?;
             tracing::debug!(
                 run_id = %run_id,
                 "Ignoring late run:cancel for run that is no longer running"
@@ -2241,19 +2463,17 @@ ON CONFLICT (call_id) DO UPDATE SET
     where
         E: sqlx::Executor<'e, Database = Sqlite>,
     {
-        let size: i64 = args.map_or(0, |s| s.len() as i64)
-            + return_value.map_or(0, |s| s.len() as i64)
-            + flow.map_or(0, |s| s.len() as i64)
-            + 50;
-
         let args_safe = args.map(sanitize_json_for_jsonb);
         let return_value_safe = return_value.map(sanitize_json_for_jsonb);
         let error_safe = error.map(sanitize_text_for_postgres);
         let flow_safe = flow.map(sanitize_json_for_jsonb);
 
-        sqlx::query(
+        let result = sqlx::query(
             "INSERT INTO call (call_id, run_id, parent_call_id, function_name, static_scope, runtime_path, call_depth, args, return_value, error, flow, start_time, stop_time, duration_us, file, line, \"column\", position, size)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18,
+                 COALESCE(length(CAST(?8 AS BLOB)), 0) + COALESCE(length(CAST(?9 AS BLOB)), 0) +
+                 COALESCE(length(CAST(?10 AS BLOB)), 0) + COALESCE(length(CAST(?11 AS BLOB)), 0) + 50
+             WHERE ?3 IS NULL OR EXISTS (SELECT 1 FROM call parent WHERE parent.call_id=?3 AND parent.run_id=?2)
              ON CONFLICT (call_id) DO UPDATE SET
                  stop_time = COALESCE(excluded.stop_time, call.stop_time),
                  return_value = COALESCE(excluded.return_value, call.return_value),
@@ -2272,9 +2492,11 @@ ON CONFLICT (call_id) DO UPDATE SET
                  line = COALESCE(excluded.line, call.line),
                  \"column\" = COALESCE(excluded.\"column\", call.\"column\"),
                  position = COALESCE(excluded.position, call.position),
-                 size = COALESCE(length(COALESCE(excluded.args, call.args)), 0) +
-                        COALESCE(length(COALESCE(excluded.return_value, call.return_value)), 0) +
-                        COALESCE(length(COALESCE(excluded.flow, call.flow)), 0) + 50",
+                 size = COALESCE(length(CAST(COALESCE(excluded.args, call.args) AS BLOB)), 0) +
+                        COALESCE(length(CAST(COALESCE(excluded.return_value, call.return_value) AS BLOB)), 0) +
+                        COALESCE(length(CAST(COALESCE(excluded.flow, call.flow) AS BLOB)), 0) +
+                        COALESCE(length(CAST(COALESCE(excluded.error, call.error) AS BLOB)), 0) + 50
+             WHERE call.run_id = excluded.run_id",
         )
         .bind(call_id)
         .bind(ctx.run_id)
@@ -2294,123 +2516,12 @@ ON CONFLICT (call_id) DO UPDATE SET
         .bind(line)
         .bind(column)
         .bind(position)
-        .bind(size)
         .execute(executor)
         .await?;
-        Ok(())
-    }
-
-    /// Write a call record using UPSERT to handle both INSERT and UPDATE
-    #[allow(clippy::too_many_arguments)]
-    async fn write_call(
-        pool: &DatabasePool,
-        ctx: &ExecutionContext,
-        call_id: Uuid,
-        parent_call_id: Option<Uuid>,
-        function_name: &str,
-        static_scope: &str,
-        runtime_path: &str,
-        call_depth: i64,
-        args: Option<&str>,
-        return_value: Option<&str>,
-        error: Option<&str>,
-        flow: Option<&str>,
-        file: Option<&str>,
-        line: Option<i64>,
-        column: Option<i64>,
-        position: Option<i64>,
-        start_time: Option<chrono::DateTime<chrono::Utc>>,
-        stop_time: Option<chrono::DateTime<chrono::Utc>>,
-        duration_us: Option<i64>,
-    ) -> Result<(), sqlx::Error> {
-        let size: i64 = args.map_or(0, |s| s.len() as i64)
-            + return_value.map_or(0, |s| s.len() as i64)
-            + flow.map_or(0, |s| s.len() as i64)
-            + 50;
-
-        // Defense in depth: scrub Postgres-rejected chars from `jsonb`
-        // columns and the `text` `error` column before bind. Upstream
-        // serialization sanitizes too; this catches anything from a future
-        // caller that bypasses the upstream path.
-        let args_safe = args.map(sanitize_json_for_jsonb);
-        let return_value_safe = return_value.map(sanitize_json_for_jsonb);
-        let error_safe = error.map(sanitize_text_for_postgres);
-        let flow_safe = flow.map(sanitize_json_for_jsonb);
-
-        match pool {
-            DatabasePool::Postgres(pg_pool) => {
-                // PostgreSQL UPSERT
-                sqlx::query(
-                    "INSERT INTO hot.call (call_id, run_id, parent_call_id, function_name, static_scope, runtime_path, call_depth, args, return_value, error, flow, start_time, stop_time, duration_us, file, line, \"column\", position, size)
-                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9::jsonb, $10, $11::jsonb, $12, $13, $14, $15, $16, $17, $18, $19)
-                     ON CONFLICT (call_id) DO UPDATE SET
-                         stop_time = COALESCE(EXCLUDED.stop_time, hot.call.stop_time),
-                         return_value = COALESCE(EXCLUDED.return_value, hot.call.return_value),
-                         error = COALESCE(EXCLUDED.error, hot.call.error),
-                         flow = COALESCE(EXCLUDED.flow, hot.call.flow),
-                         duration_us = COALESCE(EXCLUDED.duration_us, hot.call.duration_us),
-                         start_time = COALESCE(EXCLUDED.start_time, hot.call.start_time),
-                         parent_call_id = COALESCE(EXCLUDED.parent_call_id, hot.call.parent_call_id),
-                         -- Use NULLIF to treat 'unknown' as NULL, preferring real function names
-                         function_name = COALESCE(NULLIF(EXCLUDED.function_name, 'unknown'), NULLIF(hot.call.function_name, 'unknown'), 'unknown'),
-                         static_scope = COALESCE(NULLIF(EXCLUDED.static_scope, 'unknown'), NULLIF(hot.call.static_scope, 'unknown'), 'unknown'),
-                         runtime_path = COALESCE(NULLIF(EXCLUDED.runtime_path, 'unknown'), NULLIF(hot.call.runtime_path, 'unknown'), 'unknown'),
-                         call_depth = CASE WHEN EXCLUDED.call_depth = 0 AND hot.call.call_depth != 0 THEN hot.call.call_depth ELSE COALESCE(EXCLUDED.call_depth, hot.call.call_depth) END,
-                         args = COALESCE(EXCLUDED.args, hot.call.args),
-                         file = COALESCE(EXCLUDED.file, hot.call.file),
-                         line = COALESCE(EXCLUDED.line, hot.call.line),
-                         \"column\" = COALESCE(EXCLUDED.\"column\", hot.call.\"column\"),
-                         position = COALESCE(EXCLUDED.position, hot.call.position),
-                         size = COALESCE(octet_length(COALESCE(EXCLUDED.args, hot.call.args)::text), 0) +
-                                COALESCE(octet_length(COALESCE(EXCLUDED.return_value, hot.call.return_value)::text), 0) +
-                                COALESCE(octet_length(COALESCE(EXCLUDED.flow, hot.call.flow)::text), 0) + 50"
-                )
-                .bind(call_id)
-                .bind(ctx.run_id)
-                .bind(parent_call_id)
-                .bind(function_name)
-                .bind(static_scope)
-                .bind(runtime_path)
-                .bind(call_depth as i32)
-                .bind(args_safe.as_deref())
-                .bind(return_value_safe.as_deref())
-                .bind(error_safe.as_deref())
-                .bind(flow_safe.as_deref())
-                .bind(start_time)
-                .bind(stop_time)
-                .bind(duration_us)
-                .bind(file)
-                .bind(line.map(|v| v as i32))
-                .bind(column.map(|v| v as i32))
-                .bind(position.map(|v| v as i32))
-                .bind(size)
-                .execute(pg_pool)
-                .await?;
-            }
-            DatabasePool::Sqlite(sqlite_pool) => {
-                Self::write_call_sqlite(
-                    sqlite_pool,
-                    ctx,
-                    call_id,
-                    parent_call_id,
-                    function_name,
-                    static_scope,
-                    runtime_path,
-                    call_depth,
-                    args,
-                    return_value,
-                    error,
-                    flow,
-                    file,
-                    line,
-                    column,
-                    position,
-                    start_time,
-                    stop_time,
-                    duration_us,
-                )
-                .await?;
-            }
+        if result.rows_affected() != 1 {
+            return Err(sqlx::Error::Protocol(
+                "Trace call or parent ownership changed".into(),
+            ));
         }
         Ok(())
     }
@@ -2420,6 +2531,130 @@ ON CONFLICT (call_id) DO UPDATE SET
 mod tests {
     use super::*;
     use crate::lang::bytecode::LambdaInfo;
+
+    fn trace_write(
+        ctx: &ExecutionContext,
+        call_id: Uuid,
+        args: Option<&str>,
+        error: &str,
+    ) -> DatabaseWrite {
+        DatabaseWrite::Call {
+            execution_context: Box::new(ctx.clone()),
+            call_id,
+            parent_call_id: None,
+            function_name: "test/trace".into(),
+            static_scope: "test/trace".into(),
+            runtime_path: "test/trace".into(),
+            call_depth: 0,
+            args: args.map(str::to_string),
+            return_value: None,
+            error: Some(error.into()),
+            flow: None,
+            file: None,
+            line: None,
+            column: None,
+            position: None,
+            start_time: Some(chrono::Utc::now()),
+            stop_time: None,
+            duration_us: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn trace_quota_counts_utf8_errors_and_rolls_back_upsert_without_losing_terminal_run() {
+        let db = crate::db::test_db().await;
+        let data = crate::db::insert_test_data(&db).await.unwrap();
+        let DatabasePool::Sqlite(pool) = &db else {
+            unreachable!()
+        };
+        sqlx::query("UPDATE org SET features=? WHERE org_id=?")
+            .bind(r#"{"call_storage_bytes":57}"#)
+            .bind(data.org_id)
+            .execute(pool)
+            .await
+            .unwrap();
+        let context = ExecutionContext::new(
+            data.run_id,
+            data.stream_id,
+            4,
+            Some(data.env_id),
+            Some(data.user_id),
+            Some(data.org_id),
+            Some(data.build_id),
+        );
+        let call = Uuid::new_v4();
+        let writer = DatabaseWriter::new(Arc::new(RwLock::new(Some(db.clone()))));
+        writer.write(trace_write(&context, call, Some("\"é\""), "ø"));
+        writer.flush_run(data.run_id).await.unwrap();
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT size FROM call WHERE call_id=?")
+                .bind(call)
+                .fetch_one(pool)
+                .await
+                .unwrap(),
+            56
+        );
+        // The merged update retains the old args and grows the error by two
+        // bytes. Only its trace transaction rolls back when the account is full.
+        writer.write(trace_write(&context, call, None, "øø"));
+        writer.write(DatabaseWrite::RunStop {
+            run_id: data.run_id,
+            event_time: chrono::Utc::now(),
+            result: Val::Null,
+        });
+        assert!(writer.flush_run(data.run_id).await.is_err());
+        assert!(writer.flush_run(data.run_id).await.is_err());
+        assert!(writer.shutdown().await.is_err());
+        let row: (i64, String) = sqlx::query_as("SELECT size,error FROM call WHERE call_id=?")
+            .bind(call)
+            .fetch_one(pool)
+            .await
+            .unwrap();
+        assert_eq!(row, (56, "ø".into()));
+        assert_eq!(
+            crate::db::Run::get_run(&db, &data.run_id)
+                .await
+                .unwrap()
+                .status_id,
+            crate::db::RunStatus::Succeeded.as_id()
+        );
+
+        // The upgrade backfill uses the same byte accounting as new writes.
+        sqlx::query("UPDATE call SET size=0 WHERE call_id=?")
+            .bind(call)
+            .execute(pool)
+            .await
+            .unwrap();
+        sqlx::raw_sql(include_str!(
+            "../../../../../resources/db/sqlite/migrations/015_call_storage_accounting.sql"
+        ))
+        .execute(pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT size FROM call WHERE call_id=?")
+                .bind(call)
+                .fetch_one(pool)
+                .await
+                .unwrap(),
+            56
+        );
+    }
+
+    #[tokio::test]
+    async fn missing_run_failure_is_sticky_across_flushes() {
+        let db = crate::db::test_db().await;
+        let writer = DatabaseWriter::new(Arc::new(RwLock::new(Some(db))));
+        let run_id = Uuid::new_v4();
+        writer.write(DatabaseWrite::RunStop {
+            run_id,
+            event_time: chrono::Utc::now(),
+            result: Val::Null,
+        });
+        assert!(writer.flush_run(run_id).await.is_err());
+        assert!(writer.flush_run(run_id).await.is_err());
+        assert!(writer.shutdown().await.is_err());
+    }
 
     #[test]
     fn queue_timing_info_splits_queue_and_worker_preparation() {

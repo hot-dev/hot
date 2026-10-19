@@ -58,10 +58,14 @@ pub mod resource_types {
     pub const KEY: &str = "key";
     pub const SESSION: &str = "session";
     pub const ENV: &str = "env";
+    pub const FILE: &str = "file";
+    pub const BLOB: &str = "blob";
+    pub const DOMAIN: &str = "domain";
 
     /// All known resource types
     pub const ALL: &[&str] = &[
-        MCP, WEBHOOK, STREAM, EVENT, RUN, PROJECT, BUILD, CONTEXT, KEY, SESSION, ENV,
+        MCP, WEBHOOK, STREAM, EVENT, RUN, PROJECT, BUILD, CONTEXT, KEY, SESSION, ENV, FILE, BLOB,
+        DOMAIN,
     ];
 
     /// Resource types that service keys are allowed to use.
@@ -90,6 +94,9 @@ pub mod resource_types {
             KEY => Some(&[CREATE, READ, UPDATE, DELETE]),
             SESSION => Some(&[CREATE, READ, DELETE]),
             ENV => Some(&[READ]),
+            FILE => Some(&[CREATE, READ, DELETE]),
+            BLOB => Some(&[READ]),
+            DOMAIN => Some(&[CREATE, READ, UPDATE, DELETE]),
             _ => None,
         }
     }
@@ -541,13 +548,19 @@ mod tests {
 
     #[test]
     fn intersection_narrows_resources_actions_and_discovery() {
-        let child = perms(&[("event:orders:*", &["create", "read"]), ("stream:*", &["read"])]);
+        let child = perms(&[
+            ("event:orders:*", &["create", "read"]),
+            ("stream:*", &["read"]),
+        ]);
         let issuer = perms(&[("event:orders:paid", &["read"]), ("stream:one", &["read"])]);
         let effective = child.intersection(&issuer);
         assert!(effective.has_permission("event:orders:paid", "read"));
         assert!(!effective.has_permission("event:orders:paid", "create"));
         assert!(!effective.has_permission("event:orders:cancelled", "read"));
-        assert_eq!(effective.stream_restrictions(), Some(vec!["one".to_string()]));
+        assert_eq!(
+            effective.stream_restrictions(),
+            Some(vec!["one".to_string()])
+        );
         assert_eq!(effective, issuer.intersection(&child));
     }
 
@@ -559,7 +572,11 @@ mod tests {
         assert_eq!(child.intersection(&full), child);
         assert!(child.intersection(&disjoint).is_empty());
         assert!(child.intersection(&Permissions::new()).is_empty());
-        assert!(!child.intersection(&full).has_permission("mcp:payments/send", "execute"));
+        assert!(
+            !child
+                .intersection(&full)
+                .has_permission("mcp:payments/send", "execute")
+        );
     }
 
     // ========================================================================

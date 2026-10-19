@@ -129,14 +129,14 @@ pub mod file;
 pub mod file_upload;
 pub mod hierarchy;
 pub mod invite;
-pub mod mcp_tool;
 pub mod management_key;
+pub mod mcp_tool;
 pub mod org;
 pub mod org_note;
 pub mod port;
 pub mod project;
-pub mod run;
 pub mod rls;
+pub mod run;
 pub mod schedule;
 pub mod schedule_log;
 pub mod scheduler_state;
@@ -182,7 +182,10 @@ pub use schedule::{
 };
 pub use schedule_log::{ScheduleLog, ScheduleLogError};
 pub use scheduler_state::{SchedulerState, SchedulerStateError};
-pub use scope::{BootstrapOperation, DatabaseScope, MaintenanceOperation, current_database_scope, with_database_scope};
+pub use scope::{
+    BootstrapOperation, DatabaseScope, MaintenanceOperation, current_database_scope,
+    with_database_scope,
+};
 pub use scoped_postgres::ScopedPgPool;
 pub use service_key::{ServiceKey, ServiceKeyError};
 pub use session::{Session, SessionError};
@@ -276,7 +279,13 @@ impl DatabasePool {
 /// the lock is released when [`AdvisoryLock::release`] is called (or when the
 /// connection is dropped / the session ends). On SQLite there is no fleet to
 /// coordinate, so the lock is a no-op marker that simply lets the caller proceed.
-pub enum AdvisoryLock {
+pub struct AdvisoryLock {
+    inner: AdvisoryLockInner,
+}
+
+// Keep the raw session private: callers receive only the lifetime/release
+// guard, never an alternate executor around ScopedPgPool.
+enum AdvisoryLockInner {
     Postgres {
         conn: Option<sqlx::pool::PoolConnection<Postgres>>,
         lock_id: i64,
@@ -290,7 +299,7 @@ impl AdvisoryLock {
     /// critical section completes so the pooled connection is returned promptly
     /// rather than held for the lifetime of the process.
     pub async fn release(mut self) {
-        let AdvisoryLock::Postgres { conn, lock_id } = &mut self else {
+        let AdvisoryLockInner::Postgres { conn, lock_id } = &mut self.inner else {
             return;
         };
         let Some(mut conn) = conn.take() else {
@@ -310,7 +319,7 @@ impl AdvisoryLock {
 
 impl Drop for AdvisoryLock {
     fn drop(&mut self) {
-        if let AdvisoryLock::Postgres { conn, .. } = self
+        if let AdvisoryLockInner::Postgres { conn, .. } = &mut self.inner
             && let Some(conn) = conn
         {
             // Session-level advisory locks are held by the underlying Postgres
@@ -345,15 +354,19 @@ pub async fn try_acquire_advisory_lock(
                 .fetch_one(&mut *conn)
                 .await?;
             if acquired {
-                Ok(Some(AdvisoryLock::Postgres {
-                    conn: Some(conn),
-                    lock_id,
+                Ok(Some(AdvisoryLock {
+                    inner: AdvisoryLockInner::Postgres {
+                        conn: Some(conn),
+                        lock_id,
+                    },
                 }))
             } else {
                 Ok(None)
             }
         }
-        DatabasePool::Sqlite(_) => Ok(Some(AdvisoryLock::NotRequired)),
+        DatabasePool::Sqlite(_) => Ok(Some(AdvisoryLock {
+            inner: AdvisoryLockInner::NotRequired,
+        })),
     }
 }
 
@@ -435,7 +448,10 @@ pub fn get_db_uri_from_conf(conf: &Val) -> String {
 /// for explicit privileged fixtures/isolated development; scoped queries and
 /// database policies still apply. SQLite does not use PostgreSQL role checks.
 pub fn rls_enforcement_required(conf: &Val) -> bool {
-    conf.get_bool_or_default("db.rls.enforce", conf.get_bool_or_default("rls.enforce", true))
+    conf.get_bool_or_default(
+        "db.rls.enforce",
+        conf.get_bool_or_default("rls.enforce", true),
+    )
 }
 
 /// Redact password from database URI for safe display
@@ -595,7 +611,9 @@ pub async fn create_db_pool(conf: &Val) -> Result<DatabasePool, DatabaseError> {
             if rls_enforcement_required(conf) {
                 rls::validate_runtime_role(&db, &validation_schema).await?;
             } else {
-                tracing::warn!("PostgreSQL runtime role validation is explicitly disabled; this connection is not qualified for production RLS isolation");
+                tracing::warn!(
+                    "PostgreSQL runtime role validation is explicitly disabled; this connection is not qualified for production RLS isolation"
+                );
             }
             Ok(DatabasePool::Postgres(ScopedPgPool::new(db)))
         }
@@ -619,10 +637,16 @@ pub async fn test_connection(db: &DatabasePool) -> Result<(), DatabaseError> {
 /// Run database migrations
 pub async fn run_migrations(conf: &Val) -> Result<(), DatabaseError> {
     let runtime_uri = get_db_uri_from_conf(conf);
-    let migration_uri = conf.get_str_or_default("db.migration-uri", &conf.get_str_or_default("migration-uri", ""));
+    let migration_uri = conf.get_str_or_default(
+        "db.migration-uri",
+        &conf.get_str_or_default("migration-uri", ""),
+    );
     let uri = if migration_uri.is_empty() {
-        if matches!(DatabaseType::from_uri(&runtime_uri)?, DatabaseType::Postgres)
-            && rls_enforcement_required(conf) {
+        if matches!(
+            DatabaseType::from_uri(&runtime_uri)?,
+            DatabaseType::Postgres
+        ) && rls_enforcement_required(conf)
+        {
             return Err(DatabaseError::Migration("PostgreSQL requires a separate db.migration-uri for schema changes; runtime credentials must not own tables".into()));
         }
         runtime_uri

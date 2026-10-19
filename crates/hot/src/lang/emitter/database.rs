@@ -28,7 +28,7 @@ pub struct DatabaseEngineEventEmitter {
     writer: DatabaseWriter,
     event_sender: mpsc::UnboundedSender<EngineEvent>,
     flush_sender: mpsc::UnboundedSender<ProcessorFlushRequest>,
-    shutdown_sender: mpsc::UnboundedSender<oneshot::Sender<()>>,
+    shutdown_sender: mpsc::UnboundedSender<oneshot::Sender<Result<(), String>>>,
     /// Flag to suppress errors during shutdown (when channel is expected to be closed)
     shutdown_initiated: Arc<AtomicBool>,
 }
@@ -97,7 +97,7 @@ impl DatabaseEngineEventEmitter {
 
         // Create shutdown channel
         let (shutdown_sender, mut shutdown_receiver) =
-            mpsc::unbounded_channel::<oneshot::Sender<()>>();
+            mpsc::unbounded_channel::<oneshot::Sender<Result<(), String>>>();
 
         let writer_for_processor = writer.clone();
 
@@ -157,13 +157,10 @@ impl DatabaseEngineEventEmitter {
                             // Final flush
                             processor.flush_all().await;
 
-                            // Shutdown the writer and wait for completion
-                            if let Err(e) = processor.writer.shutdown().await {
-                                tracing::error!("DatabaseEngineEventEmitter: Writer shutdown error: {}", e);
-                            }
-
-                            // Signal completion
-                            let _ = sender.send(());
+                            // Delivery failures remain observable at the public emitter
+                            // boundary; a completed shutdown is not proof of persistence.
+                            let result = processor.writer.shutdown().await;
+                            let _ = sender.send(result);
                             break;
                         }
                     }
@@ -195,7 +192,7 @@ impl DatabaseEngineEventEmitter {
 
         // Create shutdown channel
         let (shutdown_sender, mut shutdown_receiver) =
-            mpsc::unbounded_channel::<oneshot::Sender<()>>();
+            mpsc::unbounded_channel::<oneshot::Sender<Result<(), String>>>();
 
         let db_for_processor = Arc::clone(&db);
         let writer_for_processor = writer.clone();
@@ -272,13 +269,10 @@ impl DatabaseEngineEventEmitter {
                             // Final flush
                             processor.flush_all().await;
 
-                            // Shutdown the writer and wait for completion
-                            if let Err(e) = processor.writer.shutdown().await {
-                                tracing::error!("DatabaseEngineEventEmitter: Writer shutdown error: {}", e);
-                            }
-
-                            // Signal completion
-                            let _ = sender.send(());
+                            // Delivery failures remain observable at the public emitter
+                            // boundary; a completed shutdown is not proof of persistence.
+                            let result = processor.writer.shutdown().await;
+                            let _ = sender.send(result);
                             break;
                         }
                     }
@@ -324,10 +318,9 @@ impl DatabaseEngineEventEmitter {
             );
         }
 
-        match completion_receiver.await {
-            Ok(()) => Ok(()),
-            Err(_) => Err("Shutdown completion signal was dropped".to_string()),
-        }
+        completion_receiver
+            .await
+            .map_err(|_| "Shutdown completion signal was dropped".to_string())?
     }
 }
 
@@ -1037,15 +1030,7 @@ mod tests {
     async fn test_database_emitter_persists_hot_data_repr_for_call_args() {
         let db = crate::db::test_db().await;
         let emitter = DatabaseEngineEventEmitter::new_with_pool(db.clone());
-        let execution_context = ExecutionContext::new(
-            Uuid::now_v7(),
-            Uuid::now_v7(),
-            crate::db::run::RunType::Run.as_id(),
-            None,
-            None,
-            None,
-            None,
-        );
+        let execution_context = persisted_execution_context(&db).await;
         let call_id = Uuid::now_v7();
 
         let mut closure_env = ahash::AHashMap::new();
@@ -1132,24 +1117,58 @@ mod tests {
         )
     }
 
-    fn execution_context_with_org() -> ExecutionContext {
+    async fn persisted_execution_context(db: &crate::db::DatabasePool) -> ExecutionContext {
+        let fixture = crate::db::insert_test_data(db).await.unwrap();
         ExecutionContext::new(
-            Uuid::now_v7(),
-            Uuid::now_v7(),
+            fixture.run_id,
+            fixture.stream_id,
             crate::db::run::RunType::Run.as_id(),
-            Some(Uuid::now_v7()),
-            Some(Uuid::now_v7()),
-            Some(Uuid::now_v7()),
-            // run.build_id is NOT NULL; without it INSERT OR IGNORE drops the row
-            Some(Uuid::now_v7()),
+            Some(fixture.env_id),
+            Some(fixture.user_id),
+            Some(fixture.org_id),
+            Some(fixture.build_id),
         )
+    }
+
+    #[tokio::test]
+    async fn emitter_reports_rejected_trace_on_flush_and_shutdown() {
+        let db = crate::db::test_db().await;
+        let emitter = DatabaseEngineEventEmitter::new_with_pool(db.clone());
+        let mut execution_context = persisted_execution_context(&db).await;
+        execution_context.env_id = None;
+        let call_id = Uuid::now_v7();
+        emitter.emit(EngineEvent::call_start(
+            &execution_context,
+            call_id,
+            None,
+            "::hot::test/invalid-scope".to_string(),
+            "::hot::test/invalid-scope".to_string(),
+            "run/test".to_string(),
+            0,
+            vec![],
+            None,
+            chrono::Utc::now(),
+            None,
+        ));
+        assert!(emitter.flush_async().await.is_err());
+        assert!(emitter.flush_async().await.is_err());
+        assert!(emitter.shutdown().await.is_err());
+        let crate::db::DatabasePool::Sqlite(pool) = db else {
+            panic!("test_db should return SQLite");
+        };
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM call WHERE call_id = ?")
+            .bind(call_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(count, 0, "scope-less traces must never be persisted");
     }
 
     #[tokio::test]
     async fn run_start_persists_queue_phase_timing() {
         let db = crate::db::test_db().await;
         let emitter = DatabaseEngineEventEmitter::new_with_pool(db.clone());
-        let mut execution_context = execution_context_with_org();
+        let mut execution_context = persisted_execution_context(&db).await;
         let claimed_at = chrono::Utc::now();
         execution_context.queue_timing = Some(crate::lang::event::QueueExecutionTiming {
             backend: "redis".to_string(),
@@ -1188,7 +1207,7 @@ mod tests {
         let (blob_store, _tmp) = test_blob_store(&db);
         let emitter =
             DatabaseEngineEventEmitter::new_with_pool_and_blob_store(db.clone(), Some(blob_store));
-        let execution_context = execution_context_with_org();
+        let execution_context = persisted_execution_context(&db).await;
         let call_id = Uuid::now_v7();
         let big_bytes = vec![7u8; 8192];
 
@@ -1258,7 +1277,7 @@ mod tests {
         let (blob_store, _tmp) = test_blob_store(&db);
         let emitter =
             DatabaseEngineEventEmitter::new_with_pool_and_blob_store(db.clone(), Some(blob_store));
-        let execution_context = execution_context_with_org();
+        let execution_context = persisted_execution_context(&db).await;
 
         emitter.emit(EngineEvent::run_start(&execution_context));
         emitter.emit(EngineEvent::run_stop(
@@ -1294,7 +1313,7 @@ mod tests {
             db.clone(),
             Some(blob_store.clone()),
         );
-        let mut execution_context = execution_context_with_org();
+        let mut execution_context = persisted_execution_context(&db).await;
 
         // Register a large string as a secret.
         let secret_text = "s".repeat(4096);

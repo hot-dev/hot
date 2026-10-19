@@ -3,40 +3,107 @@
 
 use sqlx::PgPool;
 
+const REFERENCE_TABLES: &[&str] = &[
+    "build_type",
+    "email_verification_status",
+    "invite_status",
+    "org_user_role",
+    "run_status",
+    "run_type",
+    "task_status",
+    "team_user_role",
+    "org_plan_status",
+    "alert_delivery_status",
+    "alert_destination_type",
+    "plan",
+];
+
 pub async fn validate_runtime_role(pool: &PgPool, schema: &str) -> Result<(), sqlx::Error> {
     let privileged: bool = sqlx::query_scalar(
-        "SELECT EXISTS (SELECT 1 FROM pg_roles r WHERE (r.rolsuper OR r.rolbypassrls) AND (r.rolname = current_user OR pg_has_role(current_user, r.oid, 'MEMBER')))"
+        "SELECT EXISTS (SELECT 1 FROM pg_roles r WHERE (r.rolsuper OR r.rolbypassrls OR r.rolcreaterole OR r.rolcreatedb OR r.rolreplication) AND (r.rolname = current_user OR pg_has_role(current_user, r.oid, 'MEMBER')))"
     ).fetch_one(pool).await?;
     if privileged {
-        return Err(sqlx::Error::Protocol("RLS runtime login must not be superuser, BYPASSRLS, or a member of a privileged role".into()));
+        return Err(sqlx::Error::Protocol("RLS runtime login must not be superuser, BYPASSRLS, CREATEROLE, CREATEDB, REPLICATION, or a member of a privileged role".into()));
+    }
+    let can_create: bool =
+        sqlx::query_scalar("SELECT has_schema_privilege(current_user, $1, 'CREATE')")
+            .bind(schema)
+            .fetch_one(pool)
+            .await?;
+    if can_create {
+        return Err(sqlx::Error::Protocol(
+            "RLS runtime login must not have CREATE on the application schema".into(),
+        ));
     }
     let owns_tables: bool = sqlx::query_scalar(
         "SELECT EXISTS (SELECT 1 FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = $1 AND c.relkind IN ('r','p') AND pg_has_role(current_user, c.relowner, 'MEMBER'))"
     ).bind(schema).fetch_one(pool).await?;
     if owns_tables {
-        return Err(sqlx::Error::Protocol("RLS runtime login must not own or be able to assume ownership of application tables".into()));
+        return Err(sqlx::Error::Protocol(
+            "RLS runtime login must not own or be able to assume ownership of application tables"
+                .into(),
+        ));
     }
     let can_truncate: bool = sqlx::query_scalar(
         "SELECT EXISTS (SELECT 1 FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = $1 AND c.relkind IN ('r','p') AND has_table_privilege(current_user, c.oid, 'TRUNCATE'))"
     ).bind(schema).fetch_one(pool).await?;
     if can_truncate {
-        return Err(sqlx::Error::Protocol("RLS runtime login must not have TRUNCATE privileges".into()));
+        return Err(sqlx::Error::Protocol(
+            "RLS runtime login must not have TRUNCATE privileges".into(),
+        ));
+    }
+    let writable_reference_tables: Vec<String> = sqlx::query_scalar(
+        "SELECT c.relname FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+         WHERE n.nspname = $1 AND c.relkind IN ('r','p') AND c.relname = ANY($2)
+           AND (has_table_privilege(current_user, c.oid, 'INSERT,UPDATE,DELETE,REFERENCES,TRIGGER')
+                OR has_any_column_privilege(current_user, c.oid, 'INSERT,UPDATE,REFERENCES'))
+         ORDER BY c.relname",
+    )
+    .bind(schema)
+    .bind(REFERENCE_TABLES)
+    .fetch_all(pool)
+    .await?;
+    if !writable_reference_tables.is_empty() {
+        return Err(sqlx::Error::Protocol(format!(
+            "RLS runtime login must have read-only reference table access: {}",
+            writable_reference_tables.join(", ")
+        )));
+    }
+    let migration_access: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+         WHERE n.nspname = $1 AND c.relname = '_sqlx_migrations'
+           AND (has_table_privilege(current_user, c.oid, 'SELECT,INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER')
+                OR has_any_column_privilege(current_user, c.oid, 'SELECT,INSERT,UPDATE,REFERENCES')))"
+    ).bind(schema).fetch_one(pool).await?;
+    if migration_access {
+        return Err(sqlx::Error::Protocol(
+            "RLS runtime login must not have access to SQLx migration metadata".into(),
+        ));
     }
     let uncovered: Vec<String> = sqlx::query_scalar(
         "SELECT c.relname FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
          WHERE n.nspname = $1 AND c.relkind IN ('r','p')
-           AND c.relname NOT IN ('_sqlx_migrations','build_type','email_verification_status','invite_status','org_user_role','run_status','run_type','task_status','team_user_role','org_plan_status','alert_delivery_status','alert_destination_type','plan')
+           AND c.relname <> '_sqlx_migrations' AND NOT (c.relname = ANY($2))
            AND (NOT c.relrowsecurity OR NOT c.relforcerowsecurity)
-         ORDER BY c.relname"
-    ).bind(schema).fetch_all(pool).await?;
+         ORDER BY c.relname",
+    )
+    .bind(schema)
+    .bind(REFERENCE_TABLES)
+    .fetch_all(pool)
+    .await?;
     if !uncovered.is_empty() {
-        return Err(sqlx::Error::Protocol(format!("RLS coverage is incomplete for: {}", uncovered.join(", "))));
+        return Err(sqlx::Error::Protocol(format!(
+            "RLS coverage is incomplete for: {}",
+            uncovered.join(", ")
+        )));
     }
     let helper_exists: bool = sqlx::query_scalar(
         "SELECT EXISTS (SELECT 1 FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace WHERE n.nspname = $1 AND p.proname = 'scope_env_allows')"
     ).bind(schema).fetch_one(pool).await?;
     if !helper_exists {
-        return Err(sqlx::Error::Protocol("RLS migrations must be applied before starting runtime services".into()));
+        return Err(sqlx::Error::Protocol(
+            "RLS migrations must be applied before starting runtime services".into(),
+        ));
     }
     Ok(())
 }
@@ -45,18 +112,29 @@ pub async fn validate_runtime_role(pool: &PgPool, schema: &str) -> Result<(), sq
 /// credentials. Runtime ensure_store never performs DDL. This administrative
 /// path exposes no pool and needs no runtime BYPASSRLS privilege.
 pub async fn provision_store_indexes(conf: &crate::val::Val) -> Result<usize, String> {
-    use sqlx::Row;
     use super::{DatabaseScope, MaintenanceOperation};
-    let uri = conf.get_str_or_default("db.migration-uri", &conf.get_str_or_default("migration-uri", ""));
-    if uri.is_empty() || !matches!(super::DatabaseType::from_uri(&uri), Ok(super::DatabaseType::Postgres)) {
+    use sqlx::Row;
+    let uri = conf.get_str_or_default(
+        "db.migration-uri",
+        &conf.get_str_or_default("migration-uri", ""),
+    );
+    if uri.is_empty()
+        || !matches!(
+            super::DatabaseType::from_uri(&uri),
+            Ok(super::DatabaseType::Postgres)
+        )
+    {
         return Err("Store index provisioning requires a PostgreSQL db.migration-uri".into());
     }
     let schema = conf.get_str_or_default("db.schema", &conf.get_str_or_default("schema", "hot"));
     if schema != "hot" {
         return Err("PostgreSQL RLS currently supports only the hot schema".into());
     }
-    let pool = sqlx::postgres::PgPoolOptions::new().max_connections(1).connect(&uri)
-        .await.map_err(|e| format!("Cannot connect index provisioner: {e}"))?;
+    let pool = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(1)
+        .connect(&uri)
+        .await
+        .map_err(|e| format!("Cannot connect index provisioner: {e}"))?;
     let result = async {
         let mut tx = pool.begin().await.map_err(|e| e.to_string())?;
         DatabaseScope::Maintenance { operation: MaintenanceOperation::StoreProvisioning, org_id: None }

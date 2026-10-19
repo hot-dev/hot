@@ -26,6 +26,7 @@ pub enum DomainError {
     PendingDeletion,
     NotVerified,
     InvalidDomain,
+    QuotaExceeded,
 }
 
 impl fmt::Display for DomainError {
@@ -40,6 +41,7 @@ impl fmt::Display for DomainError {
             ),
             DomainError::NotVerified => write!(f, "Domain ownership not verified"),
             DomainError::InvalidDomain => write!(f, "Invalid domain name"),
+            DomainError::QuotaExceeded => write!(f, "Account custom-domain limit reached"),
         }
     }
 }
@@ -132,6 +134,29 @@ pub struct Domain {
     pub deleted_at: Option<DateTime<Utc>>,
     /// User-facing error when provider provisioning fails (e.g., stale CNAME conflict).
     pub provisioning_error: Option<String>,
+}
+
+fn domain_limit(plan: Option<String>, overrides: Option<String>) -> Result<i32, DomainError> {
+    if plan.is_none() && overrides.is_none() {
+        return Ok(-1);
+    }
+    let plan = plan
+        .map(|s| serde_json::from_str(&s))
+        .transpose()
+        .map_err(|_| {
+            DomainError::Database(sqlx::Error::Protocol(
+                "Malformed account domain entitlements".into(),
+            ))
+        })?;
+    let overrides = overrides
+        .map(|s| serde_json::from_str(&s))
+        .transpose()
+        .map_err(|_| {
+            DomainError::Database(sqlx::Error::Protocol(
+                "Malformed account domain entitlements".into(),
+            ))
+        })?;
+    Ok(crate::db::Features::resolve(plan.as_ref(), overrides.as_ref()).max_custom_domains())
 }
 
 impl Domain {
@@ -290,12 +315,64 @@ impl Domain {
 
         let domain_id = Uuid::now_v7();
 
-        match db {
-            crate::db::DatabasePool::Sqlite(db) => {
-                Self::insert_sqlite(db, &domain_id, env_id, &domain_name).await?;
+        use crate::db::{DatabasePool, DatabaseScope, MaintenanceOperation};
+        let env = crate::db::Env::get_env_uncached(db, env_id)
+            .await
+            .map_err(|_| DomainError::NotFound)?;
+        if let DatabasePool::Postgres(pool) = db
+            && !matches!(pool.scope()?, DatabaseScope::Environment { org_id, env_id: selected } if org_id == env.org_id && selected == *env_id)
+        {
+            return Err(DomainError::Database(sqlx::Error::Protocol(
+                "Domain creation requires its exact environment scope".into(),
+            )));
+        }
+        let root = crate::db::Org::billing_owner_id_for(db, &env.org_id)
+            .await
+            .map_err(|_| DomainError::NotFound)?;
+        let billing = db.with_scope(DatabaseScope::Maintenance {
+            operation: MaintenanceOperation::Billing,
+            org_id: Some(root),
+        });
+        match &billing {
+            DatabasePool::Postgres(pool) => {
+                let mut tx = pool.begin().await?;
+                sqlx::query("SELECT org_id FROM org WHERE org_id=$1 FOR UPDATE")
+                    .bind(root)
+                    .execute(&mut *tx)
+                    .await?;
+                let (plan,overrides):(Option<String>,Option<String>)=sqlx::query_as("SELECT CAST(p.features AS TEXT),CAST(o.features AS TEXT) FROM org o LEFT JOIN org_plan op ON op.org_id=o.org_id LEFT JOIN plan p ON p.plan_uuid=op.plan_uuid WHERE o.org_id=$1")
+                    .bind(root).fetch_one(&mut *tx).await?;
+                let limit = domain_limit(plan, overrides)?;
+                let count:i64=sqlx::query_scalar("SELECT COUNT(*) FROM domain d JOIN env e ON e.env_id=d.env_id JOIN org o ON o.org_id=e.org_id WHERE d.deleted_at IS NULL AND (o.org_id=$1 OR o.parent_org_id=$1)")
+                    .bind(root).fetch_one(&mut *tx).await?;
+                if limit >= 0 && count >= i64::from(limit) {
+                    return Err(DomainError::QuotaExceeded);
+                }
+                DatabaseScope::Environment {
+                    org_id: env.org_id,
+                    env_id: *env_id,
+                }
+                .apply_to_connection(&mut tx)
+                .await?;
+                Self::insert_postgres(&mut tx, &domain_id, env_id, &domain_name).await?;
+                tx.commit().await?;
             }
-            crate::db::DatabasePool::Postgres(db) => {
-                Self::insert_postgres(db, &domain_id, env_id, &domain_name).await?;
+            DatabasePool::Sqlite(pool) => {
+                let mut tx = pool.begin().await?;
+                sqlx::query("UPDATE org SET org_id=org_id WHERE org_id=?")
+                    .bind(root)
+                    .execute(&mut *tx)
+                    .await?;
+                let (plan,overrides):(Option<String>,Option<String>)=sqlx::query_as("SELECT CAST(p.features AS TEXT),CAST(o.features AS TEXT) FROM org o LEFT JOIN org_plan op ON op.org_id=o.org_id LEFT JOIN plan p ON p.plan_uuid=op.plan_uuid WHERE o.org_id=?")
+                    .bind(root).fetch_one(&mut *tx).await?;
+                let limit = domain_limit(plan, overrides)?;
+                let count:i64=sqlx::query_scalar("SELECT COUNT(*) FROM domain d JOIN env e ON e.env_id=d.env_id JOIN org o ON o.org_id=e.org_id WHERE d.deleted_at IS NULL AND (o.org_id=? OR o.parent_org_id=?)")
+                    .bind(root).bind(root).fetch_one(&mut *tx).await?;
+                if limit >= 0 && count >= i64::from(limit) {
+                    return Err(DomainError::QuotaExceeded);
+                }
+                Self::insert_sqlite(&mut tx, &domain_id, env_id, &domain_name).await?;
+                tx.commit().await?;
             }
         }
 
@@ -317,7 +394,7 @@ impl Domain {
     }
 
     async fn insert_sqlite(
-        db: &Pool<Sqlite>,
+        db: &mut sqlx::SqliteConnection,
         domain_id: &Uuid,
         env_id: &Uuid,
         domain: &str,
@@ -344,7 +421,7 @@ impl Domain {
     }
 
     async fn insert_postgres(
-        db: &crate::db::ScopedPgPool,
+        db: &mut sqlx::PgConnection,
         domain_id: &Uuid,
         env_id: &Uuid,
         domain: &str,
@@ -529,7 +606,9 @@ impl Domain {
         )
     }
 
-    async fn list_unverified_postgres(db: &crate::db::ScopedPgPool) -> Result<Vec<Domain>, DomainError> {
+    async fn list_unverified_postgres(
+        db: &crate::db::ScopedPgPool,
+    ) -> Result<Vec<Domain>, DomainError> {
         let query = format!(
             "SELECT {} FROM domain WHERE verified_at IS NULL AND deleted_at IS NULL ORDER BY created_at ASC",
             DOMAIN_COLUMNS
@@ -955,6 +1034,57 @@ impl Domain {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn siblings_share_atomic_custom_domain_limit() {
+        let db = crate::db::test_db().await;
+        let root = Uuid::now_v7();
+        let actor = Uuid::now_v7();
+        crate::db::Org::insert_org(
+            &db,
+            &root,
+            "Root",
+            &root.to_string(),
+            "organization",
+            &actor,
+        )
+        .await
+        .unwrap();
+        let crate::db::DatabasePool::Sqlite(pool) = &db else {
+            unreachable!()
+        };
+        sqlx::query("UPDATE org SET features=? WHERE org_id=?")
+            .bind(r#"{"custom_domains":1}"#)
+            .bind(root)
+            .execute(pool)
+            .await
+            .unwrap();
+        let mut envs = Vec::new();
+        for _ in 0..2 {
+            let child = Uuid::now_v7();
+            let env = Uuid::now_v7();
+            sqlx::query("INSERT INTO org (org_id,parent_org_id,name,slug,org_type,created_by_user_id) VALUES (?,?,'Child',?,'organization',?)")
+                .bind(child).bind(root).bind(child.to_string()).bind(actor).execute(pool).await.unwrap();
+            crate::db::Env::insert_env(&db, &env, &child, "development", &actor)
+                .await
+                .unwrap();
+            envs.push(env);
+        }
+        let (one, two) = tokio::join!(
+            Domain::create(&db, &envs[0], "a.example.test"),
+            Domain::create(&db, &envs[1], "b.example.test")
+        );
+        assert_eq!(usize::from(one.is_ok()) + usize::from(two.is_ok()), 1);
+        assert!(
+            matches!(&one, Err(DomainError::QuotaExceeded))
+                || matches!(&two, Err(DomainError::QuotaExceeded))
+        );
+        let winner = one.ok().or_else(|| two.ok()).unwrap();
+        Domain::soft_delete(&db, &winner.domain_id).await.unwrap();
+        Domain::create(&db, &envs[1], "replacement.example.test")
+            .await
+            .unwrap();
+    }
 
     #[test]
     fn test_domain_validation_valid() {

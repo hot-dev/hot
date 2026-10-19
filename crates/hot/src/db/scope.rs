@@ -61,11 +61,23 @@ impl MaintenanceOperation {
 /// Organization scope does not grant execution-table access in its envs.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DatabaseScope {
-    Environment { org_id: Uuid, env_id: Uuid },
-    Organization { org_id: Uuid },
+    /// Authenticated user's own profile and notification preferences only.
+    User {
+        user_id: Uuid,
+    },
+    Environment {
+        org_id: Uuid,
+        env_id: Uuid,
+    },
+    Organization {
+        org_id: Uuid,
+    },
     /// Both lists are exact allowlists. Listing an org does not implicitly add
     /// all its environments. PostgreSQL also makes this transaction read-only.
-    ReadSet { org_ids: Vec<Uuid>, env_ids: Vec<Uuid> },
+    ReadSet {
+        org_ids: Vec<Uuid>,
+        env_ids: Vec<Uuid>,
+    },
     Bootstrap(BootstrapOperation),
     Maintenance {
         operation: MaintenanceOperation,
@@ -76,6 +88,7 @@ pub enum DatabaseScope {
 impl DatabaseScope {
     pub fn validate(&self) -> Result<(), sqlx::Error> {
         let invalid = match self {
+            Self::User { user_id } => user_id.is_nil(),
             Self::Environment { org_id, env_id } => org_id.is_nil() || env_id.is_nil(),
             Self::Organization { org_id } => org_id.is_nil(),
             Self::ReadSet { org_ids, env_ids } => {
@@ -84,8 +97,11 @@ impl DatabaseScope {
             Self::Bootstrap(_) => false,
             Self::Maintenance { operation, org_id } => {
                 org_id.is_some_and(|id| id.is_nil())
-                    || (matches!(operation, MaintenanceOperation::Billing | MaintenanceOperation::OrganizationProvisioning)
-                        && org_id.is_none())
+                    || (matches!(
+                        operation,
+                        MaintenanceOperation::Billing
+                            | MaintenanceOperation::OrganizationProvisioning
+                    ) && org_id.is_none())
             }
         };
         if invalid {
@@ -98,11 +114,14 @@ impl DatabaseScope {
     /// to retain an account admission lock while narrowing to the exact resource
     /// owner before mutation. Callers must not derive this authority from ctx.
     /// A read-only transaction stays read-only even if its scope is changed.
-    pub async fn apply_to_connection(&self, connection: &mut sqlx::PgConnection) -> Result<(), sqlx::Error> {
+    pub async fn apply_to_connection(
+        &self,
+        connection: &mut sqlx::PgConnection,
+    ) -> Result<(), sqlx::Error> {
         self.validate()?;
-        let (mode, org, env, orgs, envs, operation) = self.settings();
-        sqlx::query("SELECT set_config('hot.scope_mode', $1, true), set_config('hot.scope_org', $2, true), set_config('hot.scope_env', $3, true), set_config('hot.scope_orgs', $4, true), set_config('hot.scope_envs', $5, true), set_config('hot.scope_operation', $6, true)")
-            .bind(mode).bind(org).bind(env).bind(orgs).bind(envs).bind(operation)
+        let (mode, org, env, orgs, envs, operation, user) = self.settings();
+        sqlx::query("SELECT set_config('hot.scope_mode', $1, true), set_config('hot.scope_org', $2, true), set_config('hot.scope_env', $3, true), set_config('hot.scope_orgs', $4, true), set_config('hot.scope_envs', $5, true), set_config('hot.scope_operation', $6, true), set_config('hot.scope_user', $7, true)")
+            .bind(mode).bind(org).bind(env).bind(orgs).bind(envs).bind(operation).bind(user)
             .execute(connection).await?;
         Ok(())
     }
@@ -111,14 +130,19 @@ impl DatabaseScope {
         matches!(self, Self::ReadSet { .. })
     }
 
-    pub(crate) fn settings(&self) -> (String, String, String, String, String, String) {
+    pub(crate) fn settings(&self) -> (String, String, String, String, String, String, String) {
         let mut mode = String::new();
+        let mut user = String::new();
         let mut org = String::new();
         let mut env = String::new();
         let mut orgs = String::from("[]");
         let mut envs = String::from("[]");
         let mut operation = String::new();
         match self {
+            Self::User { user_id } => {
+                mode.push_str("user");
+                user = user_id.to_string();
+            }
             Self::Environment { org_id, env_id } => {
                 mode.push_str("environment");
                 org = org_id.to_string();
@@ -137,13 +161,16 @@ impl DatabaseScope {
                 mode.push_str("bootstrap");
                 operation.push_str(op.as_str());
             }
-            Self::Maintenance { operation: op, org_id } => {
+            Self::Maintenance {
+                operation: op,
+                org_id,
+            } => {
                 mode.push_str("maintenance");
                 operation.push_str(op.as_str());
                 org = org_id.map(|id| id.to_string()).unwrap_or_default();
             }
         }
-        (mode, org, env, orgs, envs, operation)
+        (mode, org, env, orgs, envs, operation, user)
     }
 }
 
@@ -166,22 +193,69 @@ mod tests {
     #[tokio::test]
     async fn scope_nesting_restores_and_spawn_does_not_inherit() {
         assert!(current_database_scope().is_none());
-        let outer = DatabaseScope::Organization { org_id: Uuid::new_v4() };
+        let outer = DatabaseScope::Organization {
+            org_id: Uuid::new_v4(),
+        };
         with_database_scope(outer.clone(), async {
             assert_eq!(current_database_scope(), Some(outer.clone()));
-            with_database_scope(DatabaseScope::Bootstrap(BootstrapOperation::Health), async {
-                assert_ne!(current_database_scope(), Some(outer.clone()));
-            }).await;
+            with_database_scope(
+                DatabaseScope::Bootstrap(BootstrapOperation::Health),
+                async {
+                    assert_ne!(current_database_scope(), Some(outer.clone()));
+                },
+            )
+            .await;
             assert_eq!(current_database_scope(), Some(outer));
-            assert!(tokio::spawn(async { current_database_scope() }).await.unwrap().is_none());
-        }).await;
+            assert!(
+                tokio::spawn(async { current_database_scope() })
+                    .await
+                    .unwrap()
+                    .is_none()
+            );
+        })
+        .await;
         assert!(current_database_scope().is_none());
     }
 
     #[test]
     fn invalid_scope_cannot_use_nil_or_missing_account_as_wildcard() {
-        assert!(DatabaseScope::Environment { org_id: Uuid::new_v4(), env_id: Uuid::nil() }.validate().is_err());
-        assert!(DatabaseScope::ReadSet { org_ids: vec![], env_ids: vec![] }.validate().is_err());
-        assert!(DatabaseScope::Maintenance { operation: MaintenanceOperation::Billing, org_id: None }.validate().is_err());
+        assert!(
+            DatabaseScope::User {
+                user_id: Uuid::nil()
+            }
+            .validate()
+            .is_err()
+        );
+        assert!(
+            DatabaseScope::User {
+                user_id: Uuid::new_v4()
+            }
+            .validate()
+            .is_ok()
+        );
+        assert!(
+            DatabaseScope::Environment {
+                org_id: Uuid::new_v4(),
+                env_id: Uuid::nil()
+            }
+            .validate()
+            .is_err()
+        );
+        assert!(
+            DatabaseScope::ReadSet {
+                org_ids: vec![],
+                env_ids: vec![]
+            }
+            .validate()
+            .is_err()
+        );
+        assert!(
+            DatabaseScope::Maintenance {
+                operation: MaintenanceOperation::Billing,
+                org_id: None
+            }
+            .validate()
+            .is_err()
+        );
     }
 }

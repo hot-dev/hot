@@ -610,7 +610,10 @@ impl Session {
         Ok(())
     }
 
-    async fn revoke_postgres(db: &crate::db::ScopedPgPool, session_id: &Uuid) -> Result<(), SessionError> {
+    async fn revoke_postgres(
+        db: &crate::db::ScopedPgPool,
+        session_id: &Uuid,
+    ) -> Result<(), SessionError> {
         sqlx::query(
             r#"
             UPDATE session SET revoked_at = now()

@@ -18,7 +18,7 @@ tracing = { workspace = true }
 futures = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
-uuid = { workspace = true, features = ["serde", "v4", "v7"] }
+uuid = { workspace = true, features = ["serde", "v4", "v5", "v7"] }
 hot = { workspace = true }
 reqwest = { workspace = true }
 fd-lock = { workspace = true }
@@ -26,6 +26,7 @@ zstd = { workspace = true }
 parking_lot = { workspace = true }
 
 [dev-dependencies]
+sqlx = { workspace = true }
 tempfile = { workspace = true }
 
 # ONNX Runtime (used by fastembed) has no prebuilt binaries for Windows ARM64

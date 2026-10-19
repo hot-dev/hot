@@ -1,6 +1,14 @@
 pub mod embedding;
 pub mod postgres;
+pub(crate) mod quota;
 pub mod sqlite;
+
+type StoreWrite = (
+    serde_json::Value,
+    serde_json::Value,
+    Option<Vec<f32>>,
+    Option<String>,
+);
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};

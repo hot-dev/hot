@@ -119,7 +119,10 @@ impl WorkerExecutionServices {
 
         let store = match hot::store::store_from_config_with_db(
             conf,
-            Some(Arc::clone(&self.db)),
+            Some(Arc::new(
+                self.db
+                    .with_scope(DatabaseScope::Environment { org_id, env_id }),
+            )),
             Some(org_id),
             Some(env_id),
         )
@@ -177,10 +180,14 @@ impl WorkerExecutionServices {
             }
         }
 
+        let db = self.db.with_scope(DatabaseScope::Environment {
+            org_id: key.org_id,
+            env_id: key.env_id,
+        });
         let mut values = AHashMap::new();
         let mut cacheable = true;
 
-        match Context::get_by_env(self.db.as_ref(), &key.env_id).await {
+        match Context::get_by_env(&db, &key.env_id).await {
             Ok(context_vars) => {
                 for context_var in context_vars.into_iter().filter(|value| value.active) {
                     match context_var.get_decrypted_value(encryption, &key.org_id) {
@@ -211,7 +218,7 @@ impl WorkerExecutionServices {
             }
         }
 
-        match Context::get_by_project(self.db.as_ref(), &key.project_id).await {
+        match Context::get_by_project(&db, &key.project_id).await {
             Ok(context_vars) => {
                 for context_var in context_vars.into_iter().filter(|value| value.active) {
                     match context_var.get_decrypted_value(encryption, &key.org_id) {
@@ -532,7 +539,10 @@ fn spawn_worker_queue_claimer(
 }
 
 // Add imports for database operations and event handler execution
-use hot::db::{Build, Context, DatabasePool, Env, EventHandler, Project, Schedule};
+use hot::db::{
+    Build, Context, DatabasePool, DatabaseScope, Env, EventHandler, MaintenanceOperation, Project,
+    Schedule,
+};
 use hot::lang::event::ExecutionContext;
 use serde_json::Value as JsonValue;
 
@@ -1258,6 +1268,10 @@ fn is_event_setup_timeout_error(error: &str) -> bool {
 /// timeout (the handler produced no run side effects) AND no earlier handler
 /// for the same event already started a run — redelivering after a run
 /// started would duplicate its side effects.
+fn should_defer_run_admission(error: &str, started_any_handler: bool) -> bool {
+    error.contains("[run-admission]") && !started_any_handler
+}
+
 fn should_redeliver_event_after_handler_error(error: &str, started_any_handler: bool) -> bool {
     (is_blocking_slot_timeout_error(error) || is_event_setup_timeout_error(error))
         && !started_any_handler
@@ -1716,6 +1730,42 @@ async fn hydrate_event_message_from_db(
             infra_retry_backoff_ms,
         )
     })?;
+    if !hot::db::Org::is_environment_admitted(db, &stored_env.env_id)
+        .await
+        .map_err(|e| {
+            worker_infrastructure_retry_error(
+                format!("Failed to verify execution admission: {e}"),
+                infra_retry_backoff_ms,
+            )
+        })?
+    {
+        return Err(worker_infrastructure_retry_error(
+            "environment is suspended; event remains pending",
+            infra_retry_backoff_ms.max(5_000),
+        ));
+    }
+    if event_message
+        .body
+        .execution_context
+        .org_id
+        .is_some_and(|id| id != stored_env.org_id)
+        || event_message
+            .body
+            .execution_context
+            .env_id
+            .is_some_and(|id| id != stored_env.env_id)
+        || event_message.body.event.stream_id != stored_event.stream_id
+        || event_message.body.execution_context.stream_id != stored_event.stream_id
+    {
+        return Err(worker_error(
+            "Queued event scope does not match durable event ownership",
+        ));
+    }
+    let scoped_db = db.with_scope(DatabaseScope::Environment {
+        org_id: stored_env.org_id,
+        env_id: stored_env.env_id,
+    });
+    let db = &scoped_db;
     let org_slug = hot::db::org::Org::get_org(db, &stored_env.org_id)
         .await
         .ok()
@@ -1996,6 +2046,10 @@ async fn process_alert_delivery_message(
     worker_conf: Val,
     message: Message,
 ) -> Result<(), WorkerError> {
+    let db = Arc::new(db.with_scope(DatabaseScope::Maintenance {
+        operation: MaintenanceOperation::Alerts,
+        org_id: None,
+    }));
     let alert_msg: hot::lang::event::queue::AlertDeliveryMessage =
         message.try_into().map_err(|e: String| worker_error(e))?;
 
@@ -2057,6 +2111,10 @@ async fn process_email_message(
     worker_conf: Val,
     message: Message,
 ) -> Result<(), WorkerError> {
+    let db = Arc::new(db.with_scope(DatabaseScope::Maintenance {
+        operation: MaintenanceOperation::Email,
+        org_id: None,
+    }));
     let email_msg: hot::lang::event::queue::EmailMessage =
         message.try_into().map_err(|e: String| worker_error(e))?;
 
@@ -2833,6 +2891,11 @@ async fn backfill_deployed_bundle_manifest_versions(
                 continue;
             }
         };
+        let scoped_db = db.with_scope(DatabaseScope::Environment {
+            org_id: env.org_id,
+            env_id: env.env_id,
+        });
+        let db = &scoped_db;
 
         match prepare_bundle_runtime(
             db,
@@ -2874,6 +2937,12 @@ async fn resolve_build_project_env(
     let env = Env::get_env(db, &project.env_id)
         .await
         .map_err(|e| format!("env lookup failed: {e}"))?;
+    if !hot::db::Org::is_environment_admitted(db, &env.env_id)
+        .await
+        .map_err(|error| error.to_string())?
+    {
+        return Err("environment is suspended; deployment remains pending".into());
+    }
     Ok((project, env))
 }
 
@@ -2921,6 +2990,11 @@ async fn warm_ready_bundle_runtimes(
                 continue;
             }
         };
+        let scoped_db = db.with_scope(DatabaseScope::Environment {
+            org_id: env.org_id,
+            env_id: env.env_id,
+        });
+        let db = &scoped_db;
 
         match prepare_bundle_runtime(
             db,
@@ -2995,6 +3069,11 @@ async fn recover_interrupted_bundle_deployments(
                 continue;
             }
         };
+        let scoped_db = db.with_scope(DatabaseScope::Environment {
+            org_id: env.org_id,
+            env_id: env.env_id,
+        });
+        let db = &scoped_db;
 
         let prepared = match prepare_bundle_runtime(
             db,
@@ -3795,6 +3874,20 @@ async fn execute_single_event_handler_inner(
     // The caller already registered `run_id`; from here this guard owns
     // unregistration on every exit path (see `RunRegistration` docs).
     let _run_registration = RunRegistration::new(Arc::clone(&shutdown_coordinator), run_id);
+
+    let org_id = event_message
+        .body
+        .execution_context
+        .org_id
+        .ok_or("Hydrated event has no organization scope")?;
+    if event_message.body.event.env_id != *_env_id {
+        return Err("Execution environment does not match hydrated event".into());
+    }
+    let scoped_db = db.with_scope(DatabaseScope::Environment {
+        org_id,
+        env_id: *_env_id,
+    });
+    let db = &scoped_db;
 
     // TIMING: Track execution phases
     let timing_start = std::time::Instant::now();
@@ -5409,6 +5502,15 @@ pub async fn run_with_components_shared_context_and_db(
         },
     };
 
+    // The worker coordinator discovers durable queue work globally. Execution
+    // receives a fresh exact-environment handle after hydration below.
+    let db = db.map(|db| {
+        Arc::new(db.with_scope(DatabaseScope::Maintenance {
+            operation: MaintenanceOperation::Queue,
+            org_id: None,
+        }))
+    });
+
     // Shared blob store for spilling large payloads on write (emitter/event
     // publisher) and rehydrating BlobRefs when events are loaded for execution.
     // None when blob spill is disabled or storage init fails.
@@ -6753,6 +6855,11 @@ pub async fn run_with_components_shared_context_and_db(
                                                         infra_retry_backoff_ms,
                                                     )
                                                     .await?;
+                                                let scoped_db = Arc::new(db.with_scope(DatabaseScope::Environment {
+                                                    org_id: event_message.body.execution_context.org_id.ok_or_else(|| worker_error("Hydrated event has no org scope"))?,
+                                                    env_id: event_message.body.event.env_id,
+                                                }));
+                                                let db = &scoped_db;
                                                 event_message.body.execution_context.queue_timing =
                                                     Some(hot::lang::event::QueueExecutionTiming {
                                                         backend: if queue_lease_timing
@@ -6954,36 +7061,31 @@ pub async fn run_with_components_shared_context_and_db(
                                                         debug!("hot.dev: WORKER {} executing {} handler(s) for event type '{}'",
                                                             worker_id, handlers_to_execute.len(), event_message.body.event.event_type);
 
+                                                        // Resolve and reserve the entire event fan-out before any
+                                                        // handler can execute. Durable IDs prevent infra redelivery
+                                                        // from consuming additional monthly run slots.
+                                                        let mut admitted_handlers = Vec::new();
+                                                        for event_handler in handlers_to_execute {
+                                                            let handler_build = Build::get_build(db, &event_handler.build_id).await
+                                                                .map_err(|e| worker_infrastructure_retry_error(format!("Cannot resolve handler build: {e}"), infra_retry_backoff_ms.max(5_000)))?;
+                                                            if !handler_build.deployed || !handler_build.active || handler_build.runtime_status != Build::RUNTIME_STATUS_READY {
+                                                                continue;
+                                                            }
+                                                            let identity = format!("{}:{}:{}", event_message.body.event.event_id, event_handler.event_handler_id, event_message.body.execution_context.retry_attempt);
+                                                            let run_id = Uuid::new_v5(&Uuid::NAMESPACE_OID, identity.as_bytes());
+                                                            admitted_handlers.push((event_handler, handler_build, run_id));
+                                                        }
+                                                        let run_ids: Vec<Uuid> = admitted_handlers.iter().map(|(_, _, id)| *id).collect();
+                                                        let org_id = event_message.body.execution_context.org_id.ok_or_else(|| worker_error("Hydrated event has no organization"))?;
+                                                        hot::db::run::Run::admit_executions(db, &org_id, &env_id, &run_ids).await
+                                                            .map_err(|e| worker_infrastructure_retry_error(e.to_string(), infra_retry_backoff_ms.max(5_000)))?;
+
                                                         // Step 4: Execute the selected handlers
                                                         let execution_result: (Result<(), String>, bool) = {
                                                             let mut all_success = true;
                                                             let mut started_any_handler = false;
                                                             let mut is_first_handler = true;
-                                                            for event_handler in handlers_to_execute {
-                                                                // Get the build for this handler
-                                                                let handler_build = match Build::get_build(db, &event_handler.build_id).await {
-                                                                    Ok(b) => b,
-                                                                    Err(e) => {
-                                                                        error!("hot.dev: WORKER {} failed to get build for handler {}: {}",
-                                                                            worker_id, event_handler.event_handler_id, e);
-                                                                        all_success = false;
-                                                                        continue;
-                                                                    }
-                                                                };
-
-                                                                // Skip if build is no longer runtime-visible (deactivated or superseded while event was in queue).
-                                                                if !handler_build.deployed
-                                                                    || !handler_build.active
-                                                                    || handler_build.runtime_status
-                                                                        != Build::RUNTIME_STATUS_READY
-                                                                {
-                                                                    warn!("hot.dev: WORKER {} skipping handler {}/{} - build {} is not deployed and ready",
-                                                                        worker_id, event_handler.ns, event_handler.var, handler_build.build_id);
-                                                                    continue;
-                                                                }
-
-                                                                // Generate run_id here so the handler can register cancellation state before execution.
-                                                                let run_id = Uuid::now_v7();
+                                                            for (event_handler, handler_build, run_id) in admitted_handlers {
                                                                 shutdown_coord_ref.register_run(run_id);
 
                                                                 debug!("hot.dev: WORKER {} executing {}/{} (event_id={}, run_id={}, event_handler_id={}, build_id={})",
@@ -7021,6 +7123,12 @@ pub async fn run_with_components_shared_context_and_db(
                                                                                                             && let Err(e) = hot::db::run::Run::update_info(db, &run_id, Some(warning_info)).await {
                                                                                                                 warn!("hot.dev: WORKER {} failed to update run {} info with routing warning: {}", worker_id, run_id, e);
                                                                                                             }
+                                                                                                }
+                                                                                                Err(e) if should_defer_run_admission(&e, started_any_handler) => {
+                                                                                                    // No bytecode or run:start was emitted. A suspension
+                                                                                                    // or transient quota lookup must leave accepted work
+                                                                                                    // pending without exhausting its delivery budget.
+                                                                                                    return Err(worker_infrastructure_retry_error(e, infra_retry_backoff_ms.max(5_000)));
                                                                                                 }
                                                                                                 Err(e) if should_redeliver_event_after_handler_error(&e, started_any_handler) => {
                                                                                                     // Setup or blocking-slot admission timed out before any run side
@@ -7123,6 +7231,11 @@ pub async fn run_with_components_shared_context_and_db(
                                                                 // Get environment to derive org_id
                                                                 match hot::db::Env::get_env(db, &project.env_id).await {
                                                                     Ok(env) => {
+                                                                        if !hot::db::Org::is_environment_admitted(db, &env.env_id).await.map_err(|error| worker_infrastructure_retry_error(error.to_string(), 5_000))? {
+                                                                            return Err(worker_infrastructure_retry_error("environment is suspended; deployment remains pending", 5_000));
+                                                                        }
+                                                                        let scoped_db = Arc::new(db.with_scope(DatabaseScope::Environment { org_id: env.org_id, env_id: env.env_id }));
+                                                                        let db = &scoped_db;
                                                                         debug!("hot.dev: WORKER {} processing deployment for build {} (env: {}, org: {})",
                                                                             worker_id,
                                                                             build.build_id,
@@ -7448,6 +7561,13 @@ pub async fn run_with_components_shared_context_and_db(
 
                                             if let Some(ref db) = db_ref {
                                                 for task in &maint_message.body.tasks {
+                                                    let operation = match task.as_str() {
+                                                        "session_cleanup" | "inactive_schedule_cleanup" | "upload_cleanup" | "call_retention_cleanup" => MaintenanceOperation::Retention,
+                                                        "blob_cleanup" => MaintenanceOperation::BlobGc,
+                                                        _ => MaintenanceOperation::Queue,
+                                                    };
+                                                    let scoped_db = Arc::new(db.with_scope(DatabaseScope::Maintenance { operation, org_id: None }));
+                                                    let db = &scoped_db;
                                                     match task.as_str() {
                                                         "session_cleanup" => {
                                                             match hot::db::session::Session::cleanup_expired(db).await {
@@ -7759,7 +7879,7 @@ pub async fn run_with_components_shared_context_and_db(
                                                                         }
                                                                     }
                                                                     let cutoff = chrono::Utc::now() - chrono::Duration::days(days as i64);
-                                                                    match hot::db::blob::deactivate_refs_older_than(db, None, CALL_REF_KINDS, cutoff).await {
+                                                                    match hot::db::blob::deactivate_refs_older_than(&db.with_scope(DatabaseScope::Maintenance { operation: MaintenanceOperation::BlobGc, org_id: None }), None, CALL_REF_KINDS, cutoff).await {
                                                                         Ok(n) if n > 0 => {
                                                                             info!("hot.dev: WORKER {} maintenance: deactivated {} expired call blob ref(s)", worker_id, n);
                                                                         }
@@ -7770,7 +7890,14 @@ pub async fn run_with_components_shared_context_and_db(
                                                                     }
                                                                 }
                                                             } else {
-                                                                let org_ids = hot::db::subscription::OrgPlan::get_all_active_org_ids(db).await.unwrap_or_default();
+                                                                let mut org_ids = hot::db::subscription::OrgPlan::get_all_active_org_ids(db).await.unwrap_or_default();
+                                                                for root_id in org_ids.clone() {
+                                                                    if let Ok(children) = hot::db::Org::list_children(db, &root_id).await {
+                                                                        org_ids.extend(children.into_iter().map(|child| child.org_id));
+                                                                    }
+                                                                }
+                                                                org_ids.sort_unstable();
+                                                                org_ids.dedup();
                                                                 for org_id in &org_ids {
                                                                     let days = hot::db::subscription::call_deletion_days_for_org(db, org_id).await;
                                                                     if days < 0 { continue; }
@@ -7790,7 +7917,7 @@ pub async fn run_with_components_shared_context_and_db(
                                                                     }
 
                                                                     let cutoff = chrono::Utc::now() - chrono::Duration::days(days as i64);
-                                                                    match hot::db::blob::deactivate_refs_older_than(db, Some(*org_id), CALL_REF_KINDS, cutoff).await {
+                                                                    match hot::db::blob::deactivate_refs_older_than(&db.with_scope(DatabaseScope::Maintenance { operation: MaintenanceOperation::BlobGc, org_id: None }), Some(*org_id), CALL_REF_KINDS, cutoff).await {
                                                                         Ok(n) if n > 0 => {
                                                                             info!("hot.dev: WORKER {} maintenance: deactivated {} expired call blob ref(s) for org {}", worker_id, n, org_id);
                                                                         }
@@ -8421,6 +8548,19 @@ mod tests {
     }
 
     #[test]
+    fn run_admission_defers_only_before_any_handler_side_effects() {
+        assert!(should_defer_run_admission(
+            "[run-admission] Account suspended",
+            false
+        ));
+        assert!(!should_defer_run_admission(
+            "[run-admission] Account suspended",
+            true
+        ));
+        assert!(!should_defer_run_admission("User handler failed", false));
+    }
+
+    #[test]
     fn slot_admission_timeout_redelivers_only_side_effect_free_events() {
         let timeout_error = format!("{} after 30s", BLOCKING_SLOT_TIMEOUT_ERROR);
         let setup_timeout_error = format!("{} after 30s", EVENT_SETUP_TIMEOUT_ERROR);
@@ -8952,11 +9092,39 @@ mod tests {
                     hot::db::run::RunType::Call.as_id(),
                     Some(test_data.env_id),
                     Some(Uuid::now_v7()),
-                    Some(Uuid::now_v7()),
+                    Some(test_data.org_id),
                     None,
                 ),
             },
         };
+
+        let mut wrong_org = thin_message.clone();
+        wrong_org.body.execution_context.org_id = Some(Uuid::now_v7());
+        assert!(
+            hydrate_event_message_from_db(0, &db, None, wrong_org, 0)
+                .await
+                .is_err()
+        );
+        let DatabasePool::Sqlite(pool) = &db else {
+            unreachable!()
+        };
+        sqlx::query("UPDATE org SET lifecycle_state = 'suspended' WHERE org_id = ?")
+            .bind(test_data.org_id)
+            .execute(pool)
+            .await
+            .unwrap();
+        let held = hydrate_event_message_from_db(0, &db, None, thin_message.clone(), 0)
+            .await
+            .unwrap_err();
+        assert!(
+            held.downcast_ref::<QueueInfrastructureError>().is_some(),
+            "Suspension must defer work without consuming the poison-message retry budget"
+        );
+        sqlx::query("UPDATE org SET lifecycle_state = 'active' WHERE org_id = ?")
+            .bind(test_data.org_id)
+            .execute(pool)
+            .await
+            .unwrap();
 
         let hydrated = hydrate_event_message_from_db(0, &db, None, thin_message, 0)
             .await

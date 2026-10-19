@@ -7,10 +7,16 @@ use uuid::Uuid;
 
 use super::search::{IdSearch, pg_placeholders, sqlite_placeholders};
 
+pub(crate) mod quota;
+
 #[derive(Error, Debug)]
 pub enum RunError {
     #[error("Database error: {0}")]
     Database(#[from] sqlx::Error),
+    #[error("Run admission denied: {0}")]
+    QuotaExceeded(String),
+    #[error("Run scope does not match its environment owner")]
+    ScopeDenied,
     #[error("Run not found")]
     NotFound,
 }
@@ -1565,6 +1571,50 @@ impl Run {
                 })?;
         }
 
+        Ok(())
+    }
+
+    /// Finish a host-managed run only while it is still running. The environment
+    /// predicate protects SQLite callers too; already-terminal emitter results win.
+    pub async fn finish_if_running(
+        db: &crate::db::DatabasePool,
+        env_id: &Uuid,
+        run_id: &Uuid,
+        status: &RunStatus,
+    ) -> Result<(), RunError> {
+        if !matches!(
+            status,
+            RunStatus::Succeeded | RunStatus::Failed | RunStatus::Cancelled
+        ) {
+            return Err(RunError::ScopeDenied);
+        }
+        if let crate::db::DatabasePool::Postgres(pool) = db
+            && !matches!(pool.scope()?, crate::db::DatabaseScope::Environment { env_id: scoped_env, .. } if scoped_env == *env_id)
+        {
+            return Err(RunError::ScopeDenied);
+        }
+        let run = Self::get_run(db, run_id).await?;
+        if run.env_id != *env_id {
+            return Err(RunError::ScopeDenied);
+        }
+        let stop_time = Utc::now();
+        let changed = match db {
+            crate::db::DatabasePool::Postgres(pool) => sqlx::query(
+                "UPDATE run SET stop_time=$3, status_id=$4 WHERE run_id=$1 AND env_id=$2 AND status_id=$5",
+            )
+            .bind(run_id).bind(env_id).bind(stop_time).bind(status.as_id())
+            .bind(RunStatus::Running.as_id()).execute(pool).await?.rows_affected(),
+            crate::db::DatabasePool::Sqlite(pool) => sqlx::query(
+                "UPDATE run SET stop_time=$3, status_id=$4 WHERE run_id=$1 AND env_id=$2 AND status_id=$5",
+            )
+            .bind(run_id).bind(env_id).bind(stop_time).bind(status.as_id())
+            .bind(RunStatus::Running.as_id()).execute(pool).await?.rows_affected(),
+        };
+        if changed > 0 {
+            crate::db::stream::Stream::update_metrics(db, &run.stream_id)
+                .await
+                .map_err(|error| RunError::Database(sqlx::Error::Protocol(error.to_string())))?;
+        }
         Ok(())
     }
 

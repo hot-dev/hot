@@ -1,3 +1,45 @@
+-- Refuse enforcement over inconsistent existing ownership. This runs before
+-- any RLS policy is installed and reports the table requiring operator repair.
+DO $$
+DECLARE table_name text; invalid_rows bigint;
+BEGIN
+    FOREACH table_name IN ARRAY ARRAY['store_map','store_map_entry','file','file_upload','blob_object','blob_ref','alert','alert_channel','alert_subscription'] LOOP
+        EXECUTE format('SELECT count(*) FROM hot.%I r JOIN hot.env e ON e.env_id = r.env_id WHERE r.org_id <> e.org_id', table_name) INTO invalid_rows;
+        IF invalid_rows > 0 THEN RAISE EXCEPTION 'Scope preflight: % has % org/env ownership mismatches', table_name, invalid_rows; END IF;
+    END LOOP;
+    FOREACH table_name IN ARRAY ARRAY['run','task','agent','workflow'] LOOP
+        EXECUTE format('SELECT count(*) FROM hot.%I r JOIN hot.build b ON b.build_id = r.build_id JOIN hot.project p ON p.project_id = b.project_id WHERE r.env_id <> p.env_id', table_name) INTO invalid_rows;
+        IF invalid_rows > 0 THEN RAISE EXCEPTION 'Scope preflight: % has % build/env ownership mismatches', table_name, invalid_rows; END IF;
+    END LOOP;
+    FOREACH table_name IN ARRAY ARRAY['run','task','event'] LOOP
+        EXECUTE format('SELECT count(*) FROM hot.%I r JOIN hot.stream s ON s.stream_id = r.stream_id WHERE r.env_id <> s.env_id', table_name) INTO invalid_rows;
+        IF invalid_rows > 0 THEN RAISE EXCEPTION 'Scope preflight: % has % stream/env ownership mismatches', table_name, invalid_rows; END IF;
+    END LOOP;
+    FOREACH table_name IN ARRAY ARRAY['service_key','session'] LOOP
+        EXECUTE format('SELECT count(*) FROM hot.%I r JOIN hot.api_key k ON k.api_key_id = r.api_key_id WHERE r.env_id <> k.env_id', table_name) INTO invalid_rows;
+        IF invalid_rows > 0 THEN RAISE EXCEPTION 'Scope preflight: % has % credential/env ownership mismatches', table_name, invalid_rows; END IF;
+    END LOOP;
+    SELECT count(*) INTO invalid_rows FROM hot.context c JOIN hot.project p ON p.project_id = c.project_id
+        WHERE c.env_id IS NOT NULL AND c.env_id <> p.env_id;
+    IF invalid_rows > 0 THEN RAISE EXCEPTION 'Scope preflight: context has % project/env ownership mismatches', invalid_rows; END IF;
+    SELECT count(*) INTO invalid_rows FROM hot.task t JOIN hot.run r ON r.run_id = t.run_id WHERE t.env_id <> r.env_id;
+    IF invalid_rows > 0 THEN RAISE EXCEPTION 'Scope preflight: task has % run/env ownership mismatches', invalid_rows; END IF;
+    SELECT count(*) INTO invalid_rows FROM hot.blob_ref r JOIN hot.blob_object b ON b.blob_object_id = r.blob_object_id
+        WHERE r.org_id <> b.org_id OR r.env_id IS DISTINCT FROM b.env_id;
+    IF invalid_rows > 0 THEN RAISE EXCEPTION 'Scope preflight: blob_ref has % object ownership mismatches', invalid_rows; END IF;
+    SELECT count(*) INTO invalid_rows FROM hot.alert_subscription_channel l
+        JOIN hot.alert_subscription s ON s.alert_subscription_id=l.subscription_id
+        JOIN hot.alert_channel c ON c.alert_channel_id=l.channel_id
+        WHERE (c.org_id IS NOT NULL AND c.org_id<>s.org_id)
+           OR (c.env_id IS NOT NULL AND c.env_id IS DISTINCT FROM s.env_id);
+    IF invalid_rows > 0 THEN RAISE EXCEPTION 'Scope preflight: alert subscription has % incompatible channel links', invalid_rows; END IF;
+    SELECT count(*) INTO invalid_rows FROM hot.alert_subscription_destination l
+        JOIN hot.alert_subscription s ON s.alert_subscription_id=l.subscription_id
+        JOIN hot.alert_destination d ON d.alert_destination_id=l.destination_id
+        WHERE d.org_id<>s.org_id;
+    IF invalid_rows > 0 THEN RAISE EXCEPTION 'Scope preflight: alert subscription has % cross-org destination links', invalid_rows; END IF;
+END $$;
+
 -- Scope is set only by trusted backend executors, transaction-locally.
 -- This migration deliberately creates no login roles and grants no BYPASSRLS.
 -- Use resources/db/postgres/provision_runtime.sql to provision restricted roles.
@@ -116,7 +158,7 @@ CREATE POLICY hot_scope_delete ON hot."org_usage" FOR DELETE USING ((hot.scope_o
 -- org_plan: separate SELECT and mutation grants; a read set is never a write grant.
 ALTER TABLE hot."org_plan" ENABLE ROW LEVEL SECURITY;
 ALTER TABLE hot."org_plan" FORCE ROW LEVEL SECURITY;
-CREATE POLICY hot_scope_read ON hot."org_plan" FOR SELECT USING (hot.scope_maintenance('retention') OR (hot.scope_org_allows(org_id)) OR (hot.scope_billing_org(org_id)));
+CREATE POLICY hot_scope_read ON hot."org_plan" FOR SELECT USING ((hot.scope_maintenance('organization_provisioning') AND org_id = hot.scope_org_id()) OR hot.scope_maintenance('retention') OR (hot.scope_org_allows(org_id)) OR (hot.scope_billing_org(org_id)));
 CREATE POLICY hot_scope_insert ON hot."org_plan" FOR INSERT WITH CHECK ((hot.scope_org_writes(org_id)) OR (hot.scope_billing_org(org_id)) OR (hot.scope_bootstrap('onboarding')));
 CREATE POLICY hot_scope_update ON hot."org_plan" FOR UPDATE USING ((hot.scope_org_writes(org_id)) OR (hot.scope_billing_org(org_id)) OR (hot.scope_bootstrap('onboarding'))) WITH CHECK ((hot.scope_org_writes(org_id)) OR (hot.scope_billing_org(org_id)) OR (hot.scope_bootstrap('onboarding')));
 CREATE POLICY hot_scope_delete ON hot."org_plan" FOR DELETE USING ((hot.scope_org_writes(org_id)) OR (hot.scope_billing_org(org_id)) OR (hot.scope_bootstrap('onboarding')));
@@ -132,7 +174,7 @@ CREATE POLICY hot_scope_delete ON hot."org_child_provisioning" FOR DELETE USING 
 -- api_key: separate SELECT and mutation grants; a read set is never a write grant.
 ALTER TABLE hot."api_key" ENABLE ROW LEVEL SECURITY;
 ALTER TABLE hot."api_key" FORCE ROW LEVEL SECURITY;
-CREATE POLICY hot_scope_read ON hot."api_key" FOR SELECT USING ((hot.scope_env_allows(env_id)) OR ((hot.scope_bootstrap('authentication')) OR (hot.scope_provisions_org((SELECT e.org_id FROM hot.env e WHERE e.env_id = api_key.env_id)))));
+CREATE POLICY hot_scope_read ON hot."api_key" FOR SELECT USING (hot.scope_bootstrap('onboarding') OR (hot.scope_env_allows(env_id)) OR ((hot.scope_bootstrap('authentication')) OR (hot.scope_provisions_org((SELECT e.org_id FROM hot.env e WHERE e.env_id = api_key.env_id)))));
 CREATE POLICY hot_scope_insert ON hot."api_key" FOR INSERT WITH CHECK ((hot.scope_env_writes(env_id)) OR ((hot.scope_bootstrap('onboarding'))));
 CREATE POLICY hot_scope_update ON hot."api_key" FOR UPDATE USING ((hot.scope_env_writes(env_id)) OR ((hot.scope_bootstrap('onboarding')))) WITH CHECK ((hot.scope_env_writes(env_id)) OR ((hot.scope_bootstrap('onboarding'))));
 CREATE POLICY hot_scope_delete ON hot."api_key" FOR DELETE USING ((hot.scope_env_writes(env_id)) OR ((hot.scope_bootstrap('onboarding'))));
@@ -298,20 +340,36 @@ CREATE POLICY hot_scope_update ON hot."alert_delivery" FOR UPDATE USING ((EXISTS
 CREATE POLICY hot_scope_delete ON hot."alert_delivery" FOR DELETE USING ((EXISTS (SELECT 1 FROM hot.alert p WHERE p.alert_id = alert_delivery.alert_id)) AND (hot.scope_mode() = 'environment' OR hot.scope_maintenance('queue') OR hot.scope_maintenance('scheduler') OR hot.scope_maintenance('retention') OR hot.scope_maintenance('alerts')));
 
 -- alert_subscription_channel: separate SELECT and mutation grants; a read set is never a write grant.
+CREATE FUNCTION hot.scope_subscription_writes(target uuid) RETURNS boolean LANGUAGE sql STABLE AS $$
+    SELECT EXISTS (SELECT 1 FROM hot.alert_subscription p WHERE p.alert_subscription_id = target
+        AND ((p.env_id IS NULL AND hot.scope_org_writes(p.org_id))
+          OR (p.env_id IS NOT NULL AND hot.scope_env_writes(p.env_id) AND hot.scope_org_allows(p.org_id))
+          OR hot.scope_maintenance('alerts')))
+$$;
+CREATE FUNCTION hot.scope_subscription_channel_matches(subscription uuid, channel uuid) RETURNS boolean LANGUAGE sql STABLE AS $$
+    SELECT EXISTS (SELECT 1 FROM hot.alert_subscription p JOIN hot.alert_channel c ON c.alert_channel_id = channel
+        WHERE p.alert_subscription_id = subscription
+          AND (c.org_id IS NULL OR c.org_id = p.org_id)
+          AND (c.env_id IS NULL OR c.env_id = p.env_id))
+$$;
+CREATE FUNCTION hot.scope_subscription_destination_matches(subscription uuid, destination uuid) RETURNS boolean LANGUAGE sql STABLE AS $$
+    SELECT EXISTS (SELECT 1 FROM hot.alert_subscription p JOIN hot.alert_destination d ON d.alert_destination_id = destination
+        WHERE p.alert_subscription_id = subscription AND d.org_id = p.org_id)
+$$;
 ALTER TABLE hot."alert_subscription_channel" ENABLE ROW LEVEL SECURITY;
 ALTER TABLE hot."alert_subscription_channel" FORCE ROW LEVEL SECURITY;
 CREATE POLICY hot_scope_read ON hot."alert_subscription_channel" FOR SELECT USING (EXISTS (SELECT 1 FROM hot.alert_subscription p WHERE p.alert_subscription_id = alert_subscription_channel.subscription_id));
-CREATE POLICY hot_scope_insert ON hot."alert_subscription_channel" FOR INSERT WITH CHECK ((EXISTS (SELECT 1 FROM hot.alert_subscription p WHERE p.alert_subscription_id = alert_subscription_channel.subscription_id)) AND hot.scope_mode() IN ('organization','maintenance'));
-CREATE POLICY hot_scope_update ON hot."alert_subscription_channel" FOR UPDATE USING ((EXISTS (SELECT 1 FROM hot.alert_subscription p WHERE p.alert_subscription_id = alert_subscription_channel.subscription_id)) AND hot.scope_mode() IN ('organization','maintenance')) WITH CHECK ((EXISTS (SELECT 1 FROM hot.alert_subscription p WHERE p.alert_subscription_id = alert_subscription_channel.subscription_id)) AND hot.scope_mode() IN ('organization','maintenance'));
-CREATE POLICY hot_scope_delete ON hot."alert_subscription_channel" FOR DELETE USING ((EXISTS (SELECT 1 FROM hot.alert_subscription p WHERE p.alert_subscription_id = alert_subscription_channel.subscription_id)) AND hot.scope_mode() IN ('organization','maintenance'));
+CREATE POLICY hot_scope_insert ON hot."alert_subscription_channel" FOR INSERT WITH CHECK (hot.scope_subscription_writes(subscription_id) AND hot.scope_subscription_channel_matches(subscription_id, channel_id));
+CREATE POLICY hot_scope_update ON hot."alert_subscription_channel" FOR UPDATE USING (hot.scope_subscription_writes(subscription_id)) WITH CHECK (hot.scope_subscription_writes(subscription_id) AND hot.scope_subscription_channel_matches(subscription_id, channel_id));
+CREATE POLICY hot_scope_delete ON hot."alert_subscription_channel" FOR DELETE USING (hot.scope_subscription_writes(subscription_id));
 
 -- alert_subscription_destination: separate SELECT and mutation grants; a read set is never a write grant.
 ALTER TABLE hot."alert_subscription_destination" ENABLE ROW LEVEL SECURITY;
 ALTER TABLE hot."alert_subscription_destination" FORCE ROW LEVEL SECURITY;
 CREATE POLICY hot_scope_read ON hot."alert_subscription_destination" FOR SELECT USING (EXISTS (SELECT 1 FROM hot.alert_subscription p WHERE p.alert_subscription_id = alert_subscription_destination.subscription_id));
-CREATE POLICY hot_scope_insert ON hot."alert_subscription_destination" FOR INSERT WITH CHECK ((EXISTS (SELECT 1 FROM hot.alert_subscription p WHERE p.alert_subscription_id = alert_subscription_destination.subscription_id)) AND hot.scope_mode() IN ('organization','maintenance'));
-CREATE POLICY hot_scope_update ON hot."alert_subscription_destination" FOR UPDATE USING ((EXISTS (SELECT 1 FROM hot.alert_subscription p WHERE p.alert_subscription_id = alert_subscription_destination.subscription_id)) AND hot.scope_mode() IN ('organization','maintenance')) WITH CHECK ((EXISTS (SELECT 1 FROM hot.alert_subscription p WHERE p.alert_subscription_id = alert_subscription_destination.subscription_id)) AND hot.scope_mode() IN ('organization','maintenance'));
-CREATE POLICY hot_scope_delete ON hot."alert_subscription_destination" FOR DELETE USING ((EXISTS (SELECT 1 FROM hot.alert_subscription p WHERE p.alert_subscription_id = alert_subscription_destination.subscription_id)) AND hot.scope_mode() IN ('organization','maintenance'));
+CREATE POLICY hot_scope_insert ON hot."alert_subscription_destination" FOR INSERT WITH CHECK (hot.scope_subscription_writes(subscription_id) AND hot.scope_subscription_destination_matches(subscription_id, destination_id));
+CREATE POLICY hot_scope_update ON hot."alert_subscription_destination" FOR UPDATE USING (hot.scope_subscription_writes(subscription_id)) WITH CHECK (hot.scope_subscription_writes(subscription_id) AND hot.scope_subscription_destination_matches(subscription_id, destination_id));
+CREATE POLICY hot_scope_delete ON hot."alert_subscription_destination" FOR DELETE USING (hot.scope_subscription_writes(subscription_id));
 
 -- file: separate SELECT and mutation grants; a read set is never a write grant.
 ALTER TABLE hot."file" ENABLE ROW LEVEL SECURITY;
@@ -397,16 +455,16 @@ CREATE POLICY hot_scope_delete ON hot."alert_destination" FOR DELETE USING ((hot
 ALTER TABLE hot."alert_channel" ENABLE ROW LEVEL SECURITY;
 ALTER TABLE hot."alert_channel" FORCE ROW LEVEL SECURITY;
 CREATE POLICY hot_scope_read ON hot."alert_channel" FOR SELECT USING ((org_id IS NULL AND hot.scope_mode() <> '') OR (org_id IS NOT NULL AND hot.scope_org_allows(org_id) AND (env_id IS NULL OR hot.scope_env_allows(env_id))) OR (hot.scope_maintenance('alerts')));
-CREATE POLICY hot_scope_insert ON hot."alert_channel" FOR INSERT WITH CHECK ((org_id IS NOT NULL AND hot.scope_org_writes(org_id)) OR (hot.scope_maintenance('alerts')));
-CREATE POLICY hot_scope_update ON hot."alert_channel" FOR UPDATE USING ((org_id IS NOT NULL AND hot.scope_org_writes(org_id)) OR (hot.scope_maintenance('alerts'))) WITH CHECK ((org_id IS NOT NULL AND hot.scope_org_writes(org_id)) OR (hot.scope_maintenance('alerts')));
-CREATE POLICY hot_scope_delete ON hot."alert_channel" FOR DELETE USING ((org_id IS NOT NULL AND hot.scope_org_writes(org_id)) OR (hot.scope_maintenance('alerts')));
+CREATE POLICY hot_scope_insert ON hot."alert_channel" FOR INSERT WITH CHECK ((org_id IS NOT NULL AND env_id IS NULL AND hot.scope_org_writes(org_id)) OR (env_id IS NOT NULL AND hot.scope_org_allows(org_id) AND hot.scope_env_writes(env_id)) OR hot.scope_maintenance('alerts'));
+CREATE POLICY hot_scope_update ON hot."alert_channel" FOR UPDATE USING ((org_id IS NOT NULL AND env_id IS NULL AND hot.scope_org_writes(org_id)) OR (env_id IS NOT NULL AND hot.scope_org_allows(org_id) AND hot.scope_env_writes(env_id)) OR hot.scope_maintenance('alerts')) WITH CHECK ((org_id IS NOT NULL AND env_id IS NULL AND hot.scope_org_writes(org_id)) OR (env_id IS NOT NULL AND hot.scope_org_allows(org_id) AND hot.scope_env_writes(env_id)) OR hot.scope_maintenance('alerts'));
+CREATE POLICY hot_scope_delete ON hot."alert_channel" FOR DELETE USING ((org_id IS NOT NULL AND env_id IS NULL AND hot.scope_org_writes(org_id)) OR (env_id IS NOT NULL AND hot.scope_org_allows(org_id) AND hot.scope_env_writes(env_id)) OR hot.scope_maintenance('alerts'));
 
 -- user: separate SELECT and mutation grants; a read set is never a write grant.
 ALTER TABLE hot."user" ENABLE ROW LEVEL SECURITY;
 ALTER TABLE hot."user" FORCE ROW LEVEL SECURITY;
-CREATE POLICY hot_scope_read ON hot."user" FOR SELECT USING (hot.scope_bootstrap('authentication') OR hot.scope_bootstrap('membership') OR hot.scope_bootstrap('onboarding'));
+CREATE POLICY hot_scope_read ON hot."user" FOR SELECT USING ((hot.scope_mode() = 'user' AND user_id = NULLIF(current_setting('hot.scope_user', true), '')::uuid) OR EXISTS (SELECT 1 FROM hot.org_user ou WHERE ou.user_id = "user".user_id AND ou.active AND hot.scope_org_allows(ou.org_id)) OR hot.scope_bootstrap('authentication') OR hot.scope_bootstrap('membership') OR hot.scope_bootstrap('onboarding'));
 CREATE POLICY hot_scope_insert ON hot."user" FOR INSERT WITH CHECK (hot.scope_bootstrap('authentication') OR hot.scope_bootstrap('onboarding'));
-CREATE POLICY hot_scope_update ON hot."user" FOR UPDATE USING (hot.scope_bootstrap('authentication') OR hot.scope_bootstrap('onboarding')) WITH CHECK (hot.scope_bootstrap('authentication') OR hot.scope_bootstrap('onboarding'));
+CREATE POLICY hot_scope_update ON hot."user" FOR UPDATE USING ((hot.scope_mode() = 'user' AND user_id = NULLIF(current_setting('hot.scope_user', true), '')::uuid) OR hot.scope_bootstrap('authentication') OR hot.scope_bootstrap('onboarding')) WITH CHECK ((hot.scope_mode() = 'user' AND user_id = NULLIF(current_setting('hot.scope_user', true), '')::uuid) OR hot.scope_bootstrap('authentication') OR hot.scope_bootstrap('onboarding'));
 CREATE POLICY hot_scope_delete ON hot."user" FOR DELETE USING (hot.scope_bootstrap('authentication') OR hot.scope_bootstrap('onboarding'));
 
 -- user_auth: separate SELECT and mutation grants; a read set is never a write grant.
@@ -589,6 +647,10 @@ CREATE TRIGGER resource_scope_integrity BEFORE INSERT OR UPDATE ON hot.service_k
 CREATE TRIGGER resource_scope_integrity BEFORE INSERT OR UPDATE ON hot.session
     FOR EACH ROW EXECUTE FUNCTION hot.enforce_resource_scope();
 CREATE TRIGGER resource_scope_integrity BEFORE INSERT OR UPDATE ON hot.file
+    FOR EACH ROW EXECUTE FUNCTION hot.enforce_resource_scope();
+CREATE TRIGGER resource_scope_integrity BEFORE INSERT OR UPDATE ON hot.alert_channel
+    FOR EACH ROW EXECUTE FUNCTION hot.enforce_resource_scope();
+CREATE TRIGGER resource_scope_integrity BEFORE INSERT OR UPDATE ON hot.alert_subscription
     FOR EACH ROW EXECUTE FUNCTION hot.enforce_resource_scope();
 CREATE TRIGGER resource_scope_integrity BEFORE INSERT OR UPDATE ON hot.file_upload
     FOR EACH ROW EXECUTE FUNCTION hot.enforce_resource_scope();

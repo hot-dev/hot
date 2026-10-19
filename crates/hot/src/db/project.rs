@@ -43,7 +43,8 @@ impl Project {
         project_id: &Uuid,
     ) -> Result<Project, ProjectError> {
         if matches!(db, crate::db::DatabasePool::Sqlite(_))
-            && let Some(project) = PROJECT_CACHE.get(project_id) {
+            && let Some(project) = PROJECT_CACHE.get(project_id)
+        {
             return Ok(project);
         }
 

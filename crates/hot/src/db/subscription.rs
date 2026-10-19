@@ -1,3 +1,5 @@
+mod runtime_usage;
+
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
@@ -282,10 +284,12 @@ impl OrgPlan {
 
     /// Get subscription by organization ID
     pub async fn get_by_org_id(db: &DatabasePool, org_id: &Uuid) -> Result<Self, PlanError> {
-        let root_id = super::org::Org::billing_owner_id_for(db, org_id).await
+        let root_id = super::org::Org::billing_owner_id_for(db, org_id)
+            .await
             .map_err(|error| PlanError::InvalidOrganization(error.to_string()))?;
         let db = db.with_scope(super::DatabaseScope::Maintenance {
-            operation: super::MaintenanceOperation::Billing, org_id: Some(root_id),
+            operation: super::MaintenanceOperation::Billing,
+            org_id: Some(root_id),
         });
         let org_id = &root_id;
         let db = &db;
@@ -319,9 +323,14 @@ impl OrgPlan {
         billing_period: BillingPeriod,
         created_by_user_id: &Uuid,
     ) -> Result<Self, PlanError> {
-        if super::org::Org::billing_owner_id_for(db, org_id).await
-            .map_err(|error| PlanError::InvalidOrganization(error.to_string()))? != *org_id {
-            return Err(PlanError::InvalidOrganization("child subscriptions are managed by the root".into()));
+        if super::org::Org::billing_owner_id_for(db, org_id)
+            .await
+            .map_err(|error| PlanError::InvalidOrganization(error.to_string()))?
+            != *org_id
+        {
+            return Err(PlanError::InvalidOrganization(
+                "child subscriptions are managed by the root".into(),
+            ));
         }
         let org_plan_id = Uuid::now_v7();
         let billing_period_str = billing_period.as_str();
@@ -670,7 +679,8 @@ pub async fn call_deletion_days_for_org(db: &DatabasePool, org_id: &Uuid) -> i32
         Err(_) => return 0,
     };
     let db = db.with_scope(super::DatabaseScope::Maintenance {
-        operation: super::MaintenanceOperation::Billing, org_id: Some(root_id),
+        operation: super::MaintenanceOperation::Billing,
+        org_id: Some(root_id),
     });
     let db = &db;
     let org_id = &root_id;
@@ -870,15 +880,21 @@ impl OrgUsageStats {
     /// Account usage for authorized billing and quota operations. Runtime data
     /// remains attributed to its actual org; root directory seats are counted once.
     pub async fn calculate_account(
-        db: &DatabasePool, org_id: &Uuid, period_start: DateTime<Utc>, retention_days: i32,
+        db: &DatabasePool,
+        org_id: &Uuid,
+        period_start: DateTime<Utc>,
+        retention_days: i32,
     ) -> Result<Self, PlanError> {
-        let root_id = super::org::Org::billing_owner_id_for(db, org_id).await
+        let root_id = super::org::Org::billing_owner_id_for(db, org_id)
+            .await
             .map_err(|error| PlanError::InvalidOrganization(error.to_string()))?;
         let db = db.with_scope(super::DatabaseScope::Maintenance {
-            operation: super::MaintenanceOperation::Billing, org_id: Some(root_id),
+            operation: super::MaintenanceOperation::Billing,
+            org_id: Some(root_id),
         });
         let mut total = Self::calculate(&db, &root_id, period_start, retention_days).await?;
-        let children = super::org::Org::list_children(&db, &root_id).await
+        let children = super::org::Org::list_children(&db, &root_id)
+            .await
             .map_err(|error| PlanError::InvalidOrganization(error.to_string()))?;
         for child in children {
             let usage = Self::calculate(&db, &child.org_id, period_start, retention_days).await?;
@@ -887,7 +903,8 @@ impl OrgUsageStats {
             total.call_storage_bytes += usage.call_storage_bytes;
             total.call_count += usage.call_count;
             total.oldest_call_time = match (total.oldest_call_time, usage.oldest_call_time) {
-                (Some(a), Some(b)) => Some(a.min(b)), (a, b) => a.or(b),
+                (Some(a), Some(b)) => Some(a.min(b)),
+                (a, b) => a.or(b),
             };
             total.store_storage_bytes += usage.store_storage_bytes;
             total.blob_storage_bytes += usage.blob_storage_bytes;
@@ -896,6 +913,26 @@ impl OrgUsageStats {
             total.compute_units += usage.compute_units;
             total.active_schedules += usage.active_schedules;
         }
+        // Admission, not retained history, is the account's quota consumption.
+        // Include task runs and reservations whose run:start was not persisted;
+        // respect the caller's billing/calendar window without resetting on retention.
+        total.runs_this_period =
+            match &db {
+                DatabasePool::Postgres(pool) => sqlx::query_scalar(
+                    "SELECT COUNT(*) FROM run_admission WHERE root_org_id=$1 AND admitted_at >= $2",
+                )
+                .bind(root_id)
+                .bind(period_start)
+                .fetch_one(pool)
+                .await?,
+                DatabasePool::Sqlite(pool) => sqlx::query_scalar(
+                    "SELECT COUNT(*) FROM run_admission WHERE root_org_id=$1 AND admitted_at >= $2",
+                )
+                .bind(root_id)
+                .bind(period_start)
+                .fetch_one(pool)
+                .await?,
+            };
         Ok(total)
     }
 

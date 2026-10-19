@@ -20,7 +20,7 @@ use uuid::Uuid;
 // parallel by default, so serialize the tests that share that schema.
 static POSTGRES_SCHEMA_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
-async fn external_schema_dependencies(pool: &sqlx::PgPool, schema: &str) -> Vec<String> {
+async fn external_schema_dependencies(pool: &hot::db::ScopedPgPool, schema: &str) -> Vec<String> {
     sqlx::query_scalar(
         "WITH dependency_objects AS ( \
              SELECT d.classid, d.objid, dependent.type, \
@@ -88,7 +88,7 @@ async fn external_schema_dependencies(pool: &sqlx::PgPool, schema: &str) -> Vec<
     .expect("cross-schema dependencies should be queryable")
 }
 
-async fn assert_schema_drop_isolated(pool: &sqlx::PgPool, schema: &str) {
+async fn assert_schema_drop_isolated(pool: &hot::db::ScopedPgPool, schema: &str) {
     let dependencies = external_schema_dependencies(pool, schema).await;
     assert!(
         dependencies.is_empty(),
@@ -145,7 +145,13 @@ async fn reset_schema_if_requested(uri: &str, schema: &str) {
     // column types. Views, foreign keys, functions, and indexes using an
     // extension operator class can all live outside this schema yet be
     // cascade-dropped with it.
-    assert_schema_drop_isolated(&pool, schema).await;
+    assert_schema_drop_isolated(
+        &hot::db::ScopedPgPool::new(pool.clone()).with_scope(hot::db::DatabaseScope::Bootstrap(
+            hot::db::BootstrapOperation::Health,
+        )),
+        schema,
+    )
+    .await;
 
     pool.execute(sqlx::AssertSqlSafe(format!(
         "drop schema if exists {} cascade",
@@ -181,6 +187,7 @@ async fn postgres_db() -> Option<(DatabasePool, String)> {
     let conf = val!({
         "uri": uri.clone(),
         "schema": schema.clone(),
+        "rls": {"enforce": false},
     });
 
     db::run_migrations(&conf)
@@ -190,7 +197,12 @@ async fn postgres_db() -> Option<(DatabasePool, String)> {
         .await
         .expect("Postgres pool should connect");
 
-    Some((db, schema))
+    Some((
+        db.with_scope(hot::db::DatabaseScope::Bootstrap(
+            hot::db::BootstrapOperation::Onboarding,
+        )),
+        schema,
+    ))
 }
 
 async fn drop_schema(db: &DatabasePool, schema: &str) {

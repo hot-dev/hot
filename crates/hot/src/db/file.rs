@@ -1,6 +1,6 @@
 //! Database operations for file storage tracking
 
-use crate::db::DatabasePool;
+use crate::db::{DatabasePool, DatabaseScope, MaintenanceOperation};
 use chrono::{DateTime, Utc};
 use sqlx::Row;
 use uuid::Uuid;
@@ -23,6 +23,125 @@ pub struct FileRecord {
     pub updated_at: DateTime<Utc>,
     pub created_by_user_id: Uuid,
     pub updated_by_user_id: Option<Uuid>,
+}
+
+/// Metadata is the commit point for a file upload. Every size-increasing write
+/// holds the billing root row lock across the account total and metadata update.
+/// Staged object bytes are never counted as committed storage.
+enum StorageWriteTransaction {
+    Postgres(sqlx::Transaction<'static, sqlx::Postgres>),
+    Sqlite(sqlx::Transaction<'static, sqlx::Sqlite>),
+}
+
+async fn begin_storage_write(
+    db: &DatabasePool,
+    org_id: Uuid,
+    env_id: Option<Uuid>,
+    file_id: Option<Uuid>,
+    new_size: i64,
+) -> Result<StorageWriteTransaction, FileWriteError> {
+    if new_size < 0 {
+        return Err(fwe("File size cannot be negative"));
+    }
+    // Validate caller authority before entering the internal billing scope.
+    if let DatabasePool::Postgres(pool) = db {
+        let scope = pool.scope().map_err(fwe)?;
+        let allowed = match scope {
+            DatabaseScope::Environment {
+                org_id: org,
+                env_id: env,
+            } => org == org_id && Some(env) == env_id,
+            DatabaseScope::Organization { org_id: org } => org == org_id && env_id.is_none(),
+            _ => false,
+        };
+        if !allowed {
+            return Err(fwe(
+                "File write requires its exact organization/environment scope",
+            ));
+        }
+    }
+    let root_id = super::org::Org::billing_owner_id_for(db, &org_id)
+        .await
+        .map_err(fwe)?;
+    let billing = db.with_scope(DatabaseScope::Maintenance {
+        operation: MaintenanceOperation::Billing,
+        org_id: Some(root_id),
+    });
+    match &billing {
+        DatabasePool::Postgres(pool) => {
+            let mut tx = pool.begin().await.map_err(fwe)?;
+            let overrides: Option<serde_json::Value> =
+                sqlx::query_scalar("SELECT features FROM org WHERE org_id=$1 FOR UPDATE")
+                    .bind(root_id)
+                    .fetch_one(&mut *tx)
+                    .await
+                    .map_err(fwe)?;
+            let plan: Option<serde_json::Value> = sqlx::query_scalar(
+                "SELECT COALESCE(p.features,'{}'::jsonb) FROM org_plan op JOIN plan p ON p.plan_uuid=op.plan_uuid WHERE op.org_id=$1"
+            ).bind(root_id).fetch_optional(&mut *tx).await.map_err(fwe)?.flatten();
+            let usage: i64 = sqlx::query_scalar(
+                "SELECT COALESCE(SUM(f.size),0)::bigint FROM file f JOIN org o ON o.org_id=f.org_id WHERE f.active AND (o.org_id=$1 OR o.parent_org_id=$1) AND ($2::uuid IS NULL OR f.file_id<>$2)"
+            ).bind(root_id).bind(file_id).fetch_one(&mut *tx).await.map_err(fwe)?;
+            validate_storage_limit(plan.as_ref(), overrides.as_ref(), usage, new_size)?;
+            let scope = match env_id {
+                Some(env_id) => DatabaseScope::Environment { org_id, env_id },
+                None => DatabaseScope::Organization { org_id },
+            };
+            scope.apply_to_connection(&mut tx).await.map_err(fwe)?;
+            Ok(StorageWriteTransaction::Postgres(tx))
+        }
+        DatabasePool::Sqlite(pool) => {
+            let mut tx = pool.begin().await.map_err(fwe)?;
+            sqlx::query("UPDATE org SET org_id=org_id WHERE org_id=?")
+                .bind(root_id)
+                .execute(&mut *tx)
+                .await
+                .map_err(fwe)?;
+            let overrides: Option<String> =
+                sqlx::query_scalar("SELECT features FROM org WHERE org_id=?")
+                    .bind(root_id)
+                    .fetch_one(&mut *tx)
+                    .await
+                    .map_err(fwe)?;
+            let plan: Option<String> = sqlx::query_scalar(
+                "SELECT COALESCE(p.features,'{}') FROM org_plan op JOIN plan p ON p.plan_uuid=op.plan_uuid WHERE op.org_id=?"
+            ).bind(root_id).fetch_optional(&mut *tx).await.map_err(fwe)?.flatten();
+            let overrides = overrides
+                .map(|s| serde_json::from_str(&s))
+                .transpose()
+                .map_err(fwe)?;
+            let plan = plan
+                .map(|s| serde_json::from_str(&s))
+                .transpose()
+                .map_err(fwe)?;
+            let usage: i64 = sqlx::query_scalar(
+                "SELECT COALESCE(SUM(f.size),0) FROM file f JOIN org o ON o.org_id=f.org_id WHERE f.active=1 AND (o.org_id=? OR o.parent_org_id=?) AND (? IS NULL OR f.file_id<>?)"
+            ).bind(root_id).bind(root_id).bind(file_id).bind(file_id).fetch_one(&mut *tx).await.map_err(fwe)?;
+            validate_storage_limit(plan.as_ref(), overrides.as_ref(), usage, new_size)?;
+            Ok(StorageWriteTransaction::Sqlite(tx))
+        }
+    }
+}
+
+fn validate_storage_limit(
+    plan: Option<&serde_json::Value>,
+    overrides: Option<&serde_json::Value>,
+    usage: i64,
+    size: i64,
+) -> Result<(), FileWriteError> {
+    let features = if plan.is_none() && overrides.is_none() {
+        super::Features::unlimited()
+    } else {
+        super::Features::resolve(plan, overrides)
+    };
+    let limit = features.storage_bytes();
+    if limit >= 0 && usage.checked_add(size).is_none_or(|total| total > limit) {
+        return Err(fwe(format!(
+            "Storage quota exceeded: account usage {} + file {} > limit {}",
+            usage, size, limit
+        )));
+    }
+    Ok(())
 }
 
 /// Insert/update error that distinguishes foreign-key violations so callers
@@ -164,8 +283,9 @@ async fn insert_file_record_attempt(
         }
     };
 
-    match db {
-        DatabasePool::Postgres(pool) => {
+    let transaction = begin_storage_write(db, org_id, env_id, None, size).await?;
+    match transaction {
+        StorageWriteTransaction::Postgres(mut tx) => {
             let row = sqlx::query(query)
                 .bind(file_id)
                 .bind(path)
@@ -180,10 +300,11 @@ async fn insert_file_record_attempt(
                 .bind(created_by_run_id)
                 .bind(now)
                 .bind(now)
-                .fetch_one(pool)
+                .fetch_one(&mut *tx)
                 .await
                 .map_err(|e| FileWriteError::from_sqlx("Failed to insert file record", e))?;
 
+            tx.commit().await.map_err(fwe)?;
             Ok(FileRecord {
                 file_id: row.try_get("file_id").map_err(fwe)?,
                 path: row.try_get("path").map_err(fwe)?,
@@ -202,7 +323,7 @@ async fn insert_file_record_attempt(
                 updated_by_user_id: row.try_get("updated_by_user_id").map_err(fwe)?,
             })
         }
-        DatabasePool::Sqlite(pool) => {
+        StorageWriteTransaction::Sqlite(mut tx) => {
             sqlx::query(query)
                 .bind(file_id)
                 .bind(path)
@@ -217,10 +338,11 @@ async fn insert_file_record_attempt(
                 .bind(created_by_run_id)
                 .bind(now)
                 .bind(now)
-                .execute(pool)
+                .execute(&mut *tx)
                 .await
                 .map_err(|e| FileWriteError::from_sqlx("Failed to insert file record", e))?;
 
+            tx.commit().await.map_err(fwe)?;
             // Fetch the inserted record - now requires env_id for security
             get_file_by_path(db, path, org_id, env_id)
                 .await
@@ -336,8 +458,11 @@ async fn update_file_record_attempt(
         }
     };
 
-    match db {
-        DatabasePool::Postgres(pool) => {
+    let existing = get_file_by_id(db, file_id).await.map_err(fwe)?;
+    let transaction =
+        begin_storage_write(db, existing.org_id, existing.env_id, Some(file_id), size).await?;
+    match transaction {
+        StorageWriteTransaction::Postgres(mut tx) => {
             let row = sqlx::query(query)
                 .bind(file_id)
                 .bind(size)
@@ -347,10 +472,11 @@ async fn update_file_record_attempt(
                 .bind(updated_by_user_id)
                 .bind(updated_by_run_id)
                 .bind(now)
-                .fetch_one(pool)
+                .fetch_one(&mut *tx)
                 .await
                 .map_err(|e| FileWriteError::from_sqlx("Failed to update file record", e))?;
 
+            tx.commit().await.map_err(fwe)?;
             Ok(FileRecord {
                 file_id: row.try_get("file_id").map_err(fwe)?,
                 path: row.try_get("path").map_err(fwe)?,
@@ -369,7 +495,7 @@ async fn update_file_record_attempt(
                 updated_by_user_id: row.try_get("updated_by_user_id").map_err(fwe)?,
             })
         }
-        DatabasePool::Sqlite(pool) => {
+        StorageWriteTransaction::Sqlite(mut tx) => {
             sqlx::query(query)
                 .bind(size)
                 .bind(etag)
@@ -379,10 +505,11 @@ async fn update_file_record_attempt(
                 .bind(updated_by_run_id)
                 .bind(now)
                 .bind(file_id)
-                .execute(pool)
+                .execute(&mut *tx)
                 .await
                 .map_err(|e| FileWriteError::from_sqlx("Failed to update file record", e))?;
 
+            tx.commit().await.map_err(fwe)?;
             // Fetch the updated record by file_id
             get_file_by_id(db, file_id)
                 .await
@@ -470,8 +597,36 @@ async fn update_file_record_if_etag_attempt(
     updated_by_run_id: Option<Uuid>,
 ) -> Result<Option<FileRecord>, FileWriteError> {
     let now = Utc::now();
-    match db {
+    // A missing, inactive, or no-longer-visible row is a lost comparison. Keep
+    // database failures distinct, and check the expected tag before quota work.
+    let existing: Option<(Uuid, Option<Uuid>, Option<String>)> = match db {
         DatabasePool::Postgres(pool) => {
+            sqlx::query_as("SELECT org_id,env_id,etag FROM file WHERE file_id=$1 AND active=true")
+                .bind(file_id)
+                .fetch_optional(pool)
+                .await
+                .map_err(fwe)?
+        }
+        DatabasePool::Sqlite(pool) => {
+            sqlx::query_as("SELECT org_id,env_id,etag FROM file WHERE file_id=? AND active=true")
+                .bind(file_id)
+                .fetch_optional(pool)
+                .await
+                .map_err(fwe)?
+        }
+    };
+    let Some((org_id, env_id, current_etag)) = existing else {
+        return Ok(None);
+    };
+    if current_etag
+        .as_deref()
+        .is_some_and(|tag| tag != expected_etag)
+    {
+        return Ok(None);
+    }
+    let transaction = begin_storage_write(db, org_id, env_id, Some(file_id), size).await?;
+    match transaction {
+        StorageWriteTransaction::Postgres(mut tx) => {
             let query = r#"
             UPDATE file SET
                 size = $2,
@@ -497,11 +652,12 @@ async fn update_file_record_if_etag_attempt(
                 .bind(updated_by_run_id)
                 .bind(now)
                 .bind(expected_etag)
-                .fetch_optional(pool)
+                .fetch_optional(&mut *tx)
                 .await
                 .map_err(|e| {
                     FileWriteError::from_sqlx("Failed to conditionally update file record", e)
                 })?;
+            tx.commit().await.map_err(fwe)?;
             let Some(row) = row else {
                 return Ok(None);
             };
@@ -523,7 +679,7 @@ async fn update_file_record_if_etag_attempt(
                 updated_by_user_id: row.try_get("updated_by_user_id").map_err(fwe)?,
             }))
         }
-        DatabasePool::Sqlite(pool) => {
+        StorageWriteTransaction::Sqlite(mut tx) => {
             let query = r#"
             UPDATE file SET
                 size = ?,
@@ -545,11 +701,12 @@ async fn update_file_record_if_etag_attempt(
                 .bind(now)
                 .bind(file_id)
                 .bind(expected_etag)
-                .execute(pool)
+                .execute(&mut *tx)
                 .await
                 .map_err(|e| {
                     FileWriteError::from_sqlx("Failed to conditionally update file record", e)
                 })?;
+            tx.commit().await.map_err(fwe)?;
             if result.rows_affected() == 0 {
                 return Ok(None);
             }
@@ -2043,6 +2200,30 @@ pub async fn get_storage_usage_by_org(db: &DatabasePool, org_id: Uuid) -> Result
 }
 
 #[cfg(test)]
+pub(crate) async fn seed_storage_quota_test_org(db: &DatabasePool, org_id: Uuid) {
+    let DatabasePool::Sqlite(pool) = db else {
+        panic!("SQLite fixture")
+    };
+    sqlx::raw_sql("CREATE TABLE IF NOT EXISTS org (
+        org_id blob PRIMARY KEY, parent_org_id blob, external_id text, lifecycle_state text NOT NULL DEFAULT 'active',
+        name text NOT NULL, slug text NOT NULL, org_type text NOT NULL DEFAULT 'organization', settings text, features text,
+        active integer NOT NULL DEFAULT 1, created_at datetime NOT NULL DEFAULT current_timestamp, created_by_user_id blob NOT NULL,
+        updated_at datetime NOT NULL DEFAULT current_timestamp, updated_by_user_id blob, active_toggle_at datetime, active_toggle_by_user_id blob);
+        CREATE TABLE IF NOT EXISTS plan (plan_uuid blob PRIMARY KEY, features text);
+        CREATE TABLE IF NOT EXISTS org_plan (org_id blob PRIMARY KEY, plan_uuid blob);")
+        .execute(pool).await.unwrap();
+    sqlx::query(
+        "INSERT INTO org (org_id,name,slug,created_by_user_id) VALUES (?,'Storage test',?,?)",
+    )
+    .bind(org_id)
+    .bind(org_id.to_string())
+    .bind(org_id)
+    .execute(pool)
+    .await
+    .unwrap();
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -2098,9 +2279,67 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn siblings_share_atomic_storage_capacity_and_replacements_use_delta() {
+        let db = setup_fk_db().await;
+        let root = Uuid::now_v7();
+        let first = Uuid::now_v7();
+        let second = Uuid::now_v7();
+        for id in [root, first, second] {
+            seed_storage_quota_test_org(&db, id).await;
+        }
+        let DatabasePool::Sqlite(pool) = &db else {
+            unreachable!()
+        };
+        sqlx::query("UPDATE org SET parent_org_id=? WHERE org_id IN (?,?)")
+            .bind(root)
+            .bind(first)
+            .bind(second)
+            .execute(pool)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE org SET features=? WHERE org_id=?")
+            .bind(r#"{"storage_bytes":10}"#)
+            .bind(root)
+            .execute(pool)
+            .await
+            .unwrap();
+        let a = insert_file_record(
+            &db, "a", 6, None, None, "local", "a", first, None, root, None,
+        );
+        let b = insert_file_record(
+            &db, "b", 6, None, None, "local", "b", second, None, root, None,
+        );
+        let (a, b) = tokio::join!(a, b);
+        assert_eq!(usize::from(a.is_ok()) + usize::from(b.is_ok()), 1);
+        let record = a.ok().or_else(|| b.ok()).unwrap();
+        let replacement = update_file_record(&db, record.file_id, 7, None, None, "new", root, None)
+            .await
+            .unwrap();
+        assert_eq!(replacement.size, 7);
+        let other = if record.org_id == first {
+            second
+        } else {
+            first
+        };
+        insert_file_record(
+            &db, "other", 3, None, None, "local", "other", other, None, root, None,
+        )
+        .await
+        .unwrap();
+        assert!(
+            update_file_record(&db, record.file_id, 8, None, None, "rejected", root, None)
+                .await
+                .is_err()
+        );
+        let current = get_file_by_id(&db, record.file_id).await.unwrap();
+        assert_eq!((current.size, current.storage_path.as_str()), (7, "new"));
+    }
+
+    #[tokio::test]
     async fn insert_falls_back_to_null_run_id_when_run_row_is_missing() {
         let db = setup_fk_db().await;
         let org_id = Uuid::now_v7();
+        seed_storage_quota_test_org(&db, org_id).await;
         let env_id = Uuid::now_v7();
         let user_id = Uuid::now_v7();
         let missing_run_id = Uuid::now_v7();
@@ -2129,6 +2368,7 @@ mod tests {
     async fn insert_keeps_run_id_when_run_row_exists() {
         let db = setup_fk_db().await;
         let org_id = Uuid::now_v7();
+        seed_storage_quota_test_org(&db, org_id).await;
         let user_id = Uuid::now_v7();
         let run_id = Uuid::now_v7();
 
@@ -2163,6 +2403,7 @@ mod tests {
     async fn conditional_update_wins_once_then_conflicts() {
         let db = setup_fk_db().await;
         let org_id = Uuid::now_v7();
+        seed_storage_quota_test_org(&db, org_id).await;
         let user_id = Uuid::now_v7();
 
         let inserted = insert_file_record(
@@ -2226,6 +2467,7 @@ mod tests {
     async fn update_falls_back_to_null_run_id_when_run_row_is_missing() {
         let db = setup_fk_db().await;
         let org_id = Uuid::now_v7();
+        seed_storage_quota_test_org(&db, org_id).await;
         let user_id = Uuid::now_v7();
 
         let inserted = insert_file_record(
@@ -2265,6 +2507,7 @@ mod tests {
     async fn non_fk_errors_still_fail() {
         let db = setup_fk_db().await;
         let org_id = Uuid::now_v7();
+        seed_storage_quota_test_org(&db, org_id).await;
         let user_id = Uuid::now_v7();
         let file_id = Uuid::now_v7();
 
@@ -2301,6 +2544,7 @@ mod tests {
     async fn conditional_update_matches_null_etag_exactly_once() {
         let db = setup_fk_db().await;
         let org_id = Uuid::now_v7();
+        seed_storage_quota_test_org(&db, org_id).await;
         let user_id = Uuid::now_v7();
 
         // Multipart uploads and legacy rows store a NULL etag; a CAS whose
@@ -2359,6 +2603,7 @@ mod tests {
     async fn conditional_update_loses_against_inactive_record() {
         let db = setup_fk_db().await;
         let org_id = Uuid::now_v7();
+        seed_storage_quota_test_org(&db, org_id).await;
         let user_id = Uuid::now_v7();
 
         let inserted = insert_file_record(
@@ -2423,6 +2668,7 @@ mod tests {
     async fn conditional_update_falls_back_to_null_run_id_when_run_row_is_missing() {
         let db = setup_fk_db().await;
         let org_id = Uuid::now_v7();
+        seed_storage_quota_test_org(&db, org_id).await;
         let user_id = Uuid::now_v7();
 
         let inserted = insert_file_record(

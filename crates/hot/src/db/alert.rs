@@ -412,6 +412,14 @@ impl AlertDestination {
         db: &crate::db::DatabasePool,
         token: &str,
     ) -> Result<AlertDestination, AlertError> {
+        // Token possession is the authorization for this public verification
+        // flow. Discovery is a trusted alert operation, then the write narrows
+        // to the destination's resolved owner.
+        let lookup = db.with_scope(crate::db::DatabaseScope::Maintenance {
+            operation: crate::db::MaintenanceOperation::Alerts,
+            org_id: None,
+        });
+        let db = &lookup;
         // Find destination by token
         let dest = match db {
             crate::db::DatabasePool::Postgres(pool) => {
@@ -447,6 +455,10 @@ impl AlertDestination {
             ));
         }
 
+        let owner = db.with_scope(crate::db::DatabaseScope::Organization {
+            org_id: dest.org_id,
+        });
+        let db = &owner;
         // Mark as verified, clear token
         let now = Utc::now();
         match db {

@@ -65,7 +65,10 @@ impl Context {
         Ok(row)
     }
 
-    async fn get_by_id_postgres(db: &crate::db::ScopedPgPool, id: &Uuid) -> Result<Context, ContextError> {
+    async fn get_by_id_postgres(
+        db: &crate::db::ScopedPgPool,
+        id: &Uuid,
+    ) -> Result<Context, ContextError> {
         let row = sqlx::query_as::<_, Context>(
             r#"
             SELECT context_id, env_id, project_id, key, value, description, active,
@@ -704,7 +707,10 @@ impl Context {
         Ok(())
     }
 
-    async fn delete_postgres(db: &crate::db::ScopedPgPool, context_id: &Uuid) -> Result<(), ContextError> {
+    async fn delete_postgres(
+        db: &crate::db::ScopedPgPool,
+        context_id: &Uuid,
+    ) -> Result<(), ContextError> {
         sqlx::query(
             r#"
             UPDATE context

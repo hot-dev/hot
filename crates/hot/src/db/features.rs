@@ -363,25 +363,36 @@ impl Features {
             }
         };
         let db = db.with_scope(super::DatabaseScope::Maintenance {
-            operation: super::MaintenanceOperation::Billing, org_id: Some(root_id),
+            operation: super::MaintenanceOperation::Billing,
+            org_id: Some(root_id),
         });
         let db = &db;
         let org_id = &root_id;
 
         // Get plan features from the org's selected plan.
         let plan_features = match OrgPlan::get_by_org_id(db, org_id).await {
-            Ok(subscription) => {
-                if let Ok(plan) = subscription.get_plan(db).await {
-                    plan.features.clone()
-                } else {
-                    None
+            Ok(subscription) => match subscription.get_plan(db).await {
+                Ok(plan) => Some(plan.features.unwrap_or_else(|| serde_json::json!({}))),
+                Err(error) => {
+                    tracing::warn!(%org_id, %error, "Cannot load account entitlement plan");
+                    return Self::resolve(None, None);
                 }
+            },
+            Err(super::subscription::PlanError::NotFound) => None,
+            Err(error) => {
+                tracing::warn!(%org_id, %error, "Cannot load account subscription");
+                return Self::resolve(None, None);
             }
-            Err(_) => None,
         };
 
         // Get org-level overrides
-        let org_features = Self::get_org_features(db, org_id).await;
+        let org_features = match Self::get_org_features(db, org_id).await {
+            Ok(features) => features,
+            Err(error) => {
+                tracing::warn!(%org_id, %error, "Cannot load account entitlement overrides");
+                return Self::resolve(None, None);
+            }
+        };
 
         // If no subscription at all, return unlimited (self-hosted / local dev)
         if plan_features.is_none() && org_features.is_none() {
@@ -410,47 +421,79 @@ impl Features {
             }
         };
         let db = db.with_scope(super::DatabaseScope::Maintenance {
-            operation: super::MaintenanceOperation::Billing, org_id: Some(root_id),
+            operation: super::MaintenanceOperation::Billing,
+            org_id: Some(root_id),
         });
         let db = &db;
         let org_id = &root_id;
 
         let plan_features = match OrgPlan::get_by_org_id(db, org_id).await {
-            Ok(subscription) => {
-                if let Ok(plan) = subscription.get_plan(db).await {
-                    plan.features.clone()
-                } else {
-                    None
+            Ok(subscription) => match subscription.get_plan(db).await {
+                Ok(plan) => Some(plan.features.unwrap_or_else(|| serde_json::json!({}))),
+                Err(error) => {
+                    tracing::warn!(%org_id, %error, "Cannot load account entitlement plan");
+                    return Self::resolve(None, None);
                 }
+            },
+            Err(super::subscription::PlanError::NotFound) => None,
+            Err(error) => {
+                tracing::warn!(%org_id, %error, "Cannot load account subscription");
+                return Self::resolve(None, None);
             }
-            Err(_) => None,
         };
 
-        let org_features = Self::get_org_features(db, org_id).await;
+        let org_features = match Self::get_org_features(db, org_id).await {
+            Ok(features) => features,
+            Err(error) => {
+                tracing::warn!(%org_id, %error, "Cannot load account entitlement overrides");
+                return Self::resolve(None, None);
+            }
+        };
         Self::resolve(plan_features.as_ref(), org_features.as_ref())
     }
 
+    /// Read the owning account's entitlement overrides without exposing its
+    /// consumption or directory. Lookup failures remain errors for API callers.
+    pub async fn account_overrides(
+        db: &DatabasePool,
+        org_id: &Uuid,
+    ) -> Result<Option<JsonValue>, super::subscription::PlanError> {
+        let root_id = super::org::Org::billing_owner_id_for(db, org_id)
+            .await
+            .map_err(|error| {
+                super::subscription::PlanError::InvalidOrganization(error.to_string())
+            })?;
+        let billing = db.with_scope(super::DatabaseScope::Maintenance {
+            operation: super::MaintenanceOperation::Billing,
+            org_id: Some(root_id),
+        });
+        Ok(Self::get_org_features(&billing, &root_id).await?)
+    }
+
     /// Fetch the org.features column value.
-    async fn get_org_features(db: &DatabasePool, org_id: &Uuid) -> Option<JsonValue> {
+    async fn get_org_features(
+        db: &DatabasePool,
+        org_id: &Uuid,
+    ) -> Result<Option<JsonValue>, sqlx::Error> {
         match db {
             DatabasePool::Postgres(pool) => {
-                let row: Option<(Option<JsonValue>,)> =
-                    sqlx::query_as("SELECT features FROM org WHERE org_id = $1")
-                        .bind(org_id)
-                        .fetch_optional(pool)
-                        .await
-                        .ok()?;
-                row.and_then(|(f,)| f)
+                sqlx::query_scalar("SELECT features FROM org WHERE org_id=$1")
+                    .bind(org_id)
+                    .fetch_one(pool)
+                    .await
             }
             DatabasePool::Sqlite(pool) => {
-                let row: Option<(Option<String>,)> =
-                    sqlx::query_as("SELECT features FROM org WHERE org_id = ?")
+                let raw: Option<String> =
+                    sqlx::query_scalar("SELECT features FROM org WHERE org_id=?")
                         .bind(org_id)
-                        .fetch_optional(pool)
-                        .await
-                        .ok()?;
-                row.and_then(|(f,)| f)
-                    .and_then(|s| serde_json::from_str(&s).ok())
+                        .fetch_one(pool)
+                        .await?;
+                raw.map(|value| {
+                    serde_json::from_str(&value).map_err(|_| {
+                        sqlx::Error::Protocol("Malformed account feature overrides".into())
+                    })
+                })
+                .transpose()
             }
         }
     }

@@ -23,7 +23,8 @@ pub struct PgStore {
 
 impl PgStore {
     pub fn new(pool: Arc<DatabasePool>, org_id: Uuid, env_id: Uuid) -> Self {
-        let pool = Arc::new(pool.with_scope(crate::db::DatabaseScope::Environment { org_id, env_id }));
+        let pool =
+            Arc::new(pool.with_scope(crate::db::DatabaseScope::Environment { org_id, env_id }));
         Self {
             pool,
             org_id,
@@ -37,6 +38,91 @@ impl PgStore {
             DatabasePool::Postgres(pg) => Ok(pg),
             _ => Err("PgStore requires a Postgres database pool".to_string()),
         }
+    }
+
+    /// All writes in a batch share one account lock and commit together.
+    async fn write_batch(
+        &self,
+        store_name: &str,
+        entries: Vec<super::StoreWrite>,
+        only_missing: bool,
+    ) -> Result<Vec<StoreEntry>, String> {
+        let (mut tx, mut budget) = super::quota::begin_postgres(
+            &self.pool,
+            self.org_id,
+            self.env_id,
+            super::quota::QuotaKind::Store,
+        )
+        .await?;
+        let mut written = Vec::with_capacity(entries.len());
+        for (key, value, embedding, text_content) in entries {
+            let key_data = &key;
+            let value_data = &value;
+            let embedding_data = embedding
+                .as_ref()
+                .map(|e| Self::embedding_to_pgvector_literal(e));
+            let now = Utc::now();
+            let old:Option<i64>=sqlx::query_scalar("SELECT size FROM store_map_entry WHERE org_id=$1 AND env_id=$2 AND store_name=$3 AND key=$4")
+                .bind(self.org_id).bind(self.env_id).bind(store_name).bind(key_data).fetch_optional(&mut *tx).await.map_err(|e|e.to_string())?;
+            if only_missing && old.is_some() {
+                continue;
+            }
+            let embedding_bytes = embedding
+                .as_ref()
+                .map_or(Some(0), |e| e.len().checked_mul(4))
+                .ok_or("Store embedding is too large")?;
+            let size = super::quota::entry_size(
+                key.to_string().len(),
+                value.to_string().len(),
+                text_content.as_ref().map_or(0, |s| s.len()),
+                embedding_bytes,
+            )?;
+            budget.replace(old.unwrap_or(0), size)?;
+            let query = if only_missing {
+                "INSERT INTO store_map_entry (org_id, env_id, store_name, key, value, embedding, text_content, size, created_at, updated_at)
+             VALUES ($1,$2,$3,$4,$5,$6::vector,$7,$8,$9,$9)
+             ON CONFLICT (org_id,env_id,store_name,key) DO NOTHING
+             RETURNING seq,created_at,updated_at"
+            } else {
+                "INSERT INTO store_map_entry (org_id, env_id, store_name, key, value, embedding, text_content, size, created_at, updated_at)
+             VALUES ($1,$2,$3,$4,$5,$6::vector,$7,$8,$9,$9)
+             ON CONFLICT (org_id,env_id,store_name,key) DO UPDATE SET value=EXCLUDED.value,embedding=EXCLUDED.embedding,text_content=EXCLUDED.text_content,size=EXCLUDED.size,updated_at=EXCLUDED.updated_at
+             RETURNING seq,created_at,updated_at"
+            };
+            let row = sqlx::query(query)
+                .bind(self.org_id)
+                .bind(self.env_id)
+                .bind(store_name)
+                .bind(key_data)
+                .bind(value_data)
+                .bind(&embedding_data)
+                .bind(&text_content)
+                .bind(size)
+                .bind(now)
+                .fetch_optional(&mut *tx)
+                .await
+                .map_err(|e| format!("store write failed: {e}"))?;
+            let Some(row) = row else {
+                continue;
+            };
+            let seq: i64 = row.try_get("seq").map_err(|e| e.to_string())?;
+            let created_at: chrono::DateTime<Utc> =
+                row.try_get("created_at").map_err(|e| e.to_string())?;
+            let updated_at: chrono::DateTime<Utc> =
+                row.try_get("updated_at").map_err(|e| e.to_string())?;
+            written.push(StoreEntry {
+                key,
+                value,
+                seq,
+                embedding,
+                created_at,
+                updated_at,
+            });
+        }
+        tx.commit()
+            .await
+            .map_err(|e| format!("store commit failed: {e}"))?;
+        Ok(written)
     }
 
     fn row_to_entry(row: &sqlx::postgres::PgRow) -> Result<StoreEntry, String> {
@@ -112,8 +198,6 @@ impl PgStore {
             })
             .collect()
     }
-
-
 }
 
 fn cosine_similarity(a: &[f32], b: &[f32]) -> f64 {
@@ -202,66 +286,14 @@ impl Store for PgStore {
         embedding: Option<Vec<f32>>,
         text_content: Option<String>,
     ) -> Result<StoreEntry, String> {
-        let pg = self.pg_pool()?;
-
-        let embedding_literal = embedding
-            .as_ref()
-            .map(|e| Self::embedding_to_pgvector_literal(e));
-
-        let size: i64 = key.to_string().len() as i64
-            + value.to_string().len() as i64
-            + text_content.as_ref().map_or(0, |s| s.len() as i64)
-            + embedding.as_ref().map_or(0, |e| (e.len() * 4) as i64);
-
-        let query_str = if embedding_literal.is_some() {
-            "INSERT INTO store_map_entry (org_id, env_id, store_name, key, value, embedding, text_content, size)
-             VALUES ($1, $2, $3, $4, $5, $6::vector, $7, $8)
-             ON CONFLICT (org_id, env_id, store_name, key) DO UPDATE SET
-                value = EXCLUDED.value,
-                embedding = EXCLUDED.embedding,
-                text_content = EXCLUDED.text_content,
-                size = EXCLUDED.size,
-                updated_at = NOW()
-             RETURNING seq, created_at, updated_at"
-        } else {
-            "INSERT INTO store_map_entry (org_id, env_id, store_name, key, value, embedding, text_content, size)
-             VALUES ($1, $2, $3, $4, $5, NULL, $7, $8)
-             ON CONFLICT (org_id, env_id, store_name, key) DO UPDATE SET
-                value = EXCLUDED.value,
-                embedding = EXCLUDED.embedding,
-                text_content = EXCLUDED.text_content,
-                size = EXCLUDED.size,
-                updated_at = NOW()
-             RETURNING seq, created_at, updated_at"
-        };
-
-        let row = sqlx::query(query_str)
-            .bind(self.org_id)
-            .bind(self.env_id)
-            .bind(store_name)
-            .bind(&key)
-            .bind(&value)
-            .bind(&embedding_literal)
-            .bind(&text_content)
-            .bind(size)
-            .fetch_one(pg)
-            .await
-            .map_err(|e| format!("store put failed: {e}"))?;
-
-        let seq: i64 = row.try_get("seq").map_err(|e| e.to_string())?;
-        let created_at: chrono::DateTime<Utc> =
-            row.try_get("created_at").unwrap_or_else(|_| Utc::now());
-        let updated_at: chrono::DateTime<Utc> =
-            row.try_get("updated_at").unwrap_or_else(|_| Utc::now());
-
-        Ok(StoreEntry {
-            key,
-            value,
-            seq,
-            embedding,
-            created_at,
-            updated_at,
-        })
+        self.write_batch(
+            store_name,
+            vec![(key, value, embedding, text_content)],
+            false,
+        )
+        .await?
+        .pop()
+        .ok_or_else(|| "Store write returned no entry".into())
     }
 
     async fn put_if_missing(
@@ -272,40 +304,14 @@ impl Store for PgStore {
         embedding: Option<Vec<f32>>,
         text_content: Option<String>,
     ) -> Result<bool, String> {
-        let pg = self.pg_pool()?;
-        let embedding_literal = embedding
-            .as_ref()
-            .map(|e| Self::embedding_to_pgvector_literal(e));
-
-        let size: i64 = key.to_string().len() as i64
-            + value.to_string().len() as i64
-            + text_content.as_ref().map_or(0, |s| s.len() as i64)
-            + embedding.as_ref().map_or(0, |e| (e.len() * 4) as i64);
-
-        let query_str = if embedding_literal.is_some() {
-            "INSERT INTO store_map_entry (org_id, env_id, store_name, key, value, embedding, text_content, size)
-             VALUES ($1, $2, $3, $4, $5, $6::vector, $7, $8)
-             ON CONFLICT (org_id, env_id, store_name, key) DO NOTHING"
-        } else {
-            "INSERT INTO store_map_entry (org_id, env_id, store_name, key, value, embedding, text_content, size)
-             VALUES ($1, $2, $3, $4, $5, NULL, $7, $8)
-             ON CONFLICT (org_id, env_id, store_name, key) DO NOTHING"
-        };
-
-        let result = sqlx::query(query_str)
-            .bind(self.org_id)
-            .bind(self.env_id)
-            .bind(store_name)
-            .bind(&key)
-            .bind(&value)
-            .bind(&embedding_literal)
-            .bind(&text_content)
-            .bind(size)
-            .execute(pg)
-            .await
-            .map_err(|e| format!("store put-if-missing failed: {e}"))?;
-
-        Ok(result.rows_affected() == 1)
+        Ok(!self
+            .write_batch(
+                store_name,
+                vec![(key, value, embedding, text_content)],
+                true,
+            )
+            .await?
+            .is_empty())
     }
 
     async fn get(
@@ -587,20 +593,9 @@ impl Store for PgStore {
     async fn put_many(
         &self,
         store_name: &str,
-        entries: Vec<(
-            serde_json::Value,
-            serde_json::Value,
-            Option<Vec<f32>>,
-            Option<String>,
-        )>,
+        entries: Vec<super::StoreWrite>,
     ) -> Result<usize, String> {
-        let mut count = 0usize;
-        for (key, value, embedding, text_content) in entries {
-            self.put(store_name, key, value, embedding, text_content)
-                .await?;
-            count += 1;
-        }
-        Ok(count)
+        Ok(self.write_batch(store_name, entries, false).await?.len())
     }
 
     async fn search(
@@ -620,7 +615,9 @@ impl Store for PgStore {
                 let vec_literal = Self::embedding_to_pgvector_literal(&qe);
 
                 let dimensions = qe.len();
-                if dimensions == 0 { return Err("Semantic search requires a nonempty embedding".into()); }
+                if dimensions == 0 {
+                    return Err("Semantic search requires a nonempty embedding".into());
+                }
                 let statement = format!("SELECT key, value, seq, embedding::text as embedding_text, created_at, updated_at,
                             1 - (embedding::vector({dimensions}) <=> $5::vector({dimensions})) as score
                      FROM store_map_entry
@@ -629,14 +626,14 @@ impl Store for PgStore {
                      ORDER BY embedding::vector({dimensions}) <=> $5::vector({dimensions})
                      LIMIT $4");
                 let rows = sqlx::query(sqlx::AssertSqlSafe(statement.as_str()))
-                .bind(self.org_id)
-                .bind(self.env_id)
-                .bind(store_name)
-                .bind(limit)
-                .bind(&vec_literal)
-                .fetch_all(pg)
-                .await
-                .map_err(|e| format!("semantic search failed: {e}"))?;
+                    .bind(self.org_id)
+                    .bind(self.env_id)
+                    .bind(store_name)
+                    .bind(limit)
+                    .bind(&vec_literal)
+                    .fetch_all(pg)
+                    .await
+                    .map_err(|e| format!("semantic search failed: {e}"))?;
 
                 let mut results = Vec::new();
                 for r in &rows {
@@ -687,7 +684,9 @@ impl Store for PgStore {
                 if let Some(qe) = &query_embedding {
                     let vec_literal = Self::embedding_to_pgvector_literal(qe);
                     let dimensions = qe.len();
-                    if dimensions == 0 { return Err("Semantic search requires a nonempty embedding".into()); }
+                    if dimensions == 0 {
+                        return Err("Semantic search requires a nonempty embedding".into());
+                    }
                     let statement = format!("SELECT key, value, seq, embedding::text as embedding_text, created_at, updated_at,
                                 1 - (embedding::vector({dimensions}) <=> $5::vector({dimensions})) as score
                          FROM store_map_entry
@@ -696,14 +695,14 @@ impl Store for PgStore {
                          ORDER BY embedding::vector({dimensions}) <=> $5::vector({dimensions})
                          LIMIT $4");
                     let sem_rows = sqlx::query(sqlx::AssertSqlSafe(statement.as_str()))
-                    .bind(self.org_id)
-                    .bind(self.env_id)
-                    .bind(store_name)
-                    .bind(limit)
-                    .bind(&vec_literal)
-                    .fetch_all(pg)
-                    .await
-                    .map_err(|e| format!("hybrid semantic search failed: {e}"))?;
+                        .bind(self.org_id)
+                        .bind(self.env_id)
+                        .bind(store_name)
+                        .bind(limit)
+                        .bind(&vec_literal)
+                        .fetch_all(pg)
+                        .await
+                        .map_err(|e| format!("hybrid semantic search failed: {e}"))?;
 
                     for r in &sem_rows {
                         let score: f64 = r.try_get("score").unwrap_or(0.0);
@@ -954,6 +953,9 @@ mod tests {
         let conf = crate::val!({
             "uri": uri,
             "schema": schema,
+            // This concurrency fixture uses the dedicated admin test URI.
+            // Production role qualification is exercised by postgres_rls.
+            "rls": { "enforce": false },
         });
         crate::db::run_migrations(&conf)
             .await

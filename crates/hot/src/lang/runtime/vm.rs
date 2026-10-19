@@ -387,6 +387,8 @@ pub struct VirtualMachine {
     emitter: Option<Arc<dyn crate::lang::emitter::EngineEventEmitter>>,
     /// Execution context for emitter events
     execution_context: Option<crate::lang::event::ExecutionContext>,
+    /// Last durable admission on this VM; retries also deduplicate in SQL.
+    admitted_execution: Option<(uuid::Uuid, uuid::Uuid, uuid::Uuid)>,
     /// Database pool for file storage and other operations
     database_pool: Option<Arc<crate::db::DatabasePool>>,
     /// File storage backend for file operations
@@ -543,6 +545,7 @@ impl VirtualMachine {
             current_namespace: "::hot::main".to_string(),
             emitter: None,
             execution_context: None,
+            admitted_execution: None,
             database_pool: None,
             file_storage: None,
             store: None,
@@ -664,9 +667,22 @@ impl VirtualMachine {
         self.file_storage = Some(storage);
     }
 
-    /// Get the database pool
+    /// Carry canonical execution authority across blocking/syscall task boundaries.
     pub fn get_database_pool(&self) -> Option<Arc<crate::db::DatabasePool>> {
-        self.database_pool.clone()
+        let pool = self.database_pool.as_ref()?;
+        match self
+            .execution_context
+            .as_ref()
+            .and_then(|ctx| Some((ctx.org_id?, ctx.env_id?)))
+        {
+            Some((org_id, env_id)) => Some(Arc::new(
+                pool.with_scope(crate::db::DatabaseScope::Environment { org_id, env_id }),
+            )),
+            // A coordinator/bootstrap handle must never reach user syscalls
+            // when canonical execution authority is incomplete.
+            None if matches!(pool.as_ref(), crate::db::DatabasePool::Postgres(_)) => None,
+            None => Some(pool.clone()),
+        }
     }
 
     /// Get the file storage backend
@@ -921,6 +937,7 @@ impl VirtualMachine {
     /// Execute a range of instructions (for incremental REPL execution)
     /// This executes instructions from `start` (inclusive) to `end` (exclusive)
     pub fn execute_instruction_range(&mut self, start: usize, end: usize) -> VmResult<Val> {
+        self.admit_execution()?;
         // Set instruction pointer to start
         self.instruction_pointer = start;
 
@@ -1178,6 +1195,7 @@ impl VirtualMachine {
 
     /// Execute a list of additional instructions on the already-initialized VM (for cached bytecode + eval code)
     pub fn execute_instruction_list(&mut self, instructions: &[Instruction]) -> VmResult<Val> {
+        self.admit_execution()?;
         let mut last_result_register = 0;
 
         for instruction in instructions.iter() {
@@ -1198,7 +1216,50 @@ impl VirtualMachine {
         }
     }
 
+    /// Admit a host execution before any customer bytecode or run:start side
+    /// effect. VM hosts execute on blocking threads, like async storage syscalls.
+    /// The durable ledger makes independent VM instances/retries idempotent.
+    pub(crate) fn admit_execution(&mut self) -> VmResult<()> {
+        let Some(pool) = self.database_pool.as_ref() else {
+            return Ok(());
+        };
+        let Some(context) = self.execution_context.as_ref() else {
+            return if matches!(pool.as_ref(), crate::db::DatabasePool::Postgres(_)) {
+                Err(VmError::runtime(
+                    "[run-admission] Missing canonical execution scope".into(),
+                ))
+            } else {
+                Ok(())
+            };
+        };
+        let (Some(org_id), Some(env_id)) = (context.org_id, context.env_id) else {
+            return if matches!(pool.as_ref(), crate::db::DatabasePool::Postgres(_)) {
+                Err(VmError::runtime(
+                    "[run-admission] Missing canonical org/environment".into(),
+                ))
+            } else {
+                Ok(())
+            };
+        };
+        let run_id = context.run_id;
+        if self.admitted_execution == Some((org_id, env_id, run_id)) {
+            return Ok(());
+        }
+        let db = pool.with_scope(crate::db::DatabaseScope::Environment { org_id, env_id });
+        let handle = tokio::runtime::Handle::try_current().map_err(|_| {
+            VmError::runtime("[run-admission] Database execution requires a runtime".into())
+        })?;
+        handle
+            .block_on(crate::db::Run::admit_execution(
+                &db, &org_id, &env_id, &run_id,
+            ))
+            .map_err(|error| VmError::runtime(format!("[run-admission] {error}")))?;
+        self.admitted_execution = Some((org_id, env_id, run_id));
+        Ok(())
+    }
+
     pub fn execute(&mut self) -> VmResult<Val> {
+        self.admit_execution()?;
         let mut last_result_register = 0;
         let mut instruction_count = 0;
         tracing::trace!(

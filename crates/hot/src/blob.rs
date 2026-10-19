@@ -404,11 +404,24 @@ impl BlobStore {
         &self.db
     }
 
+    fn scoped_db(&self, scope: &BlobScope) -> DatabasePool {
+        let authority = scope
+            .env_id
+            .map(|env_id| crate::db::DatabaseScope::Environment {
+                org_id: scope.org_id,
+                env_id,
+            })
+            .unwrap_or(crate::db::DatabaseScope::Organization {
+                org_id: scope.org_id,
+            });
+        self.db.with_scope(authority)
+    }
+
     /// FileStorageContext for internal blob byte IO. user_id is nil because
     /// blob bytes never create user-facing file rows.
     fn storage_ctx(&self, scope: &BlobScope) -> FileStorageContext {
         FileStorageContext {
-            db: self.db.clone(),
+            db: Arc::new(self.scoped_db(scope)),
             org_id: scope.org_id,
             env_id: scope.env_id,
             user_id: Uuid::nil(),
@@ -548,6 +561,7 @@ impl BlobStore {
         path: &str,
         stats: &mut SpillStats,
     ) -> Result<Val, BlobError> {
+        let db = self.scoped_db(scope);
         let content_type = match encoding {
             ENCODING_STRING => "text/plain",
             _ => "application/octet-stream",
@@ -567,7 +581,7 @@ impl BlobStore {
         );
 
         let blob_ref = blob_db::insert_ref(
-            &self.db,
+            &db,
             object.blob_object_id,
             scope.org_id,
             scope.env_id,
@@ -625,21 +639,17 @@ impl BlobStore {
         content_type: Option<&str>,
         scope: &BlobScope,
     ) -> Result<BlobObjectRecord, BlobError> {
+        let db = self.scoped_db(scope);
         let hash = blake3::hash(bytes).to_hex().to_string();
 
         // Dedupe hit: touch last_referenced_at BEFORE the caller inserts a ref
         // so GC's grace window cannot race a concurrent delete.
-        if let Some(existing) = blob_db::get_object_by_hash(
-            &self.db,
-            scope.org_id,
-            scope.env_id,
-            HASH_ALG_BLAKE3,
-            &hash,
-        )
-        .await?
+        if let Some(existing) =
+            blob_db::get_object_by_hash(&db, scope.org_id, scope.env_id, HASH_ALG_BLAKE3, &hash)
+                .await?
             && existing.status == object_status::AVAILABLE
         {
-            blob_db::touch_object(&self.db, existing.blob_object_id).await?;
+            blob_db::touch_object(&db, existing.blob_object_id).await?;
             return Ok(existing);
         }
 
@@ -649,7 +659,7 @@ impl BlobStore {
         // A stale pending row from a crashed writer may exist; reuse it and
         // retry the storage write rather than failing on the unique index.
         let pending = match blob_db::get_object_by_hash(
-            &self.db,
+            &db,
             scope.org_id,
             scope.env_id,
             HASH_ALG_BLAKE3,
@@ -660,7 +670,7 @@ impl BlobStore {
             Some(existing) => existing,
             None => {
                 blob_db::insert_pending_object(
-                    &self.db,
+                    &db,
                     scope.org_id,
                     scope.env_id,
                     HASH_ALG_BLAKE3,
@@ -679,9 +689,8 @@ impl BlobStore {
             .await
             .map_err(BlobError::Storage)?;
 
-        blob_db::set_object_status(&self.db, pending.blob_object_id, object_status::AVAILABLE)
-            .await?;
-        blob_db::touch_object(&self.db, pending.blob_object_id).await?;
+        blob_db::set_object_status(&db, pending.blob_object_id, object_status::AVAILABLE).await?;
+        blob_db::touch_object(&db, pending.blob_object_id).await?;
 
         Ok(BlobObjectRecord {
             status: object_status::AVAILABLE.to_string(),
@@ -696,7 +705,8 @@ impl BlobStore {
         blob_ref_id: Uuid,
         scope: &BlobScope,
     ) -> Result<(Vec<u8>, BlobObjectRecord), BlobError> {
-        let blob_ref = blob_db::get_ref_by_id(&self.db, blob_ref_id)
+        let db = self.scoped_db(scope);
+        let blob_ref = blob_db::get_ref_by_id(&db, blob_ref_id)
             .await?
             .ok_or(BlobError::RefNotFound(blob_ref_id))?;
         if !blob_ref.active {
@@ -713,7 +723,7 @@ impl BlobStore {
             return Err(BlobError::Unauthorized);
         }
 
-        let object = blob_db::get_object_by_id(&self.db, blob_ref.blob_object_id)
+        let object = blob_db::get_object_by_id(&db, blob_ref.blob_object_id)
             .await?
             .ok_or(BlobError::ObjectNotAvailable(blob_ref.blob_object_id))?;
         if object.status != object_status::AVAILABLE {
@@ -836,27 +846,27 @@ impl BlobStore {
         grace_cutoff: chrono::DateTime<chrono::Utc>,
         limit: i64,
     ) -> Result<usize, BlobError> {
-        let candidates = blob_db::gc_candidate_objects(&self.db, grace_cutoff, limit).await?;
+        let db = self.db.with_scope(crate::db::DatabaseScope::Maintenance {
+            operation: crate::db::MaintenanceOperation::BlobGc,
+            org_id: None,
+        });
+        let candidates = blob_db::gc_candidate_objects(&db, grace_cutoff, limit).await?;
         let mut deleted = 0;
         for object in candidates {
             // Re-check active refs right before delete: a dedupe hit may have
             // touched + ref'd the object after candidate selection.
-            if blob_db::count_active_refs(&self.db, object.blob_object_id).await? > 0 {
+            if blob_db::count_active_refs(&db, object.blob_object_id).await? > 0 {
                 continue;
             }
-            let refreshed = blob_db::get_object_by_id(&self.db, object.blob_object_id).await?;
+            let refreshed = blob_db::get_object_by_id(&db, object.blob_object_id).await?;
             if let Some(refreshed) = &refreshed
                 && refreshed.last_referenced_at >= grace_cutoff
             {
                 continue;
             }
 
-            blob_db::set_object_status(
-                &self.db,
-                object.blob_object_id,
-                object_status::DELETE_PENDING,
-            )
-            .await?;
+            blob_db::set_object_status(&db, object.blob_object_id, object_status::DELETE_PENDING)
+                .await?;
 
             let object_scope = BlobScope {
                 org_id: object.org_id,
@@ -874,8 +884,7 @@ impl BlobStore {
                 continue;
             }
 
-            blob_db::set_object_status(&self.db, object.blob_object_id, object_status::DELETED)
-                .await?;
+            blob_db::set_object_status(&db, object.blob_object_id, object_status::DELETED).await?;
             deleted += 1;
         }
         Ok(deleted)

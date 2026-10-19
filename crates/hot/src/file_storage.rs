@@ -137,6 +137,11 @@ impl FileStorageContext {
             .user_id
             .ok_or_else(|| "No user_id in execution context".to_string())?;
 
+        let scope = exec_ctx
+            .env_id
+            .map(|env_id| crate::db::DatabaseScope::Environment { org_id, env_id })
+            .unwrap_or(crate::db::DatabaseScope::Organization { org_id });
+        let db = std::sync::Arc::new(db.with_scope(scope));
         Ok(Self {
             db,
             org_id,
@@ -160,6 +165,10 @@ impl FileStorageContext {
         env_id: Option<Uuid>,
         user_id: Uuid,
     ) -> Self {
+        let scope = env_id
+            .map(|env_id| crate::db::DatabaseScope::Environment { org_id, env_id })
+            .unwrap_or(crate::db::DatabaseScope::Organization { org_id });
+        let db = std::sync::Arc::new(db.with_scope(scope));
         Self {
             db,
             org_id,
@@ -404,7 +413,6 @@ pub trait FileStorage: Send + Sync {
 /// Quota checks shared by the conditional write path (mirrors write_file).
 async fn check_write_quota(ctx: &FileStorageContext, content_len: i64) -> Result<(), String> {
     use crate::db::Features;
-    use crate::db::file::get_storage_usage_by_org;
 
     let features = Features::resolve_for_org(&ctx.db, &ctx.org_id).await;
     let max_file_bytes = ctx.effective_file_max_bytes(features.file_upload_max_bytes());
@@ -414,18 +422,8 @@ async fn check_write_quota(ctx: &FileStorageContext, content_len: i64) -> Result
             content_len, max_file_bytes
         ));
     }
-    let storage_limit = features.storage_bytes();
-    if storage_limit >= 0 {
-        let current_usage = get_storage_usage_by_org(&ctx.db, ctx.org_id)
-            .await
-            .unwrap_or(0);
-        if current_usage + content_len > storage_limit {
-            return Err(format!(
-                "Storage quota exceeded: current usage {} + file {} > limit {}",
-                current_usage, content_len, storage_limit
-            ));
-        }
-    }
+    // Account storage is checked atomically with the metadata commit, using
+    // the replacement delta. A pre-upload total cannot reserve sibling capacity.
     Ok(())
 }
 
@@ -704,123 +702,25 @@ impl FileStorage for LocalFileStorage {
         content_type: Option<&str>,
         ctx: &FileStorageContext,
     ) -> Result<FileMetadata, String> {
-        // Step 1: Normalize and validate path
+        // Each attempt stages a unique blob; quota rejection or a concurrent
+        // writer can never modify bytes referenced by the current metadata.
         let normalized_path = normalize_path(path)?;
         validate_path_security(&normalized_path)?;
-
-        // Check storage quota before writing
-        {
-            use crate::db::Features;
-            use crate::db::file::get_storage_usage_by_org;
-
-            let features = Features::resolve_for_org(&ctx.db, &ctx.org_id).await;
-            let max_file_bytes = ctx.effective_file_max_bytes(features.file_upload_max_bytes());
-            let content_size = content.len() as i64;
-
-            if content_size > max_file_bytes {
-                return Err(format!(
-                    "File size {} bytes exceeds maximum allowed {} bytes",
-                    content_size, max_file_bytes
-                ));
-            }
-
-            let storage_limit = features.storage_bytes();
-            if storage_limit >= 0 {
-                let current_usage = get_storage_usage_by_org(&ctx.db, ctx.org_id)
-                    .await
-                    .unwrap_or(0);
-                if current_usage + content_size > storage_limit {
-                    return Err(format!(
-                        "Storage quota exceeded: current usage {} + file {} > limit {}",
-                        current_usage, content_size, storage_limit
-                    ));
-                }
-            }
-        }
-
-        // Step 2: Compute etag (MD5)
-        let etag = compute_md5(content);
-
-        // Step 3: Detect content type if not provided
-        let content_type_final = content_type
-            .map(|s| s.to_string())
-            .or_else(|| detect_content_type(&normalized_path, content));
-
-        // Step 4: Write to filesystem
-        let full_path = self.full_path(&normalized_path, ctx);
-
-        // Create parent directories if they don't exist
-        if let Some(parent) = full_path.parent() {
-            tokio::fs::create_dir_all(parent)
+        for _ in 0..8 {
+            let existing = get_file_by_path(&ctx.db, &normalized_path, ctx.org_id, ctx.env_id)
                 .await
-                .map_err(|e| format!("Failed to create parent directories: {}", e))?;
+                .ok();
+            let expected = existing
+                .as_ref()
+                .map(|row| row.etag.as_deref().unwrap_or(""));
+            if let Some(meta) = self
+                .write_file_if(&normalized_path, content, content_type, expected, ctx)
+                .await?
+            {
+                return Ok(meta);
+            }
         }
-
-        tokio::fs::write(&full_path, content)
-            .await
-            .map_err(|e| format!("Failed to write file to storage: {}", e))?;
-
-        let storage_path = full_path.to_string_lossy().to_string();
-
-        // Step 5: Create or update database record
-        if let Err(e) = ctx.ensure_run_row().await {
-            tracing::debug!(
-                run_id = ?ctx.run_id,
-                path = %normalized_path,
-                "Local file write: could not ensure run row before metadata insert: {}",
-                e
-            );
-        }
-        let file_metadata =
-            match get_file_by_path(&ctx.db, &normalized_path, ctx.org_id, ctx.env_id).await {
-                Ok(existing) => {
-                    // File exists, update it
-                    let updated = update_file_record(
-                        &ctx.db,
-                        existing.file_id,
-                        content.len() as i64,
-                        Some(&etag),
-                        content_type_final.as_deref(),
-                        &storage_path,
-                        ctx.user_id,
-                        ctx.run_id,
-                    )
-                    .await?;
-
-                    // If the record previously pointed at a conditional-write
-                    // staged blob, that blob is now unreachable (best-effort).
-                    if existing.storage_backend == "local"
-                        && !existing.storage_path.is_empty()
-                        && existing.storage_path != storage_path
-                    {
-                        let _ = tokio::fs::remove_file(&existing.storage_path).await;
-                    }
-
-                    FileMetadata::from_file_record(updated)
-                }
-                Err(_) => {
-                    // New file, insert record
-                    let inserted = insert_file_record(
-                        &ctx.db,
-                        &normalized_path,
-                        content.len() as i64,
-                        Some(&etag),
-                        content_type_final.as_deref(),
-                        "local",
-                        &storage_path,
-                        ctx.org_id,
-                        ctx.env_id, // Added env_id for security
-                        ctx.user_id,
-                        ctx.run_id,
-                    )
-                    .await?;
-
-                    FileMetadata::from_file_record(inserted)
-                }
-            };
-
-        tracing::debug!("Wrote file {} to local storage", normalized_path);
-        Ok(file_metadata)
+        Err("File changed repeatedly during upload; retry the write".into())
     }
 
     async fn write_file_if(
@@ -1099,7 +999,7 @@ impl FileStorage for LocalFileStorage {
         let normalized_path = normalize_path(path)?;
         validate_path_security(&normalized_path)?;
 
-        let full_path = self.full_path(&normalized_path, ctx);
+        let full_path = self.full_path(&cas_blob_rel_path(&normalized_path), ctx);
         if let Some(parent) = full_path.parent() {
             tokio::fs::create_dir_all(parent)
                 .await
@@ -1153,47 +1053,58 @@ impl FileStorage for LocalFileStorage {
                 e
             );
         }
-        let file_metadata =
-            match get_file_by_path(&ctx.db, &normalized_path, ctx.org_id, ctx.env_id).await {
-                Ok(existing) => {
-                    let updated = update_file_record(
-                        &ctx.db,
-                        existing.file_id,
-                        actual_size,
-                        Some(&etag),
-                        content_type_final.as_deref(),
-                        &storage_path,
-                        ctx.user_id,
-                        ctx.run_id,
-                    )
-                    .await?;
-                    // Superseded conditional-write blob cleanup (best-effort).
-                    if existing.storage_backend == "local"
-                        && !existing.storage_path.is_empty()
-                        && existing.storage_path != storage_path
-                    {
-                        let _ = tokio::fs::remove_file(&existing.storage_path).await;
+        let metadata_result: Result<FileMetadata, String> = async {
+            Ok(
+                match get_file_by_path(&ctx.db, &normalized_path, ctx.org_id, ctx.env_id).await {
+                    Ok(existing) => {
+                        let updated = update_file_record(
+                            &ctx.db,
+                            existing.file_id,
+                            actual_size,
+                            Some(&etag),
+                            content_type_final.as_deref(),
+                            &storage_path,
+                            ctx.user_id,
+                            ctx.run_id,
+                        )
+                        .await?;
+                        // Superseded conditional-write blob cleanup (best-effort).
+                        if existing.storage_backend == "local"
+                            && !existing.storage_path.is_empty()
+                            && existing.storage_path != storage_path
+                        {
+                            let _ = tokio::fs::remove_file(&existing.storage_path).await;
+                        }
+                        FileMetadata::from_file_record(updated)
                     }
-                    FileMetadata::from_file_record(updated)
-                }
-                Err(_) => {
-                    let inserted = insert_file_record(
-                        &ctx.db,
-                        &normalized_path,
-                        actual_size,
-                        Some(&etag),
-                        content_type_final.as_deref(),
-                        "local",
-                        &storage_path,
-                        ctx.org_id,
-                        ctx.env_id,
-                        ctx.user_id,
-                        ctx.run_id,
-                    )
-                    .await?;
-                    FileMetadata::from_file_record(inserted)
-                }
-            };
+                    Err(_) => {
+                        let inserted = insert_file_record(
+                            &ctx.db,
+                            &normalized_path,
+                            actual_size,
+                            Some(&etag),
+                            content_type_final.as_deref(),
+                            "local",
+                            &storage_path,
+                            ctx.org_id,
+                            ctx.env_id,
+                            ctx.user_id,
+                            ctx.run_id,
+                        )
+                        .await?;
+                        FileMetadata::from_file_record(inserted)
+                    }
+                },
+            )
+        }
+        .await;
+        let file_metadata = match metadata_result {
+            Ok(metadata) => metadata,
+            Err(error) => {
+                let _ = tokio::fs::remove_file(&full_path).await;
+                return Err(error);
+            }
+        };
 
         tracing::debug!(
             "Completed multipart upload for {} to local storage",
@@ -1415,6 +1326,21 @@ pub mod s3 {
         }
     }
 
+    fn multipart_staged_path(path: &str, backend_id: &str) -> Result<(String, String), String> {
+        let encoded = backend_id.strip_prefix("hot-stage-v1:").ok_or_else(|| {
+            "Legacy multipart upload must be restarted before completion".to_string()
+        })?;
+        let (nonce, upload_id) = encoded
+            .split_once(':')
+            .ok_or_else(|| "Invalid multipart upload token".to_string())?;
+        let nonce =
+            Uuid::parse_str(nonce).map_err(|_| "Invalid multipart upload nonce".to_string())?;
+        Ok((
+            format!("{}.cas-{}", path, nonce.simple()),
+            upload_id.to_string(),
+        ))
+    }
+
     #[async_trait]
     impl FileStorage for S3FileStorage {
         async fn write_file(
@@ -1424,162 +1350,25 @@ pub mod s3 {
             content_type: Option<&str>,
             ctx: &FileStorageContext,
         ) -> Result<FileMetadata, String> {
-            // Step 1: Normalize and validate path
+            // Each attempt stages a unique blob; quota rejection or a concurrent
+            // writer can never modify bytes referenced by the current metadata.
             let normalized_path = normalize_path(path)?;
             validate_path_security(&normalized_path)?;
-
-            // Check storage quota before writing
-            {
-                use crate::db::Features;
-                use crate::db::file::get_storage_usage_by_org;
-
-                let features = Features::resolve_for_org(&ctx.db, &ctx.org_id).await;
-                let max_file_bytes = ctx.effective_file_max_bytes(features.file_upload_max_bytes());
-                let content_size = content.len() as i64;
-
-                if content_size > max_file_bytes {
-                    return Err(format!(
-                        "File size {} bytes exceeds maximum allowed {} bytes",
-                        content_size, max_file_bytes
-                    ));
-                }
-
-                let storage_limit = features.storage_bytes();
-                if storage_limit >= 0 {
-                    let current_usage = get_storage_usage_by_org(&ctx.db, ctx.org_id)
-                        .await
-                        .unwrap_or(0);
-                    if current_usage + content_size > storage_limit {
-                        return Err(format!(
-                            "Storage quota exceeded: current usage {} + file {} > limit {}",
-                            current_usage, content_size, storage_limit
-                        ));
-                    }
+            for _ in 0..8 {
+                let existing = get_file_by_path(&ctx.db, &normalized_path, ctx.org_id, ctx.env_id)
+                    .await
+                    .ok();
+                let expected = existing
+                    .as_ref()
+                    .map(|row| row.etag.as_deref().unwrap_or(""));
+                if let Some(meta) = self
+                    .write_file_if(&normalized_path, content, content_type, expected, ctx)
+                    .await?
+                {
+                    return Ok(meta);
                 }
             }
-
-            // Step 2: Compute etag (MD5)
-            let etag = compute_md5(content);
-
-            // Step 3: Detect content type if not provided
-            let content_type_final = content_type
-                .map(|s| s.to_string())
-                .or_else(|| detect_content_type(&normalized_path, content));
-
-            // Step 4: Write to S3
-            let key = self.s3_key(&normalized_path, ctx);
-            let byte_stream = ByteStream::from(content.to_vec());
-
-            let mut put_request = self
-                .client
-                .put_object()
-                .bucket(&self.bucket)
-                .key(&key)
-                .body(byte_stream);
-
-            if let Some(ct) = &content_type_final {
-                put_request = put_request.content_type(ct);
-            }
-
-            let result = put_request.send().await;
-
-            let response = match result {
-                Ok(resp) => resp,
-                Err(e) => {
-                    // Extract detailed error information
-                    let error_msg = format!(
-                        "Failed to upload file to S3 (bucket: {}, key: {}, path: {}): {}",
-                        self.bucket, key, normalized_path, e
-                    );
-                    tracing::error!("{}", error_msg);
-
-                    // Log additional context if available
-                    if let Some(raw) = e.raw_response() {
-                        tracing::error!(
-                            "S3 file upload error details - status: {:?}, headers: {:?}",
-                            raw.status(),
-                            raw.headers()
-                        );
-                    }
-
-                    return Err(error_msg);
-                }
-            };
-
-            let s3_etag = response
-                .e_tag()
-                .unwrap_or(&etag)
-                .trim_matches('"')
-                .to_string();
-            let storage_path = format!("s3://{}/{}", self.bucket, key);
-
-            // Step 5: Create or update database record
-            if let Err(e) = ctx.ensure_run_row().await {
-                tracing::debug!(
-                    run_id = ?ctx.run_id,
-                    path = %normalized_path,
-                    "S3 file write: could not ensure run row before metadata insert: {}",
-                    e
-                );
-            }
-            let file_metadata =
-                match get_file_by_path(&ctx.db, &normalized_path, ctx.org_id, ctx.env_id).await {
-                    Ok(existing) => {
-                        // File exists, update it
-                        let updated = update_file_record(
-                            &ctx.db,
-                            existing.file_id,
-                            content.len() as i64,
-                            Some(&s3_etag),
-                            content_type_final.as_deref(),
-                            &storage_path,
-                            ctx.user_id,
-                            ctx.run_id,
-                        )
-                        .await?;
-
-                        // If the record previously pointed at a conditional-write
-                        // staged blob, that blob is now unreachable (best-effort).
-                        if existing.storage_backend == "s3"
-                            && !existing.storage_path.is_empty()
-                            && existing.storage_path != storage_path
-                            && let Some((old_bucket, old_key)) =
-                                self.parse_storage_path(&existing.storage_path)
-                        {
-                            let _ = self
-                                .client
-                                .delete_object()
-                                .bucket(&old_bucket)
-                                .key(&old_key)
-                                .send()
-                                .await;
-                        }
-
-                        FileMetadata::from_file_record(updated)
-                    }
-                    Err(_) => {
-                        // New file, insert record
-                        let inserted = insert_file_record(
-                            &ctx.db,
-                            &normalized_path,
-                            content.len() as i64,
-                            Some(&s3_etag),
-                            content_type_final.as_deref(),
-                            "s3",
-                            &storage_path,
-                            ctx.org_id,
-                            ctx.env_id, // Added env_id for security
-                            ctx.user_id,
-                            ctx.run_id,
-                        )
-                        .await?;
-
-                        FileMetadata::from_file_record(inserted)
-                    }
-                };
-
-            tracing::debug!("Wrote file {} to S3: {}", normalized_path, storage_path);
-            Ok(file_metadata)
+            Err("File changed repeatedly during upload; retry the write".into())
         }
 
         async fn write_file_if(
@@ -1913,7 +1702,8 @@ pub mod s3 {
         ) -> Result<String, String> {
             let normalized_path = normalize_path(path)?;
             validate_path_security(&normalized_path)?;
-            let key = self.s3_key(&normalized_path, ctx);
+            let nonce = Uuid::new_v4();
+            let key = self.s3_key(&format!("{}.cas-{}", normalized_path, nonce.simple()), ctx);
 
             let mut req = self
                 .client
@@ -1931,7 +1721,7 @@ pub mod s3 {
                 .map_err(|e| format!("Failed to initiate multipart upload: {}", e))?;
 
             resp.upload_id()
-                .map(|id| id.to_string())
+                .map(|id| format!("hot-stage-v1:{}:{}", nonce, id))
                 .ok_or_else(|| "S3 did not return an upload ID".to_string())
         }
 
@@ -1945,14 +1735,19 @@ pub mod s3 {
         ) -> Result<String, String> {
             validate_part_number(part_number)?;
             let normalized_path = normalize_path(path)?;
-            let key = self.s3_key(&normalized_path, ctx);
+            let (staged_path, upload_id) = if backend_upload_id.starts_with("hot-stage-v1:") {
+                multipart_staged_path(&normalized_path, backend_upload_id)?
+            } else {
+                (normalized_path.clone(), backend_upload_id.to_string())
+            };
+            let key = self.s3_key(&staged_path, ctx);
 
             let resp = self
                 .client
                 .upload_part()
                 .bucket(&self.bucket)
                 .key(&key)
-                .upload_id(backend_upload_id)
+                .upload_id(&upload_id)
                 .part_number(part_number)
                 .body(ByteStream::from(content.to_vec()))
                 .send()
@@ -1975,7 +1770,9 @@ pub mod s3 {
         ) -> Result<FileMetadata, String> {
             let normalized_path = normalize_path(path)?;
             validate_path_security(&normalized_path)?;
-            let key = self.s3_key(&normalized_path, ctx);
+            let (staged_path, upload_id) =
+                multipart_staged_path(&normalized_path, backend_upload_id)?;
+            let key = self.s3_key(&staged_path, ctx);
 
             let completed_parts: Vec<CompletedPart> = parts
                 .iter()
@@ -1995,7 +1792,7 @@ pub mod s3 {
                 .complete_multipart_upload()
                 .bucket(&self.bucket)
                 .key(&key)
-                .upload_id(backend_upload_id)
+                .upload_id(&upload_id)
                 .multipart_upload(completed_upload)
                 .send()
                 .await
@@ -2015,55 +1812,73 @@ pub mod s3 {
                     e
                 );
             }
-            let file_metadata =
-                match get_file_by_path(&ctx.db, &normalized_path, ctx.org_id, ctx.env_id).await {
-                    Ok(existing) => {
-                        let updated = update_file_record(
-                            &ctx.db,
-                            existing.file_id,
-                            total_size,
-                            None,
-                            content_type_final.as_deref(),
-                            &storage_path,
-                            ctx.user_id,
-                            ctx.run_id,
-                        )
-                        .await?;
-                        // Superseded conditional-write blob cleanup (best-effort).
-                        if existing.storage_backend == "s3"
-                            && !existing.storage_path.is_empty()
-                            && existing.storage_path != storage_path
-                            && let Some((old_bucket, old_key)) =
-                                self.parse_storage_path(&existing.storage_path)
-                        {
-                            let _ = self
-                                .client
-                                .delete_object()
-                                .bucket(&old_bucket)
-                                .key(&old_key)
-                                .send()
-                                .await;
+            let metadata_result: Result<FileMetadata, String> = async {
+                Ok(
+                    match get_file_by_path(&ctx.db, &normalized_path, ctx.org_id, ctx.env_id).await
+                    {
+                        Ok(existing) => {
+                            let updated = update_file_record(
+                                &ctx.db,
+                                existing.file_id,
+                                total_size,
+                                None,
+                                content_type_final.as_deref(),
+                                &storage_path,
+                                ctx.user_id,
+                                ctx.run_id,
+                            )
+                            .await?;
+                            // Superseded conditional-write blob cleanup (best-effort).
+                            if existing.storage_backend == "s3"
+                                && !existing.storage_path.is_empty()
+                                && existing.storage_path != storage_path
+                                && let Some((old_bucket, old_key)) =
+                                    self.parse_storage_path(&existing.storage_path)
+                            {
+                                let _ = self
+                                    .client
+                                    .delete_object()
+                                    .bucket(&old_bucket)
+                                    .key(&old_key)
+                                    .send()
+                                    .await;
+                            }
+                            FileMetadata::from_file_record(updated)
                         }
-                        FileMetadata::from_file_record(updated)
-                    }
-                    Err(_) => {
-                        let inserted = insert_file_record(
-                            &ctx.db,
-                            &normalized_path,
-                            total_size,
-                            None,
-                            content_type_final.as_deref(),
-                            "s3",
-                            &storage_path,
-                            ctx.org_id,
-                            ctx.env_id,
-                            ctx.user_id,
-                            ctx.run_id,
-                        )
-                        .await?;
-                        FileMetadata::from_file_record(inserted)
-                    }
-                };
+                        Err(_) => {
+                            let inserted = insert_file_record(
+                                &ctx.db,
+                                &normalized_path,
+                                total_size,
+                                None,
+                                content_type_final.as_deref(),
+                                "s3",
+                                &storage_path,
+                                ctx.org_id,
+                                ctx.env_id,
+                                ctx.user_id,
+                                ctx.run_id,
+                            )
+                            .await?;
+                            FileMetadata::from_file_record(inserted)
+                        }
+                    },
+                )
+            }
+            .await;
+            let file_metadata = match metadata_result {
+                Ok(metadata) => metadata,
+                Err(error) => {
+                    let _ = self
+                        .client
+                        .delete_object()
+                        .bucket(&self.bucket)
+                        .key(&key)
+                        .send()
+                        .await;
+                    return Err(error);
+                }
+            };
 
             tracing::debug!(
                 "Completed multipart upload for {} to S3: {}",
@@ -2080,13 +1895,18 @@ pub mod s3 {
             ctx: &FileStorageContext,
         ) -> Result<(), String> {
             let normalized_path = normalize_path(path)?;
-            let key = self.s3_key(&normalized_path, ctx);
+            let (staged_path, upload_id) = if backend_upload_id.starts_with("hot-stage-v1:") {
+                multipart_staged_path(&normalized_path, backend_upload_id)?
+            } else {
+                (normalized_path.clone(), backend_upload_id.to_string())
+            };
+            let key = self.s3_key(&staged_path, ctx);
 
             self.client
                 .abort_multipart_upload()
                 .bucket(&self.bucket)
                 .key(&key)
-                .upload_id(backend_upload_id)
+                .upload_id(&upload_id)
                 .send()
                 .await
                 .map_err(|e| format!("Failed to abort multipart upload: {}", e))?;
@@ -2393,6 +2213,7 @@ mod tests {
         let db_arc = std::sync::Arc::new(db);
 
         let org_id = uuid::Uuid::now_v7();
+        crate::db::file::seed_storage_quota_test_org(&db_arc, org_id).await;
         let env_id = uuid::Uuid::now_v7();
         let user_id = uuid::Uuid::now_v7();
 
@@ -2407,6 +2228,38 @@ mod tests {
         };
 
         (storage, ctx, temp_dir)
+    }
+
+    #[tokio::test]
+    async fn rejected_storage_growth_preserves_committed_bytes() {
+        let (storage, ctx, _temp) = setup_test_storage().await;
+        let crate::db::DatabasePool::Sqlite(pool) = ctx.db.as_ref() else {
+            unreachable!()
+        };
+        sqlx::query("UPDATE org SET features=? WHERE org_id=?")
+            .bind(r#"{"storage_bytes":5}"#)
+            .bind(ctx.org_id)
+            .execute(pool)
+            .await
+            .unwrap();
+        storage
+            .write_file("same.txt", b"first", None, &ctx)
+            .await
+            .unwrap();
+        assert!(
+            storage
+                .write_file("same.txt", b"too long", None, &ctx)
+                .await
+                .is_err()
+        );
+        let bytes = storage.read_file("same.txt", &ctx).await.unwrap();
+        assert_eq!(bytes, b"first");
+        storage
+            .write_file("same.txt", b"short", None, &ctx)
+            .await
+            .unwrap();
+        let bytes = storage.read_file("same.txt", &ctx).await.unwrap();
+        assert_eq!(bytes, b"short");
     }
 
     #[tokio::test]
