@@ -31,6 +31,20 @@ env:
   CI: 'true'
 
 jobs:
+  browser-security:
+    name: Browser Security Regressions
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '24'
+      - run: node --test scripts/browser-security.test.mjs
+        env:
+          CHROME_BIN: google-chrome
+
   clippy-and-checks:
     name: Clippy and Static Checks
     runs-on: ubuntu-24.04

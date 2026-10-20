@@ -414,6 +414,7 @@ pub async fn orgs_create_handler(
             .max_age(time::Duration::days(30))
             .http_only(true)
             .same_site(axum_extra::extract::cookie::SameSite::Lax)
+            .secure(!hot::env::is_local_dev())
             .build();
 
             // Set the environment cookie to the new development env
@@ -425,6 +426,7 @@ pub async fn orgs_create_handler(
             .max_age(time::Duration::days(30))
             .http_only(true)
             .same_site(axum_extra::extract::cookie::SameSite::Lax)
+            .secure(!hot::env::is_local_dev())
             .build();
 
             let jar = jar.add(org_cookie).add(env_cookie);

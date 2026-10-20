@@ -293,10 +293,16 @@ pub async fn contexts_list_handler(
     let project = match Project::get_project_by_env_and_name(&db, &env_id, &project_name).await {
         Ok(Some(project)) => project,
         Ok(None) => {
-            return Html(format!("Project '{}' not found", project_name)).into_response();
+            return super::plain_text_error(
+                axum::http::StatusCode::NOT_FOUND,
+                format!("Project '{}' not found", project_name),
+            );
         }
         Err(e) => {
-            return Html(format!("Error loading project: {}", e)).into_response();
+            return super::plain_text_error(
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Error loading project: {}", e),
+            );
         }
     };
 
@@ -304,7 +310,10 @@ pub async fn contexts_list_handler(
     let contexts = match Context::get_by_project(&db, &project.project_id).await {
         Ok(contexts) => contexts,
         Err(e) => {
-            return Html(format!("Error loading context variables: {}", e)).into_response();
+            return super::plain_text_error(
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Error loading context variables: {}", e),
+            );
         }
     };
 

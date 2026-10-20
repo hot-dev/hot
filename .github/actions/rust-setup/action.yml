@@ -35,13 +35,13 @@ runs:
   using: "composite"
   steps:
     - name: Install Rust toolchain
-      uses: dtolnay/rust-toolchain@stable
+      uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
       with:
         toolchain: ${{ inputs.rust-toolchain }}
         components: clippy
 
     - name: Install sccache
-      uses: mozilla-actions/sccache-action@v0.0.10
+      uses: mozilla-actions/sccache-action@9e7fa8a12102821edf02ca5dbea1acd0f89a2696 # v0.0.10
       with:
         version: "v0.16.0"
         token: ${{ github.token }}
@@ -102,7 +102,7 @@ runs:
           sccache-${{ runner.os }}-${{ inputs.rust-toolchain }}-
 
     - name: Rust Cache
-      uses: Swatinem/rust-cache@v2
+      uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
       with:
         # Cache key based on Cargo files and toolchain
         key: ${{ inputs.rust-toolchain }}
