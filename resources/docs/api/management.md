@@ -97,8 +97,11 @@ Organization suspension separately blocks new work admission and retries.
 
 OpenAPI publishes the management routes and separate `management_auth` scheme.
 Existing SDK runtime calls require no new selectors: use the child environment's
-key. Management helpers in external SDK repositories must follow this separate
-credential contract; the REST endpoints can be used directly meanwhile.
+key. SDK 1.3.0 provides separate management clients for all five languages:
+`HotManagementClient` in JavaScript, Python, Rust, and Java, and
+`NewManagementClient` in Go. See the [SDK management guide](/docs/api/sdks#manage-sub-organizations)
+for provisioning examples, async variants, and environment-bound runtime clients.
+The management API can also be called directly with its separate credential.
 
 ## Monthly run admission
 
