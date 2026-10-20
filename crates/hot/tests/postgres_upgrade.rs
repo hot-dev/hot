@@ -202,6 +202,9 @@ struct ExistingRows {
     env: Uuid,
     sibling_env: Uuid,
     other_env: Uuid,
+    project: Uuid,
+    build: Uuid,
+    webhook: Uuid,
     run: Uuid,
     call: Uuid,
     alert: Uuid,
@@ -222,6 +225,9 @@ impl ExistingRows {
             env: Uuid::new_v4(),
             sibling_env: Uuid::new_v4(),
             other_env: Uuid::new_v4(),
+            project: Uuid::new_v4(),
+            build: Uuid::new_v4(),
+            webhook: Uuid::new_v4(),
             run: Uuid::new_v4(),
             call: Uuid::new_v4(),
             alert: Uuid::new_v4(),
@@ -262,13 +268,15 @@ impl ExistingRows {
             .execute(pool)
             .await?;
         }
-        let project = Uuid::new_v4();
-        let build = Uuid::new_v4();
+        let project = rows.project;
+        let build = rows.build;
         let stream = Uuid::new_v4();
         sqlx::query("INSERT INTO project(project_id,env_id,name,created_by_user_id) VALUES($1,$2,'retained',$3)")
             .bind(project).bind(rows.env).bind(rows.user).execute(pool).await?;
         sqlx::query("INSERT INTO build(build_id,project_id,hash,size,created_by_user_id) VALUES($1,$2,'retained-bundle',123,$3)")
             .bind(build).bind(project).bind(rows.user).execute(pool).await?;
+        sqlx::query("INSERT INTO webhook(webhook_id,build_id,service,path,method,ns,var,name,meta) VALUES($1,$2,'retained-service','/retained','POST','retained','handler','retained handler',$3)")
+            .bind(rows.webhook).bind(build).bind(serde_json::json!({"auth":"required","retained":true})).execute(pool).await?;
         sqlx::query("INSERT INTO stream(stream_id,env_id) VALUES($1,$2)")
             .bind(stream)
             .bind(rows.env)
@@ -428,6 +436,80 @@ async fn assert_runtime_contract(fixture: &UpgradeDatabase, rows: &ExistingRows)
         .execute(&env)
         .await?;
 
+    // A retained endpoint keeps its identity and metadata across deployment of
+    // the next build of the same project. The old build_id immutability guard
+    // must be replaced by the upgrade without allowing project/scope changes.
+    assert_eq!(
+        sqlx::query_scalar::<_, Uuid>("SELECT build_id FROM webhook WHERE webhook_id=$1")
+            .bind(rows.webhook)
+            .fetch_one(&env)
+            .await?,
+        rows.build
+    );
+    let next_build = Uuid::new_v4();
+    sqlx::query("INSERT INTO build(build_id,project_id,hash,size,created_by_user_id) VALUES($1,$2,'next-bundle',123,$3)")
+        .bind(next_build).bind(rows.project).bind(rows.user).execute(&env).await?;
+    assert_eq!(
+        sqlx::query("UPDATE webhook SET build_id=$1 WHERE webhook_id=$2")
+            .bind(next_build)
+            .bind(rows.webhook)
+            .execute(&env)
+            .await?
+            .rows_affected(),
+        1
+    );
+    let retained: (Uuid, Uuid, String, String, serde_json::Value) = sqlx::query_as(
+        "SELECT webhook_id,build_id,service,path,meta FROM webhook WHERE webhook_id=$1",
+    )
+    .bind(rows.webhook)
+    .fetch_one(&env)
+    .await?;
+    assert_eq!(
+        retained,
+        (
+            rows.webhook,
+            next_build,
+            "retained-service".into(),
+            "/retained".into(),
+            serde_json::json!({"auth":"required","retained":true}),
+        )
+    );
+    for (target_scope, target_env) in [(&env, rows.env), (&other, rows.other_env)] {
+        let target_project = Uuid::new_v4();
+        let target_build = Uuid::new_v4();
+        sqlx::query("INSERT INTO project(project_id,env_id,name,created_by_user_id) VALUES($1,$2,'forbidden-webhook-target',$3)")
+            .bind(target_project).bind(target_env).bind(rows.user).execute(target_scope).await?;
+        sqlx::query("INSERT INTO build(build_id,project_id,hash,size,created_by_user_id) VALUES($1,$2,'forbidden-bundle',123,$3)")
+            .bind(target_build).bind(target_project).bind(rows.user).execute(target_scope).await?;
+        assert!(
+            sqlx::query("UPDATE webhook SET build_id=$1 WHERE webhook_id=$2")
+                .bind(target_build)
+                .bind(rows.webhook)
+                .execute(&env)
+                .await
+                .is_err(),
+            "a deployment cannot move a retained webhook to another project or environment"
+        );
+        assert_eq!(
+            sqlx::query("UPDATE webhook SET build_id=$1 WHERE webhook_id=$2")
+                .bind(target_build)
+                .bind(rows.webhook)
+                .execute(&other)
+                .await?
+                .rows_affected(),
+            0,
+            "another environment cannot mutate the retained endpoint"
+        );
+    }
+    assert_eq!(
+        sqlx::query_scalar::<_, Uuid>("SELECT build_id FROM webhook WHERE webhook_id=$1")
+            .bind(rows.webhook)
+            .fetch_one(&env)
+            .await?,
+        next_build,
+        "rejected reassignments preserve the deployed build"
+    );
+
     // Provisioning a child after upgrade cannot change the parent deployment's
     // owner. A child environment gets positive writes but no parent run access.
     let child = Uuid::new_v4();
@@ -474,7 +556,7 @@ async fn populated_upgrades_use_non_bypass_owner_and_reprovision_runtime_grants(
     let Ok(admin_uri) = std::env::var("HOT_TEST_POSTGRES_URI") else {
         return Ok(());
     };
-    for baseline in [9, 15] {
+    for baseline in [9, 15, 17] {
         let fixture = UpgradeDatabase::new(&admin_uri, baseline).await?;
         let result: TestResult = async {
             let rows = ExistingRows::seed(&fixture.admin).await?;

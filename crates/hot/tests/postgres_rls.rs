@@ -7,6 +7,31 @@ use sqlx::{Executor, postgres::PgPoolOptions};
 use std::time::Duration;
 use uuid::Uuid;
 
+async fn upsert_test_webhook(
+    db: &db::DatabasePool,
+    webhook_id: &Uuid,
+    build_id: &Uuid,
+) -> Result<(), db::WebhookError> {
+    db::Webhook::insert_webhook(
+        db,
+        webhook_id,
+        build_id,
+        "redeploy",
+        "/stable",
+        "POST",
+        "::rls",
+        "echo",
+        "Stable webhook",
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+    )
+    .await
+}
+
 #[tokio::test]
 async fn scoped_pool_enforces_isolation_under_a_restricted_login()
 -> Result<(), Box<dyn std::error::Error>> {
@@ -790,6 +815,100 @@ async fn scoped_pool_enforces_isolation_under_a_restricted_login()
             .fetch_one(&a)
             .await?
     );
+
+    // Stable webhook capabilities must survive a new build of the same
+    // project, while their project/environment/organization ownership cannot
+    // change. Exercise the real upsert used by local and manifest deployments.
+    let next_build_a = Uuid::new_v4();
+    let other_project_a = Uuid::new_v4();
+    let other_build_a = Uuid::new_v4();
+    sqlx::query("INSERT INTO project(project_id,env_id,name,created_by_user_id) VALUES($1,$2,'other-project',$3)")
+        .bind(other_project_a).bind(env_a).bind(user).execute(&a).await?;
+    for (project, build) in [(project_a, next_build_a), (other_project_a, other_build_a)] {
+        sqlx::query("INSERT INTO build(build_id,project_id,hash,size,created_by_user_id) VALUES($1,$2,'redeploy-build',0,$3)")
+            .bind(build).bind(project).bind(user).execute(&a).await?;
+    }
+    let webhook_id = Uuid::new_v4();
+    upsert_test_webhook(&db_a, &webhook_id, &build_a).await?;
+    let token = db::Webhook::get_webhook(&db_a, &webhook_id).await?.token();
+    assert_eq!(
+        db::Webhook::find_existing_webhook_id_for_build(
+            &db_a,
+            &next_build_a,
+            "redeploy",
+            "/stable",
+            "POST",
+        )
+        .await?,
+        Some(webhook_id)
+    );
+    upsert_test_webhook(&db_a, &webhook_id, &next_build_a).await?;
+    let redeployed = db::Webhook::get_webhook(&db_a, &webhook_id).await?;
+    assert_eq!(redeployed.build_id, next_build_a);
+    assert_eq!(redeployed.token(), token);
+    // An unchanged build remains a valid upsert as well.
+    upsert_test_webhook(&db_a, &webhook_id, &next_build_a).await?;
+    let queue_db = db::DatabasePool::Postgres(pool.with_scope(DatabaseScope::Maintenance {
+        operation: db::MaintenanceOperation::Queue,
+        org_id: None,
+    }));
+    for connection in [&db_a, &queue_db] {
+        for forbidden_build in [other_build_a, build_b, Uuid::new_v4()] {
+            assert!(
+                upsert_test_webhook(connection, &webhook_id, &forbidden_build)
+                    .await
+                    .is_err()
+            );
+            // INSERT ... ON CONFLICT can fail its insertion RLS check before
+            // reaching the update trigger. A direct update proves the guard
+            // itself rejects hidden/missing builds, including under broad
+            // maintenance visibility where both projects are otherwise legal.
+            let db::DatabasePool::Postgres(pg_connection) = connection else {
+                unreachable!()
+            };
+            let error = sqlx::query("UPDATE webhook SET build_id=$1 WHERE webhook_id=$2")
+                .bind(forbidden_build)
+                .bind(webhook_id)
+                .execute(pg_connection)
+                .await
+                .unwrap_err();
+            assert!(
+                error
+                    .to_string()
+                    .contains("Webhook project ownership is immutable"),
+                "unexpected webhook reassignment error: {error}"
+            );
+            assert_eq!(
+                db::Webhook::get_webhook(&db_a, &webhook_id).await?.build_id,
+                next_build_a
+            );
+        }
+    }
+    // Rolling back to an earlier build of that same project also keeps the
+    // public URL stable; broad queue visibility does not grant reparenting.
+    upsert_test_webhook(&queue_db, &webhook_id, &build_a).await?;
+    assert_eq!(
+        db::Webhook::get_webhook(&db_a, &webhook_id).await?.token(),
+        token
+    );
+    assert!(
+        db::Webhook::get_webhook(&db::DatabasePool::Postgres(b.clone()), &webhook_id)
+            .await
+            .is_err()
+    );
+    sqlx::query("DELETE FROM webhook WHERE webhook_id=$1")
+        .bind(webhook_id)
+        .execute(&a)
+        .await?;
+    sqlx::query("DELETE FROM build WHERE build_id=ANY($1)")
+        .bind(vec![next_build_a, other_build_a])
+        .execute(&a)
+        .await?;
+    sqlx::query("DELETE FROM project WHERE project_id=$1")
+        .bind(other_project_a)
+        .execute(&a)
+        .await?;
+
     for (org, env, run, build) in [
         (child_a, env_a, run_a, build_a),
         (child_b, env_b, run_b, build_b),
