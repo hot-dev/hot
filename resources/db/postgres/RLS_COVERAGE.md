@@ -27,7 +27,7 @@ The scope settings are trusted backend context, not customer SQL credentials.
 | `agent` | Explicit policy in migration 011 |
 | `workflow` | Explicit policy in migration 011 |
 | `build` | Explicit policy in migration 011 |
-| `call` | Explicit policy in migration 011 |
+| `call` | Exact `env_id`, validated against its run; direct policies in 015 |
 | `event_handler` | Explicit policy in migration 011 |
 | `mcp_tool` | Explicit policy in migration 011 |
 | `webhook` | Explicit policy in migration 011 |
@@ -108,3 +108,25 @@ account under Billing, so a schema owner without BYPASSRLS retains existing
 usage. The restricted-login integration test exercises durable sibling-shared
 run limits and verifies that ordinary environment access cannot delete the
 ledger to reset capacity.
+
+| Maintained usage table | Coverage |
+| --- | --- |
+| `usage_storage` (015) | Exact env and org, account Billing, or named queue/scheduler/retention/alerts operation; immutable env/org/slot; no runtime DELETE |
+| `usage_task` (013) | Exact env and org, account Billing, or named queue/scheduler/retention/alerts operation; immutable env/org; no runtime DELETE |
+| `usage_run` (014) | Exact account Billing only; immutable root/period; DELETE permits pruning obsolete counter periods, never ledger rows |
+
+Each counter table enables and forces RLS. Provisioning discovers these tables
+and grants their protected DML privileges. Triggers run with the caller's
+scope and rights, without SECURITY DEFINER or owner bypass. Scope policies on
+the counter rows reject a sibling's env or org. Runtime access to arbitrary SQL
+and construction of maintenance authority remain outside this boundary.
+
+Migration 015 backfills `call.env_id` from its existing run, makes it required,
+and validates the pair with a composite foreign key. Both ownership fields are
+immutable. Call policies and retention queries use the local environment field,
+so cascaded run deletion can account removed bytes without looking up the
+already deleted run. PostgreSQL bulk deletes use transition tables to subtract
+one aggregate per environment. SQLite enforces the ownership pair in triggers.
+
+See [usage counter operation and validation](USAGE_COUNTERS.md) for formulas,
+rollover, reconciliation and performance evidence.

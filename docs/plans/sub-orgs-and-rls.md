@@ -257,6 +257,44 @@ The service-backed suite used `HOT_TEST_POSTGRES_URI`, `REDIS_URL`, and
 `HOT_REDIS_URI` against disposable local fixtures. Those fixtures, including
 the live-worker database and restricted role, were removed after validation.
 
+### PR follow-up and maintained usage — 2026-10-20
+
+Integrated the incoming review fixes and current main while preserving the
+published branch history. Scope is applied once per transaction, migration
+credentials stay out of runtime startup, failed retention lookups preserve
+history, observed requests avoid shared enforced budgets, and runnable-work
+admission distinguishes suspension from exhausted capacity.
+
+Migrations 013–015 now maintain storage, task and run counters under the same
+scope and account-lock contract. Calls carry immutable environment ownership
+validated against their run, including retention and cascaded deletion.
+Period rollover takes a fresh snapshot after counter locks; hourly reconciliation
+compares consistent snapshots and adds relative repairs without stopping
+ordinary writes. Invalid metering falls back while valid signed 64-bit values
+remain accepted. Candidate task locks use exact environment authority because
+Billing scope deliberately cannot update task rows.
+
+A scoped unit-of-work API combines multi-statement reads, beginning with project
+pagination. Detached advisory sessions keep one-connection data pools usable
+while the scheduler or reconciler holds coordination locks. Tests cover those
+boundaries plus sibling counter denial, slot deltas, rollback, cancellation,
+period changes, full-range metering and populated owner/runtime upgrades.
+
+Final local qualification passed 2,586 Rust workspace tests (10 ignored),
+915 Hot tests and 2,509 assertions each on isolated SQLite and restricted
+PostgreSQL/Valkey, Clippy with warnings denied, browser scope tests, Hot static
+checks, and AGENTS/AI mirror synchronization. The 100,000-row account benchmark
+and populated non-BYPASS owner backfill are recorded in the counter document.
+
+The temporary engineering handoff is folded into
+[usage counter operation and measured performance](../../resources/db/postgres/USAGE_COUNTERS.md),
+[RLS setup](../../resources/db/postgres/RLS_SETUP.md) and
+[RLS coverage](../../resources/db/postgres/RLS_COVERAGE.md). The paired provider
+change has its own bootstrap/billing integration and one-off migration-task
+checks. Snapshot-copy rehearsal, deployed integrations and production cutover
+remain explicit release gates. Shared deployments and usage-display semantics
+remain deferred.
+
 Hot will support a parent organization with child organizations that each own
 their environments, projects, deployments, credentials, and runtime data.
 The parent owns the subscription and human member directory. Authorized parent

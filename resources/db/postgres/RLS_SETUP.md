@@ -150,7 +150,10 @@ For an existing database:
    missing from that history against an authoritative account usage source
    before enforcing an existing paid account's monthly run cap.
    Migration 015 reconciles retained trace sizes, including UTF-8 and error
-   payloads, before account trace-storage admission uses those totals.
+   payloads, backfills immutable call environments, and initializes storage
+   counters before trace-storage admission uses them. Migration 013 initializes
+   active task counters; period usage is initialized on the first limited claim.
+   Migration 014 leaves run counters lazy, backed by the admission ledger.
 3. Drain work and stop every old process using the database, including workers,
    scheduler, direct CLI sessions and private provider jobs. Take a recoverable
    backup. Apply the additive migrations and rerun the grant script as the
@@ -207,7 +210,8 @@ they are additional safeguards, not distributed account concurrency counters.
 
 Store and trace storage admission serialize sibling writes on the account root
 and enforce recorded logical bytes. Accounts without a storage limit skip both
-the lock and the usage recount. Trace-cap failure rolls back the trace
+the root lock and the admission usage read. Transactional counters remain active
+for every account so adding a limit cannot start from incomplete usage. Trace-cap failure rolls back the trace
 batch and is reported by emitter flush/shutdown; run terminal state is committed
 separately. Diagnose the storage failure before replaying work, since workflow
 side effects may already have completed. These logical limits do not cap total
@@ -232,3 +236,20 @@ Run the same positive/negative scope and cancellation checks against each
 deployed connection path, and verify that private jobs use named operations and
 never inherit migration credentials. Shared deployments across child orgs remain
 deferred; each child currently owns its environments and deployments.
+
+## Usage counters and development migration revisions
+
+[Maintained usage counters](USAGE_COUNTERS.md) replace history scans in quota
+admission. Include their initialization and the first billing-period task/run
+claim in the rehearsal window. Monitor hourly reconciliation warnings: they
+identify source/counter drift, applied deltas, and a retry after an error.
+Reconciliation retains ordinary writes and does not hold the admission root
+lock. It still reads account history, so budget for that hourly background load.
+
+Migrations 010–018 on this development branch are unshipped and were revised in
+place, including 013–015 for counters and call ownership. A scratch database
+that already applied an earlier revision will fail SQLx checksum validation.
+Recreate only disposable development/test databases with known ownership and
+retain any needed data first. Never edit the SQLx ledger to conceal a checksum
+mismatch, and never use this development reset procedure on a deployed database.
+A deployed revision requires a new forward migration instead.
