@@ -25,11 +25,15 @@ pub async fn validate_runtime_role(pool: &PgPool, schema: &str) -> Result<(), sq
     if privileged {
         return Err(sqlx::Error::Protocol("RLS runtime login must not be superuser, BYPASSRLS, CREATEROLE, CREATEDB, REPLICATION, or a member of a privileged server-file, server-program, or administrative role".into()));
     }
-    let can_create: bool =
-        sqlx::query_scalar("SELECT has_schema_privilege(current_user, $1, 'CREATE')")
-            .bind(schema)
-            .fetch_one(pool)
-            .await?;
+    // Include memberships that require SET ROLE, not only privileges currently
+    // inherited by this login. A NOINHERIT login must not pass qualification
+    // and then recover unsafe privileges through a non-owner group role.
+    let can_create: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM pg_roles r WHERE pg_has_role(current_user, r.oid, 'MEMBER') AND has_schema_privilege(r.oid, $1, 'CREATE'))",
+    )
+    .bind(schema)
+    .fetch_one(pool)
+    .await?;
     if can_create {
         return Err(sqlx::Error::Protocol(
             "RLS runtime login must not have CREATE on the application schema".into(),
@@ -45,7 +49,7 @@ pub async fn validate_runtime_role(pool: &PgPool, schema: &str) -> Result<(), sq
         ));
     }
     let unsafe_table_privileges: bool = sqlx::query_scalar(
-        "SELECT EXISTS (SELECT 1 FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = $1 AND c.relkind IN ('r','p') AND (has_table_privilege(current_user, c.oid, 'TRUNCATE,REFERENCES,TRIGGER') OR has_any_column_privilege(current_user, c.oid, 'REFERENCES')))"
+        "SELECT EXISTS (SELECT 1 FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace JOIN pg_roles r ON pg_has_role(current_user, r.oid, 'MEMBER') WHERE n.nspname = $1 AND c.relkind IN ('r','p') AND (has_table_privilege(r.oid, c.oid, 'TRUNCATE,REFERENCES,TRIGGER') OR has_any_column_privilege(r.oid, c.oid, 'REFERENCES')))"
     ).bind(schema).fetch_one(pool).await?;
     if unsafe_table_privileges {
         return Err(sqlx::Error::Protocol(
@@ -53,10 +57,11 @@ pub async fn validate_runtime_role(pool: &PgPool, schema: &str) -> Result<(), sq
         ));
     }
     let writable_reference_tables: Vec<String> = sqlx::query_scalar(
-        "SELECT c.relname FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+        "SELECT DISTINCT c.relname FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+         JOIN pg_roles r ON pg_has_role(current_user, r.oid, 'MEMBER')
          WHERE n.nspname = $1 AND c.relkind IN ('r','p') AND c.relname = ANY($2)
-           AND (has_table_privilege(current_user, c.oid, 'INSERT,UPDATE,DELETE,REFERENCES,TRIGGER')
-                OR has_any_column_privilege(current_user, c.oid, 'INSERT,UPDATE,REFERENCES'))
+           AND (has_table_privilege(r.oid, c.oid, 'INSERT,UPDATE,DELETE,REFERENCES,TRIGGER')
+                OR has_any_column_privilege(r.oid, c.oid, 'INSERT,UPDATE,REFERENCES'))
          ORDER BY c.relname",
     )
     .bind(schema)
@@ -71,9 +76,10 @@ pub async fn validate_runtime_role(pool: &PgPool, schema: &str) -> Result<(), sq
     }
     let migration_access: bool = sqlx::query_scalar(
         "SELECT EXISTS (SELECT 1 FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+         JOIN pg_roles r ON pg_has_role(current_user, r.oid, 'MEMBER')
          WHERE n.nspname = $1 AND c.relname = '_sqlx_migrations'
-           AND (has_table_privilege(current_user, c.oid, 'SELECT,INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER')
-                OR has_any_column_privilege(current_user, c.oid, 'SELECT,INSERT,UPDATE,REFERENCES')))"
+           AND (has_table_privilege(r.oid, c.oid, 'SELECT,INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER')
+                OR has_any_column_privilege(r.oid, c.oid, 'SELECT,INSERT,UPDATE,REFERENCES')))"
     ).bind(schema).fetch_one(pool).await?;
     if migration_access {
         return Err(sqlx::Error::Protocol(

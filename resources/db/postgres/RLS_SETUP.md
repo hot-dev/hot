@@ -12,13 +12,18 @@ role. Do not reuse a role that already has global grants or role memberships.
 Apply migrations using `db.migration-uri`, then apply `provision_runtime.sql`
 with psql variables `runtime_role` and `schema`. Apply that grant script again
 after adding newly protected tables. It grants no access to SQLx migration
-metadata and never grants TRUNCATE.
+metadata and never grants TRUNCATE, REFERENCES, or TRIGGER. Reapplying it removes
+the runtime login's direct table and column grants, direct schema CREATE, and
+direct sequence grants before installing the required privileges.
 
 Configure runtime `db.uri` separately from `db.migration-uri`. Keep migration
 credentials out of long-running API, app and worker processes. Supply the
 migration URI only to the deployment migration command. Runtime startup checks
 privileged memberships, ownership, TRUNCATE, reference-table write grants,
-migration-metadata access and enabled/forced table coverage.
+migration-metadata access and enabled/forced table coverage. They also reject
+REFERENCES (including column grants), TRIGGER, and server-file/server-program
+roles. Qualification includes privileges available through role memberships,
+even when the runtime login uses NOINHERIT and would need SET ROLE to use them.
 The public migration chain currently hardcodes schema `hot`; enforced runtime
 startup rejects other schema configurations until the full migration chain has
 a supported schema-remapping upgrade strategy.
@@ -89,6 +94,9 @@ All scope GUC fields, including the user UUID, are reset transaction-locally.
 
 For a fresh installation, create the schema-owner and runtime roles separately,
 run the full migration chain as the owner, then run `provision_runtime.sql`.
+The schema-owner login can be NOSUPERUSER and NOBYPASSRLS. Install required
+extensions (`vector` and `pg_trgm`) into schema `hot` using an administrative
+deployment connection first if that owner lacks extension-installation rights.
 Only then start runtime services with the restricted login and enforcement
 enabled. The public CLI's bootstrap provider is a no-op; a private provider
 that seeds data must run after grants exist and use the explicit onboarding or
@@ -98,10 +106,20 @@ separately instead of supplying owner credentials to a runtime pool.
 For an existing database:
 
 1. Restore a recent backup into a separate database and rehearse migrations
-   010–015 with the intended owner/runtime roles. Check duplicate environment
+   010–017 with the intended owner/runtime roles, including a non-superuser,
+   non-BYPASSRLS schema owner. Check duplicate environment
    names within each org before migration 010 adds its unique index. Inspect
    migration 011's ownership preflight and resolve any reported mismatch in a
    reviewed repair migration. Preserve original ownership evidence.
+   Migration 016 similarly refuses alert deliveries whose subscription or
+   destination belongs to another org, or whose subscription targets a different
+   environment. Verify a refused migration leaves its earlier statements and
+   SQLx ledger entry rolled back before applying an approved repair and retrying.
+   Migration 017 validates retained run/task origin references and run/event
+   links against their environments. Migration 011 already checks new writes,
+   but its original preflight did not cover those historical links. A refusal
+   preserves the offending records and earlier committed migrations, including
+   016; investigate and repair the relationship explicitly before retrying.
 2. Record row counts and account usage, including retained run history, before
    the change. Migration 014 backfills the admission ledger from retained runs;
    it cannot recover runs already deleted by retention. Reconcile any usage
@@ -113,6 +131,9 @@ For an existing database:
    scheduler, direct CLI sessions and private provider jobs. Take a recoverable
    backup. Apply the additive migrations and rerun the grant script as the
    owner. Do not mix older unscoped services with the new database policies.
+   Test the grant script twice to verify idempotence. Table-level revocation
+   alone does not remove older column ACLs; the script explicitly removes those
+   direct grants, including grants on reference tables and `_sqlx_migrations`.
 4. Start the scope-capable services with their restricted login. Verify startup
    qualification, a permitted read/write, cross-child denial, queue execution,
    an invite acceptance, and a retained-run ledger count. A successful health
@@ -120,6 +141,18 @@ For an existing database:
 5. Resume traffic only after those checks pass. Monitor denied operations,
    queue retries, writer failures and account quota rejections. Retain the
    backup and migration logs for the agreed rollback window.
+
+`provision_runtime.sql` is transactional and checks the resulting effective
+privileges before committing. Unsafe PUBLIC grants, privileges available through
+group roles, privileged attributes, and ownership cause it to abort. It does not
+silently revoke shared grants or role memberships, since other applications may
+depend on them. Inspect the reported grant source, remove or narrow the relevant
+PUBLIC/group grant or runtime membership through an approved administrative
+change, then rerun the script. If the script aborts, its direct-grant remediation
+rolls back too. Use a new dedicated runtime login when an existing role cannot
+be safely separated. Follow with startup qualification and real scoped
+read/write and cross-org denial checks; script success alone is not a complete
+application smoke test.
 
 Restart S3 multipart uploads begun by the older application: new upload tokens
 bind the staged object version, so an old in-flight token cannot complete an

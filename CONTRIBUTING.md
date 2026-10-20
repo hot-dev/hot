@@ -42,8 +42,10 @@ for a tour of the crates and resources directories. The most common areas:
   `.github/workflows/hot.yml`)
 - Docker, optional for most development but required for `::hot::box` container
   tasks and release packaging.
-- Postgres 18 with pgvector and Valkey/Redis are optional for the full
-  service-backed test suite.
+- Postgres 18 with pgvector, `psql` on `PATH`, and Valkey/Redis are optional for
+  the full service-backed test suite. PostgreSQL upgrade tests require a
+  disposable privileged `HOT_TEST_POSTGRES_URI`: they create isolated databases
+  and restricted owner/runtime roles, then execute the real provisioning script.
 - `protoc` is required only for the Linux Kata feature check.
 
 ### Build, Check, Test
