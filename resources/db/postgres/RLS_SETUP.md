@@ -35,7 +35,18 @@ using false is not evidence of production RLS isolation. Never use false to
 recover a production outage.
 
 Scope settings are transaction-local and are set by `ScopedPgPool` on the same
-connection used for each query. `ReadSet` starts a read-only transaction.
+connection used for each query, through one `SELECT hot.apply_scope(...)` call.
+That function verifies the scoped environment against the scoped organizations
+once per transaction, so policies compare each row with the verified value
+instead of querying `env` per row; settings written directly with `set_config`
+verify nothing and grant no environment rows. A read set always makes its
+transaction read-only. Because scope is applied by a function call with
+transaction-local settings, connection proxies that multiplex between
+transactions (such as RDS Proxy, which pins sessions on `SET` and direct
+`set_config` statements) can keep multiplexing. Set the runtime login's
+`search_path`, `statement_timeout` and `lock_timeout` as role defaults
+(`ALTER ROLE ... SET`) or in the proxy's initialization query: the connection
+setup otherwise issues session-level `SET` statements, which pin.
 Task-local scope is not inherited by Tokio spawned tasks: bind a cloned database
 handle with `DatabasePool::with_scope` or explicitly establish scope inside the
 new task. Pool-bound authority takes precedence over task-local authority.
@@ -98,15 +109,28 @@ The schema-owner login can be NOSUPERUSER and NOBYPASSRLS. Install required
 extensions (`vector` and `pg_trgm`) into schema `hot` using an administrative
 deployment connection first if that owner lacks extension-installation rights.
 Only then start runtime services with the restricted login and enforcement
-enabled. The public CLI's bootstrap provider is a no-op; a private provider
-that seeds data must run after grants exist and use the explicit onboarding or
-billing operation appropriate to its rows. Rehearse that provider's ordering
-separately instead of supplying owner credentials to a runtime pool.
+enabled. The public CLI's bootstrap provider is a no-op. A private provider
+runs right after migrations under the onboarding operation, and its
+configuration's `db.uri` is the migration URI with runtime-role qualification
+off, so it can create its own tables and seed reference rows such as `plan`.
+With enforcement on, `hot app` migrates and bootstraps at startup only when it
+is configured with `db.migration-uri`; otherwise run `hot db migrate` (or set
+`HOT_DB_MIGRATION_URI`) from the deployment's migration job.
+
+Runtime qualification only rejects unprotected tables the runtime login can
+reach. A provider's own tables in schema `hot` may stay unprotected if the
+runtime login never needs them; tables it does need must enable and force RLS
+with their own policies, after which `provision_runtime.sql` grants them like
+platform tables. Billing-provider webhooks run under the `billing_webhook`
+bootstrap operation, which grants no platform rows: a provider verifies the
+callback, resolves its account from its own records (policies on those tables
+can allow `hot.scope_bootstrap('billing_webhook')`), then uses
+`Org::billing_scope` for platform billing reads and writes.
 
 For an existing database:
 
 1. Restore a recent backup into a separate database and rehearse migrations
-   010–017 with the intended owner/runtime roles, including a non-superuser,
+   010–018 with the intended owner/runtime roles, including a non-superuser,
    non-BYPASSRLS schema owner. Check duplicate environment
    names within each org before migration 010 adds its unique index. Inspect
    migration 011's ownership preflight and resolve any reported mismatch in a
@@ -154,6 +178,21 @@ be safely separated. Follow with startup qualification and real scoped
 read/write and cross-org denial checks; script success alone is not a complete
 application smoke test.
 
+Managed PostgreSQL services such as Amazon RDS have no superuser, and only a
+superuser or an existing BYPASSRLS role can create a BYPASSRLS role. Forced RLS
+therefore applies to every login, including the master user and the table
+owner. Logical dumps with `pg_dump` fail (it disables row security and stops
+when a policy applies), and ad hoc queries see no protected rows until the
+session establishes a scope with `SELECT hot.apply_scope(...)` inside a
+transaction. Rely on snapshots and point-in-time recovery for backups. The
+master user (CREATEDB, CREATEROLE, `rds_superuser`) fails runtime
+qualification by design: use it, or the current table owner, only as the
+migration login, and create a separate runtime login without those
+memberships. Migration 015 rewrites every retained call row in one
+transaction, under RLS for a non-bypass owner; size the window, WAL, storage
+headroom and replica lag for the `call` table, and keep `statement_timeout`
+off for the migration login.
+
 Restart S3 multipart uploads begun by the older application: new upload tokens
 bind the staged object version, so an old in-flight token cannot complete an
 upload after this upgrade. Already committed files keep their existing paths.
@@ -167,7 +206,8 @@ In-flight request and SSE connection guards remain per-process resource limits;
 they are additional safeguards, not distributed account concurrency counters.
 
 Store and trace storage admission serialize sibling writes on the account root
-and enforce recorded logical bytes. Trace-cap failure rolls back the trace
+and enforce recorded logical bytes. Accounts without a storage limit skip both
+the lock and the usage recount. Trace-cap failure rolls back the trace
 batch and is reported by emitter flush/shutdown; run terminal state is committed
 separately. Diagnose the storage failure before replaying work, since workflow
 side effects may already have completed. These logical limits do not cap total

@@ -12,7 +12,7 @@ typed scopes and restricted runtime connections, forced PostgreSQL policies,
 direct-child organizations with independent environments/builds, inherited
 root administration and explicit child grants, account billing/quota resolution,
 management credentials and REST routes, runtime ingress and worker ownership,
-and the hierarchical UI. Migrations 010–017 preserve existing org identities and
+and the hierarchical UI. Migrations 010–018 preserve existing org identities and
 add ownership integrity, credential lineage, quota reservations, durable run
 admissions, trace byte reconciliation, and retained runtime relationship checks.
 SQLite shares application authorization

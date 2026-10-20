@@ -66,7 +66,7 @@ Management credential tables introduced by migration 012 carry their own policie
 | --- | --- |
 | `account_request_window` | Exact root; Billing only (011) |
 | `management_key` | Exact root Organization; Authentication read; immutable root (012, tightened by 016) |
-| `api_key_management_issuer` | API key environment; Authentication read; immutable issuer; delegated parent deletion restricted (012, 016) |
+| `api_key_management_issuer` | API key environment (writes need an exact environment scope); Authentication read; immutable issuer; delegated parent deletion restricted (012, 016) |
 
 `StoreProvisioning` can read only `store_map` configuration; index DDL uses the
 separately supplied schema-owner credentials. `Retention` reads session/plan
