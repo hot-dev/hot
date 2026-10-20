@@ -1,0 +1,10 @@
+{
+  "schema_version": 1,
+  "release": "development-fixture-not-a-published-release",
+  "images": {
+    "hot": "registry.example.invalid/hot@sha256:0000000000000000000000000000000000000000000000000000000000000000",
+    "postgres": "registry.example.invalid/postgres@sha256:0000000000000000000000000000000000000000000000000000000000000000",
+    "valkey": "registry.example.invalid/valkey@sha256:0000000000000000000000000000000000000000000000000000000000000000",
+    "ingress": "registry.example.invalid/ingress@sha256:0000000000000000000000000000000000000000000000000000000000000000"
+  }
+}

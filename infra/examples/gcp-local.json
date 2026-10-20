@@ -1,0 +1,27 @@
+{
+  "installation": {
+    "schema_version": 1,
+    "name": "hot-example",
+    "cloud": "gcp",
+    "region": "us-central1",
+    "zone": "us-central1-a",
+    "size": "small",
+    "host_image": "projects/example-project/global/images/hot-host-amd64",
+    "project": "example-project",
+    "release_pointer": "projects/example-project/locations/global/parameters/hot-example-release",
+    "secret_references": {
+      "app": "projects/example-project/secrets/hot-example-app"
+    },
+    "app_hostname": "app.hot.internal",
+    "api_hostname": "api.hot.internal",
+    "storage": {
+      "build": {
+        "backend": "local"
+      },
+      "file": {
+        "backend": "local"
+      }
+    }
+  },
+  "acknowledge_unqualified": true
+}
