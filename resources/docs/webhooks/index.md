@@ -197,6 +197,9 @@ fn (request: HttpRequest): Map {
 
 When `auth` is set to `"required"`, the caller must include an `Authorization: Bearer <token>` header. The token can be an API key, service key, or session token. The credential must have a `webhook` permission (e.g., `{"webhook:*": ["execute"]}` or `{"webhook:internal/*": ["execute"]}`).
 
+Only `"none"` and `"required"` are supported. An invalid explicit `auth` value
+requires authentication; omitting `auth` retains the public default.
+
 Authenticated webhook handlers receive the caller's identity in the `auth` field of the `HttpRequest` argument. The same data is also available via `::hot::ctx/get("hot.request")` for consistency with MCP tools.
 
 ### Caller Identity (`hot.request`)

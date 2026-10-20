@@ -66,12 +66,17 @@ pub struct WebhookWithProject {
     pub project_name: String,
 }
 
-/// Extract auth_mode from webhook meta JSON. Defaults to "none".
-fn webhook_auth_mode_from_meta(meta: Option<&JsonValue>) -> &str {
-    meta.and_then(|m| m.get("webhook"))
+/// Omission preserves the public webhook default. An explicit but invalid
+/// auth value must not silently disable the caller's authentication intent.
+fn webhook_auth_mode_from_meta(meta: Option<&JsonValue>) -> &'static str {
+    match meta
+        .and_then(|m| m.get("webhook"))
         .and_then(|w| w.get("auth"))
-        .and_then(|a| a.as_str())
-        .unwrap_or("none")
+    {
+        None => "none",
+        Some(JsonValue::String(mode)) if mode == "none" => "none",
+        Some(_) => "required",
+    }
 }
 
 /// Extract user-declared secret header names from top-level `meta.secret-headers`.
@@ -1047,6 +1052,26 @@ mod tests {
             "webhook": {"service": "test", "path": "/test", "auth": "required"}
         })));
         assert_eq!(wh.auth_mode(), "required");
+    }
+
+    #[test]
+    fn explicit_invalid_auth_modes_require_credentials() {
+        for auth in [
+            json!("Required"),
+            json!("optional"),
+            json!(""),
+            json!(null),
+            json!(false),
+            json!({}),
+        ] {
+            let webhook = make_webhook(Some(json!({"webhook":{"auth":auth}})));
+            assert_eq!(webhook.auth_mode(), "required");
+        }
+        assert_eq!(make_webhook(None).auth_mode(), "none");
+        assert_eq!(
+            make_webhook(Some(json!({"webhook":{"auth":"none"}}))).auth_mode(),
+            "none"
+        );
     }
 
     #[test]

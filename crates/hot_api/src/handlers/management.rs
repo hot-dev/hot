@@ -710,3 +710,6 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+mod postgres_lifecycle;

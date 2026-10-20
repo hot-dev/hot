@@ -9440,6 +9440,107 @@ handler fn () { initialized }
     }
 
     #[tokio::test]
+    async fn webhook_url_hints_restore_after_real_queue_roundtrip_and_db_hydration() {
+        let (db, db_path) = migrated_sqlite_file_db().await;
+        let data = hot::db::insert_test_data(&db).await.unwrap();
+        let event_id = Uuid::now_v7();
+        let stream_id = Uuid::now_v7();
+        let raw_url = "https://hooks.example.test/webhook/svc/path/abcdef123456?x=1";
+        let request = val!({"original-url":raw_url,"body":"authoritative body"});
+        let original = val!({
+            "fn":"::durable/handler",
+            "args": Val::Vec(vec![request.clone()]),
+            "caller":request
+        });
+        let stored = hot::webhook_url::redact_event_data_original_urls(&original);
+        let stored_json = serde_json::to_value(stored.to_hot_data_repr()).unwrap();
+        assert!(!stored_json.to_string().contains("abcdef123456"));
+        hot::db::Event::insert_event(
+            &db,
+            &event_id,
+            &data.env_id,
+            &stream_id,
+            "hot:call",
+            &stored_json,
+            chrono::Utc::now(),
+            &data.user_id,
+            None,
+        )
+        .await
+        .unwrap();
+
+        for (hint_url, accepted) in [
+            (raw_url, true),
+            (
+                "https://sibling.example.test/webhook/svc/path/abcdef123456?x=1",
+                false,
+            ),
+        ] {
+            let hint_request = val!({"original-url":hint_url,"body":"untrusted body"});
+            let envelope = EventMessage {
+                id: event_id,
+                head: AHashMap::new(),
+                body: hot::lang::event::EventMessageBody {
+                    event: hot::lang::event::Event {
+                        event_id,
+                        env_id: data.env_id,
+                        stream_id,
+                        event_type: "hot:call".into(),
+                        event_data: val!({
+                            "fn":"::untrusted/handler",
+                            "args":Val::Vec(vec![hint_request.clone()]),
+                            "caller":hint_request
+                        }),
+                        event_time: chrono::Utc::now(),
+                        target_project_id: None,
+                        target_project_name: None,
+                    },
+                    execution_context: ExecutionContext::new(
+                        Uuid::now_v7(),
+                        stream_id,
+                        hot::db::run::RunType::Call.as_id(),
+                        Some(data.env_id),
+                        Some(data.user_id),
+                        Some(data.org_id),
+                        None,
+                    ),
+                },
+            };
+            let serialized: hot::data::msg::Message = envelope.into();
+            let parsed = EventMessage::try_from(serialized).unwrap();
+            let hydrated = hydrate_event_message_from_db(0, &db, None, parsed, 0)
+                .await
+                .unwrap();
+            assert_eq!(
+                hydrated.body.event.event_data.get_str("fn"),
+                "::durable/handler"
+            );
+            let caller = hydrated.body.event.event_data.get("caller").unwrap();
+            assert_eq!(caller.get_str("body"), "authoritative body");
+            if accepted {
+                assert_eq!(hydrated.body.event.event_data, original);
+            } else {
+                assert!(caller.get("original-url").is_none());
+                let Val::Vec(args) = hydrated.body.event.event_data.get("args").unwrap() else {
+                    panic!("hydrated arguments must remain intact");
+                };
+                assert!(args[0].get("original-url").is_none());
+            }
+            assert_eq!(
+                hot::db::Event::get_event(&db, &event_id)
+                    .await
+                    .unwrap()
+                    .event_data,
+                stored_json
+            );
+        }
+        if let DatabasePool::Sqlite(pool) = &db {
+            pool.close().await;
+        }
+        let _ = std::fs::remove_file(db_path);
+    }
+
+    #[tokio::test]
     async fn hydrate_rehydrates_spilled_event_data_blob_refs() {
         use hot::blob::{BlobConfig, BlobScope, BlobStore, SpillSource};
 

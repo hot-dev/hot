@@ -382,10 +382,12 @@ impl From<EventMessage> for Message {
             "head": head_val
         });
 
-        // Convert event message body to Val. Keep the queued event envelope
-        // intentionally thin: the worker hydrates authoritative event_data
-        // from the database by event_id before routing/execution.
-        let body = crate::val!({
+        // Keep the envelope thin: authoritative event_data comes from the DB.
+        // Only raw webhook URL hints survive separately because the durable
+        // event deliberately redacts their capability token.
+        let original_urls =
+            crate::webhook_url::event_data_original_url_hints(&event_msg.body.event.event_data);
+        let mut body = crate::val!({
             "event": {
                 "event_id": event_msg.body.event.event_id.to_string(),
                 "env_id": event_msg.body.event.env_id.to_string(),
@@ -408,6 +410,9 @@ impl From<EventMessage> for Message {
                 "retry_attempt": event_msg.body.execution_context.retry_attempt as i64,
             }
         });
+        if let (Val::Map(map), Some(original_urls)) = (&mut body, original_urls) {
+            map.insert(Val::from("webhook_original_urls"), original_urls);
+        }
 
         Message {
             id: event_msg.id,
@@ -421,29 +426,20 @@ impl TryFrom<Message> for EventMessage {
     type Error = String;
 
     fn try_from(msg: Message) -> Result<Self, Self::Error> {
-        // Debug: log the actual message structure
+        // URL hints may contain webhook capability tokens. Never log the raw
+        // queue body or head while parsing the envelope.
         tracing::debug!(
-            "Attempting to parse EventMessage from: head={}, body={}",
-            msg.head.pretty_print(),
-            msg.body.pretty_print()
+            message_id = %msg.id,
+            "Attempting to parse EventMessage"
         );
 
         // Check type discriminator
         let msg_type = msg.head.get_str("__type");
         if msg_type != "EventMessage" {
-            return Err(format!(
-                "Expected EventMessage type, got: '{}'. Message head: {}",
-                msg_type,
-                msg.head.pretty_print()
-            ));
+            return Err("Expected EventMessage type discriminator".to_string());
         }
 
-        let head_val = msg.head.get("head").ok_or_else(|| {
-            format!(
-                "Missing head in EventMessage. Message head: {}",
-                msg.head.pretty_print()
-            )
-        })?;
+        let head_val = msg.head.get("head").ok_or("Missing head in EventMessage")?;
 
         let mut head = AHashMap::new();
         if let Val::Map(header_map) = head_val {
@@ -477,12 +473,19 @@ impl TryFrom<Message> for EventMessage {
 
         let event_type = event_val.get_str("event_type");
         // New queue messages are thin and omit event_data; older in-flight
-        // messages may still carry it. The worker hydrates from DB before
-        // execution, so a placeholder keeps parsing backward-compatible.
+        // messages may still carry it. Only allowlisted original-url hints
+        // accompany the placeholder; the worker corroborates each against
+        // the redacted durable URL before restoring it.
         let event_data = event_val.get("event_data").unwrap_or_else(|| {
-            crate::val!({
-                "event_id": event_id.to_string(),
-            })
+            let mut hints = msg
+                .body
+                .get("webhook_original_urls")
+                .and_then(|hints| crate::webhook_url::event_data_original_url_hints(&hints))
+                .unwrap_or_else(|| crate::val!({}));
+            if let Val::Map(map) = &mut hints {
+                map.insert(Val::from("event_id"), Val::from(event_id.to_string()));
+            }
+            hints
         });
 
         let event_time_str = event_val.get_str("event_time");
@@ -1287,6 +1290,68 @@ mod tests {
         let event_val = message.body.get("event").expect("event envelope");
         assert!(event_val.get("event_id").is_some());
         assert!(event_val.get("event_data").is_none());
+    }
+
+    #[test]
+    fn test_webhook_url_hints_survive_thin_message_without_request_payload() {
+        let raw = "https://hooks.example.test/webhook/svc/path/abcdef123456?x=1";
+        let request = crate::val!({
+            "original-url": raw,
+            "headers": {"authorization": "Bearer secret-credential"},
+            "body": "private-request-body",
+            "auth": {"type": "api-key"}
+        });
+        let data = crate::val!({
+            "fn": "::durable/handler",
+            "args": Val::Vec(vec![Val::Null, request.clone()]),
+            "caller": request
+        });
+        let event = Event::new(
+            Uuid::now_v7(),
+            Uuid::now_v7(),
+            "hot:call".into(),
+            data.clone(),
+        );
+        let context = ExecutionContext::new(
+            Uuid::now_v7(),
+            event.stream_id,
+            4,
+            Some(event.env_id),
+            None,
+            None,
+            None,
+        );
+        let message: Message = EventMessage {
+            id: event.event_id,
+            head: AHashMap::new(),
+            body: EventMessageBody {
+                event,
+                execution_context: context,
+            },
+        }
+        .into();
+        assert!(
+            message
+                .body
+                .get("event")
+                .unwrap()
+                .get("event_data")
+                .is_none()
+        );
+        let serialized = message.body.pretty_print();
+        assert!(!serialized.contains("secret-credential"));
+        assert!(!serialized.contains("private-request-body"));
+        assert!(!serialized.contains("::durable/handler"));
+        assert!(!serialized.contains("api-key"));
+
+        let parsed = EventMessage::try_from(message).unwrap();
+        let mut durable = crate::webhook_url::redact_event_data_original_urls(&data);
+        assert!(!durable.pretty_print().contains("abcdef123456"));
+        crate::webhook_url::restore_event_data_original_urls(
+            &mut durable,
+            &parsed.body.event.event_data,
+        );
+        assert_eq!(durable, data);
     }
 
     #[test]

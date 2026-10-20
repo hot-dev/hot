@@ -82,6 +82,35 @@ fn redact_request_original_url(request: &mut Val) {
     }
 }
 
+/// Keep only raw URL hints needed to restore a DB-hydrated webhook request.
+/// The queue must not copy request bodies, headers, auth, or other event data.
+/// Argument positions are retained so a hint cannot move between call slots.
+pub(crate) fn event_data_original_url_hints(event_data: &Val) -> Option<Val> {
+    let request_hint = |request: &Val| match map_get(request, ORIGINAL_URL_KEY) {
+        Some(Val::Str(url)) if !is_redacted(url) => {
+            Some(crate::val!({ "original-url": url.to_string() }))
+        }
+        _ => None,
+    };
+    let mut hints = crate::val!({});
+    let Val::Map(map) = &mut hints else {
+        unreachable!();
+    };
+    if let Some(Val::Vec(args)) = map_get(event_data, "args") {
+        let args: Vec<Val> = args
+            .iter()
+            .map(|arg| request_hint(arg).unwrap_or(Val::Null))
+            .collect();
+        if args.iter().any(|arg| !matches!(arg, Val::Null)) {
+            map.insert(Val::from("args"), Val::Vec(args));
+        }
+    }
+    if let Some(caller) = map_get(event_data, "caller").and_then(request_hint) {
+        map.insert(Val::from("caller"), caller);
+    }
+    if map.is_empty() { None } else { Some(hints) }
+}
+
 /// Re-attach raw `original-url` values from the queue envelope onto
 /// DB-hydrated event data.
 ///

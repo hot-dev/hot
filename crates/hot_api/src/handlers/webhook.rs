@@ -578,24 +578,41 @@ async fn webhook_handler_inner(
     let stream_id = Uuid::now_v7();
     let run_id = Uuid::now_v7();
 
-    // Fetch build and project info for execution context
-    let (build_hash, project_id, project_name) =
-        match Build::get_build(db, &endpoint.build_id).await {
-            Ok(build) => {
-                let project_name = Project::get_project(db, &build.project_id)
-                    .await
-                    .ok()
-                    .map(|p| p.name);
-                (Some(build.hash), Some(build.project_id), project_name)
-            }
-            Err(_) => (None, None, None),
-        };
-
-    // Get the default user for this env (for event attribution)
-    let user_id = hot::db::User::get_default_user(db)
+    // Resolve the selected deployment completely before persisting or queuing
+    // work. Child organizations keep their member directory at the root, so an
+    // environment-scoped query cannot choose a "default" user under RLS.
+    let build = Build::get_build(db, &endpoint.build_id)
         .await
-        .map(|u| u.user_id)
-        .unwrap_or_else(|_| Uuid::nil());
+        .map_err(|_| {
+            (
+                StatusCode::NOT_FOUND,
+                Json(ApiErrorResponse::not_found("Webhook deployment")),
+            )
+        })?;
+    let project = Project::get_project(db, &build.project_id)
+        .await
+        .map_err(|_| {
+            (
+                StatusCode::NOT_FOUND,
+                Json(ApiErrorResponse::not_found("Webhook deployment")),
+            )
+        })?;
+    if project.env_id != ctx.env.env_id {
+        return Err((
+            StatusCode::NOT_FOUND,
+            Json(ApiErrorResponse::not_found("Webhook deployment")),
+        ));
+    }
+    // Authenticated calls retain their credential's creator; public capability
+    // calls belong to the deployment creator. Neither selects an unrelated
+    // global user or invents a UUID when the member directory is not visible.
+    let user_id = auth_result
+        .as_ref()
+        .map(|(_, key)| key.created_by_user_id)
+        .unwrap_or(build.created_by_user_id);
+    let build_hash = Some(build.hash);
+    let project_id = Some(build.project_id);
+    let project_name = Some(project.name);
 
     let mut execution_context = hot::lang::event::ExecutionContext {
         run_id,
@@ -959,6 +976,9 @@ fn build_webhook_response(
     }
     Ok((StatusCode::OK, Json(result)).into_response())
 }
+
+#[cfg(test)]
+pub(crate) mod postgres_lifecycle;
 
 #[cfg(test)]
 mod tests {
