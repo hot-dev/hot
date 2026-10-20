@@ -333,7 +333,7 @@ pub fn call_function_with_vm(
 pub fn count(args: &[Val]) -> HotResult<Val> {
     validate_args!("::hot::coll/count", args, 1);
 
-    match &args[0] {
+    match crate::val::as_fields(&args[0]) {
         Val::Vec(v) => HotResult::Ok(Val::Int(v.len() as i64)),
         Val::Map(m) => HotResult::Ok(Val::Int(m.len() as i64)),
         Val::Str(s) => HotResult::Ok(Val::Int(s.chars().count() as i64)),
@@ -417,7 +417,7 @@ pub fn mapcat(vm: &mut crate::lang::runtime::vm::VirtualMachine, args: &[Val]) -
         Err(err) => return HotResult::Err(err),
     };
 
-    let collection = &args[0];
+    let collection = crate::val::as_fields(&args[0]);
     let function_val = &args[1];
 
     tracing::debug!(
@@ -523,7 +523,7 @@ pub fn filter(vm: &mut crate::lang::runtime::vm::VirtualMachine, args: &[Val]) -
     }
 
     // Enforce coll-first ordering: (coll, predicate)
-    let collection = &args[0];
+    let collection = crate::val::as_fields(&args[0]);
     let predicate_val = &args[1];
 
     tracing::debug!(
@@ -722,7 +722,7 @@ pub fn map(vm: &mut crate::lang::runtime::vm::VirtualMachine, args: &[Val]) -> H
     };
 
     // Enforce coll-first ordering: (coll, func)
-    let collection = &args[0];
+    let collection = crate::val::as_fields(&args[0]);
     let function_val = &args[1];
 
     tracing::debug!(
@@ -885,7 +885,7 @@ pub fn map(vm: &mut crate::lang::runtime::vm::VirtualMachine, args: &[Val]) -> H
 pub fn length(args: &[Val]) -> HotResult<Val> {
     validate_args!("::hot::coll/length", args, 1);
 
-    let len = match &args[0] {
+    let len = match crate::val::as_fields(&args[0]) {
         Val::Vec(v) => v.len(),
         Val::Map(m) => m.len(),
         Val::Str(s) => s.len(),
@@ -910,7 +910,7 @@ pub fn get(args: &[Val]) -> HotResult<Val> {
         ));
     }
 
-    let coll = &args[0];
+    let coll = crate::val::as_fields(&args[0]);
     let key = &args[1];
     let not_found = if args.len() == 3 {
         args[2].clone()
@@ -994,6 +994,7 @@ pub fn get(args: &[Val]) -> HotResult<Val> {
 
 /// Associate a key-value pair with a map, returning a new map
 /// Works only on Map. Creates a new map with the key-value pair added.
+/// A constructed value keeps its type, like deep-path assignment.
 pub fn assoc(args: &[Val]) -> HotResult<Val> {
     if args.len() != 3 {
         return HotResult::Err(Val::from(format!(
@@ -1002,7 +1003,7 @@ pub fn assoc(args: &[Val]) -> HotResult<Val> {
         )));
     }
 
-    let map = &args[0];
+    let map = crate::val::as_fields(&args[0]);
     let key = &args[1];
     let value = &args[2];
 
@@ -1010,7 +1011,10 @@ pub fn assoc(args: &[Val]) -> HotResult<Val> {
         Val::Map(m) => {
             let mut new_map = (**m).clone(); // Clone the inner IndexMap
             new_map.insert(key.clone(), value.clone());
-            HotResult::Ok(Val::Map(Box::new(new_map)))
+            HotResult::Ok(crate::val::with_type_of(
+                &args[0],
+                Val::Map(Box::new(new_map)),
+            ))
         }
         _ => HotResult::Err(Val::from(
             "::hot::coll/assoc expects a Map as the first argument".to_string(),
@@ -1123,19 +1127,33 @@ pub fn concat(args: &[Val]) -> HotResult<Val> {
 pub fn merge(args: &[Val]) -> HotResult<Val> {
     validate_args!("::hot::coll/merge", args, 2);
 
-    let first_map = &args[0];
-    let second_map = &args[1];
-
-    let unwrapped_first = first_map.clone();
-    let unwrapped_second = second_map.clone();
-
-    match (&unwrapped_first, &unwrapped_second) {
-        (Val::Map(_), Val::Map(_)) => {
-            // Delegate to Val::merge for canonical deep merge semantics
-            let result = unwrapped_first.merge(&unwrapped_second);
-            HotResult::Ok(result)
-        }
+    match (
+        crate::val::as_fields(&args[0]),
+        crate::val::as_fields(&args[1]),
+    ) {
+        (Val::Map(_), Val::Map(_)) => HotResult::Ok(merge_fields(&args[0], &args[1])),
         _ => HotResult::Err(Val::from("merge expects two maps")),
+    }
+}
+
+/// `Val::merge`'s deep merge, seen through constructed values: a typed value
+/// merges its fields and keeps its type (`merge(server, {port: 2})` is still
+/// a `Server`). The left map's key order wins, and a non-map right value
+/// replaces the left one.
+fn merge_fields(a: &Val, b: &Val) -> Val {
+    match (crate::val::as_fields(a), crate::val::as_fields(b)) {
+        (Val::Map(left), Val::Map(right)) => {
+            let mut merged = (**left).clone();
+            for (key, value) in right.iter() {
+                let value = match left.get(key) {
+                    Some(existing) => merge_fields(existing, value),
+                    None => value.clone(),
+                };
+                merged.insert(key.clone(), value);
+            }
+            crate::val::with_type_of(a, Val::Map(Box::new(merged)))
+        }
+        _ => b.clone(),
     }
 }
 
@@ -1147,7 +1165,7 @@ pub fn reduce(vm: &mut crate::lang::runtime::vm::VirtualMachine, args: &[Val]) -
         )));
     }
 
-    let collection = &args[0];
+    let collection = crate::val::as_fields(&args[0]);
     let function_val = &args[1];
     let init_val = &args[2];
 
@@ -1306,7 +1324,7 @@ pub fn some(vm: &mut crate::lang::runtime::vm::VirtualMachine, args: &[Val]) -> 
         )));
     }
 
-    let collection = &args[0];
+    let collection = crate::val::as_fields(&args[0]);
     let predicate_val = &args[1];
 
     tracing::debug!(
@@ -1476,7 +1494,7 @@ pub fn find_first(
         )));
     }
 
-    let collection = &args[0];
+    let collection = crate::val::as_fields(&args[0]);
     let predicate_val = &args[1];
 
     if matches!(collection, Val::Null) {
@@ -1602,7 +1620,7 @@ pub fn for_each(vm: &mut crate::lang::runtime::vm::VirtualMachine, args: &[Val])
         )));
     }
 
-    let collection = &args[0];
+    let collection = crate::val::as_fields(&args[0]);
     let function_val = &args[1];
 
     if matches!(collection, Val::Null) {
@@ -1701,7 +1719,7 @@ pub fn pmap(vm: &mut crate::lang::runtime::vm::VirtualMachine, args: &[Val]) -> 
         Err(err) => return HotResult::Err(err),
     };
 
-    let collection = &args[0];
+    let collection = crate::val::as_fields(&args[0]);
     let function_val = &args[1];
     let thread_count = vm.get_thread_count();
 
@@ -2042,7 +2060,7 @@ pub fn map_indexed(
     };
 
     // Enforce coll-first ordering: (coll, func)
-    let collection = &args[0];
+    let collection = crate::val::as_fields(&args[0]);
     let function_val = &args[1];
 
     tracing::debug!(
@@ -2127,7 +2145,7 @@ pub fn remove(vm: &mut crate::lang::runtime::vm::VirtualMachine, args: &[Val]) -
     }
 
     // Enforce coll-first ordering: (coll, predicate)
-    let collection = &args[0];
+    let collection = crate::val::as_fields(&args[0]);
     let predicate_val = &args[1];
 
     tracing::debug!(
@@ -2220,7 +2238,7 @@ pub fn delete(args: &[Val]) -> HotResult<Val> {
         )));
     }
 
-    let collection = &args[0];
+    let collection = crate::val::as_fields(&args[0]);
     let key_or_index = &args[1];
 
     match (collection, key_or_index) {
@@ -2346,7 +2364,7 @@ pub fn is_empty(args: &[Val]) -> HotResult<Val> {
         )));
     }
 
-    match &args[0] {
+    match crate::val::as_fields(&args[0]) {
         Val::Vec(vec) => HotResult::Ok(Val::Bool(vec.is_empty())),
         Val::Map(map) => HotResult::Ok(Val::Bool(map.is_empty())),
         Val::Str(s) => HotResult::Ok(Val::Bool(s.is_empty())),
@@ -2367,7 +2385,7 @@ pub fn partition(
         )));
     }
 
-    let a0 = &args[0];
+    let a0 = crate::val::as_fields(&args[0]);
     let a1 = &args[1];
 
     tracing::debug!(
@@ -2508,7 +2526,7 @@ pub fn partition_by(
     }
 
     // Enforce coll-first ordering: (coll, func)
-    let collection = &args[0];
+    let collection = crate::val::as_fields(&args[0]);
     let function_val = &args[1];
 
     tracing::debug!(
@@ -2923,7 +2941,7 @@ pub fn all(vm: &mut crate::lang::runtime::vm::VirtualMachine, args: &[Val]) -> H
     }
 
     // Enforce coll-first ordering: (coll, predicate)
-    let collection = &args[0];
+    let collection = crate::val::as_fields(&args[0]);
     let predicate_val = &args[1];
 
     tracing::debug!(
@@ -3041,7 +3059,7 @@ pub fn slice(args: &[Val]) -> HotResult<Val> {
         )));
     }
 
-    let collection = &args[0];
+    let collection = crate::val::as_fields(&args[0]);
     let start = match &args[1] {
         Val::Int(n) => *n as usize,
         _ => return HotResult::Err(Val::from("slice start index must be an integer")),
@@ -3126,7 +3144,7 @@ pub fn keys(args: &[Val]) -> HotResult<Val> {
         )));
     }
 
-    match &args[0] {
+    match crate::val::as_fields(&args[0]) {
         Val::Map(map) => {
             let keys: Vec<Val> = map.keys().cloned().collect();
             HotResult::Ok(Val::Vec(keys))
@@ -3152,7 +3170,7 @@ pub fn values(args: &[Val]) -> HotResult<Val> {
         )));
     }
 
-    match &args[0] {
+    match crate::val::as_fields(&args[0]) {
         Val::Map(map) => {
             let vals: Vec<Val> = map.values().cloned().collect();
             HotResult::Ok(Val::Vec(vals))
@@ -3325,7 +3343,8 @@ pub fn walk(vm: &mut crate::lang::runtime::vm::VirtualMachine, args: &[Val]) -> 
     let outer = &args[1];
     let form = &args[2];
 
-    let walked = match form {
+    let walked = match crate::val::as_fields(form) {
+        Val::Map(map) if crate::val::is_tagged_wrapper(map) => form.clone(),
         Val::Vec(items) => {
             let mut result = Vec::with_capacity(items.len());
             for item in items {
@@ -3350,7 +3369,7 @@ pub fn walk(vm: &mut crate::lang::runtime::vm::VirtualMachine, args: &[Val]) -> 
                     Err(err) => return HotResult::Err(Val::from(err)),
                 }
             }
-            Val::Map(Box::new(result))
+            crate::val::with_type_of(form, Val::Map(Box::new(result)))
         }
         _ => form.clone(),
     };
@@ -3388,8 +3407,11 @@ pub fn prewalk(vm: &mut crate::lang::runtime::vm::VirtualMachine, args: &[Val]) 
             Err(err) => return HotResult::Err(Val::from(err)),
         };
 
-        // Then recurse into children
-        match &transformed {
+        // Then recurse into children. A constructed value is walked through
+        // its fields and keeps its type; a wrapper without map fields (unit
+        // variant, newtype, Err) is a leaf.
+        match crate::val::as_fields(&transformed) {
+            Val::Map(map) if crate::val::is_tagged_wrapper(map) => HotResult::Ok(transformed),
             Val::Vec(items) => {
                 let mut result = Vec::new();
                 for item in items {
@@ -3410,7 +3432,10 @@ pub fn prewalk(vm: &mut crate::lang::runtime::vm::VirtualMachine, args: &[Val]) 
                         HotResult::Err(err) => return HotResult::Err(err),
                     }
                 }
-                HotResult::Ok(Val::Map(Box::new(result_map)))
+                HotResult::Ok(crate::val::with_type_of(
+                    &transformed,
+                    Val::Map(Box::new(result_map)),
+                ))
             }
             _ => HotResult::Ok(transformed),
         }
@@ -3436,8 +3461,10 @@ pub fn postwalk(vm: &mut crate::lang::runtime::vm::VirtualMachine, args: &[Val])
         function_val: &Val,
         data: &Val,
     ) -> HotResult<Val> {
-        // First recurse into children
-        let walked = match data {
+        // First recurse into children. A constructed value is walked through
+        // its fields and keeps its type; a wrapper without map fields is a leaf.
+        let walked = match crate::val::as_fields(data) {
+            Val::Map(map) if crate::val::is_tagged_wrapper(map) => data.clone(),
             Val::Vec(items) => {
                 let mut result = Vec::new();
                 for item in items {
@@ -3458,7 +3485,7 @@ pub fn postwalk(vm: &mut crate::lang::runtime::vm::VirtualMachine, args: &[Val])
                         HotResult::Err(err) => return HotResult::Err(err),
                     }
                 }
-                Val::Map(Box::new(result_map))
+                crate::val::with_type_of(data, Val::Map(Box::new(result_map)))
             }
             _ => data.clone(),
         };
@@ -3503,8 +3530,11 @@ pub fn postwalk_replace(
         replacement_map: &indexmap::IndexMap<Val, Val>,
         data: &Val,
     ) -> Val {
-        // First recurse into children (post-order)
-        let walked = match data {
+        // First recurse into children (post-order). A constructed value is
+        // walked through its fields and keeps its type; a wrapper without map
+        // fields is a leaf.
+        let walked = match crate::val::as_fields(data) {
+            Val::Map(map) if crate::val::is_tagged_wrapper(map) => data.clone(),
             Val::Vec(items) => Val::Vec(
                 items
                     .iter()
@@ -3519,7 +3549,7 @@ pub fn postwalk_replace(
                         postwalk_replace_recursive(replacement_map, value),
                     );
                 }
-                Val::Map(Box::new(result_map))
+                crate::val::with_type_of(data, Val::Map(Box::new(result_map)))
             }
             _ => data.clone(),
         };
@@ -3538,7 +3568,7 @@ pub fn postwalk_replace(
 
 /// Helper: look up a single key in a Map or Vec
 fn get_one(coll: &Val, key: &Val) -> Val {
-    match coll {
+    match crate::val::as_fields(coll) {
         Val::Map(m) => m.get(key).cloned().unwrap_or(Val::Null),
         Val::Vec(v) => {
             if let Val::Int(i) = key {
@@ -3622,7 +3652,7 @@ pub fn assoc_in(args: &[Val]) -> HotResult<Val> {
         let key = &path[0];
         let rest = &path[1..];
 
-        match coll {
+        match crate::val::as_fields(coll) {
             Val::Map(m) => {
                 let mut new_map = (**m).clone();
                 let child = m
@@ -3631,7 +3661,8 @@ pub fn assoc_in(args: &[Val]) -> HotResult<Val> {
                     .unwrap_or(Val::Map(Box::new(IndexMap::new())));
                 let new_child = assoc_in_recursive(&child, rest, value)?;
                 new_map.insert(key.clone(), new_child);
-                Ok(Val::Map(Box::new(new_map)))
+                // Constructed values along the path keep their types.
+                Ok(crate::val::with_type_of(coll, Val::Map(Box::new(new_map))))
             }
             Val::Vec(v) => {
                 if let Val::Int(i) = key {

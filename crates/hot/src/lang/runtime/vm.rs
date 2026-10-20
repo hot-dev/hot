@@ -5744,14 +5744,14 @@ impl VirtualMachine {
                         Val::Int(a) => fast_return!(math::fast_is_zero_int(*a)),
                         _ => fast_return_hr!(math::is_zero(args)),
                     },
-                    "is-empty" => match &args[0] {
+                    "is-empty" => match crate::val::as_fields(&args[0]) {
                         Val::Vec(v) => fast_return!(coll::fast_is_empty_vec(v)),
                         Val::Str(s) => fast_return!(coll::fast_is_empty_str(s)),
                         Val::Map(m) => fast_return!(coll::fast_is_empty_map(m)),
                         Val::Null => fast_return!(Val::Bool(true)),
                         _ => fast_return_hr!(coll::is_empty(args)),
                     },
-                    "length" => match &args[0] {
+                    "length" => match crate::val::as_fields(&args[0]) {
                         Val::Vec(v) => fast_return!(coll::fast_length_vec(v)),
                         Val::Str(s) => fast_return!(coll::fast_length_str(s)),
                         Val::Map(m) => fast_return!(coll::fast_length_map(m)),
@@ -5813,7 +5813,7 @@ impl VirtualMachine {
 
                     // Tier 1: collection operations with common type combos
                     match function_name {
-                        "get" => match (&args[0], &args[1]) {
+                        "get" => match (crate::val::as_fields(&args[0]), &args[1]) {
                             (Val::Vec(v), Val::Int(i)) => {
                                 fast_return!(coll::fast_get_vec_int(v, *i))
                             }
