@@ -24,6 +24,13 @@ inputs:
       sccache provides the compiled-artifact cache and quota is constrained.
     required: false
     default: "true"
+  ci-tuning:
+    description: >-
+      Apply CI-only build settings: line-tables-only debug info for dev and
+      test builds, and rust-lld as the Windows linker. For test workflows;
+      release builds leave it off.
+    required: false
+    default: "false"
 runs:
   using: "composite"
   steps:
@@ -54,6 +61,21 @@ runs:
         echo "RUSTC_WRAPPER=sccache" >> "$GITHUB_ENV"
         echo "SCCACHE_CACHE_SIZE=${{ inputs.sccache-size }}" >> "$GITHUB_ENV"
 
+    # Set before the cache steps: rust-cache keys on CARGO_* variables.
+    - name: Apply CI build settings
+      if: inputs.ci-tuning == 'true'
+      shell: bash
+      run: |
+        # CI never attaches a debugger. Line tables keep file and line in
+        # backtraces while cutting compile and link work.
+        echo "CARGO_PROFILE_DEV_DEBUG=line-tables-only" >> "$GITHUB_ENV"
+        echo "CARGO_PROFILE_TEST_DEBUG=line-tables-only" >> "$GITHUB_ENV"
+        # rust-lld links the large Windows test binaries much faster than
+        # MSVC link.exe.
+        if [[ "$RUNNER_OS" == "Windows" ]]; then
+          echo "CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_LINKER=rust-lld.exe" >> "$GITHUB_ENV"
+        fi
+
     - name: Cache sccache artifacts
       if: inputs.save-cache == 'true'
       uses: actions/cache@v5
@@ -61,8 +83,10 @@ runs:
         path: ~/.cache/sccache
         # Stable across source-only runs: sccache content-addresses compiler
         # inputs, so a fresh run_id key only duplicates the same dependency
-        # objects and burns quota.
-        key: sccache-${{ runner.os }}-${{ inputs.rust-toolchain }}-${{ github.job }}-${{ hashFiles('Cargo.lock', '.github/actions/rust-setup/action.yml') }}
+        # objects and burns quota. The size is part of the key because
+        # actions/cache never re-saves an existing key, so a raised size
+        # would otherwise never persist.
+        key: sccache-${{ runner.os }}-${{ inputs.rust-toolchain }}-${{ github.job }}-${{ inputs.sccache-size }}-${{ hashFiles('Cargo.lock', '.github/actions/rust-setup/action.yml') }}
         restore-keys: |
           sccache-${{ runner.os }}-${{ inputs.rust-toolchain }}-${{ github.job }}-
           sccache-${{ runner.os }}-${{ inputs.rust-toolchain }}-
@@ -72,7 +96,7 @@ runs:
       uses: actions/cache/restore@v5
       with:
         path: ~/.cache/sccache
-        key: sccache-${{ runner.os }}-${{ inputs.rust-toolchain }}-${{ github.job }}-${{ hashFiles('Cargo.lock', '.github/actions/rust-setup/action.yml') }}
+        key: sccache-${{ runner.os }}-${{ inputs.rust-toolchain }}-${{ github.job }}-${{ inputs.sccache-size }}-${{ hashFiles('Cargo.lock', '.github/actions/rust-setup/action.yml') }}
         restore-keys: |
           sccache-${{ runner.os }}-${{ inputs.rust-toolchain }}-${{ github.job }}-
           sccache-${{ runner.os }}-${{ inputs.rust-toolchain }}-

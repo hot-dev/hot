@@ -102,7 +102,7 @@ until the function forces it with `do`. This is how Hot enables safe Result
 inspection.
 
 ```hot
-// The if function uses lazy arguments
+// The if function declares lazy parameters for its branches
 if fn cond (pred: Any, lazy then: Any, lazy else: Any): Any {
   pred => { do then }
   => { do else }
