@@ -110,8 +110,22 @@ pub mod resource_types {
 ///
 /// Resource URN format: `type:path` where path can contain `*` suffix wildcard.
 /// Actions: create, read, update, delete, execute, * (all).
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Permissions(HashMap<String, Vec<String>>);
+
+/// Grants compare as sets: action order and duplicates carry no meaning, and
+/// revalidation compares independently built values.
+impl PartialEq for Permissions {
+    fn eq(&self, other: &Self) -> bool {
+        self.0.len() == other.0.len()
+            && self.0.iter().all(|(resource, actions)| {
+                other.0.get(resource).is_some_and(|other_actions| {
+                    actions.iter().all(|action| other_actions.contains(action))
+                        && other_actions.iter().all(|action| actions.contains(action))
+                })
+            })
+    }
+}
 
 #[derive(Debug)]
 pub enum PermissionError {
@@ -281,6 +295,11 @@ impl Permissions {
                     }
                 }
             }
+        }
+        // Several pattern pairs can feed one resource in hash-map order; keep
+        // the serialized grants deterministic.
+        for actions in grants.values_mut() {
+            actions.sort();
         }
         Self(grants)
     }
@@ -562,6 +581,32 @@ mod tests {
             Some(vec!["one".to_string()])
         );
         assert_eq!(effective, issuer.intersection(&child));
+    }
+
+    #[test]
+    fn intersection_equality_ignores_overlap_iteration_order() {
+        // Two issuer patterns contribute different actions to one resource,
+        // so the merged list order follows each fresh map's iteration order.
+        let issuer = serde_json::json!({"*:*": ["read"], "event:*": ["create"]});
+        let child = serde_json::json!({"event:*": ["create", "read"]});
+        let expected = Permissions::from_json(&child)
+            .unwrap()
+            .intersection(&Permissions::from_json(&issuer).unwrap());
+        for _ in 0..64 {
+            let current = Permissions::from_json(&child)
+                .unwrap()
+                .intersection(&Permissions::from_json(&issuer).unwrap());
+            assert_eq!(current, expected);
+            assert_eq!(current.to_json(), expected.to_json());
+        }
+        assert_eq!(
+            perms(&[("event:*", &["read", "create"])]),
+            perms(&[("event:*", &["create", "read"])])
+        );
+        assert_ne!(
+            perms(&[("event:*", &["read"])]),
+            perms(&[("event:*", &["read", "create"])])
+        );
     }
 
     #[test]

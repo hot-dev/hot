@@ -917,7 +917,7 @@ fn build_signin_redirect(uri: &axum::http::Uri) -> String {
 pub async fn session_middleware(
     State(db): axum::extract::State<std::sync::Arc<DatabasePool>>,
     axum::extract::Extension(conf): axum::extract::Extension<Val>,
-    cookies: CookieJar,
+    mut cookies: CookieJar,
     mut request: Request,
     next: Next,
 ) -> Result<impl IntoResponse, StatusCode> {
@@ -1000,7 +1000,14 @@ pub async fn session_middleware(
                 return Ok((cookies, response));
             }
             Err(_) => {
-                return Ok((cookies, create_redirect_response(&request, "/signin")));
+                // Clear a signed token whose user is inactive, missing or
+                // unloadable: /signin sends any valid token back to /, so
+                // keeping it loops. Local development falls through to
+                // auto-login; otherwise the redirect below drops the token.
+                cookies = cookies
+                    .add(build_removal_cookie(JWT_COOKIE_NAME))
+                    .add(build_removal_cookie(CURRENT_ORG_COOKIE_NAME))
+                    .add(build_removal_cookie(CURRENT_ENV_COOKIE_NAME));
             }
         }
     }
