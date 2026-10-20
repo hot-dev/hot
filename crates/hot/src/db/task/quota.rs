@@ -104,15 +104,31 @@ impl Task {
                         .bind(root_id)
                         .fetch_one(&mut *tx)
                         .await?;
-                let queued: bool =
-                    sqlx::query_scalar("SELECT task_status_id=1 FROM task WHERE task_id=$1")
-                        .bind(task_id)
-                        .fetch_one(&mut *tx)
-                        .await?;
+                // Row locks also require UPDATE policy visibility. Billing
+                // authority can read sibling tasks, but may not mutate them.
+                // Lock this candidate under its verified environment first.
+                DatabaseScope::Environment {
+                    org_id: env.org_id,
+                    env_id: task.env_id,
+                }
+                .apply_to_connection(&mut tx)
+                .await?;
+                let queued: bool = sqlx::query_scalar(
+                    "SELECT task_status_id=1 FROM task WHERE task_id=$1 FOR UPDATE",
+                )
+                .bind(task_id)
+                .fetch_one(&mut *tx)
+                .await?;
                 if !queued {
                     tx.rollback().await?;
                     return Ok(false);
                 }
+                DatabaseScope::Maintenance {
+                    operation: MaintenanceOperation::Billing,
+                    org_id: Some(root_id),
+                }
+                .apply_to_connection(&mut tx)
+                .await?;
                 let admitted: bool = sqlx::query_scalar("SELECT e.active AND o.active AND o.lifecycle_state='active' AND r.active AND r.lifecycle_state='active' FROM env e JOIN org o ON o.org_id=e.org_id JOIN org r ON r.org_id=COALESCE(o.parent_org_id,o.org_id) WHERE e.env_id=$1")
                     .bind(task.env_id).fetch_one(&mut *tx).await?;
                 if !admitted {
@@ -136,15 +152,7 @@ impl Task {
                 ) {
                     (0, 0, 0, 0, 0)
                 } else {
-                    sqlx::query_as(
-                    "SELECT
-                     COUNT(*) FILTER(WHERE (t.task_status_id=2 OR (t.task_status_id=5 AND t.task_type='container' AND t.reserved_duration_ms>0)) AND t.task_type='container')::bigint,
-                     COALESCE(SUM(CASE WHEN (t.task_status_id=2 OR (t.task_status_id=5 AND t.task_type='container' AND t.reserved_duration_ms>0)) THEN CASE WHEN t.reserved_compute_units>0 THEN t.reserved_compute_units WHEN t.task_type='container' THEN ((GREATEST(t.timeout_ms,0)*32+999)/1000) ELSE 0 END ELSE 0 END),0)::bigint,
-                     COALESCE(SUM(CASE WHEN NOT (t.task_status_id=2 OR (t.task_status_id=5 AND t.task_type='container' AND t.reserved_duration_ms>0)) AND t.task_type='container' AND COALESCE(t.stop_time,t.start_time,t.created_at) >= $2 THEN GREATEST(COALESCE((t.result->'$val'->'err'->>'compute-units')::bigint,(t.result->>'compute-units')::bigint,CASE WHEN t.reserved_duration_ms>0 THEN (t.reserved_compute_units*LEAST(GREATEST(COALESCE(t.duration_ms,0),0),t.reserved_duration_ms)+t.reserved_duration_ms-1)/t.reserved_duration_ms ELSE t.reserved_compute_units END,0),0) ELSE 0 END),0)::bigint,
-                     COALESCE(SUM(CASE WHEN (t.task_status_id=2 OR (t.task_status_id=5 AND t.task_type='container' AND t.reserved_duration_ms>0)) THEN CASE WHEN t.reserved_duration_ms>0 THEN t.reserved_duration_ms ELSE GREATEST(t.timeout_ms,0) END ELSE 0 END),0)::bigint,
-                     COALESCE(SUM(CASE WHEN NOT (t.task_status_id=2 OR (t.task_status_id=5 AND t.task_type='container' AND t.reserved_duration_ms>0)) AND COALESCE(t.stop_time,t.start_time,t.created_at) >= $2 THEN GREATEST(COALESCE(t.duration_ms,0),0) ELSE 0 END),0)::bigint
-                     FROM task t JOIN env e ON e.env_id=t.env_id JOIN org o ON o.org_id=e.org_id WHERE (o.org_id=$1 OR o.parent_org_id=$1) AND (t.task_status_id=2 OR (t.task_status_id=5 AND t.reserved_duration_ms>0) OR COALESCE(t.stop_time,t.start_time,t.created_at) >= $2)"
-                ).bind(root_id).bind(period).fetch_one(&mut *tx).await?
+                    crate::db::usage::task_usage_postgres(&mut tx, root_id, period).await?
                 };
                 check_capacity(
                     plan.as_ref().and_then(|p| p.0.as_ref()),
@@ -224,15 +232,7 @@ impl Task {
                 ) {
                     (0, 0, 0, 0, 0)
                 } else {
-                    sqlx::query_as(
-                    "SELECT
-                     COALESCE(SUM(CASE WHEN (t.task_status_id=2 OR (t.task_status_id=5 AND t.task_type='container' AND t.reserved_duration_ms>0)) AND t.task_type='container' THEN 1 ELSE 0 END),0),
-                     COALESCE(SUM(CASE WHEN (t.task_status_id=2 OR (t.task_status_id=5 AND t.task_type='container' AND t.reserved_duration_ms>0)) THEN CASE WHEN t.reserved_compute_units>0 THEN t.reserved_compute_units WHEN t.task_type='container' THEN ((MAX(t.timeout_ms,0)*32+999)/1000) ELSE 0 END ELSE 0 END),0),
-                     COALESCE(SUM(CASE WHEN NOT (t.task_status_id=2 OR (t.task_status_id=5 AND t.task_type='container' AND t.reserved_duration_ms>0)) AND t.task_type='container' AND COALESCE(t.stop_time,t.start_time,t.created_at) >= ? THEN MAX(COALESCE(CAST(json_extract(t.result,'$.\"$val\".err.\"compute-units\"') AS integer),CAST(json_extract(t.result,'$.\"compute-units\"') AS integer),CASE WHEN t.reserved_duration_ms>0 THEN (t.reserved_compute_units*MIN(MAX(COALESCE(t.duration_ms,0),0),t.reserved_duration_ms)+t.reserved_duration_ms-1)/t.reserved_duration_ms ELSE t.reserved_compute_units END,0),0) ELSE 0 END),0),
-                     COALESCE(SUM(CASE WHEN (t.task_status_id=2 OR (t.task_status_id=5 AND t.task_type='container' AND t.reserved_duration_ms>0)) THEN CASE WHEN t.reserved_duration_ms>0 THEN t.reserved_duration_ms ELSE MAX(t.timeout_ms,0) END ELSE 0 END),0),
-                     COALESCE(SUM(CASE WHEN NOT (t.task_status_id=2 OR (t.task_status_id=5 AND t.task_type='container' AND t.reserved_duration_ms>0)) AND COALESCE(t.stop_time,t.start_time,t.created_at) >= ? THEN MAX(COALESCE(t.duration_ms,0),0) ELSE 0 END),0)
-                     FROM task t JOIN env e ON e.env_id=t.env_id JOIN org o ON o.org_id=e.org_id WHERE (o.org_id=? OR o.parent_org_id=?) AND (t.task_status_id=2 OR (t.task_status_id=5 AND t.reserved_duration_ms>0) OR COALESCE(t.stop_time,t.start_time,t.created_at) >= ?)"
-                ).bind(period).bind(period).bind(root_id).bind(root_id).bind(period).fetch_one(&mut *tx).await?
+                    crate::db::usage::task_usage_sqlite(&mut tx, root_id, period).await?
                 };
                 check_capacity(
                     plan_features.as_ref(),

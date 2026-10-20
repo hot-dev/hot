@@ -1148,11 +1148,13 @@ async fn scoped_pool_enforces_isolation_under_a_restricted_login()
         .bind(winner_call)
         .execute(&mut *backfill)
         .await?;
-    sqlx::raw_sql(include_str!(
-        "../../../resources/db/postgres/migrations/015_call_storage_accounting.sql"
-    ))
-    .execute(&mut *backfill)
-    .await?;
+    let migration =
+        include_str!("../../../resources/db/postgres/migrations/015_call_storage_accounting.sql");
+    let start = migration.find("DO $$").unwrap();
+    let end = migration.find("END $$;").unwrap() + "END $$;".len();
+    sqlx::raw_sql(&migration[start..end])
+        .execute(&mut *backfill)
+        .await?;
     assert_eq!(
         sqlx::query_as::<_, (Uuid, i64)>("SELECT run_id,size FROM call WHERE call_id=$1")
             .bind(winner_call)
@@ -1203,8 +1205,343 @@ async fn scoped_pool_enforces_isolation_under_a_restricted_login()
             .unwrap_err();
     assert!(claim_error.to_string().contains("exact environment scope"));
     assert_eq!(db::Task::get(&db_a, &queued_task).await?.task_status_id, 1);
-    assert!(db::Task::claim_for_worker_with_quota(&db_a, &queued_task, "rls-test", reserve).await?);
+    assert!(
+        db::Task::claim_for_worker_with_quota(&db_a, &queued_task, "rls-test", reserve)
+            .await
+            .map_err(|e| format!("initial code task claim: {e:?}"))?
+    );
     assert_eq!(db::Task::get(&db_a, &queued_task).await?.task_status_id, 2);
+    // Use independent data connections for the concurrency checks below; the
+    // original fixture intentionally has a one-connection pool.
+    let counter_runtime = PgPoolOptions::new()
+        .max_connections(4)
+        .after_connect(|conn, _| {
+            Box::pin(async move {
+                conn.execute("SET search_path=hot,public").await?;
+                Ok(())
+            })
+        })
+        .connect(runtime_url.as_str())
+        .await?;
+    let counter_pool = ScopedPgPool::new(counter_runtime);
+    let a = counter_pool.with_scope(DatabaseScope::Environment {
+        org_id: child_a,
+        env_id: env_a,
+    });
+    let b = counter_pool.with_scope(DatabaseScope::Environment {
+        org_id: child_b,
+        env_id: env_b,
+    });
+    let db_a = db::DatabasePool::Postgres(a.clone());
+    let db_b = db::DatabasePool::Postgres(b.clone());
+    // A completion holding the counter row must become visible to a period
+    // initialization that waited for it. Source reads use a fresh statement
+    // snapshot after acquiring counter locks.
+    let stream_b: Uuid = sqlx::query_scalar("SELECT stream_id FROM run WHERE run_id=$1")
+        .bind(run_b)
+        .fetch_one(&b)
+        .await?;
+    let period_task = Uuid::new_v4();
+    let period_claim = Uuid::new_v4();
+    for (id, env, stream, build, connection) in [
+        (period_task, env_a, stream_a, build_a, &a),
+        (period_claim, env_b, stream_b, build_b, &b),
+    ] {
+        sqlx::query("INSERT INTO task(task_id,env_id,stream_id,build_id,function_name,task_type) VALUES($1,$2,$3,$4,'period-test','code')")
+            .bind(id).bind(env).bind(stream).bind(build).execute(connection).await?;
+    }
+    sqlx::query("UPDATE hot.org SET features=$1 WHERE org_id=$2")
+        .bind(serde_json::json!({"compute_units_budget":1000000,"runs_per_month":-1}))
+        .bind(root)
+        .execute(&admin)
+        .await?;
+    assert!(
+        db::Task::claim_for_worker_with_quota(&db_a, &period_task, "period-first", reserve)
+            .await
+            .map_err(|e| format!("first period task claim: {e:?}"))?
+    );
+    sqlx::query("UPDATE hot.usage_task SET period_start=now()+interval '10 days',compute_units=0,duration_ms=0 WHERE org_id=ANY($1)").bind(vec![child_a,child_b]).execute(&admin).await?;
+    let mut completion = a.begin().await?;
+    sqlx::query(
+        "UPDATE task SET task_status_id=3,duration_ms=200,stop_time=now() WHERE task_id=$1",
+    )
+    .bind(period_task)
+    .execute(&mut *completion)
+    .await?;
+    let claim_db = db_b.clone();
+    let waiting = tokio::spawn(async move {
+        db::Task::claim_for_worker_with_quota(&claim_db, &period_claim, "period-second", reserve)
+            .await
+    });
+    tokio::time::sleep(Duration::from_millis(30)).await;
+    assert!(
+        !waiting.is_finished(),
+        "claim must wait for the uncommitted counter writer"
+    );
+    completion.commit().await?;
+    assert!(
+        waiting
+            .await?
+            .map_err(|e| format!("rollover task claim: {e:?}"))?
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT duration_ms FROM usage_task WHERE env_id=$1")
+            .bind(env_a)
+            .fetch_one(&a)
+            .await?,
+        200
+    );
+    sqlx::query("DELETE FROM hot.task WHERE task_id=ANY($1)")
+        .bind(vec![period_task, period_claim])
+        .execute(&admin)
+        .await?;
+    sqlx::query("UPDATE hot.org SET features=NULL WHERE org_id=$1")
+        .bind(root)
+        .execute(&admin)
+        .await?;
+
+    // Multi-statement units of work preserve the exact scope and rollback.
+    let tx_ids: (i64, i64) = a
+        .transaction(|conn| {
+            Box::pin(async move {
+                let first = sqlx::query_scalar("SELECT txid_current()")
+                    .fetch_one(&mut *conn)
+                    .await?;
+                let second = sqlx::query_scalar("SELECT txid_current()")
+                    .fetch_one(&mut *conn)
+                    .await?;
+                Ok::<_, sqlx::Error>((first, second))
+            })
+        })
+        .await?;
+    assert_eq!(tx_ids.0, tx_ids.1);
+    let original: String = sqlx::query_scalar("SELECT name FROM env WHERE env_id=$1")
+        .bind(env_a)
+        .fetch_one(&a)
+        .await?;
+    let rejected: Result<(), sqlx::Error> = a
+        .transaction(move |conn| {
+            Box::pin(async move {
+                sqlx::query("UPDATE env SET name='must-rollback' WHERE env_id=$1")
+                    .bind(env_a)
+                    .execute(&mut *conn)
+                    .await?;
+                Err(sqlx::Error::Protocol("intentional rollback".into()))
+            })
+        })
+        .await;
+    assert!(rejected.is_err());
+    assert_eq!(
+        sqlx::query_scalar::<_, String>("SELECT name FROM env WHERE env_id=$1")
+            .bind(env_a)
+            .fetch_one(&a)
+            .await?,
+        original
+    );
+    // Even a one-connection data pool remains usable while coordination owns
+    // an advisory session. The guard must not consume the pool's only slot.
+    let single = PgPoolOptions::new()
+        .max_connections(1)
+        .after_connect(|conn, _| {
+            Box::pin(async move {
+                conn.execute("SET search_path=hot,public").await?;
+                Ok(())
+            })
+        })
+        .connect(runtime_url.as_str())
+        .await?;
+    let single = ScopedPgPool::new(single).with_scope(DatabaseScope::Environment {
+        org_id: child_a,
+        env_id: env_a,
+    });
+    let guard = db::try_acquire_advisory_lock(
+        &db::DatabasePool::Postgres(single.clone()),
+        i64::from_be_bytes(Uuid::new_v4().as_bytes()[..8].try_into()?),
+    )
+    .await?
+    .unwrap();
+    assert_eq!(
+        tokio::time::timeout(
+            Duration::from_secs(3),
+            sqlx::query_scalar::<_, i32>("SELECT 1").fetch_one(&single)
+        )
+        .await??,
+        1
+    );
+    guard.release().await;
+    single.close().await;
+
+    // All counter tables retain the same exact ownership boundary as source rows.
+    let counter_call = Uuid::new_v4();
+    sqlx::query("INSERT INTO call(call_id,run_id,env_id,function_name,static_scope,runtime_path,call_depth,start_time,size) VALUES($1,$2,$3,'counter','counter','counter',0,now(),11)")
+        .bind(counter_call).bind(run_a).bind(env_a).execute(&a).await?;
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM usage_storage WHERE env_id=$1")
+            .bind(env_a)
+            .fetch_one(&b)
+            .await?,
+        0
+    );
+    assert!(
+        sqlx::query("INSERT INTO usage_storage(env_id,org_id,slot,call_bytes) VALUES($1,$2,0,1)")
+            .bind(env_a)
+            .bind(child_a)
+            .execute(&b)
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM usage_task WHERE env_id=$1")
+            .bind(env_a)
+            .fetch_one(&b)
+            .await?,
+        0
+    );
+    assert!(
+        sqlx::query("INSERT INTO usage_task(env_id,org_id) VALUES($1,$2)")
+            .bind(env_a)
+            .bind(child_a)
+            .execute(&b)
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM usage_run")
+            .fetch_one(&b)
+            .await?,
+        0
+    );
+    assert!(
+        sqlx::query("INSERT INTO usage_run(root_org_id,period_start) VALUES($1,now())")
+            .bind(root)
+            .execute(&b)
+            .await
+            .is_err()
+    );
+    let queue = pool.with_scope(DatabaseScope::Maintenance {
+        operation: db::MaintenanceOperation::Queue,
+        org_id: None,
+    });
+    assert!(sqlx::query("INSERT INTO call(call_id,run_id,env_id,function_name,static_scope,runtime_path,call_depth,start_time,size) VALUES($1,$2,$3,'counter','counter','counter',0,now(),11)")
+        .bind(Uuid::new_v4()).bind(run_a).bind(env_b).execute(&queue).await.is_err(),"broad queue scope still cannot forge call ownership");
+    let billing_db = db::DatabasePool::Postgres(pool.with_scope(DatabaseScope::Maintenance {
+        operation: db::MaintenanceOperation::Billing,
+        org_id: Some(root),
+    }));
+    db::usage::reconcile_account(&billing_db, root).await?;
+    sqlx::query("UPDATE hot.usage_storage SET call_bytes=call_bytes+29 WHERE env_id=$1 AND slot=(SELECT min(slot) FROM hot.usage_storage WHERE env_id=$1)").bind(env_a).execute(&admin).await?;
+    let writer = a.clone();
+    let writing = tokio::spawn(async move {
+        for size in 12..32 {
+            sqlx::query("UPDATE call SET size=$1 WHERE call_id=$2")
+                .bind(size)
+                .bind(counter_call)
+                .execute(&writer)
+                .await
+                .unwrap();
+        }
+    });
+    let report = db::usage::reconcile_account(&billing_db, root)
+        .await?
+        .unwrap();
+    assert_eq!(report.storage_rows, 1);
+    writing.await?;
+    assert!(
+        db::usage::reconcile_account(&billing_db, root)
+            .await?
+            .unwrap()
+            .is_empty()
+    );
+    let actual: i64 = sqlx::query_scalar(
+        "SELECT COALESCE(SUM(call_bytes),0)::bigint FROM usage_storage WHERE env_id=$1",
+    )
+    .bind(env_a)
+    .fetch_one(&a)
+    .await?;
+    let expected: i64 = sqlx::query_scalar(
+        "SELECT COALESCE(SUM(GREATEST(size,0)),0)::bigint FROM call WHERE env_id=$1",
+    )
+    .bind(env_a)
+    .fetch_one(&a)
+    .await?;
+    assert_eq!(actual, expected);
+
+    // Distinct runtime sessions publish deltas to their own backend slots.
+    // Retention and a cascaded run delete both subtract exactly once.
+    let cascade_run = Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO run(run_id,env_id,stream_id,build_id,run_type_id) VALUES($1,$2,$3,$4,1)",
+    )
+    .bind(cascade_run)
+    .bind(env_a)
+    .bind(stream_a)
+    .bind(build_a)
+    .execute(&a)
+    .await?;
+    let prior_slots: Vec<(i16, i64)> =
+        sqlx::query_as("SELECT slot,call_bytes FROM usage_storage WHERE env_id=$1")
+            .bind(env_a)
+            .fetch_all(&a)
+            .await?;
+    let mut first = a.begin().await?;
+    let mut second = a.begin().await?;
+    let slot1: i32 = sqlx::query_scalar("SELECT pg_backend_pid()%16")
+        .fetch_one(&mut *first)
+        .await?;
+    let slot2: i32 = sqlx::query_scalar("SELECT pg_backend_pid()%16")
+        .fetch_one(&mut *second)
+        .await?;
+    sqlx::query("INSERT INTO call(call_id,run_id,env_id,function_name,static_scope,runtime_path,call_depth,start_time,size) VALUES($1,$2,$3,'slots','slots','slots',0,'2000-01-01',17)")
+        .bind(Uuid::new_v4()).bind(cascade_run).bind(env_a).execute(&mut *first).await?;
+    first.commit().await?;
+    sqlx::query("INSERT INTO call(call_id,run_id,env_id,function_name,static_scope,runtime_path,call_depth,start_time,size) VALUES($1,$2,$3,'slots','slots','slots',0,'2000-01-01',23)")
+        .bind(Uuid::new_v4()).bind(cascade_run).bind(env_a).execute(&mut *second).await?;
+    second.commit().await?;
+    let mut expected_slots: std::collections::BTreeMap<i16, i64> =
+        prior_slots.into_iter().collect();
+    *expected_slots.entry(slot1 as i16).or_default() += 17;
+    *expected_slots.entry(slot2 as i16).or_default() += 23;
+    let current_slots: Vec<(i16, i64)> =
+        sqlx::query_as("SELECT slot,call_bytes FROM usage_storage WHERE env_id=$1")
+            .bind(env_a)
+            .fetch_all(&a)
+            .await?;
+    assert_eq!(
+        current_slots
+            .into_iter()
+            .collect::<std::collections::BTreeMap<_, _>>(),
+        expected_slots
+    );
+    let retention = db::DatabasePool::Postgres(pool.with_scope(DatabaseScope::Maintenance {
+        operation: db::MaintenanceOperation::Retention,
+        org_id: None,
+    }));
+    assert_eq!(
+        db::Call::delete_older_than_for_org(&retention, &[env_a], 3650, 100).await?,
+        2
+    );
+    sqlx::query("INSERT INTO call(call_id,run_id,env_id,function_name,static_scope,runtime_path,call_depth,start_time,size) VALUES($1,$2,$3,'cascade','cascade','cascade',0,now(),29)")
+        .bind(Uuid::new_v4()).bind(cascade_run).bind(env_a).execute(&a).await?;
+    let db::DatabasePool::Postgres(retention_pg) = &retention else {
+        unreachable!()
+    };
+    sqlx::query("DELETE FROM run WHERE run_id=$1")
+        .bind(cascade_run)
+        .execute(retention_pg)
+        .await?;
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COALESCE(SUM(call_bytes),0)::bigint FROM usage_storage WHERE env_id=$1"
+        )
+        .bind(env_a)
+        .fetch_one(&a)
+        .await?,
+        expected
+    );
+    sqlx::query("DELETE FROM call WHERE call_id=$1")
+        .bind(counter_call)
+        .execute(&a)
+        .await?;
     sqlx::query("DELETE FROM hot.task WHERE task_id=$1")
         .bind(queued_task)
         .execute(&admin)
@@ -1230,6 +1567,7 @@ async fn scoped_pool_enforces_isolation_under_a_restricted_login()
         .await?;
 
     // Remove only this test's unique fixture records and role, never schemas.
+    counter_pool.close().await;
     pool.close().await;
     sqlx::query("DELETE FROM hot.store_map_entry WHERE org_id = ANY($1)")
         .bind(vec![child_a, child_b])
@@ -1237,6 +1575,18 @@ async fn scoped_pool_enforces_isolation_under_a_restricted_login()
         .await?;
     sqlx::query("DELETE FROM hot.stream WHERE env_id = ANY($1)")
         .bind(vec![env_a, env_b])
+        .execute(&admin)
+        .await?;
+    for table in ["usage_storage", "usage_task"] {
+        sqlx::query(sqlx::AssertSqlSafe(format!(
+            "DELETE FROM hot.{table} WHERE org_id=ANY($1)"
+        )))
+        .bind(vec![child_a, child_b])
+        .execute(&admin)
+        .await?;
+    }
+    sqlx::query("DELETE FROM hot.usage_run WHERE root_org_id=$1")
+        .bind(root)
         .execute(&admin)
         .await?;
     sqlx::query("DELETE FROM hot.env WHERE env_id = ANY($1)")

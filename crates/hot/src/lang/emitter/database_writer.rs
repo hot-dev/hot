@@ -1126,10 +1126,10 @@ impl DatabaseWriter {
                                     let flow_safe = flow.as_deref().map(sanitize_json_for_jsonb);
                                     sqlx::query(
                                         "
-INSERT INTO hot.call (call_id, run_id, parent_call_id, function_name, static_scope, runtime_path, call_depth, args, return_value, error, flow, file, line, \"column\", position, start_time, stop_time, duration_us, size)
+INSERT INTO hot.call (call_id, run_id, parent_call_id, function_name, static_scope, runtime_path, call_depth, args, return_value, error, flow, file, line, \"column\", position, start_time, stop_time, duration_us, size, env_id)
 VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9::jsonb, $10, $11::jsonb, $12, $13, $14, $15, $16, $17, $18,
     COALESCE(octet_length(($8::jsonb)::text), 0) + COALESCE(octet_length(($9::jsonb)::text), 0) +
-    COALESCE(octet_length($10::text), 0) + COALESCE(octet_length(($11::jsonb)::text), 0) + 50)
+    COALESCE(octet_length($10::text), 0) + COALESCE(octet_length(($11::jsonb)::text), 0) + 50, $19)
 ON CONFLICT (call_id) DO UPDATE SET
     stop_time = COALESCE(EXCLUDED.stop_time, hot.call.stop_time),
     return_value = COALESCE(EXCLUDED.return_value, hot.call.return_value),
@@ -1173,6 +1173,7 @@ WHERE hot.call.run_id = EXCLUDED.run_id
                                     .bind(start_time)
                                     .bind(stop_time)
                                     .bind(duration_us)
+                                    .bind(execution_context.env_id)
                                     .execute(&mut *tx)
                                     .await
                                     .and_then(|result| {
@@ -2525,10 +2526,10 @@ WHERE hot.call.run_id = EXCLUDED.run_id
         let flow_safe = flow.map(sanitize_json_for_jsonb);
 
         let result = sqlx::query(
-            "INSERT INTO call (call_id, run_id, parent_call_id, function_name, static_scope, runtime_path, call_depth, args, return_value, error, flow, start_time, stop_time, duration_us, file, line, \"column\", position, size)
+            "INSERT INTO call (call_id, run_id, parent_call_id, function_name, static_scope, runtime_path, call_depth, args, return_value, error, flow, start_time, stop_time, duration_us, file, line, \"column\", position, size, env_id)
              SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18,
                  COALESCE(length(CAST(?8 AS BLOB)), 0) + COALESCE(length(CAST(?9 AS BLOB)), 0) +
-                 COALESCE(length(CAST(?10 AS BLOB)), 0) + COALESCE(length(CAST(?11 AS BLOB)), 0) + 50
+                 COALESCE(length(CAST(?10 AS BLOB)), 0) + COALESCE(length(CAST(?11 AS BLOB)), 0) + 50, ?19
              WHERE ?3 IS NULL OR EXISTS (SELECT 1 FROM call parent WHERE parent.call_id=?3 AND parent.run_id=?2)
              ON CONFLICT (call_id) DO UPDATE SET
                  stop_time = COALESCE(excluded.stop_time, call.stop_time),
@@ -2572,6 +2573,7 @@ WHERE hot.call.run_id = EXCLUDED.run_id
         .bind(line)
         .bind(column)
         .bind(position)
+        .bind(ctx.env_id)
         .execute(executor)
         .await?;
         if result.rows_affected() != 1 {
@@ -2681,12 +2683,15 @@ mod tests {
             .execute(pool)
             .await
             .unwrap();
-        sqlx::raw_sql(include_str!(
+        let migration = include_str!(
             "../../../../../resources/db/sqlite/migrations/015_call_storage_accounting.sql"
-        ))
-        .execute(pool)
-        .await
-        .unwrap();
+        );
+        let start = migration.find("UPDATE call SET").unwrap();
+        let end = start + migration[start..].find(';').unwrap() + 1;
+        sqlx::raw_sql(&migration[start..end])
+            .execute(pool)
+            .await
+            .unwrap();
         assert_eq!(
             sqlx::query_scalar::<_, i64>("SELECT size FROM call WHERE call_id=?")
                 .bind(call)

@@ -37,8 +37,28 @@ impl ScopedPgPool {
     }
 
     pub async fn begin(&self) -> Result<Transaction<'static, Postgres>, sqlx::Error> {
+        self.begin_with_snapshot(false).await
+    }
+
+    /// A stable snapshot must be selected before applying the billing scope,
+    /// because applying scope itself reads environment ownership.
+    pub async fn begin_repeatable_read(
+        &self,
+    ) -> Result<Transaction<'static, Postgres>, sqlx::Error> {
+        self.begin_with_snapshot(true).await
+    }
+
+    async fn begin_with_snapshot(
+        &self,
+        repeatable_read: bool,
+    ) -> Result<Transaction<'static, Postgres>, sqlx::Error> {
         let scope = self.scope()?;
         let mut tx = self.pool.begin().await?;
+        if repeatable_read {
+            sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
+                .execute(&mut *tx)
+                .await?;
+        }
         // A fresh transaction starts with every scope setting empty, which
         // denies all platform rows. That is all a health check needs, and it
         // must work before migrations install hot.apply_scope.
@@ -48,6 +68,20 @@ impl ScopedPgPool {
             scope.apply_to_connection(&mut tx).await?;
         }
         Ok(tx)
+    }
+
+    /// Run a unit of work with one scope application and one commit. An error
+    /// or cancelled future rolls the transaction back; no unscoped pool escapes.
+    pub async fn transaction<T, E, F>(&self, work: F) -> Result<T, E>
+    where
+        T: Send,
+        E: From<sqlx::Error> + Send,
+        F: for<'c> FnOnce(&'c mut sqlx::PgConnection) -> BoxFuture<'c, Result<T, E>> + Send,
+    {
+        let mut tx = self.begin().await?;
+        let result = work(&mut tx).await?;
+        tx.commit().await?;
+        Ok(result)
     }
 
     pub async fn close(&self) {
@@ -64,8 +98,10 @@ impl ScopedPgPool {
     // Kept crate-private so request handlers cannot obtain an unscoped executor.
     pub(crate) async fn acquire_advisory_connection(
         &self,
-    ) -> Result<sqlx::pool::PoolConnection<Postgres>, sqlx::Error> {
-        self.pool.acquire().await
+    ) -> Result<sqlx::PgConnection, sqlx::Error> {
+        // Coordination may outlive an entire scheduler process. Detaching keeps
+        // a one-connection data pool usable while that session holds its lock.
+        Ok(self.pool.acquire().await?.detach())
     }
 }
 

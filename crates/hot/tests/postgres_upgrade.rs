@@ -284,8 +284,15 @@ impl ExistingRows {
             .await?;
         sqlx::query("INSERT INTO run(run_id,env_id,stream_id,build_id,run_type_id,start_time,result) VALUES($1,$2,$3,$4,1,'2026-09-01 12:00:00','\"retained result\"')")
             .bind(rows.run).bind(rows.env).bind(stream).bind(build).execute(pool).await?;
-        sqlx::query("INSERT INTO call(call_id,run_id,function_name,static_scope,runtime_path,call_depth,args,error,start_time,size) VALUES($1,$2,'::retained/work','root','root',0,'[\"é\"]','☃','2026-09-01 12:00:00',999)")
-            .bind(rows.call).bind(rows.run).execute(pool).await?;
+        let has_env: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM information_schema.columns WHERE table_schema='hot' AND table_name='call' AND column_name='env_id')").fetch_one(pool).await?;
+        let mut insert = sqlx::query(if has_env { "INSERT INTO call(call_id,run_id,function_name,static_scope,runtime_path,call_depth,args,error,start_time,size,env_id) VALUES($1,$2,'::retained/work','root','root',0,'[\"é\"]','☃','2026-09-01 12:00:00',999,$3)" } else { "INSERT INTO call(call_id,run_id,function_name,static_scope,runtime_path,call_depth,args,error,start_time,size) VALUES($1,$2,'::retained/work','root','root',0,'[\"é\"]','☃','2026-09-01 12:00:00',999)" })
+            .bind(rows.call).bind(rows.run);
+        if has_env {
+            insert = insert.bind(rows.env);
+        }
+        insert.execute(pool).await?;
+        sqlx::query("INSERT INTO task(task_id,env_id,stream_id,build_id,task_type,function_name,task_status_id,timeout_ms) VALUES($1,$2,$3,$4,'container','::retained/task',2,1000)")
+            .bind(rows.run).bind(rows.env).bind(stream).bind(build).execute(pool).await?;
         sqlx::query("INSERT INTO alert(alert_id,org_id,env_id,channel,data) VALUES($1,$2,$3,'run.failed','{\"retained\":true}')")
             .bind(rows.alert).bind(rows.org).bind(rows.env).execute(pool).await?;
         sqlx::query("INSERT INTO alert_subscription(alert_subscription_id,org_id,env_id,created_by_user_id) VALUES($1,$2,$3,$4)")
@@ -332,6 +339,30 @@ async fn assert_runtime_contract(fixture: &UpgradeDatabase, rows: &ExistingRows)
         env_id: rows.other_env,
     });
     let organization = pool.with_scope(DatabaseScope::Organization { org_id: rows.org });
+    assert_eq!(
+        sqlx::query_scalar::<_, Uuid>("SELECT env_id FROM call WHERE call_id=$1")
+            .bind(rows.call)
+            .fetch_one(&env)
+            .await?,
+        rows.env
+    );
+    let bytes: i64 = sqlx::query_scalar(
+        "SELECT COALESCE(SUM(call_bytes),0)::bigint FROM usage_storage WHERE env_id=$1",
+    )
+    .bind(rows.env)
+    .fetch_one(&env)
+    .await?;
+    assert_eq!(
+        bytes,
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COALESCE(SUM(GREATEST(size,0)),0)::bigint FROM call WHERE env_id=$1"
+        )
+        .bind(rows.env)
+        .fetch_one(&env)
+        .await?
+    );
+    let task_usage: (i64,i64,i64,Option<chrono::DateTime<chrono::Utc>>,i64,i64) = sqlx::query_as("SELECT active_containers,reserved_compute_units,reserved_duration_ms,period_start,compute_units,duration_ms FROM usage_task WHERE env_id=$1").bind(rows.env).fetch_one(&env).await?;
+    assert_eq!(task_usage, (1, 32, 1000, None, 0, 0));
     let raw = connect(&fixture.runtime_uri).await?;
     assert_eq!(
         sqlx::query_scalar::<_, i64>("SELECT count(*) FROM run")

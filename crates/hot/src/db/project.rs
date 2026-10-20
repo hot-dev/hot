@@ -47,6 +47,52 @@ pub struct Project {
 }
 
 impl Project {
+    /// List rows and their count with one scoped database transaction.
+    pub async fn get_page_by_env(
+        db: &crate::db::DatabasePool,
+        env_id: Uuid,
+        limit: i64,
+        offset: i64,
+    ) -> Result<(Vec<Self>, i64), ProjectError> {
+        const ROWS: &str = "SELECT project_id,env_id,name,active,created_by_user_id,created_at,updated_at,updated_by_user_id,active_toggle_at,active_toggle_by_user_id,deployment_sequence FROM project WHERE env_id=$1 ORDER BY active DESC,created_at DESC LIMIT $2 OFFSET $3";
+        const COUNT: &str = "SELECT COUNT(*) FROM project WHERE env_id=$1";
+        match db {
+            crate::db::DatabasePool::Postgres(pool) => {
+                pool.transaction(move |connection| {
+                    Box::pin(async move {
+                        let rows = sqlx::query_as(ROWS)
+                            .bind(env_id)
+                            .bind(limit)
+                            .bind(offset)
+                            .fetch_all(&mut *connection)
+                            .await?;
+                        let count = sqlx::query_scalar(COUNT)
+                            .bind(env_id)
+                            .fetch_one(&mut *connection)
+                            .await?;
+                        Ok((rows, count))
+                    })
+                })
+                .await
+            }
+            crate::db::DatabasePool::Sqlite(pool) => {
+                let mut tx = pool.begin().await?;
+                let rows = sqlx::query_as(ROWS)
+                    .bind(env_id)
+                    .bind(limit)
+                    .bind(offset)
+                    .fetch_all(&mut *tx)
+                    .await?;
+                let count = sqlx::query_scalar(COUNT)
+                    .bind(env_id)
+                    .fetch_one(&mut *tx)
+                    .await?;
+                tx.commit().await?;
+                Ok((rows, count))
+            }
+        }
+    }
+
     /// Get a project by its ID
     pub async fn get_project(
         db: &crate::db::DatabasePool,

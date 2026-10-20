@@ -423,8 +423,7 @@ impl Call {
                     let result = sqlx::query(
                         "WITH to_delete AS (
                             SELECT c.call_id FROM hot.call c
-                            JOIN hot.run r ON r.run_id = c.run_id
-                            WHERE r.env_id = ANY($1)
+                            WHERE c.env_id = ANY($1)
                             AND c.start_time < NOW() - ($2 || ' days')::interval
                             LIMIT $3
                         )
@@ -448,8 +447,7 @@ impl Call {
                     let query = format!(
                         "DELETE FROM call WHERE call_id IN (
                             SELECT c.call_id FROM call c
-                            JOIN run r ON r.run_id = c.run_id
-                            WHERE r.env_id IN ({})
+                            WHERE c.env_id IN ({})
                             AND c.start_time < datetime('now', '-' || ? || ' days')
                             LIMIT ?
                         )",

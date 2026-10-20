@@ -47,3 +47,24 @@ CREATE POLICY run_admission_insert ON hot.run_admission FOR INSERT WITH CHECK (
     )
 );
 -- No runtime UPDATE/DELETE policy: deleting history cannot reset run capacity.
+
+CREATE TABLE hot.usage_run (
+    root_org_id uuid NOT NULL, period_start timestamptz NOT NULL,
+    admitted bigint NOT NULL, PRIMARY KEY(root_org_id,period_start)
+);
+CREATE FUNCTION hot.count_run_admission() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+    UPDATE hot.usage_run SET admitted=admitted+1
+    WHERE root_org_id=NEW.root_org_id AND period_start<=NEW.admitted_at;
+    RETURN NULL;
+END $$;
+CREATE TRIGGER count_run_admission AFTER INSERT ON hot.run_admission
+    FOR EACH ROW EXECUTE FUNCTION hot.count_run_admission();
+ALTER TABLE hot.usage_run ENABLE ROW LEVEL SECURITY;
+ALTER TABLE hot.usage_run FORCE ROW LEVEL SECURITY;
+CREATE POLICY hot_scope_read ON hot.usage_run FOR SELECT USING (hot.scope_maintenance('billing') AND root_org_id=hot.scope_org_id());
+CREATE POLICY hot_scope_insert ON hot.usage_run FOR INSERT WITH CHECK (hot.scope_maintenance('billing') AND root_org_id=hot.scope_org_id());
+CREATE POLICY hot_scope_update ON hot.usage_run FOR UPDATE USING (hot.scope_maintenance('billing') AND root_org_id=hot.scope_org_id()) WITH CHECK (hot.scope_maintenance('billing') AND root_org_id=hot.scope_org_id());
+CREATE POLICY hot_scope_delete ON hot.usage_run FOR DELETE USING (hot.scope_maintenance('billing') AND root_org_id=hot.scope_org_id());
+CREATE TRIGGER immutable_resource_scope BEFORE UPDATE ON hot.usage_run
+    FOR EACH ROW EXECUTE FUNCTION hot.prevent_scope_reassignment('root_org_id','period_start');

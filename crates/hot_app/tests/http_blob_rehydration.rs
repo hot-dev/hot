@@ -147,14 +147,15 @@ async fn insert_call(
         DatabasePool::Sqlite(pool) => {
             sqlx::query(
                 "INSERT INTO call (call_id, run_id, function_name, static_scope, runtime_path, \
-                 call_depth, args, return_value, start_time, stop_time, duration_us) \
+                 call_depth, args, return_value, start_time, stop_time, duration_us, env_id) \
                  VALUES (?, ?, '::app/main', '::app/main', 'main-0', 0, ?, ?, \
-                 datetime('now'), datetime('now'), 1000)",
+                 datetime('now'), datetime('now'), 1000, (SELECT env_id FROM run WHERE run_id=?))",
             )
             .bind(call_id)
             .bind(run_id)
             .bind(args.to_string())
             .bind(return_value.to_string())
+            .bind(run_id)
             .execute(pool)
             .await
             .expect("insert call");

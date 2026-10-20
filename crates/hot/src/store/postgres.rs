@@ -940,12 +940,12 @@ mod tests {
     use crate::store::{Store, StoreMapConfig};
     use serde_json::json;
 
-    async fn postgres_store() -> Option<PgStore> {
+    async fn postgres_store() -> Result<Option<PgStore>, String> {
         let uri = match std::env::var("HOT_TEST_POSTGRES_URI") {
             Ok(uri) => uri,
             Err(_) => {
                 eprintln!("skipping: HOT_TEST_POSTGRES_URI is not set");
-                return None;
+                return Ok(None);
             }
         };
         let schema =
@@ -959,16 +959,44 @@ mod tests {
         });
         crate::db::run_migrations(&conf)
             .await
-            .expect("Postgres migrations should run");
+            .map_err(|e| format!("Postgres fixture migrations: {e}"))?;
         let pool = Arc::new(
             crate::db::create_db_pool(&conf)
                 .await
-                .expect("Postgres pool should connect"),
+                .map_err(|e| format!("Postgres fixture pool: {e}"))?,
         );
-        let test_data = crate::db::insert_test_data(&pool)
+        // The supplied database can survive repeated test runs. Local-dev
+        // defaults use fixed unique emails/slugs, so give this fixture its own
+        // identity rather than colliding with a previous run's records.
+        let user = Uuid::now_v7();
+        let org = Uuid::now_v7();
+        let env = Uuid::now_v7();
+        let onboarding = pool.with_scope(crate::db::DatabaseScope::Bootstrap(
+            crate::db::BootstrapOperation::Onboarding,
+        ));
+        crate::db::User::insert_user(
+            &onboarding,
+            &user,
+            &format!("store-{user}@example.test"),
+            None,
+            Some(&user),
+        )
+        .await
+        .map_err(|e| e.to_string())?;
+        crate::db::Org::insert_org(
+            &onboarding,
+            &org,
+            "Store fixture",
+            &format!("store-{org}"),
+            "individual",
+            &user,
+        )
+        .await
+        .map_err(|e| e.to_string())?;
+        crate::db::Env::insert_env(&onboarding, &env, &org, "development", &user)
             .await
-            .expect("Postgres test data should seed");
-        Some(PgStore::new(pool, test_data.org_id, test_data.env_id))
+            .map_err(|e| e.to_string())?;
+        Ok(Some(PgStore::new(pool, org, env)))
     }
 
     fn plain_config(name: &str) -> StoreMapConfig {
@@ -1015,12 +1043,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn postgres_put_if_missing_has_one_concurrent_winner() {
-        let Some(store) = postgres_store().await else {
-            return;
+    async fn postgres_put_if_missing_has_one_concurrent_winner() -> Result<(), String> {
+        let Some(store) = postgres_store().await? else {
+            return Ok(());
         };
         let name = format!("insert-test-{}", Uuid::now_v7());
-        store.ensure_store(&plain_config(&name)).await.unwrap();
+        store.ensure_store(&plain_config(&name)).await?;
         let store = Arc::new(store);
 
         let handles: Vec<_> = (0..8)
@@ -1031,25 +1059,24 @@ mod tests {
                     store
                         .put_if_missing(&name, json!("race"), json!(i), None, None)
                         .await
-                        .unwrap()
                 })
             })
             .collect();
 
         let mut winners = 0;
         for handle in handles {
-            if handle.await.unwrap() {
+            if handle.await.map_err(|e| e.to_string())?? {
                 winners += 1;
             }
         }
 
         assert_eq!(winners, 1);
-        assert_eq!(store.length(&name).await.unwrap(), 1);
+        assert_eq!(store.length(&name).await?, 1);
         assert!(
             !store
                 .put_if_missing(&name, json!("race"), json!("replacement"), None, None)
-                .await
-                .unwrap()
+                .await?
         );
+        Ok(())
     }
 }

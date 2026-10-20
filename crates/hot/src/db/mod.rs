@@ -1,5 +1,5 @@
 use crate::val::Val;
-use sqlx::{Executor, Pool, Postgres, Sqlite, postgres::PgPoolOptions};
+use sqlx::{Executor, Pool, Sqlite, postgres::PgPoolOptions};
 use std::path::PathBuf;
 use thiserror::Error;
 use tracing::debug;
@@ -150,6 +150,7 @@ pub mod stream;
 pub mod subscription;
 pub mod task;
 pub mod team;
+pub mod usage;
 pub mod user;
 pub mod webhook;
 pub mod workflow;
@@ -287,7 +288,7 @@ pub struct AdvisoryLock {
 // guard, never an alternate executor around ScopedPgPool.
 enum AdvisoryLockInner {
     Postgres {
-        conn: Option<sqlx::pool::PoolConnection<Postgres>>,
+        conn: Option<sqlx::PgConnection>,
         lock_id: i64,
     },
     /// SQLite (local, single process): no coordination needed, caller proceeds.
@@ -308,26 +309,12 @@ impl AdvisoryLock {
 
         if let Err(e) = sqlx::query("SELECT pg_advisory_unlock($1)")
             .bind(*lock_id)
-            .execute(&mut *conn)
+            .execute(&mut conn)
             .await
         {
             tracing::warn!(lock_id = *lock_id, "failed to release advisory lock: {e}");
-            conn.close_on_drop();
         }
-    }
-}
-
-impl Drop for AdvisoryLock {
-    fn drop(&mut self) {
-        if let AdvisoryLockInner::Postgres { conn, .. } = &mut self.inner
-            && let Some(conn) = conn
-        {
-            // Session-level advisory locks are held by the underlying Postgres
-            // session. If a guard is dropped before explicit unlock (for example
-            // task cancellation), do not return that session to the pool still
-            // holding the lock.
-            conn.close_on_drop();
-        }
+        let _ = sqlx::Connection::close(conn).await;
     }
 }
 
@@ -351,7 +338,7 @@ pub async fn try_acquire_advisory_lock(
             let mut conn = pool.acquire_advisory_connection().await?;
             let acquired: bool = sqlx::query_scalar("SELECT pg_try_advisory_lock($1)")
                 .bind(lock_id)
-                .fetch_one(&mut *conn)
+                .fetch_one(&mut conn)
                 .await?;
             if acquired {
                 Ok(Some(AdvisoryLock {

@@ -77,7 +77,7 @@ impl Run {
 // These helpers deliberately take the caller's transaction connection. Task
 // claims reserve execution time and the run slot together, or neither commits.
 macro_rules! admission {
-    ($name:ident, $connection:ty, $lock:literal) => {
+    ($name:ident, $connection:ty, $lock:literal, $usage:ident) => {
         pub(crate) async fn $name(
             conn: &mut $connection,
             org_id: Uuid,
@@ -114,9 +114,7 @@ macro_rules! admission {
             let plan_features = parse_features(plan.and_then(|p| p.0))?;
             let limit = run_limit(plan_features.as_ref(), overrides.as_ref())?;
             if limit >= 0 {
-                let used: i64 = sqlx::query_scalar(
-                    "SELECT COUNT(*) FROM run_admission WHERE root_org_id=$1 AND admitted_at >= $2"
-                ).bind(root_id).bind(period).fetch_one(&mut *conn).await?;
+                let used = crate::db::usage::$usage(conn, root_id, period).await?;
                 if used >= limit {
                     return Err(RunError::QuotaExceeded("Account monthly run limit reached".into()));
                 }
@@ -131,12 +129,14 @@ macro_rules! admission {
 admission!(
     admit_postgres,
     sqlx::PgConnection,
-    "SELECT org_id FROM org WHERE org_id=$1 FOR UPDATE"
+    "SELECT org_id FROM org WHERE org_id=$1 FOR UPDATE",
+    run_usage_postgres
 );
 admission!(
     admit_sqlite,
     sqlx::SqliteConnection,
-    "UPDATE org SET org_id=org_id WHERE org_id=$1"
+    "UPDATE org SET org_id=org_id WHERE org_id=$1",
+    run_usage_sqlite
 );
 
 fn parse_features(json: Option<String>) -> Result<Option<Value>, RunError> {

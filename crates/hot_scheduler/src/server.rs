@@ -248,6 +248,24 @@ pub async fn run(
             sync_interval, retry_interval, at_interval
         );
 
+        // Reconciliation takes consistent snapshots and applies relative deltas;
+        // it never holds the account lock used by quota admission.
+        let usage_db = Arc::clone(&db);
+        let mut usage_shutdown = shutdown_tx.subscribe();
+        tokio::spawn(async move {
+            let mut timer = interval(Duration::from_secs(3600));
+            loop {
+                tokio::select! {
+                    _ = timer.tick() => {
+                        if let Err(error) = hot::db::usage::reconcile_accounts(&usage_db).await {
+                            error!(%error, "hot.dev: SCHEDULER usage reconciliation failed");
+                        }
+                    }
+                    _ = usage_shutdown.recv() => break,
+                }
+            }
+        });
+
         // Start the database sync task
         let scheduler_clone = scheduler.clone();
         let queue_clone = Arc::clone(&event_queue);

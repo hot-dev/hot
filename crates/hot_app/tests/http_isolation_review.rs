@@ -58,8 +58,8 @@ async fn call_inspection_requires_the_selected_environment() {
     .await
     .unwrap();
     let call = Uuid::now_v7();
-    sqlx::query("INSERT INTO call (call_id,run_id,function_name,static_scope,runtime_path,call_depth,args,start_time,stop_time,duration_us) VALUES (?,?,'::private/customer','::private/customer','customer-0',0,?,datetime('now'),datetime('now'),1000)")
-        .bind(call).bind(other_run).bind(json!(["private-customer-payload"]).to_string())
+    sqlx::query("INSERT INTO call (call_id,run_id,function_name,static_scope,runtime_path,call_depth,args,start_time,stop_time,duration_us,env_id) VALUES (?,?,'::private/customer','::private/customer','customer-0',0,?,datetime('now'),datetime('now'),1000,?)")
+        .bind(call).bind(other_run).bind(json!(["private-customer-payload"]).to_string()).bind(other_env)
         .execute(sqlite(&client)).await.unwrap();
     client.login_as(&td.user_id);
     let paths = [

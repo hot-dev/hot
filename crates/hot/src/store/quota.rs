@@ -19,10 +19,10 @@ impl QuotaKind {
     fn usage_sql(self) -> &'static str {
         match self {
             Self::Store => {
-                "SELECT CAST(COALESCE(SUM(CASE WHEN s.size<0 THEN 0 ELSE s.size END),0) AS BIGINT) FROM store_map_entry s JOIN org o ON o.org_id=s.org_id WHERE o.org_id=$1 OR o.parent_org_id=$1"
+                "SELECT CAST(COALESCE(SUM(s.store_bytes),0) AS BIGINT) FROM usage_storage s JOIN org o ON o.org_id=s.org_id WHERE o.org_id=$1 OR o.parent_org_id=$1"
             }
             Self::Call => {
-                "SELECT CAST(COALESCE(SUM(CASE WHEN c.size<0 THEN 0 ELSE c.size END),0) AS BIGINT) FROM call c JOIN run r ON r.run_id=c.run_id JOIN env e ON e.env_id=r.env_id JOIN org o ON o.org_id=e.org_id WHERE o.org_id=$1 OR o.parent_org_id=$1"
+                "SELECT CAST(COALESCE(SUM(c.call_bytes),0) AS BIGINT) FROM usage_storage c JOIN org o ON o.org_id=c.org_id WHERE o.org_id=$1 OR o.parent_org_id=$1"
             }
         }
     }
@@ -46,7 +46,7 @@ impl Budget {
         }
         Ok(())
     }
-    /// Recount merged call UPSERT payloads under the held root lock, restoring
+    /// Read counters after merged call UPSERT payloads under the held root lock, restoring
     /// exact environment scope before returning. The caller commits only on Ok.
     pub(crate) async fn check_postgres(&self, conn: &mut sqlx::PgConnection) -> Result<(), String> {
         if self.limit < 0 {
@@ -86,7 +86,7 @@ impl Budget {
         if old < 0 || new < 0 {
             return Err("Invalid store storage accounting".into());
         }
-        // Unlimited accounts are not counted (see `begin!`).
+        // Unlimited accounts skip admission reads; triggers still maintain usage.
         if self.limit < 0 {
             return Ok(());
         }

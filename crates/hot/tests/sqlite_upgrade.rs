@@ -119,8 +119,19 @@ impl ExistingRows {
             .await?;
         sqlx::query("INSERT INTO run(run_id,env_id,stream_id,build_id,run_type_id,start_time,result) VALUES(?,?,?,?,1,'2026-09-01 12:00:00','\"retained result\"')")
             .bind(rows.run).bind(rows.env).bind(stream).bind(build).execute(pool).await?;
-        sqlx::query("INSERT INTO call(call_id,run_id,function_name,static_scope,runtime_path,call_depth,args,error,start_time,size) VALUES(?,?,'::retained/work','root','root',0,'[\"é\"]','☃','2026-09-01 12:00:00',999)")
-            .bind(rows.call).bind(rows.run).execute(pool).await?;
+        let has_env: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM pragma_table_info('call') WHERE name='env_id')",
+        )
+        .fetch_one(pool)
+        .await?;
+        let mut insert = sqlx::query(if has_env { "INSERT INTO call(call_id,run_id,function_name,static_scope,runtime_path,call_depth,args,error,start_time,size,env_id) VALUES(?,?,'::retained/work','root','root',0,'[\"é\"]','☃','2026-09-01 12:00:00',999,?)" } else { "INSERT INTO call(call_id,run_id,function_name,static_scope,runtime_path,call_depth,args,error,start_time,size) VALUES(?,?,'::retained/work','root','root',0,'[\"é\"]','☃','2026-09-01 12:00:00',999)" })
+            .bind(rows.call).bind(rows.run);
+        if has_env {
+            insert = insert.bind(rows.env);
+        }
+        insert.execute(pool).await?;
+        sqlx::query("INSERT INTO task(task_id,env_id,stream_id,build_id,task_type,function_name,task_status_id,timeout_ms) VALUES(?,?,?,?,'container','::retained/task',2,1000)")
+            .bind(rows.run).bind(rows.env).bind(stream).bind(build).execute(pool).await?;
         sqlx::query("INSERT INTO alert(alert_id,org_id,env_id,channel,data) VALUES(?,?,?,'run.failed','{\"retained\":true}')")
             .bind(rows.alert).bind(rows.org).bind(rows.env).execute(pool).await?;
         sqlx::query("INSERT INTO alert_subscription(alert_subscription_id,org_id,env_id,created_by_user_id) VALUES(?,?,?,?)")
@@ -153,6 +164,30 @@ impl ExistingRows {
     }
 
     async fn assert_preserved_and_protected(&self, pool: &SqlitePool) -> TestResult {
+        assert_eq!(
+            sqlx::query_scalar::<_, Uuid>("SELECT env_id FROM call WHERE call_id=?")
+                .bind(self.call)
+                .fetch_one(pool)
+                .await?,
+            self.env
+        );
+        let bytes: i64 = sqlx::query_scalar(
+            "SELECT COALESCE(SUM(call_bytes),0) FROM usage_storage WHERE env_id=?",
+        )
+        .bind(self.env)
+        .fetch_one(pool)
+        .await?;
+        assert_eq!(
+            bytes,
+            sqlx::query_scalar::<_, i64>(
+                "SELECT COALESCE(SUM(MAX(size,0)),0) FROM call WHERE env_id=?"
+            )
+            .bind(self.env)
+            .fetch_one(pool)
+            .await?
+        );
+        let task_usage: (i64,i64,i64,Option<String>,i64,i64) = sqlx::query_as("SELECT active_containers,reserved_compute_units,reserved_duration_ms,period_start,compute_units,duration_ms FROM usage_task WHERE env_id=?").bind(self.env).fetch_one(pool).await?;
+        assert_eq!(task_usage, (1, 32, 1000, None, 0, 0));
         let delivery: (Uuid, Uuid, Uuid, i64, String) = sqlx::query_as("SELECT alert_id,subscription_id,destination_id,attempts,last_error FROM alert_delivery WHERE alert_delivery_id=?")
             .bind(self.delivery).fetch_one(pool).await?;
         assert_eq!(
