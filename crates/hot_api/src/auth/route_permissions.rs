@@ -136,7 +136,15 @@ pub(super) fn authorize(
             (format!("file:{}", param("file_id")?), "read")
         }
         ("/v1/files/{file_id}", "DELETE") => (format!("file:{}", param("file_id")?), "delete"),
-        ("/v1/files/upload/{*path}", "PUT") => (format!("file:{}", param("path")?), "create"),
+        ("/v1/files/upload/{*path}", "PUT") => {
+            // Authorize the same identity that storage will write. Checking the
+            // raw URL lets a prefix grant escape via `allowed/../other`.
+            let path = hot::file_storage::normalize_path(param("path")?)
+                .map_err(|_| StatusCode::BAD_REQUEST)?;
+            hot::file_storage::validate_path_security(&path)
+                .map_err(|_| StatusCode::BAD_REQUEST)?;
+            (format!("file:{path}"), "create")
+        }
         // Multipart IDs are upload sessions, not file identities. Until their
         // eventual target is resolved, require authority over all file uploads.
         ("/v1/files/uploads" | "/v1/files/uploads/{upload_id}/complete", "POST")
@@ -178,6 +186,28 @@ mod tests {
             active_toggle_by_user_id: None,
             permissions: grants,
         })
+    }
+
+    #[test]
+    fn file_upload_grants_apply_to_the_normalized_storage_path() {
+        let auth = principal(json!({"file:allowed/*": ["create"]}));
+        for (path, expected) in [
+            ("allowed/report.json", Ok(())),
+            ("allowed/nested/../report.json", Ok(())),
+            ("hot://allowed/report.json", Ok(())),
+            ("allowed/../private/report.json", Err(StatusCode::FORBIDDEN)),
+            (
+                "allowed/../../private/report.json",
+                Err(StatusCode::BAD_REQUEST),
+            ),
+        ] {
+            let params = HashMap::from([("path".into(), path.into())]);
+            assert_eq!(
+                authorize(&auth, &Method::PUT, "/v1/files/upload/{*path}", &params),
+                expected,
+                "{path}"
+            );
+        }
     }
 
     #[test]

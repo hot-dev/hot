@@ -1494,11 +1494,13 @@ pub async fn mcp_handler(
     State((db, _storage, conf, stream_pubsub)): State<ApiStateData>,
     OptionalAccessId(access_id): OptionalAccessId,
     client_ip: Option<Extension<ClientIp>>,
+    resolved: Option<Extension<ResolvedDomain>>,
     Path((org_slug, env_name, service)): Path<(String, String, String)>,
     headers: HeaderMap,
     Json(request): Json<JsonRpcRequest>,
 ) -> Result<axum::response::Response, (StatusCode, Json<ApiErrorResponse>)> {
     let source = McpRouteSource::Path {
+        resolved: resolved.map(|extension| extension.0),
         org_slug,
         env_name,
         service,
@@ -1556,6 +1558,7 @@ pub async fn mcp_handler_domain(
 #[derive(Clone)]
 enum McpRouteSource {
     Path {
+        resolved: Option<ResolvedDomain>,
         org_slug: String,
         env_name: String,
         service: String,
@@ -1573,6 +1576,7 @@ impl McpRouteSource {
                 org_slug,
                 env_name,
                 service,
+                ..
             } => format!("path:{}/{}/{}", org_slug, env_name, service),
             McpRouteSource::Domain { resolved, service } => {
                 format!("domain:{}:{}:{}", resolved.domain, resolved.env_id, service)
@@ -1590,10 +1594,26 @@ impl McpRouteSource {
         ));
         let ctx = match self {
             McpRouteSource::Path {
+                resolved,
                 org_slug,
                 env_name,
                 service,
-            } => resolve_mcp_context(&routing_db, auth, &org_slug, &env_name, service).await,
+            } => {
+                let ctx =
+                    resolve_mcp_context(&routing_db, auth, &org_slug, &env_name, service).await?;
+                if resolved.as_ref().is_some_and(|domain| {
+                    domain.env_id != ctx.env.env_id || domain.org_id != ctx.org.org_id
+                }) {
+                    return Err((
+                        StatusCode::FORBIDDEN,
+                        Json(ApiErrorResponse::new(
+                            "forbidden",
+                            "MCP route does not belong to this custom domain",
+                        )),
+                    ));
+                }
+                Ok(ctx)
+            }
             McpRouteSource::Domain { resolved, service } => {
                 resolve_mcp_context_from_domain(&routing_db, auth, &resolved, service).await
             }
@@ -2816,6 +2836,7 @@ fn mcp_http_sse_session_timeout(conf: &Val) -> tokio::time::Duration {
 /// `mcp_http_sse_messages_handler` via the shared pub/sub layer.
 pub async fn mcp_sse_handler(
     State((db, _storage, conf, stream_pubsub)): State<ApiStateData>,
+    resolved: Option<Extension<ResolvedDomain>>,
     Path((org_slug, env_name, service)): Path<(String, String, String)>,
     headers: HeaderMap,
 ) -> Result<
@@ -2824,6 +2845,7 @@ pub async fn mcp_sse_handler(
 > {
     let messages_path_prefix = format!("/mcp/{}/{}/{}", org_slug, env_name, service);
     let source = McpRouteSource::Path {
+        resolved: resolved.map(|extension| extension.0),
         org_slug,
         env_name,
         service,
@@ -3049,16 +3071,19 @@ async fn mcp_sse_handler_core(
 /// the response through the shared pub/sub layer so it reaches the SSE
 /// stream (which may be on a different server instance).
 /// Returns HTTP 202 Accepted immediately (response comes via SSE).
+#[allow(clippy::too_many_arguments)]
 pub async fn mcp_http_sse_messages_handler(
     State(state): State<ApiStateData>,
     OptionalAccessId(access_id): OptionalAccessId,
     client_ip: Option<Extension<ClientIp>>,
+    resolved: Option<Extension<ResolvedDomain>>,
     Path((org_slug, env_name, service)): Path<(String, String, String)>,
     query: Query<HttpSseMessageQuery>,
     headers: HeaderMap,
     Json(request): Json<JsonRpcRequest>,
 ) -> Result<StatusCode, (StatusCode, Json<ApiErrorResponse>)> {
     let source = McpRouteSource::Path {
+        resolved: resolved.map(|extension| extension.0),
         org_slug,
         env_name,
         service,
@@ -3933,6 +3958,7 @@ mod tests {
             State(state),
             OptionalAccessId(None),
             None,
+            None,
             Path((
                 "local".to_string(),
                 "development".to_string(),
@@ -3977,6 +4003,7 @@ mod tests {
             None,
             None,
             McpRouteSource::Path {
+                resolved: None,
                 org_slug: "local".to_string(),
                 env_name: "development".to_string(),
                 service: "svc".to_string(),
@@ -4031,6 +4058,7 @@ mod tests {
             None,
             None,
             McpRouteSource::Path {
+                resolved: None,
                 org_slug: "local".to_string(),
                 env_name: "development".to_string(),
                 service: "svc".to_string(),
@@ -4089,6 +4117,7 @@ mod tests {
             None,
             None,
             McpRouteSource::Path {
+                resolved: None,
                 org_slug: "local".to_string(),
                 env_name: "development".to_string(),
                 service: "svc".to_string(),
@@ -4153,6 +4182,7 @@ mod tests {
             State(ctx.state.clone()),
             OptionalAccessId(None),
             None,
+            None,
             Path((
                 ctx.org_slug.clone(),
                 ctx.env_name.clone(),
@@ -4195,6 +4225,7 @@ mod tests {
         let result = mcp_http_sse_messages_handler(
             State(ctx.state.clone()),
             OptionalAccessId(None),
+            None,
             None,
             Path((ctx.org_slug, ctx.env_name, ctx.service)),
             Query(HttpSseMessageQuery {
@@ -4246,6 +4277,7 @@ mod tests {
             State(ctx.state.clone()),
             OptionalAccessId(None),
             None,
+            None,
             Path((ctx.org_slug, ctx.env_name, ctx.service)),
             Query(HttpSseMessageQuery {
                 transport_session_id: transport_session_id.to_string(),
@@ -4273,6 +4305,7 @@ mod tests {
         // No Authorization header → 401
         let result = mcp_sse_handler(
             State(state),
+            None,
             Path((
                 "local".to_string(),
                 "development".to_string(),
@@ -5064,6 +5097,7 @@ mod tests {
             State(ctx.state.clone()),
             OptionalAccessId(None),
             None,
+            None,
             Path((
                 ctx.org_slug.clone(),
                 ctx.env_name.clone(),
@@ -5081,6 +5115,89 @@ mod tests {
             .await
             .unwrap();
         serde_json::from_slice(&body).unwrap()
+    }
+
+    #[tokio::test]
+    async fn custom_domain_cannot_route_long_form_mcp_requests_to_another_environment() {
+        use axum::body::Body;
+        use axum::routing::{get, post};
+        use tower::ServiceExt;
+
+        let ctx = make_auth_test_context().await;
+        let org = Org::get_org_by_slug(&ctx.state.0, &ctx.org_slug)
+            .await
+            .unwrap();
+        let env = hot::db::Env::get_env_by_org_and_name(&ctx.state.0, &org.org_id, &ctx.env_name)
+            .await
+            .unwrap();
+        let route = format!("/mcp/{}/{}/{}", ctx.org_slug, ctx.env_name, ctx.service);
+        let app_for = |domain: ResolvedDomain| {
+            axum::Router::new()
+                .route(
+                    "/mcp/{org_slug}/{env_name}/{service}",
+                    get(mcp_sse_handler).post(mcp_handler),
+                )
+                .route(
+                    "/mcp/{org_slug}/{env_name}/{service}/messages",
+                    post(mcp_http_sse_messages_handler),
+                )
+                .layer(Extension(domain))
+                .with_state(ctx.state.clone())
+        };
+        let matching = app_for(ResolvedDomain {
+            domain: "matching.example.com".into(),
+            org_id: org.org_id,
+            env_id: env.env_id,
+        });
+        let foreign = app_for(ResolvedDomain {
+            domain: "other-child.example.com".into(),
+            org_id: Uuid::now_v7(),
+            env_id: Uuid::now_v7(),
+        });
+        let list = json!({"jsonrpc":"2.0", "id":1, "method":"tools/list"});
+        let response = matching
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri(&route)
+                    .header("content-type", "application/json")
+                    .body(Body::from(list.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        for (method, path, request, authenticated) in [
+            ("POST", route.clone(), list, false),
+            (
+                "POST",
+                route.clone(),
+                json!({"jsonrpc":"2.0", "id":2, "method":"tools/call", "params":{"name":"get-forecast", "arguments":{"city":"Boston"}}}),
+                false,
+            ),
+            ("GET", route.clone(), JsonValue::Null, true),
+            (
+                "POST",
+                format!("{route}/messages?sessionId={}", Uuid::now_v7()),
+                json!({"jsonrpc":"2.0", "id":3, "method":"ping"}),
+                true,
+            ),
+        ] {
+            let mut builder = axum::http::Request::builder()
+                .method(method)
+                .uri(&path)
+                .header("content-type", "application/json");
+            if authenticated {
+                builder = builder.header("authorization", format!("Bearer {}", ctx.api_key_token));
+            }
+            let response = foreign
+                .clone()
+                .oneshot(builder.body(Body::from(request.to_string())).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::FORBIDDEN, "{method} {path}");
+        }
     }
 
     #[tokio::test]
@@ -5246,6 +5363,7 @@ mod tests {
             State(ctx.state.clone()),
             OptionalAccessId(None),
             None,
+            None,
             Path((
                 ctx.org_slug.clone(),
                 ctx.env_name.clone(),
@@ -5290,6 +5408,7 @@ mod tests {
             State(ctx.state.clone()),
             OptionalAccessId(None),
             None,
+            None,
             Path((
                 ctx.org_slug.clone(),
                 ctx.env_name.clone(),
@@ -5320,6 +5439,7 @@ mod tests {
             State(ctx.state.clone()),
             OptionalAccessId(None),
             None,
+            None,
             Path((
                 ctx.org_slug.clone(),
                 ctx.env_name.clone(),
@@ -5348,6 +5468,7 @@ mod tests {
         let result = mcp_handler(
             State(ctx.state.clone()),
             OptionalAccessId(None),
+            None,
             None,
             Path((
                 ctx.org_slug.clone(),
@@ -5392,6 +5513,7 @@ mod tests {
             State(ctx.state.clone()),
             OptionalAccessId(None),
             None,
+            None,
             Path((ctx.org_slug.clone(), ctx.env_name.clone(), ctx.service.clone())),
             bearer_header("hot_00000000000000000000000000000000_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
             Json(make_jsonrpc("tools/list", None)),
@@ -5409,6 +5531,7 @@ mod tests {
         let result = mcp_handler(
             State(ctx.state.clone()),
             OptionalAccessId(None),
+            None,
             None,
             Path((
                 ctx.org_slug.clone(),
@@ -5456,6 +5579,7 @@ mod tests {
             State(ctx.state.clone()),
             OptionalAccessId(None),
             None,
+            None,
             Path((
                 "nonexistent-org".to_string(),
                 ctx.env_name.clone(),
@@ -5498,6 +5622,7 @@ mod tests {
             State(ctx.state.clone()),
             OptionalAccessId(None),
             None,
+            None,
             Path((
                 "other-org".to_string(),
                 "development".to_string(),
@@ -5522,6 +5647,7 @@ mod tests {
         let ctx = make_auth_test_context().await;
         let result = mcp_sse_handler(
             State(ctx.state.clone()),
+            None,
             Path((
                 ctx.org_slug.clone(),
                 ctx.env_name.clone(),
@@ -5539,6 +5665,7 @@ mod tests {
         let ctx = make_auth_test_context().await;
         let result = mcp_sse_handler(
             State(ctx.state.clone()),
+            None,
             Path((
                 ctx.org_slug.clone(),
                 ctx.env_name.clone(),
