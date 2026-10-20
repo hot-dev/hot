@@ -572,6 +572,31 @@ meta ["test"] fn () {
     assert-eq(50, result2, "Closure captures param: times5(10) = 50")
 }
 
+// `name (x) { ... }` in a function body binds a lambda, as at top level.
+test-lambda-local-binding
+meta ["test"] fn () {
+    clamp (x) { if(gt(x, 1), x, 0) }
+    assert-eq([0, 2, 3], map([1, 2, 3], clamp), "local lambda passed to map")
+    assert-eq(2, clamp(2), "local lambda called directly")
+
+    double (x: Int): Int { mul(x, 2) }
+    assert-eq(8, double(4), "typed local lambda")
+
+    sum2 (a, b) { add(a, b) }
+    assert-eq(5, sum2(2, 3), "two-parameter local lambda")
+
+    factor 3
+    scale (x) { mul(x, factor) }
+    assert-eq([3, 6], map([1, 2], scale), "local lambda captures outer bindings")
+
+    bump-all (xs) {
+        inc (x) { add(x, 1) }
+        map(xs, inc)
+    }
+
+    assert-eq([2, 3], bump-all([1, 2]), "local lambda inside a lambda body")
+}
+
 test-lambda-nested
 meta ["test"] fn () {
     // Test nested lambda definitions
