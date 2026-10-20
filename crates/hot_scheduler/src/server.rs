@@ -220,6 +220,9 @@ pub async fn run(
     // Create shutdown signal for background tasks
     let (shutdown_tx, _) = tokio::sync::broadcast::channel::<()>(1);
 
+    // Held until shutdown: dropping the guard closes its session and frees the lock.
+    let mut singleton_guard = None;
+
     // If database is provided, start the sync loop and retry processor
     if let Some(db) = db {
         if !singleton {
@@ -228,7 +231,7 @@ pub async fn run(
                     .into(),
             );
         }
-        let _singleton_guard = acquire_scheduler_singleton_guard(&db).await?;
+        singleton_guard = acquire_scheduler_singleton_guard(&db).await?;
         let db = Arc::new(db.with_scope(DatabaseScope::Maintenance {
             operation: MaintenanceOperation::Scheduler,
             org_id: None,
@@ -488,6 +491,9 @@ pub async fn run(
     info!("hot.dev: SCHEDULER shutting down gracefully");
     let _ = shutdown_tx.send(());
     scheduler.shutdown().await?;
+    if let Some(guard) = singleton_guard {
+        guard.release().await;
+    }
 
     Ok(())
 }

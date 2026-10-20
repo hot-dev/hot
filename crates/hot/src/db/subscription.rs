@@ -674,9 +674,10 @@ impl OrgPlan {
 ///
 /// Returns -1 for unlimited (never delete).
 pub async fn call_deletion_days_for_org(db: &DatabasePool, org_id: &Uuid) -> i32 {
+    // A failed lookup must keep data: 0 would make retention delete everything.
     let root_id = match super::org::Org::billing_owner_id_for(db, org_id).await {
         Ok(id) => id,
-        Err(_) => return 0,
+        Err(_) => return -1,
     };
     let db = db.with_scope(super::DatabaseScope::Maintenance {
         operation: super::MaintenanceOperation::Billing,

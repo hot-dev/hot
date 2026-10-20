@@ -73,6 +73,15 @@ mod tests {
     use super::*;
 
     #[tokio::test]
+    async fn retention_keeps_data_when_the_account_cannot_be_resolved() {
+        let db = crate::db::test_db().await;
+        assert_eq!(
+            crate::db::subscription::call_deletion_days_for_org(&db, &Uuid::new_v4()).await,
+            -1
+        );
+    }
+
+    #[tokio::test]
     async fn environment_usage_excludes_sibling_environments_and_directory_seats() {
         let db = crate::db::test_db().await;
         let DatabasePool::Sqlite(pool) = &db else {
