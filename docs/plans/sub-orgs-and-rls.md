@@ -12,9 +12,10 @@ typed scopes and restricted runtime connections, forced PostgreSQL policies,
 direct-child organizations with independent environments/builds, inherited
 root administration and explicit child grants, account billing/quota resolution,
 management credentials and REST routes, runtime ingress and worker ownership,
-and the hierarchical UI. Migrations 010–016 preserve existing org identities and
+and the hierarchical UI. Migrations 010–017 preserve existing org identities and
 add ownership integrity, credential lineage, quota reservations, durable run
-admissions, and trace byte reconciliation. SQLite shares application authorization
+admissions, trace byte reconciliation, and retained runtime relationship checks.
+SQLite shares application authorization
 and quota semantics; PostgreSQL additionally enforces row policies.
 
 The implementation includes exact CLI profile selection, independent migration
@@ -114,6 +115,52 @@ this review did not rerun external provider, remote S3, or Kata qualification.
 
 These fixes strengthen the same root/child scope contract. They do not add
 shared deployments or remove the deployment-specific release gates above.
+
+### Existing-database upgrade rehearsal — 2026-10-19
+
+New PostgreSQL and SQLite integration suites build populated databases at
+migrations 009 and 015, retain their real SQLx ledgers/checksums, and run the
+application migration entry point through the latest migration. PostgreSQL uses
+separate NOSUPERUSER, NOBYPASSRLS, NOINHERIT owner and runtime logins. Only the
+disposable fixture's role/database/extension setup and historical data seeding
+use an administrator. Every application migration and the actual `psql`
+provisioning script run as the restricted schema owner.
+
+The rehearsal found and repaired two upgrade gaps:
+
+- Legacy column ACLs survived table-level revocation, and NOINHERIT group
+  privileges could evade runtime qualification. Provisioning now removes
+  direct table/column/schema CREATE grants, validates effective and assumable
+  authority before committing, and refuses unsafe PUBLIC/group grants without
+  changing shared principals. Startup qualification checks the same memberships.
+- Migration 011's historical preflight omitted run/task origin and run/event
+  relationships already checked on new PostgreSQL writes. Additive migration
+  017 checks those retained links on both databases without changing historical
+  checksums or silently rewriting provenance.
+
+The tests verify migration 016's policy, FK, trigger, and ledger rollback for
+cross-org destinations, cross-org subscriptions, and wrong-environment
+subscriptions. They retain the offending data, explicitly repair it, and retry.
+Migration 017 failures preserve earlier committed migrations, including 016.
+Successful upgrades preserve credentials, delegated issuer links, alert retry
+state, run results, the admission backfill, and UTF-8 trace sizes. Runtime smoke
+checks cover permitted reads/writes, management-key separation, parent/child
+isolation, and denied DDL, TRUNCATE, ledger reads, and foreign mutations.
+Provisioning is exercised twice, including rollback on unsafe shared grants
+and recovery after their explicit removal. CI installs `psql` for these tests.
+
+| Check | Result |
+| --- | --- |
+| Populated upgrade regressions | Four PostgreSQL and three SQLite tests passed, including the strengthened latest-ledger and valid non-NULL relationship assertions. |
+| Rust workspace, all targets, locked/offline | 2,554 passed, zero failed, nine ignored across 37 targets with dedicated PostgreSQL 18/pgvector and Valkey fixtures. |
+| Rust formatting and workspace Clippy with `-D warnings` | Passed. |
+| Hot static checks | Project/package checks, formatting, documentation snippets, and bundled skill checks passed; the sandbox denied optional package-cache writes without affecting validation. |
+| Isolated SQLite `hot init` and main Hot suite | 909 tests and 2,460 assertions passed. |
+| Browser scope and repository checks | Five browser scope tests, AGENTS synchronization, workflow YAML parsing, and diff whitespace checks passed. |
+
+These are synthetic populated upgrade fixtures, not a restore of a production
+backup. Private bootstrap/provider ordering, deployed proxies/roles, account
+usage reconciliation, and production backup/restore remain deployment gates.
 
 Hot will support a parent organization with child organizations that each own
 their environments, projects, deployments, credentials, and runtime data.
