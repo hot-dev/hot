@@ -1232,7 +1232,8 @@
      */
     function decodeHtmlEntities(text) {
         var textarea = document.createElement('textarea');
-        textarea.innerHTML = text;
+        // Decode entities without letting literal markup change the parser context.
+        textarea.innerHTML = String(text == null ? '' : text).replace(/</g, '&lt;');
         return textarea.value;
     }
 

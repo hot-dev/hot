@@ -332,8 +332,17 @@ function linkifyTypesInSignatures() {
         var typeName = span.textContent;
         var url = registry[typeName];
         if (url) {
+            var targetUrl;
+            try {
+                targetUrl = new URL(url, window.location.href);
+            } catch (e) {
+                return;
+            }
+            if (targetUrl.protocol !== 'http:' && targetUrl.protocol !== 'https:') {
+                return;
+            }
             var link = document.createElement('a');
-            link.href = url;
+            link.href = targetUrl.href;
             link.className = 'type-link';
             link.textContent = typeName;
             span.textContent = '';
