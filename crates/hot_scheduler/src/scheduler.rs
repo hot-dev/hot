@@ -3,7 +3,6 @@ use chrono::Utc;
 use croner::Cron;
 use std::future::Future;
 use std::pin::Pin;
-use std::str::FromStr;
 use std::sync::Arc;
 use tokio::sync::{Mutex, RwLock};
 use tokio::task::JoinHandle;
@@ -152,7 +151,7 @@ impl Job {
         Fut: Future<Output = ()> + Send + 'static,
     {
         // Parse with full croner capabilities - no restrictions!
-        let cron = Cron::from_str(cron_expression)
+        let cron = hot::db::schedule::parse_cron(cron_expression)
             .map_err(|e| format!("Invalid cron expression '{}': {}", cron_expression, e))?;
 
         let job_id = Uuid::now_v7();
