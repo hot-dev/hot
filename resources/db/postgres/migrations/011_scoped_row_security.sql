@@ -46,57 +46,123 @@ END $$;
 -- Runtime scope is not a defense against arbitrary SQL with backend credentials.
 SET row_security = on;
 
-CREATE FUNCTION hot.scope_mode() RETURNS text LANGUAGE sql STABLE AS $$
+-- Policies call these helpers once per row. Each top-level helper is a single
+-- SQL expression without subqueries, so PostgreSQL inlines it into the policy;
+-- table lookups live in separate *_check functions that run only when the
+-- inlined mode test selects them. Ownership of the scoped environment is
+-- verified once per scope by hot.apply_scope instead of once per row.
+CREATE FUNCTION hot.scope_mode() RETURNS text LANGUAGE sql STABLE PARALLEL SAFE AS $$
     SELECT COALESCE(current_setting('hot.scope_mode', true), '')
 $$;
-CREATE FUNCTION hot.scope_org_id() RETURNS uuid LANGUAGE sql STABLE AS $$
+CREATE FUNCTION hot.scope_org_id() RETURNS uuid LANGUAGE sql STABLE PARALLEL SAFE AS $$
     SELECT NULLIF(current_setting('hot.scope_org', true), '')::uuid
 $$;
-CREATE FUNCTION hot.scope_bootstrap(operation text) RETURNS boolean LANGUAGE sql STABLE AS $$
+CREATE FUNCTION hot.scope_bootstrap(operation text) RETURNS boolean LANGUAGE sql STABLE PARALLEL SAFE AS $$
     SELECT hot.scope_mode() = 'bootstrap'
        AND current_setting('hot.scope_operation', true) = operation
 $$;
-CREATE FUNCTION hot.scope_maintenance(operation text) RETURNS boolean LANGUAGE sql STABLE AS $$
+CREATE FUNCTION hot.scope_maintenance(operation text) RETURNS boolean LANGUAGE sql STABLE PARALLEL SAFE AS $$
     SELECT hot.scope_mode() = 'maintenance'
        AND current_setting('hot.scope_operation', true) = operation
 $$;
-CREATE FUNCTION hot.scope_org_allows(target uuid) RETURNS boolean LANGUAGE sql STABLE AS $$
+CREATE FUNCTION hot.scope_org_allows(target uuid) RETURNS boolean LANGUAGE sql STABLE PARALLEL SAFE AS $$
     SELECT COALESCE((hot.scope_mode() IN ('environment', 'organization') AND target = hot.scope_org_id())
         OR (hot.scope_mode() = 'read_set' AND
             COALESCE(NULLIF(current_setting('hot.scope_orgs', true), ''), '[]')::jsonb ? target::text), false)
 $$;
-CREATE FUNCTION hot.scope_org_writes(target uuid) RETURNS boolean LANGUAGE sql STABLE AS $$
+CREATE FUNCTION hot.scope_org_writes(target uuid) RETURNS boolean LANGUAGE sql STABLE PARALLEL SAFE AS $$
     SELECT hot.scope_mode() = 'organization' AND target = hot.scope_org_id()
 $$;
 -- This helper does not query env, so the env policy can use it without recursion.
-CREATE FUNCTION hot.scope_env_id_allows(target uuid) RETURNS boolean LANGUAGE sql STABLE AS $$
+CREATE FUNCTION hot.scope_env_id_allows(target uuid) RETURNS boolean LANGUAGE sql STABLE PARALLEL SAFE AS $$
     SELECT COALESCE((hot.scope_mode() = 'environment' AND target = NULLIF(current_setting('hot.scope_env', true), '')::uuid)
         OR (hot.scope_mode() = 'read_set' AND
             COALESCE(NULLIF(current_setting('hot.scope_envs', true), ''), '[]')::jsonb ? target::text), false)
 $$;
-CREATE FUNCTION hot.scope_env_allows(target uuid) RETURNS boolean LANGUAGE sql STABLE AS $$
-    SELECT hot.scope_env_id_allows(target) AND EXISTS
-        (SELECT 1 FROM hot.env e WHERE e.env_id = target AND hot.scope_org_allows(e.org_id))
+-- Only environments that hot.apply_scope verified against the scoped orgs.
+-- Settings written without apply_scope verify nothing and grant nothing.
+CREATE FUNCTION hot.scope_env_allows(target uuid) RETURNS boolean LANGUAGE sql STABLE PARALLEL SAFE AS $$
+    SELECT COALESCE(
+        (hot.scope_mode() = 'environment'
+            AND target = NULLIF(current_setting('hot.scope_env_verified', true), '')::uuid)
+        OR (hot.scope_mode() = 'read_set'
+            AND target = ANY (NULLIF(current_setting('hot.scope_envs_verified', true), '')::uuid[])),
+        false)
 $$;
-CREATE FUNCTION hot.scope_env_writes(target uuid) RETURNS boolean LANGUAGE sql STABLE AS $$
+CREATE FUNCTION hot.scope_env_writes(target uuid) RETURNS boolean LANGUAGE sql STABLE PARALLEL SAFE AS $$
     SELECT hot.scope_mode() = 'environment' AND hot.scope_env_allows(target)
 $$;
-CREATE FUNCTION hot.scope_billing_org(target uuid) RETURNS boolean LANGUAGE sql STABLE AS $$
-    SELECT hot.scope_maintenance('billing') AND hot.scope_org_id() IS NOT NULL AND EXISTS
+CREATE FUNCTION hot.scope_billing_org_check(target uuid) RETURNS boolean LANGUAGE sql STABLE PARALLEL SAFE AS $$
+    SELECT hot.scope_org_id() IS NOT NULL AND EXISTS
         (SELECT 1 FROM hot.org o WHERE o.org_id = target
          AND (o.org_id = hot.scope_org_id() OR o.parent_org_id = hot.scope_org_id()))
 $$;
-CREATE FUNCTION hot.scope_billing_env(target uuid) RETURNS boolean LANGUAGE sql STABLE AS $$
+CREATE FUNCTION hot.scope_billing_org(target uuid) RETURNS boolean LANGUAGE sql STABLE PARALLEL SAFE AS $$
+    SELECT hot.scope_maintenance('billing') AND hot.scope_billing_org_check(target)
+$$;
+CREATE FUNCTION hot.scope_billing_env_check(target uuid) RETURNS boolean LANGUAGE sql STABLE PARALLEL SAFE AS $$
     SELECT EXISTS (SELECT 1 FROM hot.env e WHERE e.env_id = target AND hot.scope_billing_org(e.org_id))
 $$;
-CREATE FUNCTION hot.scope_provisions_org(target uuid) RETURNS boolean LANGUAGE sql STABLE AS $$
-    SELECT hot.scope_maintenance('organization_provisioning') AND hot.scope_org_id() IS NOT NULL AND EXISTS
+-- hot.apply_scope lists a billing account's environments when there are few
+-- enough to compare per row; larger accounts check ownership per row.
+CREATE FUNCTION hot.scope_billing_env(target uuid) RETURNS boolean LANGUAGE sql STABLE PARALLEL SAFE AS $$
+    SELECT hot.scope_maintenance('billing') AND CASE
+        WHEN COALESCE(current_setting('hot.scope_billing_envs', true), '') <> ''
+            THEN target = ANY (current_setting('hot.scope_billing_envs', true)::uuid[])
+        ELSE hot.scope_billing_env_check(target)
+    END
+$$;
+CREATE FUNCTION hot.scope_provisions_org_check(target uuid) RETURNS boolean LANGUAGE sql STABLE PARALLEL SAFE AS $$
+    SELECT hot.scope_org_id() IS NOT NULL AND EXISTS
         (SELECT 1 FROM hot.org o WHERE o.org_id = target
          AND (o.org_id = hot.scope_org_id() OR o.parent_org_id = hot.scope_org_id()))
 $$;
-CREATE FUNCTION hot.scope_member_org(target uuid) RETURNS boolean LANGUAGE sql STABLE AS $$
-    SELECT hot.scope_org_writes(target) OR (hot.scope_mode() = 'organization' AND EXISTS
-        (SELECT 1 FROM hot.org o WHERE o.org_id = target AND o.parent_org_id = hot.scope_org_id()))
+CREATE FUNCTION hot.scope_provisions_org(target uuid) RETURNS boolean LANGUAGE sql STABLE PARALLEL SAFE AS $$
+    SELECT hot.scope_maintenance('organization_provisioning') AND hot.scope_provisions_org_check(target)
+$$;
+CREATE FUNCTION hot.scope_member_org_check(target uuid) RETURNS boolean LANGUAGE sql STABLE PARALLEL SAFE AS $$
+    SELECT EXISTS (SELECT 1 FROM hot.org o WHERE o.org_id = target AND o.parent_org_id = hot.scope_org_id())
+$$;
+CREATE FUNCTION hot.scope_member_org(target uuid) RETURNS boolean LANGUAGE sql STABLE PARALLEL SAFE AS $$
+    SELECT hot.scope_org_writes(target) OR (hot.scope_mode() = 'organization' AND hot.scope_member_org_check(target))
+$$;
+
+-- The only supported way to establish scope: trusted backends call this once
+-- per transaction. Settings are transaction-local, so connection poolers and
+-- proxies can multiplex sessions between transactions. Environment ownership
+-- is verified here, under the env policy, rather than per protected row. A
+-- read set is never a write grant, so it always makes the transaction read-only.
+CREATE FUNCTION hot.apply_scope(
+    mode text, org text, env text, orgs text, envs text, operation text, scope_user text
+) RETURNS void LANGUAGE plpgsql AS $$
+BEGIN
+    PERFORM set_config('hot.scope_mode', mode, true),
+            set_config('hot.scope_org', org, true),
+            set_config('hot.scope_env', env, true),
+            set_config('hot.scope_orgs', orgs, true),
+            set_config('hot.scope_envs', envs, true),
+            set_config('hot.scope_operation', operation, true),
+            set_config('hot.scope_user', scope_user, true),
+            set_config('hot.scope_env_verified', '', true),
+            set_config('hot.scope_envs_verified', '', true),
+            set_config('hot.scope_billing_envs', '', true);
+    IF mode = 'environment' THEN
+        PERFORM set_config('hot.scope_env_verified', COALESCE(
+            (SELECT e.env_id::text FROM hot.env e
+             WHERE hot.scope_env_id_allows(e.env_id) AND hot.scope_org_allows(e.org_id)), ''), true);
+    ELSIF mode = 'read_set' THEN
+        PERFORM set_config('hot.scope_envs_verified', COALESCE(
+            (SELECT '{' || string_agg(e.env_id::text, ',') || '}' FROM hot.env e
+             WHERE hot.scope_env_id_allows(e.env_id) AND hot.scope_org_allows(e.org_id)), ''), true);
+        PERFORM set_config('transaction_read_only', 'on', true);
+    ELSIF mode = 'maintenance' AND operation = 'billing' AND org <> '' THEN
+        PERFORM set_config('hot.scope_billing_envs', COALESCE(
+            (SELECT CASE WHEN count(*) <= 256
+                         THEN '{' || COALESCE(string_agg(e.env_id::text, ','), '') || '}' END
+             FROM hot.env e JOIN hot.org o ON o.org_id = e.org_id
+             WHERE o.org_id = org::uuid OR o.parent_org_id = org::uuid), ''), true);
+    END IF;
+END
 $$;
 
 -- org: separate SELECT and mutation grants; a read set is never a write grant.

@@ -35,7 +35,7 @@ CREATE POLICY api_key_management_issuer_read ON hot.api_key_management_issuer FO
     )
 );
 CREATE POLICY api_key_management_issuer_insert ON hot.api_key_management_issuer FOR INSERT WITH CHECK (
-    EXISTS (SELECT 1 FROM hot.api_key k WHERE k.api_key_id = api_key_management_issuer.api_key_id AND hot.scope_env_allows(k.env_id))
+    EXISTS (SELECT 1 FROM hot.api_key k WHERE k.api_key_id = api_key_management_issuer.api_key_id AND hot.scope_env_writes(k.env_id))
 );
 -- No UPDATE or DELETE policy: runtime-key issuer lineage cannot be detached or
 -- reassigned. Parent API-key deletion may cascade its no-longer-usable lineage.

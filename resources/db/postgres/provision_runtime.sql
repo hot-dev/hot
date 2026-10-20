@@ -100,8 +100,11 @@ BEGIN
         SELECT 1 FROM pg_class c WHERE c.relnamespace = schema_oid AND c.relkind IN ('r','p')
           AND c.relname <> '_sqlx_migrations' AND NOT (c.relname = ANY(reference_tables))
           AND (NOT c.relrowsecurity OR NOT c.relforcerowsecurity)
+          AND EXISTS (SELECT 1 FROM pg_roles r WHERE pg_has_role(runtime_oid, r.oid, 'MEMBER')
+              AND (has_table_privilege(r.oid, c.oid, 'SELECT,INSERT,UPDATE,DELETE')
+                   OR has_any_column_privilege(r.oid, c.oid, 'SELECT,INSERT,UPDATE')))
     ) OR NOT EXISTS (
-        SELECT 1 FROM pg_proc WHERE pronamespace = schema_oid AND proname = 'scope_env_allows'
+        SELECT 1 FROM pg_proc WHERE pronamespace = schema_oid AND proname = 'apply_scope'
     ) THEN
         RAISE EXCEPTION 'Apply all RLS migrations before provisioning runtime grants';
     END IF;

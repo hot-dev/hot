@@ -87,10 +87,15 @@ pub async fn validate_runtime_role(pool: &PgPool, schema: &str) -> Result<(), sq
         ));
     }
     let uncovered: Vec<String> = sqlx::query_scalar(
+        // Tables the login cannot reach (for example an embedding application's
+        // own tables in this schema) do not weaken isolation.
         "SELECT c.relname FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
          WHERE n.nspname = $1 AND c.relkind IN ('r','p')
            AND c.relname <> '_sqlx_migrations' AND NOT (c.relname = ANY($2))
            AND (NOT c.relrowsecurity OR NOT c.relforcerowsecurity)
+           AND EXISTS (SELECT 1 FROM pg_roles r WHERE pg_has_role(current_user, r.oid, 'MEMBER')
+               AND (has_table_privilege(r.oid, c.oid, 'SELECT,INSERT,UPDATE,DELETE')
+                    OR has_any_column_privilege(r.oid, c.oid, 'SELECT,INSERT,UPDATE')))
          ORDER BY c.relname",
     )
     .bind(schema)
@@ -104,7 +109,7 @@ pub async fn validate_runtime_role(pool: &PgPool, schema: &str) -> Result<(), sq
         )));
     }
     let helper_exists: bool = sqlx::query_scalar(
-        "SELECT EXISTS (SELECT 1 FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace WHERE n.nspname = $1 AND p.proname = 'scope_env_allows')"
+        "SELECT EXISTS (SELECT 1 FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace WHERE n.nspname = $1 AND p.proname = 'apply_scope')"
     ).bind(schema).fetch_one(pool).await?;
     if !helper_exists {
         return Err(sqlx::Error::Protocol(

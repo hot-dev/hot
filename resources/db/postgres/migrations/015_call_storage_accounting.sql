@@ -13,11 +13,8 @@ BEGIN
     PERFORM set_config('hot.scope_operation', 'membership', true);
     SELECT COALESCE(jsonb_agg(jsonb_build_object('org', org_id, 'env', env_id)), '[]'::jsonb)
       INTO owners FROM hot.env;
-    PERFORM set_config('hot.scope_mode', 'environment', true);
-    PERFORM set_config('hot.scope_operation', '', true);
     FOR owner IN SELECT value FROM jsonb_array_elements(owners) LOOP
-        PERFORM set_config('hot.scope_org', owner->>'org', true);
-        PERFORM set_config('hot.scope_env', owner->>'env', true);
+        PERFORM hot.apply_scope('environment', owner->>'org', owner->>'env', '[]', '[]', '', '');
         UPDATE hot.call c SET size =
             COALESCE(octet_length(c.args::text), 0)::bigint +
             COALESCE(octet_length(c.return_value::text), 0) +
@@ -26,8 +23,5 @@ BEGIN
         FROM hot.run r
         WHERE r.run_id = c.run_id AND r.env_id = (owner->>'env')::uuid;
     END LOOP;
-    PERFORM set_config('hot.scope_mode', prior_mode, true);
-    PERFORM set_config('hot.scope_operation', prior_operation, true);
-    PERFORM set_config('hot.scope_org', prior_org, true);
-    PERFORM set_config('hot.scope_env', prior_env, true);
+    PERFORM hot.apply_scope(prior_mode, prior_org, prior_env, '[]', '[]', prior_operation, '');
 END $$;

@@ -14,6 +14,10 @@ pub enum BootstrapOperation {
     Membership,
     Onboarding,
     Health,
+    /// An inbound billing-provider callback before it is resolved to one
+    /// account. Grants no platform rows; providers narrow to
+    /// `Maintenance { Billing, Some(root) }` (see `Org::billing_scope`).
+    BillingWebhook,
 }
 
 impl BootstrapOperation {
@@ -24,6 +28,7 @@ impl BootstrapOperation {
             Self::Membership => "membership",
             Self::Onboarding => "onboarding",
             Self::Health => "health",
+            Self::BillingWebhook => "billing_webhook",
         }
     }
 }
@@ -120,9 +125,19 @@ impl DatabaseScope {
     ) -> Result<(), sqlx::Error> {
         self.validate()?;
         let (mode, org, env, orgs, envs, operation, user) = self.settings();
-        sqlx::query("SELECT set_config('hot.scope_mode', $1, true), set_config('hot.scope_org', $2, true), set_config('hot.scope_env', $3, true), set_config('hot.scope_orgs', $4, true), set_config('hot.scope_envs', $5, true), set_config('hot.scope_operation', $6, true), set_config('hot.scope_user', $7, true)")
-            .bind(mode).bind(org).bind(env).bind(orgs).bind(envs).bind(operation).bind(user)
-            .execute(connection).await?;
+        // One function call: it verifies environment ownership once for the
+        // policies, makes read sets read-only, and (unlike a direct set_config)
+        // does not pin sessions behind connection proxies such as RDS Proxy.
+        sqlx::query("SELECT hot.apply_scope($1, $2, $3, $4, $5, $6, $7)")
+            .bind(mode)
+            .bind(org)
+            .bind(env)
+            .bind(orgs)
+            .bind(envs)
+            .bind(operation)
+            .bind(user)
+            .execute(connection)
+            .await?;
         Ok(())
     }
 

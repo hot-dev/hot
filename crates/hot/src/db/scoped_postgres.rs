@@ -4,7 +4,7 @@
 use futures::{TryStreamExt, future::BoxFuture, stream::BoxStream};
 use sqlx::{Database, Either, Execute, Executor, PgPool, Postgres, SqlStr, Transaction};
 
-use super::scope::{DatabaseScope, current_database_scope};
+use super::scope::{BootstrapOperation, DatabaseScope, current_database_scope};
 
 #[derive(Debug, Clone)]
 pub struct ScopedPgPool {
@@ -39,13 +39,14 @@ impl ScopedPgPool {
     pub async fn begin(&self) -> Result<Transaction<'static, Postgres>, sqlx::Error> {
         let scope = self.scope()?;
         let mut tx = self.pool.begin().await?;
-        if scope.is_read_only() {
-            sqlx::query("SET TRANSACTION READ ONLY")
-                .execute(&mut *tx)
-                .await?;
+        // A fresh transaction starts with every scope setting empty, which
+        // denies all platform rows. That is all a health check needs, and it
+        // must work before migrations install hot.apply_scope.
+        if scope != DatabaseScope::Bootstrap(BootstrapOperation::Health) {
+            // Reset every field, including empty values, on this transaction
+            // only. Read sets also become read-only here.
+            scope.apply_to_connection(&mut tx).await?;
         }
-        // Reset every field, including empty values, on this transaction only.
-        scope.apply_to_connection(&mut tx).await?;
         Ok(tx)
     }
 
