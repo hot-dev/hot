@@ -25,6 +25,61 @@ pub(crate) fn tagged_type_name(map: &IndexMap<Val, Val>) -> Option<&str> {
     }
 }
 
+fn tagged_payload_key() -> &'static Val {
+    static VAL_KEY: OnceLock<Val> = OnceLock::new();
+    VAL_KEY.get_or_init(|| Val::from("$val"))
+}
+
+/// Return true when a map uses Hot's tagged JSON wrapper representation.
+///
+/// A data-bearing wrapper consists of `$type`, `$val`, and the one defined
+/// wrapper-metadata member, `$origin`. A unit enum wrapper consists only of
+/// `$type`, whose local name has the `Enum.Variant` form. Rejecting every
+/// other sibling field keeps foreign maps stable instead of guessing that
+/// arbitrary `$...` application data is Hot metadata.
+pub(crate) fn is_tagged_wrapper(map: &IndexMap<Val, Val>) -> bool {
+    let Some(type_name) = tagged_type_name(map) else {
+        return false;
+    };
+    if !type_name.starts_with("::") {
+        return false;
+    }
+    if map.contains_key(tagged_payload_key()) {
+        return map.keys().all(
+            |key| matches!(key, Val::Str(name) if matches!(&**name, "$type" | "$val" | "$origin")),
+        );
+    }
+
+    map.len() == 1
+        && type_name
+            .rsplit('/')
+            .next()
+            .is_some_and(|local_name| local_name.contains('.'))
+}
+
+/// The entries a map spread (`{...source}`) contributes, or `None` when
+/// `source` has no entries to spread.
+///
+/// Constructed values (structs and enum variants with a payload) live in the
+/// tagged wrapper, which is transparent to field access, so spreading one
+/// contributes its fields rather than the internal `$type`/`$val` keys. The
+/// literal's result is a plain map: wrap it in the constructor
+/// (`Server({...base, port: 2})`) to get a typed value back. An `Err` wrapper
+/// is left intact so the error keeps propagating instead of having its
+/// payload merged as data.
+pub(crate) fn map_spread_entries(source: &Val) -> Option<&IndexMap<Val, Val>> {
+    let Val::Map(map) = source else {
+        return None;
+    };
+    if !is_tagged_wrapper(map) || source.is_err() {
+        return Some(map);
+    }
+    match map.get(tagged_payload_key()) {
+        Some(Val::Map(fields)) => Some(fields),
+        _ => None,
+    }
+}
+
 pub use crate::val;
 // Re-export indexmap for use by macros
 pub use indexmap;
@@ -2978,6 +3033,38 @@ impl Val {
 mod tests {
     use super::*;
     use fastnum::decimal::Context;
+
+    #[test]
+    fn map_spread_entries_unwraps_constructed_values() {
+        let fields = val!({"host": "a.example", "port": 1});
+        let server = val!({"$type": "::test/Server", "$val": {"host": "a.example", "port": 1}});
+        let Val::Map(expected) = &fields else {
+            unreachable!()
+        };
+        assert_eq!(map_spread_entries(&server), Some(&**expected));
+
+        // Plain maps, including foreign maps that only look tagged, spread as-is.
+        let plain = val!({"$type": "::test/Server", "$val": {}, "extra": 1});
+        let Val::Map(plain_map) = &plain else {
+            unreachable!()
+        };
+        assert_eq!(map_spread_entries(&plain), Some(&**plain_map));
+
+        // An Err keeps its wrapper so it still propagates as an error.
+        let error = Val::err(val!({"message": "boom"}));
+        let Val::Map(error_map) = &error else {
+            unreachable!()
+        };
+        assert_eq!(map_spread_entries(&error), Some(&**error_map));
+
+        // Wrappers without map fields, and non-maps, have nothing to spread.
+        assert_eq!(
+            map_spread_entries(&val!({"$type": "::test/Email", "$val": "x"})),
+            None
+        );
+        assert_eq!(map_spread_entries(&val!({"$type": "::test/Dir.Up"})), None);
+        assert_eq!(map_spread_entries(&Val::from("text")), None);
+    }
 
     #[test]
     fn test_byte_equality() {

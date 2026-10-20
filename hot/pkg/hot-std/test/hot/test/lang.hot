@@ -874,6 +874,46 @@ meta ["test"] fn () {
 }
 
 
+SpreadServer type {
+    host: Str,
+    port: Int
+}
+
+SpreadCircle type {
+    radius: Dec
+}
+
+SpreadShape enum { Circle(SpreadCircle), Point }
+
+// Spreading a constructed value contributes its fields, and the literal's
+// result is a plain map.
+test-map-spread-typed-values
+meta ["test"] fn () {
+    base SpreadServer({host: "a.example", port: 1})
+
+    copy {...base}
+    assert-eq({host: "a.example", port: 1}, copy, "spread copies the fields")
+    assert(not(is-type(copy, SpreadServer)), "spread result is a plain map")
+
+    overridden {...base, port: 2}
+    assert-eq("a.example", overridden.host, "spread keeps unmentioned fields")
+    assert-eq(2, overridden.port, "spread override replaces a field")
+
+    extended {...base, tls: true}
+    assert-eq(["host", "port", "tls"], keys(extended), "spread adds keys after the fields")
+
+    rebuilt SpreadServer({...base, port: 3})
+    assert(is-type(rebuilt, SpreadServer), "constructor rebuilds a typed value")
+    assert-eq("a.example", rebuilt.host, "rebuilt value keeps the fields")
+    assert-eq(3, rebuilt.port, "rebuilt value carries the override")
+
+    circle SpreadShape.Circle({radius: 2.0})
+    styled {...circle, color: "red"}
+    assert-eq(2.0, styled.radius, "variant payload fields spread")
+    assert-eq("red", styled.color, "variant spread adds keys")
+}
+
+
 test-vec-concat-patterns
 meta ["test"] fn () {
     a [1, 2, 3]

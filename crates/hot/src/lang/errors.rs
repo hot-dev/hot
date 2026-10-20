@@ -288,6 +288,26 @@ pub enum CompilerError {
         field_name: String,
         location: Option<ErrorLocation>,
     },
+    /// A context value declared `required` in function `meta {ctx: ...}` has
+    /// no value in the checked environment. A *warning* in `hot check`:
+    /// values are supplied per environment, and `run` and `eval` still
+    /// refuse to start without them.
+    MissingContext {
+        key: String,
+        /// Function that declares (or transitively needs) the key.
+        required_by: String,
+        location: Option<ErrorLocation>,
+    },
+    /// An implicit `%` lambda would contain another implicit `%` lambda, as
+    /// in `map(items, filter(%, gt(%, 0)))`. The two `%` would refer to
+    /// different parameters, so the inner function must be explicit.
+    NestedPlaceholder {
+        /// The call whose `Fn` argument would become the outer lambda.
+        function: String,
+        /// That argument's parameter name, when the signature is known.
+        parameter: Option<String>,
+        location: Option<ErrorLocation>,
+    },
     /// A binding or return type annotation names a type the value can never
     /// be (e.g. `x: Int "hello"`). This is a *warning*: annotations are not
     /// enforced at runtime, but a definite mismatch is always a bug — either
@@ -300,6 +320,14 @@ pub enum CompilerError {
         inferred: String,
         location: Option<ErrorLocation>,
     },
+}
+
+/// "the `func` argument of `map`", or "an argument of `map`" without a name.
+fn nested_placeholder_slot(function: &str, parameter: Option<&str>) -> String {
+    match parameter {
+        Some(name) => format!("the `{}` argument of `{}`", name, function),
+        None => format!("an argument of `{}`", function),
+    }
 }
 
 impl fmt::Display for CompilerError {
@@ -1011,6 +1039,48 @@ impl fmt::Display for CompilerError {
                     write!(f, "{}", body)
                 }
             }
+            CompilerError::MissingContext {
+                key,
+                required_by,
+                location,
+            } => {
+                let body = format!(
+                    "Missing required context variable '{}' (required by {})",
+                    key, required_by
+                );
+                match location.as_ref().and_then(|loc| loc.file.as_ref()) {
+                    Some(file) => write!(f, "{} in {}", body, file.display()),
+                    None => write!(f, "{}", body),
+                }
+            }
+            CompilerError::NestedPlaceholder {
+                function,
+                parameter,
+                location,
+            } => {
+                let body = format!(
+                    "Nested implicit `%` lambdas in {}: one `%` binds to an inner \
+                     function argument and another to `{}`'s. Write the inner \
+                     function explicitly with `%(...)` or `(x) {{ ... }}`",
+                    nested_placeholder_slot(function, parameter.as_deref()),
+                    function
+                );
+                if let Some(loc) = location {
+                    write!(
+                        f,
+                        "{}:{}:{}: {}",
+                        loc.file
+                            .as_ref()
+                            .map(|p| p.display().to_string())
+                            .unwrap_or_else(|| "<source>".to_string()),
+                        loc.line,
+                        loc.column,
+                        body
+                    )
+                } else {
+                    write!(f, "{}", body)
+                }
+            }
             CompilerError::AnnotationMismatch {
                 name,
                 annotation,
@@ -1168,6 +1238,8 @@ impl CompilerErrors {
             CompilerError::NestedTypeImplementation { location, .. } => location.as_ref(),
             CompilerError::DeprecatedUsage { location, .. } => location.as_ref(),
             CompilerError::UnknownField { location, .. } => location.as_ref(),
+            CompilerError::MissingContext { location, .. } => location.as_ref(),
+            CompilerError::NestedPlaceholder { location, .. } => location.as_ref(),
             CompilerError::AnnotationMismatch { location, .. } => location.as_ref(),
         }?;
 
@@ -1636,6 +1708,41 @@ impl CompilerErrors {
                             .with_color(label_color),
                     );
             }
+            CompilerError::MissingContext {
+                key, required_by, ..
+            } => {
+                report = report
+                    .with_code("missing-context")
+                    .with_message(format!("Missing required context variable '{}'", key))
+                    .with_label(
+                        Label::new((source_name.as_str(), span_start..span_end))
+                            .with_message(format!("required by {}", required_by))
+                            .with_color(label_color),
+                    )
+                    .with_help(
+                        "Set it in a ctx file (--ctx), hot/ctx.hot, or the app before running",
+                    );
+            }
+            CompilerError::NestedPlaceholder {
+                function,
+                parameter,
+                ..
+            } => {
+                report = report
+                    .with_code("nested-placeholder")
+                    .with_message("Nested implicit `%` lambdas")
+                    .with_label(
+                        Label::new((source_name.as_str(), span_start..span_end))
+                            .with_message(format!(
+                                "one `%` in {} binds to an inner function argument, \
+                                 another to `{}`'s",
+                                nested_placeholder_slot(function, parameter.as_deref()),
+                                function
+                            ))
+                            .with_color(label_color),
+                    )
+                    .with_help("write the inner function explicitly: `%(...)` or `(x) { ... }`");
+            }
             CompilerError::AnnotationMismatch {
                 name,
                 annotation,
@@ -1727,6 +1834,8 @@ impl CompilerError {
             CompilerError::NestedTypeImplementation { location, .. } => location.as_ref(),
             CompilerError::DeprecatedUsage { location, .. } => location.as_ref(),
             CompilerError::UnknownField { location, .. } => location.as_ref(),
+            CompilerError::MissingContext { location, .. } => location.as_ref(),
+            CompilerError::NestedPlaceholder { location, .. } => location.as_ref(),
             CompilerError::AnnotationMismatch { location, .. } => location.as_ref(),
         }
     }
@@ -1737,6 +1846,7 @@ impl CompilerError {
         match self {
             CompilerError::DeprecatedUsage { .. }
             | CompilerError::UnknownField { .. }
+            | CompilerError::MissingContext { .. }
             | CompilerError::AnnotationMismatch { .. } => DiagnosticSeverity::Warning,
             _ => DiagnosticSeverity::Error,
         }
@@ -1782,6 +1892,8 @@ impl CompilerError {
             CompilerError::NestedTypeImplementation { .. } => "nested-type-implementation",
             CompilerError::DeprecatedUsage { .. } => "deprecated-usage",
             CompilerError::UnknownField { .. } => "unknown-field",
+            CompilerError::MissingContext { .. } => "missing-context",
+            CompilerError::NestedPlaceholder { .. } => "nested-placeholder",
             CompilerError::AnnotationMismatch { .. } => "annotation-mismatch",
         }
     }
