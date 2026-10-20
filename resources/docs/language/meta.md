@@ -291,6 +291,8 @@ meta {ctx: {
 | `default` | any | none | Value if not provided (implies `required: false`) |
 | `secret` | bool | `true` | If true, value will be masked in call logs |
 
+`hot run` and `hot eval` refuse to start while a required key is unset. `hot check` reports it as a `missing-context` warning instead, so projects can be checked without their secrets. Pass `--check.deny-warnings` to make it fail.
+
 ### Examples
 
 **Required secret (most common):**

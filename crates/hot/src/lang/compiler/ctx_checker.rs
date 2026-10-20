@@ -165,6 +165,27 @@ pub struct MissingCtxError {
     pub source_file: Option<String>,
 }
 
+impl MissingCtxError {
+    /// The `hot check` warning for this key. `meta` declarations don't carry
+    /// per-key spans yet, so the location is the declaring file.
+    pub fn to_compiler_error(&self) -> crate::lang::errors::CompilerError {
+        crate::lang::errors::CompilerError::MissingContext {
+            key: self.key.clone(),
+            required_by: self.namespace.clone(),
+            location: self
+                .source_file
+                .as_ref()
+                .map(|f| crate::lang::errors::ErrorLocation {
+                    line: 1,
+                    column: 1,
+                    position: 0,
+                    length: 1,
+                    file: Some(std::path::PathBuf::from(f)),
+                }),
+        }
+    }
+}
+
 impl std::fmt::Display for MissingCtxError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         if let Some(file) = &self.source_file {
