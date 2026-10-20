@@ -97,7 +97,6 @@ pub(crate) fn get_blob_resolved_conf(conf: Val, in_project: bool, managed_runtim
 /// underscores alone cannot spell them.
 const HYPHENATED_ENV_KEYS: &[(&str, &str)] = &[
     ("HOT_DB_MIGRATION_URI", "db.migration-uri"),
-    ("HOT_APP_SESSION_SECRET", "app.session-secret"),
     ("HOT_BUILD_AWS_ACCESS_KEY_ID", "build.aws.access-key-id"),
     (
         "HOT_BUILD_AWS_SECRET_ACCESS_KEY",
@@ -110,6 +109,15 @@ const HYPHENATED_ENV_KEYS: &[(&str, &str)] = &[
         "file.aws.secret-access-key",
     ),
     ("HOT_FILE_AWS_SESSION_TOKEN", "file.aws.session-token"),
+    ("HOT_NETWORK_ALLOW_PRIVATE", "network.allow-private"),
+    ("HOT_TASK_MAX_CONCURRENT", "task.max-concurrent"),
+    ("HOT_TASK_CODE_MAX_CONCURRENT", "task.code-max-concurrent"),
+    (
+        "HOT_TASK_CONTAINER_MAX_CONCURRENT",
+        "task.container-max-concurrent",
+    ),
+    ("HOT_TASK_WORKER_MEMORY_MB", "task.worker-memory-mb"),
+    ("HOT_TASK_WORKER_DISK_MB", "task.worker-disk-mb"),
 ];
 
 // Helper function to convert environment variable name to dot notation conf key
@@ -1997,6 +2005,24 @@ mod tests {
         let reloaded =
             preserve_runtime_overrides_after_init(val!({"set": {"profile": "local-dev"}}), &conf);
         assert_eq!(reloaded.get_str("set.profile"), "child");
+    }
+
+    #[test]
+    fn runtime_resource_limits_map_to_existing_hyphenated_keys() {
+        let conf = apply_env_bindings(
+            create_default_conf(),
+            [
+                ("HOT_TASK_CODE_MAX_CONCURRENT".into(), "2".into()),
+                ("HOT_TASK_WORKER_MEMORY_MB".into(), "1536".into()),
+                ("HOT_NETWORK_ALLOW_PRIVATE".into(), "false".into()),
+            ]
+            .into(),
+        )
+        .unwrap();
+        assert_eq!(conf.get_int("task.code-max-concurrent"), 2);
+        assert_eq!(conf.get_int("task.worker-memory-mb"), 1536);
+        assert!(!conf.get_bool("network.allow-private"));
+        assert!(conf.get("task.code.max.concurrent").is_none());
     }
 
     #[test]
