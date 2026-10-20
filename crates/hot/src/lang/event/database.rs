@@ -222,6 +222,23 @@ impl DatabaseEventProcessor {
             let user_id = ctx.user_id.ok_or_else(|| {
                 "Missing user_id in ExecutionContext - cannot publish event".to_string()
             })?;
+            // This processor runs in a spawned task that no task-local scope
+            // reaches, and the shared handle may be unscoped or cross-tenant:
+            // bind every write to the context's exact environment.
+            let scoped_db;
+            let db = match (db, ctx.org_id) {
+                (crate::db::DatabasePool::Postgres(_), Some(org_id)) => {
+                    scoped_db =
+                        db.with_scope(crate::db::DatabaseScope::Environment { org_id, env_id });
+                    &scoped_db
+                }
+                (crate::db::DatabasePool::Postgres(_), None) => {
+                    return Err(
+                        "Missing org_id in ExecutionContext - cannot publish event".to_string()
+                    );
+                }
+                (crate::db::DatabasePool::Sqlite(_), _) => db,
+            };
 
             // Spill large payload leaves before serialization. Event data is
             // executable payload: fail closed on spill errors rather than

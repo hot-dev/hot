@@ -694,15 +694,19 @@ pub async fn billing_webhook_handler(
         return Err(billing_unavailable());
     }
 
-    billing_provider()
-        .handle_webhook(BillingWebhookRequest {
+    // The route runs before any account is known. Providers verify the
+    // callback, resolve its account, then use `Org::billing_scope`.
+    hot::db::with_database_scope(
+        hot::db::DatabaseScope::Bootstrap(hot::db::BootstrapOperation::BillingWebhook),
+        billing_provider().handle_webhook(BillingWebhookRequest {
             db: &db,
             conf: &conf,
             headers: &headers,
             body: &body,
-        })
-        .await
-        .map_err(billing_error)?;
+        }),
+    )
+    .await
+    .map_err(billing_error)?;
 
     Ok(StatusCode::OK)
 }

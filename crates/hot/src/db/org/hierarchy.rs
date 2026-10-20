@@ -132,6 +132,17 @@ impl Org {
             .billing_owner_id())
     }
 
+    /// A handle with billing authority over the account that owns `org_id`,
+    /// for trusted billing code (such as a provider webhook) once it has
+    /// resolved the account from verified provider data.
+    pub async fn billing_scope(db: &DatabasePool, org_id: &Uuid) -> Result<DatabasePool, OrgError> {
+        let root_id = Self::billing_owner_id_for(db, org_id).await?;
+        Ok(db.with_scope(DatabaseScope::Maintenance {
+            operation: MaintenanceOperation::Billing,
+            org_id: Some(root_id),
+        }))
+    }
+
     /// None means the identity has no effective grant. A root admin can have an
     /// administrative grant with runtime_allowed=false for billing/lifecycle recovery.
     pub async fn resolve_user_access(
