@@ -1985,13 +1985,58 @@ async fn load_task_for_execution(
     }
 }
 
+/// Result of the atomic task claim.
+#[derive(Debug)]
+enum TaskClaim {
+    Claimed,
+    /// Already claimed, finished or cancelled elsewhere.
+    NotClaimable,
+    /// The account cannot admit this task during its billing period, so
+    /// retrying would cycle it forever; the caller fails it instead.
+    Refused(String),
+}
+
+/// Fail a task its account refused outright, like the free-plan pre-checks.
+async fn fail_refused_task(
+    db: &DatabasePool,
+    stream_publisher: &StreamPubSub,
+    request: &TaskRequest,
+    task_id: &Uuid,
+    env_id: Uuid,
+    stream_id: Uuid,
+    reason: &str,
+) {
+    let error = task_failure_json(reason, None);
+    if complete_task_with_event(
+        db,
+        stream_publisher,
+        task_id,
+        env_id,
+        stream_id,
+        &request.function_name,
+        &request.task_type,
+        TaskStatus::Failed,
+        Some(&error),
+        None,
+        None,
+    )
+    .await
+    {
+        let org_id = request
+            .org_id
+            .as_deref()
+            .and_then(|s| Uuid::parse_str(s).ok());
+        publish_task_alert(db, org_id, env_id, task_id, "task:failed", &error).await;
+    }
+}
+
 async fn claim_task_for_execution(
     db: &DatabasePool,
     task_id: &Uuid,
     worker_id: &str,
     backoff: std::time::Duration,
     reservation: hot::db::task::TaskQuotaReservation,
-) -> Result<bool, QueueInfrastructureError> {
+) -> Result<TaskClaim, QueueInfrastructureError> {
     let task = Task::get(db, task_id).await.map_err(|error| {
         QueueInfrastructureError::new(
             format!("Cannot resolve task before claim: {error}"),
@@ -2019,8 +2064,9 @@ async fn claim_task_for_execution(
     )
     .await
     {
-        Ok(Ok(true)) => Ok(true),
-        Ok(Ok(false)) => Ok(false),
+        Ok(Ok(true)) => Ok(TaskClaim::Claimed),
+        Ok(Ok(false)) => Ok(TaskClaim::NotClaimable),
+        Ok(Err(hot::db::TaskError::QuotaExhausted(reason))) => Ok(TaskClaim::Refused(reason)),
         Ok(Err(e)) => {
             let backoff = if matches!(e, hot::db::TaskError::QuotaExceeded(_)) {
                 backoff.max(std::time::Duration::from_secs(5))
@@ -2443,8 +2489,21 @@ async fn process_task(
             )
             .await
             {
-                Ok(true) => {}
-                Ok(false) => return Ok(()),
+                Ok(TaskClaim::Claimed) => {}
+                Ok(TaskClaim::NotClaimable) => return Ok(()),
+                Ok(TaskClaim::Refused(reason)) => {
+                    fail_refused_task(
+                        &db,
+                        &stream_publisher,
+                        &request,
+                        &task_id,
+                        env_id,
+                        stream_id,
+                        &reason,
+                    )
+                    .await;
+                    return Ok(());
+                }
                 Err(e) => {
                     return Err(Box::new(e) as Box<dyn std::error::Error + Send + Sync>);
                 }
@@ -2986,13 +3045,29 @@ async fn process_container_task(
     )
     .await
     {
-        Ok(true) => {}
-        Ok(false) => {
+        Ok(TaskClaim::Claimed) => {}
+        Ok(TaskClaim::NotClaimable) => {
             // Not ours to run: clean the just-created volume via the bounded
             // helper rather than an implicit (synchronous) Drop.
             if let Some(vol) = data_volume {
                 cleanup_data_volume_with_timeout(&task_id, vol).await;
             }
+            return Ok(());
+        }
+        Ok(TaskClaim::Refused(reason)) => {
+            if let Some(vol) = data_volume {
+                cleanup_data_volume_with_timeout(&task_id, vol).await;
+            }
+            fail_refused_task(
+                &db,
+                &stream_publisher,
+                &request,
+                &task_id,
+                env_id,
+                stream_id,
+                &reason,
+            )
+            .await;
             return Ok(());
         }
         Err(e) => {
@@ -7378,7 +7453,7 @@ mod tests {
             .execute(pool)
             .await
             .unwrap();
-        assert!(
+        assert!(matches!(
             claim_task_for_execution(
                 &db,
                 &task.task_id,
@@ -7390,8 +7465,9 @@ mod tests {
                 }
             )
             .await
-            .unwrap()
-        );
+            .unwrap(),
+            TaskClaim::Claimed
+        ));
     }
 
     #[tokio::test]

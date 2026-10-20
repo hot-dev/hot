@@ -16,6 +16,10 @@ pub enum TaskError {
     Database(#[from] sqlx::Error),
     #[error("Task quota exceeded: {0}")]
     QuotaExceeded(String),
+    /// Retrying cannot admit this task within the current billing period
+    /// (or ever, for an invalid request); the claimant should fail it.
+    #[error("Task quota exhausted: {0}")]
+    QuotaExhausted(String),
     #[error("Task not found")]
     NotFound,
 }

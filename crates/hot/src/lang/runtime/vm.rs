@@ -1253,7 +1253,14 @@ impl VirtualMachine {
             .block_on(crate::db::Run::admit_execution(
                 &db, &org_id, &env_id, &run_id,
             ))
-            .map_err(|error| VmError::runtime(format!("[run-admission] {error}")))?;
+            .map_err(|error| match error {
+                // Deferred admission keeps the work pending; any other refusal
+                // (an exhausted account limit) fails like a handler error.
+                crate::db::run::RunError::Suspended(_) | crate::db::run::RunError::Database(_) => {
+                    VmError::runtime(format!("[run-admission] {error}"))
+                }
+                _ => VmError::runtime(format!("[run-quota] {error}")),
+            })?;
         self.admitted_execution = Some((org_id, env_id, run_id));
         Ok(())
     }

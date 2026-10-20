@@ -93,7 +93,7 @@ macro_rules! admission {
                 "SELECT e.active AND o.active AND o.lifecycle_state='active' AND r.active AND r.lifecycle_state='active' AND r.parent_org_id IS NULL FROM env e JOIN org o ON o.org_id=e.org_id JOIN org r ON r.org_id=COALESCE(o.parent_org_id,o.org_id) WHERE e.env_id=$1 AND e.org_id=$2"
             ).bind(env_id).bind(org_id).fetch_one(&mut *conn).await?;
             if !admitted {
-                return Err(RunError::QuotaExceeded("Run environment or account is suspended".into()));
+                return Err(RunError::Suspended("Run environment or account is suspended".into()));
             }
             let prior: Option<(Uuid, Uuid)> = sqlx::query_as(
                 "SELECT org_id,env_id FROM run_admission WHERE run_id=$1"
@@ -260,7 +260,7 @@ mod tests {
             .unwrap();
         assert!(matches!(
             Run::admit_execution(&db, &child.0, &child.1, &ids[0]).await,
-            Err(RunError::QuotaExceeded(_))
+            Err(RunError::Suspended(_))
         ));
         sqlx::query("UPDATE org SET active=true WHERE org_id=?")
             .bind(root)

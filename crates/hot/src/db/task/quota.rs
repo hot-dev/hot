@@ -60,7 +60,7 @@ impl Task {
         reserve: TaskQuotaReservation,
     ) -> Result<bool, TaskError> {
         if reserve.compute_units < 0 || reserve.duration_ms <= 0 {
-            return Err(TaskError::QuotaExceeded(
+            return Err(TaskError::QuotaExhausted(
                 "Invalid task quota reservation".into(),
             ));
         }
@@ -70,7 +70,7 @@ impl Task {
             return Ok(false);
         }
         if task.task_type == "container" && reserve.compute_units == 0 {
-            return Err(TaskError::QuotaExceeded(
+            return Err(TaskError::QuotaExhausted(
                 "Container claim requires a compute reservation".into(),
             ));
         }
@@ -124,21 +124,33 @@ impl Task {
                     "SELECT COALESCE(p.features,'{}'),p.plan_id,op.current_period_start FROM org_plan op JOIN plan p ON p.plan_uuid=op.plan_uuid WHERE op.org_id=$1"
                 ).bind(root_id).fetch_optional(&mut *tx).await?;
                 let period = plan.as_ref().and_then(|p| p.2).unwrap_or(month_start);
-                let usage: (i64,i64,i64,i64,i64) = sqlx::query_as(
+                let is_free = plan
+                    .as_ref()
+                    .is_some_and(|p| p.1.as_deref() == Some("hot-free"));
+                let container = task.task_type == "container";
+                let usage: (i64, i64, i64, i64, i64) = if !usage_required(
+                    plan.as_ref().and_then(|p| p.0.as_ref()),
+                    overrides.as_ref(),
+                    is_free,
+                    container,
+                ) {
+                    (0, 0, 0, 0, 0)
+                } else {
+                    sqlx::query_as(
                     "SELECT
                      COUNT(*) FILTER(WHERE (t.task_status_id=2 OR (t.task_status_id=5 AND t.task_type='container' AND t.reserved_duration_ms>0)) AND t.task_type='container')::bigint,
                      COALESCE(SUM(CASE WHEN (t.task_status_id=2 OR (t.task_status_id=5 AND t.task_type='container' AND t.reserved_duration_ms>0)) THEN CASE WHEN t.reserved_compute_units>0 THEN t.reserved_compute_units WHEN t.task_type='container' THEN ((GREATEST(t.timeout_ms,0)*32+999)/1000) ELSE 0 END ELSE 0 END),0)::bigint,
-                     COALESCE(SUM(CASE WHEN NOT (t.task_status_id=2 OR (t.task_status_id=5 AND t.task_type='container' AND t.reserved_duration_ms>0)) AND t.task_type='container' AND COALESCE(t.stop_time,t.start_time,t.created_at) >= $2 THEN GREATEST(COALESCE((t.result->'$val'->'err'->>'compute-units')::bigint,(t.result->>'compute-units')::bigint,t.reserved_compute_units,0),0) ELSE 0 END),0)::bigint,
+                     COALESCE(SUM(CASE WHEN NOT (t.task_status_id=2 OR (t.task_status_id=5 AND t.task_type='container' AND t.reserved_duration_ms>0)) AND t.task_type='container' AND COALESCE(t.stop_time,t.start_time,t.created_at) >= $2 THEN GREATEST(COALESCE((t.result->'$val'->'err'->>'compute-units')::bigint,(t.result->>'compute-units')::bigint,CASE WHEN t.reserved_duration_ms>0 THEN (t.reserved_compute_units*LEAST(GREATEST(COALESCE(t.duration_ms,0),0),t.reserved_duration_ms)+t.reserved_duration_ms-1)/t.reserved_duration_ms ELSE t.reserved_compute_units END,0),0) ELSE 0 END),0)::bigint,
                      COALESCE(SUM(CASE WHEN (t.task_status_id=2 OR (t.task_status_id=5 AND t.task_type='container' AND t.reserved_duration_ms>0)) THEN CASE WHEN t.reserved_duration_ms>0 THEN t.reserved_duration_ms ELSE GREATEST(t.timeout_ms,0) END ELSE 0 END),0)::bigint,
-                     COALESCE(SUM(CASE WHEN NOT (t.task_status_id=2 OR (t.task_status_id=5 AND t.task_type='container' AND t.reserved_duration_ms>0)) AND COALESCE(t.stop_time,t.start_time,t.created_at) >= $2 THEN GREATEST(COALESCE(t.duration_ms,0),CASE WHEN t.task_status_id=5 THEN t.reserved_duration_ms ELSE 0 END,0) ELSE 0 END),0)::bigint
-                     FROM task t JOIN env e ON e.env_id=t.env_id JOIN org o ON o.org_id=e.org_id WHERE o.org_id=$1 OR o.parent_org_id=$1"
-                ).bind(root_id).bind(period).fetch_one(&mut *tx).await?;
+                     COALESCE(SUM(CASE WHEN NOT (t.task_status_id=2 OR (t.task_status_id=5 AND t.task_type='container' AND t.reserved_duration_ms>0)) AND COALESCE(t.stop_time,t.start_time,t.created_at) >= $2 THEN GREATEST(COALESCE(t.duration_ms,0),0) ELSE 0 END),0)::bigint
+                     FROM task t JOIN env e ON e.env_id=t.env_id JOIN org o ON o.org_id=e.org_id WHERE (o.org_id=$1 OR o.parent_org_id=$1) AND (t.task_status_id=2 OR (t.task_status_id=5 AND t.reserved_duration_ms>0) OR COALESCE(t.stop_time,t.start_time,t.created_at) >= $2)"
+                ).bind(root_id).bind(period).fetch_one(&mut *tx).await?
+                };
                 check_capacity(
                     plan.as_ref().and_then(|p| p.0.as_ref()),
                     overrides.as_ref(),
-                    plan.as_ref()
-                        .is_some_and(|p| p.1.as_deref() == Some("hot-free")),
-                    task.task_type == "container",
+                    is_free,
+                    container,
                     &reserve,
                     usage,
                 )?;
@@ -150,7 +162,7 @@ impl Task {
                         *task_id,
                     )
                     .await
-                    .map_err(|e| TaskError::QuotaExceeded(e.to_string()))?;
+                    .map_err(admission_error)?;
                 }
                 DatabaseScope::Environment {
                     org_id: env.org_id,
@@ -200,28 +212,40 @@ impl Task {
                 let period = plan.as_ref().and_then(|p| p.2).unwrap_or(month_start);
                 let overrides = parse_features(overrides)?;
                 let plan_features = parse_features(plan.as_ref().and_then(|p| p.0.clone()))?;
-                let usage: (i64,i64,i64,i64,i64) = sqlx::query_as(
+                let is_free = plan
+                    .as_ref()
+                    .is_some_and(|p| p.1.as_deref() == Some("hot-free"));
+                let container = task.task_type == "container";
+                let usage: (i64, i64, i64, i64, i64) = if !usage_required(
+                    plan_features.as_ref(),
+                    overrides.as_ref(),
+                    is_free,
+                    container,
+                ) {
+                    (0, 0, 0, 0, 0)
+                } else {
+                    sqlx::query_as(
                     "SELECT
                      COALESCE(SUM(CASE WHEN (t.task_status_id=2 OR (t.task_status_id=5 AND t.task_type='container' AND t.reserved_duration_ms>0)) AND t.task_type='container' THEN 1 ELSE 0 END),0),
                      COALESCE(SUM(CASE WHEN (t.task_status_id=2 OR (t.task_status_id=5 AND t.task_type='container' AND t.reserved_duration_ms>0)) THEN CASE WHEN t.reserved_compute_units>0 THEN t.reserved_compute_units WHEN t.task_type='container' THEN ((MAX(t.timeout_ms,0)*32+999)/1000) ELSE 0 END ELSE 0 END),0),
-                     COALESCE(SUM(CASE WHEN NOT (t.task_status_id=2 OR (t.task_status_id=5 AND t.task_type='container' AND t.reserved_duration_ms>0)) AND t.task_type='container' AND COALESCE(t.stop_time,t.start_time,t.created_at) >= ? THEN MAX(COALESCE(CAST(json_extract(t.result,'$.\"$val\".err.\"compute-units\"') AS integer),CAST(json_extract(t.result,'$.\"compute-units\"') AS integer),t.reserved_compute_units,0),0) ELSE 0 END),0),
+                     COALESCE(SUM(CASE WHEN NOT (t.task_status_id=2 OR (t.task_status_id=5 AND t.task_type='container' AND t.reserved_duration_ms>0)) AND t.task_type='container' AND COALESCE(t.stop_time,t.start_time,t.created_at) >= ? THEN MAX(COALESCE(CAST(json_extract(t.result,'$.\"$val\".err.\"compute-units\"') AS integer),CAST(json_extract(t.result,'$.\"compute-units\"') AS integer),CASE WHEN t.reserved_duration_ms>0 THEN (t.reserved_compute_units*MIN(MAX(COALESCE(t.duration_ms,0),0),t.reserved_duration_ms)+t.reserved_duration_ms-1)/t.reserved_duration_ms ELSE t.reserved_compute_units END,0),0) ELSE 0 END),0),
                      COALESCE(SUM(CASE WHEN (t.task_status_id=2 OR (t.task_status_id=5 AND t.task_type='container' AND t.reserved_duration_ms>0)) THEN CASE WHEN t.reserved_duration_ms>0 THEN t.reserved_duration_ms ELSE MAX(t.timeout_ms,0) END ELSE 0 END),0),
-                     COALESCE(SUM(CASE WHEN NOT (t.task_status_id=2 OR (t.task_status_id=5 AND t.task_type='container' AND t.reserved_duration_ms>0)) AND COALESCE(t.stop_time,t.start_time,t.created_at) >= ? THEN MAX(COALESCE(t.duration_ms,0),CASE WHEN t.task_status_id=5 THEN t.reserved_duration_ms ELSE 0 END,0) ELSE 0 END),0)
-                     FROM task t JOIN env e ON e.env_id=t.env_id JOIN org o ON o.org_id=e.org_id WHERE o.org_id=? OR o.parent_org_id=?"
-                ).bind(period).bind(period).bind(root_id).bind(root_id).fetch_one(&mut *tx).await?;
+                     COALESCE(SUM(CASE WHEN NOT (t.task_status_id=2 OR (t.task_status_id=5 AND t.task_type='container' AND t.reserved_duration_ms>0)) AND COALESCE(t.stop_time,t.start_time,t.created_at) >= ? THEN MAX(COALESCE(t.duration_ms,0),0) ELSE 0 END),0)
+                     FROM task t JOIN env e ON e.env_id=t.env_id JOIN org o ON o.org_id=e.org_id WHERE (o.org_id=? OR o.parent_org_id=?) AND (t.task_status_id=2 OR (t.task_status_id=5 AND t.reserved_duration_ms>0) OR COALESCE(t.stop_time,t.start_time,t.created_at) >= ?)"
+                ).bind(period).bind(period).bind(root_id).bind(root_id).bind(period).fetch_one(&mut *tx).await?
+                };
                 check_capacity(
                     plan_features.as_ref(),
                     overrides.as_ref(),
-                    plan.as_ref()
-                        .is_some_and(|p| p.1.as_deref() == Some("hot-free")),
-                    task.task_type == "container",
+                    is_free,
+                    container,
                     &reserve,
                     usage,
                 )?;
                 {
                     crate::db::run::quota::admit_sqlite(&mut tx, env.org_id, task.env_id, *task_id)
                         .await
-                        .map_err(|e| TaskError::QuotaExceeded(e.to_string()))?;
+                        .map_err(admission_error)?;
                 }
                 let changed=sqlx::query("UPDATE task SET task_status_id=2,start_time=?,worker_id=?,last_heartbeat_at=?,reserved_compute_units=?,reserved_duration_ms=? WHERE task_id=? AND task_status_id=1")
                     .bind(now).bind(worker_id).bind(now).bind(reserve.compute_units).bind(reserve.duration_ms).bind(task_id).execute(&mut *tx).await?.rows_affected();
@@ -239,9 +263,42 @@ impl Task {
 fn parse_features(json: Option<String>) -> Result<Option<Value>, TaskError> {
     json.map(|s| {
         serde_json::from_str(&s)
-            .map_err(|_| TaskError::QuotaExceeded("Malformed account features".into()))
+            .map_err(|_| TaskError::QuotaExhausted("Malformed account features".into()))
     })
     .transpose()
+}
+
+/// Run admission failures other than suspension cannot clear by retrying this
+/// claim: the account limit holds for the rest of the billing period.
+fn admission_error(error: crate::db::run::RunError) -> TaskError {
+    match error {
+        crate::db::run::RunError::Database(error) => TaskError::Database(error),
+        crate::db::run::RunError::Suspended(_) => TaskError::QuotaExceeded(error.to_string()),
+        _ => TaskError::QuotaExhausted(error.to_string()),
+    }
+}
+
+fn claim_features(plan: Option<&Value>, overrides: Option<&Value>) -> Features {
+    if plan.is_none() && overrides.is_none() {
+        Features::unlimited()
+    } else {
+        Features::resolve(plan, overrides)
+    }
+}
+
+/// Whether any limit in `check_capacity` reads account usage; unlimited
+/// accounts skip the aggregate over their task history.
+fn usage_required(
+    plan: Option<&Value>,
+    overrides: Option<&Value>,
+    is_free: bool,
+    container: bool,
+) -> bool {
+    let features = claim_features(plan, overrides);
+    (container && features.box_concurrent_tasks() >= 0)
+        || features.compute_units_budget() > 0
+        || (is_free
+            && (features.compute_units_per_month() >= 0 || features.task_minutes_per_month() >= 0))
 }
 
 fn check_capacity(
@@ -252,11 +309,7 @@ fn check_capacity(
     reserve: &TaskQuotaReservation,
     usage: (i64, i64, i64, i64, i64),
 ) -> Result<(), TaskError> {
-    let features = if plan.is_none() && overrides.is_none() {
-        Features::unlimited()
-    } else {
-        Features::resolve(plan, overrides)
-    };
+    let features = claim_features(plan, overrides);
     let concurrent = features.box_concurrent_tasks();
     if container && concurrent >= 0 && usage.0 >= concurrent {
         return Err(TaskError::QuotaExceeded(
@@ -265,7 +318,7 @@ fn check_capacity(
     }
     let monthly = features.compute_units_per_month();
     if container && monthly == 0 {
-        return Err(TaskError::QuotaExceeded(
+        return Err(TaskError::QuotaExhausted(
             "Container tasks are disabled on this account".into(),
         ));
     }
@@ -277,7 +330,13 @@ fn check_capacity(
     if (budget > 0 && total.is_none_or(|v| v > budget))
         || (is_free && monthly >= 0 && total.is_none_or(|v| v > monthly))
     {
-        return Err(TaskError::QuotaExceeded("Account compute quota cannot cover this task's maximum execution; reduce its timeout or increase capacity".into()));
+        // Only running reservations can free capacity during this period.
+        let message = "Account compute quota cannot cover this task's maximum execution; reduce its timeout or increase capacity".to_string();
+        return Err(if usage.1 == 0 {
+            TaskError::QuotaExhausted(message)
+        } else {
+            TaskError::QuotaExceeded(message)
+        });
     }
     let minutes = i64::from(features.task_minutes_per_month());
     if is_free
@@ -288,9 +347,13 @@ fn check_capacity(
             .and_then(|v| v.checked_add(reserve.duration_ms))
             .is_none_or(|v| v > minutes.saturating_mul(60_000))
     {
-        return Err(TaskError::QuotaExceeded(
-            "Account task-minute quota cannot cover this task's maximum execution".into(),
-        ));
+        let message =
+            "Account task-minute quota cannot cover this task's maximum execution".to_string();
+        return Err(if usage.3 == 0 {
+            TaskError::QuotaExhausted(message)
+        } else {
+            TaskError::QuotaExceeded(message)
+        });
     }
     Ok(())
 }
@@ -340,6 +403,74 @@ mod tests {
         .unwrap();
         id
     }
+    #[tokio::test]
+    async fn interrupted_containers_charge_their_runtime_not_their_reservation() {
+        let (db, _root, e1, e2) = fixture(
+            r#"{"runs_per_month":-1,"box_concurrent_tasks":-1,"compute_units_per_month":-1,"compute_units_budget":100}"#,
+        )
+        .await;
+        let DatabasePool::Sqlite(pool) = &db else {
+            unreachable!()
+        };
+        // Reaped after 10% of its timeout, with no recorded compute units.
+        let reaped = queued(&db, e1).await;
+        let now = Utc::now();
+        sqlx::query("UPDATE task SET task_status_id=?,start_time=?,stop_time=?,duration_ms=6000,reserved_compute_units=90,reserved_duration_ms=60000,result=? WHERE task_id=?")
+            .bind(TaskStatus::Failed.as_id())
+            .bind(now - chrono::Duration::seconds(6))
+            .bind(now)
+            .bind(r#"{"msg":"worker lost","err":null}"#)
+            .bind(reaped)
+            .execute(pool)
+            .await
+            .unwrap();
+        let next = queued(&db, e2).await;
+        let reserve = TaskQuotaReservation {
+            compute_units: 20,
+            duration_ms: 60_000,
+        };
+        assert!(
+            Task::claim_for_worker_with_quota(&db, &next, "w", reserve)
+                .await
+                .unwrap()
+        );
+        // With nothing running, a reservation the budget cannot cover is final.
+        let large = queued(&db, e2).await;
+        assert!(matches!(
+            Task::claim_for_worker_with_quota(
+                &db,
+                &large,
+                "w",
+                TaskQuotaReservation {
+                    compute_units: 200,
+                    duration_ms: 60_000,
+                }
+            )
+            .await,
+            Err(TaskError::QuotaExceeded(_))
+        ));
+        sqlx::query("UPDATE task SET task_status_id=3,stop_time=?,duration_ms=1000,result=? WHERE task_id=?")
+            .bind(Utc::now())
+            .bind(r#"{"compute-units":2}"#)
+            .bind(next)
+            .execute(pool)
+            .await
+            .unwrap();
+        assert!(matches!(
+            Task::claim_for_worker_with_quota(
+                &db,
+                &large,
+                "w",
+                TaskQuotaReservation {
+                    compute_units: 200,
+                    duration_ms: 60_000,
+                }
+            )
+            .await,
+            Err(TaskError::QuotaExhausted(_))
+        ));
+    }
+
     #[tokio::test]
     async fn concurrent_sibling_claims_share_one_atomic_container_slot() {
         let (db, root, e1, e2) = fixture(

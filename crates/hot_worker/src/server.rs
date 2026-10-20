@@ -7055,7 +7055,15 @@ pub async fn run_with_components_shared_context_and_db(
                                                         let run_ids: Vec<Uuid> = admitted_handlers.iter().map(|(_, _, id)| *id).collect();
                                                         let org_id = event_message.body.execution_context.org_id.ok_or_else(|| worker_error("Hydrated event has no organization"))?;
                                                         hot::db::run::Run::admit_executions(db, &org_id, &env_id, &run_ids).await
-                                                            .map_err(|e| worker_infrastructure_retry_error(e.to_string(), infra_retry_backoff_ms.max(5_000)))?;
+                                                            .map_err(|e| match e {
+                                                                // Suspension and database errors leave accepted work pending.
+                                                                hot::db::run::RunError::Suspended(_) | hot::db::run::RunError::Database(_) => {
+                                                                    worker_infrastructure_retry_error(e.to_string(), infra_retry_backoff_ms.max(5_000))
+                                                                }
+                                                                // A reached account limit cannot clear by redelivery: use the
+                                                                // bounded retry path so the event dead-letters visibly.
+                                                                _ => worker_error(e.to_string()),
+                                                            })?;
 
                                                         // Step 4: Execute the selected handlers
                                                         let execution_result: (Result<(), String>, bool) = {

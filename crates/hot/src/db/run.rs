@@ -15,6 +15,10 @@ pub enum RunError {
     Database(#[from] sqlx::Error),
     #[error("Run admission denied: {0}")]
     QuotaExceeded(String),
+    /// The environment or account is not admitting work; accepted work stays
+    /// pending until it is.
+    #[error("Run admission deferred: {0}")]
+    Suspended(String),
     #[error("Run scope does not match its environment owner")]
     ScopeDenied,
     #[error("Run not found")]
@@ -3339,7 +3343,9 @@ impl Run {
     }
 
     /// Get runs that are pending retry and ready to be retried (next_retry_at <= now)
-    /// Limited to batch_size runs to avoid overwhelming the system
+    /// Limited to batch_size runs to avoid overwhelming the system. Retries in
+    /// environments that are not admitting work stay pending without occupying
+    /// the batch, so one suspended tenant cannot starve every other tenant.
     pub async fn get_pending_retries(
         db: &crate::db::DatabasePool,
         batch_size: i64,
@@ -3349,7 +3355,7 @@ impl Run {
         match db {
             crate::db::DatabasePool::Postgres(pg_pool) => {
                 let runs = sqlx::query_as::<_, Run>(
-                    "SELECT r.run_id, r.env_id, r.stream_id, r.build_id, r.run_type_id, rt.run_type, r.origin_run_id, r.event_id, r.start_time, r.stop_time, r.status_id, rs.status, r.by_user_id, r.result, r.info, r.retry_attempt, r.next_retry_at, b.project_id, p.name as project_name, COALESCE(e.event_data->>'fn', (SELECT function_name FROM call WHERE run_id = r.run_id AND parent_call_id IS NULL LIMIT 1), (SELECT function_name FROM task WHERE run_id = r.run_id LIMIT 1)) as event_fn, e.created_at as queued_at FROM run r JOIN run_status rs ON r.status_id = rs.status_id JOIN run_type rt ON r.run_type_id = rt.run_type_id LEFT JOIN build b ON r.build_id = b.build_id LEFT JOIN project p ON b.project_id = p.project_id LEFT JOIN event e ON r.event_id = e.event_id WHERE r.status_id = 5 AND r.next_retry_at IS NOT NULL AND r.next_retry_at <= $1 ORDER BY r.next_retry_at ASC LIMIT $2"
+                    "SELECT r.run_id, r.env_id, r.stream_id, r.build_id, r.run_type_id, rt.run_type, r.origin_run_id, r.event_id, r.start_time, r.stop_time, r.status_id, rs.status, r.by_user_id, r.result, r.info, r.retry_attempt, r.next_retry_at, b.project_id, p.name as project_name, COALESCE(e.event_data->>'fn', (SELECT function_name FROM call WHERE run_id = r.run_id AND parent_call_id IS NULL LIMIT 1), (SELECT function_name FROM task WHERE run_id = r.run_id LIMIT 1)) as event_fn, e.created_at as queued_at FROM run r JOIN run_status rs ON r.status_id = rs.status_id JOIN run_type rt ON r.run_type_id = rt.run_type_id LEFT JOIN build b ON r.build_id = b.build_id LEFT JOIN project p ON b.project_id = p.project_id LEFT JOIN event e ON r.event_id = e.event_id WHERE r.status_id = 5 AND r.next_retry_at IS NOT NULL AND r.next_retry_at <= $1 AND EXISTS (SELECT 1 FROM env en JOIN org og ON og.org_id = en.org_id JOIN org ro ON ro.org_id = COALESCE(og.parent_org_id, og.org_id) WHERE en.env_id = r.env_id AND en.active = true AND og.active = true AND ro.active = true AND og.lifecycle_state = 'active' AND ro.lifecycle_state = 'active') ORDER BY r.next_retry_at ASC LIMIT $2"
                 )
                 .bind(now)
                 .bind(batch_size)
@@ -3359,7 +3365,7 @@ impl Run {
             }
             crate::db::DatabasePool::Sqlite(sqlite_pool) => {
                 let runs = sqlx::query_as::<_, Run>(
-                    "SELECT r.run_id, r.env_id, r.stream_id, r.build_id, r.run_type_id, rt.run_type, r.origin_run_id, r.event_id, r.start_time, r.stop_time, r.status_id, rs.status, r.by_user_id, r.result, r.info, r.retry_attempt, r.next_retry_at, b.project_id, p.name as project_name, COALESCE(json_extract(e.event_data, '$.fn'), (SELECT function_name FROM call WHERE run_id = r.run_id AND parent_call_id IS NULL LIMIT 1), (SELECT function_name FROM task WHERE run_id = r.run_id LIMIT 1)) as event_fn, e.created_at as queued_at FROM run r JOIN run_status rs ON r.status_id = rs.status_id JOIN run_type rt ON r.run_type_id = rt.run_type_id LEFT JOIN build b ON r.build_id = b.build_id LEFT JOIN project p ON b.project_id = p.project_id LEFT JOIN event e ON r.event_id = e.event_id WHERE r.status_id = 5 AND r.next_retry_at IS NOT NULL AND r.next_retry_at <= ? ORDER BY r.next_retry_at ASC LIMIT ?"
+                    "SELECT r.run_id, r.env_id, r.stream_id, r.build_id, r.run_type_id, rt.run_type, r.origin_run_id, r.event_id, r.start_time, r.stop_time, r.status_id, rs.status, r.by_user_id, r.result, r.info, r.retry_attempt, r.next_retry_at, b.project_id, p.name as project_name, COALESCE(json_extract(e.event_data, '$.fn'), (SELECT function_name FROM call WHERE run_id = r.run_id AND parent_call_id IS NULL LIMIT 1), (SELECT function_name FROM task WHERE run_id = r.run_id LIMIT 1)) as event_fn, e.created_at as queued_at FROM run r JOIN run_status rs ON r.status_id = rs.status_id JOIN run_type rt ON r.run_type_id = rt.run_type_id LEFT JOIN build b ON r.build_id = b.build_id LEFT JOIN project p ON b.project_id = p.project_id LEFT JOIN event e ON r.event_id = e.event_id WHERE r.status_id = 5 AND r.next_retry_at IS NOT NULL AND r.next_retry_at <= ? AND EXISTS (SELECT 1 FROM env en JOIN org og ON og.org_id = en.org_id JOIN org ro ON ro.org_id = COALESCE(og.parent_org_id, og.org_id) WHERE en.env_id = r.env_id AND en.active = 1 AND og.active = 1 AND ro.active = 1 AND og.lifecycle_state = 'active' AND ro.lifecycle_state = 'active') ORDER BY r.next_retry_at ASC LIMIT ?"
                 )
                 .bind(now)
                 .bind(batch_size)
@@ -3497,6 +3503,32 @@ impl Run {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn pending_retries_skip_environments_that_are_not_admitting() {
+        let db = crate::db::test_db().await;
+        let data = crate::db::insert_test_data(&db).await.unwrap();
+        let crate::db::DatabasePool::Sqlite(pool) = &db else {
+            unreachable!()
+        };
+        sqlx::query("UPDATE run SET status_id = 5, next_retry_at = ? WHERE run_id = ?")
+            .bind(chrono::Utc::now() - chrono::Duration::minutes(1))
+            .bind(data.run_id)
+            .execute(pool)
+            .await
+            .unwrap();
+        let due = Run::get_pending_retries(&db, 50).await.unwrap();
+        assert!(due.iter().any(|run| run.run_id == data.run_id));
+
+        // A suspended tenant's retries must not occupy the batch.
+        sqlx::query("UPDATE env SET active = 0 WHERE env_id = ?")
+            .bind(data.env_id)
+            .execute(pool)
+            .await
+            .unwrap();
+        let due = Run::get_pending_retries(&db, 50).await.unwrap();
+        assert!(due.iter().all(|run| run.run_id != data.run_id));
+    }
 
     #[tokio::test]
     async fn sqlite_update_info_matches_postgres_shallow_merge_semantics() {
