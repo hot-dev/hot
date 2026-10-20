@@ -41,6 +41,9 @@ provides detailed reference documentation for the Hot programming language.
 
 ## Semantic Rules Agents Must Preserve
 
+- A **parameter** is a named input declared by a function; an **argument** is
+  an expression supplied in a call. In `greet fn (name: Str): Str { name }`,
+  `name` is a parameter; in `greet("Alice")`, `"Alice"` is an argument.
 - Ordinary function arguments are eager, and ordinary function bodies are
   serial. Never imply that Hot parallelizes arbitrary code.
 - Use `parallel` intentionally, usually for independent I/O. Hot analyzes
@@ -59,8 +62,9 @@ provides detailed reference documentation for the Hot programming language.
   dispatch.
 - Values have immutable semantics. Reusing a name or assigning a deep path
   creates an updated binding rather than mutating a shared object.
-- A `lazy` argument is a non-memoized deferred computation. Bind `do value`
-  before reusing it if evaluating it may be expensive or effectful.
+- A parameter marked `lazy` holds its argument expression as a non-memoized
+  deferred computation. Bind `do value` before reusing it if evaluating it
+  may be expensive or effectful.
 - Prefer `map`, `filter`, `reduce`, iterators, and `for-each` for iteration.
   Recursive calls are stack-safe only when they are genuinely in tail position.
 

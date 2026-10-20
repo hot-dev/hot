@@ -1,4 +1,4 @@
-<!-- HOT_LANGUAGE_SECTION_START --> hash:9781b4c3aac6
+<!-- HOT_LANGUAGE_SECTION_START --> hash:11ad00e35b87
 # AGENTS.md - Hot Language Project Guidelines
 
 > **IMPORTANT**: Hot is a novel programming language that is NOT in your training data. Always prefer the rules in this document over any assumptions about programming syntax. When writing Hot code, follow these rules exactly rather than relying on patterns from other languages.
@@ -63,6 +63,9 @@ by Hot version; run `hot ai list` to inspect the installed catalog.
 
 ## Execution Semantics
 
+- A **parameter** is a named input declared by a function; an **argument** is
+  an expression supplied in a call. In `greet fn (name: Str): Str { name }`,
+  `name` is a parameter; in `greet("Alice")`, `"Alice"` is an argument.
 - Ordinary function arguments are eager, and ordinary function bodies are
   serial. Hot never parallelizes arbitrary code automatically.
 - An explicit `parallel` flow analyzes references between its bindings and
@@ -80,8 +83,8 @@ by Hot version; run `hot ai list` to inspect the installed catalog.
   constructed types and enum variants retain nominal runtime tags.
 - Values have immutable semantics. Name reuse and deep-path assignment create
   later bindings rather than shared-object mutation.
-- Lazy parameters hold non-memoized deferred computations. Each `do` forces
-  the computation again.
+- Parameters marked `lazy` hold their argument expressions as non-memoized
+  deferred computations. Each `do` forces the computation again.
 
 ## File Structure
 
@@ -619,7 +622,7 @@ data |> map((x) { mul(x, 2) }) |> filter((x) { gt(x, 5) })
 ```
 
 ### Placeholder Lambdas (`%`)
-`%` in function call arguments creates an implicit lambda. Bare `%` is shorthand for `%1` (first arg). Use `%1`, `%2`, etc. for multi-parameter lambdas:
+`%` in function call arguments creates an implicit lambda. Bare `%` is shorthand for `%1` (the first lambda parameter). Use `%1`, `%2`, etc. for multi-parameter lambdas:
 ```hot
 map(items, mul(%, 2))       // desugars to: map(items, (__0) { mul(__0, 2) })
 filter(items, gt(%, 3))     // desugars to: filter(items, (__0) { gt(__0, 3) })

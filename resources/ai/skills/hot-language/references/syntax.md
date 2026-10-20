@@ -82,6 +82,10 @@ get-env ::hot::env/get
 
 ## Functions
 
+A **parameter** is a named input declared by a function; an **argument** is an
+expression supplied in a call. In the definition below, `name` is a parameter.
+In `greet("Alice")`, `"Alice"` is an argument.
+
 ### Basic Function
 
 ```hot
@@ -126,7 +130,7 @@ parsed map(strings, (s: Str): Int { Int(s) })
 
 ### Placeholder Lambdas (`%`)
 
-`%` in a function argument creates an implicit lambda. Bare `%` is shorthand for `%1`. Use `%1`, `%2`, etc. for multi-parameter lambdas.
+`%` in a function argument creates an implicit lambda. Bare `%` is shorthand for `%1`, the first lambda parameter. Use `%1`, `%2`, etc. for multi-parameter lambdas.
 
 ```hot
 doubled map(numbers, mul(%, 2))     // (x) { mul(x, 2) }

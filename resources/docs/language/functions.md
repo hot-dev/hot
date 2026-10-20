@@ -14,6 +14,10 @@ Use `fn` followed by parameters and a body:
 
 {{result:functions#basic-functions}}
 
+A **parameter** is a named input declared by a function. An **argument** is an
+expression supplied in a call. In `greet fn (name: Str): Str { name }`, `name` is
+a parameter; in `greet("Alice")`, `"Alice"` is an argument.
+
 The last expression in the body is the return value—no `return` keyword needed.
 
 ### Functions are Flows
@@ -30,7 +34,7 @@ See [Flows](/docs/language/flows) for more on `serial`, `parallel`, `cond`, and 
 
 ## Calling Functions
 
-Call functions with parentheses:
+Call functions with arguments in parentheses:
 
 {{snippet:functions#calling-functions}}
 
@@ -87,7 +91,7 @@ Hot dispatches to the correct version based on arguments.
 
 ## Variadic Functions
 
-Accept any number of arguments with `...`:
+A variadic parameter declared with `...` accepts any number of arguments:
 
 {{snippet:functions#variadic-functions}}
 
@@ -161,8 +165,8 @@ Use explicit `(params) { body }` when:
 ## Lazy Arguments
 
 Ordinary function arguments are evaluated before the function body runs.
-Arguments marked `lazy` instead arrive as deferred computations. This enables
-short-circuit evaluation:
+When a parameter is marked `lazy`, its argument expression is deferred until
+the function forces it with `do`. This enables short-circuit evaluation:
 
 ```hot
 if fn
@@ -278,5 +282,5 @@ sum-acc fn cond (xs: Vec, acc: Int): Int {
 - Call with no space before `(`: `func(args)`
 - Overload by arity or type
 - Use lambdas `(x) { body }` for inline functions, or `%` for concise single-param lambdas
-- Mark args `lazy` for deferred evaluation
+- Mark parameters `lazy` to defer evaluation of their arguments
 - Tail-recursive functions are automatically optimized (TCO)
