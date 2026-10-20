@@ -12,7 +12,7 @@
 		'meta-annotation': [
 		{
 			// Meta annotation with brackets: meta [...]
-			pattern: /\bmeta\s*\[(?:[^\]"]*|"""[\s\S]*?"""|"(?:[^"\\]|\\.)*")*\]/,
+			pattern: /\bmeta\s*\[(?:[^\]"]|"""(?:(?!""")[\s\S])*"""|"(?!"")(?:[^"\\]|\\.)*")*\]/,
 			greedy: true,
 			inside: {
 				'keyword': /^meta/,
@@ -34,7 +34,7 @@
 			},
 		{
 			// Meta annotation with braces: meta {...}
-			pattern: /\bmeta\s*\{(?:[^}"]*|"""[\s\S]*?"""|"(?:[^"\\]|\\.)*")*\}/,
+			pattern: /\bmeta\s*\{(?:[^}"]|"""(?:(?!""")[\s\S])*"""|"(?!"")(?:[^"\\]|\\.)*")*\}/,
 			greedy: true,
 			inside: {
 				'keyword': /^meta/,

@@ -45,6 +45,14 @@ pub fn is_htmx_request(headers: &axum::http::HeaderMap) -> bool {
         .unwrap_or(false)
 }
 
+/// Keep request values and diagnostic messages out of an HTML parsing context.
+pub(super) fn plain_text_error(
+    status: axum::http::StatusCode,
+    message: impl Into<String>,
+) -> axum::response::Response {
+    axum::response::IntoResponse::into_response((status, message.into()))
+}
+
 // Re-export handlers from modules for backward compatibility
 pub use account::{
     account_handler, account_update_handler, notifications_handler, notifications_update_handler,
@@ -954,6 +962,21 @@ pub async fn build_permission_path_options(
 mod tests {
     use super::*;
     use axum::http::HeaderValue;
+
+    #[tokio::test]
+    async fn error_responses_render_untrusted_markup_as_plain_text() {
+        let message = "Project '<img src=x onerror=alert(1)>' not found";
+        let response = plain_text_error(axum::http::StatusCode::NOT_FOUND, message);
+        assert_eq!(response.status(), axum::http::StatusCode::NOT_FOUND);
+        assert_eq!(
+            response.headers()[axum::http::header::CONTENT_TYPE],
+            "text/plain; charset=utf-8"
+        );
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert_eq!(body.as_ref(), message.as_bytes());
+    }
 
     #[test]
     fn test_referrer_redirect_accepts_same_host_path() {
