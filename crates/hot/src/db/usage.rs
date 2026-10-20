@@ -464,8 +464,37 @@ mod tests {
             ),
             (0, 0, 40, 0, 400)
         );
+        for (metering, expected) in [
+            (serde_json::json!({"compute-units":i64::MAX}), i64::MAX),
+            (
+                serde_json::json!({"compute-units":i64::MAX.to_string()}),
+                i64::MAX,
+            ),
+            (
+                serde_json::json!({"$val":{"err":{"compute-units":i64::MAX}}}),
+                i64::MAX,
+            ),
+            (
+                serde_json::json!({"compute-units":"9223372036854775808"}),
+                40,
+            ),
+            (
+                serde_json::json!({"compute-units":9223372036854775808_u64}),
+                40,
+            ),
+            (serde_json::json!({"compute-units":i64::MIN}), 0),
+        ] {
+            sqlx::query("UPDATE task SET result=? WHERE task_id=?")
+                .bind(metering.to_string())
+                .bind(task)
+                .execute(pool)
+                .await
+                .unwrap();
+            assert_eq!(read().await.2, expected);
+        }
         for malformed in [
             serde_json::json!({"compute-units":"broken"}),
+            serde_json::json!({"compute-units":true}),
             serde_json::json!({"compute-units":{}}),
         ] {
             sqlx::query("UPDATE task SET result=? WHERE task_id=?")
@@ -476,6 +505,12 @@ mod tests {
                 .unwrap();
             assert_eq!(read().await, settled);
         }
+        sqlx::query("UPDATE task SET result='not valid JSON' WHERE task_id=?")
+            .bind(task)
+            .execute(pool)
+            .await
+            .unwrap();
+        assert_eq!(read().await, settled);
         sqlx::query("UPDATE task SET result='{\"compute-units\":7}' WHERE task_id=?")
             .bind(task)
             .execute(pool)

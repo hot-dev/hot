@@ -1291,6 +1291,37 @@ async fn scoped_pool_enforces_isolation_under_a_restricted_login()
             .await?,
         200
     );
+    for (metering, expected) in [
+        (serde_json::json!({"compute-units":i64::MAX}), i64::MAX),
+        (
+            serde_json::json!({"compute-units":i64::MAX.to_string()}),
+            i64::MAX,
+        ),
+        (
+            serde_json::json!({"$val":{"err":{"compute-units":i64::MAX}}}),
+            i64::MAX,
+        ),
+        (
+            serde_json::json!({"compute-units":"9223372036854775808"}),
+            20,
+        ),
+        (
+            serde_json::json!({"compute-units":9223372036854775808_u64}),
+            20,
+        ),
+        (serde_json::json!({"compute-units":i64::MIN}), 0),
+        (serde_json::json!({"compute-units":true}), 20),
+    ] {
+        sqlx::query("UPDATE task SET task_type='container',reserved_compute_units=100,result=$2 WHERE task_id=$1")
+            .bind(period_task).bind(metering).execute(&a).await?;
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT compute_units FROM usage_task WHERE env_id=$1")
+                .bind(env_a)
+                .fetch_one(&a)
+                .await?,
+            expected
+        );
+    }
     sqlx::query("DELETE FROM hot.task WHERE task_id=ANY($1)")
         .bind(vec![period_task, period_claim])
         .execute(&admin)

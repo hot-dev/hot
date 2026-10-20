@@ -25,8 +25,8 @@ CREATE FUNCTION hot.task_usage(t hot.task) RETURNS TABLE (
             WHEN t.task_type='container' THEN (GREATEST(t.timeout_ms,0)*32+999)/1000 ELSE 0 END ELSE 0 END,
         CASE WHEN active THEN CASE WHEN t.reserved_duration_ms>0 THEN t.reserved_duration_ms ELSE GREATEST(t.timeout_ms,0) END ELSE 0 END,
         CASE WHEN NOT active AND t.task_type='container' THEN GREATEST(COALESCE(
-            CASE WHEN nested ~ '^-?[0-9]{1,18}$' THEN nested::bigint END,
-            CASE WHEN direct ~ '^-?[0-9]{1,18}$' THEN direct::bigint END,
+            CASE WHEN nested ~ '^-?[0-9]{1,19}$' THEN CASE WHEN nested::numeric BETWEEN -9223372036854775808::numeric AND 9223372036854775807::numeric THEN nested::bigint END END,
+            CASE WHEN direct ~ '^-?[0-9]{1,19}$' THEN CASE WHEN direct::numeric BETWEEN -9223372036854775808::numeric AND 9223372036854775807::numeric THEN direct::bigint END END,
             CASE WHEN t.reserved_duration_ms>0 THEN
                 floor((t.reserved_compute_units::numeric*LEAST(GREATEST(COALESCE(t.duration_ms,0),0),t.reserved_duration_ms)+t.reserved_duration_ms-1)/t.reserved_duration_ms)::bigint
                 ELSE t.reserved_compute_units END,0),0) ELSE 0 END,
@@ -52,11 +52,11 @@ BEGIN
         reserved_compute_units=u.reserved_compute_units+EXCLUDED.reserved_compute_units,
         reserved_duration_ms=u.reserved_duration_ms+EXCLUDED.reserved_duration_ms,
         compute_units=u.compute_units
-            + CASE WHEN TG_OP<>'DELETE' AND n.usage_at>=u.period_start THEN n.compute_units ELSE 0 END
-            - CASE WHEN TG_OP<>'INSERT' AND o.usage_at>=u.period_start THEN o.compute_units ELSE 0 END,
+            - CASE WHEN TG_OP<>'INSERT' AND o.usage_at>=u.period_start THEN o.compute_units ELSE 0 END
+            + CASE WHEN TG_OP<>'DELETE' AND n.usage_at>=u.period_start THEN n.compute_units ELSE 0 END,
         duration_ms=u.duration_ms
-            + CASE WHEN TG_OP<>'DELETE' AND n.usage_at>=u.period_start THEN n.duration_ms ELSE 0 END
-            - CASE WHEN TG_OP<>'INSERT' AND o.usage_at>=u.period_start THEN o.duration_ms ELSE 0 END;
+            - CASE WHEN TG_OP<>'INSERT' AND o.usage_at>=u.period_start THEN o.duration_ms ELSE 0 END
+            + CASE WHEN TG_OP<>'DELETE' AND n.usage_at>=u.period_start THEN n.duration_ms ELSE 0 END;
     RETURN NULL;
 END $$;
 CREATE TRIGGER count_task_usage_insert AFTER INSERT ON hot.task FOR EACH ROW EXECUTE FUNCTION hot.count_task_usage();

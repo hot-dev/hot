@@ -17,14 +17,14 @@ SELECT task_id,env_id,
     CASE WHEN active THEN CASE WHEN reserved_compute_units>0 THEN reserved_compute_units
         WHEN task_type='container' THEN (MAX(timeout_ms,0)*32+999)/1000 ELSE 0 END ELSE 0 END AS reserved_compute_units,
     CASE WHEN active THEN CASE WHEN reserved_duration_ms>0 THEN reserved_duration_ms ELSE MAX(timeout_ms,0) END ELSE 0 END AS reserved_duration_ms,
-    CASE WHEN NOT active AND task_type='container' THEN MAX(COALESCE(CASE WHEN length(ltrim(CAST(nested AS TEXT),'-')) BETWEEN 1 AND 18 AND ((CAST(nested AS TEXT) NOT GLOB '*[^0-9]*') OR (substr(CAST(nested AS TEXT),1,1)='-' AND substr(CAST(nested AS TEXT),2) NOT GLOB '*[^0-9]*')) THEN CAST(nested AS INTEGER) END,CASE WHEN length(ltrim(CAST(direct AS TEXT),'-')) BETWEEN 1 AND 18 AND ((CAST(direct AS TEXT) NOT GLOB '*[^0-9]*') OR (substr(CAST(direct AS TEXT),1,1)='-' AND substr(CAST(direct AS TEXT),2) NOT GLOB '*[^0-9]*')) THEN CAST(direct AS INTEGER) END,
+    CASE WHEN NOT active AND task_type='container' THEN MAX(COALESCE(CASE WHEN length(ltrim(CAST(nested AS TEXT),'-')) BETWEEN 1 AND 19 AND ((CAST(nested AS TEXT) NOT GLOB '*[^0-9]*') OR (substr(CAST(nested AS TEXT),1,1)='-' AND substr(CAST(nested AS TEXT),2) NOT GLOB '*[^0-9]*')) THEN CASE WHEN length(ltrim(CAST(nested AS TEXT),'-'))<19 OR substr(ltrim(CAST(nested AS TEXT),'-'),1,1)='0' OR CAST(CAST(nested AS INTEGER) AS TEXT)=CAST(nested AS TEXT) THEN CAST(nested AS INTEGER) END END,CASE WHEN length(ltrim(CAST(direct AS TEXT),'-')) BETWEEN 1 AND 19 AND ((CAST(direct AS TEXT) NOT GLOB '*[^0-9]*') OR (substr(CAST(direct AS TEXT),1,1)='-' AND substr(CAST(direct AS TEXT),2) NOT GLOB '*[^0-9]*')) THEN CASE WHEN length(ltrim(CAST(direct AS TEXT),'-'))<19 OR substr(ltrim(CAST(direct AS TEXT),'-'),1,1)='0' OR CAST(CAST(direct AS INTEGER) AS TEXT)=CAST(direct AS TEXT) THEN CAST(direct AS INTEGER) END END,
         CASE WHEN reserved_duration_ms>0 THEN (reserved_compute_units*MIN(MAX(COALESCE(duration_ms,0),0),reserved_duration_ms)+reserved_duration_ms-1)/reserved_duration_ms
         ELSE reserved_compute_units END,0),0) ELSE 0 END AS compute_units,
     CASE WHEN NOT active THEN MAX(COALESCE(duration_ms,0),0) ELSE 0 END AS duration_ms,
     COALESCE(stop_time,start_time,created_at) AS usage_at
 FROM (SELECT t.*, t.task_status_id=2 OR (t.task_status_id=5 AND t.task_type='container' AND t.reserved_duration_ms>0) AS active,
-    json_extract(CASE WHEN json_valid(t.result) THEN t.result END,'$."$val".err."compute-units"') AS nested,
-    json_extract(CASE WHEN json_valid(t.result) THEN t.result END,'$."compute-units"') AS direct FROM task t);
+    CASE WHEN json_type(CASE WHEN json_valid(t.result) THEN t.result END,'$."$val".err."compute-units"') IN ('integer','text') THEN json_extract(CASE WHEN json_valid(t.result) THEN t.result END,'$."$val".err."compute-units"') END AS nested,
+    CASE WHEN json_type(CASE WHEN json_valid(t.result) THEN t.result END,'$."compute-units"') IN ('integer','text') THEN json_extract(CASE WHEN json_valid(t.result) THEN t.result END,'$."compute-units"') END AS direct FROM task t);
 CREATE TRIGGER count_task_usage_insert AFTER INSERT ON task
 BEGIN
     INSERT INTO usage_task(env_id,org_id,active_containers,reserved_compute_units,reserved_duration_ms,compute_units,duration_ms)

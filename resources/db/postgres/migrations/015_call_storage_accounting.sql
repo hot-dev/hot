@@ -32,6 +32,9 @@ ALTER TABLE hot.call ALTER COLUMN env_id SET NOT NULL;
 CREATE UNIQUE INDEX run_env_ownership_idx ON hot.run(run_id, env_id);
 ALTER TABLE hot.call ADD CONSTRAINT call_run_environment_fk
     FOREIGN KEY (run_id, env_id) REFERENCES hot.run(run_id, env_id) ON DELETE CASCADE;
+-- The composite key also enforces run existence. Keep one parent check and
+-- one cascade path rather than retaining the redundant original foreign key.
+ALTER TABLE hot.call DROP CONSTRAINT call_run_id_fkey;
 CREATE INDEX call_env_start_time_idx ON hot.call(env_id, start_time);
 DROP TRIGGER immutable_resource_scope ON hot.call;
 CREATE TRIGGER immutable_resource_scope BEFORE UPDATE ON hot.call
