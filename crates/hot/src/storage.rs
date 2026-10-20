@@ -572,46 +572,212 @@ pub mod s3 {
 }
 
 // ============================================================================
+// Google Cloud Storage
+// ============================================================================
+
+#[cfg(feature = "gcs-storage")]
+pub mod gcs {
+    use super::*;
+    use crate::gcs::{BACKEND_ID, GcsClient, GcsConfig};
+
+    const BUILD_CONTENT_TYPE: &str = "application/zip";
+
+    /// Google Cloud Storage for builds.
+    /// Layout: `{prefix}/{org_id}/{env_id}/{build_id}.hot.zip`, matching S3.
+    pub struct GcsBuildStorage {
+        client: GcsClient,
+    }
+
+    impl GcsBuildStorage {
+        pub fn new(client: GcsClient) -> Self {
+            Self { client }
+        }
+
+        /// Create from Hot configuration (`build.gcs.*` / `HOT_BUILD_GCS_*`).
+        pub async fn from_config(conf: &crate::val::Val) -> Result<Self, String> {
+            let config = GcsConfig::from_conf(conf, "build")?;
+            let client = GcsClient::connect(&config).await?;
+            tracing::info!(bucket = %config.bucket, "Using GCS build storage");
+            Ok(Self::new(client))
+        }
+
+        fn object_key(&self, build_id: &Uuid, org_id: &Uuid, env_id: &Uuid) -> String {
+            let org = org_id.simple().to_string();
+            let env = env_id.simple().to_string();
+            let file = build_zip_filename(build_id);
+            self.client.key([org.as_str(), env.as_str(), file.as_str()])
+        }
+
+        /// Build IDs are unique, so a precondition failure on create means
+        /// a retried earlier attempt already stored this build. Accept it
+        /// when the size matches; never overwrite a different build.
+        async fn accept_existing(&self, key: &str, expected_size: u64) -> Result<(), String> {
+            match self.client.head(key).await? {
+                Some(obj) if obj.size as u64 == expected_size => Ok(()),
+                Some(_) => Err("A different build already exists at this build ID".to_string()),
+                None => Err("Build upload failed a precondition but no object exists".to_string()),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl BuildStorage for GcsBuildStorage {
+        async fn store_build(
+            &self,
+            build_id: &Uuid,
+            org_id: &Uuid,
+            env_id: &Uuid,
+            data: Vec<u8>,
+        ) -> Result<String, String> {
+            let key = self.object_key(build_id, org_id, env_id);
+            let size = data.len() as u64;
+            match self
+                .client
+                .put_bytes(
+                    &key,
+                    bytes::Bytes::from(data),
+                    Some(BUILD_CONTENT_TYPE),
+                    Some(0),
+                    &[],
+                )
+                .await
+            {
+                Ok(_) => {}
+                Err(e) if e.is_precondition_failed() => self.accept_existing(&key, size).await?,
+                Err(e) => return Err(format!("Failed to upload build {} to GCS: {}", build_id, e)),
+            }
+            tracing::info!("Stored build {} in GCS", build_id);
+            Ok(self.client.uri(&key))
+        }
+
+        async fn store_build_from_path(
+            &self,
+            build_id: &Uuid,
+            org_id: &Uuid,
+            env_id: &Uuid,
+            path: &Path,
+        ) -> Result<String, String> {
+            let key = self.object_key(build_id, org_id, env_id);
+            let size = tokio::fs::metadata(path)
+                .await
+                .map_err(|e| format!("Failed to stat staged build file: {}", e))?
+                .len();
+            // Streams from disk; the build is never read fully into memory.
+            match self
+                .client
+                .put_file(&key, path, Some(BUILD_CONTENT_TYPE), Some(0))
+                .await
+            {
+                Ok(_) => {}
+                Err(e) if e.is_precondition_failed() => self.accept_existing(&key, size).await?,
+                Err(e) => return Err(format!("Failed to upload build {} to GCS: {}", build_id, e)),
+            }
+            tracing::info!("Stored build {} in GCS", build_id);
+            Ok(self.client.uri(&key))
+        }
+
+        async fn retrieve_build(
+            &self,
+            build_id: &Uuid,
+            org_id: &Uuid,
+            env_id: &Uuid,
+        ) -> Result<Vec<u8>, String> {
+            let key = self.object_key(build_id, org_id, env_id);
+            self.client
+                .get_bytes(&key, None)
+                .await
+                .map_err(|e| format!("Failed to retrieve build {} from GCS: {}", build_id, e))
+        }
+
+        async fn exists(
+            &self,
+            build_id: &Uuid,
+            org_id: &Uuid,
+            env_id: &Uuid,
+        ) -> Result<bool, String> {
+            let key = self.object_key(build_id, org_id, env_id);
+            self.client
+                .head(&key)
+                .await
+                .map(|obj| obj.is_some())
+                .map_err(|e| format!("Failed to check build {} in GCS: {}", build_id, e))
+        }
+
+        async fn delete_build(
+            &self,
+            build_id: &Uuid,
+            org_id: &Uuid,
+            env_id: &Uuid,
+        ) -> Result<(), String> {
+            let key = self.object_key(build_id, org_id, env_id);
+            self.client
+                .delete(&key, None)
+                .await
+                .map_err(|e| format!("Failed to delete build {} from GCS: {}", build_id, e))?;
+            tracing::info!("Deleted build {} from GCS", build_id);
+            Ok(())
+        }
+
+        fn build_path(&self, build_id: &Uuid, org_id: &Uuid, env_id: &Uuid) -> String {
+            self.client.uri(&self.object_key(build_id, org_id, env_id))
+        }
+
+        fn storage_type(&self) -> &str {
+            BACKEND_ID
+        }
+    }
+}
+
+// ============================================================================
 // Storage Factory
 // ============================================================================
 
 /// Build storage type from configuration
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BuildStorageType {
     Local,
     S3,
+    Gcs,
 }
 
 impl BuildStorageType {
-    pub fn from_env() -> Self {
-        match std::env::var("HOT_BUILD_STORAGE_TYPE")
-            .unwrap_or_else(|_| "local".to_string())
-            .to_lowercase()
-            .as_str()
-        {
-            "s3" => BuildStorageType::S3,
-            _ => BuildStorageType::Local,
-        }
+    /// Backend selected by `HOT_BUILD_STORAGE_TYPE` / `build.storage.type`.
+    pub fn resolve(conf: &crate::val::Val) -> Result<Self, String> {
+        use crate::file_storage::FileStorageType;
+        Ok(
+            match crate::file_storage::resolve_storage_backend(conf, "build")? {
+                FileStorageType::Local => BuildStorageType::Local,
+                FileStorageType::S3 => BuildStorageType::S3,
+                FileStorageType::Gcs => BuildStorageType::Gcs,
+            },
+        )
     }
 }
 
 /// Create a build storage instance from Hot configuration
 pub async fn build_storage_from_config(
-    _conf: &crate::val::Val,
+    conf: &crate::val::Val,
 ) -> Result<Box<dyn BuildStorage>, String> {
-    let storage_type = BuildStorageType::from_env();
+    let storage_type = BuildStorageType::resolve(conf)?;
 
     match storage_type {
         BuildStorageType::Local => Ok(Box::new(LocalBuildStorage::from_env())),
         #[cfg(feature = "s3-storage")]
         BuildStorageType::S3 => {
-            let storage = s3::S3BuildStorage::from_config(_conf).await?;
+            let storage = s3::S3BuildStorage::from_config(conf).await?;
             Ok(Box::new(storage))
         }
         #[cfg(not(feature = "s3-storage"))]
         BuildStorageType::S3 => {
             Err("S3 storage requested but s3-storage feature is not enabled".to_string())
         }
+        #[cfg(feature = "gcs-storage")]
+        BuildStorageType::Gcs => Ok(Box::new(gcs::GcsBuildStorage::from_config(conf).await?)),
+        #[cfg(not(feature = "gcs-storage"))]
+        BuildStorageType::Gcs => Err(
+            "GCS build storage requested but this binary was built without the gcs-storage feature"
+                .to_string(),
+        ),
     }
 }
 
@@ -662,6 +828,77 @@ mod tests {
             .unwrap();
         let exists_after = storage.exists(&build_id, &org_id, &env_id).await.unwrap();
         assert!(!exists_after);
+    }
+
+    #[test]
+    fn test_build_backend_names_are_strict() {
+        let conf = crate::val!({"build": {"storage": {"type": "gcs"}}});
+        // HOT_BUILD_STORAGE_TYPE (when set) wins; only assert the conf path
+        // when the environment leaves it unset.
+        if std::env::var("HOT_BUILD_STORAGE_TYPE").is_err() {
+            assert_eq!(
+                BuildStorageType::resolve(&conf).unwrap(),
+                BuildStorageType::Gcs
+            );
+            let bad = crate::val!({"build": {"storage": {"type": "gcp"}}});
+            assert!(BuildStorageType::resolve(&bad).is_err());
+            let unset = crate::val!({});
+            assert_eq!(
+                BuildStorageType::resolve(&unset).unwrap(),
+                BuildStorageType::Local
+            );
+        }
+    }
+
+    /// Runs against a real bucket when `HOT_TEST_GCS_BUCKET` is set.
+    #[cfg(feature = "gcs-storage")]
+    #[tokio::test]
+    async fn test_gcs_build_storage_against_real_bucket() {
+        let Ok(bucket) = std::env::var("HOT_TEST_GCS_BUCKET") else {
+            eprintln!("skipping: HOT_TEST_GCS_BUCKET not set");
+            return;
+        };
+        let prefix = format!("hot-contract-tests/builds-{}", Uuid::new_v4().simple());
+        let conf = crate::val!({"build": {"gcs": {"bucket": bucket, "prefix": prefix}}});
+        let config = crate::gcs::GcsConfig::resolve(&conf, "build", |_| None).unwrap();
+        let storage =
+            gcs::GcsBuildStorage::new(crate::gcs::GcsClient::connect(&config).await.unwrap());
+        let (build_id, org_id, env_id) = (Uuid::now_v7(), Uuid::now_v7(), Uuid::now_v7());
+
+        let staging = tempfile::tempdir().unwrap();
+        let staged = staging.path().join("b.hot.zip");
+        tokio::fs::write(&staged, b"zip-bytes").await.unwrap();
+        let location = storage
+            .store_build_from_path(&build_id, &org_id, &env_id, &staged)
+            .await
+            .unwrap();
+        assert_eq!(location, storage.build_path(&build_id, &org_id, &env_id));
+        assert!(location.starts_with("gs://"));
+        // Re-storing the same build (retry) is accepted; a different build
+        // at the same ID is not.
+        storage
+            .store_build(&build_id, &org_id, &env_id, b"zip-bytes".to_vec())
+            .await
+            .unwrap();
+        assert!(
+            storage
+                .store_build(&build_id, &org_id, &env_id, b"other".to_vec())
+                .await
+                .is_err()
+        );
+        assert!(storage.exists(&build_id, &org_id, &env_id).await.unwrap());
+        assert_eq!(
+            storage
+                .retrieve_build(&build_id, &org_id, &env_id)
+                .await
+                .unwrap(),
+            b"zip-bytes"
+        );
+        storage
+            .delete_build(&build_id, &org_id, &env_id)
+            .await
+            .unwrap();
+        assert!(!storage.exists(&build_id, &org_id, &env_id).await.unwrap());
     }
 
     #[tokio::test]

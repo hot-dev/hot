@@ -75,11 +75,11 @@ pub async fn insert_upload(
                 ) SELECT $1, $2, $3, $4, $5, 'pending', $6, $7, $8, $9, 0, 0, $10, '[]'::jsonb, $11, $12, $13
                   WHERE (
                       SELECT COUNT(*) FROM file_upload
-                      WHERE org_id = $3 AND env_id = $4 AND status = 'pending'
+                      WHERE org_id = $3 AND env_id = $4 AND status IN ('pending', 'completing')
                   ) < $14
                   AND COALESCE((
                       SELECT SUM(expected_size) FROM file_upload
-                      WHERE org_id = $3 AND status = 'pending'
+                      WHERE org_id = $3 AND status IN ('pending', 'completing')
                   ), 0) + $6 <= $15
                 RETURNING upload_id, path, org_id, env_id, created_by_user_id, status,
                           expected_size, content_type, part_size, parts_expected,
@@ -133,11 +133,11 @@ pub async fn insert_upload(
                 ) SELECT ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, 0, 0, ?, '[]', ?, ?, ?
                   WHERE (
                       SELECT COUNT(*) FROM file_upload
-                      WHERE org_id = ? AND env_id = ? AND status = 'pending'
+                      WHERE org_id = ? AND env_id = ? AND status IN ('pending', 'completing')
                   ) < ?
                   AND COALESCE((
                       SELECT SUM(expected_size) FROM file_upload
-                      WHERE org_id = ? AND status = 'pending'
+                      WHERE org_id = ? AND status IN ('pending', 'completing')
                   ), 0) + ? <= ?
                 "#,
             )
@@ -325,6 +325,87 @@ pub async fn record_part(
     }
 }
 
+/// Durably claim an upload for completion (`pending` -> `completing`).
+///
+/// Once claimed, the upload can no longer be aborted by a client or the
+/// expiry sweep, so a backend that assembles bytes before committing the
+/// file record never has those bytes deleted out from under it. Completion
+/// stays retryable: a `completing` upload may be claimed again by any
+/// service instance after a crash, lost response, or failed commit.
+pub async fn begin_completion(
+    db: &DatabasePool,
+    upload_id: Uuid,
+    org_id: Uuid,
+    env_id: Uuid,
+) -> Result<(), String> {
+    let query = match db {
+        DatabasePool::Postgres(_) => {
+            "UPDATE file_upload SET status = 'completing' WHERE upload_id = $1 AND org_id = $2 AND env_id = $3 AND status IN ('pending', 'completing') AND (parts_expected IS NULL OR parts_received = parts_expected) AND (parts_expected IS NULL OR bytes_received = expected_size)"
+        }
+        DatabasePool::Sqlite(_) => {
+            "UPDATE file_upload SET status = 'completing' WHERE upload_id = ? AND org_id = ? AND env_id = ? AND status IN ('pending', 'completing') AND (parts_expected IS NULL OR parts_received = parts_expected) AND (parts_expected IS NULL OR bytes_received = expected_size)"
+        }
+    };
+
+    let rows_affected = match db {
+        DatabasePool::Postgres(pool) => sqlx::query(query)
+            .bind(upload_id)
+            .bind(org_id)
+            .bind(env_id)
+            .execute(pool)
+            .await
+            .map_err(|e| format!("Failed to begin upload completion: {}", e))?
+            .rows_affected(),
+        DatabasePool::Sqlite(pool) => sqlx::query(query)
+            .bind(upload_id)
+            .bind(org_id)
+            .bind(env_id)
+            .execute(pool)
+            .await
+            .map_err(|e| format!("Failed to begin upload completion: {}", e))?
+            .rows_affected(),
+    };
+
+    if rows_affected == 0 {
+        return Err("Upload not found, incomplete, or no longer pending".to_string());
+    }
+
+    Ok(())
+}
+
+/// Return a failed completion claim to `pending` so the client can retry or
+/// abort. A missing claim (already completed or released) is not an error.
+pub async fn release_completion(
+    db: &DatabasePool,
+    upload_id: Uuid,
+    org_id: Uuid,
+    env_id: Uuid,
+) -> Result<(), String> {
+    match db {
+        DatabasePool::Postgres(pool) => sqlx::query(
+            "UPDATE file_upload SET status = 'pending' WHERE upload_id = $1 AND org_id = $2 AND env_id = $3 AND status = 'completing'",
+        )
+        .bind(upload_id)
+        .bind(org_id)
+        .bind(env_id)
+        .execute(pool)
+        .await
+        .map_err(|e| format!("Failed to release upload completion: {e}"))?
+        .rows_affected(),
+        DatabasePool::Sqlite(pool) => sqlx::query(
+            "UPDATE file_upload SET status = 'pending' WHERE upload_id = ? AND org_id = ? AND env_id = ? AND status = 'completing'",
+        )
+        .bind(upload_id)
+        .bind(org_id)
+        .bind(env_id)
+        .execute(pool)
+        .await
+        .map_err(|e| format!("Failed to release upload completion: {e}"))?
+        .rows_affected(),
+    };
+    Ok(())
+}
+
 pub async fn complete_upload(
     db: &DatabasePool,
     upload_id: Uuid,
@@ -333,10 +414,10 @@ pub async fn complete_upload(
 ) -> Result<(), String> {
     let query = match db {
         DatabasePool::Postgres(_) => {
-            "UPDATE file_upload SET status = 'completed' WHERE upload_id = $1 AND org_id = $2 AND env_id = $3 AND status = 'pending' AND (parts_expected IS NULL OR parts_received = parts_expected) AND (parts_expected IS NULL OR bytes_received = expected_size)"
+            "UPDATE file_upload SET status = 'completed' WHERE upload_id = $1 AND org_id = $2 AND env_id = $3 AND status IN ('pending', 'completing') AND (parts_expected IS NULL OR parts_received = parts_expected) AND (parts_expected IS NULL OR bytes_received = expected_size)"
         }
         DatabasePool::Sqlite(_) => {
-            "UPDATE file_upload SET status = 'completed' WHERE upload_id = ? AND org_id = ? AND env_id = ? AND status = 'pending' AND (parts_expected IS NULL OR parts_received = parts_expected) AND (parts_expected IS NULL OR bytes_received = expected_size)"
+            "UPDATE file_upload SET status = 'completed' WHERE upload_id = ? AND org_id = ? AND env_id = ? AND status IN ('pending', 'completing') AND (parts_expected IS NULL OR parts_received = parts_expected) AND (parts_expected IS NULL OR bytes_received = expected_size)"
         }
     };
 
@@ -416,7 +497,7 @@ pub async fn cleanup_expired_uploads(db: &DatabasePool) -> Result<Vec<FileUpload
                 r#"
                 UPDATE file_upload
                 SET status = 'aborting'
-                WHERE status = 'pending' AND expires_at < $1 AND env_id IS NOT NULL
+                WHERE status IN ('pending', 'completing') AND expires_at < $1 AND env_id IS NOT NULL
                 RETURNING upload_id, path, org_id, env_id, created_by_user_id, status,
                           expected_size, content_type, part_size, parts_expected,
                           parts_received, bytes_received, backend_upload_id,
@@ -435,7 +516,7 @@ pub async fn cleanup_expired_uploads(db: &DatabasePool) -> Result<Vec<FileUpload
                 r#"
                 UPDATE file_upload
                 SET status = 'aborting'
-                WHERE status = 'pending' AND expires_at < ? AND env_id IS NOT NULL
+                WHERE status IN ('pending', 'completing') AND expires_at < ? AND env_id IS NOT NULL
                 RETURNING upload_id, path, org_id, env_id, created_by_user_id, status,
                           expected_size, content_type, part_size, parts_expected,
                           parts_received, bytes_received, backend_upload_id,

@@ -418,6 +418,20 @@ impl BlobStore {
         }
     }
 
+    /// Blob objects are only read, reused, or deleted through the backend
+    /// that stored them; switching backends does not migrate blob bytes.
+    fn ensure_backend(&self, object: &BlobObjectRecord) -> Result<(), BlobError> {
+        let configured = self.storage.storage_type();
+        if object.storage_backend == configured {
+            return Ok(());
+        }
+        Err(BlobError::Storage(format!(
+            "blob object {} is stored in the '{}' backend, but this installation uses '{}'; \
+             migrate blob bytes and references before switching backends",
+            object.blob_object_id, object.storage_backend, configured
+        )))
+    }
+
     /// Deterministic org/env-relative storage key for a content hash.
     fn storage_key(&self, hash: &str) -> String {
         let prefix = &self.config.storage_prefix;
@@ -639,6 +653,7 @@ impl BlobStore {
         .await?
             && existing.status == object_status::AVAILABLE
         {
+            self.ensure_backend(&existing)?;
             blob_db::touch_object(&self.db, existing.blob_object_id).await?;
             return Ok(existing);
         }
@@ -657,7 +672,10 @@ impl BlobStore {
         )
         .await?
         {
-            Some(existing) => existing,
+            Some(existing) => {
+                self.ensure_backend(&existing)?;
+                existing
+            }
             None => {
                 blob_db::insert_pending_object(
                     &self.db,
@@ -727,6 +745,7 @@ impl BlobStore {
             env_id: object.env_id,
             run_id: None,
         };
+        self.ensure_backend(&object)?;
         let ctx = self.storage_ctx(&object_scope);
         let key = self.storage_key(&object.hash);
         let bytes = self
@@ -848,6 +867,15 @@ impl BlobStore {
             if let Some(refreshed) = &refreshed
                 && refreshed.last_referenced_at >= grace_cutoff
             {
+                continue;
+            }
+
+            if let Err(e) = self.ensure_backend(&object) {
+                tracing::warn!(
+                    blob_object_id = %object.blob_object_id,
+                    error = %e,
+                    "skipping GC of blob stored in another backend"
+                );
                 continue;
             }
 
@@ -1060,6 +1088,52 @@ mod tests {
             .unwrap();
         assert_eq!(result, small);
         assert!(!contains_blob_ref(&result));
+    }
+
+    #[tokio::test]
+    async fn test_blob_objects_from_another_backend_are_refused() {
+        let (store, scope, _tmp) = test_store().await;
+        let payload = large_bytes(3, 4096);
+        let spilled = store
+            .spill_large_val(
+                val!({"data": Val::Bytes(payload.clone())}),
+                scope,
+                SpillSource::CallArgs,
+                Some("c1"),
+            )
+            .await
+            .unwrap();
+
+        // Simulate an installation that switched backends without migrating.
+        let crate::db::DatabasePool::Sqlite(pool) = store.db.as_ref() else {
+            panic!("test db is sqlite");
+        };
+        sqlx::query("UPDATE blob_object SET storage_backend = 's3'")
+            .execute(pool)
+            .await
+            .unwrap();
+
+        // Reads, dedupe hits, and GC all refuse the foreign object instead
+        // of routing it through the configured backend.
+        assert!(
+            store
+                .rehydrate_blob_refs(spilled, scope, RehydrateBudget::from_config(store.config()))
+                .await
+                .is_err()
+        );
+        let err = store
+            .put_object(&payload, None, &scope)
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("'s3'"), "{err}");
+        assert_eq!(
+            store
+                .gc_objects(chrono::Utc::now() + chrono::Duration::days(1), 10)
+                .await
+                .unwrap(),
+            0
+        );
     }
 
     #[tokio::test]

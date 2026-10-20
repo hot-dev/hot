@@ -524,6 +524,125 @@ async fn cas_file_record(
     }
 }
 
+/// Commit an unconditional write whose bytes are already durable at
+/// `storage_path`: update the active record for the path, or insert one.
+/// A concurrent creator winning the unique index turns the insert into an
+/// update, so the write still lands instead of failing.
+///
+/// On success the second element carries the storage path the record
+/// previously referenced when it differs from `storage_path` (the caller
+/// owns cleaning it up). Records owned by another backend are refused: an
+/// update would leave `storage_backend` pointing at the old backend.
+#[allow(clippy::too_many_arguments)]
+async fn commit_file_record(
+    backend: &str,
+    storage_path: &str,
+    normalized_path: &str,
+    content_len: i64,
+    etag: Option<&str>,
+    content_type: Option<&str>,
+    ctx: &FileStorageContext,
+) -> Result<(FileMetadata, Option<String>), String> {
+    if let Err(e) = ctx.ensure_run_row().await {
+        tracing::debug!(
+            run_id = ?ctx.run_id,
+            path = %normalized_path,
+            "File write: could not ensure run row before metadata insert: {}",
+            e
+        );
+    }
+    for _ in 0..3 {
+        match get_file_by_path(&ctx.db, normalized_path, ctx.org_id, ctx.env_id).await {
+            Ok(existing) => {
+                ensure_record_backend(&existing.storage_backend, backend, normalized_path)?;
+                let updated = update_file_record(
+                    &ctx.db,
+                    existing.file_id,
+                    content_len,
+                    etag,
+                    content_type,
+                    storage_path,
+                    ctx.user_id,
+                    ctx.run_id,
+                )
+                .await?;
+                let previous = (!existing.storage_path.is_empty()
+                    && existing.storage_path != storage_path)
+                    .then_some(existing.storage_path);
+                return Ok((FileMetadata::from_file_record(updated), previous));
+            }
+            Err(_) => match insert_file_record(
+                &ctx.db,
+                normalized_path,
+                content_len,
+                etag,
+                content_type,
+                backend,
+                storage_path,
+                ctx.org_id,
+                ctx.env_id,
+                ctx.user_id,
+                ctx.run_id,
+            )
+            .await
+            {
+                Ok(rec) => return Ok((FileMetadata::from_file_record(rec), None)),
+                // A concurrent creator won the unique index: update instead.
+                Err(msg)
+                    if msg.contains("UNIQUE")
+                        || msg.contains("unique")
+                        || msg.contains("duplicate key") => {}
+                Err(e) => return Err(e),
+            },
+        }
+    }
+    Err(format!(
+        "File record for {} kept changing during write; retry",
+        normalized_path
+    ))
+}
+
+/// Refuse to operate on bytes persisted by a different backend. Changing the
+/// configured backend does not migrate data, and silently routing an old
+/// reference through the new backend would read or delete the wrong object.
+pub fn ensure_record_backend(
+    record_backend: &str,
+    configured_backend: &str,
+    path: &str,
+) -> Result<(), String> {
+    if record_backend == configured_backend {
+        Ok(())
+    } else {
+        Err(format!(
+            "File {} is stored in the '{}' backend, but this installation uses '{}'; \
+             migrate the bytes and persisted references before switching backends",
+            path, record_backend, configured_backend
+        ))
+    }
+}
+
+/// Refuse a write over an active record owned by another backend before any
+/// bytes are staged. `update_file_record` keeps the record's backend, so
+/// letting the write through would pair one backend's id with another
+/// backend's storage path.
+async fn ensure_path_writable(
+    backend: &str,
+    normalized_path: &str,
+    ctx: &FileStorageContext,
+) -> Result<(), String> {
+    if let Ok(existing) = get_file_by_path(&ctx.db, normalized_path, ctx.org_id, ctx.env_id).await {
+        ensure_record_backend(&existing.storage_backend, backend, normalized_path)?;
+    }
+    Ok(())
+}
+
+/// Unique per-write object location. Each unconditional write stages its
+/// bytes at its own key and the record swap commits it, so concurrent
+/// writers never overwrite each other's bytes.
+fn unique_write_rel_path(normalized_path: &str) -> String {
+    format!("{}.v-{}", normalized_path, Uuid::new_v4().simple())
+}
+
 pub fn normalize_path(path: &str) -> Result<String, String> {
     // Accept the same hot:// paths that the in-container hotbox CLI accepts.
     // hotbox strips this scheme before it asks the file server for /files/<path>,
@@ -693,6 +812,38 @@ impl LocalFileStorage {
 
         full
     }
+
+    /// Concatenate uploaded parts (already sorted) into `dest`, computing
+    /// the MD5 etag as bytes are written. Returns (etag, size).
+    async fn assemble_parts(
+        upload_dir: &Path,
+        sorted_parts: &[(i32, String)],
+        dest: &Path,
+    ) -> Result<(String, i64), String> {
+        use tokio::io::AsyncWriteExt;
+
+        let mut file = tokio::fs::File::create(dest)
+            .await
+            .map_err(|e| format!("Failed to create output file: {}", e))?;
+        let mut hasher = md5::Context::new();
+        let mut size = 0i64;
+        for (part_number, _etag) in sorted_parts {
+            validate_part_number(*part_number)?;
+            let part_path = upload_dir.join(format!("part_{:05}", part_number));
+            let part_data = tokio::fs::read(&part_path)
+                .await
+                .map_err(|e| format!("Failed to read part {}: {}", part_number, e))?;
+            hasher.consume(&part_data);
+            size += part_data.len() as i64;
+            file.write_all(&part_data)
+                .await
+                .map_err(|e| format!("Failed to write part {}: {}", part_number, e))?;
+        }
+        file.sync_all()
+            .await
+            .map_err(|e| format!("Failed to flush assembled file: {}", e))?;
+        Ok((format!("{:x}", hasher.finalize()), size))
+    }
 }
 
 #[async_trait]
@@ -704,123 +855,55 @@ impl FileStorage for LocalFileStorage {
         content_type: Option<&str>,
         ctx: &FileStorageContext,
     ) -> Result<FileMetadata, String> {
-        // Step 1: Normalize and validate path
         let normalized_path = normalize_path(path)?;
         validate_path_security(&normalized_path)?;
+        check_write_quota(ctx, content.len() as i64).await?;
+        ensure_path_writable("local", &normalized_path, ctx).await?;
 
-        // Check storage quota before writing
-        {
-            use crate::db::Features;
-            use crate::db::file::get_storage_usage_by_org;
-
-            let features = Features::resolve_for_org(&ctx.db, &ctx.org_id).await;
-            let max_file_bytes = ctx.effective_file_max_bytes(features.file_upload_max_bytes());
-            let content_size = content.len() as i64;
-
-            if content_size > max_file_bytes {
-                return Err(format!(
-                    "File size {} bytes exceeds maximum allowed {} bytes",
-                    content_size, max_file_bytes
-                ));
-            }
-
-            let storage_limit = features.storage_bytes();
-            if storage_limit >= 0 {
-                let current_usage = get_storage_usage_by_org(&ctx.db, ctx.org_id)
-                    .await
-                    .unwrap_or(0);
-                if current_usage + content_size > storage_limit {
-                    return Err(format!(
-                        "Storage quota exceeded: current usage {} + file {} > limit {}",
-                        current_usage, content_size, storage_limit
-                    ));
-                }
-            }
-        }
-
-        // Step 2: Compute etag (MD5)
         let etag = compute_md5(content);
-
-        // Step 3: Detect content type if not provided
         let content_type_final = content_type
             .map(|s| s.to_string())
             .or_else(|| detect_content_type(&normalized_path, content));
 
-        // Step 4: Write to filesystem
-        let full_path = self.full_path(&normalized_path, ctx);
-
-        // Create parent directories if they don't exist
-        if let Some(parent) = full_path.parent() {
+        // Stage at a unique path; the record swap below is the commit point.
+        // Concurrent writers never share bytes, so the committed record's
+        // size and etag always describe the file it references, and a
+        // failed write leaves the current file untouched.
+        let staged_path = self.full_path(&unique_write_rel_path(&normalized_path), ctx);
+        if let Some(parent) = staged_path.parent() {
             tokio::fs::create_dir_all(parent)
                 .await
                 .map_err(|e| format!("Failed to create parent directories: {}", e))?;
         }
-
-        tokio::fs::write(&full_path, content)
+        tokio::fs::write(&staged_path, content)
             .await
             .map_err(|e| format!("Failed to write file to storage: {}", e))?;
+        let storage_path = staged_path.to_string_lossy().to_string();
 
-        let storage_path = full_path.to_string_lossy().to_string();
-
-        // Step 5: Create or update database record
-        if let Err(e) = ctx.ensure_run_row().await {
-            tracing::debug!(
-                run_id = ?ctx.run_id,
-                path = %normalized_path,
-                "Local file write: could not ensure run row before metadata insert: {}",
-                e
-            );
+        match commit_file_record(
+            "local",
+            &storage_path,
+            &normalized_path,
+            content.len() as i64,
+            Some(&etag),
+            content_type_final.as_deref(),
+            ctx,
+        )
+        .await
+        {
+            Ok((meta, previous)) => {
+                // The superseded file is unreachable now (best-effort).
+                if let Some(previous) = previous {
+                    let _ = tokio::fs::remove_file(&previous).await;
+                }
+                tracing::debug!("Wrote file {} to local storage", normalized_path);
+                Ok(meta)
+            }
+            Err(e) => {
+                let _ = tokio::fs::remove_file(&staged_path).await;
+                Err(e)
+            }
         }
-        let file_metadata =
-            match get_file_by_path(&ctx.db, &normalized_path, ctx.org_id, ctx.env_id).await {
-                Ok(existing) => {
-                    // File exists, update it
-                    let updated = update_file_record(
-                        &ctx.db,
-                        existing.file_id,
-                        content.len() as i64,
-                        Some(&etag),
-                        content_type_final.as_deref(),
-                        &storage_path,
-                        ctx.user_id,
-                        ctx.run_id,
-                    )
-                    .await?;
-
-                    // If the record previously pointed at a conditional-write
-                    // staged blob, that blob is now unreachable (best-effort).
-                    if existing.storage_backend == "local"
-                        && !existing.storage_path.is_empty()
-                        && existing.storage_path != storage_path
-                    {
-                        let _ = tokio::fs::remove_file(&existing.storage_path).await;
-                    }
-
-                    FileMetadata::from_file_record(updated)
-                }
-                Err(_) => {
-                    // New file, insert record
-                    let inserted = insert_file_record(
-                        &ctx.db,
-                        &normalized_path,
-                        content.len() as i64,
-                        Some(&etag),
-                        content_type_final.as_deref(),
-                        "local",
-                        &storage_path,
-                        ctx.org_id,
-                        ctx.env_id, // Added env_id for security
-                        ctx.user_id,
-                        ctx.run_id,
-                    )
-                    .await?;
-
-                    FileMetadata::from_file_record(inserted)
-                }
-            };
-
-        tracing::debug!("Wrote file {} to local storage", normalized_path);
-        Ok(file_metadata)
     }
 
     async fn write_file_if(
@@ -834,6 +917,7 @@ impl FileStorage for LocalFileStorage {
         let normalized_path = normalize_path(path)?;
         validate_path_security(&normalized_path)?;
         check_write_quota(ctx, content.len() as i64).await?;
+        ensure_path_writable("local", &normalized_path, ctx).await?;
 
         let etag = compute_md5(content);
         let content_type_final = content_type
@@ -1098,108 +1182,63 @@ impl FileStorage for LocalFileStorage {
     ) -> Result<FileMetadata, String> {
         let normalized_path = normalize_path(path)?;
         validate_path_security(&normalized_path)?;
+        ensure_path_writable("local", &normalized_path, ctx).await?;
 
-        let full_path = self.full_path(&normalized_path, ctx);
-        if let Some(parent) = full_path.parent() {
+        let upload_dir = self.base_path.join(".uploads").join(backend_upload_id);
+        let mut sorted_parts = parts.to_vec();
+        sorted_parts.sort_by_key(|(num, _)| *num);
+
+        // Assemble into a unique path, never the live file: the record swap
+        // is the commit point, so a failed assembly or commit leaves the
+        // current file and its metadata untouched.
+        let staged_path = self.full_path(&unique_write_rel_path(&normalized_path), ctx);
+        if let Some(parent) = staged_path.parent() {
             tokio::fs::create_dir_all(parent)
                 .await
                 .map_err(|e| format!("Failed to create parent directories: {}", e))?;
         }
-
-        let upload_dir = self.base_path.join(".uploads").join(backend_upload_id);
-
-        let mut sorted_parts = parts.to_vec();
-        sorted_parts.sort_by_key(|(num, _)| *num);
-
-        // Assemble parts into the final file
-        let mut file = tokio::fs::File::create(&full_path)
-            .await
-            .map_err(|e| format!("Failed to create output file: {}", e))?;
-
-        for (part_number, _etag) in &sorted_parts {
-            let part_path = upload_dir.join(format!("part_{:05}", part_number));
-            let part_data = tokio::fs::read(&part_path)
-                .await
-                .map_err(|e| format!("Failed to read part {}: {}", part_number, e))?;
-            tokio::io::AsyncWriteExt::write_all(&mut file, &part_data)
-                .await
-                .map_err(|e| format!("Failed to write part {}: {}", part_number, e))?;
-        }
-        tokio::io::AsyncWriteExt::shutdown(&mut file)
-            .await
-            .map_err(|e| format!("Failed to flush assembled file: {}", e))?;
-
-        // Compute etag on the assembled file
-        let assembled = tokio::fs::read(&full_path)
-            .await
-            .map_err(|e| format!("Failed to read assembled file: {}", e))?;
-        let etag = compute_md5(&assembled);
-        let actual_size = assembled.len() as i64;
-
-        // Clean up temp directory
-        let _ = tokio::fs::remove_dir_all(&upload_dir).await;
+        let assembled = Self::assemble_parts(&upload_dir, &sorted_parts, &staged_path).await;
+        let (etag, actual_size) = match assembled {
+            Ok(result) => result,
+            Err(e) => {
+                let _ = tokio::fs::remove_file(&staged_path).await;
+                return Err(e);
+            }
+        };
 
         let content_type_final = content_type
             .map(|s| s.to_string())
             .or_else(|| detect_content_type(&normalized_path, &[]));
+        let storage_path = staged_path.to_string_lossy().to_string();
 
-        let storage_path = full_path.to_string_lossy().to_string();
-
-        if let Err(e) = ctx.ensure_run_row().await {
-            tracing::debug!(
-                run_id = ?ctx.run_id,
-                path = %normalized_path,
-                "Multipart complete: could not ensure run row before metadata insert: {}",
-                e
-            );
+        let (meta, previous) = match commit_file_record(
+            "local",
+            &storage_path,
+            &normalized_path,
+            actual_size,
+            Some(&etag),
+            content_type_final.as_deref(),
+            ctx,
+        )
+        .await
+        {
+            Ok(committed) => committed,
+            Err(e) => {
+                // Parts are kept so the completion can be retried.
+                let _ = tokio::fs::remove_file(&staged_path).await;
+                return Err(e);
+            }
+        };
+        if let Some(previous) = previous {
+            let _ = tokio::fs::remove_file(&previous).await;
         }
-        let file_metadata =
-            match get_file_by_path(&ctx.db, &normalized_path, ctx.org_id, ctx.env_id).await {
-                Ok(existing) => {
-                    let updated = update_file_record(
-                        &ctx.db,
-                        existing.file_id,
-                        actual_size,
-                        Some(&etag),
-                        content_type_final.as_deref(),
-                        &storage_path,
-                        ctx.user_id,
-                        ctx.run_id,
-                    )
-                    .await?;
-                    // Superseded conditional-write blob cleanup (best-effort).
-                    if existing.storage_backend == "local"
-                        && !existing.storage_path.is_empty()
-                        && existing.storage_path != storage_path
-                    {
-                        let _ = tokio::fs::remove_file(&existing.storage_path).await;
-                    }
-                    FileMetadata::from_file_record(updated)
-                }
-                Err(_) => {
-                    let inserted = insert_file_record(
-                        &ctx.db,
-                        &normalized_path,
-                        actual_size,
-                        Some(&etag),
-                        content_type_final.as_deref(),
-                        "local",
-                        &storage_path,
-                        ctx.org_id,
-                        ctx.env_id,
-                        ctx.user_id,
-                        ctx.run_id,
-                    )
-                    .await?;
-                    FileMetadata::from_file_record(inserted)
-                }
-            };
+        let _ = tokio::fs::remove_dir_all(&upload_dir).await;
 
         tracing::debug!(
             "Completed multipart upload for {} to local storage",
             normalized_path
         );
-        Ok(file_metadata)
+        Ok(meta)
     }
 
     async fn abort_multipart_upload(
@@ -1413,7 +1452,51 @@ pub mod s3 {
                 None => Some((self.bucket.clone(), storage_path.to_string())),
             }
         }
+
+        /// Best-effort delete of a location no record references.
+        async fn delete_location_best_effort(&self, storage_path: &str) {
+            if let Some((bucket, key)) = self.parse_storage_path(storage_path)
+                && let Err(e) = self
+                    .client
+                    .delete_object()
+                    .bucket(&bucket)
+                    .key(&key)
+                    .send()
+                    .await
+            {
+                tracing::warn!("Failed to delete unreferenced S3 object: {}", e);
+            }
+        }
+
+        /// Resolve a backend upload id to (object key, S3 upload id).
+        ///
+        /// New uploads complete into a unique per-upload key, encoded in the
+        /// backend id as `hot1:{nonce}:{s3UploadId}`, so completion never
+        /// overwrites the live object before the record swap commits it.
+        /// Bare ids from uploads started before this format complete at the
+        /// deterministic key, as they always did.
+        pub(super) fn multipart_target(
+            &self,
+            backend_upload_id: &str,
+            normalized_path: &str,
+            ctx: &FileStorageContext,
+        ) -> (String, String) {
+            if let Some((nonce, upload_id)) = backend_upload_id
+                .strip_prefix(MULTIPART_ID_PREFIX)
+                .and_then(|rest| rest.split_once(':'))
+            {
+                let rel = format!("{}.mp-{}", normalized_path, nonce);
+                (self.s3_key(&rel, ctx), upload_id.to_string())
+            } else {
+                (
+                    self.s3_key(normalized_path, ctx),
+                    backend_upload_id.to_string(),
+                )
+            }
+        }
     }
+
+    const MULTIPART_ID_PREFIX: &str = "hot1:";
 
     #[async_trait]
     impl FileStorage for S3FileStorage {
@@ -1424,76 +1507,39 @@ pub mod s3 {
             content_type: Option<&str>,
             ctx: &FileStorageContext,
         ) -> Result<FileMetadata, String> {
-            // Step 1: Normalize and validate path
             let normalized_path = normalize_path(path)?;
             validate_path_security(&normalized_path)?;
+            check_write_quota(ctx, content.len() as i64).await?;
+            ensure_path_writable("s3", &normalized_path, ctx).await?;
 
-            // Check storage quota before writing
-            {
-                use crate::db::Features;
-                use crate::db::file::get_storage_usage_by_org;
-
-                let features = Features::resolve_for_org(&ctx.db, &ctx.org_id).await;
-                let max_file_bytes = ctx.effective_file_max_bytes(features.file_upload_max_bytes());
-                let content_size = content.len() as i64;
-
-                if content_size > max_file_bytes {
-                    return Err(format!(
-                        "File size {} bytes exceeds maximum allowed {} bytes",
-                        content_size, max_file_bytes
-                    ));
-                }
-
-                let storage_limit = features.storage_bytes();
-                if storage_limit >= 0 {
-                    let current_usage = get_storage_usage_by_org(&ctx.db, ctx.org_id)
-                        .await
-                        .unwrap_or(0);
-                    if current_usage + content_size > storage_limit {
-                        return Err(format!(
-                            "Storage quota exceeded: current usage {} + file {} > limit {}",
-                            current_usage, content_size, storage_limit
-                        ));
-                    }
-                }
-            }
-
-            // Step 2: Compute etag (MD5)
             let etag = compute_md5(content);
-
-            // Step 3: Detect content type if not provided
             let content_type_final = content_type
                 .map(|s| s.to_string())
                 .or_else(|| detect_content_type(&normalized_path, content));
 
-            // Step 4: Write to S3
-            let key = self.s3_key(&normalized_path, ctx);
-            let byte_stream = ByteStream::from(content.to_vec());
-
+            // Stage at a unique key; the record swap below is the commit
+            // point. Concurrent writers never share an object, so the
+            // committed record's size and etag always describe the object it
+            // references, and a failed write leaves the current file intact.
+            let key = self.s3_key(&unique_write_rel_path(&normalized_path), ctx);
             let mut put_request = self
                 .client
                 .put_object()
                 .bucket(&self.bucket)
                 .key(&key)
-                .body(byte_stream);
-
+                .body(ByteStream::from(content.to_vec()));
             if let Some(ct) = &content_type_final {
                 put_request = put_request.content_type(ct);
             }
 
-            let result = put_request.send().await;
-
-            let response = match result {
+            let response = match put_request.send().await {
                 Ok(resp) => resp,
                 Err(e) => {
-                    // Extract detailed error information
                     let error_msg = format!(
                         "Failed to upload file to S3 (bucket: {}, key: {}, path: {}): {}",
                         self.bucket, key, normalized_path, e
                     );
                     tracing::error!("{}", error_msg);
-
-                    // Log additional context if available
                     if let Some(raw) = e.raw_response() {
                         tracing::error!(
                             "S3 file upload error details - status: {:?}, headers: {:?}",
@@ -1501,7 +1547,6 @@ pub mod s3 {
                             raw.headers()
                         );
                     }
-
                     return Err(error_msg);
                 }
             };
@@ -1513,73 +1558,30 @@ pub mod s3 {
                 .to_string();
             let storage_path = format!("s3://{}/{}", self.bucket, key);
 
-            // Step 5: Create or update database record
-            if let Err(e) = ctx.ensure_run_row().await {
-                tracing::debug!(
-                    run_id = ?ctx.run_id,
-                    path = %normalized_path,
-                    "S3 file write: could not ensure run row before metadata insert: {}",
-                    e
-                );
+            match commit_file_record(
+                "s3",
+                &storage_path,
+                &normalized_path,
+                content.len() as i64,
+                Some(&s3_etag),
+                content_type_final.as_deref(),
+                ctx,
+            )
+            .await
+            {
+                Ok((meta, previous)) => {
+                    // The superseded object is unreachable now (best-effort).
+                    if let Some(previous) = previous {
+                        self.delete_location_best_effort(&previous).await;
+                    }
+                    tracing::debug!("Wrote file {} to S3: {}", normalized_path, storage_path);
+                    Ok(meta)
+                }
+                Err(e) => {
+                    self.delete_location_best_effort(&storage_path).await;
+                    Err(e)
+                }
             }
-            let file_metadata =
-                match get_file_by_path(&ctx.db, &normalized_path, ctx.org_id, ctx.env_id).await {
-                    Ok(existing) => {
-                        // File exists, update it
-                        let updated = update_file_record(
-                            &ctx.db,
-                            existing.file_id,
-                            content.len() as i64,
-                            Some(&s3_etag),
-                            content_type_final.as_deref(),
-                            &storage_path,
-                            ctx.user_id,
-                            ctx.run_id,
-                        )
-                        .await?;
-
-                        // If the record previously pointed at a conditional-write
-                        // staged blob, that blob is now unreachable (best-effort).
-                        if existing.storage_backend == "s3"
-                            && !existing.storage_path.is_empty()
-                            && existing.storage_path != storage_path
-                            && let Some((old_bucket, old_key)) =
-                                self.parse_storage_path(&existing.storage_path)
-                        {
-                            let _ = self
-                                .client
-                                .delete_object()
-                                .bucket(&old_bucket)
-                                .key(&old_key)
-                                .send()
-                                .await;
-                        }
-
-                        FileMetadata::from_file_record(updated)
-                    }
-                    Err(_) => {
-                        // New file, insert record
-                        let inserted = insert_file_record(
-                            &ctx.db,
-                            &normalized_path,
-                            content.len() as i64,
-                            Some(&s3_etag),
-                            content_type_final.as_deref(),
-                            "s3",
-                            &storage_path,
-                            ctx.org_id,
-                            ctx.env_id, // Added env_id for security
-                            ctx.user_id,
-                            ctx.run_id,
-                        )
-                        .await?;
-
-                        FileMetadata::from_file_record(inserted)
-                    }
-                };
-
-            tracing::debug!("Wrote file {} to S3: {}", normalized_path, storage_path);
-            Ok(file_metadata)
         }
 
         async fn write_file_if(
@@ -1593,6 +1595,7 @@ pub mod s3 {
             let normalized_path = normalize_path(path)?;
             validate_path_security(&normalized_path)?;
             check_write_quota(ctx, content.len() as i64).await?;
+            ensure_path_writable("s3", &normalized_path, ctx).await?;
 
             let etag = compute_md5(content);
             let content_type_final = content_type
@@ -1913,7 +1916,10 @@ pub mod s3 {
         ) -> Result<String, String> {
             let normalized_path = normalize_path(path)?;
             validate_path_security(&normalized_path)?;
-            let key = self.s3_key(&normalized_path, ctx);
+            ensure_path_writable("s3", &normalized_path, ctx).await?;
+
+            let nonce = Uuid::new_v4().simple().to_string();
+            let key = self.s3_key(&format!("{}.mp-{}", normalized_path, nonce), ctx);
 
             let mut req = self
                 .client
@@ -1931,7 +1937,7 @@ pub mod s3 {
                 .map_err(|e| format!("Failed to initiate multipart upload: {}", e))?;
 
             resp.upload_id()
-                .map(|id| id.to_string())
+                .map(|id| format!("{MULTIPART_ID_PREFIX}{nonce}:{id}"))
                 .ok_or_else(|| "S3 did not return an upload ID".to_string())
         }
 
@@ -1945,14 +1951,14 @@ pub mod s3 {
         ) -> Result<String, String> {
             validate_part_number(part_number)?;
             let normalized_path = normalize_path(path)?;
-            let key = self.s3_key(&normalized_path, ctx);
+            let (key, upload_id) = self.multipart_target(backend_upload_id, &normalized_path, ctx);
 
             let resp = self
                 .client
                 .upload_part()
                 .bucket(&self.bucket)
                 .key(&key)
-                .upload_id(backend_upload_id)
+                .upload_id(upload_id)
                 .part_number(part_number)
                 .body(ByteStream::from(content.to_vec()))
                 .send()
@@ -1975,7 +1981,8 @@ pub mod s3 {
         ) -> Result<FileMetadata, String> {
             let normalized_path = normalize_path(path)?;
             validate_path_security(&normalized_path)?;
-            let key = self.s3_key(&normalized_path, ctx);
+            ensure_path_writable("s3", &normalized_path, ctx).await?;
+            let (key, upload_id) = self.multipart_target(backend_upload_id, &normalized_path, ctx);
 
             let completed_parts: Vec<CompletedPart> = parts
                 .iter()
@@ -1995,7 +2002,7 @@ pub mod s3 {
                 .complete_multipart_upload()
                 .bucket(&self.bucket)
                 .key(&key)
-                .upload_id(backend_upload_id)
+                .upload_id(upload_id)
                 .multipart_upload(completed_upload)
                 .send()
                 .await
@@ -2007,70 +2014,28 @@ pub mod s3 {
 
             let storage_path = format!("s3://{}/{}", self.bucket, key);
 
-            if let Err(e) = ctx.ensure_run_row().await {
-                tracing::debug!(
-                    run_id = ?ctx.run_id,
-                    path = %normalized_path,
-                    "Multipart complete: could not ensure run row before metadata insert: {}",
-                    e
-                );
+            // The completed object lives at its own key; the record swap is
+            // the commit point.
+            let (meta, previous) = commit_file_record(
+                "s3",
+                &storage_path,
+                &normalized_path,
+                total_size,
+                None,
+                content_type_final.as_deref(),
+                ctx,
+            )
+            .await?;
+            if let Some(previous) = previous {
+                self.delete_location_best_effort(&previous).await;
             }
-            let file_metadata =
-                match get_file_by_path(&ctx.db, &normalized_path, ctx.org_id, ctx.env_id).await {
-                    Ok(existing) => {
-                        let updated = update_file_record(
-                            &ctx.db,
-                            existing.file_id,
-                            total_size,
-                            None,
-                            content_type_final.as_deref(),
-                            &storage_path,
-                            ctx.user_id,
-                            ctx.run_id,
-                        )
-                        .await?;
-                        // Superseded conditional-write blob cleanup (best-effort).
-                        if existing.storage_backend == "s3"
-                            && !existing.storage_path.is_empty()
-                            && existing.storage_path != storage_path
-                            && let Some((old_bucket, old_key)) =
-                                self.parse_storage_path(&existing.storage_path)
-                        {
-                            let _ = self
-                                .client
-                                .delete_object()
-                                .bucket(&old_bucket)
-                                .key(&old_key)
-                                .send()
-                                .await;
-                        }
-                        FileMetadata::from_file_record(updated)
-                    }
-                    Err(_) => {
-                        let inserted = insert_file_record(
-                            &ctx.db,
-                            &normalized_path,
-                            total_size,
-                            None,
-                            content_type_final.as_deref(),
-                            "s3",
-                            &storage_path,
-                            ctx.org_id,
-                            ctx.env_id,
-                            ctx.user_id,
-                            ctx.run_id,
-                        )
-                        .await?;
-                        FileMetadata::from_file_record(inserted)
-                    }
-                };
 
             tracing::debug!(
                 "Completed multipart upload for {} to S3: {}",
                 normalized_path,
                 storage_path
             );
-            Ok(file_metadata)
+            Ok(meta)
         }
 
         async fn abort_multipart_upload(
@@ -2080,13 +2045,13 @@ pub mod s3 {
             ctx: &FileStorageContext,
         ) -> Result<(), String> {
             let normalized_path = normalize_path(path)?;
-            let key = self.s3_key(&normalized_path, ctx);
+            let (key, upload_id) = self.multipart_target(backend_upload_id, &normalized_path, ctx);
 
             self.client
                 .abort_multipart_upload()
                 .bucket(&self.bucket)
                 .key(&key)
-                .upload_id(backend_upload_id)
+                .upload_id(upload_id)
                 .send()
                 .await
                 .map_err(|e| format!("Failed to abort multipart upload: {}", e))?;
@@ -2184,32 +2149,801 @@ pub mod s3 {
 }
 
 // ============================================================================
+// Google Cloud Storage
+// ============================================================================
+
+#[cfg(feature = "gcs-storage")]
+pub mod gcs {
+    //! GCS file storage.
+    //!
+    //! Layout under the configured prefix:
+    //!
+    //! - `{org}/{env}/{path}.v-{uuid}`: committed file bytes. Every write
+    //!   (plain, conditional, or multipart) lands at a fresh key and the
+    //!   database record swap is the commit point.
+    //! - `{org}/{env}/{path}.cas-{uuid}`: conditional-write bytes.
+    //! - `{org}/{env}/{path}.mp-{upload}`: completed multipart uploads.
+    //! - `{org}/{env}/{blob-key}`: content-addressed internal blobs.
+    //! - `.uploads/{org}/{env}/{upload}/...`: multipart staging (parts and
+    //!   intermediate compositions). Nothing committed ever lives here, so a
+    //!   bucket lifecycle rule scoped to this prefix is safe.
+    //!
+    //! Database metadata stays authoritative for authorization and listings;
+    //! the bucket is never listed outside the staging prefix.
+
+    use super::*;
+    use crate::gcs::{BACKEND_ID, GcsClient, GcsConfig, GcsError, plan_compose_levels};
+    use bytes::Bytes;
+
+    const STAGING_DIR: &str = ".uploads";
+    const META_UPLOAD_ID: &str = "hot-upload-id";
+    const META_MANIFEST: &str = "hot-upload-manifest";
+
+    /// Google Cloud Storage backend for files and internal blobs.
+    pub struct GcsFileStorage {
+        client: GcsClient,
+    }
+
+    impl GcsFileStorage {
+        pub fn new(client: GcsClient) -> Self {
+            Self { client }
+        }
+
+        /// Create from Hot configuration (`file.gcs.*` / `HOT_FILE_GCS_*`).
+        pub async fn from_config(conf: &Val) -> Result<Self, String> {
+            let config = GcsConfig::from_conf(conf, "file")?;
+            let client = GcsClient::connect(&config).await?;
+            tracing::info!(bucket = %config.bucket, "Using GCS file storage");
+            Ok(Self::new(client))
+        }
+
+        fn env_segment(ctx: &FileStorageContext) -> String {
+            ctx.env_id
+                .map(|id| id.simple().to_string())
+                .unwrap_or_else(|| "default".to_string())
+        }
+
+        /// Tenant-isolated object key: prefix/org/env/rel.
+        fn object_key(&self, rel: &str, ctx: &FileStorageContext) -> String {
+            let org = ctx.org_id.simple().to_string();
+            let env = Self::env_segment(ctx);
+            self.client.key([org.as_str(), env.as_str(), rel])
+        }
+
+        /// Staging prefix for one multipart upload (trailing slash included
+        /// so listing never matches a sibling upload id).
+        fn staging_prefix(&self, backend_upload_id: &str, ctx: &FileStorageContext) -> String {
+            let org = ctx.org_id.simple().to_string();
+            let env = Self::env_segment(ctx);
+            format!(
+                "{}/",
+                self.client
+                    .key([STAGING_DIR, org.as_str(), env.as_str(), backend_upload_id])
+            )
+        }
+
+        /// Object key for an authorized record. Records from another backend
+        /// or another bucket are refused rather than guessed at.
+        fn record_key(&self, record: &FileRecord) -> Result<String, String> {
+            ensure_record_backend(&record.storage_backend, BACKEND_ID, &record.path)?;
+            if record.storage_path.is_empty() {
+                return Err(format!("File {} has no stored location", record.path));
+            }
+            Ok(self.client.key_from_uri(&record.storage_path)?)
+        }
+
+        /// Refuse writes over a record owned by another backend before any
+        /// bytes are uploaded.
+        async fn ensure_writable(
+            &self,
+            normalized_path: &str,
+            ctx: &FileStorageContext,
+        ) -> Result<(), String> {
+            ensure_path_writable(BACKEND_ID, normalized_path, ctx).await
+        }
+
+        /// Create `key` (which no other writer can share). A precondition
+        /// failure means an earlier attempt of this same request already
+        /// created it (lost response, retried); accept it when the size
+        /// matches.
+        async fn put_unique(
+            &self,
+            key: &str,
+            data: Bytes,
+            content_type: Option<&str>,
+            metadata: &[(&str, &str)],
+        ) -> Result<(String, i64), GcsError> {
+            let len = data.len() as i64;
+            match self
+                .client
+                .put_bytes(key, data, content_type, Some(0), metadata)
+                .await
+            {
+                Ok(obj) => Ok((obj.name, obj.generation)),
+                Err(e) if e.is_precondition_failed() => match self.client.head(key).await? {
+                    Some(obj) if obj.size == len => Ok((obj.name, obj.generation)),
+                    _ => Err(e),
+                },
+                Err(e) => Err(e),
+            }
+        }
+
+        /// Best-effort delete of a location a record no longer references.
+        async fn delete_superseded(&self, previous: Option<String>) {
+            let Some(previous) = previous else { return };
+            match self.client.key_from_uri(&previous) {
+                Ok(key) => {
+                    if let Err(e) = self.client.delete(&key, None).await {
+                        tracing::warn!(error = %e, "Failed to delete superseded GCS object");
+                    }
+                }
+                Err(e) => tracing::warn!(error = %e, "Not deleting superseded foreign object"),
+            }
+        }
+
+        async fn delete_key_best_effort(&self, key: &str, generation: Option<i64>) {
+            if let Err(e) = self.client.delete(key, generation).await {
+                tracing::warn!(error = %e, "Failed to delete unreferenced GCS object");
+            }
+        }
+
+        /// Parse a part token returned by `upload_part`: `{attempt}.{generation}`.
+        fn parse_part_token(token: &str) -> Option<(&str, i64)> {
+            let (attempt, generation) = token.split_once('.')?;
+            if attempt.len() != 32 || !attempt.chars().all(|c| c.is_ascii_hexdigit()) {
+                return None;
+            }
+            let generation = generation.parse::<i64>().ok().filter(|g| *g > 0)?;
+            Some((attempt, generation))
+        }
+
+        fn part_key(staging: &str, part_number: i32, attempt: &str) -> String {
+            format!("{staging}part-{part_number:05}-{attempt}")
+        }
+
+        /// Stable digest of the completion manifest, recorded on the final
+        /// object so a retried completion can recognize its own result.
+        fn manifest_digest(parts: &[(i32, String)]) -> String {
+            let mut hasher = blake3::Hasher::new();
+            for (number, token) in parts {
+                hasher.update(format!("{number}:{token}\n").as_bytes());
+            }
+            hasher.finalize().to_hex()[..32].to_string()
+        }
+
+        /// Compose generation-pinned `sources` into `dest`, staging through
+        /// intermediate objects when there are more than 32.
+        async fn compose_staged(
+            &self,
+            staging: &str,
+            dest: &str,
+            mut sources: Vec<(String, i64)>,
+            content_type: Option<&str>,
+            metadata: &[(&str, &str)],
+        ) -> Result<(String, i64), GcsError> {
+            let attempt = Uuid::new_v4().simple().to_string();
+            for (level, groups) in plan_compose_levels(sources.len()).into_iter().enumerate() {
+                let mut offset = 0;
+                let mut jobs = Vec::with_capacity(groups.len());
+                for (index, size) in groups.into_iter().enumerate() {
+                    let group = sources[offset..offset + size].to_vec();
+                    offset += size;
+                    let key = format!("{staging}compose-{attempt}-{level}-{index:05}");
+                    jobs.push(async move {
+                        self.client
+                            .compose(&key, &group, None, Some(0), &[])
+                            .await
+                            .map(|obj| (obj.name, obj.generation))
+                    });
+                }
+                sources = futures::future::try_join_all(jobs).await?;
+            }
+            let obj = self
+                .client
+                .compose(dest, &sources, content_type, Some(0), metadata)
+                .await?;
+            Ok((obj.name, obj.generation))
+        }
+    }
+
+    #[async_trait]
+    impl FileStorage for GcsFileStorage {
+        async fn write_file(
+            &self,
+            path: &str,
+            content: &[u8],
+            content_type: Option<&str>,
+            ctx: &FileStorageContext,
+        ) -> Result<FileMetadata, String> {
+            let normalized_path = normalize_path(path)?;
+            validate_path_security(&normalized_path)?;
+            check_write_quota(ctx, content.len() as i64).await?;
+            self.ensure_writable(&normalized_path, ctx).await?;
+
+            let etag = compute_md5(content);
+            let content_type_final = content_type
+                .map(|s| s.to_string())
+                .or_else(|| detect_content_type(&normalized_path, content));
+
+            let key = self.object_key(&unique_write_rel_path(&normalized_path), ctx);
+            let (_, generation) = self
+                .put_unique(
+                    &key,
+                    Bytes::copy_from_slice(content),
+                    content_type_final.as_deref(),
+                    &[],
+                )
+                .await
+                .map_err(|e| format!("Failed to upload file {} to GCS: {}", normalized_path, e))?;
+            let storage_path = self.client.uri(&key);
+
+            match commit_file_record(
+                BACKEND_ID,
+                &storage_path,
+                &normalized_path,
+                content.len() as i64,
+                Some(&etag),
+                content_type_final.as_deref(),
+                ctx,
+            )
+            .await
+            {
+                Ok((meta, previous)) => {
+                    self.delete_superseded(previous).await;
+                    tracing::debug!("Wrote file {} to GCS", normalized_path);
+                    Ok(meta)
+                }
+                Err(e) => {
+                    self.delete_key_best_effort(&key, Some(generation)).await;
+                    Err(e)
+                }
+            }
+        }
+
+        async fn write_file_if(
+            &self,
+            path: &str,
+            content: &[u8],
+            content_type: Option<&str>,
+            expected_etag: Option<&str>,
+            ctx: &FileStorageContext,
+        ) -> Result<Option<FileMetadata>, String> {
+            let normalized_path = normalize_path(path)?;
+            validate_path_security(&normalized_path)?;
+            check_write_quota(ctx, content.len() as i64).await?;
+            self.ensure_writable(&normalized_path, ctx).await?;
+
+            let etag = compute_md5(content);
+            let content_type_final = content_type
+                .map(|s| s.to_string())
+                .or_else(|| detect_content_type(&normalized_path, content));
+
+            // Stage at a unique key; the record swap below is the commit
+            // point. Hot's application ETag (MD5) is independent of the GCS
+            // generation, which only guards this object's own lifecycle.
+            let key = self.object_key(&cas_blob_rel_path(&normalized_path), ctx);
+            let (_, generation) = self
+                .put_unique(
+                    &key,
+                    Bytes::copy_from_slice(content),
+                    content_type_final.as_deref(),
+                    &[],
+                )
+                .await
+                .map_err(|e| format!("Failed to upload file {} to GCS: {}", normalized_path, e))?;
+            let storage_path = self.client.uri(&key);
+
+            match cas_file_record(
+                BACKEND_ID,
+                &storage_path,
+                &normalized_path,
+                content.len() as i64,
+                &etag,
+                content_type_final.as_deref(),
+                expected_etag,
+                ctx,
+            )
+            .await
+            {
+                Ok(Some((meta, previous))) => {
+                    self.delete_superseded(previous.filter(|old| *old != storage_path))
+                        .await;
+                    Ok(Some(meta))
+                }
+                lost_or_err => {
+                    // Only this attempt's generation is removed.
+                    self.delete_key_best_effort(&key, Some(generation)).await;
+                    lost_or_err.map(|_| None)
+                }
+            }
+        }
+
+        async fn read_file(&self, path: &str, ctx: &FileStorageContext) -> Result<Vec<u8>, String> {
+            let normalized_path = normalize_path(path)?;
+            validate_path_security(&normalized_path)?;
+            let record =
+                get_file_by_path(&ctx.db, &normalized_path, ctx.org_id, ctx.env_id).await?;
+            let key = self.record_key(&record)?;
+            self.client
+                .get_bytes(&key, None)
+                .await
+                .map_err(|e| match e {
+                    GcsError::NotFound(_) => {
+                        format!("File not found in storage: {}", normalized_path)
+                    }
+                    e => format!("Failed to read file {} from GCS: {}", normalized_path, e),
+                })
+        }
+
+        async fn open_file_stream(
+            &self,
+            path: &str,
+            ctx: &FileStorageContext,
+        ) -> Result<Option<FileReadStream>, String> {
+            let normalized_path = normalize_path(path)?;
+            validate_path_security(&normalized_path)?;
+            let record =
+                get_file_by_path(&ctx.db, &normalized_path, ctx.org_id, ctx.env_id).await?;
+            let key = self.record_key(&record)?;
+            let (reader, _size) =
+                self.client.open_reader(&key).await.map_err(|e| {
+                    format!("Failed to open file {} from GCS: {}", normalized_path, e)
+                })?;
+            Ok(Some(FileReadStream {
+                metadata: FileMetadata::from_file_record(record),
+                reader,
+            }))
+        }
+
+        async fn delete_file(&self, path: &str, ctx: &FileStorageContext) -> Result<bool, String> {
+            let normalized_path = normalize_path(path)?;
+            validate_path_security(&normalized_path)?;
+            let record =
+                match get_file_by_path(&ctx.db, &normalized_path, ctx.org_id, ctx.env_id).await {
+                    Ok(record) => record,
+                    Err(_) => return Ok(false),
+                };
+
+            mark_file_inactive(
+                &ctx.db,
+                &normalized_path,
+                ctx.org_id,
+                ctx.env_id,
+                ctx.user_id,
+                ctx.run_id,
+            )
+            .await?;
+
+            match self.record_key(&record) {
+                Ok(key) => {
+                    self.client.delete(&key, None).await.map_err(|e| {
+                        format!(
+                            "File {} was deleted but its GCS object could not be removed: {}",
+                            normalized_path, e
+                        )
+                    })?;
+                }
+                // The record is gone either way; bytes owned by another
+                // backend are left for the migration to reconcile.
+                Err(e) => tracing::warn!("Deleted file record without removing bytes: {}", e),
+            }
+            tracing::debug!("Deleted file {} from GCS", normalized_path);
+            Ok(true)
+        }
+
+        async fn file_exists(&self, path: &str, ctx: &FileStorageContext) -> Result<bool, String> {
+            let normalized_path = normalize_path(path)?;
+            validate_path_security(&normalized_path)?;
+            Ok(
+                get_file_by_path(&ctx.db, &normalized_path, ctx.org_id, ctx.env_id)
+                    .await
+                    .is_ok(),
+            )
+        }
+
+        async fn get_file_metadata(
+            &self,
+            path: &str,
+            ctx: &FileStorageContext,
+        ) -> Result<FileMetadata, String> {
+            let normalized_path = normalize_path(path)?;
+            validate_path_security(&normalized_path)?;
+            let record =
+                get_file_by_path(&ctx.db, &normalized_path, ctx.org_id, ctx.env_id).await?;
+            Ok(FileMetadata::from_file_record(record))
+        }
+
+        async fn list_files(
+            &self,
+            prefix: &str,
+            ctx: &FileStorageContext,
+        ) -> Result<Vec<FileMetadata>, String> {
+            use crate::db::file::list_files_by_prefix;
+            let normalized_prefix = normalize_path(prefix).unwrap_or_else(|_| prefix.to_string());
+            let records =
+                list_files_by_prefix(&ctx.db, &normalized_prefix, ctx.org_id, ctx.env_id).await?;
+            Ok(records
+                .into_iter()
+                .map(FileMetadata::from_file_record)
+                .collect())
+        }
+
+        async fn list_files_bounded(
+            &self,
+            prefix: &str,
+            limit: usize,
+            ctx: &FileStorageContext,
+        ) -> Result<Vec<FileMetadata>, String> {
+            use crate::db::file::list_files_by_prefix_bounded;
+            let normalized_prefix = normalize_path(prefix).unwrap_or_else(|_| prefix.to_string());
+            let records = list_files_by_prefix_bounded(
+                &ctx.db,
+                &normalized_prefix,
+                ctx.org_id,
+                ctx.env_id,
+                limit,
+            )
+            .await?;
+            Ok(records
+                .into_iter()
+                .map(FileMetadata::from_file_record)
+                .collect())
+        }
+
+        fn storage_type(&self) -> &str {
+            BACKEND_ID
+        }
+
+        async fn initiate_multipart_upload(
+            &self,
+            path: &str,
+            _content_type: Option<&str>,
+            ctx: &FileStorageContext,
+        ) -> Result<String, String> {
+            let normalized_path = normalize_path(path)?;
+            validate_path_security(&normalized_path)?;
+            self.ensure_writable(&normalized_path, ctx).await?;
+            // Parts are independent objects; no server-side session exists
+            // until completion composes them.
+            Ok(Uuid::new_v4().simple().to_string())
+        }
+
+        async fn upload_part(
+            &self,
+            backend_upload_id: &str,
+            _path: &str,
+            part_number: i32,
+            content: &[u8],
+            ctx: &FileStorageContext,
+        ) -> Result<String, String> {
+            validate_part_number(part_number)?;
+            let staging = self.staging_prefix(backend_upload_id, ctx);
+            // Every attempt (retry, replacement, concurrent duplicate) gets
+            // its own object, so the token recorded in the manifest pins the
+            // exact bytes that completion will compose.
+            let attempt = Uuid::new_v4().simple().to_string();
+            let key = Self::part_key(&staging, part_number, &attempt);
+            let (_, generation) = self
+                .put_unique(&key, Bytes::copy_from_slice(content), None, &[])
+                .await
+                .map_err(|e| format!("Failed to upload part {}: {}", part_number, e))?;
+            Ok(format!("{attempt}.{generation}"))
+        }
+
+        async fn complete_multipart_upload(
+            &self,
+            backend_upload_id: &str,
+            path: &str,
+            parts: &[(i32, String)],
+            total_size: i64,
+            content_type: Option<&str>,
+            ctx: &FileStorageContext,
+        ) -> Result<FileMetadata, String> {
+            let normalized_path = normalize_path(path)?;
+            validate_path_security(&normalized_path)?;
+            self.ensure_writable(&normalized_path, ctx).await?;
+
+            let mut ordered = parts.to_vec();
+            ordered.sort_by_key(|(number, _)| *number);
+            if ordered.windows(2).any(|w| w[0].0 == w[1].0) {
+                return Err("Invalid manifest: duplicate part numbers".to_string());
+            }
+            let staging = self.staging_prefix(backend_upload_id, ctx);
+            let mut sources = Vec::with_capacity(ordered.len());
+            for (number, token) in &ordered {
+                validate_part_number(*number)?;
+                let (attempt, generation) = Self::parse_part_token(token)
+                    .ok_or_else(|| format!("Invalid manifest: bad token for part {}", number))?;
+                sources.push((Self::part_key(&staging, *number, attempt), generation));
+            }
+
+            let content_type_final = content_type
+                .map(|s| s.to_string())
+                .or_else(|| detect_content_type(&normalized_path, &[]));
+            let digest = Self::manifest_digest(&ordered);
+            let metadata = [
+                (META_UPLOAD_ID, backend_upload_id),
+                (META_MANIFEST, digest.as_str()),
+            ];
+            let dest = self.object_key(
+                &format!("{}.mp-{}", normalized_path, backend_upload_id),
+                ctx,
+            );
+
+            // Recoverable completion: the destination is deterministic per
+            // upload, so a retry after a crash or lost response finds the
+            // object it (or a concurrent completer) already composed and
+            // verifies it was built from this exact manifest.
+            let existing = self
+                .client
+                .head(&dest)
+                .await
+                .map_err(|e| format!("Failed to complete upload: {}", e))?;
+            let reusable = |obj: &google_cloud_storage::model::Object| {
+                obj.metadata.get(META_UPLOAD_ID).map(String::as_str) == Some(backend_upload_id)
+                    && obj.metadata.get(META_MANIFEST) == Some(&digest)
+            };
+            let (dest_generation, composed_size) = match existing {
+                Some(obj) if reusable(&obj) => (obj.generation, obj.size),
+                Some(_) => {
+                    return Err(
+                        "Upload destination exists with a different manifest; abort and retry"
+                            .to_string(),
+                    );
+                }
+                None => {
+                    let composed = if sources.is_empty() {
+                        self.client
+                            .put_bytes(
+                                &dest,
+                                Bytes::new(),
+                                content_type_final.as_deref(),
+                                Some(0),
+                                &metadata,
+                            )
+                            .await
+                            .map(|obj| (obj.name, obj.generation))
+                    } else {
+                        self.compose_staged(
+                            &staging,
+                            &dest,
+                            sources,
+                            content_type_final.as_deref(),
+                            &metadata,
+                        )
+                        .await
+                    };
+                    match composed {
+                        Ok(_) => {}
+                        // A concurrent completer created it first.
+                        Err(e) if e.is_precondition_failed() => {}
+                        Err(GcsError::NotFound(_)) => {
+                            return Err(
+                                "Upload parts are missing (aborted or expired upload)".to_string()
+                            );
+                        }
+                        Err(e) => return Err(format!("Failed to complete upload: {}", e)),
+                    }
+                    match self.client.head(&dest).await {
+                        Ok(Some(obj)) if reusable(&obj) => (obj.generation, obj.size),
+                        Ok(_) => {
+                            return Err("Upload destination changed during completion".to_string());
+                        }
+                        Err(e) => return Err(format!("Failed to complete upload: {}", e)),
+                    }
+                }
+            };
+
+            if composed_size != total_size {
+                self.delete_key_best_effort(&dest, Some(dest_generation))
+                    .await;
+                return Err(format!(
+                    "Assembled size {} does not match the {} bytes received",
+                    composed_size, total_size
+                ));
+            }
+
+            let storage_path = self.client.uri(&dest);
+            // Composite objects carry no MD5; like S3 multipart uploads the
+            // record gets no application ETag until a later write sets one.
+            let (meta, previous) = commit_file_record(
+                BACKEND_ID,
+                &storage_path,
+                &normalized_path,
+                composed_size,
+                None,
+                content_type_final.as_deref(),
+                ctx,
+            )
+            .await?;
+            self.delete_superseded(previous).await;
+            if let Err(e) = self.client.delete_prefix(&staging).await {
+                tracing::warn!(error = %e, "Failed to clean up multipart staging objects");
+            }
+            tracing::debug!("Completed multipart upload for {} to GCS", normalized_path);
+            Ok(meta)
+        }
+
+        async fn abort_multipart_upload(
+            &self,
+            backend_upload_id: &str,
+            _path: &str,
+            ctx: &FileStorageContext,
+        ) -> Result<(), String> {
+            // Only staging objects are removed. A composed destination is
+            // never deleted here: once completion has started the upload is
+            // no longer abortable (see `file_upload::begin_completion`).
+            let staging = self.staging_prefix(backend_upload_id, ctx);
+            let failures = self
+                .client
+                .delete_prefix(&staging)
+                .await
+                .map_err(|e| format!("Failed to clean up multipart upload: {}", e))?;
+            if failures > 0 {
+                return Err(format!(
+                    "Failed to delete {} multipart staging objects",
+                    failures
+                ));
+            }
+            Ok(())
+        }
+
+        async fn write_blob_bytes(
+            &self,
+            storage_key: &str,
+            content: &[u8],
+            content_type: Option<&str>,
+            ctx: &FileStorageContext,
+        ) -> Result<String, String> {
+            let normalized = normalize_path(storage_key)?;
+            validate_path_security(&normalized)?;
+            let key = self.object_key(&normalized, ctx);
+            let data = Bytes::copy_from_slice(content);
+            // Content-addressed: an existing object with the same key holds
+            // the same bytes, so create-only avoids rewriting it.
+            match self
+                .client
+                .put_bytes(&key, data.clone(), content_type, Some(0), &[])
+                .await
+            {
+                Ok(_) => {}
+                Err(e) if e.is_precondition_failed() => match self.client.head(&key).await {
+                    Ok(Some(obj)) if obj.size == content.len() as i64 => {}
+                    // A truncated or foreign object at a content address is
+                    // replaced, pinned to the generation we saw.
+                    Ok(Some(obj)) => {
+                        self.client
+                            .put_bytes(&key, data, content_type, Some(obj.generation), &[])
+                            .await
+                            .map_err(|e| format!("Failed to upload blob to GCS: {}", e))?;
+                    }
+                    Ok(None) => {
+                        self.client
+                            .put_bytes(&key, data, content_type, Some(0), &[])
+                            .await
+                            .map_err(|e| format!("Failed to upload blob to GCS: {}", e))?;
+                    }
+                    Err(e) => return Err(format!("Failed to upload blob to GCS: {}", e)),
+                },
+                Err(e) => return Err(format!("Failed to upload blob to GCS: {}", e)),
+            }
+            Ok(self.client.uri(&key))
+        }
+
+        async fn read_blob_bytes(
+            &self,
+            storage_key: &str,
+            ctx: &FileStorageContext,
+        ) -> Result<Vec<u8>, String> {
+            let normalized = normalize_path(storage_key)?;
+            validate_path_security(&normalized)?;
+            let key = self.object_key(&normalized, ctx);
+            self.client
+                .get_bytes(&key, None)
+                .await
+                .map_err(|e| match e {
+                    GcsError::NotFound(_) => format!("Blob not found in storage: {}", normalized),
+                    e => format!("Failed to read blob from GCS: {}", e),
+                })
+        }
+
+        async fn delete_blob_bytes(
+            &self,
+            storage_key: &str,
+            ctx: &FileStorageContext,
+        ) -> Result<(), String> {
+            let normalized = normalize_path(storage_key)?;
+            validate_path_security(&normalized)?;
+            let key = self.object_key(&normalized, ctx);
+            self.client
+                .delete(&key, None)
+                .await
+                .map(|_| ())
+                .map_err(|e| format!("Failed to delete blob from GCS: {}", e))
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn part_tokens_round_trip_and_reject_garbage() {
+            let attempt = Uuid::new_v4().simple().to_string();
+            let token = format!("{attempt}.1712345678901234");
+            assert_eq!(
+                GcsFileStorage::parse_part_token(&token),
+                Some((attempt.as_str(), 1712345678901234))
+            );
+            assert!(GcsFileStorage::parse_part_token("etag").is_none());
+            assert!(GcsFileStorage::parse_part_token(&format!("{attempt}.0")).is_none());
+            assert!(GcsFileStorage::parse_part_token(&format!("{attempt}.-1")).is_none());
+            assert!(GcsFileStorage::parse_part_token("../../x.1").is_none());
+        }
+
+        #[test]
+        fn manifest_digest_depends_on_order_and_tokens() {
+            let a = vec![(1, "x.1".to_string()), (2, "y.2".to_string())];
+            let b = vec![(1, "x.1".to_string()), (2, "z.2".to_string())];
+            assert_eq!(
+                GcsFileStorage::manifest_digest(&a),
+                GcsFileStorage::manifest_digest(&a.clone())
+            );
+            assert_ne!(
+                GcsFileStorage::manifest_digest(&a),
+                GcsFileStorage::manifest_digest(&b)
+            );
+        }
+    }
+}
+
+// ============================================================================
 // Storage Factory
 // ============================================================================
 
 /// File storage type from configuration
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FileStorageType {
     Local,
     S3,
+    Gcs,
+}
+
+/// Parse a storage backend name shared by file and build storage. Empty
+/// means the default (local); unknown names are rejected rather than
+/// silently falling back to local storage.
+pub fn parse_storage_backend_name(raw: &str, setting: &str) -> Result<FileStorageType, String> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "" | "null" | "local" => Ok(FileStorageType::Local),
+        "s3" => Ok(FileStorageType::S3),
+        "gcs" => Ok(FileStorageType::Gcs),
+        other => Err(format!(
+            "Unknown {setting} '{other}'; expected one of: local, s3, gcs"
+        )),
+    }
+}
+
+/// Resolve `<role>.storage.type`: the `HOT_<ROLE>_STORAGE_TYPE` environment
+/// variable wins, then Hot configuration, then local.
+pub fn resolve_storage_backend(conf: &Val, role: &str) -> Result<FileStorageType, String> {
+    let env_name = format!("HOT_{}_STORAGE_TYPE", role.to_ascii_uppercase());
+    let raw = std::env::var(&env_name)
+        .ok()
+        .filter(|v| !v.trim().is_empty())
+        .unwrap_or_else(|| conf.get_str_or_default(&format!("{role}.storage.type"), ""));
+    parse_storage_backend_name(&raw, &format!("{role}.storage.type ({env_name})"))
 }
 
 impl FileStorageType {
-    pub fn from_env() -> Self {
-        match std::env::var("HOT_FILE_STORAGE_TYPE")
-            .unwrap_or_else(|_| "local".to_string())
-            .to_lowercase()
-            .as_str()
-        {
-            "s3" => FileStorageType::S3,
-            _ => FileStorageType::Local,
-        }
+    /// Backend selected by `HOT_FILE_STORAGE_TYPE` / `file.storage.type`.
+    pub fn resolve(conf: &Val) -> Result<Self, String> {
+        resolve_storage_backend(conf, "file")
     }
 }
 
 /// Create a file storage instance from Hot configuration
 pub async fn file_storage_from_config(conf: &Val) -> Result<Box<dyn FileStorage>, String> {
-    let storage_type = FileStorageType::from_env();
+    let storage_type = FileStorageType::resolve(conf)?;
 
     match storage_type {
         FileStorageType::Local => {
@@ -2230,6 +2964,13 @@ pub async fn file_storage_from_config(conf: &Val) -> Result<Box<dyn FileStorage>
         FileStorageType::S3 => {
             Err("S3 storage requested but s3-storage feature is not enabled".to_string())
         }
+        #[cfg(feature = "gcs-storage")]
+        FileStorageType::Gcs => Ok(Box::new(gcs::GcsFileStorage::from_config(conf).await?)),
+        #[cfg(not(feature = "gcs-storage"))]
+        FileStorageType::Gcs => Err(
+            "GCS file storage requested but this binary was built without the gcs-storage feature"
+                .to_string(),
+        ),
     }
 }
 
@@ -2822,5 +3563,496 @@ mod tests {
 
         let content = storage.read_file("data/overwrite.bin", &ctx).await.unwrap();
         assert_eq!(content, second_data);
+    }
+
+    #[tokio::test]
+    async fn test_concurrent_writes_commit_consistent_metadata() {
+        let (storage, ctx, _temp_dir) = setup_test_storage().await;
+
+        // Racing first-time creates both land (the loser becomes an update)
+        // instead of the loser failing on the unique index.
+        let (a, b) = tokio::join!(
+            storage.write_file("race/new.txt", b"first-writer", None, &ctx),
+            storage.write_file("race/new.txt", b"second-writer-longer", None, &ctx),
+        );
+        a.unwrap();
+        b.unwrap();
+
+        // Racing overwrites: whichever commits last, the record's size and
+        // etag describe exactly the bytes it references.
+        for round in 0..10 {
+            let one = format!("one-{round}");
+            let two = format!("two-two-{round}");
+            let (a, b) = tokio::join!(
+                storage.write_file("race/new.txt", one.as_bytes(), None, &ctx),
+                storage.write_file("race/new.txt", two.as_bytes(), None, &ctx),
+            );
+            a.unwrap();
+            b.unwrap();
+            let meta = storage
+                .get_file_metadata("race/new.txt", &ctx)
+                .await
+                .unwrap();
+            let bytes = storage.read_file("race/new.txt", &ctx).await.unwrap();
+            assert_eq!(meta.size, bytes.len() as i64);
+            assert_eq!(meta.etag, Some(compute_md5(&bytes)));
+        }
+    }
+
+    #[tokio::test]
+    async fn test_overwrite_removes_superseded_bytes() {
+        let (storage, ctx, _temp_dir) = setup_test_storage().await;
+        let v1 = storage
+            .write_file("docs/a.txt", b"one", None, &ctx)
+            .await
+            .unwrap();
+        let v2 = storage
+            .write_file("docs/a.txt", b"two", None, &ctx)
+            .await
+            .unwrap();
+        assert_ne!(v1.storage_path, v2.storage_path);
+        assert!(!Path::new(&v1.storage_path).exists());
+        assert!(Path::new(&v2.storage_path).exists());
+        assert!(storage.delete_file("docs/a.txt", &ctx).await.unwrap());
+        assert!(!Path::new(&v2.storage_path).exists());
+    }
+
+    #[tokio::test]
+    async fn test_writes_refuse_records_owned_by_another_backend() {
+        let (storage, ctx, _temp_dir) = setup_test_storage().await;
+        let v1 = storage
+            .write_file("moved/data.bin", b"original", None, &ctx)
+            .await
+            .unwrap();
+        let crate::db::DatabasePool::Sqlite(pool) = ctx.db.as_ref() else {
+            panic!("test uses sqlite");
+        };
+        sqlx::query("UPDATE file SET storage_backend = 's3'")
+            .execute(pool)
+            .await
+            .unwrap();
+
+        let err = storage
+            .write_file("moved/data.bin", b"new", None, &ctx)
+            .await
+            .unwrap_err();
+        assert!(err.contains("'s3'"), "{err}");
+        assert!(
+            storage
+                .write_file_if("moved/data.bin", b"new", None, v1.etag.as_deref(), &ctx)
+                .await
+                .is_err()
+        );
+        let id = storage
+            .initiate_multipart_upload("moved/data.bin", None, &ctx)
+            .await
+            .unwrap();
+        let etag = storage
+            .upload_part(&id, "moved/data.bin", 1, b"abc", &ctx)
+            .await
+            .unwrap();
+        assert!(
+            storage
+                .complete_multipart_upload(&id, "moved/data.bin", &[(1, etag)], 3, None, &ctx)
+                .await
+                .is_err()
+        );
+
+        // Nothing was rewritten, and the record still has its own backend.
+        let record = get_file_by_path(&ctx.db, "moved/data.bin", ctx.org_id, ctx.env_id)
+            .await
+            .unwrap();
+        assert_eq!(record.storage_backend, "s3");
+        assert_eq!(record.storage_path, v1.storage_path);
+        assert_eq!(
+            tokio::fs::read(&v1.storage_path).await.unwrap(),
+            b"original"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_failed_multipart_assembly_keeps_live_file() {
+        let (storage, ctx, _temp_dir) = setup_test_storage().await;
+        storage
+            .write_file("data/live.bin", b"live-bytes", None, &ctx)
+            .await
+            .unwrap();
+
+        let id = storage
+            .initiate_multipart_upload("data/live.bin", None, &ctx)
+            .await
+            .unwrap();
+        let e1 = storage
+            .upload_part(&id, "data/live.bin", 1, b"new-", &ctx)
+            .await
+            .unwrap();
+        // Part 2 is listed in the manifest but was never uploaded.
+        let manifest = vec![(1, e1.clone()), (2, "missing".to_string())];
+        assert!(
+            storage
+                .complete_multipart_upload(&id, "data/live.bin", &manifest, 8, None, &ctx)
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            storage.read_file("data/live.bin", &ctx).await.unwrap(),
+            b"live-bytes"
+        );
+        let meta = storage
+            .get_file_metadata("data/live.bin", &ctx)
+            .await
+            .unwrap();
+        assert_eq!(meta.size, 10);
+
+        // Parts survive the failure, so completion can be retried.
+        let e2 = storage
+            .upload_part(&id, "data/live.bin", 2, b"data", &ctx)
+            .await
+            .unwrap();
+        let done = storage
+            .complete_multipart_upload(&id, "data/live.bin", &[(1, e1), (2, e2)], 8, None, &ctx)
+            .await
+            .unwrap();
+        assert_eq!(done.etag, Some(compute_md5(b"new-data")));
+        assert_eq!(
+            storage.read_file("data/live.bin", &ctx).await.unwrap(),
+            b"new-data"
+        );
+    }
+
+    #[cfg(feature = "s3-storage")]
+    #[tokio::test]
+    async fn test_s3_multipart_ids_target_unique_keys_and_keep_legacy_ids() {
+        let config = aws_sdk_s3::Config::builder()
+            .behavior_version(aws_config::BehaviorVersion::latest())
+            .region(aws_config::Region::new("us-east-1"))
+            .build();
+        let storage = s3::S3FileStorage::new(
+            aws_sdk_s3::Client::from_conf(config),
+            "bucket".to_string(),
+            Some("files".to_string()),
+        );
+        let db = std::sync::Arc::new(crate::db::DatabasePool::Sqlite(
+            sqlx::sqlite::SqlitePoolOptions::new()
+                .connect_lazy("sqlite::memory:")
+                .unwrap(),
+        ));
+        let ctx = FileStorageContext::minimal(db, Uuid::nil(), None, Uuid::nil());
+        let org = Uuid::nil().simple().to_string();
+
+        let (key, upload) = storage.multipart_target("hot1:abc123:S3-UPLOAD.id", "a/b.bin", &ctx);
+        assert_eq!(key, format!("files/{org}/default/a/b.bin.mp-abc123"));
+        assert_eq!(upload, "S3-UPLOAD.id");
+
+        // Uploads started before the encoded format keep the old key.
+        let (key, upload) = storage.multipart_target("LEGACY-ID", "a/b.bin", &ctx);
+        assert_eq!(key, format!("files/{org}/default/a/b.bin"));
+        assert_eq!(upload, "LEGACY-ID");
+    }
+
+    /// Storage contract shared by every backend. Local always runs; GCS runs
+    /// against a real bucket when `HOT_TEST_GCS_BUCKET` is set (credentials
+    /// from Application Default Credentials / workload identity). Emulators
+    /// do not qualify IAM, composition, or generation semantics.
+    mod contract {
+        use super::*;
+        use tokio::io::AsyncReadExt;
+
+        async fn assert_write_read_overwrite_delete(
+            storage: &dyn FileStorage,
+            ctx: &FileStorageContext,
+        ) {
+            let v1 = storage
+                .write_file("contract/a.json", b"{\"v\":1}", None, ctx)
+                .await
+                .unwrap();
+            assert_eq!(v1.size, 7);
+            assert_eq!(v1.etag.as_deref(), Some(compute_md5(b"{\"v\":1}").as_str()));
+            assert_eq!(v1.content_type.as_deref(), Some("application/json"));
+            assert_eq!(v1.storage_backend, storage.storage_type());
+
+            let v2 = storage
+                .write_file("contract/a.json", b"{\"v\":22}", Some("text/plain"), ctx)
+                .await
+                .unwrap();
+            assert_eq!(v2.file_id, v1.file_id);
+            assert_eq!(v2.size, 8);
+            assert_eq!(
+                storage.read_file("contract/a.json", ctx).await.unwrap(),
+                b"{\"v\":22}"
+            );
+            let meta = storage
+                .get_file_metadata("contract/a.json", ctx)
+                .await
+                .unwrap();
+            assert_eq!(meta.content_type.as_deref(), Some("text/plain"));
+
+            let mut stream = storage
+                .open_file_stream("contract/a.json", ctx)
+                .await
+                .unwrap()
+                .expect("backend supports streaming");
+            let mut streamed = Vec::new();
+            stream.reader.read_to_end(&mut streamed).await.unwrap();
+            assert_eq!(streamed, b"{\"v\":22}");
+
+            assert!(storage.delete_file("contract/a.json", ctx).await.unwrap());
+            assert!(!storage.file_exists("contract/a.json", ctx).await.unwrap());
+            assert!(storage.read_file("contract/a.json", ctx).await.is_err());
+            assert!(!storage.delete_file("contract/a.json", ctx).await.unwrap());
+        }
+
+        async fn assert_env_isolation(storage: &dyn FileStorage, ctx: &FileStorageContext) {
+            let mut other = ctx.clone();
+            other.env_id = Some(Uuid::now_v7());
+            storage
+                .write_file("iso/x.txt", b"mine", None, ctx)
+                .await
+                .unwrap();
+            assert!(storage.read_file("iso/x.txt", &other).await.is_err());
+            assert!(storage.list_files("iso/", &other).await.unwrap().is_empty());
+            assert_eq!(
+                storage
+                    .list_files_bounded("iso/", 1, ctx)
+                    .await
+                    .unwrap()
+                    .len(),
+                1
+            );
+            storage.delete_file("iso/x.txt", ctx).await.unwrap();
+        }
+
+        async fn assert_conditional_writes(storage: &dyn FileStorage, ctx: &FileStorageContext) {
+            let v1 = storage
+                .write_file_if("cas/app.db", b"one", None, None, ctx)
+                .await
+                .unwrap()
+                .expect("create wins");
+            assert!(
+                storage
+                    .write_file_if("cas/app.db", b"intruder", None, None, ctx)
+                    .await
+                    .unwrap()
+                    .is_none()
+            );
+            let v2 = storage
+                .write_file_if("cas/app.db", b"two", None, v1.etag.as_deref(), ctx)
+                .await
+                .unwrap()
+                .expect("matching etag wins");
+            assert_ne!(v2.storage_path, v1.storage_path);
+            assert!(
+                storage
+                    .write_file_if("cas/app.db", b"stale", None, v1.etag.as_deref(), ctx)
+                    .await
+                    .unwrap()
+                    .is_none()
+            );
+            assert_eq!(storage.read_file("cas/app.db", ctx).await.unwrap(), b"two");
+
+            // Racing writers with the same expectation: exactly one wins and
+            // the committed bytes match the winner.
+            let (a, b) = tokio::join!(
+                storage.write_file_if("cas/app.db", b"racer-a", None, v2.etag.as_deref(), ctx),
+                storage.write_file_if("cas/app.db", b"racer-b", None, v2.etag.as_deref(), ctx),
+            );
+            let winners: Vec<_> = [a.unwrap(), b.unwrap()].into_iter().flatten().collect();
+            assert_eq!(winners.len(), 1);
+            let committed = storage.read_file("cas/app.db", ctx).await.unwrap();
+            assert_eq!(Some(compute_md5(&committed)), winners[0].etag);
+            storage.delete_file("cas/app.db", ctx).await.unwrap();
+        }
+
+        async fn assert_blob_bytes(storage: &dyn FileStorage, ctx: &FileStorageContext) {
+            let key = format!("blobs/blake3/ab/{}", Uuid::new_v4().simple());
+            storage
+                .write_blob_bytes(&key, b"blob", None, ctx)
+                .await
+                .unwrap();
+            // Idempotent for content-addressed keys.
+            storage
+                .write_blob_bytes(&key, b"blob", None, ctx)
+                .await
+                .unwrap();
+            assert_eq!(storage.read_blob_bytes(&key, ctx).await.unwrap(), b"blob");
+            // Blob bytes never create user-visible file records.
+            assert!(storage.list_files("blobs", ctx).await.unwrap().is_empty());
+            storage.delete_blob_bytes(&key, ctx).await.unwrap();
+            storage.delete_blob_bytes(&key, ctx).await.unwrap();
+            assert!(storage.read_blob_bytes(&key, ctx).await.is_err());
+        }
+
+        async fn assert_multipart(storage: &dyn FileStorage, ctx: &FileStorageContext, parts: i32) {
+            let path = format!("mp/{}.bin", Uuid::new_v4().simple());
+            let id = storage
+                .initiate_multipart_upload(&path, Some("application/octet-stream"), ctx)
+                .await
+                .unwrap();
+            // Upload out of order; part 1 is replaced and only the second
+            // token is selected by the manifest.
+            let mut manifest = Vec::new();
+            for n in (1..=parts).rev() {
+                if n == 1 {
+                    storage
+                        .upload_part(&id, &path, 1, b"old", ctx)
+                        .await
+                        .unwrap();
+                }
+                let token = storage
+                    .upload_part(&id, &path, n, &[n as u8; 3], ctx)
+                    .await
+                    .unwrap();
+                manifest.push((n, token));
+            }
+            manifest.reverse();
+            let expected: Vec<u8> = (1..=parts).flat_map(|n| [n as u8; 3]).collect();
+            let meta = storage
+                .complete_multipart_upload(&id, &path, &manifest, expected.len() as i64, None, ctx)
+                .await
+                .unwrap();
+            assert_eq!(meta.size, expected.len() as i64);
+            assert_eq!(storage.read_file(&path, ctx).await.unwrap(), expected);
+            storage.delete_file(&path, ctx).await.unwrap();
+        }
+
+        async fn assert_multipart_abort(storage: &dyn FileStorage, ctx: &FileStorageContext) {
+            let path = "mp/aborted.bin";
+            let id = storage
+                .initiate_multipart_upload(path, None, ctx)
+                .await
+                .unwrap();
+            let token = storage
+                .upload_part(&id, path, 1, b"abc", ctx)
+                .await
+                .unwrap();
+            storage
+                .abort_multipart_upload(&id, path, ctx)
+                .await
+                .unwrap();
+            assert!(
+                storage
+                    .complete_multipart_upload(&id, path, &[(1, token)], 3, None, ctx)
+                    .await
+                    .is_err()
+            );
+            assert!(!storage.file_exists(path, ctx).await.unwrap());
+        }
+
+        #[tokio::test]
+        async fn local_contract() {
+            let (storage, ctx, _dir) = setup_test_storage().await;
+            assert_write_read_overwrite_delete(&storage, &ctx).await;
+            assert_env_isolation(&storage, &ctx).await;
+            assert_conditional_writes(&storage, &ctx).await;
+            assert_blob_bytes(&storage, &ctx).await;
+            assert_multipart(&storage, &ctx, 3).await;
+            assert_multipart_abort(&storage, &ctx).await;
+        }
+
+        #[test]
+        fn backend_names_are_strict() {
+            assert_eq!(
+                parse_storage_backend_name("", "t").unwrap(),
+                FileStorageType::Local
+            );
+            assert_eq!(
+                parse_storage_backend_name("GCS", "t").unwrap(),
+                FileStorageType::Gcs
+            );
+            assert_eq!(
+                parse_storage_backend_name("s3", "t").unwrap(),
+                FileStorageType::S3
+            );
+            assert!(parse_storage_backend_name("gcp", "t").is_err());
+            assert!(parse_storage_backend_name("filesystem", "t").is_err());
+        }
+
+        #[test]
+        fn foreign_backend_records_are_refused() {
+            assert!(ensure_record_backend("gcs", "gcs", "a").is_ok());
+            let err = ensure_record_backend("s3", "gcs", "a").unwrap_err();
+            assert!(err.contains("'s3'") && err.contains("'gcs'"));
+        }
+
+        #[cfg(feature = "gcs-storage")]
+        async fn gcs_storage() -> Option<gcs::GcsFileStorage> {
+            let bucket = std::env::var("HOT_TEST_GCS_BUCKET").ok()?;
+            let prefix = format!("hot-contract-tests/{}", Uuid::new_v4().simple());
+            let conf = crate::val!({"file": {"gcs": {"bucket": bucket, "prefix": prefix}}});
+            let config = crate::gcs::GcsConfig::resolve(&conf, "file", |_| None).unwrap();
+            let client = crate::gcs::GcsClient::connect(&config).await.unwrap();
+            Some(gcs::GcsFileStorage::new(client))
+        }
+
+        #[cfg(feature = "gcs-storage")]
+        #[tokio::test]
+        async fn gcs_contract_against_real_bucket() {
+            let Some(storage) = gcs_storage().await else {
+                eprintln!("skipping: HOT_TEST_GCS_BUCKET not set");
+                return;
+            };
+            let (_local, ctx, _dir) = setup_test_storage().await;
+            assert_write_read_overwrite_delete(&storage, &ctx).await;
+            assert_env_isolation(&storage, &ctx).await;
+            assert_conditional_writes(&storage, &ctx).await;
+            assert_blob_bytes(&storage, &ctx).await;
+            // More than 32 parts exercises staged composition.
+            assert_multipart(&storage, &ctx, 70).await;
+            assert_multipart_abort(&storage, &ctx).await;
+        }
+
+        #[cfg(feature = "gcs-storage")]
+        #[tokio::test]
+        async fn gcs_multipart_completion_is_retryable_and_validates_manifest() {
+            let Some(storage) = gcs_storage().await else {
+                eprintln!("skipping: HOT_TEST_GCS_BUCKET not set");
+                return;
+            };
+            let (_local, ctx, _dir) = setup_test_storage().await;
+            let path = "mp/retry.bin";
+            let id = storage
+                .initiate_multipart_upload(path, None, &ctx)
+                .await
+                .unwrap();
+            let t1 = storage
+                .upload_part(&id, path, 1, b"aa", &ctx)
+                .await
+                .unwrap();
+            let t2 = storage
+                .upload_part(&id, path, 2, b"bb", &ctx)
+                .await
+                .unwrap();
+
+            // Invalid manifests are rejected before any composition.
+            let bogus = [(1, "bogus".to_string())];
+            assert!(
+                storage
+                    .complete_multipart_upload(&id, path, &bogus, 2, None, &ctx)
+                    .await
+                    .is_err()
+            );
+            let duplicate = [(1, t1.clone()), (1, t2.clone())];
+            assert!(
+                storage
+                    .complete_multipart_upload(&id, path, &duplicate, 4, None, &ctx)
+                    .await
+                    .is_err()
+            );
+
+            let manifest = [(1, t1), (2, t2)];
+            let first = storage
+                .complete_multipart_upload(&id, path, &manifest, 4, None, &ctx)
+                .await
+                .unwrap();
+            // A retried completion (lost response, restarted instance) finds
+            // the composed object even though staging was cleaned up.
+            let retried = storage
+                .complete_multipart_upload(&id, path, &manifest, 4, None, &ctx)
+                .await
+                .unwrap();
+            assert_eq!(first.storage_path, retried.storage_path);
+            assert_eq!(storage.read_file(path, &ctx).await.unwrap(), b"aabb");
+            storage.delete_file(path, &ctx).await.unwrap();
+        }
     }
 }

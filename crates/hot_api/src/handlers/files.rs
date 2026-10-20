@@ -32,6 +32,28 @@ fn effective_file_max_bytes(conf: &hot::val::Val, plan_max: i64) -> i64 {
     )
 }
 
+/// Refuse to route a persisted upload through a backend other than the one
+/// that created it. Switching backends does not migrate in-flight uploads.
+fn ensure_upload_backend(
+    record: &file_upload::FileUploadRecord,
+    file_storage: &SharedFileStorage,
+) -> Result<(), (StatusCode, Json<ApiErrorResponse>)> {
+    if record.storage_backend == file_storage.storage_type() {
+        return Ok(());
+    }
+    Err((
+        StatusCode::CONFLICT,
+        Json(ApiErrorResponse::new(
+            "upload_backend_mismatch",
+            format!(
+                "Upload was started on the '{}' storage backend, but this installation now uses '{}'; start a new upload",
+                record.storage_backend,
+                file_storage.storage_type()
+            ),
+        )),
+    ))
+}
+
 fn file_response_from_record(record: &FileRecord) -> FileResponse {
     FileResponse {
         file_id: record.file_id,
@@ -560,6 +582,7 @@ pub async fn upload_part_handler(
                 Json(ApiErrorResponse::not_found(&format!("Upload: {}", e))),
             )
         })?;
+    ensure_upload_backend(&record, &file_storage)?;
 
     // Non-final parts must meet S3 minimum size (5 MB)
     if body.len() < MIN_PART_SIZE
@@ -705,8 +728,11 @@ pub async fn complete_upload(
                 Json(ApiErrorResponse::not_found(&format!("Upload: {}", e))),
             )
         })?;
+    ensure_upload_backend(&record, &file_storage)?;
 
-    if record.status != "pending" {
+    // `completing` means an earlier completion attempt was interrupted
+    // (crash, lost response, failed commit); completion resumes it.
+    if record.status != "pending" && record.status != "completing" {
         return Err((
             StatusCode::CONFLICT,
             Json(ApiErrorResponse::new(
@@ -788,7 +814,18 @@ pub async fn complete_upload(
         api_key.created_by_user_id,
     );
 
-    file_storage
+    // Claim the upload before assembling bytes so a concurrent abort or the
+    // expiry sweep cannot delete them mid-completion.
+    file_upload::begin_completion(&db, upload_id, org_id, api_key.env_id)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::CONFLICT,
+                Json(ApiErrorResponse::new("upload_not_pending", e)),
+            )
+        })?;
+
+    if let Err(e) = file_storage
         .complete_multipart_upload(
             backend_upload_id,
             &record.path,
@@ -798,15 +835,21 @@ pub async fn complete_upload(
             &ctx,
         )
         .await
-        .map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ApiErrorResponse::internal_error(&format!(
-                    "Failed to complete upload: {}",
-                    e
-                ))),
-            )
-        })?;
+    {
+        // Hand the upload back so the client can retry or abort it.
+        if let Err(release_error) =
+            file_upload::release_completion(&db, upload_id, org_id, api_key.env_id).await
+        {
+            tracing::warn!(%upload_id, "Failed to release upload completion: {}", release_error);
+        }
+        return Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ApiErrorResponse::internal_error(&format!(
+                "Failed to complete upload: {}",
+                e
+            ))),
+        ));
+    }
 
     file_upload::complete_upload(&db, upload_id, org_id, api_key.env_id)
         .await
@@ -864,6 +907,7 @@ pub async fn abort_upload(
                 Json(ApiErrorResponse::not_found(&format!("Upload: {}", e))),
             )
         })?;
+    ensure_upload_backend(&record, &file_storage)?;
 
     if record.status != "pending" {
         return Err((

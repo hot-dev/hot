@@ -3161,7 +3161,14 @@ async fn build_file_app() -> (axum::Router, String, tempfile::TempDir) {
         temp_dir.path().to_path_buf(),
     )));
 
-    let api_routes = axum::Router::new()
+    (file_router(state, file_storage), api_key, temp_dir)
+}
+
+fn file_router(
+    state: hot_api::ApiStateData,
+    file_storage: Arc<Box<dyn FileStorage>>,
+) -> axum::Router {
+    axum::Router::new()
         .route(
             "/v1/files",
             axum::routing::get(hot_api::handlers::list_files),
@@ -3200,9 +3207,227 @@ async fn build_file_app() -> (axum::Router, String, tempfile::TempDir) {
         ))
         .layer(axum::extract::DefaultBodyLimit::max(300 * 1024 * 1024))
         .layer(Extension(file_storage))
-        .with_state(state);
+        .with_state(state)
+}
 
-    (api_routes, api_key, temp_dir)
+/// Local storage that reports another backend id, standing in for an
+/// installation whose configured backend changed after uploads began.
+struct RelabeledStorage(LocalFileStorage, &'static str);
+
+#[async_trait::async_trait]
+impl FileStorage for RelabeledStorage {
+    async fn write_file(
+        &self,
+        path: &str,
+        content: &[u8],
+        content_type: Option<&str>,
+        ctx: &hot::file_storage::FileStorageContext,
+    ) -> Result<hot::file_storage::FileMetadata, String> {
+        self.0.write_file(path, content, content_type, ctx).await
+    }
+    async fn write_file_if(
+        &self,
+        path: &str,
+        content: &[u8],
+        content_type: Option<&str>,
+        expected_etag: Option<&str>,
+        ctx: &hot::file_storage::FileStorageContext,
+    ) -> Result<Option<hot::file_storage::FileMetadata>, String> {
+        self.0
+            .write_file_if(path, content, content_type, expected_etag, ctx)
+            .await
+    }
+    async fn read_file(
+        &self,
+        path: &str,
+        ctx: &hot::file_storage::FileStorageContext,
+    ) -> Result<Vec<u8>, String> {
+        self.0.read_file(path, ctx).await
+    }
+    async fn delete_file(
+        &self,
+        path: &str,
+        ctx: &hot::file_storage::FileStorageContext,
+    ) -> Result<bool, String> {
+        self.0.delete_file(path, ctx).await
+    }
+    async fn file_exists(
+        &self,
+        path: &str,
+        ctx: &hot::file_storage::FileStorageContext,
+    ) -> Result<bool, String> {
+        self.0.file_exists(path, ctx).await
+    }
+    async fn get_file_metadata(
+        &self,
+        path: &str,
+        ctx: &hot::file_storage::FileStorageContext,
+    ) -> Result<hot::file_storage::FileMetadata, String> {
+        self.0.get_file_metadata(path, ctx).await
+    }
+    async fn list_files(
+        &self,
+        prefix: &str,
+        ctx: &hot::file_storage::FileStorageContext,
+    ) -> Result<Vec<hot::file_storage::FileMetadata>, String> {
+        self.0.list_files(prefix, ctx).await
+    }
+    fn storage_type(&self) -> &str {
+        self.1
+    }
+    async fn initiate_multipart_upload(
+        &self,
+        path: &str,
+        content_type: Option<&str>,
+        ctx: &hot::file_storage::FileStorageContext,
+    ) -> Result<String, String> {
+        self.0
+            .initiate_multipart_upload(path, content_type, ctx)
+            .await
+    }
+    async fn upload_part(
+        &self,
+        backend_upload_id: &str,
+        path: &str,
+        part_number: i32,
+        content: &[u8],
+        ctx: &hot::file_storage::FileStorageContext,
+    ) -> Result<String, String> {
+        self.0
+            .upload_part(backend_upload_id, path, part_number, content, ctx)
+            .await
+    }
+    async fn complete_multipart_upload(
+        &self,
+        _backend_upload_id: &str,
+        _path: &str,
+        _parts: &[(i32, String)],
+        _total_size: i64,
+        _content_type: Option<&str>,
+        _ctx: &hot::file_storage::FileStorageContext,
+    ) -> Result<hot::file_storage::FileMetadata, String> {
+        Err("simulated completion failure".to_string())
+    }
+    async fn abort_multipart_upload(
+        &self,
+        backend_upload_id: &str,
+        path: &str,
+        ctx: &hot::file_storage::FileStorageContext,
+    ) -> Result<(), String> {
+        self.0
+            .abort_multipart_upload(backend_upload_id, path, ctx)
+            .await
+    }
+}
+
+#[tokio::test]
+async fn test_multipart_upload_refuses_other_backend() {
+    let state = create_test_db().await;
+    let (_, api_key) = create_test_api_key(&state.0).await;
+    let temp_dir = tempfile::TempDir::new().unwrap();
+    let local = file_router(
+        state.clone(),
+        Arc::new(Box::new(LocalFileStorage::new(
+            temp_dir.path().to_path_buf(),
+        ))),
+    );
+    let relabeled = file_router(
+        state,
+        Arc::new(Box::new(RelabeledStorage(
+            LocalFileStorage::new(temp_dir.path().to_path_buf()),
+            "gcs",
+        ))),
+    );
+
+    let (status, json) = make_request(
+        &local,
+        Method::POST,
+        "/v1/files/uploads",
+        &api_key,
+        Some(json!({"path": "moved/backend.bin", "expected_size": 10})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let upload_id = json["data"]["upload_id"].as_str().unwrap().to_string();
+
+    // A local upload is never routed through the newly configured backend.
+    let (status, _) = make_raw_request(
+        &relabeled,
+        Method::PUT,
+        &format!("/v1/files/uploads/{}/1", upload_id),
+        &api_key,
+        "application/octet-stream",
+        vec![1u8; 10],
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    for (method, uri) in [
+        (
+            Method::POST,
+            format!("/v1/files/uploads/{}/complete", upload_id),
+        ),
+        (Method::DELETE, format!("/v1/files/uploads/{}", upload_id)),
+    ] {
+        let (status, json) = make_request(&relabeled, method, &uri, &api_key, None).await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(json["error"]["code"], "upload_backend_mismatch");
+    }
+}
+
+#[tokio::test]
+async fn test_multipart_failed_completion_returns_upload_to_pending() {
+    let state = create_test_db().await;
+    let (_, api_key) = create_test_api_key(&state.0).await;
+    let temp_dir = tempfile::TempDir::new().unwrap();
+    // Same backend id as local, but completion always fails.
+    let app = file_router(
+        state,
+        Arc::new(Box::new(RelabeledStorage(
+            LocalFileStorage::new(temp_dir.path().to_path_buf()),
+            "local",
+        ))),
+    );
+
+    let (_, json) = make_request(
+        &app,
+        Method::POST,
+        "/v1/files/uploads",
+        &api_key,
+        Some(json!({"path": "flaky/complete.bin", "expected_size": 10})),
+    )
+    .await;
+    let upload_id = json["data"]["upload_id"].as_str().unwrap().to_string();
+    let (status, _) = make_raw_request(
+        &app,
+        Method::PUT,
+        &format!("/v1/files/uploads/{}/1", upload_id),
+        &api_key,
+        "application/octet-stream",
+        vec![1u8; 10],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let (status, _) = make_request(
+        &app,
+        Method::POST,
+        &format!("/v1/files/uploads/{}/complete", upload_id),
+        &api_key,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+
+    // The completion claim was released, so the client can still abort.
+    let (status, _) = make_request(
+        &app,
+        Method::DELETE,
+        &format!("/v1/files/uploads/{}", upload_id),
+        &api_key,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
 }
 
 /// Helper to make raw (non-JSON) authenticated requests

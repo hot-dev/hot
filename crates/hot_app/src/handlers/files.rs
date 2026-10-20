@@ -151,6 +151,7 @@ pub async fn file_download_handler(
     Path(file_id): Path<Uuid>,
     State(db): State<Arc<DatabasePool>>,
     axum::extract::Extension(session): axum::extract::Extension<Session>,
+    axum::extract::Extension(conf): axum::extract::Extension<hot::val::Val>,
 ) -> impl IntoResponse {
     // Get org_id and env_id for access check
     let org_id = match session.current_org_id() {
@@ -175,35 +176,48 @@ pub async fn file_download_handler(
         }
     };
 
-    // Read file content from storage based on backend type
-    let content = match file.storage_backend.as_str() {
-        "local" => match tokio::fs::read(&file.storage_path).await {
-            Ok(bytes) => bytes,
-            Err(e) => {
-                tracing::error!("Failed to read local file {}: {}", file.storage_path, e);
-                return Response::builder()
-                    .status(StatusCode::INTERNAL_SERVER_ERROR)
-                    .body(Body::from("Failed to read file"))
-                    .unwrap();
+    // Read through the configured storage backend. It re-authorizes the
+    // path against the database and refuses records owned by a different
+    // backend instead of reading them with ambient credentials.
+    let storage = match download_storage(&conf).await {
+        Ok(storage) => storage,
+        Err(e) => {
+            tracing::error!("File storage unavailable for download: {}", e);
+            return Response::builder()
+                .status(StatusCode::SERVICE_UNAVAILABLE)
+                .body(Body::from("File storage unavailable"))
+                .unwrap();
+        }
+    };
+    let ctx = hot::file_storage::FileStorageContext::minimal(
+        db.clone(),
+        file.org_id,
+        file.env_id,
+        file.created_by_user_id,
+    );
+    let (body, content_length) = match storage.open_file_stream(&file.path, &ctx).await {
+        Ok(Some(stream)) => (
+            Body::from_stream(reader_stream(stream.reader)),
+            stream.metadata.size,
+        ),
+        Ok(None) => match storage.read_file(&file.path, &ctx).await {
+            Ok(bytes) => {
+                let len = bytes.len() as i64;
+                (Body::from(bytes), len)
             }
-        },
-        "s3" => match read_s3_file(&file.storage_path).await {
-            Ok(bytes) => bytes,
             Err(e) => {
-                tracing::error!("Failed to read S3 file {}: {}", file.storage_path, e);
+                tracing::error!("Failed to read file {}: {}", file_id, e);
                 return Response::builder()
                     .status(StatusCode::INTERNAL_SERVER_ERROR)
                     .body(Body::from("Failed to read file from storage"))
                     .unwrap();
             }
         },
-        other => {
-            tracing::error!("Unsupported storage backend for download: {}", other);
+        Err(e) => {
+            tracing::error!("Failed to open file {}: {}", file_id, e);
             return Response::builder()
-                .status(StatusCode::NOT_IMPLEMENTED)
-                .body(Body::from(
-                    "Download not supported for this storage backend",
-                ))
+                .status(StatusCode::INTERNAL_SERVER_ERROR)
+                .body(Body::from("Failed to read file from storage"))
                 .unwrap();
         }
     };
@@ -223,9 +237,43 @@ pub async fn file_download_handler(
             header::CONTENT_DISPOSITION,
             format!("attachment; filename=\"{}\"", filename),
         )
-        .header(header::CONTENT_LENGTH, content.len())
-        .body(Body::from(content))
+        .header(header::CONTENT_LENGTH, content_length)
+        .body(body)
         .unwrap()
+}
+
+/// File storage shared by download requests (clients hold connection pools).
+static DOWNLOAD_STORAGE: tokio::sync::OnceCell<Arc<dyn hot::file_storage::FileStorage>> =
+    tokio::sync::OnceCell::const_new();
+
+async fn download_storage(
+    conf: &hot::val::Val,
+) -> Result<Arc<dyn hot::file_storage::FileStorage>, String> {
+    DOWNLOAD_STORAGE
+        .get_or_try_init(|| async {
+            hot::file_storage::file_storage_from_config(conf)
+                .await
+                .map(Arc::from)
+        })
+        .await
+        .cloned()
+}
+
+/// Forward an async reader as a body stream in bounded chunks.
+fn reader_stream(
+    reader: std::pin::Pin<Box<dyn tokio::io::AsyncRead + Send>>,
+) -> impl futures::Stream<Item = std::io::Result<bytes::Bytes>> + Send {
+    futures::stream::unfold(reader, |mut reader| async move {
+        let mut buf = vec![0u8; 64 * 1024];
+        match tokio::io::AsyncReadExt::read(&mut reader, &mut buf).await {
+            Ok(0) => None,
+            Ok(n) => {
+                buf.truncate(n);
+                Some((Ok(bytes::Bytes::from(buf)), reader))
+            }
+            Err(e) => Some((Err(e), reader)),
+        }
+    })
 }
 
 /// File data for JSON response
@@ -338,36 +386,4 @@ pub async fn run_files_handler(
         files: files_json,
         total,
     })
-}
-
-/// Read a file from S3 given a storage_path like `s3://bucket/key`.
-async fn read_s3_file(storage_path: &str) -> Result<Vec<u8>, String> {
-    let path = storage_path
-        .strip_prefix("s3://")
-        .ok_or_else(|| format!("Invalid S3 storage path: {storage_path}"))?;
-
-    let (bucket, key) = path
-        .split_once('/')
-        .ok_or_else(|| format!("Invalid S3 storage path (no key): {storage_path}"))?;
-
-    let config = aws_config::defaults(aws_config::BehaviorVersion::latest())
-        .load()
-        .await;
-    let client = aws_sdk_s3::Client::new(&config);
-
-    let resp = client
-        .get_object()
-        .bucket(bucket)
-        .key(key)
-        .send()
-        .await
-        .map_err(|e| format!("S3 GetObject failed: {e}"))?;
-
-    let bytes = resp
-        .body
-        .collect()
-        .await
-        .map_err(|e| format!("S3 body read failed: {e}"))?;
-
-    Ok(bytes.to_vec())
 }
