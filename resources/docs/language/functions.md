@@ -126,20 +126,32 @@ For multi-parameter lambdas, use `%1`, `%2`, etc. (bare `%` is the same as `%1`)
 reduce([1, 2, 3], add(%1, %2), 0)  // 6
 ```
 
-#### Explicit Lambda Boundary: `%(expr)`
+#### Where `%` Binds
 
-When `%` appears inside nested function calls, the implicit lambda wraps at the outermost call boundary. If that's not what you want, use `%(expr)` to mark exactly where the lambda should be created:
+A `%` binds to the nearest enclosing argument whose parameter is a function (`Fn`). Calls without a function parameter are transparent, so these need no extra syntax:
 
 ```hot
-// Without %(expr) — implicit wrapping binds at sort, not map (wrong)
-// sort(map(items, %.value))
-
-// With %(expr) — lambda wraps at map (correct)
-sort(map(items, %(%.value)))
-length(filter(items, %(gt(%, 3))))
+sort(map(items, %.value))        // the lambda wraps at map's function argument
+length(filter(items, gt(%, 3)))  // the lambda wraps at filter's function argument
 ```
 
-Rule of thumb: if `%` is an argument to a function that is **itself** an argument to another function, use `%(...)`.
+If no enclosing argument takes a function, the `%` is a compile error.
+
+An implicit `%` lambda can't contain another one. In `map(groups, filter(%, gt(%, 0)))` the first `%` would be each group and the second each element of a group, so Hot rejects it with a `nested-placeholder` error. Write the inner function explicitly:
+
+```hot
+map(groups, filter(%, %(gt(%, 0))))
+map(groups, filter(%, (n) { gt(n, 0) }))
+```
+
+#### Explicit Lambda Boundary: `%(expr)`
+
+`%(expr)` creates a lambda exactly where you write it, and every `%` inside it is that lambda's parameter. Use it for a lambda value where no argument takes a function, or for an inner function as above:
+
+```hot
+square %(mul(%, %))
+map([1, 2, 3], square)  // [1, 4, 9]
+```
 
 Use explicit `(params) { body }` when:
 - The lambda has multiple statements

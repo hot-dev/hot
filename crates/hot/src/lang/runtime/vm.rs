@@ -3413,19 +3413,31 @@ impl VirtualMachine {
                 let dest_val = self.get_register(dest)?.clone();
                 let source_val = self.get_register(source)?.clone();
 
-                match (dest_val, source_val) {
-                    (Val::Map(mut dest_map), Val::Map(source_map)) => {
-                        // Merge source map into destination map
-                        for (k, v) in source_map.iter() {
+                // A spread contributes a constructed value's fields, not its
+                // internal `$type`/`$val` wrapper keys.
+                match (dest_val, crate::val::map_spread_entries(&source_val)) {
+                    (Val::Map(mut dest_map), Some(entries)) => {
+                        for (k, v) in entries.iter() {
                             dest_map.insert(k.clone(), v.clone());
                         }
                         self.set_register(dest, Val::Map(dest_map))?;
                     }
-                    (dest, source) => {
-                        return Err(VmError::runtime(format!(
-                            "MergeMaps requires two maps, got: {:?} and {:?}",
-                            dest, source
-                        )));
+                    (dest, entries) => {
+                        let message = match &source_val {
+                            Val::Map(m)
+                                if entries.is_none() && crate::val::is_tagged_wrapper(m) =>
+                            {
+                                format!(
+                                    "Cannot spread a {} value into a map: it has no fields",
+                                    crate::val::tagged_type_name(m).unwrap_or("typed")
+                                )
+                            }
+                            _ => format!(
+                                "MergeMaps requires two maps, got: {:?} and {:?}",
+                                dest, source_val
+                            ),
+                        };
+                        return Err(VmError::runtime(message));
                     }
                 }
 
@@ -9375,30 +9387,9 @@ impl VirtualMachine {
     }
 
     /// Return true when a map uses Hot's tagged JSON wrapper representation.
-    ///
-    /// A data-bearing wrapper consists of `$type`, `$val`, and the one defined
-    /// wrapper-metadata member, `$origin`. A unit enum wrapper consists only of
-    /// `$type`, whose local name has the `Enum.Variant` form. Rejecting every
-    /// other sibling field keeps foreign maps stable instead of guessing that
-    /// arbitrary `$...` application data is Hot metadata.
+    /// See [`crate::val::is_tagged_wrapper`].
     fn is_tagged_wrapper(&self, map: &IndexMap<Val, Val>) -> bool {
-        let Some(Val::Str(type_name)) = map.get(&Val::from("$type")) else {
-            return false;
-        };
-        if !type_name.starts_with("::") {
-            return false;
-        }
-        if map.contains_key(&Val::from("$val")) {
-            return map.keys().all(|key| {
-                matches!(key, Val::Str(name) if matches!(&**name, "$type" | "$val" | "$origin"))
-            });
-        }
-
-        map.len() == 1
-            && type_name
-                .rsplit('/')
-                .next()
-                .is_some_and(|local_name| local_name.contains('.'))
+        crate::val::is_tagged_wrapper(map)
     }
 
     /// Set a property of a value (supports both map keys and vector indices)
