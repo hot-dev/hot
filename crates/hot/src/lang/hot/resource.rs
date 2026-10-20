@@ -166,7 +166,19 @@ pub fn build_registry_from_manifest(
     manifest_resources: &Val,
     extract_dir: &Path,
 ) -> ResourceRegistry {
+    let Ok(extract_dir) = extract_dir.canonicalize() else {
+        return ResourceRegistry::default();
+    };
     let resources_root = extract_dir.join(crate::bundle::RESOURCE_BUNDLE_PREFIX);
+    // The root itself is untrusted too: a cached extraction must not redirect
+    // its entire resource tree into another build or the host filesystem.
+    if resources_root.canonicalize().ok().as_ref() != Some(&resources_root)
+        || std::fs::symlink_metadata(&resources_root)
+            .map(|metadata| metadata.file_type().is_symlink())
+            .unwrap_or(true)
+    {
+        return ResourceRegistry::default();
+    }
     let mut entries: IndexMap<String, ResourceEntry> = IndexMap::new();
 
     if let Val::Vec(items) = manifest_resources {
@@ -190,7 +202,13 @@ pub fn build_registry_from_manifest(
                 Some(Val::Int(n)) => (*n).max(0) as u64,
                 _ => 0,
             };
-            let abs_path = resources_root.join(&rel_path);
+            let abs_path = match manifest_resource_path(&resources_root, &rel_path) {
+                Ok(path) => path,
+                Err(error) => {
+                    tracing::warn!(%rel_path, %error, "Skipping unsafe bundle resource");
+                    continue;
+                }
+            };
             entries.insert(
                 rel_path.clone(),
                 ResourceEntry {
@@ -214,6 +232,58 @@ pub fn build_registry_from_manifest(
         conflicts: Vec::new(),
         roots: vec![resources_root],
     }
+}
+
+fn manifest_resource_path(root: &Path, relative: &str) -> Result<PathBuf, String> {
+    // Validate portable manifest paths before joining: an absolute path
+    // replaces PathBuf's root, and parent components can escape it.
+    if relative.is_empty()
+        || relative.contains('\\')
+        || relative
+            .split('/')
+            .any(|part| matches!(part, "" | "." | ".."))
+        || Path::new(relative)
+            .components()
+            .any(|part| !matches!(part, std::path::Component::Normal(_)))
+    {
+        return Err("Resource path must be a normal relative path".into());
+    }
+    if root.canonicalize().ok().as_deref() != Some(root)
+        || std::fs::symlink_metadata(root)
+            .map(|metadata| metadata.file_type().is_symlink())
+            .unwrap_or(true)
+    {
+        return Err("Resource root is unavailable or redirected".into());
+    }
+    let mut path = root.to_path_buf();
+    for component in Path::new(relative).components() {
+        path.push(component.as_os_str());
+        let metadata = std::fs::symlink_metadata(&path).map_err(|error| error.to_string())?;
+        if metadata.file_type().is_symlink() {
+            return Err("Resource path traverses a symlink".into());
+        }
+    }
+    let canonical = path.canonicalize().map_err(|error| error.to_string())?;
+    if !canonical.starts_with(root) || !canonical.is_file() {
+        return Err("Resource path is not a file inside its bundle".into());
+    }
+    Ok(canonical)
+}
+
+fn resource_path_for_read(
+    registry: &ResourceRegistry,
+    entry: &ResourceEntry,
+) -> Result<PathBuf, String> {
+    if !entry.from_manifest {
+        return Ok(entry.abs_path.clone());
+    }
+    // Recheck cached entries before each read so replacing a file or parent
+    // directory with a symlink after registry hydration cannot escape scope.
+    let root = registry
+        .roots
+        .first()
+        .ok_or("Bundle resource root is missing")?;
+    manifest_resource_path(root, &entry.rel_path)
 }
 
 /// Build a registry by walking the supplied roots, honoring .gitignore /
@@ -360,7 +430,9 @@ pub fn load(args: &[Val]) -> HotResult<Val> {
     };
     let registry = get_registry();
     match registry.entries.get(&rel) {
-        Some(entry) => match std::fs::read(&entry.abs_path) {
+        Some(entry) => match resource_path_for_read(&registry, entry)
+            .and_then(|path| std::fs::read(path).map_err(|error| error.to_string()))
+        {
             Ok(bytes) => HotResult::Ok(Val::Bytes(bytes)),
             Err(e) => HotResult::Err(Val::from(format!(
                 "::hot::resource/load: failed to read '{}': {}",
@@ -383,7 +455,9 @@ pub fn load_str(args: &[Val]) -> HotResult<Val> {
     };
     let registry = get_registry();
     match registry.entries.get(&rel) {
-        Some(entry) => match std::fs::read_to_string(&entry.abs_path) {
+        Some(entry) => match resource_path_for_read(&registry, entry)
+            .and_then(|path| std::fs::read_to_string(path).map_err(|error| error.to_string()))
+        {
             Ok(s) => HotResult::Ok(Val::from(s)),
             Err(e) => HotResult::Err(Val::from(format!(
                 "::hot::resource/load-str: failed to read '{}': {}",
@@ -499,6 +573,77 @@ mod tests {
         assert_eq!(registry.entries.len(), 2);
         assert!(registry.entries.contains_key("hello.txt"));
         assert!(registry.entries.contains_key("nested/deep.md"));
+    }
+
+    #[test]
+    fn bundle_resource_manifest_cannot_escape_its_root() {
+        let directory = tempfile::tempdir().unwrap();
+        let bundle = directory.path().join("bundle");
+        std::fs::create_dir_all(bundle.join("resources")).unwrap();
+        std::fs::write(bundle.join("resources/safe.txt"), "bundle").unwrap();
+        let secret = directory.path().join("host-secret.txt");
+        std::fs::write(&secret, "host").unwrap();
+        let manifest = crate::val!([
+            {"path": "safe.txt"},
+            {"path": "../../host-secret.txt"},
+            {"path": secret.to_string_lossy().to_string()},
+            {"path": "..\\..\\host-secret.txt"},
+        ]);
+        let registry = build_registry_from_manifest(&manifest, &bundle);
+        assert_eq!(registry.entries.len(), 1);
+        let _guard = ThreadRegistryGuard::install(Arc::new(registry));
+        assert!(matches!(
+            load_str(&[Val::from("safe.txt")]),
+            HotResult::Ok(_)
+        ));
+        assert!(matches!(
+            load_str(&[Val::from("../../host-secret.txt")]),
+            HotResult::Err(_)
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn bundle_resource_symlinks_are_rejected_during_hydration_and_cached_reads() {
+        use std::os::unix::fs::symlink;
+
+        let directory = tempfile::tempdir().unwrap();
+        let bundle = directory.path().join("bundle");
+        let root = bundle.join("resources");
+        let outside = directory.path().join("other-build");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("secret.txt"), "other tenant").unwrap();
+        std::fs::write(root.join("safe.txt"), "bundle").unwrap();
+        symlink(&outside, root.join("linked")).unwrap();
+        let manifest = crate::val!([{"path": "safe.txt"}, {"path": "linked/secret.txt"}]);
+        let registry = build_registry_from_manifest(&manifest, &bundle);
+        assert_eq!(registry.entries.len(), 1);
+        let _guard = ThreadRegistryGuard::install(Arc::new(registry));
+        std::fs::remove_file(root.join("safe.txt")).unwrap();
+        symlink(outside.join("secret.txt"), root.join("safe.txt")).unwrap();
+        assert!(matches!(load(&[Val::from("safe.txt")]), HotResult::Err(_)));
+        assert!(matches!(
+            load_str(&[Val::from("safe.txt")]),
+            HotResult::Err(_)
+        ));
+        assert!(
+            build_registry_from_manifest(&manifest, &bundle)
+                .entries
+                .is_empty()
+        );
+
+        std::fs::rename(&root, bundle.join("old-resources")).unwrap();
+        symlink(&outside, &root).unwrap();
+        assert!(
+            build_registry_from_manifest(&crate::val!([{"path": "secret.txt"}]), &bundle)
+                .entries
+                .is_empty()
+        );
+        assert!(matches!(
+            load_str(&[Val::from("safe.txt")]),
+            HotResult::Err(_)
+        ));
     }
 
     #[test]
@@ -626,6 +771,25 @@ mod tests {
             other => panic!("expected err after guard drop, got: {:?}", other),
         }
 
+        clear_registry();
+    }
+
+    #[test]
+    fn empty_bundle_registry_does_not_fall_back_to_host_resources() {
+        let _g = TEST_LOCK.lock();
+        let directory = setup_tmp();
+        set_registry(build_registry(&[directory.path().join("res")], false, &[]));
+        {
+            let _guard = ThreadRegistryGuard::install(Arc::new(ResourceRegistry::default()));
+            assert!(matches!(
+                load_str(&[Val::from("hello.txt")]),
+                HotResult::Err(_)
+            ));
+        }
+        assert!(matches!(
+            load_str(&[Val::from("hello.txt")]),
+            HotResult::Ok(_)
+        ));
         clear_registry();
     }
 

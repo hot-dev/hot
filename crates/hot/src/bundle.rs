@@ -2497,11 +2497,11 @@ test-fn fn (name) {
         )
         .unwrap();
 
-        // Pull the resources Vec from the manifest and rebuild a registry as
-        // the runtime would after extracting the bundle. Files are not yet
-        // extracted on disk; we just validate the registry shape and that
-        // each entry's `abs_path` points under `<extract>/resources/<rel>`.
+        // Runtime registry hydration verifies the extracted files are contained
+        // inside the bundle before exposing their paths.
         let extract_dir = tmp.path().join("extract");
+        let zip = write_bundle_zip(&bundle, tmp.path()).unwrap();
+        extract_bundle_to_dir(&zip, &extract_dir).unwrap();
         let resources_val = if let Val::Map(top) = &bundle.manifest
             && let Some(Val::Map(info)) = top.get(&Val::from("hot.bundle.round-trip"))
         {
@@ -2521,7 +2521,11 @@ test-fn fn (name) {
         assert!(entry.from_manifest);
         assert_eq!(
             entry.abs_path,
-            extract_dir.join("resources").join("prompts/system.md")
+            extract_dir
+                .join("resources")
+                .join("prompts/system.md")
+                .canonicalize()
+                .unwrap()
         );
         assert!(!entry.hash.is_empty());
         assert_eq!(entry.size, b"hello".len() as u64);

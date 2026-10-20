@@ -913,6 +913,51 @@ impl BuildPathCache {
     }
 }
 
+/// Bundle execution must never inherit the host's process-global resources,
+/// including when a legacy bundle has no resource manifest.
+fn install_event_resource_scope(
+    is_bundle: bool,
+    extract_dir: Option<&std::path::Path>,
+) -> Option<hot::lang::hot::resource::ThreadRegistryGuard> {
+    if !is_bundle {
+        return None;
+    }
+    let registry = extract_dir
+        .map(|directory| {
+            let resources = hot::bundle::read_bundle_resources(directory).unwrap_or_else(|error| {
+                tracing::warn!(%error, "Cannot read bundle resources; using an empty registry");
+                Val::Null
+            });
+            hot::lang::hot::resource::build_registry_from_manifest(&resources, directory)
+        })
+        .unwrap_or_default();
+    Some(hot::lang::hot::resource::ThreadRegistryGuard::install(
+        Arc::new(registry),
+    ))
+}
+
+/// Keep bundle resource authority around the compiler entry point as well as
+/// handler execution. The guard belongs on the synchronous compiler thread,
+/// including callers running in `spawn_blocking`.
+fn compile_event_bundle_to_cache(
+    extract_dir: &std::path::Path,
+    src_paths: &[String],
+    cache: &hot::lang::cache::bytecode_cache::BytecodeCache,
+    project_name: &str,
+    cache_key: Option<&str>,
+    file_hashes: Option<Vec<hot::lang::cache::bytecode_cache::FileHash>>,
+) -> Result<(), String> {
+    let _resource_guard = install_event_resource_scope(true, Some(extract_dir));
+    hot::lang::engine::Engine::compile_to_cache(
+        src_paths,
+        cache,
+        project_name,
+        cache_key,
+        file_hashes,
+        None, // Deployed dependencies are already included in the bundle.
+    )
+}
+
 struct PreparedEventBundle {
     src_paths: Vec<String>,
     extract_dir: std::path::PathBuf,
@@ -962,13 +1007,13 @@ fn extract_and_precompile_event_bundle(
         ),
         Err(_) => (fallback_project_name, None, None),
     };
-    hot::lang::engine::Engine::compile_to_cache(
+    compile_event_bundle_to_cache(
+        &extract_dir,
         &src_paths,
         &bundle_cache,
         &project_name,
         cache_key.as_deref(),
         file_hashes,
-        None,
     )
     .map_err(|error| format!("Failed to pre-compile bundle {build_id}: {error}"))?;
 
@@ -2454,13 +2499,13 @@ fn recompile_bundle_cache(
     let bundle_cache = hot::lang::cache::bytecode_cache::BytecodeCache::new(bundle_cache_dir);
 
     // Recompile
-    match hot::lang::engine::Engine::compile_to_cache(
+    match compile_event_bundle_to_cache(
+        extracted_path,
         &paths,
         &bundle_cache,
         &manifest.bundle_name,
         manifest.cache_key.as_deref(),
         Some(manifest.file_hashes.clone()),
-        None, // Bundle builds have deps pre-bundled
     ) {
         Ok(()) => {
             tracing::debug!(
@@ -2588,13 +2633,13 @@ async fn compile_bundle_cache(
         clear_bundle_bytecode_cache(&bundle_cache_dir);
 
         let bundle_cache = hot::lang::cache::bytecode_cache::BytecodeCache::new(bundle_cache_dir);
-        hot::lang::engine::Engine::compile_to_cache(
+        compile_event_bundle_to_cache(
+            &extracted_path,
             &paths,
             &bundle_cache,
             &manifest.bundle_name,
             manifest.cache_key.as_deref(),
             Some(manifest.file_hashes.clone()),
-            None, // Bundle builds have deps pre-bundled
         )
         .map_err(|e| {
             format!(
@@ -3615,6 +3660,12 @@ async fn find_build_for_function(
                 }
             }
             "live" => {
+                if let Err(error) =
+                    hot::profile::authorized_live_project(db, worker_conf, &build).await
+                {
+                    tracing::warn!(build_id = %build.build_id, %error, "Skipping live build outside host profile");
+                    continue;
+                }
                 // LIVE BUILD: Calculate cache key from discovered source files
                 let src_paths = hot::project::get_project_src_paths(worker_conf, &project.name);
 
@@ -3848,6 +3899,22 @@ async fn execute_single_event_handler(
     .await
 }
 
+async fn validate_event_origin_scope(
+    db: &DatabasePool,
+    env_id: Uuid,
+    origin_run_id: Option<Uuid>,
+) -> Result<(), String> {
+    if let Some(origin_run_id) = origin_run_id {
+        let origin = hot::db::Run::get_run(db, &origin_run_id)
+            .await
+            .map_err(|error| format!("Cannot resolve event origin run: {error}"))?;
+        if origin.env_id != env_id {
+            return Err("Event origin run belongs to another environment".into());
+        }
+    }
+    Ok(())
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn execute_single_event_handler_inner(
     db: &DatabasePool,
@@ -3959,6 +4026,11 @@ async fn execute_single_event_handler_inner(
         // otherwise None (for API-published events where run_id is just a new UUID placeholder)
         event_message.body.execution_context.origin_run_id
     };
+
+    // Payload retry metadata can override the queue context checked during
+    // hydration. Validate the final origin before any execution/trace writes,
+    // including on SQLite where a scoped handle does not filter reads.
+    validate_event_origin_scope(db, project.env_id, origin_run_id).await?;
 
     // For stream_id: use the stream_id from the event
     // The event was already created with a stream_id by the scheduler/publisher
@@ -4082,9 +4154,13 @@ async fn execute_single_event_handler_inner(
     // CRITICAL: If ANY error occurs between here and VM.execute(), run:start will NEVER be emitted!
     // This means the run won't exist in the database even though the event was attempted.
 
+    // A live build may use host files and development context only after
+    // matching the current profile. Deployed bundles must resolve their own bytes.
+    if build.is_live() {
+        hot::profile::authorized_live_project(db, worker_conf, build).await?;
+    }
+
     // Get source paths for the project
-    // CRITICAL: If this build was extracted from storage, use the extracted path
-    // Otherwise fall back to the config paths
     // Also track if this is a bundle build so we skip global dependency resolution
     // and use the bundle's own cache directory
     let (src_paths, is_bundle_build, bundle_extract_path, bundle_manifest) = if build.is_live() {
@@ -4175,139 +4251,36 @@ async fn execute_single_event_handler_inner(
                     build.build_id
                 );
 
-                // Get environment for this build to retrieve from storage
-                match hot::db::Env::get_env(db, &project.env_id).await {
-                    Ok(env) => {
-                        // Try to retrieve and extract the build
-                        match hot::storage::build_storage_from_config(worker_conf).await {
-                            Ok(storage) => {
-                                match storage
-                                    .retrieve_build(&build.build_id, &env.org_id, &project.env_id)
-                                    .await
-                                {
-                                    Ok(build_data) => {
-                                        debug!(
-                                            "Retrieved build {} from storage ({} bytes), extracting...",
-                                            build.build_id,
-                                            build_data.len()
-                                        );
-                                        let prep_permit = acquire_blocking_execution_slot(
-                                            Arc::clone(&blocking_execution_slots),
-                                            run_id,
-                                            BLOCKING_SLOT_ACQUIRE_TIMEOUT,
-                                        )
-                                        .await?;
-                                        let prep_extract_dir = extract_dir.clone();
-                                        let prep_build_id = build.build_id;
-                                        let prep_project_name = project.name.clone();
-                                        match tokio::task::spawn_blocking(move || {
-                                            let _prep_permit = prep_permit;
-                                            extract_and_precompile_event_bundle(
-                                                build_data,
-                                                prep_extract_dir,
-                                                prep_build_id,
-                                                prep_project_name,
-                                            )
-                                        })
-                                        .await
-                                        {
-                                            Ok(Ok(prepared)) => {
-                                                build_path_cache.insert(
-                                                    build.build_id,
-                                                    prepared.extract_dir.clone(),
-                                                );
-                                                (
-                                                    prepared.src_paths,
-                                                    true,
-                                                    Some(prepared.extract_dir),
-                                                    prepared.manifest,
-                                                )
-                                            }
-                                            Ok(Err(e)) => {
-                                                error!("{}. Falling back to config paths", e);
-                                                (
-                                                    hot::project::get_project_src_paths(
-                                                        worker_conf,
-                                                        &project.name,
-                                                    ),
-                                                    false,
-                                                    None,
-                                                    None,
-                                                )
-                                            }
-                                            Err(e) => {
-                                                error!(
-                                                    "Bundle preparation task failed for {}: {}. Falling back to config paths",
-                                                    build.build_id, e
-                                                );
-                                                (
-                                                    hot::project::get_project_src_paths(
-                                                        worker_conf,
-                                                        &project.name,
-                                                    ),
-                                                    false,
-                                                    None,
-                                                    None,
-                                                )
-                                            }
-                                        }
-                                    }
-                                    Err(e) => {
-                                        // In local dev mode, build storage is not expected to exist
-                                        // Log at debug level to avoid noise
-                                        if hot::env::is_local_dev() {
-                                            debug!(
-                                                "Build {} not in storage (expected in local dev), using config paths: {}",
-                                                build.build_id, e
-                                            );
-                                        } else {
-                                            error!(
-                                                "Failed to retrieve build {} from storage: {}. Falling back to config paths",
-                                                build.build_id, e
-                                            );
-                                        }
-                                        // Fall back to config paths (not a bundle)
-                                        (
-                                            hot::project::get_project_src_paths(
-                                                worker_conf,
-                                                &project.name,
-                                            ),
-                                            false,
-                                            None,
-                                            None,
-                                        )
-                                    }
-                                }
-                            }
-                            Err(e) => {
-                                error!(
-                                    "Failed to create storage client: {}. Falling back to config paths",
-                                    e
-                                );
-                                // Fall back to config paths (not a bundle)
-                                (
-                                    hot::project::get_project_src_paths(worker_conf, &project.name),
-                                    false,
-                                    None,
-                                    None,
-                                )
-                            }
-                        }
-                    }
-                    Err(e) => {
-                        error!(
-                            "Failed to get environment for build {}: {}. Falling back to config paths",
-                            build.build_id, e
-                        );
-                        // Fall back to config paths (not a bundle)
-                        (
-                            hot::project::get_project_src_paths(worker_conf, &project.name),
-                            false,
-                            None,
-                            None,
-                        )
-                    }
-                }
+                let env = Env::get_env(db, &project.env_id)
+                    .await
+                    .map_err(|error| format!("Cannot resolve bundle environment: {error}"))?;
+                let build_data = retrieve_build_data(build, &project, &env, worker_conf).await?;
+                let prep_permit = acquire_blocking_execution_slot(
+                    Arc::clone(&blocking_execution_slots),
+                    run_id,
+                    BLOCKING_SLOT_ACQUIRE_TIMEOUT,
+                )
+                .await?;
+                let prep_build_id = build.build_id;
+                let prep_project_name = project.name.clone();
+                let prepared = tokio::task::spawn_blocking(move || {
+                    let _prep_permit = prep_permit;
+                    extract_and_precompile_event_bundle(
+                        build_data,
+                        extract_dir,
+                        prep_build_id,
+                        prep_project_name,
+                    )
+                })
+                .await
+                .map_err(|error| format!("Bundle preparation task failed: {error}"))??;
+                build_path_cache.insert(build.build_id, prepared.extract_dir.clone());
+                (
+                    prepared.src_paths,
+                    true,
+                    Some(prepared.extract_dir),
+                    prepared.manifest,
+                )
             } // Close the else block for marker file check
         } // Close the else block for in-memory cache check
     };
@@ -4502,7 +4475,9 @@ async fn execute_single_event_handler_inner(
         let mut storage = AHashMap::new();
 
         // 1. First, load dev context storage (from hot/ctx.hot) as the base/fallback
-        if let Some(ref dev_ctx_storage) = dev_context_storage {
+        if build.is_live()
+            && let Some(ref dev_ctx_storage) = dev_context_storage
+        {
             match dev_ctx_storage.read() {
                 Ok(dev_ctx_guard) => {
                     if let Some(ref dev_ctx) = *dev_ctx_guard {
@@ -4700,6 +4675,8 @@ async fn execute_single_event_handler_inner(
         let spawn_scheduled = std::time::Instant::now();
         tokio::task::spawn_blocking(move || {
             let _blocking_execution_permit = blocking_execution_permit;
+            let _resource_scope =
+                install_event_resource_scope(is_bundle_build, bundle_extract_path.as_deref());
             let spawn_entered = std::time::Instant::now();
             debug!(
                 "TIMING [{}]: spawn_blocking entered",
@@ -7336,13 +7313,13 @@ pub async fn run_with_components_shared_context_and_db(
 
                                                                                                         let bundle_cache = hot::lang::cache::bytecode_cache::BytecodeCache::new(bundle_cache_dir);
                                                                                                         debug!("Pre-compiling bundle {} to generate bytecode cache", build.build_id);
-                                                                                                        match hot::lang::engine::Engine::compile_to_cache(
+                                                                                                        match compile_event_bundle_to_cache(
+                                                                                                            &extract_dir,
                                                                                                             &paths,
                                                                                                             &bundle_cache,
                                                                                                             &proj_name,
                                                                                                             cache_key.as_deref(),
                                                                                                             file_hashes,
-                                                                                                            None, // Bundle builds have deps pre-bundled
                                                                                                         ) {
                                                                                                             Ok(()) => {
                                                                                                                 debug!("Bundle {} pre-compiled successfully", build.build_id);
@@ -8989,6 +8966,317 @@ mod tests {
         }
         let _ = std::fs::remove_file(db_path);
         let _ = std::fs::remove_dir_all(cache_dir);
+    }
+
+    #[tokio::test]
+    async fn missing_deployed_bundle_never_falls_back_to_host_sources() {
+        let (db, db_path) = migrated_sqlite_file_db().await;
+        let test_data = hot::db::insert_test_data(&db)
+            .await
+            .expect("test data should insert");
+        let bundle_id = Uuid::now_v7();
+        Build::insert_build(
+            &db,
+            &bundle_id,
+            &test_data.project_id,
+            "missing-bundle",
+            0,
+            Build::BUILD_TYPE_BUNDLE,
+            &test_data.user_id,
+        )
+        .await
+        .unwrap();
+        let build = Build::get_build(&db, &bundle_id)
+            .await
+            .expect("test build should exist");
+
+        // A matching project name on the host is never a fallback for a deployed bundle.
+        let event_env_id = test_data.env_id;
+        let event_id = Uuid::now_v7();
+        let stream_id = Uuid::now_v7();
+        let event_message = EventMessage {
+            id: event_id,
+            head: AHashMap::new(),
+            body: hot::lang::event::queue::EventMessageBody {
+                event: hot::lang::event::Event {
+                    event_id,
+                    env_id: event_env_id,
+                    stream_id,
+                    event_type: "hot:call".to_string(),
+                    event_data: val!({
+                        "fn": "demo/handler",
+                        "args": [],
+                    }),
+                    event_time: chrono::Utc::now(),
+                    target_project_id: None,
+                    target_project_name: None,
+                },
+                execution_context: ExecutionContext::new(
+                    Uuid::now_v7(),
+                    stream_id,
+                    hot::db::run::RunType::Call.as_id(),
+                    Some(event_env_id),
+                    Some(test_data.user_id),
+                    Some(test_data.org_id),
+                    None,
+                ),
+            },
+        };
+        let event_handler = EventHandler {
+            event_handler_id: Uuid::now_v7(),
+            build_id: build.build_id,
+            event_type: "hot:call".to_string(),
+            ns: "demo".to_string(),
+            var: "handler".to_string(),
+            meta: None,
+            value: None,
+            file: None,
+            line: None,
+            column: None,
+            position: None,
+        };
+
+        let worker_conf = get_resolved_conf(val!({
+            "project": {"test-project": {"src": {"paths": ["hot/src"]}}}
+        }));
+        let cache_dir =
+            std::env::temp_dir().join(format!("hot-worker-test-cache-{}", Uuid::new_v4()));
+        let cache = Arc::new(hot::lang::cache::bytecode_cache::BytecodeCache::new(
+            cache_dir.clone(),
+        ));
+        let task_queue = Arc::new(
+            ProcessingQueue::<TaskRequest>::new(
+                QueueType::Memory,
+                format!("worker-run-unregister-test-{}", Uuid::new_v4()),
+                None,
+                Serialization::Json,
+            )
+            .expect("task queue should build"),
+        );
+        let execution_services =
+            Arc::new(WorkerExecutionServices::new(Arc::new(db.clone()), &worker_conf).await);
+
+        // Mirror the event executor: the caller registers the run, then hands
+        // unregistration responsibility to execute_single_event_handler.
+        let shutdown_coordinator = Arc::new(ShutdownCoordinator::new(1));
+        let run_id = Uuid::now_v7();
+        shutdown_coordinator.register_run(run_id);
+        assert_eq!(shutdown_coordinator.active_run_count(), 1);
+
+        let result = execute_single_event_handler(
+            &db,
+            &build,
+            &event_env_id,
+            &worker_conf,
+            &event_handler,
+            &event_message,
+            None,
+            None,
+            None,
+            cache,
+            Arc::clone(&shutdown_coordinator),
+            run_id,
+            Arc::new(BuildPathCache::new()),
+            None,
+            None,
+            task_queue,
+            execution_services,
+            Arc::new(Semaphore::new(1)),
+        )
+        .await;
+
+        assert!(
+            result.unwrap_err().contains("Failed to retrieve build"),
+            "missing bundle must stop source resolution before host source compilation"
+        );
+        assert_eq!(
+            shutdown_coordinator.active_run_count(),
+            0,
+            "an error exit must unregister the run so shutdown does not hang"
+        );
+
+        if let DatabasePool::Sqlite(pool) = &db {
+            pool.close().await;
+        }
+        let _ = std::fs::remove_file(db_path);
+        let _ = std::fs::remove_dir_all(cache_dir);
+    }
+
+    #[tokio::test]
+    async fn payload_retry_origin_cannot_cross_environment_scope() {
+        let db = hot::db::test_db().await;
+        let fixture = hot::db::insert_test_data(&db).await.unwrap();
+        let retry = hot::env::retry::RetryContext::from_event_data(
+            &val!({"retry": {"origin-run-id": fixture.run_id.to_string(), "attempt": 1}}),
+            &val!({}),
+        )
+        .unwrap();
+        validate_event_origin_scope(&db, fixture.env_id, retry.origin_run_id)
+            .await
+            .unwrap();
+        let other_env = Uuid::now_v7();
+        Env::insert_env(&db, &other_env, &fixture.org_id, "other", &fixture.user_id)
+            .await
+            .unwrap();
+        assert!(
+            validate_event_origin_scope(&db, other_env, retry.origin_run_id)
+                .await
+                .unwrap_err()
+                .contains("another environment")
+        );
+        assert!(
+            validate_event_origin_scope(&db, fixture.env_id, Some(Uuid::now_v7()))
+                .await
+                .is_err()
+        );
+        validate_event_origin_scope(&db, other_env, None)
+            .await
+            .unwrap();
+    }
+
+    #[test]
+    fn event_bundles_never_inherit_host_resources() {
+        use hot::lang::hot::resource::{self, ThreadRegistryGuard};
+        let host = tempfile::tempdir().unwrap();
+        std::fs::write(host.path().join("host-secret.txt"), "host-only").unwrap();
+        let _host = ThreadRegistryGuard::install(Arc::new(resource::build_registry(
+            &[host.path().to_path_buf()],
+            false,
+            &[],
+        )));
+        assert!(
+            resource::get_registry()
+                .entries
+                .contains_key("host-secret.txt")
+        );
+        let bundle = tempfile::tempdir().unwrap();
+        {
+            let _bundle = install_event_resource_scope(true, Some(bundle.path()));
+            assert!(resource::get_registry().entries.is_empty());
+        }
+        assert!(
+            resource::get_registry()
+                .entries
+                .contains_key("host-secret.txt")
+        );
+        std::fs::create_dir_all(bundle.path().join("resources")).unwrap();
+        std::fs::write(bundle.path().join("resources/bundle.txt"), "bundle-only").unwrap();
+        std::fs::write(
+            bundle.path().join("manifest.hot"),
+            r#"{"hot.bundle.test":{"resources":[{"path":"bundle.txt","hash":"","size":11}]}}"#,
+        )
+        .unwrap();
+        let _bundle = install_event_resource_scope(true, Some(bundle.path()));
+        let registry = resource::get_registry();
+        assert!(registry.entries.contains_key("bundle.txt"));
+        assert!(!registry.entries.contains_key("host-secret.txt"));
+    }
+
+    #[tokio::test]
+    async fn event_bundle_initializers_use_bundle_resources_on_every_cache_path() {
+        use hot::lang::cache::bytecode_cache::BytecodeCache;
+        use hot::lang::hot::resource::{self, ThreadRegistryGuard};
+
+        fn invoke_initializer(
+            extract_dir: &std::path::Path,
+            manifest: &hot::bundle::BundleManifest,
+            host_registry: Arc<resource::ResourceRegistry>,
+            expected: &str,
+        ) {
+            let _host = ThreadRegistryGuard::install(host_registry);
+            let _bundle = install_event_resource_scope(true, Some(extract_dir));
+            let cache = BytecodeCache::new(extract_dir.join(".hot/cache"));
+            let cached = cache.load(manifest.cache_key.as_deref().unwrap()).unwrap();
+            let result = hot::lang::engine::Engine::call_function_with_cached_bytecode(
+                "::bundle_scope/handler",
+                &[],
+                cached,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+            assert_eq!(result.unwrap_ok().unwrap_or(&result), &Val::from(expected));
+        }
+
+        let directory = tempfile::tempdir().unwrap();
+        let host = directory.path().join("host");
+        std::fs::create_dir_all(&host).unwrap();
+        std::fs::write(host.join("scope.txt"), "host-only-secret").unwrap();
+        let host_registry = Arc::new(resource::build_registry(&[host], false, &[]));
+        let source = directory.path().join("src");
+        let resources = directory.path().join("resources");
+        std::fs::create_dir_all(&source).unwrap();
+        std::fs::create_dir_all(&resources).unwrap();
+        std::fs::write(resources.join("scope.txt"), "bundle-only").unwrap();
+        std::fs::write(
+            source.join("scope.hot"),
+            r#"::bundle_scope ns
+initialized ::hot::resource/load-str("scope.txt") |> if-err("missing")
+handler fn () { initialized }
+"#,
+        )
+        .unwrap();
+
+        for include_resources in [true, false] {
+            let resource_roots = if include_resources {
+                vec![resources.clone()]
+            } else {
+                Vec::new()
+            };
+            let bundle = hot::bundle::create_bundle(
+                "scope-project",
+                &[source.to_string_lossy().into_owned()],
+                &[],
+                &resource_roots,
+                false,
+                &[],
+            )
+            .unwrap();
+            let zip = hot::bundle::write_bundle_zip(&bundle, directory.path()).unwrap();
+            let extract_dir = directory.path().join(format!("build-{include_resources}"));
+            let prepared = {
+                let _host = ThreadRegistryGuard::install(host_registry.clone());
+                extract_and_precompile_event_bundle(
+                    std::fs::read(zip).unwrap(),
+                    extract_dir.clone(),
+                    Uuid::now_v7(),
+                    "scope-project".into(),
+                )
+                .unwrap()
+            };
+            let manifest = prepared.manifest.unwrap();
+            let expected = if include_resources {
+                "bundle-only"
+            } else {
+                "missing"
+            };
+            invoke_initializer(&extract_dir, &manifest, host_registry.clone(), expected);
+
+            // Older bundles can have no resources manifest. Recompilation and
+            // warmup must preserve an explicit empty scope for those too.
+            if !include_resources {
+                std::fs::remove_file(extract_dir.join("manifest.hot")).unwrap();
+            }
+            {
+                let _host = ThreadRegistryGuard::install(host_registry.clone());
+                assert!(recompile_bundle_cache(&extract_dir, &manifest));
+            }
+            invoke_initializer(&extract_dir, &manifest, host_registry.clone(), expected);
+            compile_bundle_cache(extract_dir.clone(), manifest.clone())
+                .await
+                .unwrap();
+            invoke_initializer(&extract_dir, &manifest, host_registry.clone(), expected);
+        }
     }
 
     #[test]

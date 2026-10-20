@@ -118,8 +118,12 @@ impl Engine {
             .compile_extension(&mut merged_ast, &extension_ast)
             .map_err(|errors| format!("Compilation errors:\n{}", errors.format_error(color)))?;
 
-        crate::lang::hot::internal_mcp::set_registry(compiler.build_tool_specs(&merged_ast));
-        crate::lang::hot::internal_skill::set_registry(compiler.build_skill_specs(&merged_ast));
+        let _tool_scope = crate::lang::hot::internal_mcp::ThreadRegistryGuard::install(Arc::new(
+            compiler.build_tool_specs(&merged_ast),
+        ));
+        let _skill_scope = crate::lang::hot::internal_skill::ThreadRegistryGuard::install(
+            Arc::new(compiler.build_skill_specs(&merged_ast)),
+        );
 
         let program = compiler.get_program_arc();
         debug_assert!(execute_start <= program.entry_point.len());
@@ -241,6 +245,13 @@ impl Engine {
         compiler
             .compile_program(&mut combined_program)
             .map_err(|errors| format!("Compilation errors:\n{}", errors.format_error(color)))?;
+
+        let _tool_scope = crate::lang::hot::internal_mcp::ThreadRegistryGuard::install(Arc::new(
+            compiler.build_tool_specs(&combined_program),
+        ));
+        let _skill_scope = crate::lang::hot::internal_skill::ThreadRegistryGuard::install(
+            Arc::new(compiler.build_skill_specs(&combined_program)),
+        );
 
         // Create VM with full AST from combined program (includes all dependency namespaces)
         let program_arc = compiler.get_program_arc();
@@ -462,6 +473,12 @@ impl Engine {
         // Compile with validation
         match compiler.compile_program(&mut combined_program) {
             Ok(()) => {
+                let _tool_scope = crate::lang::hot::internal_mcp::ThreadRegistryGuard::install(
+                    Arc::new(compiler.build_tool_specs(&combined_program)),
+                );
+                let _skill_scope = crate::lang::hot::internal_skill::ThreadRegistryGuard::install(
+                    Arc::new(compiler.build_skill_specs(&combined_program)),
+                );
                 // Create VM and execute
                 let program_arc = compiler.get_program_arc();
                 let mut vm = crate::lang::runtime::vm::VirtualMachine::new(

@@ -1824,6 +1824,11 @@ fn pmap_vec(
     // Capture Tokio runtime handle so spawned threads can use async functions
     let tokio_handle = tokio::runtime::Handle::try_current().ok();
     let host_context = vm.host_context_snapshot();
+    // Preserve the caller's bundle resources across OS threads. In particular,
+    // an empty scoped registry must not turn into the process-global registry.
+    let resource_registry = StdArc::new(crate::lang::hot::resource::get_registry());
+    let tool_registry = StdArc::new(crate::lang::hot::internal_mcp::get_registry());
+    let skill_registry = StdArc::new(crate::lang::hot::internal_skill::get_registry());
 
     // Store results with chunk index to preserve order. Each entry is
     // (chunk_idx, values_produced_before_halt, optional halt).
@@ -1849,6 +1854,9 @@ fn pmap_vec(
         let error_clone = error_mutex.clone();
         let tokio_handle_clone = tokio_handle.clone();
         let host_context_clone = host_context.clone();
+        let resource_registry_clone = resource_registry.clone();
+        let tool_registry_clone = tool_registry.clone();
+        let skill_registry_clone = skill_registry.clone();
 
         // These workers run the VM, which may execute JIT-compiled code. The
         // JIT stack-overflow guard is calibrated for a large stack (see
@@ -1859,6 +1867,13 @@ fn pmap_vec(
         let worker_body = move || {
             // Enter Tokio runtime context so async functions work on spawned threads
             let _tokio_guard = tokio_handle_clone.as_ref().map(|h| h.enter());
+            let _resource_guard =
+                crate::lang::hot::resource::ThreadRegistryGuard::install(resource_registry_clone);
+            let _tool_scope =
+                crate::lang::hot::internal_mcp::ThreadRegistryGuard::install(tool_registry_clone);
+            let _skill_scope = crate::lang::hot::internal_skill::ThreadRegistryGuard::install(
+                skill_registry_clone,
+            );
 
             // Create a new VM for this thread with its own private failure
             // state. Halts in this worker do not affect the parent or

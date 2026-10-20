@@ -2,7 +2,7 @@
 //
 // Mirrors `internal_mcp.rs` but for `meta {skill: {...}}` annotations.
 // The compiler walks every Hot fn def, harvests the skill meta as a
-// raw `Val::Map`, and parks it in a process-global registry keyed by
+// raw `Val::Map`, and parks it in an execution-scoped registry keyed by
 // fully qualified function name. `::ai::skill/from-fn` consults this
 // registry to reconstruct a `Skill` record at runtime without
 // re-parsing source.
@@ -18,7 +18,10 @@ use crate::validate_args;
 use indexmap::IndexMap;
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
-use std::sync::OnceLock;
+use std::cell::RefCell;
+use std::marker::PhantomData;
+use std::rc::Rc;
+use std::sync::{Arc, OnceLock};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SkillSpecEntry {
@@ -40,34 +43,76 @@ fn registry_lock() -> &'static RwLock<SkillSpecRegistry> {
     REGISTRY.get_or_init(|| RwLock::new(SkillSpecRegistry::default()))
 }
 
-/// Merge `registry` into the global skill-spec registry. Additive
-/// semantics: existing entries with the same FQ name are overwritten,
-/// other entries are preserved. See `internal_mcp::set_registry` for
-/// the rationale.
-pub fn set_registry(registry: SkillSpecRegistry) {
-    let mut g = registry_lock().write();
-    for (k, v) in registry.entries {
-        g.entries.insert(k, v);
+thread_local! {
+    static THREAD_REGISTRY: RefCell<Option<Arc<SkillSpecRegistry>>> = const { RefCell::new(None) };
+}
+
+/// Exact execution metadata, restored on return or unwind. Even an empty
+/// registry is authoritative and must never fall back to another build.
+/// The guard cannot move between threads because its authority is thread-local.
+pub struct ThreadRegistryGuard {
+    previous: Option<Arc<SkillSpecRegistry>>,
+    _thread_bound: PhantomData<Rc<()>>,
+}
+
+impl ThreadRegistryGuard {
+    pub fn install(registry: Arc<SkillSpecRegistry>) -> Self {
+        Self {
+            previous: THREAD_REGISTRY.with(|slot| slot.replace(Some(registry))),
+            _thread_bound: PhantomData,
+        }
     }
 }
 
-/// Destructively replace the global skill-spec registry. Intended
-/// only for tests and tooling that need a clean slate.
+impl Drop for ThreadRegistryGuard {
+    fn drop(&mut self) {
+        THREAD_REGISTRY.with(|slot| *slot.borrow_mut() = self.previous.take());
+    }
+}
+
+fn with_registry<T>(read: impl FnOnce(&SkillSpecRegistry) -> T) -> T {
+    let scoped = THREAD_REGISTRY.with(|slot| slot.borrow().clone());
+    match scoped {
+        Some(registry) => read(&registry),
+        None => read(&registry_lock().read()),
+    }
+}
+
+fn update_registry(update: impl FnOnce(&mut SkillSpecRegistry)) {
+    let mut update = Some(update);
+    THREAD_REGISTRY.with(|slot| {
+        if let Some(registry) = slot.borrow_mut().as_mut() {
+            update.take().unwrap()(Arc::make_mut(registry));
+        }
+    });
+    if let Some(update) = update {
+        update(&mut registry_lock().write());
+    }
+}
+
+/// Merge metadata into the current scope. The process-global fallback is for
+/// standalone compiler tooling; runtime entry points install exact registries.
+pub fn set_registry(registry: SkillSpecRegistry) {
+    update_registry(|current| current.entries.extend(registry.entries));
+}
+
+/// Replace the current scope's metadata (or the standalone tooling registry).
 pub fn replace_registry(registry: SkillSpecRegistry) {
-    *registry_lock().write() = registry;
+    update_registry(|current| *current = registry);
 }
 
 pub fn get_registry() -> SkillSpecRegistry {
-    registry_lock().read().clone()
+    with_registry(Clone::clone)
 }
 
 pub fn put_entry(entry: SkillSpecEntry) {
-    let mut g = registry_lock().write();
-    g.entries.insert(entry.name.clone(), entry);
+    update_registry(|current| {
+        current.entries.insert(entry.name.clone(), entry);
+    });
 }
 
 pub fn clear_registry() {
-    *registry_lock().write() = SkillSpecRegistry::default();
+    replace_registry(SkillSpecRegistry::default());
 }
 
 fn extract_fn_name(val: &Val) -> Option<String> {
@@ -104,8 +149,7 @@ pub fn meta_from_fn(args: &[Val]) -> HotResult<Val> {
             ));
         }
     };
-    let g = registry_lock().read();
-    match g.entries.get(&name) {
+    with_registry(|g| match g.entries.get(&name) {
         Some(entry) => {
             // Always include the canonical Hot fn name so callers can
             // round-trip a Skill back to its source fn even when no
@@ -124,7 +168,7 @@ pub fn meta_from_fn(args: &[Val]) -> HotResult<Val> {
              have no `meta {{skill: ...}}` annotation)",
             name
         ))),
-    }
+    })
 }
 
 /// `::hot::internal::skill/all-skill-metas(): Vec<Map>`
@@ -138,22 +182,23 @@ pub fn all_skill_metas(args: &[Val]) -> HotResult<Val> {
             "::hot::internal::skill/all-skill-metas takes no arguments".to_string(),
         ));
     }
-    let g = registry_lock().read();
-    let out: Vec<Val> = g
-        .entries
-        .values()
-        .map(|e| {
-            let mut merged: IndexMap<Val, Val> = match &e.skill_meta {
-                Val::Map(m) => (**m).clone(),
-                _ => IndexMap::new(),
-            };
-            merged
-                .entry(Val::from("fn-name"))
-                .or_insert_with(|| Val::from(e.name.as_str()));
-            Val::Map(Box::new(merged))
-        })
-        .collect();
-    HotResult::Ok(Val::Vec(out))
+    with_registry(|g| {
+        let out: Vec<Val> = g
+            .entries
+            .values()
+            .map(|e| {
+                let mut merged: IndexMap<Val, Val> = match &e.skill_meta {
+                    Val::Map(m) => (**m).clone(),
+                    _ => IndexMap::new(),
+                };
+                merged
+                    .entry(Val::from("fn-name"))
+                    .or_insert_with(|| Val::from(e.name.as_str()));
+                Val::Map(Box::new(merged))
+            })
+            .collect();
+        HotResult::Ok(Val::Vec(out))
+    })
 }
 
 #[cfg(test)]
@@ -217,5 +262,37 @@ mod tests {
             other => panic!("unexpected: {:?}", other),
         }
         clear_registry();
+    }
+
+    #[test]
+    fn scoped_mutations_restore_outer_registry() {
+        let mut outer = SkillSpecRegistry::default();
+        outer.entries.insert(
+            "::outer/skill".into(),
+            fixture_entry("::outer/skill", "outer"),
+        );
+        let outer = Arc::new(outer);
+        let _outer = ThreadRegistryGuard::install(outer.clone());
+        {
+            let _inner = ThreadRegistryGuard::install(Arc::new(SkillSpecRegistry::default()));
+            assert!(matches!(
+                meta_from_fn(&[Val::from("::outer/skill")]),
+                HotResult::Err(_)
+            ));
+            put_entry(fixture_entry("::inner/one", "one"));
+            assert!(get_registry().entries.contains_key("::inner/one"));
+            let mut additional = SkillSpecRegistry::default();
+            additional
+                .entries
+                .insert("::inner/two".into(), fixture_entry("::inner/two", "two"));
+            set_registry(additional);
+            assert_eq!(get_registry().entries.len(), 2);
+            replace_registry((*outer).clone());
+            assert!(!get_registry().entries.contains_key("::inner/one"));
+            clear_registry();
+            assert!(get_registry().entries.is_empty());
+        }
+        assert_eq!(get_registry().entries.len(), 1);
+        assert!(get_registry().entries.contains_key("::outer/skill"));
     }
 }

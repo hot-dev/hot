@@ -4728,7 +4728,8 @@ async fn process_code_task(
     coordinator.set_cancel_token(&task_id, Arc::clone(&vm_cancel_token));
 
     let panic_label = format!("task_worker:{}:{}", fn_name_exec, task_id);
-    let resource_registry_for_task = hot::lang::hot::resource::get_build_registry(&build_id);
+    let resource_registry_for_task = hot::lang::hot::resource::get_build_registry(&build_id)
+        .unwrap_or_else(|| Arc::new(hot::lang::hot::resource::ResourceRegistry::default()));
     let workload_started_at = chrono::Utc::now();
     let task_handle = tokio::task::spawn_blocking(move || {
         // Hold the blocking-execution slot for the lifetime of the THREAD,
@@ -4740,10 +4741,10 @@ async fn process_code_task(
         // produced its bytecode. The guard installs the per-build registry
         // as a thread-local before user code runs and restores the prior
         // value (typically `None`) on drop, so panics still leave the
-        // thread in a clean state. When `None` (live builds, missing
-        // manifest, dev mode), the global registry stays in effect.
+        // thread in a clean state. Missing bundle metadata must never fall
+        // through to another project's process-global host resources.
         let _resource_guard =
-            resource_registry_for_task.map(hot::lang::hot::resource::ThreadRegistryGuard::install);
+            hot::lang::hot::resource::ThreadRegistryGuard::install(resource_registry_for_task);
         // Wrap user-code execution in run_user_code so any panic from the
         // user's Hot code becomes a structured UserCodePanic that we surface
         // as a typed task failure (with location, thread, optional backtrace)
@@ -5780,12 +5781,6 @@ async fn load_bytecode(
 ) -> Result<(Arc<CachedBytecode>, tokio::sync::OwnedSemaphorePermit), String> {
     let cache_key = build_id.to_string();
 
-    // Fast path: bytecode already in local cache
-    if let Ok(cached) = cache.load(&cache_key) {
-        tracing::debug!(build_id = %build_id, "Bytecode cache hit");
-        return Ok((cached, blocking_execution_permit));
-    }
-
     let (db, conf) = match (db, worker_conf) {
         (Some(d), Some(c)) => (d, c),
         _ => {
@@ -5805,6 +5800,17 @@ async fn load_bytecode(
         .map_err(|e| format!("Failed to fetch project: {}", e))?;
 
     if build.is_live() {
+        hot::profile::authorized_live_project(db, conf, &build).await?;
+        // Only an authorized local live build may inherit this host's resources.
+        hot::lang::hot::resource::set_build_registry(
+            *build_id,
+            Arc::new(hot::lang::hot::resource::get_registry()),
+        );
+        if let Ok(cached) = cache.load(&cache_key) {
+            tracing::debug!(build_id = %build_id, "Bytecode cache hit");
+            return Ok((cached, blocking_execution_permit));
+        }
+
         let build_id = *build_id;
         let cache_for_task = Arc::clone(&cache);
         let conf = conf.clone();
@@ -6129,18 +6135,10 @@ async fn load_bytecode_bundle(
 
     let build_id = *build_id;
     let project = project.clone();
-    let conf = conf.clone();
     let cache_for_task = Arc::clone(&cache);
     let (loaded, permit) =
         run_blocking_with_execution_permit(blocking_execution_permit, move || {
-            compile_bundle_bytecode(
-                build_id,
-                cache_key,
-                cache_for_task,
-                project,
-                conf,
-                extract_dir,
-            )
+            compile_bundle_bytecode(build_id, cache_key, cache_for_task, project, extract_dir)
         })
         .await?;
     Ok((loaded?, permit))
@@ -6154,38 +6152,24 @@ fn compile_bundle_bytecode(
     cache_key: String,
     cache: Arc<BytecodeCache>,
     project: hot::db::Project,
-    conf: Val,
     extract_dir: std::path::PathBuf,
 ) -> Result<Arc<CachedBytecode>, String> {
-    // Build a per-build resource registry from the manifest and cache it so
-    // task threads can install it as a thread-local override during
-    // `::hot::resource/*` calls. We do this once per bundle build (idempotent
-    // on the per-build cache) so concurrent tasks for the same build share an
-    // `Arc<ResourceRegistry>` without re-walking the bundle. Failures here are
-    // logged but non-fatal — bytecode loading still proceeds, and Hot code
-    // that calls `::hot::resource/*` will see an empty registry (treated as
-    // "resource not found").
-    match hot::bundle::read_bundle_resources(&extract_dir) {
-        Ok(resources_val) => {
-            let registry =
-                std::sync::Arc::new(hot::lang::hot::resource::build_registry_from_manifest(
-                    &resources_val,
-                    &extract_dir,
-                ));
-            tracing::debug!(
-                build_id = %build_id,
-                resource_count = registry.entries.len(),
-                "Installed per-build resource registry"
-            );
-            hot::lang::hot::resource::set_build_registry(build_id, registry);
+    // Registry hydration precedes even a warm bytecode cache hit: the disk
+    // cache can survive a process restart while the registry cannot.
+    let registry = match hot::bundle::read_bundle_resources(&extract_dir) {
+        Ok(resources) => {
+            hot::lang::hot::resource::build_registry_from_manifest(&resources, &extract_dir)
         }
-        Err(e) => {
-            tracing::warn!(
-                build_id = %build_id,
-                "Failed to read bundle manifest for resources (continuing without resource registry): {}",
-                e
-            );
+        Err(error) => {
+            tracing::warn!(%build_id, %error, "Invalid bundle resources; using an empty registry");
+            hot::lang::hot::resource::ResourceRegistry::default()
         }
+    };
+    let registry = Arc::new(registry);
+    hot::lang::hot::resource::set_build_registry(build_id, registry.clone());
+    let _resource_guard = hot::lang::hot::resource::ThreadRegistryGuard::install(registry);
+    if let Ok(cached) = cache.load(&cache_key) {
+        return Ok(cached);
     }
 
     let src_dir = extract_dir.join("hot/src");
@@ -6213,7 +6197,7 @@ fn compile_bundle_bytecode(
         &project.name,
         Some(&cache_key),
         None,
-        Some(&conf),
+        None, // Bundle dependencies are already included in hot/pkg.
     )
     .map_err(|e| format!("Failed to compile build: {}", e))?;
 
@@ -7408,6 +7392,192 @@ mod tests {
             .await
             .unwrap()
         );
+    }
+
+    #[tokio::test]
+    async fn cached_live_bytecode_requires_current_host_profile_scope() {
+        let db = hot::db::test_db().await;
+        let fixture = hot::db::insert_test_data(&db).await.unwrap();
+        let directory = std::env::temp_dir().join(format!("hot-live-scope-{}", Uuid::new_v4()));
+        let source = directory.join("src");
+        std::fs::create_dir_all(&source).unwrap();
+        std::fs::write(source.join("scope.hot"), "::scope ns\nvalue 1\n").unwrap();
+        let cache = Arc::new(BytecodeCache::new(directory.join("cache")));
+        let conf = val!({
+            "set": {"profile": "selected"},
+            "profile": {"selected": {
+                "user": {"email": "local@hot.dev"}, "org": {"slug": "local"},
+                "env": {"name": "development"}
+            }},
+            "project": {"test-project": {"src": {"paths": [source.to_string_lossy().to_string()]}}}
+        });
+        let slots = Arc::new(Semaphore::new(1));
+        let (_, permit) = load_bytecode(
+            &fixture.build_id,
+            cache.clone(),
+            Some(&db),
+            Some(&conf),
+            slots.clone().acquire_owned().await.unwrap(),
+        )
+        .await
+        .unwrap();
+        drop(permit);
+        assert!(cache.load(&fixture.build_id.to_string()).is_ok());
+
+        let sibling_env = Uuid::now_v7();
+        Env::insert_env(
+            &db,
+            &sibling_env,
+            &fixture.org_id,
+            "sibling",
+            &fixture.user_id,
+        )
+        .await
+        .unwrap();
+        let sibling_conf =
+            conf.merge(&val!({"profile": {"selected": {"env": {"name": "sibling"}}}}));
+        let result = load_bytecode(
+            &fixture.build_id,
+            cache.clone(),
+            Some(&db),
+            Some(&sibling_conf),
+            slots.clone().acquire_owned().await.unwrap(),
+        )
+        .await;
+        assert!(result.unwrap_err().contains("selected environment"));
+        let result = load_bytecode(
+            &fixture.build_id,
+            cache,
+            None,
+            None,
+            slots.acquire_owned().await.unwrap(),
+        )
+        .await;
+        assert!(
+            result.is_err(),
+            "a warm cache cannot replace scope authorization"
+        );
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[tokio::test]
+    async fn cached_bundle_bytecode_rehydrates_resources_without_host_dependencies() {
+        use hot::lang::hot::resource;
+
+        let db = hot::db::test_db().await;
+        let fixture = hot::db::insert_test_data(&db).await.unwrap();
+        let build_id = Uuid::now_v7();
+        hot::db::Build::insert_build(
+            &db,
+            &build_id,
+            &fixture.project_id,
+            "bundle",
+            0,
+            hot::db::Build::BUILD_TYPE_BUNDLE,
+            &fixture.user_id,
+        )
+        .await
+        .unwrap();
+        let directory = std::env::temp_dir().join(format!("hot-bundle-scope-{build_id}"));
+        let source = directory.join("src");
+        let resources = directory.join("resources");
+        let host_dependency = directory.join("host-dependency");
+        for path in [&source, &resources, &host_dependency] {
+            std::fs::create_dir_all(path).unwrap();
+        }
+        std::fs::write(source.join("scope.hot"), "::bundled ns\nvalue fn () {1}\n").unwrap();
+        std::fs::write(resources.join("own.txt"), "bundle resource").unwrap();
+        std::fs::write(
+            host_dependency.join("private.hot"),
+            "::privatehost ns\nsecret fn () {41}\n",
+        )
+        .unwrap();
+        let bundle = hot::bundle::create_bundle(
+            "test-project",
+            &[source.to_string_lossy().to_string()],
+            &[],
+            &[resources],
+            false,
+            &[],
+        )
+        .unwrap();
+        let zip = hot::bundle::write_bundle_zip(&bundle, &directory).unwrap();
+        let extract_dir = bundle_extract_dir(&build_id);
+        hot::bundle::extract_bundle_to_dir(&zip, &extract_dir).unwrap();
+        let conf = val!({"project": {"test-project": {"deps": {"host-private": {
+            "local": host_dependency.to_string_lossy().to_string()
+        }}}}});
+        assert!(
+            hot::project::get_resolved_project_dependencies(&conf, "test-project")
+                .unwrap()
+                .iter()
+                .any(
+                    |dependency| dependency.resolved_path.canonicalize().unwrap()
+                        == host_dependency.canonicalize().unwrap()
+                )
+        );
+        let cache = Arc::new(BytecodeCache::new(directory.join("cache")));
+        let slots = Arc::new(Semaphore::new(1));
+        let (compiled, permit) = load_bytecode(
+            &build_id,
+            cache.clone(),
+            Some(&db),
+            Some(&conf),
+            slots.clone().acquire_owned().await.unwrap(),
+        )
+        .await
+        .unwrap();
+        drop(permit);
+        assert!(
+            compiled
+                .function_mapping
+                .keys()
+                .all(|name| !name.contains("privatehost")),
+            "deployed code must not compile the similarly named host project's dependencies"
+        );
+
+        // Model a process restart: bytecode remains warm but the in-memory
+        // resource registry is gone. Removing sources proves no recompile occurs.
+        resource::remove_build_registry(&build_id);
+        std::fs::remove_dir_all(extract_dir.join("hot/src")).unwrap();
+        let (_, permit) = load_bytecode(
+            &build_id,
+            cache.clone(),
+            Some(&db),
+            Some(&conf),
+            slots.clone().acquire_owned().await.unwrap(),
+        )
+        .await
+        .unwrap();
+        drop(permit);
+        let registry = resource::get_build_registry(&build_id).unwrap();
+        assert_eq!(registry.entries.len(), 1);
+        {
+            let _guard = resource::ThreadRegistryGuard::install(registry);
+            assert!(matches!(resource::load_str(&[Val::from("own.txt")]),
+                hot::lang::hot::r#type::HotResult::Ok(Val::Str(value)) if value.as_ref() == "bundle resource"));
+        }
+        resource::remove_build_registry(&build_id);
+        std::fs::write(extract_dir.join("manifest.hot"), "invalid @@ manifest").unwrap();
+        let (_, permit) = load_bytecode(
+            &build_id,
+            cache,
+            Some(&db),
+            Some(&conf),
+            slots.acquire_owned().await.unwrap(),
+        )
+        .await
+        .unwrap();
+        drop(permit);
+        assert!(
+            resource::get_build_registry(&build_id)
+                .unwrap()
+                .entries
+                .is_empty()
+        );
+        resource::remove_build_registry(&build_id);
+        std::fs::remove_dir_all(extract_dir).unwrap();
+        std::fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]

@@ -88,27 +88,16 @@ impl ReplSession {
         let saved_state = self.preserved_state.clone();
         let saved_namespace = self.current_namespace.clone();
         let saved_instruction_count = self.executed_instruction_count;
-        let saved_tool_registry = crate::lang::hot::internal_mcp::get_registry();
-        let saved_skill_registry = crate::lang::hot::internal_skill::get_registry();
-        let is_declaration = self.is_declaration(input);
 
         // Try to execute the input
         match self.try_eval_input(input) {
-            Ok(result) => {
-                if !is_declaration {
-                    crate::lang::hot::internal_mcp::replace_registry(saved_tool_registry);
-                    crate::lang::hot::internal_skill::replace_registry(saved_skill_registry);
-                }
-                Ok(result)
-            }
+            Ok(result) => Ok(result),
             Err(e) => {
                 // Rollback on error to maintain consistent state
                 self.accumulated_source = saved_source;
                 self.preserved_state = saved_state;
                 self.current_namespace = saved_namespace;
                 self.executed_instruction_count = saved_instruction_count;
-                crate::lang::hot::internal_mcp::replace_registry(saved_tool_registry);
-                crate::lang::hot::internal_skill::replace_registry(saved_skill_registry);
                 Err(e)
             }
         }

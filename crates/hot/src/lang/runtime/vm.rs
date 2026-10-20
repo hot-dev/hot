@@ -8677,6 +8677,12 @@ impl VirtualMachine {
         let conf = self.get_conf().clone();
         let shared_failure_state = self.get_failure_state_arc();
         let host_context = self.host_context_snapshot();
+        // Resource authority lives on the executing thread, not on the VM.
+        // Snapshot the effective registry (including an empty bundle registry)
+        // before spawning so branches cannot fall back to host resources.
+        let resource_registry = StdArc::new(crate::lang::hot::resource::get_registry());
+        let tool_registry = StdArc::new(crate::lang::hot::internal_mcp::get_registry());
+        let skill_registry = StdArc::new(crate::lang::hot::internal_skill::get_registry());
 
         // Correlation ids for worker-thread logs. Parallel branches run user
         // code on detached threads, so without these a branch failure in a
@@ -8829,6 +8835,9 @@ impl VirtualMachine {
                 let core_variables_tmpl = core_variables.clone();
                 let conf_tmpl = conf.clone();
                 let host_context_tmpl = host_context.clone();
+                let resource_registry_worker = resource_registry.clone();
+                let tool_registry_worker = tool_registry.clone();
+                let skill_registry_worker = skill_registry.clone();
                 let namespace_snapshot_tmpl = namespace_snapshot.clone();
                 let namespace_tmpl = main_namespace.clone();
                 let computed_vars_tmpl = computed_vars_snapshot.clone();
@@ -8851,6 +8860,14 @@ impl VirtualMachine {
                         // Enter Tokio runtime context so async functions (e.g.
                         // ::hot::box/run) work on spawned threads.
                         let _tokio_guard = tokio_handle_clone.as_ref().map(|h| h.enter());
+                        let _resource_guard =
+                            crate::lang::hot::resource::ThreadRegistryGuard::install(
+                                resource_registry_worker,
+                            );
+                        let _tool_scope =
+                            crate::lang::hot::internal_mcp::ThreadRegistryGuard::install(tool_registry_worker);
+                        let _skill_scope =
+                            crate::lang::hot::internal_skill::ThreadRegistryGuard::install(skill_registry_worker);
 
                         loop {
                             // Stop claiming new work once any branch has failed so

@@ -432,8 +432,12 @@ impl Engine {
 
         // Rebuild from the merged AST so eval-defined and shadowed functions
         // are visible without dropping cached base entries.
-        crate::lang::hot::internal_mcp::set_registry(compiler.build_tool_specs(&merged_ast));
-        crate::lang::hot::internal_skill::set_registry(compiler.build_skill_specs(&merged_ast));
+        let _tool_scope = crate::lang::hot::internal_mcp::ThreadRegistryGuard::install(Arc::new(
+            compiler.build_tool_specs(&merged_ast),
+        ));
+        let _skill_scope = crate::lang::hot::internal_skill::ThreadRegistryGuard::install(
+            Arc::new(compiler.build_skill_specs(&merged_ast)),
+        );
 
         let mut vm = crate::lang::runtime::vm::VirtualMachine::new(
             compiler.get_program_arc(),
@@ -665,13 +669,17 @@ impl Engine {
         // BEFORE module-init runs. Module-level statements like
         // `agent-tools [::tool/from-fn(::ns/fn, ...)]` call
         // `::hot::internal::mcp/schema-from-fn` which reads the
-        // process-global registry; without this hydration, cache
+        // execution-scoped registry; without this hydration, cache
         // hits in fresh worker processes (and zip-build deployments)
         // would error out with
         // `no schema registered for '...'`.
         let registry_started = std::time::Instant::now();
-        crate::lang::hot::internal_mcp::set_registry(cached.tool_specs.clone());
-        crate::lang::hot::internal_skill::set_registry(cached.skill_specs.clone());
+        let _tool_scope = crate::lang::hot::internal_mcp::ThreadRegistryGuard::install(Arc::new(
+            cached.tool_specs.clone(),
+        ));
+        let _skill_scope = crate::lang::hot::internal_skill::ThreadRegistryGuard::install(
+            Arc::new(cached.skill_specs.clone()),
+        );
         tracing::debug!(
             "TIMING [{}]: vm_registry_install: {:?}",
             timing_id,
@@ -1021,8 +1029,12 @@ impl Engine {
         // Install tool/skill spec registries from cached bytecode
         // before module-init runs. Same rationale as
         // `call_function_with_cached_bytecode`.
-        crate::lang::hot::internal_mcp::set_registry(cached.tool_specs.clone());
-        crate::lang::hot::internal_skill::set_registry(cached.skill_specs.clone());
+        let _tool_scope = crate::lang::hot::internal_mcp::ThreadRegistryGuard::install(Arc::new(
+            cached.tool_specs.clone(),
+        ));
+        let _skill_scope = crate::lang::hot::internal_skill::ThreadRegistryGuard::install(
+            Arc::new(cached.skill_specs.clone()),
+        );
 
         // Canonical authority and admission apply to module initialization too;
         // leaving the emitter absent still avoids recording a separate init run.
@@ -1183,8 +1195,8 @@ impl Engine {
             project_name
         );
 
-        // Use the unified pipeline with NO eval code - just compile project sources
-        let result = Self::run_unified_pipeline_with_artifacts(
+        // Stop after compilation; module initialization requires runtime authority.
+        let result = Self::run_unified_pipeline_artifacts_internal(
             src_paths,
             &[], // No test paths for event handlers
             conf,
@@ -1201,6 +1213,7 @@ impl Engine {
             None, // No store
             None, // No embedding provider
             false,
+            false, // Never execute module initializers while populating a cache.
         )?;
 
         match result.artifacts {
@@ -1411,6 +1424,68 @@ mod tests {
             None,
             None,
         )
+    }
+
+    #[test]
+    fn cache_compilation_defers_module_side_effects_until_scoped_execution() {
+        let directory = tempfile::tempdir().unwrap();
+        let source = directory.path().join("src");
+        std::fs::create_dir_all(&source).unwrap();
+        let marker = directory.path().join("initializer.txt");
+        let marker_literal = serde_json::to_string(&marker.to_string_lossy()).unwrap();
+        std::fs::write(
+            source.join("initializer.hot"),
+            format!(
+                "::initializer ns\nwritten ::hot::file/write-file({marker_literal}, \"initialized\")\nrun fn () {{ written }}\n"
+            ),
+        )
+        .unwrap();
+        let cache =
+            crate::lang::cache::bytecode_cache::BytecodeCache::new(directory.path().join("cache"));
+        Engine::compile_to_cache(
+            &[source.to_string_lossy().to_string()],
+            &cache,
+            "initializer",
+            Some("initializer-cache"),
+            None,
+            None,
+        )
+        .unwrap();
+        assert!(
+            !marker.exists(),
+            "precompilation must not execute user code"
+        );
+        let cached = cache.load("initializer-cache").unwrap();
+        let managed_conf = crate::val!({"file": {"mode": "service"}});
+        let invoke = |conf: Option<&Val>| {
+            Engine::call_function_with_cached_bytecode(
+                "::initializer/run",
+                &[],
+                cached.clone(),
+                conf,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
+        };
+        let managed = invoke(Some(&managed_conf));
+        assert!(managed.is_err() || managed.as_ref().is_ok_and(|value| value.is_err()));
+        assert!(
+            !marker.exists(),
+            "managed invocation must not use direct host files"
+        );
+        // A standalone invocation still performs normal module initialization.
+        let direct = invoke(None).unwrap();
+        assert!(!direct.is_err(), "{direct:?}");
+        assert_eq!(std::fs::read_to_string(&marker).unwrap(), "initialized");
     }
 
     #[test]

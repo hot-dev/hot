@@ -8,7 +8,7 @@
 //
 // Because Hot functions are dropped to bytecode + a function table at
 // runtime, schemas are computed at compile time (by the compiler) and
-// stored in a process-global registry keyed by fully qualified
+// stored in an execution-scoped registry keyed by fully qualified
 // function name (`::ns/name`). At runtime, `::hot::internal::mcp/schema-from-fn`
 // receives a `FunctionRef`, extracts the name, and returns the cached
 // `{input-schema: ..., output-schema: ...}` map.
@@ -20,7 +20,10 @@ use crate::validate_args;
 use indexmap::IndexMap;
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
-use std::sync::OnceLock;
+use std::cell::RefCell;
+use std::marker::PhantomData;
+use std::rc::Rc;
+use std::sync::{Arc, OnceLock};
 
 /// One entry in the tool-spec registry: schema + optional metadata
 /// overrides harvested from `meta {tool:}` / `meta {mcp:}`.
@@ -65,42 +68,76 @@ fn registry_lock() -> &'static RwLock<ToolSchemaRegistry> {
     REGISTRY.get_or_init(|| RwLock::new(ToolSchemaRegistry::default()))
 }
 
-/// Merge `registry` into the global tool-schema registry, overwriting any
-/// existing entries with matching fully-qualified names. This is the
-/// preferred installer in multi-tenant worker processes where multiple
-/// builds can install schemas concurrently — each install is additive,
-/// keyed by FQ name, so builds do not clobber each other.
-///
-/// Despite the historical "set" name, this is now additive (merge)
-/// semantics. Use [`replace_registry`] explicitly if you need
-/// destructive replacement (e.g. test fixtures).
-pub fn set_registry(registry: ToolSchemaRegistry) {
-    let mut g = registry_lock().write();
-    for (k, v) in registry.entries {
-        g.entries.insert(k, v);
+thread_local! {
+    static THREAD_REGISTRY: RefCell<Option<Arc<ToolSchemaRegistry>>> = const { RefCell::new(None) };
+}
+
+/// Exact execution metadata, restored on return or unwind. Even an empty
+/// registry is authoritative and must never fall back to another build.
+/// The guard cannot move between threads because its authority is thread-local.
+pub struct ThreadRegistryGuard {
+    previous: Option<Arc<ToolSchemaRegistry>>,
+    _thread_bound: PhantomData<Rc<()>>,
+}
+
+impl ThreadRegistryGuard {
+    pub fn install(registry: Arc<ToolSchemaRegistry>) -> Self {
+        Self {
+            previous: THREAD_REGISTRY.with(|slot| slot.replace(Some(registry))),
+            _thread_bound: PhantomData,
+        }
     }
 }
 
-/// Destructively replace the global tool-schema registry. Intended
-/// only for tests and tooling that need a clean slate.
+impl Drop for ThreadRegistryGuard {
+    fn drop(&mut self) {
+        THREAD_REGISTRY.with(|slot| *slot.borrow_mut() = self.previous.take());
+    }
+}
+
+fn with_registry<T>(read: impl FnOnce(&ToolSchemaRegistry) -> T) -> T {
+    let scoped = THREAD_REGISTRY.with(|slot| slot.borrow().clone());
+    match scoped {
+        Some(registry) => read(&registry),
+        None => read(&registry_lock().read()),
+    }
+}
+
+fn update_registry(update: impl FnOnce(&mut ToolSchemaRegistry)) {
+    let mut update = Some(update);
+    THREAD_REGISTRY.with(|slot| {
+        if let Some(registry) = slot.borrow_mut().as_mut() {
+            update.take().unwrap()(Arc::make_mut(registry));
+        }
+    });
+    if let Some(update) = update {
+        update(&mut registry_lock().write());
+    }
+}
+
+/// Merge metadata into the current scope. The process-global fallback is for
+/// standalone compiler tooling; runtime entry points install exact registries.
+pub fn set_registry(registry: ToolSchemaRegistry) {
+    update_registry(|current| current.entries.extend(registry.entries));
+}
+
+/// Replace the current scope's metadata (or the standalone tooling registry).
 pub fn replace_registry(registry: ToolSchemaRegistry) {
-    *registry_lock().write() = registry;
+    update_registry(|current| *current = registry);
 }
 
-/// Read-only snapshot of the registry.
 pub fn get_registry() -> ToolSchemaRegistry {
-    registry_lock().read().clone()
+    with_registry(Clone::clone)
 }
 
-/// Insert/overwrite a single entry.
 pub fn put_entry(entry: ToolSchemaEntry) {
-    let mut g = registry_lock().write();
-    g.entries.insert(entry.name.clone(), entry);
+    update_registry(|current| {
+        current.entries.insert(entry.name.clone(), entry);
+    });
 }
 
-/// Clear (for tests).
 pub fn clear_registry() {
-    *registry_lock().write() = ToolSchemaRegistry::default();
+    replace_registry(ToolSchemaRegistry::default());
 }
 
 fn entry_to_val(entry: &ToolSchemaEntry) -> Val {
@@ -141,35 +178,35 @@ pub fn schema_from_fn(args: &[Val]) -> HotResult<Val> {
             }
         },
     };
-    let g = registry_lock().read();
-    match g.entries.get(&name) {
+    with_registry(|g| match g.entries.get(&name) {
         Some(entry) => HotResult::Ok(entry_to_val(entry)),
         None => HotResult::Err(Val::from(format!(
             "::hot::internal::mcp/schema-from-fn: no schema registered for '{}' (function may \
              have no typed parameters or may not have been compiled)",
             name
         ))),
-    }
+    })
 }
 
 /// Look up a function's input-schema parameter names in the same order
 /// they appear in the function signature.
 fn input_param_names(name: &str) -> Option<Vec<String>> {
-    let g = registry_lock().read();
-    let entry = g.entries.get(name)?;
-    let Val::Map(schema) = &entry.input_schema else {
-        return None;
-    };
-    let Val::Map(props) = schema.get(&Val::from("properties"))? else {
-        return None;
-    };
-    let mut names = Vec::with_capacity(props.len());
-    for (k, _) in props.iter() {
-        if let Val::Str(s) = k {
-            names.push((**s).to_owned());
+    with_registry(|g| {
+        let entry = g.entries.get(name)?;
+        let Val::Map(schema) = &entry.input_schema else {
+            return None;
+        };
+        let Val::Map(props) = schema.get(&Val::from("properties"))? else {
+            return None;
+        };
+        let mut names = Vec::with_capacity(props.len());
+        for (k, _) in props.iter() {
+            if let Val::Str(s) = k {
+                names.push((**s).to_owned());
+            }
         }
-    }
-    Some(names)
+        Some(names)
+    })
 }
 
 fn extract_fn_name(val: &Val) -> Option<String> {
@@ -326,9 +363,10 @@ pub fn all_tool_schemas(args: &[Val]) -> HotResult<Val> {
             "::hot::internal::mcp/all-tool-schemas takes no arguments".to_string(),
         ));
     }
-    let g = registry_lock().read();
-    let out: Vec<Val> = g.entries.values().map(entry_to_val).collect();
-    HotResult::Ok(Val::Vec(out))
+    with_registry(|g| {
+        let out: Vec<Val> = g.entries.values().map(entry_to_val).collect();
+        HotResult::Ok(Val::Vec(out))
+    })
 }
 
 #[cfg(test)]
@@ -412,5 +450,36 @@ mod tests {
             other => panic!("unexpected: {:?}", other),
         }
         clear_registry();
+    }
+
+    #[test]
+    fn scoped_mutations_restore_outer_registry() {
+        let mut outer = ToolSchemaRegistry::default();
+        outer
+            .entries
+            .insert("::outer/tool".into(), fixture_entry("::outer/tool"));
+        let outer = Arc::new(outer);
+        let _outer = ThreadRegistryGuard::install(outer.clone());
+        {
+            let _inner = ThreadRegistryGuard::install(Arc::new(ToolSchemaRegistry::default()));
+            assert!(matches!(
+                schema_from_fn(&[Val::from("::outer/tool")]),
+                HotResult::Err(_)
+            ));
+            put_entry(fixture_entry("::inner/one"));
+            assert!(get_registry().entries.contains_key("::inner/one"));
+            let mut additional = ToolSchemaRegistry::default();
+            additional
+                .entries
+                .insert("::inner/two".into(), fixture_entry("::inner/two"));
+            set_registry(additional);
+            assert_eq!(get_registry().entries.len(), 2);
+            replace_registry((*outer).clone());
+            assert!(!get_registry().entries.contains_key("::inner/one"));
+            clear_registry();
+            assert!(get_registry().entries.is_empty());
+        }
+        assert_eq!(get_registry().entries.len(), 1);
+        assert!(get_registry().entries.contains_key("::outer/tool"));
     }
 }
