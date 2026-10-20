@@ -112,6 +112,16 @@ pub struct ApiKeyEditForm {
     pub permissions: String,
 }
 
+fn keys_list_redirect(session: &Session) -> Redirect {
+    // A different tab can change navigation cookies before this redirect is
+    // followed. Keep the destination bound to the workspace that handled it.
+    let target = match &session.current_env {
+        Some(env) => format!("/keys?org_id={}&env_id={}", env.org_id, env.env_id),
+        None => "/keys".to_string(),
+    };
+    Redirect::to(&target)
+}
+
 pub async fn keys_list_handler(
     State(db): State<Arc<DatabasePool>>,
     Query(params): Query<AHashMap<String, String>>,
@@ -251,7 +261,7 @@ pub async fn keys_edit_handler(
     let current_env = match &session.current_env {
         Some(env) => env,
         None => {
-            return Redirect::to("/keys").into_response();
+            return keys_list_redirect(&session).into_response();
         }
     };
 
@@ -260,7 +270,7 @@ pub async fn keys_edit_handler(
         Ok(api_key) => {
             // SECURITY: Verify the API key belongs to the current environment
             if api_key.env_id != current_env.env_id {
-                return Redirect::to("/keys").into_response();
+                return keys_list_redirect(&session).into_response();
             }
 
             // Determine access level from permissions
@@ -308,7 +318,7 @@ pub async fn keys_edit_handler(
         }
         Err(_) => {
             // API key not found, redirect to keys list
-            Redirect::to("/keys").into_response()
+            keys_list_redirect(&session).into_response()
         }
     }
 }
@@ -423,7 +433,7 @@ pub async fn keys_create_handler(
     {
         Ok(_) => {
             // Redirect to the keys list
-            Ok(Redirect::to("/keys"))
+            Ok(keys_list_redirect(&session))
         }
         Err(_) => Err(render_keys_new_with_error(
             &session,
@@ -456,12 +466,12 @@ pub async fn keys_update_handler(
     // Get the API key
     let api_key = match hot::db::api_key::ApiKey::get_api_key(&db, &api_key_id).await {
         Ok(key) => key,
-        Err(_) => return Ok(Redirect::to("/keys")),
+        Err(_) => return Ok(keys_list_redirect(&session)),
     };
 
     // Check if API key belongs to current environment
     if api_key.env_id != current_env.env_id {
-        return Ok(Redirect::to("/keys"));
+        return Ok(keys_list_redirect(&session));
     }
 
     // Validate form data
@@ -553,7 +563,7 @@ pub async fn keys_update_handler(
     }
 
     // Redirect to the keys list
-    Ok(Redirect::to("/keys"))
+    Ok(keys_list_redirect(&session))
 }
 
 // Helper function to render keys new page with error

@@ -19,10 +19,10 @@ struct Workspace {
 }
 
 impl Workspace {
-    fn new(label: &str, suffix: &str) -> Self {
+    fn new(label: &str, suffix: &str, org: Uuid, env: Uuid) -> Self {
         Self {
-            org: Uuid::new_v4(),
-            env: Uuid::new_v4(),
+            org,
+            env,
             project: Uuid::new_v4(),
             build: Uuid::new_v4(),
             stream: Uuid::new_v4(),
@@ -32,18 +32,7 @@ impl Workspace {
         }
     }
 
-    async fn seed(&self, admin: &PgPool, root: Uuid, user: Uuid) -> Result<(), sqlx::Error> {
-        sqlx::query("INSERT INTO hot.org(org_id,parent_org_id,name,slug,org_type,created_by_user_id) VALUES($1,$2,$3,$3,'organization',$4)")
-            .bind(self.org).bind(root).bind(&self.marker).bind(user).execute(admin).await?;
-        sqlx::query(
-            "INSERT INTO hot.env(env_id,org_id,name,created_by_user_id) VALUES($1,$2,$3,$4)",
-        )
-        .bind(self.env)
-        .bind(self.org)
-        .bind(format!("{}-env", self.marker))
-        .bind(user)
-        .execute(admin)
-        .await?;
+    async fn seed(&self, admin: &PgPool, user: Uuid) -> Result<(), sqlx::Error> {
         sqlx::query("INSERT INTO hot.project(project_id,env_id,name,created_by_user_id) VALUES($1,$2,$3,$4)")
             .bind(self.project).bind(self.env).bind(format!("{}-project", self.marker)).bind(user).execute(admin).await?;
         sqlx::query("INSERT INTO hot.build(build_id,project_id,hash,size,created_by_user_id) VALUES($1,$2,'fixture',0,$3)")
@@ -84,44 +73,55 @@ impl Workspace {
 }
 
 #[tokio::test]
-async fn root_admin_pages_render_child_data_under_a_restricted_login()
+async fn sub_org_lifecycle_and_browser_scope_use_a_restricted_runtime_login()
 -> Result<(), Box<dyn std::error::Error>> {
     let Ok(admin_uri) = std::env::var("HOT_TEST_POSTGRES_URI") else {
         eprintln!("skipping PostgreSQL app scope smoke: HOT_TEST_POSTGRES_URI not set");
         return Ok(());
     };
+    let suffix = Uuid::new_v4().simple().to_string();
+    let database = format!("hot_app_lifecycle_{suffix}");
+    let cluster = PgPool::connect(&admin_uri).await?;
+    cluster
+        .execute(sqlx::AssertSqlSafe(format!("CREATE DATABASE {database}")))
+        .await?;
+    let mut fixture_url = url::Url::parse(&admin_uri)?;
+    fixture_url.set_path(&format!("/{database}"));
+    let admin_uri = fixture_url.to_string();
     db::run_migrations(&hot::val!({"uri":admin_uri.clone(),"rls":{"enforce":false}})).await?;
     let admin = PgPool::connect(&admin_uri).await?;
-    let suffix = Uuid::new_v4().simple().to_string();
     let role = format!("hot_app_rls_{suffix}");
     let password = Uuid::new_v4().simple().to_string();
     admin.execute(sqlx::AssertSqlSafe(format!("CREATE ROLE {role} LOGIN PASSWORD '{password}' NOSUPERUSER NOBYPASSRLS NOINHERIT NOCREATEDB NOCREATEROLE"))).await?;
-    admin
-        .execute(sqlx::AssertSqlSafe(format!(
-            "GRANT USAGE ON SCHEMA hot TO {role}"
-        )))
+    let admin_password = fixture_url.password().unwrap_or_default().to_owned();
+    fixture_url
+        .set_password(None)
+        .map_err(|_| "invalid fixture URL")?;
+    let provision = tokio::process::Command::new("psql")
+        .args([
+            "-X",
+            "-v",
+            "ON_ERROR_STOP=1",
+            "-v",
+            &format!("runtime_role={role}"),
+            "-v",
+            "schema=hot",
+            "-f",
+        ])
+        .arg(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../resources/db/postgres/provision_runtime.sql"),
+        )
+        .arg("--dbname")
+        .arg(fixture_url.as_str())
+        .env("PGPASSWORD", admin_password)
+        .output()
         .await?;
-    // Exactly the table categories in provision_runtime.sql; no migration grants.
-    let grants: Vec<(String, bool)> = sqlx::query_as(
-        "SELECT format('%I.%I',n.nspname,c.relname),c.relrowsecurity AND c.relforcerowsecurity FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname='hot' AND c.relkind IN ('r','p') AND ((c.relrowsecurity AND c.relforcerowsecurity) OR c.relname IN ('build_type','email_verification_status','invite_status','org_user_role','run_status','run_type','task_status','team_user_role','org_plan_status','alert_delivery_status','alert_destination_type','plan'))"
-    ).fetch_all(&admin).await?;
-    for (table, scoped) in grants {
-        let privileges = if scoped {
-            "SELECT, INSERT, UPDATE, DELETE"
-        } else {
-            "SELECT"
-        };
-        admin
-            .execute(sqlx::AssertSqlSafe(format!(
-                "GRANT {privileges} ON {table} TO {role}"
-            )))
-            .await?;
-    }
-    admin
-        .execute(sqlx::AssertSqlSafe(format!(
-            "GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA hot TO {role}"
-        )))
-        .await?;
+    assert!(
+        provision.status.success(),
+        "{}",
+        String::from_utf8_lossy(&provision.stderr)
+    );
     let mut runtime_url = url::Url::parse(&admin_uri)?;
     runtime_url
         .set_username(&role)
@@ -135,17 +135,61 @@ async fn root_admin_pages_render_child_data_under_a_restricted_login()
 
     let user = Uuid::new_v4();
     let root = Uuid::new_v4();
-    let root_slug = format!("root-{suffix}");
+    let root_slug = format!("root-{}", &suffix[..16]);
     sqlx::query("INSERT INTO hot.\"user\"(user_id,email,name,created_by_user_id) VALUES($1,$2,'Root administrator',$1)")
         .bind(user).bind(format!("{suffix}@app-rls.example.test")).execute(&admin).await?;
-    sqlx::query("INSERT INTO hot.org(org_id,name,slug,org_type,features,created_by_user_id) VALUES($1,'HTTP test account',$2,'organization','{\"alerts\":true,\"service_keys\":true}',$3)")
+    sqlx::query("INSERT INTO hot.org(org_id,name,slug,org_type,features,created_by_user_id) VALUES($1,'HTTP test account',$2,'organization','{\"alerts\":true,\"service_keys\":true,\"sub_orgs\":4}',$3)")
         .bind(root).bind(&root_slug).bind(user).execute(&admin).await?;
     sqlx::query("INSERT INTO hot.org_user(org_user_id,org_id,user_id,org_user_role_id,created_by_user_id) VALUES($1,$2,$3,2,$3)")
         .bind(Uuid::new_v4()).bind(root).bind(user).execute(&admin).await?;
-    let a = Workspace::new("alpha", &suffix);
-    let b = Workspace::new("beta", &suffix);
-    a.seed(&admin, root, user).await?;
-    b.seed(&admin, root, user).await?;
+    let mut client = TestClient::new_with_db(
+        runtime.clone(),
+        hot::val!({"app":{"host":"localhost","port":4680},"db":{"uri":runtime_url.to_string(),"schema":"hot"},"store":{"type":"postgres"}}),
+    ).await;
+    client.login_as(&user);
+    let children_path = format!("/@{root_slug}/children");
+    let mut workspaces = Vec::new();
+    for label in ["alpha", "beta"] {
+        let slug = format!("{label}-{}", &suffix[..16]);
+        let form = [
+            ("name", slug.as_str()),
+            ("slug", slug.as_str()),
+            ("idempotency_key", slug.as_str()),
+        ];
+        for _ in 0..2 {
+            client
+                .post_form(&children_path, &form)
+                .await
+                .assert_status(StatusCode::SEE_OTHER);
+        }
+        let org: Uuid = sqlx::query_scalar("SELECT org_id FROM hot.org WHERE slug=$1")
+            .bind(&slug)
+            .fetch_one(&admin)
+            .await?;
+        let env: Uuid = sqlx::query_scalar("SELECT env_id FROM hot.env WHERE org_id=$1")
+            .bind(org)
+            .fetch_one(&admin)
+            .await?;
+        let workspace = Workspace::new(label, &suffix[..16], org, env);
+        client
+            .post_form(
+                &format!("/envs/{env}/edit?org_id={org}&env_id={env}"),
+                &[("name", &format!("{}-env", workspace.marker))],
+            )
+            .await
+            .assert_status(StatusCode::SEE_OTHER);
+        workspace.seed(&admin, user).await?;
+        workspaces.push(workspace);
+    }
+    let [a, b]: [Workspace; 2] = workspaces.try_into().ok().unwrap();
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM hot.org WHERE parent_org_id=$1")
+            .bind(root)
+            .fetch_one(&admin)
+            .await?,
+        2,
+        "idempotent child provisioning must not duplicate children"
+    );
     assert_eq!(
         sqlx::query_scalar::<_, i64>("SELECT count(*) FROM hot.org_user WHERE org_id=ANY($1)")
             .bind(vec![a.org, b.org])
@@ -218,12 +262,6 @@ async fn root_admin_pages_render_child_data_under_a_restricted_login()
         .is_err()
     );
 
-    let mut client = TestClient::new_with_db(
-        runtime.clone(),
-        hot::val!({"app":{"host":"localhost","port":4680},"db":{"uri":runtime_url.to_string(),"schema":"hot"},"store":{"type":"postgres"}}),
-    )
-    .await;
-    client.login_as(&user);
     for (selected, other) in [(&a, &b), (&b, &a)] {
         let cases = [
             (
@@ -320,92 +358,277 @@ async fn root_admin_pages_render_child_data_under_a_restricted_login()
             .contains(&format!("data-overview-org=\"{}\"", b.org))
     );
 
-    // Remove only this test's fixtures; never reset the shared test database.
-    let org_ids = vec![a.org, b.org];
-    let env_ids = vec![a.env, b.env];
-    sqlx::query("DELETE FROM hot.alert_subscription_channel WHERE subscription_id IN (SELECT alert_subscription_id FROM hot.alert_subscription WHERE org_id=ANY($1))").bind(&org_ids).execute(&admin).await?;
-    sqlx::query("DELETE FROM hot.alert_subscription_destination WHERE subscription_id IN (SELECT alert_subscription_id FROM hot.alert_subscription WHERE org_id=ANY($1))").bind(&org_ids).execute(&admin).await?;
-    sqlx::query("DELETE FROM hot.alert_subscription WHERE org_id=ANY($1)")
-        .bind(&org_ids)
-        .execute(&admin)
+    let scope_a = format!("org_id={}&env_id={}", a.org, a.env);
+    let scope_b = format!("org_id={}&env_id={}", b.org, b.env);
+    let page_a = format!("/stores?{scope_a}");
+    let page_b = format!("/stores?{scope_b}");
+
+    // Generate in A, switch the browser to B, and submit the old form. The
+    // pending secret must not migrate to B or be consumed by the wrong scope.
+    let pending = client.get(&format!("/keys/new?{scope_a}")).await;
+    pending.assert_status(StatusCode::OK);
+    let key_id = pending
+        .body
+        .split("name=\"api_key_id\" value=\"")
+        .nth(1)
+        .unwrap()
+        .split('"')
+        .next()
+        .unwrap()
+        .to_string();
+    let key_form = [
+        ("api_key_id", key_id.as_str()),
+        ("description", "lifecycle-ui-key"),
+        ("access_level", "full"),
+    ];
+    client
+        .post_form(&format!("/switch-org/{}", b.org), &[])
+        .await
+        .assert_status(StatusCode::SEE_OTHER);
+    let wrong_scope = client
+        .post_form(&format!("/keys/new?{scope_b}"), &key_form)
+        .await;
+    assert!(wrong_scope.body.contains("Session expired"));
+    let created = client
+        .post_form(&format!("/keys/new?{scope_a}"), &key_form)
+        .await;
+    created.assert_status(StatusCode::SEE_OTHER);
+    let key_redirect = created.location().unwrap().to_owned();
+    assert_eq!(key_redirect, format!("/keys?{scope_a}"));
+    let key_env: Uuid = sqlx::query_scalar("SELECT env_id FROM hot.api_key WHERE api_key_id=$1")
+        .bind(Uuid::parse_str(&key_id)?)
+        .fetch_one(&admin)
         .await?;
-    sqlx::query("DELETE FROM hot.alert_channel WHERE org_id=ANY($1)")
-        .bind(&org_ids)
-        .execute(&admin)
-        .await?;
-    sqlx::query("DELETE FROM hot.alert_destination WHERE org_id=ANY($1)")
-        .bind(&org_ids)
-        .execute(&admin)
-        .await?;
-    sqlx::query("DELETE FROM hot.file WHERE org_id=ANY($1)")
-        .bind(&org_ids)
-        .execute(&admin)
-        .await?;
-    sqlx::query("DELETE FROM hot.context WHERE env_id=ANY($1)")
-        .bind(&env_ids)
-        .execute(&admin)
-        .await?;
-    sqlx::query("DELETE FROM hot.service_key WHERE env_id=ANY($1)")
-        .bind(&env_ids)
-        .execute(&admin)
-        .await?;
-    sqlx::query("DELETE FROM hot.api_key WHERE env_id=ANY($1)")
-        .bind(&env_ids)
-        .execute(&admin)
-        .await?;
-    sqlx::query("DELETE FROM hot.run WHERE env_id=ANY($1)")
-        .bind(&env_ids)
-        .execute(&admin)
-        .await?;
-    sqlx::query("DELETE FROM hot.stream WHERE env_id=ANY($1)")
-        .bind(&env_ids)
-        .execute(&admin)
-        .await?;
-    sqlx::query("DELETE FROM hot.build WHERE project_id=ANY($1)")
-        .bind(vec![a.project, b.project])
-        .execute(&admin)
-        .await?;
-    sqlx::query("DELETE FROM hot.project WHERE env_id=ANY($1)")
-        .bind(&env_ids)
-        .execute(&admin)
-        .await?;
-    sqlx::query("DELETE FROM hot.store_map_entry WHERE org_id=ANY($1)")
-        .bind(&org_ids)
-        .execute(&admin)
-        .await?;
-    sqlx::query("DELETE FROM hot.store_map WHERE org_id=ANY($1)")
-        .bind(&org_ids)
-        .execute(&admin)
-        .await?;
-    sqlx::query("DELETE FROM hot.env WHERE env_id=ANY($1)")
-        .bind(&env_ids)
-        .execute(&admin)
-        .await?;
-    sqlx::query("DELETE FROM hot.org WHERE org_id=ANY($1)")
-        .bind(&org_ids)
-        .execute(&admin)
-        .await?;
-    sqlx::query("DELETE FROM hot.org_user WHERE org_id=$1")
-        .bind(root)
-        .execute(&admin)
-        .await?;
-    sqlx::query("DELETE FROM hot.org WHERE org_id=$1")
-        .bind(root)
-        .execute(&admin)
-        .await?;
-    sqlx::query("DELETE FROM hot.\"user\" WHERE user_id=$1")
-        .bind(user)
-        .execute(&admin)
-        .await?;
+    assert_eq!(key_env, a.env);
+    // Simulate another tab switching after the mutation response but before
+    // following its redirect. The redirect itself must carry A's authority.
+    client
+        .post_form(&format!("/switch-org/{}", b.org), &[])
+        .await
+        .assert_status(StatusCode::SEE_OTHER);
+    let returned = client.get(&key_redirect).await;
+    returned.assert_status(StatusCode::OK);
+    assert!(returned.body.contains("lifecycle-ui-key"));
+    assert!(!returned.body.contains(&format!("{}-api-key", b.marker)));
+    client.get(&page_a).await.assert_status(StatusCode::OK);
+    client
+        .get(&format!("/stores?org_id={}&env_id={}", a.org, b.env))
+        .await
+        .assert_status(StatusCode::NOT_FOUND);
+    client
+        .get_with_headers(&page_a, &[("X-Hot-Org-Id", &b.org.to_string())])
+        .await
+        .assert_status(StatusCode::BAD_REQUEST);
+    client
+        .post_form("/keys/new", &key_form)
+        .await
+        .assert_status(StatusCode::BAD_REQUEST);
+
+    let issued = client
+        .post_form(
+            &format!("/service-keys/new?{scope_a}"),
+            &[
+                ("name", "lifecycle-service-key"),
+                ("permissions", r#"{"webhook:*":["*"]}"#),
+            ],
+        )
+        .await;
+    issued.assert_status(StatusCode::OK);
+    assert!(
+        issued.body.contains("Service Key Created"),
+        "{}",
+        issued.body
+    );
+    let (service_key, parent_key, service_env): (Uuid,Uuid,Uuid) = sqlx::query_as("SELECT service_key_id,api_key_id,env_id FROM hot.service_key WHERE name='lifecycle-service-key'").fetch_one(&admin).await?;
+    assert_eq!(
+        (parent_key, service_env),
+        (Uuid::parse_str(&key_id)?, a.env)
+    );
+    client
+        .get(&format!("/service-keys/{service_key}?{scope_b}"))
+        .await
+        .assert_status(StatusCode::NOT_FOUND);
+    client
+        .post_form(
+            &format!("/service-keys/{service_key}/revoke?{scope_b}"),
+            &[],
+        )
+        .await
+        .assert_status(StatusCode::NOT_FOUND);
+    assert!(
+        sqlx::query_scalar::<_, bool>(
+            "SELECT revoked_at IS NULL FROM hot.service_key WHERE service_key_id=$1"
+        )
+        .bind(service_key)
+        .fetch_one(&admin)
+        .await?
+    );
+    let revoked = client
+        .post_form(
+            &format!("/service-keys/{service_key}/revoke?{scope_a}"),
+            &[],
+        )
+        .await;
+    revoked.assert_status(StatusCode::SEE_OTHER);
+    let service_redirect = revoked.location().unwrap().to_owned();
+    assert_eq!(service_redirect, format!("/service-keys?{scope_a}"));
+    client
+        .post_form(&format!("/switch-org/{}", b.org), &[])
+        .await
+        .assert_status(StatusCode::SEE_OTHER);
+    let returned = client.get(&service_redirect).await;
+    returned.assert_status(StatusCode::OK);
+    assert!(
+        returned
+            .body
+            .contains(&format!("const orgId = '{}'", a.org))
+    );
+    assert!(
+        !sqlx::query_scalar::<_, bool>(
+            "SELECT revoked_at IS NULL FROM hot.service_key WHERE service_key_id=$1"
+        )
+        .bind(service_key)
+        .fetch_one(&admin)
+        .await?
+    );
+    let edit_form = [
+        ("description", "lifecycle-revoked-api-key"),
+        ("active", "false"),
+        ("access_level", "full"),
+    ];
+    client
+        .post_form(&format!("/keys/{key_id}/edit?{scope_b}"), &edit_form)
+        .await
+        .assert_status(StatusCode::SEE_OTHER);
+    assert!(
+        sqlx::query_scalar::<_, bool>("SELECT active FROM hot.api_key WHERE api_key_id=$1")
+            .bind(Uuid::parse_str(&key_id)?)
+            .fetch_one(&admin)
+            .await?
+    );
+    let edited = client
+        .post_form(&format!("/keys/{key_id}/edit?{scope_a}"), &edit_form)
+        .await;
+    edited.assert_status(StatusCode::SEE_OTHER);
+    assert_eq!(edited.location(), Some(format!("/keys?{scope_a}").as_str()));
+    assert!(
+        !sqlx::query_scalar::<_, bool>("SELECT active FROM hot.api_key WHERE api_key_id=$1")
+            .bind(Uuid::parse_str(&key_id)?)
+            .fetch_one(&admin)
+            .await?
+    );
+
+    let lifecycle = format!("/@{root_slug}/children/{}/lifecycle", a.org);
+    for state in ["suspended", "archived"] {
+        client
+            .post_form(&lifecycle, &[("state", state)])
+            .await
+            .assert_status(StatusCode::SEE_OTHER);
+        client
+            .get(&page_a)
+            .await
+            .assert_status(StatusCode::FORBIDDEN);
+        client.get(&page_b).await.assert_status(StatusCode::OK);
+        client
+            .get(&children_path)
+            .await
+            .assert_status(StatusCode::OK);
+    }
+    client
+        .post_form(&lifecycle, &[("state", "active")])
+        .await
+        .assert_status(StatusCode::BAD_REQUEST);
+    for state in ["suspended", "active"] {
+        client
+            .post_form(&lifecycle, &[("state", state)])
+            .await
+            .assert_status(StatusCode::SEE_OTHER);
+    }
+    client.get(&page_a).await.assert_status(StatusCode::OK);
+    let root_lifecycle = format!("/@{root_slug}/lifecycle");
+    client
+        .post_form(&root_lifecycle, &[("state", "suspended")])
+        .await
+        .assert_status(StatusCode::SEE_OTHER);
+    client
+        .get(&page_a)
+        .await
+        .assert_status(StatusCode::FORBIDDEN);
+    client
+        .get(&page_b)
+        .await
+        .assert_status(StatusCode::FORBIDDEN);
+    client
+        .get(&children_path)
+        .await
+        .assert_status(StatusCode::OK);
+    client
+        .post_form(&root_lifecycle, &[("state", "active")])
+        .await
+        .assert_status(StatusCode::SEE_OTHER);
+    client.get(&page_a).await.assert_status(StatusCode::OK);
+
+    let member = Uuid::new_v4();
+    sqlx::query("INSERT INTO hot.\"user\"(user_id,email,name,created_by_user_id) VALUES($1,$2,'Child member',$3)").bind(member).bind(format!("member-{suffix}@example.test")).bind(user).execute(&admin).await?;
+    sqlx::query("INSERT INTO hot.org_user(org_user_id,org_id,user_id,org_user_role_id,created_by_user_id) VALUES($1,$2,$3,1,$4)").bind(Uuid::new_v4()).bind(root).bind(member).bind(user).execute(&admin).await?;
+    client.login_as(&member);
+    client
+        .get(&page_a)
+        .await
+        .assert_status(StatusCode::NOT_FOUND);
+    client
+        .get(&children_path)
+        .await
+        .assert_status(StatusCode::FORBIDDEN);
+    client.login_as(&user);
+    let grant_path = format!("/@{root_slug}/children/{}/access", a.org);
+    client
+        .post_form(
+            &grant_path,
+            &[("user_id", &member.to_string()), ("role_id", "1")],
+        )
+        .await
+        .assert_status(StatusCode::SEE_OTHER);
+    client.login_as(&member);
+    client.get(&page_a).await.assert_status(StatusCode::OK);
+    client
+        .get(&page_b)
+        .await
+        .assert_status(StatusCode::NOT_FOUND);
+    client
+        .get(&format!("/service-keys?{scope_a}"))
+        .await
+        .assert_status(StatusCode::FORBIDDEN);
+    client
+        .post_form(&lifecycle, &[("state", "suspended")])
+        .await
+        .assert_status(StatusCode::FORBIDDEN);
+    client.login_as(&user);
+    client
+        .post_form(
+            &grant_path,
+            &[("user_id", &member.to_string()), ("role_id", "0")],
+        )
+        .await
+        .assert_status(StatusCode::SEE_OTHER);
+    client.login_as(&member);
+    client
+        .get(&page_a)
+        .await
+        .assert_status(StatusCode::NOT_FOUND);
+
     if let DatabasePool::Postgres(pool) = &runtime {
         pool.close().await;
     }
-    admin
-        .execute(sqlx::AssertSqlSafe(format!("DROP OWNED BY {role}")))
+    admin.close().await;
+    cluster
+        .execute(sqlx::AssertSqlSafe(format!(
+            "DROP DATABASE {database} WITH (FORCE)"
+        )))
         .await?;
-    admin
+    cluster
         .execute(sqlx::AssertSqlSafe(format!("DROP ROLE {role}")))
         .await?;
-    admin.close().await;
+    cluster.close().await;
     Ok(())
 }

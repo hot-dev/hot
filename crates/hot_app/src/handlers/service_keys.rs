@@ -383,7 +383,10 @@ pub async fn service_keys_revoke_handler(
         )
     })?;
 
-    Ok(Redirect::to("/service-keys"))
+    Ok(Redirect::to(&format!(
+        "/service-keys?org_id={}&env_id={}",
+        env.org_id, env.env_id
+    )))
 }
 
 #[derive(serde::Deserialize)]
