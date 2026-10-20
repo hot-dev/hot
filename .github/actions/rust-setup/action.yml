@@ -83,8 +83,10 @@ runs:
         path: ~/.cache/sccache
         # Stable across source-only runs: sccache content-addresses compiler
         # inputs, so a fresh run_id key only duplicates the same dependency
-        # objects and burns quota.
-        key: sccache-${{ runner.os }}-${{ inputs.rust-toolchain }}-${{ github.job }}-${{ hashFiles('Cargo.lock', '.github/actions/rust-setup/action.yml') }}
+        # objects and burns quota. The size is part of the key because
+        # actions/cache never re-saves an existing key, so a raised size
+        # would otherwise never persist.
+        key: sccache-${{ runner.os }}-${{ inputs.rust-toolchain }}-${{ github.job }}-${{ inputs.sccache-size }}-${{ hashFiles('Cargo.lock', '.github/actions/rust-setup/action.yml') }}
         restore-keys: |
           sccache-${{ runner.os }}-${{ inputs.rust-toolchain }}-${{ github.job }}-
           sccache-${{ runner.os }}-${{ inputs.rust-toolchain }}-
@@ -94,7 +96,7 @@ runs:
       uses: actions/cache/restore@v5
       with:
         path: ~/.cache/sccache
-        key: sccache-${{ runner.os }}-${{ inputs.rust-toolchain }}-${{ github.job }}-${{ hashFiles('Cargo.lock', '.github/actions/rust-setup/action.yml') }}
+        key: sccache-${{ runner.os }}-${{ inputs.rust-toolchain }}-${{ github.job }}-${{ inputs.sccache-size }}-${{ hashFiles('Cargo.lock', '.github/actions/rust-setup/action.yml') }}
         restore-keys: |
           sccache-${{ runner.os }}-${{ inputs.rust-toolchain }}-${{ github.job }}-
           sccache-${{ runner.os }}-${{ inputs.rust-toolchain }}-

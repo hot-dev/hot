@@ -92,9 +92,11 @@ jobs:
           # Restore-only on PR runs. Main/weekly saves use bounded sccache
           # entries and registry-only rust-cache entries; persisting both full
           # target/ and compiler caches for each OS would exceed the repo's
-          # 10 GB Actions cache budget.
+          # 10 GB Actions cache budget. The dependency set needs more than
+          # 512M (a full Linux set is about 0.7 GiB): at 512M both OSes hit
+          # about 2% and compiled nearly everything on every run.
           save-cache: ${{ github.ref == 'refs/heads/main' }}
-          sccache-size: 512M
+          sccache-size: 2G
           cache-rust-targets: "false"
           ci-tuning: "true"
 
