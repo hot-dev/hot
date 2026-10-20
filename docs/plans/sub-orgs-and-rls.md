@@ -162,6 +162,101 @@ These are synthetic populated upgrade fixtures, not a restore of a production
 backup. Private bootstrap/provider ordering, deployed proxies/roles, account
 usage reconciliation, and production backup/restore remain deployment gates.
 
+### Restricted-role lifecycle validation — 2026-10-19
+
+The API and app lifecycle fixtures each create an isolated PostgreSQL database,
+apply the real runtime provisioning script, and open the application pool with
+role enforcement enabled. Initial account identities and marker data use the
+fixture administrator; child creation, environment provisioning, credentials,
+lifecycle mutations, and HTTP reads use the restricted runtime login. The API
+test assembles the same router and middleware as production. The app test uses
+the real app router and browser-session cookies.
+
+The review repaired these issues:
+
+- Child webhook calls selected a global default user for attribution. A child
+  with only inherited root membership exposes no such user under RLS, causing
+  event insertion to fail. Authenticated calls now use the credential creator;
+  public calls use the selected deployment creator. The handler resolves and
+  verifies deployment ownership before persisting or enqueueing work.
+- An explicit, unrecognized webhook `auth` value silently made the endpoint
+  public. Only omission and the documented `"none"` value retain public access;
+  all other explicit values require authentication.
+- Credential mutation redirects omitted selected org/env identifiers. Another
+  tab could switch navigation cookies before the redirect was followed. API-key
+  create/edit redirects and service-key revocation redirects now retain the
+  workspace that handled the request.
+- RLS-hidden project UUIDs surfaced as database errors and produced HTTP 500.
+  Project lookup now maps a missing row to the domain's not-found error, so
+  foreign and nonexistent project IDs both return HTTP 404.
+- A live deployment rehearsal exposed an ownership trigger that rejected
+  webhook redeployment. Webhook capability IDs intentionally survive new builds
+  of the same project. Migration `018` permits that build reassignment while
+  rejecting moves to another project, including projects in the same environment.
+- Queue serialization discarded the transient webhook `original-url`, although
+  worker hydration needs it for signature verification. The thin envelope now
+  carries only URL restoration hints; request bodies, headers, and execution
+  payloads still come from the scoped database record. Restoration requires the
+  URL to match that record's redacted path, and durable event data stays redacted.
+
+The fixtures exercise child creation/idempotence, independent environments and
+same-name sibling resources, API/service key creation and revocation, issuer
+ceilings, token-class separation, suspension and archive recovery, root recovery,
+explicit child grants and revocation, stale forms, competing cookie switches,
+and sibling read/mutation denial. Webhook checks inspect persisted events and
+queued org/env/build/project/creator identities, reject sibling credentials and
+capabilities without creating work, and ignore a wrong-environment completion.
+Public and authenticated calls use distinct deployment and credential creators.
+The webhook test also covers current custom-domain ownership after cache hits.
+
+The automated webhook fixture controls the completion publisher after validating
+the actual queue handoff. It checks the thin queue envelope and the authoritative
+persisted deployment target; worker hydration restores the omitted project data.
+The separate live deployment rehearsal runs actual workflow code in the worker.
+Neither rehearsal qualifies external webhook providers, deployed proxies, or
+cloud queues.
+
+The live rehearsal used PostgreSQL 18, a dedicated Valkey instance, and the
+rebuilt CLI running API, app, and worker processes with database tracing enabled.
+The dev startup migration check used a separate owner connection; inspection of
+active service connections showed only the restricted runtime login. That login
+had neither superuser, bypass-RLS, nor inherited privileges, and an unscoped org
+query returned no rows.
+
+- Two child projects deployed the same namespace/function/service/path with
+  distinct response markers. Live-to-bundle and subsequent bundle deployment
+  preserved each webhook capability ID.
+- Ten real queue-to-worker executions (five per child) returned the correct
+  marker and exact original URL, including its encoded query. All ten persisted
+  runs succeeded with the correct child environment and deployed build.
+- Sibling capability substitution returned 404 without creating an event.
+  Child suspension/archive and root suspension returned 403 without creating an
+  event. The active sibling kept executing; valid recovery restored execution.
+  Direct archive-to-active recovery remained rejected.
+- Durable webhook event data contained redacted URLs, with no capability tokens.
+
+The populated upgrade regression now starts at migrations `009`, `015`, and
+`017`, retains existing webhook rows, applies the current chain, reprovisions
+runtime grants, and verifies same-project redeployment plus rejection of
+cross-project/environment reassignment. The live fixture also applied `018`
+to its existing deployment before the successful rehearsal.
+
+Final validation:
+
+| Check | Result |
+| --- | --- |
+| Rust workspace, all targets, with PostgreSQL and Valkey enabled | 2,559 passed, 0 failed, 9 ignored across 37 targets |
+| Production API/router restricted-role lifecycle | Passed, including API/service keys, issuer revocation/ceilings, webhook routing, lifecycle denials, and sibling isolation |
+| PostgreSQL RLS and populated upgrade regressions | Passed, including migration 018 redeployment and the existing migration failure/recovery cases |
+| Browser scope JavaScript tests | 5 passed |
+| Live CLI/API/UI/Valkey/worker rehearsal | 10 successful executions; lifecycle, sibling denial, deployment identity, URL delivery, and persisted scope assertions passed |
+| Isolated Hot initialization and main suite | 909 tests and 2,460 assertions passed |
+| Rust formatting, Clippy with warnings denied, Hot static checks, AGENTS synchronization, and diff checks | Passed |
+
+The service-backed suite used `HOT_TEST_POSTGRES_URI`, `REDIS_URL`, and
+`HOT_REDIS_URI` against disposable local fixtures. Those fixtures, including
+the live-worker database and restricted role, were removed after validation.
+
 Hot will support a parent organization with child organizations that each own
 their environments, projects, deployments, credentials, and runtime data.
 The parent owns the subscription and human member directory. Authorized parent
