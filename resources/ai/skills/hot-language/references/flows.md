@@ -159,7 +159,8 @@ describe fn match (shape: Shape): Str {
 }
 ```
 
-`match` functions may accept extra arguments after the matched value:
+`match` functions may declare additional parameters after the parameter whose
+argument is matched:
 
 ```hot
 render fn match (shape: Shape, color: Str): Str {
