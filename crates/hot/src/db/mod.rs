@@ -634,13 +634,43 @@ pub async fn test_connection(db: &DatabasePool) -> Result<(), DatabaseError> {
     Ok(())
 }
 
+/// Schema-owner credentials (`db.migration-uri`, or `migration-uri` in a
+/// resolved database section); empty when not configured.
+fn get_migration_uri_from_conf(conf: &Val) -> String {
+    conf.get_str_or_default(
+        "db.migration-uri",
+        &conf.get_str_or_default("migration-uri", ""),
+    )
+}
+
+/// Whether this process may change the schema. Enforced PostgreSQL keeps
+/// migration credentials out of long-running services, so there only a process
+/// configured with `db.migration-uri` migrates and bootstraps.
+pub fn schema_changes_enabled(conf: &Val) -> bool {
+    !get_migration_uri_from_conf(conf).is_empty()
+        || !matches!(
+            DatabaseType::from_uri(&get_db_uri_from_conf(conf)),
+            Ok(DatabaseType::Postgres)
+        )
+        || !rls_enforcement_required(conf)
+}
+
+/// Configuration for a schema bootstrap provider. Bootstrap runs right after
+/// migrations and may create tables or seed reference data, so it connects with
+/// the migration credentials, which are not a qualified runtime login.
+pub fn bootstrap_conf(conf: &Val) -> Val {
+    let migration_uri = get_migration_uri_from_conf(conf);
+    if migration_uri.is_empty() {
+        return conf.clone();
+    }
+    conf.set_str("db.uri", Some(migration_uri), "")
+        .set_bool("db.rls.enforce", Some(false), false)
+}
+
 /// Run database migrations
 pub async fn run_migrations(conf: &Val) -> Result<(), DatabaseError> {
     let runtime_uri = get_db_uri_from_conf(conf);
-    let migration_uri = conf.get_str_or_default(
-        "db.migration-uri",
-        &conf.get_str_or_default("migration-uri", ""),
-    );
+    let migration_uri = get_migration_uri_from_conf(conf);
     let uri = if migration_uri.is_empty() {
         if matches!(
             DatabaseType::from_uri(&runtime_uri)?,

@@ -93,8 +93,18 @@ pub(crate) fn get_blob_resolved_conf(conf: Val, in_project: bool, managed_runtim
     conf.set_str("mode", Some(resolved_mode.to_string()), "")
 }
 
+/// Hyphenated keys that deployments commonly set from the environment;
+/// underscores alone cannot spell them.
+const HYPHENATED_ENV_KEYS: &[(&str, &str)] = &[("HOT_DB_MIGRATION_URI", "db.migration-uri")];
+
 // Helper function to convert environment variable name to dot notation conf key
 fn env_var_to_conf_key(env_var: &str) -> String {
+    if let Some((_, key)) = HYPHENATED_ENV_KEYS
+        .iter()
+        .find(|(name, _)| *name == env_var)
+    {
+        return (*key).to_string();
+    }
     env_var
         .strip_prefix("HOT_")
         .unwrap_or(env_var)
@@ -1751,6 +1761,15 @@ pub(crate) fn apply_command_specific_defaults(mut conf: Val, command: &Option<Co
 mod tests {
     use super::*;
     use hot::val;
+
+    #[test]
+    fn migration_uri_environment_variable_maps_to_its_hyphenated_key() {
+        assert_eq!(
+            env_var_to_conf_key("HOT_DB_MIGRATION_URI"),
+            "db.migration-uri"
+        );
+        assert_eq!(env_var_to_conf_key("HOT_DB_URI"), "db.uri");
+    }
 
     #[test]
     fn whole_map_environment_overrides_are_explicit_scope() {

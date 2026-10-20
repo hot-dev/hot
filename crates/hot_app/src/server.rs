@@ -115,18 +115,29 @@ pub async fn run_with_stream_pubsub(conf: Val, shared_stream_pubsub: Option<Arc<
     // Create database pool using db config from original full config
     let db_conf = hot::db::get_resolved_conf(conf.clone());
 
-    // Run database migrations
-    if let Err(e) = run_migrations(&db_conf).await {
-        error!("hot.dev: Failed to run database migrations: {}", e);
-        panic!("Failed to run database migrations: {}", e);
-    }
+    // Schema changes need migration credentials. A restricted PostgreSQL
+    // runtime login cannot create tables or seed reference data, and must not
+    // hold the owner's credentials, so deployments migrate with `hot db migrate`.
+    if hot::db::schema_changes_enabled(&db_conf) {
+        if let Err(e) = run_migrations(&db_conf).await {
+            error!("hot.dev: Failed to run database migrations: {}", e);
+            panic!("Failed to run database migrations: {}", e);
+        }
 
-    if let Err(e) = crate::database_bootstrap::database_bootstrap()
-        .bootstrap(&db_conf)
+        let bootstrap_conf = hot::db::bootstrap_conf(&db_conf);
+        if let Err(e) = hot::db::with_database_scope(
+            hot::db::DatabaseScope::Bootstrap(hot::db::BootstrapOperation::Onboarding),
+            crate::database_bootstrap::database_bootstrap().bootstrap(&bootstrap_conf),
+        )
         .await
-    {
-        error!("hot.dev: Failed to run database bootstrap: {}", e);
-        panic!("Failed to run database bootstrap: {}", e);
+        {
+            error!("hot.dev: Failed to run database bootstrap: {}", e);
+            panic!("Failed to run database bootstrap: {}", e);
+        }
+    } else {
+        info!(
+            "hot.dev: Skipping schema migrations and bootstrap at startup; run `hot db migrate` with db.migration-uri during deployment"
+        );
     }
 
     let db = match create_db_pool(&db_conf).await {

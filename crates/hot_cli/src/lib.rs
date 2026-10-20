@@ -296,9 +296,10 @@ pub(crate) async fn run_migrations_with_bootstrap(
     hot::db::run_migrations(conf)
         .await
         .map_err(|e| MigrationFailure::from_message(e.to_string()))?;
+    let bootstrap_conf = hot::db::bootstrap_conf(conf);
     hot::db::with_database_scope(
         hot::db::DatabaseScope::Bootstrap(hot::db::BootstrapOperation::Onboarding),
-        providers.database_bootstrap.bootstrap(conf),
+        providers.database_bootstrap.bootstrap(&bootstrap_conf),
     )
     .await
     .map_err(MigrationFailure::from_message)
