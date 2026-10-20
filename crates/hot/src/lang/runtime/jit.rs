@@ -2783,7 +2783,7 @@ unsafe extern "C" fn hot_jit_capture_var(name_ptr: i64, scope_depth: i64) -> i64
 /// Takes an OwnedVal pointer and returns the length as an i64 Int.
 unsafe extern "C" fn hot_jit_length(val_ptr: i64) -> i64 {
     let val = unsafe { &*(val_ptr as *const Val) };
-    match val {
+    match crate::val::as_fields(val) {
         Val::Vec(v) => v.len() as i64,
         Val::Str(s) => s.len() as i64,
         Val::Map(m) => m.len() as i64,

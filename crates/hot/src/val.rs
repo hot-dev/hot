@@ -74,10 +74,61 @@ pub(crate) fn map_spread_entries(source: &Val) -> Option<&IndexMap<Val, Val>> {
     if !is_tagged_wrapper(map) || source.is_err() {
         return Some(map);
     }
-    match map.get(tagged_payload_key()) {
+    match typed_fields(source) {
         Some(Val::Map(fields)) => Some(fields),
         _ => None,
     }
+}
+
+/// The fields of a constructed value: the `$val` payload of a tagged wrapper
+/// when that payload is a map. `None` for every other value, including `Err`
+/// wrappers, so an error is never read as data.
+fn typed_fields(val: &Val) -> Option<&Val> {
+    let Val::Map(map) = val else {
+        return None;
+    };
+    if !is_tagged_wrapper(map) || val.is_err() {
+        return None;
+    }
+    match map.get(tagged_payload_key()) {
+        Some(fields @ Val::Map(_)) => Some(fields),
+        _ => None,
+    }
+}
+
+/// How collection functions see a value: a constructed value (a struct, or
+/// an enum variant with a map payload) is its fields, and anything else is
+/// itself. The tagged wrapper is transparent to field access, and `get`,
+/// `keys`, `length`, `reduce` and the rest follow suit.
+pub(crate) fn as_fields(val: &Val) -> &Val {
+    typed_fields(val).unwrap_or(val)
+}
+
+/// Give `fields` the type of `original` when `original` is a constructed
+/// value; otherwise return `fields` as-is. Updating functions (`assoc`,
+/// `update`, `merge`, ...) use this so `assoc(server, "port", 2)` stays a
+/// `Server`, matching deep-path assignment. Custom constructors are not
+/// re-run.
+pub(crate) fn with_type_of(original: &Val, fields: Val) -> Val {
+    let Val::Map(map) = original else {
+        return fields;
+    };
+    if typed_fields(original).is_none() {
+        return fields;
+    }
+    let mut fields = Some(fields);
+    let wrapper = map
+        .iter()
+        .map(|(key, value)| {
+            let value = if key == tagged_payload_key() {
+                fields.take().unwrap_or(Val::Null)
+            } else {
+                value.clone()
+            };
+            (key.clone(), value)
+        })
+        .collect();
+    Val::Map(Box::new(wrapper))
 }
 
 pub use crate::val;
@@ -3033,6 +3084,37 @@ impl Val {
 mod tests {
     use super::*;
     use fastnum::decimal::Context;
+
+    #[test]
+    fn as_fields_and_with_type_of_round_trip_constructed_values() {
+        let server = val!({
+            "$type": "::test/Server",
+            "$val": {"host": "a.example", "port": 1},
+            "$origin": "::test"
+        });
+        assert_eq!(as_fields(&server), &val!({"host": "a.example", "port": 1}));
+
+        // The type (and wrapper metadata) is re-attached to the new fields.
+        let moved = with_type_of(&server, val!({"host": "a.example", "port": 2}));
+        assert_eq!(
+            moved,
+            val!({
+                "$type": "::test/Server",
+                "$val": {"host": "a.example", "port": 2},
+                "$origin": "::test"
+            })
+        );
+
+        // Plain maps, non-map payloads and errors are left alone.
+        let plain = val!({"host": "a.example"});
+        assert_eq!(as_fields(&plain), &plain);
+        assert_eq!(with_type_of(&plain, val!({"x": 1})), val!({"x": 1}));
+        let email = val!({"$type": "::test/Email", "$val": "x"});
+        assert_eq!(as_fields(&email), &email);
+        let error = Val::err(val!({"message": "boom"}));
+        assert_eq!(as_fields(&error), &error);
+        assert_eq!(with_type_of(&error, val!({"x": 1})), val!({"x": 1}));
+    }
 
     #[test]
     fn map_spread_entries_unwraps_constructed_values() {

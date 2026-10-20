@@ -83,7 +83,7 @@ handle-with-match fn (id: Str): Str {
 // LAZY ARGUMENTS
 // ============================================
 
-// Arguments marked 'lazy' aren't evaluated until needed
+// Arguments passed to parameters marked 'lazy' aren't evaluated until forced with 'do'
 // This enables short-circuit evaluation and safe result inspection
 
 // maybe-run only evaluates action if should-run is true

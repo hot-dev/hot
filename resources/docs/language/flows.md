@@ -328,7 +328,8 @@ is-result match value {
 
 ### Match Functions with Extra Arguments
 
-Match flow functions can have additional arguments beyond the matched value:
+Match flow functions can declare additional parameters after the parameter
+whose argument is matched:
 
 {{snippet:flows#match-direction-enum}}
 
@@ -405,13 +406,14 @@ result 10
   |> add(5)     // add(20, 5) → 25
 ```
 
-2. **`%` creates a lambda only inside an argument that expects a function** — the higher-order arguments of `map`, `filter`, `reduce`, and friends:
+2. **`%` creates a lambda inside an argument supplied to a parameter whose type contains `Fn`** — such as the callback parameters of `map`, `filter`, `reduce`, and friends:
 
 ```hot
 [1, 2, 3] |> map(mul(%, 2))    // % is each element → [2, 4, 6]
 ```
 
-A bare `%` in a pipe stage that isn't a function-typed argument is a compile error:
+A bare `%` in a pipe stage with no enclosing argument supplied to a parameter
+whose type contains `Fn` is a compile error:
 
 ```hot
 10 |> mul(%, 2)

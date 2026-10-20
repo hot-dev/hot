@@ -106,9 +106,8 @@ the payload.
 
 ## Lazy Arguments
 
-Ordinary arguments are eager. Arguments marked `lazy` instead arrive as
-deferred computations and aren't evaluated until explicitly forced. This
-enables:
+Ordinary arguments are eager. When a parameter is marked `lazy`, its argument
+expression is deferred until the function forces it with `do`. This enables:
 
 1. **Safe Result inspection** — `is-ok` and `is-err` can receive Results without triggering auto-unwrap
 2. **Short-circuit evaluation** — `and` and `or` don't evaluate unused branches
@@ -116,10 +115,10 @@ enables:
 
 ### How if() Works
 
-The `if` function uses lazy arguments:
+The `if` function declares lazy parameters for its branches:
 
 ```hot
-// Both 'then' and 'else' are lazy - only one is evaluated
+// 'then' and 'else' are lazy parameters - only the selected argument is evaluated
 if fn cond (pred: Any, lazy then: Any, lazy else: Any): Any {
     pred => { do then }
     => { do else }
