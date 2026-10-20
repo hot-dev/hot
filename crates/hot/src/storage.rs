@@ -280,12 +280,12 @@ pub mod s3 {
                 .get("s3")
                 .ok_or_else(|| "build.aws.s3 configuration section not found".to_string())?;
 
-            let bucket = s3_conf.get_str("bucket");
+            let bucket = s3_conf.get_str_or_default("bucket", "");
             if bucket.is_empty() {
                 return Err("build.aws.s3.bucket not configured".to_string());
             }
 
-            let prefix_str = s3_conf.get_str("prefix");
+            let prefix_str = s3_conf.get_str_or_default("prefix", "");
             let prefix = if prefix_str.is_empty() {
                 None
             } else {
@@ -296,7 +296,7 @@ pub mod s3 {
             let mut config_loader = aws_config::defaults(BehaviorVersion::latest());
 
             // Override region if specified in S3 config
-            let s3_region = s3_conf.get_str("region");
+            let s3_region = s3_conf.get_str_or_default("region", "");
             if !s3_region.is_empty() {
                 config_loader = config_loader.region(aws_config::Region::new(s3_region));
             }

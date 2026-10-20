@@ -1763,12 +1763,12 @@ pub mod s3 {
                 .get("s3")
                 .ok_or_else(|| "file.aws.s3 configuration section not found".to_string())?;
 
-            let bucket = s3_conf.get_str("bucket");
+            let bucket = s3_conf.get_str_or_default("bucket", "");
             if bucket.is_empty() {
                 return Err("file.aws.s3.bucket not configured".to_string());
             }
 
-            let prefix_str = s3_conf.get_str("prefix");
+            let prefix_str = s3_conf.get_str_or_default("prefix", "");
             let prefix = if prefix_str.is_empty() {
                 None
             } else {
@@ -1779,7 +1779,7 @@ pub mod s3 {
             let mut config_loader = aws_config::defaults(BehaviorVersion::latest());
 
             // Override region if specified in S3 config
-            let s3_region = s3_conf.get_str("region");
+            let s3_region = s3_conf.get_str_or_default("region", "");
             if !s3_region.is_empty() {
                 config_loader = config_loader.region(aws_config::Region::new(s3_region));
             }
@@ -3546,6 +3546,26 @@ pub async fn file_storage_from_config(conf: &Val) -> Result<Box<dyn FileStorage>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(feature = "s3-storage")]
+    #[tokio::test]
+    async fn s3_configuration_errors_do_not_panic_or_contact_aws() {
+        let missing_bucket = crate::val!({"file": {"aws": {"s3": {}}}});
+        assert!(
+            s3::S3FileStorage::from_config(&missing_bucket)
+                .await
+                .is_err()
+        );
+        let incomplete_credentials = crate::val!({"file": {"aws": {
+            "access-key-id": "only-one-half",
+            "s3": {"bucket": "customer-bucket", "region": "us-east-1"}
+        }}});
+        assert!(
+            s3::S3FileStorage::from_config(&incomplete_credentials)
+                .await
+                .is_err()
+        );
+    }
 
     #[test]
     fn test_normalize_path() {
