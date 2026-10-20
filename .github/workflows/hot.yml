@@ -143,18 +143,26 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y postgresql-client
 
-      # Cargo runs crate tests outside the workspace root. Supply runtime
-      # assets explicitly instead of relying on a system-wide Hot install.
+      # Cargo runs crate tests outside the workspace root. Expose checkout
+      # assets through executable-relative discovery without changing the
+      # default database/profile behavior via HOT_HOME.
       - name: Prepare checkout runtime for Rust tests
         run: |
-          runtime_home="$RUNNER_TEMP/hot-rust-test-home"
-          mkdir -p "$runtime_home"
-          ln -s "$GITHUB_WORKSPACE/hot/pkg" "$runtime_home/pkg"
-          ln -s "$GITHUB_WORKSPACE/resources" "$runtime_home/resources"
+          runtime_assets="$RUNNER_TEMP/hot-rust-test-resources"
+          mkdir -p "$runtime_assets" target/debug/deps
+          for entry in "$GITHUB_WORKSPACE/resources/"*; do
+            ln -s "$entry" "$runtime_assets/${entry##*/}"
+          done
+          ln -s "$GITHUB_WORKSPACE/hot/pkg" "$runtime_assets/pkg"
+          for destination in target/debug/resources target/debug/deps/resources; do
+            if [[ -L "$destination" ]]; then
+              rm "$destination"
+            fi
+            ln -s "$runtime_assets" "$destination"
+          done
 
       - name: Run Rust tests
         env:
-          HOT_HOME: ${{ runner.temp }}/hot-rust-test-home
           REDIS_URL: redis://localhost:6379
           HOT_TEST_POSTGRES_URI: postgres://hot:hot@localhost:5432/hot
           HOT_TEST_POSTGRES_RESET_SCHEMA: '1'
