@@ -24,8 +24,13 @@ pub fn format_str(input: &str, indent_spaces: usize) -> Result<String, String> {
     // Step 3: Expand inline type struct maps to multi-line
     let step3 = reformat_inline_type_blocks(&step2, indent_spaces);
 
-    // Step 4: Clean up whitespace
-    let formatted = cleanup_whitespace(&step3);
+    // Step 4: Steps 2 and 3 can create new standalone `}` lines, so normalize
+    // the blank lines after declarations again. Without this, a second run
+    // adds the blank lines the first run missed.
+    let step4 = ensure_blank_line_after_declarations(&step3);
+
+    // Step 5: Clean up whitespace
+    let formatted = cleanup_whitespace(&step4);
 
     // CHAR-AUDIT: Compare non-whitespace characters for safety
     let original_chars: String = input.chars().filter(|c| !c.is_whitespace()).collect();
@@ -1289,6 +1294,43 @@ fn (data: Bytes): Str {
         let orig_chars: String = input.chars().filter(|c| !c.is_whitespace()).collect();
         let fmt_chars: String = result.chars().filter(|c| !c.is_whitespace()).collect();
         assert_eq!(orig_chars, fmt_chars);
+    }
+
+    /// `format_str` must reach its fixed point in one pass.
+    fn assert_formats_in_one_pass(input: &str) {
+        let once = format_str(input, 4).unwrap();
+        let twice = format_str(&once, 4).unwrap();
+        assert_eq!(
+            once, twice,
+            "a second pass changed the output of:\n{}",
+            input
+        );
+    }
+
+    #[test]
+    fn test_format_is_idempotent_after_expansions() {
+        // Adjacent inline types expand into blocks that need a blank line
+        // between them.
+        assert_formats_in_one_pass(
+            "::fmt ns\n\nServer type { host: Str, port: Int }\nCircle type { radius: Dec }\nShape enum { Circle(Circle), Point }\n",
+        );
+        // An inline meta block that expands, followed by its alias target.
+        assert_formats_in_one_pass(
+            "::fmt ns\n\nhook\nmeta {webhook: {service: \"leads\", path: \"/signup\", method: \"POST\"}, secret-headers: [\"x-signature\"]}\nhandle\n\nhandle fn (request: Map): Map { request }\n",
+        );
+    }
+
+    #[test]
+    fn test_expanded_inline_types_are_separated_by_a_blank_line() {
+        let result = format_str(
+            "Server type { host: Str }\nCircle type { radius: Dec }\n",
+            4,
+        )
+        .unwrap();
+        assert_eq!(
+            result,
+            "Server type {\n    host: Str\n}\n\nCircle type {\n    radius: Dec\n}\n"
+        );
     }
 
     #[test]
