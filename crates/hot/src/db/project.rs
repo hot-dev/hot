@@ -12,13 +12,23 @@ static PROJECT_CACHE: LazyLock<EntityCache<Uuid, Project>> =
 #[derive(Error, Debug)]
 pub enum ProjectError {
     #[error("Database error: {0}")]
-    Database(#[from] sqlx::Error),
+    Database(#[source] sqlx::Error),
     #[error("Project not found")]
     NotFound,
     #[error("Project already exists")]
     AlreadyExists,
     #[error("{0}")]
     Other(String),
+}
+
+impl From<sqlx::Error> for ProjectError {
+    fn from(error: sqlx::Error) -> Self {
+        match error {
+            // RLS-hidden rows have the same absence contract as unknown IDs.
+            sqlx::Error::RowNotFound => Self::NotFound,
+            error => Self::Database(error),
+        }
+    }
 }
 
 #[derive(Debug, Clone, FromRow)]
@@ -823,6 +833,34 @@ mod tests {
     async fn cleanup_test_db(_db: &crate::db::DatabasePool) {
         // In a real test environment, we might want to clean up test data
         // For now, we're using in-memory SQLite so cleanup happens automatically
+    }
+
+    #[tokio::test]
+    async fn missing_and_inactive_project_lookups_report_not_found() {
+        let db = crate::db::test_db().await;
+        let data = crate::db::insert_test_data(&db).await.unwrap();
+        Project::toggle_active(&db, &data.project_id, false, &data.user_id)
+            .await
+            .unwrap();
+        assert!(matches!(
+            Project::get_project(&db, &data.project_id).await,
+            Err(ProjectError::NotFound)
+        ));
+        assert!(
+            !Project::get_project_including_inactive(&db, &data.project_id)
+                .await
+                .unwrap()
+                .active
+        );
+        let missing = Uuid::new_v4();
+        assert!(matches!(
+            Project::get_project(&db, &missing).await,
+            Err(ProjectError::NotFound)
+        ));
+        assert!(matches!(
+            Project::get_project_including_inactive(&db, &missing).await,
+            Err(ProjectError::NotFound)
+        ));
     }
 
     #[tokio::test]
