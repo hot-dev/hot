@@ -139,6 +139,47 @@ async fn scoped_pool_enforces_isolation_under_a_restricted_login()
         )))
         .await?;
     db::rls::validate_runtime_role(&raw_runtime, "hot").await?;
+    // These grants do not set rolsuper/BYPASSRLS, but expose data outside the
+    // row policy boundary (including column-level REFERENCES grants).
+    for privilege in ["REFERENCES", "REFERENCES(env_id)", "TRIGGER"] {
+        admin
+            .execute(sqlx::AssertSqlSafe(format!(
+                "GRANT {privilege} ON hot.env TO {role}"
+            )))
+            .await?;
+        assert!(
+            db::rls::validate_runtime_role(&raw_runtime, "hot")
+                .await
+                .is_err()
+        );
+        admin
+            .execute(sqlx::AssertSqlSafe(format!(
+                "REVOKE {privilege} ON hot.env FROM {role}"
+            )))
+            .await?;
+    }
+    for privileged_role in [
+        "pg_read_server_files",
+        "pg_write_server_files",
+        "pg_execute_server_program",
+    ] {
+        admin
+            .execute(sqlx::AssertSqlSafe(format!(
+                "GRANT {privileged_role} TO {role}"
+            )))
+            .await?;
+        assert!(
+            db::rls::validate_runtime_role(&raw_runtime, "hot")
+                .await
+                .is_err()
+        );
+        admin
+            .execute(sqlx::AssertSqlSafe(format!(
+                "REVOKE {privileged_role} FROM {role}"
+            )))
+            .await?;
+    }
+    db::rls::validate_runtime_role(&raw_runtime, "hot").await?;
     let pool = ScopedPgPool::new(raw_runtime.clone());
 
     let user = Uuid::new_v4();
@@ -403,10 +444,10 @@ async fn scoped_pool_enforces_isolation_under_a_restricted_login()
         user,
         &db::management_key::CreateManagementKey {
             name: "test".into(),
-            capabilities: vec!["children:read".into()],
+            capabilities: vec!["children:read".into(), "runtime-keys:create".into()],
             target_org_ids: vec![provisioned.org.org_id],
             all_children: false,
-            delegation_permissions: None,
+            delegation_permissions: Some(serde_json::json!({"event:*": ["create"]})),
             expires_in_seconds: 60,
         },
     )
@@ -415,6 +456,82 @@ async fn scoped_pool_enforces_isolation_under_a_restricted_login()
         db::management_key::ManagementKey::verify_token(&runtime_db, &token)
             .await
             .is_ok()
+    );
+    let root_env = Uuid::new_v4();
+    sqlx::query("INSERT INTO hot.env(env_id,org_id,name,created_by_user_id) VALUES($1,$2,'management-isolation',$3)")
+        .bind(root_env).bind(root).bind(user).execute(&admin).await?;
+    let root_runtime = pool.with_scope(DatabaseScope::Environment {
+        org_id: root,
+        env_id: root_env,
+    });
+    let root_read_set = pool.with_scope(DatabaseScope::ReadSet {
+        org_ids: vec![root],
+        env_ids: vec![root_env],
+    });
+    for forbidden in [&root_runtime, &root_read_set, &a] {
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT count(*) FROM management_key")
+                .fetch_one(forbidden)
+                .await?,
+            0
+        );
+        assert!(sqlx::query("INSERT INTO management_key(management_key_id,root_org_id,created_by_user_id,name,secret_hash,capabilities,expires_at) VALUES($1,$2,$3,'forged',$4,'[\"children:create\"]',now()+interval '1 hour')")
+            .bind(Uuid::new_v4()).bind(root).bind(user).bind(vec![0u8; 32]).execute(forbidden).await.is_err());
+    }
+    assert_eq!(
+        sqlx::query("UPDATE management_key SET revoked_at=now() WHERE management_key_id=$1")
+            .bind(management.management_key_id)
+            .execute(&root_runtime)
+            .await?
+            .rows_affected(),
+        0
+    );
+    assert!(
+        db::management_key::ManagementKey::verify_token(&runtime_db, &token)
+            .await
+            .is_ok()
+    );
+    sqlx::query("DELETE FROM hot.env WHERE env_id=$1")
+        .bind(root_env)
+        .execute(&admin)
+        .await?;
+    let (delegated_id, _) = management
+        .issue_runtime_key(
+            &runtime_db,
+            provisioned.org.org_id,
+            provisioned.env_id,
+            "delegated",
+            &serde_json::json!({"event:*": ["create"]}),
+        )
+        .await?;
+    let delegated_pool = pool.with_scope(DatabaseScope::Environment {
+        org_id: provisioned.org.org_id,
+        env_id: provisioned.env_id,
+    });
+    let delegated_db = db::DatabasePool::Postgres(delegated_pool.clone());
+    let delegated_key = db::api_key::ApiKey::get_api_key(&delegated_db, &delegated_id).await?;
+    assert!(
+        db::management_key::ManagementKey::effective_runtime_permissions(
+            &runtime_db,
+            &delegated_key
+        )
+        .await
+        .is_ok()
+    );
+    assert_eq!(
+        sqlx::query("DELETE FROM api_key_management_issuer WHERE api_key_id=$1")
+            .bind(delegated_id)
+            .execute(&delegated_pool)
+            .await?
+            .rows_affected(),
+        0
+    );
+    assert!(
+        sqlx::query("DELETE FROM api_key WHERE api_key_id=$1")
+            .bind(delegated_id)
+            .execute(&delegated_pool)
+            .await
+            .is_err()
     );
     db::management_key::ManagementKey::revoke_for_user(
         &runtime_db,
@@ -428,6 +545,26 @@ async fn scoped_pool_enforces_isolation_under_a_restricted_login()
             .await
             .is_err()
     );
+    assert!(
+        db::management_key::ManagementKey::effective_runtime_permissions(
+            &runtime_db,
+            &delegated_key
+        )
+        .await
+        .is_err()
+    );
+    sqlx::query("UPDATE api_key SET active=false WHERE api_key_id=$1")
+        .bind(delegated_id)
+        .execute(&delegated_pool)
+        .await?;
+    sqlx::query("DELETE FROM hot.api_key_management_issuer WHERE api_key_id=$1")
+        .bind(delegated_id)
+        .execute(&admin)
+        .await?;
+    sqlx::query("DELETE FROM hot.api_key WHERE api_key_id=$1")
+        .bind(delegated_id)
+        .execute(&admin)
+        .await?;
     // Ledger admission shares the root limit across siblings and survives run
     // retention; repeating the same run UUID consumes no second slot.
     sqlx::query("UPDATE hot.org SET features=$1 WHERE org_id=$2")
@@ -509,6 +646,89 @@ async fn scoped_pool_enforces_isolation_under_a_restricted_login()
         .await?;
     sqlx::query("DELETE FROM hot.org_user WHERE org_id=$1")
         .bind(root)
+        .execute(&admin)
+        .await?;
+
+    // Delivery ownership is checked even under the cross-account alert worker
+    // scope. A same-org subscription in another env is also a foreign target.
+    let alerts = pool.with_scope(DatabaseScope::Maintenance {
+        operation: db::MaintenanceOperation::Alerts,
+        org_id: None,
+    });
+    let env_a_other = Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO hot.env(env_id,org_id,name,created_by_user_id) VALUES($1,$2,'other',$3)",
+    )
+    .bind(env_a_other)
+    .bind(child_a)
+    .bind(user)
+    .execute(&admin)
+    .await?;
+    let alert_a = Uuid::new_v4();
+    let destination_a = Uuid::new_v4();
+    let destination_b = Uuid::new_v4();
+    let subscription_a = Uuid::new_v4();
+    let subscription_b = Uuid::new_v4();
+    let subscription_other_env = Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO alert(alert_id,org_id,env_id,channel,data) VALUES($1,$2,$3,'test','{}')",
+    )
+    .bind(alert_a)
+    .bind(child_a)
+    .bind(env_a)
+    .execute(&a)
+    .await?;
+    for (id, org) in [(destination_a, child_a), (destination_b, child_b)] {
+        sqlx::query("INSERT INTO hot.alert_destination(alert_destination_id,org_id,name,destination_type_id,config,created_by_user_id) VALUES($1,$2,$3,1,'{}',$4)")
+            .bind(id).bind(org).bind(id.to_string()).bind(user).execute(&admin).await?;
+    }
+    for (id, org, env) in [
+        (subscription_a, child_a, env_a),
+        (subscription_b, child_b, env_b),
+        (subscription_other_env, child_a, env_a_other),
+    ] {
+        sqlx::query("INSERT INTO hot.alert_subscription(alert_subscription_id,org_id,env_id,created_by_user_id) VALUES($1,$2,$3,$4)")
+            .bind(id).bind(org).bind(env).bind(user).execute(&admin).await?;
+    }
+    for executor in [&a, &alerts] {
+        for (subscription, destination) in [
+            (subscription_b, destination_a),
+            (subscription_other_env, destination_a),
+            (subscription_a, destination_b),
+        ] {
+            assert!(sqlx::query("INSERT INTO alert_delivery(alert_delivery_id,alert_id,subscription_id,destination_id) VALUES($1,$2,$3,$4)")
+                .bind(Uuid::new_v4()).bind(alert_a).bind(subscription).bind(destination).execute(executor).await.is_err());
+        }
+    }
+    let delivery = Uuid::new_v4();
+    sqlx::query("INSERT INTO alert_delivery(alert_delivery_id,alert_id,subscription_id,destination_id) VALUES($1,$2,$3,$4)")
+        .bind(delivery).bind(alert_a).bind(subscription_a).bind(destination_a).execute(&a).await?;
+    assert!(
+        sqlx::query("UPDATE alert_delivery SET subscription_id=$1 WHERE alert_delivery_id=$2")
+            .bind(subscription_other_env)
+            .bind(delivery)
+            .execute(&alerts)
+            .await
+            .is_err()
+    );
+    sqlx::query("UPDATE alert_delivery SET attempts=attempts+1 WHERE alert_delivery_id=$1")
+        .bind(delivery)
+        .execute(&alerts)
+        .await?;
+    sqlx::query("DELETE FROM hot.alert WHERE alert_id=$1")
+        .bind(alert_a)
+        .execute(&admin)
+        .await?;
+    sqlx::query("DELETE FROM hot.alert_subscription WHERE alert_subscription_id=ANY($1)")
+        .bind(vec![subscription_a, subscription_b, subscription_other_env])
+        .execute(&admin)
+        .await?;
+    sqlx::query("DELETE FROM hot.alert_destination WHERE alert_destination_id=ANY($1)")
+        .bind(vec![destination_a, destination_b])
+        .execute(&admin)
+        .await?;
+    sqlx::query("DELETE FROM hot.env WHERE env_id=$1")
+        .bind(env_a_other)
         .execute(&admin)
         .await?;
 

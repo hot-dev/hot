@@ -485,6 +485,55 @@ impl ManagementKey {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[tokio::test]
+    async fn delegated_lineage_cannot_be_removed_by_deleting_the_key() {
+        let db = crate::db::test_db().await;
+        let DatabasePool::Sqlite(pool) = &db else {
+            unreachable!()
+        };
+        let key_id = Uuid::now_v7();
+        let issuer_id = Uuid::now_v7();
+        sqlx::query("INSERT INTO api_key(api_key_id,env_id,description,key_data,created_by_user_id) VALUES(?,?,'delegated','{}',?)")
+            .bind(key_id).bind(Uuid::now_v7()).bind(Uuid::now_v7()).execute(pool).await.unwrap();
+        sqlx::query(
+            "INSERT INTO api_key_management_issuer(api_key_id,management_key_id) VALUES(?,?)",
+        )
+        .bind(key_id)
+        .bind(issuer_id)
+        .execute(pool)
+        .await
+        .unwrap();
+        assert!(
+            sqlx::query("DELETE FROM api_key WHERE api_key_id=?")
+                .bind(key_id)
+                .execute(pool)
+                .await
+                .is_err()
+        );
+        assert!(
+            sqlx::query("DELETE FROM api_key_management_issuer WHERE api_key_id=?")
+                .bind(key_id)
+                .execute(pool)
+                .await
+                .is_err()
+        );
+        sqlx::query("UPDATE api_key SET active=0 WHERE api_key_id=?")
+            .bind(key_id)
+            .execute(pool)
+            .await
+            .unwrap();
+        assert_eq!(
+            sqlx::query_scalar::<_, Uuid>(
+                "SELECT management_key_id FROM api_key_management_issuer WHERE api_key_id=?"
+            )
+            .bind(key_id)
+            .fetch_one(pool)
+            .await
+            .unwrap(),
+            issuer_id
+        );
+    }
+
     #[test]
     fn management_delegation_requires_an_explicit_ceiling() {
         let mut request = CreateManagementKey {

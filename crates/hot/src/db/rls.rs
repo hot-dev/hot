@@ -20,10 +20,10 @@ const REFERENCE_TABLES: &[&str] = &[
 
 pub async fn validate_runtime_role(pool: &PgPool, schema: &str) -> Result<(), sqlx::Error> {
     let privileged: bool = sqlx::query_scalar(
-        "SELECT EXISTS (SELECT 1 FROM pg_roles r WHERE (r.rolsuper OR r.rolbypassrls OR r.rolcreaterole OR r.rolcreatedb OR r.rolreplication) AND (r.rolname = current_user OR pg_has_role(current_user, r.oid, 'MEMBER')))"
+        "SELECT EXISTS (SELECT 1 FROM pg_roles r WHERE (r.rolsuper OR r.rolbypassrls OR r.rolcreaterole OR r.rolcreatedb OR r.rolreplication OR r.rolname IN ('pg_read_server_files','pg_write_server_files','pg_execute_server_program')) AND (r.rolname = current_user OR pg_has_role(current_user, r.oid, 'MEMBER')))"
     ).fetch_one(pool).await?;
     if privileged {
-        return Err(sqlx::Error::Protocol("RLS runtime login must not be superuser, BYPASSRLS, CREATEROLE, CREATEDB, REPLICATION, or a member of a privileged role".into()));
+        return Err(sqlx::Error::Protocol("RLS runtime login must not be superuser, BYPASSRLS, CREATEROLE, CREATEDB, REPLICATION, or a member of a privileged server-file, server-program, or administrative role".into()));
     }
     let can_create: bool =
         sqlx::query_scalar("SELECT has_schema_privilege(current_user, $1, 'CREATE')")
@@ -44,12 +44,12 @@ pub async fn validate_runtime_role(pool: &PgPool, schema: &str) -> Result<(), sq
                 .into(),
         ));
     }
-    let can_truncate: bool = sqlx::query_scalar(
-        "SELECT EXISTS (SELECT 1 FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = $1 AND c.relkind IN ('r','p') AND has_table_privilege(current_user, c.oid, 'TRUNCATE'))"
+    let unsafe_table_privileges: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = $1 AND c.relkind IN ('r','p') AND (has_table_privilege(current_user, c.oid, 'TRUNCATE,REFERENCES,TRIGGER') OR has_any_column_privilege(current_user, c.oid, 'REFERENCES')))"
     ).bind(schema).fetch_one(pool).await?;
-    if can_truncate {
+    if unsafe_table_privileges {
         return Err(sqlx::Error::Protocol(
-            "RLS runtime login must not have TRUNCATE privileges".into(),
+            "RLS runtime login must not have TRUNCATE, REFERENCES, or TRIGGER privileges".into(),
         ));
     }
     let writable_reference_tables: Vec<String> = sqlx::query_scalar(

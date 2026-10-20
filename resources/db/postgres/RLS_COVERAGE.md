@@ -65,8 +65,8 @@ Management credential tables introduced by migration 012 carry their own policie
 | Added control table | Ownership and operation |
 | --- | --- |
 | `account_request_window` | Exact root; Billing only (011) |
-| `management_key` | Exact root Organization; Authentication read (012) |
-| `api_key_management_issuer` | API key environment; Authentication read; immutable issuer (012) |
+| `management_key` | Exact root Organization; Authentication read; immutable root (012, tightened by 016) |
+| `api_key_management_issuer` | API key environment; Authentication read; immutable issuer; delegated parent deletion restricted (012, 016) |
 
 `StoreProvisioning` can read only `store_map` configuration; index DDL uses the
 separately supplied schema-owner credentials. `Retention` reads session/plan
@@ -81,6 +81,15 @@ It also rejects runtime mutation privileges on those reference tables and any
 runtime access to SQLx migration metadata. The restricted-role test uses the
 same protected-table DML and reference-table SELECT grant rules as the deployment
 script, and checks that extra reference or migration grants fail qualification.
+Runtime qualification also rejects REFERENCES (including column grants), TRIGGER,
+and the predefined server-file/server-program roles, which can bypass row policy
+protection through foreign-key checks or direct server access.
+
+Migration 016 validates delivery relationships before installing integrity
+triggers: the alert, subscription, and destination must share an organization,
+and an environment-specific subscription must match the alert environment.
+Delivery ownership cannot be reassigned. SQLite has equivalent integrity
+triggers, and the sender checks the subscription environment independently.
 
 | Admission extension | Coverage |
 | --- | --- |
