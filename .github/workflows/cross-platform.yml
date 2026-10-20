@@ -96,6 +96,7 @@ jobs:
           save-cache: ${{ github.ref == 'refs/heads/main' }}
           sccache-size: 512M
           cache-rust-targets: "false"
+          ci-tuning: "true"
 
       # The ort crate downloads ONNX Runtime binaries at build time; cache
       # them like release.yml does.
