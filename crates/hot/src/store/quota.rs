@@ -49,6 +49,9 @@ impl Budget {
     /// Recount merged call UPSERT payloads under the held root lock, restoring
     /// exact environment scope before returning. The caller commits only on Ok.
     pub(crate) async fn check_postgres(&self, conn: &mut sqlx::PgConnection) -> Result<(), String> {
+        if self.limit < 0 {
+            return Ok(());
+        }
         DatabaseScope::Maintenance {
             operation: MaintenanceOperation::Billing,
             org_id: Some(self.root_id),
@@ -68,6 +71,9 @@ impl Budget {
         &self,
         conn: &mut sqlx::SqliteConnection,
     ) -> Result<(), String> {
+        if self.limit < 0 {
+            return Ok(());
+        }
         let total = sqlx::query_scalar(sqlx::AssertSqlSafe(self.kind.usage_sql()))
             .bind(self.root_id)
             .fetch_one(&mut *conn)
@@ -79,6 +85,10 @@ impl Budget {
     pub fn replace(&mut self, old: i64, new: i64) -> Result<(), String> {
         if old < 0 || new < 0 {
             return Err("Invalid store storage accounting".into());
+        }
+        // Unlimited accounts are not counted (see `begin!`).
+        if self.limit < 0 {
+            return Ok(());
         }
         let next = self
             .used
@@ -155,14 +165,18 @@ macro_rules! begin {
             let billing=db.with_scope(DatabaseScope::Maintenance { operation:MaintenanceOperation::Billing,org_id:Some(root) });
             let DatabasePool::$variant(pool)=&billing else { return Err("Incorrect store database backend".into()); };
             let mut tx=pool.begin().await.map_err(|e| e.to_string())?;
-            sqlx::query($lock).bind(root).execute(&mut *tx).await.map_err(|e|e.to_string())?;
             let overrides:Option<String>=sqlx::query_scalar("SELECT CAST(features AS TEXT) FROM org WHERE org_id=$1")
                 .bind(root).fetch_one(&mut *tx).await.map_err(|e|e.to_string())?;
             let plan:Option<String>=sqlx::query_scalar("SELECT CAST(COALESCE(p.features,'{}') AS TEXT) FROM org_plan op JOIN plan p ON p.plan_uuid=op.plan_uuid WHERE op.org_id=$1")
                 .bind(root).fetch_optional(&mut *tx).await.map_err(|e|e.to_string())?;
             let limit=limit(plan,overrides,kind)?;
-            let used:i64=sqlx::query_scalar(sqlx::AssertSqlSafe(kind.usage_sql()))
-                .bind(root).fetch_one(&mut *tx).await.map_err(|e|e.to_string())?;
+            // Unlimited accounts need neither the sibling-serializing account
+            // lock nor a recount of every stored byte in the account.
+            let used:i64=if limit<0 { 0 } else {
+                sqlx::query($lock).bind(root).execute(&mut *tx).await.map_err(|e|e.to_string())?;
+                sqlx::query_scalar(sqlx::AssertSqlSafe(kind.usage_sql()))
+                    .bind(root).fetch_one(&mut *tx).await.map_err(|e|e.to_string())?
+            };
             $narrow(&mut tx,org,env).await?;
             Ok((tx,Budget {used,limit,root_id:root,org_id:org,env_id:env,kind}))
         }

@@ -295,11 +295,54 @@ struct DatabaseWriterShard {
     shutdown_sender: mpsc::UnboundedSender<oneshot::Sender<()>>,
 }
 
+/// How long a finished run keeps its scope for trailing writes. The emitter
+/// batches calls, so they routinely arrive after the run's terminal write.
+const FINISHED_RUN_SCOPE_TTL: std::time::Duration = std::time::Duration::from_secs(300);
+const RUN_SCOPE_PRUNE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(60);
+
+enum RunScope {
+    Active(DatabaseScope),
+    Finished(DatabaseScope, Instant),
+}
+
+impl RunScope {
+    fn scope(&self) -> &DatabaseScope {
+        match self {
+            Self::Active(scope) | Self::Finished(scope, _) => scope,
+        }
+    }
+}
+
+/// Execution scope of each run seen by this writer. Terminal writes carry no
+/// execution context, so they rely on it.
+#[derive(Default)]
+struct RunScopes {
+    runs: AHashMap<Uuid, RunScope>,
+    pruned_at: Option<Instant>,
+}
+
+impl RunScopes {
+    /// Drop finished runs once trailing writes can no longer need them.
+    fn prune(&mut self, now: Instant) {
+        if self
+            .pruned_at
+            .is_some_and(|at| now.duration_since(at) < RUN_SCOPE_PRUNE_INTERVAL)
+        {
+            return;
+        }
+        self.runs.retain(|_, run| match run {
+            RunScope::Active(_) => true,
+            RunScope::Finished(_, at) => now.duration_since(*at) < FINISHED_RUN_SCOPE_TTL,
+        });
+        self.pruned_at = Some(now);
+    }
+}
+
 /// Handle to the database writer - allows sending writes without blocking
 #[derive(Clone)]
 pub struct DatabaseWriter {
     shards: Arc<Vec<DatabaseWriterShard>>,
-    run_scopes: Arc<StdMutex<AHashMap<Uuid, DatabaseScope>>>,
+    run_scopes: Arc<StdMutex<RunScopes>>,
     failed_runs: Arc<StdMutex<AHashSet<Uuid>>>,
     pressure_stats: Option<Arc<DatabaseWriterPressureStats>>,
 }
@@ -493,7 +536,7 @@ impl DatabaseWriter {
 
         Self {
             shards: Arc::new(shards),
-            run_scopes: Arc::new(StdMutex::new(AHashMap::new())),
+            run_scopes: Arc::new(StdMutex::new(RunScopes::default())),
             failed_runs,
             pressure_stats,
         }
@@ -530,10 +573,11 @@ impl DatabaseWriter {
                 .run_scopes
                 .lock()
                 .unwrap_or_else(|error| error.into_inner());
-            if let Some(scope) = provided_scope {
+            if let Some(scope) = &provided_scope {
                 if scopes
+                    .runs
                     .get(&run_id)
-                    .is_some_and(|existing| existing != &scope)
+                    .is_some_and(|existing| existing.scope() != scope)
                 {
                     self.failed_runs
                         .lock()
@@ -542,16 +586,28 @@ impl DatabaseWriter {
                     tracing::error!(%run_id, "DatabaseWriter rejected a changed execution scope");
                     return;
                 }
-                scopes.insert(run_id, scope);
+                // Writes trailing a terminal write must not re-register a
+                // finished run, or every run would leave a permanent entry.
+                scopes
+                    .runs
+                    .entry(run_id)
+                    .or_insert_with(|| RunScope::Active(scope.clone()));
             }
-            let scope = scopes.get(&run_id).cloned();
+            let scope =
+                provided_scope.or_else(|| scopes.runs.get(&run_id).map(|run| run.scope().clone()));
             if matches!(
                 write,
                 DatabaseWrite::RunStop { .. }
                     | DatabaseWrite::RunFail { .. }
                     | DatabaseWrite::RunCancel { .. }
             ) {
-                scopes.remove(&run_id);
+                let now = Instant::now();
+                if let Some(scope) = &scope {
+                    scopes
+                        .runs
+                        .insert(run_id, RunScope::Finished(scope.clone(), now));
+                }
+                scopes.prune(now);
             }
             scope
         };
@@ -2639,6 +2695,41 @@ mod tests {
                 .unwrap(),
             56
         );
+    }
+
+    #[tokio::test]
+    async fn calls_after_terminal_write_do_not_retain_run_scope() {
+        let db = crate::db::test_db().await;
+        let data = crate::db::insert_test_data(&db).await.unwrap();
+        let context = ExecutionContext::new(
+            data.run_id,
+            data.stream_id,
+            4,
+            Some(data.env_id),
+            Some(data.user_id),
+            Some(data.org_id),
+            Some(data.build_id),
+        );
+        let writer = DatabaseWriter::new(Arc::new(RwLock::new(Some(db.clone()))));
+        writer.write(trace_write(&context, Uuid::new_v4(), None, "early"));
+        writer.write(DatabaseWrite::RunStop {
+            run_id: data.run_id,
+            event_time: chrono::Utc::now(),
+            result: Val::Null,
+        });
+        // The emitter batches calls, so they routinely follow run:stop.
+        writer.write(trace_write(&context, Uuid::new_v4(), None, "late"));
+        writer.flush_run(data.run_id).await.unwrap();
+        let mut scopes = writer
+            .run_scopes
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        assert!(matches!(
+            scopes.runs.get(&data.run_id),
+            Some(RunScope::Finished(..))
+        ));
+        scopes.prune(Instant::now() + FINISHED_RUN_SCOPE_TTL + RUN_SCOPE_PRUNE_INTERVAL);
+        assert!(scopes.runs.is_empty());
     }
 
     #[tokio::test]
