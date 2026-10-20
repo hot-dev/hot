@@ -287,8 +287,8 @@ pub(crate) async fn run_check_with_raw(
 
     if json_mode {
         // Structured path: collect diagnostics and emit as JSON regardless of
-        // success/failure. Includes ctx-requirements so CI can catch missing
-        // context variables alongside type errors.
+        // success/failure. Missing context variables are reported as
+        // `missing-context` warnings (fatal with `--deny-warnings`).
         let available_ctx_keys: ahash::AHashSet<String> = context_storage
             .as_ref()
             .map(|cs| cs.keys().cloned().collect())
@@ -312,10 +312,10 @@ pub(crate) async fn run_check_with_raw(
         return Ok(if fail { 1 } else { 0 });
     }
 
-    // Pretty/text path: keep using the legacy formatter with ctx-requirements
-    // validation included. Project-scoped warnings (deprecated-API usage) are
-    // collected and rendered on success without failing the check unless
-    // `--deny-warnings` is set.
+    // Pretty/text path: keep using the legacy formatter. Project-scoped
+    // warnings (deprecated-API usage, missing context values) are collected
+    // and rendered on success without failing the check unless
+    // `--check.deny-warnings` is set.
     let color = hot::env::is_local_dev();
     let mut warnings = hot::lang::errors::CompilerErrors::new();
     match hot::lang::engine::Engine::check_sources_pipeline_with_context_warnings(

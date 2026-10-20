@@ -122,6 +122,30 @@ meta ["test"] fn () {
     assert-eq(expected, result)
 }
 
+// Walkers see a typed value's fields and keep its type; the type name
+// itself is never walked.
+test-walk-typed-values
+meta ["test"] fn () {
+    user UserData({
+        name: "alice",
+        age: 30,
+        preferences: Preferences({theme: "dark", notifications: true}),
+    })
+    post postwalk((x) {
+            if(is-type(x, Str), uppercase(x), x)
+        }, user)
+    assert-eq(true, is-type(post, UserData), "postwalk keeps the outer type")
+    assert-eq(true, is-type(post.preferences, Preferences), "postwalk keeps nested types")
+    assert-eq("ALICE", post.name, "postwalk walks the fields")
+    assert-eq("DARK", post.preferences.theme, "postwalk walks nested fields")
+
+    pre prewalk((x) {
+            if(is-type(x, Str), uppercase(x), x)
+        }, user)
+    assert-eq(true, is-type(pre, UserData), "prewalk keeps the outer type")
+    assert-eq("DARK", pre.preferences.theme, "prewalk walks nested fields")
+}
+
 // Test prewalk - should apply function before walking children
 test-prewalk
 meta ["test"] fn () {

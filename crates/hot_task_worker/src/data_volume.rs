@@ -43,7 +43,7 @@ static ACTIVE_DETACHED_CLEANUPS: AtomicUsize = AtomicUsize::new(0);
 
 fn try_reserve_detached_cleanup(counter: &AtomicUsize, limit: usize) -> bool {
     counter
-        .fetch_update(Ordering::AcqRel, Ordering::Acquire, |active| {
+        .try_update(Ordering::AcqRel, Ordering::Acquire, |active| {
             (active < limit).then_some(active + 1)
         })
         .is_ok()

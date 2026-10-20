@@ -613,7 +613,10 @@ impl BuildDocsCache {
                 .by_index(i)
                 .map_err(|e| format!("Failed to access file in archive: {}", e))?;
 
-            let name = file.name().to_string();
+            let name = file
+                .name()
+                .map_err(|e| format!("Failed to read file name in archive: {}", e))?
+                .into_owned();
 
             // Extract project docs
             if name == "docs/project/docs.json" {

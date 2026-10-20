@@ -1512,7 +1512,7 @@ impl BuildFetcher for LocalBuildFetcher {
                 None => continue,
             };
 
-            if file.name().ends_with('/') {
+            if file.name_raw().ends_with(b"/") {
                 // Directory
                 if let Err(e) = std::fs::create_dir_all(&outpath) {
                     return Err(format!(

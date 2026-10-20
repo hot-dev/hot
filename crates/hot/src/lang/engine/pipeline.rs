@@ -467,10 +467,10 @@ impl Engine {
 
     /// Like `check_sources_pipeline_diagnostics`, but also emits diagnostics
     /// for missing context variables when `available_ctx_keys` is provided.
-    /// Each missing key becomes a `CallLibError` with `func_name = "<ctx>"`
-    /// and a file-level location pointing at the namespace's source file
-    /// (the call graph doesn't currently track per-`meta` line/column, so
-    /// the location is best-effort).
+    /// Each missing key becomes a `missing-context` warning with a file-level
+    /// location pointing at the namespace's source file (the call graph
+    /// doesn't currently track per-`meta` line/column, so the location is
+    /// best-effort).
     pub fn check_sources_pipeline_diagnostics_with_ctx(
         src_paths: &[String],
         test_paths: &[String],
@@ -604,8 +604,8 @@ impl Engine {
         };
 
         // Optional ctx-requirements check. Each missing key becomes a
-        // `CallLibError` with a file-level location (no line/column,
-        // since meta declarations don't carry per-key spans yet).
+        // `missing-context` warning with a file-level location (meta
+        // declarations don't carry per-key spans yet).
         if let Some(available) = available_ctx_keys {
             let call_graph = crate::lang::compiler::call_graph::CallGraph::build(&combined_program);
             let ctx_requirements = call_graph.resolve_user_ctx_requirements(&combined_program);
@@ -615,25 +615,7 @@ impl Engine {
                     available,
                 );
                 for missing in &result.missing {
-                    let location =
-                        missing
-                            .source_file
-                            .as_ref()
-                            .map(|f| crate::lang::errors::ErrorLocation {
-                                line: 1,
-                                column: 1,
-                                position: 0,
-                                length: 1,
-                                file: Some(std::path::PathBuf::from(f)),
-                            });
-                    errors.add(CompilerError::CallLibError {
-                        func_name: format!("<ctx:{}>", missing.key),
-                        message: format!(
-                            "Missing required context variable '{}' (required by {})",
-                            missing.key, missing.namespace
-                        ),
-                        location,
-                    });
+                    errors.add_warning(missing.to_compiler_error());
                 }
             }
         }
@@ -693,6 +675,10 @@ impl Engine {
     /// `warnings_out` with project-scoped, non-fatal warnings (e.g. deprecated
     /// API usage) collected during a successful check. Errors are still
     /// returned via `Err(String)`; warnings never affect the result.
+    ///
+    /// Required context values missing from `context_storage` are reported
+    /// as `missing-context` warnings here rather than failing the check
+    /// (`check_sources_pipeline_with_context` still fails on them).
     pub fn check_sources_pipeline_with_context_warnings(
         src_paths: &[String],
         test_paths: &[String],
@@ -851,7 +837,7 @@ impl Engine {
         task_queue: Option<Arc<crate::queue::ProcessingQueue<crate::lang::hot::task::TaskRequest>>>,
         stream_publisher: Option<Arc<crate::stream::StreamPubSub>>,
         color: bool,
-        warnings_out: Option<&mut crate::lang::errors::CompilerErrors>,
+        mut warnings_out: Option<&mut crate::lang::errors::CompilerErrors>,
     ) -> Result<crate::val::Val, String> {
         tracing::debug!(" Unified Pipeline: Loading Hot dependencies...");
         tracing::debug!(" Source paths: {:?}", src_paths);
@@ -1058,7 +1044,7 @@ impl Engine {
                 // Compilation with validation succeeded. Capture non-fatal
                 // deprecation warnings for the caller (scoped to project files)
                 // without failing the check.
-                if let Some(out) = warnings_out {
+                if let Some(out) = warnings_out.as_deref_mut() {
                     let project_files = Self::project_source_files(&units);
                     *out = Self::scope_warnings_to_project(
                         compiler.take_diagnostics(),
@@ -1128,13 +1114,40 @@ impl Engine {
                 // Check mode: validate only, no VM execution
                 tracing::debug!(" Unified Pipeline: Check mode - validating...");
 
-                Self::validate_compiled_program(
+                // A caller that collects warnings (`hot check`, `hot watch`)
+                // gets unset required context values as warnings instead of a
+                // failed check: values are supplied per environment, and
+                // `run`/`eval` still refuse to start without them. Callers
+                // without a warnings sink (the `hot dev` pre-check) keep the
+                // strict policy.
+                let context_policy = if warnings_out.is_some() {
+                    ContextValidationPolicy::CollectOnly
+                } else {
+                    Self::runtime_context_validation_policy(context_storage.as_ref())
+                };
+                let ctx_requirements = Self::validate_compiled_program(
                     &mut compiler,
                     &combined_program,
                     conf,
-                    Self::runtime_context_validation_policy(context_storage.as_ref()),
+                    context_policy,
                     color,
                 )?;
+
+                if let Some(out) = warnings_out
+                    && ctx_requirements.has_requirements()
+                {
+                    let available: AHashSet<String> = context_storage
+                        .as_ref()
+                        .map(|storage| storage.keys().cloned().collect())
+                        .unwrap_or_default();
+                    let ctx_result = crate::lang::compiler::ctx_checker::check_ctx_requirements(
+                        &ctx_requirements,
+                        &available,
+                    );
+                    for missing in &ctx_result.missing {
+                        out.add_warning(missing.to_compiler_error());
+                    }
+                }
 
                 tracing::debug!(" Unified Pipeline: Check completed successfully");
                 Ok(crate::val::Val::Null)
@@ -1831,10 +1844,9 @@ impl Engine {
 mod tests {
     use super::*;
 
-    #[test]
-    fn structural_compile_allows_required_ctx_but_runtime_execute_rejects_empty_keys() {
-        let temp = tempfile::tempdir().unwrap();
-        let src_dir = temp.path().join("src");
+    /// A source dir with one function that requires the `api.key` context value.
+    fn write_required_ctx_src(root: &std::path::Path) -> Vec<String> {
+        let src_dir = root.join("src");
         std::fs::create_dir_all(&src_dir).unwrap();
         std::fs::write(
             src_dir.join("required_ctx.hot"),
@@ -1846,6 +1858,68 @@ fn (): Str { "unused" }
 "#,
         )
         .unwrap();
+        vec![src_dir.to_string_lossy().to_string()]
+    }
+
+    #[test]
+    fn warning_check_reports_missing_ctx_without_failing() {
+        let temp = tempfile::tempdir().unwrap();
+        let src_paths = write_required_ctx_src(temp.path());
+        let missing_ctx = |warnings: &crate::lang::errors::CompilerErrors| {
+            warnings
+                .warnings
+                .iter()
+                .filter(|w| w.code() == "missing-context")
+                .map(|w| w.to_string())
+                .collect::<Vec<_>>()
+        };
+
+        let mut warnings = crate::lang::errors::CompilerErrors::new();
+        Engine::check_sources_pipeline_with_context_warnings(
+            &src_paths,
+            &[],
+            None,
+            None,
+            Some(&AHashMap::new()),
+            false,
+            Some(&mut warnings),
+        )
+        .expect("an unset context value should not fail `hot check`");
+        let reported = missing_ctx(&warnings);
+        assert_eq!(reported.len(), 1, "warnings: {:?}", warnings.warnings);
+        assert!(reported[0].contains("Missing required context variable 'api.key'"));
+
+        let mut context = AHashMap::new();
+        context.insert("api.key".to_string(), crate::val::Val::from("set"));
+        let mut warnings = crate::lang::errors::CompilerErrors::new();
+        Engine::check_sources_pipeline_with_context_warnings(
+            &src_paths,
+            &[],
+            None,
+            None,
+            Some(&context),
+            false,
+            Some(&mut warnings),
+        )
+        .unwrap();
+        assert!(missing_ctx(&warnings).is_empty());
+
+        // `hot check --check.format json` reports it as a warning too.
+        let diagnostics = Engine::check_sources_pipeline_diagnostics_with_ctx(
+            &src_paths,
+            &[],
+            None,
+            None,
+            Some(&AHashSet::new()),
+        );
+        assert!(diagnostics.is_empty(), "errors: {:?}", diagnostics.errors);
+        assert_eq!(missing_ctx(&diagnostics).len(), 1);
+    }
+
+    #[test]
+    fn structural_compile_allows_required_ctx_but_runtime_execute_rejects_empty_keys() {
+        let temp = tempfile::tempdir().unwrap();
+        let src_paths = write_required_ctx_src(temp.path());
         let target_file = temp.path().join("validation_target.hot");
         std::fs::write(
             &target_file,
@@ -1856,14 +1930,14 @@ value 1
         )
         .unwrap();
 
-        let src_paths = vec![src_dir.to_string_lossy().to_string()];
         let target_file = target_file.to_string_lossy().to_string();
 
         // Structural validation collects the requirement without demanding a value.
         Engine::run_file_pipeline_with_deps(&target_file, &src_paths, &[], None, None, false)
             .expect("structural compile should collect, not require, context");
 
-        // Check and Execute both require it.
+        // A check without a warnings sink (the `hot dev` pre-check) and
+        // Execute both require it.
         let empty_context = AHashMap::new();
         let check_error = Engine::check_sources_pipeline_with_context(
             &src_paths,

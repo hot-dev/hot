@@ -1440,3 +1440,82 @@ meta ["test"] fn () {
     assert-eq(["a", "b", "c"], keys(merged), "left map key order wins")
     assert-eq(3, merged.b, "right map value wins on conflict")
 }
+
+
+CollServer type {
+    host: Str,
+    port: Int
+}
+
+CollOrder type {
+    id: Str,
+    server: CollServer
+}
+
+CollCircle type {
+    radius: Dec
+}
+
+CollShape enum { Circle(CollCircle), Point }
+
+// Collection functions read a constructed value's fields, not its wrapper.
+test-typed-value-reads
+meta ["test"] fn () {
+    base CollServer({host: "a.example", port: 1})
+    assert-eq(1, get(base, "port"), "get reads a field")
+    assert-eq(80, get(base, "missing", 80), "get falls back for a missing field")
+    assert-eq(["host", "port"], keys(base), "keys are the field names")
+    assert-eq(["a.example", 1], vals(base), "vals are the field values")
+    assert-eq(2, length(base), "length counts the fields")
+    assert(not(is-empty(base)), "a struct with fields is not empty")
+
+    order CollOrder({id: "o1", server: base})
+    assert-eq("a.example", get-in(order, ["server", "host"]), "get-in walks nested types")
+
+    circle CollShape.Circle({radius: 2.0})
+    assert-eq(2.0, get(circle, "radius"), "get reads a variant's fields")
+}
+
+// Updating functions keep the type, like deep-path assignment.
+test-typed-value-updates
+meta ["test"] fn () {
+    base CollServer({host: "a.example", port: 1})
+
+    moved assoc(base, "port", 2)
+    assert(is-type(moved, CollServer), "assoc keeps the type")
+    assert-eq("a.example", moved.host, "assoc keeps the other fields")
+    assert-eq(2, moved.port, "assoc sets the field")
+
+    bumped update(base, "port", add(%, 1))
+    assert(is-type(bumped, CollServer), "update keeps the type")
+    assert-eq(2, bumped.port, "update applies the function to the field")
+
+    merged merge(base, {port: 3})
+    assert(is-type(merged, CollServer), "merge keeps the left type")
+    assert-eq("a.example", merged.host, "merge keeps the other fields")
+    assert-eq(3, merged.port, "merge takes the right value")
+
+    order CollOrder({id: "o1", server: base})
+    relocated assoc-in(order, ["server", "host"], "b.example")
+    assert(is-type(relocated, CollOrder), "assoc-in keeps the outer type")
+    assert(is-type(relocated.server, CollServer), "assoc-in keeps nested types")
+    assert-eq("b.example", relocated.server.host, "assoc-in sets the nested field")
+
+    rebumped update-in(order, ["server", "port"], add(%, 10))
+    assert(is-type(rebumped.server, CollServer), "update-in keeps nested types")
+    assert-eq(11, rebumped.server.port, "update-in applies the function to the nested field")
+
+    plain-left merge({tls: true}, base)
+    assert(not(is-type(plain-left, CollServer)), "a plain left map stays plain")
+    assert-eq("a.example", plain-left.host, "merge reads the right value's fields")
+}
+
+// Filters and transforms return plain maps of the fields.
+test-typed-value-transforms
+meta ["test"] fn () {
+    base CollServer({host: "a.example", port: 1})
+    assert-eq({host: "a.example"}, filter-keys(base, eq(%, "host")), "filter-keys sees the fields")
+    assert-eq({host: "a.example", port: "1"}, map-vals(base, Str(%)), "map-vals transforms the fields")
+    assert-eq([["port", 1]], filter(base, (k, v) { is-int(v) }), "filter sees the fields")
+    assert-eq({host: "a.example"}, delete(base, "port"), "delete removes a field")
+}

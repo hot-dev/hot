@@ -44,6 +44,7 @@ dotenvy = { workspace = true }
 dirs = { workspace = true }
 open = { workspace = true }
 sha2 = { workspace = true }
+hex = { workspace = true }
 siphasher = { workspace = true }
 fd-lock = { workspace = true }
 

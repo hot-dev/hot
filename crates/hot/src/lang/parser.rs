@@ -5854,9 +5854,13 @@ impl Parser {
                                     true
                                 }
                             }
-                            // Direct function calls like function() should NOT be treated as assignments
-                            // Only patterns like: var_name function_name() should be assignments
-                            TokenType::LeftParen => false,
+                            // `name(…)` is a call. `name (…)` on the same line binds
+                            // the parenthesized value (a lambda `(x) { … }`, a flow,
+                            // or a tuple) to `name`, as it does at top level.
+                            TokenType::LeftParen => {
+                                next_token.line == token.line
+                                    && next_token.column > var_column + var_name_len as u32
+                            }
                             _ => false,
                         }
                     } else {
@@ -6820,6 +6824,92 @@ pub(crate) fn contains_placeholder(value: &Value) -> bool {
         }
         _ => false,
     }
+}
+
+/// Count the placeholder lambdas in a tree: lambdas whose parameters are all
+/// `__N`, as built by `%` lowering and by `%(expr)`. Descends into lambda
+/// bodies, so a placeholder lambda nested anywhere inside is counted.
+pub(crate) fn count_placeholder_lambdas(value: &Value) -> usize {
+    match value {
+        Value::Lambda(lambda) => {
+            let is_placeholder_lambda = !lambda.args.args.is_empty()
+                && lambda
+                    .args
+                    .args
+                    .iter()
+                    .all(|arg| is_placeholder_param(arg.var.sym.name()));
+            usize::from(is_placeholder_lambda) + count_placeholder_lambdas(&lambda.body)
+        }
+        Value::Val(v, _) => val_count_placeholder_lambdas(v),
+        Value::FnCall(call) => {
+            count_placeholder_lambdas(&call.function)
+                + call
+                    .args
+                    .iter()
+                    .map(|arg| count_placeholder_lambdas(&arg.value))
+                    .sum::<usize>()
+        }
+        Value::Flow(flow) => flow.expressions.iter().map(count_placeholder_lambdas).sum(),
+        Value::Cond(_, cond, flow) => {
+            count_placeholder_lambdas(cond)
+                + flow
+                    .expressions
+                    .iter()
+                    .map(count_placeholder_lambdas)
+                    .sum::<usize>()
+        }
+        Value::CondDefault(flow) => flow.expressions.iter().map(count_placeholder_lambdas).sum(),
+        Value::Raw(inner) | Value::Do(inner) => count_placeholder_lambdas(inner),
+        Value::TemplateLiteral(tl) => tl
+            .parts
+            .iter()
+            .map(|p| match p {
+                TemplatePart::Expression(e) => count_placeholder_lambdas(e),
+                _ => 0,
+            })
+            .sum(),
+        Value::MultipleValues(vals) => vals.iter().map(count_placeholder_lambdas).sum(),
+        Value::Match(m) => {
+            count_placeholder_lambdas(&m.value)
+                + m.arms
+                    .iter()
+                    .map(|arm| count_placeholder_lambdas(&arm.body))
+                    .sum::<usize>()
+        }
+        Value::MatchArm(arm) => count_placeholder_lambdas(&arm.body),
+        Value::MapWithSpread {
+            base_entries,
+            spread_entries,
+        } => {
+            base_entries
+                .values()
+                .map(val_count_placeholder_lambdas)
+                .sum::<usize>()
+                + spread_entries
+                    .iter()
+                    .map(|(_, v)| count_placeholder_lambdas(v))
+                    .sum::<usize>()
+        }
+        _ => 0,
+    }
+}
+
+fn val_count_placeholder_lambdas(v: &Val) -> usize {
+    match v {
+        Val::Box(b) => b
+            .as_any()
+            .downcast_ref::<AstNode>()
+            .map_or(0, |ast| count_placeholder_lambdas(&ast.0)),
+        Val::Map(m) => m.values().map(val_count_placeholder_lambdas).sum(),
+        Val::Vec(v) => v.iter().map(val_count_placeholder_lambdas).sum(),
+        _ => 0,
+    }
+}
+
+/// `__0`, `__1`, ...: the parameter names placeholder lambdas are built with.
+fn is_placeholder_param(name: &str) -> bool {
+    name.strip_prefix("__")
+        .is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
 }
 
 fn deep_path_max_placeholder_node(dp: &DeepPath) -> usize {

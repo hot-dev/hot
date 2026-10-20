@@ -303,7 +303,7 @@ async fn fetch_latest_version(
     release_base_url: &str,
 ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
     let user_agent = format!("hot/{}", crate::build_info::VERSION);
-    let client = reqwest::Client::builder()
+    let client = hot::outbound::client_builder()
         .timeout(std::time::Duration::from_secs(10))
         .user_agent(&user_agent)
         .build()?;
@@ -428,7 +428,7 @@ pub async fn run_installer(
     println!("Downloading {}...", platform.package_name);
 
     let user_agent = format!("hot/{}", crate::build_info::VERSION);
-    let client = reqwest::Client::builder()
+    let client = hot::outbound::client_builder()
         .timeout(std::time::Duration::from_secs(300)) // 5 min timeout for large downloads
         .user_agent(&user_agent)
         .build()?;

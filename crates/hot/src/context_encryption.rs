@@ -164,8 +164,8 @@ impl ContextEncryption {
 
         // Generate random nonce (96 bits for GCM)
         let mut nonce_bytes = [0u8; 12];
-        use rand::RngCore;
-        rand::thread_rng().fill_bytes(&mut nonce_bytes);
+        use rand::Rng;
+        rand::rng().fill_bytes(&mut nonce_bytes);
         let nonce = Nonce::from(nonce_bytes);
 
         // Encrypt
@@ -213,9 +213,9 @@ impl ContextEncryption {
 
     /// Generate a new random master key (for CLI command)
     pub fn generate_key() -> String {
-        use rand::RngCore;
+        use rand::Rng;
         let mut key = [0u8; 32];
-        rand::thread_rng().fill_bytes(&mut key);
+        rand::rng().fill_bytes(&mut key);
         hex::encode(key)
     }
 }
@@ -310,6 +310,38 @@ mod tests {
         assert!(
             hex::decode(&key).is_ok(),
             "Generated key should be valid hex"
+        );
+    }
+
+    // Produced by this module before the aes-gcm 0.11, hkdf 0.13, sha2 0.11
+    // and base64 0.23 upgrades. Stored context values must keep decrypting.
+    const KAT_MASTER_KEY: [u8; 32] = [0x2a; 32];
+    const KAT_ORG_ID: &str = "0192d3a8-5f6e-7c01-9a2b-3c4d5e6f7a8b";
+
+    #[test]
+    fn test_org_key_derivation_known_answer() {
+        let encryption = ContextEncryption {
+            master_key: KAT_MASTER_KEY,
+        };
+        let org_id = Uuid::parse_str(KAT_ORG_ID).unwrap();
+
+        assert_eq!(
+            hex::encode(encryption.derive_org_key(&org_id)),
+            "165e5828873e0eca170de094fd3462fe4791398b68718959104520c6c39de77e"
+        );
+    }
+
+    #[test]
+    fn test_decrypts_previously_stored_ciphertext() {
+        let encryption = ContextEncryption {
+            master_key: KAT_MASTER_KEY,
+        };
+        let org_id = Uuid::parse_str(KAT_ORG_ID).unwrap();
+        let stored = "AfJSipTvoko/DExaLVIt+ENXZwMjCzDMBL4z/mGOdAvq1s7CxhDCRo9YwimGbg==";
+
+        assert_eq!(
+            encryption.decrypt(stored, &org_id).unwrap(),
+            "hot context secret"
         );
     }
 }

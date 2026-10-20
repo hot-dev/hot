@@ -1,6 +1,5 @@
 use ahash::AHashMap;
 use chrono::Utc;
-use croner::Cron;
 use hot::data::msg::Message;
 use hot::data::serialization::Serialization;
 use hot::db::{
@@ -12,7 +11,6 @@ use hot::lang::event::{Event, EventMessage, EventMessageBody, ExecutionContext};
 use hot::queue::{Queue, QueueType, mem::MemQueue, sqlite::SqliteQueue, streams::RedisStreamQueue};
 use hot::val;
 use hot::val::Val;
-use std::str::FromStr;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use tokio::time::{Duration, interval};
@@ -28,7 +26,7 @@ fn convert_to_scheduler_cron(
     cron_expr: &str,
 ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
     // First, try parsing as traditional cron - if it works, use as-is
-    if Cron::from_str(cron_expr).is_ok() {
+    if hot::db::schedule::parse_cron(cron_expr).is_ok() {
         return Ok(cron_expr.to_string());
     }
 
@@ -36,7 +34,7 @@ fn convert_to_scheduler_cron(
     match english_to_cron::str_cron_syntax(cron_expr) {
         Ok(converted_cron) => {
             // Validate the converted expression works with croner
-            Cron::from_str(&converted_cron).map_err(|e| {
+            hot::db::schedule::parse_cron(&converted_cron).map_err(|e| {
                 format!(
                     "Converted cron '{}' from '{}' is invalid: {}",
                     converted_cron, cron_expr, e
@@ -992,7 +990,7 @@ async fn calculate_missed_executions(
     end_time: chrono::DateTime<Utc>,
 ) -> Result<Vec<chrono::DateTime<Utc>>, Box<dyn std::error::Error + Send + Sync>> {
     let scheduler_cron = convert_to_scheduler_cron(cron_expr)?;
-    let cron = Cron::from_str(&scheduler_cron)?;
+    let cron = hot::db::schedule::parse_cron(&scheduler_cron)?;
 
     let mut missed = Vec::new();
     let mut check_time = start_time;

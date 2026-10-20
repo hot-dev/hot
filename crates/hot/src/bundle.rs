@@ -1351,9 +1351,12 @@ fn validate_bundle_archive<R: Read + Seek>(
         let entry = archive
             .by_index(index)
             .map_err(|e| format!("Failed to read file at index {index}: {e}"))?;
-        let relative_path = validate_bundle_entry_path(entry.name())?;
+        let name = entry
+            .name()
+            .map_err(|e| format!("Failed to read file name at index {index}: {e}"))?;
+        let relative_path = validate_bundle_entry_path(&name)?;
         let is_dir = entry.is_dir();
-        validate_bundle_entry_type(entry.name(), entry.unix_mode(), is_dir)?;
+        validate_bundle_entry_type(&name, entry.unix_mode(), is_dir)?;
         if !seen_paths.insert(relative_path.clone()) {
             return Err(format!(
                 "Bundle contains duplicate path: {}",
@@ -1365,8 +1368,7 @@ fn validate_bundle_archive<R: Read + Seek>(
         if size > MAX_BUNDLE_FILE_BYTES {
             return Err(format!(
                 "Bundle entry {} exceeds the {} byte per-file limit",
-                entry.name(),
-                MAX_BUNDLE_FILE_BYTES
+                name, MAX_BUNDLE_FILE_BYTES
             ));
         }
         total_size = total_size
@@ -1386,8 +1388,7 @@ fn validate_bundle_archive<R: Read + Seek>(
         {
             return Err(format!(
                 "Bundle entry {} exceeds the {}:1 compression ratio limit",
-                entry.name(),
-                MAX_BUNDLE_COMPRESSION_RATIO
+                name, MAX_BUNDLE_COMPRESSION_RATIO
             ));
         }
         entries.push((index, relative_path, is_dir));

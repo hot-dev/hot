@@ -67,7 +67,7 @@ def resolve_hot_cmd(use_system_hot: bool, hot_bin: str | None) -> str:
 
     print("Error: no hot binary found.")
     print("Build one with:")
-    print("  cd .. && cargo build --release -p hot")
+    print("  cd .. && cargo build --release -p hot_cli")
     print("Or pass --sys, --hot-bin PATH, or HOT_BIN=PATH.")
     sys.exit(1)
 

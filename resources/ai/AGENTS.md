@@ -649,14 +649,13 @@ apply-twice(3, mul(%, 2))            // wraps at apply-twice's f
 
 **No `Fn` slot ⇒ compile error.** If a `%` does not have an enclosing `Fn`-typed parameter slot to bind to, compilation fails with a clear error pointing at the placeholder. This makes the wrapping behavior local and predictable: `%` never silently bubbles past a non-HOF call.
 
-**Explicit lambda boundary `%(expr)`:** Use `%(expr)` when you need a first-class lambda value where no `Fn` slot exists, or when you want to force the lambda boundary at a specific inner point:
+**No nested implicit lambdas.** An implicit `%` lambda can't contain another one. `map(groups, filter(%, gt(%, 0)))` is a `nested-placeholder` compile error, because its two `%` would refer to different parameters (each group, then each element). Write the inner function explicitly: `map(groups, filter(%, %(gt(%, 0))))` or `map(groups, filter(%, (n) { gt(n, 0) }))`.
+
+**Explicit lambda boundary `%(expr)`:** Use `%(expr)` when you need a first-class lambda value where no `Fn` slot exists, or for an inner function inside an implicit lambda (as above):
 ```hot
 // Build a lambda value to store / pass around.
 sq %(mul(%, %))
 invoke-fn(4, sq)
-
-// Force the wrap at the inner expression.
-sort(map(data, %(%.value)))
 ```
 
 ### Validation with cond
