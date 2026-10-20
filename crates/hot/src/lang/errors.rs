@@ -288,6 +288,16 @@ pub enum CompilerError {
         field_name: String,
         location: Option<ErrorLocation>,
     },
+    /// A context value declared `required` in function `meta {ctx: ...}` has
+    /// no value in the checked environment. A *warning* in `hot check`:
+    /// values are supplied per environment, and `run` and `eval` still
+    /// refuse to start without them.
+    MissingContext {
+        key: String,
+        /// Function that declares (or transitively needs) the key.
+        required_by: String,
+        location: Option<ErrorLocation>,
+    },
     /// An implicit `%` lambda would contain another implicit `%` lambda, as
     /// in `map(items, filter(%, gt(%, 0)))`. The two `%` would refer to
     /// different parameters, so the inner function must be explicit.
@@ -1029,6 +1039,20 @@ impl fmt::Display for CompilerError {
                     write!(f, "{}", body)
                 }
             }
+            CompilerError::MissingContext {
+                key,
+                required_by,
+                location,
+            } => {
+                let body = format!(
+                    "Missing required context variable '{}' (required by {})",
+                    key, required_by
+                );
+                match location.as_ref().and_then(|loc| loc.file.as_ref()) {
+                    Some(file) => write!(f, "{} in {}", body, file.display()),
+                    None => write!(f, "{}", body),
+                }
+            }
             CompilerError::NestedPlaceholder {
                 function,
                 parameter,
@@ -1214,6 +1238,7 @@ impl CompilerErrors {
             CompilerError::NestedTypeImplementation { location, .. } => location.as_ref(),
             CompilerError::DeprecatedUsage { location, .. } => location.as_ref(),
             CompilerError::UnknownField { location, .. } => location.as_ref(),
+            CompilerError::MissingContext { location, .. } => location.as_ref(),
             CompilerError::NestedPlaceholder { location, .. } => location.as_ref(),
             CompilerError::AnnotationMismatch { location, .. } => location.as_ref(),
         }?;
@@ -1683,6 +1708,21 @@ impl CompilerErrors {
                             .with_color(label_color),
                     );
             }
+            CompilerError::MissingContext {
+                key, required_by, ..
+            } => {
+                report = report
+                    .with_code("missing-context")
+                    .with_message(format!("Missing required context variable '{}'", key))
+                    .with_label(
+                        Label::new((source_name.as_str(), span_start..span_end))
+                            .with_message(format!("required by {}", required_by))
+                            .with_color(label_color),
+                    )
+                    .with_help(
+                        "Set it in a ctx file (--ctx), hot/ctx.hot, or the app before running",
+                    );
+            }
             CompilerError::NestedPlaceholder {
                 function,
                 parameter,
@@ -1794,6 +1834,7 @@ impl CompilerError {
             CompilerError::NestedTypeImplementation { location, .. } => location.as_ref(),
             CompilerError::DeprecatedUsage { location, .. } => location.as_ref(),
             CompilerError::UnknownField { location, .. } => location.as_ref(),
+            CompilerError::MissingContext { location, .. } => location.as_ref(),
             CompilerError::NestedPlaceholder { location, .. } => location.as_ref(),
             CompilerError::AnnotationMismatch { location, .. } => location.as_ref(),
         }
@@ -1805,6 +1846,7 @@ impl CompilerError {
         match self {
             CompilerError::DeprecatedUsage { .. }
             | CompilerError::UnknownField { .. }
+            | CompilerError::MissingContext { .. }
             | CompilerError::AnnotationMismatch { .. } => DiagnosticSeverity::Warning,
             _ => DiagnosticSeverity::Error,
         }
@@ -1850,6 +1892,7 @@ impl CompilerError {
             CompilerError::NestedTypeImplementation { .. } => "nested-type-implementation",
             CompilerError::DeprecatedUsage { .. } => "deprecated-usage",
             CompilerError::UnknownField { .. } => "unknown-field",
+            CompilerError::MissingContext { .. } => "missing-context",
             CompilerError::NestedPlaceholder { .. } => "nested-placeholder",
             CompilerError::AnnotationMismatch { .. } => "annotation-mismatch",
         }

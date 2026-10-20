@@ -2220,13 +2220,14 @@ unsafe extern "C" fn hot_jit_dot_access_or_default(
 }
 
 /// JIT helper: merge source map into target map.
-/// Both args are OwnedVal pointers to Val::Map values.
+/// Both args are OwnedVal pointers to Val::Map values. A constructed source
+/// contributes its fields, matching the VM's `MergeMaps`.
 /// Returns an OwnedVal handle to the merged map.
 unsafe extern "C" fn hot_jit_merge_maps(target_ptr: i64, source_ptr: i64) -> i64 {
     let target = unsafe { &*(target_ptr as *const Val) };
     let source = unsafe { &*(source_ptr as *const Val) };
-    let result = match (target, source) {
-        (Val::Map(t), Val::Map(s)) => {
+    let result = match (target, crate::val::map_spread_entries(source)) {
+        (Val::Map(t), Some(s)) => {
             let mut merged = (**t).clone();
             for (k, v) in s.iter() {
                 merged.insert(k.clone(), v.clone());
@@ -14102,6 +14103,24 @@ mod tests {
 
     #[test]
     fn jit_merge_maps() {
+        let mut vm = merge_maps_vm();
+        let a = val!({"x": 1});
+        let b = val!({"y": 2});
+        let result = vm.execute_compiled_user_function(0, &[a, b]).unwrap();
+        assert_eq!(result, val!({"x": 1, "y": 2}));
+    }
+
+    #[test]
+    fn jit_merge_maps_spreads_typed_fields() {
+        let mut vm = merge_maps_vm();
+        let a = val!({"tls": true});
+        let b = val!({"$type": "::test/Server", "$val": {"host": "a.example", "port": 1}});
+        let result = vm.execute_compiled_user_function(0, &[a, b]).unwrap();
+        assert_eq!(result, val!({"tls": true, "host": "a.example", "port": 1}));
+    }
+
+    /// `a` and `b` merged with `MergeMaps`, JIT-compiled on first call.
+    fn merge_maps_vm() -> VirtualMachine {
         let mut program = BytecodeProgram::new();
         let a_name = program.constants.len() as u32;
         program.constants.push(Constant::Val(val!("a")));
@@ -14135,11 +14154,7 @@ mod tests {
         });
 
         let conf = val!({"jit": {"mode": "enabled", "threshold": 1}});
-        let mut vm = make_test_vm(program, conf);
-        let a = val!({"x": 1});
-        let b = val!({"y": 2});
-        let result = vm.execute_compiled_user_function(0, &[a, b]).unwrap();
-        assert_eq!(result, val!({"x": 1, "y": 2}));
+        make_test_vm(program, conf)
     }
 
     #[test]
