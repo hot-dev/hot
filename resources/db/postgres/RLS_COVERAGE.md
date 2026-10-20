@@ -91,6 +91,13 @@ and an environment-specific subscription must match the alert environment.
 Delivery ownership cannot be reassigned. SQLite has equivalent integrity
 triggers, and the sender checks the subscription environment independently.
 
+Migration 017 completes the retained-data preflight for the runtime integrity
+checks introduced by 011: run/task origin runs and run events must exist in the
+same environment. It reads under the named queue maintenance operation so a
+non-BYPASS schema owner sees every retained relationship despite FORCE RLS.
+An inconsistent link stops the upgrade for reviewed repair; no provenance is
+rewritten automatically. SQLite applies the same retained-data preflight.
+
 | Admission extension | Coverage |
 | --- | --- |
 | `task.reserved_compute_units`, `task.reserved_duration_ms` (013) | Existing exact task policies; root-locked admission narrows to env before claiming |
