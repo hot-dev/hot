@@ -6,7 +6,7 @@ use crate::lang::runtime::vm::{VirtualMachine, VmError, VmResult};
 use crate::val::Val;
 use ahash::AHashMap;
 use cranelift_codegen::ir::{
-    AbiParam, FuncRef, InstBuilder, MemFlags, StackSlotData, StackSlotKind, Type, UserFuncName,
+    AbiParam, FuncRef, InstBuilder, MemFlagsData, StackSlotData, StackSlotKind, Type, UserFuncName,
     types,
 };
 use cranelift_codegen::settings::{self, Configurable};
@@ -1423,7 +1423,7 @@ fn compile_supported_function(
             helper_refs,
             expected_return_kind,
         )?;
-        fbx.finalize();
+        fbx.finalize(module.target_config());
         result_kind
     };
 
@@ -4683,7 +4683,7 @@ impl<'a> EmitCtx<'a> {
                 .iconst(types::I64, helper_value_kind(eff_kind));
             builder
                 .ins()
-                .stack_store(kind_val, pairs_slot, (i * 2 * 8) as i32);
+                .stack_store(types::I64, kind_val, pairs_slot, (i * 2 * 8) as i32);
             // The trampoline only borrows OwnedVal args (decode_helper_val
             // clones out of them without consuming a refcount) and the source
             // register keeps the value alive across the call, so the pointer
@@ -4691,7 +4691,7 @@ impl<'a> EmitCtx<'a> {
             // argument per call.
             builder
                 .ins()
-                .stack_store(eff_raw, pairs_slot, (i * 2 * 8 + 8) as i32);
+                .stack_store(types::I64, eff_raw, pairs_slot, (i * 2 * 8 + 8) as i32);
         }
         let args_buf_ptr = builder.ins().stack_addr(self.ptr_ty, pairs_slot, 0);
         let name_val = new_owned_val(Val::Str(fn_name.to_string().into()));
@@ -4734,13 +4734,13 @@ impl<'a> EmitCtx<'a> {
                 .iconst(types::I64, helper_value_kind(eff_kind));
             builder
                 .ins()
-                .stack_store(kind_val, pairs_slot, (i * 2 * 8) as i32);
+                .stack_store(types::I64, kind_val, pairs_slot, (i * 2 * 8) as i32);
             // Borrow convention: the trampoline clones what it needs and the
             // source register keeps the value alive across the call, so no
             // extra refcount is taken here (cloning leaked one count per call).
             builder
                 .ins()
-                .stack_store(eff_raw, pairs_slot, (i * 2 * 8 + 8) as i32);
+                .stack_store(types::I64, eff_raw, pairs_slot, (i * 2 * 8 + 8) as i32);
         }
         let args_buf_ptr = builder.ins().stack_addr(self.ptr_ty, pairs_slot, 0);
         let count_val = builder.ins().iconst(types::I64, count as i64);
@@ -4781,13 +4781,13 @@ impl<'a> EmitCtx<'a> {
                 .iconst(types::I64, helper_value_kind(eff_kind));
             builder
                 .ins()
-                .stack_store(kind_val, pairs_slot, (i * 2 * 8) as i32);
+                .stack_store(types::I64, kind_val, pairs_slot, (i * 2 * 8) as i32);
             // Borrow convention: the trampoline clones what it needs and the
             // source register keeps the value alive across the call, so no
             // extra refcount is taken here (cloning leaked one count per call).
             builder
                 .ins()
-                .stack_store(eff_raw, pairs_slot, (i * 2 * 8 + 8) as i32);
+                .stack_store(types::I64, eff_raw, pairs_slot, (i * 2 * 8 + 8) as i32);
         }
         let args_buf_ptr = builder.ins().stack_addr(self.ptr_ty, pairs_slot, 0);
         let fn_id_val = builder.ins().iconst(types::I64, called_function_id as i64);
@@ -5297,12 +5297,18 @@ impl<'a> EmitCtx<'a> {
                             for (i, (name_v, val_v)) in
                                 capture_names.iter().zip(capture_values.iter()).enumerate()
                             {
-                                builder
-                                    .ins()
-                                    .stack_store(*name_v, names_slot, (i * 8) as i32);
-                                builder
-                                    .ins()
-                                    .stack_store(*val_v, values_slot, (i * 8) as i32);
+                                builder.ins().stack_store(
+                                    types::I64,
+                                    *name_v,
+                                    names_slot,
+                                    (i * 8) as i32,
+                                );
+                                builder.ins().stack_store(
+                                    types::I64,
+                                    *val_v,
+                                    values_slot,
+                                    (i * 8) as i32,
+                                );
                             }
                             let names_ptr = builder.ins().stack_addr(self.ptr_ty, names_slot, 0);
                             let values_ptr = builder.ins().stack_addr(self.ptr_ty, values_slot, 0);
@@ -5766,8 +5772,12 @@ impl<'a> EmitCtx<'a> {
                         &self.register_kinds,
                         reg,
                     )?;
-                    builder.ins().stack_store(tag, slot, (i * 2 * 8) as i32);
-                    builder.ins().stack_store(raw, slot, (i * 2 * 8 + 8) as i32);
+                    builder
+                        .ins()
+                        .stack_store(types::I64, tag, slot, (i * 2 * 8) as i32);
+                    builder
+                        .ins()
+                        .stack_store(types::I64, raw, slot, (i * 2 * 8 + 8) as i32);
                 }
                 let args_ptr = builder.ins().stack_addr(self.ptr_ty, slot, 0);
                 let count_val = builder.ins().iconst(types::I64, count_usize as i64);
@@ -5801,8 +5811,8 @@ impl<'a> EmitCtx<'a> {
                         16,
                         3,
                     ));
-                    builder.ins().stack_store(tag, slot, 0);
-                    builder.ins().stack_store(raw, slot, 8);
+                    builder.ins().stack_store(types::I64, tag, slot, 0);
+                    builder.ins().stack_store(types::I64, raw, slot, 8);
                     let ptr = builder.ins().stack_addr(self.ptr_ty, slot, 0);
                     let one = builder.ins().iconst(types::I64, 1);
                     let call = builder.ins().call(self.helper_refs.make_vec, &[ptr, one]);
@@ -5878,8 +5888,12 @@ impl<'a> EmitCtx<'a> {
                         &self.register_kinds,
                         reg,
                     )?;
-                    builder.ins().stack_store(tag, slot, (i * 2 * 8) as i32);
-                    builder.ins().stack_store(raw, slot, (i * 2 * 8 + 8) as i32);
+                    builder
+                        .ins()
+                        .stack_store(types::I64, tag, slot, (i * 2 * 8) as i32);
+                    builder
+                        .ins()
+                        .stack_store(types::I64, raw, slot, (i * 2 * 8 + 8) as i32);
                 }
                 let parts_ptr = builder.ins().stack_addr(self.ptr_ty, slot, 0);
                 let count_val = builder.ins().iconst(types::I64, count as i64);
@@ -5981,7 +5995,7 @@ impl<'a> EmitCtx<'a> {
                         .ins()
                         .call(self.helper_refs.lookup_var_or_default, &[name_raw]);
                     let resolved = builder.inst_results(call)[0];
-                    let is_found = builder.ins().icmp_imm(
+                    let is_found = builder.ins().icmp_imm_s(
                         cranelift_codegen::ir::condcodes::IntCC::NotEqual,
                         resolved,
                         0,
@@ -6127,14 +6141,17 @@ impl<'a> EmitCtx<'a> {
                         .iconst(types::I64, helper_value_kind(eff_kind));
                     builder
                         .ins()
-                        .stack_store(kind_val, pairs_slot, (i * 2 * 8) as i32);
+                        .stack_store(types::I64, kind_val, pairs_slot, (i * 2 * 8) as i32);
                     // Borrow convention: the trampoline clones what it needs
                     // and the source register keeps the value alive across the
                     // call, so no extra refcount is taken here (cloning leaked
                     // one count per call).
-                    builder
-                        .ins()
-                        .stack_store(eff_raw, pairs_slot, (i * 2 * 8 + 8) as i32);
+                    builder.ins().stack_store(
+                        types::I64,
+                        eff_raw,
+                        pairs_slot,
+                        (i * 2 * 8 + 8) as i32,
+                    );
                 }
                 let args_buf = builder.ins().stack_addr(self.ptr_ty, pairs_slot, 0);
                 let count_val = builder.ins().iconst(types::I64, count as i64);
@@ -6296,14 +6313,17 @@ impl<'a> EmitCtx<'a> {
                         .iconst(types::I64, helper_value_kind(eff_kind));
                     builder
                         .ins()
-                        .stack_store(kind_val, pairs_slot, (i * 2 * 8) as i32);
+                        .stack_store(types::I64, kind_val, pairs_slot, (i * 2 * 8) as i32);
                     // Borrow convention: the trampoline clones what it needs
                     // and the source register keeps the value alive across the
                     // call, so no extra refcount is taken here (cloning leaked
                     // one count per call).
-                    builder
-                        .ins()
-                        .stack_store(eff_raw, pairs_slot, (i * 2 * 8 + 8) as i32);
+                    builder.ins().stack_store(
+                        types::I64,
+                        eff_raw,
+                        pairs_slot,
+                        (i * 2 * 8 + 8) as i32,
+                    );
                 }
                 let args_buf = builder.ins().stack_addr(self.ptr_ty, pairs_slot, 0);
                 let count_val = builder.ins().iconst(types::I64, n as i64);
@@ -6368,14 +6388,17 @@ impl<'a> EmitCtx<'a> {
                         .iconst(types::I64, helper_value_kind(eff_kind));
                     builder
                         .ins()
-                        .stack_store(kind_val, pairs_slot, (i * 2 * 8) as i32);
+                        .stack_store(types::I64, kind_val, pairs_slot, (i * 2 * 8) as i32);
                     // Borrow convention: the trampoline clones what it needs
                     // and the source register keeps the value alive across the
                     // call, so no extra refcount is taken here (cloning leaked
                     // one count per call).
-                    builder
-                        .ins()
-                        .stack_store(eff_raw, pairs_slot, (i * 2 * 8 + 8) as i32);
+                    builder.ins().stack_store(
+                        types::I64,
+                        eff_raw,
+                        pairs_slot,
+                        (i * 2 * 8 + 8) as i32,
+                    );
                 }
                 let args_buf = builder.ins().stack_addr(self.ptr_ty, pairs_slot, 0);
                 let func_id_val = builder.ins().iconst(types::I64, *function as i64);
@@ -6549,13 +6572,13 @@ fn build_supported_body(
             RawKind::Int | RawKind::Bool => {
                 builder
                     .ins()
-                    .load(types::I64, MemFlags::new(), arg_ptr, offset as i32)
+                    .load(types::I64, MemFlagsData::new(), arg_ptr, offset as i32)
             }
             RawKind::Null => builder.ins().iconst(types::I64, 0),
             RawKind::OwnedVal => {
                 builder
                     .ins()
-                    .load(types::I64, MemFlags::new(), arg_ptr, offset as i32)
+                    .load(types::I64, MemFlagsData::new(), arg_ptr, offset as i32)
             }
             RawKind::Dec => {
                 let slot = builder.create_sized_stack_slot(StackSlotData::new(
@@ -6564,7 +6587,7 @@ fn build_supported_body(
                     3,
                 ));
                 let slot_ptr = builder.ins().stack_addr(ptr_ty, slot, 0);
-                let src_ptr = builder.ins().iadd_imm(arg_ptr, offset);
+                let src_ptr = builder.ins().iadd_imm_s(arg_ptr, offset);
                 builder
                     .ins()
                     .call(helper_refs.copy_dec, &[src_ptr, slot_ptr]);
@@ -7046,7 +7069,7 @@ fn build_supported_body(
                 }
                 match kind {
                     RawKind::Int | RawKind::Bool => {
-                        builder.ins().store(MemFlags::new(), raw, ret_ptr, 0);
+                        builder.ins().store(MemFlagsData::new(), raw, ret_ptr, 0);
                     }
                     RawKind::Dec => {
                         builder
@@ -7055,11 +7078,15 @@ fn build_supported_body(
                     }
                     RawKind::Null => {
                         let zero_val = builder.ins().iconst(types::I64, 0);
-                        builder.ins().store(MemFlags::new(), zero_val, ret_ptr, 0);
+                        builder
+                            .ins()
+                            .store(MemFlagsData::new(), zero_val, ret_ptr, 0);
                     }
                     RawKind::OwnedVal => {
                         let returned = clone_owned_raw(builder, &ctx.helper_refs, raw);
-                        builder.ins().store(MemFlags::new(), returned, ret_ptr, 0);
+                        builder
+                            .ins()
+                            .store(MemFlagsData::new(), returned, ret_ptr, 0);
                     }
                     RawKind::TypeTag | RawKind::StringConst => {
                         return Err(
@@ -7738,7 +7765,7 @@ fn try_lower_known_core_call(
             let cmp =
                 builder
                     .ins()
-                    .icmp_imm(cranelift_codegen::ir::condcodes::IntCC::Equal, val, 0);
+                    .icmp_imm_s(cranelift_codegen::ir::condcodes::IntCC::Equal, val, 0);
             let one = builder.ins().iconst(types::I64, 1);
             let zero = builder.ins().iconst(types::I64, 0);
             (RawKind::Bool, builder.ins().select(cmp, one, zero))
@@ -7783,7 +7810,7 @@ fn try_lower_known_core_call(
                     let raw = builder.use_var(registers[remap_reg(remap, arg(0))?]);
                     let call = builder.ins().call(helper_refs.is_null, &[raw]);
                     let is_null = builder.inst_results(call)[0];
-                    let cmp = builder.ins().icmp_imm(
+                    let cmp = builder.ins().icmp_imm_s(
                         cranelift_codegen::ir::condcodes::IntCC::Equal,
                         is_null,
                         0,
@@ -8341,7 +8368,7 @@ fn emit_halt_check(
 ) -> cranelift_codegen::ir::Block {
     let halt_block = builder.create_block();
     let cont_block = builder.create_block();
-    let is_halt = builder.ins().icmp_imm(
+    let is_halt = builder.ins().icmp_imm_s(
         cranelift_codegen::ir::condcodes::IntCC::Equal,
         result,
         HALT_SENTINEL,
@@ -8490,7 +8517,7 @@ fn truthy_value(
         RawKind::Bool => {
             Ok(builder
                 .ins()
-                .icmp_imm(cranelift_codegen::ir::condcodes::IntCC::NotEqual, raw, 0))
+                .icmp_imm_s(cranelift_codegen::ir::condcodes::IntCC::NotEqual, raw, 0))
         }
         // Ints, type tags, and interned strings are never falsy
         // (Val::is_truthy: only false, null, and Err are) — including 0
@@ -8499,26 +8526,28 @@ fn truthy_value(
             let one = builder.ins().iconst(types::I64, 1);
             Ok(builder
                 .ins()
-                .icmp_imm(cranelift_codegen::ir::condcodes::IntCC::NotEqual, one, 0))
+                .icmp_imm_s(cranelift_codegen::ir::condcodes::IntCC::NotEqual, one, 0))
         }
         RawKind::Dec => {
             let one = builder.ins().iconst(types::I64, 1);
             Ok(builder
                 .ins()
-                .icmp_imm(cranelift_codegen::ir::condcodes::IntCC::NotEqual, one, 0))
+                .icmp_imm_s(cranelift_codegen::ir::condcodes::IntCC::NotEqual, one, 0))
         }
         RawKind::Null => {
             Ok(builder
                 .ins()
-                .icmp_imm(cranelift_codegen::ir::condcodes::IntCC::NotEqual, raw, 0))
+                .icmp_imm_s(cranelift_codegen::ir::condcodes::IntCC::NotEqual, raw, 0))
         }
         RawKind::OwnedVal => {
             let kind = builder.ins().iconst(types::I64, HELPER_VAL_KIND_OWNED);
             let call = builder.ins().call(helper_refs.truthy_general, &[kind, raw]);
             let truthy = builder.inst_results(call)[0];
-            Ok(builder
-                .ins()
-                .icmp_imm(cranelift_codegen::ir::condcodes::IntCC::NotEqual, truthy, 0))
+            Ok(builder.ins().icmp_imm_s(
+                cranelift_codegen::ir::condcodes::IntCC::NotEqual,
+                truthy,
+                0,
+            ))
         }
     }
 }
@@ -8739,7 +8768,7 @@ fn emit_self_recursive_call(
             RawKind::Int | RawKind::Bool => {
                 builder
                     .ins()
-                    .stack_store(raw, slot, arg_layout.offset(idx)? as i32);
+                    .stack_store(ptr_ty, raw, slot, arg_layout.offset(idx)? as i32);
             }
             RawKind::Dec => {
                 let dst_ptr =
@@ -8752,13 +8781,13 @@ fn emit_self_recursive_call(
                 let zero = builder.ins().iconst(types::I64, 0);
                 builder
                     .ins()
-                    .stack_store(zero, slot, arg_layout.offset(idx)? as i32);
+                    .stack_store(ptr_ty, zero, slot, arg_layout.offset(idx)? as i32);
             }
             RawKind::OwnedVal => {
                 let cloned = clone_owned_raw(builder, helper_refs, raw);
                 builder
                     .ins()
-                    .stack_store(cloned, slot, arg_layout.offset(idx)? as i32);
+                    .stack_store(ptr_ty, cloned, slot, arg_layout.offset(idx)? as i32);
             }
             RawKind::TypeTag | RawKind::StringConst => {
                 return Err("JIT self-recursive internal tokens not supported".to_string());
@@ -8795,7 +8824,7 @@ fn emit_self_recursive_call(
         RawKind::Int | RawKind::Bool | RawKind::Null | RawKind::OwnedVal => {
             let v = builder
                 .ins()
-                .load(types::I64, MemFlags::new(), result_ptr, 0);
+                .load(types::I64, MemFlagsData::new(), result_ptr, 0);
             Ok((self_ret_raw, v, Some((error_block, ret_flag))))
         }
         RawKind::Dec => {

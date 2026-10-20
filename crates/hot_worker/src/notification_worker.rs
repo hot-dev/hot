@@ -30,7 +30,7 @@ pub fn spawn_notification_worker(
         tracing::info!("Notification worker started (alert + email queue consumer)");
 
         // Create HTTP client for webhook/Slack/PagerDuty deliveries
-        let http_client = reqwest::Client::builder()
+        let http_client = hot::outbound::client_builder()
             .timeout(Duration::from_secs(HTTP_TIMEOUT_SECS))
             .connect_timeout(Duration::from_secs(5))
             .build()

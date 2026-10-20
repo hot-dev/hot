@@ -392,12 +392,12 @@ pub fn round(args: &[Val]) -> HotResult<Val> {
 
 /// Random number generator
 pub fn rand(args: &[Val]) -> HotResult<Val> {
-    use rand::Rng;
+    use rand::RngExt;
 
     if args.is_empty() {
         // Return random decimal between 0 and 1
-        let mut rng = rand::thread_rng();
-        let random_val: f64 = rng.r#gen();
+        let mut rng = rand::rng();
+        let random_val: f64 = rng.random();
         HotResult::Ok(Val::Dec(fastnum::D256::from(random_val)))
     } else {
         validate_args!("::hot::math/rand", args, 1);
@@ -407,8 +407,8 @@ pub fn rand(args: &[Val]) -> HotResult<Val> {
                 if *max <= 0 {
                     return HotResult::Err(Val::from("rand max must be positive"));
                 }
-                let mut rng = rand::thread_rng();
-                let random_val = rng.gen_range(0.0..(*max as f64));
+                let mut rng = rand::rng();
+                let random_val = rng.random_range(0.0..(*max as f64));
                 HotResult::Ok(Val::Dec(fastnum::D256::from(random_val)))
             }
             Val::Dec(d) => {
@@ -417,8 +417,8 @@ pub fn rand(args: &[Val]) -> HotResult<Val> {
                 if max_f <= 0.0 {
                     return HotResult::Err(Val::from("rand max must be positive"));
                 }
-                let mut rng = rand::thread_rng();
-                let random_val = rng.gen_range(0.0..max_f);
+                let mut rng = rand::rng();
+                let random_val = rng.random_range(0.0..max_f);
                 HotResult::Ok(Val::Dec(fastnum::D256::from(random_val)))
             }
             _ => HotResult::Err(Val::from("rand expects a numeric max value")),

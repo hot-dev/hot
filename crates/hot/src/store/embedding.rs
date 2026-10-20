@@ -155,7 +155,7 @@ pub mod local {
                             format!("Failed to create model cache dir: {e}")
                         })?;
 
-                        let init = fastembed::InitOptions::new(model_type)
+                        let init = fastembed::TextInitOptions::new(model_type)
                             .with_cache_dir(cache_dir)
                             .with_show_download_progress(true);
 
@@ -316,6 +316,28 @@ pub mod local {
             for handle in handles {
                 let embedding = handle.await.unwrap().unwrap();
                 assert_embedding_shape(&embedding);
+            }
+        }
+
+        #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+        #[ignore = "downloads and initializes a FastEmbed ONNX model"]
+        async fn local_embedding_matches_reference_values() {
+            // Produced with fastembed 5.17 and unchanged in 7.1. Stored vectors
+            // only stay comparable while these hold.
+            const REFERENCE_PREFIX: [f32; 8] = [
+                -0.020829, -0.005926, 0.007389, -0.015848, 0.025874, 0.009380, -0.000085, -0.010167,
+            ];
+            let _guard = TEST_LOCK.lock().await;
+            let embedding = test_provider()
+                .embed("hot local embedding reference one")
+                .await
+                .unwrap();
+            assert_embedding_shape(&embedding);
+            for (index, (actual, expected)) in embedding.iter().zip(REFERENCE_PREFIX).enumerate() {
+                assert!(
+                    (actual - expected).abs() < 1e-4,
+                    "dimension {index}: {actual} != {expected}"
+                );
             }
         }
     }

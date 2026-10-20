@@ -302,7 +302,9 @@ impl BoxExecutor {
     ) -> ExecutorResult<Self> {
         match backend {
             Backend::Docker => {
-                let executor = docker::DockerExecutor::new(max_concurrent, slot_timeout_secs)?;
+                let executor = docker::DockerExecutor::new(max_concurrent, slot_timeout_secs)?
+                    .negotiate_api_version()
+                    .await;
                 Ok(Self::Docker(executor))
             }
             #[cfg(all(target_os = "linux", feature = "kata"))]
@@ -551,6 +553,12 @@ mod docker {
                 semaphore: Arc::new(Semaphore::new(max_concurrent)),
                 slot_timeout_secs,
             })
+        }
+
+        /// See [`hot::lang::hot::r#box::negotiate_docker_api_version`].
+        pub async fn negotiate_api_version(mut self) -> Self {
+            self.docker = hot::lang::hot::r#box::negotiate_docker_api_version(self.docker).await;
+            self
         }
 
         #[allow(clippy::too_many_arguments)]
@@ -1228,7 +1236,7 @@ pub(crate) fn compute_chain_id(diff_ids: &[String]) -> String {
     for diff_id in &diff_ids[1..] {
         let input = format!("{chain} {diff_id}");
         let hash = Sha256::digest(input.as_bytes());
-        chain = format!("sha256:{hash:x}");
+        chain = format!("sha256:{}", hex::encode(hash));
     }
     chain
 }
@@ -2979,9 +2987,11 @@ mod kata_tests {
     #[test]
     fn test_compute_chain_id_multi_layer() {
         let diff_ids = vec!["sha256:aaa".to_string(), "sha256:bbb".to_string()];
-        let result = super::compute_chain_id(&diff_ids);
-        assert!(result.starts_with("sha256:"));
-        assert_ne!(result, "sha256:aaa");
+        // ChainID(L1|L2) = "sha256:" + hex(SHA256(ChainID(L1) + " " + DiffID(L2)))
+        assert_eq!(
+            super::compute_chain_id(&diff_ids),
+            "sha256:56efb1d4f6c79b745d37d6eff87e3ed8dd2be28104e124ba73fd6e6c4892c792"
+        );
     }
 
     #[test]

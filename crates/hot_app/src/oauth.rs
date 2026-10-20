@@ -149,7 +149,7 @@ pub struct GitHubEmail {
 
 /// Fetch Google user info using access token
 pub async fn fetch_google_user_info(access_token: &str) -> Result<GoogleUserInfo, String> {
-    let client = reqwest::Client::new();
+    let client = hot::outbound::client();
     let response = client
         .get("https://www.googleapis.com/oauth2/v2/userinfo")
         .bearer_auth(access_token)
@@ -185,7 +185,7 @@ pub async fn fetch_google_user_info(access_token: &str) -> Result<GoogleUserInfo
 
 /// Fetch GitHub user info using access token
 pub async fn fetch_github_user_info(access_token: &str) -> Result<GitHubUserInfo, String> {
-    let client = reqwest::Client::new();
+    let client = hot::outbound::client();
     let response = client
         .get("https://api.github.com/user")
         .bearer_auth(access_token)
@@ -246,7 +246,7 @@ pub fn select_github_email(emails: &[GitHubEmail]) -> Option<String> {
 
 /// Fetch GitHub user emails
 async fn fetch_github_emails(access_token: &str) -> Result<Vec<GitHubEmail>, String> {
-    let client = reqwest::Client::new();
+    let client = hot::outbound::client();
     let response = client
         .get("https://api.github.com/user/emails")
         .bearer_auth(access_token)
@@ -307,14 +307,28 @@ pub async fn exchange_code_for_token(
     client: &ConfiguredOAuthClient,
     code: AuthorizationCode,
 ) -> Result<String, String> {
-    let http_client = reqwest::ClientBuilder::new()
+    let http_client = hot::outbound::client_builder()
         .redirect(reqwest::redirect::Policy::none())
         .build()
         .map_err(|e| format!("Failed to create OAuth HTTP client: {}", e))?;
+    // oauth2's built-in client is reqwest 0.12, so send its requests through
+    // this one instead.
+    let send = |request: oauth2::HttpRequest| {
+        let http_client = http_client.clone();
+        async move {
+            let response = http_client.execute(request.try_into()?).await?;
+            let status = response.status();
+            let headers = response.headers().clone();
+            let mut http_response = oauth2::HttpResponse::new(response.bytes().await?.to_vec());
+            *http_response.status_mut() = status;
+            *http_response.headers_mut() = headers;
+            Ok::<_, reqwest::Error>(http_response)
+        }
+    };
 
     let token_result = client
         .exchange_code(code)
-        .request_async(&http_client)
+        .request_async(&send)
         .await
         .map_err(|e| format!("Failed to exchange code for token: {}", e))?;
 

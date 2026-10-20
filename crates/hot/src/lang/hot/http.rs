@@ -246,7 +246,7 @@ async fn send_with_redirect_validation(
             .await
             .map_err(|e| err_val(format!("::hot::http/request: {e}")))?;
         let host = current_url.host_str().expect("validated URL has host");
-        let client = reqwest::Client::builder()
+        let client = crate::outbound::client_builder()
             .user_agent(build_user_agent(headers))
             .connect_timeout(std::time::Duration::from_secs(30))
             .timeout(std::time::Duration::from_secs(timeout_secs))

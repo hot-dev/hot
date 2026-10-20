@@ -2734,7 +2734,6 @@ pub fn sort_by(vm: &mut crate::lang::runtime::vm::VirtualMachine, args: &[Val]) 
 /// Shuffle a collection randomly
 pub fn shuffle(args: &[Val]) -> HotResult<Val> {
     use rand::seq::SliceRandom;
-    use rand::thread_rng;
 
     if args.len() != 1 {
         return HotResult::Err(Val::from(format!(
@@ -2746,13 +2745,13 @@ pub fn shuffle(args: &[Val]) -> HotResult<Val> {
     match &args[0] {
         Val::Vec(items) => {
             let mut shuffled = items.clone();
-            let mut rng = thread_rng();
+            let mut rng = rand::rng();
             shuffled.shuffle(&mut rng);
             HotResult::Ok(Val::Vec(shuffled))
         }
         Val::Str(s) => {
             let mut chars: Vec<char> = s.chars().collect();
-            let mut rng = thread_rng();
+            let mut rng = rand::rng();
             chars.shuffle(&mut rng);
             let shuffled: String = chars.into_iter().collect();
             HotResult::Ok(Val::from(shuffled))

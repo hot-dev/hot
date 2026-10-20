@@ -231,12 +231,12 @@ fn parse_xml(xml_str: &str) -> Result<Val, String> {
     loop {
         match reader.read_event() {
             Ok(Event::Start(e)) => {
-                let tag_name = String::from_utf8_lossy(e.name().as_ref()).to_string();
+                let tag_name = e.name().as_ref().to_string();
                 let attrs = parse_attributes(&e)?;
                 stack.push((tag_name, attrs, Vec::new()));
             }
             Ok(Event::Empty(e)) => {
-                let tag_name = String::from_utf8_lossy(e.name().as_ref()).to_string();
+                let tag_name = e.name().as_ref().to_string();
                 let attrs = parse_attributes(&e)?;
                 let element = build_xml_val(&tag_name, attrs, Vec::new());
 
@@ -258,8 +258,7 @@ fn parse_xml(xml_str: &str) -> Result<Val, String> {
                 }
             }
             Ok(Event::Text(e)) => {
-                let decoded = e.decode().map_err(|e| e.to_string())?;
-                let text = quick_xml::escape::unescape(&decoded)
+                let text = quick_xml::escape::unescape(&e)
                     .map_err(|e| e.to_string())?
                     .to_string();
                 if !text.is_empty()
@@ -269,7 +268,7 @@ fn parse_xml(xml_str: &str) -> Result<Val, String> {
                 }
             }
             Ok(Event::CData(e)) => {
-                let text = String::from_utf8_lossy(e.as_ref()).to_string();
+                let text = e.as_ref().to_string();
                 if !text.is_empty()
                     && let Some((_, _, content)) = stack.last_mut()
                 {
@@ -305,7 +304,7 @@ fn parse_attributes(e: &BytesStart) -> Result<IndexMap<Val, Val>, String> {
                 "XML element exceeds attribute size limit ({MAX_XML_ATTRIBUTE_BYTES_PER_ELEMENT} bytes)"
             ));
         }
-        let key = String::from_utf8_lossy(attr.key.as_ref()).to_string();
+        let key = attr.key.as_ref().to_string();
         let value = attr
             .normalized_value(quick_xml::XmlVersion::Implicit1_0)
             .map_err(|e| e.to_string())?

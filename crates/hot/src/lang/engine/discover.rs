@@ -48,6 +48,18 @@ fn file_label(file: &Option<String>) -> &str {
     file.as_deref().unwrap_or("<unknown file>")
 }
 
+/// Whether two source paths name the same file. Discovery yields canonical
+/// paths, but a `hot run` target keeps the path as typed (relative, or through
+/// a symlink such as macOS `/tmp`), so compare canonical forms when the strings
+/// differ.
+fn same_source_file(a: &str, b: &str) -> bool {
+    a == b
+        || matches!(
+            (std::fs::canonicalize(a), std::fs::canonicalize(b)),
+            (Ok(a), Ok(b)) if a == b
+        )
+}
+
 fn literal_type_expr(expr: &crate::lang::ast::TypeExpr) -> bool {
     match expr {
         crate::lang::ast::TypeExpr::Literal(_) => true,
@@ -297,7 +309,10 @@ pub(crate) fn merge_namespace(
             let same_file = existing_same_name.iter().any(|(prior, _)| {
                 let prior_file = binding_file(prior, &existing.source_file);
                 let incoming_file = binding_file(&var, &incoming_source_file);
-                prior_file.is_some() && prior_file == incoming_file
+                match (prior_file, incoming_file) {
+                    (Some(prior), Some(incoming)) => same_source_file(&prior, &incoming),
+                    _ => false,
+                }
             });
             if same_file {
                 // Same file merged twice — keep the existing binding.
@@ -1194,6 +1209,38 @@ mod ns_merge_tests {
         let first = parse("::myapp ns\n\nalpha fn (): Str { \"A\" }\n", "x.hot");
         merge_all(&mut target, first.clone(), NsMergePolicy::Strict).unwrap();
         merge_all(&mut target, first, NsMergePolicy::Strict).unwrap();
+
+        let names = var_names(ns(&target, "::myapp"));
+        let alpha_count = names.iter().filter(|n| n.as_str() == "alpha").count();
+        assert_eq!(alpha_count, 1, "no duplicated binding: {names:?}");
+    }
+
+    #[test]
+    fn same_file_under_different_paths_is_idempotent() {
+        // Discovery yields canonical paths, while `hot run hot/src/x.hot`
+        // parses the target under the path as typed. Both name one file.
+        let dir = tempfile::TempDir::new().unwrap();
+        let src = dir.path().join("src");
+        std::fs::create_dir(&src).unwrap();
+        let file = src.join("x.hot");
+        let source = "::myapp ns\n\nalpha fn (): Str { \"A\" }\n";
+        std::fs::write(&file, source).unwrap();
+
+        let canonical = std::fs::canonicalize(&file).unwrap();
+        let as_typed = dir.path().join("src").join("..").join("src").join("x.hot");
+        let mut target = IndexMap::new();
+        merge_all(
+            &mut target,
+            parse(source, &canonical.to_string_lossy()),
+            NsMergePolicy::Strict,
+        )
+        .unwrap();
+        merge_all(
+            &mut target,
+            parse(source, &as_typed.to_string_lossy()),
+            NsMergePolicy::Strict,
+        )
+        .unwrap();
 
         let names = var_names(ns(&target, "::myapp"));
         let alpha_count = names.iter().filter(|n| n.as_str() == "alpha").count();

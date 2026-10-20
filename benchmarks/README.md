@@ -26,7 +26,7 @@ Build the local CLI:
 
 ```bash
 cd ..
-cargo build --release -p hot
+cargo build --release -p hot_cli
 cd benchmarks
 ./run-all.py
 ```
