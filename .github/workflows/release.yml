@@ -25,6 +25,9 @@ on:
         type: boolean
         default: false
 
+permissions:
+  contents: read
+
 env:
   CARGO_TERM_COLOR: always
   # Disable incremental in CI: it bloats target/ (which Swatinem/rust-cache
@@ -126,6 +129,9 @@ jobs:
       with:
         rust-toolchain: 1.99.1
         tailwind-version: ${{ env.TAILWIND_VERSION }}
+        # Restore main's caches, but never save: a release run's caches are
+        # scoped to its tag, so no later run could restore them.
+        save-cache: "false"
 
     - name: Generate package docs
       run: |
@@ -159,7 +165,7 @@ jobs:
 
     - name: Configure AWS credentials for package CDN upload
       if: ${{ needs.validate-release.outputs.publish_package_cdn == 'true' && vars.PKG_S3_BUCKET != '' }}
-      uses: aws-actions/configure-aws-credentials@v6
+      uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6
       with:
         role-to-assume: ${{ secrets.PKG_AWS_ROLE_ARN }}
         aws-region: ${{ vars.PKG_AWS_REGION || 'us-east-2' }}
@@ -211,11 +217,19 @@ jobs:
     runs-on: ${{ matrix.os }}
 
     steps:
+    # Real-time scanning inspects every file the build writes, which slows
+    # the Windows builds (the release's critical path) considerably. The
+    # runner is a throwaway VM.
+    - name: Disable Defender real-time scanning (Windows)
+      if: runner.os == 'Windows'
+      shell: pwsh
+      run: Set-MpPreference -DisableRealtimeMonitoring $true
+
     - name: Checkout code
       uses: actions/checkout@v5
 
     - name: Setup Rust
-      uses: dtolnay/rust-toolchain@stable
+      uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
       with:
         toolchain: 1.99.1
         targets: ${{ matrix.target }}
@@ -276,28 +290,10 @@ jobs:
         sudo apt-get install -y musl-tools
         rustup target add x86_64-unknown-linux-musl
 
-    # Compilation cache. Use a local disk cache restored/saved by actions/cache
-    # so transient cache service errors do not happen inside rustc/clippy.
-    - name: Setup sccache
-      uses: mozilla-actions/sccache-action@v0.0.10
-      with:
-        version: "v0.16.0"
-        token: ${{ github.token }}
-
-    - name: Configure sccache (local disk cache)
-      shell: bash
-      run: |
-        echo "RUSTC_WRAPPER=sccache" >> "$GITHUB_ENV"
-        echo "SCCACHE_DIR=$HOME/.cache/sccache" >> "$GITHUB_ENV"
-        echo "SCCACHE_CACHE_SIZE=2G" >> "$GITHUB_ENV"
-
-    - name: Cache sccache artifacts
-      uses: actions/cache@v5
-      with:
-        path: ~/.cache/sccache
-        key: sccache-${{ runner.os }}-${{ matrix.target }}-${{ github.run_id }}
-        restore-keys: |
-          sccache-${{ runner.os }}-${{ matrix.target }}-
+    # No compilation caches here. A run can only restore caches saved on its
+    # own ref or on main, and every release has a new tag while main never
+    # builds release targets, so sccache and rust-cache hit 0% and only cost
+    # time to save, pushing main's CI caches past the 10 GB budget.
 
     - name: Cache ORT downloads (macOS)
       if: runner.os == 'macOS'
@@ -307,28 +303,6 @@ jobs:
         key: ort-${{ runner.os }}-${{ matrix.target }}-${{ hashFiles('Cargo.lock') }}
         restore-keys: |
           ort-${{ runner.os }}-${{ matrix.target }}-
-
-    # Cargo registry/git/target caching across runs. Swatinem/rust-cache
-    # handles cross-compile target dirs and strips incremental artifacts
-    # before saving (which is why we set CARGO_INCREMENTAL=0 above).
-    - name: Rust Cache
-      uses: Swatinem/rust-cache@v2
-      with:
-        # Per-target key so each matrix entry gets its own cache.
-        key: ${{ matrix.target }}
-        save-if: true
-
-    - name: Refresh ORT build output (macOS)
-      if: runner.os == 'macOS'
-      shell: bash
-      run: |
-        set -euo pipefail
-        cargo clean --release --target "${{ matrix.target }}" -p ort -p ort-sys || true
-        rm -rf \
-          "target/${{ matrix.target }}/release/build/ort-"* \
-          "target/${{ matrix.target }}/release/build/ort-sys-"* \
-          "target/${{ matrix.target }}/release/.fingerprint/ort-"* \
-          "target/${{ matrix.target }}/release/.fingerprint/ort-sys-"*
 
     - name: Verify macOS linker runtime
       if: runner.os == 'macOS'
@@ -415,9 +389,6 @@ jobs:
         FROM scratch
         COPY --from=builder /hotbox /hotbox
         DOCKERFILE
-
-    - name: sccache stats
-      run: sccache --show-stats || true
 
     - name: Prepare binary (Unix)
       if: matrix.platform != 'windows'
@@ -828,7 +799,7 @@ jobs:
 
     - name: Sign binary with Trusted Signing
       if: ${{ vars.TRUSTED_SIGNING_ENABLED == 'true' }}
-      uses: azure/artifact-signing-action@v1.2.0
+      uses: azure/artifact-signing-action@b443cf8ea4124818d2ea9f043cba29fc3ec47b16 # v1.2.0
       with:
         azure-tenant-id: ${{ secrets.AZURE_TENANT_ID }}
         azure-client-id: ${{ secrets.AZURE_CLIENT_ID }}
@@ -1148,7 +1119,7 @@ jobs:
 
     - name: Sign installer with Trusted Signing
       if: ${{ vars.TRUSTED_SIGNING_ENABLED == 'true' }}
-      uses: azure/artifact-signing-action@v1.2.0
+      uses: azure/artifact-signing-action@b443cf8ea4124818d2ea9f043cba29fc3ec47b16 # v1.2.0
       with:
         azure-tenant-id: ${{ secrets.AZURE_TENANT_ID }}
         azure-client-id: ${{ secrets.AZURE_CLIENT_ID }}
@@ -1239,7 +1210,7 @@ jobs:
 
     - name: Create GitHub Release
       if: ${{ needs.validate-release.outputs.is_beta != 'true' }}
-      uses: softprops/action-gh-release@v3.0.1
+      uses: softprops/action-gh-release@718ea10b132b3b2eba29c1007bb80653f286566b # v3.0.1
       with:
         tag_name: ${{ needs.validate-release.outputs.tag_name }}
         name: Hot v${{ steps.version.outputs.version }}
@@ -1261,7 +1232,7 @@ jobs:
 
     - name: Configure AWS credentials for S3 upload
       if: ${{ (needs.validate-release.outputs.is_beta == 'true' || github.event.inputs.publish_to_cdn == 'true' || github.ref_type == 'tag') && vars.RELEASE_S3_BUCKET != '' }}
-      uses: aws-actions/configure-aws-credentials@v6
+      uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6
       with:
         role-to-assume: ${{ secrets.RELEASE_AWS_ROLE_ARN }}
         aws-region: ${{ vars.RELEASE_AWS_REGION || 'us-east-2' }}

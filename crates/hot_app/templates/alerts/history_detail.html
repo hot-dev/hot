@@ -226,11 +226,8 @@ function openAlertDataWithFormats() {
     var hotEl = document.getElementById('alert-data-hot');
     var jsonEl = document.getElementById('alert-data-json');
     if (hotEl && jsonEl) {
-        var textarea = document.createElement('textarea');
-        textarea.innerHTML = hotEl.textContent;
-        var hotContent = textarea.value;
-        textarea.innerHTML = jsonEl.textContent;
-        var jsonContent = textarea.value;
+        var hotContent = decodeHtmlEntities(hotEl.textContent);
+        var jsonContent = decodeHtmlEntities(jsonEl.textContent);
         openContentModalWithFormats('Alert Data', hotContent, jsonContent);
     }
 }

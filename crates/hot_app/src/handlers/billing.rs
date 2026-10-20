@@ -59,6 +59,7 @@ async fn checkout_success_redirect(
     .max_age(time::Duration::days(30))
     .http_only(true)
     .same_site(axum_extra::extract::cookie::SameSite::Lax)
+    .secure(!hot::env::is_local_dev())
     .build();
 
     let mut jar = jar.add(org_cookie);
@@ -74,6 +75,7 @@ async fn checkout_success_redirect(
         .max_age(time::Duration::days(30))
         .http_only(true)
         .same_site(axum_extra::extract::cookie::SameSite::Lax)
+        .secure(!hot::env::is_local_dev())
         .build();
         jar = jar.add(env_cookie);
     }

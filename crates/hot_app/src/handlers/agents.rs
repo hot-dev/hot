@@ -746,7 +746,10 @@ pub async fn agents_detail_handler(
     let agent = match Agent::get_agent_by_qualified_name(&db, &env_id, &qualified_name).await {
         Ok(a) => a,
         Err(_) => {
-            return Html(format!("Agent not found: {qualified_name}")).into_response();
+            return super::plain_text_error(
+                axum::http::StatusCode::NOT_FOUND,
+                format!("Agent not found: {qualified_name}"),
+            );
         }
     };
 
@@ -949,7 +952,12 @@ pub async fn workflow_detail_handler(
     let workflow =
         match Workflow::get_workflow_by_qualified_name(&db, &env_id, &qualified_name).await {
             Ok(w) => w,
-            Err(_) => return Html(format!("Workflow not found: {qualified_name}")).into_response(),
+            Err(_) => {
+                return super::plain_text_error(
+                    axum::http::StatusCode::NOT_FOUND,
+                    format!("Workflow not found: {qualified_name}"),
+                );
+            }
         };
 
     let display_name = workflow_display_name(&workflow);
@@ -1062,7 +1070,10 @@ pub async fn unnamed_workflow_detail_handler(
     );
 
     if handler_displays.is_empty() {
-        return Html(format!("Unnamed workflow group not found: {build_id}")).into_response();
+        return super::plain_text_error(
+            axum::http::StatusCode::NOT_FOUND,
+            format!("Unnamed workflow group not found: {build_id}"),
+        );
     }
 
     let project_name = handlers

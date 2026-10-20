@@ -1,0 +1,25 @@
+name: "Free disk space when low"
+description: >-
+  Removes large preinstalled toolchains and unused Docker images from a Linux
+  runner, but only when / has less free space than a build may need. Hosted
+  runners currently start with far more space than that, and the cleanup
+  itself takes about 3 minutes.
+inputs:
+  min-free-gb:
+    description: "Clean up only when / has less than this many GB free."
+    required: false
+    default: "40"
+runs:
+  using: "composite"
+  steps:
+    - name: Free disk space when low
+      shell: bash
+      run: |
+        avail_gb=$(df --output=avail -BG / | tail -1 | tr -dc '0-9')
+        echo "Free on /: ${avail_gb} GB (cleanup below ${{ inputs.min-free-gb }} GB)"
+        if [ "$avail_gb" -lt "${{ inputs.min-free-gb }}" ]; then
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+            /usr/local/share/boost /opt/hostedtoolcache/CodeQL
+          sudo docker image prune --all --force
+          df -h /
+        fi

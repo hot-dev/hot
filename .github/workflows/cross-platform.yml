@@ -75,6 +75,13 @@ jobs:
       run:
         shell: bash
     steps:
+      # Real-time scanning inspects every file the build writes, which slows
+      # Windows builds considerably. The runner is a throwaway VM.
+      - name: Disable Defender real-time scanning (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: Set-MpPreference -DisableRealtimeMonitoring $true
+
       - uses: actions/checkout@v5
 
       - name: Setup toolchain, cache, sccache, tailwind
@@ -85,10 +92,13 @@ jobs:
           # Restore-only on PR runs. Main/weekly saves use bounded sccache
           # entries and registry-only rust-cache entries; persisting both full
           # target/ and compiler caches for each OS would exceed the repo's
-          # 10 GB Actions cache budget.
+          # 10 GB Actions cache budget. The dependency set needs more than
+          # 512M (a full Linux set is about 0.7 GiB): at 512M both OSes hit
+          # about 2% and compiled nearly everything on every run.
           save-cache: ${{ github.ref == 'refs/heads/main' }}
-          sccache-size: 512M
+          sccache-size: 2G
           cache-rust-targets: "false"
+          ci-tuning: "true"
 
       # The ort crate downloads ONNX Runtime binaries at build time; cache
       # them like release.yml does.
@@ -132,34 +142,6 @@ jobs:
           psql -h localhost -d postgres -c "CREATE ROLE hot LOGIN SUPERUSER PASSWORD 'hot';"
           createdb -h localhost -O hot hot
 
-      - name: Set up Postgres + pgvector (Windows)
-        if: runner.os == 'Windows'
-        continue-on-error: true
-        shell: pwsh
-        run: |
-          # The runner image's preinstalled PostgreSQL is older than 18, but
-          # the migrations use PG18 features (uuidv7()), matching the
-          # postgres:18.x service containers on Linux and postgresql@18 on
-          # macOS — so install 18 explicitly.
-          $ErrorActionPreference = 'Stop'
-          choco install postgresql18 --yes --no-progress --params '/Password:root'
-          $pgRoot = 'C:\Program Files\PostgreSQL\18'
-          $pgBin = Join-Path $pgRoot 'bin'
-          Add-Content -Path $env:GITHUB_PATH -Value $pgBin
-          $env:Path = "$pgBin;$env:Path"
-          $env:PGPASSWORD = 'root'
-          $svc = Get-Service -Name 'postgresql*18*' -ErrorAction SilentlyContinue | Select-Object -First 1
-          if ($svc -and $svc.Status -ne 'Running') { Start-Service -Name $svc.Name }
-
-          # Build pgvector with MSVC against this Postgres.
-          git clone --depth 1 --branch v0.8.1 https://github.com/pgvector/pgvector "$env:RUNNER_TEMP\pgvector"
-          $vsPath = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -property installationPath
-          cmd /c "`"$vsPath\VC\Auxiliary\Build\vcvars64.bat`" && set `"PGROOT=$pgRoot`" && cd /d `"$env:RUNNER_TEMP\pgvector`" && nmake /F Makefile.win && nmake /F Makefile.win install"
-          if ($LASTEXITCODE -ne 0) { throw 'pgvector build failed' }
-
-          psql -U postgres -c "CREATE ROLE hot LOGIN SUPERUSER PASSWORD 'hot';"
-          createdb -U postgres -O hot hot
-
       # No Redis on Windows: there is no official Redis or Valkey Windows
       # build, and Memurai/WSL would add fragility. Redis-backed tests
       # self-skip there.
@@ -174,6 +156,42 @@ jobs:
             redis-cli ping 2>/dev/null | grep -q PONG && break
             sleep 1
           done
+
+      # ----- Rust suite ----------------------------------------------------
+
+      - name: Build Rust tests
+        if: runner.os != 'Windows'
+        run: cargo test --workspace --all-targets --locked --no-run -j ${{ matrix.cargo_jobs }}
+
+      # Windows: the Chocolatey Postgres install takes about 9 minutes, so run
+      # it as a background job while the tests compile. Both share this step
+      # because Windows ends a step's child processes when the step finishes.
+      # "Run Rust tests" reuses these builds.
+      - name: Build Rust tests, setting up Postgres alongside (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          # Handle failures explicitly: the setup job's native stderr must not
+          # fail the step, and the build's exit code decides the result.
+          $ErrorActionPreference = 'Continue'
+          Add-Content -Path $env:GITHUB_PATH -Value 'C:\Program Files\PostgreSQL\18\bin'
+          $script = "$env:GITHUB_WORKSPACE\.github\scripts\setup-postgres-windows.ps1"
+          $statusFile = Join-Path $env:RUNNER_TEMP 'postgres-setup.status'
+          $setup = Start-Job -FilePath $script
+          cargo test --workspace --all-targets --locked --no-run -j ${{ matrix.cargo_jobs }}
+          $buildExit = $LASTEXITCODE
+          Write-Host '--- Postgres setup output ---'
+          Receive-Job $setup -Wait -AutoRemoveJob 2>&1 | Out-Host
+          $status = Get-Content $statusFile -ErrorAction SilentlyContinue
+          # If the job never got going, set up in the foreground rather than
+          # let the Postgres-backed tests skip.
+          if (-not $status) {
+            Write-Host 'Background setup left no status; running it in the foreground.'
+            & $script 2>&1 | Out-Host
+            $status = Get-Content $statusFile -ErrorAction SilentlyContinue
+          }
+          if ($status -ne 'ok') { Write-Host "::warning::Postgres setup did not succeed: $status" }
+          exit $buildExit
 
       - name: Probe services
         id: svc
@@ -197,8 +215,6 @@ jobs:
           echo "pg=$pg" >> "$GITHUB_OUTPUT"
           echo "redis=$redis" >> "$GITHUB_OUTPUT"
           echo "::notice::Postgres available: $pg — Redis available: $redis (unavailable services mean those tests self-skip)"
-
-      # ----- Rust suite ----------------------------------------------------
 
       - name: Run Rust tests
         run: |
