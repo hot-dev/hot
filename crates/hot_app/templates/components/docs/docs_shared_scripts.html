@@ -214,7 +214,7 @@ function onSearchKeydown(e) {
   } else if (e.key === 'Enter' && searchResults.length > 0) {
     e.preventDefault();
     var result = searchResults[selectedIndex];
-    window.location.href = searchResultUrl(result);
+    window.location.href = window.hotScopeUrl(searchResultUrl(result));
   }
 }
 

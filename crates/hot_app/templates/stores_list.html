@@ -138,7 +138,7 @@ function storesListFilters() {
                 params.set('search', this.searchQuery.trim());
             }
             const qs = params.toString();
-            window.location.href = qs ? `/stores?${qs}` : '/stores';
+            window.location.href = window.hotScopeUrl(qs ? `/stores?${qs}` : '/stores');
         }
     };
 }

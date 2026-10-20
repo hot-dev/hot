@@ -282,7 +282,7 @@ function webhookServiceDetailFilter() {
             const baseUrl = `/webhooks/${this.service}`;
             const queryString = params.toString();
             const url = queryString ? `${baseUrl}?${queryString}` : baseUrl;
-            window.location.href = url;
+            window.location.href = window.hotScopeUrl(url);
         }
     };
 }

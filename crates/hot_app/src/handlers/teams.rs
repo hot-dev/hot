@@ -659,6 +659,20 @@ pub async fn team_users_add_post_handler(
         return Err(Html("You must be an admin to add team users".to_string()));
     }
 
+    // A global user UUID is not authority to attach that user to this org.
+    // Resolve effective access so children also honor the root membership and
+    // explicit grant requirements, including inherited root administrators.
+    if !hot::db::Org::resolve_user_access(&db, &current_org.org_id, &form.user_id)
+        .await
+        .ok()
+        .flatten()
+        .is_some_and(|access| access.runtime_allowed)
+    {
+        return Err(Html(
+            "User must be an active member of this organization".to_string(),
+        ));
+    }
+
     // Check if user is already a team member
     if hot::db::TeamUser::get_team_user(&db, &team_id, &form.user_id)
         .await
@@ -790,6 +804,18 @@ pub async fn team_users_edit_post_handler(
             &team,
             &team_user_display,
             "You cannot change your own role or status",
+        ));
+    }
+
+    if form.active
+        && !hot::db::Org::resolve_user_access(&db, &current_org.org_id, &user_id)
+            .await
+            .ok()
+            .flatten()
+            .is_some_and(|access| access.runtime_allowed)
+    {
+        return Err(Html(
+            "User must be an active member of this organization".to_string(),
         ));
     }
 

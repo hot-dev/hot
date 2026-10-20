@@ -23,6 +23,7 @@ function harness() {
   }
   const window = {
     location: { href: 'https://hot.example/stores', origin: 'https://hot.example' },
+    history: { state: { tab: 'kept' }, replaceState(state, _, url) { this.state = state; this.url = url; } },
     fetch: (...args) => { requests.push(args); },
     EventSource: class { constructor(url) { this.url = url; } },
   };
@@ -74,4 +75,34 @@ test('streams bind scope; external requests and durable org routes stay untouche
     h.window.fetch(target, { method: 'POST' });
     assert.equal(h.requests.at(-1)[1].headers, undefined);
   }
+});
+
+
+test('filter navigation and dynamically inserted links preserve the rendered workspace', () => {
+  const h = harness();
+  assert.equal(h.window.hotScopeUrl('/stores?search=customer'), '/stores?search=customer&org_id=org-a&env_id=env-a');
+  assert.equal(h.window.hotScopeUrl('/@customer/children'), '/@customer/children');
+  h.handlers.get('DOMContentLoaded')();
+  assert.equal(h.window.history.url, '/stores?org_id=org-a&env_id=env-a');
+  assert.deepEqual(h.window.history.state, { tab: 'kept' });
+  // The inspector inserts this anchor after the page's initial binding.
+  const anchor = { href: '/tasks/task-id', getAttribute() { return this.href; }, setAttribute(_, value) { this.href = value; } };
+  h.handlers.get('click')({ target: { closest() { return anchor; } } });
+  assert.equal(anchor.href, '/tasks/task-id?org_id=org-a&env_id=env-a');
+  anchor.href = '/tasks/task-id?org_id=org-b&env_id=env-b';
+  h.handlers.get('click')({ target: { closest() { return anchor; } } });
+  assert.equal(anchor.href, '/tasks/task-id?org_id=org-b&env_id=env-b');
+});
+
+test('the store filter keeps the old tab scope when rebuilding its URL', () => {
+  const h = harness();
+  const template = readFileSync(new URL('../crates/hot_app/templates/stores_list.html', import.meta.url), 'utf8');
+  const filterScript = template.match(/<script>\s*(function storesListFilters\(\)[\s\S]*?)<\/script>/)[1];
+  const context = { window: h.window, URLSearchParams };
+  vm.createContext(context);
+  vm.runInContext(filterScript, context);
+  const filter = context.storesListFilters();
+  filter.searchQuery = 'customer records';
+  filter.applyFilters();
+  assert.equal(h.window.location.href, '/stores?search=customer+records&org_id=org-a&env_id=env-a');
 });

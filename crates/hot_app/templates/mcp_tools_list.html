@@ -96,7 +96,7 @@ function mcpServicesFilter() {
             const baseUrl = '/mcp';
             const queryString = params.toString();
             const url = queryString ? `${baseUrl}?${queryString}` : baseUrl;
-            window.location.href = url;
+            window.location.href = window.hotScopeUrl(url);
         }
     };
 }

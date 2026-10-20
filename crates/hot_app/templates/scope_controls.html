@@ -17,6 +17,8 @@
         if (envId && !url.searchParams.has('env_id')) url.searchParams.set('env_id', envId);
         return url.pathname + url.search + url.hash;
     }
+    // Programmatic navigation must carry the same immutable scope as links.
+    window.hotScopeUrl = scopedUrl;
     function bindGetForm(form) {
         const url = localScope(form.action);
         if (form.method.toLowerCase() !== 'get' || !url) return;
@@ -37,7 +39,20 @@
             if (scoped !== original) element.setAttribute(attribute, scoped);
         });
     }
-    document.addEventListener('DOMContentLoaded', () => bindScope(document));
+    document.addEventListener('DOMContentLoaded', () => {
+        // Reloads and copied links must keep the rendered workspace as well.
+        const current = scopedUrl(window.location.href);
+        if (current !== window.location.href) window.history.replaceState(window.history.state, '', current);
+        bindScope(document);
+    });
+    // Charts, inspectors, and client-side search can insert links after load.
+    document.addEventListener('click', event => {
+        const anchor = event.target.closest?.('a[href]');
+        if (!anchor) return;
+        const original = anchor.getAttribute('href');
+        if (!original || original.startsWith('#') || /^(mailto|tel|javascript):/.test(original)) return;
+        anchor.setAttribute('href', scopedUrl(original));
+    }, true);
     document.addEventListener('htmx:afterSwap', () => bindScope(document));
     document.addEventListener('submit', event => {
         if (event.target instanceof HTMLFormElement) {

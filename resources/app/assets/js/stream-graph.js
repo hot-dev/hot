@@ -475,7 +475,7 @@ function renderNodeRow(node, lineInfo, inspectorCallbackName) {
     return `
         <tr class="group hover:bg-gray-100 dark:hover:bg-[#222] cursor-pointer border-b border-gray-100 dark:border-neutral-800 transition-colors"
             style="height: 40px;"
-            onclick="${navNodeType === 'task' ? `window.location.href='${detailUrl}'` : `window.${inspectorCallbackName}('${node.id}', '${navNodeType}', ${JSON.stringify(details).replace(/"/g, '&quot;')})`}">
+            onclick="${navNodeType === 'task' ? `window.location.href=window.hotScopeUrl('${detailUrl}')` : `window.${inspectorCallbackName}('${node.id}', '${navNodeType}', ${JSON.stringify(details).replace(/"/g, '&quot;')})`}">
             <td class="p-0 pl-2 align-middle" style="line-height: 0;">${graphCell}</td>
             <td class="pl-2 pr-0 align-middle" style="width: 24px;">${nodeTypeIcon(navNodeType, typeColor)}</td>
             <td class="px-2 align-middle">

@@ -27,12 +27,9 @@ pub async fn get_hierarchy_handler(
     State(db): State<Arc<DatabasePool>>,
     axum::extract::Extension(session): axum::extract::Extension<Session>,
 ) -> impl IntoResponse {
-    // Get list of environment IDs the user has access to
-    let user_env_ids: Vec<Uuid> = session
-        .current_org_envs
-        .iter()
-        .map(|env| env.env_id)
-        .collect();
+    // Runtime reads stay in the explicitly selected environment, including on
+    // SQLite where PostgreSQL RLS cannot provide the final enforcement layer.
+    let user_env_ids: Vec<Uuid> = session.current_env_id().into_iter().collect();
 
     // Check if user has access to this run
     if !user_env_ids.is_empty() {
@@ -179,11 +176,7 @@ pub async fn get_call_detail_handler(
     State(blob_store): State<Option<Arc<hot::blob::BlobStore>>>,
     axum::extract::Extension(session): axum::extract::Extension<Session>,
 ) -> impl IntoResponse {
-    let user_env_ids: Vec<Uuid> = session
-        .current_org_envs
-        .iter()
-        .map(|env| env.env_id)
-        .collect();
+    let user_env_ids: Vec<Uuid> = session.current_env_id().into_iter().collect();
 
     if user_env_ids.is_empty() {
         return Json(serde_json::json!({
@@ -275,11 +268,7 @@ pub async fn search_run_calls_handler(
     State(db): State<Arc<DatabasePool>>,
     axum::extract::Extension(session): axum::extract::Extension<Session>,
 ) -> impl IntoResponse {
-    let user_env_ids: Vec<Uuid> = session
-        .current_org_envs
-        .iter()
-        .map(|env| env.env_id)
-        .collect();
+    let user_env_ids: Vec<Uuid> = session.current_env_id().into_iter().collect();
 
     if user_env_ids.is_empty() {
         return Json(serde_json::json!({

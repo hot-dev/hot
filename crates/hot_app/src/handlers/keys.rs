@@ -15,6 +15,9 @@ use uuid::Uuid;
 // Simple in-memory session store for temporary API key data
 #[derive(Clone)]
 struct ApiKeySession {
+    user_id: Uuid,
+    org_id: Uuid,
+    env_id: Uuid,
     key_hash: String,
     created_at: Instant,
 }
@@ -37,13 +40,22 @@ async fn cleanup_expired_sessions() {
 }
 
 // Store API key data in session
-async fn store_api_key_session(api_key_id: Uuid, key_hash: String) {
+async fn store_api_key_session(
+    api_key_id: Uuid,
+    user_id: Uuid,
+    org_id: Uuid,
+    env_id: Uuid,
+    key_hash: String,
+) {
     cleanup_expired_sessions().await; // Clean up old sessions
     let store = get_session_store();
     let mut sessions = store.write().await;
     sessions.insert(
         api_key_id,
         ApiKeySession {
+            user_id,
+            org_id,
+            env_id,
             key_hash,
             created_at: Instant::now(),
         },
@@ -51,13 +63,23 @@ async fn store_api_key_session(api_key_id: Uuid, key_hash: String) {
 }
 
 // Retrieve and remove API key data from session
-async fn take_api_key_session(api_key_id: &Uuid) -> Option<String> {
+async fn take_api_key_session(
+    api_key_id: &Uuid,
+    user_id: Uuid,
+    org_id: Uuid,
+    env_id: Uuid,
+) -> Option<String> {
     let store = get_session_store();
     let mut sessions = store.write().await;
 
     // Check if session exists and is not expired
     if let Some(session) = sessions.get(api_key_id) {
         if Instant::now().duration_since(session.created_at) < Duration::from_secs(300) {
+            // A pending credential belongs to the identity and execution scope
+            // that saw its secret. A mismatched request must not consume it.
+            if (session.user_id, session.org_id, session.env_id) != (user_id, org_id, env_id) {
+                return None;
+            }
             // Session is valid, remove and return the key_hash
             let key_hash = session.key_hash.clone();
             sessions.remove(api_key_id);
@@ -181,7 +203,14 @@ pub async fn keys_new_handler(
     };
 
     // Store the key hash in the session
-    store_api_key_session(api_key_id, key_hash.clone()).await;
+    store_api_key_session(
+        api_key_id,
+        session.current_user_id(),
+        current_env.org_id,
+        current_env.env_id,
+        key_hash,
+    )
+    .await;
 
     let (mcp_tools_json, webhooks_json) =
         super::build_permission_path_options(&db, &current_env.env_id).await;
@@ -313,7 +342,14 @@ pub async fn keys_create_handler(
     }
 
     // Retrieve the key hash from the session store
-    let key_hash = match take_api_key_session(&form.api_key_id).await {
+    let key_hash = match take_api_key_session(
+        &form.api_key_id,
+        session.current_user_id(),
+        current_env.org_id,
+        current_env.env_id,
+    )
+    .await
+    {
         Some(hash) => hash,
         None => {
             return Err(render_keys_new_with_error(
