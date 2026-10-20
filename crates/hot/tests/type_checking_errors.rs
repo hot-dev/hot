@@ -1029,4 +1029,76 @@ mod integration_tests {
             errors
         );
     }
+
+    /// An implicit `%` lambda may not contain another implicit `%` lambda:
+    /// in `map(xs, filter(%, gt(%, 0)))` the two `%` would refer to
+    /// different parameters.
+    #[test]
+    fn test_nested_implicit_placeholders_error() {
+        for source in [
+            r#"
+            ::test ns
+
+            nested map([[1, -2]], filter(%, gt(%, 0)))
+            "#,
+            r#"
+            ::test ns
+
+            piped [[1, -2]] |> map(filter(%, gt(%, 0)))
+            "#,
+        ] {
+            let errors = compile_and_get_type_errors(source);
+            assert!(
+                has_error_type(&errors, |e| matches!(
+                    e,
+                    CompilerError::NestedPlaceholder { function, parameter, .. }
+                        if function == "map" && parameter.as_deref() == Some("func")
+                )),
+                "Expected a nested-placeholder error for {}. Got: {:?}",
+                source,
+                errors
+            );
+        }
+    }
+
+    /// An explicit inner function, `%(...)` or `(x) { ... }`, is allowed
+    /// inside an implicit `%` lambda.
+    #[test]
+    fn test_explicit_inner_lambda_inside_placeholder_compiles() {
+        let source = r#"
+            ::test ns
+
+            explicit-boundary map([[1, -2]], filter(%, %(gt(%, 0))))
+            explicit-lambda map([[1, -2]], filter(%, (n) { gt(n, 0) }))
+        "#;
+
+        let errors = compile_and_get_type_errors(source);
+        assert!(
+            errors.is_empty(),
+            "Explicit inner lambdas should compile. Got: {:?}",
+            errors
+        );
+    }
+
+    /// Single-level placeholders keep working, including a `%` that passes
+    /// through calls with no `Fn` slot and pipe stages.
+    #[test]
+    fn test_single_level_placeholders_compile() {
+        let source = r#"
+            ::test ns
+
+            items [{value: 3}, {value: 1}]
+            counted length(filter([1, 5, 9], gt(%, 3)))
+            sorted sort(map(items, %.value))
+            doubled map([1, 2], add(%, %))
+            emails [{active: true, email: "a@x"}] |> filter(%.active) |> map(%.email)
+        "#;
+
+        let errors = compile_and_get_type_errors(source);
+        assert!(
+            errors.is_empty(),
+            "Single-level placeholders should compile. Got: {:?}",
+            errors
+        );
+    }
 }
