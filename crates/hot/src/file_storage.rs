@@ -1786,8 +1786,17 @@ pub mod s3 {
 
             // Check for custom file-specific AWS credentials from config
             // Prioritize: 1) Config values, 2) HOT_FILE_AWS_* env vars, 3) Standard AWS credential chain
-            let access_key = aws_conf.get_str("access-key-id");
-            let secret_key = aws_conf.get_str("secret-access-key");
+            let access_key = aws_conf.get_str_or_default("access-key-id", "");
+            let secret_key = aws_conf.get_str_or_default("secret-access-key", "");
+            let session_token = aws_conf.get_str_or_default("session-token", "");
+            if access_key.is_empty() != secret_key.is_empty()
+                || (!session_token.is_empty() && access_key.is_empty())
+            {
+                return Err(
+                    "AWS storage credentials require both access-key-id and secret-access-key"
+                        .into(),
+                );
+            }
 
             if !access_key.is_empty() && !secret_key.is_empty() {
                 use aws_runtime::env_config::file::{EnvConfigFileKind, EnvConfigFiles};
@@ -1795,8 +1804,8 @@ pub mod s3 {
                 let credentials = Credentials::new(
                     access_key,
                     secret_key,
-                    None, // session token
-                    None, // expiry
+                    (!session_token.is_empty()).then_some(session_token), // temporary credentials
+                    None,                                                 // expiry
                     "hot-file-config",
                 );
                 config_loader = config_loader
@@ -3504,6 +3513,9 @@ pub async fn file_storage_from_config(conf: &Val) -> Result<Box<dyn FileStorage>
                     .map(PathBuf::from)
                     .unwrap_or_else(|_| crate::lang::cache::paths::get_file_storage_dir())
             };
+            if path.as_os_str().is_empty() {
+                return Err("file.storage.path must not be empty".into());
+            }
             Ok(Box::new(LocalFileStorage::new(path)))
         }
         #[cfg(feature = "s3-storage")]

@@ -303,8 +303,17 @@ pub mod s3 {
 
             // Check for custom build-specific AWS credentials from config
             // Prioritize: 1) Config values, 2) HOT_BUILD_AWS_* env vars, 3) Standard AWS credential chain
-            let access_key = aws_conf.get_str("access-key-id");
-            let secret_key = aws_conf.get_str("secret-access-key");
+            let access_key = aws_conf.get_str_or_default("access-key-id", "");
+            let secret_key = aws_conf.get_str_or_default("secret-access-key", "");
+            let session_token = aws_conf.get_str_or_default("session-token", "");
+            if access_key.is_empty() != secret_key.is_empty()
+                || (!session_token.is_empty() && access_key.is_empty())
+            {
+                return Err(
+                    "AWS storage credentials require both access-key-id and secret-access-key"
+                        .into(),
+                );
+            }
 
             if !access_key.is_empty() && !secret_key.is_empty() {
                 use aws_runtime::env_config::file::{EnvConfigFileKind, EnvConfigFiles};
@@ -312,8 +321,8 @@ pub mod s3 {
                 let credentials = Credentials::new(
                     access_key,
                     secret_key,
-                    None, // session token
-                    None, // expiry
+                    (!session_token.is_empty()).then_some(session_token), // temporary credentials
+                    None,                                                 // expiry
                     "hot-build-config",
                 );
                 config_loader = config_loader
@@ -761,7 +770,17 @@ pub async fn build_storage_from_config(
     let storage_type = BuildStorageType::resolve(conf)?;
 
     match storage_type {
-        BuildStorageType::Local => Ok(Box::new(LocalBuildStorage::from_env())),
+        BuildStorageType::Local => {
+            let path = conf
+                .get("build.storage.path")
+                .map(|_| conf.get_str("build.storage.path"))
+                .or(crate::environment::read_optional("HOT_BUILD_STORAGE_PATH")?)
+                .unwrap_or_else(|| ".hot/build".into());
+            if path.is_empty() {
+                return Err("build.storage.path must not be empty".into());
+            }
+            Ok(Box::new(LocalBuildStorage::new(PathBuf::from(path))))
+        }
         #[cfg(feature = "s3-storage")]
         BuildStorageType::S3 => {
             let storage = s3::S3BuildStorage::from_config(conf)
@@ -790,6 +809,20 @@ pub async fn build_storage_from_config(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn configured_backends_and_paths_are_authoritative() {
+        let conf = crate::val!({"build": {"storage": {"type": "typo"}}});
+        assert!(build_storage_from_config(&conf).await.is_err());
+        let conf =
+            crate::val!({"build": {"storage": {"type": "local", "path": "/tmp/chosen-builds"}}});
+        let store = build_storage_from_config(&conf).await.unwrap();
+        assert!(
+            store
+                .build_path(&Uuid::nil(), &Uuid::nil(), &Uuid::nil())
+                .starts_with("/tmp/chosen-builds/")
+        );
+    }
 
     #[test]
     fn test_build_zip_filename() {

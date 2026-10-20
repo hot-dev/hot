@@ -95,7 +95,22 @@ pub(crate) fn get_blob_resolved_conf(conf: Val, in_project: bool, managed_runtim
 
 /// Hyphenated keys that deployments commonly set from the environment;
 /// underscores alone cannot spell them.
-const HYPHENATED_ENV_KEYS: &[(&str, &str)] = &[("HOT_DB_MIGRATION_URI", "db.migration-uri")];
+const HYPHENATED_ENV_KEYS: &[(&str, &str)] = &[
+    ("HOT_DB_MIGRATION_URI", "db.migration-uri"),
+    ("HOT_APP_SESSION_SECRET", "app.session-secret"),
+    ("HOT_BUILD_AWS_ACCESS_KEY_ID", "build.aws.access-key-id"),
+    (
+        "HOT_BUILD_AWS_SECRET_ACCESS_KEY",
+        "build.aws.secret-access-key",
+    ),
+    ("HOT_BUILD_AWS_SESSION_TOKEN", "build.aws.session-token"),
+    ("HOT_FILE_AWS_ACCESS_KEY_ID", "file.aws.access-key-id"),
+    (
+        "HOT_FILE_AWS_SECRET_ACCESS_KEY",
+        "file.aws.secret-access-key",
+    ),
+    ("HOT_FILE_AWS_SESSION_TOKEN", "file.aws.session-token"),
+];
 
 // Helper function to convert environment variable name to dot notation conf key
 fn env_var_to_conf_key(env_var: &str) -> String {
@@ -325,17 +340,40 @@ pub(crate) fn reload_dotenv_files() {
 
 // Function to load environment variables and apply them to the configuration
 pub(crate) fn apply_env_vars(conf: Val) -> Val {
-    let mut conf = conf;
+    apply_env_bindings(conf, env::vars().collect()).unwrap_or_else(|error| {
+        eprintln!("Invalid environment configuration: {error}");
+        std::process::exit(1);
+    })
+}
 
-    // Get all environment variables starting with "HOT_"
-    for (key, value) in env::vars() {
+fn apply_env_bindings(
+    conf: Val,
+    bindings: std::collections::BTreeMap<String, String>,
+) -> Result<Val, String> {
+    let mut conf = conf;
+    let mut secret_files = Val::map_empty();
+
+    for setting in hot::environment::resolve_hot(bindings)? {
+        let key = setting.name;
+        let value = setting.value;
         if key.starts_with("HOT_") {
             let conf_key = env_var_to_conf_key(&key);
+            if let Some(path) = setting.source_file {
+                // Retain provenance independently of key naming. Do not put
+                // the resolved secret back in the process environment.
+                secret_files =
+                    secret_files.set(&conf_key, Val::from(path.to_string_lossy().into_owned()));
+            }
             // A path that extends an existing scalar (HOT_LOG_LEVEL_EXTRA ->
             // log.level.extra while log.level is a Str) would replace that
             // scalar with a materialized map, silently destroying the
             // configured value. Skip such variables instead of clobbering.
             if env_path_extends_scalar(&conf, &conf_key) {
+                if secret_files.get(&conf_key).is_some() {
+                    return Err(format!(
+                        "{key}_FILE cannot extend scalar configuration at {conf_key}"
+                    ));
+                }
                 tracing::warn!(
                     "Ignoring environment variable {}: path '{}' extends an existing \
                      scalar setting",
@@ -352,7 +390,7 @@ pub(crate) fn apply_env_vars(conf: Val) -> Val {
         }
     }
 
-    conf
+    Ok(conf.set("_secret-files", secret_files))
 }
 
 /// True when setting `conf_key` would have to write *through* an existing
@@ -1529,7 +1567,10 @@ pub(crate) fn show_command_config(command: &Option<Command>, conf: &Val) {
         }
     };
 
-    let relevant_config = redact_sensitive_config(&relevant_config);
+    let relevant_config = redact_sensitive_config(&relevant_config.set(
+        "_secret-files",
+        conf.get("_secret-files").unwrap_or_else(Val::map_empty),
+    ));
 
     println!(
         "{}",
@@ -1548,10 +1589,17 @@ fn filter_config(conf: &Val, keys: &[&str]) -> Val {
 }
 
 pub(crate) fn redact_sensitive_config(conf: &Val) -> Val {
-    redact_sensitive_config_at_path(conf, "")
+    let sources = conf.get("_secret-files").unwrap_or_else(Val::map_empty);
+    redact_sensitive_config_at_path(conf, "", &sources)
 }
 
-fn redact_sensitive_config_at_path(value: &Val, path: &str) -> Val {
+fn redact_sensitive_config_at_path(value: &Val, path: &str, sources: &Val) -> Val {
+    if path == "_secret-files" {
+        return value.clone();
+    }
+    if !path.is_empty() && matches!(sources.get(path), Some(Val::Str(_))) {
+        return Val::from("***");
+    }
     if is_uri_config_path(path) {
         return match value {
             Val::Str(uri) => Val::from(hot::db::redact_password(uri)),
@@ -1574,7 +1622,7 @@ fn redact_sensitive_config_at_path(value: &Val, path: &str) -> Val {
                 };
                 (
                     key.clone(),
-                    redact_sensitive_config_at_path(child, &child_path),
+                    redact_sensitive_config_at_path(child, &child_path, sources),
                 )
             });
             Val::map_from_iter(entries)
@@ -1582,7 +1630,7 @@ fn redact_sensitive_config_at_path(value: &Val, path: &str) -> Val {
         Val::Vec(items) => Val::Vec(
             items
                 .iter()
-                .map(|item| redact_sensitive_config_at_path(item, path))
+                .map(|item| redact_sensitive_config_at_path(item, path, sources))
                 .collect(),
         ),
         _ => value.clone(),
@@ -1949,6 +1997,29 @@ mod tests {
         let reloaded =
             preserve_runtime_overrides_after_init(val!({"set": {"profile": "local-dev"}}), &conf);
         assert_eq!(reloaded.get_str("set.profile"), "child");
+    }
+
+    #[test]
+    fn file_overlay_redacts_arbitrary_names_and_keeps_provenance() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(file.path(), "never-print-this\n").unwrap();
+        let conf = apply_env_bindings(
+            val!({"custom": {"value": "old"}}),
+            [(
+                "HOT_CUSTOM_VALUE_FILE".to_string(),
+                file.path().to_string_lossy().into_owned(),
+            )]
+            .into(),
+        )
+        .unwrap();
+        assert_eq!(conf.get_str("custom.value"), "never-print-this");
+        let redacted = redact_sensitive_config(&conf);
+        assert_eq!(redacted.get_str("custom.value"), "***");
+        assert_eq!(
+            redacted.get_str("_secret-files.custom.value"),
+            file.path().to_string_lossy()
+        );
+        assert!(!redacted.to_string().contains("never-print-this"));
     }
 
     #[test]

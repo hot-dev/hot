@@ -14,6 +14,7 @@ pub mod domain;
 pub mod domain_provider;
 pub mod email;
 pub mod env;
+pub mod environment;
 pub mod file_storage;
 #[cfg(feature = "gcs-storage")]
 pub mod gcs;
