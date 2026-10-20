@@ -140,21 +140,6 @@ jobs:
           psql -h localhost -d postgres -c "CREATE ROLE hot LOGIN SUPERUSER PASSWORD 'hot';"
           createdb -h localhost -O hot hot
 
-      - name: Start Postgres + pgvector setup (Windows, background)
-        if: runner.os == 'Windows'
-        continue-on-error: true
-        shell: pwsh
-        run: |
-          # The Chocolatey install takes about 9 minutes, and nothing needs
-          # Postgres until the Rust tests run. Start it now so it overlaps the
-          # build; "Wait for Postgres setup" joins it before the probe.
-          Add-Content -Path $env:GITHUB_PATH -Value 'C:\Program Files\PostgreSQL\18\bin'
-          $log = Join-Path $env:RUNNER_TEMP 'postgres-setup'
-          $p = Start-Process pwsh -PassThru -WindowStyle Hidden `
-            -ArgumentList '-NoProfile', '-File', "$env:GITHUB_WORKSPACE\.github\scripts\setup-postgres-windows.ps1" `
-            -RedirectStandardOutput "$log.out" -RedirectStandardError "$log.err"
-          Set-Content -Path "$log.pid" -Value $p.Id
-
       # No Redis on Windows: there is no official Redis or Valkey Windows
       # build, and Memurai/WSL would add fragility. Redis-backed tests
       # self-skip there.
@@ -172,32 +157,39 @@ jobs:
 
       # ----- Rust suite ----------------------------------------------------
 
-      # Compile first so the background Windows Postgres setup finishes in
-      # the meantime. "Run Rust tests" reuses these builds.
       - name: Build Rust tests
+        if: runner.os != 'Windows'
         run: cargo test --workspace --all-targets --locked --no-run -j ${{ matrix.cargo_jobs }}
 
-      - name: Wait for Postgres setup (Windows)
+      # Windows: the Chocolatey Postgres install takes about 9 minutes, so run
+      # it as a background job while the tests compile. Both share this step
+      # because Windows ends a step's child processes when the step finishes.
+      # "Run Rust tests" reuses these builds.
+      - name: Build Rust tests, setting up Postgres alongside (Windows)
         if: runner.os == 'Windows'
-        continue-on-error: true
         shell: pwsh
         run: |
-          $log = Join-Path $env:RUNNER_TEMP 'postgres-setup'
-          $setupPid = Get-Content "$log.pid" -ErrorAction SilentlyContinue
-          if ($setupPid) {
-            Wait-Process -Id $setupPid -Timeout 1800 -ErrorAction SilentlyContinue
-          }
-          Get-Content "$log.out", "$log.err" -ErrorAction SilentlyContinue
-          $status = Get-Content "$log.status" -ErrorAction SilentlyContinue
-          # If the background run never got going, set up in the foreground
-          # rather than let the Postgres-backed tests skip.
-          $running = $setupPid -and (Get-Process -Id $setupPid -ErrorAction SilentlyContinue)
-          if (-not $status -and -not $running) {
+          # Handle failures explicitly: the setup job's native stderr must not
+          # fail the step, and the build's exit code decides the result.
+          $ErrorActionPreference = 'Continue'
+          Add-Content -Path $env:GITHUB_PATH -Value 'C:\Program Files\PostgreSQL\18\bin'
+          $script = "$env:GITHUB_WORKSPACE\.github\scripts\setup-postgres-windows.ps1"
+          $statusFile = Join-Path $env:RUNNER_TEMP 'postgres-setup.status'
+          $setup = Start-Job -FilePath $script
+          cargo test --workspace --all-targets --locked --no-run -j ${{ matrix.cargo_jobs }}
+          $buildExit = $LASTEXITCODE
+          Write-Host '--- Postgres setup output ---'
+          Receive-Job $setup -Wait -AutoRemoveJob 2>&1 | Out-Host
+          $status = Get-Content $statusFile -ErrorAction SilentlyContinue
+          # If the job never got going, set up in the foreground rather than
+          # let the Postgres-backed tests skip.
+          if (-not $status) {
             Write-Host 'Background setup left no status; running it in the foreground.'
-            & "$env:GITHUB_WORKSPACE\.github\scripts\setup-postgres-windows.ps1"
-            $status = Get-Content "$log.status" -ErrorAction SilentlyContinue
+            & $script 2>&1 | Out-Host
+            $status = Get-Content $statusFile -ErrorAction SilentlyContinue
           }
-          if ($status -ne 'ok') { throw "Postgres setup did not succeed: $status" }
+          if ($status -ne 'ok') { Write-Host "::warning::Postgres setup did not succeed: $status" }
+          exit $buildExit
 
       - name: Probe services
         id: svc

@@ -1,9 +1,9 @@
 # Install PostgreSQL 18 and build pgvector for the Windows cross-platform job.
 #
-# The job starts this in the background so the Chocolatey install (about
-# 9 minutes) overlaps the Rust build; "Wait for Postgres setup" joins it.
-# It always leaves a status file: "ok", or why setup failed. The job's
-# service probe decides whether Postgres-backed tests run.
+# The Windows build step runs this as a background job, so the Chocolatey
+# install (about 9 minutes) overlaps the Rust build. It always leaves a
+# status file: "ok", or why setup failed. The job's service probe decides
+# whether Postgres-backed tests run.
 $ErrorActionPreference = 'Stop'
 $status = Join-Path $env:RUNNER_TEMP 'postgres-setup.status'
 try {
