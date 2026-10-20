@@ -4,7 +4,9 @@
 //! shared by sibling organizations and API replicas. Immutable env ownership
 //! and root entitlement caches avoid repeated feature reads. In-flight and SSE
 //! connection counters are additionally enforced per process and credential.
-//! Accounting lookup failures deny admission rather than bypassing the quota.
+//! In enforce mode, accounting lookup failures deny admission rather than
+//! bypassing the quota. Observe mode (public ingress default) only estimates
+//! per process: it never consumes the shared counter and never rejects.
 
 use ahash::AHashMap;
 use axum::{
@@ -16,7 +18,6 @@ use axum::{
 use hot::db::env::Env;
 use hot::db::features::Features;
 use hot::val::Val;
-#[cfg(test)]
 use std::collections::VecDeque;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
@@ -106,7 +107,6 @@ impl FeaturesCache {
 // Sliding window rate limiter (per org, 1-second window)
 // ============================================================================
 
-#[cfg(test)]
 struct SlidingWindowLimiter {
     windows: Mutex<AHashMap<Uuid, VecDeque<Instant>>>,
     window_duration: Duration,
@@ -114,11 +114,9 @@ struct SlidingWindowLimiter {
 }
 
 /// How often to sweep stale entries from the windows map.
-#[cfg(test)]
 const SWEEP_INTERVAL: Duration = Duration::from_secs(60);
 
 /// Remove org entries whose newest request is older than this.
-#[cfg(test)]
 const STALE_THRESHOLD: Duration = Duration::from_secs(300); // 5 minutes
 
 const DEFAULT_PUBLIC_ORG_INFLIGHT_LIMIT: i64 = 50;
@@ -126,7 +124,6 @@ const DEFAULT_SSE_PER_CREDENTIAL_LIMIT: i64 = 128;
 const DEFAULT_SSE_PER_ORG_LIMIT: i64 = 1_024;
 const DEFAULT_SSE_GLOBAL_LIMIT: i64 = 10_000;
 
-#[cfg(test)]
 impl SlidingWindowLimiter {
     fn new() -> Self {
         Self {
@@ -193,6 +190,9 @@ struct RateLimitState {
     features: FeaturesCache,
     inflight: InFlightLimiter,
     sse_connections: SseConnectionLimiter,
+    /// Per-process estimate for observe mode, which must not consume the
+    /// shared account budget that authenticated API traffic enforces.
+    observed: SlidingWindowLimiter,
 }
 
 static STATE: once_cell::sync::Lazy<RateLimitState> =
@@ -201,6 +201,7 @@ static STATE: once_cell::sync::Lazy<RateLimitState> =
         features: FeaturesCache::new(Duration::from_secs(60)),
         inflight: InFlightLimiter::new(),
         sse_connections: SseConnectionLimiter::new(),
+        observed: SlidingWindowLimiter::new(),
     });
 
 // ============================================================================
@@ -468,6 +469,19 @@ pub async fn check_org_rate_limit(
     mode: PublicRateLimitMode,
     context: &'static str,
 ) -> Result<(), RateLimitExceeded> {
+    if mode == PublicRateLimitMode::Observe {
+        // Observe mode only reports. Anonymous public traffic must not drain
+        // the shared counter that enforces the API budget for the root and
+        // every sibling, and an accounting failure must not reject requests.
+        let Ok(root_id) = hot::db::Org::billing_owner_id_for(db, org_id).await else {
+            return Ok(());
+        };
+        let rate_limit_rps = org_rate_limit_rps(db, &root_id).await;
+        if STATE.observed.check(&root_id, rate_limit_rps).is_err() {
+            tracing::warn!(context, %org_id, %root_id, "Account RPS limit would have been hit");
+        }
+        return Ok(());
+    }
     let root_id = hot::db::Org::billing_owner_id_for(db, org_id)
         .await
         .map_err(|_| RateLimitExceeded {
@@ -484,16 +498,11 @@ pub async fn check_org_rate_limit(
     if admitted {
         return Ok(());
     }
-    match mode {
-        PublicRateLimitMode::Observe => {
-            tracing::warn!(context, %org_id, %root_id, "Account RPS limit would have been hit");
-            Ok(())
-        }
-        PublicRateLimitMode::Enforce => Err(RateLimitExceeded {
-            retry_after_secs: 1,
-            message: "Account rate limit exceeded".into(),
-        }),
-    }
+    tracing::debug!(context, %org_id, %root_id, "Account RPS limit reached");
+    Err(RateLimitExceeded {
+        retry_after_secs: 1,
+        message: "Account rate limit exceeded".into(),
+    })
 }
 
 pub async fn check_public_org_inflight(
@@ -578,12 +587,17 @@ pub async fn acquire_sse_connection(
         }
     };
 
-    let org_id = hot::db::Org::billing_owner_id_for(db, &org_id)
-        .await
-        .map_err(|_| RateLimitExceeded {
-            retry_after_secs: 1,
-            message: "Unable to resolve account SSE budget".into(),
-        })?;
+    let org_id = match hot::db::Org::billing_owner_id_for(db, &org_id).await {
+        Ok(root_id) => root_id,
+        // Observe mode keeps the nil account scope rather than rejecting.
+        Err(_) if mode == PublicRateLimitMode::Observe => Uuid::nil(),
+        Err(_) => {
+            return Err(RateLimitExceeded {
+                retry_after_secs: 1,
+                message: "Unable to resolve account SSE budget".into(),
+            });
+        }
+    };
 
     STATE.sse_connections.acquire(
         auth.credential_id(),
@@ -915,6 +929,36 @@ mod tests {
                 .await
                 .is_ok(),
             "observe mode should log but allow over-limit requests"
+        );
+    }
+
+    #[tokio::test]
+    async fn public_org_rps_observe_does_not_consume_enforced_budget() {
+        let db = memory_db().await;
+        let org_id = Uuid::new_v4();
+        seed_org(&db, org_id).await;
+        STATE.features.insert(org_id, 1);
+
+        for _ in 0..5 {
+            check_org_rate_limit(&db, &org_id, PublicRateLimitMode::Observe, "test")
+                .await
+                .expect("observe mode never rejects");
+        }
+        assert!(
+            check_org_rate_limit(&db, &org_id, PublicRateLimitMode::Enforce, "test")
+                .await
+                .is_ok(),
+            "anonymous observed traffic must leave the account budget intact"
+        );
+    }
+
+    #[tokio::test]
+    async fn public_org_rps_observe_allows_unresolvable_account() {
+        let db = memory_db().await;
+        assert!(
+            check_org_rate_limit(&db, &Uuid::new_v4(), PublicRateLimitMode::Observe, "test")
+                .await
+                .is_ok()
         );
     }
 
