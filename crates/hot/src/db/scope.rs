@@ -15,8 +15,9 @@ pub enum BootstrapOperation {
     Onboarding,
     Health,
     /// An inbound billing-provider callback before it is resolved to one
-    /// account. Grants no platform rows; providers narrow to
-    /// `Maintenance { Billing, Some(root) }` (see `Org::billing_scope`).
+    /// account. Grants only reads of org plans, to resolve the account;
+    /// providers then narrow to `Maintenance { Billing, Some(root) }` (see
+    /// `Org::billing_scope`) for everything else.
     BillingWebhook,
 }
 

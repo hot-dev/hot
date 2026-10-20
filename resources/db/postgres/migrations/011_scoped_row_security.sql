@@ -224,7 +224,7 @@ CREATE POLICY hot_scope_delete ON hot."org_usage" FOR DELETE USING ((hot.scope_o
 -- org_plan: separate SELECT and mutation grants; a read set is never a write grant.
 ALTER TABLE hot."org_plan" ENABLE ROW LEVEL SECURITY;
 ALTER TABLE hot."org_plan" FORCE ROW LEVEL SECURITY;
-CREATE POLICY hot_scope_read ON hot."org_plan" FOR SELECT USING ((hot.scope_maintenance('organization_provisioning') AND org_id = hot.scope_org_id()) OR hot.scope_maintenance('retention') OR (hot.scope_org_allows(org_id)) OR (hot.scope_billing_org(org_id)));
+CREATE POLICY hot_scope_read ON hot."org_plan" FOR SELECT USING ((hot.scope_maintenance('organization_provisioning') AND org_id = hot.scope_org_id()) OR hot.scope_maintenance('retention') OR (hot.scope_org_allows(org_id)) OR (hot.scope_billing_org(org_id)) OR hot.scope_bootstrap('billing_webhook'));
 CREATE POLICY hot_scope_insert ON hot."org_plan" FOR INSERT WITH CHECK ((hot.scope_org_writes(org_id)) OR (hot.scope_billing_org(org_id)) OR (hot.scope_bootstrap('onboarding')));
 CREATE POLICY hot_scope_update ON hot."org_plan" FOR UPDATE USING ((hot.scope_org_writes(org_id)) OR (hot.scope_billing_org(org_id)) OR (hot.scope_bootstrap('onboarding'))) WITH CHECK ((hot.scope_org_writes(org_id)) OR (hot.scope_billing_org(org_id)) OR (hot.scope_bootstrap('onboarding')));
 CREATE POLICY hot_scope_delete ON hot."org_plan" FOR DELETE USING ((hot.scope_org_writes(org_id)) OR (hot.scope_billing_org(org_id)) OR (hot.scope_bootstrap('onboarding')));

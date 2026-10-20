@@ -122,10 +122,10 @@ reach. A provider's own tables in schema `hot` may stay unprotected if the
 runtime login never needs them; tables it does need must enable and force RLS
 with their own policies, after which `provision_runtime.sql` grants them like
 platform tables. Billing-provider webhooks run under the `billing_webhook`
-bootstrap operation, which grants no platform rows: a provider verifies the
+bootstrap operation, which can only read org plans: a provider verifies the
 callback, resolves its account from its own records (policies on those tables
-can allow `hot.scope_bootstrap('billing_webhook')`), then uses
-`Org::billing_scope` for platform billing reads and writes.
+can allow `hot.scope_bootstrap('billing_webhook')`) and the org plan, then uses
+`Org::billing_scope` for every other platform billing read and write.
 
 For an existing database:
 
