@@ -12,7 +12,7 @@ typed scopes and restricted runtime connections, forced PostgreSQL policies,
 direct-child organizations with independent environments/builds, inherited
 root administration and explicit child grants, account billing/quota resolution,
 management credentials and REST routes, runtime ingress and worker ownership,
-and the hierarchical UI. Migrations 010–015 preserve existing org identities and
+and the hierarchical UI. Migrations 010–016 preserve existing org identities and
 add ownership integrity, credential lineage, quota reservations, durable run
 admissions, and trace byte reconciliation. SQLite shares application authorization
 and quota semantics; PostgreSQL additionally enforces row policies.
@@ -39,7 +39,7 @@ plan/override enables it; unconfigured local accounts retain local defaults.
 External SDK management helpers belong in their SDK repositories. Shared
 deployments and the other deferred product boundaries below remain deferred.
 
-### Local qualification — 2026-10-19
+### Initial implementation qualification — 2026-10-19
 
 | Check | Result |
 | --- | --- |
@@ -59,6 +59,61 @@ The local offline Hot build used an existing ONNX Runtime library through
 change. Default-ignored tests are not counted as passes; the explicit Docker
 regression is additional to the workspace total. These results do not replace
 the deployment-specific gates above or the Phase 6 rollout rehearsal below.
+
+### Isolation review follow-up — 2026-10-19
+
+A second review covered the branch against `4466aee`, including PostgreSQL
+policies/grants, API and browser authorization, credential lineage, custom
+routing, queued execution, local source/cache access, and bundle resources.
+The review produced the following repairs and regression coverage:
+
+| Boundary | Repair |
+| --- | --- |
+| Account management credentials | Root environment connections cannot read or mutate management keys; the root ownership field is immutable. |
+| Delegated key lineage | Deleting an API key cannot cascade away its management issuer and remove issuer ceilings/revocation. Revoke with `active=false`. |
+| Runtime PostgreSQL grants | Startup rejects REFERENCES (including column grants), TRIGGER, and server-file/server-program role memberships in addition to earlier owner/BYPASSRLS/DDL checks. |
+| Alert delivery | Alert, subscription, and destination must share an org; environment-specific subscriptions must match the alert. Ownership is immutable and the sender checks the environment again. |
+| Custom domains and MCP | Standard MCP routes honor the resolved domain's exact environment. Positive domain cache entries recheck current verified ownership on every request, including remote deletion/reassignment. |
+| File permissions | Authorization uses the normalized storage path, so a prefix grant cannot escape through parent-path components. |
+| Deployment mutations | Build/project ownership is checked before reactivating a project. |
+| Browser object reads | Call hierarchy/detail/search use the selected environment on SQLite as well as PostgreSQL. |
+| Pending API key creation | Temporary key material binds to the user, org, and environment that generated it; another scope cannot consume it. |
+| Teams | Adding/reactivating users requires effective active access to the team's org, including current child grants. |
+| Stale tabs | Filters, dynamic links, row navigation, copied URLs, and reloads retain the rendered scope. |
+| Retry origin | Payload retry metadata cannot override the validated queue context with a run owned by another environment. |
+| Worker host source/context | Both worker types authorize live builds against the selected profile before source/cache use. Missing deployed bundles stop execution. Only authorized live builds receive local development context. |
+| Module initialization | Cache compilation produces artifacts without executing module code. Initializers execute only when the program is invoked with its authorized runtime scope and services. |
+| Bytecode memory cache | Entries and compilation locks include the cache directory, so a caller-controlled manifest key in one bundle cannot supply bytecode to another bundle's cache. |
+| Bundle resources/dependencies | Bundles use their own dependencies and resource registries, including warm cache hits and parallel/pmap branches. Manifest paths and cached resource reads reject traversal and symlink escapes. |
+| Tool and skill metadata | Runtime metadata registries are scoped to the executing program, including concurrent same-name functions and parallel/pmap branches; another build's metadata cannot supply a missing entry. |
+
+Migration 016 checks existing alert delivery relationships before installing
+new integrity triggers. An inconsistent relationship aborts migration for
+operator investigation; migration does not rewrite customer ownership. Runtime
+roles provisioned with broader grants must be narrowed before the new startup
+qualification succeeds. Positive domain routing now costs a verified-domain
+lookup per request to avoid stale cross-instance routing authority.
+
+Final review validation:
+
+| Check | Result |
+| --- | --- |
+| Rust workspace, all targets, locked/offline | 2,547 passed, zero failed, nine ignored across 35 targets. Dedicated PostgreSQL 18/pgvector and Valkey fixtures were enabled; the final run started from a fresh disposable database. |
+| Restricted PostgreSQL login | RLS visibility/writes, management credential separation, delegated issuer retention, alert delivery ownership, and unsafe-role/grant rejection passed. |
+| Rust formatting and workspace Clippy with `-D warnings` | Passed. |
+| Hot static checks | Project/package checks, source formatting, documentation snippets, and bundled skill checks passed. |
+| Isolated SQLite `hot init` and main Hot suite | 909 tests and 2,460 assertions passed. |
+| Affected Hot package suites | `pkg-test-hot-ai`: 203 tests / 416 assertions; `pkg-test-hot-ai-agent`: 109 / 247; `pkg-test-mcp`: 26 / 73. All passed. |
+| Browser scope and repository checks | Five browser scope regressions, AGENTS synchronization, and diff whitespace checks passed. |
+
+The new runtime regressions exercise concurrent same-name metadata, duplicate
+manifest cache keys in different build directories, module initialization,
+warm caches, nested parallel/pmap work, and missing resource manifests. The
+initial implementation's deployment-specific qualification limits still apply;
+this review did not rerun external provider, remote S3, or Kata qualification.
+
+These fixes strengthen the same root/child scope contract. They do not add
+shared deployments or remove the deployment-specific release gates above.
 
 Hot will support a parent organization with child organizations that each own
 their environments, projects, deployments, credentials, and runtime data.
