@@ -24,9 +24,10 @@
 use crate::lang::ast::*;
 use crate::lang::compiler::core_registry::CoreVariableRegistry;
 use crate::lang::errors::{CompilerError, CompilerErrors, CompilerResult, ErrorLocation};
-use crate::lang::parser::{contains_placeholder, wrap_placeholder_arg};
+use crate::lang::parser::{contains_placeholder, count_placeholder_lambdas, wrap_placeholder_arg};
 use crate::val::Val;
 use indexmap::IndexMap;
+use std::cell::RefCell;
 use std::path::PathBuf;
 
 /// Run the placeholder lowering pass over the entire program.
@@ -34,9 +35,11 @@ use std::path::PathBuf;
 /// On success, every implicit `%` placeholder has been wrapped into a lambda
 /// at the appropriate `Fn`-typed parameter slot. On failure, the returned
 /// [`CompilerErrors`] describes each `%` that did not land in a `Fn` slot
-/// (with source location and a `%(expr)` migration hint).
+/// (with source location and a `%(expr)` migration hint), and each implicit
+/// lambda that would contain another implicit lambda.
 pub fn lower_program(program: &mut Program) -> CompilerResult<()> {
     let registry = SignatureRegistry::build(program);
+    let mut errors: Vec<CompilerError> = Vec::new();
 
     // Walk every function body in every namespace and lower placeholders.
     // We mutate values in place via `std::mem::replace` so the IndexMap's
@@ -64,12 +67,14 @@ pub fn lower_program(program: &mut Program) -> CompilerResult<()> {
             let taken = std::mem::replace(slot, Value::Placeholder(0));
             let lowered = lower_value(taken, &ns_path, &aliases, &registry);
             *slot = lowered;
+            for site in registry.nested.borrow_mut().drain(..) {
+                errors.push(site.into_error(namespace.source_file.as_ref()));
+            }
         }
     }
 
     // After lowering, scan for any leftover bare placeholders. Each one is a
     // user error: a `%` that did not land in a `Fn`-typed parameter slot.
-    let mut errors: Vec<CompilerError> = Vec::new();
     for (ns_path, namespace) in &program.namespaces {
         let source_file = namespace.source_file.clone();
         for (var, value) in &namespace.scope.vars {
@@ -109,6 +114,45 @@ pub fn lower_program(program: &mut Program) -> CompilerResult<()> {
 struct SignatureRegistry {
     by_qualified: IndexMap<(String, String), Vec<FnArgs>>,
     by_short_name: IndexMap<String, Vec<FnArgs>>,
+    /// Nested implicit lambdas found while lowering the current variable.
+    /// Drained by [`lower_program`], which knows the source file.
+    nested: RefCell<Vec<NestedPlaceholderSite>>,
+}
+
+/// A call whose `Fn` argument would become an implicit `%` lambda that
+/// contains another implicit `%` lambda.
+struct NestedPlaceholderSite {
+    function: String,
+    parameter: Option<String>,
+    src: Option<Source>,
+}
+
+impl NestedPlaceholderSite {
+    fn into_error(self, source_file: Option<&PathBuf>) -> CompilerError {
+        CompilerError::NestedPlaceholder {
+            function: self.function,
+            parameter: self.parameter,
+            location: self.src.map(|s| ErrorLocation {
+                line: s.line,
+                column: s.column,
+                position: s.position,
+                length: s.length,
+                file: source_file.cloned(),
+            }),
+        }
+    }
+}
+
+/// Display name of a callee for diagnostics: `map`, `::hot::coll/map`.
+fn callee_name(function: &Value) -> String {
+    match function {
+        Value::Ref(Ref::Var(vr)) => vr.var.sym.name().to_string(),
+        Value::Ref(Ref::Ns(ns_ref)) => match &ns_ref.function_name {
+            Some(name) => format!("{}/{}", ns_ref.ns, name),
+            None => ns_ref.ns.to_string(),
+        },
+        _ => "this call".to_string(),
+    }
 }
 
 impl SignatureRegistry {
@@ -146,6 +190,7 @@ impl SignatureRegistry {
         Self {
             by_qualified,
             by_short_name,
+            nested: RefCell::new(Vec::new()),
         }
     }
 
@@ -251,33 +296,57 @@ fn lower_value_inner(
         Value::FnCall(mut call) => {
             // Effective arity for signature lookup includes the piped LHS, if any.
             let effective_arity = call.args.len() + arg_index_offset;
-            let signature_args: Vec<Option<String>> = registry
+            // (type annotation, parameter name) per declared parameter.
+            let signature_args: Vec<(Option<String>, String)> = registry
                 .lookup(&call.function, effective_arity, current_ns, aliases)
                 .map(|args| {
                     args.args
                         .iter()
-                        .map(|a| a.type_annotation.clone())
+                        .map(|a| (a.type_annotation.clone(), a.var.sym.name().to_string()))
                         .collect()
                 })
                 .unwrap_or_default();
 
             call.function = Box::new(lower_value(*call.function, current_ns, aliases, registry));
+            let function_name = callee_name(&call.function);
+            let call_src = call.src.clone();
 
             let new_args: Vec<FnCallArg> = call
                 .args
                 .into_iter()
                 .enumerate()
                 .map(|(i, mut arg)| {
-                    // Inner expressions of an arg are not "outermost" — they
-                    // carry no piped LHS, so reset the offset to 0.
-                    let lowered = lower_value(arg.value, current_ns, aliases, registry);
                     let param_index = i + arg_index_offset;
                     let is_fn_slot = signature_args
                         .get(param_index)
-                        .and_then(|opt| opt.as_deref())
+                        .and_then(|(annotation, _)| annotation.as_deref())
                         .map(is_fn_typed)
                         .unwrap_or(false);
+                    // Placeholder lambdas already present are explicit `%(...)`
+                    // boundaries. Any extra one after lowering was created
+                    // implicitly inside this argument.
+                    let lambdas_before = if is_fn_slot {
+                        count_placeholder_lambdas(&arg.value)
+                    } else {
+                        0
+                    };
+                    // Inner expressions of an arg are not "outermost" — they
+                    // carry no piped LHS, so reset the offset to 0.
+                    let lowered = lower_value(arg.value, current_ns, aliases, registry);
                     arg.value = if is_fn_slot && contains_placeholder(&lowered) {
+                        // Wrapping here would put an implicit lambda around
+                        // another one: two `%` meaning different parameters.
+                        if !matches!(lowered, Value::Placeholder(_))
+                            && count_placeholder_lambdas(&lowered) > lambdas_before
+                        {
+                            registry.nested.borrow_mut().push(NestedPlaceholderSite {
+                                function: function_name.clone(),
+                                parameter: signature_args
+                                    .get(param_index)
+                                    .map(|(_, name)| name.clone()),
+                                src: call_src.clone(),
+                            });
+                        }
                         wrap_placeholder_arg(lowered)
                     } else {
                         lowered

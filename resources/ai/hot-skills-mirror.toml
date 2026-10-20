@@ -9,4 +9,4 @@ tree_hash = "891eced027dd728021e8897185a8c88eb9ce4ef9b827c22a2fb3f7e74b471b34"
 [skills."hot-language"]
 source_path = "resources/ai/skills/hot-language"
 mirror_path = "skills/hot-language"
-tree_hash = "9fe05bfac3807077e535857c2be09f63d88ce1293865ab69a3c7b968286ec32c"
+tree_hash = "b286770aec61e26dcda64d0f09d9f47773f0b71845176c757733a5cb5e114452"
