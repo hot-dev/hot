@@ -158,13 +158,13 @@ fn limit(plan: Option<String>, overrides: Option<String>, kind: QuotaKind) -> Re
 }
 
 macro_rules! begin {
-    ($name:ident,$database:ty,$variant:ident,$lock:literal,$narrow:expr) => {
+    ($name:ident,$database:ty,$variant:ident,$begin:expr,$lock:literal,$narrow:expr) => {
         pub(crate) async fn $name(db:&DatabasePool,org:Uuid,env:Uuid,kind:QuotaKind)
             -> Result<(sqlx::Transaction<'static,$database>,Budget),String> {
             let root=root_for(db,org,env).await?;
             let billing=db.with_scope(DatabaseScope::Maintenance { operation:MaintenanceOperation::Billing,org_id:Some(root) });
             let DatabasePool::$variant(pool)=&billing else { return Err("Incorrect store database backend".into()); };
-            let mut tx=pool.begin().await.map_err(|e| e.to_string())?;
+            let mut tx=$begin(pool).await.map_err(|e| e.to_string())?;
             let overrides:Option<String>=sqlx::query_scalar("SELECT CAST(features AS TEXT) FROM org WHERE org_id=$1")
                 .bind(root).fetch_one(&mut *tx).await.map_err(|e|e.to_string())?;
             let plan:Option<String>=sqlx::query_scalar("SELECT CAST(COALESCE(p.features,'{}') AS TEXT) FROM org_plan op JOIN plan p ON p.plan_uuid=op.plan_uuid WHERE op.org_id=$1")
@@ -196,10 +196,24 @@ async fn narrow_postgres(
 async fn narrow_sqlite(_: &mut sqlx::SqliteConnection, _: Uuid, _: Uuid) -> Result<(), String> {
     Ok(())
 }
+async fn begin_postgres_tx(
+    pool: &crate::db::ScopedPgPool,
+) -> Result<sqlx::Transaction<'static, sqlx::Postgres>, sqlx::Error> {
+    pool.begin().await
+}
+/// Admission reads before it writes. A deferred SQLite transaction that has
+/// read cannot wait for the writer lock: its first write fails at once with
+/// SQLITE_BUSY instead of honoring busy_timeout. Take the writer lock up front.
+async fn begin_sqlite_tx(
+    pool: &sqlx::SqlitePool,
+) -> Result<sqlx::Transaction<'static, sqlx::Sqlite>, sqlx::Error> {
+    pool.begin_with("BEGIN IMMEDIATE").await
+}
 begin!(
     begin_postgres,
     sqlx::Postgres,
     Postgres,
+    begin_postgres_tx,
     "SELECT org_id FROM org WHERE org_id=$1 FOR UPDATE",
     narrow_postgres
 );
@@ -207,6 +221,7 @@ begin!(
     begin_sqlite,
     sqlx::Sqlite,
     Sqlite,
+    begin_sqlite_tx,
     "UPDATE org SET org_id=org_id WHERE org_id=$1",
     narrow_sqlite
 );
@@ -233,5 +248,40 @@ mod tests {
             );
             assert_eq!(limit(None, Some("{}".into()), kind).unwrap(), 0);
         }
+    }
+
+    #[tokio::test]
+    async fn sqlite_admission_waits_for_another_writer_instead_of_failing() {
+        let dir = tempfile::tempdir().unwrap();
+        let conf =
+            crate::val!({"uri": format!("sqlite:{}", dir.path().join("quota.db").display())});
+        crate::db::run_migrations(&conf).await.unwrap();
+        let db = crate::db::create_db_pool(&conf).await.unwrap();
+        let DatabasePool::Sqlite(pool) = &db else {
+            unreachable!()
+        };
+        let data = crate::db::insert_test_data(&db).await.unwrap();
+        let (org, env) = (data.org_id, data.env_id);
+        // Another connection holds the writer lock while admission starts.
+        let mut holder = pool.begin_with("BEGIN IMMEDIATE").await.unwrap();
+        sqlx::query("UPDATE env SET name=name WHERE env_id=?")
+            .bind(env)
+            .execute(&mut *holder)
+            .await
+            .unwrap();
+        let release = tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+            holder.commit().await.unwrap();
+        });
+        let (mut tx, budget) = begin_sqlite(&db, org, env, QuotaKind::Store).await.unwrap();
+        // The first write after admission's reads must not hit SQLITE_BUSY.
+        sqlx::query("UPDATE org SET org_id=org_id WHERE org_id=?")
+            .bind(org)
+            .execute(&mut *tx)
+            .await
+            .unwrap();
+        budget.check_sqlite(&mut tx).await.unwrap();
+        tx.commit().await.unwrap();
+        release.await.unwrap();
     }
 }
