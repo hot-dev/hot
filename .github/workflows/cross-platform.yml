@@ -216,6 +216,19 @@ jobs:
           echo "redis=$redis" >> "$GITHUB_OUTPUT"
           echo "::notice::Postgres available: $pg — Redis available: $redis (unavailable services mean those tests self-skip)"
 
+      # Cargo runs crate tests from their crate directory, where neither the
+      # checkout's hot/pkg nor an installed Hot is found. Put the checkout's
+      # runtime assets beside the test binaries, as hot.yml does. Copies
+      # rather than symlinks also work in Windows Git Bash.
+      - name: Prepare checkout runtime for Rust tests
+        run: |
+          for destination in target/debug/resources target/debug/deps/resources; do
+            rm -rf "$destination"
+            mkdir -p "$destination"
+            cp -R resources/. "$destination/"
+            cp -R hot/pkg "$destination/pkg"
+          done
+
       - name: Run Rust tests
         run: |
           if [[ "${{ steps.svc.outputs.pg }}" == "true" ]]; then
