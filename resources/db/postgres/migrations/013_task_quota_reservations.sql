@@ -14,6 +14,8 @@ CREATE TABLE hot.usage_task (
     duration_ms bigint NOT NULL DEFAULT 0
 );
 CREATE INDEX usage_task_org_idx ON hot.usage_task(org_id);
+-- Period initialization recounts only tasks whose usage time is in the period.
+CREATE INDEX task_env_usage_at_idx ON hot.task(env_id,(COALESCE(stop_time,start_time,created_at)));
 CREATE FUNCTION hot.task_usage(t hot.task) RETURNS TABLE (
     active_containers bigint, reserved_compute_units bigint,
     reserved_duration_ms bigint, compute_units bigint, duration_ms bigint,

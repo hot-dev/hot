@@ -98,6 +98,27 @@ impl Task {
             .expect("valid month");
         match &billing {
             DatabasePool::Postgres(pool) => {
+                // Initialize a new period's counters before taking the account
+                // lock, so a rejected claim cannot discard the work. The
+                // transaction below re-reads these limits under the lock.
+                let overrides: Option<Value> =
+                    sqlx::query_scalar("SELECT features FROM org WHERE org_id=$1")
+                        .bind(root_id)
+                        .fetch_one(pool)
+                        .await?;
+                let plan: Option<TaskAccountPlan<Value>> = sqlx::query_as(
+                    "SELECT COALESCE(p.features,'{}'),p.plan_id,op.current_period_start FROM org_plan op JOIN plan p ON p.plan_uuid=op.plan_uuid WHERE op.org_id=$1"
+                ).bind(root_id).fetch_optional(pool).await?;
+                if usage_required(
+                    plan.as_ref().and_then(|p| p.0.as_ref()),
+                    overrides.as_ref(),
+                    plan.as_ref()
+                        .is_some_and(|p| p.1.as_deref() == Some("hot-free")),
+                    task.task_type == "container",
+                ) {
+                    let period = plan.as_ref().and_then(|p| p.2).unwrap_or(month_start);
+                    crate::db::usage::prepare_task_period(&billing, root_id, period).await?;
+                }
                 let mut tx = pool.begin().await?;
                 let overrides: Option<Value> =
                     sqlx::query_scalar("SELECT features FROM org WHERE org_id=$1 FOR UPDATE")

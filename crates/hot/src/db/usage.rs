@@ -10,6 +10,57 @@ type TaskTotals = (i64, i64, i64, i64, i64);
 type TaskDrift = (Uuid, Uuid, Option<DateTime<Utc>>, [i64; 5]);
 const TASK_TOTALS: &str = "SELECT CAST(COALESCE(SUM(u.active_containers),0) AS BIGINT),CAST(COALESCE(SUM(u.reserved_compute_units),0) AS BIGINT),CAST(COALESCE(SUM(u.compute_units),0) AS BIGINT),CAST(COALESCE(SUM(u.reserved_duration_ms),0) AS BIGINT),CAST(COALESCE(SUM(u.duration_ms),0) AS BIGINT) FROM usage_task u JOIN org o ON o.org_id=u.org_id WHERE o.org_id=$1 OR o.parent_org_id=$1";
 
+/// Recount one environment's usage for `period`. Callers lock the counter row
+/// first; this runs as a new statement, so its snapshot includes every writer
+/// that held the row. The timestamp predicate matches `usage_at` and uses
+/// `task_env_usage_at_idx`, so the cost follows the period, not history.
+const PERIOD_RECOUNT: &str = "WITH totals AS (SELECT t.env_id,SUM(f.compute_units) AS cu,SUM(f.duration_ms) AS ms FROM task t CROSS JOIN LATERAL hot.task_usage(t) f WHERE t.env_id=ANY($1) AND COALESCE(t.stop_time,t.start_time,t.created_at) >= $2 GROUP BY t.env_id) UPDATE usage_task u SET compute_units=COALESCE((SELECT cu FROM totals WHERE env_id=u.env_id),0),duration_ms=COALESCE((SELECT ms FROM totals WHERE env_id=u.env_id),0),period_start=$2 WHERE u.env_id=ANY($1)";
+
+/// Initialize counters for a new billing period before admission takes the
+/// account lock. Each environment commits separately under its own scope, so
+/// a rejected claim cannot discard the work and make every redelivery rescan
+/// history while holding the lock. Admission's in-transaction initialization
+/// only remains for a period that changes in between.
+pub(crate) async fn prepare_task_period(
+    db: &DatabasePool,
+    root: Uuid,
+    period: DateTime<Utc>,
+) -> Result<(), sqlx::Error> {
+    let DatabasePool::Postgres(pool) = db else {
+        return Ok(());
+    };
+    let billing = pool.with_scope(DatabaseScope::Maintenance {
+        operation: MaintenanceOperation::Billing,
+        org_id: Some(root),
+    });
+    let stale: Vec<(Uuid, Uuid)> = sqlx::query_as("SELECT e.env_id,e.org_id FROM env e JOIN org o ON o.org_id=e.org_id LEFT JOIN usage_task u ON u.env_id=e.env_id WHERE (o.org_id=$1 OR o.parent_org_id=$1) AND u.period_start IS DISTINCT FROM $2 ORDER BY e.env_id")
+        .bind(root).bind(period).fetch_all(&billing).await?;
+    for (env_id, org_id) in stale {
+        let mut tx = pool
+            .with_scope(DatabaseScope::Environment { org_id, env_id })
+            .begin()
+            .await?;
+        sqlx::query(
+            "INSERT INTO usage_task(env_id,org_id) VALUES($1,$2) ON CONFLICT(env_id) DO NOTHING",
+        )
+        .bind(env_id)
+        .bind(org_id)
+        .execute(&mut *tx)
+        .await?;
+        let locked: Option<Uuid> = sqlx::query_scalar("SELECT env_id FROM usage_task WHERE env_id=$1 AND period_start IS DISTINCT FROM $2 FOR UPDATE")
+            .bind(env_id).bind(period).fetch_optional(&mut *tx).await?;
+        if locked.is_some() {
+            sqlx::query(PERIOD_RECOUNT)
+                .bind(vec![env_id])
+                .bind(period)
+                .execute(&mut *tx)
+                .await?;
+        }
+        tx.commit().await?;
+    }
+    Ok(())
+}
+
 /// Called under the root lock. Lock stale counter rows before taking the fresh
 /// statement snapshot that initializes a new billing period. Task writers after
 /// that snapshot wait in their trigger and then apply their own deltas.
@@ -23,8 +74,11 @@ pub(crate) async fn task_usage_postgres(
     let stale: Vec<Uuid> = sqlx::query_scalar("SELECT u.env_id FROM usage_task u JOIN org o ON o.org_id=u.org_id WHERE (o.org_id=$1 OR o.parent_org_id=$1) AND u.period_start IS DISTINCT FROM $2 ORDER BY u.env_id FOR UPDATE OF u")
         .bind(root).bind(period).fetch_all(&mut *conn).await?;
     if !stale.is_empty() {
-        sqlx::query("WITH totals AS (SELECT t.env_id,SUM(f.compute_units) AS cu,SUM(f.duration_ms) AS ms FROM task t CROSS JOIN LATERAL hot.task_usage(t) f WHERE t.env_id=ANY($1) AND f.usage_at >= $2 GROUP BY t.env_id) UPDATE usage_task u SET compute_units=COALESCE((SELECT cu FROM totals WHERE env_id=u.env_id),0),duration_ms=COALESCE((SELECT ms FROM totals WHERE env_id=u.env_id),0),period_start=$2 WHERE u.env_id=ANY($1)")
-            .bind(stale).bind(period).execute(&mut *conn).await?;
+        sqlx::query(PERIOD_RECOUNT)
+            .bind(stale)
+            .bind(period)
+            .execute(&mut *conn)
+            .await?;
     }
     sqlx::query_as(TASK_TOTALS).bind(root).fetch_one(conn).await
 }

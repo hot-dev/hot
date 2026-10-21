@@ -1370,6 +1370,52 @@ async fn scoped_pool_enforces_isolation_under_a_restricted_login()
             expected
         );
     }
+    // A rejected claim at period rollover must not discard counter
+    // initialization; otherwise every redelivery rescans history under the
+    // account lock.
+    let rejected_claim = Uuid::new_v4();
+    sqlx::query("INSERT INTO task(task_id,env_id,stream_id,build_id,function_name,task_type) VALUES($1,$2,$3,$4,'period-test','container')")
+        .bind(rejected_claim).bind(env_b).bind(stream_b).bind(build_b).execute(&b).await?;
+    sqlx::query("UPDATE hot.org SET features=$1 WHERE org_id=$2")
+        .bind(serde_json::json!({"box_concurrent_tasks":0,"runs_per_month":-1}))
+        .bind(root)
+        .execute(&admin)
+        .await?;
+    sqlx::query(
+        "UPDATE hot.usage_task SET period_start=now()+interval '10 days' WHERE org_id=ANY($1)",
+    )
+    .bind(vec![child_a, child_b])
+    .execute(&admin)
+    .await?;
+    let container_reserve = db::task::TaskQuotaReservation {
+        compute_units: 10,
+        duration_ms: 1000,
+    };
+    let rejected = db::Task::claim_for_worker_with_quota(
+        &db_b,
+        &rejected_claim,
+        "period-rejected",
+        container_reserve,
+    )
+    .await;
+    assert!(
+        matches!(rejected, Err(db::task::TaskError::QuotaExceeded(_))),
+        "{rejected:?}"
+    );
+    let initialized: bool = sqlx::query_scalar(
+        "SELECT bool_and(period_start <= now()) FROM hot.usage_task WHERE org_id=ANY($1)",
+    )
+    .bind(vec![child_a, child_b])
+    .fetch_one(&admin)
+    .await?;
+    assert!(
+        initialized,
+        "period initialization must survive a rejected claim"
+    );
+    sqlx::query("DELETE FROM hot.task WHERE task_id=$1")
+        .bind(rejected_claim)
+        .execute(&admin)
+        .await?;
     sqlx::query("DELETE FROM hot.task WHERE task_id=ANY($1)")
         .bind(vec![period_task, period_claim])
         .execute(&admin)
