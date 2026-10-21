@@ -66,8 +66,13 @@ total fits. Heartbeats, timing and info-only updates
 do not update the counters.
 
 The migration initializes current reservations and leaves `period_start` null.
-The first limited task claim initializes period usage under the root lock. A
-period change locks stale counter rows in environment order, then recomputes
+Before a limited task claim takes the root lock, each environment whose counter
+period is missing or stale is initialized in its own committed transaction
+under that environment's scope, recounting only tasks whose usage time is in
+the period. A rejected claim cannot discard that work. A counter still stale
+under the root lock (its period or environment changed in between) is
+initialized there: a period change locks stale counter rows in environment
+order, then recomputes
 source totals in a **new statement snapshot**. A completion that committed while
 the claim waited is included; subsequent completions wait for those row locks
 and add their own deltas. The candidate task is locked before counters, under
@@ -188,8 +193,10 @@ recent snapshot with representative history, account count, storage and WAL.
 First-period initialization for the 100,000-row account, measured separately
 under the restricted role, took 172.97 ms for tasks and
 44.63 ms for runs (including one fresh psql connection each).
-These history scans occur once per tracked period, under the account lock;
-include them in billing-period rollover and first-enforcement rehearsals.
+That measurement predates per-environment initialization, which now runs before
+the claim takes the account lock and scans only each environment's tasks in the
+period; still include it in billing-period rollover and first-enforcement
+rehearsals.
 
 The final public workspace run passed 2,586 Rust tests (10 intentionally
 ignored), formatting, Clippy with warnings denied, and five browser scope tests.
