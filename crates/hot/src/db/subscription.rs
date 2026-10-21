@@ -688,27 +688,11 @@ pub async fn call_deletion_days_for_org(db: &DatabasePool, org_id: &Uuid) -> i32
 
     use super::features::keys;
 
-    // Check for an explicit per-org override (not merged with plan)
-    let org_features_json = match db {
-        DatabasePool::Postgres(pool) => {
-            sqlx::query_scalar::<_, Option<JsonValue>>("SELECT features FROM org WHERE org_id = $1")
-                .bind(org_id)
-                .fetch_optional(pool)
-                .await
-                .ok()
-                .flatten()
-                .flatten()
-        }
-        DatabasePool::Sqlite(pool) => {
-            sqlx::query_scalar::<_, Option<String>>("SELECT features FROM org WHERE org_id = ?")
-                .bind(org_id)
-                .fetch_optional(pool)
-                .await
-                .ok()
-                .flatten()
-                .flatten()
-                .and_then(|s| serde_json::from_str::<JsonValue>(&s).ok())
-        }
+    // Check for an explicit per-org override (not merged with plan). An
+    // unreadable override keeps data rather than falling back to the plan.
+    let org_features_json = match super::features::Features::get_org_features(db, org_id).await {
+        Ok(features) => features,
+        Err(_) => return -1,
     };
 
     if let Some(JsonValue::Object(ref map)) = org_features_json
@@ -744,7 +728,8 @@ pub async fn call_deletion_days_for_org(db: &DatabasePool, org_id: &Uuid) -> i32
                 next_retention
             }
         }
-        Err(_) => retention * 2, // top tier, no next plan
+        Err(PlanError::NotFound) => retention * 2, // top tier, no next plan
+        Err(_) => -1,                              // lookup failed: keep data
     }
 }
 

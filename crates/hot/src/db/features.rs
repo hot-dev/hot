@@ -471,7 +471,7 @@ impl Features {
     }
 
     /// Fetch the org.features column value.
-    async fn get_org_features(
+    pub(crate) async fn get_org_features(
         db: &DatabasePool,
         org_id: &Uuid,
     ) -> Result<Option<JsonValue>, sqlx::Error> {

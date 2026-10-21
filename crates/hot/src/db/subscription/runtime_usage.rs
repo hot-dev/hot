@@ -82,6 +82,56 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn retention_keeps_data_when_override_or_next_plan_cannot_be_read() {
+        let db = crate::db::test_db().await;
+        let data = crate::db::insert_test_data(&db).await.unwrap();
+        let DatabasePool::Sqlite(pool) = &db else {
+            unreachable!()
+        };
+        let plan = Uuid::now_v7();
+        sqlx::query("INSERT INTO plan (plan_uuid, plan_id, plan_name, base_price_monthly_cents, base_price_annual_cents, sort_order, active, features) VALUES (?, 'retention-test', 'Retention Test', 0, 0, 1000, 1, ?)")
+            .bind(plan)
+            .bind(serde_json::json!({"call_retention_days": 7}).to_string())
+            .execute(pool)
+            .await
+            .unwrap();
+        crate::db::OrgPlan::create(
+            &db,
+            &data.org_id,
+            &plan,
+            crate::db::BillingPeriod::Monthly,
+            &data.user_id,
+        )
+        .await
+        .unwrap();
+        let days = |db| async move {
+            crate::db::subscription::call_deletion_days_for_org(db, &data.org_id).await
+        };
+        assert!(days(&db).await > 0, "the plan sets a deletion cutoff");
+
+        // An unreadable override must not fall through to the plan cutoff.
+        sqlx::query("UPDATE org SET features = '{not json' WHERE org_id = ?")
+            .bind(data.org_id)
+            .execute(pool)
+            .await
+            .unwrap();
+        assert_eq!(days(&db).await, -1);
+
+        // A failed next-tier lookup is not the same as "no next tier".
+        sqlx::query("UPDATE org SET features = NULL WHERE org_id = ?")
+            .bind(data.org_id)
+            .execute(pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO plan (plan_uuid, plan_id, plan_name, base_price_monthly_cents, base_price_annual_cents, sort_order, active, features) VALUES (?, 'retention-next', 'Retention Next', 0, 0, 1001, 1, '{bad')")
+            .bind(Uuid::now_v7())
+            .execute(pool)
+            .await
+            .unwrap();
+        assert_eq!(days(&db).await, -1);
+    }
+
+    #[tokio::test]
     async fn environment_usage_excludes_sibling_environments_and_directory_seats() {
         let db = crate::db::test_db().await;
         let DatabasePool::Sqlite(pool) = &db else {
