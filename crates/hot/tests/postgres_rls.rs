@@ -1400,7 +1400,7 @@ async fn scoped_pool_enforces_isolation_under_a_restricted_login()
     .await;
     assert!(
         matches!(rejected, Err(db::task::TaskError::QuotaExceeded(_))),
-        "{rejected:?}"
+        "a full account must refuse the claim as retryable"
     );
     let initialized: bool = sqlx::query_scalar(
         "SELECT bool_and(period_start <= now()) FROM hot.usage_task WHERE org_id=ANY($1)",
