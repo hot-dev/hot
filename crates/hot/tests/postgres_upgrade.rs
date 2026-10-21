@@ -116,8 +116,13 @@ impl UpgradeDatabase {
         uri.set_password(Some(&password))
             .map_err(|_| "invalid fixture password")?;
         let owner_uri = uri.to_string();
+        // Apply the baseline on its own pool, as run_migrations does: migration
+        // 001 turns row_security off for its session, which must not leak into
+        // the scoped queries tests later run through `owner`.
+        let migrator = connect(&owner_uri).await?;
+        migrations_through(version).await?.run(&migrator).await?;
+        migrator.close().await;
         let owner = connect(&owner_uri).await?;
-        migrations_through(version).await?.run(&owner).await?;
         uri.set_username(&runtime_role)
             .map_err(|_| "invalid fixture username")?;
         let runtime_uri = uri.to_string();
