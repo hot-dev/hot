@@ -14,7 +14,8 @@ use uuid::Uuid;
 
 use crate::db::DatabasePool;
 use crate::db::file::{
-    FileRecord, get_file_by_path, insert_file_record, mark_file_inactive, update_file_record,
+    FileRecord, find_file_by_path, get_file_by_path, insert_file_record, mark_file_inactive,
+    update_file_record_if_storage_path,
 };
 use crate::val::Val;
 
@@ -340,6 +341,14 @@ pub trait FileStorage: Send + Sync {
     /// Complete a multipart upload by assembling all parts.
     /// `parts` is a list of (part_number, etag) pairs in order.
     /// Returns the final file metadata.
+    ///
+    /// Each upload assembles into its own destination, so a retry (after a
+    /// crash, lost response, or failed commit) recognizes and reuses what an
+    /// earlier attempt produced. The record is only swapped from `base`, the
+    /// version the completion was claimed against; if the file changed since,
+    /// nothing is committed and the error starts with
+    /// [`COMPLETION_CONFLICT`].
+    #[allow(clippy::too_many_arguments)]
     async fn complete_multipart_upload(
         &self,
         _backend_upload_id: &str,
@@ -347,12 +356,16 @@ pub trait FileStorage: Send + Sync {
         _parts: &[(i32, String)],
         _total_size: i64,
         _content_type: Option<&str>,
+        _base: &CommitBase,
         _ctx: &FileStorageContext,
     ) -> Result<FileMetadata, String> {
         Err("Multipart upload not supported by this storage backend".to_string())
     }
 
-    /// Abort a multipart upload and clean up any uploaded parts.
+    /// Abort a multipart upload and clean up any uploaded parts, plus an
+    /// assembled destination that no record references. Aborting an upload
+    /// whose backend state is already gone succeeds, so aborts and the expiry
+    /// sweep converge.
     async fn abort_multipart_upload(
         &self,
         _backend_upload_id: &str,
@@ -511,28 +524,83 @@ async fn cas_file_record(
             {
                 Ok(rec) => Ok(Some((FileMetadata::from_file_record(rec), None))),
                 // A concurrent creator won the unique index race: CAS lost.
-                Err(msg)
-                    if msg.contains("UNIQUE")
-                        || msg.contains("unique")
-                        || msg.contains("duplicate key") =>
-                {
-                    Ok(None)
-                }
+                Err(msg) if is_unique_violation(&msg) => Ok(None),
                 Err(e) => Err(e),
             }
         }
     }
 }
 
-/// Commit an unconditional write whose bytes are already durable at
-/// `storage_path`: update the active record for the path, or insert one.
-/// A concurrent creator winning the unique index turns the insert into an
-/// update, so the write still lands instead of failing.
+/// Which file version a commit may replace.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CommitBase {
+    /// Whatever is current: an unconditional write (last writer wins).
+    Any,
+    /// No active file: the path was empty when the completion was claimed.
+    Absent,
+    /// The active file still stored at this location.
+    Path(String),
+}
+
+impl CommitBase {
+    /// Decode `file_upload.completion_base`: NULL for uploads claimed before
+    /// the base was recorded, `""` when the path had no active file.
+    pub fn from_column(value: Option<&str>) -> Self {
+        match value {
+            None => CommitBase::Any,
+            Some("") => CommitBase::Absent,
+            Some(path) => CommitBase::Path(path.to_string()),
+        }
+    }
+}
+
+/// Prefix of the error a multipart completion returns when the file changed
+/// after the completion was claimed. Nothing was written; the upload can
+/// only be aborted.
+pub const COMPLETION_CONFLICT: &str = "Upload completion conflict";
+
+/// Outcome of [`commit_file_record`].
+enum Committed {
+    /// The record now references the new location. `previous` is the
+    /// location it replaced, which the caller deletes.
+    Swapped {
+        meta: FileMetadata,
+        previous: Option<String>,
+    },
+    /// The record already referenced the new location (a retried multipart
+    /// completion whose earlier attempt committed).
+    Already(FileMetadata),
+    /// The file changed since `base`; nothing was written.
+    Conflict,
+}
+
+impl Committed {
+    /// The result of an unconditional write ([`CommitBase::Any`]).
+    fn into_write(self, normalized_path: &str) -> Result<(FileMetadata, Option<String>), String> {
+        match self {
+            Committed::Swapped { meta, previous } => Ok((meta, previous)),
+            Committed::Already(meta) => Ok((meta, None)),
+            Committed::Conflict => Err(format!(
+                "{COMPLETION_CONFLICT}: {normalized_path} changed during the write"
+            )),
+        }
+    }
+}
+
+/// Attempts at the record swap before giving up on a hot path.
+const COMMIT_ATTEMPTS: usize = 8;
+
+/// Commit a write whose bytes are already durable at `storage_path`: swap
+/// the active record for the path to it, or insert one.
 ///
-/// On success the second element carries the storage path the record
-/// previously referenced when it differs from `storage_path` (the caller
-/// owns cleaning it up). Records owned by another backend are refused: an
-/// update would leave `storage_backend` pointing at the old backend.
+/// The swap is a compare-and-swap on the location read just before it, so
+/// the replaced location handed back for cleanup is exactly the one this
+/// commit superseded: concurrent writers each delete only their own
+/// predecessor, and a write that races a delete re-inserts rather than
+/// landing on the deactivated row. A concurrent creator winning the unique
+/// index turns the insert into another swap attempt. Records owned by
+/// another backend are refused: an update would leave `storage_backend`
+/// pointing at the old backend.
 #[allow(clippy::too_many_arguments)]
 async fn commit_file_record(
     backend: &str,
@@ -541,8 +609,9 @@ async fn commit_file_record(
     content_len: i64,
     etag: Option<&str>,
     content_type: Option<&str>,
+    base: &CommitBase,
     ctx: &FileStorageContext,
-) -> Result<(FileMetadata, Option<String>), String> {
+) -> Result<Committed, String> {
     if let Err(e) = ctx.ensure_run_row().await {
         tracing::debug!(
             run_id = ?ctx.run_id,
@@ -551,27 +620,15 @@ async fn commit_file_record(
             e
         );
     }
-    for _ in 0..3 {
-        match get_file_by_path(&ctx.db, normalized_path, ctx.org_id, ctx.env_id).await {
-            Ok(existing) => {
-                ensure_record_backend(&existing.storage_backend, backend, normalized_path)?;
-                let updated = update_file_record(
-                    &ctx.db,
-                    existing.file_id,
-                    content_len,
-                    etag,
-                    content_type,
-                    storage_path,
-                    ctx.user_id,
-                    ctx.run_id,
-                )
-                .await?;
-                let previous = (!existing.storage_path.is_empty()
-                    && existing.storage_path != storage_path)
-                    .then_some(existing.storage_path);
-                return Ok((FileMetadata::from_file_record(updated), previous));
+    for _ in 0..COMMIT_ATTEMPTS {
+        let Some(existing) =
+            find_file_by_path(&ctx.db, normalized_path, ctx.org_id, ctx.env_id).await?
+        else {
+            if matches!(base, CommitBase::Path(_)) {
+                // The file the completion was claimed against was deleted.
+                return Ok(Committed::Conflict);
             }
-            Err(_) => match insert_file_record(
+            match insert_file_record(
                 &ctx.db,
                 normalized_path,
                 content_len,
@@ -586,20 +643,116 @@ async fn commit_file_record(
             )
             .await
             {
-                Ok(rec) => return Ok((FileMetadata::from_file_record(rec), None)),
-                // A concurrent creator won the unique index: update instead.
-                Err(msg)
-                    if msg.contains("UNIQUE")
-                        || msg.contains("unique")
-                        || msg.contains("duplicate key") => {}
+                Ok(rec) => {
+                    return Ok(Committed::Swapped {
+                        meta: FileMetadata::from_file_record(rec),
+                        previous: None,
+                    });
+                }
+                // A concurrent creator won the unique index: swap instead.
+                Err(msg) if is_unique_violation(&msg) => continue,
                 Err(e) => return Err(e),
-            },
+            }
+        };
+        ensure_record_backend(&existing.storage_backend, backend, normalized_path)?;
+        if existing.storage_path == storage_path {
+            return Ok(Committed::Already(FileMetadata::from_file_record(existing)));
         }
+        match base {
+            CommitBase::Any => {}
+            CommitBase::Path(path) if *path == existing.storage_path => {}
+            CommitBase::Absent | CommitBase::Path(_) => return Ok(Committed::Conflict),
+        }
+        if let Some(updated) = update_file_record_if_storage_path(
+            &ctx.db,
+            existing.file_id,
+            &existing.storage_path,
+            content_len,
+            etag,
+            content_type,
+            storage_path,
+            ctx.user_id,
+            ctx.run_id,
+        )
+        .await?
+        {
+            let previous = (!existing.storage_path.is_empty()).then_some(existing.storage_path);
+            return Ok(Committed::Swapped {
+                meta: FileMetadata::from_file_record(updated),
+                previous,
+            });
+        }
+        // Changed or deleted since the read: look again.
     }
     Err(format!(
         "File record for {} kept changing during write; retry",
         normalized_path
     ))
+}
+
+/// Whether an insert failed on the active-path unique index.
+fn is_unique_violation(msg: &str) -> bool {
+    msg.contains("UNIQUE") || msg.contains("unique") || msg.contains("duplicate key")
+}
+
+/// What staged bytes are to the active record.
+enum StagedBytes {
+    /// The record references them (after a failed commit: it landed even
+    /// though it reported an error).
+    Committed(Box<FileMetadata>),
+    /// Nothing references them; they can be deleted.
+    Unreferenced,
+    /// The record could not be read; keep the bytes.
+    Unknown,
+}
+
+/// Whether the active record references the bytes at `storage_path`.
+///
+/// Used after a failed commit, which can fail after its row change landed
+/// (SQLite re-reads the row in a second statement; a Postgres
+/// acknowledgement can be lost), and before deleting an assembled upload:
+/// bytes are only deleted once the record provably references something
+/// else. An orphaned object is cheaper than a record pointing at deleted
+/// bytes.
+async fn staged_bytes_state(
+    ctx: &FileStorageContext,
+    normalized_path: &str,
+    storage_path: &str,
+) -> StagedBytes {
+    match find_file_by_path(&ctx.db, normalized_path, ctx.org_id, ctx.env_id).await {
+        Ok(Some(record)) if record.storage_path == storage_path => {
+            StagedBytes::Committed(Box::new(FileMetadata::from_file_record(record)))
+        }
+        Ok(_) => StagedBytes::Unreferenced,
+        Err(_) => StagedBytes::Unknown,
+    }
+}
+
+/// Lookups of a record whose bytes vanished before giving up on a read.
+const READ_ATTEMPTS: usize = 3;
+
+/// Read the active record for `normalized_path` and hand it to `fetch`,
+/// which returns `Ok(None)` when the bytes it names are gone. An overwrite
+/// swaps the record and then deletes the superseded bytes, so a reader can
+/// lose that race between its lookup and its fetch; the record is read again
+/// and, if it moved, the fetch is retried.
+async fn fetch_current<'a, T>(
+    ctx: &FileStorageContext,
+    normalized_path: &str,
+    mut fetch: impl FnMut(&FileRecord) -> futures::future::BoxFuture<'a, Result<Option<T>, String>>,
+) -> Result<(FileRecord, T), String> {
+    let mut record = get_file_by_path(&ctx.db, normalized_path, ctx.org_id, ctx.env_id).await?;
+    for _ in 0..READ_ATTEMPTS {
+        if let Some(found) = fetch(&record).await? {
+            return Ok((record, found));
+        }
+        let latest = get_file_by_path(&ctx.db, normalized_path, ctx.org_id, ctx.env_id).await?;
+        if latest.storage_path == record.storage_path {
+            break;
+        }
+        record = latest;
+    }
+    Err(format!("File not found in storage: {}", normalized_path))
 }
 
 /// Refuse to operate on bytes persisted by a different backend. Changing the
@@ -641,6 +794,20 @@ async fn ensure_path_writable(
 /// writers never overwrite each other's bytes.
 fn unique_write_rel_path(normalized_path: &str) -> String {
     format!("{}.v-{}", normalized_path, Uuid::new_v4().simple())
+}
+
+/// Location of a completed multipart upload: one per upload, so a retried
+/// completion finds what an earlier attempt assembled.
+fn multipart_rel_path(normalized_path: &str, upload: &str) -> String {
+    format!("{}.mp-{}", normalized_path, upload)
+}
+
+/// The error for a completion whose file changed after it was claimed.
+fn completion_conflict(normalized_path: &str) -> String {
+    format!(
+        "{COMPLETION_CONFLICT}: {normalized_path} changed after the upload's completion began; \
+         abort the upload and upload again to replace it"
+    )
 }
 
 pub fn normalize_path(path: &str) -> Result<String, String> {
@@ -813,6 +980,25 @@ impl LocalFileStorage {
         full
     }
 
+    /// Where a record's bytes live. The record's storage_path is
+    /// authoritative (every write commits by swapping it to the bytes it
+    /// staged); records that predate storage_path fall back to the
+    /// deterministic location.
+    fn record_location(
+        &self,
+        record: &FileRecord,
+        normalized_path: &str,
+        ctx: &FileStorageContext,
+    ) -> PathBuf {
+        if record.storage_backend == "local" && !record.storage_path.is_empty() {
+            let recorded = PathBuf::from(&record.storage_path);
+            if recorded.exists() {
+                return recorded;
+            }
+        }
+        self.full_path(normalized_path, ctx)
+    }
+
     /// Concatenate uploaded parts (already sorted) into `dest`, computing
     /// the MD5 etag as bytes are written. Returns (etag, size).
     async fn assemble_parts(
@@ -827,9 +1013,13 @@ impl LocalFileStorage {
             .map_err(|e| format!("Failed to create output file: {}", e))?;
         let mut hasher = md5::Context::new();
         let mut size = 0i64;
-        for (part_number, _etag) in sorted_parts {
+        for (part_number, etag) in sorted_parts {
             validate_part_number(*part_number)?;
-            let part_path = upload_dir.join(format!("part_{:05}", part_number));
+            let mut part_path = Self::part_path(upload_dir, *part_number, etag);
+            if !tokio::fs::try_exists(&part_path).await.unwrap_or(false) {
+                // Uploads started before parts were named by content.
+                part_path = upload_dir.join(format!("part_{:05}", part_number));
+            }
             let part_data = tokio::fs::read(&part_path)
                 .await
                 .map_err(|e| format!("Failed to read part {}: {}", part_number, e))?;
@@ -839,10 +1029,37 @@ impl LocalFileStorage {
                 .await
                 .map_err(|e| format!("Failed to write part {}: {}", part_number, e))?;
         }
+        // tokio completes writes on a blocking thread: `flush` surfaces an
+        // error from the last one, which `sync_all` would silently drop.
+        file.flush()
+            .await
+            .map_err(|e| format!("Failed to write assembled file: {}", e))?;
         file.sync_all()
             .await
             .map_err(|e| format!("Failed to flush assembled file: {}", e))?;
+        let written = file
+            .metadata()
+            .await
+            .map_err(|e| format!("Failed to inspect assembled file: {}", e))?
+            .len();
+        if written != size as u64 {
+            return Err(format!(
+                "Assembled file has {} bytes on disk, expected {}",
+                written, size
+            ));
+        }
         Ok((format!("{:x}", hasher.finalize()), size))
+    }
+
+    /// File for one uploaded part body. The name carries the content hash
+    /// (the part's etag), so different bodies for one part number never
+    /// share a file.
+    fn part_path(upload_dir: &Path, part_number: i32, etag: &str) -> PathBuf {
+        if etag.len() == 32 && etag.bytes().all(|b| b.is_ascii_hexdigit()) {
+            upload_dir.join(format!("part_{:05}-{}", part_number, etag))
+        } else {
+            upload_dir.join(format!("part_{:05}", part_number))
+        }
     }
 }
 
@@ -875,22 +1092,25 @@ impl FileStorage for LocalFileStorage {
                 .await
                 .map_err(|e| format!("Failed to create parent directories: {}", e))?;
         }
-        tokio::fs::write(&staged_path, content)
-            .await
-            .map_err(|e| format!("Failed to write file to storage: {}", e))?;
+        if let Err(e) = tokio::fs::write(&staged_path, content).await {
+            let _ = tokio::fs::remove_file(&staged_path).await;
+            return Err(format!("Failed to write file to storage: {}", e));
+        }
         let storage_path = staged_path.to_string_lossy().to_string();
 
-        match commit_file_record(
+        let committed = commit_file_record(
             "local",
             &storage_path,
             &normalized_path,
             content.len() as i64,
             Some(&etag),
             content_type_final.as_deref(),
+            &CommitBase::Any,
             ctx,
         )
         .await
-        {
+        .and_then(|committed| committed.into_write(&normalized_path));
+        match committed {
             Ok((meta, previous)) => {
                 // The superseded file is unreachable now (best-effort).
                 if let Some(previous) = previous {
@@ -899,10 +1119,14 @@ impl FileStorage for LocalFileStorage {
                 tracing::debug!("Wrote file {} to local storage", normalized_path);
                 Ok(meta)
             }
-            Err(e) => {
-                let _ = tokio::fs::remove_file(&staged_path).await;
-                Err(e)
-            }
+            Err(e) => match staged_bytes_state(ctx, &normalized_path, &storage_path).await {
+                StagedBytes::Committed(meta) => Ok(*meta),
+                StagedBytes::Unreferenced => {
+                    let _ = tokio::fs::remove_file(&staged_path).await;
+                    Err(e)
+                }
+                StagedBytes::Unknown => Err(e),
+            },
         }
     }
 
@@ -935,9 +1159,10 @@ impl FileStorage for LocalFileStorage {
                 .await
                 .map_err(|e| format!("Failed to create parent directories: {}", e))?;
         }
-        tokio::fs::write(&staged_path, content)
-            .await
-            .map_err(|e| format!("Failed to write file to storage: {}", e))?;
+        if let Err(e) = tokio::fs::write(&staged_path, content).await {
+            let _ = tokio::fs::remove_file(&staged_path).await;
+            return Err(format!("Failed to write file to storage: {}", e));
+        }
 
         match cas_file_record(
             "local",
@@ -965,39 +1190,34 @@ impl FileStorage for LocalFileStorage {
                 let _ = tokio::fs::remove_file(&staged_path).await;
                 Ok(None)
             }
-            Err(e) => {
-                let _ = tokio::fs::remove_file(&staged_path).await;
-                Err(e)
-            }
+            Err(e) => match staged_bytes_state(ctx, &normalized_path, &storage_path).await {
+                StagedBytes::Committed(meta) => Ok(Some(*meta)),
+                StagedBytes::Unreferenced => {
+                    let _ = tokio::fs::remove_file(&staged_path).await;
+                    Err(e)
+                }
+                StagedBytes::Unknown => Err(e),
+            },
         }
     }
 
     async fn read_file(&self, path: &str, ctx: &FileStorageContext) -> Result<Vec<u8>, String> {
-        // Normalize and validate path
         let normalized_path = normalize_path(path)?;
         validate_path_security(&normalized_path)?;
 
-        // Check database first for access control
-        let record = get_file_by_path(&ctx.db, &normalized_path, ctx.org_id, ctx.env_id).await?;
-
-        // The record's storage_path is authoritative — conditional writes
-        // commit by swapping it to a staged blob key. Fall back to the
-        // deterministic location for records that predate storage_path or
-        // whose base directory moved.
-        let recorded_path = (record.storage_backend == "local" && !record.storage_path.is_empty())
-            .then(|| PathBuf::from(&record.storage_path));
-        let full_path = match recorded_path {
-            Some(p) if p.exists() => p,
-            _ => self.full_path(&normalized_path, ctx),
-        };
-
-        if !full_path.exists() {
-            return Err(format!("File not found in storage: {}", normalized_path));
-        }
-
-        tokio::fs::read(&full_path)
-            .await
-            .map_err(|e| format!("Failed to read file: {}", e))
+        // The database record authorizes the read and names the bytes.
+        let (_, bytes) = fetch_current(ctx, &normalized_path, |record| {
+            let location = self.record_location(record, &normalized_path, ctx);
+            Box::pin(async move {
+                match tokio::fs::read(location).await {
+                    Ok(bytes) => Ok(Some(bytes)),
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+                    Err(e) => Err(format!("Failed to read file: {}", e)),
+                }
+            })
+        })
+        .await?;
+        Ok(bytes)
     }
 
     async fn open_file_stream(
@@ -1008,16 +1228,17 @@ impl FileStorage for LocalFileStorage {
         let normalized_path = normalize_path(path)?;
         validate_path_security(&normalized_path)?;
 
-        let record = get_file_by_path(&ctx.db, &normalized_path, ctx.org_id, ctx.env_id).await?;
-        let recorded_path = (record.storage_backend == "local" && !record.storage_path.is_empty())
-            .then(|| PathBuf::from(&record.storage_path));
-        let full_path = match recorded_path {
-            Some(path) if path.exists() => path,
-            _ => self.full_path(&normalized_path, ctx),
-        };
-        let file = tokio::fs::File::open(&full_path)
-            .await
-            .map_err(|e| format!("Failed to open file for streaming: {}", e))?;
+        let (record, file) = fetch_current(ctx, &normalized_path, |record| {
+            let location = self.record_location(record, &normalized_path, ctx);
+            Box::pin(async move {
+                match tokio::fs::File::open(location).await {
+                    Ok(file) => Ok(Some(file)),
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+                    Err(e) => Err(format!("Failed to open file for streaming: {}", e)),
+                }
+            })
+        })
+        .await?;
 
         Ok(Some(FileReadStream {
             metadata: FileMetadata::from_file_record(record),
@@ -1160,15 +1381,27 @@ impl FileStorage for LocalFileStorage {
         _ctx: &FileStorageContext,
     ) -> Result<String, String> {
         validate_part_number(part_number)?;
-        let part_path = self
-            .base_path
-            .join(".uploads")
-            .join(backend_upload_id)
-            .join(format!("part_{:05}", part_number));
-        tokio::fs::write(&part_path, content)
-            .await
-            .map_err(|e| format!("Failed to write part {}: {}", part_number, e))?;
-        Ok(compute_md5(content))
+        let upload_dir = self.base_path.join(".uploads").join(backend_upload_id);
+        let etag = compute_md5(content);
+        // Each distinct body gets its own file, named by part number and
+        // content hash, so a retried or duplicate PUT can never change the
+        // bytes behind a part the manifest already recorded. It is written
+        // under a temporary name and renamed, so part files are always whole.
+        let part_path = Self::part_path(&upload_dir, part_number, &etag);
+        let tmp = upload_dir.join(format!(
+            ".part_{:05}.tmp-{}",
+            part_number,
+            Uuid::new_v4().simple()
+        ));
+        let written = match tokio::fs::write(&tmp, content).await {
+            Ok(()) => tokio::fs::rename(&tmp, &part_path).await,
+            Err(e) => Err(e),
+        };
+        if let Err(e) = written {
+            let _ = tokio::fs::remove_file(&tmp).await;
+            return Err(format!("Failed to write part {}: {}", part_number, e));
+        }
+        Ok(etag)
     }
 
     async fn complete_multipart_upload(
@@ -1176,8 +1409,9 @@ impl FileStorage for LocalFileStorage {
         backend_upload_id: &str,
         path: &str,
         parts: &[(i32, String)],
-        _total_size: i64,
+        total_size: i64,
         content_type: Option<&str>,
+        base: &CommitBase,
         ctx: &FileStorageContext,
     ) -> Result<FileMetadata, String> {
         let normalized_path = normalize_path(path)?;
@@ -1185,53 +1419,90 @@ impl FileStorage for LocalFileStorage {
         ensure_path_writable("local", &normalized_path, ctx).await?;
 
         let upload_dir = self.base_path.join(".uploads").join(backend_upload_id);
+        let dest = self.full_path(
+            &multipart_rel_path(&normalized_path, backend_upload_id),
+            ctx,
+        );
+        let storage_path = dest.to_string_lossy().to_string();
+
+        // A retried completion whose earlier attempt already committed.
+        if let StagedBytes::Committed(meta) =
+            staged_bytes_state(ctx, &normalized_path, &storage_path).await
+        {
+            let _ = tokio::fs::remove_dir_all(&upload_dir).await;
+            return Ok(*meta);
+        }
+
         let mut sorted_parts = parts.to_vec();
         sorted_parts.sort_by_key(|(num, _)| *num);
 
-        // Assemble into a unique path, never the live file: the record swap
-        // is the commit point, so a failed assembly or commit leaves the
-        // current file and its metadata untouched.
-        let staged_path = self.full_path(&unique_write_rel_path(&normalized_path), ctx);
-        if let Some(parent) = staged_path.parent() {
+        // Assemble beside the destination and rename it into place, never
+        // over the live file: the record swap is the commit point, so a
+        // failed assembly or commit leaves the current file and its metadata
+        // untouched, and the destination only ever holds a whole file.
+        if let Some(parent) = dest.parent() {
             tokio::fs::create_dir_all(parent)
                 .await
                 .map_err(|e| format!("Failed to create parent directories: {}", e))?;
         }
-        let assembled = Self::assemble_parts(&upload_dir, &sorted_parts, &staged_path).await;
-        let (etag, actual_size) = match assembled {
-            Ok(result) => result,
+        let tmp = PathBuf::from(format!("{}.tmp-{}", storage_path, Uuid::new_v4().simple()));
+        let (etag, actual_size) = match Self::assemble_parts(&upload_dir, &sorted_parts, &tmp).await
+        {
+            Ok(assembled) => assembled,
             Err(e) => {
-                let _ = tokio::fs::remove_file(&staged_path).await;
+                let _ = tokio::fs::remove_file(&tmp).await;
                 return Err(e);
             }
         };
+        if actual_size != total_size {
+            let _ = tokio::fs::remove_file(&tmp).await;
+            return Err(format!(
+                "Assembled size {} does not match the {} bytes received",
+                actual_size, total_size
+            ));
+        }
+        if let Err(e) = tokio::fs::rename(&tmp, &dest).await {
+            let _ = tokio::fs::remove_file(&tmp).await;
+            return Err(format!("Failed to move assembled file into place: {}", e));
+        }
 
         let content_type_final = content_type
             .map(|s| s.to_string())
             .or_else(|| detect_content_type(&normalized_path, &[]));
-        let storage_path = staged_path.to_string_lossy().to_string();
 
-        let (meta, previous) = match commit_file_record(
+        let committed = commit_file_record(
             "local",
             &storage_path,
             &normalized_path,
             actual_size,
             Some(&etag),
             content_type_final.as_deref(),
+            base,
             ctx,
         )
-        .await
-        {
-            Ok(committed) => committed,
-            Err(e) => {
-                // Parts are kept so the completion can be retried.
-                let _ = tokio::fs::remove_file(&staged_path).await;
-                return Err(e);
+        .await;
+        let meta = match committed {
+            Ok(Committed::Swapped { meta, previous }) => {
+                if let Some(previous) = previous {
+                    let _ = tokio::fs::remove_file(&previous).await;
+                }
+                meta
             }
+            Ok(Committed::Already(meta)) => meta,
+            Ok(Committed::Conflict) => {
+                let _ = tokio::fs::remove_file(&dest).await;
+                return Err(completion_conflict(&normalized_path));
+            }
+            Err(e) => match staged_bytes_state(ctx, &normalized_path, &storage_path).await {
+                StagedBytes::Committed(meta) => *meta,
+                StagedBytes::Unreferenced => {
+                    // Parts are kept so the completion can be retried.
+                    let _ = tokio::fs::remove_file(&dest).await;
+                    return Err(e);
+                }
+                StagedBytes::Unknown => return Err(e),
+            },
         };
-        if let Some(previous) = previous {
-            let _ = tokio::fs::remove_file(&previous).await;
-        }
         let _ = tokio::fs::remove_dir_all(&upload_dir).await;
 
         tracing::debug!(
@@ -1244,13 +1515,28 @@ impl FileStorage for LocalFileStorage {
     async fn abort_multipart_upload(
         &self,
         backend_upload_id: &str,
-        _path: &str,
-        _ctx: &FileStorageContext,
+        path: &str,
+        ctx: &FileStorageContext,
     ) -> Result<(), String> {
         let upload_dir = self.base_path.join(".uploads").join(backend_upload_id);
-        tokio::fs::remove_dir_all(&upload_dir)
-            .await
-            .map_err(|e| format!("Failed to clean up multipart upload: {}", e))?;
+        match tokio::fs::remove_dir_all(&upload_dir).await {
+            Ok(()) => {}
+            // Already cleaned up by a completion or an earlier abort.
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(format!("Failed to clean up multipart upload: {}", e)),
+        }
+        // A completion that assembled but never committed leaves its
+        // destination behind.
+        let normalized_path = normalize_path(path)?;
+        let dest = self.full_path(
+            &multipart_rel_path(&normalized_path, backend_upload_id),
+            ctx,
+        );
+        if let StagedBytes::Unreferenced =
+            staged_bytes_state(ctx, &normalized_path, &dest.to_string_lossy()).await
+        {
+            let _ = tokio::fs::remove_file(&dest).await;
+        }
         Ok(())
     }
 
@@ -1453,6 +1739,23 @@ pub mod s3 {
             }
         }
 
+        /// (bucket, key) of a record's bytes. The record's storage_path is
+        /// authoritative; records that predate it fall back to the
+        /// deterministic key.
+        fn record_location(
+            &self,
+            record: &FileRecord,
+            normalized_path: &str,
+            ctx: &FileStorageContext,
+        ) -> (String, String) {
+            if record.storage_backend == "s3"
+                && let Some(location) = self.parse_storage_path(&record.storage_path)
+            {
+                return location;
+            }
+            (self.bucket.clone(), self.s3_key(normalized_path, ctx))
+        }
+
         /// Best-effort delete of a location no record references.
         async fn delete_location_best_effort(&self, storage_path: &str) {
             if let Some((bucket, key)) = self.parse_storage_path(storage_path)
@@ -1485,7 +1788,7 @@ pub mod s3 {
                 .strip_prefix(MULTIPART_ID_PREFIX)
                 .and_then(|rest| rest.split_once(':'))
             {
-                let rel = format!("{}.mp-{}", normalized_path, nonce);
+                let rel = multipart_rel_path(normalized_path, nonce);
                 (self.s3_key(&rel, ctx), upload_id.to_string())
             } else {
                 (
@@ -1558,17 +1861,19 @@ pub mod s3 {
                 .to_string();
             let storage_path = format!("s3://{}/{}", self.bucket, key);
 
-            match commit_file_record(
+            let committed = commit_file_record(
                 "s3",
                 &storage_path,
                 &normalized_path,
                 content.len() as i64,
                 Some(&s3_etag),
                 content_type_final.as_deref(),
+                &CommitBase::Any,
                 ctx,
             )
             .await
-            {
+            .and_then(|committed| committed.into_write(&normalized_path));
+            match committed {
                 Ok((meta, previous)) => {
                     // The superseded object is unreachable now (best-effort).
                     if let Some(previous) = previous {
@@ -1577,10 +1882,14 @@ pub mod s3 {
                     tracing::debug!("Wrote file {} to S3: {}", normalized_path, storage_path);
                     Ok(meta)
                 }
-                Err(e) => {
-                    self.delete_location_best_effort(&storage_path).await;
-                    Err(e)
-                }
+                Err(e) => match staged_bytes_state(ctx, &normalized_path, &storage_path).await {
+                    StagedBytes::Committed(meta) => Ok(*meta),
+                    StagedBytes::Unreferenced => {
+                        self.delete_location_best_effort(&storage_path).await;
+                        Err(e)
+                    }
+                    StagedBytes::Unknown => Err(e),
+                },
             }
         }
 
@@ -1655,82 +1964,63 @@ pub mod s3 {
                     }
                     Ok(Some(meta))
                 }
-                lost_or_err => {
-                    let _ = self
-                        .client
-                        .delete_object()
-                        .bucket(&self.bucket)
-                        .key(&key)
-                        .send()
-                        .await;
-                    lost_or_err.map(|_| None)
+                Ok(None) => {
+                    self.delete_location_best_effort(&storage_path).await;
+                    Ok(None)
                 }
+                Err(e) => match staged_bytes_state(ctx, &normalized_path, &storage_path).await {
+                    StagedBytes::Committed(meta) => Ok(Some(*meta)),
+                    StagedBytes::Unreferenced => {
+                        self.delete_location_best_effort(&storage_path).await;
+                        Err(e)
+                    }
+                    StagedBytes::Unknown => Err(e),
+                },
             }
         }
         async fn read_file(&self, path: &str, ctx: &FileStorageContext) -> Result<Vec<u8>, String> {
-            // Normalize and validate path
             let normalized_path = normalize_path(path)?;
             validate_path_security(&normalized_path)?;
 
-            // Check database first for access control
-            let record =
-                get_file_by_path(&ctx.db, &normalized_path, ctx.org_id, ctx.env_id).await?;
-
-            // The record's storage_path is authoritative — conditional writes
-            // commit by swapping it to a staged blob key. Fall back to the
-            // deterministic key for records that predate storage_path.
-            let (bucket, key) = if record.storage_backend == "s3" {
-                self.parse_storage_path(&record.storage_path)
-                    .unwrap_or_else(|| (self.bucket.clone(), self.s3_key(&normalized_path, ctx)))
-            } else {
-                (self.bucket.clone(), self.s3_key(&normalized_path, ctx))
-            };
-
-            let result = self
-                .client
-                .get_object()
-                .bucket(&bucket)
-                .key(&key)
-                .send()
-                .await;
-
-            let response = match result {
-                Ok(resp) => resp,
-                Err(e) => {
-                    // Extract detailed error information
-                    let error_msg = format!(
-                        "Failed to retrieve file from S3 (bucket: {}, key: {}, path: {}): {}",
-                        bucket, key, normalized_path, e
-                    );
-                    tracing::error!("{}", error_msg);
-
-                    // Log additional context if available
-                    if let Some(raw) = e.raw_response() {
-                        tracing::error!(
-                            "S3 file download error details - status: {:?}, headers: {:?}",
-                            raw.status(),
-                            raw.headers()
+            // The database record authorizes the read and names the object.
+            let (_, data) = fetch_current(ctx, &normalized_path, |record| {
+                let (bucket, key) = self.record_location(record, &normalized_path, ctx);
+                let normalized_path = normalized_path.clone();
+                Box::pin(async move {
+                    let result = self.client.get_object().bucket(&bucket).key(&key).send().await;
+                    let response = match result {
+                        Ok(resp) => resp,
+                        Err(e) if e.as_service_error().is_some_and(|se| se.is_no_such_key()) => {
+                            return Ok(None);
+                        }
+                        Err(e) => {
+                            let error_msg = format!(
+                                "Failed to retrieve file from S3 (bucket: {}, key: {}, path: {}): {}",
+                                bucket, key, normalized_path, e
+                            );
+                            tracing::error!("{}", error_msg);
+                            if let Some(raw) = e.raw_response() {
+                                tracing::error!(
+                                    "S3 file download error details - status: {:?}, headers: {:?}",
+                                    raw.status(),
+                                    raw.headers()
+                                );
+                            }
+                            return Err(error_msg);
+                        }
+                    };
+                    let data = response.body.collect().await.map_err(|e| {
+                        let error_msg = format!(
+                            "Failed to read S3 response body for file {} (bucket: {}, key: {}): {}",
+                            normalized_path, bucket, key, e
                         );
-                    }
-
-                    return Err(error_msg);
-                }
-            };
-
-            let data = response
-                .body
-                .collect()
-                .await
-                .map_err(|e| {
-                    let error_msg = format!(
-                        "Failed to read S3 response body for file {} (bucket: {}, key: {}): {}",
-                        normalized_path, bucket, key, e
-                    );
-                    tracing::error!("{}", error_msg);
-                    error_msg
-                })?
-                .into_bytes()
-                .to_vec();
+                        tracing::error!("{}", error_msg);
+                        error_msg
+                    })?;
+                    Ok(Some(data.into_bytes().to_vec()))
+                })
+            })
+            .await?;
 
             tracing::info!("Read file {} from S3", normalized_path);
             Ok(data)
@@ -1744,27 +2034,30 @@ pub mod s3 {
             let normalized_path = normalize_path(path)?;
             validate_path_security(&normalized_path)?;
 
-            let record =
-                get_file_by_path(&ctx.db, &normalized_path, ctx.org_id, ctx.env_id).await?;
-            let (bucket, key) = if record.storage_backend == "s3" {
-                self.parse_storage_path(&record.storage_path)
-                    .unwrap_or_else(|| (self.bucket.clone(), self.s3_key(&normalized_path, ctx)))
-            } else {
-                (self.bucket.clone(), self.s3_key(&normalized_path, ctx))
-            };
-            let response = self
-                .client
-                .get_object()
-                .bucket(&bucket)
-                .key(&key)
-                .send()
-                .await
-                .map_err(|e| {
-                    format!(
-                        "Failed to retrieve file from S3 (bucket: {}, key: {}, path: {}): {}",
-                        bucket, key, normalized_path, e
-                    )
-                })?;
+            let (record, response) = fetch_current(ctx, &normalized_path, |record| {
+                let (bucket, key) = self.record_location(record, &normalized_path, ctx);
+                let normalized_path = normalized_path.clone();
+                Box::pin(async move {
+                    match self
+                        .client
+                        .get_object()
+                        .bucket(&bucket)
+                        .key(&key)
+                        .send()
+                        .await
+                    {
+                        Ok(resp) => Ok(Some(resp)),
+                        Err(e) if e.as_service_error().is_some_and(|se| se.is_no_such_key()) => {
+                            Ok(None)
+                        }
+                        Err(e) => Err(format!(
+                            "Failed to retrieve file from S3 (bucket: {}, key: {}, path: {}): {}",
+                            bucket, key, normalized_path, e
+                        )),
+                    }
+                })
+            })
+            .await?;
 
             Ok(Some(FileReadStream {
                 metadata: FileMetadata::from_file_record(record),
@@ -1919,7 +2212,7 @@ pub mod s3 {
             ensure_path_writable("s3", &normalized_path, ctx).await?;
 
             let nonce = Uuid::new_v4().simple().to_string();
-            let key = self.s3_key(&format!("{}.mp-{}", normalized_path, nonce), ctx);
+            let key = self.s3_key(&multipart_rel_path(&normalized_path, &nonce), ctx);
 
             let mut req = self
                 .client
@@ -1977,12 +2270,28 @@ pub mod s3 {
             parts: &[(i32, String)],
             total_size: i64,
             content_type: Option<&str>,
+            base: &CommitBase,
             ctx: &FileStorageContext,
         ) -> Result<FileMetadata, String> {
+            use aws_sdk_s3::error::ProvideErrorMetadata;
+
             let normalized_path = normalize_path(path)?;
             validate_path_security(&normalized_path)?;
             ensure_path_writable("s3", &normalized_path, ctx).await?;
             let (key, upload_id) = self.multipart_target(backend_upload_id, &normalized_path, ctx);
+            let storage_path = format!("s3://{}/{}", self.bucket, key);
+            // Uploads started before the encoded id format complete into the
+            // live key itself, so they keep last-writer-wins semantics.
+            let legacy = !backend_upload_id.starts_with(MULTIPART_ID_PREFIX);
+            let base = if legacy { &CommitBase::Any } else { base };
+
+            // A retried completion whose earlier attempt already committed.
+            if !legacy
+                && let StagedBytes::Committed(meta) =
+                    staged_bytes_state(ctx, &normalized_path, &storage_path).await
+            {
+                return Ok(*meta);
+            }
 
             let completed_parts: Vec<CompletedPart> = parts
                 .iter()
@@ -1998,37 +2307,78 @@ pub mod s3 {
                 .set_parts(Some(completed_parts))
                 .build();
 
-            self.client
+            let completed = self
+                .client
                 .complete_multipart_upload()
                 .bucket(&self.bucket)
                 .key(&key)
                 .upload_id(upload_id)
                 .multipart_upload(completed_upload)
                 .send()
-                .await
-                .map_err(|e| format!("Failed to complete multipart upload: {}", e))?;
+                .await;
+            let etag = match completed {
+                Ok(resp) => resp.e_tag().map(|t| t.trim_matches('"').to_string()),
+                // An earlier attempt completed the upload but never committed
+                // it (lost response, crash, or failed commit): its object is
+                // still at this upload's key.
+                Err(e)
+                    if !legacy
+                        && e.as_service_error().and_then(|se| se.code())
+                            == Some("NoSuchUpload") =>
+                {
+                    match self
+                        .client
+                        .head_object()
+                        .bucket(&self.bucket)
+                        .key(&key)
+                        .send()
+                        .await
+                    {
+                        Ok(head) if head.content_length() == Some(total_size) => {
+                            head.e_tag().map(|t| t.trim_matches('"').to_string())
+                        }
+                        _ => return Err(format!("Failed to complete multipart upload: {}", e)),
+                    }
+                }
+                Err(e) => return Err(format!("Failed to complete multipart upload: {}", e)),
+            };
 
             let content_type_final = content_type
                 .map(|s| s.to_string())
                 .or_else(|| detect_content_type(&normalized_path, &[]));
 
-            let storage_path = format!("s3://{}/{}", self.bucket, key);
-
             // The completed object lives at its own key; the record swap is
             // the commit point.
-            let (meta, previous) = commit_file_record(
+            let committed = commit_file_record(
                 "s3",
                 &storage_path,
                 &normalized_path,
                 total_size,
-                None,
+                etag.as_deref(),
                 content_type_final.as_deref(),
+                base,
                 ctx,
             )
-            .await?;
-            if let Some(previous) = previous {
-                self.delete_location_best_effort(&previous).await;
-            }
+            .await;
+            let meta = match committed {
+                Ok(Committed::Swapped { meta, previous }) => {
+                    if let Some(previous) = previous {
+                        self.delete_location_best_effort(&previous).await;
+                    }
+                    meta
+                }
+                Ok(Committed::Already(meta)) => meta,
+                Ok(Committed::Conflict) => {
+                    self.delete_location_best_effort(&storage_path).await;
+                    return Err(completion_conflict(&normalized_path));
+                }
+                // The completed object is kept: a retry recovers it, and an
+                // abort deletes it.
+                Err(e) => match staged_bytes_state(ctx, &normalized_path, &storage_path).await {
+                    StagedBytes::Committed(meta) => *meta,
+                    StagedBytes::Unreferenced | StagedBytes::Unknown => return Err(e),
+                },
+            };
 
             tracing::debug!(
                 "Completed multipart upload for {} to S3: {}",
@@ -2047,15 +2397,34 @@ pub mod s3 {
             let normalized_path = normalize_path(path)?;
             let (key, upload_id) = self.multipart_target(backend_upload_id, &normalized_path, ctx);
 
-            self.client
+            match self
+                .client
                 .abort_multipart_upload()
                 .bucket(&self.bucket)
                 .key(&key)
                 .upload_id(upload_id)
                 .send()
                 .await
-                .map_err(|e| format!("Failed to abort multipart upload: {}", e))?;
+            {
+                Ok(_) => {}
+                // Already completed or aborted.
+                Err(e)
+                    if e.as_service_error()
+                        .is_some_and(|se| se.is_no_such_upload()) => {}
+                Err(e) => return Err(format!("Failed to abort multipart upload: {}", e)),
+            }
 
+            // A completion that finished on S3 but never committed leaves its
+            // object at this upload's own key. Legacy ids target the live key,
+            // which is never removed here.
+            if backend_upload_id.starts_with(MULTIPART_ID_PREFIX) {
+                let storage_path = format!("s3://{}/{}", self.bucket, key);
+                if let StagedBytes::Unreferenced =
+                    staged_bytes_state(ctx, &normalized_path, &storage_path).await
+                {
+                    self.delete_location_best_effort(&storage_path).await;
+                }
+            }
             Ok(())
         }
 
@@ -2281,6 +2650,14 @@ pub mod gcs {
             }
         }
 
+        /// Remove a finished upload's staging objects (best-effort; the
+        /// staging lifecycle rule is the backstop).
+        async fn cleanup_staging(&self, staging: &str) {
+            if let Err(e) = self.client.delete_prefix(staging).await {
+                tracing::warn!(error = %e, "Failed to clean up multipart staging objects");
+            }
+        }
+
         async fn delete_key_best_effort(&self, key: &str, generation: Option<i64>) {
             if let Err(e) = self.client.delete(key, generation).await {
                 tracing::warn!(error = %e, "Failed to delete unreferenced GCS object");
@@ -2330,10 +2707,19 @@ pub mod gcs {
                     offset += size;
                     let key = format!("{staging}compose-{attempt}-{level}-{index:05}");
                     jobs.push(async move {
-                        self.client
-                            .compose(&key, &group, None, Some(0), &[])
-                            .await
-                            .map(|obj| (obj.name, obj.generation))
+                        match self.client.compose(&key, &group, None, Some(0), &[]).await {
+                            Ok(obj) => Ok((obj.name, obj.generation)),
+                            // The key is unique to this attempt, so an
+                            // existing object is our own earlier try whose
+                            // response was lost before the SDK retried.
+                            Err(e) if e.is_precondition_failed() => {
+                                match self.client.head(&key).await? {
+                                    Some(obj) => Ok((obj.name, obj.generation)),
+                                    None => Err(e),
+                                }
+                            }
+                            Err(e) => Err(e),
+                        }
                     });
                 }
                 sources = futures::future::try_join_all(jobs).await?;
@@ -2377,26 +2763,32 @@ pub mod gcs {
                 .map_err(|e| format!("Failed to upload file {} to GCS: {}", normalized_path, e))?;
             let storage_path = self.client.uri(&key);
 
-            match commit_file_record(
+            let committed = commit_file_record(
                 BACKEND_ID,
                 &storage_path,
                 &normalized_path,
                 content.len() as i64,
                 Some(&etag),
                 content_type_final.as_deref(),
+                &CommitBase::Any,
                 ctx,
             )
             .await
-            {
+            .and_then(|committed| committed.into_write(&normalized_path));
+            match committed {
                 Ok((meta, previous)) => {
                     self.delete_superseded(previous).await;
                     tracing::debug!("Wrote file {} to GCS", normalized_path);
                     Ok(meta)
                 }
-                Err(e) => {
-                    self.delete_key_best_effort(&key, Some(generation)).await;
-                    Err(e)
-                }
+                Err(e) => match staged_bytes_state(ctx, &normalized_path, &storage_path).await {
+                    StagedBytes::Committed(meta) => Ok(*meta),
+                    StagedBytes::Unreferenced => {
+                        self.delete_key_best_effort(&key, Some(generation)).await;
+                        Err(e)
+                    }
+                    StagedBytes::Unknown => Err(e),
+                },
             }
         }
 
@@ -2450,29 +2842,41 @@ pub mod gcs {
                         .await;
                     Ok(Some(meta))
                 }
-                lost_or_err => {
-                    // Only this attempt's generation is removed.
+                // Only this attempt's generation is ever removed.
+                Ok(None) => {
                     self.delete_key_best_effort(&key, Some(generation)).await;
-                    lost_or_err.map(|_| None)
+                    Ok(None)
                 }
+                Err(e) => match staged_bytes_state(ctx, &normalized_path, &storage_path).await {
+                    StagedBytes::Committed(meta) => Ok(Some(*meta)),
+                    StagedBytes::Unreferenced => {
+                        self.delete_key_best_effort(&key, Some(generation)).await;
+                        Err(e)
+                    }
+                    StagedBytes::Unknown => Err(e),
+                },
             }
         }
 
         async fn read_file(&self, path: &str, ctx: &FileStorageContext) -> Result<Vec<u8>, String> {
             let normalized_path = normalize_path(path)?;
             validate_path_security(&normalized_path)?;
-            let record =
-                get_file_by_path(&ctx.db, &normalized_path, ctx.org_id, ctx.env_id).await?;
-            let key = self.record_key(&record)?;
-            self.client
-                .get_bytes(&key, None)
-                .await
-                .map_err(|e| match e {
-                    GcsError::NotFound(_) => {
-                        format!("File not found in storage: {}", normalized_path)
+            let (_, bytes) = fetch_current(ctx, &normalized_path, |record| {
+                let key = self.record_key(record);
+                let normalized_path = normalized_path.clone();
+                Box::pin(async move {
+                    match self.client.get_bytes(&key?, None).await {
+                        Ok(bytes) => Ok(Some(bytes)),
+                        Err(GcsError::NotFound(_)) => Ok(None),
+                        Err(e) => Err(format!(
+                            "Failed to read file {} from GCS: {}",
+                            normalized_path, e
+                        )),
                     }
-                    e => format!("Failed to read file {} from GCS: {}", normalized_path, e),
                 })
+            })
+            .await?;
+            Ok(bytes)
         }
 
         async fn open_file_stream(
@@ -2482,13 +2886,21 @@ pub mod gcs {
         ) -> Result<Option<FileReadStream>, String> {
             let normalized_path = normalize_path(path)?;
             validate_path_security(&normalized_path)?;
-            let record =
-                get_file_by_path(&ctx.db, &normalized_path, ctx.org_id, ctx.env_id).await?;
-            let key = self.record_key(&record)?;
-            let (reader, _size) =
-                self.client.open_reader(&key).await.map_err(|e| {
-                    format!("Failed to open file {} from GCS: {}", normalized_path, e)
-                })?;
+            let (record, reader) = fetch_current(ctx, &normalized_path, |record| {
+                let key = self.record_key(record);
+                let normalized_path = normalized_path.clone();
+                Box::pin(async move {
+                    match self.client.open_reader(&key?).await {
+                        Ok((reader, _size)) => Ok(Some(reader)),
+                        Err(GcsError::NotFound(_)) => Ok(None),
+                        Err(e) => Err(format!(
+                            "Failed to open file {} from GCS: {}",
+                            normalized_path, e
+                        )),
+                    }
+                })
+            })
+            .await?;
             Ok(Some(FileReadStream {
                 metadata: FileMetadata::from_file_record(record),
                 reader,
@@ -2637,6 +3049,7 @@ pub mod gcs {
             parts: &[(i32, String)],
             total_size: i64,
             content_type: Option<&str>,
+            base: &CommitBase,
             ctx: &FileStorageContext,
         ) -> Result<FileMetadata, String> {
             let normalized_path = normalize_path(path)?;
@@ -2666,9 +3079,18 @@ pub mod gcs {
                 (META_MANIFEST, digest.as_str()),
             ];
             let dest = self.object_key(
-                &format!("{}.mp-{}", normalized_path, backend_upload_id),
+                &multipart_rel_path(&normalized_path, backend_upload_id),
                 ctx,
             );
+            let storage_path = self.client.uri(&dest);
+
+            // A retried completion whose earlier attempt already committed.
+            if let StagedBytes::Committed(meta) =
+                staged_bytes_state(ctx, &normalized_path, &storage_path).await
+            {
+                self.cleanup_staging(&staging).await;
+                return Ok(*meta);
+            }
 
             // Recoverable completion: the destination is deterministic per
             // upload, so a retry after a crash or lost response finds the
@@ -2743,23 +3165,40 @@ pub mod gcs {
                 ));
             }
 
-            let storage_path = self.client.uri(&dest);
-            // Composite objects carry no MD5; like S3 multipart uploads the
-            // record gets no application ETag until a later write sets one.
-            let (meta, previous) = commit_file_record(
+            // Composite objects carry no MD5. The manifest digest names the
+            // exact parts composed, so it serves as the version token: a
+            // NULL etag would match any expectation in a conditional write.
+            let etag = format!("{}-{}", digest, ordered.len());
+            let committed = commit_file_record(
                 BACKEND_ID,
                 &storage_path,
                 &normalized_path,
                 composed_size,
-                None,
+                Some(&etag),
                 content_type_final.as_deref(),
+                base,
                 ctx,
             )
-            .await?;
-            self.delete_superseded(previous).await;
-            if let Err(e) = self.client.delete_prefix(&staging).await {
-                tracing::warn!(error = %e, "Failed to clean up multipart staging objects");
-            }
+            .await;
+            let meta = match committed {
+                Ok(Committed::Swapped { meta, previous }) => {
+                    self.delete_superseded(previous).await;
+                    meta
+                }
+                Ok(Committed::Already(meta)) => meta,
+                Ok(Committed::Conflict) => {
+                    self.delete_key_best_effort(&dest, Some(dest_generation))
+                        .await;
+                    return Err(completion_conflict(&normalized_path));
+                }
+                // The composed object is kept: a retry reuses it, and an
+                // abort deletes it.
+                Err(e) => match staged_bytes_state(ctx, &normalized_path, &storage_path).await {
+                    StagedBytes::Committed(meta) => *meta,
+                    StagedBytes::Unreferenced | StagedBytes::Unknown => return Err(e),
+                },
+            };
+            self.cleanup_staging(&staging).await;
             tracing::debug!("Completed multipart upload for {} to GCS", normalized_path);
             Ok(meta)
         }
@@ -2767,18 +3206,27 @@ pub mod gcs {
         async fn abort_multipart_upload(
             &self,
             backend_upload_id: &str,
-            _path: &str,
+            path: &str,
             ctx: &FileStorageContext,
         ) -> Result<(), String> {
-            // Only staging objects are removed. A composed destination is
-            // never deleted here: once completion has started the upload is
-            // no longer abortable (see `file_upload::begin_completion`).
             let staging = self.staging_prefix(backend_upload_id, ctx);
             let failures = self
                 .client
                 .delete_prefix(&staging)
                 .await
                 .map_err(|e| format!("Failed to clean up multipart upload: {}", e))?;
+            // A completion that composed but never committed leaves its
+            // destination outside the staging prefix.
+            let normalized_path = normalize_path(path)?;
+            let dest = self.object_key(
+                &multipart_rel_path(&normalized_path, backend_upload_id),
+                ctx,
+            );
+            if let StagedBytes::Unreferenced =
+                staged_bytes_state(ctx, &normalized_path, &self.client.uri(&dest)).await
+            {
+                self.delete_key_best_effort(&dest, None).await;
+            }
             if failures > 0 {
                 return Err(format!(
                     "Failed to delete {} multipart staging objects",
@@ -2923,6 +3371,17 @@ pub fn parse_storage_backend_name(raw: &str, setting: &str) -> Result<FileStorag
     }
 }
 
+/// A backend's initialization error, naming the settings that selected it.
+/// Configuration generated by older role templates sets `storage.type` to
+/// "s3" without a bucket; it was ignored before config values were honored.
+pub fn backend_init_error(error: String, role: &str, backend: &str) -> String {
+    format!(
+        "{error} ({role} storage type '{backend}' is selected by HOT_{}_STORAGE_TYPE or \
+         {role}.storage.type; set it to \"local\" to keep local storage)",
+        role.to_ascii_uppercase()
+    )
+}
+
 /// Resolve `<role>.storage.type`: the `HOT_<ROLE>_STORAGE_TYPE` environment
 /// variable wins, then Hot configuration, then local.
 pub fn resolve_storage_backend(conf: &Val, role: &str) -> Result<FileStorageType, String> {
@@ -2957,7 +3416,9 @@ pub async fn file_storage_from_config(conf: &Val) -> Result<Box<dyn FileStorage>
         }
         #[cfg(feature = "s3-storage")]
         FileStorageType::S3 => {
-            let storage = s3::S3FileStorage::from_config(conf).await?;
+            let storage = s3::S3FileStorage::from_config(conf)
+                .await
+                .map_err(|e| backend_init_error(e, "file", "s3"))?;
             Ok(Box::new(storage))
         }
         #[cfg(not(feature = "s3-storage"))]
@@ -2965,7 +3426,11 @@ pub async fn file_storage_from_config(conf: &Val) -> Result<Box<dyn FileStorage>
             Err("S3 storage requested but s3-storage feature is not enabled".to_string())
         }
         #[cfg(feature = "gcs-storage")]
-        FileStorageType::Gcs => Ok(Box::new(gcs::GcsFileStorage::from_config(conf).await?)),
+        FileStorageType::Gcs => Ok(Box::new(
+            gcs::GcsFileStorage::from_config(conf)
+                .await
+                .map_err(|e| backend_init_error(e, "file", "gcs"))?,
+        )),
         #[cfg(not(feature = "gcs-storage"))]
         FileStorageType::Gcs => Err(
             "GCS file storage requested but this binary was built without the gcs-storage feature"
@@ -3444,6 +3909,7 @@ mod tests {
                 &parts,
                 total_size,
                 Some("video/mp4"),
+                &CommitBase::Any,
                 &ctx,
             )
             .await
@@ -3521,6 +3987,7 @@ mod tests {
                 &parts,
                 total_size,
                 None,
+                &CommitBase::Any,
                 &ctx,
             )
             .await
@@ -3557,12 +4024,192 @@ mod tests {
 
         let parts = vec![(1, etag)];
         storage
-            .complete_multipart_upload(&upload_id, "data/overwrite.bin", &parts, 100, None, &ctx)
+            .complete_multipart_upload(
+                &upload_id,
+                "data/overwrite.bin",
+                &parts,
+                100,
+                None,
+                &CommitBase::Any,
+                &ctx,
+            )
             .await
             .unwrap();
 
         let content = storage.read_file("data/overwrite.bin", &ctx).await.unwrap();
         assert_eq!(content, second_data);
+    }
+
+    #[tokio::test]
+    async fn test_concurrent_writes_leave_no_orphaned_bytes() {
+        let (storage, ctx, _temp_dir) = setup_test_storage().await;
+
+        // Overlapping writers each delete exactly the version they replaced,
+        // so only the committed version is left on disk.
+        for round in 0..10 {
+            let one = format!("one-{round}");
+            let two = format!("two-two-{round}");
+            let three = format!("three-three-three-{round}");
+            let (a, b, c) = tokio::join!(
+                storage.write_file("race/leak.txt", one.as_bytes(), None, &ctx),
+                storage.write_file("race/leak.txt", two.as_bytes(), None, &ctx),
+                storage.write_file("race/leak.txt", three.as_bytes(), None, &ctx),
+            );
+            a.unwrap();
+            b.unwrap();
+            c.unwrap();
+        }
+        let names: Vec<String> = std::fs::read_dir(storage.full_path("race", &ctx))
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+            .collect();
+        assert_eq!(names.len(), 1, "{names:?}");
+        let meta = storage
+            .get_file_metadata("race/leak.txt", &ctx)
+            .await
+            .unwrap();
+        assert!(meta.storage_path.ends_with(&names[0]));
+    }
+
+    #[tokio::test]
+    async fn test_commit_respects_completion_base() {
+        let (storage, ctx, _temp_dir) = setup_test_storage().await;
+        let path = "base/f.bin";
+        let dest = "/nonexistent/f.bin.mp-upload";
+        let v0 = storage.write_file(path, b"v0", None, &ctx).await.unwrap();
+        let claimed_at_v0 = CommitBase::Path(v0.storage_path.clone());
+        let commit = async |base: &CommitBase| {
+            commit_file_record("local", dest, path, 3, Some("e"), None, base, &ctx)
+                .await
+                .unwrap()
+        };
+
+        // A completion claimed against v0 commits, and retrying it is a no-op.
+        assert!(matches!(
+            commit(&claimed_at_v0).await,
+            Committed::Swapped { .. }
+        ));
+        assert!(matches!(
+            commit(&claimed_at_v0).await,
+            Committed::Already(_)
+        ));
+
+        // Once a newer write supersedes it, a retried completion can no
+        // longer revert that write.
+        let v2 = storage.write_file(path, b"v2", None, &ctx).await.unwrap();
+        assert!(matches!(commit(&claimed_at_v0).await, Committed::Conflict));
+        assert!(matches!(
+            commit(&CommitBase::Absent).await,
+            Committed::Conflict
+        ));
+        assert_eq!(storage.read_file(path, &ctx).await.unwrap(), b"v2");
+
+        // Nor can it resurrect a deleted file.
+        storage.delete_file(path, &ctx).await.unwrap();
+        let claimed_at_v2 = CommitBase::Path(v2.storage_path.clone());
+        assert!(matches!(commit(&claimed_at_v2).await, Committed::Conflict));
+        assert!(!storage.file_exists(path, &ctx).await.unwrap());
+
+        // A completion claimed while the path was empty creates the file.
+        assert!(matches!(
+            commit(&CommitBase::Absent).await,
+            Committed::Swapped { previous: None, .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_local_multipart_completion_retry_is_idempotent() {
+        let (storage, ctx, _temp_dir) = setup_test_storage().await;
+        let path = "mp/retry.bin";
+        let id = storage
+            .initiate_multipart_upload(path, None, &ctx)
+            .await
+            .unwrap();
+        let etag = storage
+            .upload_part(&id, path, 1, b"abc", &ctx)
+            .await
+            .unwrap();
+        let parts = [(1, etag)];
+
+        let first = storage
+            .complete_multipart_upload(&id, path, &parts, 3, None, &CommitBase::Absent, &ctx)
+            .await
+            .unwrap();
+        // A retry after a lost response, or after the process died before the
+        // upload row was marked complete, finds its own committed result even
+        // though the parts are gone.
+        let retried = storage
+            .complete_multipart_upload(&id, path, &parts, 3, None, &CommitBase::Absent, &ctx)
+            .await
+            .unwrap();
+        assert_eq!(first.storage_path, retried.storage_path);
+
+        // Aborting afterwards succeeds and leaves the committed file alone.
+        storage
+            .abort_multipart_upload(&id, path, &ctx)
+            .await
+            .unwrap();
+        assert_eq!(storage.read_file(path, &ctx).await.unwrap(), b"abc");
+    }
+
+    #[tokio::test]
+    async fn test_local_part_retries_cannot_change_recorded_bytes() {
+        let (storage, ctx, _temp_dir) = setup_test_storage().await;
+        let path = "mp/parts.bin";
+        let id = storage
+            .initiate_multipart_upload(path, None, &ctx)
+            .await
+            .unwrap();
+        let recorded = storage
+            .upload_part(&id, path, 1, b"aaa", &ctx)
+            .await
+            .unwrap();
+        // A late duplicate of part 1 with other bytes does not replace the
+        // bytes behind the etag the manifest recorded.
+        storage
+            .upload_part(&id, path, 1, b"bbb", &ctx)
+            .await
+            .unwrap();
+        storage
+            .complete_multipart_upload(&id, path, &[(1, recorded)], 3, None, &CommitBase::Any, &ctx)
+            .await
+            .unwrap();
+        assert_eq!(storage.read_file(path, &ctx).await.unwrap(), b"aaa");
+    }
+
+    #[tokio::test]
+    async fn test_reads_follow_a_superseding_write() {
+        let (storage, ctx, _temp_dir) = setup_test_storage().await;
+        let v1 = storage
+            .write_file("race/read.txt", b"one", None, &ctx)
+            .await
+            .unwrap();
+
+        // The reader looked up v1 just before a writer replaced and deleted
+        // it; the read follows the record to the new version.
+        let mut stale = true;
+        let (record, bytes) = fetch_current(&ctx, "race/read.txt", |record| {
+            let overwrite = std::mem::replace(&mut stale, false);
+            let location = PathBuf::from(&record.storage_path);
+            let (storage, ctx) = (&storage, &ctx);
+            Box::pin(async move {
+                if overwrite {
+                    storage
+                        .write_file("race/read.txt", b"two", None, ctx)
+                        .await
+                        .unwrap();
+                }
+                match tokio::fs::read(&location).await {
+                    Ok(bytes) => Ok(Some(bytes)),
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+                    Err(e) => Err(e.to_string()),
+                }
+            })
+        })
+        .await
+        .unwrap();
+        assert_ne!(record.storage_path, v1.storage_path);
+        assert_eq!(bytes, b"two");
     }
 
     #[tokio::test]
@@ -3653,7 +4300,15 @@ mod tests {
             .unwrap();
         assert!(
             storage
-                .complete_multipart_upload(&id, "moved/data.bin", &[(1, etag)], 3, None, &ctx)
+                .complete_multipart_upload(
+                    &id,
+                    "moved/data.bin",
+                    &[(1, etag)],
+                    3,
+                    None,
+                    &CommitBase::Any,
+                    &ctx
+                )
                 .await
                 .is_err()
         );
@@ -3690,7 +4345,15 @@ mod tests {
         let manifest = vec![(1, e1.clone()), (2, "missing".to_string())];
         assert!(
             storage
-                .complete_multipart_upload(&id, "data/live.bin", &manifest, 8, None, &ctx)
+                .complete_multipart_upload(
+                    &id,
+                    "data/live.bin",
+                    &manifest,
+                    8,
+                    None,
+                    &CommitBase::Any,
+                    &ctx
+                )
                 .await
                 .is_err()
         );
@@ -3710,7 +4373,15 @@ mod tests {
             .await
             .unwrap();
         let done = storage
-            .complete_multipart_upload(&id, "data/live.bin", &[(1, e1), (2, e2)], 8, None, &ctx)
+            .complete_multipart_upload(
+                &id,
+                "data/live.bin",
+                &[(1, e1), (2, e2)],
+                8,
+                None,
+                &CommitBase::Any,
+                &ctx,
+            )
             .await
             .unwrap();
         assert_eq!(done.etag, Some(compute_md5(b"new-data")));
@@ -3907,7 +4578,15 @@ mod tests {
             manifest.reverse();
             let expected: Vec<u8> = (1..=parts).flat_map(|n| [n as u8; 3]).collect();
             let meta = storage
-                .complete_multipart_upload(&id, &path, &manifest, expected.len() as i64, None, ctx)
+                .complete_multipart_upload(
+                    &id,
+                    &path,
+                    &manifest,
+                    expected.len() as i64,
+                    None,
+                    &CommitBase::Any,
+                    ctx,
+                )
                 .await
                 .unwrap();
             assert_eq!(meta.size, expected.len() as i64);
@@ -3931,7 +4610,15 @@ mod tests {
                 .unwrap();
             assert!(
                 storage
-                    .complete_multipart_upload(&id, path, &[(1, token)], 3, None, ctx)
+                    .complete_multipart_upload(
+                        &id,
+                        path,
+                        &[(1, token)],
+                        3,
+                        None,
+                        &CommitBase::Any,
+                        ctx
+                    )
                     .await
                     .is_err()
             );
@@ -4027,27 +4714,35 @@ mod tests {
             let bogus = [(1, "bogus".to_string())];
             assert!(
                 storage
-                    .complete_multipart_upload(&id, path, &bogus, 2, None, &ctx)
+                    .complete_multipart_upload(&id, path, &bogus, 2, None, &CommitBase::Any, &ctx)
                     .await
                     .is_err()
             );
             let duplicate = [(1, t1.clone()), (1, t2.clone())];
             assert!(
                 storage
-                    .complete_multipart_upload(&id, path, &duplicate, 4, None, &ctx)
+                    .complete_multipart_upload(
+                        &id,
+                        path,
+                        &duplicate,
+                        4,
+                        None,
+                        &CommitBase::Any,
+                        &ctx
+                    )
                     .await
                     .is_err()
             );
 
             let manifest = [(1, t1), (2, t2)];
             let first = storage
-                .complete_multipart_upload(&id, path, &manifest, 4, None, &ctx)
+                .complete_multipart_upload(&id, path, &manifest, 4, None, &CommitBase::Any, &ctx)
                 .await
                 .unwrap();
             // A retried completion (lost response, restarted instance) finds
             // the composed object even though staging was cleaned up.
             let retried = storage
-                .complete_multipart_upload(&id, path, &manifest, 4, None, &ctx)
+                .complete_multipart_upload(&id, path, &manifest, 4, None, &CommitBase::Any, &ctx)
                 .await
                 .unwrap();
             assert_eq!(first.storage_path, retried.storage_path);

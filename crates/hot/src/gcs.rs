@@ -8,18 +8,23 @@
 //!
 //! Every request is bounded: a per-client semaphore caps concurrent requests,
 //! each request carries a timeout, and the SDK retry loop is limited in both
-//! attempts and elapsed time. Writes are only marked idempotent (and therefore
-//! retried) when they carry a generation precondition or target a key that no
-//! other writer can share.
+//! attempts and elapsed time. Clients are shared per process (see
+//! [`GcsClient::connect`]). The SDK only retries requests marked idempotent;
+//! every request Hot issues is safe to repeat (reads, generation-pinned
+//! writes and deletes, `ifGenerationMatch=0` creates, or keys that no other
+//! writer can share), so all of them are marked.
 
+use std::collections::HashMap;
 use std::pin::Pin;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::task::{Context, Poll};
 use std::time::Duration;
 
 use bytes::Bytes;
+use google_cloud_auth::credentials::{Builder as CredentialsBuilder, Credentials};
 use google_cloud_gax::error::rpc::Code;
 use google_cloud_gax::exponential_backoff::ExponentialBackoffBuilder;
+use google_cloud_gax::options::RequestOptionsBuilder;
 use google_cloud_gax::retry_policy::RetryPolicyExt;
 use google_cloud_storage::client::{Storage, StorageControl};
 use google_cloud_storage::model::Object;
@@ -151,7 +156,7 @@ impl From<GcsError> for String {
 ///
 /// Precedence for each setting: the `HOT_<ROLE>_GCS_*` environment variable,
 /// then `<role>.gcs.*` in Hot configuration, then the default.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct GcsConfig {
     pub bucket: String,
     /// Object-name prefix without leading or trailing slashes.
@@ -314,8 +319,42 @@ pub struct GcsClient {
 }
 
 impl GcsClient {
-    /// Build clients using Application Default Credentials.
+    /// The process-wide client for `config`, authenticated with Application
+    /// Default Credentials.
+    ///
+    /// Storage is resolved per task and per request, so clients are built
+    /// once and shared: each one owns a token cache (whose refresh task
+    /// outlives a dropped client), connection pools, and the concurrency
+    /// limit, which has to bound the process rather than each caller.
     pub async fn connect(config: &GcsConfig) -> Result<Self, GcsError> {
+        static CLIENTS: OnceLock<tokio::sync::Mutex<HashMap<GcsConfig, GcsClient>>> =
+            OnceLock::new();
+        let mut clients = CLIENTS.get_or_init(Default::default).lock().await;
+        if let Some(client) = clients.get(config) {
+            return Ok(client.clone());
+        }
+        let credentials = CredentialsBuilder::default().build().map_err(|e| {
+            GcsError::InvalidConfig(format!(
+                "failed to initialize GCS client (Application Default Credentials): {e}"
+            ))
+        })?;
+        let client = Self::connect_with_credentials(config, credentials).await?;
+        clients.insert(config.clone(), client.clone());
+        Ok(client)
+    }
+
+    /// Build an unshared client. The data-plane and control-plane clients
+    /// share `credentials`, so they share one token cache.
+    pub async fn connect_with_credentials(
+        config: &GcsConfig,
+        credentials: Credentials,
+    ) -> Result<Self, GcsError> {
+        // The SDK's gRPC transport builds its TLS config from rustls's
+        // process-default crypto provider. Hot enables both rustls backends
+        // (aws-lc-rs directly, ring through ureq), so rustls cannot pick one
+        // and panics unless a default is installed first.
+        crate::redis::init_crypto_provider();
+
         let retry = || {
             RetryableErrors
                 .with_attempt_limit(config.retry_attempts)
@@ -329,9 +368,11 @@ impl GcsClient {
         };
 
         let mut storage_builder = Storage::builder()
+            .with_credentials(credentials.clone())
             .with_retry_policy(retry())
             .with_backoff_policy(backoff());
         let mut control_builder = StorageControl::builder()
+            .with_credentials(credentials)
             .with_retry_policy(retry())
             .with_backoff_policy(backoff());
         if let Some(endpoint) = &config.endpoint {
@@ -339,14 +380,10 @@ impl GcsClient {
             control_builder = control_builder.with_endpoint(endpoint.clone());
         }
         let storage = storage_builder.build().await.map_err(|e| {
-            GcsError::InvalidConfig(format!(
-                "failed to initialize GCS client (Application Default Credentials): {e}"
-            ))
+            GcsError::InvalidConfig(format!("failed to initialize GCS client: {e}"))
         })?;
         let control = control_builder.build().await.map_err(|e| {
-            GcsError::InvalidConfig(format!(
-                "failed to initialize GCS control client (Application Default Credentials): {e}"
-            ))
+            GcsError::InvalidConfig(format!("failed to initialize GCS control client: {e}"))
         })?;
 
         Ok(Self {
@@ -532,7 +569,8 @@ impl GcsClient {
             .control
             .get_object()
             .set_bucket(&self.bucket_resource)
-            .set_object(key);
+            .set_object(key)
+            .with_idempotency(true);
         match self.bounded("get object metadata", req.send()).await {
             Ok(obj) => Ok(Some(obj)),
             Err(e) if e.is_not_found() => Ok(None),
@@ -545,11 +583,14 @@ impl GcsClient {
     /// when nothing matched (already gone).
     pub async fn delete(&self, key: &str, generation: Option<i64>) -> Result<bool, GcsError> {
         tracing::debug!(bucket = %self.bucket, key, ?generation, "GCS delete object");
+        // Repeating a delete is safe: a retry after a lost response sees
+        // NotFound, which is reported as "already gone".
         let mut req = self
             .control
             .delete_object()
             .set_bucket(&self.bucket_resource)
-            .set_object(key);
+            .set_object(key)
+            .with_idempotency(true);
         if let Some(generation) = generation {
             req = req.set_if_generation_match(generation);
         }
@@ -598,11 +639,15 @@ impl GcsClient {
                     ObjectPreconditions::new().set_if_generation_match(*generation),
                 )
         });
+        // Sources are generation-pinned and every caller guards the
+        // destination with a generation precondition, so a retry after a
+        // lost response fails the precondition rather than composing twice.
         let mut req = self
             .control
             .compose_object()
             .set_destination(destination)
-            .set_source_objects(source_objects);
+            .set_source_objects(source_objects)
+            .with_idempotency(true);
         if let Some(generation) = if_generation_match {
             req = req.set_if_generation_match(generation);
         }
@@ -623,7 +668,8 @@ impl GcsClient {
                 .set_parent(&self.bucket_resource)
                 .set_prefix(prefix)
                 .set_page_size(1000)
-                .set_page_token(page_token.clone());
+                .set_page_token(page_token.clone())
+                .with_idempotency(true);
             let page = self.bounded("list objects", req.send()).await?;
             out.extend(page.objects.into_iter().map(|o| (o.name, o.generation)));
             if page.next_page_token.is_empty() {
@@ -635,14 +681,20 @@ impl GcsClient {
 
     /// Best-effort delete of every object under `prefix` (generation
     /// pinned). Returns the number of failures.
+    ///
+    /// A large upload stages thousands of objects. Only a few deletes run at
+    /// once so cleanup never queues ahead of every other request on the
+    /// shared semaphore.
     pub async fn delete_prefix(&self, prefix: &str) -> Result<usize, GcsError> {
+        use futures::StreamExt;
+        const CLEANUP_CONCURRENCY: usize = 8;
+
         let objects = self.list_prefix(prefix).await?;
-        let results = futures::future::join_all(
-            objects
-                .iter()
-                .map(|(name, generation)| self.delete(name, Some(*generation))),
-        )
-        .await;
+        let results: Vec<_> = futures::stream::iter(objects)
+            .map(|(name, generation)| async move { self.delete(&name, Some(generation)).await })
+            .buffer_unordered(CLEANUP_CONCURRENCY)
+            .collect()
+            .await;
         let failures = results.iter().filter(|r| r.is_err()).count();
         if failures > 0 {
             tracing::warn!(

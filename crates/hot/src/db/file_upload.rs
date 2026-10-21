@@ -25,6 +25,10 @@ pub struct FileUploadRecord {
     pub storage_backend: String,
     pub created_at: DateTime<Utc>,
     pub expires_at: DateTime<Utc>,
+    /// The file version the completion was claimed against: the active
+    /// file's storage location, `""` when the path had none, or NULL before
+    /// the first claim (and for uploads claimed by older releases).
+    pub completion_base: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -84,7 +88,7 @@ pub async fn insert_upload(
                 RETURNING upload_id, path, org_id, env_id, created_by_user_id, status,
                           expected_size, content_type, part_size, parts_expected,
                           parts_received, bytes_received, backend_upload_id,
-                          parts_manifest, storage_backend, created_at, expires_at
+                          parts_manifest, storage_backend, created_at, expires_at, completion_base
                 "#,
             )
             .bind(upload_id)
@@ -172,7 +176,7 @@ pub async fn insert_upload(
                 SELECT upload_id, path, org_id, env_id, created_by_user_id, status,
                        expected_size, content_type, part_size, parts_expected,
                        parts_received, bytes_received, backend_upload_id,
-                       parts_manifest, storage_backend, created_at, expires_at
+                       parts_manifest, storage_backend, created_at, expires_at, completion_base
                 FROM file_upload
                 WHERE upload_id = ? AND org_id = ? AND env_id = ?
                 "#,
@@ -205,7 +209,7 @@ pub async fn get_upload(
                 SELECT upload_id, path, org_id, env_id, created_by_user_id, status,
                        expected_size, content_type, part_size, parts_expected,
                        parts_received, bytes_received, backend_upload_id,
-                       parts_manifest, storage_backend, created_at, expires_at
+                       parts_manifest, storage_backend, created_at, expires_at, completion_base
                 FROM file_upload
                 WHERE upload_id = $1 AND org_id = $2 AND env_id = $3
                 "#,
@@ -225,7 +229,7 @@ pub async fn get_upload(
                 SELECT upload_id, path, org_id, env_id, created_by_user_id, status,
                        expected_size, content_type, part_size, parts_expected,
                        parts_received, bytes_received, backend_upload_id,
-                       parts_manifest, storage_backend, created_at, expires_at
+                       parts_manifest, storage_backend, created_at, expires_at, completion_base
                 FROM file_upload
                 WHERE upload_id = ? AND org_id = ? AND env_id = ?
                 "#,
@@ -268,7 +272,7 @@ pub async fn record_part(
                 RETURNING upload_id, path, org_id, env_id, created_by_user_id, status,
                           expected_size, content_type, part_size, parts_expected,
                           parts_received, bytes_received, backend_upload_id,
-                          parts_manifest, storage_backend, created_at, expires_at
+                          parts_manifest, storage_backend, created_at, expires_at, completion_base
                 "#,
             )
             .bind(upload_id)
@@ -327,50 +331,163 @@ pub async fn record_part(
 
 /// Durably claim an upload for completion (`pending` -> `completing`).
 ///
-/// Once claimed, the upload can no longer be aborted by a client or the
-/// expiry sweep, so a backend that assembles bytes before committing the
-/// file record never has those bytes deleted out from under it. Completion
-/// stays retryable: a `completing` upload may be claimed again by any
-/// service instance after a crash, lost response, or failed commit.
+/// Once claimed, a client abort and late part uploads are refused, and the
+/// expiry sweep leaves the upload alone until `lease_until`: the claim
+/// extends `expires_at` to at least that time, so only a completion that
+/// stopped making progress (a crash) is ever swept. Completion stays
+/// retryable: a `completing` upload may be claimed again by any service
+/// instance after a crash, lost response, or failed commit, which renews
+/// the lease.
+///
+/// The first claim also records the file version the completion replaces
+/// (`completion_base`): the active file's storage location, or `""` when the
+/// path has no active file. Re-claims keep it, so a retried completion
+/// commits against the same version and can never revert a write that
+/// landed after an earlier attempt committed. Returns the recorded base.
 pub async fn begin_completion(
     db: &DatabasePool,
     upload_id: Uuid,
     org_id: Uuid,
     env_id: Uuid,
-) -> Result<(), String> {
-    let query = match db {
-        DatabasePool::Postgres(_) => {
-            "UPDATE file_upload SET status = 'completing' WHERE upload_id = $1 AND org_id = $2 AND env_id = $3 AND status IN ('pending', 'completing') AND (parts_expected IS NULL OR parts_received = parts_expected) AND (parts_expected IS NULL OR bytes_received = expected_size)"
-        }
-        DatabasePool::Sqlite(_) => {
-            "UPDATE file_upload SET status = 'completing' WHERE upload_id = ? AND org_id = ? AND env_id = ? AND status IN ('pending', 'completing') AND (parts_expected IS NULL OR parts_received = parts_expected) AND (parts_expected IS NULL OR bytes_received = expected_size)"
-        }
-    };
-
+    lease_until: DateTime<Utc>,
+) -> Result<String, String> {
     let rows_affected = match db {
-        DatabasePool::Postgres(pool) => sqlx::query(query)
-            .bind(upload_id)
-            .bind(org_id)
-            .bind(env_id)
-            .execute(pool)
-            .await
-            .map_err(|e| format!("Failed to begin upload completion: {}", e))?
-            .rows_affected(),
-        DatabasePool::Sqlite(pool) => sqlx::query(query)
-            .bind(upload_id)
-            .bind(org_id)
-            .bind(env_id)
-            .execute(pool)
-            .await
-            .map_err(|e| format!("Failed to begin upload completion: {}", e))?
-            .rows_affected(),
+        DatabasePool::Postgres(pool) => sqlx::query(
+            r#"
+            UPDATE file_upload SET
+                status = 'completing',
+                expires_at = CASE WHEN expires_at < $4 THEN $4 ELSE expires_at END,
+                completion_base = CASE
+                    WHEN status = 'pending' OR completion_base IS NULL THEN COALESCE((
+                        SELECT f.storage_path FROM file f
+                        WHERE f.path = file_upload.path
+                          AND f.org_id = file_upload.org_id
+                          AND f.env_id = file_upload.env_id
+                          AND f.active = true
+                    ), '')
+                    ELSE completion_base
+                END
+            WHERE upload_id = $1 AND org_id = $2 AND env_id = $3
+              AND status IN ('pending', 'completing')
+              AND (parts_expected IS NULL OR parts_received = parts_expected)
+              AND (parts_expected IS NULL OR bytes_received = expected_size)
+            "#,
+        )
+        .bind(upload_id)
+        .bind(org_id)
+        .bind(env_id)
+        .bind(lease_until)
+        .execute(pool)
+        .await
+        .map_err(|e| format!("Failed to begin upload completion: {}", e))?
+        .rows_affected(),
+        DatabasePool::Sqlite(pool) => sqlx::query(
+            r#"
+            UPDATE file_upload SET
+                status = 'completing',
+                expires_at = CASE WHEN expires_at < ? THEN ? ELSE expires_at END,
+                completion_base = CASE
+                    WHEN status = 'pending' OR completion_base IS NULL THEN COALESCE((
+                        SELECT f.storage_path FROM file f
+                        WHERE f.path = file_upload.path
+                          AND f.org_id = file_upload.org_id
+                          AND f.env_id = file_upload.env_id
+                          AND f.active = 1
+                    ), '')
+                    ELSE completion_base
+                END
+            WHERE upload_id = ? AND org_id = ? AND env_id = ?
+              AND status IN ('pending', 'completing')
+              AND (parts_expected IS NULL OR parts_received = parts_expected)
+              AND (parts_expected IS NULL OR bytes_received = expected_size)
+            "#,
+        )
+        .bind(lease_until)
+        .bind(lease_until)
+        .bind(upload_id)
+        .bind(org_id)
+        .bind(env_id)
+        .execute(pool)
+        .await
+        .map_err(|e| format!("Failed to begin upload completion: {}", e))?
+        .rows_affected(),
     };
 
     if rows_affected == 0 {
         return Err("Upload not found, incomplete, or no longer pending".to_string());
     }
 
-    Ok(())
+    get_upload(db, upload_id, org_id, env_id)
+        .await?
+        .completion_base
+        .ok_or_else(|| "Upload completion base was not recorded".to_string())
+}
+
+/// Claim a `pending` upload for a client abort (`pending` -> `aborting`)
+/// before any staged bytes are deleted, so an abort can never race a
+/// completion that is assembling those bytes.
+pub async fn begin_abort(
+    db: &DatabasePool,
+    upload_id: Uuid,
+    org_id: Uuid,
+    env_id: Uuid,
+) -> Result<(), String> {
+    transition_status(db, upload_id, org_id, env_id, "pending", "aborting")
+        .await
+        .map_err(|e| format!("Failed to begin upload abort: {e}"))?
+        .then_some(())
+        .ok_or_else(|| "Upload not found or no longer pending".to_string())
+}
+
+/// Turn a completion that can never be applied (the file changed after the
+/// completion was claimed) into an abort (`completing` -> `aborting`).
+pub async fn abandon_completion(
+    db: &DatabasePool,
+    upload_id: Uuid,
+    org_id: Uuid,
+    env_id: Uuid,
+) -> Result<(), String> {
+    transition_status(db, upload_id, org_id, env_id, "completing", "aborting")
+        .await
+        .map_err(|e| format!("Failed to abandon upload completion: {e}"))?
+        .then_some(())
+        .ok_or_else(|| "Upload is no longer completing".to_string())
+}
+
+/// `UPDATE status = to WHERE status = from`; whether a row changed.
+async fn transition_status(
+    db: &DatabasePool,
+    upload_id: Uuid,
+    org_id: Uuid,
+    env_id: Uuid,
+    from: &str,
+    to: &str,
+) -> Result<bool, sqlx::Error> {
+    let rows_affected = match db {
+        DatabasePool::Postgres(pool) => sqlx::query(
+            "UPDATE file_upload SET status = $5 WHERE upload_id = $1 AND org_id = $2 AND env_id = $3 AND status = $4",
+        )
+        .bind(upload_id)
+        .bind(org_id)
+        .bind(env_id)
+        .bind(from)
+        .bind(to)
+        .execute(pool)
+        .await?
+        .rows_affected(),
+        DatabasePool::Sqlite(pool) => sqlx::query(
+            "UPDATE file_upload SET status = ? WHERE upload_id = ? AND org_id = ? AND env_id = ? AND status = ?",
+        )
+        .bind(to)
+        .bind(upload_id)
+        .bind(org_id)
+        .bind(env_id)
+        .bind(from)
+        .execute(pool)
+        .await?
+        .rows_affected(),
+    };
+    Ok(rows_affected > 0)
 }
 
 /// Return a failed completion claim to `pending` so the client can retry or
@@ -501,7 +618,7 @@ pub async fn cleanup_expired_uploads(db: &DatabasePool) -> Result<Vec<FileUpload
                 RETURNING upload_id, path, org_id, env_id, created_by_user_id, status,
                           expected_size, content_type, part_size, parts_expected,
                           parts_received, bytes_received, backend_upload_id,
-                          parts_manifest, storage_backend, created_at, expires_at
+                          parts_manifest, storage_backend, created_at, expires_at, completion_base
                 "#,
             )
             .bind(now)
@@ -520,7 +637,7 @@ pub async fn cleanup_expired_uploads(db: &DatabasePool) -> Result<Vec<FileUpload
                 RETURNING upload_id, path, org_id, env_id, created_by_user_id, status,
                           expected_size, content_type, part_size, parts_expected,
                           parts_received, bytes_received, backend_upload_id,
-                          parts_manifest, storage_backend, created_at, expires_at
+                          parts_manifest, storage_backend, created_at, expires_at, completion_base
                 "#,
             )
             .bind(now)
@@ -590,6 +707,7 @@ fn row_to_upload_pg(row: &sqlx::postgres::PgRow) -> Result<FileUploadRecord, Str
         storage_backend: row.try_get("storage_backend").map_err(|e| e.to_string())?,
         created_at: row.try_get("created_at").map_err(|e| e.to_string())?,
         expires_at: row.try_get("expires_at").map_err(|e| e.to_string())?,
+        completion_base: row.try_get("completion_base").map_err(|e| e.to_string())?,
     })
 }
 
@@ -626,6 +744,7 @@ fn row_to_upload_sqlite(row: &sqlx::sqlite::SqliteRow) -> Result<FileUploadRecor
         storage_backend: row.try_get("storage_backend").map_err(|e| e.to_string())?,
         created_at: row.try_get("created_at").map_err(|e| e.to_string())?,
         expires_at: row.try_get("expires_at").map_err(|e| e.to_string())?,
+        completion_base: row.try_get("completion_base").map_err(|e| e.to_string())?,
     })
 }
 
@@ -640,7 +759,7 @@ async fn get_upload_internal_sqlite(
         SELECT upload_id, path, org_id, env_id, created_by_user_id, status,
                expected_size, content_type, part_size, parts_expected,
                parts_received, bytes_received, backend_upload_id,
-               parts_manifest, storage_backend, created_at, expires_at
+               parts_manifest, storage_backend, created_at, expires_at, completion_base
         FROM file_upload
         WHERE upload_id = ? AND org_id = ? AND env_id = ?
         "#,

@@ -3304,6 +3304,7 @@ impl FileStorage for RelabeledStorage {
         _parts: &[(i32, String)],
         _total_size: i64,
         _content_type: Option<&str>,
+        _base: &hot::file_storage::CommitBase,
         _ctx: &hot::file_storage::FileStorageContext,
     ) -> Result<hot::file_storage::FileMetadata, String> {
         Err("simulated completion failure".to_string())
@@ -3430,6 +3431,163 @@ async fn test_multipart_failed_completion_returns_upload_to_pending() {
     assert_eq!(status, StatusCode::NO_CONTENT);
 }
 
+#[tokio::test]
+async fn test_multipart_part_retry_does_not_abort_upload() {
+    let (app, api_key, _temp_dir) = build_file_app().await;
+    let (status, json) = make_request(
+        &app,
+        Method::POST,
+        "/v1/files/uploads",
+        &api_key,
+        Some(json!({"path": "retry/part.bin", "expected_size": 3})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let upload_id = json["data"]["upload_id"].as_str().unwrap().to_string();
+    let put_part = async |bytes: &[u8]| {
+        make_raw_request(
+            &app,
+            Method::PUT,
+            &format!("/v1/files/uploads/{}/1", upload_id),
+            &api_key,
+            "application/octet-stream",
+            bytes.to_vec(),
+        )
+        .await
+    };
+
+    let (status, first) = put_part(b"abc").await;
+    assert_eq!(status, StatusCode::OK);
+    // A client retrying after a lost response gets the recorded part back.
+    let (status, retried) = put_part(b"abc").await;
+    assert_eq!(status, StatusCode::OK);
+    let etag = |body: &[u8]| serde_json::from_slice::<Value>(body).unwrap()["data"]["etag"].clone();
+    assert_eq!(etag(&first), etag(&retried));
+    // Different bytes for a recorded part are refused, and the upload lives on.
+    let (status, body) = put_part(b"xyz").await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    let body: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(body["error"]["code"], "part_already_uploaded");
+
+    let (status, json) = make_request(
+        &app,
+        Method::POST,
+        &format!("/v1/files/uploads/{}/complete", upload_id),
+        &api_key,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let file_id = json["data"]["file_id"].as_str().unwrap();
+    let (status, content) = make_raw_request(
+        &app,
+        Method::GET,
+        &format!("/v1/files/{}/download", file_id),
+        &api_key,
+        "application/octet-stream",
+        Vec::new(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(content, b"abc");
+}
+
+#[tokio::test]
+async fn test_upload_completion_claim_is_a_lease() {
+    use hot::db::file_upload;
+
+    let state = create_test_db().await;
+    let (_, api_key) = create_test_api_key(&state.0).await;
+    let temp_dir = tempfile::TempDir::new().unwrap();
+    let app = file_router(
+        state.clone(),
+        Arc::new(Box::new(LocalFileStorage::new(
+            temp_dir.path().to_path_buf(),
+        ))),
+    );
+    let (status, json) = make_request(
+        &app,
+        Method::POST,
+        "/v1/files/uploads",
+        &api_key,
+        Some(json!({"path": "lease/file.bin", "expected_size": 3})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let upload_id: Uuid = json["data"]["upload_id"].as_str().unwrap().parse().unwrap();
+    let (status, _) = make_raw_request(
+        &app,
+        Method::PUT,
+        &format!("/v1/files/uploads/{}/1", upload_id),
+        &api_key,
+        "application/octet-stream",
+        b"abc".to_vec(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let db = state.0.as_ref();
+    let env = Env::get_default_env(db).await.unwrap();
+    let (org_id, env_id) = (env.org_id, env.env_id);
+    let DatabasePool::Sqlite(pool) = db else {
+        panic!("test db is sqlite");
+    };
+    // The upload already expired, but its completion has just begun.
+    sqlx::query("UPDATE file_upload SET expires_at = ?")
+        .bind(chrono::Utc::now() - chrono::Duration::minutes(5))
+        .execute(pool)
+        .await
+        .unwrap();
+    let base = file_upload::begin_completion(
+        db,
+        upload_id,
+        org_id,
+        env_id,
+        chrono::Utc::now() + chrono::Duration::hours(1),
+    )
+    .await
+    .unwrap();
+    // No file existed at the path when the completion was claimed.
+    assert_eq!(base, "");
+
+    // The expiry sweep leaves an in-progress completion alone.
+    assert!(
+        file_upload::cleanup_expired_uploads(db)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    let upload = file_upload::get_upload(db, upload_id, org_id, env_id)
+        .await
+        .unwrap();
+    assert_eq!(upload.status, "completing");
+
+    // A client abort can't race it either.
+    let (status, _) = make_request(
+        &app,
+        Method::DELETE,
+        &format!("/v1/files/uploads/{}", upload_id),
+        &api_key,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT);
+
+    // Once the lease runs out, a crashed completion is collectable.
+    sqlx::query("UPDATE file_upload SET expires_at = ?")
+        .bind(chrono::Utc::now() - chrono::Duration::minutes(5))
+        .execute(pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        file_upload::cleanup_expired_uploads(db)
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+}
+
 /// Helper to make raw (non-JSON) authenticated requests
 async fn make_raw_request(
     app: &axum::Router,
@@ -3454,6 +3612,26 @@ async fn make_raw_request(
         .unwrap();
 
     (status, body.to_vec())
+}
+
+/// Every regular file under `dir`, outside multipart staging.
+fn stored_files(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
+    let mut files = Vec::new();
+    let mut pending = vec![dir.to_path_buf()];
+    while let Some(dir) = pending.pop() {
+        for entry in std::fs::read_dir(&dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.file_name().is_some_and(|name| name == ".uploads") {
+                continue;
+            }
+            if path.is_dir() {
+                pending.push(path);
+            } else {
+                files.push(path);
+            }
+        }
+    }
+    files
 }
 
 #[tokio::test]
@@ -3577,6 +3755,7 @@ async fn test_file_delete() {
 
     let upload_json: Value = serde_json::from_slice(&body).unwrap();
     let file_id = upload_json["data"]["file_id"].as_str().unwrap();
+    assert_eq!(stored_files(_temp_dir.path()).len(), 1);
 
     let (status, _) = make_request(
         &app,
@@ -3587,6 +3766,8 @@ async fn test_file_delete() {
     )
     .await;
     assert_eq!(status, StatusCode::NO_CONTENT);
+    // The stored bytes go with the record.
+    assert!(stored_files(_temp_dir.path()).is_empty());
 
     let (status, _) = make_request(
         &app,

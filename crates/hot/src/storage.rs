@@ -764,7 +764,9 @@ pub async fn build_storage_from_config(
         BuildStorageType::Local => Ok(Box::new(LocalBuildStorage::from_env())),
         #[cfg(feature = "s3-storage")]
         BuildStorageType::S3 => {
-            let storage = s3::S3BuildStorage::from_config(conf).await?;
+            let storage = s3::S3BuildStorage::from_config(conf)
+                .await
+                .map_err(|e| crate::file_storage::backend_init_error(e, "build", "s3"))?;
             Ok(Box::new(storage))
         }
         #[cfg(not(feature = "s3-storage"))]
@@ -772,7 +774,11 @@ pub async fn build_storage_from_config(
             Err("S3 storage requested but s3-storage feature is not enabled".to_string())
         }
         #[cfg(feature = "gcs-storage")]
-        BuildStorageType::Gcs => Ok(Box::new(gcs::GcsBuildStorage::from_config(conf).await?)),
+        BuildStorageType::Gcs => Ok(Box::new(
+            gcs::GcsBuildStorage::from_config(conf)
+                .await
+                .map_err(|e| crate::file_storage::backend_init_error(e, "build", "gcs"))?,
+        )),
         #[cfg(not(feature = "gcs-storage"))]
         BuildStorageType::Gcs => Err(
             "GCS build storage requested but this binary was built without the gcs-storage feature"
