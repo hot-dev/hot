@@ -209,6 +209,7 @@ async fn copy_user_data(db_path: &Path, backup_path: &Path) -> Result<PortReport
         .await?;
 
     let v2_tables = list_user_tables(&mut conn, "main").await?;
+    let v2_tables = copy_order(&mut conn, &v2_tables).await?;
 
     let mut copied_tables = Vec::new();
     let mut skipped_tables = Vec::new();
@@ -231,7 +232,7 @@ async fn copy_user_data(db_path: &Path, backup_path: &Path) -> Result<PortReport
 
         let v2_cols = column_names(&mut conn, "main", table).await?;
         let v1_cols = column_names(&mut conn, "v1", table).await?;
-        let v2_only_columns: Vec<String> = v2_cols
+        let mut v2_only_columns: Vec<String> = v2_cols
             .iter()
             .filter(|c| !v1_cols.contains(c))
             .cloned()
@@ -254,9 +255,42 @@ async fn copy_user_data(db_path: &Path, backup_path: &Path) -> Result<PortReport
             .map(|c| format!("\"{c}\""))
             .collect::<Vec<_>>()
             .join(", ");
-        let copy_sql = format!(
-            "INSERT INTO main.\"{table}\" ({cols_sql}) SELECT {cols_sql} FROM v1.\"{table}\""
-        );
+        // v1 traces predate call.env_id. Derive it from the owning run, as
+        // migration 015 does; v2 rejects a call whose run is not in its env.
+        let derives_call_env = table == "call"
+            && v2_only_columns.iter().any(|c| c == "env_id")
+            && table_exists(&mut conn, "v1", "run").await?
+            && column_names(&mut conn, "v1", "run")
+                .await?
+                .iter()
+                .any(|c| c == "env_id");
+        let copy_sql = if derives_call_env {
+            v2_only_columns.retain(|c| c != "env_id");
+            let orphaned: i64 = sqlx::query_scalar(
+                "SELECT COUNT(*) FROM v1.\"call\" c \
+                 WHERE NOT EXISTS (SELECT 1 FROM v1.\"run\" r WHERE r.\"run_id\" = c.\"run_id\")",
+            )
+            .fetch_one(&mut conn)
+            .await?;
+            if orphaned > 0 {
+                tracing::warn!(
+                    "hot.dev: skipping {orphaned} v1 call row(s) whose run no longer exists"
+                );
+            }
+            let source_cols = intersection
+                .iter()
+                .map(|c| format!("c.\"{c}\""))
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!(
+                "INSERT INTO main.\"call\" ({cols_sql}, \"env_id\") SELECT {source_cols}, r.\"env_id\" \
+                 FROM v1.\"call\" c JOIN v1.\"run\" r ON r.\"run_id\" = c.\"run_id\""
+            )
+        } else {
+            format!(
+                "INSERT INTO main.\"{table}\" ({cols_sql}) SELECT {cols_sql} FROM v1.\"{table}\""
+            )
+        };
         let result = sqlx::query(sqlx::AssertSqlSafe(copy_sql.as_str()))
             .execute(&mut conn)
             .await
@@ -352,6 +386,43 @@ async fn inspect_v1_database(db_path: &Path) -> Result<(), DatabaseError> {
 
     conn.close().await?;
     Ok(())
+}
+
+/// Copy referenced tables before the tables that point at them: v2 triggers
+/// check ownership against parent rows as each child row is inserted, so name
+/// order (`call` before `run`) would reject valid data. Cycles fall back to
+/// name order.
+async fn copy_order(
+    conn: &mut SqliteConnection,
+    tables: &[String],
+) -> Result<Vec<String>, DatabaseError> {
+    let mut parents = std::collections::BTreeMap::new();
+    for table in tables {
+        validate_identifier(table, "table")?;
+        let sql = format!("SELECT \"table\" FROM pragma_foreign_key_list('{table}', 'main')");
+        let referenced: Vec<(String,)> = sqlx::query_as(sqlx::AssertSqlSafe(sql.as_str()))
+            .fetch_all(&mut *conn)
+            .await?;
+        let referenced: std::collections::BTreeSet<String> = referenced
+            .into_iter()
+            .map(|(parent,)| parent)
+            .filter(|parent| parent != table && tables.contains(parent))
+            .collect();
+        parents.insert(table.as_str(), referenced);
+    }
+    let mut ordered: Vec<String> = Vec::with_capacity(tables.len());
+    while ordered.len() < tables.len() {
+        let pending = |table: &&String| !ordered.contains(*table);
+        let next = tables
+            .iter()
+            .filter(pending)
+            .find(|table| parents[table.as_str()].iter().all(|p| ordered.contains(p)))
+            .or_else(|| tables.iter().find(pending))
+            .expect("an unordered table remains")
+            .clone();
+        ordered.push(next);
+    }
+    Ok(ordered)
 }
 
 async fn list_user_tables(
@@ -673,6 +744,99 @@ mod tests {
                 "uri": format!("sqlite:{}", path.display()),
             }
         })
+    }
+
+    #[tokio::test]
+    async fn test_port_copies_run_history_with_call_ownership() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db_path = tmp.path().join("hot.sqlite.db");
+        let (_, user_id, env_id) = build_v1_fixture(&db_path).await;
+        let (build_id, stream_id, run_id, call_id, orphan_id) = (
+            Uuid::now_v7(),
+            Uuid::now_v7(),
+            Uuid::now_v7(),
+            Uuid::now_v7(),
+            Uuid::now_v7(),
+        );
+        let mut v1 = SqliteConnectOptions::new()
+            .filename(&db_path)
+            .connect()
+            .await
+            .unwrap();
+        // v1 traces have no env_id, and `call` sorts before `run` by name.
+        v1.execute(
+            "CREATE TABLE build (build_id blob primary key, project_id blob not null, hash text not null, size integer not null, created_by_user_id blob not null);
+             CREATE TABLE stream (stream_id blob primary key, env_id blob not null);
+             CREATE TABLE run (run_id blob primary key, env_id blob not null, stream_id blob not null, build_id blob not null, run_type_id integer not null, start_time datetime);
+             CREATE TABLE call (call_id blob primary key, run_id blob not null, function_name text not null, static_scope text not null, runtime_path text not null, call_depth integer not null, args text, start_time datetime not null, size integer not null default 0);",
+        )
+        .await
+        .unwrap();
+        let project_id: Vec<u8> = sqlx::query_scalar("SELECT project_id FROM project")
+            .fetch_one(&mut v1)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO build VALUES (?, ?, 'bundle', 1, ?)")
+            .bind(build_id)
+            .bind(project_id)
+            .bind(user_id)
+            .execute(&mut v1)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO stream VALUES (?, ?)")
+            .bind(stream_id)
+            .bind(env_id)
+            .execute(&mut v1)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO run VALUES (?, ?, ?, ?, 1, '2026-01-01 00:00:00')")
+            .bind(run_id)
+            .bind(env_id)
+            .bind(stream_id)
+            .bind(build_id)
+            .execute(&mut v1)
+            .await
+            .unwrap();
+        for (call, run) in [(call_id, run_id), (orphan_id, Uuid::now_v7())] {
+            sqlx::query("INSERT INTO call VALUES (?, ?, 'f', 's', 'p', 0, '[1]', '2026-01-01 00:00:00', 70)")
+                .bind(call)
+                .bind(run)
+                .execute(&mut v1)
+                .await
+                .unwrap();
+        }
+        v1.close().await.unwrap();
+
+        let report = port_v1_sqlite_to_v2(&conf_for_path(&db_path))
+            .await
+            .expect("port should copy run history");
+        let calls = report
+            .copied_tables
+            .iter()
+            .find(|t| t.table == "call")
+            .expect("call table copied");
+        assert_eq!(calls.rows_copied, 1, "orphaned call is skipped");
+        assert!(!calls.v2_only_columns.contains(&"env_id".to_string()));
+
+        let mut v2 = SqliteConnectOptions::new()
+            .filename(&db_path)
+            .connect()
+            .await
+            .unwrap();
+        let owner: Uuid = sqlx::query_scalar("SELECT env_id FROM call WHERE call_id = ?")
+            .bind(call_id)
+            .fetch_one(&mut v2)
+            .await
+            .unwrap();
+        assert_eq!(owner, env_id);
+        let counted: i64 = sqlx::query_scalar(
+            "SELECT COALESCE(SUM(call_bytes), 0) FROM usage_storage WHERE env_id = ?",
+        )
+        .bind(env_id)
+        .fetch_one(&mut v2)
+        .await
+        .unwrap();
+        assert_eq!(counted, 70, "ported trace bytes are counted");
     }
 
     #[tokio::test]
