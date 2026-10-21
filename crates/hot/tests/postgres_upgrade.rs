@@ -587,11 +587,11 @@ async fn populated_upgrades_use_non_bypass_owner_and_reprovision_runtime_grants(
     let Ok(admin_uri) = std::env::var("HOT_TEST_POSTGRES_URI") else {
         return Ok(());
     };
-    for baseline in [9, 17, 19] {
+    for baseline in [9, 15, 17] {
         let fixture = UpgradeDatabase::new(&admin_uri, baseline).await?;
         let result: TestResult = async {
             let rows = ExistingRows::seed(&fixture.admin).await?;
-            if baseline >= 14 { rows.add_delegated_issuer(&fixture.admin).await?; }
+            if baseline >= 12 { rows.add_delegated_issuer(&fixture.admin).await?; }
             let old_ledger = ledger(&fixture.owner).await?;
             let owner_privileged: bool = sqlx::query_scalar("SELECT rolsuper OR rolbypassrls OR rolcreaterole OR rolcreatedb FROM pg_roles WHERE rolname=current_user")
                 .fetch_one(&fixture.owner).await?;
@@ -602,8 +602,8 @@ async fn populated_upgrades_use_non_bypass_owner_and_reprovision_runtime_grants(
             assert_latest_ledger(&fixture.owner).await?;
             fixture.upgrade().await?;
             assert_eq!(ledger(&fixture.owner).await?, final_ledger);
-            if baseline < 14 { rows.add_delegated_issuer(&fixture.admin).await?; }
-            if baseline < 16 {
+            if baseline < 12 { rows.add_delegated_issuer(&fixture.admin).await?; }
+            if baseline < 14 {
                 let admission: (Uuid,Uuid,Uuid,bool) = sqlx::query_as("SELECT root_org_id,org_id,env_id,admitted_at='2026-09-01 12:00:00+00'::timestamptz FROM run_admission WHERE run_id=$1")
                     .bind(rows.run).fetch_one(&fixture.admin).await?;
                 assert_eq!(admission,(rows.org,rows.org,rows.env,true));
@@ -636,17 +636,17 @@ async fn populated_upgrades_use_non_bypass_owner_and_reprovision_runtime_grants(
 }
 
 #[tokio::test]
-async fn migration_018_failure_rolls_back_all_ddl_then_retries_after_explicit_repair() -> TestResult
+async fn migration_016_failure_rolls_back_all_ddl_then_retries_after_explicit_repair() -> TestResult
 {
     let Ok(admin_uri) = std::env::var("HOT_TEST_POSTGRES_URI") else {
         return Ok(());
     };
     for mismatch in ["destination", "subscription_org", "subscription_env"] {
-        let fixture = UpgradeDatabase::new(&admin_uri, 17).await?;
+        let fixture = UpgradeDatabase::new(&admin_uri, 15).await?;
         let result: TestResult = async {
             let rows = ExistingRows::seed(&fixture.admin).await?;
             rows.add_delegated_issuer(&fixture.admin).await?;
-            // An existing 017 application could create these references because
+            // An existing015 application could create these references because
             // FK checks bypass RLS and only check existence, not owner equality.
             if mismatch == "destination" {
                 sqlx::query("UPDATE alert_delivery SET destination_id=$1 WHERE alert_delivery_id=$2")
@@ -699,7 +699,7 @@ async fn provisioning_rejects_shared_and_set_role_privileges_atomically() -> Tes
     let Ok(admin_uri) = std::env::var("HOT_TEST_POSTGRES_URI") else {
         return Ok(());
     };
-    let fixture = UpgradeDatabase::new(&admin_uri, 17).await?;
+    let fixture = UpgradeDatabase::new(&admin_uri, 15).await?;
     let result: TestResult = async {
         fixture.upgrade().await?;
         assert_latest_ledger(&fixture.owner).await?;
@@ -746,7 +746,7 @@ async fn provisioning_rejects_shared_and_set_role_privileges_atomically() -> Tes
 }
 
 #[tokio::test]
-async fn retained_cross_environment_origins_abort_019_without_rewriting_history() -> TestResult {
+async fn retained_cross_environment_origins_abort_017_without_rewriting_history() -> TestResult {
     let Ok(admin_uri) = std::env::var("HOT_TEST_POSTGRES_URI") else {
         return Ok(());
     };
@@ -795,12 +795,12 @@ async fn retained_cross_environment_origins_abort_019_without_rewriting_history(
             let error = fixture.upgrade().await.unwrap_err().to_string();
             assert!(error.contains(diagnostic),"{error}");
             let committed = ledger(&fixture.owner).await?;
-            assert_eq!(committed.last().unwrap().0,18,"earlier transactional migrations remain committed");
+            assert_eq!(committed.last().unwrap().0,16,"earlier transactional migrations remain committed");
             let retained: Uuid = sqlx::query_scalar(read_sql).bind(record).fetch_one(&fixture.admin).await?;
             assert_eq!(retained,original);
             let policy: String = sqlx::query_scalar("SELECT qual FROM pg_policies WHERE schemaname='hot' AND tablename='management_key' AND policyname='management_key_read'")
                 .fetch_one(&fixture.owner).await?;
-            assert!(policy.contains("scope_org_writes"),"018 must remain enforced");
+            assert!(policy.contains("scope_org_writes"),"016 must remain enforced");
             let repair = ScopedPgPool::new(fixture.owner.clone()).with_scope(DatabaseScope::Maintenance { operation: MaintenanceOperation::Queue, org_id: None });
             let valid_target = if mismatch == "run_event" { local_event } else { local_run };
             sqlx::query(repair_sql).bind(record).bind(valid_target).execute(&repair).await?;
@@ -826,10 +826,10 @@ async fn bypass_rls_migrations_initialize_each_account_counter_once() -> TestRes
     let Ok(admin_uri) = std::env::var("HOT_TEST_POSTGRES_URI") else {
         return Ok(());
     };
-    let fixture = UpgradeDatabase::new(&admin_uri, 16).await?;
+    let fixture = UpgradeDatabase::new(&admin_uri, 14).await?;
     let result: TestResult = async {
         // Two accounts with stored bytes: the first holds a trace, the second a
-        // store entry. A superuser sees both accounts in every 017 pass.
+        // store entry. A superuser sees both accounts in every 015 pass.
         let rows = ExistingRows::seed(&fixture.admin).await?;
         sqlx::query("INSERT INTO store_map_entry(org_id,env_id,store_name,key,value,size) VALUES($1,$2,'retained','\"k\"','\"v\"',40)")
             .bind(rows.other_org).bind(rows.other_env).execute(&fixture.admin).await?;

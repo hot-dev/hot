@@ -1,7 +1,7 @@
 # PostgreSQL scoped runtime setup
 
 PostgreSQL runtime connections require a validated backend scope for every
-query. Migration 013 forces RLS on scoped platform tables; later migrations must
+query. Migration 011 forces RLS on scoped platform tables; later migrations must
 extend that coverage. Missing scope fails closed. SQLite continues to use the
 shared application authorization contract and explicit SQL filters.
 
@@ -94,7 +94,7 @@ Live documentation and source browsing additionally require the configured
 local profile and current live build. Their cache keys include the build ID.
 A missing uploaded build never falls back to a similarly named host project.
 
-Migration 013 validates existing org/env, build/env, stream/env, credential/env,
+Migration 011 validates existing org/env, build/env, stream/env, credential/env,
 context/project and blob ownership before installing policies. Repair reported
 rows through a reviewed migration, then retry; it never reassigns ownership
 automatically. New writes also enforce those links and immutable owner columns.
@@ -134,30 +134,30 @@ can allow `hot.scope_bootstrap('billing_webhook')`) and the org plan, then uses
 For an existing database:
 
 1. Restore a recent backup into a separate database and rehearse migrations
-   012–020 with the intended owner/runtime roles, including a non-superuser,
+   010–018 with the intended owner/runtime roles, including a non-superuser,
    non-BYPASSRLS schema owner. Check duplicate environment
-   names within each org before migration 012 adds its unique index. Inspect
-   migration 013's ownership preflight and resolve any reported mismatch in a
+   names within each org before migration 010 adds its unique index. Inspect
+   migration 011's ownership preflight and resolve any reported mismatch in a
    reviewed repair migration. Preserve original ownership evidence.
-   Migration 018 similarly refuses alert deliveries whose subscription or
+   Migration 016 similarly refuses alert deliveries whose subscription or
    destination belongs to another org, or whose subscription targets a different
    environment. Verify a refused migration leaves its earlier statements and
    SQLx ledger entry rolled back before applying an approved repair and retrying.
-   Migration 019 validates retained run/task origin references and run/event
-   links against their environments. Migration 013 already checks new writes,
+   Migration 017 validates retained run/task origin references and run/event
+   links against their environments. Migration 011 already checks new writes,
    but its original preflight did not cover those historical links. A refusal
    preserves the offending records and earlier committed migrations, including
-   018; investigate and repair the relationship explicitly before retrying.
+   016; investigate and repair the relationship explicitly before retrying.
 2. Record row counts and account usage, including retained run history, before
-   the change. Migration 016 backfills the admission ledger from retained runs;
+   the change. Migration 014 backfills the admission ledger from retained runs;
    it cannot recover runs already deleted by retention. Reconcile any usage
    missing from that history against an authoritative account usage source
    before enforcing an existing paid account's monthly run cap.
-   Migration 017 reconciles retained trace sizes, including UTF-8 and error
+   Migration 015 reconciles retained trace sizes, including UTF-8 and error
    payloads, backfills immutable call environments, and initializes storage
-   counters before trace-storage admission uses them. Migration 015 initializes
+   counters before trace-storage admission uses them. Migration 013 initializes
    active task counters; period usage is initialized on the first limited claim.
-   Migration 016 leaves run counters lazy, backed by the admission ledger.
+   Migration 014 leaves run counters lazy, backed by the admission ledger.
 3. Drain work and stop every old process using the database, including workers,
    scheduler, direct CLI sessions and private provider jobs. Take a recoverable
    backup. Apply the additive migrations and rerun the grant script as the
@@ -195,7 +195,7 @@ transaction. Rely on snapshots and point-in-time recovery for backups. The
 master user (CREATEDB, CREATEROLE, `rds_superuser`) fails runtime
 qualification by design: use it, or the current table owner, only as the
 migration login, and create a separate runtime login without those
-memberships. Migration 017 rewrites every retained call row in one
+memberships. Migration 015 rewrites every retained call row in one
 transaction, under RLS for a non-bypass owner; size the window, WAL, storage
 headroom and replica lag for the `call` table, and keep `statement_timeout`
 off for the migration login.
@@ -251,8 +251,8 @@ Reconciliation retains ordinary writes and does not hold the admission root
 lock. It checks one counter per short transaction, but still reads account
 history, so budget for that hourly background load.
 
-Migrations 012–020 on this development branch are unshipped and were revised in
-place, including 015–017 for counters and call ownership. A scratch database
+Migrations 010–018 on this development branch are unshipped and were revised in
+place, including 013–015 for counters and call ownership. A scratch database
 that already applied an earlier revision will fail SQLx checksum validation.
 Recreate only disposable development/test databases with known ownership and
 retain any needed data first. Never edit the SQLx ledger to conceal a checksum

@@ -1,4 +1,4 @@
--- Migration 013 enforces these relationships on new writes, but its original
+-- Migration 011 enforces these relationships on new writes, but its original
 -- preflight did not examine retained origin-run or event references. Refuse an
 -- upgrade that would leave existing rows unable to receive normal status/data
 -- updates. Preserve the rows for an explicit, reviewed repair and retry.
