@@ -34,13 +34,13 @@ impl Run {
         }
         let env = crate::db::env::Env::get_env_uncached(db, env_id)
             .await
-            .map_err(|_| RunError::ScopeDenied)?;
+            .map_err(env_lookup_error)?;
         if env.org_id != *org_id {
             return Err(RunError::ScopeDenied);
         }
         let root_id = crate::db::org::Org::billing_owner_id_for(db, org_id)
             .await
-            .map_err(|_| RunError::ScopeDenied)?;
+            .map_err(org_lookup_error)?;
         let billing = db.with_scope(DatabaseScope::Maintenance {
             operation: MaintenanceOperation::Billing,
             org_id: Some(root_id),
@@ -138,6 +138,26 @@ admission!(
     "UPDATE org SET org_id=org_id WHERE org_id=$1",
     run_usage_sqlite
 );
+
+/// A missing or out-of-scope owner (RLS hides it as RowNotFound) is a scope
+/// denial. Any other failure (pool timeout, I/O, statement timeout) is
+/// infrastructure and must leave accepted work pending.
+fn env_lookup_error(error: crate::db::env::EnvError) -> RunError {
+    use crate::db::env::EnvError;
+    match error {
+        EnvError::NotFound | EnvError::Database(sqlx::Error::RowNotFound) => RunError::ScopeDenied,
+        EnvError::Database(error) => RunError::Database(error),
+    }
+}
+
+fn org_lookup_error(error: crate::db::org::OrgError) -> RunError {
+    use crate::db::org::OrgError;
+    match error {
+        OrgError::Database(sqlx::Error::RowNotFound) => RunError::ScopeDenied,
+        OrgError::Database(error) => RunError::Database(error),
+        _ => RunError::ScopeDenied,
+    }
+}
 
 fn parse_features(json: Option<String>) -> Result<Option<Value>, RunError> {
     json.map(|s| {
@@ -273,6 +293,33 @@ mod tests {
         assert!(matches!(
             Run::admit_execution(&db, &child.0, &child.1, &ids[1]).await,
             Err(RunError::QuotaExceeded(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn transient_lookup_failures_defer_instead_of_denying_scope() {
+        let (db, _, children) = fixture(1).await;
+        assert!(matches!(
+            Run::admit_execution(&db, &children[0].0, &Uuid::now_v7(), &Uuid::now_v7()).await,
+            Err(RunError::ScopeDenied)
+        ));
+        let DatabasePool::Sqlite(pool) = &db else {
+            unreachable!()
+        };
+        pool.close().await;
+        assert!(matches!(
+            Run::admit_execution(&db, &children[0].0, &children[0].1, &Uuid::now_v7()).await,
+            Err(RunError::Database(_))
+        ));
+        assert!(matches!(
+            env_lookup_error(crate::db::env::EnvError::Database(
+                sqlx::Error::PoolTimedOut
+            )),
+            RunError::Database(_)
+        ));
+        assert!(matches!(
+            org_lookup_error(crate::db::org::OrgError::Database(sqlx::Error::RowNotFound)),
+            RunError::ScopeDenied
         ));
     }
 
