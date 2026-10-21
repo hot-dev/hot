@@ -43,7 +43,11 @@ verify nothing and grant no environment rows. A read set always makes its
 transaction read-only. Because scope is applied by a function call with
 transaction-local settings, connection proxies that multiplex between
 transactions (such as RDS Proxy, which pins sessions on `SET` and direct
-`set_config` statements) can keep multiplexing. Set the runtime login's
+`set_config` statements) can keep multiplexing. The scheduler is the exception:
+its singleton is a session advisory lock held on a dedicated connection, so
+connect it directly or with a pinned session. It checks the lock every 30
+seconds and exits if the lock is lost, so a replacement never runs alongside
+it. Set the runtime login's
 `search_path`, `statement_timeout` and `lock_timeout` as role defaults
 (`ALTER ROLE ... SET`) or in the proxy's initialization query: the connection
 setup otherwise issues session-level `SET` statements, which pin.

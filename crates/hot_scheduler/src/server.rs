@@ -73,6 +73,8 @@ pub const DEFAULT_SYNC_INTERVAL_SECONDS: u64 = 30; // Sync with database every 3
 pub const DEFAULT_RETRY_INTERVAL_SECONDS: u64 = 1;
 pub const DEFAULT_AT_INTERVAL_SECONDS: u64 = 1;
 const SCHEDULER_ADVISORY_LOCK_ID: i64 = 4_849_672_113_597_841;
+/// How often the scheduler confirms it still holds its singleton lock.
+const SINGLETON_CHECK_INTERVAL: Duration = Duration::from_secs(30);
 
 async fn acquire_scheduler_singleton_guard(
     db: &DatabasePool,
@@ -497,18 +499,61 @@ pub async fn run(
         warn!("hot.dev: SCHEDULER running without database - no schedule sync will occur");
     }
 
+    // The singleton lock lives on its own session, which can end silently
+    // (failover, termination, idle timeout). Stop scheduling if it is lost so a
+    // replacement scheduler never runs alongside this one.
+    let (lock_lost_tx, lock_lost_rx) = tokio::sync::oneshot::channel::<()>();
+    let guard_task = singleton_guard.map(|mut guard| {
+        let mut shutdown_rx = shutdown_tx.subscribe();
+        tokio::spawn(async move {
+            let mut timer = interval(SINGLETON_CHECK_INTERVAL);
+            timer.tick().await;
+            loop {
+                tokio::select! {
+                    _ = timer.tick() => match guard.ensure_held().await {
+                        Ok(true) => {}
+                        outcome => {
+                            error!(?outcome, "hot.dev: SCHEDULER lost its singleton lock; stopping");
+                            let _ = lock_lost_tx.send(());
+                            return None;
+                        }
+                    },
+                    _ = shutdown_rx.recv() => return Some(guard),
+                }
+            }
+        })
+    });
+
     // Start the scheduler
     scheduler.start().await?;
 
     info!("hot.dev: SCHEDULER started and running");
 
-    // Wait for SIGINT or SIGTERM
-    hot::signal::shutdown_signal().await;
+    // Wait for SIGINT or SIGTERM, or the loss of the singleton lock.
+    let watching_lock = guard_task.is_some();
+    let lock_lost = async move {
+        if watching_lock {
+            let _ = lock_lost_rx.await;
+        } else {
+            std::future::pending::<()>().await;
+        }
+    };
+    let lost = tokio::select! {
+        _ = hot::signal::shutdown_signal() => false,
+        _ = lock_lost => true,
+    };
     info!("hot.dev: SCHEDULER shutting down gracefully");
     let _ = shutdown_tx.send(());
     scheduler.shutdown().await?;
-    if let Some(guard) = singleton_guard {
+    if let Some(task) = guard_task
+        && let Ok(Some(guard)) = task.await
+    {
         guard.release().await;
+    }
+    if lost {
+        return Err(
+            "scheduler singleton lock was lost; stopping to avoid duplicate scheduling".into(),
+        );
     }
 
     Ok(())

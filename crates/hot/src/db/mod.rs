@@ -316,6 +316,28 @@ impl AdvisoryLock {
         }
         let _ = sqlx::Connection::close(conn).await;
     }
+
+    /// Whether this guard's session still holds the lock. A session advisory
+    /// lock disappears silently when its backend ends (failover, termination,
+    /// an idle timeout), so long-lived holders must check before relying on it.
+    /// An error means the session is gone.
+    pub async fn ensure_held(&mut self) -> Result<bool, sqlx::Error> {
+        let AdvisoryLockInner::Postgres { conn, lock_id } = &mut self.inner else {
+            return Ok(true);
+        };
+        let Some(conn) = conn.as_mut() else {
+            return Ok(false);
+        };
+        // A bigint key is stored as classid (high 32 bits) and objid (low 32 bits).
+        sqlx::query_scalar(
+            "SELECT EXISTS (SELECT 1 FROM pg_locks WHERE locktype = 'advisory' AND granted \
+             AND pid = pg_backend_pid() AND objsubid = 1 \
+             AND classid = (($1 >> 32) & 4294967295)::oid AND objid = ($1 & 4294967295)::oid)",
+        )
+        .bind(*lock_id)
+        .fetch_one(conn)
+        .await
+    }
 }
 
 /// Try to acquire a session-scoped Postgres advisory lock without blocking.
