@@ -87,6 +87,9 @@ hot.build.gcs.prefix "builds"
 ```
 
 Hot uses existing buckets. It never creates, configures, or deletes buckets.
+The concurrency limit covers download bodies as well as request setup. The
+request timeout covers headers and the entire body, including backpressure
+from a slow consumer; dropping the reader cancels the download.
 
 ### Authentication
 
@@ -176,18 +179,38 @@ than 32 parts are combined in stages, all within the same bucket.
 Completion is recoverable. If a completion is interrupted (a crash, a
 database error, or a lost response), retrying it on any instance reuses the
 object it assembled, or reports success if the file already references it.
+Once completed, retries return the saved completion response even if a later
+write or deletion changed the path. They never reapply the upload.
 Completion only replaces the file version that existed when it began: if the
 file was written or deleted in the meantime, nothing is committed, the upload
 is aborted, and the request fails with `409 upload_conflict`.
 
 While a completion is in progress the upload cannot be aborted, and its parts
 can no longer change. A failed completion returns the upload to `pending`.
+Its original file-version guard is preserved across failures and retries.
 Starting a completion extends the upload's expiry by an hour, so the expiry
 sweep only aborts a completion that stopped making progress. Aborting removes
 the staged parts and any assembled object the file does not reference.
 Retrying a part upload whose response was lost is safe: the same bytes are
 acknowledged again, and different bytes for an already uploaded part are
 refused with `409 part_already_uploaded`.
+Before sending any part bytes to storage, the API reserves that part's content
+hash in the database. Backend ETags remain opaque object tokens. Concurrent
+requests for different bytes are rejected before they can replace an S3 part;
+an identical request still in progress returns `409 part_in_progress` and can
+be retried after it finishes. A crashed part attempt is reclaimable after ten
+minutes, with the same bytes. Each part operation times out after five minutes.
+
+Abort claims also have a one-hour lease. A client retry or the expiry sweep
+can reclaim an interrupted abort when that lease expires. Cleanup failures
+release the claim immediately while retaining the abort intent, and retrying
+an already aborted upload succeeds.
+
+Migration 011 adds durable part reservations and saved completion responses.
+Completed uploads from before this migration have no saved response and return
+`409 completion_result_unavailable` when completion is retried. Older Local/S3
+parts without reservations can still be retried when their ETag matches the
+body's MD5; opaque legacy part tokens cannot establish content equality.
 
 ### Lifecycle, Retention, and Costs
 

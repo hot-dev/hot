@@ -29,6 +29,8 @@ pub struct FileUploadRecord {
     /// file's storage location, `""` when the path had none, or NULL before
     /// the first claim (and for uploads claimed by older releases).
     pub completion_base: Option<String>,
+    /// Stable response saved atomically with the completed status.
+    pub completion_result: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -88,7 +90,7 @@ pub async fn insert_upload(
                 RETURNING upload_id, path, org_id, env_id, created_by_user_id, status,
                           expected_size, content_type, part_size, parts_expected,
                           parts_received, bytes_received, backend_upload_id,
-                          parts_manifest, storage_backend, created_at, expires_at, completion_base
+                          parts_manifest, storage_backend, created_at, expires_at, completion_base, completion_result
                 "#,
             )
             .bind(upload_id)
@@ -176,7 +178,7 @@ pub async fn insert_upload(
                 SELECT upload_id, path, org_id, env_id, created_by_user_id, status,
                        expected_size, content_type, part_size, parts_expected,
                        parts_received, bytes_received, backend_upload_id,
-                       parts_manifest, storage_backend, created_at, expires_at, completion_base
+                       parts_manifest, storage_backend, created_at, expires_at, completion_base, completion_result
                 FROM file_upload
                 WHERE upload_id = ? AND org_id = ? AND env_id = ?
                 "#,
@@ -209,7 +211,7 @@ pub async fn get_upload(
                 SELECT upload_id, path, org_id, env_id, created_by_user_id, status,
                        expected_size, content_type, part_size, parts_expected,
                        parts_received, bytes_received, backend_upload_id,
-                       parts_manifest, storage_backend, created_at, expires_at, completion_base
+                       parts_manifest, storage_backend, created_at, expires_at, completion_base, completion_result
                 FROM file_upload
                 WHERE upload_id = $1 AND org_id = $2 AND env_id = $3
                 "#,
@@ -229,7 +231,7 @@ pub async fn get_upload(
                 SELECT upload_id, path, org_id, env_id, created_by_user_id, status,
                        expected_size, content_type, part_size, parts_expected,
                        parts_received, bytes_received, backend_upload_id,
-                       parts_manifest, storage_backend, created_at, expires_at, completion_base
+                       parts_manifest, storage_backend, created_at, expires_at, completion_base, completion_result
                 FROM file_upload
                 WHERE upload_id = ? AND org_id = ? AND env_id = ?
                 "#,
@@ -246,12 +248,117 @@ pub async fn get_upload(
     }
 }
 
+/// A reservation fixes a part's content before touching a mutable backend
+/// such as S3. Only the lease owner may upload and record it. A crashed owner
+/// can be replaced, but the reserved bytes can never change.
+pub enum PartReservation {
+    Claimed(Uuid),
+    Busy,
+    DifferentContent,
+}
+
+pub async fn part_content_hash(
+    db: &DatabasePool,
+    upload_id: Uuid,
+    part_number: i32,
+) -> Result<Option<String>, String> {
+    match db {
+        DatabasePool::Postgres(pool) => sqlx::query_scalar(
+            "SELECT content_hash FROM file_upload_part_claim WHERE upload_id = $1 AND part_number = $2",
+        ).bind(upload_id).bind(part_number).fetch_optional(pool).await,
+        DatabasePool::Sqlite(pool) => sqlx::query_scalar(
+            "SELECT content_hash FROM file_upload_part_claim WHERE upload_id = ? AND part_number = ?",
+        ).bind(upload_id).bind(part_number).fetch_optional(pool).await,
+    }.map_err(|e| format!("Failed to read part reservation: {e}"))
+}
+
+pub async fn reserve_part(
+    db: &DatabasePool,
+    upload_id: Uuid,
+    org_id: Uuid,
+    env_id: Uuid,
+    part_number: i32,
+    content_hash: &str,
+) -> Result<PartReservation, String> {
+    let owner = Uuid::new_v4();
+    let now = Utc::now();
+    // Longer than the API's bounded five-minute upload operation.
+    let until = now + chrono::Duration::minutes(10);
+    let claimed: Option<Uuid> = match db {
+        DatabasePool::Postgres(pool) => sqlx::query_scalar(
+            "INSERT INTO file_upload_part_claim (upload_id, part_number, content_hash, owner, lease_until)
+             SELECT $1, $2, $3, $4, $5 FROM file_upload
+             WHERE upload_id = $1 AND org_id = $6 AND env_id = $7 AND status = 'pending'
+             ON CONFLICT (upload_id, part_number) DO UPDATE
+             SET owner = EXCLUDED.owner, lease_until = EXCLUDED.lease_until
+             WHERE file_upload_part_claim.content_hash = EXCLUDED.content_hash
+               AND file_upload_part_claim.lease_until <= $8
+             RETURNING owner",
+        ).bind(upload_id).bind(part_number).bind(content_hash).bind(owner).bind(until)
+            .bind(org_id).bind(env_id).bind(now).fetch_optional(pool).await,
+        DatabasePool::Sqlite(pool) => sqlx::query_scalar(
+            "INSERT INTO file_upload_part_claim (upload_id, part_number, content_hash, owner, lease_until)
+             SELECT ?, ?, ?, ?, ? FROM file_upload
+             WHERE upload_id = ? AND org_id = ? AND env_id = ? AND status = 'pending'
+             ON CONFLICT (upload_id, part_number) DO UPDATE
+             SET owner = excluded.owner, lease_until = excluded.lease_until
+             WHERE file_upload_part_claim.content_hash = excluded.content_hash
+               AND file_upload_part_claim.lease_until <= ?
+             RETURNING owner",
+        ).bind(upload_id).bind(part_number).bind(content_hash).bind(owner).bind(until)
+            .bind(upload_id).bind(org_id).bind(env_id).bind(now).fetch_optional(pool).await,
+    }.map_err(|e| format!("Failed to reserve part: {e}"))?;
+    if let Some(owner) = claimed {
+        return Ok(PartReservation::Claimed(owner));
+    }
+    match part_content_hash(db, upload_id, part_number).await? {
+        Some(hash) if hash != content_hash => Ok(PartReservation::DifferentContent),
+        Some(_) => Ok(PartReservation::Busy),
+        None => Err("Upload is no longer pending".to_string()),
+    }
+}
+
+pub async fn release_part(
+    db: &DatabasePool,
+    upload_id: Uuid,
+    part_number: i32,
+    owner: Uuid,
+) -> Result<(), String> {
+    match db {
+        DatabasePool::Postgres(pool) => sqlx::query(
+            "UPDATE file_upload_part_claim SET lease_until = $4
+             WHERE upload_id = $1 AND part_number = $2 AND owner = $3",
+        )
+        .bind(upload_id)
+        .bind(part_number)
+        .bind(owner)
+        .bind(Utc::now())
+        .execute(pool)
+        .await
+        .map(|_| ()),
+        DatabasePool::Sqlite(pool) => sqlx::query(
+            "UPDATE file_upload_part_claim SET lease_until = ?
+             WHERE upload_id = ? AND part_number = ? AND owner = ?",
+        )
+        .bind(Utc::now())
+        .bind(upload_id)
+        .bind(part_number)
+        .bind(owner)
+        .execute(pool)
+        .await
+        .map(|_| ()),
+    }
+    .map_err(|e| format!("Failed to release part reservation: {e}"))?;
+    Ok(())
+}
+
 pub async fn record_part(
     db: &DatabasePool,
     upload_id: Uuid,
     org_id: Uuid,
     env_id: Uuid,
     part_info: &PartInfo,
+    claim_token: Uuid,
 ) -> Result<FileUploadRecord, String> {
     let part_json = serde_json::to_value(part_info)
         .map_err(|e| format!("Failed to serialize part info: {}", e))?;
@@ -266,13 +373,16 @@ pub async fn record_part(
                     bytes_received = bytes_received + $4
                 WHERE upload_id = $1 AND org_id = $2 AND env_id = $5
                   AND status = 'pending'
+                  AND EXISTS (SELECT 1 FROM file_upload_part_claim c
+                      WHERE c.upload_id = file_upload.upload_id AND c.part_number = $6
+                        AND c.owner = $7 AND c.lease_until > $8)
                   AND NOT parts_manifest @> jsonb_build_array(jsonb_build_object('part_number', $6))
                   AND (parts_expected IS NULL OR $6 <= parts_expected)
                   AND (expected_size IS NULL OR bytes_received + $4 <= expected_size)
                 RETURNING upload_id, path, org_id, env_id, created_by_user_id, status,
                           expected_size, content_type, part_size, parts_expected,
                           parts_received, bytes_received, backend_upload_id,
-                          parts_manifest, storage_backend, created_at, expires_at, completion_base
+                          parts_manifest, storage_backend, created_at, expires_at, completion_base, completion_result
                 "#,
             )
             .bind(upload_id)
@@ -281,6 +391,8 @@ pub async fn record_part(
             .bind(part_info.size)
             .bind(env_id)
             .bind(part_info.part_number)
+            .bind(claim_token)
+            .bind(Utc::now())
             .fetch_one(pool)
             .await
             .map_err(|e| format!("Failed to record part: {}", e))?;
@@ -299,6 +411,9 @@ pub async fn record_part(
                     bytes_received = bytes_received + ?
                 WHERE upload_id = ? AND org_id = ? AND env_id = ?
                   AND status = 'pending'
+                  AND EXISTS (SELECT 1 FROM file_upload_part_claim c
+                      WHERE c.upload_id = file_upload.upload_id AND c.part_number = ?
+                        AND c.owner = ? AND c.lease_until > ?)
                   AND NOT EXISTS (
                       SELECT 1 FROM json_each(parts_manifest)
                       WHERE json_extract(value, '$.part_number') = ?
@@ -312,6 +427,9 @@ pub async fn record_part(
             .bind(upload_id)
             .bind(org_id)
             .bind(env_id)
+            .bind(part_info.part_number)
+            .bind(claim_token)
+            .bind(Utc::now())
             .bind(part_info.part_number)
             .bind(part_info.part_number)
             .bind(part_info.size)
@@ -358,7 +476,7 @@ pub async fn begin_completion(
                 status = 'completing',
                 expires_at = CASE WHEN expires_at < $4 THEN $4 ELSE expires_at END,
                 completion_base = CASE
-                    WHEN status = 'pending' OR completion_base IS NULL THEN COALESCE((
+                    WHEN completion_base IS NULL THEN COALESCE((
                         SELECT f.storage_path FROM file f
                         WHERE f.path = file_upload.path
                           AND f.org_id = file_upload.org_id
@@ -387,7 +505,7 @@ pub async fn begin_completion(
                 status = 'completing',
                 expires_at = CASE WHEN expires_at < ? THEN ? ELSE expires_at END,
                 completion_base = CASE
-                    WHEN status = 'pending' OR completion_base IS NULL THEN COALESCE((
+                    WHEN completion_base IS NULL THEN COALESCE((
                         SELECT f.storage_path FROM file f
                         WHERE f.path = file_upload.path
                           AND f.org_id = file_upload.org_id
@@ -432,62 +550,65 @@ pub async fn begin_abort(
     org_id: Uuid,
     env_id: Uuid,
 ) -> Result<(), String> {
-    transition_status(db, upload_id, org_id, env_id, "pending", "aborting")
-        .await
-        .map_err(|e| format!("Failed to begin upload abort: {e}"))?
-        .then_some(())
-        .ok_or_else(|| "Upload not found or no longer pending".to_string())
+    claim_abort(db, upload_id, org_id, env_id, false).await
 }
 
-/// Turn a completion that can never be applied (the file changed after the
-/// completion was claimed) into an abort (`completing` -> `aborting`).
+/// Turn an irreconcilable completion into a recoverable abort.
 pub async fn abandon_completion(
     db: &DatabasePool,
     upload_id: Uuid,
     org_id: Uuid,
     env_id: Uuid,
 ) -> Result<(), String> {
-    transition_status(db, upload_id, org_id, env_id, "completing", "aborting")
-        .await
-        .map_err(|e| format!("Failed to abandon upload completion: {e}"))?
-        .then_some(())
-        .ok_or_else(|| "Upload is no longer completing".to_string())
+    claim_abort(db, upload_id, org_id, env_id, true).await
 }
 
-/// `UPDATE status = to WHERE status = from`; whether a row changed.
-async fn transition_status(
+async fn claim_abort(
     db: &DatabasePool,
     upload_id: Uuid,
     org_id: Uuid,
     env_id: Uuid,
-    from: &str,
-    to: &str,
-) -> Result<bool, sqlx::Error> {
-    let rows_affected = match db {
+    completion: bool,
+) -> Result<(), String> {
+    let now = Utc::now();
+    let until = now + chrono::Duration::hours(1);
+    let from = if completion { "completing" } else { "pending" };
+    let changed = match db {
         DatabasePool::Postgres(pool) => sqlx::query(
-            "UPDATE file_upload SET status = $5 WHERE upload_id = $1 AND org_id = $2 AND env_id = $3 AND status = $4",
+            "UPDATE file_upload SET status = 'aborting', expires_at = $5
+             WHERE upload_id = $1 AND org_id = $2 AND env_id = $3
+             AND (status = $4 OR (status = 'aborting' AND expires_at <= $6))",
         )
         .bind(upload_id)
         .bind(org_id)
         .bind(env_id)
         .bind(from)
-        .bind(to)
+        .bind(until)
+        .bind(now)
         .execute(pool)
-        .await?
+        .await
+        .map_err(|e| e.to_string())?
         .rows_affected(),
         DatabasePool::Sqlite(pool) => sqlx::query(
-            "UPDATE file_upload SET status = ? WHERE upload_id = ? AND org_id = ? AND env_id = ? AND status = ?",
+            "UPDATE file_upload SET status = 'aborting', expires_at = ?
+             WHERE upload_id = ? AND org_id = ? AND env_id = ?
+             AND (status = ? OR (status = 'aborting' AND expires_at <= ?))",
         )
-        .bind(to)
+        .bind(until)
         .bind(upload_id)
         .bind(org_id)
         .bind(env_id)
         .bind(from)
+        .bind(now)
         .execute(pool)
-        .await?
+        .await
+        .map_err(|e| e.to_string())?
         .rows_affected(),
     };
-    Ok(rows_affected > 0)
+    if changed == 0 {
+        return Err("Upload is not available for abort".to_string());
+    }
+    Ok(())
 }
 
 /// Return a failed completion claim to `pending` so the client can retry or
@@ -528,13 +649,14 @@ pub async fn complete_upload(
     upload_id: Uuid,
     org_id: Uuid,
     env_id: Uuid,
+    result: &serde_json::Value,
 ) -> Result<(), String> {
     let query = match db {
         DatabasePool::Postgres(_) => {
-            "UPDATE file_upload SET status = 'completed' WHERE upload_id = $1 AND org_id = $2 AND env_id = $3 AND status IN ('pending', 'completing') AND (parts_expected IS NULL OR parts_received = parts_expected) AND (parts_expected IS NULL OR bytes_received = expected_size)"
+            "UPDATE file_upload SET status = 'completed', completion_result = COALESCE(completion_result, $4) WHERE upload_id = $1 AND org_id = $2 AND env_id = $3 AND status IN ('pending', 'completing', 'completed') AND (parts_expected IS NULL OR parts_received = parts_expected) AND (parts_expected IS NULL OR bytes_received = expected_size)"
         }
         DatabasePool::Sqlite(_) => {
-            "UPDATE file_upload SET status = 'completed' WHERE upload_id = ? AND org_id = ? AND env_id = ? AND status IN ('pending', 'completing') AND (parts_expected IS NULL OR parts_received = parts_expected) AND (parts_expected IS NULL OR bytes_received = expected_size)"
+            "UPDATE file_upload SET status = 'completed', completion_result = COALESCE(completion_result, ?) WHERE upload_id = ? AND org_id = ? AND env_id = ? AND status IN ('pending', 'completing', 'completed') AND (parts_expected IS NULL OR parts_received = parts_expected) AND (parts_expected IS NULL OR bytes_received = expected_size)"
         }
     };
 
@@ -543,11 +665,13 @@ pub async fn complete_upload(
             .bind(upload_id)
             .bind(org_id)
             .bind(env_id)
+            .bind(result)
             .execute(pool)
             .await
             .map_err(|e| format!("Failed to complete upload: {}", e))?
             .rows_affected(),
         DatabasePool::Sqlite(pool) => sqlx::query(query)
+            .bind(result.to_string())
             .bind(upload_id)
             .bind(org_id)
             .bind(env_id)
@@ -572,10 +696,10 @@ pub async fn abort_upload(
 ) -> Result<(), String> {
     let query = match db {
         DatabasePool::Postgres(_) => {
-            "UPDATE file_upload SET status = 'aborted' WHERE upload_id = $1 AND org_id = $2 AND env_id = $3 AND status IN ('pending', 'aborting')"
+            "UPDATE file_upload SET status = 'aborted' WHERE upload_id = $1 AND org_id = $2 AND env_id = $3 AND status IN ('pending', 'aborting', 'aborted')"
         }
         DatabasePool::Sqlite(_) => {
-            "UPDATE file_upload SET status = 'aborted' WHERE upload_id = ? AND org_id = ? AND env_id = ? AND status IN ('pending', 'aborting')"
+            "UPDATE file_upload SET status = 'aborted' WHERE upload_id = ? AND org_id = ? AND env_id = ? AND status IN ('pending', 'aborting', 'aborted')"
         }
     };
 
@@ -613,15 +737,16 @@ pub async fn cleanup_expired_uploads(db: &DatabasePool) -> Result<Vec<FileUpload
             let rows = sqlx::query(
                 r#"
                 UPDATE file_upload
-                SET status = 'aborting'
-                WHERE status IN ('pending', 'completing') AND expires_at < $1 AND env_id IS NOT NULL
+                SET status = 'aborting', expires_at = $2
+                WHERE status IN ('pending', 'completing', 'aborting') AND expires_at < $1 AND env_id IS NOT NULL
                 RETURNING upload_id, path, org_id, env_id, created_by_user_id, status,
                           expected_size, content_type, part_size, parts_expected,
                           parts_received, bytes_received, backend_upload_id,
-                          parts_manifest, storage_backend, created_at, expires_at, completion_base
+                          parts_manifest, storage_backend, created_at, expires_at, completion_base, completion_result
                 "#,
             )
             .bind(now)
+            .bind(now + chrono::Duration::hours(1))
             .fetch_all(pool)
             .await
             .map_err(|e| format!("Failed to query expired uploads: {}", e))?;
@@ -632,14 +757,15 @@ pub async fn cleanup_expired_uploads(db: &DatabasePool) -> Result<Vec<FileUpload
             let rows = sqlx::query(
                 r#"
                 UPDATE file_upload
-                SET status = 'aborting'
-                WHERE status IN ('pending', 'completing') AND expires_at < ? AND env_id IS NOT NULL
+                SET status = 'aborting', expires_at = ?
+                WHERE status IN ('pending', 'completing', 'aborting') AND expires_at < ? AND env_id IS NOT NULL
                 RETURNING upload_id, path, org_id, env_id, created_by_user_id, status,
                           expected_size, content_type, part_size, parts_expected,
                           parts_received, bytes_received, backend_upload_id,
-                          parts_manifest, storage_backend, created_at, expires_at, completion_base
+                          parts_manifest, storage_backend, created_at, expires_at, completion_base, completion_result
                 "#,
             )
+            .bind(now + chrono::Duration::hours(1))
             .bind(now)
             .fetch_all(pool)
             .await
@@ -658,18 +784,20 @@ pub async fn release_cleanup_claim(
 ) -> Result<(), String> {
     let rows_affected = match db {
         DatabasePool::Postgres(pool) => sqlx::query(
-            "UPDATE file_upload SET status = 'pending' WHERE upload_id = $1 AND org_id = $2 AND env_id = $3 AND status = 'aborting'",
+            "UPDATE file_upload SET expires_at = $4 WHERE upload_id = $1 AND org_id = $2 AND env_id = $3 AND status = 'aborting'",
         )
         .bind(upload_id)
         .bind(org_id)
         .bind(env_id)
+        .bind(Utc::now())
         .execute(pool)
         .await
         .map_err(|e| format!("Failed to release upload cleanup claim: {e}"))?
         .rows_affected(),
         DatabasePool::Sqlite(pool) => sqlx::query(
-            "UPDATE file_upload SET status = 'pending' WHERE upload_id = ? AND org_id = ? AND env_id = ? AND status = 'aborting'",
+            "UPDATE file_upload SET expires_at = ? WHERE upload_id = ? AND org_id = ? AND env_id = ? AND status = 'aborting'",
         )
+        .bind(Utc::now())
         .bind(upload_id)
         .bind(org_id)
         .bind(env_id)
@@ -708,6 +836,9 @@ fn row_to_upload_pg(row: &sqlx::postgres::PgRow) -> Result<FileUploadRecord, Str
         created_at: row.try_get("created_at").map_err(|e| e.to_string())?,
         expires_at: row.try_get("expires_at").map_err(|e| e.to_string())?,
         completion_base: row.try_get("completion_base").map_err(|e| e.to_string())?,
+        completion_result: row
+            .try_get("completion_result")
+            .map_err(|e| e.to_string())?,
     })
 }
 
@@ -745,6 +876,12 @@ fn row_to_upload_sqlite(row: &sqlx::sqlite::SqliteRow) -> Result<FileUploadRecor
         created_at: row.try_get("created_at").map_err(|e| e.to_string())?,
         expires_at: row.try_get("expires_at").map_err(|e| e.to_string())?,
         completion_base: row.try_get("completion_base").map_err(|e| e.to_string())?,
+        completion_result: row
+            .try_get::<Option<String>, _>("completion_result")
+            .map_err(|e| e.to_string())?
+            .map(|value| serde_json::from_str(&value))
+            .transpose()
+            .map_err(|e| e.to_string())?,
     })
 }
 
@@ -759,7 +896,7 @@ async fn get_upload_internal_sqlite(
         SELECT upload_id, path, org_id, env_id, created_by_user_id, status,
                expected_size, content_type, part_size, parts_expected,
                parts_received, bytes_received, backend_upload_id,
-               parts_manifest, storage_backend, created_at, expires_at, completion_base
+               parts_manifest, storage_backend, created_at, expires_at, completion_base, completion_result
         FROM file_upload
         WHERE upload_id = ? AND org_id = ? AND env_id = ?
         "#,

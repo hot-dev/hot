@@ -3151,6 +3151,212 @@ async fn test_domain_get_api_response_format() {
 use axum::Extension;
 use hot::file_storage::{FileStorage, LocalFileStorage};
 
+#[tokio::test]
+async fn test_completion_retry_preserves_original_base() {
+    use hot::db::file_upload;
+    let state = create_test_db().await;
+    let (_, api_key) = create_test_api_key(&state.0).await;
+    let dir = tempfile::TempDir::new().unwrap();
+    let app = file_router(
+        state.clone(),
+        Arc::new(Box::new(LocalFileStorage::new(dir.path().to_path_buf()))),
+    );
+    let (_, json) = make_request(
+        &app,
+        Method::POST,
+        "/v1/files/uploads",
+        &api_key,
+        Some(json!({"path":"review/retry.bin", "expected_size":3})),
+    )
+    .await;
+    let upload_id: Uuid = json["data"]["upload_id"].as_str().unwrap().parse().unwrap();
+    let (status, _) = make_raw_request(
+        &app,
+        Method::PUT,
+        &format!("/v1/files/uploads/{upload_id}/1"),
+        &api_key,
+        "application/octet-stream",
+        b"old".to_vec(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let env = Env::get_default_env(&state.0).await.unwrap();
+    let base = file_upload::begin_completion(
+        &state.0,
+        upload_id,
+        env.org_id,
+        env.env_id,
+        chrono::Utc::now() + chrono::Duration::hours(1),
+    )
+    .await
+    .unwrap();
+    assert_eq!(base, "");
+    // The same release performed by the handler after an assembly/commit error.
+    file_upload::release_completion(&state.0, upload_id, env.org_id, env.env_id)
+        .await
+        .unwrap();
+    let (status, _) = make_raw_request(
+        &app,
+        Method::PUT,
+        "/v1/files/upload/review/retry.bin",
+        &api_key,
+        "application/octet-stream",
+        b"new".to_vec(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, response) = make_request(
+        &app,
+        Method::POST,
+        &format!("/v1/files/uploads/{upload_id}/complete"),
+        &api_key,
+        None,
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::CONFLICT,
+        "completion reverted the newer write: {response}"
+    );
+}
+
+#[tokio::test]
+async fn test_successful_completion_is_retryable() {
+    let (app, api_key, _dir) = build_file_app().await;
+    let (_, json) = make_request(
+        &app,
+        Method::POST,
+        "/v1/files/uploads",
+        &api_key,
+        Some(json!({"path":"review/completed.bin", "expected_size":3})),
+    )
+    .await;
+    let id = json["data"]["upload_id"].as_str().unwrap();
+    let (status, _) = make_raw_request(
+        &app,
+        Method::PUT,
+        &format!("/v1/files/uploads/{id}/1"),
+        &api_key,
+        "application/octet-stream",
+        b"abc".to_vec(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let url = format!("/v1/files/uploads/{id}/complete");
+    let (status, first) = make_request(&app, Method::POST, &url, &api_key, None).await;
+    assert_eq!(status, StatusCode::OK, "{first}");
+    let (status, second) = make_request(&app, Method::POST, &url, &api_key, None).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "retry after losing a success response failed: {second}"
+    );
+    assert_eq!(first["data"], second["data"]);
+    // A replay must keep returning its own result after a newer write or delete.
+    let (status, _) = make_raw_request(
+        &app,
+        Method::PUT,
+        "/v1/files/upload/review/completed.bin",
+        &api_key,
+        "application/octet-stream",
+        b"newer-content".to_vec(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, replay) = make_request(&app, Method::POST, &url, &api_key, None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(first["data"], replay["data"]);
+    let file_id = replay["data"]["file_id"].as_str().unwrap();
+    let (status, _) = make_request(
+        &app,
+        Method::DELETE,
+        &format!("/v1/files/{file_id}"),
+        &api_key,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let (status, replay) = make_request(&app, Method::POST, &url, &api_key, None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(first["data"], replay["data"]);
+    let (status, _) = make_request(
+        &app,
+        Method::GET,
+        &format!("/v1/files/{file_id}"),
+        &api_key,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn test_interrupted_abort_is_reclaimable() {
+    use hot::db::file_upload;
+    let state = create_test_db().await;
+    let (_, api_key) = create_test_api_key(&state.0).await;
+    let dir = tempfile::TempDir::new().unwrap();
+    let app = file_router(
+        state.clone(),
+        Arc::new(Box::new(LocalFileStorage::new(dir.path().to_path_buf()))),
+    );
+    let (_, json) = make_request(
+        &app,
+        Method::POST,
+        "/v1/files/uploads",
+        &api_key,
+        Some(json!({"path":"review/abort.bin", "expected_size":3})),
+    )
+    .await;
+    let id: Uuid = json["data"]["upload_id"].as_str().unwrap().parse().unwrap();
+    let env = Env::get_default_env(&state.0).await.unwrap();
+    file_upload::begin_abort(&state.0, id, env.org_id, env.env_id)
+        .await
+        .unwrap();
+    // Simulate process death after claiming the abort and before cleanup.
+    let DatabasePool::Sqlite(pool) = state.0.as_ref() else {
+        panic!("sqlite");
+    };
+    sqlx::query("UPDATE file_upload SET expires_at = ?")
+        .bind(chrono::Utc::now() - chrono::Duration::hours(2))
+        .execute(pool)
+        .await
+        .unwrap();
+    let swept = file_upload::cleanup_expired_uploads(&state.0)
+        .await
+        .unwrap();
+    assert_eq!(
+        swept.len(),
+        1,
+        "interrupted abort stays permanently outside the expiry sweep"
+    );
+    assert!(
+        file_upload::cleanup_expired_uploads(&state.0)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    // A failed sweeper releases its lease but retains abort intent.
+    file_upload::release_cleanup_claim(&state.0, id, env.org_id, env.env_id)
+        .await
+        .unwrap();
+    let upload = file_upload::get_upload(&state.0, id, env.org_id, env.env_id)
+        .await
+        .unwrap();
+    assert_eq!(upload.status, "aborting");
+    for _ in 0..2 {
+        let (status, _) = make_request(
+            &app,
+            Method::DELETE,
+            &format!("/v1/files/uploads/{id}"),
+            &api_key,
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+    }
+}
+
 /// Helper to build an authenticated app with file routes and file storage
 async fn build_file_app() -> (axum::Router, String, tempfile::TempDir) {
     let state = create_test_db().await;
@@ -3213,6 +3419,171 @@ fn file_router(
 /// Local storage that reports another backend id, standing in for an
 /// installation whose configured backend changed after uploads began.
 struct RelabeledStorage(LocalFileStorage, &'static str);
+
+#[tokio::test]
+async fn test_part_retry_compares_content_instead_of_opaque_gcs_etags() {
+    let state = create_test_db().await;
+    let (_, api_key) = create_test_api_key(&state.0).await;
+    let dir = tempfile::TempDir::new().unwrap();
+    let app = file_router(
+        state,
+        Arc::new(Box::new(RelabeledStorage(
+            LocalFileStorage::new(dir.path().to_path_buf()),
+            "gcs",
+        ))),
+    );
+    let (_, json) = make_request(
+        &app,
+        Method::POST,
+        "/v1/files/uploads",
+        &api_key,
+        Some(json!({"path":"opaque.bin", "expected_size":3})),
+    )
+    .await;
+    let id = json["data"]["upload_id"].as_str().unwrap();
+    let put = async |bytes: &[u8]| {
+        make_raw_request(
+            &app,
+            Method::PUT,
+            &format!("/v1/files/uploads/{id}/1"),
+            &api_key,
+            "application/octet-stream",
+            bytes.to_vec(),
+        )
+        .await
+    };
+    let (status, first) = put(b"abc").await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, retry) = put(b"abc").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        serde_json::from_slice::<Value>(&first).unwrap()["data"],
+        serde_json::from_slice::<Value>(&retry).unwrap()["data"]
+    );
+    let (status, _) = put(b"xyz").await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    // No retry (including a rejected replacement) may touch backend bytes.
+    let upload_dir = std::fs::read_dir(dir.path().join(".uploads"))
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    assert_eq!(std::fs::read_dir(upload_dir).unwrap().count(), 1);
+}
+
+#[tokio::test]
+async fn test_concurrent_different_parts_are_reserved_before_backend_io() {
+    let (app, api_key, dir) = build_file_app().await;
+    let (_, json) = make_request(
+        &app,
+        Method::POST,
+        "/v1/files/uploads",
+        &api_key,
+        Some(json!({"path":"concurrent.bin", "expected_size":3})),
+    )
+    .await;
+    let id = json["data"]["upload_id"].as_str().unwrap();
+    let put = async |bytes: &[u8]| {
+        make_raw_request(
+            &app,
+            Method::PUT,
+            &format!("/v1/files/uploads/{id}/1"),
+            &api_key,
+            "application/octet-stream",
+            bytes.to_vec(),
+        )
+        .await
+    };
+    let (one, two) = tokio::join!(put(b"abc"), put(b"xyz"));
+    assert!(matches!(
+        (one.0, two.0),
+        (StatusCode::OK, StatusCode::CONFLICT) | (StatusCode::CONFLICT, StatusCode::OK)
+    ));
+    let upload_dir = std::fs::read_dir(dir.path().join(".uploads"))
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    assert_eq!(
+        std::fs::read_dir(upload_dir).unwrap().count(),
+        1,
+        "the rejected request reached the backend and could replace an S3 part"
+    );
+    let (status, _) = make_request(
+        &app,
+        Method::POST,
+        &format!("/v1/files/uploads/{id}/complete"),
+        &api_key,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+}
+
+#[tokio::test]
+async fn test_part_reservation_recovers_crashes_without_changing_content() {
+    use hot::db::file_upload::{self, PartReservation};
+    let state = create_test_db().await;
+    let (_, api_key) = create_test_api_key(&state.0).await;
+    let dir = tempfile::TempDir::new().unwrap();
+    let app = file_router(
+        state.clone(),
+        Arc::new(Box::new(LocalFileStorage::new(dir.path().to_path_buf()))),
+    );
+    let (_, json) = make_request(
+        &app,
+        Method::POST,
+        "/v1/files/uploads",
+        &api_key,
+        Some(json!({"path":"claim.bin", "expected_size":3})),
+    )
+    .await;
+    let id: Uuid = json["data"]["upload_id"].as_str().unwrap().parse().unwrap();
+    let env = Env::get_default_env(&state.0).await.unwrap();
+    let hash = hot::file_storage::compute_part_hash(b"abc");
+    let claim = async |hash: &str| {
+        file_upload::reserve_part(&state.0, id, env.org_id, env.env_id, 1, hash)
+            .await
+            .unwrap()
+    };
+    let PartReservation::Claimed(old_owner) = claim(&hash).await else {
+        panic!("first claim");
+    };
+    assert!(matches!(claim(&hash).await, PartReservation::Busy));
+    assert!(matches!(
+        claim("other-content").await,
+        PartReservation::DifferentContent
+    ));
+    let DatabasePool::Sqlite(pool) = state.0.as_ref() else {
+        panic!("sqlite");
+    };
+    sqlx::query("UPDATE file_upload_part_claim SET lease_until = ?")
+        .bind(chrono::Utc::now() - chrono::Duration::minutes(1))
+        .execute(pool)
+        .await
+        .unwrap();
+    let PartReservation::Claimed(owner) = claim(&hash).await else {
+        panic!("reclaim");
+    };
+    assert_ne!(old_owner, owner);
+    let part = file_upload::PartInfo {
+        part_number: 1,
+        size: 3,
+        etag: "opaque".to_string(),
+    };
+    assert!(
+        file_upload::record_part(&state.0, id, env.org_id, env.env_id, &part, old_owner)
+            .await
+            .is_err()
+    );
+    let record = file_upload::record_part(&state.0, id, env.org_id, env.env_id, &part, owner)
+        .await
+        .unwrap();
+    assert_eq!(record.parts_received, 1);
+    assert_eq!(record.bytes_received, 3);
+}
 
 #[async_trait::async_trait]
 impl FileStorage for RelabeledStorage {
@@ -3293,9 +3664,15 @@ impl FileStorage for RelabeledStorage {
         content: &[u8],
         ctx: &hot::file_storage::FileStorageContext,
     ) -> Result<String, String> {
-        self.0
+        let etag = self
+            .0
             .upload_part(backend_upload_id, path, part_number, content, ctx)
-            .await
+            .await?;
+        if self.1 == "gcs" {
+            Ok(format!("{}.123", Uuid::new_v4().simple()))
+        } else {
+            Ok(etag)
+        }
     }
     async fn complete_multipart_upload(
         &self,

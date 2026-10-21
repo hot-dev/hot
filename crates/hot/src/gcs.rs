@@ -32,7 +32,8 @@ use google_cloud_storage::model::compose_object_request::SourceObject;
 use google_cloud_storage::model::compose_object_request::source_object::ObjectPreconditions;
 use google_cloud_storage::retry_policy::RetryableErrors;
 use tokio::io::{AsyncRead, ReadBuf};
-use tokio::sync::{Semaphore, mpsc};
+use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc};
+use tokio::time::Instant;
 
 use crate::val::Val;
 
@@ -508,15 +509,16 @@ impl GcsClient {
     /// Read a whole object (optionally a specific generation).
     pub async fn get_bytes(&self, key: &str, generation: Option<i64>) -> Result<Vec<u8>, GcsError> {
         let mut reader = self.open_read(key, generation).await?;
-        let mut out = Vec::with_capacity(usize::try_from(reader.1).unwrap_or(0));
+        let mut out =
+            Vec::with_capacity(usize::try_from(reader.response.object().size).unwrap_or(0));
         let body = async {
-            while let Some(chunk) = reader.0.next().await {
+            while let Some(chunk) = reader.response.next().await {
                 let chunk: Bytes = chunk?;
                 out.extend_from_slice(&chunk);
             }
             Ok::<_, google_cloud_storage::Error>(())
         };
-        match tokio::time::timeout(self.timeout, body).await {
+        match tokio::time::timeout_at(reader.deadline, body).await {
             Ok(Ok(())) => Ok(out),
             Ok(Err(e)) => Err(GcsError::from_sdk("read object", &e)),
             Err(_) => Err(GcsError::Transient(format!(
@@ -526,19 +528,28 @@ impl GcsClient {
         }
     }
 
-    async fn open_read(
-        &self,
-        key: &str,
-        generation: Option<i64>,
-    ) -> Result<(google_cloud_storage::read_object::ReadObjectResponse, i64), GcsError> {
+    async fn open_read(&self, key: &str, generation: Option<i64>) -> Result<ActiveRead, GcsError> {
         tracing::debug!(bucket = %self.bucket, key, "GCS read object");
         let mut req = self.storage.read_object(&self.bucket_resource, key);
         if let Some(generation) = generation {
             req = req.set_generation(generation);
         }
-        let resp = self.bounded("read object", req.send()).await?;
-        let size = resp.object().size;
-        Ok((resp, size))
+        let permit = self
+            .limiter
+            .clone()
+            .acquire_owned()
+            .await
+            .map_err(|_| GcsError::Other("GCS client is shut down".to_string()))?;
+        let deadline = Instant::now() + self.timeout;
+        let response = tokio::time::timeout_at(deadline, req.send())
+            .await
+            .map_err(|_| GcsError::Transient("GCS read object timed out".to_string()))?
+            .map_err(|e| GcsError::from_sdk("read object", &e))?;
+        Ok(ActiveRead {
+            response,
+            deadline,
+            permit,
+        })
     }
 
     /// Open a streaming reader. At most a few chunks are buffered ahead of
@@ -547,20 +558,9 @@ impl GcsClient {
         &self,
         key: &str,
     ) -> Result<(Pin<Box<dyn AsyncRead + Send>>, i64), GcsError> {
-        let (mut resp, size) = self.open_read(key, None).await?;
-        let (tx, rx) = mpsc::channel::<std::io::Result<Bytes>>(STREAM_CHANNEL_CHUNKS);
-        tokio::spawn(async move {
-            while let Some(chunk) = resp.next().await {
-                let item = chunk.map_err(|e| {
-                    std::io::Error::other(GcsError::from_sdk("read object", &e).to_string())
-                });
-                let failed = item.is_err();
-                if tx.send(item).await.is_err() || failed {
-                    break;
-                }
-            }
-        });
-        Ok((Box::pin(ChannelReader::new(rx)), size))
+        let read = self.open_read(key, None).await?;
+        let size = read.response.object().size;
+        Ok((read.into_reader(), size))
     }
 
     /// Object metadata, or `None` when it does not exist.
@@ -728,11 +728,64 @@ pub fn plan_compose_levels(count: usize) -> Vec<Vec<usize>> {
 // Streaming reader
 // ============================================================================
 
+/// A request remains active through its body, including backpressure. The
+/// deadline covers headers and body together. Dropping a streaming reader
+/// also aborts its producer while it is waiting on the network.
+struct ActiveRead {
+    response: google_cloud_storage::read_object::ReadObjectResponse,
+    deadline: Instant,
+    permit: OwnedSemaphorePermit,
+}
+
+impl ActiveRead {
+    fn into_reader(self) -> Pin<Box<dyn AsyncRead + Send>> {
+        let (tx, rx) = mpsc::channel(STREAM_CHANNEL_CHUNKS);
+        let Self {
+            mut response,
+            deadline,
+            permit,
+        } = self;
+        let task = tokio::spawn(async move {
+            let transfer = async {
+                while let Some(chunk) = response.next().await {
+                    let item = chunk.map_err(|e| {
+                        std::io::Error::other(GcsError::from_sdk("read object", &e).to_string())
+                    });
+                    let failed = item.is_err();
+                    if tx.send(item).await.is_err() || failed {
+                        break;
+                    }
+                }
+            };
+            let timed_out = tokio::select! {
+                _ = tx.closed() => false,
+                result = tokio::time::timeout_at(deadline, transfer) => result.is_err(),
+            };
+            // A slow consumer must not retain the permit while we queue the
+            // timeout error behind already-buffered chunks.
+            drop(response);
+            drop(permit);
+            if timed_out {
+                let _ = tx
+                    .send(Err(std::io::Error::new(
+                        std::io::ErrorKind::TimedOut,
+                        "GCS read object timed out",
+                    )))
+                    .await;
+            }
+        });
+        let mut reader = ChannelReader::new(rx);
+        reader.producer = Some(task);
+        Box::pin(reader)
+    }
+}
+
 /// `AsyncRead` over chunks produced by a download task. Errors from the
 /// download surface as read errors, never as a silently truncated body.
 struct ChannelReader {
     rx: mpsc::Receiver<std::io::Result<Bytes>>,
     current: Bytes,
+    producer: Option<tokio::task::JoinHandle<()>>,
 }
 
 impl ChannelReader {
@@ -740,6 +793,15 @@ impl ChannelReader {
         Self {
             rx,
             current: Bytes::new(),
+            producer: None,
+        }
+    }
+}
+
+impl Drop for ChannelReader {
+    fn drop(&mut self) {
+        if let Some(producer) = &self.producer {
+            producer.abort();
         }
     }
 }
@@ -770,6 +832,103 @@ impl AsyncRead for ChannelReader {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A real SDK response whose body blocks until explicitly released.
+    struct PausedSource(Arc<tokio::sync::Notify>);
+
+    struct BurstSource(std::vec::IntoIter<Bytes>);
+
+    impl google_cloud_storage::streaming_source::StreamingSource for BurstSource {
+        type Error = std::io::Error;
+        async fn next(&mut self) -> Option<Result<Bytes, Self::Error>> {
+            self.0.next().map(Ok)
+        }
+    }
+
+    impl google_cloud_storage::streaming_source::StreamingSource for PausedSource {
+        type Error = std::io::Error;
+        async fn next(&mut self) -> Option<Result<Bytes, Self::Error>> {
+            self.0.notified().await;
+            None
+        }
+    }
+
+    async fn paused_read(limiter: &Arc<Semaphore>, timeout: Duration) -> ActiveRead {
+        let source = PausedSource(Arc::new(tokio::sync::Notify::new()));
+        ActiveRead {
+            response: google_cloud_storage::read_object::ReadObjectResponse::from_source(
+                Default::default(),
+                source,
+            ),
+            permit: limiter.clone().acquire_owned().await.unwrap(),
+            deadline: Instant::now() + timeout,
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn streaming_body_holds_permit_until_timeout_and_reports_error() {
+        use tokio::io::AsyncReadExt;
+        let limiter = Arc::new(Semaphore::new(1));
+        let mut reader = paused_read(&limiter, Duration::from_secs(5))
+            .await
+            .into_reader();
+        tokio::task::yield_now().await;
+        assert!(
+            limiter.clone().try_acquire_owned().is_err(),
+            "body escaped its concurrency limit"
+        );
+        tokio::time::advance(Duration::from_secs(6)).await;
+        let error = reader.read_to_end(&mut Vec::new()).await.unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::TimedOut);
+        assert!(limiter.clone().try_acquire_owned().is_ok());
+    }
+
+    #[tokio::test]
+    async fn dropping_reader_cancels_a_stalled_body_and_releases_permit() {
+        let limiter = Arc::new(Semaphore::new(1));
+        let reader = paused_read(&limiter, Duration::from_secs(300))
+            .await
+            .into_reader();
+        tokio::task::yield_now().await;
+        assert_eq!(limiter.available_permits(), 0);
+        drop(reader);
+        let permit = tokio::time::timeout(Duration::from_secs(1), limiter.acquire())
+            .await
+            .expect("dropping the reader must cancel even a stalled network read")
+            .unwrap();
+        drop(permit);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn backpressured_download_times_out_without_holding_the_permit() {
+        use tokio::io::AsyncReadExt;
+        let limiter = Arc::new(Semaphore::new(1));
+        let chunks = vec![Bytes::from_static(b"x"); STREAM_CHANNEL_CHUNKS + 2];
+        let read = ActiveRead {
+            response: google_cloud_storage::read_object::ReadObjectResponse::from_source(
+                Default::default(),
+                BurstSource(chunks.into_iter()),
+            ),
+            permit: limiter.clone().acquire_owned().await.unwrap(),
+            deadline: Instant::now() + Duration::from_secs(5),
+        };
+        let mut reader = read.into_reader();
+        tokio::task::yield_now().await;
+        assert_eq!(limiter.available_permits(), 0);
+        tokio::time::advance(Duration::from_secs(6)).await;
+        tokio::task::yield_now().await;
+        assert_eq!(
+            limiter.available_permits(),
+            1,
+            "slow consumers must release the expired request"
+        );
+        let mut received = Vec::new();
+        assert_eq!(
+            reader.read_to_end(&mut received).await.unwrap_err().kind(),
+            std::io::ErrorKind::TimedOut
+        );
+        assert_eq!(received.len(), STREAM_CHANNEL_CHUNKS);
+    }
     use std::collections::HashMap;
     use tokio::io::AsyncReadExt;
 

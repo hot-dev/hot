@@ -866,7 +866,12 @@ pub fn validate_path_security(path: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// Compute MD5 hash of content
+/// Content identity used for multipart retries, independent of backend ETags.
+pub fn compute_part_hash(content: &[u8]) -> String {
+    blake3::hash(content).to_hex().to_string()
+}
+
+/// Compute MD5 hash of content.
 pub fn compute_md5(content: &[u8]) -> String {
     format!("{:x}", md5::compute(content))
 }
