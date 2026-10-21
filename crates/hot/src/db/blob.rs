@@ -238,6 +238,31 @@ pub async fn set_object_status(
     Ok(())
 }
 
+/// Point an object at the backend that now holds its bytes.
+pub async fn set_object_backend(
+    db: &DatabasePool,
+    blob_object_id: Uuid,
+    storage_backend: &str,
+) -> Result<(), BlobDbError> {
+    match db {
+        DatabasePool::Postgres(pool) => {
+            sqlx::query("UPDATE blob_object SET storage_backend = $1 WHERE blob_object_id = $2")
+                .bind(storage_backend)
+                .bind(blob_object_id)
+                .execute(pool)
+                .await?;
+        }
+        DatabasePool::Sqlite(pool) => {
+            sqlx::query("UPDATE blob_object SET storage_backend = ? WHERE blob_object_id = ?")
+                .bind(storage_backend)
+                .bind(blob_object_id)
+                .execute(pool)
+                .await?;
+        }
+    }
+    Ok(())
+}
+
 /// Touch `last_referenced_at` so GC grace-window checks see recent use.
 /// Must be called before inserting a ref on a dedupe hit to close the
 /// dedupe-vs-GC race.
@@ -544,9 +569,12 @@ pub async fn deactivate_expired_refs(db: &DatabasePool) -> Result<u64, BlobDbErr
 
 /// Objects eligible for physical deletion: no active refs and not referenced
 /// within the grace window. Includes stale `pending` objects older than the
-/// grace window (failed writes that never became available).
+/// grace window (failed writes that never became available). Only objects
+/// stored in `storage_backend` are returned: objects another backend holds
+/// can't be deleted from here, and would otherwise fill every batch.
 pub async fn gc_candidate_objects(
     db: &DatabasePool,
+    storage_backend: &str,
     grace_cutoff: DateTime<Utc>,
     limit: i64,
 ) -> Result<Vec<BlobObjectRecord>, BlobDbError> {
@@ -555,6 +583,7 @@ pub async fn gc_candidate_objects(
             let query = format!(
                 "SELECT {OBJECT_COLUMNS} FROM blob_object o \
                  WHERE o.status IN ('pending', 'available', 'delete_pending') \
+                 AND o.storage_backend = $3 \
                  AND o.last_referenced_at < $1 \
                  AND NOT EXISTS ( \
                      SELECT 1 FROM blob_ref r \
@@ -566,6 +595,7 @@ pub async fn gc_candidate_objects(
                 sqlx::query_as::<_, BlobObjectRecord>(sqlx::AssertSqlSafe(query.as_str()))
                     .bind(grace_cutoff)
                     .bind(limit)
+                    .bind(storage_backend)
                     .fetch_all(pool)
                     .await?,
             )
@@ -574,6 +604,7 @@ pub async fn gc_candidate_objects(
             let query = format!(
                 "SELECT {OBJECT_COLUMNS} FROM blob_object o \
                  WHERE o.status IN ('pending', 'available', 'delete_pending') \
+                 AND o.storage_backend = ? \
                  AND o.last_referenced_at < ? \
                  AND NOT EXISTS ( \
                      SELECT 1 FROM blob_ref r \
@@ -583,6 +614,7 @@ pub async fn gc_candidate_objects(
             );
             Ok(
                 sqlx::query_as::<_, BlobObjectRecord>(sqlx::AssertSqlSafe(query.as_str()))
+                    .bind(storage_backend)
                     .bind(grace_cutoff)
                     .bind(limit)
                     .fetch_all(pool)

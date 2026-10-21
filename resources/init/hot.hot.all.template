@@ -97,7 +97,7 @@ hot.db.sqlite.maintenance.incremental-vacuum-pages Int(::env/get("HOT_DB_SQLITE_
 // Defaults: "service" in project/managed runtimes, "direct" for ad hoc local CLI.
 // Managed/cloud runtimes force "service" for filesystem isolation.
 hot.file.mode ::env/get("HOT_FILE_MODE", "service")
-// Type: "local" or "s3" (only used in "service" mode)
+// Type: "local", "s3", or "gcs" (only used in "service" mode)
 hot.file.storage.type ::env/get("HOT_FILE_STORAGE_TYPE", "local")
 hot.file.storage.path ::env/get("HOT_FILE_STORAGE_PATH", "./.hot/file")
 
@@ -105,6 +105,11 @@ hot.file.storage.path ::env/get("HOT_FILE_STORAGE_PATH", "./.hot/file")
 hot.file.aws.s3.bucket ::env/get("HOT_FILE_AWS_S3_BUCKET", "")
 hot.file.aws.s3.prefix ::env/get("HOT_FILE_AWS_S3_PREFIX", "files/")
 hot.file.aws.s3.region ::env/get("HOT_FILE_AWS_S3_REGION", "")
+
+// Google Cloud Storage File Storage (when storage.type is "gcs").
+// Authenticates with Application Default Credentials; see the Storage docs.
+hot.file.gcs.bucket ::env/get("HOT_FILE_GCS_BUCKET", "")
+hot.file.gcs.prefix ::env/get("HOT_FILE_GCS_PREFIX", "")
 
 // Blob Storage Configuration
 // In "service" mode, large byte/string values in persisted call/run/event
@@ -187,6 +192,9 @@ hot.stripe.secret-key ::env/get("HOT_STRIPE_SECRET_KEY", "")
 hot.stripe.publishable-key ::env/get("HOT_STRIPE_PUBLISHABLE_KEY", "")
 hot.stripe.webhook-secret ::env/get("HOT_STRIPE_WEBHOOK_SECRET", "")
 
+// Build Storage Type: "local", "s3", or "gcs"
+hot.build.storage.type ::env/get("HOT_BUILD_STORAGE_TYPE", "local")
+
 // AWS Build Configuration (for deploying builds to S3)
 hot.build.aws.s3.bucket ::env/get("HOT_BUILD_AWS_S3_BUCKET", "")
 hot.build.aws.s3.prefix ::env/get("HOT_BUILD_AWS_S3_PREFIX", "")
@@ -194,6 +202,10 @@ hot.build.aws.s3.region ::env/get("HOT_BUILD_AWS_S3_REGION", "")
 hot.build.aws.region ::env/get("HOT_BUILD_AWS_REGION", "")
 hot.build.aws.access-key-id ::env/get("HOT_BUILD_AWS_ACCESS_KEY_ID", "")
 hot.build.aws.secret-access-key ::env/get("HOT_BUILD_AWS_SECRET_ACCESS_KEY", "")
+
+// Google Cloud Storage Build Configuration (when build.storage.type is "gcs")
+hot.build.gcs.bucket ::env/get("HOT_BUILD_GCS_BUCKET", "")
+hot.build.gcs.prefix ::env/get("HOT_BUILD_GCS_PREFIX", "")
 
 // Build File Size Limit (in bytes)
 // Maximum size for build file uploads

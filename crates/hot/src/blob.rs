@@ -418,6 +418,22 @@ impl BlobStore {
         }
     }
 
+    /// Blob bytes are only read through the backend that stored them;
+    /// switching backends does not migrate blob bytes. (Writes re-home an
+    /// object by storing its bytes in the configured backend, and GC only
+    /// collects objects the configured backend holds.)
+    fn ensure_backend(&self, object: &BlobObjectRecord) -> Result<(), BlobError> {
+        let configured = self.storage.storage_type();
+        if object.storage_backend == configured {
+            return Ok(());
+        }
+        Err(BlobError::Storage(format!(
+            "blob object {} is stored in the '{}' backend, but this installation uses '{}'; \
+             migrate blob bytes and references before switching backends",
+            object.blob_object_id, object.storage_backend, configured
+        )))
+    }
+
     /// Deterministic org/env-relative storage key for a content hash.
     fn storage_key(&self, hash: &str) -> String {
         let prefix = &self.config.storage_prefix;
@@ -627,6 +643,8 @@ impl BlobStore {
     ) -> Result<BlobObjectRecord, BlobError> {
         let hash = blake3::hash(bytes).to_hex().to_string();
 
+        let backend = self.storage.storage_type();
+
         // Dedupe hit: touch last_referenced_at BEFORE the caller inserts a ref
         // so GC's grace window cannot race a concurrent delete.
         if let Some(existing) = blob_db::get_object_by_hash(
@@ -638,6 +656,7 @@ impl BlobStore {
         )
         .await?
             && existing.status == object_status::AVAILABLE
+            && existing.storage_backend == backend
         {
             blob_db::touch_object(&self.db, existing.blob_object_id).await?;
             return Ok(existing);
@@ -648,6 +667,10 @@ impl BlobStore {
 
         // A stale pending row from a crashed writer may exist; reuse it and
         // retry the storage write rather than failing on the unique index.
+        // Rows another backend holds (unmigrated objects, tombstones, failed
+        // writes) are reused the same way: blobs are content-addressed, so
+        // writing the bytes here and pointing the row at this backend makes
+        // every existing ref to it readable again.
         let pending = match blob_db::get_object_by_hash(
             &self.db,
             scope.org_id,
@@ -679,12 +702,16 @@ impl BlobStore {
             .await
             .map_err(BlobError::Storage)?;
 
+        if pending.storage_backend != backend {
+            blob_db::set_object_backend(&self.db, pending.blob_object_id, backend).await?;
+        }
         blob_db::set_object_status(&self.db, pending.blob_object_id, object_status::AVAILABLE)
             .await?;
         blob_db::touch_object(&self.db, pending.blob_object_id).await?;
 
         Ok(BlobObjectRecord {
             status: object_status::AVAILABLE.to_string(),
+            storage_backend: backend.to_string(),
             ..pending
         })
     }
@@ -727,6 +754,7 @@ impl BlobStore {
             env_id: object.env_id,
             run_id: None,
         };
+        self.ensure_backend(&object)?;
         let ctx = self.storage_ctx(&object_scope);
         let key = self.storage_key(&object.hash);
         let bytes = self
@@ -836,7 +864,13 @@ impl BlobStore {
         grace_cutoff: chrono::DateTime<chrono::Utc>,
         limit: i64,
     ) -> Result<usize, BlobError> {
-        let candidates = blob_db::gc_candidate_objects(&self.db, grace_cutoff, limit).await?;
+        let candidates = blob_db::gc_candidate_objects(
+            &self.db,
+            self.storage.storage_type(),
+            grace_cutoff,
+            limit,
+        )
+        .await?;
         let mut deleted = 0;
         for object in candidates {
             // Re-check active refs right before delete: a dedupe hit may have
@@ -1060,6 +1094,75 @@ mod tests {
             .unwrap();
         assert_eq!(result, small);
         assert!(!contains_blob_ref(&result));
+    }
+
+    #[tokio::test]
+    async fn test_blob_objects_from_another_backend_are_refused() {
+        let (store, scope, _tmp) = test_store().await;
+        let payload = large_bytes(3, 4096);
+        let spilled = store
+            .spill_large_val(
+                val!({"data": Val::Bytes(payload.clone())}),
+                scope,
+                SpillSource::CallArgs,
+                Some("c1"),
+            )
+            .await
+            .unwrap();
+
+        // Simulate an installation that switched backends without migrating.
+        let crate::db::DatabasePool::Sqlite(pool) = store.db.as_ref() else {
+            panic!("test db is sqlite");
+        };
+        let set_foreign = async || {
+            sqlx::query("UPDATE blob_object SET storage_backend = 's3'")
+                .execute(pool)
+                .await
+                .unwrap();
+        };
+        set_foreign().await;
+        let budget = RehydrateBudget::from_config(store.config());
+
+        // Reads refuse the foreign object instead of routing it through the
+        // configured backend.
+        assert!(
+            store
+                .rehydrate_blob_refs(spilled.clone(), scope, budget)
+                .await
+                .is_err()
+        );
+
+        // Writing the same content re-homes the object (blobs are
+        // content-addressed), which makes the existing ref readable again.
+        let object = store.put_object(&payload, None, &scope).await.unwrap();
+        assert_eq!(object.storage_backend, "local");
+        assert!(
+            store
+                .rehydrate_blob_refs(spilled, scope, budget)
+                .await
+                .is_ok()
+        );
+
+        // GC never selects objects another backend holds, so they can't
+        // crowd native garbage out of a batch.
+        set_foreign().await;
+        sqlx::query("UPDATE blob_ref SET active = 0")
+            .execute(pool)
+            .await
+            .unwrap();
+        assert_eq!(
+            store
+                .gc_objects(chrono::Utc::now() + chrono::Duration::days(1), 10)
+                .await
+                .unwrap(),
+            0
+        );
+        let (status, backend): (String, String) =
+            sqlx::query_as("SELECT status, storage_backend FROM blob_object")
+                .fetch_one(pool)
+                .await
+                .unwrap();
+        assert_eq!((status.as_str(), backend.as_str()), ("available", "s3"));
     }
 
     #[tokio::test]

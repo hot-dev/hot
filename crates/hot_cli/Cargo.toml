@@ -20,7 +20,7 @@ kata = ["hot_task_worker/kata"]
 
 [dependencies]
 ahash = { workspace = true }
-hot = { workspace = true }
+hot = { workspace = true, features = ["gcs-storage"] }
 hot_app = { workspace = true }
 hot_worker = { workspace = true }
 hot_task_worker = { workspace = true }

@@ -410,7 +410,7 @@ impl ApiErrorResponse {
 // File DTOs
 // ============================================================================
 
-#[derive(Debug, Serialize, ToSchema)]
+#[derive(Debug, Serialize, Deserialize, ToSchema)]
 pub struct FileResponse {
     pub file_id: Uuid,
     pub path: String,

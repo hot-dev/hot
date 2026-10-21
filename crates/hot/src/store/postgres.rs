@@ -988,10 +988,19 @@ mod tests {
                 .await
                 .expect("Postgres pool should connect"),
         );
-        let test_data = crate::db::insert_test_data(&pool)
-            .await
-            .expect("Postgres test data should seed");
-        Some(PgStore::new(pool, test_data.org_id, test_data.env_id))
+        // The test database is shared with the other Postgres integration
+        // tests, so default data may already exist; seed it only when it is
+        // missing (another test seeding concurrently is just as good).
+        let env = match crate::db::env::Env::get_default_env(&pool).await {
+            Ok(env) => env,
+            Err(_) => {
+                let _ = crate::db::insert_test_data(&pool).await;
+                crate::db::env::Env::get_default_env(&pool)
+                    .await
+                    .expect("Postgres test data should seed")
+            }
+        };
+        Some(PgStore::new(pool, env.org_id, env.env_id))
     }
 
     fn plain_config(name: &str) -> StoreMapConfig {
