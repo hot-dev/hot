@@ -21,12 +21,15 @@ Individual slots may be negative after updates/deletes by another session.
 They are not independent usage totals and must not be clamped to zero.
 
 Insert and size-changing update triggers publish deltas in the same transaction
-as the source write. PostgreSQL statement delete triggers aggregate transition
+as the source write. PostgreSQL adds each delta to the backend's existing slot
+with a plain UPDATE and only inserts a slot when none exists, so a trace batch
+does not repeat speculative insertion per write. PostgreSQL statement delete triggers aggregate transition
 rows by environment; SQLite subtracts row deltas. Cascaded run deletion subtracts
 call bytes once, without looking up a run that is already gone. Store counters
 have no environment foreign key: orphaned store entries remain charged to their
 original organization, matching the existing accounting contract. Source and
-counter ownership fields cannot be reassigned.
+counter ownership fields cannot be reassigned. PostgreSQL ownership guards run
+only when an update changes an ownership column.
 
 A limited write still holds the account root lock. Storage admission rejects an
 increase beyond the cap and permits a decrease or unchanged usage even if the
@@ -162,7 +165,11 @@ network distance, multi-client contention and production proxies are excluded.
 
 Always-on counters add work to unlimited writes. The small absolute overhead
 here and overlapping ranges do not establish a reliable percentage throughput
-cost. Store writes still have an existing JSON-key lookup cost under RLS; this
+cost. A trace flush writes each call twice (start and completion) in one
+transaction. For 50 calls, the median server time of 20 such transactions was
+10.3 ms, against 6.8 ms with the call counter triggers disabled; before counters
+updated existing slots directly and ownership guards skipped unchanged rows, it
+was 14.4 ms. Store writes still have an existing JSON-key lookup cost under RLS; this
 change removes quota history scans, not every source-row lookup. Multi-client
 throughput and proxy behavior require deployment-specific measurements.
 

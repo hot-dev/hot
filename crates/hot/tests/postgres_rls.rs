@@ -1574,6 +1574,30 @@ async fn scoped_pool_enforces_isolation_under_a_restricted_login()
             .await
             .is_err()
     );
+    // Ownership guards skip updates that keep ownership, so trace and counter
+    // writes do not pay for them, but still reject reassignment.
+    let unguarded: Vec<String> = sqlx::query_scalar(
+        "SELECT tgrelid::regclass::text FROM pg_trigger WHERE tgname='immutable_resource_scope' AND tgqual IS NULL ORDER BY 1",
+    )
+    .fetch_all(&admin)
+    .await?;
+    assert!(unguarded.is_empty(), "unguarded: {unguarded:?}");
+    sqlx::query("UPDATE hot.call SET env_id=env_id,run_id=run_id WHERE call_id=$1")
+        .bind(counter_call)
+        .execute(&admin)
+        .await?;
+    let moved = sqlx::query("UPDATE hot.usage_storage SET org_id=$1 WHERE env_id=$2")
+        .bind(child_b)
+        .bind(env_a)
+        .execute(&admin)
+        .await
+        .unwrap_err();
+    assert!(
+        moved
+            .to_string()
+            .contains("Resource ownership is immutable"),
+        "{moved}"
+    );
     let queue = pool.with_scope(DatabaseScope::Maintenance {
         operation: db::MaintenanceOperation::Queue,
         org_id: None,

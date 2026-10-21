@@ -67,4 +67,5 @@ CREATE POLICY hot_scope_insert ON hot.usage_run FOR INSERT WITH CHECK (hot.scope
 CREATE POLICY hot_scope_update ON hot.usage_run FOR UPDATE USING (hot.scope_maintenance('billing') AND root_org_id=hot.scope_org_id()) WITH CHECK (hot.scope_maintenance('billing') AND root_org_id=hot.scope_org_id());
 CREATE POLICY hot_scope_delete ON hot.usage_run FOR DELETE USING (hot.scope_maintenance('billing') AND root_org_id=hot.scope_org_id());
 CREATE TRIGGER immutable_resource_scope BEFORE UPDATE ON hot.usage_run
-    FOR EACH ROW EXECUTE FUNCTION hot.prevent_scope_reassignment('root_org_id','period_start');
+    FOR EACH ROW WHEN ((OLD.root_org_id, OLD.period_start) IS DISTINCT FROM (NEW.root_org_id, NEW.period_start))
+    EXECUTE FUNCTION hot.prevent_scope_reassignment('root_org_id','period_start');

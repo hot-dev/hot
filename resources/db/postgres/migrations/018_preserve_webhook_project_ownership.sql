@@ -20,4 +20,5 @@ END $$;
 
 DROP TRIGGER immutable_resource_scope ON hot.webhook;
 CREATE TRIGGER immutable_resource_scope BEFORE UPDATE ON hot.webhook
-    FOR EACH ROW EXECUTE FUNCTION hot.prevent_webhook_project_reassignment();
+    FOR EACH ROW WHEN (OLD.build_id IS DISTINCT FROM NEW.build_id)
+    EXECUTE FUNCTION hot.prevent_webhook_project_reassignment();

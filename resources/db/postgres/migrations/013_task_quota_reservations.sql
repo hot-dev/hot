@@ -85,4 +85,5 @@ CREATE POLICY hot_scope_read ON hot.usage_task FOR SELECT USING ((hot.scope_env_
 CREATE POLICY hot_scope_insert ON hot.usage_task FOR INSERT WITH CHECK ((hot.scope_env_writes(env_id) AND hot.scope_org_allows(org_id)) OR (hot.scope_maintenance('queue') OR hot.scope_maintenance('scheduler') OR hot.scope_maintenance('retention') OR hot.scope_maintenance('alerts')) OR hot.scope_billing_org(org_id));
 CREATE POLICY hot_scope_update ON hot.usage_task FOR UPDATE USING ((hot.scope_env_writes(env_id) AND hot.scope_org_allows(org_id)) OR (hot.scope_maintenance('queue') OR hot.scope_maintenance('scheduler') OR hot.scope_maintenance('retention') OR hot.scope_maintenance('alerts')) OR hot.scope_billing_org(org_id)) WITH CHECK ((hot.scope_env_writes(env_id) AND hot.scope_org_allows(org_id)) OR (hot.scope_maintenance('queue') OR hot.scope_maintenance('scheduler') OR hot.scope_maintenance('retention') OR hot.scope_maintenance('alerts')) OR hot.scope_billing_org(org_id));
 CREATE TRIGGER immutable_resource_scope BEFORE UPDATE ON hot.usage_task
-    FOR EACH ROW EXECUTE FUNCTION hot.prevent_scope_reassignment('env_id', 'org_id');
+    FOR EACH ROW WHEN ((OLD.env_id, OLD.org_id) IS DISTINCT FROM (NEW.env_id, NEW.org_id))
+    EXECUTE FUNCTION hot.prevent_scope_reassignment('env_id', 'org_id');

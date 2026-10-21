@@ -38,7 +38,8 @@ ALTER TABLE hot.call DROP CONSTRAINT call_run_id_fkey;
 CREATE INDEX call_env_start_time_idx ON hot.call(env_id, start_time);
 DROP TRIGGER immutable_resource_scope ON hot.call;
 CREATE TRIGGER immutable_resource_scope BEFORE UPDATE ON hot.call
-    FOR EACH ROW EXECUTE FUNCTION hot.prevent_scope_reassignment('run_id', 'env_id');
+    FOR EACH ROW WHEN ((OLD.run_id, OLD.env_id) IS DISTINCT FROM (NEW.run_id, NEW.env_id))
+    EXECUTE FUNCTION hot.prevent_scope_reassignment('run_id', 'env_id');
 DROP POLICY hot_scope_read ON hot.call;
 DROP POLICY hot_scope_insert ON hot.call;
 DROP POLICY hot_scope_update ON hot.call;
@@ -59,6 +60,10 @@ DECLARE delta bigint; owner_org uuid;
 BEGIN
     delta:=GREATEST(NEW.size,0)-CASE WHEN TG_OP='UPDATE' THEN GREATEST(OLD.size,0) ELSE 0 END;
     IF delta=0 THEN RETURN NULL; END IF;
+    -- Trace batches update the same slot once per write: a plain UPDATE avoids
+    -- speculative insertion, and ownership is only needed to create the slot.
+    UPDATE hot.usage_storage SET call_bytes=call_bytes+delta WHERE env_id=NEW.env_id AND slot=pg_backend_pid()%16;
+    IF FOUND THEN RETURN NULL; END IF;
     SELECT org_id INTO STRICT owner_org FROM hot.env WHERE env_id=NEW.env_id;
     INSERT INTO hot.usage_storage AS u(env_id,org_id,slot,call_bytes) VALUES(NEW.env_id,owner_org,pg_backend_pid()%16,delta)
     ON CONFLICT(env_id,slot) DO UPDATE SET call_bytes=u.call_bytes+EXCLUDED.call_bytes;
@@ -82,6 +87,8 @@ DECLARE delta bigint; owner_org uuid;
 BEGIN
     delta:=GREATEST(NEW.size,0)-CASE WHEN TG_OP='UPDATE' THEN GREATEST(OLD.size,0) ELSE 0 END;
     IF delta=0 THEN RETURN NULL; END IF;
+    UPDATE hot.usage_storage SET store_bytes=store_bytes+delta WHERE env_id=NEW.env_id AND slot=pg_backend_pid()%16;
+    IF FOUND THEN RETURN NULL; END IF;
     owner_org:=NEW.org_id;
     INSERT INTO hot.usage_storage AS u(env_id,org_id,slot,store_bytes) VALUES(NEW.env_id,owner_org,pg_backend_pid()%16,delta)
     ON CONFLICT(env_id,slot) DO UPDATE SET store_bytes=u.store_bytes+EXCLUDED.store_bytes;
@@ -127,4 +134,5 @@ CREATE POLICY hot_scope_read ON hot.usage_storage FOR SELECT USING ((hot.scope_e
 CREATE POLICY hot_scope_insert ON hot.usage_storage FOR INSERT WITH CHECK ((hot.scope_env_writes(env_id) AND hot.scope_org_allows(org_id)) OR (hot.scope_maintenance('queue') OR hot.scope_maintenance('scheduler') OR hot.scope_maintenance('retention') OR hot.scope_maintenance('alerts')) OR hot.scope_billing_org(org_id));
 CREATE POLICY hot_scope_update ON hot.usage_storage FOR UPDATE USING ((hot.scope_env_writes(env_id) AND hot.scope_org_allows(org_id)) OR (hot.scope_maintenance('queue') OR hot.scope_maintenance('scheduler') OR hot.scope_maintenance('retention') OR hot.scope_maintenance('alerts')) OR hot.scope_billing_org(org_id)) WITH CHECK ((hot.scope_env_writes(env_id) AND hot.scope_org_allows(org_id)) OR (hot.scope_maintenance('queue') OR hot.scope_maintenance('scheduler') OR hot.scope_maintenance('retention') OR hot.scope_maintenance('alerts')) OR hot.scope_billing_org(org_id));
 CREATE TRIGGER immutable_resource_scope BEFORE UPDATE ON hot.usage_storage
-    FOR EACH ROW EXECUTE FUNCTION hot.prevent_scope_reassignment('env_id', 'org_id', 'slot');
+    FOR EACH ROW WHEN ((OLD.env_id, OLD.org_id, OLD.slot) IS DISTINCT FROM (NEW.env_id, NEW.org_id, NEW.slot))
+    EXECUTE FUNCTION hot.prevent_scope_reassignment('env_id', 'org_id', 'slot');

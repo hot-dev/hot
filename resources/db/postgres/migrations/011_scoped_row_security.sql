@@ -580,6 +580,8 @@ CREATE POLICY account_request_window_scope ON hot.account_request_window
 
 -- Immutability prevents a permitted update from moving an existing resource
 -- between projects/scopes. RLS alone checks rows, not historical ownership.
+-- Each trigger's WHEN clause skips the check unless an ownership column
+-- changes, so frequent updates (traces, heartbeats, counters) do not pay for it.
 CREATE FUNCTION hot.prevent_scope_reassignment() RETURNS trigger LANGUAGE plpgsql AS $$
 DECLARE column_name text;
 BEGIN
@@ -591,55 +593,80 @@ BEGIN
     RETURN NEW;
 END $$;
 CREATE TRIGGER immutable_resource_scope BEFORE UPDATE ON hot.env
-    FOR EACH ROW EXECUTE FUNCTION hot.prevent_scope_reassignment('org_id');
+    FOR EACH ROW WHEN (OLD.org_id IS DISTINCT FROM NEW.org_id)
+    EXECUTE FUNCTION hot.prevent_scope_reassignment('org_id');
 CREATE TRIGGER immutable_resource_scope BEFORE UPDATE ON hot.project
-    FOR EACH ROW EXECUTE FUNCTION hot.prevent_scope_reassignment('env_id');
+    FOR EACH ROW WHEN (OLD.env_id IS DISTINCT FROM NEW.env_id)
+    EXECUTE FUNCTION hot.prevent_scope_reassignment('env_id');
 CREATE TRIGGER immutable_resource_scope BEFORE UPDATE ON hot.build
-    FOR EACH ROW EXECUTE FUNCTION hot.prevent_scope_reassignment('project_id');
+    FOR EACH ROW WHEN (OLD.project_id IS DISTINCT FROM NEW.project_id)
+    EXECUTE FUNCTION hot.prevent_scope_reassignment('project_id');
 CREATE TRIGGER immutable_resource_scope BEFORE UPDATE ON hot.run
-    FOR EACH ROW EXECUTE FUNCTION hot.prevent_scope_reassignment('env_id', 'build_id', 'stream_id');
+    FOR EACH ROW WHEN ((OLD.env_id, OLD.build_id, OLD.stream_id) IS DISTINCT FROM (NEW.env_id, NEW.build_id, NEW.stream_id))
+    EXECUTE FUNCTION hot.prevent_scope_reassignment('env_id', 'build_id', 'stream_id');
 CREATE TRIGGER immutable_resource_scope BEFORE UPDATE ON hot.task
-    FOR EACH ROW EXECUTE FUNCTION hot.prevent_scope_reassignment('env_id', 'build_id', 'stream_id');
+    FOR EACH ROW WHEN ((OLD.env_id, OLD.build_id, OLD.stream_id) IS DISTINCT FROM (NEW.env_id, NEW.build_id, NEW.stream_id))
+    EXECUTE FUNCTION hot.prevent_scope_reassignment('env_id', 'build_id', 'stream_id');
 CREATE TRIGGER immutable_resource_scope BEFORE UPDATE ON hot.event
-    FOR EACH ROW EXECUTE FUNCTION hot.prevent_scope_reassignment('env_id', 'stream_id');
+    FOR EACH ROW WHEN ((OLD.env_id, OLD.stream_id) IS DISTINCT FROM (NEW.env_id, NEW.stream_id))
+    EXECUTE FUNCTION hot.prevent_scope_reassignment('env_id', 'stream_id');
 CREATE TRIGGER immutable_resource_scope BEFORE UPDATE ON hot.stream
-    FOR EACH ROW EXECUTE FUNCTION hot.prevent_scope_reassignment('env_id');
+    FOR EACH ROW WHEN (OLD.env_id IS DISTINCT FROM NEW.env_id)
+    EXECUTE FUNCTION hot.prevent_scope_reassignment('env_id');
 CREATE TRIGGER immutable_resource_scope BEFORE UPDATE ON hot.api_key
-    FOR EACH ROW EXECUTE FUNCTION hot.prevent_scope_reassignment('env_id');
+    FOR EACH ROW WHEN (OLD.env_id IS DISTINCT FROM NEW.env_id)
+    EXECUTE FUNCTION hot.prevent_scope_reassignment('env_id');
 CREATE TRIGGER immutable_resource_scope BEFORE UPDATE ON hot.service_key
-    FOR EACH ROW EXECUTE FUNCTION hot.prevent_scope_reassignment('env_id', 'api_key_id');
+    FOR EACH ROW WHEN ((OLD.env_id, OLD.api_key_id) IS DISTINCT FROM (NEW.env_id, NEW.api_key_id))
+    EXECUTE FUNCTION hot.prevent_scope_reassignment('env_id', 'api_key_id');
 CREATE TRIGGER immutable_resource_scope BEFORE UPDATE ON hot.session
-    FOR EACH ROW EXECUTE FUNCTION hot.prevent_scope_reassignment('env_id', 'api_key_id');
+    FOR EACH ROW WHEN ((OLD.env_id, OLD.api_key_id) IS DISTINCT FROM (NEW.env_id, NEW.api_key_id))
+    EXECUTE FUNCTION hot.prevent_scope_reassignment('env_id', 'api_key_id');
 CREATE TRIGGER immutable_resource_scope BEFORE UPDATE ON hot.agent
-    FOR EACH ROW EXECUTE FUNCTION hot.prevent_scope_reassignment('env_id', 'build_id');
+    FOR EACH ROW WHEN ((OLD.env_id, OLD.build_id) IS DISTINCT FROM (NEW.env_id, NEW.build_id))
+    EXECUTE FUNCTION hot.prevent_scope_reassignment('env_id', 'build_id');
 CREATE TRIGGER immutable_resource_scope BEFORE UPDATE ON hot.workflow
-    FOR EACH ROW EXECUTE FUNCTION hot.prevent_scope_reassignment('env_id', 'build_id');
+    FOR EACH ROW WHEN ((OLD.env_id, OLD.build_id) IS DISTINCT FROM (NEW.env_id, NEW.build_id))
+    EXECUTE FUNCTION hot.prevent_scope_reassignment('env_id', 'build_id');
 CREATE TRIGGER immutable_resource_scope BEFORE UPDATE ON hot.file
-    FOR EACH ROW EXECUTE FUNCTION hot.prevent_scope_reassignment('org_id', 'env_id');
+    FOR EACH ROW WHEN ((OLD.org_id, OLD.env_id) IS DISTINCT FROM (NEW.org_id, NEW.env_id))
+    EXECUTE FUNCTION hot.prevent_scope_reassignment('org_id', 'env_id');
 CREATE TRIGGER immutable_resource_scope BEFORE UPDATE ON hot.file_upload
-    FOR EACH ROW EXECUTE FUNCTION hot.prevent_scope_reassignment('org_id', 'env_id');
+    FOR EACH ROW WHEN ((OLD.org_id, OLD.env_id) IS DISTINCT FROM (NEW.org_id, NEW.env_id))
+    EXECUTE FUNCTION hot.prevent_scope_reassignment('org_id', 'env_id');
 CREATE TRIGGER immutable_resource_scope BEFORE UPDATE ON hot.blob_object
-    FOR EACH ROW EXECUTE FUNCTION hot.prevent_scope_reassignment('org_id', 'env_id');
+    FOR EACH ROW WHEN ((OLD.org_id, OLD.env_id) IS DISTINCT FROM (NEW.org_id, NEW.env_id))
+    EXECUTE FUNCTION hot.prevent_scope_reassignment('org_id', 'env_id');
 CREATE TRIGGER immutable_resource_scope BEFORE UPDATE ON hot.blob_ref
-    FOR EACH ROW EXECUTE FUNCTION hot.prevent_scope_reassignment('org_id', 'env_id', 'blob_object_id');
+    FOR EACH ROW WHEN ((OLD.org_id, OLD.env_id, OLD.blob_object_id) IS DISTINCT FROM (NEW.org_id, NEW.env_id, NEW.blob_object_id))
+    EXECUTE FUNCTION hot.prevent_scope_reassignment('org_id', 'env_id', 'blob_object_id');
 CREATE TRIGGER immutable_resource_scope BEFORE UPDATE ON hot.store_map
-    FOR EACH ROW EXECUTE FUNCTION hot.prevent_scope_reassignment('org_id', 'env_id');
+    FOR EACH ROW WHEN ((OLD.org_id, OLD.env_id) IS DISTINCT FROM (NEW.org_id, NEW.env_id))
+    EXECUTE FUNCTION hot.prevent_scope_reassignment('org_id', 'env_id');
 CREATE TRIGGER immutable_resource_scope BEFORE UPDATE ON hot.store_map_entry
-    FOR EACH ROW EXECUTE FUNCTION hot.prevent_scope_reassignment('org_id', 'env_id');
+    FOR EACH ROW WHEN ((OLD.org_id, OLD.env_id) IS DISTINCT FROM (NEW.org_id, NEW.env_id))
+    EXECUTE FUNCTION hot.prevent_scope_reassignment('org_id', 'env_id');
 CREATE TRIGGER immutable_resource_scope BEFORE UPDATE ON hot.domain
-    FOR EACH ROW EXECUTE FUNCTION hot.prevent_scope_reassignment('env_id');
+    FOR EACH ROW WHEN (OLD.env_id IS DISTINCT FROM NEW.env_id)
+    EXECUTE FUNCTION hot.prevent_scope_reassignment('env_id');
 CREATE TRIGGER immutable_resource_scope BEFORE UPDATE ON hot.schedule
-    FOR EACH ROW EXECUTE FUNCTION hot.prevent_scope_reassignment('build_id');
+    FOR EACH ROW WHEN (OLD.build_id IS DISTINCT FROM NEW.build_id)
+    EXECUTE FUNCTION hot.prevent_scope_reassignment('build_id');
 CREATE TRIGGER immutable_resource_scope BEFORE UPDATE ON hot.webhook
-    FOR EACH ROW EXECUTE FUNCTION hot.prevent_scope_reassignment('build_id');
+    FOR EACH ROW WHEN (OLD.build_id IS DISTINCT FROM NEW.build_id)
+    EXECUTE FUNCTION hot.prevent_scope_reassignment('build_id');
 CREATE TRIGGER immutable_resource_scope BEFORE UPDATE ON hot.mcp_tool
-    FOR EACH ROW EXECUTE FUNCTION hot.prevent_scope_reassignment('build_id');
+    FOR EACH ROW WHEN (OLD.build_id IS DISTINCT FROM NEW.build_id)
+    EXECUTE FUNCTION hot.prevent_scope_reassignment('build_id');
 CREATE TRIGGER immutable_resource_scope BEFORE UPDATE ON hot.event_handler
-    FOR EACH ROW EXECUTE FUNCTION hot.prevent_scope_reassignment('build_id');
+    FOR EACH ROW WHEN (OLD.build_id IS DISTINCT FROM NEW.build_id)
+    EXECUTE FUNCTION hot.prevent_scope_reassignment('build_id');
 CREATE TRIGGER immutable_resource_scope BEFORE UPDATE ON hot.context
-    FOR EACH ROW EXECUTE FUNCTION hot.prevent_scope_reassignment('env_id', 'project_id');
+    FOR EACH ROW WHEN ((OLD.env_id, OLD.project_id) IS DISTINCT FROM (NEW.env_id, NEW.project_id))
+    EXECUTE FUNCTION hot.prevent_scope_reassignment('env_id', 'project_id');
 CREATE TRIGGER immutable_resource_scope BEFORE UPDATE ON hot.alert
-    FOR EACH ROW EXECUTE FUNCTION hot.prevent_scope_reassignment('org_id', 'env_id');
+    FOR EACH ROW WHEN ((OLD.org_id, OLD.env_id) IS DISTINCT FROM (NEW.org_id, NEW.env_id))
+    EXECUTE FUNCTION hot.prevent_scope_reassignment('org_id', 'env_id');
 
 -- Validate cross-resource ownership on writes. PostgreSQL foreign-key checks
 -- intentionally bypass RLS, so FK existence alone is not an isolation check.
@@ -739,4 +766,5 @@ CREATE TRIGGER resource_scope_integrity BEFORE INSERT OR UPDATE ON hot.alert
 CREATE TRIGGER resource_scope_integrity BEFORE INSERT OR UPDATE ON hot.context
     FOR EACH ROW EXECUTE FUNCTION hot.enforce_resource_scope();
 CREATE TRIGGER immutable_resource_scope BEFORE UPDATE ON hot.call
-    FOR EACH ROW EXECUTE FUNCTION hot.prevent_scope_reassignment('run_id');
+    FOR EACH ROW WHEN (OLD.run_id IS DISTINCT FROM NEW.run_id)
+    EXECUTE FUNCTION hot.prevent_scope_reassignment('run_id');
