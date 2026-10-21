@@ -269,14 +269,15 @@ Migrations 013–015 now maintain storage, task and run counters under the same
 scope and account-lock contract. Calls carry immutable environment ownership
 validated against their run, including retention and cascaded deletion.
 Period rollover takes a fresh snapshot after counter locks; hourly reconciliation
-compares consistent snapshots and adds relative repairs without stopping
-ordinary writes. Invalid metering falls back while valid signed 64-bit values
+checks one counter per short transaction (one statement snapshot) and adds
+relative repairs without stopping ordinary writes. Invalid metering falls back while valid signed 64-bit values
 remain accepted. Candidate task locks use exact environment authority because
 Billing scope deliberately cannot update task rows.
 
 A scoped unit-of-work API combines multi-statement reads, beginning with project
-pagination. Detached advisory sessions keep one-connection data pools usable
-while the scheduler or reconciler holds coordination locks. Tests cover those
+pagination. A detached advisory session keeps one-connection data pools usable
+while the scheduler holds its singleton lock; reconciliation uses transaction
+advisory locks and needs no extra connection. Tests cover those
 boundaries plus sibling counter denial, slot deltas, rollback, cancellation,
 period changes, full-range metering and populated owner/runtime upgrades.
 

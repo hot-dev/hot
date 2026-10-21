@@ -248,7 +248,8 @@ admission. Include their initialization and the first billing-period task/run
 claim in the rehearsal window. Monitor hourly reconciliation warnings: they
 identify source/counter drift, applied deltas, and a retry after an error.
 Reconciliation retains ordinary writes and does not hold the admission root
-lock. It still reads account history, so budget for that hourly background load.
+lock. It checks one counter per short transaction, but still reads account
+history, so budget for that hourly background load.
 
 Migrations 010–018 on this development branch are unshipped and were revised in
 place, including 013–015 for counters and call ownership. A scratch database

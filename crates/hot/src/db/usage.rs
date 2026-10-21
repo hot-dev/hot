@@ -7,7 +7,6 @@ use uuid::Uuid;
 use super::{DatabasePool, DatabaseScope, MaintenanceOperation};
 
 type TaskTotals = (i64, i64, i64, i64, i64);
-type TaskDrift = (Uuid, Uuid, Option<DateTime<Utc>>, [i64; 5]);
 const TASK_TOTALS: &str = "SELECT CAST(COALESCE(SUM(u.active_containers),0) AS BIGINT),CAST(COALESCE(SUM(u.reserved_compute_units),0) AS BIGINT),CAST(COALESCE(SUM(u.compute_units),0) AS BIGINT),CAST(COALESCE(SUM(u.reserved_duration_ms),0) AS BIGINT),CAST(COALESCE(SUM(u.duration_ms),0) AS BIGINT) FROM usage_task u JOIN org o ON o.org_id=u.org_id WHERE o.org_id=$1 OR o.parent_org_id=$1";
 
 /// Recount one environment's usage for `period`. Callers lock the counter row
@@ -121,112 +120,122 @@ run_usage!(
     "julianday(admitted_at) >= julianday($2)"
 );
 
-#[derive(Debug, Default)]
-struct Snapshot {
-    storage: Vec<(Uuid, Uuid, i64, i64)>,
-    tasks: Vec<TaskDrift>,
-    runs: Vec<(DateTime<Utc>, i64)>,
-}
+// Reconciliation checks one counter at a time: a single statement compares the
+// counter with its source rows (one snapshot), and the same short transaction
+// adds the difference. No snapshot spans an account, and no repair holds more
+// than one counter row, so repairs cannot deadlock with ordered writers.
 
-macro_rules! snapshot {
-    ($name:ident,$connection:ty,$task_from:literal,$task_env:literal,$since:literal,$run_since:literal) => {
-        async fn $name(conn: &mut $connection,root:Uuid) -> Result<Snapshot,sqlx::Error> {
-            let root_exists:Option<bool>=sqlx::query_scalar("SELECT parent_org_id IS NULL FROM org WHERE org_id=$1").bind(root).fetch_optional(&mut *conn).await?;
-            if root_exists!=Some(true) { return Err(sqlx::Error::Protocol("Usage reconciliation requires a root account".into())); }
-            let mut report=Snapshot::default();
-            let envs:Vec<(Uuid,Uuid)>=sqlx::query_as("SELECT env_id,org_id FROM env WHERE org_id IN (SELECT org_id FROM org WHERE org_id=$1 OR parent_org_id=$1) UNION SELECT env_id,org_id FROM usage_storage WHERE org_id IN (SELECT org_id FROM org WHERE org_id=$1 OR parent_org_id=$1) UNION SELECT env_id,org_id FROM store_map_entry WHERE org_id IN (SELECT org_id FROM org WHERE org_id=$1 OR parent_org_id=$1) UNION SELECT env_id,org_id FROM usage_task WHERE org_id IN (SELECT org_id FROM org WHERE org_id=$1 OR parent_org_id=$1)")
-                .bind(root).fetch_all(&mut *conn).await?;
-            for (env,org) in envs {
-                let actual:(i64,i64)=sqlx::query_as("SELECT CAST(COALESCE(SUM(store_bytes),0) AS BIGINT),CAST(COALESCE(SUM(call_bytes),0) AS BIGINT) FROM usage_storage WHERE env_id=$1")
-                    .bind(env).fetch_one(&mut *conn).await?;
-                let store:i64=sqlx::query_scalar("SELECT CAST(COALESCE(SUM(CASE WHEN size<0 THEN 0 ELSE size END),0) AS BIGINT) FROM store_map_entry WHERE env_id=$1")
-                    .bind(env).fetch_one(&mut *conn).await?;
-                let call:i64=sqlx::query_scalar("SELECT CAST(COALESCE(SUM(CASE WHEN size<0 THEN 0 ELSE size END),0) AS BIGINT) FROM call WHERE env_id=$1")
-                    .bind(env).fetch_one(&mut *conn).await?;
-                let ds=store.checked_sub(actual.0).ok_or_else(overflow)?;
-                let dc=call.checked_sub(actual.1).ok_or_else(overflow)?;
-                if ds!=0 || dc!=0 {report.storage.push((env,org,ds,dc));}
-                let row:Option<(Option<DateTime<Utc>>,i64,i64,i64,i64,i64)>=sqlx::query_as("SELECT period_start,active_containers,reserved_compute_units,reserved_duration_ms,compute_units,duration_ms FROM usage_task WHERE env_id=$1")
-                    .bind(env).fetch_optional(&mut *conn).await?;
-                let (period,a,b,c,d,e)=row.unwrap_or((None,0,0,0,0,0));
-                let truth:TaskTotals=sqlx::query_as(concat!("SELECT CAST(COALESCE(SUM(f.active_containers),0) AS BIGINT),CAST(COALESCE(SUM(f.reserved_compute_units),0) AS BIGINT),CAST(COALESCE(SUM(f.reserved_duration_ms),0) AS BIGINT),CAST(COALESCE(SUM(CASE WHEN ",$since," THEN f.compute_units ELSE 0 END),0) AS BIGINT),CAST(COALESCE(SUM(CASE WHEN ",$since," THEN f.duration_ms ELSE 0 END),0) AS BIGINT) FROM ",$task_from," WHERE ",$task_env,"=$1"))
-                    .bind(env).bind(period).fetch_one(&mut *conn).await?;
-                let mut delta=[0;5];
-                for (i,(expected,actual)) in [truth.0,truth.1,truth.2,truth.3,truth.4].into_iter().zip([a,b,c,d,e]).enumerate() {
-                    delta[i]=expected.checked_sub(actual).ok_or_else(overflow)?;
-                }
-                if delta.iter().any(|d|*d!=0) { report.tasks.push((env,org,period,delta)); }
-            }
-            let rows:Vec<(DateTime<Utc>,i64)>=sqlx::query_as("SELECT period_start,admitted FROM usage_run WHERE root_org_id=$1")
-                .bind(root).fetch_all(&mut *conn).await?;
-            for (period,count) in rows {
-                let truth:i64=sqlx::query_scalar(concat!("SELECT COUNT(*) FROM run_admission WHERE root_org_id=$1 AND ", $run_since))
-                    .bind(root).bind(period).fetch_one(&mut *conn).await?;
-                let delta=truth.checked_sub(count).ok_or_else(overflow)?;
-                if delta!=0 { report.runs.push((period,delta)); }
-            }
-            Ok(report)
-        }
-    };
-}
-// Run and task timestamp names differ, so use two explicit snapshot expansions.
-snapshot!(
-    snapshot_postgres,
-    PgConnection,
-    "task t CROSS JOIN LATERAL hot.task_usage(t) f",
-    "t.env_id",
-    "f.usage_at >= $2",
-    "admitted_at >= $2"
-);
-snapshot!(
-    snapshot_sqlite,
-    SqliteConnection,
-    "task_usage f",
-    "f.env_id",
-    "julianday(f.usage_at) >= julianday($2)",
-    "julianday(admitted_at) >= julianday($2)"
+/// The account's environments, including orphaned counter or store rows, in
+/// environment order. The flag marks environments that still exist.
+const ACCOUNT_ENVS: &str = "SELECT x.env_id,x.org_id,EXISTS(SELECT 1 FROM env e WHERE e.env_id=x.env_id AND e.org_id=x.org_id) AS live FROM (SELECT env_id,org_id FROM env WHERE org_id IN (SELECT org_id FROM org WHERE org_id=$1 OR parent_org_id=$1) UNION SELECT env_id,org_id FROM usage_storage WHERE org_id IN (SELECT org_id FROM org WHERE org_id=$1 OR parent_org_id=$1) UNION SELECT env_id,org_id FROM store_map_entry WHERE org_id IN (SELECT org_id FROM org WHERE org_id=$1 OR parent_org_id=$1) UNION SELECT env_id,org_id FROM usage_task WHERE org_id IN (SELECT org_id FROM org WHERE org_id=$1 OR parent_org_id=$1)) x ORDER BY x.env_id,live DESC";
+const STORAGE_CHECK: &str = "SELECT (SELECT CAST(COALESCE(SUM(CASE WHEN size<0 THEN 0 ELSE size END),0) AS BIGINT) FROM store_map_entry WHERE env_id=$1),(SELECT CAST(COALESCE(SUM(CASE WHEN size<0 THEN 0 ELSE size END),0) AS BIGINT) FROM call WHERE env_id=$1),(SELECT CAST(COALESCE(SUM(store_bytes),0) AS BIGINT) FROM usage_storage WHERE env_id=$1),(SELECT CAST(COALESCE(SUM(call_bytes),0) AS BIGINT) FROM usage_storage WHERE env_id=$1)";
+const STORAGE_REPAIR: &str = "INSERT INTO usage_storage(env_id,org_id,slot,store_bytes,call_bytes) VALUES($1,$2,0,$3,$4) ON CONFLICT(env_id,slot) DO UPDATE SET store_bytes=usage_storage.store_bytes+excluded.store_bytes,call_bytes=usage_storage.call_bytes+excluded.call_bytes";
+const RUN_REPAIR: &str =
+    "UPDATE usage_run SET admitted=admitted+$3 WHERE root_org_id=$1 AND period_start=$2";
+
+type TaskCheck = (
+    Option<DateTime<Utc>>,
+    i64,
+    i64,
+    i64,
+    i64,
+    i64,
+    i64,
+    i64,
+    i64,
+    i64,
+    i64,
 );
 
 fn overflow() -> sqlx::Error {
     sqlx::Error::Protocol("Usage reconciliation delta overflow".into())
 }
 
-macro_rules! repair {
-    ($name:ident,$connection:ty,$same_period:literal) => {
-        async fn $name(conn:&mut $connection,root:Uuid,snapshot:&Snapshot) -> Result<(),sqlx::Error> {
-            for &(env,org,store,call) in &snapshot.storage {
-                sqlx::query("INSERT INTO usage_storage(env_id,org_id,slot,store_bytes,call_bytes) VALUES($1,$2,0,$3,$4) ON CONFLICT(env_id,slot) DO UPDATE SET store_bytes=usage_storage.store_bytes+excluded.store_bytes,call_bytes=usage_storage.call_bytes+excluded.call_bytes")
-                    .bind(env).bind(org).bind(store).bind(call).execute(&mut *conn).await?;
-                tracing::warn!(%root,%env,store_delta=store,call_delta=call,"Repaired storage usage drift");
+macro_rules! reconcile_units {
+    ($storage:ident,$task:ident,$run:ident,$connection:ty,$task_from:literal,$task_env:literal,$since:literal,$same_period:literal,$run_since:literal) => {
+        /// Add the difference between one environment's store and call bytes
+        /// and its storage counters to slot zero.
+        async fn $storage(conn: &mut $connection, env: Uuid, org: Uuid) -> Result<bool, sqlx::Error> {
+            let (store, call, counted_store, counted_call): (i64, i64, i64, i64) =
+                sqlx::query_as(STORAGE_CHECK).bind(env).fetch_one(&mut *conn).await?;
+            let store = store.checked_sub(counted_store).ok_or_else(overflow)?;
+            let call = call.checked_sub(counted_call).ok_or_else(overflow)?;
+            if store == 0 && call == 0 {
+                return Ok(false);
             }
-            for &(env,org,period,d) in &snapshot.tasks {
-                let changed=sqlx::query(concat!("INSERT INTO usage_task(env_id,org_id,period_start,active_containers,reserved_compute_units,reserved_duration_ms,compute_units,duration_ms) VALUES($1,$2,$3,$4,$5,$6,$7,$8) ON CONFLICT(env_id) DO UPDATE SET active_containers=usage_task.active_containers+excluded.active_containers,reserved_compute_units=usage_task.reserved_compute_units+excluded.reserved_compute_units,reserved_duration_ms=usage_task.reserved_duration_ms+excluded.reserved_duration_ms,compute_units=usage_task.compute_units+excluded.compute_units,duration_ms=usage_task.duration_ms+excluded.duration_ms WHERE ",$same_period))
-                    .bind(env).bind(org).bind(period).bind(d[0]).bind(d[1]).bind(d[2]).bind(d[3]).bind(d[4]).execute(&mut *conn).await?.rows_affected();
-                tracing::warn!(%root,%env,?period,delta=?d,changed,"Reconciled task usage drift");
+            sqlx::query(STORAGE_REPAIR).bind(env).bind(org).bind(store).bind(call).execute(conn).await?;
+            tracing::warn!(%env,store_delta=store,call_delta=call,"Repaired storage usage drift");
+            Ok(true)
+        }
+
+        /// Add the difference between one environment's tasks and its task
+        /// counter. A period that changed before the repair skips it.
+        async fn $task(conn: &mut $connection, env: Uuid, org: Uuid) -> Result<bool, sqlx::Error> {
+            let row: TaskCheck = sqlx::query_as(concat!(
+                "SELECT u.p,u.a,u.b,u.c,u.d,u.e,s.a,s.b,s.c,s.d,s.e FROM (SELECT MAX(period_start) AS p,CAST(COALESCE(MAX(active_containers),0) AS BIGINT) AS a,CAST(COALESCE(MAX(reserved_compute_units),0) AS BIGINT) AS b,CAST(COALESCE(MAX(reserved_duration_ms),0) AS BIGINT) AS c,CAST(COALESCE(MAX(compute_units),0) AS BIGINT) AS d,CAST(COALESCE(MAX(duration_ms),0) AS BIGINT) AS e FROM usage_task WHERE env_id=$1) u,",
+                "(SELECT CAST(COALESCE(SUM(f.active_containers),0) AS BIGINT) AS a,CAST(COALESCE(SUM(f.reserved_compute_units),0) AS BIGINT) AS b,CAST(COALESCE(SUM(f.reserved_duration_ms),0) AS BIGINT) AS c,CAST(COALESCE(SUM(CASE WHEN ",$since," THEN f.compute_units ELSE 0 END),0) AS BIGINT) AS d,CAST(COALESCE(SUM(CASE WHEN ",$since," THEN f.duration_ms ELSE 0 END),0) AS BIGINT) AS e FROM ",$task_from," WHERE ",$task_env,"=$1) s"))
+                .bind(env).fetch_one(&mut *conn).await?;
+            let period = row.0;
+            let mut delta = [0; 5];
+            for (i, (expected, counted)) in [row.6, row.7, row.8, row.9, row.10]
+                .into_iter()
+                .zip([row.1, row.2, row.3, row.4, row.5])
+                .enumerate()
+            {
+                delta[i] = expected.checked_sub(counted).ok_or_else(overflow)?;
             }
-            for &(period,delta) in &snapshot.runs {
-                // A claim may have pruned an old period since the snapshot.
-                // Never resurrect that row with a partial repair value.
-                sqlx::query("UPDATE usage_run SET admitted=admitted+$3 WHERE root_org_id=$1 AND period_start=$2")
-                    .bind(root).bind(period).bind(delta).execute(&mut *conn).await?;
-                tracing::warn!(%root,?period,delta,"Reconciled run usage drift");
+            if delta.iter().all(|d| *d == 0) {
+                return Ok(false);
             }
-            Ok(())
+            let changed=sqlx::query(concat!("INSERT INTO usage_task(env_id,org_id,period_start,active_containers,reserved_compute_units,reserved_duration_ms,compute_units,duration_ms) VALUES($1,$2,$3,$4,$5,$6,$7,$8) ON CONFLICT(env_id) DO UPDATE SET active_containers=usage_task.active_containers+excluded.active_containers,reserved_compute_units=usage_task.reserved_compute_units+excluded.reserved_compute_units,reserved_duration_ms=usage_task.reserved_duration_ms+excluded.reserved_duration_ms,compute_units=usage_task.compute_units+excluded.compute_units,duration_ms=usage_task.duration_ms+excluded.duration_ms WHERE ",$same_period))
+                .bind(env).bind(org).bind(period).bind(delta[0]).bind(delta[1]).bind(delta[2]).bind(delta[3]).bind(delta[4]).execute(conn).await?.rows_affected();
+            tracing::warn!(%env,?period,?delta,changed,"Reconciled task usage drift");
+            Ok(true)
+        }
+
+        /// Add the difference between the admission ledger and one run counter
+        /// period. A period pruned in between is never recreated.
+        async fn $run(conn: &mut $connection, root: Uuid, period: DateTime<Utc>) -> Result<bool, sqlx::Error> {
+            let row: Option<(i64, i64)> = sqlx::query_as(concat!("SELECT u.admitted,(SELECT COUNT(*) FROM run_admission WHERE root_org_id=$1 AND ",$run_since,") FROM usage_run u WHERE u.root_org_id=$1 AND u.period_start=$2"))
+                .bind(root).bind(period).fetch_optional(&mut *conn).await?;
+            let Some((counted, admitted)) = row else {
+                return Ok(false);
+            };
+            let delta = admitted.checked_sub(counted).ok_or_else(overflow)?;
+            if delta == 0 {
+                return Ok(false);
+            }
+            sqlx::query(RUN_REPAIR).bind(root).bind(period).bind(delta).execute(conn).await?;
+            tracing::warn!(%root,?period,delta,"Reconciled run usage drift");
+            Ok(true)
         }
     };
 }
-repair!(
-    repair_postgres,
+// Task and run timestamp predicates differ, so use two explicit expansions.
+reconcile_units!(
+    reconcile_storage_postgres,
+    reconcile_task_postgres,
+    reconcile_run_postgres,
     PgConnection,
-    "usage_task.period_start IS NOT DISTINCT FROM excluded.period_start"
+    "task t CROSS JOIN LATERAL hot.task_usage(t) f",
+    "t.env_id",
+    "f.usage_at >= (SELECT period_start FROM usage_task WHERE env_id=$1)",
+    "usage_task.period_start IS NOT DISTINCT FROM excluded.period_start",
+    "admitted_at >= $2"
 );
-repair!(
-    repair_sqlite,
+reconcile_units!(
+    reconcile_storage_sqlite,
+    reconcile_task_sqlite,
+    reconcile_run_sqlite,
     SqliteConnection,
-    "usage_task.period_start IS excluded.period_start"
+    "task_usage f",
+    "f.env_id",
+    "julianday(f.usage_at) >= julianday((SELECT period_start FROM usage_task WHERE env_id=$1))",
+    "usage_task.period_start IS excluded.period_start",
+    "julianday(admitted_at) >= julianday($2)"
 );
 
-/// Number of counter rows whose consistent snapshot differed from source data.
+/// Number of counter rows whose check differed from source data.
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct UsageDrift {
     pub storage_rows: usize,
@@ -241,15 +250,33 @@ impl UsageDrift {
 
 static SQLITE_RECONCILIATION: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
-/// Trusted maintenance only. Compare counters and source rows in one stable
-/// snapshot, then apply relative corrections without locking the account row.
-/// A separate advisory session serializes repairs, not ordinary writers. This
-/// prevents two reconcilers from applying the same snapshot difference twice.
-/// None means another reconciler owns that account; a later tick retries it.
-pub async fn reconcile_account(
-    db: &DatabasePool,
-    root: Uuid,
-) -> Result<Option<UsageDrift>, sqlx::Error> {
+const STORAGE_LOCK: i64 = 0x5553_4147_4553_544f;
+const TASK_LOCK: i64 = 0x5553_4147_4554_4153;
+const RUN_LOCK: i64 = 0x5553_4147_4552_554e;
+
+fn reconcile_lock(id: Uuid, kind: i64) -> i64 {
+    let bytes = id.as_bytes();
+    i64::from_be_bytes(bytes[..8].try_into().unwrap())
+        ^ i64::from_be_bytes(bytes[8..].try_into().unwrap()).rotate_left(13)
+        ^ kind
+}
+
+/// PostgreSQL check units take a transaction advisory lock, so two reconcilers
+/// never add the same difference twice. A unit that another reconciler holds
+/// is skipped until the next tick.
+async fn lock_unit(conn: &mut PgConnection, key: i64) -> Result<bool, sqlx::Error> {
+    sqlx::query_scalar("SELECT pg_try_advisory_xact_lock($1)")
+        .bind(key)
+        .fetch_one(conn)
+        .await
+}
+
+/// Trusted maintenance only. Check each counter of the account against its
+/// source rows in its own short transaction and add any difference, without
+/// locking the account row. Live environments are checked under their exact
+/// scope; orphaned rows and run counters under Billing authority. SQLite
+/// checks hold the writer lock, and a mutex serializes local reconcilers.
+pub async fn reconcile_account(db: &DatabasePool, root: Uuid) -> Result<UsageDrift, sqlx::Error> {
     if let DatabasePool::Postgres(pool) = db {
         match pool.scope()? {
             DatabaseScope::Maintenance {
@@ -272,47 +299,117 @@ pub async fn reconcile_account(
     } else {
         None
     };
-    let bytes = root.as_bytes();
-    let key = i64::from_be_bytes(bytes[..8].try_into().unwrap())
-        ^ i64::from_be_bytes(bytes[8..].try_into().unwrap()).rotate_left(13)
-        ^ 0x55474147455f5243;
     let billing = db.with_scope(DatabaseScope::Maintenance {
         operation: MaintenanceOperation::Billing,
         org_id: Some(root),
     });
-    let Some(guard) = super::try_acquire_advisory_lock(&billing, key).await? else {
-        return Ok(None);
-    };
-    let outcome = async {
-        let snapshot = match &billing {
-            DatabasePool::Postgres(pool) => {
-                let mut tx = pool.begin_repeatable_read().await?;
-                let snapshot = snapshot_postgres(&mut tx, root).await?;
-                tx.commit().await?;
-                let mut tx = pool.begin().await?;
-                repair_postgres(&mut tx, root, &snapshot).await?;
-                tx.commit().await?;
-                snapshot
+    let mut drift = UsageDrift::default();
+    let mut previous = None;
+    match &billing {
+        DatabasePool::Postgres(pool) => {
+            let is_root: Option<bool> =
+                sqlx::query_scalar("SELECT parent_org_id IS NULL FROM org WHERE org_id=$1")
+                    .bind(root)
+                    .fetch_optional(pool)
+                    .await?;
+            if is_root != Some(true) {
+                return Err(root_required());
             }
-            DatabasePool::Sqlite(pool) => {
-                let mut tx = pool.begin().await?;
-                let snapshot = snapshot_sqlite(&mut tx, root).await?;
+            let envs: Vec<(Uuid, Uuid, bool)> = sqlx::query_as(ACCOUNT_ENVS)
+                .bind(root)
+                .fetch_all(pool)
+                .await?;
+            for (env, org, live) in envs {
+                if previous.replace(env) == Some(env) {
+                    continue;
+                }
+                let scoped = if live {
+                    pool.with_scope(DatabaseScope::Environment {
+                        org_id: org,
+                        env_id: env,
+                    })
+                } else {
+                    pool.clone()
+                };
+                let mut tx = scoped.begin().await?;
+                if lock_unit(&mut tx, reconcile_lock(env, STORAGE_LOCK)).await?
+                    && reconcile_storage_postgres(&mut tx, env, org).await?
+                {
+                    drift.storage_rows += 1;
+                }
                 tx.commit().await?;
-                let mut tx = pool.begin().await?;
-                repair_sqlite(&mut tx, root, &snapshot).await?;
+                let mut tx = scoped.begin().await?;
+                if lock_unit(&mut tx, reconcile_lock(env, TASK_LOCK)).await?
+                    && reconcile_task_postgres(&mut tx, env, org).await?
+                {
+                    drift.task_rows += 1;
+                }
                 tx.commit().await?;
-                snapshot
             }
-        };
-        Ok(Some(UsageDrift {
-            storage_rows: snapshot.storage.len(),
-            task_rows: snapshot.tasks.len(),
-            run_rows: snapshot.runs.len(),
-        }))
+            let periods: Vec<DateTime<Utc>> = sqlx::query_scalar(
+                "SELECT period_start FROM usage_run WHERE root_org_id=$1 ORDER BY period_start",
+            )
+            .bind(root)
+            .fetch_all(pool)
+            .await?;
+            for period in periods {
+                let mut tx = pool.begin().await?;
+                if lock_unit(&mut tx, reconcile_lock(root, RUN_LOCK)).await?
+                    && reconcile_run_postgres(&mut tx, root, period).await?
+                {
+                    drift.run_rows += 1;
+                }
+                tx.commit().await?;
+            }
+        }
+        DatabasePool::Sqlite(pool) => {
+            let is_root: Option<bool> =
+                sqlx::query_scalar("SELECT parent_org_id IS NULL FROM org WHERE org_id=$1")
+                    .bind(root)
+                    .fetch_optional(pool)
+                    .await?;
+            if is_root != Some(true) {
+                return Err(root_required());
+            }
+            let envs: Vec<(Uuid, Uuid, bool)> = sqlx::query_as(ACCOUNT_ENVS)
+                .bind(root)
+                .fetch_all(pool)
+                .await?;
+            for (env, org, _) in envs {
+                if previous.replace(env) == Some(env) {
+                    continue;
+                }
+                let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
+                if reconcile_storage_sqlite(&mut tx, env, org).await? {
+                    drift.storage_rows += 1;
+                }
+                tx.commit().await?;
+                let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
+                if reconcile_task_sqlite(&mut tx, env, org).await? {
+                    drift.task_rows += 1;
+                }
+                tx.commit().await?;
+            }
+            let periods: Vec<DateTime<Utc>> = sqlx::query_scalar(
+                "SELECT period_start FROM usage_run WHERE root_org_id=$1 ORDER BY period_start",
+            )
+            .bind(root)
+            .fetch_all(pool)
+            .await?;
+            for period in periods {
+                let mut tx = pool.begin_with("BEGIN IMMEDIATE").await?;
+                if reconcile_run_sqlite(&mut tx, root, period).await? {
+                    drift.run_rows += 1;
+                }
+                tx.commit().await?;
+            }
+        }
     }
-    .await;
-    guard.release().await;
-    outcome
+    Ok(drift)
+}
+
+fn root_required() -> sqlx::Error {
+    sqlx::Error::Protocol("Usage reconciliation requires a root account".into())
 }
 
 /// The singleton scheduler enumerates roots; each repair narrows to one account.
@@ -402,25 +499,23 @@ mod tests {
             .execute(pool)
             .await
             .unwrap();
-        let mut tx = pool.begin().await.unwrap();
-        let snapshot = snapshot_sqlite(&mut tx, data.org_id).await.unwrap();
-        tx.commit().await.unwrap();
-        // A writer after the snapshot must survive the relative correction.
+        // A later writer keeps its own trigger delta beside the correction.
         sqlx::query("UPDATE call SET size=size+11 WHERE run_id=?")
             .bind(data.run_id)
             .execute(pool)
             .await
             .unwrap();
-        let mut tx = pool.begin().await.unwrap();
-        repair_sqlite(&mut tx, data.org_id, &snapshot)
-            .await
-            .unwrap();
-        tx.commit().await.unwrap();
+        assert_eq!(
+            reconcile_account(&db, data.org_id)
+                .await
+                .unwrap()
+                .storage_rows,
+            1
+        );
         storage_truth(pool, data.env_id).await;
         assert!(
             reconcile_account(&db, data.org_id)
                 .await
-                .unwrap()
                 .unwrap()
                 .is_empty()
         );
@@ -433,14 +528,12 @@ mod tests {
             reconcile_account(&db, data.org_id)
                 .await
                 .unwrap()
-                .unwrap()
                 .storage_rows,
             1
         );
         assert!(
             reconcile_account(&db, data.org_id)
                 .await
-                .unwrap()
                 .unwrap()
                 .is_empty()
         );
@@ -593,17 +686,12 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(
-            reconcile_account(&db, data.org_id)
-                .await
-                .unwrap()
-                .unwrap()
-                .task_rows,
+            reconcile_account(&db, data.org_id).await.unwrap().task_rows,
             1
         );
         assert!(
             reconcile_account(&db, data.org_id)
                 .await
-                .unwrap()
                 .unwrap()
                 .is_empty()
         );
@@ -639,9 +727,13 @@ mod tests {
             .execute(pool)
             .await
             .unwrap();
-        let mut tx = pool.begin().await.unwrap();
-        let snapshot = snapshot_sqlite(&mut tx, data.org_id).await.unwrap();
-        tx.commit().await.unwrap();
+        let drifted: DateTime<Utc> =
+            sqlx::query_scalar("SELECT period_start FROM usage_run WHERE root_org_id=?")
+                .bind(data.org_id)
+                .fetch_one(pool)
+                .await
+                .unwrap();
+        // A claim prunes that period after the reconciler listed it.
         let mut tx = pool.begin().await.unwrap();
         assert_eq!(
             run_usage_sqlite(&mut tx, data.org_id, Utc::now() + chrono::Duration::days(1))
@@ -651,9 +743,11 @@ mod tests {
         );
         tx.commit().await.unwrap();
         let mut tx = pool.begin().await.unwrap();
-        repair_sqlite(&mut tx, data.org_id, &snapshot)
-            .await
-            .unwrap();
+        assert!(
+            !reconcile_run_sqlite(&mut tx, data.org_id, drifted)
+                .await
+                .unwrap()
+        );
         tx.commit().await.unwrap();
         assert_eq!(
             sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM usage_run WHERE root_org_id=?")
@@ -666,7 +760,6 @@ mod tests {
         assert!(
             reconcile_account(&db, data.org_id)
                 .await
-                .unwrap()
                 .unwrap()
                 .is_empty()
         );

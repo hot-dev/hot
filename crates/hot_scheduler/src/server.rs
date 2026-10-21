@@ -250,8 +250,8 @@ pub async fn run(
             sync_interval, retry_interval, at_interval
         );
 
-        // Reconciliation takes consistent snapshots and applies relative deltas;
-        // it never holds the account lock used by quota admission.
+        // Reconciliation checks one counter per short transaction and applies
+        // relative deltas; it never holds the account lock used by admission.
         let usage_db = Arc::clone(&db);
         let mut usage_shutdown = shutdown_tx.subscribe();
         tokio::spawn(async move {

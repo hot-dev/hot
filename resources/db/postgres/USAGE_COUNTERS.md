@@ -98,25 +98,36 @@ no runtime UPDATE or DELETE policy; pruning a counter never deletes admissions.
 ## Reconciliation
 
 The singleton scheduler reconciles immediately at startup and hourly thereafter.
-For each root, it narrows to Billing authority and:
+For each root it lists the account's environments, including orphaned counter or
+store rows, in environment order. It then checks each counter separately:
 
-1. Reads source and counters in one consistent snapshot (REPEATABLE READ on
-   PostgreSQL), recording relative differences, then commits the snapshot.
-2. Adds those differences to current counters in a new transaction. Writes
-   committed since the snapshot retain their own trigger deltas.
+1. A short transaction compares one counter (an environment's storage, an
+   environment's tasks, or one run period) with its source rows in a **single
+   statement**, so both come from one snapshot.
+2. The same transaction adds the difference. Writes committed after that
+   statement keep their own trigger deltas.
 
-A dedicated per-root advisory session serializes reconcilers, without locking
-the root admission row. SQLite serializes local reconcilers with a mutex.
-A changed task period skips that correction and is checked again next time.
-A pruned run period is never recreated by repair. Storage repairs use slot zero.
-Warnings include root/environment, differences and repair outcomes; errors retry
-on the next tick. Drift is evidence to investigate, not a reason to bypass RLS.
-The background source scans still scale with retained history.
+Live environments are checked under their exact environment scope, which keeps
+RLS checks cheap; orphaned rows and run counters use Billing authority. No
+snapshot spans an account, so a heavy account does not hold back row cleanup
+for other tenants. Each repair holds at most one counter row, so it cannot
+deadlock with ordered writers such as retention or period initialization.
 
-Session advisory guards use detached connections, which close on drop. A held
-scheduler/reconciliation guard does not consume the only slot of a one-connection
-data pool or return a locked session to it. Allow those dedicated coordination
-connections in the database connection budget.
+On PostgreSQL each check takes a transaction advisory lock for its counter, so
+two reconcilers never add the same difference twice; a check that another
+reconciler holds is skipped until the next tick. No dedicated coordination
+connection is needed. SQLite checks hold the writer lock, and a mutex serializes
+local reconcilers. A changed task period skips that correction and is checked
+again next time. A pruned run period is never recreated by repair. Storage
+repairs use slot zero. Warnings include root/environment, differences and repair
+outcomes; errors retry on the next tick. Drift is evidence to investigate, not a
+reason to bypass RLS. The background source scans still scale with retained
+history.
+
+The scheduler singleton is a session advisory guard on a detached connection,
+which closes on drop. A held guard does not consume the only slot of a
+one-connection data pool or return a locked session to it. Allow that dedicated
+coordination connection in the database connection budget.
 
 ## Scoped units of work
 

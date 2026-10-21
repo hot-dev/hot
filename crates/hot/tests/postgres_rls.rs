@@ -1664,15 +1664,12 @@ async fn scoped_pool_enforces_isolation_under_a_restricted_login()
                 .unwrap();
         }
     });
-    let report = db::usage::reconcile_account(&billing_db, root)
-        .await?
-        .unwrap();
+    let report = db::usage::reconcile_account(&billing_db, root).await?;
     assert_eq!(report.storage_rows, 1);
     writing.await?;
     assert!(
         db::usage::reconcile_account(&billing_db, root)
             .await?
-            .unwrap()
             .is_empty()
     );
     let actual: i64 = sqlx::query_scalar(
@@ -1688,6 +1685,77 @@ async fn scoped_pool_enforces_isolation_under_a_restricted_login()
     .fetch_one(&a)
     .await?;
     assert_eq!(actual, expected);
+    // Each counter is checked and repaired in its own short transaction: a
+    // writer holding one environment's counter delays only that repair, not
+    // the account's other environments, and no snapshot spans them.
+    let (first, last) = if env_a < env_b {
+        (env_a, env_b)
+    } else {
+        (env_b, env_a)
+    };
+    for (env, org) in [(env_a, child_a), (env_b, child_b)] {
+        sqlx::query("INSERT INTO hot.usage_storage(env_id,org_id,slot,store_bytes) VALUES($1,$2,0,7) ON CONFLICT(env_id,slot) DO UPDATE SET store_bytes=hot.usage_storage.store_bytes+7")
+            .bind(env).bind(org).execute(&admin).await?;
+    }
+    let mut holder = admin.begin().await?;
+    sqlx::query("SELECT 1 FROM hot.usage_storage WHERE env_id=$1 AND slot=0 FOR UPDATE")
+        .bind(last)
+        .execute(&mut *holder)
+        .await?;
+    let reconciling = tokio::spawn({
+        let billing_db = billing_db.clone();
+        async move { db::usage::reconcile_account(&billing_db, root).await }
+    });
+    let store_matches = |env: Uuid| {
+        sqlx::query_scalar::<_, bool>("SELECT (SELECT COALESCE(SUM(store_bytes),0) FROM hot.usage_storage WHERE env_id=$1)=(SELECT COALESCE(SUM(GREATEST(size,0)),0) FROM hot.store_map_entry WHERE env_id=$1)")
+            .bind(env)
+            .fetch_one(&admin)
+    };
+    let mut first_repaired = false;
+    for _ in 0..100 {
+        if store_matches(first).await? {
+            first_repaired = true;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    assert!(
+        first_repaired && !reconciling.is_finished(),
+        "an earlier environment's repair must commit while a later one waits"
+    );
+    holder.rollback().await?;
+    assert_eq!(reconciling.await??.storage_rows, 2);
+    assert!(store_matches(last).await?);
+    // Reconciliation needs no dedicated coordination connection, so a
+    // one-connection pool keeps its session.
+    let one_connection = ScopedPgPool::new(
+        PgPoolOptions::new()
+            .max_connections(1)
+            .after_connect(|conn, _| {
+                Box::pin(async move {
+                    conn.execute("SET search_path=hot,public").await?;
+                    Ok(())
+                })
+            })
+            .connect(runtime_url.as_str())
+            .await?,
+    )
+    .with_scope(DatabaseScope::Maintenance {
+        operation: db::MaintenanceOperation::Billing,
+        org_id: Some(root),
+    });
+    let backend = || async {
+        let mut tx = one_connection.begin().await?;
+        let pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+            .fetch_one(&mut *tx)
+            .await?;
+        tx.commit().await?;
+        Ok::<_, sqlx::Error>(pid)
+    };
+    let session = backend().await?;
+    db::usage::reconcile_account(&db::DatabasePool::Postgres(one_connection.clone()), root).await?;
+    assert_eq!(backend().await?, session);
+    one_connection.close().await;
 
     // Distinct runtime sessions publish deltas to their own backend slots.
     // Retention and a cascaded run delete both subtract exactly once.
