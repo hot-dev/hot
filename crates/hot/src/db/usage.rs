@@ -64,13 +64,15 @@ pub(crate) async fn prepare_task_period(
 /// Called under the root lock. Lock stale counter rows before taking the fresh
 /// statement snapshot that initializes a new billing period. Task writers after
 /// that snapshot wait in their trigger and then apply their own deltas.
+/// `prepare_task_period` already created missing rows; an environment still
+/// without one has recorded no usage, so it adds nothing to the totals. Not
+/// touching other environments' rows keeps this claim from waiting on their
+/// in-flight counter changes while it holds the account lock.
 pub(crate) async fn task_usage_postgres(
     conn: &mut PgConnection,
     root: Uuid,
     period: DateTime<Utc>,
 ) -> Result<TaskTotals, sqlx::Error> {
-    sqlx::query("INSERT INTO usage_task(env_id,org_id) SELECT e.env_id,e.org_id FROM env e JOIN org o ON o.org_id=e.org_id WHERE o.org_id=$1 OR o.parent_org_id=$1 ORDER BY e.env_id ON CONFLICT(env_id) DO NOTHING")
-        .bind(root).execute(&mut *conn).await?;
     let stale: Vec<Uuid> = sqlx::query_scalar("SELECT u.env_id FROM usage_task u JOIN org o ON o.org_id=u.org_id WHERE (o.org_id=$1 OR o.parent_org_id=$1) AND u.period_start IS DISTINCT FROM $2 ORDER BY u.env_id FOR UPDATE OF u")
         .bind(root).bind(period).fetch_all(&mut *conn).await?;
     if !stale.is_empty() {

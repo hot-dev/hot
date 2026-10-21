@@ -42,6 +42,17 @@ DECLARE n record; o record; owner_env uuid; owner_org uuid;
 BEGIN
     SELECT * INTO n FROM hot.task_usage(CASE WHEN TG_OP='DELETE' THEN OLD ELSE NEW END);
     SELECT * INTO o FROM hot.task_usage(CASE WHEN TG_OP='INSERT' THEN NEW ELSE OLD END);
+    -- Queued inserts and other writes that change no usage leave the counter
+    -- row alone, so concurrent enqueues in one environment do not serialize.
+    IF (CASE TG_OP
+        WHEN 'INSERT' THEN (n.active_containers,n.reserved_compute_units,n.reserved_duration_ms,n.compute_units,n.duration_ms)=(0,0,0,0,0)
+        WHEN 'DELETE' THEN (o.active_containers,o.reserved_compute_units,o.reserved_duration_ms,o.compute_units,o.duration_ms)=(0,0,0,0,0)
+        ELSE (n.active_containers,n.reserved_compute_units,n.reserved_duration_ms)=(o.active_containers,o.reserved_compute_units,o.reserved_duration_ms)
+            AND ((n.compute_units,n.duration_ms,o.compute_units,o.duration_ms)=(0,0,0,0)
+                OR (n.compute_units,n.duration_ms,n.usage_at) IS NOT DISTINCT FROM (o.compute_units,o.duration_ms,o.usage_at))
+    END) THEN
+        RETURN NULL;
+    END IF;
     owner_env:=CASE WHEN TG_OP='DELETE' THEN OLD.env_id ELSE NEW.env_id END;
     SELECT org_id INTO STRICT owner_org FROM hot.env WHERE env_id=owner_env;
     INSERT INTO hot.usage_task AS u (env_id,org_id,active_containers,reserved_compute_units,reserved_duration_ms)

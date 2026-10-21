@@ -1424,6 +1424,49 @@ async fn scoped_pool_enforces_isolation_under_a_restricted_login()
         .bind(root)
         .execute(&admin)
         .await?;
+    // Enqueues change no usage, so they must not serialize on the
+    // environment's counter row.
+    let enqueue = |id: Uuid| {
+        sqlx::query("INSERT INTO task(task_id,env_id,stream_id,build_id,function_name,task_type) VALUES($1,$2,$3,$4,'enqueue-test','container')")
+            .bind(id).bind(env_a).bind(stream_a).bind(build_a)
+    };
+    let enqueued = [Uuid::new_v4(), Uuid::new_v4()];
+    let mut first_enqueue = a.begin().await?;
+    enqueue(enqueued[0]).execute(&mut *first_enqueue).await?;
+    tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        enqueue(enqueued[1]).execute(&a),
+    )
+    .await
+    .map_err(|_| "a concurrent enqueue waited on the counter row")??;
+    first_enqueue.commit().await?;
+    // A limited claim holds the account lock, so it must not wait on another
+    // environment's in-flight counter change.
+    sqlx::query("UPDATE hot.org SET features=$1 WHERE org_id=$2")
+        .bind(serde_json::json!({"box_concurrent_tasks":100,"compute_units_per_month":-1,"runs_per_month":-1}))
+        .bind(root)
+        .execute(&admin)
+        .await?;
+    let mut in_flight = b.begin().await?;
+    sqlx::query("INSERT INTO task(task_id,env_id,stream_id,build_id,function_name,task_type,task_status_id,start_time,reserved_compute_units,reserved_duration_ms) VALUES($1,$2,$3,$4,'in-flight-test','container',2,now(),10,1000)")
+        .bind(Uuid::new_v4()).bind(env_b).bind(stream_b).bind(build_b).execute(&mut *in_flight).await?;
+    let claimed = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        db::Task::claim_for_worker_with_quota(&db_a, &enqueued[0], "in-flight", container_reserve),
+    )
+    .await
+    .map_err(|_| "a claim waited on another environment's counter row")?
+    .map_err(|e| format!("claim beside an in-flight counter change: {e:?}"))?;
+    assert!(claimed);
+    in_flight.rollback().await?;
+    sqlx::query("DELETE FROM hot.task WHERE task_id=ANY($1)")
+        .bind(enqueued.to_vec())
+        .execute(&admin)
+        .await?;
+    sqlx::query("UPDATE hot.org SET features=NULL WHERE org_id=$1")
+        .bind(root)
+        .execute(&admin)
+        .await?;
     // Code task results are user values: account usage neither fails on nor
     // counts their compute-units, matching the counters.
     let usage_since = chrono::Utc::now() - chrono::Duration::days(1);

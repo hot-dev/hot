@@ -63,7 +63,12 @@ completion can release reservations. Valid signed 64-bit metering is accepted;
 out-of-range values use the fallback. Updates subtract the old period charge
 before adding the replacement, avoiding intermediate overflow when the final
 total fits. Heartbeats, timing and info-only updates
-do not update the counters.
+do not update the counters. On PostgreSQL, writes whose contribution does not
+change (queued inserts, for example) skip the counter row entirely, so
+concurrent enqueues in one environment do not serialize on it. A limited claim
+reads and locks only stale counter rows, never other environments' current
+rows, so it does not wait on their in-flight changes while holding the root
+lock.
 
 The migration initializes current reservations and leaves `period_start` null.
 Before a limited task claim takes the root lock, each environment whose counter
