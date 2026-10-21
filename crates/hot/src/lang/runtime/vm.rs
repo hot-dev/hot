@@ -158,6 +158,21 @@ impl std::fmt::Display for VmError {
 
 pub type VmResult<T> = Result<T, VmError>;
 
+/// Marks a run admission that must stay pending. The engine places it at the
+/// start of the error only for its own admission step, which runs before any
+/// user code; user errors are always wrapped, so their text cannot spoof it.
+pub const RUN_ADMISSION_DEFERRED: &str = "[run-admission]";
+
+/// The engine's error text for a failed admission step.
+pub fn admission_failure(error: VmError) -> String {
+    let message = error.to_string();
+    if message.contains(RUN_ADMISSION_DEFERRED) {
+        format!("{RUN_ADMISSION_DEFERRED} {message}")
+    } else {
+        message
+    }
+}
+
 /// Result of executing function instructions.
 /// Can either be a final value or a tail call request.
 #[derive(Debug, Clone)]

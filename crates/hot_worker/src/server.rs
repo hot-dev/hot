@@ -1308,13 +1308,13 @@ fn is_event_setup_timeout_error(error: &str) -> bool {
     error.contains("[event-setup-timeout]")
 }
 
-/// Whether a failed handler execution should leave the event un-ACKed for
-/// redelivery. Only safe when the failure is the blocking-slot admission
-/// timeout (the handler produced no run side effects) AND no earlier handler
-/// for the same event already started a run — redelivering after a run
-/// started would duplicate its side effects.
+/// Whether a failed handler should stay pending without spending a delivery:
+/// only for the engine's own run-admission deferral (a suspended account or a
+/// transient lookup), which happens before any user code, and only when no
+/// earlier handler for the same event already started a run. Redelivering after
+/// a run started would duplicate its side effects.
 fn should_defer_run_admission(error: &str, started_any_handler: bool) -> bool {
-    error.contains("[run-admission]") && !started_any_handler
+    error.starts_with(hot::lang::runtime::vm::RUN_ADMISSION_DEFERRED) && !started_any_handler
 }
 
 fn should_redeliver_event_after_handler_error(error: &str, started_any_handler: bool) -> bool {
@@ -8543,6 +8543,20 @@ mod tests {
             true
         ));
         assert!(!should_defer_run_admission("User handler failed", false));
+        // User code can put the tag in its own error text; only the engine's
+        // admission step may begin an error with it.
+        assert!(!should_defer_run_admission(
+            "Failed to call function 'handler': Runtime error: Function '[run-admission] x' not found",
+            false
+        ));
+        let admission = hot::lang::runtime::vm::admission_failure(
+            hot::lang::runtime::vm::VmError::runtime("[run-admission] Account suspended".into()),
+        );
+        assert!(should_defer_run_admission(&admission, false));
+        let quota = hot::lang::runtime::vm::admission_failure(
+            hot::lang::runtime::vm::VmError::runtime("[run-quota] Monthly limit".into()),
+        );
+        assert!(!should_defer_run_admission(&quota, false));
     }
 
     #[test]

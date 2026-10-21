@@ -691,7 +691,8 @@ impl Engine {
         if let Some(ref context) = execution_context {
             vm.set_execution_context(context.clone());
         }
-        vm.admit_execution().map_err(|error| error.to_string())?;
+        vm.admit_execution()
+            .map_err(crate::lang::runtime::vm::admission_failure)?;
 
         // Initialize global state WITHOUT emitter (don't record initialization as a run)
         if instruction_count > 0 {
@@ -1041,7 +1042,8 @@ impl Engine {
         if let Some(ref context) = execution_context {
             vm.set_execution_context(context.clone());
         }
-        vm.admit_execution().map_err(|error| error.to_string())?;
+        vm.admit_execution()
+            .map_err(crate::lang::runtime::vm::admission_failure)?;
 
         // Initialize global state WITHOUT emitter
         if instruction_count > 0 {
