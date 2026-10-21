@@ -15,6 +15,8 @@ pub mod domain_provider;
 pub mod email;
 pub mod env;
 pub mod file_storage;
+#[cfg(feature = "gcs-storage")]
+pub mod gcs;
 pub mod hasher;
 pub mod lang;
 pub mod log;

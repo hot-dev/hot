@@ -51,6 +51,7 @@ migrations, editor reference).
 - [Hot Configuration](configuration)
   - [Dependencies](configuration/dependencies)
   - [Projects](configuration/projects)
+  - [Storage](configuration/storage)
 - [Hot Packages](packages)
   - [Package Manifest](packages/manifest)
   - [Package Dependencies](packages/dependencies)

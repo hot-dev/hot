@@ -273,13 +273,13 @@ impl ExistingRows {
 
 #[tokio::test]
 async fn sqlite_upgrades_preserve_populated_data_and_delegated_credentials() -> TestResult {
-    for baseline in [9, 15] {
+    for baseline in [9, 17] {
         let directory = tempfile::tempdir()?;
         let path = directory.path().join("existing.db");
         let pool = existing_database(&path, baseline).await?;
         let rows = ExistingRows::seed(&pool).await?;
-        if baseline < 15 {
-            migrations_through(15).await?.run(&pool).await?;
+        if baseline < 17 {
+            migrations_through(17).await?.run(&pool).await?;
             let admission: (Uuid, Uuid, Uuid, String) = sqlx::query_as(
                 "SELECT root_org_id,org_id,env_id,admitted_at FROM run_admission WHERE run_id=?",
             )
@@ -335,10 +335,10 @@ async fn sqlite_upgrades_preserve_populated_data_and_delegated_credentials() -> 
 }
 
 #[tokio::test]
-async fn sqlite_016_rejects_legacy_mismatches_atomically_and_allows_reviewed_retry() -> TestResult {
+async fn sqlite_018_rejects_legacy_mismatches_atomically_and_allows_reviewed_retry() -> TestResult {
     for mismatch in ["destination_org", "subscription_org", "subscription_env"] {
         let directory = tempfile::tempdir()?;
-        let pool = existing_database(&directory.path().join("existing.db"), 15).await?;
+        let pool = existing_database(&directory.path().join("existing.db"), 17).await?;
         let rows = ExistingRows::seed(&pool).await?;
         rows.add_delegated_issuer(&pool).await?;
         match mismatch {
@@ -373,7 +373,7 @@ async fn sqlite_016_rejects_legacy_mismatches_atomically_and_allows_reviewed_ret
             .run(&pool)
             .await
             .unwrap_err();
-        assert!(error.to_string().contains("16"), "{mismatch}: {error}");
+        assert!(error.to_string().contains("18"), "{mismatch}: {error}");
         assert_eq!(ledger(&pool).await?, before);
         let installed: i64 = sqlx::query_scalar("SELECT count(*) FROM sqlite_master WHERE name IN ('alert_delivery_scope_insert','alert_delivery_scope_update','management_key_scope_immutable','delegated_api_key_no_delete','api_key_management_issuer_no_delete')")
             .fetch_one(&pool).await?;
@@ -458,7 +458,7 @@ async fn runtime_reference(
 }
 
 #[tokio::test]
-async fn sqlite_017_rejects_retained_cross_environment_origins_and_events() -> TestResult {
+async fn sqlite_019_rejects_retained_cross_environment_origins_and_events() -> TestResult {
     for mismatch in [
         "run_origin_environment",
         "task_origin_environment",
@@ -500,13 +500,13 @@ async fn sqlite_017_rejects_retained_cross_environment_origins_and_events() -> T
             .run(&pool)
             .await
             .unwrap_err();
-        assert!(error.to_string().contains("17"), "{error}");
+        assert!(error.to_string().contains("19"), "{error}");
         assert!(error.to_string().contains(mismatch), "{error}");
         let before_retry = ledger(&pool).await?;
-        assert_eq!(before_retry.last().map(|row| row.0), Some(16));
+        assert_eq!(before_retry.last().map(|row| row.0), Some(18));
         assert_eq!(
             before_retry.len(),
-            16,
+            18,
             "earlier migrations remain committed"
         );
         let temporary: i64 = sqlx::query_scalar(
@@ -519,7 +519,7 @@ async fn sqlite_017_rejects_retained_cross_environment_origins_and_events() -> T
             .fetch_one(&pool).await?;
         assert_eq!(
             installed, 2,
-            "migration 016 remains installed after 017 fails"
+            "migration 018 remains installed after 019 fails"
         );
         let (retained_id, repaired_id) = match mismatch {
             "run_origin_environment" => {

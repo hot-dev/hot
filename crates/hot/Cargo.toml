@@ -13,6 +13,7 @@ workspace = true
 [features]
 default = []
 s3-storage = ["aws-config", "aws-runtime", "aws-sdk-s3"]
+gcs-storage = ["dep:google-cloud-storage", "dep:google-cloud-gax", "dep:google-cloud-auth"]
 local-embeddings = ["dep:fastembed"]
 test-utils = []
 
@@ -106,6 +107,12 @@ aws-config = { workspace = true, optional = true }
 aws-sdk-s3 = { workspace = true, optional = true }
 
 aws-runtime = { workspace = true, optional = true }
+
+# Google Cloud Storage SDK (optional). Authenticates with Application Default
+# Credentials; no gcloud subprocesses at runtime.
+google-cloud-storage = { workspace = true, optional = true }
+google-cloud-gax = { workspace = true, optional = true }
+google-cloud-auth = { workspace = true, optional = true }
 cranelift-codegen = { workspace = true }
 cranelift-frontend = { workspace = true }
 cranelift-module = { workspace = true }

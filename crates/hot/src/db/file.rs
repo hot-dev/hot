@@ -542,10 +542,76 @@ pub async fn update_file_record_if_etag(
     updated_by_user_id: Uuid,
     updated_by_run_id: Option<Uuid>,
 ) -> Result<Option<FileRecord>, String> {
-    let attempt = update_file_record_if_etag_attempt(
+    update_file_record_if(
         db,
         file_id,
-        expected_etag,
+        RecordGuard::Etag(expected_etag),
+        size,
+        etag,
+        content_type,
+        storage_path,
+        updated_by_user_id,
+        updated_by_run_id,
+    )
+    .await
+}
+
+/// Conditionally update a file record: succeeds only while the record is
+/// still active and still references `expected_storage_path`. Every write
+/// stages its bytes at a unique location, so the location identifies the
+/// version exactly; Ok(None) means another writer (or a delete) got there
+/// first and the caller must re-read before trying again.
+#[allow(clippy::too_many_arguments)]
+pub async fn update_file_record_if_storage_path(
+    db: &DatabasePool,
+    file_id: Uuid,
+    expected_storage_path: &str,
+    size: i64,
+    etag: Option<&str>,
+    content_type: Option<&str>,
+    storage_path: &str,
+    updated_by_user_id: Uuid,
+    updated_by_run_id: Option<Uuid>,
+) -> Result<Option<FileRecord>, String> {
+    update_file_record_if(
+        db,
+        file_id,
+        RecordGuard::StoragePath(expected_storage_path),
+        size,
+        etag,
+        content_type,
+        storage_path,
+        updated_by_user_id,
+        updated_by_run_id,
+    )
+    .await
+}
+
+/// The version a conditional update requires the record to still have.
+#[derive(Clone, Copy)]
+enum RecordGuard<'a> {
+    /// Application etag; legacy NULL etags match any expectation.
+    Etag(&'a str),
+    /// Exact stored location.
+    StoragePath(&'a str),
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn update_file_record_if(
+    db: &DatabasePool,
+    file_id: Uuid,
+    guard: RecordGuard<'_>,
+    size: i64,
+    etag: Option<&str>,
+    content_type: Option<&str>,
+    storage_path: &str,
+    updated_by_user_id: Uuid,
+    updated_by_run_id: Option<Uuid>,
+) -> Result<Option<FileRecord>, String> {
+    let attempt = update_file_record_if_attempt(
+        db,
+        file_id,
+        guard,
         size,
         etag,
         content_type,
@@ -566,10 +632,10 @@ pub async fn update_file_record_if_etag(
                 msg,
                 updated_by_run_id.unwrap_or_default(),
             );
-            update_file_record_if_etag_attempt(
+            update_file_record_if_attempt(
                 db,
                 file_id,
-                expected_etag,
+                guard,
                 size,
                 etag,
                 content_type,
@@ -585,10 +651,10 @@ pub async fn update_file_record_if_etag(
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn update_file_record_if_etag_attempt(
+async fn update_file_record_if_attempt(
     db: &DatabasePool,
     file_id: Uuid,
-    expected_etag: &str,
+    guard: RecordGuard<'_>,
     size: i64,
     etag: Option<&str>,
     content_type: Option<&str>,
@@ -598,36 +664,42 @@ async fn update_file_record_if_etag_attempt(
 ) -> Result<Option<FileRecord>, FileWriteError> {
     let now = Utc::now();
     // A missing, inactive, or no-longer-visible row is a lost comparison. Keep
-    // database failures distinct, and check the expected tag before quota work.
-    let existing: Option<(Uuid, Option<Uuid>, Option<String>)> = match db {
-        DatabasePool::Postgres(pool) => {
-            sqlx::query_as("SELECT org_id,env_id,etag FROM file WHERE file_id=$1 AND active=true")
-                .bind(file_id)
-                .fetch_optional(pool)
-                .await
-                .map_err(fwe)?
-        }
-        DatabasePool::Sqlite(pool) => {
-            sqlx::query_as("SELECT org_id,env_id,etag FROM file WHERE file_id=? AND active=true")
-                .bind(file_id)
-                .fetch_optional(pool)
-                .await
-                .map_err(fwe)?
-        }
+    // database failures distinct, and check the guard before quota work.
+    let existing: Option<(Uuid, Option<Uuid>, Option<String>, String)> = match db {
+        DatabasePool::Postgres(pool) => sqlx::query_as(
+            "SELECT org_id,env_id,etag,storage_path FROM file WHERE file_id=$1 AND active=true",
+        )
+        .bind(file_id)
+        .fetch_optional(pool)
+        .await
+        .map_err(fwe)?,
+        DatabasePool::Sqlite(pool) => sqlx::query_as(
+            "SELECT org_id,env_id,etag,storage_path FROM file WHERE file_id=? AND active=1",
+        )
+        .bind(file_id)
+        .fetch_optional(pool)
+        .await
+        .map_err(fwe)?,
     };
-    let Some((org_id, env_id, current_etag)) = existing else {
+    let Some((org_id, env_id, current_etag, current_path)) = existing else {
         return Ok(None);
     };
-    if current_etag
-        .as_deref()
-        .is_some_and(|tag| tag != expected_etag)
-    {
+    let (expected, matches) = match guard {
+        RecordGuard::Etag(expected) => (
+            expected,
+            current_etag.as_deref().is_none_or(|tag| tag == expected),
+        ),
+        RecordGuard::StoragePath(expected) => (expected, current_path == expected),
+    };
+    if !matches {
         return Ok(None);
     }
     let transaction = begin_storage_write(db, org_id, env_id, Some(file_id), size).await?;
     match transaction {
         StorageWriteTransaction::Postgres(mut tx) => {
-            let query = r#"
+            let query = match guard {
+                RecordGuard::Etag(_) => {
+                    r#"
             UPDATE file SET
                 size = $2,
                 etag = $3,
@@ -641,7 +713,26 @@ async fn update_file_record_if_etag_attempt(
                       storage_backend, storage_path, org_id, env_id,
                       created_by_run_id, updated_by_run_id,
                       created_at, updated_at, created_by_user_id, updated_by_user_id
-            "#;
+            "#
+                }
+                RecordGuard::StoragePath(_) => {
+                    r#"
+            UPDATE file SET
+                size = $2,
+                etag = $3,
+                content_type = $4,
+                storage_path = $5,
+                updated_by_user_id = $6,
+                updated_by_run_id = $7,
+                updated_at = $8
+            WHERE file_id = $1 AND active = true AND storage_path = $9
+            RETURNING file_id, path, size, etag, content_type,
+                      storage_backend, storage_path, org_id, env_id,
+                      created_by_run_id, updated_by_run_id,
+                      created_at, updated_at, created_by_user_id, updated_by_user_id
+            "#
+                }
+            };
             let row = sqlx::query(query)
                 .bind(file_id)
                 .bind(size)
@@ -651,7 +742,7 @@ async fn update_file_record_if_etag_attempt(
                 .bind(updated_by_user_id)
                 .bind(updated_by_run_id)
                 .bind(now)
-                .bind(expected_etag)
+                .bind(expected)
                 .fetch_optional(&mut *tx)
                 .await
                 .map_err(|e| {
@@ -680,7 +771,9 @@ async fn update_file_record_if_etag_attempt(
             }))
         }
         StorageWriteTransaction::Sqlite(mut tx) => {
-            let query = r#"
+            let query = match guard {
+                RecordGuard::Etag(_) => {
+                    r#"
             UPDATE file SET
                 size = ?,
                 etag = ?,
@@ -690,7 +783,22 @@ async fn update_file_record_if_etag_attempt(
                 updated_by_run_id = ?,
                 updated_at = ?
             WHERE file_id = ? AND active = 1 AND (etag = ? OR etag IS NULL)
-            "#;
+            "#
+                }
+                RecordGuard::StoragePath(_) => {
+                    r#"
+            UPDATE file SET
+                size = ?,
+                etag = ?,
+                content_type = ?,
+                storage_path = ?,
+                updated_by_user_id = ?,
+                updated_by_run_id = ?,
+                updated_at = ?
+            WHERE file_id = ? AND active = 1 AND storage_path = ?
+            "#
+                }
+            };
             let result = sqlx::query(query)
                 .bind(size)
                 .bind(etag)
@@ -700,7 +808,7 @@ async fn update_file_record_if_etag_attempt(
                 .bind(updated_by_run_id)
                 .bind(now)
                 .bind(file_id)
-                .bind(expected_etag)
+                .bind(expected)
                 .execute(&mut *tx)
                 .await
                 .map_err(|e| {
@@ -725,6 +833,19 @@ pub async fn get_file_by_path(
     org_id: Uuid,
     env_id: Option<Uuid>, // Added env_id for security
 ) -> Result<FileRecord, String> {
+    find_file_by_path(db, path, org_id, env_id)
+        .await?
+        .ok_or_else(|| format!("File not found: {}", sqlx::Error::RowNotFound))
+}
+
+/// Like [`get_file_by_path`], but distinguishes "no active record" (`None`)
+/// from a failed query, for callers whose next step depends on which.
+pub async fn find_file_by_path(
+    db: &DatabasePool,
+    path: &str,
+    org_id: Uuid,
+    env_id: Option<Uuid>,
+) -> Result<Option<FileRecord>, String> {
     let query = match db {
         DatabasePool::Postgres(_) => {
             r#"
@@ -755,11 +876,14 @@ pub async fn get_file_by_path(
                 .bind(org_id)
                 .bind(env_id) // First bind for env_id = $3
                 .bind(env_id) // Second bind for $3 IS NULL check
-                .fetch_one(pool)
+                .fetch_optional(pool)
                 .await
                 .map_err(|e| format!("File not found: {}", e))?;
+            let Some(row) = row else {
+                return Ok(None);
+            };
 
-            Ok(FileRecord {
+            Ok(Some(FileRecord {
                 file_id: row.try_get("file_id").map_err(|e| e.to_string())?,
                 path: row.try_get("path").map_err(|e| e.to_string())?,
                 size: row.try_get("size").map_err(|e| e.to_string())?,
@@ -783,7 +907,7 @@ pub async fn get_file_by_path(
                 updated_by_user_id: row
                     .try_get("updated_by_user_id")
                     .map_err(|e| e.to_string())?,
-            })
+            }))
         }
         DatabasePool::Sqlite(pool) => {
             let row = sqlx::query(query)
@@ -791,9 +915,12 @@ pub async fn get_file_by_path(
                 .bind(org_id)
                 .bind(env_id) // Added env_id for security
                 .bind(env_id) // Need to bind twice for IS NULL check
-                .fetch_one(pool)
+                .fetch_optional(pool)
                 .await
                 .map_err(|e| format!("File not found: {}", e))?;
+            let Some(row) = row else {
+                return Ok(None);
+            };
 
             let file_id_bytes: Vec<u8> = row.try_get("file_id").map_err(|e| e.to_string())?;
             let org_id_bytes: Vec<u8> = row.try_get("org_id").map_err(|e| e.to_string())?;
@@ -811,7 +938,7 @@ pub async fn get_file_by_path(
                 .try_get("updated_by_run_id")
                 .map_err(|e| e.to_string())?;
 
-            Ok(FileRecord {
+            Ok(Some(FileRecord {
                 file_id: Uuid::from_slice(&file_id_bytes).map_err(|e| e.to_string())?,
                 path: row.try_get("path").map_err(|e| e.to_string())?,
                 size: row.try_get("size").map_err(|e| e.to_string())?,
@@ -840,7 +967,7 @@ pub async fn get_file_by_path(
                     .map(|b| Uuid::from_slice(b.as_slice()))
                     .transpose()
                     .map_err(|e| e.to_string())?,
-            })
+            }))
         }
     }
 }

@@ -14,7 +14,7 @@ use hot::db::env::Env;
 use hot::db::file::{self, FileRecord};
 use hot::db::file_upload::{self, PartInfo};
 use hot::file_storage::{
-    self, FileStorage, FileStorageContext, compute_part_size, validate_part_number,
+    self, CommitBase, FileStorage, FileStorageContext, compute_part_size, validate_part_number,
 };
 use std::sync::Arc;
 use uuid::Uuid;
@@ -32,6 +32,66 @@ fn effective_file_max_bytes(conf: &hot::val::Val, plan_max: i64) -> i64 {
     )
 }
 
+/// Refuse to route a persisted upload through a backend other than the one
+/// that created it. Switching backends does not migrate in-flight uploads.
+fn ensure_upload_backend(
+    record: &file_upload::FileUploadRecord,
+    file_storage: &SharedFileStorage,
+) -> Result<(), (StatusCode, Json<ApiErrorResponse>)> {
+    if record.storage_backend == file_storage.storage_type() {
+        return Ok(());
+    }
+    Err((
+        StatusCode::CONFLICT,
+        Json(ApiErrorResponse::new(
+            "upload_backend_mismatch",
+            format!(
+                "Upload was started on the '{}' storage backend, but this installation now uses '{}'; start a new upload",
+                record.storage_backend,
+                file_storage.storage_type()
+            ),
+        )),
+    ))
+}
+
+/// How long a completion claim keeps the expiry sweep away. Retried
+/// completions renew it; only a completion that stopped making progress
+/// (a crashed process) outlives it.
+const COMPLETION_LEASE_HOURS: i64 = 1;
+
+/// Abort an upload whose completion found the file changed underneath it.
+/// Failures are logged; a claim that could not finish returns to `pending`,
+/// where the client or the expiry sweep can abort it again.
+async fn abandon_upload(
+    db: &hot::db::DatabasePool,
+    file_storage: &dyn FileStorage,
+    record: &file_upload::FileUploadRecord,
+    org_id: Uuid,
+    ctx: &FileStorageContext,
+) {
+    let Some(env_id) = record.env_id else { return };
+    if let Err(e) = file_upload::abandon_completion(db, record.upload_id, org_id, env_id).await {
+        tracing::warn!(upload_id = %record.upload_id, "Failed to abandon upload completion: {}", e);
+        return;
+    }
+    let aborted = match record.backend_upload_id.as_deref() {
+        Some(backend_upload_id) => {
+            file_storage
+                .abort_multipart_upload(backend_upload_id, &record.path, ctx)
+                .await
+        }
+        None => Ok(()),
+    };
+    let finished = match aborted {
+        Ok(()) => file_upload::abort_upload(db, record.upload_id, org_id, env_id).await,
+        Err(e) => Err(e),
+    };
+    if let Err(e) = finished {
+        tracing::warn!(upload_id = %record.upload_id, "Failed to abort conflicting upload: {}", e);
+        let _ = file_upload::release_cleanup_claim(db, record.upload_id, org_id, env_id).await;
+    }
+}
+
 fn file_response_from_record(record: &FileRecord) -> FileResponse {
     FileResponse {
         file_id: record.file_id,
@@ -45,6 +105,75 @@ fn file_response_from_record(record: &FileRecord) -> FileResponse {
         created_at: record.created_at,
         updated_at: record.updated_at,
     }
+}
+
+fn file_response_from_metadata(meta: &file_storage::FileMetadata) -> FileResponse {
+    FileResponse {
+        file_id: meta.file_id,
+        path: meta.path.clone(),
+        size: meta.size,
+        etag: meta.etag.clone(),
+        content_type: meta.content_type.clone(),
+        storage_backend: meta.storage_backend.clone(),
+        created_by_run_id: meta.created_by_run_id,
+        updated_by_run_id: meta.updated_by_run_id,
+        created_at: meta.created_at,
+        updated_at: meta.updated_at,
+    }
+}
+
+fn part_conflict() -> (StatusCode, Json<ApiErrorResponse>) {
+    (
+        StatusCode::CONFLICT,
+        Json(ApiErrorResponse::new(
+            "part_already_uploaded",
+            "Part content is already reserved; abort the upload to replace it",
+        )),
+    )
+}
+
+async fn recorded_part_retry(
+    db: &hot::db::DatabasePool,
+    record: &file_upload::FileUploadRecord,
+    part_number: i32,
+    content_hash: &str,
+    content_md5: &str,
+) -> Result<Option<PartInfo>, (StatusCode, Json<ApiErrorResponse>)> {
+    let parts: Vec<PartInfo> =
+        serde_json::from_value(record.parts_manifest.clone()).map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ApiErrorResponse::internal_error(&e.to_string())),
+            )
+        })?;
+    let Some(part) = parts.into_iter().find(|p| p.part_number == part_number) else {
+        return Ok(None);
+    };
+    let hash = file_upload::part_content_hash(db, record.upload_id, part_number)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ApiErrorResponse::internal_error(&e)),
+            )
+        })?;
+    // Old Local/S3 manifests predate reservations and use the body MD5 as ETag.
+    if hash
+        .as_deref()
+        .map_or(part.etag == content_md5, |hash| hash == content_hash)
+    {
+        Ok(Some(part))
+    } else {
+        Err(part_conflict())
+    }
+}
+
+fn part_response(part: PartInfo) -> Json<ApiResponse<UploadPartResponse>> {
+    Json(ApiResponse::new(UploadPartResponse {
+        part_number: part.part_number,
+        size: part.size,
+        etag: part.etag,
+    }))
 }
 
 pub async fn list_files(
@@ -285,6 +414,7 @@ pub async fn delete_file(
     State((db, _storage, _conf, _stream_pubsub)): State<ApiStateData>,
     Extension(auth): Extension<AuthContext>,
     Extension(api_key): Extension<ApiKey>,
+    Extension(file_storage): Extension<SharedFileStorage>,
     Path(file_id): Path<Uuid>,
 ) -> Result<StatusCode, (StatusCode, Json<ApiErrorResponse>)> {
     super::require_api_key(&auth, "Only API keys can delete files.")?;
@@ -308,24 +438,32 @@ pub async fn delete_file(
             )
         })?;
 
-    file::mark_file_inactive(
-        &db,
-        &record.path,
+    // Delete through the storage backend so the bytes go with the record:
+    // every write stores its bytes at a new location, so bytes left behind
+    // here would never be reused or collected.
+    let ctx = FileStorageContext::minimal(
+        Arc::clone(&db),
         org_id,
         Some(api_key.env_id),
         api_key.created_by_user_id,
-        None,
-    )
-    .await
-    .map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ApiErrorResponse::internal_error(&format!(
-                "Failed to delete file: {}",
-                e
-            ))),
-        )
-    })?;
+    );
+    if let Err(e) = file_storage.delete_file(&record.path, &ctx).await {
+        // The record may be gone even though removing its bytes failed.
+        match file::find_file_by_path(&db, &record.path, org_id, Some(api_key.env_id)).await {
+            Ok(None) => {
+                tracing::warn!(%file_id, "Deleted file record but not its stored bytes: {}", e);
+            }
+            _ => {
+                return Err((
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(ApiErrorResponse::internal_error(&format!(
+                        "Failed to delete file: {}",
+                        e
+                    ))),
+                ));
+            }
+        }
+    }
 
     Ok(StatusCode::NO_CONTENT)
 }
@@ -560,6 +698,7 @@ pub async fn upload_part_handler(
                 Json(ApiErrorResponse::not_found(&format!("Upload: {}", e))),
             )
         })?;
+    ensure_upload_backend(&record, &file_storage)?;
 
     // Non-final parts must meet S3 minimum size (5 MB)
     if body.len() < MIN_PART_SIZE
@@ -630,18 +769,87 @@ pub async fn upload_part_handler(
         api_key.created_by_user_id,
     );
 
-    let etag = file_storage
-        .upload_part(backend_upload_id, &record.path, part_number, &body, &ctx)
+    let content_hash = file_storage::compute_part_hash(&body);
+    let content_md5 = file_storage::compute_md5(&body);
+    if let Some(part) =
+        recorded_part_retry(&db, &record, part_number, &content_hash, &content_md5).await?
+    {
+        return Ok(part_response(part));
+    }
+    let claim_token = match file_upload::reserve_part(
+        &db,
+        upload_id,
+        org_id,
+        api_key.env_id,
+        part_number,
+        &content_hash,
+    )
+    .await
+    .map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ApiErrorResponse::internal_error(&e)),
+        )
+    })? {
+        file_upload::PartReservation::Claimed(owner) => owner,
+        file_upload::PartReservation::DifferentContent => return Err(part_conflict()),
+        file_upload::PartReservation::Busy => {
+            let current = file_upload::get_upload(&db, upload_id, org_id, api_key.env_id)
+                .await
+                .map_err(|e| {
+                    (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(ApiErrorResponse::internal_error(&e)),
+                    )
+                })?;
+            if let Some(part) =
+                recorded_part_retry(&db, &current, part_number, &content_hash, &content_md5).await?
+            {
+                return Ok(part_response(part));
+            }
+            return Err((
+                StatusCode::CONFLICT,
+                Json(ApiErrorResponse::new(
+                    "part_in_progress",
+                    "This part is being uploaded; retry after it finishes",
+                )),
+            ));
+        }
+    };
+    // A previous owner may have recorded the part between our first lookup
+    // and the reservation. Never send a recorded part to S3 again.
+    let current = file_upload::get_upload(&db, upload_id, org_id, api_key.env_id)
         .await
         .map_err(|e| {
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ApiErrorResponse::internal_error(&format!(
-                    "Failed to upload part: {}",
-                    e
-                ))),
+                Json(ApiErrorResponse::internal_error(&e)),
             )
         })?;
+    if let Some(part) =
+        recorded_part_retry(&db, &current, part_number, &content_hash, &content_md5).await?
+    {
+        return Ok(part_response(part));
+    }
+    let uploaded = tokio::time::timeout(
+        std::time::Duration::from_secs(300),
+        file_storage.upload_part(backend_upload_id, &record.path, part_number, &body, &ctx),
+    )
+    .await;
+    let etag = match uploaded {
+        Ok(Ok(etag)) => etag,
+        result => {
+            let _ = file_upload::release_part(&db, upload_id, part_number, claim_token).await;
+            let error = match result {
+                Ok(Err(e)) => e,
+                _ => "Part upload timed out".to_string(),
+            };
+            return Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ApiErrorResponse::internal_error(&error)),
+            ));
+        }
+    };
 
     let part_size = body.len() as i64;
 
@@ -655,18 +863,44 @@ pub async fn upload_part_handler(
             size: part_size,
             etag: etag.clone(),
         },
+        claim_token,
     )
     .await;
     if let Err(e) = record_result {
-        let _ = file_storage
-            .abort_multipart_upload(backend_upload_id, &record.path, &ctx)
-            .await;
-        let _ = file_upload::abort_upload(&db, upload_id, org_id, api_key.env_id).await;
+        // Never abort the upload here: the request may be a retry of a part
+        // already recorded, or a late duplicate racing a completion that now
+        // owns the upload. Unrecorded bytes stay in staging until the upload
+        // completes or is aborted.
+        let current = file_upload::get_upload(&db, upload_id, org_id, api_key.env_id)
+            .await
+            .map_err(|_| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(ApiErrorResponse::internal_error(&format!(
+                        "Failed to record part: {}",
+                        e
+                    ))),
+                )
+            })?;
+        if current.status != "pending" {
+            return Err((
+                StatusCode::CONFLICT,
+                Json(ApiErrorResponse::new(
+                    "upload_not_pending",
+                    format!("Upload is in '{}' status, not 'pending'", current.status),
+                )),
+            ));
+        }
+        let _ = file_upload::release_part(&db, upload_id, part_number, claim_token).await;
+        if let Some(part) =
+            recorded_part_retry(&db, &current, part_number, &content_hash, &content_md5).await?
+        {
+            return Ok(part_response(part));
+        }
         return Err((
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(ApiErrorResponse::internal_error(&format!(
-                "Failed to record part; upload was aborted: {}",
-                e
+                "Failed to record part: {e}"
             ))),
         ));
     }
@@ -705,8 +939,30 @@ pub async fn complete_upload(
                 Json(ApiErrorResponse::not_found(&format!("Upload: {}", e))),
             )
         })?;
+    ensure_upload_backend(&record, &file_storage)?;
 
-    if record.status != "pending" {
+    if record.status == "completed" {
+        if let Some(result) = record.completion_result {
+            let response = serde_json::from_value(result).map_err(|e| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(ApiErrorResponse::internal_error(&e.to_string())),
+                )
+            })?;
+            return Ok(Json(ApiResponse::new(response)));
+        }
+        return Err((
+            StatusCode::CONFLICT,
+            Json(ApiErrorResponse::new(
+                "completion_result_unavailable",
+                "This upload completed before response snapshots were recorded",
+            )),
+        ));
+    }
+
+    // `completing` means an earlier completion attempt was interrupted
+    // (crash, lost response, failed commit); completion resumes it.
+    if record.status != "pending" && record.status != "completing" {
         return Err((
             StatusCode::CONFLICT,
             Json(ApiErrorResponse::new(
@@ -788,27 +1044,71 @@ pub async fn complete_upload(
         api_key.created_by_user_id,
     );
 
-    file_storage
+    // Claim the upload before assembling bytes so a concurrent abort or the
+    // expiry sweep cannot delete them mid-completion. The claim is a lease:
+    // the sweep only reclaims a completion that stopped making progress.
+    let base = file_upload::begin_completion(
+        &db,
+        upload_id,
+        org_id,
+        api_key.env_id,
+        Utc::now() + Duration::hours(COMPLETION_LEASE_HOURS),
+    )
+    .await
+    .map_err(|e| {
+        (
+            StatusCode::CONFLICT,
+            Json(ApiErrorResponse::new("upload_not_pending", e)),
+        )
+    })?;
+
+    let metadata = match file_storage
         .complete_multipart_upload(
             backend_upload_id,
             &record.path,
             &parts,
             record.bytes_received,
             record.content_type.as_deref(),
+            &CommitBase::from_column(Some(base.as_str())),
             &ctx,
         )
         .await
-        .map_err(|e| {
-            (
+    {
+        Ok(meta) => meta,
+        Err(e) => {
+            if e.starts_with(file_storage::COMPLETION_CONFLICT) {
+                // The file changed after this completion began, so the upload
+                // can never be applied: abort it rather than leave it retryable.
+                abandon_upload(&db, file_storage.as_ref().as_ref(), &record, org_id, &ctx).await;
+                return Err((
+                    StatusCode::CONFLICT,
+                    Json(ApiErrorResponse::new("upload_conflict", e)),
+                ));
+            }
+            // Hand the upload back so the client can retry or abort it.
+            if let Err(release_error) =
+                file_upload::release_completion(&db, upload_id, org_id, api_key.env_id).await
+            {
+                tracing::warn!(%upload_id, "Failed to release upload completion: {}", release_error);
+            }
+            return Err((
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(ApiErrorResponse::internal_error(&format!(
                     "Failed to complete upload: {}",
                     e
                 ))),
-            )
-        })?;
+            ));
+        }
+    };
 
-    file_upload::complete_upload(&db, upload_id, org_id, api_key.env_id)
+    let response = file_response_from_metadata(&metadata);
+    let result = serde_json::to_value(&response).map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ApiErrorResponse::internal_error(&e.to_string())),
+        )
+    })?;
+    file_upload::complete_upload(&db, upload_id, org_id, api_key.env_id, &result)
         .await
         .map_err(|e| {
             (
@@ -820,21 +1120,7 @@ pub async fn complete_upload(
             )
         })?;
 
-    let file_record = file::get_file_by_path(&db, &record.path, org_id, Some(api_key.env_id))
-        .await
-        .map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ApiErrorResponse::internal_error(&format!(
-                    "Failed to fetch file record: {}",
-                    e
-                ))),
-            )
-        })?;
-
-    Ok(Json(ApiResponse::new(file_response_from_record(
-        &file_record,
-    ))))
+    Ok(Json(ApiResponse::new(response)))
 }
 
 pub async fn abort_upload(
@@ -864,16 +1150,25 @@ pub async fn abort_upload(
                 Json(ApiErrorResponse::not_found(&format!("Upload: {}", e))),
             )
         })?;
+    ensure_upload_backend(&record, &file_storage)?;
 
-    if record.status != "pending" {
-        return Err((
-            StatusCode::CONFLICT,
-            Json(ApiErrorResponse::new(
-                "upload_not_pending",
-                format!("Upload is in '{}' status, not 'pending'", record.status),
-            )),
-        ));
+    if record.status == "aborted" {
+        return Ok(StatusCode::NO_CONTENT);
     }
+
+    // Claim the upload before deleting anything, so an abort can never
+    // delete parts out from under a completion that has already started.
+    file_upload::begin_abort(&db, upload_id, org_id, api_key.env_id)
+        .await
+        .map_err(|_| {
+            (
+                StatusCode::CONFLICT,
+                Json(ApiErrorResponse::new(
+                    "upload_not_pending",
+                    format!("Upload is in '{}' status, not 'pending'", record.status),
+                )),
+            )
+        })?;
 
     if let Some(backend_upload_id) = record.backend_upload_id.as_deref() {
         let ctx = FileStorageContext::minimal(
@@ -883,18 +1178,23 @@ pub async fn abort_upload(
             api_key.created_by_user_id,
         );
 
-        file_storage
+        if let Err(e) = file_storage
             .abort_multipart_upload(backend_upload_id, &record.path, &ctx)
             .await
-            .map_err(|e| {
-                (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(ApiErrorResponse::internal_error(&format!(
-                        "Failed to abort upload: {}",
-                        e
-                    ))),
-                )
-            })?;
+        {
+            if let Err(release_error) =
+                file_upload::release_cleanup_claim(&db, upload_id, org_id, api_key.env_id).await
+            {
+                tracing::warn!(%upload_id, "Failed to release upload abort claim: {}", release_error);
+            }
+            return Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ApiErrorResponse::internal_error(&format!(
+                    "Failed to abort upload: {}",
+                    e
+                ))),
+            ));
+        }
     }
 
     file_upload::abort_upload(&db, upload_id, org_id, api_key.env_id)

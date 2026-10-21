@@ -7760,7 +7760,11 @@ pub async fn run_with_components_shared_context_and_db(
                                                                                 }
                                                                                 continue;
                                                                             };
-                                                                            if let Some(backend_upload_id) = upload.backend_upload_id.as_deref() {
+                                                                            if upload.storage_backend != storage.storage_type() {
+                                                                                // Never route an upload through a backend that did not
+                                                                                // create it; its staged bytes need the migration's cleanup.
+                                                                                error!("hot.dev: WORKER {} upload_cleanup: upload {} belongs to the '{}' backend but '{}' is configured; marking aborted without deleting staged bytes", worker_id, upload.upload_id, upload.storage_backend, storage.storage_type());
+                                                                            } else if let Some(backend_upload_id) = upload.backend_upload_id.as_deref() {
                                                                                 let ctx = hot::file_storage::FileStorageContext::minimal(
                                                                                     db.clone(),
                                                                                     upload.org_id,

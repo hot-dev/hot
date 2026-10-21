@@ -32,7 +32,7 @@ hot.network.client-ip.header ::env/get("HOT_CLIENT_IP_HEADER", "x-forwarded-for"
 hot.network.client-ip.trusted-proxies ::env/get("HOT_CLIENT_IP_TRUSTED_PROXIES", "")
 
 // Build Storage Configuration
-hot.build.storage.type ::env/get("HOT_BUILD_STORAGE_TYPE", "s3")
+hot.build.storage.type ::env/get("HOT_BUILD_STORAGE_TYPE", "local")
 hot.build.aws.s3.bucket ::env/get("HOT_BUILD_AWS_S3_BUCKET", "")
 hot.build.aws.s3.prefix ::env/get("HOT_BUILD_AWS_S3_PREFIX", "builds/")
 hot.build.aws.s3.region ::env/get("HOT_BUILD_AWS_S3_REGION", "us-east-1")

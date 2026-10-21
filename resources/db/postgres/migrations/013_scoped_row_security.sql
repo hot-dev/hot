@@ -458,6 +458,15 @@ CREATE POLICY hot_scope_insert ON hot."file_upload" FOR INSERT WITH CHECK (((env
 CREATE POLICY hot_scope_update ON hot."file_upload" FOR UPDATE USING (hot.scope_maintenance('retention') OR ((env_id IS NULL AND hot.scope_org_writes(org_id))) OR ((env_id IS NOT NULL AND hot.scope_env_writes(env_id) AND hot.scope_org_allows(org_id)))) WITH CHECK (hot.scope_maintenance('retention') OR ((env_id IS NULL AND hot.scope_org_writes(org_id))) OR ((env_id IS NOT NULL AND hot.scope_env_writes(env_id) AND hot.scope_org_allows(org_id))));
 CREATE POLICY hot_scope_delete ON hot."file_upload" FOR DELETE USING (((env_id IS NULL AND hot.scope_org_writes(org_id))) OR ((env_id IS NOT NULL AND hot.scope_env_writes(env_id) AND hot.scope_org_allows(org_id))));
 
+-- file_upload_part_claim: a part reservation follows its upload. Reads need
+-- the upload to be visible; writes need the upload's own write scope.
+ALTER TABLE hot."file_upload_part_claim" ENABLE ROW LEVEL SECURITY;
+ALTER TABLE hot."file_upload_part_claim" FORCE ROW LEVEL SECURITY;
+CREATE POLICY hot_scope_read ON hot."file_upload_part_claim" FOR SELECT USING (EXISTS (SELECT 1 FROM hot.file_upload u WHERE u.upload_id = file_upload_part_claim.upload_id));
+CREATE POLICY hot_scope_insert ON hot."file_upload_part_claim" FOR INSERT WITH CHECK (EXISTS (SELECT 1 FROM hot.file_upload u WHERE u.upload_id = file_upload_part_claim.upload_id AND ((u.env_id IS NULL AND hot.scope_org_writes(u.org_id)) OR (u.env_id IS NOT NULL AND hot.scope_env_writes(u.env_id) AND hot.scope_org_allows(u.org_id)))));
+CREATE POLICY hot_scope_update ON hot."file_upload_part_claim" FOR UPDATE USING (EXISTS (SELECT 1 FROM hot.file_upload u WHERE u.upload_id = file_upload_part_claim.upload_id AND ((u.env_id IS NULL AND hot.scope_org_writes(u.org_id)) OR (u.env_id IS NOT NULL AND hot.scope_env_writes(u.env_id) AND hot.scope_org_allows(u.org_id))))) WITH CHECK (EXISTS (SELECT 1 FROM hot.file_upload u WHERE u.upload_id = file_upload_part_claim.upload_id AND ((u.env_id IS NULL AND hot.scope_org_writes(u.org_id)) OR (u.env_id IS NOT NULL AND hot.scope_env_writes(u.env_id) AND hot.scope_org_allows(u.org_id)))));
+CREATE POLICY hot_scope_delete ON hot."file_upload_part_claim" FOR DELETE USING (EXISTS (SELECT 1 FROM hot.file_upload u WHERE u.upload_id = file_upload_part_claim.upload_id AND ((u.env_id IS NULL AND hot.scope_org_writes(u.org_id)) OR (u.env_id IS NOT NULL AND hot.scope_env_writes(u.env_id) AND hot.scope_org_allows(u.org_id)))));
+
 -- blob_object: separate SELECT and mutation grants; a read set is never a write grant.
 ALTER TABLE hot."blob_object" ENABLE ROW LEVEL SECURITY;
 ALTER TABLE hot."blob_object" FORCE ROW LEVEL SECURITY;
@@ -634,6 +643,9 @@ CREATE TRIGGER immutable_resource_scope BEFORE UPDATE ON hot.file
 CREATE TRIGGER immutable_resource_scope BEFORE UPDATE ON hot.file_upload
     FOR EACH ROW WHEN ((OLD.org_id, OLD.env_id) IS DISTINCT FROM (NEW.org_id, NEW.env_id))
     EXECUTE FUNCTION hot.prevent_scope_reassignment('org_id', 'env_id');
+CREATE TRIGGER immutable_resource_scope BEFORE UPDATE ON hot.file_upload_part_claim
+    FOR EACH ROW WHEN (OLD.upload_id IS DISTINCT FROM NEW.upload_id)
+    EXECUTE FUNCTION hot.prevent_scope_reassignment('upload_id');
 CREATE TRIGGER immutable_resource_scope BEFORE UPDATE ON hot.blob_object
     FOR EACH ROW WHEN ((OLD.org_id, OLD.env_id) IS DISTINCT FROM (NEW.org_id, NEW.env_id))
     EXECUTE FUNCTION hot.prevent_scope_reassignment('org_id', 'env_id');
