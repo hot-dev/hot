@@ -110,6 +110,49 @@ pub struct Session {
     pub product_support_email: String,
 }
 
+/// Why a signed session could not be loaded.
+#[derive(Debug)]
+pub enum SessionError {
+    /// The user is missing or inactive, so the token can never work again.
+    Unusable(String),
+    /// The lookup failed (for example a database timeout); the token may be fine.
+    Unavailable(String),
+}
+
+impl std::fmt::Display for SessionError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Unusable(reason) | Self::Unavailable(reason) => f.write_str(reason),
+        }
+    }
+}
+
+impl std::error::Error for SessionError {}
+
+/// Clear a token only when it can never load: /signin sends any valid token
+/// back to /, so keeping an unusable one loops. A failed lookup keeps the
+/// cookies and asks the client to retry, so a database blip does not sign
+/// everyone out.
+fn handle_session_error(
+    error: SessionError,
+    cookies: CookieJar,
+    user_id: &Uuid,
+) -> Result<CookieJar, StatusCode> {
+    match error {
+        SessionError::Unusable(reason) => {
+            tracing::info!(%user_id, %reason, "Clearing unusable session");
+            Ok(cookies
+                .add(build_removal_cookie(JWT_COOKIE_NAME))
+                .add(build_removal_cookie(CURRENT_ORG_COOKIE_NAME))
+                .add(build_removal_cookie(CURRENT_ENV_COOKIE_NAME)))
+        }
+        SessionError::Unavailable(reason) => {
+            tracing::error!(%user_id, %reason, "Session lookup failed");
+            Err(StatusCode::SERVICE_UNAVAILABLE)
+        }
+    }
+}
+
 impl Session {
     /// Create a new session from user_id and cookies
     pub async fn from_user_id(
@@ -117,15 +160,24 @@ impl Session {
         conf: &Val,
         user_id: &Uuid,
         cookies: &CookieJar,
-    ) -> Result<Self, String> {
+    ) -> Result<Self, SessionError> {
         let scoped_db = db.with_scope(DatabaseScope::Bootstrap(BootstrapOperation::Membership));
         let db = &scoped_db;
         // Get user details
-        let user = User::get_user(db, user_id)
-            .await
-            .map_err(|e| format!("Failed to get user: {}", e))?;
+        let user = match User::get_user(db, user_id).await {
+            Ok(user) => user,
+            Err(
+                hot::db::user::UserError::NotFound
+                | hot::db::user::UserError::Database(sqlx::Error::RowNotFound),
+            ) => return Err(SessionError::Unusable("User not found".into())),
+            Err(error) => {
+                return Err(SessionError::Unavailable(format!(
+                    "Failed to get user: {error}"
+                )));
+            }
+        };
         if !user.active {
-            return Err("User is inactive".to_string());
+            return Err(SessionError::Unusable("User is inactive".into()));
         }
 
         // Extract initials from name or email
@@ -149,7 +201,11 @@ impl Session {
         // Get all organizations for this user
         let user_orgs = hot::db::org::Org::get_orgs_by_user(db, user_id)
             .await
-            .map_err(|error| format!("Unable to resolve organization membership: {error}"))?;
+            .map_err(|error| {
+                SessionError::Unavailable(format!(
+                    "Unable to resolve organization membership: {error}"
+                ))
+            })?;
 
         // Get current organization from cookie or default to first org
         let current_org_id = get_current_org_id_from_cookies(cookies);
@@ -196,7 +252,9 @@ impl Session {
         let current_org_envs = if let Some(ref org) = current_org {
             hot::db::env::Env::get_envs_by_org(db, &org.org_id)
                 .await
-                .map_err(|error| format!("Unable to resolve environments: {error}"))?
+                .map_err(|error| {
+                    SessionError::Unavailable(format!("Unable to resolve environments: {error}"))
+                })?
         } else {
             Vec::new()
         };
@@ -999,15 +1057,10 @@ pub async fn session_middleware(
                 // User is authenticated, continue to the handler
                 return Ok((cookies, response));
             }
-            Err(_) => {
-                // Clear a signed token whose user is inactive, missing or
-                // unloadable: /signin sends any valid token back to /, so
-                // keeping it loops. Local development falls through to
-                // auto-login; otherwise the redirect below drops the token.
-                cookies = cookies
-                    .add(build_removal_cookie(JWT_COOKIE_NAME))
-                    .add(build_removal_cookie(CURRENT_ORG_COOKIE_NAME))
-                    .add(build_removal_cookie(CURRENT_ENV_COOKIE_NAME));
+            Err(error) => {
+                // An unusable token is cleared; local development then falls
+                // through to auto-login, otherwise the redirect below drops it.
+                cookies = handle_session_error(error, cookies, &user_id)?;
             }
         }
     }
@@ -1210,6 +1263,44 @@ mod scope_contract_tests {
             .uri(uri)
             .body(axum::body::Body::empty())
             .unwrap()
+    }
+
+    #[tokio::test]
+    async fn only_unusable_sessions_clear_cookies() {
+        let db = hot::db::test_db().await;
+        let data = hot::db::insert_test_data(&db).await.unwrap();
+        let conf = hot::val!({});
+        let jar = CookieJar::new();
+        assert!(matches!(
+            Session::from_user_id(&db, &conf, &Uuid::now_v7(), &jar).await,
+            Err(SessionError::Unusable(_))
+        ));
+        if let DatabasePool::Sqlite(pool) = &db {
+            sqlx::query("UPDATE user SET active = 0 WHERE user_id = ?")
+                .bind(data.user_id)
+                .execute(pool)
+                .await
+                .unwrap();
+        }
+        let inactive = Session::from_user_id(&db, &conf, &data.user_id, &jar)
+            .await
+            .unwrap_err();
+        assert!(matches!(inactive, SessionError::Unusable(_)));
+        let cleared = handle_session_error(inactive, jar.clone(), &data.user_id).unwrap();
+        assert!(cleared.get(JWT_COOKIE_NAME).is_some(), "removal cookie set");
+
+        // A database failure says nothing about the token: keep the cookies.
+        if let DatabasePool::Sqlite(pool) = &db {
+            pool.close().await;
+        }
+        let unavailable = Session::from_user_id(&db, &conf, &data.user_id, &jar)
+            .await
+            .unwrap_err();
+        assert!(matches!(unavailable, SessionError::Unavailable(_)));
+        assert_eq!(
+            handle_session_error(unavailable, jar, &data.user_id).unwrap_err(),
+            StatusCode::SERVICE_UNAVAILABLE
+        );
     }
 
     #[tokio::test]
