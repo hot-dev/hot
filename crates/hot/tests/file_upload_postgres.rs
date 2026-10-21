@@ -14,8 +14,16 @@ async fn postgres_upload_retry_state() {
     let conf = hot::val!({"uri": uri, "schema": "hot"});
     db::run_migrations(&conf).await.unwrap();
     let db = Arc::new(db::create_db_pool(&conf).await.unwrap());
-    db::insert_default_data(&db).await.unwrap();
-    let env = Env::get_default_env(&db).await.unwrap();
+    // The test database is shared with the other Postgres integration tests,
+    // so default data may already exist; seed it only when it is missing.
+    let env = match Env::get_default_env(&db).await {
+        Ok(env) => env,
+        Err(_) => {
+            // Another test may seed concurrently; its row is just as good.
+            let _ = db::insert_default_data(&db).await;
+            Env::get_default_env(&db).await.unwrap()
+        }
+    };
     let dir = tempfile::TempDir::new().unwrap();
     let storage = LocalFileStorage::new(dir.path().to_path_buf());
     let ctx = FileStorageContext::minimal(
