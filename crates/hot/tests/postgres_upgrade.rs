@@ -820,3 +820,35 @@ async fn retained_cross_environment_origins_abort_017_without_rewriting_history(
     }
     Ok(())
 }
+
+#[tokio::test]
+async fn bypass_rls_migrations_initialize_each_account_counter_once() -> TestResult {
+    let Ok(admin_uri) = std::env::var("HOT_TEST_POSTGRES_URI") else {
+        return Ok(());
+    };
+    let fixture = UpgradeDatabase::new(&admin_uri, 14).await?;
+    let result: TestResult = async {
+        // Two accounts with stored bytes: the first holds a trace, the second a
+        // store entry. A superuser sees both accounts in every 015 pass.
+        let rows = ExistingRows::seed(&fixture.admin).await?;
+        sqlx::query("INSERT INTO store_map_entry(org_id,env_id,store_name,key,value,size) VALUES($1,$2,'retained','\"k\"','\"v\"',40)")
+            .bind(rows.other_org).bind(rows.other_env).execute(&fixture.admin).await?;
+        let privileged: bool = sqlx::query_scalar("SELECT rolsuper OR rolbypassrls FROM pg_roles WHERE rolname=current_user")
+            .fetch_one(&fixture.admin).await?;
+        assert!(privileged, "the fixture admin must bypass RLS");
+        migrations_through(i64::MAX).await?.run(&fixture.admin).await?;
+        assert_latest_ledger(&fixture.admin).await?;
+        let counters: Vec<(Uuid, i64, i64, i64)> = sqlx::query_as(
+            "SELECT env_id, COUNT(*), SUM(store_bytes)::bigint, SUM(call_bytes)::bigint FROM usage_storage GROUP BY env_id ORDER BY env_id",
+        )
+        .fetch_all(&fixture.admin)
+        .await?;
+        let mut expected = vec![(rows.env, 1, 0, 59), (rows.other_env, 1, 40, 0)];
+        expected.sort();
+        assert_eq!(counters, expected);
+        Ok(())
+    }
+    .await;
+    fixture.cleanup().await?;
+    result
+}

@@ -109,10 +109,14 @@ BEGIN
     SELECT COALESCE(array_agg(org_id),ARRAY[]::uuid[]) INTO roots FROM hot.org WHERE parent_org_id IS NULL;
     FOREACH root_id IN ARRAY roots LOOP
         PERFORM hot.apply_scope('maintenance',root_id::text,'','[]','[]','billing','');
+-- Filter by account explicitly: a superuser or BYPASSRLS migration role sees
+-- every account in every pass, and the filter lets each pass use indexes.
 INSERT INTO hot.usage_storage(env_id,org_id,slot,store_bytes,call_bytes)
 SELECT x.env_id,x.org_id,0,SUM(x.store_bytes),SUM(x.call_bytes) FROM (
-    SELECT env_id,org_id,CASE WHEN size<0 THEN 0 ELSE size END AS store_bytes,0 AS call_bytes FROM hot.store_map_entry
+    SELECT s.env_id,s.org_id,CASE WHEN s.size<0 THEN 0 ELSE s.size END AS store_bytes,0 AS call_bytes FROM hot.store_map_entry s
+    WHERE s.org_id IN (SELECT o.org_id FROM hot.org o WHERE o.org_id=root_id OR o.parent_org_id=root_id)
     UNION ALL SELECT c.env_id,e.org_id,0,CASE WHEN c.size<0 THEN 0 ELSE c.size END FROM hot.call c JOIN hot.env e ON e.env_id=c.env_id
+    WHERE e.org_id IN (SELECT o.org_id FROM hot.org o WHERE o.org_id=root_id OR o.parent_org_id=root_id)
 ) x GROUP BY x.env_id,x.org_id;
     END LOOP;
     PERFORM hot.apply_scope(m,org,env,'[]','[]',op,'');
