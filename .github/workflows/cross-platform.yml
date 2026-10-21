@@ -43,6 +43,9 @@ env:
   SQLX_OFFLINE: 'true'
   CI: 'true'
   PG_URI: postgres://hot:hot@localhost:5432/hot
+  # PostgreSQL forces RLS: the Hot suite runs as a restricted runtime role and
+  # only the owner (PG_URI) applies schema changes, as in hot.yml.
+  RUNTIME_PG_URI: postgres://hot_runtime:hot_runtime@localhost:5432/hot
   # The hot panic hook suppresses the default stderr dump; without this,
   # panics on non-test threads (e.g. inside spawn_blocking) leave failing
   # tests with no output at all in CI logs.
@@ -264,23 +267,43 @@ jobs:
             -c "DROP DATABASE IF EXISTS hot WITH (FORCE);" \
             -c "CREATE DATABASE hot OWNER hot;"
 
+      - name: Provision restricted PostgreSQL runtime
+        if: steps.svc.outputs.pg == 'true'
+        run: |
+          # The instance outlives a single run's setup, so the role may exist.
+          psql "$PG_URI" -v ON_ERROR_STOP=1 <<'SQL'
+          DO $$ BEGIN
+            IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'hot_runtime') THEN
+              CREATE ROLE hot_runtime;
+            END IF;
+            ALTER ROLE hot_runtime LOGIN PASSWORD 'hot_runtime'
+              NOSUPERUSER NOBYPASSRLS NOINHERIT NOCREATEDB NOCREATEROLE;
+          END $$;
+          SQL
+          export HOT_TEST_POSTGRES_URI="$RUNTIME_PG_URI"
+          cargo run --locked --bin hot -- db migrate -c hot.test.hot --ctx hot/ci.ctx.hot \
+            --db.migration-uri="$PG_URI"
+          psql "$PG_URI" -v ON_ERROR_STOP=1 -v runtime_role=hot_runtime -v schema=hot \
+            -f resources/db/postgres/provision_runtime.sql
+
       - name: Run Hot init (full suite, Postgres)
         if: steps.svc.outputs.pg == 'true'
         run: |
-          export HOT_TEST_POSTGRES_URI="$PG_URI"
+          export HOT_TEST_POSTGRES_URI="$RUNTIME_PG_URI"
           export HOT_TEST_FILE_STORAGE_PATH=./.hot/pg-full/file
           if [[ "${{ steps.svc.outputs.redis }}" == "true" ]]; then
             export HOT_REDIS_URI=redis://localhost:6379
             export HOT_QUEUE_TYPE=redis
           fi
-          cargo run --locked --bin hot -- init -c hot.test.hot --ctx hot/ci.ctx.hot
+          cargo run --locked --bin hot -- init -c hot.test.hot --ctx hot/ci.ctx.hot \
+            --db.migration-uri="$PG_URI"
 
       - name: Run Hot tests (full suite, Postgres)
         if: steps.svc.outputs.pg == 'true'
         env:
           HOT_TEST_VAR: "set so that :hot.env/vars() is not empty"
         run: |
-          export HOT_TEST_POSTGRES_URI="$PG_URI"
+          export HOT_TEST_POSTGRES_URI="$RUNTIME_PG_URI"
           export HOT_TEST_FILE_STORAGE_PATH=./.hot/pg-full/file
           if [[ "${{ steps.svc.outputs.redis }}" == "true" ]]; then
             export HOT_REDIS_URI=redis://localhost:6379
@@ -293,11 +316,13 @@ jobs:
         env:
           HOT_TEST_VAR: "set so that :hot.env/vars() is not empty"
         run: |
-          export HOT_TEST_POSTGRES_URI="$PG_URI"
+          export HOT_TEST_POSTGRES_URI="$RUNTIME_PG_URI"
           export HOT_REDIS_URI=redis://localhost:6379
           export HOT_QUEUE_TYPE=redis
-          cargo run --locked --bin hot -- init -c pg.redis.test.hot --ctx hot/ci.ctx.hot
-          cargo run --locked --bin hot -- test -c pg.redis.test.hot --ctx hot/ci.ctx.hot
+          cargo run --locked --bin hot -- init -c pg.redis.test.hot --ctx hot/ci.ctx.hot \
+            --profile local-dev --db.migration-uri="$PG_URI"
+          cargo run --locked --bin hot -- test -c pg.redis.test.hot --ctx hot/ci.ctx.hot \
+            --profile local-dev
 
       # No `hot test box` steps: Docker is unavailable on macOS runners and
       # Windows runners cannot run Linux containers.
