@@ -146,14 +146,19 @@ BEGIN
             set_config('hot.scope_env_verified', '', true),
             set_config('hot.scope_envs_verified', '', true),
             set_config('hot.scope_billing_envs', '', true);
+    -- Key the lookup on the requested ids so verification is an index probe;
+    -- the helper predicates keep the same authority rules.
     IF mode = 'environment' THEN
         PERFORM set_config('hot.scope_env_verified', COALESCE(
             (SELECT e.env_id::text FROM hot.env e
-             WHERE hot.scope_env_id_allows(e.env_id) AND hot.scope_org_allows(e.org_id)), ''), true);
+             WHERE e.env_id = NULLIF(env, '')::uuid AND e.org_id = NULLIF(org, '')::uuid
+               AND hot.scope_env_id_allows(e.env_id) AND hot.scope_org_allows(e.org_id)), ''), true);
     ELSIF mode = 'read_set' THEN
         PERFORM set_config('hot.scope_envs_verified', COALESCE(
             (SELECT '{' || string_agg(e.env_id::text, ',') || '}' FROM hot.env e
-             WHERE hot.scope_env_id_allows(e.env_id) AND hot.scope_org_allows(e.org_id)), ''), true);
+             WHERE e.env_id = ANY (ARRAY(SELECT jsonb_array_elements_text(
+                       COALESCE(NULLIF(envs, ''), '[]')::jsonb)::uuid))
+               AND hot.scope_env_id_allows(e.env_id) AND hot.scope_org_allows(e.org_id)), ''), true);
         PERFORM set_config('transaction_read_only', 'on', true);
     ELSIF mode = 'maintenance' AND operation = 'billing' AND org <> '' THEN
         PERFORM set_config('hot.scope_billing_envs', COALESCE(

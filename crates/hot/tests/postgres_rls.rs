@@ -309,6 +309,54 @@ async fn scoped_pool_enforces_isolation_under_a_restricted_login()
     });
     let read_set_db = db::DatabasePool::Postgres(both.clone());
     assert_eq!(ids(both.clone()).await?.len(), 2);
+    // Scope verification runs once per transaction, so it must be an index
+    // probe rather than a scan of every tenant's environments. With sequential
+    // scans disabled, applying either scope must leave hot.env unscanned.
+    let read_set_orgs = serde_json::json!([child_a, child_b]).to_string();
+    let read_set_envs = serde_json::json!([env_a, env_b]).to_string();
+    for (mode, org, env, orgs, envs) in [
+        (
+            "environment",
+            child_a.to_string(),
+            env_a.to_string(),
+            "[]",
+            "[]",
+        ),
+        (
+            "read_set",
+            String::new(),
+            String::new(),
+            read_set_orgs.as_str(),
+            read_set_envs.as_str(),
+        ),
+    ] {
+        let scans = "SELECT COALESCE(seq_scan, 0) FROM pg_stat_xact_user_tables WHERE schemaname = 'hot' AND relname = 'env'";
+        let mut tx = raw_runtime.begin().await?;
+        sqlx::query("SET LOCAL enable_seqscan = off")
+            .execute(&mut *tx)
+            .await?;
+        let before: i64 = sqlx::query_scalar(scans).fetch_one(&mut *tx).await?;
+        sqlx::query("SELECT hot.apply_scope($1, $2, $3, $4, $5, '', '')")
+            .bind(mode)
+            .bind(&org)
+            .bind(&env)
+            .bind(orgs)
+            .bind(envs)
+            .execute(&mut *tx)
+            .await?;
+        let after: i64 = sqlx::query_scalar(scans).fetch_one(&mut *tx).await?;
+        assert_eq!(
+            before, after,
+            "{mode} scope verification must not scan every environment"
+        );
+        let verified: String = sqlx::query_scalar(
+            "SELECT current_setting('hot.scope_env_verified') || current_setting('hot.scope_envs_verified')",
+        )
+        .fetch_one(&mut *tx)
+        .await?;
+        assert!(verified.contains(&env_a.to_string()), "{mode}: {verified}");
+        tx.rollback().await?;
+    }
     assert!(
         sqlx::query("DELETE FROM store_map_entry")
             .execute(&both)
