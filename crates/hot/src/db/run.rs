@@ -3343,9 +3343,10 @@ impl Run {
     }
 
     /// Get runs that are pending retry and ready to be retried (next_retry_at <= now)
-    /// Limited to batch_size runs to avoid overwhelming the system. Retries in
-    /// environments that are not admitting work stay pending without occupying
-    /// the batch, so one suspended tenant cannot starve every other tenant.
+    /// Limited to batch_size runs to avoid overwhelming the system. The
+    /// scheduler defers retries whose environment is not admitting work (see
+    /// [`Run::deferred_retry_at`]), so a suspended tenant's backlog leaves the
+    /// due set instead of occupying every batch or slowing this indexed scan.
     pub async fn get_pending_retries(
         db: &crate::db::DatabasePool,
         batch_size: i64,
@@ -3355,7 +3356,7 @@ impl Run {
         match db {
             crate::db::DatabasePool::Postgres(pg_pool) => {
                 let runs = sqlx::query_as::<_, Run>(
-                    "SELECT r.run_id, r.env_id, r.stream_id, r.build_id, r.run_type_id, rt.run_type, r.origin_run_id, r.event_id, r.start_time, r.stop_time, r.status_id, rs.status, r.by_user_id, r.result, r.info, r.retry_attempt, r.next_retry_at, b.project_id, p.name as project_name, COALESCE(e.event_data->>'fn', (SELECT function_name FROM call WHERE run_id = r.run_id AND parent_call_id IS NULL LIMIT 1), (SELECT function_name FROM task WHERE run_id = r.run_id LIMIT 1)) as event_fn, e.created_at as queued_at FROM run r JOIN run_status rs ON r.status_id = rs.status_id JOIN run_type rt ON r.run_type_id = rt.run_type_id LEFT JOIN build b ON r.build_id = b.build_id LEFT JOIN project p ON b.project_id = p.project_id LEFT JOIN event e ON r.event_id = e.event_id WHERE r.status_id = 5 AND r.next_retry_at IS NOT NULL AND r.next_retry_at <= $1 AND EXISTS (SELECT 1 FROM env en JOIN org og ON og.org_id = en.org_id JOIN org ro ON ro.org_id = COALESCE(og.parent_org_id, og.org_id) WHERE en.env_id = r.env_id AND en.active = true AND og.active = true AND ro.active = true AND og.lifecycle_state = 'active' AND ro.lifecycle_state = 'active') ORDER BY r.next_retry_at ASC LIMIT $2"
+                    "SELECT r.run_id, r.env_id, r.stream_id, r.build_id, r.run_type_id, rt.run_type, r.origin_run_id, r.event_id, r.start_time, r.stop_time, r.status_id, rs.status, r.by_user_id, r.result, r.info, r.retry_attempt, r.next_retry_at, b.project_id, p.name as project_name, COALESCE(e.event_data->>'fn', (SELECT function_name FROM call WHERE run_id = r.run_id AND parent_call_id IS NULL LIMIT 1), (SELECT function_name FROM task WHERE run_id = r.run_id LIMIT 1)) as event_fn, e.created_at as queued_at FROM run r JOIN run_status rs ON r.status_id = rs.status_id JOIN run_type rt ON r.run_type_id = rt.run_type_id LEFT JOIN build b ON r.build_id = b.build_id LEFT JOIN project p ON b.project_id = p.project_id LEFT JOIN event e ON r.event_id = e.event_id WHERE r.status_id = 5 AND r.next_retry_at IS NOT NULL AND r.next_retry_at <= $1 ORDER BY r.next_retry_at ASC LIMIT $2"
                 )
                 .bind(now)
                 .bind(batch_size)
@@ -3365,7 +3366,7 @@ impl Run {
             }
             crate::db::DatabasePool::Sqlite(sqlite_pool) => {
                 let runs = sqlx::query_as::<_, Run>(
-                    "SELECT r.run_id, r.env_id, r.stream_id, r.build_id, r.run_type_id, rt.run_type, r.origin_run_id, r.event_id, r.start_time, r.stop_time, r.status_id, rs.status, r.by_user_id, r.result, r.info, r.retry_attempt, r.next_retry_at, b.project_id, p.name as project_name, COALESCE(json_extract(e.event_data, '$.fn'), (SELECT function_name FROM call WHERE run_id = r.run_id AND parent_call_id IS NULL LIMIT 1), (SELECT function_name FROM task WHERE run_id = r.run_id LIMIT 1)) as event_fn, e.created_at as queued_at FROM run r JOIN run_status rs ON r.status_id = rs.status_id JOIN run_type rt ON r.run_type_id = rt.run_type_id LEFT JOIN build b ON r.build_id = b.build_id LEFT JOIN project p ON b.project_id = p.project_id LEFT JOIN event e ON r.event_id = e.event_id WHERE r.status_id = 5 AND r.next_retry_at IS NOT NULL AND r.next_retry_at <= ? AND EXISTS (SELECT 1 FROM env en JOIN org og ON og.org_id = en.org_id JOIN org ro ON ro.org_id = COALESCE(og.parent_org_id, og.org_id) WHERE en.env_id = r.env_id AND en.active = 1 AND og.active = 1 AND ro.active = 1 AND og.lifecycle_state = 'active' AND ro.lifecycle_state = 'active') ORDER BY r.next_retry_at ASC LIMIT ?"
+                    "SELECT r.run_id, r.env_id, r.stream_id, r.build_id, r.run_type_id, rt.run_type, r.origin_run_id, r.event_id, r.start_time, r.stop_time, r.status_id, rs.status, r.by_user_id, r.result, r.info, r.retry_attempt, r.next_retry_at, b.project_id, p.name as project_name, COALESCE(json_extract(e.event_data, '$.fn'), (SELECT function_name FROM call WHERE run_id = r.run_id AND parent_call_id IS NULL LIMIT 1), (SELECT function_name FROM task WHERE run_id = r.run_id LIMIT 1)) as event_fn, e.created_at as queued_at FROM run r JOIN run_status rs ON r.status_id = rs.status_id JOIN run_type rt ON r.run_type_id = rt.run_type_id LEFT JOIN build b ON r.build_id = b.build_id LEFT JOIN project p ON b.project_id = p.project_id LEFT JOIN event e ON r.event_id = e.event_id WHERE r.status_id = 5 AND r.next_retry_at IS NOT NULL AND r.next_retry_at <= ? ORDER BY r.next_retry_at ASC LIMIT ?"
                 )
                 .bind(now)
                 .bind(batch_size)
@@ -3475,6 +3476,40 @@ impl Run {
         }
     }
 
+    /// When to look again at a pending retry whose environment is not
+    /// admitting work. The wait is half the run's age, between one minute and
+    /// one day, so a suspended tenant's backlog is re-checked rarely instead of
+    /// staying at the head of the due set. A reactivated environment's old
+    /// retries resume within that wait.
+    pub fn deferred_retry_at(&self, now: DateTime<Utc>) -> DateTime<Utc> {
+        retry_deferral(self.stop_time.unwrap_or(self.start_time), now)
+    }
+
+    /// Move a pending retry out of the due window until `until`.
+    pub async fn defer_pending_retry(
+        db: &crate::db::DatabasePool,
+        run_id: &Uuid,
+        until: DateTime<Utc>,
+    ) -> Result<(), RunError> {
+        match db {
+            crate::db::DatabasePool::Postgres(pg_pool) => {
+                sqlx::query("UPDATE hot.run SET next_retry_at = $2 WHERE run_id = $1 AND status_id = 5 AND next_retry_at IS NOT NULL")
+                    .bind(run_id)
+                    .bind(until)
+                    .execute(pg_pool)
+                    .await?;
+            }
+            crate::db::DatabasePool::Sqlite(sqlite_pool) => {
+                sqlx::query("UPDATE run SET next_retry_at = ? WHERE run_id = ? AND status_id = 5 AND next_retry_at IS NOT NULL")
+                    .bind(until)
+                    .bind(run_id)
+                    .execute(sqlite_pool)
+                    .await?;
+            }
+        }
+        Ok(())
+    }
+
     /// Mark a pending retry run as failed (exhausted retries or manual cancellation)
     pub async fn mark_retry_as_failed(
         db: &crate::db::DatabasePool,
@@ -3500,12 +3535,17 @@ impl Run {
     }
 }
 
+fn retry_deferral(failed_at: DateTime<Utc>, now: DateTime<Utc>) -> DateTime<Utc> {
+    let age = (now - failed_at).max(chrono::Duration::zero());
+    now + (age / 2).clamp(chrono::Duration::minutes(1), chrono::Duration::days(1))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn pending_retries_skip_environments_that_are_not_admitting() {
+    async fn deferred_retries_leave_the_due_batch() {
         let db = crate::db::test_db().await;
         let data = crate::db::insert_test_data(&db).await.unwrap();
         let crate::db::DatabasePool::Sqlite(pool) = &db else {
@@ -3518,16 +3558,37 @@ mod tests {
             .await
             .unwrap();
         let due = Run::get_pending_retries(&db, 50).await.unwrap();
-        assert!(due.iter().any(|run| run.run_id == data.run_id));
+        let run = due
+            .into_iter()
+            .find(|run| run.run_id == data.run_id)
+            .unwrap();
 
-        // A suspended tenant's retries must not occupy the batch.
-        sqlx::query("UPDATE env SET active = 0 WHERE env_id = ?")
-            .bind(data.env_id)
-            .execute(pool)
+        let now = chrono::Utc::now();
+        Run::defer_pending_retry(&db, &run.run_id, run.deferred_retry_at(now))
             .await
             .unwrap();
         let due = Run::get_pending_retries(&db, 50).await.unwrap();
-        assert!(due.iter().all(|run| run.run_id != data.run_id));
+        assert!(due.iter().all(|due| due.run_id != data.run_id));
+        let deferred: chrono::DateTime<chrono::Utc> =
+            sqlx::query_scalar("SELECT next_retry_at FROM run WHERE run_id = ?")
+                .bind(data.run_id)
+                .fetch_one(pool)
+                .await
+                .unwrap();
+        assert!(deferred >= now + chrono::Duration::minutes(1));
+    }
+
+    #[test]
+    fn deferred_retry_wait_grows_with_age_and_is_bounded() {
+        let now = chrono::Utc::now();
+        let wait = |age: chrono::Duration| retry_deferral(now - age, now) - now;
+        assert_eq!(wait(chrono::Duration::zero()), chrono::Duration::minutes(1));
+        assert_eq!(
+            wait(-chrono::Duration::hours(1)),
+            chrono::Duration::minutes(1)
+        );
+        assert_eq!(wait(chrono::Duration::hours(4)), chrono::Duration::hours(2));
+        assert_eq!(wait(chrono::Duration::days(30)), chrono::Duration::days(1));
     }
 
     #[tokio::test]

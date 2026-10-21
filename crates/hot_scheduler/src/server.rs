@@ -1289,7 +1289,14 @@ async fn process_pending_retries(
         let (scoped_db, org_id) = match admitted_environment_db(db, run.env_id).await {
             Ok(scope) => scope,
             Err(error) => {
-                debug!(run_id = %run.run_id, %error, "Retry remains pending until environment is admitted");
+                // Leave the due window instead of re-occupying every batch: a
+                // suspended tenant's backlog is re-checked with growing backoff.
+                let until = run.deferred_retry_at(Utc::now());
+                if let Err(e) = hot::db::run::Run::defer_pending_retry(db, &run.run_id, until).await
+                {
+                    warn!(run_id = %run.run_id, error = %e, "Failed to defer pending retry");
+                }
+                debug!(run_id = %run.run_id, %error, %until, "Retry remains pending until environment is admitted");
                 continue;
             }
         };
@@ -1742,5 +1749,57 @@ mod tests {
             Some(data.run_id)
         );
         assert_eq!(event_message.body.execution_context.retry_attempt, 1);
+    }
+
+    #[tokio::test]
+    async fn suspended_retries_are_deferred_out_of_the_due_batch() {
+        let db = Arc::new(hot::db::test_db().await);
+        let data = hot::db::insert_test_data(&db).await.unwrap();
+        let hot::db::DatabasePool::Sqlite(pool) = db.as_ref() else {
+            panic!("test_db should be SQLite");
+        };
+        let due = Utc::now() - chrono::Duration::seconds(60);
+        sqlx::query(
+            "UPDATE run SET status_id = ?, retry_attempt = 1, next_retry_at = ? WHERE run_id = ?",
+        )
+        .bind(hot::db::run::RunStatus::PendingRetry.as_id())
+        .bind(due)
+        .bind(data.run_id)
+        .execute(pool)
+        .await
+        .unwrap();
+        sqlx::query("UPDATE env SET active = 0 WHERE env_id = ?")
+            .bind(data.env_id)
+            .execute(pool)
+            .await
+            .unwrap();
+        let queue: Arc<dyn Queue<Message>> = Arc::new(
+            MemQueue::new(format!("test:retry-suspended:{}", Uuid::now_v7()))
+                .expect("memory queue"),
+        );
+
+        process_pending_retries(&db, &queue).await.unwrap();
+
+        assert!(
+            queue.dequeue().await.unwrap().is_none(),
+            "suspended work is not enqueued"
+        );
+        let (status, next): (i16, Option<chrono::DateTime<Utc>>) =
+            sqlx::query_as("SELECT status_id, next_retry_at FROM run WHERE run_id = ?")
+                .bind(data.run_id)
+                .fetch_one(pool)
+                .await
+                .unwrap();
+        assert_eq!(status, hot::db::run::RunStatus::PendingRetry.as_id());
+        assert!(
+            next.is_some_and(|next| next > Utc::now()),
+            "retry left the due window"
+        );
+        assert!(
+            hot::db::run::Run::get_pending_retries(&db, 50)
+                .await
+                .unwrap()
+                .is_empty()
+        );
     }
 }
