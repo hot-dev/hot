@@ -58,11 +58,11 @@ impl OrgUsageStats {
         match db {
             DatabasePool::Postgres(pool) => calculate!(
                 pool,
-                "SELECT COUNT(*),CAST(COALESCE(SUM(duration_ms),0) AS BIGINT),CAST(COALESCE(SUM(COALESCE((result->'$val'->'err'->>'compute-units')::bigint,(result->>'compute-units')::bigint,0)),0) AS BIGINT) FROM task WHERE env_id=$1 AND created_at >= $2"
+                "SELECT COUNT(*),CAST(COALESCE(SUM(t.duration_ms),0) AS BIGINT),CAST(COALESCE(SUM(u.compute_units),0) AS BIGINT) FROM task t CROSS JOIN LATERAL hot.task_usage(t) u WHERE t.env_id=$1 AND t.created_at >= $2"
             ),
             DatabasePool::Sqlite(pool) => calculate!(
                 pool,
-                "SELECT COUNT(*),CAST(COALESCE(SUM(duration_ms),0) AS BIGINT),CAST(COALESCE(SUM(COALESCE(CAST(json_extract(result,'$.\"$val\".err.\"compute-units\"') AS integer),CAST(json_extract(result,'$.\"compute-units\"') AS integer),0)),0) AS BIGINT) FROM task WHERE env_id=$1 AND created_at >= $2"
+                "SELECT COUNT(*),CAST(COALESCE(SUM(t.duration_ms),0) AS BIGINT),CAST(COALESCE(SUM(u.compute_units),0) AS BIGINT) FROM task t JOIN task_usage u ON u.task_id=t.task_id WHERE t.env_id=$1 AND t.created_at >= $2"
             ),
         }
     }
@@ -179,6 +179,54 @@ mod tests {
                 .await
                 .is_err()
         );
+    }
+
+    #[tokio::test]
+    async fn task_usage_counts_only_metered_container_units() {
+        let db = crate::db::test_db().await;
+        let DatabasePool::Sqlite(pool) = &db else {
+            unreachable!()
+        };
+        let org = Uuid::now_v7();
+        let env = Uuid::now_v7();
+        sqlx::query("INSERT INTO org(org_id,name,slug,created_by_user_id) VALUES (?,'Org',?,?)")
+            .bind(org)
+            .bind(org.to_string())
+            .bind(org)
+            .execute(pool)
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO env(env_id,org_id,name,created_by_user_id) VALUES (?,?,'development',?)",
+        )
+        .bind(env)
+        .bind(org)
+        .bind(org)
+        .execute(pool)
+        .await
+        .unwrap();
+        // Code task results are user values; only container metering counts.
+        for (task_type, status, result) in [
+            ("code", 3, r#"{"compute-units":1000000}"#),
+            ("code", 3, r#"{"compute-units":"n/a"}"#),
+            ("container", 3, r#"{"compute-units":7}"#),
+            ("container", 4, r#"{"$val":{"err":{"compute-units":5}}}"#),
+        ] {
+            sqlx::query("INSERT INTO task(task_id,env_id,stream_id,build_id,function_name,task_type,task_status_id,result,duration_ms,stop_time,created_at) VALUES (?,?,?,?,'::app/task',?,?,?,1000,?,?)")
+                .bind(Uuid::now_v7()).bind(env).bind(Uuid::now_v7()).bind(Uuid::now_v7())
+                .bind(task_type).bind(status).bind(result).bind(Utc::now()).bind(Utc::now())
+                .execute(pool).await.unwrap();
+        }
+        let period = Utc::now() - chrono::Duration::days(1);
+        let account = OrgUsageStats::calculate_account(&db, &org, period, -1)
+            .await
+            .unwrap();
+        assert_eq!(account.compute_units, 12);
+        assert_eq!(account.tasks_this_period, 4);
+        let environment = OrgUsageStats::calculate_environment(&db, &org, &env, period, -1)
+            .await
+            .unwrap();
+        assert_eq!(environment.compute_units, 12);
     }
 
     #[tokio::test]

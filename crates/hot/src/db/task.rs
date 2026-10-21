@@ -1385,50 +1385,6 @@ impl Task {
         }
     }
 
-    /// Get total CUS (Compute Unit Seconds) and total duration_ms for an environment.
-    /// Returns (total_cus, total_duration_ms).
-    pub async fn get_compute_stats_by_env(
-        db: &crate::db::DatabasePool,
-        env_id: &Uuid,
-    ) -> Result<(i64, i64), TaskError> {
-        match db {
-            crate::db::DatabasePool::Postgres(pg_pool) => {
-                let row: (Option<i64>, Option<i64>) = sqlx::query_as(
-                    "SELECT COALESCE(SUM(CASE
-                        WHEN result->'$val'->'err'->>'compute-units' IS NOT NULL
-                            THEN (result->'$val'->'err'->>'compute-units')::bigint
-                        WHEN result->>'compute-units' IS NOT NULL
-                            THEN (result->>'compute-units')::bigint
-                        ELSE 0
-                    END), 0)::bigint,
-                    COALESCE(SUM(duration_ms), 0)::bigint
-                    FROM task WHERE env_id = $1",
-                )
-                .bind(env_id)
-                .fetch_one(pg_pool)
-                .await?;
-                Ok((row.0.unwrap_or(0), row.1.unwrap_or(0)))
-            }
-            crate::db::DatabasePool::Sqlite(sqlite_pool) => {
-                let row: (Option<i64>, Option<i64>) = sqlx::query_as(
-                    "SELECT COALESCE(SUM(CASE
-                        WHEN json_extract(result, '$.\"$val\".\"err\".\"compute-units\"') IS NOT NULL
-                            THEN CAST(json_extract(result, '$.\"$val\".\"err\".\"compute-units\"') AS INTEGER)
-                        WHEN json_extract(result, '$.\"compute-units\"') IS NOT NULL
-                            THEN CAST(json_extract(result, '$.\"compute-units\"') AS INTEGER)
-                        ELSE 0
-                    END), 0),
-                    COALESCE(SUM(duration_ms), 0)
-                    FROM task WHERE env_id = ?",
-                )
-                .bind(env_id)
-                .fetch_one(sqlite_pool)
-                .await?;
-                Ok((row.0.unwrap_or(0), row.1.unwrap_or(0)))
-            }
-        }
-    }
-
     /// Get tasks by environment, ordered by creation time.
     pub async fn get_by_env(
         db: &crate::db::DatabasePool,

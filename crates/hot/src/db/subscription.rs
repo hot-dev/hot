@@ -855,8 +855,8 @@ pub struct OrgUsageStats {
     pub tasks_this_period: i64,
     /// Total task duration in milliseconds (current billing period)
     pub task_duration_ms: i64,
-    /// Total compute unit seconds (CUS) consumed this billing period.
-    /// Extracted from `result."compute-units"` on completed container tasks.
+    /// Total compute unit seconds (CUS) consumed this billing period: the
+    /// validated container metering that the usage counters charge.
     pub compute_units: i64,
     /// Active schedules attached to active deployed builds in this org.
     pub active_schedules: i64,
@@ -1016,16 +1016,10 @@ impl OrgUsageStats {
         .fetch_one(pool);
 
         let task_fut = sqlx::query_as::<_, (i64, Option<i64>, Option<i64>)>(
-            "SELECT COUNT(*)::bigint, COALESCE(SUM(duration_ms), 0)::bigint,
-                    COALESCE(SUM(CASE
-                        WHEN result->'$val'->'err'->>'compute-units' IS NOT NULL
-                            THEN (result->'$val'->'err'->>'compute-units')::bigint
-                        WHEN result->>'compute-units' IS NOT NULL
-                            THEN (result->>'compute-units')::bigint
-                        ELSE 0
-                    END), 0)::bigint
-             FROM task
-             WHERE env_id = ANY($1) AND created_at >= $2",
+            "SELECT COUNT(*)::bigint, COALESCE(SUM(t.duration_ms), 0)::bigint,
+                    COALESCE(SUM(u.compute_units), 0)::bigint
+             FROM task t CROSS JOIN LATERAL hot.task_usage(t) u
+             WHERE t.env_id = ANY($1) AND t.created_at >= $2",
         )
         .bind(&env_ids)
         .bind(period_start)
@@ -1141,16 +1135,9 @@ impl OrgUsageStats {
         };
 
         let task_q = format!(
-            "SELECT COUNT(*), COALESCE(SUM(duration_ms), 0),
-                    COALESCE(SUM(CASE
-                        WHEN json_extract(result, '$.\"$val\".\"err\".\"compute-units\"') IS NOT NULL
-                            THEN CAST(json_extract(result, '$.\"$val\".\"err\".\"compute-units\"') AS INTEGER)
-                        WHEN json_extract(result, '$.\"compute-units\"') IS NOT NULL
-                            THEN CAST(json_extract(result, '$.\"compute-units\"') AS INTEGER)
-                        ELSE 0
-                    END), 0)
-             FROM task
-             WHERE {ENV_SUB} AND created_at >= ?",
+            "SELECT COUNT(*), COALESCE(SUM(t.duration_ms), 0), COALESCE(SUM(u.compute_units), 0)
+             FROM task t JOIN task_usage u ON u.task_id = t.task_id
+             WHERE t.{ENV_SUB} AND t.created_at >= ?",
         );
         let task_fut = sqlx::query_as::<_, (i64, Option<i64>, Option<i64>)>(sqlx::AssertSqlSafe(
             task_q.as_str(),

@@ -1424,6 +1424,37 @@ async fn scoped_pool_enforces_isolation_under_a_restricted_login()
         .bind(root)
         .execute(&admin)
         .await?;
+    // Code task results are user values: account usage neither fails on nor
+    // counts their compute-units, matching the counters.
+    let usage_since = chrono::Utc::now() - chrono::Duration::days(1);
+    let compute_units = || async {
+        db::subscription::OrgUsageStats::calculate_account(&db_a, &root, usage_since, -1)
+            .await
+            .map(|usage| usage.compute_units)
+            .map_err(|e| format!("account usage: {e:?}"))
+    };
+    let before = compute_units().await?;
+    let metered = vec![Uuid::new_v4(), Uuid::new_v4()];
+    for (id, task_type, result) in [
+        (
+            metered[0],
+            "code",
+            serde_json::json!({"compute-units":"n/a"}),
+        ),
+        (
+            metered[1],
+            "container",
+            serde_json::json!({"compute-units":7}),
+        ),
+    ] {
+        sqlx::query("INSERT INTO task(task_id,env_id,stream_id,build_id,function_name,task_type,task_status_id,result,stop_time) VALUES($1,$2,$3,$4,'usage-test',$5,3,$6,now())")
+            .bind(id).bind(env_a).bind(stream_a).bind(build_a).bind(task_type).bind(result).execute(&a).await?;
+    }
+    assert_eq!(compute_units().await?, before + 7);
+    sqlx::query("DELETE FROM hot.task WHERE task_id=ANY($1)")
+        .bind(metered)
+        .execute(&admin)
+        .await?;
 
     // Multi-statement units of work preserve the exact scope and rollback.
     let tx_ids: (i64, i64) = a

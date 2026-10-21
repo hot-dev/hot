@@ -44,8 +44,9 @@ Migration 013 creates one `usage_task` row per environment. The row tracks:
 - one `period_start` and completed compute units/milliseconds since that start.
 
 The shared contribution definition is `hot.task_usage(task)` in PostgreSQL and
-the `task_usage` view in SQLite. Triggers, initialization, rollover and
-reconciliation all use it. Running tasks are active. A cancelled container with
+the `task_usage` view in SQLite. Triggers, initialization, rollover,
+reconciliation and the usage readers (account and environment usage, dashboard
+compute totals) all use it. Running tasks are active. A cancelled container with
 a retained duration reservation remains active until termination is confirmed.
 Legacy active container reservations fall back to timeout × 32 compute units
 per second; active code tasks also reserve their timeout duration.

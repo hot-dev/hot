@@ -363,13 +363,7 @@ pub async fn task_cus_timeline_handler(
                 ""
             };
 
-            let cus_expr = r#"COALESCE(SUM(CASE
-                WHEN t.result->'$val'->'err'->>'compute-units' IS NOT NULL
-                    THEN (t.result->'$val'->'err'->>'compute-units')::bigint
-                WHEN t.result->>'compute-units' IS NOT NULL
-                    THEN (t.result->>'compute-units')::bigint
-                ELSE 0
-            END), 0)::bigint"#;
+            let cus_expr = "COALESCE(SUM(u.compute_units), 0)::bigint";
 
             let query = if interval.is_some() {
                 format!(
@@ -378,6 +372,7 @@ pub async fn task_cus_timeline_handler(
                         {group_by} as period,
                         {cus} as cus
                     FROM task t
+                    CROSS JOIN LATERAL hot.task_usage(t) u
                     {project_join}
                     WHERE t.env_id = $1
                         AND t.created_at >= NOW() - ($2 || ' days')::INTERVAL
@@ -394,6 +389,7 @@ pub async fn task_cus_timeline_handler(
                         {group_by} as period,
                         {cus} as cus
                     FROM task t
+                    CROSS JOIN LATERAL hot.task_usage(t) u
                     {project_join}
                     WHERE t.env_id = $1
                     GROUP BY period
@@ -463,13 +459,7 @@ pub async fn task_cus_timeline_handler(
                 ""
             };
 
-            let cus_expr = r#"COALESCE(SUM(CASE
-                WHEN json_extract(t.result, '$."$val"."err"."compute-units"') IS NOT NULL
-                    THEN CAST(json_extract(t.result, '$."$val"."err"."compute-units"') AS INTEGER)
-                WHEN json_extract(t.result, '$."compute-units"') IS NOT NULL
-                    THEN CAST(json_extract(t.result, '$."compute-units"') AS INTEGER)
-                ELSE 0
-            END), 0)"#;
+            let cus_expr = "COALESCE(SUM(u.compute_units), 0)";
 
             let query = if interval.is_some() {
                 format!(
@@ -478,6 +468,7 @@ pub async fn task_cus_timeline_handler(
                         {group_by} as period,
                         {cus} as cus
                     FROM task t
+                    JOIN task_usage u ON u.task_id = t.task_id
                     {project_join}
                     WHERE t.env_id = ?1
                         AND t.created_at >= datetime('now', '-' || ?2 || ' days')
@@ -494,6 +485,7 @@ pub async fn task_cus_timeline_handler(
                         {group_by} as period,
                         {cus} as cus
                     FROM task t
+                    JOIN task_usage u ON u.task_id = t.task_id
                     {project_join}
                     WHERE t.env_id = ?1
                     GROUP BY period

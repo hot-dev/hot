@@ -141,6 +141,31 @@ async fn cached_usage_stats(
 
 const USAGE_STATS_CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(60);
 
+/// Failure for a free-plan container task whose monthly compute units or task
+/// minutes are already used up. `None` when usage is unknown.
+fn exhausted_free_plan_message(
+    features: &hot::db::features::Features,
+    usage: Option<&hot::db::subscription::OrgUsageStats>,
+) -> Option<String> {
+    let usage = usage?;
+    let cus_limit = features.compute_units_per_month();
+    if cus_limit > 0 && usage.compute_units >= cus_limit {
+        return Some(format!(
+            "Monthly compute unit limit reached ({}/{}). Upgrade your plan for more compute.",
+            usage.compute_units, cus_limit
+        ));
+    }
+    let minutes_limit = i64::from(features.task_minutes_per_month());
+    let minutes_used = usage.task_duration_ms / 60_000;
+    if minutes_limit > 0 && minutes_used >= minutes_limit {
+        return Some(format!(
+            "Monthly task minutes exhausted ({}/{}). Upgrade your plan.",
+            minutes_used, minutes_limit
+        ));
+    }
+    None
+}
+
 /// Maximum time to spend on per-task post-execution cleanup (DB writes,
 /// stream publishes, retry enqueue). When this fires we log + drop the rest
 /// of the cleanup so a stuck DB pool can't pin the worker on a single task.
@@ -2823,92 +2848,44 @@ async fn process_container_task(
                     )
                 })?
                 .is_free_plan();
-            let period_start = subscription
-                .current_period_start
-                .unwrap_or_else(chrono::Utc::now);
-
-            let usage = cached_usage_stats(
-                &db,
-                *oid,
-                period_start,
-                features.call_retention_days(),
-                &usage_stats_cache,
-            )
-            .await
-            .ok_or_else(|| {
-                QueueInfrastructureError::new(
-                    "Cannot verify account usage",
-                    std::time::Duration::from_secs(5),
+            // Claim-time admission enforces these limits atomically against the
+            // usage counters. This early check only gives an exhausted free plan
+            // a clear failure, so usage that cannot be read skips it.
+            let usage = if is_free {
+                let period_start = subscription
+                    .current_period_start
+                    .unwrap_or_else(chrono::Utc::now);
+                cached_usage_stats(
+                    &db,
+                    *oid,
+                    period_start,
+                    features.call_retention_days(),
+                    &usage_stats_cache,
                 )
-            })?;
-            {
-                // CUS (compute units) per month — hard gate for free plans
-                let cus_limit = features.compute_units_per_month();
-                if cus_limit > 0 && usage.compute_units >= cus_limit && is_free {
-                    let msg = format!(
-                        "Monthly compute unit limit reached ({}/{}). Upgrade your plan for more compute.",
-                        usage.compute_units, cus_limit
-                    );
-                    let error = task_failure_json(&msg, None);
-                    if complete_task_with_event(
-                        &db,
-                        &stream_publisher,
-                        &task_id,
-                        env_id,
-                        stream_id,
-                        &function_name,
-                        &request.task_type,
-                        TaskStatus::Failed,
-                        Some(&error),
-                        None,
-                        None,
-                    )
-                    .await
-                    {
-                        publish_task_alert(&db, org_id, env_id, &task_id, "task:failed", &error)
-                            .await;
-                    }
-                    return Ok(());
+                .await
+            } else {
+                None
+            };
+            if let Some(msg) = exhausted_free_plan_message(&features, usage.as_ref()) {
+                let error = task_failure_json(&msg, None);
+                if complete_task_with_event(
+                    &db,
+                    &stream_publisher,
+                    &task_id,
+                    env_id,
+                    stream_id,
+                    &function_name,
+                    &request.task_type,
+                    TaskStatus::Failed,
+                    Some(&error),
+                    None,
+                    None,
+                )
+                .await
+                {
+                    publish_task_alert(&db, org_id, env_id, &task_id, "task:failed", &error).await;
                 }
-
-                // Task minutes per month
-                let minutes_limit = features.task_minutes_per_month();
-                if minutes_limit > 0 {
-                    let minutes_used = usage.task_duration_ms / 60_000;
-                    if minutes_used >= minutes_limit as i64 && is_free {
-                        let msg = format!(
-                            "Monthly task minutes exhausted ({}/{}). Upgrade your plan.",
-                            minutes_used, minutes_limit
-                        );
-                        let error = task_failure_json(&msg, None);
-                        if complete_task_with_event(
-                            &db,
-                            &stream_publisher,
-                            &task_id,
-                            env_id,
-                            stream_id,
-                            &function_name,
-                            &request.task_type,
-                            TaskStatus::Failed,
-                            Some(&error),
-                            None,
-                            None,
-                        )
-                        .await
-                        {
-                            publish_task_alert(
-                                &db,
-                                org_id,
-                                env_id,
-                                &task_id,
-                                "task:failed",
-                                &error,
-                            )
-                            .await;
-                        }
-                        return Ok(());
-                    }
-                }
+                return Ok(());
             }
         }
     }
@@ -9797,5 +9774,46 @@ mod tests {
         let json_str = serde_json::to_string(&original).unwrap();
         let deserialized: serde_json::Value = serde_json::from_str(&json_str).unwrap();
         assert_eq!(deserialized, original);
+    }
+
+    #[test]
+    fn free_plan_usage_check_skips_unknown_usage() {
+        let features = hot::db::features::Features::resolve(
+            Some(&serde_json::json!({
+                "compute_units_per_month": 100,
+                "task_minutes_per_month": 10
+            })),
+            None,
+        );
+        let usage = |compute_units, task_duration_ms| hot::db::subscription::OrgUsageStats {
+            runs_this_period: 0,
+            file_storage_bytes: 0,
+            team_members_count: 0,
+            call_storage_bytes: 0,
+            call_count: 0,
+            oldest_call_time: None,
+            store_storage_bytes: 0,
+            blob_storage_bytes: 0,
+            tasks_this_period: 0,
+            task_duration_ms,
+            compute_units,
+            active_schedules: 0,
+        };
+        // Claim-time admission still enforces the limits against the counters.
+        assert_eq!(exhausted_free_plan_message(&features, None), None);
+        assert_eq!(
+            exhausted_free_plan_message(&features, Some(&usage(99, 9 * 60_000))),
+            None
+        );
+        assert!(
+            exhausted_free_plan_message(&features, Some(&usage(100, 0)))
+                .unwrap()
+                .starts_with("Monthly compute unit limit reached (100/100)")
+        );
+        assert!(
+            exhausted_free_plan_message(&features, Some(&usage(0, 10 * 60_000)))
+                .unwrap()
+                .starts_with("Monthly task minutes exhausted (10/10)")
+        );
     }
 }
