@@ -390,6 +390,7 @@ impl Compiler {
                     );
 
                 let (display_name, description) = harvest_tool_meta(&effective_var);
+                let description = with_precondition(description, value);
 
                 registry.entries.insert(
                     fq_name.clone(),
@@ -550,6 +551,28 @@ impl Compiler {
             }
         }
 
+        // What each type's `where` clause adds to its schema.
+        for (ns_path, namespace) in &program.namespaces {
+            for (var, value) in &namespace.scope.vars {
+                let Value::TypeDef(type_def) = value else {
+                    continue;
+                };
+                let Some(refinement) = &type_def.refinement else {
+                    continue;
+                };
+                if let Some((param, body)) = predicate_body(program, &refinement.predicate) {
+                    registry.set_refinement(
+                        &format!("{}/{}", ns_path, var.sym.name()),
+                        crate::lang::json_schema::refinement_schema(
+                            &body,
+                            &param,
+                            &refinement.source,
+                        ),
+                    );
+                }
+            }
+        }
+
         registry
     }
 
@@ -651,6 +674,7 @@ impl Compiler {
                         None
                     }),
                 };
+                let description = with_precondition(description, schema_value);
 
                 let title = match mcp_config.get(&Val::from("title")) {
                     Some(Val::Str(s)) => Some(s.trim().to_string()),
@@ -1934,6 +1958,53 @@ impl Compiler {
 
         None
     }
+}
+
+/// A `where` predicate's parameter and body, from its hidden function (or,
+/// before lowering, its `::hot::type/predicate(...)` declaration).
+fn predicate_body(program: &Program, predicate: &str) -> Option<(String, Value)> {
+    let (ns, name) = predicate.rsplit_once('/')?;
+    let namespace = program
+        .namespaces
+        .get(&crate::lang::ast::NsPath::from_string(ns))?;
+    let value = namespace
+        .scope
+        .vars
+        .iter()
+        .find_map(|(var, value)| (var.sym.name() == name).then_some(value))?;
+    match value {
+        Value::Fn(defs) => {
+            let def = defs.first()?;
+            Some((
+                def.args.args.first()?.var.sym.name().to_string(),
+                def.body.clone(),
+            ))
+        }
+        Value::FnCall(call) => match &call.args.first()?.value {
+            Value::Lambda(lambda) => Some((
+                lambda.args.args.first()?.var.sym.name().to_string(),
+                (*lambda.body).clone(),
+            )),
+            other => Some(("%".to_string(), other.clone())),
+        },
+        _ => None,
+    }
+}
+
+/// A tool description with the function's argument-list precondition, which
+/// JSON Schema can't express per argument.
+fn with_precondition(description: Option<String>, value: &Value) -> Option<String> {
+    let Value::Fn(defs) = value else {
+        return description;
+    };
+    let Some(precondition) = defs.first().and_then(|d| d.precondition.as_ref()) else {
+        return description;
+    };
+    let note = format!("Arguments must satisfy: {}", precondition.source);
+    Some(match description {
+        Some(text) if !text.is_empty() => format!("{text}\n\n{note}"),
+        _ => note,
+    })
 }
 
 #[cfg(test)]
