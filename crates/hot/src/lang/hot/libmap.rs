@@ -263,8 +263,9 @@ pub fn is_pure_native(name: &str) -> bool {
     let Some((namespace, function)) = name.rsplit_once('/') else {
         return false;
     };
+    // `call` invokes a function value; the VM checks what that reaches.
     if namespace == "::hot::lang" {
-        return function == "call";
+        return matches!(function, "call" | "call-internal");
     }
     if !PURE_NAMESPACES.contains(&namespace) {
         return false;

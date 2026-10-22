@@ -119,6 +119,9 @@ pub struct Parser {
     /// inline refinement types), added to their namespace after the
     /// statement that declared them.
     pending_hidden: Vec<(NsPath, Var, Value)>,
+    /// A `where` error. It has no other reading, so a fallback that
+    /// re-parses the statement another way reports it instead.
+    where_error: Option<ParseError>,
 }
 
 /// A parsed `where <predicate>` clause.
@@ -216,6 +219,7 @@ impl Parser {
             source_content: None,
             var_counter: 0,
             pending_hidden: Vec::new(),
+            where_error: None,
         }
     }
 
@@ -464,6 +468,10 @@ impl Parser {
 
         self.tokens = tokens;
         self.token_index = 0;
+        // `where` clauses keep their predicate's source text.
+        if self.source_content.is_none() {
+            self.source_content = Some(source.to_string());
+        }
 
         // Parse into a program with an initial default namespace.
         let mut hot_program = Program {
@@ -891,6 +899,9 @@ impl Parser {
                         (var, value)
                     }
                     Err(e) => {
+                        if let Some(where_error) = self.where_error.take() {
+                            return Err(where_error);
+                        }
                         tracing::trace!(
                             "Failed to parse as variable definition ({}), treating as bare expression",
                             e
@@ -6509,8 +6520,11 @@ impl Parser {
         let Some(where_token) = self.next() else {
             return Err(self.error("Expected `where`"));
         };
-        if self.peek().is_none() || self.check(&TokenType::Newline) {
-            return Err(self.error_at(
+        if matches!(
+            self.peek().map(|t| &t.token_type),
+            None | Some(TokenType::Newline | TokenType::Eof)
+        ) {
+            return Err(self.where_err_at(
                 &where_token,
                 "Expected a predicate after `where`, such as `where gt(%, 0)`",
             ));
@@ -6532,7 +6546,7 @@ impl Parser {
         );
         let predicate = match check_where_predicate(predicate) {
             Ok(predicate) => predicate,
-            Err(message) => return Err(self.error_at(&where_token, &message)),
+            Err(message) => return Err(self.where_err_at(&where_token, &message)),
         };
         Ok(WhereClause {
             predicate,
@@ -6660,12 +6674,12 @@ impl Parser {
         }
         self.skip_newlines();
         let Some(declared) = declared else {
-            return Err(self.error(
+            return Err(self.where_error_here(
                 "A binding-level `where` needs a declared type (where-requires-type). Write `name: Type value where …`, with `: Any` for an untyped value",
             ));
         };
         if matches!(&declared, TypeExpr::Named(name) if is_inline_refinement_type(name)) {
-            return Err(self.error(
+            return Err(self.where_error_here(
                 "A binding takes one `where` clause, before or after its value (duplicate-where). Combine conditions with and(…)",
             ));
         }
@@ -6692,7 +6706,7 @@ impl Parser {
         let refinement = self.parse_where_refinement()?;
         if self.at_where_after_newlines() {
             self.skip_newlines();
-            return Err(self.error(
+            return Err(self.where_error_here(
                 "A declaration takes one `where` clause (duplicate-where). Combine conditions with and(…)",
             ));
         }
@@ -6703,7 +6717,7 @@ impl Parser {
     /// statement can't start with it.
     fn reject_stray_where(&mut self) -> ParseResult<()> {
         if self.at_where() {
-            return Err(self.error(
+            return Err(self.where_error_here(
                 "`where` must follow a typed binding or a type, as in `n: Int 3 where gt(%, 0)` (where-requires-type). It can't name a variable",
             ));
         }
@@ -6718,6 +6732,22 @@ impl Parser {
                 namespace.scope.vars.insert(var, value);
             }
         }
+    }
+
+    fn where_err_at(&mut self, token: &Token, message: &str) -> ParseError {
+        let error = self.error_at(token, message);
+        self.where_err(error)
+    }
+
+    fn where_error_here(&mut self, message: &str) -> ParseError {
+        let error = self.error(message);
+        self.where_err(error)
+    }
+
+    /// Record a `where` error so a fallback parse can't hide it.
+    fn where_err(&mut self, error: ParseError) -> ParseError {
+        self.where_error = Some(error.clone());
+        error
     }
 
     fn error_at(&self, token: &Token, message: &str) -> ParseError {
@@ -6887,7 +6917,7 @@ impl Parser {
         // level: `Int | Str where p` refines the union.
         let clause = self.parse_where_clause()?;
         if self.at_where() {
-            return Err(self.error(
+            return Err(self.where_error_here(
                 "A type takes one `where` clause (duplicate-where). Combine conditions with and(…)",
             ));
         }

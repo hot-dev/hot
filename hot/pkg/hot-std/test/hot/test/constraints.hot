@@ -1,0 +1,243 @@
+::hot::test::constraints ns
+meta {doc: """Runtime tests for `where` constraints."""}
+
+// Values the tests pass through `dynamic` reach their boundary at run time,
+// where a literal would be rejected by `hot check` already.
+dynamic fn (value: Any): Any {
+    value
+}
+
+// The kind of constraint error a result holds, or "ok".
+constraint-kind fn (lazy result: Any): Str {
+    forced do result
+    cond {
+        is-ok(forced) => { "ok" }
+        => {
+            match err-value(forced) {
+                ConstraintError.Violation => { "violation" }
+                ConstraintError.EvaluationFailed => { "evaluation-failed" }
+                ConstraintError.BudgetExceeded => { "budget-exceeded" }
+                _ => { "other" }
+            }
+        }
+    }
+}
+
+// The payload of a constraint error.
+violation fn (lazy result: Any): Map {
+    forced do result
+    err-value(forced)
+}
+
+Port type Int where between(%, 1, 65535)
+Cents type Int where gte(%, 0)
+Quantity type Int where between(%, 1, 99)
+Username type Str where between(length(%), 3, 20)
+Currency type "USD" | "EUR" | "GBP"
+TrackLinks type open "None" | "HtmlAndText"
+
+LineItem type {
+    sku: Str,
+    quantity: Quantity,
+    price: Cents,
+}
+
+Order type {
+    items: Vec<LineItem> where between(length(%), 1, 100),
+    currency: Currency,
+    discount: Cents,
+    subtotal: Cents,
+} where lte(%.discount, %.subtotal)
+
+Window type {
+    start: Int,
+    finish: Int
+} where lte(%.start, %.finish)
+fn (start: Int, days: Int): Window {
+    Window({start: start, finish: add(start, days)})
+}
+
+Server type {
+    host: Str,
+    port: Port
+}
+
+valid-extension-days fn (days: Int): Bool {
+    and(gte(days, 1), lte(days, 3))
+}
+
+ExtensionDays type Int where valid-extension-days(%)
+
+spin fn (n: Int): Bool {
+    spin(add(n, 1))
+}
+
+Spins type Int where spin(%)
+
+clock ::hot::time/now
+Clocked type Int where and(gt(%, 0), is-some(call(clock, [])))
+
+listen fn (port: Port): Str {
+    `listening on ${port}`
+}
+
+retry-delay fn (attempt: Int where between(%, 1, 10)): Int where lte(%, 30000) {
+    mul(mul(attempt, attempt), 1000)
+}
+
+withdraw fn (amount: Int, balance: Int)
+    where and(gt(%.amount, 0), lte(%.amount, %.balance))
+    : Int where gte(%, 0)
+{
+    sub(balance, amount)
+}
+
+failing-body fn (x: Int): Int where gt(%, 0) {
+    err("body failed")
+}
+
+countdown fn (n: Int): Int where gte(%, 0) {
+    if(eq(n, 0), 0, countdown(sub(n, 1)))
+}
+
+open-port fn (port: Port): Port {
+    port
+}
+
+plain-port fn (port: Int): Int {
+    port
+}
+
+describe-tracking fn (mode: TrackLinks): Str {
+    mode
+}
+
+charge fn (cents: Cents, currency: Currency): Str {
+    `${cents} ${currency}`
+}
+
+kind fn (v: Int): Str {
+    match v {
+        Port => { "port" }
+        _ => { "other" }
+    }
+}
+
+extension fn (requested: Int): Int {
+    days: Int min(requested, 5)
+        where between(%, 1, 3)
+    days
+}
+
+test-refinement-values-are-base-values
+meta ["test"] fn () {
+    port: Port 8080
+    assert-eq(8081, add(port, 1), "arithmetic returns the base type")
+    assert-eq(8080, Port(8080), "the constructor returns the plain value")
+    assert(eq(port, 8080), "equal to the base value")
+    assert-eq("8080", to-json(port), "no type tag in JSON")
+    assert(is-type(443, Port), "is-type runs the predicate")
+    assert(not(is-type(0, Port)), "is-type rejects a value outside the refinement")
+    assert-eq("port", kind(80), "a match arm on a refinement is a guard")
+    assert-eq("other", kind(70000), "a value outside it falls through")
+}
+
+test-constructor-and-binding-boundaries
+meta ["test"] fn () {
+    assert-eq("violation", constraint-kind(Port(dynamic(70000))), "constructor")
+    v violation(Port(dynamic(70000)))
+    assert-eq("constructor", v.boundary, "boundary")
+    assert-eq("between(%, 1, 65535)", v.predicate, "predicate source")
+    assert-eq([], v.path, "the value itself failed")
+    assert-eq("Int", v.value-type, "value type")
+    assert(not(contains(v.message, "70000")), "the message never includes the value")
+    assert-eq(2, extension(2), "a binding that passes")
+    assert-eq("binding", violation(extension(4)).boundary, "a binding that fails")
+}
+
+test-parameter-precondition-and-return
+meta ["test"] fn () {
+    assert-eq("listening on 8080", listen(8080), "a refined parameter")
+    p violation(listen(dynamic(0)))
+    assert-eq("parameter", p.boundary, "parameter boundary")
+    assert-eq("port", p.parameter, "parameter name")
+    assert-eq(9000, retry-delay(3), "inline parameter and return refinements")
+    assert-eq("parameter", violation(retry-delay(dynamic(0))).boundary, "inline parameter")
+    assert-eq("return", violation(retry-delay(6)).boundary, "return value")
+    assert-eq(90, withdraw(10, 100), "precondition passes")
+    assert-eq("arguments", violation(withdraw(150, 100)).boundary, "precondition fails")
+    assert-eq("body failed", err-message(failing-body(1)), "a body Err passes through unchanged")
+}
+
+test-nested-paths-and-invariants
+meta ["test"] fn () {
+    good {
+        items: [{sku: "A-1", quantity: 1, price: 500}],
+        currency: "USD",
+        discount: 0,
+        subtotal: 500,
+    }
+
+    assert-eq("ok", constraint-kind(Order(good)), "a valid order")
+    bad-price assoc-in(good, ["items", 0, "price"], -5)
+    v violation(Order(bad-price))
+    assert-eq(["items", 0, "price"], v.path, "path to the failing field")
+    assert-eq("::hot::test::constraints/Cents", v.constraint, "innermost constraint first")
+    bad-discount assoc(good, "discount", 900)
+    assert-eq([], violation(Order(bad-discount)).path, "the record invariant")
+    no-items assoc(good, "items", [])
+    assert-eq(["items"], violation(Order(no-items)).path, "a refined field")
+    assert-eq("violation", constraint-kind(Window({start: 9, finish: 5})), "default constructor")
+    assert-eq("ok", constraint-kind(Window(1, 5)), "custom constructor")
+}
+
+test-updates-keep-constraints
+meta ["test"] fn () {
+    server Server({host: "localhost", port: 8080})
+    assert-eq(9090, assoc(server, "port", 9090).port, "a valid update")
+    u violation(assoc(server, "port", dynamic(70000)))
+    assert-eq("update", u.boundary, "assoc")
+    assert-eq(["port"], u.path, "path")
+    assert-eq("update", violation(merge(server, {port: dynamic(0)})).boundary, "merge")
+    moved Server({host: "localhost", port: 8080})
+    moved.port dynamic(0)
+    assert-eq("update", violation(moved).boundary, "deep-path assignment")
+}
+
+test-exact-numeric-conversions
+meta ["test"] fn () {
+    body from-json("{\"a\": 443, \"b\": 443.0, \"c\": 443.5, \"d\": \"443\"}")
+    assert-eq(443, open-port(body.a), "the base type")
+    assert-eq(443, open-port(body.b), "an integral Dec")
+    assert-eq("violation", constraint-kind(open-port(body.c)), "never truncated")
+    assert-eq("violation", constraint-kind(open-port(body.d)), "no string parsing")
+    assert-eq(443, plain-port(body.c), "unrefined parameters still truncate")
+    assert-eq(443, plain-port(body.d), "and still parse strings")
+}
+
+test-literal-unions
+meta ["test"] fn () {
+    body from-json("{\"usd\": \"USD\", \"jpy\": \"JPY\", \"html\": \"HtmlOnly\"}")
+    assert-eq("500 USD", charge(500, body.usd), "a known value")
+    assert-eq("violation", constraint-kind(charge(500, body.jpy)), "a closed union")
+    assert-eq("HtmlOnly", describe-tracking(body.html), "an open union accepts unknown values")
+    assert-eq("EUR", Currency("EUR"), "a closed union's values stay plain")
+    assert(is-type("USD", Currency), "is-type checks membership")
+}
+
+test-predicate-outcomes
+meta ["test"] fn () {
+    assert-eq(2, ExtensionDays(2), "a pure helper")
+    assert-eq("violation", constraint-kind(ExtensionDays(dynamic(5))), "false")
+    assert-eq("budget-exceeded", constraint-kind(Spins(1)), "an unbounded predicate")
+    assert-eq("instructions", violation(Spins(1)).budget, "budget kind")
+    assert-eq("evaluation-failed", constraint-kind(Clocked(1)), "an impure call through a function value")
+}
+
+test-tail-calls-and-nullable
+meta ["test"] fn () {
+    assert-eq(0, countdown(100000), "a self tail call keeps the return refinement and the stack")
+    nickname: Username? null
+    assert-eq(null, nickname, "null passes a nullable refinement")
+    assert-eq("violation", constraint-kind(Username(dynamic("al"))), "a short name")
+}

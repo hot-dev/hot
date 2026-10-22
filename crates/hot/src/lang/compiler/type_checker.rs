@@ -3203,6 +3203,58 @@ impl TypeChecker {
     }
 
     /// Infer the return type of a function call
+    /// Precise result types for `and`, `or`, `if` and `not`. `and` and `or`
+    /// return one of their arguments and `if` one of its branches, so the
+    /// result is the union of those types: `Bool` when every one is a
+    /// `Bool`. `not` always returns a `Bool`. `None` for any other call, or
+    /// when a local definition shadows the core one.
+    fn logic_result_type(&mut self, name: &str, fn_call: &FnCall) -> Option<TypeExpr> {
+        let short = name.strip_prefix("::hot::bool/").unwrap_or(name);
+        if !matches!(short, "and" | "or" | "if" | "not") {
+            return None;
+        }
+        if name == short && self.context.current_namespace != "::hot::bool" {
+            let local = format!("{}/{}", self.context.current_namespace, short);
+            if self.context.get_function_signature(&local).is_some() {
+                return None;
+            }
+        }
+        if short == "not" {
+            return Some(TypeExpr::Bool);
+        }
+        let skip = usize::from(short == "if");
+        let mut types: Vec<TypeExpr> = fn_call
+            .args
+            .iter()
+            .skip(skip)
+            .map(|arg| arg.value.clone())
+            .collect::<Vec<_>>()
+            .iter()
+            .map(|value| self.infer_value_type(value))
+            .collect();
+        if short == "if" && fn_call.args.len() == 2 {
+            types.push(TypeExpr::Null);
+        }
+        let mut members: Vec<TypeExpr> = Vec::new();
+        for t in types {
+            let parts = match t {
+                TypeExpr::Any => return Some(TypeExpr::Any),
+                TypeExpr::Union(parts) => parts,
+                other => vec![other],
+            };
+            for part in parts {
+                if !members.contains(&part) {
+                    members.push(part);
+                }
+            }
+        }
+        Some(match members.len() {
+            0 => TypeExpr::Any,
+            1 => members.remove(0),
+            _ => TypeExpr::Union(members),
+        })
+    }
+
     fn infer_function_call_type(&mut self, fn_call: &FnCall) -> TypeExpr {
         // Check for type conversion calls like `::hot::type/Str(value)`. These
         // are constructor calls that double as coercion functions; if the
@@ -3385,7 +3437,11 @@ impl TypeChecker {
                 let matching_sig = self.find_matching_signature(fn_call, lookup_name, &signatures);
 
                 if let Some(sig) = matching_sig {
-                    return sig.return_type.clone();
+                    let declared = sig.return_type.clone();
+                    if let Some(precise) = self.logic_result_type(lookup_name, fn_call) {
+                        return precise;
+                    }
+                    return declared;
                 }
 
                 // No matching signature found - report error
