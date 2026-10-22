@@ -1324,6 +1324,25 @@ mod integration_tests {
         );
     }
 
+    /// A parameter's predicate can't use another parameter; the error points
+    /// to argument-list preconditions.
+    #[test]
+    fn test_where_parameter_predicate_cannot_use_other_parameters() {
+        let source = r#"
+            ::test ns
+            clamp fn (low: Int, high: Int where gte(%, low)): Int { high }
+        "#;
+        let errors = compile_and_get_type_errors(source);
+        assert!(
+            errors
+                .iter()
+                .any(|e| constraint_code(e) == Some("invalid-constraint")
+                    && e.to_string().contains("uses `low`, another parameter")),
+            "Expected invalid-constraint. Got: {:?}",
+            errors
+        );
+    }
+
     /// An open literal union doesn't open a closed enum that has the same
     /// short name in another namespace, so matching the enum still needs no
     /// default arm.

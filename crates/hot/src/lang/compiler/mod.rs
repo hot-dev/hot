@@ -142,6 +142,11 @@ pub struct Compiler {
     constrained_types: AHashMap<String, bool>,
     /// Constant ids of registered constraint specs, by qualified type name.
     constraint_spec_ids: AHashMap<String, ConstantId>,
+    /// `where` predicate functions by qualified name: parameter and body.
+    constraint_predicates: AHashMap<String, (String, Value)>,
+    /// Namespaces that define a function named like a canonical predicate
+    /// function (`gt`, `between`, ...), whose predicates get no fast form.
+    shadowing_namespaces: AHashSet<String>,
 }
 
 /// Complete append-only compiler state for compiling code against an already
@@ -255,6 +260,8 @@ impl Compiler {
             constraint_type_defs: AHashMap::new(),
             constrained_types: AHashMap::new(),
             constraint_spec_ids: AHashMap::new(),
+            constraint_predicates: AHashMap::new(),
+            shadowing_namespaces: AHashSet::new(),
         }
     }
 
@@ -8180,7 +8187,7 @@ impl Compiler {
                     .constraint_type_defs
                     .get(&full_type_path)
                     .is_some_and(Self::is_constrained_alias)
-                    && let Some(spec) = self.constraint_spec_for_annotation(&full_type_path)
+                    && let Some(spec) = self.untagged_alias_spec(&full_type_path)
                 {
                     let checked = self.emit_constraint_check(
                         value_reg,

@@ -85,6 +85,12 @@ fn builtin_name(builtin: &BuiltinType) -> &'static str {
     }
 }
 
+/// Functions a fast predicate form stands for; a namespace that defines one
+/// of these itself gets no fast forms.
+const FAST_FUNCTIONS: &[&str] = &[
+    "and", "between", "eq", "gt", "gte", "in", "length", "lt", "lte",
+];
+
 /// Runtime type names a strict base check understands.
 fn is_base_type_name(name: &str) -> bool {
     matches!(
@@ -99,9 +105,31 @@ impl Compiler {
     pub(super) fn collect_constraint_types(&mut self, program: &crate::lang::ast::Program) {
         for (ns_path, namespace) in &program.namespaces {
             for (var, value) in &namespace.scope.vars {
-                if let crate::lang::ast::Value::TypeDef(type_def) = value {
-                    self.constraint_type_defs
-                        .insert(format!("{}/{}", ns_path, var.sym.name()), type_def.clone());
+                let name = var.sym.name();
+                match value {
+                    crate::lang::ast::Value::TypeDef(type_def) => {
+                        self.constraint_type_defs
+                            .insert(format!("{ns_path}/{name}"), type_def.clone());
+                    }
+                    crate::lang::ast::Value::Fn(defs) => {
+                        if crate::lang::ast::is_where_predicate(name)
+                            && let Some(def) = defs.first()
+                            && let Some(param) = def.args.args.first()
+                        {
+                            self.constraint_predicates.insert(
+                                format!("{ns_path}/{name}"),
+                                (param.var.sym.name().to_string(), def.body.clone()),
+                            );
+                        } else if FAST_FUNCTIONS.contains(&name)
+                            && !matches!(
+                                ns_path.to_string().as_str(),
+                                "::hot::cmp" | "::hot::bool" | "::hot::coll" | "::hot::str"
+                            )
+                        {
+                            self.shadowing_namespaces.insert(ns_path.to_string());
+                        }
+                    }
+                    _ => {}
                 }
             }
         }
@@ -345,6 +373,9 @@ impl Compiler {
             qualified.to_string()
         };
         if let Some(alias) = &type_def.type_alias {
+            if let Some(spec) = self.open_union_spec(type_def) {
+                return spec;
+            }
             let base = match alias {
                 TypeExpr::Literal(_) if !type_def.is_open => {
                     self.literal_spec(std::slice::from_ref(alias), Some(qualified))
@@ -358,14 +389,14 @@ impl Compiler {
                 _ => self.full_spec(alias),
             };
             return match &type_def.refinement {
-                Some(refinement) => refine_node(base, refinement, &display_name),
+                Some(refinement) => self.refine_node(base, refinement, &display_name),
                 None => base,
             };
         }
         let invariant = type_def
             .refinement
             .as_ref()
-            .map(|r| refine_node(node("any", vec![]), r, &display_name))
+            .map(|r| self.refine_node(node("any", vec![]), r, &display_name))
             .unwrap_or(Val::Null);
         if let Some(fields) = &type_def.fields {
             let mut field_specs = Vec::new();
@@ -392,11 +423,40 @@ impl Compiler {
     /// The spec of an argument-list precondition: a refinement of the record
     /// of bound arguments.
     pub(super) fn precondition_spec(&self, refinement: &Refinement) -> Val {
-        refine_node(
+        self.refine_node(
             node("base", vec![("type", Val::from("Map"))]),
             refinement,
             "<inline>",
         )
+    }
+
+    /// The fast form of a predicate made only of canonical shapes: bounds,
+    /// lengths, `in` and `eq` with literals, joined by `and`. The VM checks it
+    /// without calling the predicate. `None` when any part needs the call.
+    fn fast_form(&self, refinement: &Refinement) -> Option<Val> {
+        let (namespace, _) = refinement.predicate.rsplit_once('/')?;
+        if self.shadowing_namespaces.contains(namespace) {
+            return None;
+        }
+        let (param, body) = self.constraint_predicates.get(&refinement.predicate)?;
+        let schema = crate::lang::json_schema::refinement_schema(body, param, &refinement.source);
+        if schema.describe
+            || schema.keywords.is_empty()
+            || schema.keywords.iter().any(|(k, _)| k == "pattern")
+        {
+            return None;
+        }
+        Some(Val::map_from_iter(
+            schema.keywords.into_iter().map(|(k, v)| (Val::from(k), v)),
+        ))
+    }
+
+    fn refine_node(&self, base: Val, refinement: &Refinement, constraint: &str) -> Val {
+        let mut node = refine_node(base, refinement, constraint);
+        if let (Some(fast), Val::Map(entries)) = (self.fast_form(refinement), &mut node) {
+            entries.insert(Val::from("fast"), fast);
+        }
+        node
     }
 
     /// Emit a check of `src` against `type_spec`, returning the register that
@@ -690,10 +750,52 @@ impl Compiler {
             .add_constant(Constant::Val(Val::map_from_iter(entries)))
     }
 
+    /// An open literal union's spec: its values are plain values of the
+    /// members' base types, and any value of those types is accepted.
+    fn open_union_spec(&mut self, type_def: &TypeDef) -> Option<Val> {
+        if !type_def.is_open {
+            return None;
+        }
+        let members = match type_def.type_alias.as_ref()? {
+            TypeExpr::Union(members) => members.clone(),
+            literal @ TypeExpr::Literal(_) => vec![literal.clone()],
+            _ => return None,
+        };
+        let mut bases: Vec<&str> = Vec::new();
+        for member in &members {
+            let TypeExpr::Literal(literal) = member else {
+                return None;
+            };
+            let base = match literal {
+                LiteralType::Str(_) => "Str",
+                LiteralType::Int(_) => "Int",
+                LiteralType::Dec(_) => "Dec",
+                LiteralType::Bool(_) => "Bool",
+                LiteralType::Null => "Null",
+            };
+            if !bases.contains(&base) {
+                bases.push(base);
+            }
+        }
+        let specs: Vec<Val> = bases
+            .into_iter()
+            .map(|base| node("base", vec![("type", Val::from(base))]))
+            .collect();
+        Some(match specs.len() {
+            1 => specs.into_iter().next().unwrap_or(Val::Null),
+            _ => node("union", vec![("members", Val::Vec(specs))]),
+        })
+    }
+
     /// The boundary constant for a constrained type's constructor, or `None`
-    /// when the type has no constraints.
+    /// when the type has no constraints. An open literal union counts: its
+    /// constructor checks the base type and keeps the value plain.
     pub(super) fn constructor_check_constant(&mut self, qualified: &str) -> Option<ConstantId> {
-        if !self.type_is_constrained(qualified, &mut AHashSet::new()) {
+        let open_union = self
+            .constraint_type_defs
+            .get(qualified)
+            .is_some_and(|t| t.is_open && Self::is_literal_union(t));
+        if !open_union && !self.type_is_constrained(qualified, &mut AHashSet::new()) {
             return None;
         }
         self.named_spec_id(qualified)?;
@@ -705,17 +807,33 @@ impl Compiler {
         Some(self.constraint_boundary_constant(spec, &boundary))
     }
 
-    /// A refinement alias (`Port type Int where …`) or a closed literal union
-    /// (`Fruit type "apple" | "banana"`): its values stay plain base values.
+    /// A refinement alias (`Port type Int where …`) or a literal union
+    /// (`Fruit type "apple" | "banana"`, closed or open): its values stay
+    /// plain base values.
     pub(super) fn is_constrained_alias(type_def: &TypeDef) -> bool {
+        (type_def.type_alias.is_some() && type_def.refinement.is_some())
+            || Self::is_literal_union(type_def)
+    }
+
+    fn is_literal_union(type_def: &TypeDef) -> bool {
         match &type_def.type_alias {
-            Some(_) if type_def.refinement.is_some() => true,
-            Some(TypeExpr::Literal(_)) => !type_def.is_open,
+            Some(TypeExpr::Literal(_)) => true,
             Some(TypeExpr::Union(members)) => {
-                !type_def.is_open && members.iter().all(|m| matches!(m, TypeExpr::Literal(_)))
+                members.iter().all(|m| matches!(m, TypeExpr::Literal(_)))
             }
             _ => false,
         }
+    }
+
+    /// The spec of a refinement alias or literal union, for a `match` arm
+    /// that guards on it.
+    pub(super) fn untagged_alias_spec(&mut self, qualified: &str) -> Option<Val> {
+        let type_def = self.constraint_type_defs.get(qualified)?;
+        if !Self::is_constrained_alias(type_def) {
+            return None;
+        }
+        self.named_spec_id(qualified)?;
+        Some(node("named", vec![("type", Val::from(qualified))]))
     }
 
     /// Whether a type name resolves to a constrained alias.

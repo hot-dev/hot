@@ -588,6 +588,19 @@ impl VirtualMachine {
                 return Ok(Err(failure));
             }
         };
+        // Canonical shapes are checked here without calling the predicate.
+        if let Some(fast) = get(node, "fast")
+            && let Some(passed) = fast_check(&checked, fast)
+        {
+            if passed {
+                return Ok(Ok(checked));
+            }
+            let mut failure = self.failure(FailureKind::Violation, &checked, path);
+            failure.constraint = constraint;
+            failure.predicate = predicate_source;
+            failure.location = location;
+            return Ok(Err(failure));
+        }
         let predicate = get_str(node, "pred").unwrap_or_default().to_string();
         let kind = match self.run_predicate(&predicate, &checked) {
             PredicateOutcome::Pass => return Ok(Ok(checked)),
@@ -758,6 +771,65 @@ impl VirtualMachine {
             (Val::from("$val"), payload),
         ]))
     }
+}
+
+/// Check a value against a predicate's fast form (see
+/// `constraint_specs::fast_form`). `None` when the value doesn't fit the
+/// shapes, so the predicate itself must decide.
+fn fast_check(value: &Val, fast: &Val) -> Option<bool> {
+    let Val::Map(keywords) = fast else {
+        return None;
+    };
+    let number = |v: &Val| match v {
+        Val::Int(n) => Some(D256::from(*n)),
+        Val::Dec(d) => Some(*d),
+        _ => None,
+    };
+    // Hot's `length`: bytes of a Str, entries of a Vec or Map.
+    let length = |v: &Val| match crate::val::as_fields(v) {
+        Val::Str(s) => Some(s.len() as i64),
+        Val::Vec(items) => Some(items.len() as i64),
+        Val::Map(entries) => Some(entries.len() as i64),
+        _ => None,
+    };
+    let int = |v: &Val| match v {
+        Val::Int(n) => Some(*n),
+        _ => None,
+    };
+    let mut passed = true;
+    for (keyword, bound) in keywords.iter() {
+        let Val::Str(keyword) = keyword else {
+            return None;
+        };
+        let ok = match keyword.as_ref() {
+            "minimum" => number(value)? >= number(bound)?,
+            "maximum" => number(value)? <= number(bound)?,
+            "exclusiveMinimum" => number(value)? > number(bound)?,
+            "exclusiveMaximum" => number(value)? < number(bound)?,
+            "$minLength" => length(value)? >= int(bound)?,
+            "$maxLength" => length(value)? <= int(bound)?,
+            // Only same-typed values decide here; `eq` and `in` may treat
+            // other pairs (such as `5` and `5.0`) as equal.
+            "enum" => match bound {
+                Val::Vec(values) if values.contains(value) => true,
+                Val::Vec(values)
+                    if values
+                        .iter()
+                        .all(|v| std::mem::discriminant(v) == std::mem::discriminant(value)) =>
+                {
+                    false
+                }
+                _ => return None,
+            },
+            "const" if std::mem::discriminant(value) == std::mem::discriminant(bound) => {
+                value == bound
+            }
+            "const" => return None,
+            _ => return None,
+        };
+        passed &= ok;
+    }
+    Some(passed)
 }
 
 /// `an Int`, `a Str`.

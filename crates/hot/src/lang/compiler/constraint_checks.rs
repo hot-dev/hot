@@ -522,6 +522,7 @@ impl<'a> Index<'a> {
                 continue;
             }
             for def in defs {
+                self.check_captured_parameters(ns, name, def, out);
                 for arg in def.args.args.iter().filter(|a| a.lazy) {
                     if arg
                         .type_annotation
@@ -555,6 +556,67 @@ impl<'a> Index<'a> {
                         precondition.src.as_ref().map(error_location),
                     ));
                 }
+            }
+        }
+    }
+
+    /// A parameter's predicate sees only its own value, so naming another
+    /// parameter is an error that points to argument-list preconditions.
+    fn check_captured_parameters(
+        &self,
+        ns: &str,
+        function: &str,
+        def: &FnDef,
+        out: &mut ConstraintDiagnostics,
+    ) {
+        let params: AHashSet<&str> = def.args.args.iter().map(|a| a.var.sym.name()).collect();
+        for arg in &def.args.args {
+            let Some(annotation) = arg.type_annotation.as_deref() else {
+                continue;
+            };
+            if !annotation.starts_with(WHERE_TYPE_PREFIX) {
+                continue;
+            }
+            let Some(refinement) = self
+                .type_def(ns, annotation)
+                .and_then(|t| t.refinement.as_ref())
+            else {
+                continue;
+            };
+            let Some((_, defs)) = self.predicate_defs(refinement) else {
+                continue;
+            };
+            let Some(predicate) = defs.first() else {
+                continue;
+            };
+            let own = predicate.args.args.first().map(|a| a.var.sym.name());
+            let mut captured = None;
+            walk(&predicate.body, &mut |v| {
+                if let Value::Ref(Ref::Var(var_ref)) = v {
+                    let name = var_ref.var.sym.name();
+                    if captured.is_none()
+                        && Some(name) != own
+                        && name != arg.var.sym.name()
+                        && params.contains(name)
+                    {
+                        captured = Some(name.to_string());
+                    }
+                }
+            });
+            if let Some(other) = captured {
+                out.errors.push(diagnostic(
+                    "invalid-constraint",
+                    format!(
+                        "The `where` predicate on parameter `{}` of `{function}` uses `{other}`, another parameter. A parameter's predicate sees only its own value",
+                        arg.var.sym.name()
+                    ),
+                    Some(&format!(
+                        "relate parameters in an argument-list precondition: `fn (...) where gte(%.{}, %.{other})`",
+                        arg.var.sym.name()
+                    )),
+                    false,
+                    refinement.src.as_ref().map(error_location),
+                ));
             }
         }
     }
@@ -926,7 +988,8 @@ impl Evaluator<'_, '_> {
             },
             ("is-null", 1) => Val::Bool(matches!(arg(self, 0)?, Val::Null)),
             ("length", 1) => match arg(self, 0)? {
-                Val::Str(s) => Val::Int(s.chars().count() as i64),
+                // Hot's `length` of a Str counts bytes.
+                Val::Str(s) => Val::Int(s.len() as i64),
                 Val::Vec(items) => Val::Int(items.len() as i64),
                 _ => return None,
             },
