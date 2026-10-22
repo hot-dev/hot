@@ -6082,7 +6082,11 @@ impl VirtualMachine {
     }
 
     /// Call a function value (namespace reference, function reference, etc.)
-    fn call_function_value(&mut self, function_val: &Val, args: &[Val]) -> VmResult<Val> {
+    pub(crate) fn call_function_value(
+        &mut self,
+        function_val: &Val,
+        args: &[Val],
+    ) -> VmResult<Val> {
         match function_val {
             Val::Box(boxed) => {
                 // Handle boxed callable values
