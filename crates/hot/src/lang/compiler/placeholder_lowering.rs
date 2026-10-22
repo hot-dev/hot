@@ -68,7 +68,7 @@ pub fn lower_program(program: &mut Program) -> CompilerResult<()> {
             let lowered = lower_value(taken, &ns_path, &aliases, &registry);
             *slot = lowered;
             for site in registry.nested.borrow_mut().drain(..) {
-                errors.push(site.into_error(namespace.source_file.as_ref()));
+                errors.push(site.into_error(&var, namespace.source_file.as_ref()));
             }
         }
     }
@@ -79,15 +79,13 @@ pub fn lower_program(program: &mut Program) -> CompilerResult<()> {
     // After lowering, scan for any leftover bare placeholders. Each one is a
     // user error: a `%` that did not land in a `Fn`-typed parameter slot.
     for (ns_path, namespace) in &program.namespaces {
-        let source_file = namespace.source_file.clone();
         for (var, value) in &namespace.scope.vars {
-            collect_placeholder_errors(
-                value,
-                var.sym.name(),
+            let binding = ScannedBinding {
+                var,
                 ns_path,
-                source_file.as_ref(),
-                &mut errors,
-            );
+                namespace_file: namespace.source_file.as_ref(),
+            };
+            collect_placeholder_errors(value, &binding, var.src.as_ref(), &mut errors);
         }
     }
 
@@ -118,7 +116,7 @@ struct SignatureRegistry {
     by_qualified: IndexMap<(String, String), Vec<FnArgs>>,
     by_short_name: IndexMap<String, Vec<FnArgs>>,
     /// Nested implicit lambdas found while lowering the current variable.
-    /// Drained by [`lower_program`], which knows the source file.
+    /// Drained by [`lower_program`], which knows the enclosing binding.
     nested: RefCell<Vec<NestedPlaceholderSite>>,
 }
 
@@ -131,18 +129,35 @@ struct NestedPlaceholderSite {
 }
 
 impl NestedPlaceholderSite {
-    fn into_error(self, source_file: Option<&PathBuf>) -> CompilerError {
+    /// `var` is the top-level binding the call was found in.
+    fn into_error(self, var: &Var, namespace_file: Option<&PathBuf>) -> CompilerError {
         CompilerError::NestedPlaceholder {
             function: self.function,
             parameter: self.parameter,
-            location: self.src.map(|s| ErrorLocation {
-                line: s.line,
-                column: s.column,
-                position: s.position,
-                length: s.length,
-                file: source_file.cloned(),
-            }),
+            location: self.src.map(|s| error_location(&s, var, namespace_file)),
         }
+    }
+}
+
+/// Location of a diagnostic at `src` inside the top-level binding `var`.
+///
+/// The file comes from the spans, not the namespace: `Namespace::source_file`
+/// names only the first file merged into that namespace. That is wrong for a
+/// namespace split across files, and for the root namespace `::`, which holds
+/// every file without an `ns` declaration but names the first file loaded (a
+/// hot-std module).
+fn error_location(src: &Source, var: &Var, namespace_file: Option<&PathBuf>) -> ErrorLocation {
+    ErrorLocation {
+        line: src.line,
+        column: src.column,
+        position: src.position,
+        length: src.length,
+        file: src
+            .file
+            .as_ref()
+            .or_else(|| var.src.as_ref().and_then(|s| s.file.as_ref()))
+            .map(PathBuf::from)
+            .or_else(|| namespace_file.cloned()),
     }
 }
 
@@ -528,25 +543,28 @@ fn lower_val(
     }
 }
 
+/// The top-level binding [`collect_placeholder_errors`] is scanning.
+struct ScannedBinding<'a> {
+    var: &'a Var,
+    ns_path: &'a NsPath,
+    namespace_file: Option<&'a PathBuf>,
+}
+
 /// Walk a (lowered) AST and emit a [`CompilerError`] for every leftover
 /// `Value::Placeholder` node. The presence of one means the user wrote `%`
 /// somewhere with no enclosing `Fn`-typed parameter slot to bind to.
+///
+/// A bare placeholder has no span of its own, so `near` carries the innermost
+/// enclosing one: the call argument it sits in, else the binding's name.
 fn collect_placeholder_errors(
     value: &Value,
-    enclosing_var: &str,
-    ns_path: &NsPath,
-    source_file: Option<&PathBuf>,
+    binding: &ScannedBinding,
+    near: Option<&Source>,
     errors: &mut Vec<CompilerError>,
 ) {
     match value {
         Value::Placeholder(n) => {
-            errors.push(make_placeholder_error(
-                *n,
-                enclosing_var,
-                ns_path,
-                source_file,
-                None,
-            ));
+            errors.push(make_placeholder_error(*n, binding, near));
         }
         Value::Ref(Ref::Var(vr)) => {
             // Bare `%`/`%N` parsed inside a deep_path may leave a placeholder
@@ -558,88 +576,77 @@ fn collect_placeholder_errors(
                     .and_then(|s| s.strip_suffix("__"))
                     .and_then(|s| s.parse::<usize>().ok())
                     .unwrap_or(1);
-                errors.push(make_placeholder_error(
-                    n,
-                    enclosing_var,
-                    ns_path,
-                    source_file,
-                    vr.src.as_ref(),
-                ));
+                errors.push(make_placeholder_error(n, binding, vr.src.as_ref().or(near)));
             }
         }
         Value::FnCall(call) => {
-            collect_placeholder_errors(&call.function, enclosing_var, ns_path, source_file, errors);
+            let near = call.src.as_ref().or(near);
+            collect_placeholder_errors(&call.function, binding, near, errors);
             for arg in &call.args {
-                collect_placeholder_errors(&arg.value, enclosing_var, ns_path, source_file, errors);
+                collect_placeholder_errors(&arg.value, binding, arg.src.as_ref().or(near), errors);
             }
         }
         Value::Flow(flow) => {
             for e in &flow.expressions {
-                collect_placeholder_errors(e, enclosing_var, ns_path, source_file, errors);
+                collect_placeholder_errors(e, binding, near, errors);
             }
         }
         Value::Fn(fn_defs) => {
             for fn_def in fn_defs {
-                collect_placeholder_errors(
-                    &fn_def.body,
-                    enclosing_var,
-                    ns_path,
-                    source_file,
-                    errors,
-                );
+                collect_placeholder_errors(&fn_def.body, binding, near, errors);
             }
         }
         Value::Lambda(lambda) => {
-            collect_placeholder_errors(&lambda.body, enclosing_var, ns_path, source_file, errors);
+            collect_placeholder_errors(&lambda.body, binding, near, errors);
         }
         Value::Cond(_, cond, flow) => {
-            collect_placeholder_errors(cond, enclosing_var, ns_path, source_file, errors);
+            collect_placeholder_errors(cond, binding, near, errors);
             for e in &flow.expressions {
-                collect_placeholder_errors(e, enclosing_var, ns_path, source_file, errors);
+                collect_placeholder_errors(e, binding, near, errors);
             }
         }
         Value::CondDefault(flow) => {
             for e in &flow.expressions {
-                collect_placeholder_errors(e, enclosing_var, ns_path, source_file, errors);
+                collect_placeholder_errors(e, binding, near, errors);
             }
         }
         Value::TemplateLiteral(tl) => {
             for p in &tl.parts {
                 if let TemplatePart::Expression(e) = p {
-                    collect_placeholder_errors(e, enclosing_var, ns_path, source_file, errors);
+                    collect_placeholder_errors(e, binding, near, errors);
                 }
             }
         }
         Value::Raw(inner) | Value::Do(inner) => {
-            collect_placeholder_errors(inner, enclosing_var, ns_path, source_file, errors);
+            collect_placeholder_errors(inner, binding, near, errors);
         }
         Value::MultipleValues(vals) => {
             for v in vals {
-                collect_placeholder_errors(v, enclosing_var, ns_path, source_file, errors);
+                collect_placeholder_errors(v, binding, near, errors);
             }
         }
         Value::Match(m) => {
-            collect_placeholder_errors(&m.value, enclosing_var, ns_path, source_file, errors);
+            collect_placeholder_errors(&m.value, binding, near, errors);
             for arm in &m.arms {
-                collect_placeholder_errors(&arm.body, enclosing_var, ns_path, source_file, errors);
+                collect_placeholder_errors(&arm.body, binding, near, errors);
             }
         }
         Value::MatchArm(arm) => {
-            collect_placeholder_errors(&arm.body, enclosing_var, ns_path, source_file, errors);
+            collect_placeholder_errors(&arm.body, binding, near, errors);
         }
         Value::MapWithSpread {
             base_entries,
             spread_entries,
         } => {
             for v in base_entries.values() {
-                collect_val_placeholder_errors(v, enclosing_var, ns_path, source_file, errors);
+                collect_val_placeholder_errors(v, binding, near, errors);
             }
             for (_, v) in spread_entries {
-                collect_placeholder_errors(v, enclosing_var, ns_path, source_file, errors);
+                collect_placeholder_errors(v, binding, near, errors);
             }
         }
         Value::Val(v, _) => {
-            collect_val_placeholder_errors(v, enclosing_var, ns_path, source_file, errors);
+            collect_val_placeholder_errors(v, binding, near, errors);
         }
         Value::Ref(Ref::Ns(_))
         | Value::TypeDef(_)
@@ -651,25 +658,24 @@ fn collect_placeholder_errors(
 
 fn collect_val_placeholder_errors(
     val: &Val,
-    enclosing_var: &str,
-    ns_path: &NsPath,
-    source_file: Option<&PathBuf>,
+    binding: &ScannedBinding,
+    near: Option<&Source>,
     errors: &mut Vec<CompilerError>,
 ) {
     match val {
         Val::Box(b) => {
             if let Some(ast) = b.as_any().downcast_ref::<AstNode>() {
-                collect_placeholder_errors(&ast.0, enclosing_var, ns_path, source_file, errors);
+                collect_placeholder_errors(&ast.0, binding, near, errors);
             }
         }
         Val::Map(m) => {
             for v in m.values() {
-                collect_val_placeholder_errors(v, enclosing_var, ns_path, source_file, errors);
+                collect_val_placeholder_errors(v, binding, near, errors);
             }
         }
         Val::Vec(v) => {
             for x in v {
-                collect_val_placeholder_errors(x, enclosing_var, ns_path, source_file, errors);
+                collect_val_placeholder_errors(x, binding, near, errors);
             }
         }
         _ => {}
@@ -678,9 +684,7 @@ fn collect_val_placeholder_errors(
 
 fn make_placeholder_error(
     n: usize,
-    enclosing_var: &str,
-    ns_path: &NsPath,
-    source_file: Option<&PathBuf>,
+    binding: &ScannedBinding,
     src: Option<&Source>,
 ) -> CompilerError {
     let token = if n == 1 {
@@ -688,19 +692,15 @@ fn make_placeholder_error(
     } else {
         format!("%{}", n)
     };
-    let location = src.map(|s| ErrorLocation {
-        line: s.line,
-        column: s.column,
-        position: s.position,
-        length: s.length,
-        file: source_file.cloned(),
-    });
+    let location = src.map(|s| error_location(s, binding.var, binding.namespace_file));
     let message = format!(
         "Placeholder `{}` in `{}` (in `{}`) has no enclosing parameter \
          slot of type `Fn` to bind to. Wrap the expression with `%(expr)` \
          to construct an explicit lambda value, or move the `%` inside \
          a higher-order function call.",
-        token, enclosing_var, ns_path
+        token,
+        binding.var.sym.name(),
+        binding.ns_path
     );
     CompilerError::CallLibError {
         func_name: token,
