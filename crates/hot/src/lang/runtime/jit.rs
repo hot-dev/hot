@@ -6831,6 +6831,20 @@ fn build_supported_body(
                 ) {
                     return Err(format!("Unsupported flow type for JIT: {:?}", flow_type));
                 }
+                // A collecting serial flow, such as a body returning
+                // `All<Vec>`, gathers the bindings it makes. Compiled code
+                // never saw them and returned an empty collection.
+                if flow_type == FlowType::Serial
+                    && matches!(
+                        result_modifier,
+                        FlowResultModifier::Map | FlowResultModifier::Vec
+                    )
+                {
+                    return Err(unsupported_jit_bailout(
+                        "serial_collect",
+                        "JIT does not collect a serial flow's bindings",
+                    ));
+                }
                 let pre_flow_owned: Vec<usize> = ctx
                     .register_kinds
                     .iter()

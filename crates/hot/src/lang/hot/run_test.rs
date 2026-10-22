@@ -544,6 +544,34 @@ probe()"#;
         }
     }
 
+    /// A body returning `All<Vec>` or `All<Map>` collects its bindings. The
+    /// compiled version returned an empty collection.
+    #[test]
+    fn jit_collecting_serial_bodies() {
+        let src = r#"::t ns
+values fn (): All<Vec> {
+    a 1
+    b 2
+}
+named fn (): All<Map> {
+    a 1
+    b 2
+}
+probe fn (): Vec { [values(), named()] }
+probe()
+probe()
+probe()"#;
+        let expected = crate::val!([[1, 2], {"a": 1, "b": 2}]);
+        for conf in [
+            crate::val!({"jit": {"threshold": 1}}),
+            crate::val!({"jit": {"mode": "off"}}),
+        ] {
+            let out = compile_and_run_with_std_conf(src, Some(conf.clone()))
+                .expect("collecting bodies run");
+            assert_eq!(out, expected, "with {conf:?}");
+        }
+    }
+
     #[test]
     fn tagged_metadata_names_resolve_in_the_payload() {
         let src = r#"::t ns
