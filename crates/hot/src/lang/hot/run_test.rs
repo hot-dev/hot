@@ -447,6 +447,40 @@ probe()"#;
         }
     }
 
+    /// `cond-all` and `match-all` key their results by branch label. Compiled
+    /// code kept the compiler's uniqueness suffix on the label, so a field
+    /// such as `result.a` was missing.
+    #[test]
+    fn jit_collecting_flows_key_results_by_label() {
+        let src = r#"::t ns
+flags-of fn cond-all (flags: Map) {
+    flags.a => a { "a-result" }
+    flags.b => b { "b-result" }
+    flags.c => c { "c-result" }
+}
+inline fn (flags: Map): Map {
+    cond-all {
+        flags.a => a { 1 }
+        flags.b => b { 2 }
+    }
+}
+probe fn (): Vec {
+    [flags-of({a: true, b: true, c: false}), inline({a: true, b: false})]
+}
+probe()
+probe()
+probe()"#;
+        let expected = crate::val!([{"a": "a-result", "b": "b-result"}, {"a": 1}]);
+        for conf in [
+            crate::val!({"jit": {"threshold": 1}}),
+            crate::val!({"jit": {"mode": "off"}}),
+        ] {
+            let out = compile_and_run_with_std_conf(src, Some(conf.clone()))
+                .expect("collecting flows run");
+            assert_eq!(out, expected, "with {conf:?}");
+        }
+    }
+
     #[test]
     fn tagged_metadata_names_resolve_in_the_payload() {
         let src = r#"::t ns

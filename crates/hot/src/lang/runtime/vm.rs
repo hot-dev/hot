@@ -35,7 +35,7 @@ pub const DEFAULT_MAX_RECURSION_DEPTH: usize = 4096;
 /// etc.). The compiler appends `\0c<digits>` to every cond/match branch name
 /// to avoid `ConstantId` collisions across nested or sibling flows; the NUL
 /// byte cannot appear in a user-supplied label, so finding it is unambiguous.
-fn user_facing_branch_name(internal: &str) -> &str {
+pub(crate) fn user_facing_branch_name(internal: &str) -> &str {
     match internal.find('\0') {
         Some(idx) => &internal[..idx],
         None => internal,

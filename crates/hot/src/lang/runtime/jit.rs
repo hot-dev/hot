@@ -6954,7 +6954,11 @@ fn build_supported_body(
                     let acc_val = builder.use_var(acc_var);
                     let new_acc = match flow.result_modifier {
                         FlowResultModifier::Map => {
-                            let branch_name_str = constant_string(ctx.program, *branch_name)?;
+                            // The branch's label, without the compiler's
+                            // uniqueness suffix, as the interpreter keys it.
+                            let branch_name_str = crate::lang::runtime::vm::user_facing_branch_name(
+                                constant_string(ctx.program, *branch_name)?,
+                            );
                             let key_val =
                                 new_owned_val(Val::Str(branch_name_str.to_string().into()));
                             let key_raw = builder.ins().iconst(types::I64, key_val);
