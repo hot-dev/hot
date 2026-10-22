@@ -478,6 +478,8 @@ struct JitHelperRefs {
     make_vec_with_spread: FuncRef,
     store_global: FuncRef,
     set_namespace: FuncRef,
+    check_constraint: FuncRef,
+    set_pending_proven: FuncRef,
     call_native: FuncRef,
     define_function: FuncRef,
     load_scoped: FuncRef,
@@ -1499,6 +1501,14 @@ fn compile_supported_function(
     );
     builder.symbol("hot_jit_store_global", hot_jit_store_global as *const u8);
     builder.symbol("hot_jit_set_namespace", hot_jit_set_namespace as *const u8);
+    builder.symbol(
+        "hot_jit_check_constraint",
+        hot_jit_check_constraint as *const u8,
+    );
+    builder.symbol(
+        "hot_jit_set_pending_proven",
+        hot_jit_set_pending_proven as *const u8,
+    );
     builder.symbol("hot_jit_call_native", hot_jit_call_native as *const u8);
     builder.symbol(
         "hot_jit_define_function",
@@ -2521,6 +2531,37 @@ unsafe extern "C" fn hot_jit_construct_typed(src_ptr: i64, type_info_ptr: i64) -
     }
 }
 
+/// JIT helper: a `CheckConstraint`, through the VM's checked path. Returns
+/// an OwnedVal handle to the checked value, the `ConstraintError` Err, or a
+/// `test` check's Bool; HALT_SENTINEL when the check halted.
+unsafe extern "C" fn hot_jit_check_constraint(src_ptr: i64, spec_ptr: i64, test: i64) -> i64 {
+    let vm_ptr = get_jit_vm_ptr();
+    if vm_ptr.is_null() {
+        return new_owned_val(Val::err(Val::Str(
+            "JIT check_constraint: no VM available".into(),
+        )));
+    }
+    let vm = unsafe { &mut *vm_ptr };
+    let value = unsafe { &*(src_ptr as *const Val) }.clone();
+    let spec = unsafe { &*(spec_ptr as *const Val) };
+    let error_capture = vm.error_capture_active;
+    match vm.execute_check_constraint(value, spec, test != 0) {
+        Ok(result) => new_owned_val(result),
+        Err(err) => vm_error_to_owned_val(err, error_capture),
+    }
+}
+
+/// JIT helper: a `ProvenArgs` before a call through the VM, whose call entry
+/// takes the proofs as it does an interpreted caller's.
+unsafe extern "C" fn hot_jit_set_pending_proven(function_id: i64, mask: i64) {
+    let vm_ptr = get_jit_vm_ptr();
+    if vm_ptr.is_null() {
+        return;
+    }
+    let vm = unsafe { &mut *vm_ptr };
+    vm.pending_proven = Some((function_id as FunctionId, mask as u64));
+}
+
 /// JIT helper: append an element to a Vec, returning a new OwnedVal Vec.
 /// `vec_ptr` - OwnedVal pointer to a Val::Vec
 /// `elem_ptr` - OwnedVal pointer to the value to append
@@ -3470,6 +3511,22 @@ fn declare_jit_helpers(
             &[types::I64],
             &[],
         )?,
+        check_constraint: declare_helper_func(
+            module,
+            func,
+            ptr_ty,
+            "hot_jit_check_constraint",
+            &[types::I64, types::I64, types::I64],
+            &[types::I64],
+        )?,
+        set_pending_proven: declare_helper_func(
+            module,
+            func,
+            ptr_ty,
+            "hot_jit_set_pending_proven",
+            &[types::I64, types::I64],
+            &[],
+        )?,
         str_starts_with: declare_helper_func(
             module,
             func,
@@ -4057,7 +4114,8 @@ fn collect_used_registers(instructions: &[Instruction]) -> std::collections::BTr
                 regs.insert(*index);
                 regs.insert(*value);
             }
-            Instruction::ConstructTyped { dest, src, .. } => {
+            Instruction::ConstructTyped { dest, src, .. }
+            | Instruction::CheckConstraint { dest, src, .. } => {
                 regs.insert(*dest);
                 regs.insert(*src);
             }
@@ -4472,7 +4530,7 @@ fn prescan_return_kind(
             Instruction::StrStartsWith { dest, .. } => {
                 reg_kinds.insert(*dest, RawKind::Bool);
             }
-            Instruction::MergeMaps { dest, .. } => {
+            Instruction::MergeMaps { dest, .. } | Instruction::CheckConstraint { dest, .. } => {
                 reg_kinds.insert(*dest, RawKind::OwnedVal);
             }
             // A flow's branches define its result, not the default loaded
@@ -4734,6 +4792,8 @@ struct EmitCtx<'a> {
     /// Code was emitted that reads a self-call's result as
     /// `expected_return_kind`, so the body must return that kind.
     relies_on_expected_return: bool,
+    /// A function body, which may return early; an inlined thunk may not.
+    function_body: bool,
 }
 
 enum EmitResult {
@@ -5228,7 +5288,18 @@ impl<'a> EmitCtx<'a> {
             }
             return Ok(true);
         }
-        // Fall back to VM callback
+        // Fall back to VM callback. The VM's call entry takes the proofs of
+        // a `ProvenArgs` just before this call, as for an interpreted caller.
+        if let Some(Instruction::ProvenArgs { function_id, mask }) =
+            ip.checked_sub(1).and_then(|prev| instructions.get(prev))
+            && *function_id == called_function_id
+        {
+            let id = builder.ins().iconst(types::I64, i64::from(*function_id));
+            let mask = builder.ins().iconst(types::I64, *mask as i64);
+            builder
+                .ins()
+                .call(self.helper_refs.set_pending_proven, &[id, mask]);
+        }
         let halt_block = self.emit_vm_callback(
             builder,
             dest,
@@ -6677,6 +6748,73 @@ impl<'a> EmitCtx<'a> {
                 self.jump_to_next(builder, ip)?;
                 Ok(EmitResult::Handled)
             }
+            Instruction::CheckConstraint {
+                dest,
+                src,
+                spec,
+                test,
+            } => {
+                let spec_val = match self.program.constants.get(*spec as usize) {
+                    Some(Constant::Val(v)) => v,
+                    _ => return Err(format!("CheckConstraint: invalid spec constant {}", spec)),
+                };
+                let src_kind = self.register_kind(*src)?;
+                // A function's prologue check of a raw parameter whose spec
+                // can't convert it: a pass keeps the raw value, so the
+                // parameter keeps its kind, and a failure returns the
+                // `ConstraintError` here, as the `ReturnIfErr` after it would.
+                let fused = !*test
+                    && self.function_body
+                    && !self.error_capture_active
+                    && matches!(src_kind, RawKind::Int | RawKind::Dec | RawKind::Bool)
+                    && matches!(
+                        instructions.get(ip + 1),
+                        Some(Instruction::ReturnIfErr { src: checked }) if checked == dest
+                    )
+                    && get_val(spec_val, "type")
+                        .is_some_and(|node| spec_keeps_raw_kind(self.program, node, src_kind, 0));
+                let spec_raw = builder
+                    .ins()
+                    .iconst(types::I64, new_owned_val(spec_val.clone()));
+                let (src_val, src_temp) = self.owned_operand(builder, *src)?;
+                let test_flag = builder.ins().iconst(types::I64, i64::from(*test));
+                let call = builder.ins().call(
+                    self.helper_refs.check_constraint,
+                    &[src_val, spec_raw, test_flag],
+                );
+                let result = builder.inst_results(call)[0];
+                self.drop_owned_temps(builder, &[src_temp]);
+                let halt_block = emit_halt_check(builder, result);
+                if fused {
+                    let call = builder.ins().call(self.helper_refs.is_err, &[result]);
+                    let is_err = builder.inst_results(call)[0];
+                    let error_block = builder.create_block();
+                    let ok_block = builder.create_block();
+                    builder.ins().brif(is_err, error_block, &[], ok_block, &[]);
+
+                    builder.switch_to_block(error_block);
+                    builder.seal_block(error_block);
+                    self.emit_cleanup_owned(builder);
+                    builder.ins().return_(&[result]);
+
+                    builder.switch_to_block(ok_block);
+                    builder.seal_block(ok_block);
+                    drop_owned_raw(builder, &self.helper_refs, result);
+                    let raw = self.reg_value(builder, *src)?;
+                    self.define_register(builder, *dest, src_kind, raw)?;
+                } else {
+                    self.define_register(builder, *dest, RawKind::OwnedVal, result)?;
+                }
+                self.jump_to_next(builder, ip)?;
+                self.emit_halt_return(builder, halt_block);
+                Ok(EmitResult::Handled)
+            }
+            // Proofs for the call after it, which passes them on when it
+            // goes through the VM (see `emit_call_user_function`).
+            Instruction::ProvenArgs { .. } => {
+                self.jump_to_next(builder, ip)?;
+                Ok(EmitResult::Handled)
+            }
             // Flow-level instructions (BeginFlow, EndFlow, CondBranch*, Pipe,
             // DeferredVarExpr, Return, ReturnIfErr, TailCall) are handled by the
             // second-phase dispatch in build_supported_body. Unrecognized instructions
@@ -6840,6 +6978,7 @@ fn build_supported_body(
         scope_snapshots: Vec::new(),
         error_capture_active: false,
         relies_on_expected_return: false,
+        function_body: true,
     };
 
     // Stack guard: compare a stack slot address (proxy for current SP) against
@@ -7420,6 +7559,60 @@ fn build_supported_body(
     Ok(return_kind)
 }
 
+/// An entry of a constraint spec node.
+fn get_val<'v>(node: &'v Val, key: &str) -> Option<&'v Val> {
+    match node {
+        Val::Map(entries) => entries.get(&Val::from(key)),
+        _ => None,
+    }
+}
+
+/// Whether a value of raw `kind` that passes the constraint `node` comes
+/// back unchanged: its base type is exactly `kind`'s, so no exact numeric
+/// conversion applies.
+fn spec_keeps_raw_kind(program: &BytecodeProgram, node: &Val, kind: RawKind, depth: usize) -> bool {
+    if depth > 32 {
+        return false;
+    }
+    let Some(Val::Str(node_kind)) = get_val(node, "kind") else {
+        return false;
+    };
+    match node_kind.as_ref() {
+        "refine" => get_val(node, "base")
+            .is_some_and(|base| spec_keeps_raw_kind(program, base, kind, depth + 1)),
+        "optional" => get_val(node, "inner")
+            .is_some_and(|inner| spec_keeps_raw_kind(program, inner, kind, depth + 1)),
+        "base" => {
+            matches!(
+                (get_val(node, "type"), kind),
+                (Some(Val::Str(t)), RawKind::Int) if t.as_ref() == "Int"
+            ) || matches!(
+                (get_val(node, "type"), kind),
+                (Some(Val::Str(t)), RawKind::Dec) if t.as_ref() == "Dec"
+            ) || matches!(
+                (get_val(node, "type"), kind),
+                (Some(Val::Str(t)), RawKind::Bool) if t.as_ref() == "Bool"
+            )
+        }
+        "named" => {
+            let Some(Val::Str(name)) = get_val(node, "type") else {
+                return false;
+            };
+            program
+                .constraint_types
+                .iter()
+                .find(|(type_name, _)| type_name.as_str() == name.as_ref())
+                .and_then(|(_, id)| match program.constants.get(*id as usize) {
+                    Some(Constant::Val(spec)) => Some(spec),
+                    _ => None,
+                })
+                .is_some_and(|spec| spec_keeps_raw_kind(program, spec, kind, depth + 1))
+        }
+        "any" => true,
+        _ => false,
+    }
+}
+
 fn constant_string(program: &BytecodeProgram, constant: u32) -> Result<&str, String> {
     match program.constants.get(constant as usize) {
         Some(Constant::Val(Val::Str(s))) => Ok(s),
@@ -7719,7 +7912,8 @@ fn single_dest_register(inst: &Instruction) -> Option<u32> {
         | Instruction::WrapOk { dest, .. }
         | Instruction::DefineFunction { dest, .. }
         | Instruction::LoadScoped { dest, .. }
-        | Instruction::CaptureVar { dest, .. } => Some(*dest),
+        | Instruction::CaptureVar { dest, .. }
+        | Instruction::CheckConstraint { dest, .. } => Some(*dest),
         _ => None,
     }
 }
@@ -8940,6 +9134,7 @@ fn compile_thunk_inline(
         scope_snapshots: Vec::new(),
         error_capture_active: false,
         relies_on_expected_return: false,
+        function_body: false,
     };
 
     let mut return_kind: Option<RawKind> = None;

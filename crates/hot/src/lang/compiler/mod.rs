@@ -19,6 +19,7 @@ pub mod artifacts;
 pub mod box_checker;
 pub mod call_graph;
 mod constraint_checks;
+mod constraint_proofs;
 mod constraint_specs;
 pub mod core_registry;
 pub mod ctx_checker;
@@ -147,6 +148,16 @@ pub struct Compiler {
     /// Namespaces that define a function named like a canonical predicate
     /// function (`gt`, `between`, ...), whose predicates get no fast form.
     shadowing_namespaces: AHashSet<String>,
+    /// `where` predicates that call an `is-match` other than
+    /// `::hot::regex/is-match`, whose patterns get no fast form.
+    foreign_regex_predicates: AHashSet<String>,
+    /// Parameters of the function body being compiled that stay proven, with
+    /// their specs (see `constraint_proofs`).
+    proven_params: AHashMap<String, Val>,
+    /// Every function's parameter annotations, by qualified name.
+    param_annotations: AHashMap<String, constraint_proofs::ParamAnnotations>,
+    /// Parameter specs by callee (memo); `None` when its calls can't be proven.
+    callee_param_specs: AHashMap<FunctionId, Option<Vec<Option<Val>>>>,
 }
 
 /// Complete append-only compiler state for compiling code against an already
@@ -262,6 +273,10 @@ impl Compiler {
             constraint_spec_ids: AHashMap::new(),
             constraint_predicates: AHashMap::new(),
             shadowing_namespaces: AHashSet::new(),
+            foreign_regex_predicates: AHashSet::new(),
+            proven_params: AHashMap::new(),
+            param_annotations: AHashMap::new(),
+            callee_param_specs: AHashMap::new(),
         }
     }
 
@@ -2499,6 +2514,8 @@ impl Compiler {
         let saved_emitting_function_body = self.emitting_function_body;
         self.in_tail_position = true;
         self.emitting_function_body = true;
+        let saved_proven =
+            std::mem::replace(&mut self.proven_params, Self::proven_params(checks, body));
 
         let result = (|| {
             // Compile the function body into the scratch entry point. The VM
@@ -2508,6 +2525,11 @@ impl Compiler {
             }
             let result_reg = self.compile_value(body)?;
             let result_reg = match checks {
+                // Returning a parameter proven against the same spec.
+                Some(constraint_specs::SignatureChecks {
+                    ret: Some((spec, _)),
+                    ..
+                }) if self.returns_proven(body, spec) => result_reg,
                 Some(checks) => self.emit_return_check(checks, result_reg),
                 None => result_reg,
             };
@@ -2519,6 +2541,7 @@ impl Compiler {
         self.program.entry_point = saved_instructions;
         self.in_tail_position = saved_tail_position;
         self.emitting_function_body = saved_emitting_function_body;
+        self.proven_params = saved_proven;
         result
     }
 
@@ -2707,7 +2730,8 @@ impl Compiler {
                         {
                             self.compile_deep_set_assignment(var_name, deep_set_path, value_reg)?;
                         } else {
-                            let value_reg = self.constrain_binding(&var_ref.var, value_reg);
+                            let value_reg =
+                                self.constrain_binding(&var_ref.var, &values[1], value_reg);
                             self.store_variable(var_name, value_reg);
                         }
 
@@ -3850,6 +3874,13 @@ impl Compiler {
                         spread_mask
                     );
                 } else if function_id != 0 {
+                    // Arguments that already satisfy the callee's parameter
+                    // constraints skip their checks.
+                    let mask = self.proven_args_mask(function_id, &fn_call.args);
+                    if mask != 0 {
+                        self.emit_instruction(Instruction::ProvenArgs { function_id, mask });
+                    }
+
                     // TCO: Check if this is a self-recursive tail call
                     let is_self_recursive = self.current_function_id == Some(function_id);
                     let is_tail_call = self.in_tail_position && is_self_recursive;
@@ -4406,6 +4437,8 @@ impl Compiler {
         let saved_function_id = self.current_function_id.take();
         let saved_tail_position = self.in_tail_position;
         let saved_emitting_function_body = self.emitting_function_body;
+        // The enclosing body's proofs don't reach into a lambda.
+        let saved_proven = std::mem::take(&mut self.proven_params);
         self.in_tail_position = false;
         self.emitting_function_body = true;
 
@@ -4436,6 +4469,7 @@ impl Compiler {
         self.current_function_id = saved_function_id;
         self.in_tail_position = saved_tail_position;
         self.emitting_function_body = saved_emitting_function_body;
+        self.proven_params = saved_proven;
         let lambda_instructions = lambda_instructions?;
 
         // Create closure environment by capturing current variable values
@@ -4535,6 +4569,7 @@ impl Compiler {
         let saved_function_id = self.current_function_id.take();
         let saved_tail_position = self.in_tail_position;
         let saved_emitting_function_body = self.emitting_function_body;
+        let saved_proven = std::mem::take(&mut self.proven_params);
         self.in_tail_position = false;
         self.emitting_function_body = true;
 
@@ -4554,6 +4589,7 @@ impl Compiler {
         self.in_tail_position = saved_tail_position;
         self.emitting_function_body = saved_emitting_function_body;
         self.next_register = saved_next_register;
+        self.proven_params = saved_proven;
         let thunk_instructions = thunk_instructions?;
 
         // Calculate register count for the thunk
@@ -7332,7 +7368,7 @@ impl Compiler {
                     {
                         self.compile_deep_set_assignment(var_name, deep_set_path, value_reg)?;
                     } else {
-                        let value_reg = self.constrain_binding(&var_ref.var, value_reg);
+                        let value_reg = self.constrain_binding(&var_ref.var, value_expr, value_reg);
                         self.store_variable(var_name, value_reg);
                     }
 
@@ -7619,7 +7655,8 @@ impl Compiler {
                                     value_reg,
                                 )?;
                             } else {
-                                let value_reg = self.constrain_binding(&var_ref.var, value_reg);
+                                let value_reg =
+                                    self.constrain_binding(&var_ref.var, value_expr, value_reg);
                                 self.store_variable(var_name, value_reg);
                             }
 
@@ -7745,7 +7782,8 @@ impl Compiler {
                                     value_reg,
                                 )?;
                             } else {
-                                let value_reg = self.constrain_binding(&var_ref.var, value_reg);
+                                let value_reg =
+                                    self.constrain_binding(&var_ref.var, value_expr, value_reg);
                                 self.store_variable(var_name, value_reg);
                             }
                             last_reg = value_reg;

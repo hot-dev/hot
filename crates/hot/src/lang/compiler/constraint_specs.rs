@@ -27,7 +27,7 @@ use crate::lang::ast::{
     BuiltinType, LiteralType, Refinement, TypeDef, TypeExpr, WHERE_TYPE_PREFIX,
     is_inline_refinement_type,
 };
-use crate::lang::bytecode::{Constant, ConstantId, Instruction, RegisterId};
+use crate::lang::bytecode::{Constant, ConstantId, FunctionId, Instruction, RegisterId};
 use crate::lang::parser::parse_type_annotation;
 use crate::val::Val;
 
@@ -39,6 +39,9 @@ pub(super) struct Boundary<'a> {
     pub parameter: Option<&'a str>,
     pub binding: Option<&'a str>,
     pub declared_type: Option<&'a str>,
+    /// For a prologue check: the function and the parameter's index, which
+    /// a call site's `ProvenArgs` names to skip the check.
+    pub proof: Option<(FunctionId, usize)>,
 }
 
 impl<'a> Boundary<'a> {
@@ -49,6 +52,7 @@ impl<'a> Boundary<'a> {
             parameter: None,
             binding: None,
             declared_type: None,
+            proof: None,
         }
     }
 }
@@ -120,6 +124,10 @@ impl Compiler {
                                 format!("{ns_path}/{name}"),
                                 (param.var.sym.name().to_string(), def.body.clone()),
                             );
+                            if !is_match_calls_are_hot_regex(&def.body, namespace) {
+                                self.foreign_regex_predicates
+                                    .insert(format!("{ns_path}/{name}"));
+                            }
                         } else if FAST_FUNCTIONS.contains(&name)
                             && !matches!(
                                 ns_path.to_string().as_str(),
@@ -135,6 +143,7 @@ impl Compiler {
         }
         self.constrained_types.clear();
         self.constraint_spec_ids = self.program.constraint_types.iter().cloned().collect();
+        self.collect_param_annotations(program);
     }
 
     /// The constraint spec for the type `annotation` names in the current
@@ -431,8 +440,9 @@ impl Compiler {
     }
 
     /// The fast form of a predicate made only of canonical shapes: bounds,
-    /// lengths, `in` and `eq` with literals, joined by `and`. The VM checks it
-    /// without calling the predicate. `None` when any part needs the call.
+    /// lengths, `in` and `eq` with literals, and `::hot::regex/is-match` with
+    /// a literal pattern, joined by `and`. The VM checks it without calling
+    /// the predicate. `None` when any part needs the call.
     fn fast_form(&self, refinement: &Refinement) -> Option<Val> {
         let (namespace, _) = refinement.predicate.rsplit_once('/')?;
         if self.shadowing_namespaces.contains(namespace) {
@@ -442,7 +452,10 @@ impl Compiler {
         let schema = crate::lang::json_schema::refinement_schema(body, param, &refinement.source);
         if schema.describe
             || schema.keywords.is_empty()
-            || schema.keywords.iter().any(|(k, _)| k == "pattern")
+            || (self
+                .foreign_regex_predicates
+                .contains(&refinement.predicate)
+                && schema.keywords.iter().any(|(k, _)| k == "pattern"))
         {
             return None;
         }
@@ -481,6 +494,49 @@ impl Compiler {
     }
 }
 
+/// Whether every `is-match` call in a predicate body is
+/// `::hot::regex/is-match`: written in full, through a namespace alias, or
+/// through a var alias in `namespace`. The fast form tests a `pattern` with
+/// that function's own matcher, so any other `is-match` needs the call.
+fn is_match_calls_are_hot_regex(
+    body: &crate::lang::ast::Value,
+    namespace: &crate::lang::ast::Namespace,
+) -> bool {
+    use crate::lang::ast::{NsRef, Ref, Value};
+    let is_hot_regex = |ns_ref: &NsRef| {
+        let ns = namespace.aliases.get(&ns_ref.ns).unwrap_or(&ns_ref.ns);
+        ns_ref.function_name.as_deref() == Some("is-match") && ns.to_string() == "::hot::regex"
+    };
+    match body {
+        Value::FnCall(call) => {
+            let callee = match call.function.as_ref() {
+                Value::Ref(Ref::Ns(ns_ref))
+                    if ns_ref.function_name.as_deref() == Some("is-match") =>
+                {
+                    is_hot_regex(ns_ref)
+                }
+                Value::Ref(Ref::Var(var_ref)) if var_ref.var.sym.name() == "is-match" => {
+                    namespace.scope.vars.iter().any(|(var, value)| {
+                        var.sym.name() == "is-match"
+                            && matches!(value, Value::Ref(Ref::Ns(ns_ref)) if is_hot_regex(ns_ref))
+                    })
+                }
+                _ => true,
+            };
+            callee
+                && call
+                    .args
+                    .iter()
+                    .all(|arg| is_match_calls_are_hot_regex(&arg.value, namespace))
+        }
+        Value::Flow(flow) => flow
+            .expressions
+            .iter()
+            .all(|expr| is_match_calls_are_hot_regex(expr, namespace)),
+        _ => true,
+    }
+}
+
 fn refine_node(base: Val, refinement: &Refinement, constraint: &str) -> Val {
     let location = refinement
         .src
@@ -512,12 +568,12 @@ fn refine_node(base: Val, refinement: &Refinement, constraint: &str) -> Val {
 pub(super) struct SignatureChecks {
     function: String,
     /// Refined parameters: name, spec, declared type.
-    params: Vec<(String, Val, String)>,
+    pub(super) params: Vec<(String, Val, String)>,
     /// All parameter names, for the precondition's record of arguments.
     param_names: Vec<String>,
     precondition: Option<Val>,
     /// Return spec and declared type.
-    ret: Option<(Val, String)>,
+    pub(super) ret: Option<(Val, String)>,
 }
 
 impl Compiler {
@@ -595,10 +651,15 @@ impl Compiler {
                 dest: reg,
                 var_name,
             });
+            let index = checks.param_names.iter().position(|n| n == name);
             let boundary = Boundary {
                 function: Some(&checks.function),
                 parameter: Some(name),
                 declared_type: Some(annotation),
+                proof: self
+                    .current_function_id
+                    .zip(index)
+                    .filter(|(_, index)| *index < 64),
                 ..Boundary::new("parameter")
             };
             let checked = self.emit_constraint_check(reg, spec.clone(), &boundary, false);
@@ -666,6 +727,7 @@ impl Compiler {
     pub(super) fn constrain_binding(
         &mut self,
         var: &crate::lang::ast::Var,
+        value: &crate::lang::ast::Value,
         reg: RegisterId,
     ) -> RegisterId {
         let Some(annotation) = var.type_annotation.clone() else {
@@ -674,6 +736,9 @@ impl Compiler {
         let Some(spec) = self.constraint_spec_for_annotation(&annotation) else {
             return reg;
         };
+        if self.is_proven(value, &spec) {
+            return reg;
+        }
         let declared_type = self.display_annotation(&annotation);
         let boundary = Boundary {
             binding: Some(var.sym.name()),
@@ -745,6 +810,12 @@ impl Compiler {
             if let Some(value) = value {
                 entries.push((Val::from(key), Val::from(value)));
             }
+        }
+        if let Some((function, index)) = boundary.proof {
+            entries.push((
+                Val::from("proof"),
+                Val::Vec(vec![Val::Int(i64::from(function)), Val::Int(index as i64)]),
+            ));
         }
         self.program
             .add_constant(Constant::Val(Val::map_from_iter(entries)))

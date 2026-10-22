@@ -240,6 +240,18 @@ impl VirtualMachine {
         if value.is_err() {
             return Ok(if test { Val::Bool(false) } else { value });
         }
+        // A parameter whose argument the call site proved: each proof is
+        // used once, by the prologue of the call it was made for.
+        if let Some(Val::Vec(proof)) = get(spec, "proof")
+            && let [Val::Int(function), Val::Int(index)] = proof.as_slice()
+            && let Some((id, mask)) = &mut self.entry_proven
+            && i64::from(*id) == *function
+            && (0..64).contains(index)
+            && *mask & (1 << index) != 0
+        {
+            *mask &= !(1 << index);
+            return Ok(value);
+        }
         let boundary = Boundary::from_spec(spec);
         let type_spec = get(spec, "type").cloned().unwrap_or(Val::Null);
         let mut path = Vec::new();
@@ -825,6 +837,13 @@ fn fast_check(value: &Val, fast: &Val) -> Option<bool> {
                 value == bound
             }
             "const" => return None,
+            // `::hot::regex/is-match` itself, with its pattern cache and
+            // limits. Its errors, such as a value that isn't a Str, are the
+            // predicate's to report.
+            "pattern" => match crate::lang::hot::regex::is_match(&[value.clone(), bound.clone()]) {
+                crate::lang::hot::r#type::HotResult::Ok(Val::Bool(matched)) => matched,
+                _ => return None,
+            },
             _ => return None,
         };
         passed &= ok;
@@ -850,4 +869,25 @@ fn with_field(value: &Val, field: Val, field_value: Val) -> Val {
     };
     fields.insert(field, field_value);
     crate::val::with_type_of(value, Val::Map(Box::new(fields)))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn fast_patterns_use_regex_is_match() {
+        let fast = |pattern: &str| Val::map_from_iter([(Val::from("pattern"), Val::from(pattern))]);
+        assert_eq!(
+            fast_check(&Val::from("AB-12"), &fast("^[A-Z]{2}-")),
+            Some(true)
+        );
+        assert_eq!(
+            fast_check(&Val::from("ab-12"), &fast("^[A-Z]{2}-")),
+            Some(false)
+        );
+        // What `is-match` itself rejects goes to the predicate.
+        assert_eq!(fast_check(&Val::Int(5), &fast("^[A-Z]")), None);
+        assert_eq!(fast_check(&Val::from("A"), &fast("(")), None);
+    }
 }

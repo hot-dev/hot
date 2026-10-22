@@ -520,6 +520,10 @@ pub enum Instruction {
         spec: ConstantId,
         test: bool,
     },
+    /// The next call to `function_id` passes arguments that already satisfy
+    /// its parameters' constraints: bit `i` for parameter `i`. Its prologue
+    /// skips those checks.
+    ProvenArgs { function_id: FunctionId, mask: u64 },
 }
 
 /// Constant pool entry for storing literal values
@@ -1424,6 +1428,9 @@ impl fmt::Display for Instruction {
                 spec,
                 if *test { " test" } else { "" }
             ),
+            Instruction::ProvenArgs { function_id, mask } => {
+                write!(f, "PROVEN_ARGS fn{} {:b}", function_id, mask)
+            }
             Instruction::BeginErrorCapture => write!(f, "BEGIN_ERROR_CAPTURE"),
             Instruction::EndErrorCapture => write!(f, "END_ERROR_CAPTURE"),
             Instruction::WrapOk { dest, src } => write!(f, "WRAP_OK r{}, r{}", dest, src),

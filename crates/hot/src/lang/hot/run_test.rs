@@ -572,6 +572,79 @@ probe()"#;
         }
     }
 
+    /// `where` checks give the same results compiled as interpreted: a
+    /// parameter, a predicate call, a return check, a precondition, a
+    /// conversion that stays on the interpreter, and arguments a compiled
+    /// caller proves.
+    #[test]
+    fn jit_where_checks_match_the_interpreter() {
+        let src = r#"::t ns
+Port type Int where between(%, 1, 65535)
+Score type Int where between(%, 0, 100)
+Ratio type Dec where gte(%, 0)
+
+dynamic fn (value: Any): Any { value }
+outcome fn (lazy result: Any): Any {
+    forced do result
+    if(is-ok(forced), forced, "err")
+}
+open fn (port: Port): Int { port }
+named fn (label: Str where gt(length(%), 0)): Str { label }
+delay fn (attempt: Int where between(%, 1, 10)): Int where lte(%, 30000) {
+    mul(mul(attempt, attempt), 1000)
+}
+withdraw fn (amount: Int, balance: Int)
+    where lte(%.amount, %.balance)
+    : Int
+{
+    sub(balance, amount)
+}
+ratio fn (r: Ratio): Ratio { r }
+total fn (scores: Vec<Score>): Int { reduce(scores, add(%1, %2), 0) }
+middle fn (scores: Vec<Score>): Int { total(scores) }
+probe fn (): Vec {
+    [
+        outcome(open(80)),
+        outcome(open(dynamic(70000))),
+        outcome(named("a")),
+        outcome(named(dynamic(""))),
+        outcome(delay(3)),
+        outcome(delay(dynamic(6))),
+        outcome(delay(dynamic(0))),
+        outcome(withdraw(10, 100)),
+        outcome(withdraw(dynamic(150), 100)),
+        outcome(ratio(5)),
+        outcome(middle([1, 2, 3])),
+        outcome(middle(dynamic([1, 200])))
+    ]
+}
+probe()
+probe()
+probe()"#;
+
+        let jit = compile_and_run_with_std_conf(src, Some(crate::val!({"jit": {"threshold": 1}})))
+            .expect("compiled checks");
+        let interp =
+            compile_and_run_with_std_conf(src, Some(crate::val!({"jit": {"mode": "off"}})))
+                .expect("interpreted checks");
+        let expected = Val::Vec(vec![
+            Val::Int(80),
+            Val::from("err"),
+            Val::from("a"),
+            Val::from("err"),
+            Val::Int(9000),
+            Val::from("err"),
+            Val::from("err"),
+            Val::Int(90),
+            Val::from("err"),
+            Val::Dec(fastnum::D256::from(5)),
+            Val::Int(6),
+            Val::from("err"),
+        ]);
+        assert_eq!(interp, expected, "interpreter");
+        assert_eq!(jit, expected, "compiled");
+    }
+
     #[test]
     fn tagged_metadata_names_resolve_in_the_payload() {
         let src = r#"::t ns
