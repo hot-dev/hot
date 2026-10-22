@@ -4,11 +4,13 @@ api-request ::openai::api/request
 HttpError ::openai::api/HttpError
 is-ok-response ::hot::http/is-ok-response
 
+FineTuneReasoningEffort type open "default" | "low" | "medium" | "high"
+
 FineTuneReinforcementHyperparameters type {
     batch_size: Any?,
     learning_rate_multiplier: Any?,
     n_epochs: Any?,
-    reasoning_effort: "default" | "low" | "medium" | "high"?,
+    reasoning_effort: FineTuneReasoningEffort?,
     compute_multiplier: Any?,
     eval_interval: Any?,
     eval_samples: Any?
@@ -16,6 +18,8 @@ FineTuneReinforcementHyperparameters type {
 
 // Arbitrary key-value metadata associated with an API object
 Metadata type Map
+
+FineTuningJobStatus type open "validating_files" | "queued" | "running" | "succeeded" | "failed" | "cancelled"
 
 FineTuningJob type {
     id: Str,
@@ -28,7 +32,7 @@ FineTuningJob type {
     object: "fine_tuning.job",
     organization_id: Str,
     result_files: Vec<Str>,
-    status: "validating_files" | "queued" | "running" | "succeeded" | "failed" | "cancelled",
+    status: FineTuningJobStatus,
     trained_tokens: Int,
     training_file: Str,
     validation_file: Str,
@@ -39,8 +43,10 @@ FineTuningJob type {
     metadata: Metadata?
 }
 
+FineTuneMethodType type open "supervised" | "dpo" | "reinforcement"
+
 FineTuneMethod type {
-    type: "supervised" | "dpo" | "reinforcement",
+    type: FineTuneMethodType,
     supervised: FineTuneSupervisedMethod?,
     dpo: FineTuneDPOMethod?,
     reinforcement: FineTuneReinforcementMethod?
@@ -87,7 +93,7 @@ PauseFineTuningJobResponse type {
     object: "fine_tuning.job",
     organization_id: Str,
     result_files: Vec<Str>,
-    status: "validating_files" | "queued" | "running" | "succeeded" | "failed" | "cancelled",
+    status: FineTuningJobStatus,
     trained_tokens: Int,
     training_file: Str,
     validation_file: Str,

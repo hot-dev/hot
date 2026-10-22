@@ -101,7 +101,27 @@ pick-fruit("banana")   // Valid
 pick-fruit("grape")    // Type error
 ```
 
-Literal unions let you restrict values to a specific set of allowed values at the type level.
+Literal unions let you restrict values to a specific set of allowed values. A
+closed union is checked at runtime too: a value from outside the set, such as
+one parsed from JSON, fails where it enters the type. An `open` union also
+accepts unknown values of the same type. Literal union values stay plain
+values, with no type tag. See [Constraints](/docs/language/constraints).
+
+## Constraints
+
+Any type can carry a `where` clause, a predicate its values must pass:
+
+```hot
+Port type Int where between(%, 1, 65535)
+
+listen fn (port: Port): Str {
+  `listening on ${port}`
+}
+```
+
+A value that fails, such as `listen(70000)`, becomes a `Result.Err` holding a
+`ConstraintError`. See [Constraints](/docs/language/constraints) for fields,
+invariants, preconditions, and how checks run.
 
 ## Nullable Types
 
@@ -450,6 +470,7 @@ untype(order)
 - Use `?` for optional/nullable types: `Str?`
 - Use `|` for union types: `Int | Str`
 - Use **literal unions** for exact value sets: `"apple" | "banana"`
+- Use **`where`** for constraints: `Port type Int where between(%, 1, 65535)`
 - Use **enums** (variant unions) for discriminated types: `Direction enum { Up, Down }`
 - Define type coercions with `Type -> OtherType fn`
 - Use `Result` with `Result.Ok()`/`Result.Err()` instead of exceptions (see [Error Handling](/docs/language/errors))

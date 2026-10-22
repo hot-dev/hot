@@ -776,6 +776,7 @@ mod tests {
             },
             body: crate::lang::ast::Value::Val(Val::Int(42), None),
             return_type: Some("Int".to_string()),
+            precondition: None,
         };
         vars.insert(
             Var {

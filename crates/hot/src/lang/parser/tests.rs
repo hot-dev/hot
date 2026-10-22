@@ -225,6 +225,159 @@ total parallel (
     assert_eq!(lambda.flow_type, Some(FlowType::Parallel));
 }
 
+/// The hidden declarations a program's `where` clauses made, by name.
+fn where_declarations(program: &Program) -> Vec<(String, &Value)> {
+    program
+        .namespaces
+        .values()
+        .flat_map(|ns| ns.scope.vars.iter())
+        .filter(|(var, _)| var.sym.name().starts_with('$'))
+        .map(|(var, value)| (var.sym.name().to_string(), value))
+        .collect()
+}
+
+#[test]
+fn test_where_clauses_declare_predicates_and_refinements() {
+    let source = "\
+Port type Int where between(%, 1, 65535)
+
+Window type { start: Int, finish: Int }
+    where lte(%.start, %.finish)
+
+Shape enum { Dot, Line } where ne(%, null)
+
+retry fn (attempt: Int where gt(%, 0)): Int where lte(%, 9) { attempt }
+
+withdraw fn (amount: Int, balance: Int)
+    where lte(%.amount, %.balance)
+    : Int
+{
+    sub(balance, amount)
+}
+
+limit: Int 3 where gt(%, 0)
+";
+    let program = parse_hot(source).expect("parses");
+    let ns = &program.namespaces[&NsPath::new()];
+    let type_def = |name: &str| {
+        ns.scope
+            .vars
+            .iter()
+            .find_map(|(var, value)| match value {
+                Value::TypeDef(def) if var.sym.name() == name => Some(def),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("{name} is a type"))
+    };
+
+    // Named declarations carry their own refinement.
+    let port = type_def("Port");
+    assert_eq!(port.type_alias, Some(TypeExpr::Builtin(BuiltinType::Int)));
+    let refinement = port.refinement.as_ref().expect("Port is refined");
+    assert_eq!(refinement.source, "between(%, 1, 65535)");
+    assert!(refinement.predicate.contains("/$where-"));
+    assert!(type_def("Window").refinement.is_some());
+    assert!(type_def("Shape").refinement.is_some());
+
+    // A function's precondition, and inline refinements on its parameter and
+    // return types, which become hidden alias types.
+    let Value::Fn(defs) = ns
+        .scope
+        .vars
+        .iter()
+        .find_map(|(var, value)| (var.sym.name() == "withdraw").then_some(value))
+        .expect("withdraw")
+    else {
+        panic!("withdraw is a function")
+    };
+    assert_eq!(
+        defs[0].precondition.as_ref().map(|r| r.source.as_str()),
+        Some("lte(%.amount, %.balance)")
+    );
+    let Value::Fn(defs) = ns
+        .scope
+        .vars
+        .iter()
+        .find_map(|(var, value)| (var.sym.name() == "retry").then_some(value))
+        .expect("retry")
+    else {
+        panic!("retry is a function")
+    };
+    let param_type = defs[0].args.args[0].type_annotation.clone().unwrap();
+    let return_type = defs[0].return_type.clone().unwrap();
+    assert!(param_type.starts_with("$Where-"), "{param_type}");
+    assert!(return_type.starts_with("$Where-"), "{return_type}");
+    assert_eq!(
+        type_def(&param_type).type_alias,
+        Some(TypeExpr::Builtin(BuiltinType::Int))
+    );
+
+    // A binding-level `where` refines the declared type.
+    let limit = ns
+        .scope
+        .vars
+        .keys()
+        .find(|var| var.sym.name() == "limit")
+        .expect("limit");
+    assert!(
+        limit
+            .type_annotation
+            .as_deref()
+            .is_some_and(|t| t.starts_with("$Where-"))
+    );
+
+    // Every predicate is a hidden `::hot::type/predicate(...)` call, kept out
+    // of docs.
+    let predicates: Vec<_> = where_declarations(&program)
+        .into_iter()
+        .filter(|(name, _)| name.starts_with("$where-"))
+        .collect();
+    assert_eq!(predicates.len(), 7, "{predicates:?}");
+    for (_, value) in predicates {
+        assert!(matches!(value, Value::FnCall(_)));
+    }
+}
+
+#[test]
+fn test_where_clause_errors() {
+    for (source, expected) in [
+        ("x: Int where gt(%, 0) 3 where lt(%, 9)", "duplicate-where"),
+        ("x: Int where gt(%, 0) where lt(%, 9) 3", "duplicate-where"),
+        ("x 3 where gt(%, 0)", "where-requires-type"),
+        (
+            "f fn () {\n    x 3\n    where gt(%, 0)\n}",
+            "where-requires-type",
+        ),
+        ("where 3", "can't name a variable"),
+        (
+            "P type Int where gt(x, 0)",
+            "needs a predicate over the value",
+        ),
+        ("P type Int where gt(%2, 0)", "not `%2`"),
+        (
+            "P type Int where (a, b) { gt(a, b) }",
+            "exactly one parameter",
+        ),
+        ("P type Int where", "Expected a predicate"),
+        (
+            "P type Int where gt(%, 0) where lt(%, 9)",
+            "duplicate-where",
+        ),
+    ] {
+        let err = format!("{:?}", parse_hot(source).expect_err(source));
+        assert!(
+            err.contains(expected),
+            "expected {expected:?} for {source:?}, got: {err}"
+        );
+    }
+}
+
+#[test]
+fn test_where_is_still_a_map_key() {
+    let program = parse_hot("x {where: 1}").expect("parses");
+    assert!(where_declarations(&program).is_empty());
+}
+
 #[test]
 fn test_simple_variable() {
     let source = r#"x 42"#;

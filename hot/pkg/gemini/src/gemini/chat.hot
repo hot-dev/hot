@@ -14,10 +14,10 @@ is-ok-response ::hot::http/is-ok-response
 // ============================================================================
 
 // Literal union for content roles (Gemini uses "user" and "model")
-Role type "user" | "model"
+Role type open "user" | "model"
 
 // Literal union for finish reasons
-FinishReason type "STOP" | "MAX_TOKENS" | "SAFETY" | "RECITATION" | "OTHER"
+FinishReason type open "STOP" | "MAX_TOKENS" | "SAFETY" | "RECITATION" | "OTHER"
 
 // Content part (text, image, etc.)
 Part type {

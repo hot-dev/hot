@@ -4,6 +4,8 @@ api-request ::openai::api/request
 HttpError ::openai::api/HttpError
 is-ok-response ::hot::http/is-ok-response
 
+FineTuningJobStatus type open "validating_files" | "queued" | "running" | "succeeded" | "failed" | "cancelled"
+
 FineTuningJob type {
     id: Str,
     created_at: Int,
@@ -15,7 +17,7 @@ FineTuningJob type {
     object: "fine_tuning.job",
     organization_id: Str,
     result_files: Vec<Str>,
-    status: "validating_files" | "queued" | "running" | "succeeded" | "failed" | "cancelled",
+    status: FineTuningJobStatus,
     trained_tokens: Int,
     training_file: Str,
     validation_file: Str,
@@ -32,6 +34,9 @@ FineTuneSupervisedHyperparameters type {
     n_epochs: Any?
 }
 
+OpenAIFilePurpose type open "assistants" | "assistants_output" | "batch" | "batch_output" | "fine-tune" | "fine-tune-results" | "vision" | "user_data"
+OpenAIFileStatus type open "uploaded" | "processed" | "error"
+
 OpenAIFile type {
     id: Str,
     bytes: Int,
@@ -39,8 +44,8 @@ OpenAIFile type {
     expires_at: Int?,
     filename: Str,
     object: "file",
-    purpose: "assistants" | "assistants_output" | "batch" | "batch_output" | "fine-tune" | "fine-tune-results" | "vision" | "user_data",
-    status: "uploaded" | "processed" | "error",
+    purpose: OpenAIFilePurpose,
+    status: OpenAIFileStatus,
     status_details: Str?
 }
 
@@ -57,6 +62,8 @@ FineTuneSupervisedMethod type {
     hyperparameters: FineTuneSupervisedHyperparameters?
 }
 
+BatchStatus type open "validating" | "failed" | "in_progress" | "finalizing" | "completed" | "expired" | "cancelling" | "cancelled"
+
 Batch type {
     id: Str,
     object: "batch",
@@ -64,7 +71,7 @@ Batch type {
     errors: Map?,
     input_file_id: Str,
     completion_window: Str,
-    status: "validating" | "failed" | "in_progress" | "finalizing" | "completed" | "expired" | "cancelling" | "cancelled",
+    status: BatchStatus,
     output_file_id: Str?,
     error_file_id: Str?,
     created_at: Int,
@@ -80,18 +87,22 @@ Batch type {
     metadata: Metadata?
 }
 
+FineTuneReasoningEffort type open "default" | "low" | "medium" | "high"
+
 FineTuneReinforcementHyperparameters type {
     batch_size: Any?,
     learning_rate_multiplier: Any?,
     n_epochs: Any?,
-    reasoning_effort: "default" | "low" | "medium" | "high"?,
+    reasoning_effort: FineTuneReasoningEffort?,
     compute_multiplier: Any?,
     eval_interval: Any?,
     eval_samples: Any?
 }
 
+FineTuneMethodType type open "supervised" | "dpo" | "reinforcement"
+
 FineTuneMethod type {
-    type: "supervised" | "dpo" | "reinforcement",
+    type: FineTuneMethodType,
     supervised: FineTuneSupervisedMethod?,
     dpo: FineTuneDPOMethod?,
     reinforcement: FineTuneReinforcementMethod?
@@ -138,7 +149,7 @@ RetrieveBatchResponse type {
     errors: Map?,
     input_file_id: Str,
     completion_window: Str,
-    status: "validating" | "failed" | "in_progress" | "finalizing" | "completed" | "expired" | "cancelling" | "cancelled",
+    status: BatchStatus,
     output_file_id: Str?,
     error_file_id: Str?,
     created_at: Int,
@@ -173,8 +184,8 @@ RetrieveFileResponse type {
     expires_at: Int?,
     filename: Str,
     object: "file",
-    purpose: "assistants" | "assistants_output" | "batch" | "batch_output" | "fine-tune" | "fine-tune-results" | "vision" | "user_data",
-    status: "uploaded" | "processed" | "error",
+    purpose: OpenAIFilePurpose,
+    status: OpenAIFileStatus,
     status_details: Str?
 }
 
@@ -201,7 +212,7 @@ RetrieveFineTuningJobResponse type {
     object: "fine_tuning.job",
     organization_id: Str,
     result_files: Vec<Str>,
-    status: "validating_files" | "queued" | "running" | "succeeded" | "failed" | "cancelled",
+    status: FineTuningJobStatus,
     trained_tokens: Int,
     training_file: Str,
     validation_file: Str,

@@ -15,6 +15,8 @@ use std::sync::RwLock;
 use std::sync::atomic::{AtomicBool, Ordering};
 use uuid::Uuid;
 
+mod constraints;
+
 /// Default maximum Hot-level recursion depth. Each user-visible function call
 /// adds one to the depth counter (dispatch wrappers like `call`/`call-lib` are
 /// not counted). Hitting this limit returns a structured runtime error
@@ -424,6 +426,10 @@ pub struct VirtualMachine {
     pub(crate) error_capture_active: bool,
     /// Suppress automatic Result checking during lazy thunk evaluation
     suppress_result_checking: bool,
+    /// Set while a `where` predicate runs (see `constraints`).
+    constraint: Option<constraints::ConstraintGuard>,
+    /// Constraint specs of named types, from the program's table.
+    constraint_spec_cache: constraints::ConstraintSpecCache,
     /// User context storage for ctx-set/ctx-get functions (VM-specific)
     pub context_storage: AHashMap<String, Val>,
     /// Set of context keys that are secrets (should be masked in logs/db)
@@ -558,6 +564,8 @@ impl VirtualMachine {
             call_function_depth: 0,
             error_capture_active: false,
             suppress_result_checking: false,
+            constraint: None,
+            constraint_spec_cache: Default::default(),
             context_storage: AHashMap::new(),
             secret_keys: AHashSet::new(),
             secret_value_hashes: AHashSet::new(),
@@ -3340,6 +3348,20 @@ impl VirtualMachine {
                 self.instruction_pointer += 1;
             }
 
+            Instruction::CheckConstraint {
+                dest,
+                src,
+                spec,
+                test,
+            } => {
+                let (dest, src, spec, test) = (*dest, *src, *spec, *test);
+                let value = self.get_register(src)?.clone();
+                let spec = self.get_constant(spec)?;
+                let result = self.execute_check_constraint(value, &spec, test)?;
+                self.set_register(dest, result)?;
+                self.instruction_pointer += 1;
+            }
+
             Instruction::ConstructTyped {
                 dest,
                 src,
@@ -6060,7 +6082,11 @@ impl VirtualMachine {
     }
 
     /// Call a function value (namespace reference, function reference, etc.)
-    fn call_function_value(&mut self, function_val: &Val, args: &[Val]) -> VmResult<Val> {
+    pub(crate) fn call_function_value(
+        &mut self,
+        function_val: &Val,
+        args: &[Val],
+    ) -> VmResult<Val> {
         match function_val {
             Val::Box(boxed) => {
                 // Handle boxed callable values
@@ -7033,6 +7059,8 @@ impl VirtualMachine {
             function_name,
             args.len()
         );
+        // A `where` predicate may only call pure natives.
+        self.check_constraint_native(function_name)?;
 
         // Get the hotlib map
         let hotlib_map = crate::lang::hot::get_hotlib_map();
@@ -7309,6 +7337,10 @@ impl VirtualMachine {
         }
 
         // Push the lambda scope onto the scope stack
+        let saved_scope_depth = self.scope_stack.len();
+        let saved_flow_context_depth = self.flow_contexts.len();
+        let saved_skip_flag = self.skip_until_branch_end;
+        let saved_skip_cond_flow = self.skip_remaining_cond_flow;
         self.scope_stack.push(lambda_scope);
 
         // Save current namespace and switch to lambda's defining namespace for proper lexical scoping
@@ -7354,213 +7386,231 @@ impl VirtualMachine {
         let mut lambda_ip = 0;
         let mut last_result = Val::Null;
 
-        while lambda_ip < lambda_info.instructions.len() {
-            let instruction = &lambda_info.instructions[lambda_ip];
+        // The body runs in a closure so that an error still restores the
+        // caller's registers, scope and namespace below.
+        let body = (|| -> VmResult<()> {
+            while lambda_ip < lambda_info.instructions.len() {
+                let instruction = &lambda_info.instructions[lambda_ip];
+                // A `where` predicate draws each instruction from its budget.
+                self.charge_constraint_fuel()?;
 
-            tracing::trace!("VM: Lambda instruction {}: {:?}", lambda_ip, instruction);
+                tracing::trace!("VM: Lambda instruction {}: {:?}", lambda_ip, instruction);
 
-            // Respect branch skipping inside lambdas as well
-            if let Some((ref skip_branch, skip_depth)) = self.skip_until_branch_end {
-                let current_depth = self.flow_contexts.len();
-                // Only apply skip if we're at the same flow depth
-                if current_depth == skip_depth {
-                    // Only let the matching CondBranchEnd pass through to clear the skip
-                    if let Instruction::CondBranchEnd { branch_name, .. } = instruction {
-                        if branch_name == skip_branch {
-                            // Execute via the main instruction machinery to clear the skip flag
-                            let saved_main_ip = self.instruction_pointer;
-                            self.instruction_pointer = lambda_ip;
-                            self.execute_instruction(instruction)?;
-                            self.instruction_pointer = saved_main_ip;
+                // Respect branch skipping inside lambdas as well
+                if let Some((ref skip_branch, skip_depth)) = self.skip_until_branch_end {
+                    let current_depth = self.flow_contexts.len();
+                    // Only apply skip if we're at the same flow depth
+                    if current_depth == skip_depth {
+                        // Only let the matching CondBranchEnd pass through to clear the skip
+                        if let Instruction::CondBranchEnd { branch_name, .. } = instruction {
+                            if branch_name == skip_branch {
+                                // Execute via the main instruction machinery to clear the skip flag
+                                let saved_main_ip = self.instruction_pointer;
+                                self.instruction_pointer = lambda_ip;
+                                self.execute_instruction(instruction)?;
+                                self.instruction_pointer = saved_main_ip;
 
-                            // Track result for value-producing instructions
-                            if let Some(dest) = self.get_instruction_dest(instruction)
-                                && let Ok(val) = self.get_register(dest)
-                            {
-                                last_result = val.clone();
+                                // Track result for value-producing instructions
+                                if let Some(dest) = self.get_instruction_dest(instruction)
+                                    && let Ok(val) = self.get_register(dest)
+                                {
+                                    last_result = val.clone();
+                                }
+
+                                lambda_ip += 1;
+                                continue;
+                            } else {
+                                // Skip all instructions until the matching CondBranchEnd
+                                lambda_ip += 1;
+                                continue;
                             }
-
-                            lambda_ip += 1;
-                            continue;
                         } else {
-                            // Skip all instructions until the matching CondBranchEnd
+                            // Skip non-CondBranchEnd instructions while waiting to reach the end of the branch
                             lambda_ip += 1;
                             continue;
                         }
-                    } else {
-                        // Skip non-CondBranchEnd instructions while waiting to reach the end of the branch
-                        lambda_ip += 1;
-                        continue;
+                    }
+                    // If at different depth, don't skip - let nested flows execute normally
+                }
+
+                // Skip remaining cond/match branches (conditions + bodies) until EndFlow
+                if let Some(nested_depth) = self.skip_remaining_cond_flow {
+                    match instruction {
+                        Instruction::BeginFlow { .. } => {
+                            self.skip_remaining_cond_flow = Some(nested_depth + 1);
+                            lambda_ip += 1;
+                            continue;
+                        }
+                        Instruction::EndFlow { .. } => {
+                            if nested_depth > 0 {
+                                self.skip_remaining_cond_flow = Some(nested_depth - 1);
+                                lambda_ip += 1;
+                                continue;
+                            } else {
+                                // Target EndFlow - stop skipping, fall through to execute
+                                self.skip_remaining_cond_flow = None;
+                            }
+                        }
+                        _ => {
+                            lambda_ip += 1;
+                            continue;
+                        }
                     }
                 }
-                // If at different depth, don't skip - let nested flows execute normally
-            }
 
-            // Skip remaining cond/match branches (conditions + bodies) until EndFlow
-            if let Some(nested_depth) = self.skip_remaining_cond_flow {
+                // Execute instruction directly without interfering with main VM instruction pointer
                 match instruction {
-                    Instruction::BeginFlow { .. } => {
-                        self.skip_remaining_cond_flow = Some(nested_depth + 1);
-                        lambda_ip += 1;
-                        continue;
-                    }
-                    Instruction::EndFlow { .. } => {
-                        if nested_depth > 0 {
-                            self.skip_remaining_cond_flow = Some(nested_depth - 1);
-                            lambda_ip += 1;
-                            continue;
-                        } else {
-                            // Target EndFlow - stop skipping, fall through to execute
-                            self.skip_remaining_cond_flow = None;
-                        }
-                    }
-                    _ => {
-                        lambda_ip += 1;
-                        continue;
-                    }
-                }
-            }
+                    Instruction::LoadConst { dest, constant } => {
+                        let constant_val = self.load_constant(*constant)?;
 
-            // Execute instruction directly without interfering with main VM instruction pointer
-            match instruction {
-                Instruction::LoadConst { dest, constant } => {
-                    let constant_val = self.load_constant(*constant)?;
+                        // If this is a lambda value, capture closure variables NOW (at creation time)
+                        let constant_val = if let Val::Box(ref boxed) = constant_val {
+                            if let Some(inner_lambda_info) = boxed
+                                .as_any()
+                                .downcast_ref::<crate::lang::bytecode::LambdaInfo>(
+                            ) {
+                                let mut captured_lambda = inner_lambda_info.clone();
+                                captured_lambda.closure_env.clear();
 
-                    // If this is a lambda value, capture closure variables NOW (at creation time)
-                    let constant_val = if let Val::Box(ref boxed) = constant_val {
-                        if let Some(inner_lambda_info) = boxed
-                            .as_any()
-                            .downcast_ref::<crate::lang::bytecode::LambdaInfo>(
-                        ) {
-                            let mut captured_lambda = inner_lambda_info.clone();
-                            captured_lambda.closure_env.clear();
-
-                            for var_name in &captured_lambda.capture_vars {
-                                if let Ok(var_value) = self.lookup_variable(var_name) {
-                                    captured_lambda
-                                        .closure_env
-                                        .insert(var_name.clone(), var_value);
-                                    tracing::trace!(
-                                        "VM: Captured '{}' at inner lambda creation time",
-                                        var_name
-                                    );
-                                } else if let Ok(var_value) = self.unified_variable_lookup(var_name)
-                                {
-                                    captured_lambda
-                                        .closure_env
-                                        .insert(var_name.clone(), var_value);
-                                    tracing::trace!(
-                                        "VM: Captured '{}' at inner lambda creation time (unified)",
-                                        var_name
-                                    );
-                                } else if let Some(core_fn_name) =
-                                    self.lookup_core_function_name(var_name)
-                                {
-                                    // If it's a core function, capture as a function reference
-                                    let fn_ref =
-                                        crate::lang::runtime::function_ref::FunctionRef::new(
-                                            core_fn_name.clone(),
+                                for var_name in &captured_lambda.capture_vars {
+                                    if let Ok(var_value) = self.lookup_variable(var_name) {
+                                        captured_lambda
+                                            .closure_env
+                                            .insert(var_name.clone(), var_value);
+                                        tracing::trace!(
+                                            "VM: Captured '{}' at inner lambda creation time",
+                                            var_name
                                         );
-                                    captured_lambda
-                                        .closure_env
-                                        .insert(var_name.clone(), Val::Box(Box::new(fn_ref)));
-                                    tracing::trace!(
-                                        "VM: Captured '{}' as core function reference '{}' at inner lambda creation",
-                                        var_name,
-                                        core_fn_name
-                                    );
-                                } else if let Some(function_id) =
-                                    self.find_best_function_overload(var_name, &[])
-                                {
-                                    // If it's any other user function, capture as a function reference
-                                    if let Some(fn_info) =
-                                        self.program.functions.get(function_id as usize)
+                                    } else if let Ok(var_value) =
+                                        self.unified_variable_lookup(var_name)
                                     {
-                                        let qualified_name =
-                                            format!("{}/{}", fn_info.namespace, fn_info.name);
+                                        captured_lambda
+                                            .closure_env
+                                            .insert(var_name.clone(), var_value);
+                                        tracing::trace!(
+                                            "VM: Captured '{}' at inner lambda creation time (unified)",
+                                            var_name
+                                        );
+                                    } else if let Some(core_fn_name) =
+                                        self.lookup_core_function_name(var_name)
+                                    {
+                                        // If it's a core function, capture as a function reference
                                         let fn_ref =
                                             crate::lang::runtime::function_ref::FunctionRef::new(
-                                                qualified_name.clone(),
+                                                core_fn_name.clone(),
                                             );
                                         captured_lambda
                                             .closure_env
                                             .insert(var_name.clone(), Val::Box(Box::new(fn_ref)));
                                         tracing::trace!(
-                                            "VM: Captured '{}' as function reference '{}' at inner lambda creation",
+                                            "VM: Captured '{}' as core function reference '{}' at inner lambda creation",
                                             var_name,
-                                            qualified_name
+                                            core_fn_name
                                         );
+                                    } else if let Some(function_id) =
+                                        self.find_best_function_overload(var_name, &[])
+                                    {
+                                        // If it's any other user function, capture as a function reference
+                                        if let Some(fn_info) =
+                                            self.program.functions.get(function_id as usize)
+                                        {
+                                            let qualified_name =
+                                                format!("{}/{}", fn_info.namespace, fn_info.name);
+                                            let fn_ref =
+                                            crate::lang::runtime::function_ref::FunctionRef::new(
+                                                qualified_name.clone(),
+                                            );
+                                            captured_lambda.closure_env.insert(
+                                                var_name.clone(),
+                                                Val::Box(Box::new(fn_ref)),
+                                            );
+                                            tracing::trace!(
+                                                "VM: Captured '{}' as function reference '{}' at inner lambda creation",
+                                                var_name,
+                                                qualified_name
+                                            );
+                                        }
                                     }
                                 }
-                            }
 
-                            Val::Box(Box::new(captured_lambda))
+                                Val::Box(Box::new(captured_lambda))
+                            } else {
+                                constant_val
+                            }
                         } else {
                             constant_val
+                        };
+
+                        self.set_register(*dest, constant_val)?;
+                        last_result = self.get_register(*dest)?.clone();
+                    }
+                    Instruction::Move { dest, src } => {
+                        let value = self.get_register(*src)?.clone();
+                        self.set_register(*dest, value)?;
+                        last_result = self.get_register(*dest)?.clone();
+                    }
+                    Instruction::LoadVar { dest, var_name } => {
+                        let name = self.get_constant_string(*var_name)?;
+                        let value = self.lookup_variable(&name)?;
+                        self.set_register(*dest, value)?;
+                        last_result = self.get_register(*dest)?.clone();
+                    }
+                    Instruction::Call {
+                        dest,
+                        function,
+                        args_start,
+                        args_count,
+                    } => {
+                        // Mirror the main interpreter loop's Call handler:
+                        // arguments follow the normal auto-unwrap rules (Ok
+                        // unwraps, Err escalates with its payload message).
+                        // Without this, an Err bound inside a lambda body
+                        // reached natives raw and produced misleading type
+                        // errors instead of the Err's own message.
+                        let mut args = Vec::new();
+                        for i in 0..*args_count {
+                            let arg_reg = args_start + i as RegisterId;
+                            let arg_val = self.get_register(arg_reg)?.clone();
+                            args.push(self.prepare_call_arg(arg_val)?);
                         }
-                    } else {
-                        constant_val
-                    };
-
-                    self.set_register(*dest, constant_val)?;
-                    last_result = self.get_register(*dest)?.clone();
-                }
-                Instruction::Move { dest, src } => {
-                    let value = self.get_register(*src)?.clone();
-                    self.set_register(*dest, value)?;
-                    last_result = self.get_register(*dest)?.clone();
-                }
-                Instruction::LoadVar { dest, var_name } => {
-                    let name = self.get_constant_string(*var_name)?;
-                    let value = self.lookup_variable(&name)?;
-                    self.set_register(*dest, value)?;
-                    last_result = self.get_register(*dest)?.clone();
-                }
-                Instruction::Call {
-                    dest,
-                    function,
-                    args_start,
-                    args_count,
-                } => {
-                    // Mirror the main interpreter loop's Call handler:
-                    // arguments follow the normal auto-unwrap rules (Ok
-                    // unwraps, Err escalates with its payload message).
-                    // Without this, an Err bound inside a lambda body
-                    // reached natives raw and produced misleading type
-                    // errors instead of the Err's own message.
-                    let mut args = Vec::new();
-                    for i in 0..*args_count {
-                        let arg_reg = args_start + i as RegisterId;
-                        let arg_val = self.get_register(arg_reg)?.clone();
-                        args.push(self.prepare_call_arg(arg_val)?);
+                        let result = self.execute_function_call(*function, &args)?;
+                        self.set_register(*dest, result)?;
+                        last_result = self.get_register(*dest)?.clone();
                     }
-                    let result = self.execute_function_call(*function, &args)?;
-                    self.set_register(*dest, result)?;
-                    last_result = self.get_register(*dest)?.clone();
-                }
-                Instruction::Return { value } => {
-                    last_result = self.get_register(*value)?.clone();
-                    break; // Exit lambda execution
-                }
-                _ => {
-                    // For other instructions, we need to temporarily set the main IP
-                    // and restore it after execution
-                    let saved_main_ip = self.instruction_pointer;
-                    self.instruction_pointer = lambda_ip;
-                    self.execute_instruction(instruction)?;
-                    self.instruction_pointer = saved_main_ip;
+                    Instruction::Return { value } => {
+                        last_result = self.get_register(*value)?.clone();
+                        break; // Exit lambda execution
+                    }
+                    // An Err (such as a failed `where` check on a parameter)
+                    // returns from the lambda at once.
+                    Instruction::ReturnIfErr { src } => {
+                        let value = self.get_register(*src)?;
+                        if value.is_err() {
+                            last_result = value.clone();
+                            break;
+                        }
+                    }
+                    _ => {
+                        // For other instructions, we need to temporarily set the main IP
+                        // and restore it after execution
+                        let saved_main_ip = self.instruction_pointer;
+                        self.instruction_pointer = lambda_ip;
+                        self.execute_instruction(instruction)?;
+                        self.instruction_pointer = saved_main_ip;
 
-                    // Track result for value-producing instructions
-                    if let Some(dest) = self.get_instruction_dest(instruction)
-                        && let Ok(val) = self.get_register(dest)
-                    {
-                        last_result = val.clone();
+                        // Track result for value-producing instructions
+                        if let Some(dest) = self.get_instruction_dest(instruction)
+                            && let Ok(val) = self.get_register(dest)
+                        {
+                            last_result = val.clone();
+                        }
                     }
                 }
+
+                lambda_ip += 1;
             }
-
-            lambda_ip += 1;
-        }
+            Ok(())
+        })();
 
         // Restore instruction pointer and register state
         self.instruction_pointer = saved_instruction_pointer;
@@ -7574,8 +7624,16 @@ impl VirtualMachine {
 
         self.registers.truncate(saved_register_count);
 
-        // Pop the lambda scope
-        self.scope_stack.pop();
+        // Pop the lambda scope. An error also leaves the scopes and flow
+        // contexts the body opened, so drop those too.
+        if body.is_err() {
+            self.scope_stack.truncate(saved_scope_depth);
+            self.flow_contexts.truncate(saved_flow_context_depth);
+            self.skip_until_branch_end = saved_skip_flag;
+            self.skip_remaining_cond_flow = saved_skip_cond_flow;
+        } else {
+            self.scope_stack.pop();
+        }
 
         // Restore original namespace
         self.current_namespace = saved_namespace;
@@ -7583,6 +7641,7 @@ impl VirtualMachine {
             "VM: Restored namespace to '{}' after lambda execution",
             self.current_namespace
         );
+        body?;
 
         tracing::trace!(
             "VM: Lambda execution completed with result: {:?}",
@@ -7644,6 +7703,11 @@ impl VirtualMachine {
     }
 
     pub fn try_jit_lambda_call(&mut self, lambda_val: &Val, args: &[Val]) -> VmResult<Option<Val>> {
+        // A `where` predicate stays on the interpreter, where every
+        // instruction and native call is checked.
+        if self.in_constraint_predicate() {
+            return Ok(None);
+        }
         let lambda_info = match lambda_val {
             Val::Box(boxed_val) => boxed_val
                 .as_any()
@@ -7716,6 +7780,8 @@ impl VirtualMachine {
                     .to_string(),
             ));
         }
+        // A `where` predicate has its own, smaller call-depth budget.
+        self.check_constraint_depth()?;
         // Re-entrant (recursive) calls share the outer frame's register
         // indices, so save the function's own registers before re-entering
         // and restore them after — otherwise the inner call clobbers pending
@@ -7777,7 +7843,7 @@ impl VirtualMachine {
     }
 
     fn execute_user_function_impl(&mut self, function_id: u32, args: &[Val]) -> VmResult<Val> {
-        if self.jit.config.is_enabled() {
+        if self.jit.config.is_enabled() && !self.in_constraint_predicate() {
             self.jit.record_call(function_id, args);
 
             let was_halted = self.has_failed() || self.has_cancelled();
@@ -8048,7 +8114,11 @@ impl VirtualMachine {
                 self.current_namespace = namespace.clone();
 
                 // Ensure the function's namespace has a ns variable pointing to itself
-                self.ensure_namespace_has_ns_variable(namespace)?;
+                if let Err(err) = self.ensure_namespace_has_ns_variable(namespace) {
+                    self.scope_stack.truncate(saved_scope_depth);
+                    self.current_namespace = saved_namespace;
+                    return Err(err);
+                }
 
                 // Mirror all current function parameters/locals into the namespace registry
                 // so closures and VM-aware hotlibs can resolve them when needed.
@@ -8105,7 +8175,7 @@ impl VirtualMachine {
                 // Return a placeholder indicating execution occurred
                 // Function has no instructions - return Null
                 tracing::warn!("VM: Function '{}' has no instructions", function_name);
-                Val::Null // Return Null instead of placeholder string
+                Ok(Val::Null) // Return Null instead of placeholder string
             } else {
                 // Execute the actual function instructions
                 // Function has instructions - execute them
@@ -8125,122 +8195,136 @@ impl VirtualMachine {
                 // tail-call iterations rebind — the previous version re-bound
                 // and re-mirrored every parameter a second time on every call.
                 let mut tail_args: Option<Vec<Val>> = None;
-                loop {
-                    if let Some(current_args) = tail_args.take() {
-                        // Update parameter bindings with the tail call's args
-                        let mut namespace_param_updates: Vec<(String, Val)> =
-                            Vec::with_capacity(function_param_names.len());
-                        if let Some(scope) = self.scope_stack.last_mut() {
-                            for (i, param_name) in function_param_names.iter().enumerate() {
-                                let value = if function_is_variadic && i == variadic_param_index {
-                                    // Variadic parameter - collect remaining args
-                                    let variadic_args: Vec<Val> = if i < current_args.len() {
-                                        current_args[i..].to_vec()
+                // The body runs in a closure so that an error still reaches
+                // the cleanup below. A caller that contains the error (a JIT
+                // trampoline, `contain`) then carries on with its own
+                // namespace, scopes and registry bindings.
+                (|| -> VmResult<Val> {
+                    Ok(loop {
+                        if let Some(current_args) = tail_args.take() {
+                            // Update parameter bindings with the tail call's args
+                            let mut namespace_param_updates: Vec<(String, Val)> =
+                                Vec::with_capacity(function_param_names.len());
+                            if let Some(scope) = self.scope_stack.last_mut() {
+                                for (i, param_name) in function_param_names.iter().enumerate() {
+                                    let value = if function_is_variadic && i == variadic_param_index
+                                    {
+                                        // Variadic parameter - collect remaining args
+                                        let variadic_args: Vec<Val> = if i < current_args.len() {
+                                            current_args[i..].to_vec()
+                                        } else {
+                                            vec![]
+                                        };
+                                        Val::Vec(variadic_args)
+                                    } else if i < current_args.len() {
+                                        current_args[i].clone()
                                     } else {
-                                        vec![]
+                                        Val::Null
                                     };
-                                    Val::Vec(variadic_args)
-                                } else if i < current_args.len() {
-                                    current_args[i].clone()
-                                } else {
-                                    Val::Null
-                                };
-                                scope.variables.insert(param_name.clone(), value.clone());
-                                namespace_param_updates.push((param_name.clone(), value));
+                                    scope.variables.insert(param_name.clone(), value.clone());
+                                    namespace_param_updates.push((param_name.clone(), value));
+                                }
+                            }
+                            if !namespace_param_updates.is_empty() {
+                                let ns_entry = self
+                                    .namespace_variables
+                                    .entry(self.current_namespace.clone())
+                                    .or_default();
+                                for (param_name, value) in namespace_param_updates {
+                                    ns_entry.insert(param_name, value);
+                                }
                             }
                         }
-                        if !namespace_param_updates.is_empty() {
-                            let ns_entry = self
-                                .namespace_variables
-                                .entry(self.current_namespace.clone())
-                                .or_default();
-                            for (param_name, value) in namespace_param_updates {
-                                ns_entry.insert(param_name, value);
+
+                        // Execute the function instructions - borrow from outer Arc clone
+                        let instructions = &function_info.instructions;
+                        match self.execute_function_instructions(instructions, Some(function_id))? {
+                            FunctionExecutionResult::Value(val) => {
+                                // Normal return - exit the loop with the result
+                                break val;
                             }
-                        }
-                    }
-
-                    // Execute the function instructions - borrow from outer Arc clone
-                    let instructions = &function_info.instructions;
-                    match self.execute_function_instructions(instructions, Some(function_id))? {
-                        FunctionExecutionResult::Value(val) => {
-                            // Normal return - exit the loop with the result
-                            break val;
-                        }
-                        FunctionExecutionResult::TailCall {
-                            function_id: tail_fn_id,
-                            args: new_args,
-                        } => {
-                            // Tail call optimization: verify it's the same function
-                            if tail_fn_id != function_id {
-                                // Cross-function tail call not yet supported, fall back to regular call
-                                tracing::trace!(
-                                    "VM: Cross-function tail call from {} to {} - not yet optimized",
-                                    function_id,
-                                    tail_fn_id
-                                );
-                                // Execute as a regular call
-                                break self.execute_user_function(tail_fn_id, &new_args)?;
-                            }
-
-                            // TCO cleanup: Reset flow contexts and skip flags from previous iteration
-                            // The previous iteration may have left stale flow contexts if it exited
-                            // via TailCall before EndFlow was executed (e.g., in cond flows)
-                            self.flow_contexts.truncate(saved_flow_context_depth);
-                            self.skip_until_branch_end = None;
-                            self.skip_remaining_cond_flow = None;
-
-                            // Each tail iteration is semantically a call: record
-                            // it so hot TCO loops reach the JIT threshold, and
-                            // switch to compiled code mid-loop once available.
-                            // Without this, a million-iteration tail loop counts
-                            // as ONE call and never compiles.
-                            if self.jit.config.is_enabled() {
-                                self.jit.record_call(function_id, &new_args);
-                                if self.jit.should_compile_now(function_id, &new_args) {
-                                    match self.jit.compile_function(
-                                        &program,
+                            FunctionExecutionResult::TailCall {
+                                function_id: tail_fn_id,
+                                args: new_args,
+                            } => {
+                                // Tail call optimization: verify it's the same function
+                                if tail_fn_id != function_id {
+                                    // Cross-function tail call not yet supported, fall back to regular call
+                                    tracing::trace!(
+                                        "VM: Cross-function tail call from {} to {} - not yet optimized",
                                         function_id,
-                                        function_info,
-                                        &new_args,
-                                    ) {
-                                        Ok(()) => {}
-                                        Err(err) => {
-                                            super::jit::increment_jit_bailout_count();
-                                            if !super::jit::is_retryable_jit_bailout(&err) {
-                                                self.jit.mark_do_not_jit(function_id);
+                                        tail_fn_id
+                                    );
+                                    // Execute as a regular call
+                                    break self.execute_user_function(tail_fn_id, &new_args)?;
+                                }
+
+                                // TCO cleanup: Reset flow contexts and skip flags from previous iteration
+                                // The previous iteration may have left stale flow contexts if it exited
+                                // via TailCall before EndFlow was executed (e.g., in cond flows)
+                                self.flow_contexts.truncate(saved_flow_context_depth);
+                                self.skip_until_branch_end = None;
+                                self.skip_remaining_cond_flow = None;
+
+                                // Each tail iteration is semantically a call: record
+                                // it so hot TCO loops reach the JIT threshold, and
+                                // switch to compiled code mid-loop once available.
+                                // Without this, a million-iteration tail loop counts
+                                // as ONE call and never compiles.
+                                if self.jit.config.is_enabled() && !self.in_constraint_predicate() {
+                                    self.jit.record_call(function_id, &new_args);
+                                    if self.jit.should_compile_now(function_id, &new_args) {
+                                        match self.jit.compile_function(
+                                            &program,
+                                            function_id,
+                                            function_info,
+                                            &new_args,
+                                        ) {
+                                            Ok(()) => {}
+                                            Err(err) => {
+                                                super::jit::increment_jit_bailout_count();
+                                                if !super::jit::is_retryable_jit_bailout(&err) {
+                                                    self.jit.mark_do_not_jit(function_id);
+                                                }
                                             }
                                         }
                                     }
+                                    // Compiled code calls helpers that resolve the VM
+                                    // through the thread-local pointer; bracket the
+                                    // call like try_jit_call does or a mid-loop
+                                    // switch to compiled code sees no VM.
+                                    let was_halted = self.has_failed() || self.has_cancelled();
+                                    let prev =
+                                        super::jit::set_jit_vm_ptr(self as *mut VirtualMachine);
+                                    let call_result =
+                                        self.jit.try_call_compiled(function_id, &new_args);
+                                    super::jit::set_jit_vm_ptr(prev);
+                                    if let Some(result) = call_result.map_err(|msg| {
+                                        VmError::RuntimeError(
+                                            RuntimeError::new(msg)
+                                                .with_instruction_pointer(self.instruction_pointer),
+                                        )
+                                    })? {
+                                        self.propagate_jit_halt(was_halted)?;
+                                        break result;
+                                    }
                                 }
-                                // Compiled code calls helpers that resolve the VM
-                                // through the thread-local pointer; bracket the
-                                // call like try_jit_call does or a mid-loop
-                                // switch to compiled code sees no VM.
-                                let was_halted = self.has_failed() || self.has_cancelled();
-                                let prev = super::jit::set_jit_vm_ptr(self as *mut VirtualMachine);
-                                let call_result =
-                                    self.jit.try_call_compiled(function_id, &new_args);
-                                super::jit::set_jit_vm_ptr(prev);
-                                if let Some(result) = call_result.map_err(|msg| {
-                                    VmError::RuntimeError(
-                                        RuntimeError::new(msg)
-                                            .with_instruction_pointer(self.instruction_pointer),
-                                    )
-                                })? {
-                                    self.propagate_jit_halt(was_halted)?;
-                                    break result;
-                                }
+
+                                // Same function - update args and loop (TCO!)
+                                tail_args = Some(new_args);
+
+                                // Continue the loop with updated arguments
                             }
-
-                            // Same function - update args and loop (TCO!)
-                            tail_args = Some(new_args);
-
-                            // Continue the loop with updated arguments
                         }
-                    }
-                }
+                    })
+                })()
             };
+
+            // An error leaves the body's flow contexts open; drop them with
+            // the rest of the call's state.
+            if result.is_err() {
+                self.flow_contexts.truncate(saved_flow_context_depth);
+            }
 
             // Restore scope stack to pre-function depth.
             // This pops the function scope AND any scopes leaked by flow constructs
@@ -8284,7 +8368,9 @@ impl VirtualMachine {
             self.current_namespace = saved_namespace.clone();
 
             // Ensure the restored namespace has a ns variable pointing to itself
-            self.ensure_namespace_has_ns_variable(&saved_namespace)?;
+            let restored = self.ensure_namespace_has_ns_variable(&saved_namespace);
+            let result = result?;
+            restored?;
 
             // Only do duration calculation and event emission when emitter is attached
             if let (Some(emitter), Some(execution_context), Some(cid)) =
@@ -8596,6 +8682,12 @@ impl VirtualMachine {
 
     /// Execute a parallel flow with TRUE parallel execution of thunks by dependency level
     fn execute_parallel_flow(&mut self, parallel_ctx: ParallelFlowContext) -> VmResult<()> {
+        // Parallel branches run on fresh VMs, outside a predicate's guard.
+        if self.in_constraint_predicate() {
+            return Err(VmError::runtime(
+                "A `where` predicate can't use a parallel flow".to_string(),
+            ));
+        }
         use parking_lot::Mutex;
         use std::sync::Arc as StdArc;
         use std::thread;
@@ -9085,6 +9177,7 @@ impl VirtualMachine {
     fn get_instruction_dest(&self, instruction: &Instruction) -> Option<RegisterId> {
         match instruction {
             Instruction::LoadConst { dest, .. }
+            | Instruction::CheckConstraint { dest, .. }
             | Instruction::Move { dest, .. }
             | Instruction::LoadFunctionRef { dest, .. }
             | Instruction::LoadTypeRef { dest, .. }
@@ -9318,6 +9411,7 @@ impl VirtualMachine {
 
     /// Reset VM state for clean execution (useful between test runs)
     pub fn reset_state(&mut self) {
+        self.constraint = None;
         // Clear accumulated namespace variables (but keep core ones)
         self.namespace_variables.clear();
 
@@ -9410,11 +9504,16 @@ impl VirtualMachine {
             Val::Map(map) => {
                 if self.is_tagged_wrapper(map) {
                     if let Some(payload) = map.get_mut(&Val::from("$val")) {
-                        return self.set_property(payload, property, new_value);
+                        self.set_property(payload, property, new_value)?;
+                    } else {
+                        let mut payload = Val::Null;
+                        self.set_property(&mut payload, property, new_value)?;
+                        map.insert(Val::from("$val"), payload);
                     }
-                    let mut payload = Val::Null;
-                    self.set_property(&mut payload, property, new_value)?;
-                    map.insert(Val::from("$val"), payload);
+                    // The update keeps the value's type, so it must keep the
+                    // type's `where` constraints too.
+                    let updated = std::mem::replace(value, Val::Null);
+                    *value = self.check_typed_value(updated, "update")?;
                     return Ok(());
                 }
 
@@ -9507,7 +9606,12 @@ impl VirtualMachine {
                         "Cannot dynamically assign through a tagged unit value".to_string(),
                     ));
                 };
-                self.set_dynamic_property(payload, property, new_value)
+                self.set_dynamic_property(payload, property, new_value)?;
+                // The update keeps the value's type, so it must keep the
+                // type's `where` constraints too.
+                let updated = std::mem::replace(value, Val::Null);
+                *value = self.check_typed_value(updated, "update")?;
+                Ok(())
             }
             Val::Map(map) => {
                 map.insert(property.clone(), new_value);
@@ -9796,6 +9900,8 @@ impl VirtualMachine {
             args.len(),
             args
         );
+        // A `where` predicate may only call pure natives.
+        self.check_constraint_native(function_name)?;
 
         // Get the hotlib map
         let hotlib_map = crate::lang::hot::get_hotlib_map();
@@ -9847,7 +9953,9 @@ impl VirtualMachine {
                         function_name,
                         val
                     );
-                    return Ok(val);
+                    // An update keeps a typed value's type, so it must keep
+                    // the type's constraints too.
+                    return self.check_updated_value(function_name, val);
                 }
                 crate::lang::hot::r#type::HotResult::Err(err) => {
                     tracing::trace!("VM: Hotlib function '{}' failed: {:?}", function_name, err);
@@ -9911,7 +10019,7 @@ impl VirtualMachine {
         // Plans are memoized per FunctionId so repeated calls (including TCO
         // loop iterations) don't rescan the body.
         let fused_plans: std::rc::Rc<[crate::lang::runtime::jit_hof::PipelinePlan]> =
-            if self.jit.config.hof_fusion_enabled() {
+            if self.jit.config.hof_fusion_enabled() && !self.in_constraint_predicate() {
                 match function_id.and_then(|fid| self.hof_plan_cache.get(&fid)) {
                     Some(plans) => std::rc::Rc::clone(plans),
                     None => {
@@ -9936,6 +10044,8 @@ impl VirtualMachine {
             let instruction = &instructions[func_ip];
             // Set instruction pointer for debugging
             self.instruction_pointer = func_ip;
+            // A `where` predicate draws each instruction from its budget.
+            self.charge_constraint_fuel()?;
 
             // Check if we're skipping instructions until we reach a specific CondBranchEnd
             // This is critical for TCO: we must not execute TailCall instructions in skipped branches
@@ -10562,6 +10672,13 @@ mod tests {
     /// core function whose qualified name ends in "::bool/if"), then run a
     /// function under the given JIT mode and return its result.
     fn run_recursion_source(source: &str, entry: &str, args: &[Val], jit: &str) -> Val {
+        compile_test_vm(source, jit)
+            .call_function_bypassing_unified_lookup(entry, args)
+            .expect("entry function should run")
+    }
+
+    /// Compile `source` and run its module init under the given JIT mode.
+    fn compile_test_vm(source: &str, jit: &str) -> VirtualMachine {
         let mut program = parse_hot(source).expect("test source should parse");
         let mut compiler = Compiler::new();
         compiler
@@ -10578,8 +10695,7 @@ mod tests {
             Some(crate::val!({"jit": jit})),
         );
         vm.execute().expect("module init should run");
-        vm.call_function_bypassing_unified_lookup(entry, args)
-            .expect("entry function should run")
+        vm
     }
 
     const CORE_IF_PRELUDE: &str = r#"
@@ -10626,6 +10742,71 @@ sum-to fn (i: Int, acc: Int): Int {{
                 Val::Int(50_005_000),
                 "sum-to(10000) wrong with jit={jit}"
             );
+        }
+    }
+
+    // Regression: a runtime error unwinding out of a function or lambda must
+    // leave the caller's state as it found it. A caller that contains the
+    // error (`contain`, a JIT trampoline) keeps running: before, it ran in the
+    // failed callee's namespace and saw its parameters in the namespace
+    // registry, which made later lookups fail or read stale values.
+    #[test]
+    fn failed_call_restores_caller_state() {
+        let source = r#"
+::helper ns
+
+boom fn (amount: Any): Any {
+    add(div(amount, 0), 1)
+}
+
+make-boom fn (): Any {
+    (amount: Any) { add(div(amount, 0), 1) }
+}
+"#;
+        for jit in ["off", "on"] {
+            let mut vm = compile_test_vm(source, jit);
+            let lambda = vm
+                .call_function_bypassing_unified_lookup("::helper/make-boom", &[])
+                .expect("make-boom should run");
+
+            let namespace = vm.current_namespace.clone();
+            let scope_depth = vm.scope_stack.len();
+            let flow_depth = vm.flow_contexts.len();
+            let check = |vm: &VirtualMachine, path: &str| {
+                assert_eq!(
+                    vm.current_namespace, namespace,
+                    "{path}: namespace, jit={jit}"
+                );
+                assert_eq!(
+                    vm.scope_stack.len(),
+                    scope_depth,
+                    "{path}: scopes, jit={jit}"
+                );
+                assert_eq!(
+                    vm.flow_contexts.len(),
+                    flow_depth,
+                    "{path}: flows, jit={jit}"
+                );
+                assert!(
+                    vm.namespace_variables
+                        .get("::helper")
+                        .is_none_or(|vars| !vars.contains_key("amount")),
+                    "{path}: parameter binding leaked, jit={jit}"
+                );
+            };
+
+            let result = vm.call_function_bypassing_unified_lookup("::helper/boom", &[Val::Int(1)]);
+            assert!(result.is_err(), "boom should fail, jit={jit}");
+            check(&vm, "function");
+
+            // A lambda borrows its registers from the caller's frame, so an
+            // error must hand them back. Sentinels stand in for live values.
+            vm.registers = (0..32).map(|i| Val::from(format!("caller-{i}"))).collect();
+            let registers = vm.registers.clone();
+            let result = vm.call_function_value(&lambda, &[Val::Int(1)]);
+            assert!(result.is_err(), "the lambda should fail, jit={jit}");
+            check(&vm, "lambda");
+            assert_eq!(vm.registers, registers, "lambda: registers, jit={jit}");
         }
     }
 

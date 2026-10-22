@@ -307,6 +307,33 @@ probe(true)"#,
         }
     }
 
+    /// A compiled call through a `Fn` parameter calls the parameter, even
+    /// when a function elsewhere has the same short name: hot-std's
+    /// `filter-keys` takes `predicate`, and `::hot::type/predicate` exists.
+    #[test]
+    fn jit_call_through_a_parameter_calls_its_value() {
+        let src = r#"::u ns
+transform fn (x: Any): Any { "the other transform" }
+
+::t ns
+apply fn (x: Any, transform: Fn): Any { transform(x) }
+probe fn (): Vec {
+    [apply(1, (v) { add(v, 1) }), filter-keys({a: 1, b: 2}, ne(%, "b"))]
+}
+probe()
+probe()
+probe()"#;
+        let expected = crate::val!([2, {"a": 1}]);
+        for conf in [
+            crate::val!({"jit": {"threshold": 1}}),
+            crate::val!({"jit": {"mode": "off"}}),
+        ] {
+            let out = compile_and_run_with_std_conf(src, Some(conf.clone()))
+                .expect("calls through parameters run");
+            assert_eq!(out, expected, "with {conf:?}");
+        }
+    }
+
     #[test]
     fn tagged_metadata_names_resolve_in_the_payload() {
         let src = r#"::t ns

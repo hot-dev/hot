@@ -230,6 +230,54 @@ pub fn pure_op(name: &str) -> Option<PureOpDescriptor> {
         .copied()
 }
 
+/// Whether a native may run inside a `where` predicate: deterministic and
+/// free of side effects. Anything not listed is denied, including clocks,
+/// randomness, environment and context, files, stores, HTTP, events, tasks
+/// and sockets. Higher-order collection functions are allowed because the VM
+/// checks the natives their callbacks reach.
+pub fn is_pure_native(name: &str) -> bool {
+    const PURE_NAMESPACES: &[&str] = &[
+        "::hot::base64",
+        "::hot::bit",
+        "::hot::bool",
+        "::hot::bytes",
+        "::hot::cmp",
+        "::hot::coll",
+        "::hot::hash",
+        "::hot::hex",
+        "::hot::hmac",
+        "::hot::iter",
+        "::hot::json",
+        "::hot::map",
+        "::hot::math",
+        "::hot::md",
+        "::hot::meta",
+        "::hot::mime",
+        "::hot::regex",
+        "::hot::str",
+        "::hot::time",
+        "::hot::type",
+        "::hot::uri",
+        "::hot::xml",
+    ];
+    let Some((namespace, function)) = name.rsplit_once('/') else {
+        return false;
+    };
+    // `call` invokes a function value; the VM checks what that reaches.
+    if namespace == "::hot::lang" {
+        return matches!(function, "call" | "call-internal");
+    }
+    if !PURE_NAMESPACES.contains(&namespace) {
+        return false;
+    }
+    !(function.starts_with("rand")
+        || function.starts_with("now")
+        || matches!(
+            (namespace, function),
+            ("::hot::coll", "pmap") | ("::hot::time", "since") | ("::hot::time", "until")
+        ))
+}
+
 pub type HotLibMap = ahash::AHashMap<String, HotLibFn>;
 
 static HOTLIB_MAP: OnceLock<HotLibMap> = OnceLock::new();

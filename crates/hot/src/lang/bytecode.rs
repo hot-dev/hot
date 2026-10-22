@@ -507,6 +507,19 @@ pub enum Instruction {
         type_name: ConstantId,
         constructor_function_name: ConstantId,
     },
+
+    // === Constraints ===
+    /// Check `src` against a `where` constraint. `spec` is a constant map
+    /// describing the boundary and the constrained type. `dest` gets the
+    /// value (converted when an exact numeric conversion applies) or a
+    /// `Result.Err` holding a `ConstraintError`; an `Err` in `src` passes
+    /// through unchanged. With `test`, `dest` gets a `Bool` instead.
+    CheckConstraint {
+        dest: RegisterId,
+        src: RegisterId,
+        spec: ConstantId,
+        test: bool,
+    },
 }
 
 /// Constant pool entry for storing literal values
@@ -678,6 +691,7 @@ impl LambdaInfo {
             match instr {
                 // Value operations
                 Instruction::LoadConst { dest, .. }
+                | Instruction::CheckConstraint { dest, .. }
                 | Instruction::Move { dest, .. }
                 | Instruction::LoadFunctionRef { dest, .. }
                 | Instruction::LoadTypeRef { dest, .. }
@@ -1007,6 +1021,10 @@ pub struct BytecodeProgram {
     pub source_map: SourceMap,
     /// Variable metadata registry for emitter events
     pub variable_metadata: AHashMap<String, VariableMetadata>,
+    /// Types with `where` constraints: qualified type name and the constant
+    /// holding its constraint spec. `CheckConstraint` specs refer to named
+    /// types through this table.
+    pub constraint_types: Vec<(String, ConstantId)>,
     /// Content-hash index over `constants` so `add_constant` dedup is O(1)
     /// instead of a linear scan (which made pool construction quadratic on
     /// large programs). Values are candidate ids sharing a hash; equality is
@@ -1393,6 +1411,19 @@ impl fmt::Display for Instruction {
                 dest, var_name, scope_depth
             ),
             Instruction::ReturnIfErr { src } => write!(f, "RETURN_IF_ERR r{}", src),
+            Instruction::CheckConstraint {
+                dest,
+                src,
+                spec,
+                test,
+            } => write!(
+                f,
+                "CHECK_CONSTRAINT r{} = r{} c{}{}",
+                dest,
+                src,
+                spec,
+                if *test { " test" } else { "" }
+            ),
             Instruction::BeginErrorCapture => write!(f, "BEGIN_ERROR_CAPTURE"),
             Instruction::EndErrorCapture => write!(f, "END_ERROR_CAPTURE"),
             Instruction::WrapOk { dest, src } => write!(f, "WRAP_OK r{}, r{}", dest, src),
@@ -1430,6 +1461,7 @@ impl BytecodeProgram {
             namespaces: NamespaceRegistry::new(),
             source_map: SourceMap::new(),
             variable_metadata: AHashMap::new(),
+            constraint_types: Vec::new(),
             constant_index: AHashMap::new(),
         }
     }

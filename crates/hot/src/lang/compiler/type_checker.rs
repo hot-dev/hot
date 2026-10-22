@@ -191,10 +191,14 @@ pub struct Implementation {
 /// are registered; closed enums freeze it at declaration time.
 #[derive(Debug, Clone, Default)]
 pub struct TypeDefinition {
-    /// True for `enum open { ... }` declarations. Open enums require a
-    /// `_` default arm at every `match` site. Always `false` for
-    /// non-enum types and for closed enums.
+    /// True for an `open` declaration: `enum open { ... }` or an open
+    /// literal union. Entries are keyed by short name, so this can merge
+    /// types from different namespaces; enum checks use `enum_is_open`.
     pub is_open: bool,
+    /// True for `enum open { ... }` declarations only. Open enums require
+    /// a `_` default arm at every `match` site. An open literal union with
+    /// the same short name in another namespace doesn't set it.
+    pub enum_is_open: bool,
     /// Whether this `TypeDef` came from an `enum` declaration at all.
     /// Closed enums must be exhaustively matched (covered variants must
     /// equal the declared variant set); non-enum types skip that check.
@@ -1372,7 +1376,7 @@ impl TypeChecker {
         };
 
         let (is_enum, is_open, declared_variants) = match self.context.types.get(&short_name) {
-            Some(td) if td.is_enum => (true, td.is_open, td.variants.clone()),
+            Some(td) if td.is_enum => (true, td.enum_is_open, td.variants.clone()),
             _ => return,
         };
         if !is_enum {
@@ -1575,6 +1579,7 @@ impl TypeChecker {
         {
             let entry = self.context.types.entry(short.to_string()).or_default();
             entry.is_open = entry.is_open || type_def.is_open;
+            entry.enum_is_open = entry.enum_is_open || (is_enum && type_def.is_open);
             entry.is_enum = entry.is_enum || is_enum;
             if is_struct {
                 entry.is_struct = true;
@@ -1627,6 +1632,7 @@ impl TypeChecker {
         let qualified = format!("{}/{}", ns_str, short);
         let entry = self.context.types.entry(qualified).or_default();
         entry.is_open = entry.is_open || type_def.is_open;
+        entry.enum_is_open = entry.enum_is_open || (is_enum && type_def.is_open);
         entry.is_enum = entry.is_enum || is_enum;
         entry.is_struct = entry.is_struct || is_struct;
         if is_struct {
@@ -2093,7 +2099,7 @@ impl TypeChecker {
         if let Some((enum_fqn, variant_name)) = key.1.split_once('.')
             && let enum_short = Self::short_type_name(enum_fqn)
             && let Some(td) = self.context.types.get_mut(&enum_short)
-            && td.is_open
+            && td.enum_is_open
         {
             td.variants.insert(variant_name.to_string());
             // Record the source as the variant's payload type so that
@@ -2264,7 +2270,7 @@ impl TypeChecker {
         if let Some((src_enum_fqn, src_variant)) = src_fqn.split_once('.')
             && src_enum_fqn == target_fqn
             && let Some(td) = self.context.types.get(&Self::short_type_name(src_enum_fqn))
-            && (td.is_open || td.variants.contains(src_variant))
+            && (td.enum_is_open || td.variants.contains(src_variant))
         {
             return true;
         }
@@ -2857,7 +2863,9 @@ impl TypeChecker {
             }
             TypeExpr::Named(name) => {
                 if let Some(type_def) = self.named_type_definition(name) {
-                    if type_def.is_enum && (type_def.is_open || type_def.variants.contains(key)) {
+                    if type_def.is_enum
+                        && (type_def.enum_is_open || type_def.variants.contains(key))
+                    {
                         return base.clone();
                     }
 
@@ -3203,6 +3211,58 @@ impl TypeChecker {
     }
 
     /// Infer the return type of a function call
+    /// Precise result types for `and`, `or`, `if` and `not`. `and` and `or`
+    /// return one of their arguments and `if` one of its branches, so the
+    /// result is the union of those types: `Bool` when every one is a
+    /// `Bool`. `not` always returns a `Bool`. `None` for any other call, or
+    /// when a local definition shadows the core one.
+    fn logic_result_type(&mut self, name: &str, fn_call: &FnCall) -> Option<TypeExpr> {
+        let short = name.strip_prefix("::hot::bool/").unwrap_or(name);
+        if !matches!(short, "and" | "or" | "if" | "not") {
+            return None;
+        }
+        if name == short && self.context.current_namespace != "::hot::bool" {
+            let local = format!("{}/{}", self.context.current_namespace, short);
+            if self.context.get_function_signature(&local).is_some() {
+                return None;
+            }
+        }
+        if short == "not" {
+            return Some(TypeExpr::Bool);
+        }
+        let skip = usize::from(short == "if");
+        let mut types: Vec<TypeExpr> = fn_call
+            .args
+            .iter()
+            .skip(skip)
+            .map(|arg| arg.value.clone())
+            .collect::<Vec<_>>()
+            .iter()
+            .map(|value| self.infer_value_type(value))
+            .collect();
+        if short == "if" && fn_call.args.len() == 2 {
+            types.push(TypeExpr::Null);
+        }
+        let mut members: Vec<TypeExpr> = Vec::new();
+        for t in types {
+            let parts = match t {
+                TypeExpr::Any => return Some(TypeExpr::Any),
+                TypeExpr::Union(parts) => parts,
+                other => vec![other],
+            };
+            for part in parts {
+                if !members.contains(&part) {
+                    members.push(part);
+                }
+            }
+        }
+        Some(match members.len() {
+            0 => TypeExpr::Any,
+            1 => members.remove(0),
+            _ => TypeExpr::Union(members),
+        })
+    }
+
     fn infer_function_call_type(&mut self, fn_call: &FnCall) -> TypeExpr {
         // Check for type conversion calls like `::hot::type/Str(value)`. These
         // are constructor calls that double as coercion functions; if the
@@ -3385,7 +3445,11 @@ impl TypeChecker {
                 let matching_sig = self.find_matching_signature(fn_call, lookup_name, &signatures);
 
                 if let Some(sig) = matching_sig {
-                    return sig.return_type.clone();
+                    let declared = sig.return_type.clone();
+                    if let Some(precise) = self.logic_result_type(lookup_name, fn_call) {
+                        return precise;
+                    }
+                    return declared;
                 }
 
                 // No matching signature found - report error
@@ -3808,7 +3872,7 @@ impl TypeChecker {
                 .context
                 .types
                 .get(enum_name)
-                .filter(|td| td.is_enum && (td.is_open || td.variants.contains(variant_name)))
+                .filter(|td| td.is_enum && (td.enum_is_open || td.variants.contains(variant_name)))
                 .is_some();
             if known_enum
                 && let Some(enum_type) = self
@@ -5475,6 +5539,7 @@ mod tests {
             constructor_functions: None,
             implementations: None,
             is_open: true,
+            refinement: None,
         };
 
         let mut checker = TypeChecker::new();

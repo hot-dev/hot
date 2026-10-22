@@ -5,13 +5,13 @@ HttpError ::anthropic::api/HttpError
 is-ok-response ::hot::http/is-ok-response
 
 // Literal union for message roles
-Role type "user" | "assistant"
+Role type open "user" | "assistant"
 
 // Literal union for stop reasons
-StopReason type "end_turn" | "max_tokens" | "stop_sequence" | "tool_use"
+StopReason type open "end_turn" | "max_tokens" | "stop_sequence" | "tool_use"
 
 // Literal union for streaming event types
-StreamEventType type "message_start" | "content_block_start" | "content_block_delta" | "content_block_stop" | "message_delta" | "message_stop" | "ping" | "error"
+StreamEventType type open "message_start" | "content_block_start" | "content_block_delta" | "content_block_stop" | "message_delta" | "message_stop" | "ping" | "error"
 
 InputMessage type {
     role: Role,
@@ -250,7 +250,7 @@ MessageStreamEvent type {
 }
 
 // Literal union for delta types
-DeltaType type "text_delta" | "input_json_delta"
+DeltaType type open "text_delta" | "input_json_delta"
 
 Delta type {
     type: DeltaType?,

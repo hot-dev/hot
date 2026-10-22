@@ -2865,6 +2865,11 @@ unsafe extern "C" fn hot_jit_call_vm_by_name(
                 )))
             }
         }
+        // A typed `Fn` or a function alias.
+        Val::Map(_) => match vm.call_function_value(name_val, &args) {
+            Ok(result) => new_owned_val(result),
+            Err(err) => vm_error_to_owned_val(err, error_capture),
+        },
         _ => {
             let name_str = vm.value_to_string(name_val);
             match vm.execute_function_call_by_name(&name_str, &args) {
@@ -4835,6 +4840,30 @@ impl<'a> EmitCtx<'a> {
                 return Ok(true);
             }
         };
+        // 0. A call through a local or parameter, such as a `Fn` parameter,
+        // calls its value, as the interpreter does. Resolving the name could
+        // reach another function with the same short name instead.
+        if !fn_name.starts_with("::")
+            && let Some(&(var, kind)) = self.locals.get(fn_name.as_str())
+        {
+            if kind != RawKind::OwnedVal {
+                return Err(format!("JIT call through non-function local '{}'", fn_name));
+            }
+            let function = builder.use_var(var);
+            let halt_block = self.emit_vm_callback_by_name_raw(
+                builder,
+                dest,
+                function,
+                args_start,
+                args_count,
+                instructions,
+            )?;
+            self.jump_to_next(builder, ip)?;
+            if let Some(halt_block) = halt_block {
+                self.emit_halt_return(builder, halt_block);
+            }
+            return Ok(true);
+        }
         // 1. Try core intrinsic (explicit allowlist — deterministic)
         if let Some((result_kind, raw, cmp_halt_block)) = try_lower_known_core_call(
             builder,

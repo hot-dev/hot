@@ -1131,12 +1131,49 @@ pub enum ResultModifier {
     Vec,
 }
 
+/// A `where` clause: a one-candidate predicate that refines a type, or the
+/// arguments of a function. The predicate is a hidden function in the
+/// declaring namespace, so it is lowered, resolved and compiled like any
+/// other function.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+pub struct Refinement {
+    /// Qualified name of the hidden predicate function, such as
+    /// `::shop/$where-1a2b3c4d-3-15`.
+    pub predicate: String,
+    /// The predicate's source text, such as `between(%, 1, 65535)`.
+    pub source: String,
+    /// Location of the `where` clause.
+    pub src: Option<Source>,
+}
+
+/// Prefix of the hidden function that holds a `where` predicate.
+pub const WHERE_PREDICATE_PREFIX: &str = "$where-";
+/// Prefix of the hidden alias type that an inline `where` clause declares,
+/// as in `x: Int where gt(%, 0)`.
+pub const WHERE_TYPE_PREFIX: &str = "$Where-";
+
+/// True for the hidden alias type declared by an inline `where` clause.
+pub fn is_inline_refinement_type(name: &str) -> bool {
+    let short = name.rsplit('/').next().unwrap_or(name);
+    short.starts_with(WHERE_TYPE_PREFIX)
+}
+
+/// True for the hidden function that holds a `where` predicate.
+pub fn is_where_predicate(name: &str) -> bool {
+    let short = name.rsplit('/').next().unwrap_or(name);
+    short.starts_with(WHERE_PREDICATE_PREFIX)
+}
+
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct FnDef {
     pub args: FnArgs,
     pub body: Value,
     #[serde(default)]
     pub return_type: Option<String>,
+    /// Argument-list precondition: `fn (a: Int, b: Int) where lte(%.a, %.b)`.
+    /// Its candidate is a record of the bound arguments, keyed by parameter.
+    #[serde(default)]
+    pub precondition: Option<Refinement>,
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -1182,6 +1219,11 @@ pub struct TypeDef {
     /// Always `false` for non-enum `TypeDef`s.
     #[serde(default)]
     pub is_open: bool,
+    /// `where` clause of the declaration. On an alias (`Port type Int where
+    /// …`) it makes an untagged refinement whose values stay base values. On
+    /// a struct or enum it is a whole-value invariant.
+    #[serde(default)]
+    pub refinement: Option<Refinement>,
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -1213,6 +1255,9 @@ pub struct Lambda {
     pub body: Box<Value>, // Function body (usually a Flow)
     #[serde(default)]
     pub flow_type: Option<FlowType>, // Optional flow type for flow-based lambdas: serial(x) { ... }
+    /// Declared return type, as in `(s: Str): Int { … }`.
+    #[serde(default)]
+    pub return_type: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]

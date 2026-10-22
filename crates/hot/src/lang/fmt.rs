@@ -381,8 +381,11 @@ fn ensure_blank_line_after_declarations(input: &str) -> String {
             if j < lines.len() {
                 let next_content = lines[j].trim();
 
-                // If next content is `fn`, `type`, `enum`, or `ns`, skip all blank lines (no gap between } and keyword)
+                // If next content is `fn`, `type`, `enum`, `ns`, or a `where`
+                // clause continuing the declaration, skip all blank lines (no
+                // gap between } and keyword)
                 if next_content == "fn"
+                    || next_content.starts_with("where ")
                     || next_content.starts_with("fn ")
                     || next_content.starts_with("fn(")
                     || next_content == "type"
@@ -1463,6 +1466,24 @@ fn (data: Bytes): Str {
         assert!(result.contains("\nmeta {"));
         // fn should be on line after metadata
         assert!(result.contains("}\nfn"));
+    }
+
+    #[test]
+    fn test_where_clause_stays_with_its_declaration() {
+        // An expanded inline type keeps a `where` invariant on the next line
+        // attached, and the layout is stable.
+        for input in [
+            "Range type { start: Int, finish: Int }\n    where lte(%.start, %.finish)\n",
+            "Range type { start: Int, finish: Int } where lte(%.start, %.finish)\n",
+        ] {
+            let result = format_str(input, 4).unwrap();
+            assert!(
+                !result.contains("}\n\n"),
+                "a blank line separated the invariant: {result:?}"
+            );
+            assert!(result.contains("where lte(%.start, %.finish)"));
+            assert_formats_in_one_pass(input);
+        }
     }
 
     #[test]

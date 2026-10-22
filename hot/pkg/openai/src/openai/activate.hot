@@ -4,8 +4,10 @@ api-request ::openai::api/request
 HttpError ::openai::api/HttpError
 is-ok-response ::hot::http/is-ok-response
 
+CertificateObjectType type open "certificate" | "organization.certificate" | "organization.project.certificate"
+
 Certificate type {
-    object: "certificate" | "organization.certificate" | "organization.project.certificate",
+    object: CertificateObjectType,
     id: Str,
     name: Str,
     created_at: Int,

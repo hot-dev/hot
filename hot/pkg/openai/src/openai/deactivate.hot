@@ -8,8 +8,10 @@ ToggleCertificatesRequest type {
     certificate_ids: Vec<Str>
 }
 
+CertificateObjectType type open "certificate" | "organization.certificate" | "organization.project.certificate"
+
 Certificate type {
-    object: "certificate" | "organization.certificate" | "organization.project.certificate",
+    object: CertificateObjectType,
     id: Str,
     name: Str,
     created_at: Int,

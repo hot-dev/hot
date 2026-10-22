@@ -208,3 +208,87 @@ fn (msg: Str): Str { msg }
 
     internal_mcp::clear_registry();
 }
+
+/// `where` refinements export their canonical predicate shapes as JSON
+/// Schema keywords, describe the rest, and put an argument-list
+/// precondition in the tool description.
+#[test]
+fn test_schema_from_fn_where_refinements() {
+    let _g = TEST_LOCK.lock();
+    internal_mcp::clear_registry();
+
+    let src = r#"
+::demo ns
+
+CustomerId type Str where ::hot::regex/is-match(%, "^cus_[A-Za-z0-9]+$")
+InvoiceCents type Int where between(%, 50, 1000000)
+Memo type Str where lte(length(%), 500)
+Tags type Vec<Str> where between(length(%), 1, 5)
+DueDays type Int where valid-due-days(%)
+
+valid-due-days fn (days: Int): Bool {
+    and(gte(days, 1), lte(days, 90))
+}
+
+create-invoice meta {doc: "Create an invoice."}
+fn (
+    customer: CustomerId,
+    cents: InvoiceCents,
+    memo: Memo,
+    tags: Tags,
+    due: DueDays,
+    count: Int where gt(%, 0),
+)
+    where lte(%.count, 10)
+    : Map
+{
+    {customer: customer}
+}
+"#;
+    compile_and_extract(src);
+
+    let result = internal_mcp::schema_from_fn(&[function_ref("::demo/create-invoice".to_string())]);
+    let HotResult::Ok(Val::Map(map)) = result else {
+        panic!("expected Ok(Map), got: {:?}", result);
+    };
+    let Some(Val::Str(description)) = map.get(&Val::from("description")) else {
+        panic!("description missing: {:?}", map);
+    };
+    assert!(
+        description.ends_with("Arguments must satisfy: lte(%.count, 10)"),
+        "{description}"
+    );
+    let Some(Val::Map(input)) = map.get(&Val::from("input-schema")) else {
+        panic!("input-schema missing: {:?}", map);
+    };
+    let Some(Val::Map(props)) = input.get(&Val::from("properties")) else {
+        panic!("properties missing: {:?}", input);
+    };
+    let prop = |name: &str| match props.get(&Val::from(name)) {
+        Some(Val::Map(schema)) => schema.as_ref().clone(),
+        other => panic!("{name}: {other:?}"),
+    };
+    let customer = prop("customer");
+    assert_eq!(
+        customer.get(&Val::from("pattern")),
+        Some(&Val::from("^cus_[A-Za-z0-9]+$"))
+    );
+    let cents = prop("cents");
+    assert_eq!(cents.get(&Val::from("minimum")), Some(&Val::Int(50)));
+    assert_eq!(cents.get(&Val::from("maximum")), Some(&Val::Int(1000000)));
+    let memo = prop("memo");
+    assert_eq!(memo.get(&Val::from("maxLength")), Some(&Val::Int(500)));
+    let tags = prop("tags");
+    assert_eq!(tags.get(&Val::from("minItems")), Some(&Val::Int(1)));
+    assert_eq!(tags.get(&Val::from("maxItems")), Some(&Val::Int(5)));
+    let due = prop("due");
+    assert_eq!(
+        due.get(&Val::from("description")),
+        Some(&Val::from("Must satisfy: valid-due-days(%)"))
+    );
+    let count = prop("count");
+    assert_eq!(
+        count.get(&Val::from("exclusiveMinimum")),
+        Some(&Val::Int(0))
+    );
+}
