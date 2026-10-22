@@ -8,7 +8,7 @@ reports keeps its existing source queries and meaning.
 
 ## Storage and call ownership
 
-Migration 017 stores `call.env_id`, backfills it from the call's run, and makes
+Migration 013 stores `call.env_id`, backfills it from the call's run, and makes
 it required and immutable. PostgreSQL validates `(run_id, env_id)` against the
 run; SQLite checks that pair in a trigger. A runtime call write always supplies
 its trusted execution environment. Call policies and retention filters use
@@ -41,7 +41,7 @@ later observes all retained usage.
 
 ## Tasks and billing periods
 
-Migration 015 creates one `usage_task` row per environment. The row tracks:
+Migration 014 creates one `usage_task` row per environment. The row tracks:
 
 - active containers, reserved compute units and reserved milliseconds at all times;
 - one `period_start` and completed compute units/milliseconds since that start.
@@ -197,11 +197,13 @@ throughput and proxy behavior require deployment-specific measurements.
 A populated copy of the baseline was upgraded with SET ROLE to a schema owner
 that has neither SUPERUSER nor BYPASSRLS. On 103,000 rows per source table,
 adding/initializing task counters took 0.095 s, adding the lazy run counter took
-0.027 s, and migration 017 (call environment/size rewrite, ownership constraint,
-indexes, storage triggers and initial totals) took 5.463 s. Each phase committed
-separately, matching migration boundaries. Source bytes, active-task counts and
-call ownership matched after commit. This measures the counter additions to
-015/016 and the complete revised 017, not the earlier migration chain. Full
+0.027 s, and the call environment/size rewrite, ownership constraint, indexes,
+storage triggers and initial totals took 5.463 s. Each phase committed
+separately, matching the migration boundaries at the time; the call rewrite and
+ownership constraint now run in 013, before it installs RLS, and the counters
+and storage totals in 014. Source bytes, active-task counts and call ownership
+matched after commit. This measured the counter additions and the complete
+revised call accounting, not the earlier migration chain. Full
 SQLx upgrades and refusal/rollback paths are covered independently by tests.
 These fixture times do not size a production maintenance window: rehearse on a
 recent snapshot with representative history, account count, storage and WAL.

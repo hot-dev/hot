@@ -273,28 +273,13 @@ impl ExistingRows {
 
 #[tokio::test]
 async fn sqlite_upgrades_preserve_populated_data_and_delegated_credentials() -> TestResult {
-    for baseline in [9, 17] {
+    for baseline in [9, 13] {
         let directory = tempfile::tempdir()?;
         let path = directory.path().join("existing.db");
         let pool = existing_database(&path, baseline).await?;
         let rows = ExistingRows::seed(&pool).await?;
-        if baseline < 17 {
-            migrations_through(17).await?.run(&pool).await?;
-            let admission: (Uuid, Uuid, Uuid, String) = sqlx::query_as(
-                "SELECT root_org_id,org_id,env_id,admitted_at FROM run_admission WHERE run_id=?",
-            )
-            .bind(rows.run)
-            .fetch_one(&pool)
-            .await?;
-            assert_eq!(
-                admission,
-                (
-                    rows.org,
-                    rows.org,
-                    rows.env,
-                    "2026-09-01 12:00:00".to_string()
-                )
-            );
+        if baseline < 13 {
+            migrations_through(13).await?.run(&pool).await?;
             let trace_size: i64 = sqlx::query_scalar("SELECT size FROM call WHERE call_id=?")
                 .bind(rows.call)
                 .fetch_one(&pool)
@@ -323,6 +308,22 @@ async fn sqlite_upgrades_preserve_populated_data_and_delegated_credentials() -> 
             upgraded.len(),
             migrations_through(i64::MAX).await?.migrations.len()
         );
+        // Both baselines precede 014, which backfills admissions from runs.
+        let admission: (Uuid, Uuid, Uuid, String) = sqlx::query_as(
+            "SELECT root_org_id,org_id,env_id,admitted_at FROM run_admission WHERE run_id=?",
+        )
+        .bind(rows.run)
+        .fetch_one(&pool)
+        .await?;
+        assert_eq!(
+            admission,
+            (
+                rows.org,
+                rows.org,
+                rows.env,
+                "2026-09-01 12:00:00".to_string()
+            )
+        );
         rows.assert_preserved_and_protected(&pool).await?;
         pool.close().await;
         // A real deployment retry must neither replay DDL nor alter checksums.
@@ -335,12 +336,11 @@ async fn sqlite_upgrades_preserve_populated_data_and_delegated_credentials() -> 
 }
 
 #[tokio::test]
-async fn sqlite_018_rejects_legacy_mismatches_atomically_and_allows_reviewed_retry() -> TestResult {
+async fn sqlite_013_rejects_legacy_mismatches_atomically_and_allows_reviewed_retry() -> TestResult {
     for mismatch in ["destination_org", "subscription_org", "subscription_env"] {
         let directory = tempfile::tempdir()?;
-        let pool = existing_database(&directory.path().join("existing.db"), 17).await?;
+        let pool = existing_database(&directory.path().join("existing.db"), 12).await?;
         let rows = ExistingRows::seed(&pool).await?;
-        rows.add_delegated_issuer(&pool).await?;
         match mismatch {
             "destination_org" => {
                 sqlx::query("UPDATE alert_delivery SET destination_id=? WHERE alert_delivery_id=?")
@@ -373,9 +373,9 @@ async fn sqlite_018_rejects_legacy_mismatches_atomically_and_allows_reviewed_ret
             .run(&pool)
             .await
             .unwrap_err();
-        assert!(error.to_string().contains("18"), "{mismatch}: {error}");
+        assert!(error.to_string().contains("13"), "{mismatch}: {error}");
         assert_eq!(ledger(&pool).await?, before);
-        let installed: i64 = sqlx::query_scalar("SELECT count(*) FROM sqlite_master WHERE name IN ('alert_delivery_scope_insert','alert_delivery_scope_update','management_key_scope_immutable','delegated_api_key_no_delete','api_key_management_issuer_no_delete')")
+        let installed: i64 = sqlx::query_scalar("SELECT count(*) FROM sqlite_master WHERE name IN ('management_key','call_environment_insert','alert_delivery_scope_insert','alert_delivery_scope_update','management_key_scope_immutable','delegated_api_key_no_delete','api_key_management_issuer_no_delete')")
             .fetch_one(&pool).await?;
         assert_eq!(
             installed, 0,
@@ -420,6 +420,7 @@ async fn sqlite_018_rejects_legacy_mismatches_atomically_and_allows_reviewed_ret
         .execute(&pool)
         .await?;
         migrations_through(i64::MAX).await?.run(&pool).await?;
+        rows.add_delegated_issuer(&pool).await?;
         rows.assert_preserved_and_protected(&pool).await?;
         pool.close().await;
     }
@@ -458,7 +459,7 @@ async fn runtime_reference(
 }
 
 #[tokio::test]
-async fn sqlite_019_rejects_retained_cross_environment_origins_and_events() -> TestResult {
+async fn sqlite_013_rejects_retained_cross_environment_origins_and_events() -> TestResult {
     for mismatch in [
         "run_origin_environment",
         "task_origin_environment",
@@ -500,13 +501,13 @@ async fn sqlite_019_rejects_retained_cross_environment_origins_and_events() -> T
             .run(&pool)
             .await
             .unwrap_err();
-        assert!(error.to_string().contains("19"), "{error}");
+        assert!(error.to_string().contains("13"), "{error}");
         assert!(error.to_string().contains(mismatch), "{error}");
         let before_retry = ledger(&pool).await?;
-        assert_eq!(before_retry.last().map(|row| row.0), Some(18));
+        assert_eq!(before_retry.last().map(|row| row.0), Some(12));
         assert_eq!(
             before_retry.len(),
-            18,
+            12,
             "earlier migrations remain committed"
         );
         let temporary: i64 = sqlx::query_scalar(
@@ -517,10 +518,7 @@ async fn sqlite_019_rejects_retained_cross_environment_origins_and_events() -> T
         assert_eq!(temporary, 0);
         let installed: i64 = sqlx::query_scalar("SELECT count(*) FROM sqlite_master WHERE name IN ('alert_delivery_scope_insert','delegated_api_key_no_delete')")
             .fetch_one(&pool).await?;
-        assert_eq!(
-            installed, 2,
-            "migration 018 remains installed after 019 fails"
-        );
+        assert_eq!(installed, 0, "013 must roll back as a whole");
         let (retained_id, repaired_id) = match mismatch {
             "run_origin_environment" => {
                 let retained =

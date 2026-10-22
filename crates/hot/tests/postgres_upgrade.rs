@@ -3,7 +3,7 @@
 //! creates its own database plus NOSUPERUSER/NOBYPASSRLS owner/runtime logins.
 //! Requires psql to exercise the actual operator provisioning script.
 
-use hot::db::{self, DatabasePool, DatabaseScope, MaintenanceOperation, ScopedPgPool};
+use hot::db::{self, DatabasePool, DatabaseScope, MaintenanceOperation};
 use sqlx::{Executor, PgPool, migrate::Migrator, postgres::PgPoolOptions};
 use std::{
     path::{Path, PathBuf},
@@ -592,11 +592,11 @@ async fn populated_upgrades_use_non_bypass_owner_and_reprovision_runtime_grants(
     let Ok(admin_uri) = std::env::var("HOT_TEST_POSTGRES_URI") else {
         return Ok(());
     };
-    for baseline in [9, 17, 19] {
+    for baseline in [9, 12, 13] {
         let fixture = UpgradeDatabase::new(&admin_uri, baseline).await?;
         let result: TestResult = async {
             let rows = ExistingRows::seed(&fixture.admin).await?;
-            if baseline >= 14 { rows.add_delegated_issuer(&fixture.admin).await?; }
+            if baseline >= 13 { rows.add_delegated_issuer(&fixture.admin).await?; }
             let old_ledger = ledger(&fixture.owner).await?;
             let owner_privileged: bool = sqlx::query_scalar("SELECT rolsuper OR rolbypassrls OR rolcreaterole OR rolcreatedb FROM pg_roles WHERE rolname=current_user")
                 .fetch_one(&fixture.owner).await?;
@@ -607,11 +607,13 @@ async fn populated_upgrades_use_non_bypass_owner_and_reprovision_runtime_grants(
             assert_latest_ledger(&fixture.owner).await?;
             fixture.upgrade().await?;
             assert_eq!(ledger(&fixture.owner).await?, final_ledger);
-            if baseline < 14 { rows.add_delegated_issuer(&fixture.admin).await?; }
-            if baseline < 16 {
-                let admission: (Uuid,Uuid,Uuid,bool) = sqlx::query_as("SELECT root_org_id,org_id,env_id,admitted_at='2026-09-01 12:00:00+00'::timestamptz FROM run_admission WHERE run_id=$1")
-                    .bind(rows.run).fetch_one(&fixture.admin).await?;
-                assert_eq!(admission,(rows.org,rows.org,rows.env,true));
+            if baseline < 13 { rows.add_delegated_issuer(&fixture.admin).await?; }
+            // Every baseline precedes 014, which backfills admissions; 013
+            // reconciles the sizes of traces written before it.
+            let admission: (Uuid,Uuid,Uuid,bool) = sqlx::query_as("SELECT root_org_id,org_id,env_id,admitted_at='2026-09-01 12:00:00+00'::timestamptz FROM run_admission WHERE run_id=$1")
+                .bind(rows.run).fetch_one(&fixture.admin).await?;
+            assert_eq!(admission,(rows.org,rows.org,rows.env,true));
+            if baseline < 13 {
                 let trace_size: i64 = sqlx::query_scalar("SELECT size FROM call WHERE call_id=$1").bind(rows.call).fetch_one(&fixture.admin).await?;
                 assert_eq!(trace_size, 59);
             }
@@ -641,18 +643,17 @@ async fn populated_upgrades_use_non_bypass_owner_and_reprovision_runtime_grants(
 }
 
 #[tokio::test]
-async fn migration_018_failure_rolls_back_all_ddl_then_retries_after_explicit_repair() -> TestResult
-{
+async fn alert_delivery_mismatch_aborts_013_and_rolls_back_all_ddl_then_retries_after_repair()
+-> TestResult {
     let Ok(admin_uri) = std::env::var("HOT_TEST_POSTGRES_URI") else {
         return Ok(());
     };
     for mismatch in ["destination", "subscription_org", "subscription_env"] {
-        let fixture = UpgradeDatabase::new(&admin_uri, 17).await?;
+        let fixture = UpgradeDatabase::new(&admin_uri, 12).await?;
         let result: TestResult = async {
             let rows = ExistingRows::seed(&fixture.admin).await?;
-            rows.add_delegated_issuer(&fixture.admin).await?;
-            // An existing 017 application could create these references because
-            // FK checks bypass RLS and only check existence, not owner equality.
+            // Existing data can hold these references because FK checks only
+            // check existence, not owner equality.
             if mismatch == "destination" {
                 sqlx::query("UPDATE alert_delivery SET destination_id=$1 WHERE alert_delivery_id=$2")
                     .bind(rows.other_destination).bind(rows.delivery).execute(&fixture.admin).await?;
@@ -673,22 +674,16 @@ async fn migration_018_failure_rolls_back_all_ddl_then_retries_after_explicit_re
             let delivery: (Uuid,Uuid) = sqlx::query_as("SELECT subscription_id,destination_id FROM alert_delivery WHERE alert_delivery_id=$1")
                 .bind(rows.delivery).fetch_one(&fixture.admin).await?;
             assert_eq!(delivery,old_delivery,"failed migration must preserve evidence");
-            let policy: String = sqlx::query_scalar("SELECT qual FROM pg_policies WHERE schemaname='hot' AND tablename='management_key' AND policyname='management_key_read'")
+            let rolled_back: (bool,bool,bool) = sqlx::query_as("SELECT to_regclass('hot.management_key') IS NULL, NOT relrowsecurity, NOT EXISTS(SELECT 1 FROM information_schema.columns WHERE table_schema='hot' AND table_name='call' AND column_name='env_id') FROM pg_class WHERE oid='hot.alert_delivery'::regclass")
                 .fetch_one(&fixture.owner).await?;
-            assert!(policy.contains("scope_org_allows"),"policy alteration must roll back");
-            let cascade: bool = sqlx::query_scalar("SELECT confdeltype='c' FROM pg_constraint WHERE conrelid='hot.api_key_management_issuer'::regclass AND conname='api_key_management_issuer_api_key_id_fkey'")
-                .fetch_one(&fixture.owner).await?;
-            assert!(cascade,"FK replacement must roll back");
-            let guard_count: i64 = sqlx::query_scalar("SELECT count(*) FROM pg_trigger WHERE tgrelid='hot.management_key'::regclass AND tgname='immutable_resource_scope'")
-                .fetch_one(&fixture.owner).await?;
-            assert_eq!(guard_count,0);
-            // Explicit fixture repair uses named maintenance authority under
-            // FORCE RLS. Production operators must investigate their own data.
-            let repair = ScopedPgPool::new(fixture.owner.clone()).with_scope(DatabaseScope::Maintenance { operation: MaintenanceOperation::Alerts, org_id: None });
+            assert_eq!(rolled_back,(true,true,true),"013 must roll back as a whole");
+            // Nothing enforces RLS before 013, so the fixture repairs directly.
+            // Production operators must investigate their own data.
             sqlx::query("UPDATE alert_delivery SET subscription_id=$1,destination_id=$2 WHERE alert_delivery_id=$3")
-                .bind(rows.subscription).bind(rows.destination).bind(rows.delivery).execute(&repair).await?;
+                .bind(rows.subscription).bind(rows.destination).bind(rows.delivery).execute(&fixture.owner).await?;
             fixture.upgrade().await?;
             assert_latest_ledger(&fixture.owner).await?;
+            rows.add_delegated_issuer(&fixture.admin).await?;
             fixture.provision_ok().await?;
             assert_runtime_contract(&fixture,&rows).await?;
             Ok(())
@@ -704,7 +699,7 @@ async fn provisioning_rejects_shared_and_set_role_privileges_atomically() -> Tes
     let Ok(admin_uri) = std::env::var("HOT_TEST_POSTGRES_URI") else {
         return Ok(());
     };
-    let fixture = UpgradeDatabase::new(&admin_uri, 17).await?;
+    let fixture = UpgradeDatabase::new(&admin_uri, 13).await?;
     let result: TestResult = async {
         fixture.upgrade().await?;
         assert_latest_ledger(&fixture.owner).await?;
@@ -751,7 +746,7 @@ async fn provisioning_rejects_shared_and_set_role_privileges_atomically() -> Tes
 }
 
 #[tokio::test]
-async fn retained_cross_environment_origins_abort_019_without_rewriting_history() -> TestResult {
+async fn retained_cross_environment_origins_abort_013_without_rewriting_history() -> TestResult {
     let Ok(admin_uri) = std::env::var("HOT_TEST_POSTGRES_URI") else {
         return Ok(());
     };
@@ -800,20 +795,19 @@ async fn retained_cross_environment_origins_abort_019_without_rewriting_history(
             let error = fixture.upgrade().await.unwrap_err().to_string();
             assert!(error.contains(diagnostic),"{error}");
             let committed = ledger(&fixture.owner).await?;
-            assert_eq!(committed.last().unwrap().0,18,"earlier transactional migrations remain committed");
+            assert_eq!(committed.last().unwrap().0,12,"earlier transactional migrations remain committed");
             let retained: Uuid = sqlx::query_scalar(read_sql).bind(record).fetch_one(&fixture.admin).await?;
             assert_eq!(retained,original);
-            let policy: String = sqlx::query_scalar("SELECT qual FROM pg_policies WHERE schemaname='hot' AND tablename='management_key' AND policyname='management_key_read'")
+            let isolated: bool = sqlx::query_scalar("SELECT to_regclass('hot.management_key') IS NOT NULL")
                 .fetch_one(&fixture.owner).await?;
-            assert!(policy.contains("scope_org_writes"),"018 must remain enforced");
-            let repair = ScopedPgPool::new(fixture.owner.clone()).with_scope(DatabaseScope::Maintenance { operation: MaintenanceOperation::Queue, org_id: None });
+            assert!(!isolated,"013 must roll back as a whole");
             let valid_target = if mismatch == "run_event" { local_event } else { local_run };
-            sqlx::query(repair_sql).bind(record).bind(valid_target).execute(&repair).await?;
+            sqlx::query(repair_sql).bind(record).bind(valid_target).execute(&fixture.owner).await?;
             fixture.upgrade().await?;
             assert!(ledger(&fixture.owner).await?.starts_with(&committed));
             assert_latest_ledger(&fixture.owner).await?;
             let retained: Uuid = sqlx::query_scalar(read_sql).bind(record).fetch_one(&fixture.admin).await?;
-            assert_eq!(retained,valid_target,"valid non-NULL relationships must survive FORCE RLS preflight");
+            assert_eq!(retained,valid_target,"valid non-NULL relationships must survive the preflight");
             fixture.provision_ok().await?;
             let raw = connect(&fixture.runtime_uri).await?;
             db::rls::validate_runtime_role(&raw,"hot").await?;
@@ -831,10 +825,10 @@ async fn bypass_rls_migrations_initialize_each_account_counter_once() -> TestRes
     let Ok(admin_uri) = std::env::var("HOT_TEST_POSTGRES_URI") else {
         return Ok(());
     };
-    let fixture = UpgradeDatabase::new(&admin_uri, 16).await?;
+    let fixture = UpgradeDatabase::new(&admin_uri, 12).await?;
     let result: TestResult = async {
         // Two accounts with stored bytes: the first holds a trace, the second a
-        // store entry. A superuser sees both accounts in every 017 pass.
+        // store entry. A superuser sees both accounts in every 014 pass.
         let rows = ExistingRows::seed(&fixture.admin).await?;
         sqlx::query("INSERT INTO store_map_entry(org_id,env_id,store_name,key,value,size) VALUES($1,$2,'retained','\"k\"','\"v\"',40)")
             .bind(rows.other_org).bind(rows.other_env).execute(&fixture.admin).await?;

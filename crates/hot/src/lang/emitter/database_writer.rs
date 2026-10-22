@@ -2683,9 +2683,8 @@ mod tests {
             .execute(pool)
             .await
             .unwrap();
-        let migration = include_str!(
-            "../../../../../resources/db/sqlite/migrations/017_call_storage_accounting.sql"
-        );
+        let migration =
+            include_str!("../../../../../resources/db/sqlite/migrations/013_scope_isolation.sql");
         let start = migration.find("UPDATE call SET").unwrap();
         let end = start + migration[start..].find(';').unwrap() + 1;
         sqlx::raw_sql(&migration[start..end])

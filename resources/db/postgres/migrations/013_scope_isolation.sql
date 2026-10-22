@@ -1,5 +1,7 @@
--- Refuse enforcement over inconsistent existing ownership. This runs before
--- any RLS policy is installed and reports the table requiring operator repair.
+-- Refuse enforcement over inconsistent existing ownership, including retained
+-- runtime references and alert deliveries. This runs before any change and
+-- reports the table requiring operator repair. Preserve the rows for an
+-- explicit, reviewed repair and retry.
 DO $$
 DECLARE table_name text; invalid_rows bigint;
 BEGIN
@@ -38,7 +40,55 @@ BEGIN
         JOIN hot.alert_destination d ON d.alert_destination_id=l.destination_id
         WHERE d.org_id<>s.org_id;
     IF invalid_rows > 0 THEN RAISE EXCEPTION 'Scope preflight: alert subscription has % cross-org destination links', invalid_rows; END IF;
+    SELECT count(*) INTO invalid_rows FROM hot.run r
+        LEFT JOIN hot.run origin ON origin.run_id = r.origin_run_id
+        WHERE r.origin_run_id IS NOT NULL
+          AND (origin.run_id IS NULL OR r.env_id <> origin.env_id);
+    IF invalid_rows > 0 THEN RAISE EXCEPTION 'Scope preflight: run has % origin-run/env ownership mismatches', invalid_rows; END IF;
+    SELECT count(*) INTO invalid_rows FROM hot.task t
+        LEFT JOIN hot.run origin ON origin.run_id = t.origin_run_id
+        WHERE t.origin_run_id IS NOT NULL
+          AND (origin.run_id IS NULL OR t.env_id <> origin.env_id);
+    IF invalid_rows > 0 THEN RAISE EXCEPTION 'Scope preflight: task has % origin-run/env ownership mismatches', invalid_rows; END IF;
+    SELECT count(*) INTO invalid_rows FROM hot.run r
+        LEFT JOIN hot.event e ON e.event_id = r.event_id
+        WHERE r.event_id IS NOT NULL
+          AND (e.event_id IS NULL OR r.env_id <> e.env_id);
+    IF invalid_rows > 0 THEN RAISE EXCEPTION 'Scope preflight: run has % event/env ownership mismatches', invalid_rows; END IF;
+    -- Foreign-key checks bypass RLS, so a delivery could reference another
+    -- environment's alert, subscription or destination.
+    IF EXISTS (
+        SELECT 1 FROM hot.alert_delivery d
+        JOIN hot.alert a ON a.alert_id = d.alert_id
+        JOIN hot.alert_subscription s ON s.alert_subscription_id = d.subscription_id
+        JOIN hot.alert_destination t ON t.alert_destination_id = d.destination_id
+        WHERE s.org_id <> a.org_id OR t.org_id <> a.org_id
+           OR (s.env_id IS NOT NULL AND s.env_id <> a.env_id)
+    ) THEN
+        RAISE EXCEPTION 'Existing alert delivery ownership mismatch';
+    END IF;
 END $$;
+
+-- Store each call's environment so trace isolation and retention do not join
+-- through run. The same pass reconciles historical trace sizes, which 014's
+-- storage accounting sums.
+ALTER TABLE hot.call ADD COLUMN env_id uuid;
+UPDATE hot.call c SET env_id = r.env_id, size =
+    COALESCE(octet_length(c.args::text), 0)::bigint +
+    COALESCE(octet_length(c.return_value::text), 0) +
+    COALESCE(octet_length(c.flow::text), 0) +
+    COALESCE(octet_length(c.error), 0) + 50
+FROM hot.run r
+WHERE r.run_id = c.run_id;
+-- Keep trace ownership local to each row, including cascaded retention deletes.
+ALTER TABLE hot.call ALTER COLUMN env_id SET NOT NULL;
+CREATE UNIQUE INDEX run_env_ownership_idx ON hot.run(run_id, env_id);
+ALTER TABLE hot.call ADD CONSTRAINT call_run_environment_fk
+    FOREIGN KEY (run_id, env_id) REFERENCES hot.run(run_id, env_id) ON DELETE CASCADE;
+-- The composite key also enforces run existence. Keep one parent check and
+-- one cascade path rather than retaining the redundant original foreign key.
+ALTER TABLE hot.call DROP CONSTRAINT call_run_id_fkey;
+CREATE INDEX call_env_start_time_idx ON hot.call(env_id, start_time);
 
 -- Scope is set only by trusted backend executors, transaction-locally.
 -- This migration deliberately creates no login roles and grants no BYPASSRLS.
@@ -349,10 +399,10 @@ CREATE POLICY hot_scope_delete ON hot."build" FOR DELETE USING ((EXISTS (SELECT 
 -- call: separate SELECT and mutation grants; a read set is never a write grant.
 ALTER TABLE hot."call" ENABLE ROW LEVEL SECURITY;
 ALTER TABLE hot."call" FORCE ROW LEVEL SECURITY;
-CREATE POLICY hot_scope_read ON hot."call" FOR SELECT USING ((EXISTS (SELECT 1 FROM hot.run p WHERE p.run_id = call.run_id)) OR (hot.scope_maintenance('retention')));
-CREATE POLICY hot_scope_insert ON hot."call" FOR INSERT WITH CHECK (((EXISTS (SELECT 1 FROM hot.run p WHERE p.run_id = call.run_id)) AND (hot.scope_mode() = 'environment' OR hot.scope_maintenance('queue') OR hot.scope_maintenance('scheduler') OR hot.scope_maintenance('retention') OR hot.scope_maintenance('alerts'))) OR (hot.scope_maintenance('retention')));
-CREATE POLICY hot_scope_update ON hot."call" FOR UPDATE USING (((EXISTS (SELECT 1 FROM hot.run p WHERE p.run_id = call.run_id)) AND (hot.scope_mode() = 'environment' OR hot.scope_maintenance('queue') OR hot.scope_maintenance('scheduler') OR hot.scope_maintenance('retention') OR hot.scope_maintenance('alerts'))) OR (hot.scope_maintenance('retention'))) WITH CHECK (((EXISTS (SELECT 1 FROM hot.run p WHERE p.run_id = call.run_id)) AND (hot.scope_mode() = 'environment' OR hot.scope_maintenance('queue') OR hot.scope_maintenance('scheduler') OR hot.scope_maintenance('retention') OR hot.scope_maintenance('alerts'))) OR (hot.scope_maintenance('retention')));
-CREATE POLICY hot_scope_delete ON hot."call" FOR DELETE USING (((EXISTS (SELECT 1 FROM hot.run p WHERE p.run_id = call.run_id)) AND (hot.scope_mode() = 'environment' OR hot.scope_maintenance('queue') OR hot.scope_maintenance('scheduler') OR hot.scope_maintenance('retention') OR hot.scope_maintenance('alerts'))) OR (hot.scope_maintenance('retention')));
+CREATE POLICY hot_scope_read ON hot."call" FOR SELECT USING ((hot.scope_env_allows(env_id) OR (hot.scope_maintenance('queue') OR hot.scope_maintenance('scheduler') OR hot.scope_maintenance('retention') OR hot.scope_maintenance('alerts')) OR hot.scope_billing_env(env_id)));
+CREATE POLICY hot_scope_insert ON hot."call" FOR INSERT WITH CHECK ((hot.scope_env_writes(env_id) OR (hot.scope_maintenance('queue') OR hot.scope_maintenance('scheduler') OR hot.scope_maintenance('retention') OR hot.scope_maintenance('alerts'))));
+CREATE POLICY hot_scope_update ON hot."call" FOR UPDATE USING ((hot.scope_env_writes(env_id) OR (hot.scope_maintenance('queue') OR hot.scope_maintenance('scheduler') OR hot.scope_maintenance('retention') OR hot.scope_maintenance('alerts')))) WITH CHECK ((hot.scope_env_writes(env_id) OR (hot.scope_maintenance('queue') OR hot.scope_maintenance('scheduler') OR hot.scope_maintenance('retention') OR hot.scope_maintenance('alerts'))));
+CREATE POLICY hot_scope_delete ON hot."call" FOR DELETE USING ((hot.scope_env_writes(env_id) OR (hot.scope_maintenance('queue') OR hot.scope_maintenance('scheduler') OR hot.scope_maintenance('retention') OR hot.scope_maintenance('alerts'))));
 
 -- event_handler: separate SELECT and mutation grants; a read set is never a write grant.
 ALTER TABLE hot."event_handler" ENABLE ROW LEVEL SECURITY;
@@ -664,9 +714,6 @@ CREATE TRIGGER immutable_resource_scope BEFORE UPDATE ON hot.domain
 CREATE TRIGGER immutable_resource_scope BEFORE UPDATE ON hot.schedule
     FOR EACH ROW WHEN (OLD.build_id IS DISTINCT FROM NEW.build_id)
     EXECUTE FUNCTION hot.prevent_scope_reassignment('build_id');
-CREATE TRIGGER immutable_resource_scope BEFORE UPDATE ON hot.webhook
-    FOR EACH ROW WHEN (OLD.build_id IS DISTINCT FROM NEW.build_id)
-    EXECUTE FUNCTION hot.prevent_scope_reassignment('build_id');
 CREATE TRIGGER immutable_resource_scope BEFORE UPDATE ON hot.mcp_tool
     FOR EACH ROW WHEN (OLD.build_id IS DISTINCT FROM NEW.build_id)
     EXECUTE FUNCTION hot.prevent_scope_reassignment('build_id');
@@ -778,5 +825,101 @@ CREATE TRIGGER resource_scope_integrity BEFORE INSERT OR UPDATE ON hot.alert
 CREATE TRIGGER resource_scope_integrity BEFORE INSERT OR UPDATE ON hot.context
     FOR EACH ROW EXECUTE FUNCTION hot.enforce_resource_scope();
 CREATE TRIGGER immutable_resource_scope BEFORE UPDATE ON hot.call
-    FOR EACH ROW WHEN (OLD.run_id IS DISTINCT FROM NEW.run_id)
-    EXECUTE FUNCTION hot.prevent_scope_reassignment('run_id');
+    FOR EACH ROW WHEN ((OLD.run_id, OLD.env_id) IS DISTINCT FROM (NEW.run_id, NEW.env_id))
+    EXECUTE FUNCTION hot.prevent_scope_reassignment('run_id', 'env_id');
+
+-- Management credentials are account control data. An environment of the root
+-- organization must not gain account authority merely by sharing its org_id.
+CREATE TABLE hot.management_key (
+    management_key_id uuid PRIMARY KEY,
+    root_org_id uuid NOT NULL REFERENCES hot.org(org_id),
+    created_by_user_id uuid NOT NULL REFERENCES hot."user"(user_id),
+    name text NOT NULL,
+    secret_hash bytea NOT NULL,
+    capabilities jsonb NOT NULL,
+    target_org_ids jsonb NOT NULL DEFAULT '[]'::jsonb,
+    all_children boolean NOT NULL DEFAULT false,
+    delegation_permissions jsonb,
+    expires_at timestamptz NOT NULL,
+    revoked_at timestamptz,
+    created_at timestamptz NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX management_key_root_idx ON hot.management_key(root_org_id);
+-- A cascade would let an environment delete and recreate a delegated API key
+-- without its issuer, laundering the management ceiling and revocation chain.
+-- Delegated keys are revoked using active=false; physical deletion requires
+-- administrative removal of the protected issuer record first.
+CREATE TABLE hot.api_key_management_issuer (
+    api_key_id uuid PRIMARY KEY REFERENCES hot.api_key(api_key_id) ON DELETE RESTRICT,
+    management_key_id uuid NOT NULL REFERENCES hot.management_key(management_key_id),
+    created_at timestamptz NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX api_key_management_issuer_key_idx ON hot.api_key_management_issuer(management_key_id);
+
+ALTER TABLE hot.management_key ENABLE ROW LEVEL SECURITY;
+ALTER TABLE hot.management_key FORCE ROW LEVEL SECURITY;
+CREATE POLICY management_key_read ON hot.management_key FOR SELECT USING (
+    hot.scope_bootstrap('authentication') OR hot.scope_org_writes(root_org_id)
+);
+CREATE POLICY management_key_insert ON hot.management_key FOR INSERT WITH CHECK (hot.scope_org_writes(root_org_id));
+CREATE POLICY management_key_update ON hot.management_key FOR UPDATE USING (hot.scope_org_writes(root_org_id)) WITH CHECK (hot.scope_org_writes(root_org_id));
+CREATE TRIGGER immutable_resource_scope BEFORE UPDATE ON hot.management_key
+    FOR EACH ROW WHEN (OLD.root_org_id IS DISTINCT FROM NEW.root_org_id)
+    EXECUTE FUNCTION hot.prevent_scope_reassignment('root_org_id');
+ALTER TABLE hot.api_key_management_issuer ENABLE ROW LEVEL SECURITY;
+ALTER TABLE hot.api_key_management_issuer FORCE ROW LEVEL SECURITY;
+CREATE POLICY api_key_management_issuer_read ON hot.api_key_management_issuer FOR SELECT USING (
+    hot.scope_bootstrap('authentication') OR EXISTS (
+        SELECT 1 FROM hot.api_key k WHERE k.api_key_id = api_key_management_issuer.api_key_id AND hot.scope_env_allows(k.env_id)
+    )
+);
+CREATE POLICY api_key_management_issuer_insert ON hot.api_key_management_issuer FOR INSERT WITH CHECK (
+    EXISTS (SELECT 1 FROM hot.api_key k WHERE k.api_key_id = api_key_management_issuer.api_key_id AND hot.scope_env_writes(k.env_id))
+);
+-- No UPDATE or DELETE policy: runtime-key issuer lineage cannot be detached or
+-- reassigned.
+
+-- Foreign-key checks bypass RLS. A delivery must not attach an alert to a
+-- foreign subscription or destination, including another environment of the
+-- same org.
+CREATE FUNCTION hot.enforce_alert_delivery_scope() RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM hot.alert a
+        JOIN hot.alert_subscription s ON s.alert_subscription_id = NEW.subscription_id
+        JOIN hot.alert_destination d ON d.alert_destination_id = NEW.destination_id
+        WHERE a.alert_id = NEW.alert_id AND s.org_id = a.org_id AND d.org_id = a.org_id
+          AND (s.env_id IS NULL OR s.env_id = a.env_id)
+    ) THEN
+        RAISE EXCEPTION 'Alert delivery ownership mismatch' USING ERRCODE = '42501';
+    END IF;
+    RETURN NEW;
+END $$;
+CREATE TRIGGER resource_scope_integrity BEFORE INSERT OR UPDATE ON hot.alert_delivery
+    FOR EACH ROW EXECUTE FUNCTION hot.enforce_alert_delivery_scope();
+CREATE TRIGGER immutable_resource_scope BEFORE UPDATE ON hot.alert_delivery
+    FOR EACH ROW WHEN ((OLD.alert_id, OLD.subscription_id, OLD.destination_id) IS DISTINCT FROM (NEW.alert_id, NEW.subscription_id, NEW.destination_id))
+    EXECUTE FUNCTION hot.prevent_scope_reassignment('alert_id', 'subscription_id', 'destination_id');
+
+-- Webhook IDs are stable capabilities reused across builds of one project.
+-- Redeployment therefore changes build_id without changing resource ownership.
+-- Keep the project boundary immutable; build.project_id, project.env_id and
+-- env.org_id already have their own immutable ownership guards.
+CREATE FUNCTION hot.prevent_webhook_project_reassignment() RETURNS trigger
+LANGUAGE plpgsql SECURITY INVOKER SET search_path = pg_catalog, hot AS $$
+BEGIN
+    IF NEW.build_id IS DISTINCT FROM OLD.build_id AND NOT EXISTS (
+        SELECT 1 FROM hot.build previous
+        JOIN hot.build replacement ON replacement.project_id = previous.project_id
+        WHERE previous.build_id = OLD.build_id AND replacement.build_id = NEW.build_id
+    ) THEN
+        -- This invoker query also fails closed when either build is hidden by
+        -- RLS or missing. A maintenance scope cannot move a webhook to another
+        -- project merely because it can see and update both rows.
+        RAISE EXCEPTION 'Webhook project ownership is immutable' USING ERRCODE = '42501';
+    END IF;
+    RETURN NEW;
+END $$;
+CREATE TRIGGER immutable_resource_scope BEFORE UPDATE ON hot.webhook
+    FOR EACH ROW WHEN (OLD.build_id IS DISTINCT FROM NEW.build_id)
+    EXECUTE FUNCTION hot.prevent_webhook_project_reassignment();

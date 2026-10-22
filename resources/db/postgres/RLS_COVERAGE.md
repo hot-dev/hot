@@ -61,13 +61,13 @@ Reference tables deliberately have no RLS; runtime receives SELECT only:
 `alert_delivery_status`, `alert_destination_type`, `plan`.
 
 SQLx migration metadata is deployment control state and receives no runtime grants.
-Management credential tables introduced by migration 014 carry their own policies.
+Management credential tables in migration 013 carry their own policies.
 
 | Added control table | Ownership and operation |
 | --- | --- |
 | `account_request_window` | Exact root; Billing only (013) |
-| `management_key` | Exact root Organization; Authentication read; immutable root (014, tightened by 018) |
-| `api_key_management_issuer` | API key environment (writes need an exact environment scope); Authentication read; immutable issuer; delegated parent deletion restricted (014, 018) |
+| `management_key` | Exact root Organization; Authentication read; immutable root (013) |
+| `api_key_management_issuer` | API key environment (writes need an exact environment scope); Authentication read; immutable issuer; delegated parent deletion restricted (013) |
 
 `StoreProvisioning` can read only `store_map` configuration; index DDL uses the
 separately supplied schema-owner credentials. `Retention` reads session/plan
@@ -86,23 +86,23 @@ Runtime qualification also rejects REFERENCES (including column grants), TRIGGER
 and the predefined server-file/server-program roles, which can bypass row policy
 protection through foreign-key checks or direct server access.
 
-Migration 018 validates delivery relationships before installing integrity
+Migration 013 validates delivery relationships before installing integrity
 triggers: the alert, subscription, and destination must share an organization,
 and an environment-specific subscription must match the alert environment.
 Delivery ownership cannot be reassigned. SQLite has equivalent integrity
 triggers, and the sender checks the subscription environment independently.
 
-Migration 019 completes the retained-data preflight for the runtime integrity
-checks introduced by 013: run/task origin runs and run events must exist in the
-same environment. It reads under the named queue maintenance operation so a
-non-BYPASS schema owner sees every retained relationship despite FORCE RLS.
+Migration 013's preflight also covers retained data for its runtime integrity
+checks: run/task origin runs and run events must exist in the same environment.
+The preflight runs before 013 installs any policy, so a non-BYPASS schema owner
+sees every retained relationship.
 An inconsistent link stops the upgrade for reviewed repair; no provenance is
 rewritten automatically. SQLite applies the same retained-data preflight.
 
 | Admission extension | Coverage |
 | --- | --- |
-| `task.reserved_compute_units`, `task.reserved_duration_ms` (015) | Existing exact task policies; root-locked admission narrows to env before claiming |
-| `run_admission` (016) | Exact env or Billing root SELECT; Billing root INSERT validates org/env/root association; no runtime UPDATE/DELETE |
+| `task.reserved_compute_units`, `task.reserved_duration_ms` (014) | Existing exact task policies; root-locked admission narrows to env before claiming |
+| `run_admission` (014) | Exact env or Billing root SELECT; Billing root INSERT validates org/env/root association; no runtime UPDATE/DELETE |
 
 Run-admission backfill enumerates metadata under Membership and reads each
 account under Billing, so a schema owner without BYPASSRLS retains existing
@@ -112,9 +112,9 @@ ledger to reset capacity.
 
 | Maintained usage table | Coverage |
 | --- | --- |
-| `usage_storage` (017) | Exact env and org, account Billing, or named queue/scheduler/retention/alerts operation; immutable env/org/slot; no runtime DELETE |
-| `usage_task` (015) | Exact env and org, account Billing, or named queue/scheduler/retention/alerts operation; immutable env/org; no runtime DELETE |
-| `usage_run` (016) | Exact account Billing only; immutable root/period; DELETE permits pruning obsolete counter periods, never ledger rows |
+| `usage_storage` (014) | Exact env and org, account Billing, or named queue/scheduler/retention/alerts operation; immutable env/org/slot; no runtime DELETE |
+| `usage_task` (014) | Exact env and org, account Billing, or named queue/scheduler/retention/alerts operation; immutable env/org; no runtime DELETE |
+| `usage_run` (014) | Exact account Billing only; immutable root/period; DELETE permits pruning obsolete counter periods, never ledger rows |
 
 Each counter table enables and forces RLS. Provisioning discovers these tables
 and grants their protected DML privileges. Triggers run with the caller's
@@ -122,7 +122,7 @@ scope and rights, without SECURITY DEFINER or owner bypass. Scope policies on
 the counter rows reject a sibling's env or org. Runtime access to arbitrary SQL
 and construction of maintenance authority remain outside this boundary.
 
-Migration 017 backfills `call.env_id` from its existing run, makes it required,
+Migration 013 backfills `call.env_id` from its existing run, makes it required,
 and validates the pair with a composite foreign key. Both ownership fields are
 immutable. Call policies and retention queries use the local environment field,
 so cascaded run deletion can account removed bytes without looking up the

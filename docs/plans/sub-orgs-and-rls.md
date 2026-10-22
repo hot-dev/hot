@@ -12,7 +12,7 @@ typed scopes and restricted runtime connections, forced PostgreSQL policies,
 direct-child organizations with independent environments/builds, inherited
 root administration and explicit child grants, account billing/quota resolution,
 management credentials and REST routes, runtime ingress and worker ownership,
-and the hierarchical UI. Migrations 012–020 preserve existing org identities and
+and the hierarchical UI. Migrations 012–014 preserve existing org identities and
 add ownership integrity, credential lineage, quota reservations, durable run
 admissions, trace byte reconciliation, and retained runtime relationship checks.
 SQLite shares application authorization
@@ -88,7 +88,7 @@ The review produced the following repairs and regression coverage:
 | Bundle resources/dependencies | Bundles use their own dependencies and resource registries, including warm cache hits and parallel/pmap branches. Manifest paths and cached resource reads reject traversal and symlink escapes. |
 | Tool and skill metadata | Runtime metadata registries are scoped to the executing program, including concurrent same-name functions and parallel/pmap branches; another build's metadata cannot supply a missing entry. |
 
-Migration 018 checks existing alert delivery relationships before installing
+Migration 013 checks existing alert delivery relationships before installing
 new integrity triggers. An inconsistent relationship aborts migration for
 operator investigation; migration does not rewrite customer ownership. Runtime
 roles provisioned with broader grants must be narrowed before the new startup
@@ -118,8 +118,8 @@ shared deployments or remove the deployment-specific release gates above.
 
 ### Existing-database upgrade rehearsal — 2026-10-19
 
-New PostgreSQL and SQLite integration suites build populated databases at
-migrations 009 and 017, retain their real SQLx ledgers/checksums, and run the
+New PostgreSQL and SQLite integration suites build populated databases before
+and within this change, retain their real SQLx ledgers/checksums, and run the
 application migration entry point through the latest migration. PostgreSQL uses
 separate NOSUPERUSER, NOBYPASSRLS, NOINHERIT owner and runtime logins. Only the
 disposable fixture's role/database/extension setup and historical data seeding
@@ -134,14 +134,15 @@ The rehearsal found and repaired two upgrade gaps:
   authority before committing, and refuses unsafe PUBLIC/group grants without
   changing shared principals. Startup qualification checks the same memberships.
 - Migration 013's historical preflight omitted run/task origin and run/event
-  relationships already checked on new PostgreSQL writes. Additive migration
-  019 checks those retained links on both databases without changing historical
-  checksums or silently rewriting provenance.
+  relationships already checked on new PostgreSQL writes. Its preflight now
+  checks those retained links on both databases, before any other change,
+  without silently rewriting provenance.
 
-The tests verify migration 018's policy, FK, trigger, and ledger rollback for
-cross-org destinations, cross-org subscriptions, and wrong-environment
-subscriptions. They retain the offending data, explicitly repair it, and retry.
-Migration 019 failures preserve earlier committed migrations, including 018.
+The tests verify that migration 013 and its ledger entry roll back as a whole
+for cross-org destinations, cross-org subscriptions, wrong-environment
+subscriptions, and cross-environment retained origins and events, while
+earlier committed migrations remain. They retain the offending data,
+explicitly repair it, and retry.
 Successful upgrades preserve credentials, delegated issuer links, alert retry
 state, run results, the admission backfill, and UTF-8 trace sizes. Runtime smoke
 checks cover permitted reads/writes, management-key separation, parent/child
@@ -191,8 +192,9 @@ The review repaired these issues:
   foreign and nonexistent project IDs both return HTTP 404.
 - A live deployment rehearsal exposed an ownership trigger that rejected
   webhook redeployment. Webhook capability IDs intentionally survive new builds
-  of the same project. Migration `020` permits that build reassignment while
-  rejecting moves to another project, including projects in the same environment.
+  of the same project. Migration 013's webhook ownership trigger permits that
+  build reassignment while rejecting moves to another project, including
+  projects in the same environment.
 - Queue serialization discarded the transient webhook `original-url`, although
   worker hydration needs it for signature verification. The thin envelope now
   carries only URL restoration hints; request bodies, headers, and execution
@@ -235,11 +237,12 @@ query returned no rows.
   Direct archive-to-active recovery remained rejected.
 - Durable webhook event data contained redacted URLs, with no capability tokens.
 
-The populated upgrade regression now starts at migrations `009`, `017`, and
-`019`, retains existing webhook rows, applies the current chain, reprovisions
+The populated upgrade regression now starts at migrations `009`, `012`, and
+`013`, retains existing webhook rows, applies the current chain, reprovisions
 runtime grants, and verifies same-project redeployment plus rejection of
-cross-project/environment reassignment. The live fixture also applied `020`
-to its existing deployment before the successful rehearsal.
+cross-project/environment reassignment. The live fixture also applied the
+webhook ownership fix (then migration `020`) to its existing deployment before
+the successful rehearsal.
 
 Final validation:
 
@@ -265,7 +268,7 @@ credentials stay out of runtime startup, failed retention lookups preserve
 history, observed requests avoid shared enforced budgets, and runnable-work
 admission distinguishes suspension from exhausted capacity.
 
-Migrations 015–017 now maintain storage, task and run counters under the same
+Migration 014 now maintains storage, task and run counters under the same
 scope and account-lock contract. Calls carry immutable environment ownership
 validated against their run, including retention and cascaded deletion.
 Period rollover takes a fresh snapshot after counter locks; hourly reconciliation
@@ -295,6 +298,23 @@ change has its own bootstrap/billing integration and one-off migration-task
 checks. Snapshot-copy rehearsal, deployed integrations and production cutover
 remain explicit release gates. Shared deployments and usage-display semantics
 remain deferred.
+
+### Migration consolidation — 2026-10-22
+
+Before review, the unshipped migrations 012–020 were combined into three per
+backend. Fresh PostgreSQL and SQLite databases migrated with either set have
+identical schema dumps. Earlier entries in this record use the old numbers:
+
+| Now | Was |
+| --- | --- |
+| 012 org hierarchy | 012 |
+| 013 scope isolation | 013, 014, 018, 019, 020, and 017's call ownership |
+| 014 usage accounting | 015, 016, and 017's storage counters |
+
+Every upgrade check now runs first in 013, so a refusal rolls back the whole
+migration before any change. 013 also rewrites retained calls before it
+installs RLS, in one pass that sets their environment and reconciles their
+trace size.
 
 Hot will support a parent organization with child organizations that each own
 their environments, projects, deployments, credentials, and runtime data.

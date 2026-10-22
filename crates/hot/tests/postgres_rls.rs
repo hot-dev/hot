@@ -1189,17 +1189,17 @@ async fn scoped_pool_enforces_isolation_under_a_restricted_login()
         "é"
     );
 
-    // Re-run only the data backfill inside a rollback transaction under a real
-    // non-BYPASS login. It restores existing ownership and accounts all bytes.
+    // Re-run only 013's call backfill inside a rollback transaction under a
+    // real non-BYPASS login. It keeps ownership and accounts all bytes.
     let mut backfill = winner_pg.begin().await?;
     sqlx::query("UPDATE call SET size=0 WHERE call_id=$1")
         .bind(winner_call)
         .execute(&mut *backfill)
         .await?;
     let migration =
-        include_str!("../../../resources/db/postgres/migrations/017_call_storage_accounting.sql");
-    let start = migration.find("DO $$").unwrap();
-    let end = migration.find("END $$;").unwrap() + "END $$;".len();
+        include_str!("../../../resources/db/postgres/migrations/013_scope_isolation.sql");
+    let start = migration.find("UPDATE hot.call c SET").unwrap();
+    let end = start + migration[start..].find(';').unwrap() + 1;
     sqlx::raw_sql(&migration[start..end])
         .execute(&mut *backfill)
         .await?;

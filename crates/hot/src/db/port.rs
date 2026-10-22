@@ -256,7 +256,7 @@ async fn copy_user_data(db_path: &Path, backup_path: &Path) -> Result<PortReport
             .collect::<Vec<_>>()
             .join(", ");
         // v1 traces predate call.env_id. Derive it from the owning run, as
-        // migration 017 does; v2 rejects a call whose run is not in its env.
+        // migration 013 does; v2 rejects a call whose run is not in its env.
         let derives_call_env = table == "call"
             && v2_only_columns.iter().any(|c| c == "env_id")
             && table_exists(&mut conn, "v1", "run").await?
