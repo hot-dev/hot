@@ -40,6 +40,8 @@ message greet("Hot")
   lazy parameters
 - **[Types](/docs/language/types)** — Gradual typing, constructors, enums,
   unions, generics, and coercions
+- **[Constraints](/docs/language/constraints)** — `where` predicates on types,
+  parameters, return values, and bindings
 - **[Error Handling](/docs/language/errors)** — Results, propagation, and
   explicit failure handling
 - **[Flows](/docs/language/flows)** — Serial, conditional, matching, pipe, and

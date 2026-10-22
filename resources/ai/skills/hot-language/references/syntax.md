@@ -165,6 +165,22 @@ square %(mul(%, %))
 map([1, 2, 3], square)                    // [1, 4, 9]
 ```
 
+### Constraints (`where`)
+
+`where` follows a type, a binding's value, a declaration, or a parameter
+list. Its predicate uses `%` or a one-parameter lambda (see
+[types.md](types.md) for the rules):
+
+```hot
+Port type Int where between(%, 1, 65535)
+Window type { start: Int, finish: Int } where lte(%.start, %.finish)
+f fn (n: Int where gt(%, 0)) where lte(%.n, 9): Int where gte(%, 0) { n }
+max-retries: Int 3 where between(%, 0, 10)
+```
+
+A long signature can continue on later lines: one parameter per line, then
+`where`, `: ReturnType`, and `{` each on their own line.
+
 ### Optional Arguments
 
 ```hot

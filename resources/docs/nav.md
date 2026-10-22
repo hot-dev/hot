@@ -25,6 +25,7 @@ migrations, editor reference).
   - [Functions](language/functions)
   - [Metadata](language/meta)
   - [Types](language/types)
+  - [Constraints](language/constraints)
   - [Error Handling](language/errors)
   - [Flows](language/flows)
   - [What Hot Doesn't Have](language/not-supported)
