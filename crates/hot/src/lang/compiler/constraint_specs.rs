@@ -120,6 +120,10 @@ impl Compiler {
                                 format!("{ns_path}/{name}"),
                                 (param.var.sym.name().to_string(), def.body.clone()),
                             );
+                            if !is_match_calls_are_hot_regex(&def.body, namespace) {
+                                self.foreign_regex_predicates
+                                    .insert(format!("{ns_path}/{name}"));
+                            }
                         } else if FAST_FUNCTIONS.contains(&name)
                             && !matches!(
                                 ns_path.to_string().as_str(),
@@ -431,8 +435,9 @@ impl Compiler {
     }
 
     /// The fast form of a predicate made only of canonical shapes: bounds,
-    /// lengths, `in` and `eq` with literals, joined by `and`. The VM checks it
-    /// without calling the predicate. `None` when any part needs the call.
+    /// lengths, `in` and `eq` with literals, and `::hot::regex/is-match` with
+    /// a literal pattern, joined by `and`. The VM checks it without calling
+    /// the predicate. `None` when any part needs the call.
     fn fast_form(&self, refinement: &Refinement) -> Option<Val> {
         let (namespace, _) = refinement.predicate.rsplit_once('/')?;
         if self.shadowing_namespaces.contains(namespace) {
@@ -442,7 +447,10 @@ impl Compiler {
         let schema = crate::lang::json_schema::refinement_schema(body, param, &refinement.source);
         if schema.describe
             || schema.keywords.is_empty()
-            || schema.keywords.iter().any(|(k, _)| k == "pattern")
+            || (self
+                .foreign_regex_predicates
+                .contains(&refinement.predicate)
+                && schema.keywords.iter().any(|(k, _)| k == "pattern"))
         {
             return None;
         }
@@ -478,6 +486,49 @@ impl Compiler {
             test,
         });
         dest
+    }
+}
+
+/// Whether every `is-match` call in a predicate body is
+/// `::hot::regex/is-match`: written in full, through a namespace alias, or
+/// through a var alias in `namespace`. The fast form tests a `pattern` with
+/// that function's own matcher, so any other `is-match` needs the call.
+fn is_match_calls_are_hot_regex(
+    body: &crate::lang::ast::Value,
+    namespace: &crate::lang::ast::Namespace,
+) -> bool {
+    use crate::lang::ast::{NsRef, Ref, Value};
+    let is_hot_regex = |ns_ref: &NsRef| {
+        let ns = namespace.aliases.get(&ns_ref.ns).unwrap_or(&ns_ref.ns);
+        ns_ref.function_name.as_deref() == Some("is-match") && ns.to_string() == "::hot::regex"
+    };
+    match body {
+        Value::FnCall(call) => {
+            let callee = match call.function.as_ref() {
+                Value::Ref(Ref::Ns(ns_ref))
+                    if ns_ref.function_name.as_deref() == Some("is-match") =>
+                {
+                    is_hot_regex(ns_ref)
+                }
+                Value::Ref(Ref::Var(var_ref)) if var_ref.var.sym.name() == "is-match" => {
+                    namespace.scope.vars.iter().any(|(var, value)| {
+                        var.sym.name() == "is-match"
+                            && matches!(value, Value::Ref(Ref::Ns(ns_ref)) if is_hot_regex(ns_ref))
+                    })
+                }
+                _ => true,
+            };
+            callee
+                && call
+                    .args
+                    .iter()
+                    .all(|arg| is_match_calls_are_hot_regex(&arg.value, namespace))
+        }
+        Value::Flow(flow) => flow
+            .expressions
+            .iter()
+            .all(|expr| is_match_calls_are_hot_regex(expr, namespace)),
+        _ => true,
     }
 }
 

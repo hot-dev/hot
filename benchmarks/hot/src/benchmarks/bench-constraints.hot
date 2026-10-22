@@ -1,0 +1,51 @@
+::benchmarks::constraints ns
+meta {doc: "Cost of `where` checks at function boundaries"}
+
+::time ::hot::time
+
+Port type Int where between(%, 1, 65535)
+CheckedPort type Int where valid-port(%)
+Sku type Str where ::hot::regex/is-match(%, "^[A-Z]{2}-[0-9]+$")
+CheckedSku type Str where or(::hot::regex/is-match(%, "^[A-Z]{2}-[0-9]+$"), false)
+Score type Int where between(%, 0, 100)
+
+valid-port fn (n: Int): Bool {
+    and(gte(n, 1), lte(n, 65535))
+}
+
+plain-port fn (port: Int): Int { port }
+fast-port fn (port: Port): Int { port }
+called-port fn (port: CheckedPort): Int { port }
+fast-sku fn (sku: Sku): Int { 1 }
+called-sku fn (sku: CheckedSku): Int { 1 }
+
+// A refined collection passed down through three calls.
+total fn (scores: Vec<Score>): Int { reduce(scores, add(%1, %2), 0) }
+middle fn (scores: Vec<Score>): Int { total(scores) }
+outer fn (scores: Vec<Score>): Int { middle(scores) }
+
+// A return refinement on a self tail call.
+countdown fn (n: Int): Int where gte(%, 0) {
+    if(eq(n, 0), 0, countdown(sub(n, 1)))
+}
+
+time-it fn (name: Str, iterations: Int, f: Fn) {
+    start ::time/epoch-nanos(::time/now())
+    result reduce(range(iterations), (_acc, _i) { f() }, null)
+    end ::time/epoch-nanos(::time/now())
+    per-call div(Dec(sub(end, start)), mul(iterations, 1000))
+    println(`${name}: ${round(per-call)}us per call (result: ${result})`)
+}
+
+run-bench fn () {
+    scores map(range(100), mod(%, 101))
+    time-it("plain Int parameter", 20000, () { plain-port(8080) })
+    time-it("Port parameter (fast form)", 20000, () { fast-port(8080) })
+    time-it("Port parameter (predicate call)", 20000, () { called-port(8080) })
+    time-it("Sku parameter (fast form)", 20000, () { fast-sku("AB-12") })
+    time-it("Sku parameter (predicate call)", 20000, () { called-sku("AB-12") })
+    time-it("Vec<Score> of 100 through 3 calls", 500, () { outer(scores) })
+    time-it("countdown(10000) with a return refinement", 5, () { countdown(10000) })
+}
+
+run-bench()

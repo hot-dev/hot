@@ -1,6 +1,8 @@
 ::hot::test::constraints ns
 meta {doc: """Runtime tests for `where` constraints."""}
 
+::re ::hot::regex
+
 // Values the tests pass through `dynamic` reach their boundary at run time,
 // where a literal would be rejected by `hot check` already.
 dynamic fn (value: Any): Any {
@@ -76,6 +78,17 @@ Spins type Int where spin(%)
 
 clock ::hot::time/now
 Clocked type Int where and(gt(%, 0), is-some(call(clock, [])))
+
+Sku type Str where ::hot::regex/is-match(%, "^[A-Z]{2}-[0-9]+$")
+ShortSku type Str where and(::re/is-match(%, "^[A-Z]"), lte(length(%), 6))
+Tagged type Any where ::hot::regex/is-match(%, "^#")
+
+// A local `is-match`, which a predicate's regex fast form must not replace.
+is-match fn (value: Str, pattern: Str): Bool {
+    eq(value, pattern)
+}
+
+Exact type Str where is-match(%, "^a")
 
 listen fn (port: Port): Str {
     `listening on ${port}`
@@ -240,4 +253,15 @@ meta ["test"] fn () {
     nickname: Username? null
     assert-eq(null, nickname, "null passes a nullable refinement")
     assert-eq("violation", constraint-kind(Username(dynamic("al"))), "a short name")
+}
+
+test-pattern-refinements
+meta ["test"] fn () {
+    assert-eq("AB-12", Sku("AB-12"), "a matching pattern")
+    assert-eq("violation", constraint-kind(Sku(dynamic("ab-12"))), "a pattern that doesn't match")
+    assert-eq("A-1", ShortSku("A-1"), "through a namespace alias, with a length bound")
+    assert-eq("violation", constraint-kind(ShortSku(dynamic("ABCDEFG"))), "too long")
+    assert-eq("evaluation-failed", constraint-kind(Tagged(dynamic(5))), "is-match on a value that isn't a Str")
+    assert-eq("^a", Exact("^a"), "a local is-match keeps its meaning")
+    assert-eq("violation", constraint-kind(Exact(dynamic("abc"))), "not a regex")
 }

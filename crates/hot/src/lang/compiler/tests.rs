@@ -1973,3 +1973,55 @@ pick2 fn (x: Int): Any {
         pick2.instructions
     );
 }
+
+#[test]
+fn regex_predicates_get_a_pattern_fast_form() {
+    // `::hot::regex/is-match` with a literal pattern, in full or through a
+    // namespace alias, is checked natively. A local `is-match` is another
+    // function, so its predicate keeps the call.
+    let mut program = parse_hot(
+        r#"
+            ::test ns
+            ::re ::hot::regex
+            Sku type Str where ::hot::regex/is-match(%, "^[A-Z]+$")
+            Short type Str where ::re/is-match(%, "^[A-Z]")
+            is-match fn (value: Str, pattern: Str): Bool { false }
+            Exact type Str where is-match(%, "^a")
+            take fn (a: Sku, b: Short, c: Exact): Str { a }
+        "#,
+    )
+    .expect("parses");
+    let mut compiler = Compiler::new();
+    compiler.compile_program(&mut program).expect("compiles");
+
+    fn find_fast(value: &Val) -> Option<Val> {
+        match value {
+            Val::Map(entries) => entries
+                .get(&Val::from("fast"))
+                .cloned()
+                .or_else(|| entries.values().find_map(find_fast)),
+            Val::Vec(items) => items.iter().find_map(find_fast),
+            _ => None,
+        }
+    }
+    let program = compiler.get_program();
+    let fast = |name: &str| {
+        let (_, id) = program
+            .constraint_types
+            .iter()
+            .find(|(n, _)| n == name)
+            .unwrap_or_else(|| panic!("{name} has a spec"));
+        match &program.constants[*id as usize] {
+            Constant::Val(spec) => find_fast(spec),
+            other => panic!("{name}'s spec is {other:?}"),
+        }
+    };
+    let pattern = |p: &str| Some(Val::map_from_iter([(Val::from("pattern"), Val::from(p))]));
+    assert_eq!(fast("::test/Sku"), pattern("^[A-Z]+$"));
+    assert_eq!(fast("::test/Short"), pattern("^[A-Z]"));
+    assert_eq!(
+        fast("::test/Exact"),
+        None,
+        "a local is-match keeps the call"
+    );
+}

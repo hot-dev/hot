@@ -147,6 +147,9 @@ pub struct Compiler {
     /// Namespaces that define a function named like a canonical predicate
     /// function (`gt`, `between`, ...), whose predicates get no fast form.
     shadowing_namespaces: AHashSet<String>,
+    /// `where` predicates that call an `is-match` other than
+    /// `::hot::regex/is-match`, whose patterns get no fast form.
+    foreign_regex_predicates: AHashSet<String>,
 }
 
 /// Complete append-only compiler state for compiling code against an already
@@ -262,6 +265,7 @@ impl Compiler {
             constraint_spec_ids: AHashMap::new(),
             constraint_predicates: AHashMap::new(),
             shadowing_namespaces: AHashSet::new(),
+            foreign_regex_predicates: AHashSet::new(),
         }
     }
 
