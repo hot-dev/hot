@@ -7,8 +7,10 @@ is-ok-response ::hot::http/is-ok-response
 // Run status identifier (e.g. "queued", "in_progress", "completed", "failed", "cancelled", "expired")
 RunStatus type Str
 
+FineTuneMethodType type open "supervised" | "dpo" | "reinforcement"
+
 FineTuneMethod type {
-    type: "supervised" | "dpo" | "reinforcement",
+    type: FineTuneMethodType,
     supervised: FineTuneSupervisedMethod?,
     dpo: FineTuneDPOMethod?,
     reinforcement: FineTuneReinforcementMethod?
@@ -20,6 +22,8 @@ RunCompletionUsage type {
     total_tokens: Int
 }
 
+BatchStatus type open "validating" | "failed" | "in_progress" | "finalizing" | "completed" | "expired" | "cancelling" | "cancelled"
+
 Batch type {
     id: Str,
     object: "batch",
@@ -27,7 +31,7 @@ Batch type {
     errors: Map?,
     input_file_id: Str,
     completion_window: Str,
-    status: "validating" | "failed" | "in_progress" | "finalizing" | "completed" | "expired" | "cancelling" | "cancelled",
+    status: BatchStatus,
     output_file_id: Str?,
     error_file_id: Str?,
     created_at: Int,
@@ -101,11 +105,13 @@ RunObject type {
     response_format: AssistantsApiResponseFormatOption
 }
 
+FineTuneReasoningEffort type open "default" | "low" | "medium" | "high"
+
 FineTuneReinforcementHyperparameters type {
     batch_size: Any?,
     learning_rate_multiplier: Any?,
     n_epochs: Any?,
-    reasoning_effort: "default" | "low" | "medium" | "high"?,
+    reasoning_effort: FineTuneReasoningEffort?,
     compute_multiplier: Any?,
     eval_interval: Any?,
     eval_samples: Any?
@@ -121,6 +127,8 @@ FineTuneSupervisedMethod type {
     hyperparameters: FineTuneSupervisedHyperparameters?
 }
 
+FineTuningJobStatus type open "validating_files" | "queued" | "running" | "succeeded" | "failed" | "cancelled"
+
 FineTuningJob type {
     id: Str,
     created_at: Int,
@@ -132,7 +140,7 @@ FineTuningJob type {
     object: "fine_tuning.job",
     organization_id: Str,
     result_files: Vec<Str>,
-    status: "validating_files" | "queued" | "running" | "succeeded" | "failed" | "cancelled",
+    status: FineTuningJobStatus,
     trained_tokens: Int,
     training_file: Str,
     validation_file: Str,
@@ -172,13 +180,15 @@ Error type {
     type: Str
 }
 
+UploadStatus type open "pending" | "completed" | "cancelled" | "expired"
+
 Upload type {
     id: Str,
     created_at: Int,
     filename: Str,
     bytes: Int,
     purpose: Str,
-    status: "pending" | "completed" | "cancelled" | "expired",
+    status: UploadStatus,
     expires_at: Int,
     object: "upload",
     file: Any?
@@ -193,12 +203,14 @@ BatchRequestCounts type {
     failed: Int
 }
 
+VectorStoreFileBatchStatus type open "in_progress" | "completed" | "cancelled" | "failed"
+
 VectorStoreFileBatchObject type {
     id: Str,
     object: "vector_store.files_batch",
     created_at: Int,
     vector_store_id: Str,
-    status: "in_progress" | "completed" | "cancelled" | "failed",
+    status: VectorStoreFileBatchStatus,
     file_counts: Map
 }
 
@@ -213,7 +225,7 @@ CancelBatchResponse type {
     errors: Map?,
     input_file_id: Str,
     completion_window: Str,
-    status: "validating" | "failed" | "in_progress" | "finalizing" | "completed" | "expired" | "cancelling" | "cancelled",
+    status: BatchStatus,
     output_file_id: Str?,
     error_file_id: Str?,
     created_at: Int,
@@ -286,7 +298,7 @@ CancelFineTuningJobResponse type {
     object: "fine_tuning.job",
     organization_id: Str,
     result_files: Vec<Str>,
-    status: "validating_files" | "queued" | "running" | "succeeded" | "failed" | "cancelled",
+    status: FineTuningJobStatus,
     trained_tokens: Int,
     training_file: Str,
     validation_file: Str,
@@ -379,7 +391,7 @@ CancelUploadResponse type {
     filename: Str,
     bytes: Int,
     purpose: Str,
-    status: "pending" | "completed" | "cancelled" | "expired",
+    status: UploadStatus,
     expires_at: Int,
     object: "upload",
     file: Any?
@@ -405,7 +417,7 @@ CancelVectorStoreFileBatchResponse type {
     object: "vector_store.files_batch",
     created_at: Int,
     vector_store_id: Str,
-    status: "in_progress" | "completed" | "cancelled" | "failed",
+    status: VectorStoreFileBatchStatus,
     file_counts: Map
 }
 

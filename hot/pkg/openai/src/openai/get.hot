@@ -58,13 +58,15 @@ EvalApiError type {
     message: Str
 }
 
+VectorStoreFileStatus type open "in_progress" | "completed" | "cancelled" | "failed"
+
 VectorStoreFileObject type {
     id: Str,
     object: "vector_store.file",
     usage_bytes: Int,
     created_at: Int,
     vector_store_id: Str,
-    status: "in_progress" | "completed" | "cancelled" | "failed",
+    status: VectorStoreFileStatus,
     last_error: Map,
     chunking_strategy: ChunkingStrategyResponse?,
     attributes: VectorStoreFileAttributes?
@@ -90,6 +92,9 @@ RunStatus type Str
 // Message content -- can be text or an array of content parts
 MessageContent type Any
 
+RunStepType type open "message_creation" | "tool_calls"
+RunStepStatus type open "in_progress" | "cancelled" | "failed" | "completed" | "expired"
+
 RunStepObject type {
     id: Str,
     object: "thread.run.step",
@@ -97,8 +102,8 @@ RunStepObject type {
     assistant_id: Str,
     thread_id: Str,
     run_id: Str,
-    type: "message_creation" | "tool_calls",
-    status: "in_progress" | "cancelled" | "failed" | "completed" | "expired",
+    type: RunStepType,
+    status: RunStepStatus,
     step_details: Map,
     last_error: Map,
     expired_at: Int,
@@ -109,16 +114,19 @@ RunStepObject type {
     usage: RunStepCompletionUsage
 }
 
+MessageStatus type open "in_progress" | "incomplete" | "completed"
+MessageRole type open "user" | "assistant"
+
 MessageObject type {
     id: Str,
     object: "thread.message",
     created_at: Int,
     thread_id: Str,
-    status: "in_progress" | "incomplete" | "completed",
+    status: MessageStatus,
     incomplete_details: Map,
     completed_at: Int,
     incomplete_at: Int,
-    role: "user" | "assistant",
+    role: MessageRole,
     content: Vec<MessageContent>,
     assistant_id: Str,
     run_id: Str,
@@ -146,6 +154,8 @@ EvalRun type {
     error: EvalApiError
 }
 
+VectorStoreStatus type open "expired" | "in_progress" | "completed"
+
 VectorStoreObject type {
     id: Str,
     object: "vector_store",
@@ -153,7 +163,7 @@ VectorStoreObject type {
     name: Str,
     usage_bytes: Int,
     file_counts: Map,
-    status: "expired" | "in_progress" | "completed",
+    status: VectorStoreStatus,
     expires_after: VectorStoreExpirationAfter?,
     expires_at: Int?,
     last_active_at: Int,
@@ -233,12 +243,14 @@ VectorStoreFileBatchObject type {
     object: "vector_store.files_batch",
     created_at: Int,
     vector_store_id: Str,
-    status: "in_progress" | "completed" | "cancelled" | "failed",
+    status: VectorStoreFileStatus,
     file_counts: Map
 }
 
+CertificateObjectType type open "certificate" | "organization.certificate" | "organization.project.certificate"
+
 Certificate type {
-    object: "certificate" | "organization.certificate" | "organization.project.certificate",
+    object: CertificateObjectType,
     id: Str,
     name: Str,
     created_at: Int,
@@ -491,7 +503,7 @@ GetCertificateRequest type {
 }
 
 GetCertificateResponse type {
-    object: "certificate" | "organization.certificate" | "organization.project.certificate",
+    object: CertificateObjectType,
     id: Str,
     name: Str,
     created_at: Int,
@@ -558,11 +570,11 @@ GetMessageResponse type {
     object: "thread.message",
     created_at: Int,
     thread_id: Str,
-    status: "in_progress" | "incomplete" | "completed",
+    status: MessageStatus,
     incomplete_details: Map,
     completed_at: Int,
     incomplete_at: Int,
-    role: "user" | "assistant",
+    role: MessageRole,
     content: Vec<MessageContent>,
     assistant_id: Str,
     run_id: Str,
@@ -639,8 +651,8 @@ GetRunStepResponse type {
     assistant_id: Str,
     thread_id: Str,
     run_id: Str,
-    type: "message_creation" | "tool_calls",
-    status: "in_progress" | "cancelled" | "failed" | "completed" | "expired",
+    type: RunStepType,
+    status: RunStepStatus,
     step_details: Map,
     last_error: Map,
     expired_at: Int,
@@ -672,7 +684,7 @@ GetVectorStoreResponse type {
     name: Str,
     usage_bytes: Int,
     file_counts: Map,
-    status: "expired" | "in_progress" | "completed",
+    status: VectorStoreStatus,
     expires_after: VectorStoreExpirationAfter?,
     expires_at: Int?,
     last_active_at: Int,
@@ -699,7 +711,7 @@ GetVectorStoreFileBatchResponse type {
     object: "vector_store.files_batch",
     created_at: Int,
     vector_store_id: Str,
-    status: "in_progress" | "completed" | "cancelled" | "failed",
+    status: VectorStoreFileStatus,
     file_counts: Map
 }
 
@@ -724,7 +736,7 @@ GetVectorStoreFileResponse type {
     usage_bytes: Int,
     created_at: Int,
     vector_store_id: Str,
-    status: "in_progress" | "completed" | "cancelled" | "failed",
+    status: VectorStoreFileStatus,
     last_error: Map,
     chunking_strategy: ChunkingStrategyResponse?,
     attributes: VectorStoreFileAttributes?

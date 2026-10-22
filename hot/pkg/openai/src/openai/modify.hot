@@ -28,16 +28,19 @@ MessageContent type Any
 // Whether to allow parallel function calls during tool use
 ParallelToolCalls type Bool
 
+MessageStatus type open "in_progress" | "incomplete" | "completed"
+MessageRole type open "user" | "assistant"
+
 MessageObject type {
     id: Str,
     object: "thread.message",
     created_at: Int,
     thread_id: Str,
-    status: "in_progress" | "incomplete" | "completed",
+    status: MessageStatus,
     incomplete_details: Map,
     completed_at: Int,
     incomplete_at: Int,
-    role: "user" | "assistant",
+    role: MessageRole,
     content: Vec<MessageContent>,
     assistant_id: Str,
     run_id: Str,
@@ -70,6 +73,8 @@ RunCompletionUsage type {
     total_tokens: Int
 }
 
+VectorStoreStatus type open "expired" | "in_progress" | "completed"
+
 VectorStoreObject type {
     id: Str,
     object: "vector_store",
@@ -77,7 +82,7 @@ VectorStoreObject type {
     name: Str,
     usage_bytes: Int,
     file_counts: Map,
-    status: "expired" | "in_progress" | "completed",
+    status: VectorStoreStatus,
     expires_after: VectorStoreExpirationAfter?,
     expires_at: Int?,
     last_active_at: Int,
@@ -87,8 +92,10 @@ VectorStoreObject type {
 // Response format: "auto", or {type: "json_object"}, or {type: "json_schema", json_schema: {...}}
 AssistantsApiResponseFormatOption type Any
 
+CertificateObjectType type open "certificate" | "organization.certificate" | "organization.project.certificate"
+
 Certificate type {
-    object: "certificate" | "organization.certificate" | "organization.project.certificate",
+    object: CertificateObjectType,
     id: Str,
     name: Str,
     created_at: Int,
@@ -212,7 +219,7 @@ ModifyCertificateRequest type {
 }
 
 ModifyCertificateResponse type {
-    object: "certificate" | "organization.certificate" | "organization.project.certificate",
+    object: CertificateObjectType,
     id: Str,
     name: Str,
     created_at: Int,
@@ -262,11 +269,11 @@ ModifyMessageResponse type {
     object: "thread.message",
     created_at: Int,
     thread_id: Str,
-    status: "in_progress" | "incomplete" | "completed",
+    status: MessageStatus,
     incomplete_details: Map,
     completed_at: Int,
     incomplete_at: Int,
-    role: "user" | "assistant",
+    role: MessageRole,
     content: Vec<MessageContent>,
     assistant_id: Str,
     run_id: Str,
@@ -339,7 +346,7 @@ ModifyVectorStoreResponse type {
     name: Str,
     usage_bytes: Int,
     file_counts: Map,
-    status: "expired" | "in_progress" | "completed",
+    status: VectorStoreStatus,
     expires_after: VectorStoreExpirationAfter?,
     expires_at: Int?,
     last_active_at: Int,

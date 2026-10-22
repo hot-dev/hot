@@ -142,8 +142,10 @@ FunctionCall type {
     args: Map?
 }
 
+BlockReason type open "BLOCK_REASON_UNSPECIFIED" | "SAFETY" | "OTHER" | "BLOCKLIST" | "PROHIBITED_CONTENT"
+
 PromptFeedback type {
-    blockReason: "BLOCK_REASON_UNSPECIFIED" | "SAFETY" | "OTHER" | "BLOCKLIST" | "PROHIBITED_CONTENT"?,
+    blockReason: BlockReason?,
     safetyRatings: Vec<SafetyRating>?
 }
 
@@ -171,14 +173,18 @@ FileData type {
     fileUri: Str?
 }
 
+HarmProbability type open "HARM_PROBABILITY_UNSPECIFIED" | "NEGLIGIBLE" | "LOW" | "MEDIUM" | "HIGH"
+
 SafetyRating type {
     category: Str?,
-    probability: "HARM_PROBABILITY_UNSPECIFIED" | "NEGLIGIBLE" | "LOW" | "MEDIUM" | "HIGH"?,
+    probability: HarmProbability?,
     blocked: Bool?
 }
 
+CodeExecutionOutcome type open "OUTCOME_UNSPECIFIED" | "OUTCOME_OK" | "OUTCOME_FAILED" | "OUTCOME_DEADLINE_EXCEEDED"
+
 CodeExecutionResult type {
-    outcome: "OUTCOME_UNSPECIFIED" | "OUTCOME_OK" | "OUTCOME_FAILED" | "OUTCOME_DEADLINE_EXCEEDED"?,
+    outcome: CodeExecutionOutcome?,
     output: Str?
 }
 
@@ -219,8 +225,10 @@ EmbedContentRequest type {
     outputDimensionality: Int?
 }
 
+ExecutableCodeLanguage type open "LANGUAGE_UNSPECIFIED" | "PYTHON"
+
 ExecutableCode type {
-    language: "LANGUAGE_UNSPECIFIED" | "PYTHON"?,
+    language: ExecutableCodeLanguage?,
     code: Str?
 }
 
@@ -253,9 +261,11 @@ LogprobsResult type {
     chosenCandidates: Vec<LogprobsCandidate>?
 }
 
+FinishReason type open "FINISH_REASON_UNSPECIFIED" | "STOP" | "MAX_TOKENS" | "SAFETY" | "RECITATION" | "LANGUAGE" | "OTHER" | "BLOCKLIST" | "PROHIBITED_CONTENT" | "SPII" | "MALFORMED_FUNCTION_CALL"
+
 Candidate type {
     content: Content?,
-    finishReason: "FINISH_REASON_UNSPECIFIED" | "STOP" | "MAX_TOKENS" | "SAFETY" | "RECITATION" | "LANGUAGE" | "OTHER" | "BLOCKLIST" | "PROHIBITED_CONTENT" | "SPII" | "MALFORMED_FUNCTION_CALL"?,
+    finishReason: FinishReason?,
     safetyRatings: Vec<SafetyRating>?,
     citationMetadata: CitationMetadata?,
     tokenCount: Int?,
@@ -274,9 +284,11 @@ SearchEntryPoint type {
     sdkBlob: Str?
 }
 
+ContentRole type open "user" | "model"
+
 Content type {
     parts: Vec<Part>?,
-    role: "user" | "model"?
+    role: ContentRole?
 }
 
 RetrievedContext type {

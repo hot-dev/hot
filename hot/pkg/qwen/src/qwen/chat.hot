@@ -15,10 +15,10 @@ is-ok-response ::hot::http/is-ok-response
 // ============================================================================
 
 // Literal union for chat message roles
-Role type "user" | "system" | "assistant" | "tool"
+Role type open "user" | "system" | "assistant" | "tool"
 
 // Literal union for finish reasons (Qwen: stop | length | tool_calls)
-FinishReason type "stop" | "length" | "tool_calls"
+FinishReason type open "stop" | "length" | "tool_calls"
 
 // Chat message. `content` is Any because Qwen supports multimodal content
 // parts (arrays of {type: "text" | "image_url" | "input_audio" | "video" | "video_url", ...})
