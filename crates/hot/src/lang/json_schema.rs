@@ -827,6 +827,7 @@ mod tests {
             constructor_functions: None,
             implementations: None,
             is_open: false,
+            refinement: None,
         };
         registry.register("User", &user_type);
 
@@ -874,6 +875,7 @@ mod tests {
             constructor_functions: None,
             implementations: None,
             is_open: false,
+            refinement: None,
         };
         registry.register("Address", &address_type);
 
@@ -897,6 +899,7 @@ mod tests {
             constructor_functions: None,
             implementations: None,
             is_open: false,
+            refinement: None,
         };
         registry.register("User", &user_type);
 
@@ -968,6 +971,7 @@ mod tests {
             constructor_functions: None,
             implementations: None,
             is_open: false,
+            refinement: None,
         };
         registry.register("Direction", &direction);
 
@@ -995,6 +999,7 @@ mod tests {
             constructor_functions: None,
             implementations: None,
             is_open: false,
+            refinement: None,
         };
         registry.register("Circle", &circle);
 
@@ -1015,6 +1020,7 @@ mod tests {
             constructor_functions: None,
             implementations: None,
             is_open: false,
+            refinement: None,
         };
         registry.register("Shape", &shape);
 
@@ -1074,6 +1080,7 @@ mod tests {
             constructor_functions: None,
             implementations: None,
             is_open: false,
+            refinement: None,
         };
         registry.register("Tree", &tree);
 
@@ -1129,6 +1136,7 @@ mod tests {
             constructor_functions: None,
             implementations: None,
             is_open: false,
+            refinement: None,
         };
         registry.register("Tree", &tree);
 
@@ -1154,6 +1162,7 @@ mod tests {
             constructor_functions: None,
             implementations: None,
             is_open: false,
+            refinement: None,
         };
         registry.register("Forest", &forest);
 
@@ -1211,6 +1220,7 @@ mod tests {
             constructor_functions: None,
             implementations: None,
             is_open: false,
+            refinement: None,
         };
         registry.register("Item", &item_type);
 

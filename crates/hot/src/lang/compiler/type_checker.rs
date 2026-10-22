@@ -5475,6 +5475,7 @@ mod tests {
             constructor_functions: None,
             implementations: None,
             is_open: true,
+            refinement: None,
         };
 
         let mut checker = TypeChecker::new();

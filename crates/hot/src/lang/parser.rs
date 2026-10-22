@@ -3,8 +3,9 @@
 use crate::lang::ast::{
     AstNode, BuiltinType, DeepPath, DeepPathPart, Flow, FlowType, FnArg, FnArgs, FnCall, FnCallArg,
     FnDef, Lambda, LiteralType, MatchArm, MatchArmPattern, MatchExpr, Meta, Namespace,
-    NamespaceAliases, NsPath, NsPathPart, NsRef, Program, Ref, ResultModifier, Scope, Source, Sym,
-    TemplateLiteral, TemplatePart, TypeDef, TypeExpr, TypeImplementation, Value, Var, VarRef,
+    NamespaceAliases, NsPath, NsPathPart, NsRef, Program, Ref, Refinement, ResultModifier, Scope,
+    Source, Sym, TemplateLiteral, TemplatePart, TypeDef, TypeExpr, TypeImplementation, Value, Var,
+    VarRef, WHERE_PREDICATE_PREFIX, WHERE_TYPE_PREFIX, is_inline_refinement_type,
 };
 use crate::lang::lexer::{KeywordKind, Lexer, Token, TokenType};
 use crate::val::Val;
@@ -114,6 +115,17 @@ pub struct Parser {
     file_path: Option<PathBuf>,
     source_content: Option<String>, // Store source for error reporting
     var_counter: usize,             // Counter for auto-generated variable names
+    /// Hidden declarations made by `where` clauses (predicate functions and
+    /// inline refinement types), added to their namespace after the
+    /// statement that declared them.
+    pending_hidden: Vec<(NsPath, Var, Value)>,
+}
+
+/// A parsed `where <predicate>` clause.
+struct WhereClause {
+    predicate: Value,
+    source: String,
+    src: Source,
 }
 
 const NAMESPACE_VAR: &str = "ns";
@@ -144,6 +156,56 @@ fn merge_trailing_meta(var: &mut Var, trailing: Val) {
 
 const REMOVED_RESULT_MODIFIER_MSG: &str = "The |map, |vec, and |one result modifiers were removed in Hot 2.6.0. Annotate the binding or return type instead: `All<Map>`/`All<Vec>` collect all results; any other type (e.g. `x: Int parallel { ... }`) takes the single final value";
 
+/// Parse a type annotation string (the `Display` form of a type expression)
+/// back into a type expression.
+pub(crate) fn parse_type_annotation(annotation: &str) -> Option<TypeExpr> {
+    let mut lexer = Lexer::new(annotation);
+    let tokens = lexer.tokenize();
+    if !lexer.errors().is_empty() {
+        return None;
+    }
+    let mut parser = Parser::new();
+    parser.tokens = tokens;
+    parser.token_index = 0;
+    parser.parse_union_type().ok()
+}
+
+/// Metadata for the declarations that `where` clauses make: kept out of docs.
+fn hidden_meta() -> Meta {
+    Meta {
+        val: crate::val!({"no-doc": true}),
+    }
+}
+
+/// Check that a `where` predicate takes exactly one candidate value.
+fn check_where_predicate(predicate: Value) -> Result<Value, String> {
+    match predicate {
+        Value::Lambda(lambda) => {
+            if lambda.args.variadic || lambda.args.args.len() != 1 {
+                Err(format!(
+                    "A `where` predicate takes one value, so its lambda needs exactly one parameter, not {}",
+                    lambda.args.args.len()
+                ))
+            } else {
+                Ok(Value::Lambda(lambda))
+            }
+        }
+        // `where %` is the identity predicate: the value itself must be true.
+        Value::Placeholder(1) => Ok(force_wrap_placeholder(Value::Placeholder(1))),
+        predicate if contains_placeholder(&predicate) => {
+            if max_placeholder_index(&predicate) > 1 {
+                Err("A `where` predicate takes one value, so it uses `%`, not `%2`".to_string())
+            } else {
+                Ok(predicate)
+            }
+        }
+        _ => Err(
+            "`where` needs a predicate over the value. Use `%`, as in `where gt(%, 0)`, or a lambda, as in `where (x) { gt(x, 0) }`"
+                .to_string(),
+        ),
+    }
+}
+
 impl Parser {
     pub fn new() -> Self {
         Self {
@@ -153,6 +215,7 @@ impl Parser {
             file_path: None,
             source_content: None,
             var_counter: 0,
+            pending_hidden: Vec::new(),
         }
     }
 
@@ -342,6 +405,7 @@ impl Parser {
             args,
             body,
             return_type: Some(target_type.to_string()),
+            precondition: None,
         }])
     }
 
@@ -427,6 +491,7 @@ impl Parser {
             while let Some(token) = self.peek() {
                 if matches!(token.token_type, TokenType::Eof) {
                     // EOF encountered - exit main parsing loop
+                    self.flush_hidden(&mut hot_program);
                     return Ok(hot_program);
                 } else if matches!(token.token_type, TokenType::Newline) {
                     self.next(); // consume newline
@@ -542,6 +607,7 @@ impl Parser {
                 };
 
                 // Store in current namespace
+                self.flush_hidden(&mut hot_program);
                 if let Some(namespace) = hot_program.namespaces.get_mut(&self.current_namespace) {
                     namespace.scope.vars.insert(var, expr_value);
                 }
@@ -885,7 +951,9 @@ impl Parser {
                 // so the compiler can process it and generate SetNamespace instructions
             }
 
-            // Add variable to current namespace
+            // Add variable to current namespace, after any hidden
+            // declarations its `where` clauses made.
+            self.flush_hidden(&mut hot_program);
             if let Some(namespace) = hot_program.namespaces.get_mut(&self.current_namespace) {
                 tracing::trace!(
                     "Adding variable '{}' to namespace '{}' with value: {:?}",
@@ -906,6 +974,7 @@ impl Parser {
         // Note: Variable reference resolution is now handled at the engine level
         // after all programs are merged, so that eval code can access imported functions
 
+        self.flush_hidden(&mut hot_program);
         Ok(hot_program)
     }
 
@@ -917,12 +986,14 @@ impl Parser {
     fn try_parse_var_definition(&mut self) -> ParseResult<(Var, Value)> {
         // Save current position in case we need to backtrack
         let saved_index = self.token_index;
+        let saved_hidden = self.pending_hidden.len();
 
         match self.parse_var_definition() {
             Ok(result) => Ok(result),
             Err(e) => {
                 // Restore tokens and return error
                 self.token_index = saved_index;
+                self.pending_hidden.truncate(saved_hidden);
                 Err(e)
             }
         }
@@ -937,6 +1008,9 @@ impl Parser {
                 break;
             }
         }
+
+        // `where` continues a typed binding; it can't name a variable.
+        self.reject_stray_where()?;
 
         // Parse variable name first
         let (var_name, var_src, var_name_end_pos) = match self.next() {
@@ -1359,6 +1433,14 @@ impl Parser {
             let value = self.parse_value()?;
             let value = self.apply_all_annotation_to_value(value, type_annotation.as_ref())?;
             tracing::trace!("Parsed value for '{}': {:?}", var.sym.name(), value);
+
+            // Binding-level `where` after the initializer refines the
+            // declared type.
+            let had_type = type_annotation.is_some();
+            let refined = self.parse_binding_where(type_annotation)?;
+            if had_type {
+                var.type_annotation = refined.as_ref().map(ToString::to_string);
+            }
 
             // Trailing meta: `name value meta {...}`. Mirrors the
             // trailing-meta support already provided for `type`, `enum`,
@@ -1805,7 +1887,13 @@ impl Parser {
         self.skip_newlines();
         self.expect_token(&TokenType::RightParen)?;
 
+        // Argument-list precondition: `fn (a: Int, b: Int) where lte(%.a, %.b)`.
+        // A long signature may continue on later lines: the precondition, the
+        // return type and the opening brace can each start a new line.
+        let precondition = self.parse_declaration_where()?;
+
         // Parse optional return type annotation: ): ReturnType
+        self.skip_newlines_before(|t| matches!(t, TokenType::Colon));
         let return_type_expr = if self.check(&TokenType::Colon) {
             self.next(); // consume colon
             let type_expr = self.parse_type_ref()?;
@@ -1813,6 +1901,7 @@ impl Parser {
         } else {
             None
         };
+        self.skip_newlines_before(|t| matches!(t, TokenType::LeftBrace));
 
         // Parse function body as a flow with the specified type
         let body = if self.check(&TokenType::LeftBrace) {
@@ -1836,6 +1925,7 @@ impl Parser {
             args: FnArgs { args, variadic },
             body,
             return_type,
+            precondition,
         })
     }
 
@@ -2252,6 +2342,7 @@ impl Parser {
 
                 // Typed binding statement: `name: Type value` (same form
                 // as function bodies; see parse_block_expression_after_brace).
+                self.reject_stray_where()?;
                 if let Some(tok) = self.peek()
                     && matches!(tok.token_type, TokenType::Identifier(_))
                     && self
@@ -2266,6 +2357,7 @@ impl Parser {
                     }
                     let value = self.parse_value()?;
                     let value = self.apply_all_annotation_to_value(value, Some(&type_expr))?;
+                    let type_expr = self.parse_typed_binding_where(type_expr)?;
                     let var = Var {
                         sym: Sym::String(name),
                         deep_set: None,
@@ -2633,7 +2725,13 @@ impl Parser {
         self.skip_newlines();
         self.expect_token(&TokenType::RightParen)?;
 
+        // Argument-list precondition: `fn (a: Int, b: Int) where lte(%.a, %.b)`.
+        // A long signature may continue on later lines: the precondition, the
+        // return type and the opening brace can each start a new line.
+        let precondition = self.parse_declaration_where()?;
+
         // Parse optional return type annotation: ): ReturnType
+        self.skip_newlines_before(|t| matches!(t, TokenType::Colon));
         let return_type_expr = if self.check(&TokenType::Colon) {
             self.next(); // consume colon
             let type_expr = self.parse_type_ref()?;
@@ -2641,6 +2739,7 @@ impl Parser {
         } else {
             None
         };
+        self.skip_newlines_before(|t| matches!(t, TokenType::LeftBrace));
 
         // Parse function body
         let body = if self.check(&TokenType::LeftBrace) {
@@ -2657,6 +2756,7 @@ impl Parser {
             args: FnArgs { args, variadic },
             body,
             return_type,
+            precondition,
         })
     }
 
@@ -2718,6 +2818,7 @@ impl Parser {
                 | TokenType::Null
                 | TokenType::DoubleColon => {
                     let type_expr = self.parse_union_type()?;
+                    let refinement = self.parse_declaration_where()?;
                     return Ok(TypeDef {
                         name,
                         fields: None,
@@ -2726,11 +2827,13 @@ impl Parser {
                         constructor_functions: None,
                         implementations: None,
                         is_open: is_open_alias,
+                        refinement,
                     });
                 }
                 // Identifier on same line (but not 'meta') = type alias
                 TokenType::Identifier(ident) if ident != "meta" => {
                     let type_expr = self.parse_union_type()?;
+                    let refinement = self.parse_declaration_where()?;
                     return Ok(TypeDef {
                         name,
                         fields: None,
@@ -2739,6 +2842,7 @@ impl Parser {
                         constructor_functions: None,
                         implementations: None,
                         is_open: is_open_alias,
+                        refinement,
                     });
                 }
                 _ => {}
@@ -2850,6 +2954,9 @@ impl Parser {
                             return Err(self.error("Expected '}' to close type definition"));
                         }
                         self.next(); // consume closing brace
+
+                        // Whole-record invariant: `} where lte(%.start, %.finish)`
+                        let refinement = self.parse_declaration_where()?;
 
                         // Skip newlines before checking for 'fn' keyword
                         while let Some(token) = self.peek() {
@@ -2979,6 +3086,7 @@ impl Parser {
                                 constructor_functions: Some(constructors),
                                 implementations: None,
                                 is_open: false,
+                                refinement,
                             });
                         }
 
@@ -2995,6 +3103,7 @@ impl Parser {
                             constructor_functions: None,
                             implementations: None,
                             is_open: false,
+                            refinement,
                         })
                     }
                     TokenType::Pipe => {
@@ -3008,6 +3117,7 @@ impl Parser {
                             constructor_functions: None,
                             implementations: None,
                             is_open: false,
+                            refinement: None,
                         })
                     }
                     TokenType::Keyword(KeywordKind::Fn) => {
@@ -3121,6 +3231,7 @@ impl Parser {
                             constructor_functions: Some(constructors),
                             implementations: None,
                             is_open: false,
+                            refinement: None,
                         })
                     }
                     _ => {
@@ -3133,6 +3244,7 @@ impl Parser {
                             constructor_functions: None,
                             implementations: None,
                             is_open: false,
+                            refinement: None,
                         })
                     }
                 }
@@ -3147,6 +3259,7 @@ impl Parser {
                     constructor_functions: None,
                     implementations: None,
                     is_open: false,
+                    refinement: None,
                 })
             }
         }
@@ -3258,6 +3371,9 @@ impl Parser {
             return Err(self.error("Expected at least one variant in enum"));
         }
 
+        // Whole-value invariant: `} where …`
+        let refinement = self.parse_declaration_where()?;
+
         Ok(TypeDef {
             name,
             fields: None,
@@ -3266,6 +3382,7 @@ impl Parser {
             constructor_functions: None,
             implementations: None,
             is_open,
+            refinement,
         })
     }
 
@@ -4377,6 +4494,7 @@ impl Parser {
             // type annotation, the same statement form function bodies
             // support. Flow-shape annotations (All<...>/One) apply their
             // result modifier to the bound flow value.
+            self.reject_stray_where()?;
             if let Some(tok) = self.peek()
                 && matches!(tok.token_type, TokenType::Identifier(_))
                 && self
@@ -4391,6 +4509,7 @@ impl Parser {
                 }
                 let value = self.parse_value()?;
                 let value = self.apply_all_annotation_to_value(value, Some(&type_expr))?;
+                let type_expr = self.parse_typed_binding_where(type_expr)?;
                 let var = Var {
                     sym: Sym::String(name),
                     deep_set: None,
@@ -5442,7 +5561,7 @@ impl Parser {
         self.expect_token(&TokenType::RightParen)?;
 
         // Parse optional return type annotation: ): ReturnType {
-        let _return_type = if self.check(&TokenType::Colon) {
+        let return_type = if self.check(&TokenType::Colon) {
             self.next(); // consume colon
             Some(self.parse_type_ref()?)
         } else {
@@ -5458,7 +5577,6 @@ impl Parser {
         };
 
         // Create lambda
-        // Note: Lambda struct doesn't currently store return type, but we parse it for syntax support
         let lambda = Lambda {
             args: FnArgs {
                 args: params,
@@ -5466,6 +5584,7 @@ impl Parser {
             },
             body: Box::new(body),
             flow_type: None, // No flow type for regular lambdas: (x) { ... }
+            return_type: return_type.map(|t| t.to_string()),
         };
 
         // Return as lambda value
@@ -5595,7 +5714,7 @@ impl Parser {
         self.expect_token(&TokenType::RightParen)?;
 
         // Parse optional return type annotation: ): ReturnType {
-        let _return_type = if self.check(&TokenType::Colon) {
+        let return_type = if self.check(&TokenType::Colon) {
             self.next(); // consume colon
             Some(self.parse_type_ref()?)
         } else {
@@ -5613,6 +5732,7 @@ impl Parser {
             },
             body: Box::new(body),
             flow_type: Some(flow_type),
+            return_type: return_type.map(|t| t.to_string()),
         };
 
         Ok(Value::Lambda(lambda))
@@ -6000,6 +6120,7 @@ impl Parser {
                 // Typed binding statement: `name: Type value` (same form as
                 // function bodies). Unambiguous: identifier-colon is not a
                 // valid expression or condition start.
+                self.reject_stray_where()?;
                 if let Some(tok) = self.peek()
                     && matches!(tok.token_type, TokenType::Identifier(_))
                     && self
@@ -6014,6 +6135,7 @@ impl Parser {
                     }
                     let value = self.parse_value()?;
                     let value = self.apply_all_annotation_to_value(value, Some(&type_expr))?;
+                    let type_expr = self.parse_typed_binding_where(type_expr)?;
                     let var = Var {
                         sym: Sym::String(name),
                         deep_set: None,
@@ -6343,6 +6465,275 @@ impl Parser {
         }
     }
 
+    /// Skip newlines when the first token after them satisfies `wanted`, so
+    /// a construct can continue on the next line.
+    fn skip_newlines_before(&mut self, wanted: impl Fn(&TokenType) -> bool) {
+        let mut ahead = 0;
+        while let Some(token) = self.peek_n(ahead) {
+            if !matches!(token.token_type, TokenType::Newline) {
+                if ahead > 0 && wanted(&token.token_type) {
+                    for _ in 0..ahead {
+                        self.next();
+                    }
+                }
+                return;
+            }
+            ahead += 1;
+        }
+    }
+
+    /// True when the next token is the contextual keyword `where`.
+    fn at_where(&self) -> bool {
+        matches!(
+            self.peek().map(|t| &t.token_type),
+            Some(TokenType::Identifier(s)) if s == "where"
+        )
+    }
+
+    /// True when `where` is the next token after any newlines. A line that
+    /// starts with `where` continues the preceding binding or declaration.
+    fn at_where_after_newlines(&self) -> bool {
+        let mut ahead = 0;
+        while let Some(token) = self.peek_n(ahead) {
+            match &token.token_type {
+                TokenType::Newline => ahead += 1,
+                TokenType::Identifier(s) => return s == "where",
+                _ => return false,
+            }
+        }
+        false
+    }
+
+    /// Parse `where <predicate>`. The current token is `where`.
+    fn parse_where_clause(&mut self) -> ParseResult<WhereClause> {
+        let Some(where_token) = self.next() else {
+            return Err(self.error("Expected `where`"));
+        };
+        if self.peek().is_none() || self.check(&TokenType::Newline) {
+            return Err(self.error_at(
+                &where_token,
+                "Expected a predicate after `where`, such as `where gt(%, 0)`",
+            ));
+        }
+        let start = self.peek().map_or(where_token.position, |t| t.position);
+        let predicate = self.parse_value()?;
+        let end = self
+            .token_index
+            .checked_sub(1)
+            .and_then(|i| self.tokens.get(i))
+            .map_or(start, |t| t.position + t.length);
+        let source = self.source_text(start, end);
+        let src = Source::new(
+            self.file_path.as_ref().map(|p| p.display().to_string()),
+            where_token.line as usize,
+            where_token.column as usize,
+            where_token.position,
+            end.saturating_sub(where_token.position),
+        );
+        let predicate = match check_where_predicate(predicate) {
+            Ok(predicate) => predicate,
+            Err(message) => return Err(self.error_at(&where_token, &message)),
+        };
+        Ok(WhereClause {
+            predicate,
+            source,
+            src,
+        })
+    }
+
+    /// Source text between two token positions, for diagnostics.
+    fn source_text(&self, start: usize, end: usize) -> String {
+        self.source_content
+            .as_deref()
+            .map(|s| {
+                s.chars()
+                    .skip(start)
+                    .take(end.saturating_sub(start))
+                    .collect::<String>()
+            })
+            .unwrap_or_default()
+            .trim()
+            .to_string()
+    }
+
+    /// Stable id for a `where` clause: a hash of its file plus its position.
+    /// Names stay the same across parses and differ between files that
+    /// share a namespace.
+    fn where_id(&self, src: &Source) -> String {
+        let file = self
+            .file_path
+            .as_ref()
+            .map(|p| p.display().to_string())
+            .unwrap_or_default();
+        let mut hash: u32 = 0x811c_9dc5;
+        for byte in file.bytes() {
+            hash ^= u32::from(byte);
+            hash = hash.wrapping_mul(0x0100_0193);
+        }
+        format!("{hash:08x}-{}-{}", src.line, src.column)
+    }
+
+    /// Declare the hidden function that holds a `where` predicate, and return
+    /// the refinement that refers to it. The predicate is the argument of
+    /// `::hot::type/predicate`, whose one parameter is a function, so `%`
+    /// binds there the way it does for any function argument.
+    fn declare_where_predicate(&mut self, clause: WhereClause, id: &str) -> Refinement {
+        let name = format!("{WHERE_PREDICATE_PREFIX}{id}");
+        let call = Value::FnCall(FnCall {
+            function: Box::new(Value::Ref(Ref::Ns(NsRef {
+                ns: NsPath::from_string("::hot::type"),
+                src: None,
+                function_name: Some("predicate".to_string()),
+            }))),
+            args: vec![FnCallArg {
+                value: clause.predicate,
+                lazy: false,
+                spread: false,
+                src: None,
+            }],
+            result_path: None,
+            src: Some(clause.src.clone()),
+        });
+        let var = Var {
+            sym: Sym::String(name.clone()),
+            deep_set: None,
+            deep_path: None,
+            meta: Some(hidden_meta()),
+            type_annotation: None,
+            src: Some(clause.src.clone()),
+        };
+        let predicate = format!("{}/{}", self.current_namespace, name);
+        self.pending_hidden
+            .push((self.current_namespace.clone(), var, call));
+        Refinement {
+            predicate,
+            source: clause.source,
+            src: Some(clause.src),
+        }
+    }
+
+    /// Parse the `where` clause of a declaration. The current token is `where`.
+    fn parse_where_refinement(&mut self) -> ParseResult<Refinement> {
+        let clause = self.parse_where_clause()?;
+        let id = self.where_id(&clause.src);
+        Ok(self.declare_where_predicate(clause, &id))
+    }
+
+    /// Declare the hidden alias type for an inline `where` clause, as in
+    /// `x: Int where gt(%, 0)`, and return a reference to it.
+    fn refine_type(&mut self, base: TypeExpr, clause: WhereClause) -> TypeExpr {
+        let id = self.where_id(&clause.src);
+        let refinement = self.declare_where_predicate(clause, &id);
+        let name = format!("{WHERE_TYPE_PREFIX}{id}");
+        let src = refinement.src.clone();
+        let type_def = TypeDef {
+            name: Sym::String(name.clone()),
+            fields: None,
+            type_alias: Some(base),
+            variants: None,
+            constructor_functions: None,
+            implementations: None,
+            is_open: false,
+            refinement: Some(refinement),
+        };
+        let var = Var {
+            sym: Sym::String(name.clone()),
+            deep_set: None,
+            deep_path: None,
+            meta: Some(hidden_meta()),
+            type_annotation: None,
+            src,
+        };
+        self.pending_hidden.push((
+            self.current_namespace.clone(),
+            var,
+            Value::TypeDef(type_def),
+        ));
+        TypeExpr::Named(name)
+    }
+
+    /// A `where` after a binding's initializer, on the same line or the next,
+    /// refines the binding's declared type.
+    fn parse_binding_where(&mut self, declared: Option<TypeExpr>) -> ParseResult<Option<TypeExpr>> {
+        if !self.at_where_after_newlines() {
+            return Ok(declared);
+        }
+        self.skip_newlines();
+        let Some(declared) = declared else {
+            return Err(self.error(
+                "A binding-level `where` needs a declared type (where-requires-type). Write `name: Type value where …`, with `: Any` for an untyped value",
+            ));
+        };
+        if matches!(&declared, TypeExpr::Named(name) if is_inline_refinement_type(name)) {
+            return Err(self.error(
+                "A binding takes one `where` clause, before or after its value (duplicate-where). Combine conditions with and(…)",
+            ));
+        }
+        let clause = self.parse_where_clause()?;
+        Ok(Some(self.refine_type(declared, clause)))
+    }
+
+    /// `parse_binding_where` for a binding with a declared type.
+    fn parse_typed_binding_where(&mut self, declared: TypeExpr) -> ParseResult<TypeExpr> {
+        match self.parse_binding_where(Some(declared))? {
+            Some(refined) => Ok(refined),
+            None => Err(self.error("Expected a type")),
+        }
+    }
+
+    /// The `where` clause of a declaration, on the same line or the next: an
+    /// alias refinement, a struct or enum invariant, or a function's
+    /// argument-list precondition.
+    fn parse_declaration_where(&mut self) -> ParseResult<Option<Refinement>> {
+        if !self.at_where_after_newlines() {
+            return Ok(None);
+        }
+        self.skip_newlines();
+        let refinement = self.parse_where_refinement()?;
+        if self.at_where_after_newlines() {
+            self.skip_newlines();
+            return Err(self.error(
+                "A declaration takes one `where` clause (duplicate-where). Combine conditions with and(…)",
+            ));
+        }
+        Ok(Some(refinement))
+    }
+
+    /// `where` only continues a typed binding or a declaration, so a
+    /// statement can't start with it.
+    fn reject_stray_where(&mut self) -> ParseResult<()> {
+        if self.at_where() {
+            return Err(self.error(
+                "`where` must follow a typed binding or a type, as in `n: Int 3 where gt(%, 0)` (where-requires-type). It can't name a variable",
+            ));
+        }
+        Ok(())
+    }
+
+    /// Add the hidden declarations made by `where` clauses to their
+    /// namespaces.
+    fn flush_hidden(&mut self, program: &mut Program) {
+        for (ns, var, value) in self.pending_hidden.drain(..) {
+            if let Some(namespace) = program.namespaces.get_mut(&ns) {
+                namespace.scope.vars.insert(var, value);
+            }
+        }
+    }
+
+    fn error_at(&self, token: &Token, message: &str) -> ParseError {
+        ParseError {
+            message: message.to_string(),
+            location: ErrorLocation {
+                line: token.line as usize,
+                column: token.column as usize,
+                position: token.position,
+                length: token.length.max(1),
+                file: self.file_path.clone(),
+            },
+            source_context: self.source_content.clone(),
+        }
+    }
+
     fn is_meta_lookahead(&self) -> bool {
         self.peek_n(1).is_some_and(|t| {
             matches!(
@@ -6488,7 +6879,19 @@ impl Parser {
 
     /// Parse type reference (union types, optional types, generic types)
     fn parse_type_ref(&mut self) -> ParseResult<TypeExpr> {
-        self.parse_union_type()
+        let type_expr = self.parse_union_type()?;
+        if !self.at_where() {
+            return Ok(type_expr);
+        }
+        // `Type where predicate` refines the whole type expression at this
+        // level: `Int | Str where p` refines the union.
+        let clause = self.parse_where_clause()?;
+        if self.at_where() {
+            return Err(self.error(
+                "A type takes one `where` clause (duplicate-where). Combine conditions with and(…)",
+            ));
+        }
+        Ok(self.refine_type(type_expr, clause))
     }
 
     /// Parse union types (Int | Str | Null)
@@ -7253,6 +7656,7 @@ fn force_wrap_placeholder(value: Value) -> Value {
             },
             body: Box::new(replaced),
             flow_type: None,
+            return_type: None,
         })
     } else {
         value
@@ -7290,6 +7694,7 @@ pub(crate) fn wrap_placeholder_arg(value: Value) -> Value {
             },
             body: Box::new(replaced),
             flow_type: None,
+            return_type: None,
         })
     } else {
         value

@@ -352,6 +352,10 @@ impl Compiler {
                 // We register an entry under the *alias's* fully-qualified
                 // name so callers like `::hot::internal::mcp/schema-from-fn`
                 // can look it up by the same name they call.
+                // `where` predicates are hidden functions, not tools.
+                if crate::lang::ast::is_where_predicate(var.sym.name()) {
+                    continue;
+                }
                 let (effective_var, fn_defs) = match value {
                     Value::Fn(fn_defs) => (var.clone(), fn_defs),
                     Value::Ref(_) => {

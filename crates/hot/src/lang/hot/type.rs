@@ -1054,6 +1054,14 @@ pub fn is_type(vm: &mut crate::lang::runtime::vm::VirtualMachine, args: &[Val]) 
         return HotResult::Ok(Val::Bool(true));
     }
 
+    // A type with `where` constraints: check the value against them. A
+    // refinement's values are plain base values, so the tag can't decide.
+    match vm.satisfies_constrained_type(&value, &type_path) {
+        Ok(Some(satisfied)) => return HotResult::Ok(Val::Bool(satisfied)),
+        Ok(None) => {}
+        Err(e) => return HotResult::Err(Val::from(e.to_string())),
+    }
+
     // Compare paths - support both exact and type-level matching
     let matches = match value_type_path {
         Some(vtp) => {

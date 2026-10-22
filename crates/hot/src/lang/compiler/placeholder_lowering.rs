@@ -73,6 +73,9 @@ pub fn lower_program(program: &mut Program) -> CompilerResult<()> {
         }
     }
 
+    // `where` predicates are lambdas now; make each an ordinary function.
+    crate::lang::compiler::refinements::lower_predicates(program, &mut errors);
+
     // After lowering, scan for any leftover bare placeholders. Each one is a
     // user error: a `%` that did not land in a `Fn`-typed parameter slot.
     for (ns_path, namespace) in &program.namespaces {
@@ -305,7 +308,15 @@ fn lower_value_inner(
                         .map(|a| (a.type_annotation.clone(), a.var.sym.name().to_string()))
                         .collect()
                 })
-                .unwrap_or_default();
+                .unwrap_or_else(|| {
+                    // A `where` predicate's wrapper takes a function even when
+                    // hot-std isn't loaded to declare it.
+                    if crate::lang::compiler::refinements::is_predicate_call(&call.function) {
+                        vec![(Some("Fn".to_string()), "f".to_string())]
+                    } else {
+                        Vec::new()
+                    }
+                });
 
             call.function = Box::new(lower_value(*call.function, current_ns, aliases, registry));
             let function_name = callee_name(&call.function);

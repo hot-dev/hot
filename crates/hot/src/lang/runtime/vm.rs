@@ -15,6 +15,8 @@ use std::sync::RwLock;
 use std::sync::atomic::{AtomicBool, Ordering};
 use uuid::Uuid;
 
+mod constraints;
+
 /// Default maximum Hot-level recursion depth. Each user-visible function call
 /// adds one to the depth counter (dispatch wrappers like `call`/`call-lib` are
 /// not counted). Hitting this limit returns a structured runtime error
@@ -424,6 +426,10 @@ pub struct VirtualMachine {
     pub(crate) error_capture_active: bool,
     /// Suppress automatic Result checking during lazy thunk evaluation
     suppress_result_checking: bool,
+    /// Set while a `where` predicate runs (see `constraints`).
+    constraint: Option<constraints::ConstraintGuard>,
+    /// Constraint specs of named types, from the program's table.
+    constraint_spec_cache: constraints::ConstraintSpecCache,
     /// User context storage for ctx-set/ctx-get functions (VM-specific)
     pub context_storage: AHashMap<String, Val>,
     /// Set of context keys that are secrets (should be masked in logs/db)
@@ -558,6 +564,8 @@ impl VirtualMachine {
             call_function_depth: 0,
             error_capture_active: false,
             suppress_result_checking: false,
+            constraint: None,
+            constraint_spec_cache: Default::default(),
             context_storage: AHashMap::new(),
             secret_keys: AHashSet::new(),
             secret_value_hashes: AHashSet::new(),
@@ -3337,6 +3345,20 @@ impl VirtualMachine {
                     _ => src_val,
                 };
                 self.set_register(dest, extracted)?;
+                self.instruction_pointer += 1;
+            }
+
+            Instruction::CheckConstraint {
+                dest,
+                src,
+                spec,
+                test,
+            } => {
+                let (dest, src, spec, test) = (*dest, *src, *spec, *test);
+                let value = self.get_register(src)?.clone();
+                let spec = self.get_constant(spec)?;
+                let result = self.execute_check_constraint(value, &spec, test)?;
+                self.set_register(dest, result)?;
                 self.instruction_pointer += 1;
             }
 
@@ -7033,6 +7055,8 @@ impl VirtualMachine {
             function_name,
             args.len()
         );
+        // A `where` predicate may only call pure natives.
+        self.check_constraint_native(function_name)?;
 
         // Get the hotlib map
         let hotlib_map = crate::lang::hot::get_hotlib_map();
@@ -7356,6 +7380,8 @@ impl VirtualMachine {
 
         while lambda_ip < lambda_info.instructions.len() {
             let instruction = &lambda_info.instructions[lambda_ip];
+            // A `where` predicate draws each instruction from its budget.
+            self.charge_constraint_fuel()?;
 
             tracing::trace!("VM: Lambda instruction {}: {:?}", lambda_ip, instruction);
 
@@ -7542,6 +7568,15 @@ impl VirtualMachine {
                     last_result = self.get_register(*value)?.clone();
                     break; // Exit lambda execution
                 }
+                // An Err (such as a failed `where` check on a parameter)
+                // returns from the lambda at once.
+                Instruction::ReturnIfErr { src } => {
+                    let value = self.get_register(*src)?;
+                    if value.is_err() {
+                        last_result = value.clone();
+                        break;
+                    }
+                }
                 _ => {
                     // For other instructions, we need to temporarily set the main IP
                     // and restore it after execution
@@ -7644,6 +7679,11 @@ impl VirtualMachine {
     }
 
     pub fn try_jit_lambda_call(&mut self, lambda_val: &Val, args: &[Val]) -> VmResult<Option<Val>> {
+        // A `where` predicate stays on the interpreter, where every
+        // instruction and native call is checked.
+        if self.in_constraint_predicate() {
+            return Ok(None);
+        }
         let lambda_info = match lambda_val {
             Val::Box(boxed_val) => boxed_val
                 .as_any()
@@ -7716,6 +7756,8 @@ impl VirtualMachine {
                     .to_string(),
             ));
         }
+        // A `where` predicate has its own, smaller call-depth budget.
+        self.check_constraint_depth()?;
         // Re-entrant (recursive) calls share the outer frame's register
         // indices, so save the function's own registers before re-entering
         // and restore them after — otherwise the inner call clobbers pending
@@ -7777,7 +7819,7 @@ impl VirtualMachine {
     }
 
     fn execute_user_function_impl(&mut self, function_id: u32, args: &[Val]) -> VmResult<Val> {
-        if self.jit.config.is_enabled() {
+        if self.jit.config.is_enabled() && !self.in_constraint_predicate() {
             self.jit.record_call(function_id, args);
 
             let was_halted = self.has_failed() || self.has_cancelled();
@@ -8195,7 +8237,7 @@ impl VirtualMachine {
                             // switch to compiled code mid-loop once available.
                             // Without this, a million-iteration tail loop counts
                             // as ONE call and never compiles.
-                            if self.jit.config.is_enabled() {
+                            if self.jit.config.is_enabled() && !self.in_constraint_predicate() {
                                 self.jit.record_call(function_id, &new_args);
                                 if self.jit.should_compile_now(function_id, &new_args) {
                                     match self.jit.compile_function(
@@ -8596,6 +8638,12 @@ impl VirtualMachine {
 
     /// Execute a parallel flow with TRUE parallel execution of thunks by dependency level
     fn execute_parallel_flow(&mut self, parallel_ctx: ParallelFlowContext) -> VmResult<()> {
+        // Parallel branches run on fresh VMs, outside a predicate's guard.
+        if self.in_constraint_predicate() {
+            return Err(VmError::runtime(
+                "A `where` predicate can't use a parallel flow".to_string(),
+            ));
+        }
         use parking_lot::Mutex;
         use std::sync::Arc as StdArc;
         use std::thread;
@@ -9085,6 +9133,7 @@ impl VirtualMachine {
     fn get_instruction_dest(&self, instruction: &Instruction) -> Option<RegisterId> {
         match instruction {
             Instruction::LoadConst { dest, .. }
+            | Instruction::CheckConstraint { dest, .. }
             | Instruction::Move { dest, .. }
             | Instruction::LoadFunctionRef { dest, .. }
             | Instruction::LoadTypeRef { dest, .. }
@@ -9318,6 +9367,7 @@ impl VirtualMachine {
 
     /// Reset VM state for clean execution (useful between test runs)
     pub fn reset_state(&mut self) {
+        self.constraint = None;
         // Clear accumulated namespace variables (but keep core ones)
         self.namespace_variables.clear();
 
@@ -9410,11 +9460,16 @@ impl VirtualMachine {
             Val::Map(map) => {
                 if self.is_tagged_wrapper(map) {
                     if let Some(payload) = map.get_mut(&Val::from("$val")) {
-                        return self.set_property(payload, property, new_value);
+                        self.set_property(payload, property, new_value)?;
+                    } else {
+                        let mut payload = Val::Null;
+                        self.set_property(&mut payload, property, new_value)?;
+                        map.insert(Val::from("$val"), payload);
                     }
-                    let mut payload = Val::Null;
-                    self.set_property(&mut payload, property, new_value)?;
-                    map.insert(Val::from("$val"), payload);
+                    // The update keeps the value's type, so it must keep the
+                    // type's `where` constraints too.
+                    let updated = std::mem::replace(value, Val::Null);
+                    *value = self.check_typed_value(updated, "update")?;
                     return Ok(());
                 }
 
@@ -9507,7 +9562,12 @@ impl VirtualMachine {
                         "Cannot dynamically assign through a tagged unit value".to_string(),
                     ));
                 };
-                self.set_dynamic_property(payload, property, new_value)
+                self.set_dynamic_property(payload, property, new_value)?;
+                // The update keeps the value's type, so it must keep the
+                // type's `where` constraints too.
+                let updated = std::mem::replace(value, Val::Null);
+                *value = self.check_typed_value(updated, "update")?;
+                Ok(())
             }
             Val::Map(map) => {
                 map.insert(property.clone(), new_value);
@@ -9796,6 +9856,8 @@ impl VirtualMachine {
             args.len(),
             args
         );
+        // A `where` predicate may only call pure natives.
+        self.check_constraint_native(function_name)?;
 
         // Get the hotlib map
         let hotlib_map = crate::lang::hot::get_hotlib_map();
@@ -9847,7 +9909,9 @@ impl VirtualMachine {
                         function_name,
                         val
                     );
-                    return Ok(val);
+                    // An update keeps a typed value's type, so it must keep
+                    // the type's constraints too.
+                    return self.check_updated_value(function_name, val);
                 }
                 crate::lang::hot::r#type::HotResult::Err(err) => {
                     tracing::trace!("VM: Hotlib function '{}' failed: {:?}", function_name, err);
@@ -9911,7 +9975,7 @@ impl VirtualMachine {
         // Plans are memoized per FunctionId so repeated calls (including TCO
         // loop iterations) don't rescan the body.
         let fused_plans: std::rc::Rc<[crate::lang::runtime::jit_hof::PipelinePlan]> =
-            if self.jit.config.hof_fusion_enabled() {
+            if self.jit.config.hof_fusion_enabled() && !self.in_constraint_predicate() {
                 match function_id.and_then(|fid| self.hof_plan_cache.get(&fid)) {
                     Some(plans) => std::rc::Rc::clone(plans),
                     None => {
@@ -9936,6 +10000,8 @@ impl VirtualMachine {
             let instruction = &instructions[func_ip];
             // Set instruction pointer for debugging
             self.instruction_pointer = func_ip;
+            // A `where` predicate draws each instruction from its budget.
+            self.charge_constraint_fuel()?;
 
             // Check if we're skipping instructions until we reach a specific CondBranchEnd
             // This is critical for TCO: we must not execute TailCall instructions in skipped branches
