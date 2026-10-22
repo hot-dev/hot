@@ -4,7 +4,7 @@ use crate::lang::bytecode::{
 };
 use crate::lang::runtime::vm::{VirtualMachine, VmError, VmResult};
 use crate::val::Val;
-use ahash::AHashMap;
+use ahash::{AHashMap, AHashSet};
 use cranelift_codegen::ir::{
     AbiParam, FuncRef, InstBuilder, MemFlagsData, StackSlotData, StackSlotKind, Type, UserFuncName,
     types,
@@ -478,6 +478,8 @@ struct JitHelperRefs {
     make_vec_with_spread: FuncRef,
     store_global: FuncRef,
     set_namespace: FuncRef,
+    check_constraint: FuncRef,
+    set_pending_proven: FuncRef,
     call_native: FuncRef,
     define_function: FuncRef,
     load_scoped: FuncRef,
@@ -972,6 +974,130 @@ pub fn is_retryable_jit_bailout(error: &str) -> bool {
     jit_bailout_reason(error).starts_with("unsupported.")
 }
 
+/// Whether a thunk, or one nested in it, calls `function_id`.
+fn thunk_calls_function(
+    program: &BytecodeProgram,
+    function_id: FunctionId,
+    thunk: &crate::lang::bytecode::LambdaInfo,
+) -> bool {
+    let mut bodies: Vec<&[Instruction]> = vec![&thunk.instructions];
+    let mut seen = 0usize;
+    while let Some(body) = bodies.pop() {
+        seen += 1;
+        if seen > 256 {
+            return true;
+        }
+        for (ip, inst) in body.iter().enumerate() {
+            match inst {
+                Instruction::CallUserFunction {
+                    function_id: callee,
+                    ..
+                }
+                | Instruction::TailCall {
+                    function_id: callee,
+                    ..
+                } if *callee == function_id => return true,
+                Instruction::Call {
+                    function,
+                    args_count,
+                    ..
+                } => {
+                    let callee = resolve_const_function_name(body, program, ip, *function)
+                        .and_then(|name| {
+                            if name.starts_with("::") {
+                                find_function_exact(program, &name, Some(*args_count))
+                            } else {
+                                find_function_by_suffix(program, &name, Some(*args_count))
+                            }
+                        });
+                    if callee == Some(function_id as usize) {
+                        return true;
+                    }
+                }
+                Instruction::LoadConst { constant, .. } => {
+                    if let Some(Constant::Val(Val::Box(boxed))) =
+                        program.constants.get(*constant as usize)
+                        && let Some(lambda) = boxed
+                            .as_any()
+                            .downcast_ref::<crate::lang::bytecode::LambdaInfo>()
+                    {
+                        bodies.push(&lambda.instructions);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    false
+}
+
+/// Whether this function, or a lambda it creates, calls a function that reads
+/// one of its locals by name. A local function such as hot-ai's `item-text`
+/// in `fit` does: called directly, it finds the values it captured in its
+/// caller's scope, and compiled code doesn't keep its locals in the VM.
+fn calls_read_caller_locals(
+    program: &BytecodeProgram,
+    function_id: FunctionId,
+    function_info: &FunctionInfo,
+) -> bool {
+    let names = |instructions: &[Instruction], store: bool| -> AHashSet<String> {
+        instructions
+            .iter()
+            .filter_map(|inst| match inst {
+                Instruction::StoreVar { var_name, .. } if store => Some(*var_name),
+                Instruction::LoadVar { var_name, .. } if !store => Some(*var_name),
+                _ => None,
+            })
+            .filter_map(|name| constant_string(program, name).ok().map(str::to_string))
+            .collect()
+    };
+    let locals = names(&function_info.instructions, true);
+    if locals.is_empty() {
+        return false;
+    }
+    let mut bodies: Vec<&[Instruction]> = vec![&function_info.instructions];
+    let mut seen = 0usize;
+    while let Some(body) = bodies.pop() {
+        seen += 1;
+        if seen > 256 {
+            return true;
+        }
+        for inst in body {
+            match inst {
+                Instruction::LoadConst { constant, .. } => {
+                    if let Some(Constant::Val(Val::Box(boxed))) =
+                        program.constants.get(*constant as usize)
+                        && let Some(lambda) = boxed
+                            .as_any()
+                            .downcast_ref::<crate::lang::bytecode::LambdaInfo>()
+                    {
+                        bodies.push(&lambda.instructions);
+                    }
+                }
+                Instruction::CallUserFunction {
+                    function_id: callee_id,
+                    ..
+                } if *callee_id != function_id => {
+                    let Some(callee) = program.functions.get(*callee_id as usize) else {
+                        continue;
+                    };
+                    let own = names(&callee.instructions, true);
+                    let reads = names(&callee.instructions, false);
+                    if reads.iter().any(|name| {
+                        locals.contains(name)
+                            && !own.contains(name)
+                            && !callee.param_names.contains(name)
+                    }) {
+                        return true;
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    false
+}
+
 fn unsupported_jit_bailout(reason: &'static str, message: impl Into<String>) -> String {
     format!("unsupported.{}: {}", reason, message.into())
 }
@@ -1243,6 +1369,12 @@ fn compile_supported_function(
             "JIT policy marks a hotlib dependency as interpreter-only",
         ));
     }
+    if calls_read_caller_locals(program, function_id, function_info) {
+        return Err(unsupported_jit_bailout(
+            "caller_locals",
+            "a function this calls reads its locals by name",
+        ));
+    }
     for tag in &signature.args {
         if tag.raw_kind().is_none() {
             return Err(unsupported_jit_bailout(
@@ -1369,6 +1501,14 @@ fn compile_supported_function(
     );
     builder.symbol("hot_jit_store_global", hot_jit_store_global as *const u8);
     builder.symbol("hot_jit_set_namespace", hot_jit_set_namespace as *const u8);
+    builder.symbol(
+        "hot_jit_check_constraint",
+        hot_jit_check_constraint as *const u8,
+    );
+    builder.symbol(
+        "hot_jit_set_pending_proven",
+        hot_jit_set_pending_proven as *const u8,
+    );
     builder.symbol("hot_jit_call_native", hot_jit_call_native as *const u8);
     builder.symbol(
         "hot_jit_define_function",
@@ -2391,6 +2531,37 @@ unsafe extern "C" fn hot_jit_construct_typed(src_ptr: i64, type_info_ptr: i64) -
     }
 }
 
+/// JIT helper: a `CheckConstraint`, through the VM's checked path. Returns
+/// an OwnedVal handle to the checked value, the `ConstraintError` Err, or a
+/// `test` check's Bool; HALT_SENTINEL when the check halted.
+unsafe extern "C" fn hot_jit_check_constraint(src_ptr: i64, spec_ptr: i64, test: i64) -> i64 {
+    let vm_ptr = get_jit_vm_ptr();
+    if vm_ptr.is_null() {
+        return new_owned_val(Val::err(Val::Str(
+            "JIT check_constraint: no VM available".into(),
+        )));
+    }
+    let vm = unsafe { &mut *vm_ptr };
+    let value = unsafe { &*(src_ptr as *const Val) }.clone();
+    let spec = unsafe { &*(spec_ptr as *const Val) };
+    let error_capture = vm.error_capture_active;
+    match vm.execute_check_constraint(value, spec, test != 0) {
+        Ok(result) => new_owned_val(result),
+        Err(err) => vm_error_to_owned_val(err, error_capture),
+    }
+}
+
+/// JIT helper: a `ProvenArgs` before a call through the VM, whose call entry
+/// takes the proofs as it does an interpreted caller's.
+unsafe extern "C" fn hot_jit_set_pending_proven(function_id: i64, mask: i64) {
+    let vm_ptr = get_jit_vm_ptr();
+    if vm_ptr.is_null() {
+        return;
+    }
+    let vm = unsafe { &mut *vm_ptr };
+    vm.pending_proven = Some((function_id as FunctionId, mask as u64));
+}
+
 /// JIT helper: append an element to a Vec, returning a new OwnedVal Vec.
 /// `vec_ptr` - OwnedVal pointer to a Val::Vec
 /// `elem_ptr` - OwnedVal pointer to the value to append
@@ -2865,6 +3036,11 @@ unsafe extern "C" fn hot_jit_call_vm_by_name(
                 )))
             }
         }
+        // A typed `Fn` or a function alias.
+        Val::Map(_) => match vm.call_function_value(name_val, &args) {
+            Ok(result) => new_owned_val(result),
+            Err(err) => vm_error_to_owned_val(err, error_capture),
+        },
         _ => {
             let name_str = vm.value_to_string(name_val);
             match vm.execute_function_call_by_name(&name_str, &args) {
@@ -3333,6 +3509,22 @@ fn declare_jit_helpers(
             ptr_ty,
             "hot_jit_set_namespace",
             &[types::I64],
+            &[],
+        )?,
+        check_constraint: declare_helper_func(
+            module,
+            func,
+            ptr_ty,
+            "hot_jit_check_constraint",
+            &[types::I64, types::I64, types::I64],
+            &[types::I64],
+        )?,
+        set_pending_proven: declare_helper_func(
+            module,
+            func,
+            ptr_ty,
+            "hot_jit_set_pending_proven",
+            &[types::I64, types::I64],
             &[],
         )?,
         str_starts_with: declare_helper_func(
@@ -3922,7 +4114,8 @@ fn collect_used_registers(instructions: &[Instruction]) -> std::collections::BTr
                 regs.insert(*index);
                 regs.insert(*value);
             }
-            Instruction::ConstructTyped { dest, src, .. } => {
+            Instruction::ConstructTyped { dest, src, .. }
+            | Instruction::CheckConstraint { dest, src, .. } => {
                 regs.insert(*dest);
                 regs.insert(*src);
             }
@@ -4089,9 +4282,28 @@ fn prescan_return_kind(
     }
 
     let mut return_kind: Option<JitValueKind> = None;
+    // Each open flow: whether it accumulates (Map/Vec), and the kinds its
+    // branches produce.
+    let mut flows: Vec<(bool, Vec<Option<RawKind>>)> = Vec::new();
 
     for (inst_ip, inst) in instructions.iter().enumerate() {
         match inst {
+            Instruction::BeginFlow {
+                result_modifier, ..
+            } => {
+                flows.push((
+                    matches!(
+                        result_modifier,
+                        FlowResultModifier::Map | FlowResultModifier::Vec
+                    ),
+                    Vec::new(),
+                ));
+            }
+            Instruction::CondBranchEnd { result, .. } => {
+                if let Some((_, kinds)) = flows.last_mut() {
+                    kinds.push(reg_kinds.get(result).copied());
+                }
+            }
             Instruction::LoadConst { dest, constant } => {
                 let kind = match program.constants.get(*constant as usize) {
                     Some(Constant::Val(Val::Int(_))) => Some(RawKind::Int),
@@ -4318,11 +4530,29 @@ fn prescan_return_kind(
             Instruction::StrStartsWith { dest, .. } => {
                 reg_kinds.insert(*dest, RawKind::Bool);
             }
-            Instruction::MergeMaps { dest, .. } => {
+            Instruction::MergeMaps { dest, .. } | Instruction::CheckConstraint { dest, .. } => {
                 reg_kinds.insert(*dest, RawKind::OwnedVal);
             }
-            Instruction::EndFlow { dest } if !reg_kinds.contains_key(dest) => {
-                reg_kinds.insert(*dest, RawKind::OwnedVal);
+            // A flow's branches define its result, not the default loaded
+            // into the register before them: reading that `Null` made a
+            // self-call's result `Null`.
+            Instruction::EndFlow { dest } => {
+                let kind = match flows.pop() {
+                    Some((true, _)) => Some(RawKind::OwnedVal),
+                    Some((false, kinds)) if !kinds.is_empty() => Some(match kinds[0] {
+                        Some(first) if kinds.iter().all(|kind| *kind == Some(first)) => first,
+                        _ => RawKind::OwnedVal,
+                    }),
+                    _ => None,
+                };
+                match kind {
+                    Some(kind) => {
+                        reg_kinds.insert(*dest, kind);
+                    }
+                    None => {
+                        reg_kinds.entry(*dest).or_insert(RawKind::OwnedVal);
+                    }
+                }
             }
             Instruction::Return { value } => {
                 let kind = reg_kinds.get(value).copied()?;
@@ -4559,6 +4789,11 @@ struct EmitCtx<'a> {
     thunk_registry: AHashMap<u32, crate::lang::bytecode::LambdaInfo>,
     scope_snapshots: Vec<AHashMap<String, (Variable, RawKind)>>,
     error_capture_active: bool,
+    /// Code was emitted that reads a self-call's result as
+    /// `expected_return_kind`, so the body must return that kind.
+    relies_on_expected_return: bool,
+    /// A function body, which may return early; an inlined thunk may not.
+    function_body: bool,
 }
 
 enum EmitResult {
@@ -4835,6 +5070,30 @@ impl<'a> EmitCtx<'a> {
                 return Ok(true);
             }
         };
+        // 0. A call through a local or parameter, such as a `Fn` parameter,
+        // calls its value, as the interpreter does. Resolving the name could
+        // reach another function with the same short name instead.
+        if !fn_name.starts_with("::")
+            && let Some(&(var, kind)) = self.locals.get(fn_name.as_str())
+        {
+            if kind != RawKind::OwnedVal {
+                return Err(format!("JIT call through non-function local '{}'", fn_name));
+            }
+            let function = builder.use_var(var);
+            let halt_block = self.emit_vm_callback_by_name_raw(
+                builder,
+                dest,
+                function,
+                args_start,
+                args_count,
+                instructions,
+            )?;
+            self.jump_to_next(builder, ip)?;
+            if let Some(halt_block) = halt_block {
+                self.emit_halt_return(builder, halt_block);
+            }
+            return Ok(true);
+        }
         // 1. Try core intrinsic (explicit allowlist — deterministic)
         if let Some((result_kind, raw, cmp_halt_block)) = try_lower_known_core_call(
             builder,
@@ -4886,6 +5145,15 @@ impl<'a> EmitCtx<'a> {
                 &self.thunk_registry,
             )?
         {
+            // An inlined branch that calls this function back reads that
+            // call's result as the predicted return kind.
+            if (args_start..args_start + u32::from(args_count)).any(|reg| {
+                self.thunk_registry.get(&reg).is_some_and(|thunk| {
+                    thunk_calls_function(self.program, self.function_id, thunk)
+                })
+            }) {
+                self.relies_on_expected_return = true;
+            }
             self.define_register(builder, dest, result_kind, result_val)?;
             self.jump_to_next(builder, ip)?;
             return Ok(true);
@@ -4895,6 +5163,7 @@ impl<'a> EmitCtx<'a> {
             && called_fid as u32 == self.function_id
             && let Some(ret_kind) = self.expected_return_kind
         {
+            self.relies_on_expected_return = true;
             let (result_kind, raw, error_info) = emit_self_recursive_call(
                 builder,
                 self.ptr_ty,
@@ -4980,6 +5249,15 @@ impl<'a> EmitCtx<'a> {
             &self.register_kinds,
             &self.thunk_registry,
         )? {
+            // An inlined branch that calls this function back reads that
+            // call's result as the predicted return kind.
+            if (args_start..args_start + u32::from(args_count)).any(|reg| {
+                self.thunk_registry.get(&reg).is_some_and(|thunk| {
+                    thunk_calls_function(self.program, self.function_id, thunk)
+                })
+            }) {
+                self.relies_on_expected_return = true;
+            }
             self.define_register(builder, dest, result_kind, result_val)?;
             self.jump_to_next(builder, ip)?;
             return Ok(true);
@@ -5010,7 +5288,18 @@ impl<'a> EmitCtx<'a> {
             }
             return Ok(true);
         }
-        // Fall back to VM callback
+        // Fall back to VM callback. The VM's call entry takes the proofs of
+        // a `ProvenArgs` just before this call, as for an interpreted caller.
+        if let Some(Instruction::ProvenArgs { function_id, mask }) =
+            ip.checked_sub(1).and_then(|prev| instructions.get(prev))
+            && *function_id == called_function_id
+        {
+            let id = builder.ins().iconst(types::I64, i64::from(*function_id));
+            let mask = builder.ins().iconst(types::I64, *mask as i64);
+            builder
+                .ins()
+                .call(self.helper_refs.set_pending_proven, &[id, mask]);
+        }
         let halt_block = self.emit_vm_callback(
             builder,
             dest,
@@ -5038,6 +5327,7 @@ impl<'a> EmitCtx<'a> {
         let ret_kind = self.expected_return_kind.ok_or_else(|| {
             "JIT cannot determine return kind for self-recursive call".to_string()
         })?;
+        self.relies_on_expected_return = true;
         let (result_kind, raw, error_info) = emit_self_recursive_call(
             builder,
             self.ptr_ty,
@@ -6458,6 +6748,73 @@ impl<'a> EmitCtx<'a> {
                 self.jump_to_next(builder, ip)?;
                 Ok(EmitResult::Handled)
             }
+            Instruction::CheckConstraint {
+                dest,
+                src,
+                spec,
+                test,
+            } => {
+                let spec_val = match self.program.constants.get(*spec as usize) {
+                    Some(Constant::Val(v)) => v,
+                    _ => return Err(format!("CheckConstraint: invalid spec constant {}", spec)),
+                };
+                let src_kind = self.register_kind(*src)?;
+                // A function's prologue check of a raw parameter whose spec
+                // can't convert it: a pass keeps the raw value, so the
+                // parameter keeps its kind, and a failure returns the
+                // `ConstraintError` here, as the `ReturnIfErr` after it would.
+                let fused = !*test
+                    && self.function_body
+                    && !self.error_capture_active
+                    && matches!(src_kind, RawKind::Int | RawKind::Dec | RawKind::Bool)
+                    && matches!(
+                        instructions.get(ip + 1),
+                        Some(Instruction::ReturnIfErr { src: checked }) if checked == dest
+                    )
+                    && get_val(spec_val, "type")
+                        .is_some_and(|node| spec_keeps_raw_kind(self.program, node, src_kind, 0));
+                let spec_raw = builder
+                    .ins()
+                    .iconst(types::I64, new_owned_val(spec_val.clone()));
+                let (src_val, src_temp) = self.owned_operand(builder, *src)?;
+                let test_flag = builder.ins().iconst(types::I64, i64::from(*test));
+                let call = builder.ins().call(
+                    self.helper_refs.check_constraint,
+                    &[src_val, spec_raw, test_flag],
+                );
+                let result = builder.inst_results(call)[0];
+                self.drop_owned_temps(builder, &[src_temp]);
+                let halt_block = emit_halt_check(builder, result);
+                if fused {
+                    let call = builder.ins().call(self.helper_refs.is_err, &[result]);
+                    let is_err = builder.inst_results(call)[0];
+                    let error_block = builder.create_block();
+                    let ok_block = builder.create_block();
+                    builder.ins().brif(is_err, error_block, &[], ok_block, &[]);
+
+                    builder.switch_to_block(error_block);
+                    builder.seal_block(error_block);
+                    self.emit_cleanup_owned(builder);
+                    builder.ins().return_(&[result]);
+
+                    builder.switch_to_block(ok_block);
+                    builder.seal_block(ok_block);
+                    drop_owned_raw(builder, &self.helper_refs, result);
+                    let raw = self.reg_value(builder, *src)?;
+                    self.define_register(builder, *dest, src_kind, raw)?;
+                } else {
+                    self.define_register(builder, *dest, RawKind::OwnedVal, result)?;
+                }
+                self.jump_to_next(builder, ip)?;
+                self.emit_halt_return(builder, halt_block);
+                Ok(EmitResult::Handled)
+            }
+            // Proofs for the call after it, which passes them on when it
+            // goes through the VM (see `emit_call_user_function`).
+            Instruction::ProvenArgs { .. } => {
+                self.jump_to_next(builder, ip)?;
+                Ok(EmitResult::Handled)
+            }
             // Flow-level instructions (BeginFlow, EndFlow, CondBranch*, Pipe,
             // DeferredVarExpr, Return, ReturnIfErr, TailCall) are handled by the
             // second-phase dispatch in build_supported_body. Unrecognized instructions
@@ -6620,6 +6977,8 @@ fn build_supported_body(
         thunk_registry: AHashMap::new(),
         scope_snapshots: Vec::new(),
         error_capture_active: false,
+        relies_on_expected_return: false,
+        function_body: true,
     };
 
     // Stack guard: compare a stack slot address (proxy for current SP) against
@@ -6681,6 +7040,20 @@ fn build_supported_body(
                         | FlowType::Parallel
                 ) {
                     return Err(format!("Unsupported flow type for JIT: {:?}", flow_type));
+                }
+                // A collecting serial flow, such as a body returning
+                // `All<Vec>`, gathers the bindings it makes. Compiled code
+                // never saw them and returned an empty collection.
+                if flow_type == FlowType::Serial
+                    && matches!(
+                        result_modifier,
+                        FlowResultModifier::Map | FlowResultModifier::Vec
+                    )
+                {
+                    return Err(unsupported_jit_bailout(
+                        "serial_collect",
+                        "JIT does not collect a serial flow's bindings",
+                    ));
                 }
                 let pre_flow_owned: Vec<usize> = ctx
                     .register_kinds
@@ -6805,7 +7178,11 @@ fn build_supported_body(
                     let acc_val = builder.use_var(acc_var);
                     let new_acc = match flow.result_modifier {
                         FlowResultModifier::Map => {
-                            let branch_name_str = constant_string(ctx.program, *branch_name)?;
+                            // The branch's label, without the compiler's
+                            // uniqueness suffix, as the interpreter keys it.
+                            let branch_name_str = crate::lang::runtime::vm::user_facing_branch_name(
+                                constant_string(ctx.program, *branch_name)?,
+                            );
                             let key_val =
                                 new_owned_val(Val::Str(branch_name_str.to_string().into()));
                             let key_raw = builder.ins().iconst(types::I64, key_val);
@@ -6846,11 +7223,17 @@ fn build_supported_body(
                     }
                     if let Some(existing) = flow.merged_result_kind {
                         if existing != kind {
-                            if kind != RawKind::OwnedVal {
-                                raw = promote_to_owned(builder, &ctx.helper_refs, kind, raw)?;
+                            // An earlier branch already stored its raw result
+                            // in the shared register, and it can't be boxed
+                            // now. The prescan missed the mix, so decline the
+                            // function rather than read that value as owned.
+                            if existing != RawKind::OwnedVal {
+                                return Err(format!(
+                                    "JIT flow branches mix {existing:?} and {kind:?} results"
+                                ));
                             }
+                            raw = promote_to_owned(builder, &ctx.helper_refs, kind, raw)?;
                             kind = RawKind::OwnedVal;
-                            flow.merged_result_kind = Some(RawKind::OwnedVal);
                         }
                     } else {
                         flow.merged_result_kind = Some(kind);
@@ -7162,7 +7545,72 @@ fn build_supported_body(
     }
 
     builder.seal_all_blocks();
-    return_kind.ok_or_else(|| "JIT function has no return".to_string())
+    let return_kind = return_kind.ok_or_else(|| "JIT function has no return".to_string())?;
+    // Self-calls read their results as the prescan's kind, so the body must
+    // return exactly that kind. With no prediction, none were emitted.
+    if ctx.relies_on_expected_return
+        && let Some(expected) = ctx.expected_return_kind
+        && expected != return_kind
+    {
+        return Err(format!(
+            "JIT return kind {return_kind:?} differs from the predicted {expected:?}"
+        ));
+    }
+    Ok(return_kind)
+}
+
+/// An entry of a constraint spec node.
+fn get_val<'v>(node: &'v Val, key: &str) -> Option<&'v Val> {
+    match node {
+        Val::Map(entries) => entries.get(&Val::from(key)),
+        _ => None,
+    }
+}
+
+/// Whether a value of raw `kind` that passes the constraint `node` comes
+/// back unchanged: its base type is exactly `kind`'s, so no exact numeric
+/// conversion applies.
+fn spec_keeps_raw_kind(program: &BytecodeProgram, node: &Val, kind: RawKind, depth: usize) -> bool {
+    if depth > 32 {
+        return false;
+    }
+    let Some(Val::Str(node_kind)) = get_val(node, "kind") else {
+        return false;
+    };
+    match node_kind.as_ref() {
+        "refine" => get_val(node, "base")
+            .is_some_and(|base| spec_keeps_raw_kind(program, base, kind, depth + 1)),
+        "optional" => get_val(node, "inner")
+            .is_some_and(|inner| spec_keeps_raw_kind(program, inner, kind, depth + 1)),
+        "base" => {
+            matches!(
+                (get_val(node, "type"), kind),
+                (Some(Val::Str(t)), RawKind::Int) if t.as_ref() == "Int"
+            ) || matches!(
+                (get_val(node, "type"), kind),
+                (Some(Val::Str(t)), RawKind::Dec) if t.as_ref() == "Dec"
+            ) || matches!(
+                (get_val(node, "type"), kind),
+                (Some(Val::Str(t)), RawKind::Bool) if t.as_ref() == "Bool"
+            )
+        }
+        "named" => {
+            let Some(Val::Str(name)) = get_val(node, "type") else {
+                return false;
+            };
+            program
+                .constraint_types
+                .iter()
+                .find(|(type_name, _)| type_name.as_str() == name.as_ref())
+                .and_then(|(_, id)| match program.constants.get(*id as usize) {
+                    Some(Constant::Val(spec)) => Some(spec),
+                    _ => None,
+                })
+                .is_some_and(|spec| spec_keeps_raw_kind(program, spec, kind, depth + 1))
+        }
+        "any" => true,
+        _ => false,
+    }
 }
 
 fn constant_string(program: &BytecodeProgram, constant: u32) -> Result<&str, String> {
@@ -7353,6 +7801,41 @@ fn flow_branches_have_mixed_kinds(
             | Instruction::StrEndsWith { dest, .. } => {
                 reg_kinds.insert(*dest, RawKind::Bool);
             }
+            // Calls the emitter lowers to a raw intrinsic. Guessing owned for
+            // them hid a mix with an owned branch, and a raw `true` or length
+            // ended up treated as an `Arc<Val>` pointer.
+            Instruction::CallUserFunction {
+                dest,
+                function_id,
+                args_start,
+                args_count,
+            } => {
+                let name = program
+                    .functions
+                    .get(*function_id as usize)
+                    .map(|f| f.name.as_str());
+                let kind = intrinsic_call_kind(name, *args_start, *args_count, &reg_kinds)
+                    .unwrap_or(RawKind::OwnedVal);
+                reg_kinds.insert(*dest, kind);
+            }
+            Instruction::Call {
+                dest,
+                function,
+                args_start,
+                args_count,
+            } => {
+                let name = resolve_const_function_name(instructions, program, ip, *function);
+                // A call through a local calls its value (see `emit_call`).
+                let through_local = name
+                    .as_deref()
+                    .is_some_and(|n| !n.starts_with("::") && locals.contains_key(n));
+                let kind = if through_local {
+                    None
+                } else {
+                    intrinsic_call_kind(name.as_deref(), *args_start, *args_count, &reg_kinds)
+                };
+                reg_kinds.insert(*dest, kind.unwrap_or(RawKind::OwnedVal));
+            }
             // Everything else that defines a register yields a value whose kind
             // we do not statically prove here; treat as owned.
             other => {
@@ -7372,11 +7855,28 @@ fn flow_branches_have_mixed_kinds(
                 Some(_) => return true,
             }
         }
-
-        let _ = ip;
     }
 
     false
+}
+
+/// The raw kind of a call the emitter lowers to an intrinsic (see
+/// `try_lower_known_core_call`), given its argument kinds; `None` when it
+/// isn't lowered or its kind depends on more than this knows.
+fn intrinsic_call_kind(
+    name: Option<&str>,
+    args_start: u32,
+    args_count: u8,
+    reg_kinds: &AHashMap<u32, RawKind>,
+) -> Option<RawKind> {
+    use KnownCoreCall::*;
+    let first = reg_kinds.get(&args_start).copied();
+    match (known_core_call(name?)?, args_count) {
+        (Eq | Ne | Gt | Gte | Lt | Lte, 2) | (Not | IsNull | IsSome, 1) => Some(RawKind::Bool),
+        (IsZero, 1) if first == Some(RawKind::Int) => Some(RawKind::Bool),
+        (Length, 1) if first == Some(RawKind::OwnedVal) => Some(RawKind::Int),
+        _ => None,
+    }
 }
 
 /// The single destination register an instruction defines, if any. Used by the
@@ -7412,7 +7912,8 @@ fn single_dest_register(inst: &Instruction) -> Option<u32> {
         | Instruction::WrapOk { dest, .. }
         | Instruction::DefineFunction { dest, .. }
         | Instruction::LoadScoped { dest, .. }
-        | Instruction::CaptureVar { dest, .. } => Some(*dest),
+        | Instruction::CaptureVar { dest, .. }
+        | Instruction::CheckConstraint { dest, .. } => Some(*dest),
         _ => None,
     }
 }
@@ -8221,7 +8722,12 @@ fn numeric_binop_dec_only(
         return Err("JIT arithmetic supports Int/Dec operands only".to_string());
     }
 
-    if left_kind == RawKind::OwnedVal || right_kind == RawKind::OwnedVal {
+    // `div` of two Ints is an Int when it divides evenly and a Dec otherwise,
+    // so its kind isn't fixed; the interpreter's division decides.
+    if left_kind == RawKind::OwnedVal
+        || right_kind == RawKind::OwnedVal
+        || (left_kind == RawKind::Int && right_kind == RawKind::Int)
+    {
         let (left_tag, left_raw) =
             encode_helper_val_operand(builder, remap, registers, register_kinds, left)?;
         let (right_tag, right_raw) =
@@ -8627,6 +9133,8 @@ fn compile_thunk_inline(
         thunk_registry: AHashMap::new(),
         scope_snapshots: Vec::new(),
         error_capture_active: false,
+        relies_on_expected_return: false,
+        function_body: false,
     };
 
     let mut return_kind: Option<RawKind> = None;

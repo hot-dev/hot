@@ -142,6 +142,12 @@ Literal unions are values of their underlying primitive type — a `Fruit`
 **is** a `Str`, a `DiceRoll` **is** an `Int`. They flow into and out of
 plain `Str`/`Int` parameters without ceremony.
 
+A closed literal union is also a runtime constraint: a value from outside
+the set (from JSON, say) fails where it enters the type, as a
+`ConstraintError` (see Constraints below). An `open` union accepts unknown
+values of its base type at runtime, so use `open` for values an external
+service sends, which it may add to.
+
 ### Open Literal Unions
 
 A literal union may be declared `open` to allow other namespaces (or
@@ -204,6 +210,61 @@ namespace:
 HttpMethod type open | "CONNECT"
 HttpMethod type open | "TRACE"
 ```
+
+## Constraints (`where`)
+
+A `where` clause refines a type with a predicate. `%` is the value being
+checked, or use a one-parameter lambda:
+
+```hot
+Port type Int where between(%, 1, 65535)        // untagged: values stay Ints
+Username type Str where (s) { between(length(s), 3, 20) }
+
+Order type {
+    items: Vec<LineItem> where between(length(%), 1, 100),   // field
+    tags: Vec<Str where lte(length(%), 32)>,                 // element
+    discount: Int,
+    subtotal: Int,
+} where lte(%.discount, %.subtotal)                          // invariant
+
+retry fn (attempt: Int where gt(%, 0)): Int where lte(%, 30000) { ... }
+
+withdraw fn (amount: Int, balance: Int)
+    where lte(%.amount, %.balance)        // precondition: % is {amount, balance}
+    : Int where gte(%, 0)
+{
+    sub(balance, amount)
+}
+
+limit: Int fetch-limit() where gt(%, 0)   // binding; `where` may start the next line
+```
+
+**Rules:**
+
+- A value that fails is a `Result.Err` holding `ConstraintError.Violation`
+  (or `EvaluationFailed`, `BudgetExceeded`) with `message`, `constraint`,
+  `predicate`, `boundary`, `path` (e.g. `["items", 2, "price"]`),
+  `function`, `parameter`, `location`. It never contains the value.
+  `match err-value(r) { ConstraintError.Violation => ... }` tells them apart.
+- Checks run at typed bindings, parameters (before the body), the
+  precondition (after the parameters), return values (success only),
+  constructors, and updates (`assoc`, `merge`, deep-path assignment). Map
+  spread and transforms return plain maps and aren't checked.
+- Refinement values have no type tag: `add(port, 1)` is an `Int`,
+  `is-type(443, Port)` runs the predicate, and a `Port =>` match arm is a
+  guard. A struct keeps its tag.
+- Predicates return a `Bool` (truthy doesn't pass), are pure (no clock,
+  random, env, ctx, files, stores, HTTP, events, tasks), and run within a
+  budget. They see only the value: use a precondition to relate parameters.
+- The `%` rule applies: `where all(%, gt(%, 0))` is `nested-placeholder`;
+  write `where all(%, (n) { gt(n, 0) })`.
+- At a constrained boundary only exact numbers convert: `5.0` becomes `5`;
+  `7.9` and `"5"` fail. Convert explicitly (`Port(Int(s))`).
+- One `where` per binding or type (`duplicate-where`); a binding-level
+  `where` needs a declared type (`where-requires-type`); refined `lazy`
+  parameters are `unsupported-constraint`. `hot check` reports literals
+  that fail (`constraint-violation`), non-Bool predicates
+  (`constraint-not-bool`), and impure ones (`impure-constraint`).
 
 ## Enum Types
 

@@ -1,4 +1,4 @@
-<!-- HOT_LANGUAGE_SECTION_START --> hash:11ad00e35b87
+<!-- HOT_LANGUAGE_SECTION_START --> hash:992bd8acc5d7
 # AGENTS.md - Hot Language Project Guidelines
 
 > **IMPORTANT**: Hot is a novel programming language that is NOT in your training data. Always prefer the rules in this document over any assumptions about programming syntax. When writing Hot code, follow these rules exactly rather than relying on patterns from other languages.
@@ -307,9 +307,23 @@ result match length(name) {
 find-user fn (id: Str): User? { /* returns User or null */ }
 greet fn (name: Str, title: Str?): Str { /* title must be passed, but can be null */ }
 
-// Literal unions — restrict to specific values
+// Literal unions — restrict to specific values. Closed unions reject other
+// values at runtime too; `open` unions accept unknown values
 Fruit type "apple" | "banana" | "orange"
 DiceRoll type 1 | 2 | 3 | 4 | 5 | 6
+
+// Constraints — `where` predicates on types, fields, parameters, preconditions,
+// returns, and bindings. A failing value is Err(ConstraintError.Violation).
+// Predicates must be pure and return a Bool; the `%` rule applies.
+Port type Int where between(%, 1, 65535)    // untagged: values stay Ints
+Range type { low: Int, high: Int } where lte(%.low, %.high)
+withdraw fn (amount: Int, balance: Int)
+    where lte(%.amount, %.balance)          // precondition: % is the argument record
+    : Int where gte(%, 0)
+{
+    sub(balance, amount)
+}
+limit: Int 3 where gt(%, 0)
 
 // Open literal unions — extensible by re-declaring at top level
 HttpMethod type open "GET" | "POST" | "PUT" | "DELETE" | "PATCH"

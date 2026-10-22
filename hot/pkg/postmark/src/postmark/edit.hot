@@ -21,12 +21,15 @@ EditServerConfigurationRequest type {
     InboundSpamThreshold: Int?
 }
 
+ServerColor type open "purple" | "blue" | "turqoise" | "green" | "red" | "yellow" | "grey"
+LinkTracking type open "None" | "HtmlAndText" | "HtmlOnly" | "TextOnly"
+
 ServerConfigurationResponse type {
     ID: Int?,
     Name: Str?,
     ApiTokens: Vec<Str>?,
     ServerLink: Str?,
-    Color: "purple" | "blue" | "turqoise" | "green" | "red" | "yellow" | "grey"?,
+    Color: ServerColor?,
     InboundAddress: Str?,
     RawEmailEnabled: Bool?,
     DeliveryHookUrl: Str?,
@@ -36,7 +39,7 @@ ServerConfigurationResponse type {
     OpenHookUrl: Str?,
     PostFirstOpenOnly: Bool?,
     TrackOpens: Bool?,
-    TrackLinks: "None" | "HtmlAndText" | "HtmlOnly" | "TextOnly"?,
+    TrackLinks: LinkTracking?,
     ClickHookUrl: Str?,
     InboundDomain: Str?,
     InboundHash: Str?,
@@ -65,7 +68,7 @@ EditCurrentServerConfigurationResponse type {
     Name: Str?,
     ApiTokens: Vec<Str>?,
     ServerLink: Str?,
-    Color: "purple" | "blue" | "turqoise" | "green" | "red" | "yellow" | "grey"?,
+    Color: ServerColor?,
     InboundAddress: Str?,
     RawEmailEnabled: Bool?,
     DeliveryHookUrl: Str?,
@@ -75,7 +78,7 @@ EditCurrentServerConfigurationResponse type {
     OpenHookUrl: Str?,
     PostFirstOpenOnly: Bool?,
     TrackOpens: Bool?,
-    TrackLinks: "None" | "HtmlAndText" | "HtmlOnly" | "TextOnly"?,
+    TrackLinks: LinkTracking?,
     ClickHookUrl: Str?,
     InboundDomain: Str?,
     InboundHash: Str?,

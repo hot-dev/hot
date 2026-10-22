@@ -566,6 +566,7 @@ mod tests {
             },
             body,
             return_type: None,
+            precondition: None,
         }])
     }
 

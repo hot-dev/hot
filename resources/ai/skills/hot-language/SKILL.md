@@ -193,8 +193,16 @@ Animal enum open { Dog, Cat }
 Bird type { species: Str }
 Bird -> Animal.Bird               // bodyless arrow enrolls the variant
 
-// Literal union (enum-like, raw values)
+// Literal union (enum-like, raw values). Closed unions reject other values
+// at runtime; `open` unions accept them.
 Fruit type "apple" | "banana" | "orange"
+
+// Constraints: a failing value is Err(ConstraintError.Violation)
+Port type Int where between(%, 1, 65535)
+listen fn (port: Port): Str { `listening on ${port}` }
+withdraw fn (amount: Int, balance: Int) where lte(%.amount, %.balance): Int {
+    sub(balance, amount)
+}
 
 // Open literal union — extensible by re-declaring at top level.
 // Leading `|` makes single-member extensions read naturally.

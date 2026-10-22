@@ -20,25 +20,32 @@ CreateFileRequest type {
     purpose: FilePurpose
 }
 
+ImagesResponseBackground type open "transparent" | "opaque"
+ImagesResponseOutputFormat type open "png" | "webp" | "jpeg"
+ImagesResponseSize type open "1024x1024" | "1024x1536" | "1536x1024"
+ImagesResponseQuality type open "low" | "medium" | "high"
+
 ImagesResponse type {
     created: Int,
     data: Vec<Image>?,
-    background: "transparent" | "opaque"?,
-    output_format: "png" | "webp" | "jpeg"?,
-    size: "1024x1024" | "1024x1536" | "1536x1024"?,
-    quality: "low" | "medium" | "high"?,
+    background: ImagesResponseBackground?,
+    output_format: ImagesResponseOutputFormat?,
+    size: ImagesResponseSize?,
+    quality: ImagesResponseQuality?,
     usage: ImageGenUsage?
 }
 
 // Response creation result
 CreateResponse type Map
 
+VectorStoreFileStatus type open "in_progress" | "completed" | "cancelled" | "failed"
+
 VectorStoreFileBatchObject type {
     id: Str,
     object: "vector_store.files_batch",
     created_at: Int,
     vector_store_id: Str,
-    status: "in_progress" | "completed" | "cancelled" | "failed",
+    status: VectorStoreFileStatus,
     file_counts: Map
 }
 
@@ -49,6 +56,8 @@ ListFineTuningCheckpointPermissionResponse type {
     last_id: Str?,
     has_more: Bool
 }
+
+FineTuningJobStatus type open "validating_files" | "queued" | "running" | "succeeded" | "failed" | "cancelled"
 
 FineTuningJob type {
     id: Str,
@@ -61,7 +70,7 @@ FineTuningJob type {
     object: "fine_tuning.job",
     organization_id: Str,
     result_files: Vec<Str>,
-    status: "validating_files" | "queued" | "running" | "succeeded" | "failed" | "cancelled",
+    status: FineTuningJobStatus,
     trained_tokens: Int,
     training_file: Str,
     validation_file: Str,
@@ -92,6 +101,8 @@ CreateUploadRequest type {
     mime_type: Str
 }
 
+BatchStatus type open "validating" | "failed" | "in_progress" | "finalizing" | "completed" | "expired" | "cancelling" | "cancelled"
+
 Batch type {
     id: Str,
     object: "batch",
@@ -99,7 +110,7 @@ Batch type {
     errors: Map?,
     input_file_id: Str,
     completion_window: Str,
-    status: "validating" | "failed" | "in_progress" | "finalizing" | "completed" | "expired" | "cancelling" | "cancelled",
+    status: BatchStatus,
     output_file_id: Str?,
     error_file_id: Str?,
     created_at: Int,
@@ -155,13 +166,15 @@ CreateTranscriptionRequest type {
     include: Vec<TranscriptionInclude>?
 }
 
+UploadStatus type open "pending" | "completed" | "cancelled" | "expired"
+
 Upload type {
     id: Str,
     created_at: Int,
     filename: Str,
     bytes: Int,
     purpose: Str,
-    status: "pending" | "completed" | "cancelled" | "expired",
+    status: UploadStatus,
     expires_at: Int,
     object: "upload",
     file: Any?
@@ -267,16 +280,19 @@ FineTuningCheckpointPermission type {
     object: "checkpoint.permission"
 }
 
+MessageStatus type open "in_progress" | "incomplete" | "completed"
+MessageRole type open "user" | "assistant"
+
 MessageObject type {
     id: Str,
     object: "thread.message",
     created_at: Int,
     thread_id: Str,
-    status: "in_progress" | "incomplete" | "completed",
+    status: MessageStatus,
     incomplete_details: Map,
     completed_at: Int,
     incomplete_at: Int,
-    role: "user" | "assistant",
+    role: MessageRole,
     content: Vec<MessageContent>,
     assistant_id: Str,
     run_id: Str,
@@ -296,7 +312,7 @@ VectorStoreFileObject type {
     usage_bytes: Int,
     created_at: Int,
     vector_store_id: Str,
-    status: "in_progress" | "completed" | "cancelled" | "failed",
+    status: VectorStoreFileStatus,
     last_error: Map,
     chunking_strategy: ChunkingStrategyResponse?,
     attributes: VectorStoreFileAttributes?
@@ -305,11 +321,13 @@ VectorStoreFileObject type {
 // Run status identifier (e.g. "queued", "in_progress", "completed", "failed", "cancelled", "expired")
 RunStatus type Str
 
+FineTuneReasoningEffort type open "default" | "low" | "medium" | "high"
+
 FineTuneReinforcementHyperparameters type {
     batch_size: Any?,
     learning_rate_multiplier: Any?,
     n_epochs: Any?,
-    reasoning_effort: "default" | "low" | "medium" | "high"?,
+    reasoning_effort: FineTuneReasoningEffort?,
     compute_multiplier: Any?,
     eval_interval: Any?,
     eval_samples: Any?
@@ -323,6 +341,9 @@ CreateModerationRequest type {
     model: Any?
 }
 
+OpenAIFilePurpose type open "assistants" | "assistants_output" | "batch" | "batch_output" | "fine-tune" | "fine-tune-results" | "vision" | "user_data"
+OpenAIFileStatus type open "uploaded" | "processed" | "error"
+
 OpenAIFile type {
     id: Str,
     bytes: Int,
@@ -330,8 +351,8 @@ OpenAIFile type {
     expires_at: Int?,
     filename: Str,
     object: "file",
-    purpose: "assistants" | "assistants_output" | "batch" | "batch_output" | "fine-tune" | "fine-tune-results" | "vision" | "user_data",
-    status: "uploaded" | "processed" | "error",
+    purpose: OpenAIFilePurpose,
+    status: OpenAIFileStatus,
     status_details: Str?
 }
 
@@ -341,8 +362,10 @@ CreateEvalRunRequest type {
     data_source: Map
 }
 
+FineTuneMethodType type open "supervised" | "dpo" | "reinforcement"
+
 FineTuneMethod type {
-    type: "supervised" | "dpo" | "reinforcement",
+    type: FineTuneMethodType,
     supervised: FineTuneSupervisedMethod?,
     dpo: FineTuneDPOMethod?,
     reinforcement: FineTuneReinforcementMethod?
@@ -379,6 +402,8 @@ CreateImageVariationRequest type {
     user: Str?
 }
 
+VectorStoreStatus type open "expired" | "in_progress" | "completed"
+
 VectorStoreObject type {
     id: Str,
     object: "vector_store",
@@ -386,7 +411,7 @@ VectorStoreObject type {
     name: Str,
     usage_bytes: Int,
     file_counts: Map,
-    status: "expired" | "in_progress" | "completed",
+    status: VectorStoreStatus,
     expires_after: VectorStoreExpirationAfter?,
     expires_at: Int?,
     last_active_at: Int,
@@ -934,7 +959,7 @@ CreateBatchResponse type {
     errors: Map?,
     input_file_id: Str,
     completion_window: Str,
-    status: "validating" | "failed" | "in_progress" | "finalizing" | "completed" | "expired" | "cancelling" | "cancelled",
+    status: BatchStatus,
     output_file_id: Str?,
     error_file_id: Str?,
     created_at: Int,
@@ -1172,8 +1197,8 @@ CreateFileResponse type {
     expires_at: Int?,
     filename: Str,
     object: "file",
-    purpose: "assistants" | "assistants_output" | "batch" | "batch_output" | "fine-tune" | "fine-tune-results" | "vision" | "user_data",
-    status: "uploaded" | "processed" | "error",
+    purpose: OpenAIFilePurpose,
+    status: OpenAIFileStatus,
     status_details: Str?
 }
 
@@ -1247,7 +1272,7 @@ CreateFineTuningJobResponse type {
     object: "fine_tuning.job",
     organization_id: Str,
     result_files: Vec<Str>,
-    status: "validating_files" | "queued" | "running" | "succeeded" | "failed" | "cancelled",
+    status: FineTuningJobStatus,
     trained_tokens: Int,
     training_file: Str,
     validation_file: Str,
@@ -1303,10 +1328,10 @@ CreateImageEditRequest type {
 CreateImageEditResponse type {
     created: Int,
     data: Vec<Image>?,
-    background: "transparent" | "opaque"?,
-    output_format: "png" | "webp" | "jpeg"?,
-    size: "1024x1024" | "1024x1536" | "1536x1024"?,
-    quality: "low" | "medium" | "high"?,
+    background: ImagesResponseBackground?,
+    output_format: ImagesResponseOutputFormat?,
+    size: ImagesResponseSize?,
+    quality: ImagesResponseQuality?,
     usage: ImageGenUsage?
 }
 
@@ -1344,10 +1369,10 @@ CreateImageRequest type {
 CreateImageResponse type {
     created: Int,
     data: Vec<Image>?,
-    background: "transparent" | "opaque"?,
-    output_format: "png" | "webp" | "jpeg"?,
-    size: "1024x1024" | "1024x1536" | "1536x1024"?,
-    quality: "low" | "medium" | "high"?,
+    background: ImagesResponseBackground?,
+    output_format: ImagesResponseOutputFormat?,
+    size: ImagesResponseSize?,
+    quality: ImagesResponseQuality?,
     usage: ImageGenUsage?
 }
 
@@ -1390,10 +1415,10 @@ CreateImageVariationRequest type {
 CreateImageVariationResponse type {
     created: Int,
     data: Vec<Image>?,
-    background: "transparent" | "opaque"?,
-    output_format: "png" | "webp" | "jpeg"?,
-    size: "1024x1024" | "1024x1536" | "1536x1024"?,
-    quality: "low" | "medium" | "high"?,
+    background: ImagesResponseBackground?,
+    output_format: ImagesResponseOutputFormat?,
+    size: ImagesResponseSize?,
+    quality: ImagesResponseQuality?,
     usage: ImageGenUsage?
 }
 
@@ -1553,11 +1578,11 @@ CreateMessageResponse type {
     object: "thread.message",
     created_at: Int,
     thread_id: Str,
-    status: "in_progress" | "incomplete" | "completed",
+    status: MessageStatus,
     incomplete_details: Map,
     completed_at: Int,
     incomplete_at: Int,
-    role: "user" | "assistant",
+    role: MessageRole,
     content: Vec<MessageContent>,
     assistant_id: Str,
     run_id: Str,
@@ -1646,7 +1671,7 @@ CreateUploadResponse type {
     filename: Str,
     bytes: Int,
     purpose: Str,
-    status: "pending" | "completed" | "cancelled" | "expired",
+    status: UploadStatus,
     expires_at: Int,
     object: "upload",
     file: Any?
@@ -1675,7 +1700,7 @@ CreateVectorStoreResponse type {
     name: Str,
     usage_bytes: Int,
     file_counts: Map,
-    status: "expired" | "in_progress" | "completed",
+    status: VectorStoreStatus,
     expires_after: VectorStoreExpirationAfter?,
     expires_at: Int?,
     last_active_at: Int,
@@ -1701,7 +1726,7 @@ CreateVectorStoreFileBatchResponse type {
     object: "vector_store.files_batch",
     created_at: Int,
     vector_store_id: Str,
-    status: "in_progress" | "completed" | "cancelled" | "failed",
+    status: VectorStoreFileStatus,
     file_counts: Map
 }
 
@@ -1727,7 +1752,7 @@ CreateVectorStoreFileResponse type {
     usage_bytes: Int,
     created_at: Int,
     vector_store_id: Str,
-    status: "in_progress" | "completed" | "cancelled" | "failed",
+    status: VectorStoreFileStatus,
     last_error: Map,
     chunking_strategy: ChunkingStrategyResponse?,
     attributes: VectorStoreFileAttributes?

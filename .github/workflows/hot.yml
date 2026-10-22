@@ -314,45 +314,6 @@ jobs:
       - name: sccache stats
         run: sccache --show-stats || true
 
-  # Real-bucket Google Cloud Storage contract tests. Emulators do not qualify
-  # IAM, compose, or generation-precondition semantics. Authenticates with
-  # Workload Identity Federation (no key files) and runs without AWS
-  # credentials. Opt-in: skipped unless the repository variables are set, and
-  # never on pull requests (forks get no OIDC token).
-  gcs-integration:
-    name: GCS Integration Tests
-    runs-on: ubuntu-24.04
-    if: >-
-      vars.HOT_TEST_GCS_BUCKET != '' &&
-      (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
-    permissions:
-      contents: read
-      id-token: write
-    steps:
-      - uses: actions/checkout@v5
-
-      - name: Setup toolchain, cache, sccache, tailwind
-        uses: ./.github/actions/rust-setup
-        with:
-          rust-toolchain: ${{ env.RUST_TOOLCHAIN }}
-          tailwind-version: ${{ env.TAILWIND_VERSION }}
-          save-cache: false
-
-      - name: Authenticate to Google Cloud
-        uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3.0.0
-        with:
-          workload_identity_provider: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
-          service_account: ${{ vars.GCP_TEST_SERVICE_ACCOUNT }}
-
-      - name: GCS storage contract tests
-        env:
-          HOT_TEST_GCS_BUCKET: ${{ vars.HOT_TEST_GCS_BUCKET }}
-          AWS_ACCESS_KEY_ID: ''
-          AWS_SECRET_ACCESS_KEY: ''
-        run: >-
-          cargo test -p hot --features gcs-storage --locked --lib --
-          file_storage::tests::contract storage::tests::test_gcs
-
   lint-and-test:
     name: Lint, Rust Tests, and Hot Tests
     runs-on: ubuntu-24.04

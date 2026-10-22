@@ -22,12 +22,15 @@ MessageClickSearchResponse type {
     Clicks: Vec<ExtendedMessageClickEventInformation>?
 }
 
+ServerColor type open "purple" | "blue" | "turqoise" | "green" | "red" | "yellow" | "grey"
+LinkTracking type open "None" | "HtmlAndText" | "HtmlOnly" | "TextOnly"
+
 ServerConfigurationResponse type {
     ID: Int?,
     Name: Str?,
     ApiTokens: Vec<Str>?,
     ServerLink: Str?,
-    Color: "purple" | "blue" | "turqoise" | "green" | "red" | "yellow" | "grey"?,
+    Color: ServerColor?,
     InboundAddress: Str?,
     RawEmailEnabled: Bool?,
     DeliveryHookUrl: Str?,
@@ -37,7 +40,7 @@ ServerConfigurationResponse type {
     OpenHookUrl: Str?,
     PostFirstOpenOnly: Bool?,
     TrackOpens: Bool?,
-    TrackLinks: "None" | "HtmlAndText" | "HtmlOnly" | "TextOnly"?,
+    TrackLinks: LinkTracking?,
     ClickHookUrl: Str?,
     InboundDomain: Str?,
     InboundHash: Str?,
@@ -144,7 +147,7 @@ OutboundMessageDetailsResponse type {
     Attachments: AttachmentCollection?,
     Status: Str?,
     TrackOpens: Bool?,
-    TrackLinks: "None" | "HtmlAndText" | "HtmlOnly" | "TextOnly"?,
+    TrackLinks: LinkTracking?,
     MessageEvents: Vec<MessageEventDetails>?
 }
 
@@ -324,7 +327,7 @@ GetOutboundMessageDetailsResponse type {
     Attachments: AttachmentCollection?,
     Status: Str?,
     TrackOpens: Bool?,
-    TrackLinks: "None" | "HtmlAndText" | "HtmlOnly" | "TextOnly"?,
+    TrackLinks: LinkTracking?,
     MessageEvents: Vec<MessageEventDetails>?
 }
 
@@ -732,7 +735,7 @@ GetCurrentServerConfigurationResponse type {
     Name: Str?,
     ApiTokens: Vec<Str>?,
     ServerLink: Str?,
-    Color: "purple" | "blue" | "turqoise" | "green" | "red" | "yellow" | "grey"?,
+    Color: ServerColor?,
     InboundAddress: Str?,
     RawEmailEnabled: Bool?,
     DeliveryHookUrl: Str?,
@@ -742,7 +745,7 @@ GetCurrentServerConfigurationResponse type {
     OpenHookUrl: Str?,
     PostFirstOpenOnly: Bool?,
     TrackOpens: Bool?,
-    TrackLinks: "None" | "HtmlAndText" | "HtmlOnly" | "TextOnly"?,
+    TrackLinks: LinkTracking?,
     ClickHookUrl: Str?,
     InboundDomain: Str?,
     InboundHash: Str?,

@@ -77,6 +77,16 @@ greet-titled fn (name: Str, title: Str?): Str {
 }
 // @end: nullable-params
 
+// @doc: multiline-params
+format-price fn (
+  amount: Dec,
+  currency: Str,
+  symbol: Str?,
+): Str {
+  if(symbol, `${symbol}${amount}`, `${amount} ${currency}`)
+}
+// @end: multiline-params
+
 // @doc: function-overloading
 slice fn
 (coll: Vec, start: Int): Vec {
@@ -185,6 +195,16 @@ meta ["test"] fn () {
 // greet-titled("Alice", null)  → "Hello, Alice!"
 // greet-titled("Smith", "Dr")  → "Hello, Dr Smith!"
 // @end: nullable-params
+
+test-multiline-params
+meta ["test"] fn () {
+  assert-eq("$9.50", format-price(9.50, "USD", "$"), "with symbol")
+  assert-eq("9.50 EUR", format-price(9.50, "EUR", null), "without symbol")
+}
+// @result: multiline-params
+// format-price(9.50, "USD", "$")   → "$9.50"
+// format-price(9.50, "EUR", null)  → "9.50 EUR"
+// @end: multiline-params
 
 test-variadic
 meta ["test"] fn () {

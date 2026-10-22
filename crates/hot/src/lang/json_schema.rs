@@ -3,7 +3,7 @@
 //! This module provides functions to convert Hot type annotations (strings)
 //! to JSON Schema format for MCP tool definitions.
 
-use crate::lang::ast::{FnArg, TypeDef, TypeField};
+use crate::lang::ast::{FnArg, Ref, TypeDef, TypeField, Value};
 use crate::val::Val;
 use ahash::{AHashMap, AHashSet};
 use indexmap::IndexMap;
@@ -34,6 +34,22 @@ pub struct TypeDefInfo {
     pub variants: Option<Vec<VariantInfo>>,
     /// For type aliases, the aliased type
     pub type_alias: Option<String>,
+    /// What the type's `where` clause contributes, when it has one.
+    pub refinement: Option<RefinementSchema>,
+}
+
+/// What a `where` clause contributes to a type's schema.
+#[derive(Debug, Clone, Default)]
+pub struct RefinementSchema {
+    /// Keywords for the canonical predicate shapes, such as `minimum`. Length
+    /// bounds are `$minLength`/`$maxLength` until the base type says whether
+    /// they mean characters or items.
+    pub keywords: Vec<(String, Val)>,
+    /// The predicate's source text.
+    pub source: String,
+    /// Part of the predicate has no JSON Schema form. It is still enforced
+    /// at runtime; the schema describes it.
+    pub describe: bool,
 }
 
 impl TypeRegistry {
@@ -59,6 +75,7 @@ impl TypeRegistry {
             fields: type_def.fields.clone(),
             variants: variants_from_type_def(type_def),
             type_alias: type_def.type_alias.as_ref().map(|ta| ta.to_string()),
+            refinement: None,
         };
 
         // Register with simple name
@@ -77,6 +94,7 @@ impl TypeRegistry {
             fields: type_def.fields.clone(),
             variants: variants_from_type_def(type_def),
             type_alias: type_def.type_alias.as_ref().map(|ta| ta.to_string()),
+            refinement: None,
         };
 
         self.types.insert(qualified_name.to_string(), info.clone());
@@ -84,6 +102,17 @@ impl TypeRegistry {
         // Also register with simple name (last part after /)
         if let Some(simple_name) = qualified_name.rsplit('/').next() {
             self.types.insert(simple_name.to_string(), info);
+        }
+    }
+
+    /// Record what a registered type's `where` clause contributes to its
+    /// schema, under its qualified and simple names.
+    pub fn set_refinement(&mut self, qualified_name: &str, refinement: RefinementSchema) {
+        let simple_name = qualified_name.rsplit('/').next().unwrap_or(qualified_name);
+        for name in [qualified_name, simple_name] {
+            if let Some(info) = self.types.get_mut(name) {
+                info.refinement = Some(refinement.clone());
+            }
         }
     }
 
@@ -525,7 +554,7 @@ fn custom_type_to_schema_ctx(
     ctx.visited.insert(resolved_key.clone());
 
     let schema = if let Some(type_info) = registry.get(&resolved_key) {
-        if let Some(ref alias) = type_info.type_alias {
+        let schema = if let Some(ref alias) = type_info.type_alias {
             type_to_schema_ctx(alias, registry, ctx)
         } else if let Some(ref variants) = type_info.variants {
             enum_to_schema_ctx(&resolved_key, variants, registry, ctx)
@@ -535,6 +564,10 @@ fn custom_type_to_schema_ctx(
             let mut map = IndexMap::new();
             map.insert(Val::from("type"), Val::from("object"));
             Val::Map(Box::new(map))
+        };
+        match &type_info.refinement {
+            Some(refinement) => apply_refinement(schema, refinement),
+            None => schema,
         }
     } else {
         let mut map = IndexMap::new();
@@ -557,6 +590,241 @@ fn custom_type_to_schema_ctx(
     }
 
     schema
+}
+
+/// Add a refinement's keywords to its base type's schema. Length bounds
+/// become `minLength`/`maxLength` on strings and `minItems`/`maxItems` on
+/// arrays; a predicate with no schema form is described.
+fn apply_refinement(schema: Val, refinement: &RefinementSchema) -> Val {
+    let Val::Map(mut map) = schema else {
+        return schema;
+    };
+    let base_type = map
+        .get(&Val::from("type"))
+        .and_then(|t| match t {
+            Val::Str(s) => Some(s.to_string()),
+            _ => None,
+        })
+        .unwrap_or_default();
+    let mut describe = refinement.describe;
+    for (keyword, value) in &refinement.keywords {
+        let keyword = match (keyword.as_str(), base_type.as_str()) {
+            ("$minLength", "string") => "minLength",
+            ("$maxLength", "string") => "maxLength",
+            ("$minLength", "array") => "minItems",
+            ("$maxLength", "array") => "maxItems",
+            ("$minLength" | "$maxLength", _) => {
+                describe = true;
+                continue;
+            }
+            (other, _) => other,
+        };
+        map.insert(Val::from(keyword), value.clone());
+    }
+    if describe {
+        let text = format!("Must satisfy: {}", refinement.source);
+        let description = match map.get(&Val::from("description")) {
+            Some(Val::Str(existing)) => format!("{existing}. {text}"),
+            _ => text,
+        };
+        map.insert(Val::from("description"), Val::from(description));
+    }
+    Val::Map(map)
+}
+
+/// The JSON Schema form of a `where` predicate. `param` is the predicate's
+/// parameter (or `%`). Comparisons with literal bounds, `between`, length
+/// bounds, `::hot::regex/is-match` with a literal pattern, `in` with a
+/// literal list, `eq` with a literal, and `and` of those become keywords;
+/// anything else makes the schema describe the predicate instead.
+pub fn refinement_schema(body: &Value, param: &str, source: &str) -> RefinementSchema {
+    let mut keywords = Vec::new();
+    let canonical = canonical_predicate(body, param, &mut keywords);
+    RefinementSchema {
+        keywords,
+        source: source.to_string(),
+        describe: !canonical,
+    }
+}
+
+/// The candidate itself, or `length` of it.
+enum Subject {
+    Value,
+    Length,
+}
+
+fn is_param(value: &Value, param: &str) -> bool {
+    match value {
+        Value::Placeholder(1) => true,
+        Value::Ref(Ref::Var(var_ref)) => {
+            var_ref.var.deep_path.is_none()
+                && (var_ref.var.sym.name() == param
+                    || var_ref.var.sym.name() == "__placeholder_1__")
+        }
+        _ => false,
+    }
+}
+
+fn callee_name(value: &Value) -> Option<&str> {
+    match value {
+        Value::Ref(Ref::Var(var_ref)) => Some(var_ref.var.sym.name()),
+        Value::Ref(Ref::Ns(ns_ref)) => ns_ref.function_name.as_deref(),
+        _ => None,
+    }
+}
+
+fn subject(value: &Value, param: &str) -> Option<Subject> {
+    if is_param(value, param) {
+        return Some(Subject::Value);
+    }
+    match value {
+        Value::FnCall(call)
+            if callee_name(&call.function) == Some("length")
+                && call.args.len() == 1
+                && is_param(&call.args[0].value, param) =>
+        {
+            Some(Subject::Length)
+        }
+        _ => None,
+    }
+}
+
+fn number(value: &Value) -> Option<Val> {
+    match value {
+        Value::Val(v @ (Val::Int(_) | Val::Dec(_)), _) => Some(v.clone()),
+        _ => None,
+    }
+}
+
+fn literal_value(value: &Value) -> Option<Val> {
+    match value {
+        Value::Val(v @ (Val::Int(_) | Val::Dec(_) | Val::Str(_) | Val::Bool(_) | Val::Null), _) => {
+            Some(v.clone())
+        }
+        _ => None,
+    }
+}
+
+fn canonical_predicate(expr: &Value, param: &str, out: &mut Vec<(String, Val)>) -> bool {
+    let Value::FnCall(call) = expr else {
+        return match expr {
+            Value::Flow(flow) if flow.expressions.len() == 1 => {
+                canonical_predicate(&flow.expressions[0], param, out)
+            }
+            _ => false,
+        };
+    };
+    let args: Vec<&Value> = call.args.iter().map(|a| &a.value).collect();
+    let mut push = |keyword: &str, value: Val| out.push((keyword.to_string(), value));
+    match (
+        callee_name(&call.function).unwrap_or_default(),
+        args.as_slice(),
+    ) {
+        ("and", parts) => {
+            // Every part contributes what it can; one without a schema form
+            // makes the whole predicate described too.
+            let mut all = true;
+            for part in parts {
+                all &= canonical_predicate(part, param, out);
+            }
+            all
+        }
+        (op @ ("gt" | "gte" | "lt" | "lte"), [a, b]) => {
+            // `op(subject, bound)`, or `op(bound, subject)` reversed.
+            let (subj, bound, op) = match (subject(a, param), number(b)) {
+                (Some(subj), Some(bound)) => (subj, bound, op),
+                _ => match (number(a), subject(b, param)) {
+                    (Some(bound), Some(subj)) => (
+                        subj,
+                        bound,
+                        match op {
+                            "gt" => "lt",
+                            "gte" => "lte",
+                            "lt" => "gt",
+                            _ => "gte",
+                        },
+                    ),
+                    _ => return false,
+                },
+            };
+            match subj {
+                Subject::Value => push(
+                    match op {
+                        "gt" => "exclusiveMinimum",
+                        "gte" => "minimum",
+                        "lt" => "exclusiveMaximum",
+                        _ => "maximum",
+                    },
+                    bound,
+                ),
+                Subject::Length => {
+                    let Val::Int(n) = bound else {
+                        return false;
+                    };
+                    match op {
+                        "gt" => push("$minLength", Val::Int(n + 1)),
+                        "gte" => push("$minLength", Val::Int(n)),
+                        "lt" => push("$maxLength", Val::Int(n - 1)),
+                        _ => push("$maxLength", Val::Int(n)),
+                    }
+                }
+            }
+            true
+        }
+        ("between", [x, low, high]) => {
+            let (Some(subj), Some(low), Some(high)) =
+                (subject(x, param), number(low), number(high))
+            else {
+                return false;
+            };
+            match subj {
+                Subject::Value => {
+                    push("minimum", low);
+                    push("maximum", high);
+                }
+                Subject::Length => {
+                    push("$minLength", low);
+                    push("$maxLength", high);
+                }
+            }
+            true
+        }
+        ("in", [x, Value::Val(Val::Vec(items), _)]) if is_param(x, param) => {
+            let literals: Option<Vec<Val>> = items
+                .iter()
+                .map(|item| match item {
+                    Val::Int(_) | Val::Dec(_) | Val::Str(_) | Val::Bool(_) | Val::Null => {
+                        Some(item.clone())
+                    }
+                    _ => None,
+                })
+                .collect();
+            match literals {
+                Some(values) => {
+                    push("enum", Val::Vec(values));
+                    true
+                }
+                None => false,
+            }
+        }
+        ("eq", [a, b]) => match (
+            is_param(a, param),
+            literal_value(b),
+            literal_value(a),
+            is_param(b, param),
+        ) {
+            (true, Some(value), _, _) | (_, _, Some(value), true) => {
+                push("const", value);
+                true
+            }
+            _ => false,
+        },
+        ("is-match", [x, Value::Val(Val::Str(pattern), _)]) if is_param(x, param) => {
+            push("pattern", Val::Str(pattern.clone()));
+            true
+        }
+        _ => false,
+    }
 }
 
 /// Build a `{"$ref": "#/$defs/<sanitized>"}` Val.
@@ -827,6 +1095,7 @@ mod tests {
             constructor_functions: None,
             implementations: None,
             is_open: false,
+            refinement: None,
         };
         registry.register("User", &user_type);
 
@@ -874,6 +1143,7 @@ mod tests {
             constructor_functions: None,
             implementations: None,
             is_open: false,
+            refinement: None,
         };
         registry.register("Address", &address_type);
 
@@ -897,6 +1167,7 @@ mod tests {
             constructor_functions: None,
             implementations: None,
             is_open: false,
+            refinement: None,
         };
         registry.register("User", &user_type);
 
@@ -968,6 +1239,7 @@ mod tests {
             constructor_functions: None,
             implementations: None,
             is_open: false,
+            refinement: None,
         };
         registry.register("Direction", &direction);
 
@@ -995,6 +1267,7 @@ mod tests {
             constructor_functions: None,
             implementations: None,
             is_open: false,
+            refinement: None,
         };
         registry.register("Circle", &circle);
 
@@ -1015,6 +1288,7 @@ mod tests {
             constructor_functions: None,
             implementations: None,
             is_open: false,
+            refinement: None,
         };
         registry.register("Shape", &shape);
 
@@ -1074,6 +1348,7 @@ mod tests {
             constructor_functions: None,
             implementations: None,
             is_open: false,
+            refinement: None,
         };
         registry.register("Tree", &tree);
 
@@ -1129,6 +1404,7 @@ mod tests {
             constructor_functions: None,
             implementations: None,
             is_open: false,
+            refinement: None,
         };
         registry.register("Tree", &tree);
 
@@ -1154,6 +1430,7 @@ mod tests {
             constructor_functions: None,
             implementations: None,
             is_open: false,
+            refinement: None,
         };
         registry.register("Forest", &forest);
 
@@ -1211,6 +1488,7 @@ mod tests {
             constructor_functions: None,
             implementations: None,
             is_open: false,
+            refinement: None,
         };
         registry.register("Item", &item_type);
 

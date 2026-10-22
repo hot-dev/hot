@@ -18,10 +18,14 @@ pub mod artifact_extraction;
 pub mod artifacts;
 pub mod box_checker;
 pub mod call_graph;
+mod constraint_checks;
+mod constraint_proofs;
+mod constraint_specs;
 pub mod core_registry;
 pub mod ctx_checker;
 pub mod dependency_graph;
 pub mod placeholder_lowering;
+pub mod refinements;
 pub mod resolver;
 pub mod type_checker;
 
@@ -36,7 +40,8 @@ use crate::lang::ast::{
     BuiltinType, Flow, FlowType, FnCall, FnDef, Meta, Namespace, Program, Ref, TypeExpr, Value, Var,
 };
 use crate::lang::bytecode::{
-    BytecodeProgram, CompilationStats, Constant, FunctionId, FunctionInfo, Instruction, RegisterId,
+    BytecodeProgram, CompilationStats, Constant, ConstantId, FunctionId, FunctionInfo, Instruction,
+    RegisterId,
 };
 use crate::lang::compiler::core_registry::{CoreVariableRegistry, CoreVariableType};
 use crate::lang::compiler::resolver::Resolver;
@@ -131,6 +136,28 @@ pub struct Compiler {
     /// Errors are returned via `Result`; warnings live here so consumers
     /// (`hot check`, LSP) can surface them without failing compilation.
     diagnostics: crate::lang::errors::CompilerErrors,
+    /// Type declarations by qualified name, for building `where` constraint
+    /// specs (see `constraint_specs`).
+    constraint_type_defs: AHashMap<String, crate::lang::ast::TypeDef>,
+    /// Whether each named type carries a constraint (memo).
+    constrained_types: AHashMap<String, bool>,
+    /// Constant ids of registered constraint specs, by qualified type name.
+    constraint_spec_ids: AHashMap<String, ConstantId>,
+    /// `where` predicate functions by qualified name: parameter and body.
+    constraint_predicates: AHashMap<String, (String, Value)>,
+    /// Namespaces that define a function named like a canonical predicate
+    /// function (`gt`, `between`, ...), whose predicates get no fast form.
+    shadowing_namespaces: AHashSet<String>,
+    /// `where` predicates that call an `is-match` other than
+    /// `::hot::regex/is-match`, whose patterns get no fast form.
+    foreign_regex_predicates: AHashSet<String>,
+    /// Parameters of the function body being compiled that stay proven, with
+    /// their specs (see `constraint_proofs`).
+    proven_params: AHashMap<String, Val>,
+    /// Every function's parameter annotations, by qualified name.
+    param_annotations: AHashMap<String, constraint_proofs::ParamAnnotations>,
+    /// Parameter specs by callee (memo); `None` when its calls can't be proven.
+    callee_param_specs: AHashMap<FunctionId, Option<Vec<Option<Val>>>>,
 }
 
 /// Complete append-only compiler state for compiling code against an already
@@ -152,6 +179,7 @@ pub struct CompilerSeed {
     core_lazy_function_names: IndexMap<String, String>,
     known_functions: AHashSet<String>,
     next_cond_id: u64,
+    constraint_type_defs: AHashMap<String, crate::lang::ast::TypeDef>,
 }
 
 impl CompilerSeed {
@@ -240,6 +268,15 @@ impl Compiler {
             known_functions: AHashSet::new(),
             next_cond_id: 0,
             diagnostics: crate::lang::errors::CompilerErrors::new(),
+            constraint_type_defs: AHashMap::new(),
+            constrained_types: AHashMap::new(),
+            constraint_spec_ids: AHashMap::new(),
+            constraint_predicates: AHashMap::new(),
+            shadowing_namespaces: AHashSet::new(),
+            foreign_regex_predicates: AHashSet::new(),
+            proven_params: AHashMap::new(),
+            param_annotations: AHashMap::new(),
+            callee_param_specs: AHashMap::new(),
         }
     }
 
@@ -260,6 +297,7 @@ impl Compiler {
             core_lazy_function_names: self.core_lazy_function_names.clone(),
             known_functions: self.known_functions.clone(),
             next_cond_id: self.next_cond_id,
+            constraint_type_defs: self.constraint_type_defs.clone(),
         }
     }
 
@@ -279,6 +317,7 @@ impl Compiler {
         compiler.core_lazy_function_names = seed.core_lazy_function_names;
         compiler.known_functions = seed.known_functions;
         compiler.next_cond_id = seed.next_cond_id;
+        compiler.constraint_type_defs = seed.constraint_type_defs;
         compiler
     }
 
@@ -308,6 +347,7 @@ impl Compiler {
         compiler.next_cond_id = next_cond_id;
         compiler.extract_lazy_params(base_program);
         compiler.extract_known_functions(base_program);
+        compiler.collect_constraint_types(base_program);
         compiler.seed()
     }
 
@@ -832,6 +872,10 @@ impl Compiler {
         tracing::debug!("Compiler: Phase 0.5 - Placeholder lowering");
         crate::lang::compiler::placeholder_lowering::lower_program(program)?;
 
+        // `where` constraints: purity, Bool results, lazy parameters, and
+        // literals that provably fail.
+        let constraint_warnings = self.check_constraints(program)?;
+
         // Phase 1: Variable resolution pass
         tracing::debug!("Compiler: Phase 1 - Variable resolution");
         // Pass both the NamespaceRegistry and CoreVariableRegistry to the resolver
@@ -857,6 +901,7 @@ impl Compiler {
         // success and failure paths. Warnings live on the compiler, not in the
         // returned error, so they never count toward compilation failure.
         self.diagnostics = type_checker.take_warnings();
+        self.diagnostics.warnings.extend(constraint_warnings);
         if let Err(mut errors) = check_result {
             errors.warnings.clear();
             return Err(errors);
@@ -916,6 +961,7 @@ impl Compiler {
         self.extract_core_variables(validation_program)?;
 
         crate::lang::compiler::placeholder_lowering::lower_program(validation_program)?;
+        let constraint_warnings = self.check_constraints(validation_program)?;
 
         let mut resolver =
             Resolver::with_registries(self.program.namespaces.clone(), self.core_variables.clone());
@@ -932,6 +978,7 @@ impl Compiler {
         }
         let check_result = type_checker.check_program(validation_program);
         self.diagnostics = type_checker.take_warnings();
+        self.diagnostics.warnings.extend(constraint_warnings);
         if let Err(mut errors) = check_result {
             errors.warnings.clear();
             return Err(errors);
@@ -1040,6 +1087,7 @@ impl Compiler {
         tracing::debug!("Compiler: Pass 0 - Extracting lazy parameter info and known functions");
         self.extract_lazy_params(program);
         self.extract_known_functions(program);
+        self.collect_constraint_types(program);
 
         // Pass 0.5: Register namespace imports (type aliases) before type definitions
         // This ensures imports like `FileMeta ::hot::file/FileMeta` are available
@@ -1423,6 +1471,23 @@ impl Compiler {
         Ok(())
     }
 
+    /// Run the static `where` constraint checks. Errors fail compilation;
+    /// warnings are returned for the diagnostics.
+    fn check_constraints(
+        &self,
+        program: &Program,
+    ) -> CompilerResult<Vec<crate::lang::errors::CompilerError>> {
+        let found = constraint_checks::check_constraints(program, &self.core_variables);
+        if found.errors.is_empty() {
+            return Ok(found.warnings);
+        }
+        let mut errors = CompilerErrors::new();
+        for error in found.errors {
+            errors.add(error);
+        }
+        Err(errors)
+    }
+
     /// Compile a variable declaration
     fn compile_variable_declaration(
         &mut self,
@@ -1440,6 +1505,42 @@ impl Compiler {
         if var.sym.name() == "ns" {
             return self.handle_ns_declaration(value);
         }
+
+        // A typed binding whose type carries `where` constraints: check the
+        // value before binding it.
+        if var.deep_set.is_none()
+            && !matches!(
+                value,
+                Value::Fn(_) | Value::TypeDef(_) | Value::TypeImplementation(_) | Value::Lambda(_)
+            )
+            && let Some(annotation) = var.type_annotation.as_deref()
+            && let Some(spec) = self.constraint_spec_for_annotation(annotation)
+        {
+            let reg = self.compile_value(value)?;
+            let var_info = crate::lang::bytecode::VariableInfo {
+                name: var.sym.name().to_string(),
+                var_type: if Self::is_core_var(var) {
+                    crate::lang::bytecode::VariableType::CoreFunction
+                } else {
+                    crate::lang::bytecode::VariableType::Value
+                },
+                metadata: var.meta.as_ref().map(|m| m.val.clone()),
+                function_id: None,
+            };
+            self.program
+                .namespaces
+                .add_variable(&self.current_namespace, var_info);
+            let declared_type = self.display_annotation(annotation);
+            let boundary = constraint_specs::Boundary {
+                binding: Some(var.sym.name()),
+                declared_type: Some(&declared_type),
+                ..constraint_specs::Boundary::new("binding")
+            };
+            let checked = self.emit_constraint_check(reg, spec, &boundary, false);
+            self.store_variable_with_meta(var.sym.name(), checked, var.meta.as_ref());
+            return Ok(checked);
+        }
+
         match value {
             Value::Val(val, _metadata) => {
                 // Compile literal value
@@ -2227,7 +2328,14 @@ impl Compiler {
         self.current_function_id = Some(actual_function_id);
 
         // Compile function body into separate instruction context
-        let function_instructions = self.compile_function_body(&fn_def.body)?;
+        let checks = self.signature_checks(
+            function_name,
+            &fn_def.args,
+            fn_def.return_type.as_deref(),
+            fn_def.precondition.as_ref(),
+        );
+        let function_instructions =
+            self.compile_checked_function_body(&fn_def.body, checks.as_ref())?;
 
         // TCO: Restore previous function context
         self.current_function_name = saved_function_name;
@@ -2357,7 +2465,14 @@ impl Compiler {
         self.current_function_id = Some(reserved_id);
 
         // Compile function body into separate instruction context
-        let function_instructions = self.compile_function_body(&fn_def.body)?;
+        let checks = self.signature_checks(
+            function_name,
+            &fn_def.args,
+            fn_def.return_type.as_deref(),
+            fn_def.precondition.as_ref(),
+        );
+        let function_instructions =
+            self.compile_checked_function_body(&fn_def.body, checks.as_ref())?;
 
         // TCO: Restore previous function context
         self.current_function_name = saved_function_name;
@@ -2381,8 +2496,17 @@ impl Compiler {
         Ok(reserved_id)
     }
 
-    /// Compile a function body into a separate instruction sequence
-    fn compile_function_body(&mut self, body: &Value) -> Result<Vec<Instruction>, String> {
+    /// Compile a function body into a separate instruction sequence, with
+    /// the `where` checks of its signature, when it has any: a
+    /// prologue for refined parameters and the argument-list precondition,
+    /// and an epilogue for a refined return type. A self tail call restarts
+    /// the body, so the prologue checks every iteration's arguments; the
+    /// epilogue checks the value the last iteration returns.
+    fn compile_checked_function_body(
+        &mut self,
+        body: &Value,
+        checks: Option<&constraint_specs::SignatureChecks>,
+    ) -> Result<Vec<Instruction>, String> {
         tracing::trace!("Compiler: compile_function_body called");
         // Save the current instruction context (entry point instructions)
         let saved_instructions = std::mem::take(&mut self.program.entry_point);
@@ -2390,11 +2514,25 @@ impl Compiler {
         let saved_emitting_function_body = self.emitting_function_body;
         self.in_tail_position = true;
         self.emitting_function_body = true;
+        let saved_proven =
+            std::mem::replace(&mut self.proven_params, Self::proven_params(checks, body));
 
         let result = (|| {
             // Compile the function body into the scratch entry point. The VM
             // creates the scope containing function parameters at call time.
+            if let Some(checks) = checks {
+                self.emit_signature_prologue(checks)?;
+            }
             let result_reg = self.compile_value(body)?;
+            let result_reg = match checks {
+                // Returning a parameter proven against the same spec.
+                Some(constraint_specs::SignatureChecks {
+                    ret: Some((spec, _)),
+                    ..
+                }) if self.returns_proven(body, spec) => result_reg,
+                Some(checks) => self.emit_return_check(checks, result_reg),
+                None => result_reg,
+            };
             // If a TailCall was emitted this Return is dead code.
             self.emit_instruction(Instruction::Return { value: result_reg });
             Ok(std::mem::take(&mut self.program.entry_point))
@@ -2403,6 +2541,7 @@ impl Compiler {
         self.program.entry_point = saved_instructions;
         self.in_tail_position = saved_tail_position;
         self.emitting_function_body = saved_emitting_function_body;
+        self.proven_params = saved_proven;
         result
     }
 
@@ -2591,6 +2730,8 @@ impl Compiler {
                         {
                             self.compile_deep_set_assignment(var_name, deep_set_path, value_reg)?;
                         } else {
+                            let value_reg =
+                                self.constrain_binding(&var_ref.var, &values[1], value_reg);
                             self.store_variable(var_name, value_reg);
                         }
 
@@ -3514,6 +3655,7 @@ impl Compiler {
                         },
                         body: Box::new(arg.value.clone()),
                         flow_type: None, // Wrapper lambda, no specific flow type
+                        return_type: None,
                     };
 
                     // Compile the lambda as a lazy parameter (won't be auto-evaluated)
@@ -3732,6 +3874,13 @@ impl Compiler {
                         spread_mask
                     );
                 } else if function_id != 0 {
+                    // Arguments that already satisfy the callee's parameter
+                    // constraints skip their checks.
+                    let mask = self.proven_args_mask(function_id, &fn_call.args);
+                    if mask != 0 {
+                        self.emit_instruction(Instruction::ProvenArgs { function_id, mask });
+                    }
+
                     // TCO: Check if this is a self-recursive tail call
                     let is_self_recursive = self.current_function_id == Some(function_id);
                     let is_tail_call = self.in_tail_position && is_self_recursive;
@@ -4119,6 +4268,7 @@ impl Compiler {
                         },
                         body: Box::new(arg.value.clone()),
                         flow_type: None,
+                        return_type: None,
                     };
                     let lambda_reg = self.compile_lambda_internal(&lambda, true)?;
                     self.emit_instruction(Instruction::Move {
@@ -4287,11 +4437,29 @@ impl Compiler {
         let saved_function_id = self.current_function_id.take();
         let saved_tail_position = self.in_tail_position;
         let saved_emitting_function_body = self.emitting_function_body;
+        // The enclosing body's proofs don't reach into a lambda.
+        let saved_proven = std::mem::take(&mut self.proven_params);
         self.in_tail_position = false;
         self.emitting_function_body = true;
 
+        // `where` checks on the lambda's parameters and return type.
+        let label = match &saved_function_name {
+            Some(name) if name.starts_with("::") => format!("{name}/lambda"),
+            Some(name) => format!("{}/{}/lambda", self.current_namespace, name),
+            None => format!("{}/lambda", self.current_namespace),
+        };
+        let checks =
+            self.signature_checks(&label, &lambda.args, lambda.return_type.as_deref(), None);
+
         let lambda_instructions: Result<Vec<Instruction>, String> = (|| {
+            if let Some(checks) = &checks {
+                self.emit_signature_prologue(checks)?;
+            }
             let body_reg = self.compile_value(&lambda.body)?;
+            let body_reg = match &checks {
+                Some(checks) => self.emit_return_check(checks, body_reg),
+                None => body_reg,
+            };
             self.emit_instruction(Instruction::Return { value: body_reg });
             Ok(std::mem::take(&mut self.program.entry_point))
         })();
@@ -4301,6 +4469,7 @@ impl Compiler {
         self.current_function_id = saved_function_id;
         self.in_tail_position = saved_tail_position;
         self.emitting_function_body = saved_emitting_function_body;
+        self.proven_params = saved_proven;
         let lambda_instructions = lambda_instructions?;
 
         // Create closure environment by capturing current variable values
@@ -4317,6 +4486,7 @@ impl Compiler {
             .iter()
             .filter_map(|i| match i {
                 Instruction::LoadConst { dest, .. }
+                | Instruction::CheckConstraint { dest, .. }
                 | Instruction::Move { dest, .. }
                 | Instruction::LoadVar { dest, .. }
                 | Instruction::LoadVarOrDefault { dest, .. }
@@ -4399,6 +4569,7 @@ impl Compiler {
         let saved_function_id = self.current_function_id.take();
         let saved_tail_position = self.in_tail_position;
         let saved_emitting_function_body = self.emitting_function_body;
+        let saved_proven = std::mem::take(&mut self.proven_params);
         self.in_tail_position = false;
         self.emitting_function_body = true;
 
@@ -4418,6 +4589,7 @@ impl Compiler {
         self.in_tail_position = saved_tail_position;
         self.emitting_function_body = saved_emitting_function_body;
         self.next_register = saved_next_register;
+        self.proven_params = saved_proven;
         let thunk_instructions = thunk_instructions?;
 
         // Calculate register count for the thunk
@@ -4425,6 +4597,7 @@ impl Compiler {
             .iter()
             .filter_map(|i| match i {
                 Instruction::LoadConst { dest, .. }
+                | Instruction::CheckConstraint { dest, .. }
                 | Instruction::Move { dest, .. }
                 | Instruction::LoadVar { dest, .. }
                 | Instruction::LoadVarOrDefault { dest, .. }
@@ -5172,6 +5345,44 @@ impl Compiler {
             type_def.fields.as_ref().map(|f| f.len())
         );
 
+        // `where` constraints: a constrained alias checks the value and keeps
+        // it a plain base value; a constrained struct checks its input before
+        // constructing it.
+        let check = self.constructor_check_constant(&type_tag_name);
+        if let Some(check) = check
+            && Self::is_constrained_alias(type_def)
+        {
+            let data = self.program.add_constant(Constant::Val(Val::from("data")));
+            let function_info = FunctionInfo {
+                name: constructor_name.to_string(),
+                namespace: self.current_namespace.clone(),
+                arity: 1,
+                is_variadic: false,
+                param_names: vec!["data".to_string()],
+                param_types: vec![0],
+                return_type: 0,
+                lazy_params: vec![false],
+                flow_type: None,
+                instructions: vec![
+                    Instruction::LoadVar {
+                        dest: 1,
+                        var_name: data,
+                    },
+                    Instruction::CheckConstraint {
+                        dest: 0,
+                        src: 1,
+                        spec: check,
+                        test: false,
+                    },
+                    Instruction::Return { value: 0 },
+                ],
+                register_count: 2,
+                source: None,
+            };
+            self.program.functions.push(function_info);
+            return Ok(function_id);
+        }
+
         // Build type_info constant for ConstructTyped instruction
         // Format: {$type: "TypeName", $fields: {field_name: {$type: "FieldType", ...}, ...}}
         let type_info = self.build_type_info(&type_tag_name, type_def);
@@ -5187,22 +5398,44 @@ impl Compiler {
             return_type: 0,       // TypeId 0 as placeholder
             lazy_params: vec![false],
             flow_type: None, // Type constructors are not flow functions
-            instructions: vec![
-                // Load the input data (parameter 0) into register 1
-                Instruction::LoadVar {
-                    dest: 1,
-                    var_name: self.program.add_constant(Constant::Val(Val::from("data"))),
-                },
-                // Use ConstructTyped to recursively construct nested types
-                Instruction::ConstructTyped {
-                    dest: 0,
-                    src: 1,
-                    type_info: type_info_constant,
-                },
-                // Return the typed object
-                Instruction::Return { value: 0 },
-            ],
-            register_count: 2, // Need registers 0 (return), 1 (data)
+            instructions: match check {
+                // Check the input, then construct from the checked value.
+                Some(check) => vec![
+                    Instruction::LoadVar {
+                        dest: 1,
+                        var_name: self.program.add_constant(Constant::Val(Val::from("data"))),
+                    },
+                    Instruction::CheckConstraint {
+                        dest: 2,
+                        src: 1,
+                        spec: check,
+                        test: false,
+                    },
+                    Instruction::ReturnIfErr { src: 2 },
+                    Instruction::ConstructTyped {
+                        dest: 0,
+                        src: 2,
+                        type_info: type_info_constant,
+                    },
+                    Instruction::Return { value: 0 },
+                ],
+                None => vec![
+                    // Load the input data (parameter 0) into register 1
+                    Instruction::LoadVar {
+                        dest: 1,
+                        var_name: self.program.add_constant(Constant::Val(Val::from("data"))),
+                    },
+                    // Use ConstructTyped to recursively construct nested types
+                    Instruction::ConstructTyped {
+                        dest: 0,
+                        src: 1,
+                        type_info: type_info_constant,
+                    },
+                    // Return the typed object
+                    Instruction::Return { value: 0 },
+                ],
+            },
+            register_count: 3, // Registers 0 (return), 1 (data), 2 (checked data)
             source: None,      // Type constructor without custom fn definitions
         };
 
@@ -5314,6 +5547,14 @@ impl Compiler {
                 if Self::is_builtin_type_name(name) {
                     if include_builtin {
                         Self::simple_type_info(name)
+                    } else {
+                        Val::map_empty()
+                    }
+                } else if self.names_constrained_alias(name) {
+                    // A constrained alias's values stay plain base values; the
+                    // constructor's constraint check already validated them.
+                    if include_builtin {
+                        Self::simple_type_info("Any")
                     } else {
                         Val::map_empty()
                     }
@@ -7127,6 +7368,7 @@ impl Compiler {
                     {
                         self.compile_deep_set_assignment(var_name, deep_set_path, value_reg)?;
                     } else {
+                        let value_reg = self.constrain_binding(&var_ref.var, value_expr, value_reg);
                         self.store_variable(var_name, value_reg);
                     }
 
@@ -7413,6 +7655,8 @@ impl Compiler {
                                     value_reg,
                                 )?;
                             } else {
+                                let value_reg =
+                                    self.constrain_binding(&var_ref.var, value_expr, value_reg);
                                 self.store_variable(var_name, value_reg);
                             }
 
@@ -7538,6 +7782,8 @@ impl Compiler {
                                     value_reg,
                                 )?;
                             } else {
+                                let value_reg =
+                                    self.constrain_binding(&var_ref.var, value_expr, value_reg);
                                 self.store_variable(var_name, value_reg);
                             }
                             last_reg = value_reg;
@@ -7970,6 +8216,24 @@ impl Compiler {
                         dest,
                         constant: true_constant,
                     });
+                    return Ok(());
+                }
+
+                // A refinement or closed literal union: its values are plain
+                // base values, so the arm is a guard that checks them.
+                if self
+                    .constraint_type_defs
+                    .get(&full_type_path)
+                    .is_some_and(Self::is_constrained_alias)
+                    && let Some(spec) = self.untagged_alias_spec(&full_type_path)
+                {
+                    let checked = self.emit_constraint_check(
+                        value_reg,
+                        spec,
+                        &constraint_specs::Boundary::new("match"),
+                        true,
+                    );
+                    self.emit_instruction(Instruction::Move { dest, src: checked });
                     return Ok(());
                 }
 
