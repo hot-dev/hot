@@ -68,12 +68,14 @@ ProjectApiKeyListResponse type {
     has_more: Bool
 }
 
+ProjectRole type open "owner" | "member"
+
 ProjectUser type {
     object: "organization.project.user",
     id: Str,
     name: Str,
     email: Str,
-    role: "owner" | "member",
+    role: ProjectRole,
     added_at: Int
 }
 
@@ -93,12 +95,15 @@ ProjectListResponse type {
     has_more: Bool
 }
 
+OrganizationRole type open "owner" | "reader"
+InviteStatus type open "accepted" | "expired" | "pending"
+
 Invite type {
     object: "organization.invite",
     id: Str,
     email: Str,
-    role: "owner" | "reader",
-    status: "accepted" | "expired" | "pending",
+    role: OrganizationRole,
+    status: InviteStatus,
     invited_at: Int,
     expires_at: Int,
     accepted_at: Int?,
@@ -195,8 +200,10 @@ ProjectServiceAccountCreateResponse type {
     api_key: ProjectServiceAccountApiKey
 }
 
+AuditLogActorType type open "session" | "api_key"
+
 AuditLogActor type {
-    type: "session" | "api_key"?,
+    type: AuditLogActorType?,
     session: AuditLogActorSession?,
     api_key: AuditLogActorApiKey?
 }
@@ -217,7 +224,7 @@ ProjectServiceAccount type {
     object: "organization.project.service_account",
     id: Str,
     name: Str,
-    role: "owner" | "member",
+    role: ProjectRole,
     created_at: Int
 }
 
@@ -256,7 +263,7 @@ User type {
     id: Str,
     name: Str,
     email: Str,
-    role: "owner" | "reader",
+    role: OrganizationRole,
     added_at: Int
 }
 
@@ -287,9 +294,11 @@ UserDeleteResponse type {
     deleted: Bool
 }
 
+AuditLogActorApiKeyType type open "user" | "service_account"
+
 AuditLogActorApiKey type {
     id: Str?,
-    type: "user" | "service_account"?,
+    type: AuditLogActorApiKeyType?,
     user: AuditLogActorUser?,
     service_account: AuditLogActorServiceAccount?
 }
@@ -306,13 +315,15 @@ ProjectUpdateRequest type {
     name: Str
 }
 
+ProjectStatus type open "active" | "archived"
+
 Project type {
     id: Str,
     object: "organization.project",
     name: Str,
     created_at: Int,
     archived_at: Int?,
-    status: "active" | "archived"
+    status: ProjectStatus
 }
 
 ErrorResponse type {
@@ -497,8 +508,8 @@ RetrieveInviteResponse type {
     object: "organization.invite",
     id: Str,
     email: Str,
-    role: "owner" | "reader",
-    status: "accepted" | "expired" | "pending",
+    role: OrganizationRole,
+    status: InviteStatus,
     invited_at: Int,
     expires_at: Int,
     accepted_at: Int?,
@@ -563,7 +574,7 @@ CreateProjectResponse type {
     name: Str,
     created_at: Int,
     archived_at: Int?,
-    status: "active" | "archived"
+    status: ProjectStatus
 }
 
 
@@ -584,7 +595,7 @@ RetrieveProjectResponse type {
     name: Str,
     created_at: Int,
     archived_at: Int?,
-    status: "active" | "archived"
+    status: ProjectStatus
 }
 
 
@@ -605,7 +616,7 @@ ModifyProjectResponse type {
     name: Str,
     created_at: Int,
     archived_at: Int?,
-    status: "active" | "archived"
+    status: ProjectStatus
 }
 
 
@@ -696,7 +707,7 @@ ArchiveProjectResponse type {
     name: Str,
     created_at: Int,
     archived_at: Int?,
-    status: "active" | "archived"
+    status: ProjectStatus
 }
 
 
@@ -819,7 +830,7 @@ RetrieveProjectServiceAccountResponse type {
     object: "organization.project.service_account",
     id: Str,
     name: Str,
-    role: "owner" | "member",
+    role: ProjectRole,
     created_at: Int
 }
 
@@ -886,7 +897,7 @@ CreateProjectUserResponse type {
     id: Str,
     name: Str,
     email: Str,
-    role: "owner" | "member",
+    role: ProjectRole,
     added_at: Int
 }
 
@@ -908,7 +919,7 @@ RetrieveProjectUserResponse type {
     id: Str,
     name: Str,
     email: Str,
-    role: "owner" | "member",
+    role: ProjectRole,
     added_at: Int
 }
 
@@ -931,7 +942,7 @@ ModifyProjectUserResponse type {
     id: Str,
     name: Str,
     email: Str,
-    role: "owner" | "member",
+    role: ProjectRole,
     added_at: Int
 }
 
@@ -1220,7 +1231,7 @@ RetrieveUserResponse type {
     id: Str,
     name: Str,
     email: Str,
-    role: "owner" | "reader",
+    role: OrganizationRole,
     added_at: Int
 }
 
@@ -1241,7 +1252,7 @@ ModifyUserResponse type {
     id: Str,
     name: Str,
     email: Str,
-    role: "owner" | "reader",
+    role: OrganizationRole,
     added_at: Int
 }
 

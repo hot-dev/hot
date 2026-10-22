@@ -1102,6 +1102,12 @@ impl Backend {
                 let mut vars = Vec::new();
                 for (var, var_value) in &namespace.scope.vars {
                     let var_name_str = var.sym.name();
+                    // `where` clauses' hidden predicates and alias types.
+                    if hot::lang::ast::is_where_predicate(var_name_str)
+                        || hot::lang::ast::is_inline_refinement_type(var_name_str)
+                    {
+                        continue;
+                    }
 
                     // Extract function signature and documentation from metadata
                     let (detail, doc_markdown) = self.extract_var_metadata(var, var_value);
@@ -2234,6 +2240,12 @@ impl Backend {
                 let mut vars = Vec::new();
                 for (var, var_value) in &namespace.scope.vars {
                     let var_name_str = var.sym.name();
+                    // `where` clauses' hidden predicates and alias types.
+                    if hot::lang::ast::is_where_predicate(var_name_str)
+                        || hot::lang::ast::is_inline_refinement_type(var_name_str)
+                    {
+                        continue;
+                    }
 
                     // Extract function signature and documentation from metadata
                     let (detail, doc_markdown) = self.extract_var_metadata(var, var_value);

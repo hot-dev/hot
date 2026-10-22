@@ -1,0 +1,228 @@
+// Documentation examples for: resources/docs/language/constraints.md
+::hot::test::docs::constraints ns
+meta ["test"]
+
+// Values passed through `dynamic` reach their check at run time. Written as
+// literals, `hot check` would reject them before the program runs.
+dynamic fn (value: Any): Any {
+  value
+}
+
+// =============================================================================
+// Snippets
+// =============================================================================
+
+// @doc: named-refinements
+Port type Int where between(%, 1, 65535)
+Cents type Int where gte(%, 0)
+Username type Str where between(length(%), 3, 20)
+// @end: named-refinements
+
+// @doc: refinement-values
+port: Port 8080
+next-port add(port, 1)
+// @end: refinement-values
+
+// @doc: fields-and-invariants
+LineItem type {
+  sku: Str,
+  quantity: Int where between(%, 1, 99),
+  price: Cents,
+}
+
+Order type {
+  items: Vec<LineItem> where between(length(%), 1, 100),
+  discount: Cents,
+  subtotal: Cents,
+} where lte(%.discount, %.subtotal)
+// @end: fields-and-invariants
+
+// @doc: bindings
+max-retries: Int 3 where between(%, 0, 10)
+
+batch-size: Int div(1200, 4)
+  where between(%, 1, 500)
+// @end: bindings
+
+// @doc: parameters-and-returns
+retry-delay fn (attempt: Int where between(%, 1, 10)): Int where lte(%, 30000) {
+  mul(mul(attempt, attempt), 1000)
+}
+// @end: parameters-and-returns
+
+// @doc: preconditions
+withdraw fn (amount: Int, balance: Int)
+  where and(gt(%.amount, 0), lte(%.amount, %.balance))
+  : Int where gte(%, 0)
+{
+  sub(balance, amount)
+}
+// @end: preconditions
+
+// @doc: nullable
+nickname: Username? null
+
+SmallOrMissing type Int? where if(is-null(%), true, lt(%, 10))
+// @end: nullable
+
+// @doc: helper-predicates
+valid-extension-days fn (days: Int): Bool {
+  and(gte(days, 1), lte(days, 3))
+}
+
+ExtensionDays type Int where valid-extension-days(%)
+// @end: helper-predicates
+
+// @doc: inner-functions
+Positives type Vec<Int> where all(%, (n) { gt(n, 0) })
+Small type Vec<Int> where all(%, %(lt(%, 10)))
+// @end: inner-functions
+
+// @doc: handling-errors
+describe-port fn (value: Any): Str {
+  result Port(value)
+  if-err(result, (e) {
+    match e {
+      ConstraintError.Violation => { `invalid: ${e.message}` }
+      _ => { "could not check" }
+    }
+  })
+}
+// @end: handling-errors
+
+// @doc: literal-unions
+Currency type "USD" | "EUR" | "GBP"
+TrackLinks type open "None" | "HtmlAndText" | "TextOnly"
+// @end: literal-unions
+
+// @doc: updates
+Server type {
+    host: Str,
+    port: Port
+}
+
+server Server({host: "localhost", port: 8080})
+moved assoc(server, "port", 9090)
+// @end: updates
+
+// =============================================================================
+// Tests
+// =============================================================================
+
+test-named-refinements
+meta ["test"] fn () {
+  assert-eq(8080, Port(8080), "a valid port")
+  assert(is-err(Port(dynamic(70000))), "outside the range")
+  assert-eq("alice", Username("alice"), "a valid name")
+}
+// @result: named-refinements
+// Port(8080)      → 8080
+// Port(70000)     → Err(ConstraintError.Violation)
+// Username("al")  → Err(ConstraintError.Violation)
+// @end: named-refinements
+
+test-refinement-values
+meta ["test"] fn () {
+  assert-eq(8081, next-port, "arithmetic works on the base value")
+  assert-eq("8080", to-json(port), "no type tag")
+  assert(is-type(443, Port), "is-type runs the predicate")
+}
+// @result: refinement-values
+// next-port        → 8081
+// to-json(port)    → "8080"
+// is-type(443, Port) → true
+// @end: refinement-values
+
+test-fields-and-invariants
+meta ["test"] fn () {
+  good {items: [{sku: "A-1", quantity: 1, price: 500}], discount: 0, subtotal: 500}
+  assert(is-ok(Order(good)), "a valid order")
+  bad-price assoc-in(good, ["items", 0, "price"], -5)
+  assert-eq(["items", 0, "price"], err-value(Order(bad-price)).path, "path to the field")
+  assert(is-err(Order(assoc(good, "discount", 900))), "the invariant")
+}
+// @result: fields-and-invariants
+// Order({..., items: [{..., price: -5}]})
+//   → Err(ConstraintError.Violation), path ["items", 0, "price"]
+// Order({..., discount: 900, subtotal: 500})
+//   → Err(ConstraintError.Violation), path []
+// @end: fields-and-invariants
+
+test-bindings
+meta ["test"] fn () {
+  assert-eq(3, max-retries, "trailing where")
+  assert-eq(300, batch-size, "a where on its own line")
+}
+
+test-parameters-and-returns
+meta ["test"] fn () {
+  assert-eq(9000, retry-delay(3), "valid")
+  assert-eq("parameter", err-value(retry-delay(dynamic(0))).boundary, "parameter")
+  assert-eq("return", err-value(retry-delay(6)).boundary, "return value")
+}
+// @result: parameters-and-returns
+// retry-delay(3) → 9000
+// retry-delay(0) → Err(ConstraintError.Violation), boundary "parameter"
+// retry-delay(6) → Err(ConstraintError.Violation), boundary "return"
+// @end: parameters-and-returns
+
+test-preconditions
+meta ["test"] fn () {
+  assert-eq(90, withdraw(10, 100), "valid")
+  assert-eq("arguments", err-value(withdraw(150, 100)).boundary, "precondition")
+}
+// @result: preconditions
+// withdraw(10, 100)  → 90
+// withdraw(150, 100) → Err(ConstraintError.Violation), boundary "arguments"
+// @end: preconditions
+
+test-nullable
+meta ["test"] fn () {
+  assert-eq(null, nickname, "null passes")
+  assert-eq(3, SmallOrMissing(3), "a small value")
+  assert(is-err(SmallOrMissing(dynamic(30))), "a large one")
+}
+
+test-helper-predicates
+meta ["test"] fn () {
+  assert-eq(2, ExtensionDays(2), "valid")
+  assert(is-err(ExtensionDays(dynamic(5))), "invalid")
+}
+
+test-inner-functions
+meta ["test"] fn () {
+  assert-eq([1, 2], Positives([1, 2]), "all positive")
+  assert(is-err(Positives(dynamic([1, -2]))), "one negative")
+  assert(is-err(Small(dynamic([1, 20]))), "one too large")
+}
+
+test-handling-errors
+meta ["test"] fn () {
+  assert-eq(80, describe-port(80), "valid")
+  assert-eq("invalid: constructor of `Port` failed `between(%, 1, 65535)`", describe-port(0), "invalid")
+}
+// @result: handling-errors
+// describe-port(80) → 80
+// describe-port(0)  → "invalid: constructor of `Port` failed `between(%, 1, 65535)`"
+// @end: handling-errors
+
+test-literal-unions
+meta ["test"] fn () {
+  body from-json("{\"currency\": \"JPY\", \"tracking\": \"HtmlOnly\"}")
+  assert(is-err(Currency(body.currency)), "a closed union rejects unknown values")
+  assert-eq("HtmlOnly", TrackLinks(body.tracking), "an open union accepts them")
+}
+// @result: literal-unions
+// Currency("JPY")         → Err(ConstraintError.Violation)
+// TrackLinks("HtmlOnly")  → "HtmlOnly"
+// @end: literal-unions
+
+test-updates
+meta ["test"] fn () {
+  assert-eq(9090, moved.port, "a valid update")
+  assert-eq("update", err-value(assoc(server, "port", dynamic(70000))).boundary, "an invalid one")
+}
+// @result: updates
+// assoc(server, "port", 9090)   → Server({host: "localhost", port: 9090})
+// assoc(server, "port", 70000)  → Err(ConstraintError.Violation), boundary "update"
+// @end: updates

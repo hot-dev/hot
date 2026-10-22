@@ -41,6 +41,8 @@ InboundSearchResponse type {
     InboundMessages: Vec<InboundMessageDetail>?
 }
 
+LinkTracking type open "None" | "HtmlAndText" | "HtmlOnly" | "TextOnly"
+
 OutboundMessageDetail type {
     Tag: Str?,
     MessageID: Str?,
@@ -54,7 +56,7 @@ OutboundMessageDetail type {
     Attachments: AttachmentCollection?,
     Status: Str?,
     TrackOpens: Bool?,
-    TrackLinks: "None" | "HtmlAndText" | "HtmlOnly" | "TextOnly"?
+    TrackLinks: LinkTracking?
 }
 
 MessageOpenSearchResponse type {

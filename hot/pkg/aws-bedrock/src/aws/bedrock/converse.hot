@@ -15,7 +15,7 @@ AwsError ::aws::core/AwsError
 Role type "user" | "assistant"
 
 // Literal union for stop reasons
-StopReason type "end_turn" | "tool_use" | "max_tokens" | "stop_sequence" | "guardrail_intervened" | "content_filtered"
+StopReason type open "end_turn" | "tool_use" | "max_tokens" | "stop_sequence" | "guardrail_intervened" | "content_filtered"
 
 // Content block type (text, image, etc.)
 ContentBlock type {

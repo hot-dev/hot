@@ -16,11 +16,13 @@ FineTuneReinforcementMethod type {
     hyperparameters: FineTuneReinforcementHyperparameters?
 }
 
+FineTuneReasoningEffort type open "default" | "low" | "medium" | "high"
+
 FineTuneReinforcementHyperparameters type {
     batch_size: Any?,
     learning_rate_multiplier: Any?,
     n_epochs: Any?,
-    reasoning_effort: "default" | "low" | "medium" | "high"?,
+    reasoning_effort: FineTuneReasoningEffort?,
     compute_multiplier: Any?,
     eval_interval: Any?,
     eval_samples: Any?
@@ -31,6 +33,8 @@ FineTuneSupervisedHyperparameters type {
     learning_rate_multiplier: Any?,
     n_epochs: Any?
 }
+
+FineTuningJobStatus type open "validating_files" | "queued" | "running" | "succeeded" | "failed" | "cancelled"
 
 FineTuningJob type {
     id: Str,
@@ -43,7 +47,7 @@ FineTuningJob type {
     object: "fine_tuning.job",
     organization_id: Str,
     result_files: Vec<Str>,
-    status: "validating_files" | "queued" | "running" | "succeeded" | "failed" | "cancelled",
+    status: FineTuningJobStatus,
     trained_tokens: Int,
     training_file: Str,
     validation_file: Str,
@@ -54,8 +58,10 @@ FineTuningJob type {
     metadata: Metadata?
 }
 
+FineTuneMethodType type open "supervised" | "dpo" | "reinforcement"
+
 FineTuneMethod type {
-    type: "supervised" | "dpo" | "reinforcement",
+    type: FineTuneMethodType,
     supervised: FineTuneSupervisedMethod?,
     dpo: FineTuneDPOMethod?,
     reinforcement: FineTuneReinforcementMethod?
@@ -87,7 +93,7 @@ ResumeFineTuningJobResponse type {
     object: "fine_tuning.job",
     organization_id: Str,
     result_files: Vec<Str>,
-    status: "validating_files" | "queued" | "running" | "succeeded" | "failed" | "cancelled",
+    status: FineTuningJobStatus,
     trained_tokens: Int,
     training_file: Str,
     validation_file: Str,

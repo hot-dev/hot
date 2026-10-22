@@ -139,6 +139,7 @@ fn test_value_fn_roundtrip() {
             variadic: false,
         },
         return_type: Some("Int".to_string()),
+        precondition: None,
         body: Value::Val(Val::Int(0), None),
     };
     let fn_value = Value::Fn(vec![fn_def]);
@@ -166,6 +167,7 @@ fn test_value_lambda_roundtrip() {
         },
         body: Box::new(Value::Val(Val::Int(1), None)),
         flow_type: None,
+        return_type: None,
     };
     let lambda_value = Value::Lambda(lambda);
     assert_roundtrip(&lambda_value, "Value::Lambda");
@@ -215,6 +217,7 @@ fn test_value_type_def_roundtrip() {
         constructor_functions: None,
         implementations: None,
         is_open: false,
+        refinement: None,
     };
     let type_value = Value::TypeDef(type_def);
     assert_roundtrip(&type_value, "Value::TypeDef");
@@ -350,6 +353,7 @@ fn test_deeply_nested_value_roundtrip() {
         },
         body: Box::new(inner),
         flow_type: None,
+        return_type: None,
     });
     let raw = Value::Raw(Box::new(lambda));
     let do_val = Value::Do(Box::new(raw));
@@ -519,6 +523,7 @@ fn test_all_value_variants_covered() {
                 constructor_functions: None,
                 implementations: None,
                 is_open: false,
+                refinement: None,
             }),
             "TypeImplementation" => Value::TypeImplementation(Box::new(TypeImplementation {
                 source_type: "A".to_string(),
@@ -559,6 +564,7 @@ fn test_all_value_variants_covered() {
                 },
                 body: Box::new(Value::Val(Val::Null, None)),
                 flow_type: None,
+                return_type: None,
             }),
             "Placeholder" => Value::Placeholder(1),
             _ => panic!("Unknown variant: {}", variant),

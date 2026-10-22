@@ -77,6 +77,32 @@ Use `?` for types that accept null (shorthand for `Type | Null`):
 
 {{result:functions#nullable-params}}
 
+## Parameter Constraints
+
+A parameter's type, the parameter list, and the return type can each take a
+`where` clause. A failing argument returns a `ConstraintError` before the body
+runs:
+
+```hot
+withdraw fn (amount: Int, balance: Int)
+  where lte(%.amount, %.balance)
+  : Int where gte(%, 0)
+{
+  sub(balance, amount)
+}
+```
+
+See [Constraints](/docs/language/constraints).
+
+## Long Parameter Lists
+
+A parameter list can span lines, like a call's arguments. A trailing comma
+after the last parameter is optional:
+
+{{snippet:functions#multiline-params}}
+
+{{result:functions#multiline-params}}
+
 ## Function Overloading
 
 Define multiple versions of a function with different parameter counts (arity):

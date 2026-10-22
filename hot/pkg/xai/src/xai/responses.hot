@@ -15,13 +15,13 @@ is-ok-response ::hot::http/is-ok-response
 // ============================================================================
 
 // Literal union for message roles
-Role type "user" | "system" | "assistant" | "tool"
+Role type open "user" | "system" | "assistant" | "tool"
 
 // Literal union for finish reasons
-FinishReason type "stop" | "length" | "tool_calls" | "content_filter"
+FinishReason type open "stop" | "length" | "tool_calls" | "content_filter"
 
 // Literal union for response status
-ResponseStatus type "completed" | "failed" | "incomplete" | "in_progress"
+ResponseStatus type open "completed" | "failed" | "incomplete" | "in_progress"
 
 // Message input for requests
 InputMessage type {

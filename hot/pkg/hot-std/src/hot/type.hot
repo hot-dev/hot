@@ -868,6 +868,144 @@ fn (lazy result: Any): Str {
 }
 
 
+// `where` constraints. A value that fails one is an ordinary
+// `Result.Err` holding a `ConstraintError`.
+
+predicate
+meta {
+    no-doc: true,
+    doc: """
+    Return `f`. Hot passes every `where` predicate through this function,
+    so `%` in a predicate binds the way it does in any argument that takes
+    a function.
+    """
+}
+fn (f: Fn): Fn {
+    f
+}
+
+ConstraintViolation
+meta {
+    core: true,
+    doc: """
+    Payload of `ConstraintError.Violation`: a value failed a `where`
+    constraint.
+
+    **Fields**
+
+    - `message` — Human-readable summary. It never includes the rejected value
+    - `constraint` — The named refinement, such as `::shop/Port`, or `<inline>`
+    - `predicate` — Source text of the predicate
+    - `boundary` — Where the check ran: `binding`, `constructor`, `parameter`,
+      `arguments`, `return`, `update`, or `decode`
+    - `path` — Steps from the checked value to the part that failed, such as
+      `["items", 2, "price"]`. Empty when the value itself failed
+    - `declared-type` — The declared type at the boundary, when there is one
+    - `function` — The function, for parameter, argument, and return checks
+    - `parameter` — The parameter name, for parameter checks
+    - `location` — Source location of the `where` clause
+    - `value-type` — Type of the rejected value
+    """
+}
+type {
+    message: Str,
+    constraint: Str,
+    predicate: Str,
+    boundary: Str,
+    path: Vec,
+    declared-type: Str?,
+    function: Str?,
+    parameter: Str?,
+    location: Map?,
+    value-type: Str
+}
+
+ConstraintEvaluationFailure
+meta {
+    core: true,
+    doc: """
+    Payload of `ConstraintError.EvaluationFailed`: a `where` predicate could
+    not decide. It returned something other than a `Bool`, returned an
+    `Err`, called `fail()`, or called a function that isn't allowed in a
+    predicate.
+
+    Has the fields of `ConstraintViolation`, plus `cause`: the underlying
+    error, or a description of what the predicate returned.
+    """
+}
+type {
+    message: Str,
+    constraint: Str,
+    predicate: Str,
+    boundary: Str,
+    path: Vec,
+    declared-type: Str?,
+    function: Str?,
+    parameter: Str?,
+    location: Map?,
+    value-type: Str,
+    cause: Any
+}
+
+ConstraintBudgetFailure
+meta {
+    core: true,
+    doc: """
+    Payload of `ConstraintError.BudgetExceeded`: a `where` predicate ran out
+    of its instruction or call-depth budget.
+
+    Has the fields of `ConstraintViolation`, plus `budget` (`"instructions"`
+    or `"depth"`) and `limit`.
+    """
+}
+type {
+    message: Str,
+    constraint: Str,
+    predicate: Str,
+    boundary: Str,
+    path: Vec,
+    declared-type: Str?,
+    function: Str?,
+    parameter: Str?,
+    location: Map?,
+    value-type: Str,
+    budget: Str,
+    limit: Int
+}
+
+ConstraintError
+meta {
+    core: true,
+    doc: """
+    The error a `where` constraint returns, as the payload of a
+    `Result.Err`.
+
+    - `ConstraintError.Violation` — The value failed the predicate
+    - `ConstraintError.EvaluationFailed` — The predicate could not decide
+    - `ConstraintError.BudgetExceeded` — The predicate ran out of budget
+
+    **Example**
+
+    ```hot
+    Port type Int where between(%, 1, 65535)
+
+    r Port(70000)
+    err-message(r)   // "constructor of `Port` failed `between(%, 1, 65535)`"
+
+    kind match err-value(r) {
+        ConstraintError.Violation => { "invalid" }
+        _ => { "could not check" }
+    }
+    ```
+    """
+}
+enum {
+    Violation(ConstraintViolation),
+    EvaluationFailed(ConstraintEvaluationFailure),
+    BudgetExceeded(ConstraintBudgetFailure)
+}
+
+
 // OnErr controls whether eligible higher-order functions force or preserve
 // normal domain Result.Err values. It does not govern fail(), cancel(), or
 // hard runtime halts.

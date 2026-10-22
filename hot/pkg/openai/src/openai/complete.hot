@@ -9,13 +9,15 @@ CompleteUploadRequest type {
     md5: Str?
 }
 
+UploadStatus type open "pending" | "completed" | "cancelled" | "expired"
+
 Upload type {
     id: Str,
     created_at: Int,
     filename: Str,
     bytes: Int,
     purpose: Str,
-    status: "pending" | "completed" | "cancelled" | "expired",
+    status: UploadStatus,
     expires_at: Int,
     object: "upload",
     file: Any?
@@ -32,7 +34,7 @@ CompleteUploadResponse type {
     filename: Str,
     bytes: Int,
     purpose: Str,
-    status: "pending" | "completed" | "cancelled" | "expired",
+    status: UploadStatus,
     expires_at: Int,
     object: "upload",
     file: Any?

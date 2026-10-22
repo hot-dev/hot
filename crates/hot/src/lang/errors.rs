@@ -298,6 +298,16 @@ pub enum CompilerError {
         required_by: String,
         location: Option<ErrorLocation>,
     },
+    /// A problem with a `where` constraint. `code` is the diagnostic code,
+    /// such as `impure-constraint` or `constraint-not-bool`; `warning` marks
+    /// the codes that don't fail compilation, such as `unknown-literal`.
+    Constraint {
+        code: &'static str,
+        message: String,
+        help: Option<String>,
+        warning: bool,
+        location: Option<ErrorLocation>,
+    },
     /// An implicit `%` lambda would contain another implicit `%` lambda, as
     /// in `map(items, filter(%, gt(%, 0)))`. The two `%` would refer to
     /// different parameters, so the inner function must be explicit.
@@ -323,10 +333,25 @@ pub enum CompilerError {
 }
 
 /// "the `func` argument of `map`", or "an argument of `map`" without a name.
+/// The wrapper the parser puts around every `where` predicate.
+const WHERE_PREDICATE_WRAPPER: &str = "::hot::type/predicate";
+
 fn nested_placeholder_slot(function: &str, parameter: Option<&str>) -> String {
+    if function == WHERE_PREDICATE_WRAPPER {
+        return "a `where` predicate".to_string();
+    }
     match parameter {
         Some(name) => format!("the `{}` argument of `{}`", name, function),
         None => format!("an argument of `{}`", function),
+    }
+}
+
+/// Who the outer `%` of a nested-placeholder error binds to.
+fn nested_placeholder_owner(function: &str) -> String {
+    if function == WHERE_PREDICATE_WRAPPER {
+        "the predicate's".to_string()
+    } else {
+        format!("`{}`'s", function)
     }
 }
 
@@ -1053,6 +1078,25 @@ impl fmt::Display for CompilerError {
                     None => write!(f, "{}", body),
                 }
             }
+            CompilerError::Constraint {
+                message, location, ..
+            } => {
+                if let Some(loc) = location {
+                    write!(
+                        f,
+                        "{}:{}:{}: {}",
+                        loc.file
+                            .as_ref()
+                            .map(|p| p.display().to_string())
+                            .unwrap_or_else(|| "<source>".to_string()),
+                        loc.line,
+                        loc.column,
+                        message
+                    )
+                } else {
+                    write!(f, "{}", message)
+                }
+            }
             CompilerError::NestedPlaceholder {
                 function,
                 parameter,
@@ -1060,10 +1104,10 @@ impl fmt::Display for CompilerError {
             } => {
                 let body = format!(
                     "Nested implicit `%` lambdas in {}: one `%` binds to an inner \
-                     function argument and another to `{}`'s. Write the inner \
+                     function argument and another to {}. Write the inner \
                      function explicitly with `%(...)` or `(x) {{ ... }}`",
                     nested_placeholder_slot(function, parameter.as_deref()),
-                    function
+                    nested_placeholder_owner(function)
                 );
                 if let Some(loc) = location {
                     write!(
@@ -1240,6 +1284,7 @@ impl CompilerErrors {
             CompilerError::UnknownField { location, .. } => location.as_ref(),
             CompilerError::MissingContext { location, .. } => location.as_ref(),
             CompilerError::NestedPlaceholder { location, .. } => location.as_ref(),
+            CompilerError::Constraint { location, .. } => location.as_ref(),
             CompilerError::AnnotationMismatch { location, .. } => location.as_ref(),
         }?;
 
@@ -1723,6 +1768,21 @@ impl CompilerErrors {
                         "Set it in a ctx file (--ctx), hot/ctx.hot, or the app before running",
                     );
             }
+            CompilerError::Constraint {
+                code,
+                message,
+                help,
+                ..
+            } => {
+                report = report.with_code(*code).with_message(message).with_label(
+                    Label::new((source_name.as_str(), span_start..span_end))
+                        .with_message(message)
+                        .with_color(label_color),
+                );
+                if let Some(help) = help {
+                    report = report.with_help(help);
+                }
+            }
             CompilerError::NestedPlaceholder {
                 function,
                 parameter,
@@ -1735,9 +1795,9 @@ impl CompilerErrors {
                         Label::new((source_name.as_str(), span_start..span_end))
                             .with_message(format!(
                                 "one `%` in {} binds to an inner function argument, \
-                                 another to `{}`'s",
+                                 another to {}",
                                 nested_placeholder_slot(function, parameter.as_deref()),
-                                function
+                                nested_placeholder_owner(function)
                             ))
                             .with_color(label_color),
                     )
@@ -1836,6 +1896,7 @@ impl CompilerError {
             CompilerError::UnknownField { location, .. } => location.as_ref(),
             CompilerError::MissingContext { location, .. } => location.as_ref(),
             CompilerError::NestedPlaceholder { location, .. } => location.as_ref(),
+            CompilerError::Constraint { location, .. } => location.as_ref(),
             CompilerError::AnnotationMismatch { location, .. } => location.as_ref(),
         }
     }
@@ -1847,7 +1908,8 @@ impl CompilerError {
             CompilerError::DeprecatedUsage { .. }
             | CompilerError::UnknownField { .. }
             | CompilerError::MissingContext { .. }
-            | CompilerError::AnnotationMismatch { .. } => DiagnosticSeverity::Warning,
+            | CompilerError::AnnotationMismatch { .. }
+            | CompilerError::Constraint { warning: true, .. } => DiagnosticSeverity::Warning,
             _ => DiagnosticSeverity::Error,
         }
     }
@@ -1894,6 +1956,7 @@ impl CompilerError {
             CompilerError::UnknownField { .. } => "unknown-field",
             CompilerError::MissingContext { .. } => "missing-context",
             CompilerError::NestedPlaceholder { .. } => "nested-placeholder",
+            CompilerError::Constraint { code, .. } => code,
             CompilerError::AnnotationMismatch { .. } => "annotation-mismatch",
         }
     }

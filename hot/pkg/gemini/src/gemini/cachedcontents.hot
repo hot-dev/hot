@@ -4,8 +4,10 @@ api-request ::gemini::api/request
 HttpError ::gemini::api/HttpError
 is-ok-response ::hot::http/is-ok-response
 
+ExecutableCodeLanguage type open "LANGUAGE_UNSPECIFIED" | "PYTHON"
+
 ExecutableCode type {
-    language: "LANGUAGE_UNSPECIFIED" | "PYTHON"?,
+    language: ExecutableCodeLanguage?,
     code: Str?
 }
 
@@ -58,8 +60,10 @@ Blob type {
     data: Str?
 }
 
+FunctionCallingMode type open "MODE_UNSPECIFIED" | "AUTO" | "ANY" | "NONE"
+
 FunctionCallingConfig type {
-    mode: "MODE_UNSPECIFIED" | "AUTO" | "ANY" | "NONE"?,
+    mode: FunctionCallingMode?,
     allowedFunctionNames: Vec<Str>?
 }
 
@@ -77,9 +81,11 @@ FunctionCall type {
     args: Map?
 }
 
+ContentRole type open "user" | "model"
+
 Content type {
     parts: Vec<Part>?,
-    role: "user" | "model"?
+    role: ContentRole?
 }
 
 Part type {
@@ -98,8 +104,10 @@ FunctionDeclaration type {
     parameters: Schema?
 }
 
+SchemaType type open "TYPE_UNSPECIFIED" | "STRING" | "NUMBER" | "INTEGER" | "BOOLEAN" | "ARRAY" | "OBJECT"
+
 Schema type {
-    type: "TYPE_UNSPECIFIED" | "STRING" | "NUMBER" | "INTEGER" | "BOOLEAN" | "ARRAY" | "OBJECT"?,
+    type: SchemaType?,
     format: Str?,
     description: Str?,
     nullable: Bool?,
@@ -109,13 +117,17 @@ Schema type {
     required: Vec<Str>?
 }
 
+DynamicRetrievalMode type open "MODE_UNSPECIFIED" | "MODE_DYNAMIC"
+
 DynamicRetrievalConfig type {
-    mode: "MODE_UNSPECIFIED" | "MODE_DYNAMIC"?,
+    mode: DynamicRetrievalMode?,
     dynamicThreshold: Dec?
 }
 
+CodeExecutionOutcome type open "OUTCOME_UNSPECIFIED" | "OUTCOME_OK" | "OUTCOME_FAILED" | "OUTCOME_DEADLINE_EXCEEDED"
+
 CodeExecutionResult type {
-    outcome: "OUTCOME_UNSPECIFIED" | "OUTCOME_OK" | "OUTCOME_FAILED" | "OUTCOME_DEADLINE_EXCEEDED"?,
+    outcome: CodeExecutionOutcome?,
     output: Str?
 }
 

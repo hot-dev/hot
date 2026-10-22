@@ -1199,4 +1199,301 @@ mod integration_tests {
             errors
         );
     }
+
+    /// The code of a `where` constraint diagnostic, when `error` is one.
+    fn constraint_code(error: &CompilerError) -> Option<&'static str> {
+        match error {
+            CompilerError::Constraint { code, .. } => Some(code),
+            _ => None,
+        }
+    }
+
+    fn has_constraint_code(errors: &[CompilerError], code: &str) -> bool {
+        errors.iter().any(|e| constraint_code(e) == Some(code))
+    }
+
+    /// Every `where` form compiles cleanly when its predicates are pure,
+    /// return a Bool, and no literal fails them.
+    #[test]
+    fn test_where_constraints_compile() {
+        let source = r#"
+            ::test ns
+
+            Port type Int where between(%, 1, 65535)
+            Cents type Int where gte(%, 0)
+            Window type { start: Int, finish: Int } where lte(%.start, %.finish)
+            Order type {
+                items: Vec<Str> where between(length(%), 1, 100),
+                total: Cents,
+            }
+            listen fn (port: Port): Str { "ok" }
+            retry-delay fn (attempt: Int where between(%, 1, 10)): Int where lte(%, 30000) {
+                mul(attempt, 1000)
+            }
+            withdraw fn (amount: Int, balance: Int)
+                where and(gt(%.amount, 0), lte(%.amount, %.balance))
+                : Int where gte(%, 0)
+            {
+                sub(balance, amount)
+            }
+            max-retries: Int 3 where between(%, 0, 10)
+            a listen(8080)
+            b Port(443)
+        "#;
+        let errors = compile_and_get_type_errors(source);
+        assert!(errors.is_empty(), "Expected no errors. Got: {:?}", errors);
+    }
+
+    /// A `where` predicate is an ordinary function argument under the `%`
+    /// rule, so a nested implicit lambda is rejected.
+    #[test]
+    fn test_where_predicate_rejects_nested_placeholder() {
+        let source = r#"
+            ::test ns
+            Positives type Vec<Int> where all(%, gt(%, 0))
+        "#;
+        let errors = compile_and_get_type_errors(source);
+        assert!(
+            has_error_type(&errors, |e| matches!(
+                e,
+                CompilerError::NestedPlaceholder { function, .. } if function == "::hot::type/predicate"
+            )),
+            "Expected nested-placeholder. Got: {:?}",
+            errors
+        );
+        assert!(
+            errors
+                .iter()
+                .any(|e| e.to_string().contains("a `where` predicate")),
+            "The message should name the `where` predicate. Got: {:?}",
+            errors
+        );
+
+        let source = r#"
+            ::test ns
+            Positives type Vec<Int> where all(%, (n) { gt(n, 0) })
+            Small type Vec<Int> where all(%, %(lt(%, 10)))
+        "#;
+        let errors = compile_and_get_type_errors(source);
+        assert!(
+            errors.is_empty(),
+            "Explicit inner lambdas compile. Got: {:?}",
+            errors
+        );
+    }
+
+    /// A predicate that reaches an impure native, even through helpers, is
+    /// rejected, with the call chain in the message.
+    #[test]
+    fn test_where_predicate_must_be_pure() {
+        let source = r#"
+            ::test ns
+            sku-exists fn (sku: Str): Bool { is-ok(::hot::http/get(sku)) }
+            KnownSku type Str where sku-exists(%)
+        "#;
+        let errors = compile_and_get_type_errors(source);
+        assert!(
+            has_constraint_code(&errors, "impure-constraint"),
+            "Expected impure-constraint. Got: {:?}",
+            errors
+        );
+        let message = errors
+            .iter()
+            .find(|e| constraint_code(e) == Some("impure-constraint"))
+            .map(|e| e.to_string())
+            .unwrap_or_default();
+        assert!(
+            message.contains("::hot::http") && message.contains("::test/sku-exists"),
+            "The message should name the native and the path to it: {}",
+            message
+        );
+    }
+
+    /// A predicate whose result is definitely not a Bool is rejected.
+    #[test]
+    fn test_where_predicate_must_return_bool() {
+        let source = r#"
+            ::test ns
+            Named type Str where length(%)
+        "#;
+        let errors = compile_and_get_type_errors(source);
+        assert!(
+            has_constraint_code(&errors, "constraint-not-bool"),
+            "Expected constraint-not-bool. Got: {:?}",
+            errors
+        );
+
+        // `and`, `or` and `if` of Bools are Bools.
+        let source = r#"
+            ::test ns
+            Ranged type Int where and(gte(%, 0), or(lt(%, 10), eq(%, 99)))
+            Picked type Int where if(gt(%, 0), lt(%, 10), eq(%, -1))
+        "#;
+        let errors = compile_and_get_type_errors(source);
+        assert!(
+            errors.is_empty(),
+            "Bool predicates compile. Got: {:?}",
+            errors
+        );
+    }
+
+    /// A refined lazy parameter, and a precondition on a signature with a
+    /// lazy parameter, are unsupported.
+    #[test]
+    fn test_where_rejects_lazy_parameters() {
+        for source in [
+            r#"
+            ::test ns
+            f fn (lazy x: Int where gt(%, 0)): Int { do x }
+            "#,
+            r#"
+            ::test ns
+            g fn (lazy x: Int, y: Int) where gt(%.y, 0): Int { y }
+            "#,
+        ] {
+            let errors = compile_and_get_type_errors(source);
+            assert!(
+                has_constraint_code(&errors, "unsupported-constraint"),
+                "Expected unsupported-constraint for {}. Got: {:?}",
+                source,
+                errors
+            );
+        }
+    }
+
+    /// Bounded constant evaluation rejects literals that fail a constraint:
+    /// constructor arguments, typed bindings and call arguments.
+    #[test]
+    fn test_where_rejects_failing_literals() {
+        let source = r#"
+            ::test ns
+            Port type Int where between(%, 1, 65535)
+            AboveTwo type Int where gt(%, 2)
+            listen fn (port: Port): Str { "ok" }
+            a Port(70000)
+            three: AboveTwo 1
+            b listen(0)
+        "#;
+        let errors = compile_and_get_type_errors(source);
+        let violations: Vec<String> = errors
+            .iter()
+            .filter(|e| constraint_code(e) == Some("constraint-violation"))
+            .map(|e| e.to_string())
+            .collect();
+        assert_eq!(
+            violations.len(),
+            3,
+            "Expected three constraint-violation errors. Got: {:?}",
+            errors
+        );
+        assert!(violations.iter().any(|m| m.contains("70000 fails `Port`")));
+        assert!(violations.iter().any(|m| m.contains("1 fails `AboveTwo`")));
+        assert!(violations.iter().any(|m| m.contains("0 fails `Port`")));
+    }
+
+    /// A literal outside an open union's known values is a warning, and a
+    /// refined primitive used with `is-type` warns that it is untagged.
+    #[test]
+    fn test_where_warnings() {
+        let source = r#"
+            ::test ns
+            TrackLinks type open "None" | "HtmlAndText"
+            describe fn (mode: TrackLinks): Str { mode }
+            a describe("HtmlOnly")
+            Port type Int where between(%, 1, 65535)
+            b is-type(443, Port)
+        "#;
+        let warnings = compile_and_get_warnings(source);
+        assert!(
+            has_constraint_code(&warnings, "unknown-literal"),
+            "Expected unknown-literal. Got: {:?}",
+            warnings
+        );
+        assert!(
+            has_constraint_code(&warnings, "where-changes-representation"),
+            "Expected where-changes-representation. Got: {:?}",
+            warnings
+        );
+        let errors = compile_and_get_type_errors(source);
+        assert!(
+            errors.is_empty(),
+            "Warnings don't fail compilation. Got: {:?}",
+            errors
+        );
+    }
+
+    /// A parameter's predicate can't use another parameter; the error points
+    /// to argument-list preconditions.
+    #[test]
+    fn test_where_parameter_predicate_cannot_use_other_parameters() {
+        let source = r#"
+            ::test ns
+            clamp fn (low: Int, high: Int where gte(%, low)): Int { high }
+        "#;
+        let errors = compile_and_get_type_errors(source);
+        assert!(
+            errors
+                .iter()
+                .any(|e| constraint_code(e) == Some("invalid-constraint")
+                    && e.to_string().contains("uses `low`, another parameter")),
+            "Expected invalid-constraint. Got: {:?}",
+            errors
+        );
+    }
+
+    /// An open literal union doesn't open a closed enum that has the same
+    /// short name in another namespace, so matching the enum still needs no
+    /// default arm.
+    #[test]
+    fn test_open_union_does_not_open_a_same_named_enum() {
+        let source = r#"
+            ::a ns
+            Role type open "user" | "assistant"
+
+            ::b ns
+            Role enum { User, Assistant }
+            describe fn (r: Role): Str {
+                match r {
+                    Role.User => { "user" }
+                    Role.Assistant => { "assistant" }
+                }
+            }
+        "#;
+        let errors = compile_and_get_type_errors(source);
+        assert!(errors.is_empty(), "Expected no errors. Got: {:?}", errors);
+    }
+
+    /// `and`, `or`, `if` and `not` infer the union of their result types, so
+    /// a definite mismatch with a binding's annotation is reported.
+    #[test]
+    fn test_logic_functions_infer_precise_types() {
+        let source = r#"
+            ::test ns
+            a: Int and(true, false)
+            b: Str not(true)
+            c: Int if(true, "yes", "no")
+            d: Bool or(true, false)
+        "#;
+        let warnings = compile_and_get_warnings(source);
+        let mismatched: Vec<String> = warnings
+            .iter()
+            .filter_map(|w| match w {
+                CompilerError::AnnotationMismatch { name, .. } => Some(name.clone()),
+                _ => None,
+            })
+            .collect();
+        for name in ["a", "b", "c"] {
+            assert!(
+                mismatched.iter().any(|m| m == name),
+                "Expected an annotation mismatch for `{}`. Got: {:?}",
+                name,
+                warnings
+            );
+        }
+        assert!(
+            !mismatched.iter().any(|m| m == "d"),
+            "`or` of Bools is a Bool. Got: {:?}",
+            warnings
+        );
+    }
 }

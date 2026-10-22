@@ -15,13 +15,15 @@ CreateChatCompletionResponse type {
     usage: CompletionUsage?
 }
 
+VectorStoreFileStatus type open "in_progress" | "completed" | "cancelled" | "failed"
+
 VectorStoreFileObject type {
     id: Str,
     object: "vector_store.file",
     usage_bytes: Int,
     created_at: Int,
     vector_store_id: Str,
-    status: "in_progress" | "completed" | "cancelled" | "failed",
+    status: VectorStoreFileStatus,
     last_error: Map,
     chunking_strategy: ChunkingStrategyResponse?,
     attributes: VectorStoreFileAttributes?
@@ -124,7 +126,7 @@ UpdateVectorStoreFileAttributesResponse type {
     usage_bytes: Int,
     created_at: Int,
     vector_store_id: Str,
-    status: "in_progress" | "completed" | "cancelled" | "failed",
+    status: VectorStoreFileStatus,
     last_error: Map,
     chunking_strategy: ChunkingStrategyResponse?,
     attributes: VectorStoreFileAttributes?

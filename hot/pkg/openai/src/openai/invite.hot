@@ -10,12 +10,15 @@ InviteRequest type {
     projects: Vec<Map>?
 }
 
+OrganizationRole type open "owner" | "reader"
+InviteStatus type open "accepted" | "expired" | "pending"
+
 Invite type {
     object: "organization.invite",
     id: Str,
     email: Str,
-    role: "owner" | "reader",
-    status: "accepted" | "expired" | "pending",
+    role: OrganizationRole,
+    status: InviteStatus,
     invited_at: Int,
     expires_at: Int,
     accepted_at: Int?,
@@ -32,8 +35,8 @@ InviteUserResponse type {
     object: "organization.invite",
     id: Str,
     email: Str,
-    role: "owner" | "reader",
-    status: "accepted" | "expired" | "pending",
+    role: OrganizationRole,
+    status: InviteStatus,
     invited_at: Int,
     expires_at: Int,
     accepted_at: Int?,

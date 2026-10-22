@@ -18,6 +18,8 @@ UploadFileResponse type {
     file: File?
 }
 
+FileState type open "STATE_UNSPECIFIED" | "PROCESSING" | "ACTIVE" | "FAILED"
+
 File type {
     name: Str?,
     displayName: Str?,
@@ -28,7 +30,7 @@ File type {
     expirationTime: Str?,
     sha256Hash: Str?,
     uri: Str?,
-    state: "STATE_UNSPECIFIED" | "PROCESSING" | "ACTIVE" | "FAILED"?,
+    state: FileState?,
     error: Status?,
     videoMetadata: VideoMetadata?
 }
@@ -56,7 +58,7 @@ FilesGetResponse type {
     expirationTime: Str?,
     sha256Hash: Str?,
     uri: Str?,
-    state: "STATE_UNSPECIFIED" | "PROCESSING" | "ACTIVE" | "FAILED"?,
+    state: FileState?,
     error: Status?,
     videoMetadata: VideoMetadata?
 }

@@ -427,6 +427,8 @@ pub struct CacheableFnDef {
     pub args: CacheableFnArgs,
     pub body: CacheableValue,
     pub return_type: Option<String>,
+    /// Mirrors `FnDef::precondition`.
+    pub precondition: Option<crate::lang::ast::Refinement>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -449,6 +451,8 @@ pub struct CacheableLambda {
     pub body: Box<CacheableValue>,
     #[serde(default)]
     pub flow_type: Option<String>, // FlowType as string (e.g., "Serial", "Parallel")
+    /// Mirrors `Lambda::return_type`.
+    pub return_type: Option<String>,
 }
 
 /// Cacheable TemplateLiteral with recursive Value handling
@@ -489,6 +493,8 @@ pub struct CacheableTypeDef {
     /// files (without this field) loadable as `is_open = false`.
     #[serde(default)]
     pub is_open: bool,
+    /// Mirrors `TypeDef::refinement`.
+    pub refinement: Option<crate::lang::ast::Refinement>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -804,6 +810,7 @@ impl From<&crate::lang::ast::FnDef> for CacheableFnDef {
             args: CacheableFnArgs::from(&fd.args),
             body: CacheableValue::from(&fd.body),
             return_type: fd.return_type.clone(),
+            precondition: fd.precondition.clone(),
         }
     }
 }
@@ -814,6 +821,7 @@ impl From<&crate::lang::ast::Lambda> for CacheableLambda {
             args: CacheableFnArgs::from(&l.args),
             body: Box::new(CacheableValue::from(l.body.as_ref())),
             flow_type: l.flow_type.as_ref().map(|ft| format!("{:?}", ft)),
+            return_type: l.return_type.clone(),
         }
     }
 }
@@ -885,6 +893,7 @@ impl From<&crate::lang::ast::TypeDef> for CacheableTypeDef {
                 .as_ref()
                 .map(|is| is.iter().map(CacheableTypeImplementation::from).collect()),
             is_open: td.is_open,
+            refinement: td.refinement.clone(),
         }
     }
 }
@@ -1237,6 +1246,7 @@ impl TryFrom<CacheableFnDef> for crate::lang::ast::FnDef {
             args: FnArgs::try_from(cfd.args)?,
             body: Value::try_from(cfd.body)?,
             return_type: cfd.return_type,
+            precondition: cfd.precondition,
         })
     }
 }
@@ -1250,6 +1260,7 @@ impl TryFrom<CacheableLambda> for crate::lang::ast::Lambda {
             args: FnArgs::try_from(cl.args)?,
             body: Box::new(Value::try_from(*cl.body)?),
             flow_type: cl.flow_type.map(|s| parse_flow_type(&s)),
+            return_type: cl.return_type,
         })
     }
 }
@@ -1351,6 +1362,7 @@ impl TryFrom<CacheableTypeDef> for crate::lang::ast::TypeDef {
                 })
                 .transpose()?,
             is_open: ctd.is_open,
+            refinement: ctd.refinement,
         })
     }
 }
@@ -1611,7 +1623,7 @@ pub struct CacheEntry {
 }
 
 /// Current cache format version
-pub const CACHE_VERSION: u32 = 6; // Bumped for postcard encoding (was serde_json)
+pub const CACHE_VERSION: u32 = 7; // Bumped for `where` refinements on TypeDef, FnDef and Lambda
 
 /// Serialize namespaces to cacheable binary (postcard)
 pub fn serialize_namespaces(
@@ -1924,7 +1936,7 @@ shout fn (s: Str): Str {
         let serialized = serialize_namespaces(&program.namespaces).unwrap();
         let hash = crate::hasher::HotHasher::hash_content(&serialized);
 
-        let expected = "6189d2e977d64b1b4ea320f91f6dfe65e0cc81273210ccdf9c0b8306685ea394";
+        let expected = "35e4384f795dfcaf45d7dd762899360b9d17cdbfd3793253689576ac195f136e";
         assert_eq!(
             hash, expected,
             "postcard cache wire layout changed (got hash {hash}). If this is \
