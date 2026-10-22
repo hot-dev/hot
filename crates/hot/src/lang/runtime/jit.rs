@@ -6875,11 +6875,17 @@ fn build_supported_body(
                     }
                     if let Some(existing) = flow.merged_result_kind {
                         if existing != kind {
-                            if kind != RawKind::OwnedVal {
-                                raw = promote_to_owned(builder, &ctx.helper_refs, kind, raw)?;
+                            // An earlier branch already stored its raw result
+                            // in the shared register, and it can't be boxed
+                            // now. The prescan missed the mix, so decline the
+                            // function rather than read that value as owned.
+                            if existing != RawKind::OwnedVal {
+                                return Err(format!(
+                                    "JIT flow branches mix {existing:?} and {kind:?} results"
+                                ));
                             }
+                            raw = promote_to_owned(builder, &ctx.helper_refs, kind, raw)?;
                             kind = RawKind::OwnedVal;
-                            flow.merged_result_kind = Some(RawKind::OwnedVal);
                         }
                     } else {
                         flow.merged_result_kind = Some(kind);
@@ -7382,6 +7388,41 @@ fn flow_branches_have_mixed_kinds(
             | Instruction::StrEndsWith { dest, .. } => {
                 reg_kinds.insert(*dest, RawKind::Bool);
             }
+            // Calls the emitter lowers to a raw intrinsic. Guessing owned for
+            // them hid a mix with an owned branch, and a raw `true` or length
+            // ended up treated as an `Arc<Val>` pointer.
+            Instruction::CallUserFunction {
+                dest,
+                function_id,
+                args_start,
+                args_count,
+            } => {
+                let name = program
+                    .functions
+                    .get(*function_id as usize)
+                    .map(|f| f.name.as_str());
+                let kind = intrinsic_call_kind(name, *args_start, *args_count, &reg_kinds)
+                    .unwrap_or(RawKind::OwnedVal);
+                reg_kinds.insert(*dest, kind);
+            }
+            Instruction::Call {
+                dest,
+                function,
+                args_start,
+                args_count,
+            } => {
+                let name = resolve_const_function_name(instructions, program, ip, *function);
+                // A call through a local calls its value (see `emit_call`).
+                let through_local = name
+                    .as_deref()
+                    .is_some_and(|n| !n.starts_with("::") && locals.contains_key(n));
+                let kind = if through_local {
+                    None
+                } else {
+                    intrinsic_call_kind(name.as_deref(), *args_start, *args_count, &reg_kinds)
+                };
+                reg_kinds.insert(*dest, kind.unwrap_or(RawKind::OwnedVal));
+            }
             // Everything else that defines a register yields a value whose kind
             // we do not statically prove here; treat as owned.
             other => {
@@ -7401,11 +7442,28 @@ fn flow_branches_have_mixed_kinds(
                 Some(_) => return true,
             }
         }
-
-        let _ = ip;
     }
 
     false
+}
+
+/// The raw kind of a call the emitter lowers to an intrinsic (see
+/// `try_lower_known_core_call`), given its argument kinds; `None` when it
+/// isn't lowered or its kind depends on more than this knows.
+fn intrinsic_call_kind(
+    name: Option<&str>,
+    args_start: u32,
+    args_count: u8,
+    reg_kinds: &AHashMap<u32, RawKind>,
+) -> Option<RawKind> {
+    use KnownCoreCall::*;
+    let first = reg_kinds.get(&args_start).copied();
+    match (known_core_call(name?)?, args_count) {
+        (Eq | Ne | Gt | Gte | Lt | Lte, 2) | (Not | IsNull | IsSome, 1) => Some(RawKind::Bool),
+        (IsZero, 1) if first == Some(RawKind::Int) => Some(RawKind::Bool),
+        (Length, 1) if first == Some(RawKind::OwnedVal) => Some(RawKind::Int),
+        _ => None,
+    }
 }
 
 /// The single destination register an instruction defines, if any. Used by the

@@ -334,6 +334,49 @@ probe()"#;
         }
     }
 
+    /// A flow whose branches end in a raw scalar and an owned value: the
+    /// compiled result must be boxed, or the function declined, never a raw
+    /// `true` or `Int` read as a pointer. All three crashed with a JIT
+    /// threshold of 1: the prescan took the `eq` and `length` intrinsics for
+    /// owned values, and `add`'s kind depends on its operands.
+    #[test]
+    fn jit_flows_with_mixed_branch_kinds() {
+        let src = r#"::t ns
+check fn (entries: Vec, prefix: Str, id: Str): Any {
+    find-first(entries, (e) {
+        and(starts-with(e.key, prefix), eq(e.value.id, id))
+    })
+}
+size-or-label fn (items: Vec, count: Bool): Any {
+    if(count, length(items), "none")
+}
+next-or-label fn (n: Int, more: Bool): Any {
+    if(more, add(n, 1), "none")
+}
+entries [{key: "u1:1", value: {id: "a"}}, {key: "u1:2", value: {id: "b"}}]
+probe fn (): Vec {
+    [
+        check(entries, "u1:", "b"),
+        size-or-label([1, 2], true),
+        size-or-label([1], false),
+        next-or-label(1, true),
+        next-or-label(1, false)
+    ]
+}
+probe()
+probe()
+probe()"#;
+        let expected = crate::val!([{"key": "u1:2", "value": {"id": "b"}}, 2, "none", 2, "none"]);
+        for conf in [
+            crate::val!({"jit": {"threshold": 1}}),
+            crate::val!({"jit": {"mode": "off"}}),
+        ] {
+            let out = compile_and_run_with_std_conf(src, Some(conf.clone()))
+                .expect("mixed-kind flows run");
+            assert_eq!(out, expected, "with {conf:?}");
+        }
+    }
+
     #[test]
     fn tagged_metadata_names_resolve_in_the_payload() {
         let src = r#"::t ns
