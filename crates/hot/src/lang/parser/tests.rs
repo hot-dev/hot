@@ -151,6 +151,81 @@ fn test_spaced_paren_in_function_body_binds_a_lambda() {
 }
 
 #[test]
+fn test_parameter_lists_can_span_lines() {
+    // Parameter lists break across lines like call arguments do, with an
+    // optional trailing comma, in function definitions and lambdas alike.
+    let source = "\
+create fn (
+    customer: Str,
+    cents: Int,
+): Map {
+    {customer: customer, cents: cents}
+}
+
+pick fn cond (
+    lazy fallback: Any,
+    ...rest
+): Any {
+    is-empty(rest) => { fallback }
+    => { first(rest) }
+}
+
+scale (
+    x: Int,
+    factor: Int
+) { mul(x, factor) }
+
+total parallel (
+    a,
+    b,
+) {
+    sum add(a, b)
+}
+";
+    let program = parse_hot(source).expect("parses");
+    let default_ns = &program.namespaces[&NsPath::new()];
+    let value_of = |name: &str| {
+        default_ns
+            .scope
+            .vars
+            .iter()
+            .find_map(|(var, value)| (var.sym.name() == name).then_some(value))
+            .unwrap_or_else(|| panic!("{name} is defined"))
+    };
+    let names = |args: &FnArgs| -> Vec<String> {
+        args.args
+            .iter()
+            .map(|a| a.var.sym.name().to_string())
+            .collect()
+    };
+
+    let Value::Fn(defs) = value_of("create") else {
+        panic!("create is a function")
+    };
+    assert_eq!(names(&defs[0].args), ["customer", "cents"]);
+    assert_eq!(defs[0].args.args[1].type_annotation.as_deref(), Some("Int"));
+    assert_eq!(defs[0].return_type.as_deref(), Some("Map"));
+
+    let Value::Fn(defs) = value_of("pick") else {
+        panic!("pick is a function")
+    };
+    assert_eq!(names(&defs[0].args), ["fallback", "rest"]);
+    assert!(defs[0].args.args[0].lazy);
+    assert!(defs[0].args.variadic);
+
+    let Value::Lambda(lambda) = value_of("scale") else {
+        panic!("scale is a lambda")
+    };
+    assert_eq!(names(&lambda.args), ["x", "factor"]);
+
+    let Value::Lambda(lambda) = value_of("total") else {
+        panic!("total is a flow-based lambda")
+    };
+    assert_eq!(names(&lambda.args), ["a", "b"]);
+    assert_eq!(lambda.flow_type, Some(FlowType::Parallel));
+}
+
+#[test]
 fn test_simple_variable() {
     let source = r#"x 42"#;
     let result = parse_hot(source);

@@ -597,6 +597,26 @@ meta ["test"] fn () {
     assert-eq([2, 3], bump-all([1, 2]), "local lambda inside a lambda body")
 }
 
+// Parameter lists may span lines, like call arguments.
+describe-count fn (
+    name: Str,
+    count: Int,
+): Str {
+    `${name}: ${count}`
+}
+
+test-multiline-parameter-lists
+meta ["test"] fn () {
+    assert-eq("apples: 3", describe-count("apples", 3), "multi-line function parameters")
+
+    sum3 (
+        a,
+        b,
+        c
+    ) { add(add(a, b), c) }
+    assert-eq(6, sum3(1, 2, 3), "multi-line lambda parameters")
+}
+
 test-lambda-nested
 meta ["test"] fn () {
     // Test nested lambda definitions
