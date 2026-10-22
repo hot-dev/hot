@@ -511,6 +511,39 @@ probe()"#;
         }
     }
 
+    /// A `fail()` in one of `pmap`'s parallel workers reaches a `contain`
+    /// around a compiled caller as the structured Failure. It arrived as
+    /// plain text, so `failure.msg` was null.
+    #[test]
+    fn jit_pmap_halt_keeps_its_failure() {
+        let src = r#"::t ns
+boom fn (): Any {
+    ::hot::coll/pmap(range(0, 200), (x: Int) {
+        cond {
+            eq(x, 7) => { fail("boom on 7") }
+            => { x }
+        }
+    })
+}
+probe fn (): Vec {
+    attempt ::hot::internal::exec/contain(boom, [])
+    failure if-err(attempt, (failure) { failure })
+    [is-err(attempt), failure.msg]
+}
+probe()
+probe()
+probe()"#;
+        let expected = crate::val!([true, "boom on 7"]);
+        for conf in [
+            crate::val!({"jit": {"threshold": 1}}),
+            crate::val!({"jit": {"mode": "off"}}),
+        ] {
+            let out = compile_and_run_with_std_conf(src, Some(conf.clone()))
+                .expect("contained pmap halts run");
+            assert_eq!(out, expected, "with {conf:?}");
+        }
+    }
+
     #[test]
     fn tagged_metadata_names_resolve_in_the_payload() {
         let src = r#"::t ns
