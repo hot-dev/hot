@@ -481,6 +481,36 @@ probe()"#;
         }
     }
 
+    /// `div` of two Ints that divides evenly is an Int, as the interpreter
+    /// returns it, and a Dec otherwise. Compiled code always made a Dec, so
+    /// `eq(div(10, 2), 5)` was false.
+    #[test]
+    fn jit_int_division_keeps_the_interpreters_type() {
+        let src = r#"::t ns
+halve fn (a: Int, b: Int): Any { div(a, b) }
+probe fn (): Vec {
+    [
+        halve(10, 2),
+        is-int(halve(10, 2)),
+        eq(halve(3, 2), 1.5),
+        is-dec(halve(3, 2)),
+        is-err(halve(1, 0))
+    ]
+}
+probe()
+probe()
+probe()"#;
+        let expected = crate::val!([5, true, true, true, true]);
+        for conf in [
+            crate::val!({"jit": {"threshold": 1}}),
+            crate::val!({"jit": {"mode": "off"}}),
+        ] {
+            let out = compile_and_run_with_std_conf(src, Some(conf.clone()))
+                .expect("division runs");
+            assert_eq!(out, expected, "with {conf:?}");
+        }
+    }
+
     #[test]
     fn tagged_metadata_names_resolve_in_the_payload() {
         let src = r#"::t ns

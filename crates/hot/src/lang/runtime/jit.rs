@@ -8441,7 +8441,12 @@ fn numeric_binop_dec_only(
         return Err("JIT arithmetic supports Int/Dec operands only".to_string());
     }
 
-    if left_kind == RawKind::OwnedVal || right_kind == RawKind::OwnedVal {
+    // `div` of two Ints is an Int when it divides evenly and a Dec otherwise,
+    // so its kind isn't fixed; the interpreter's division decides.
+    if left_kind == RawKind::OwnedVal
+        || right_kind == RawKind::OwnedVal
+        || (left_kind == RawKind::Int && right_kind == RawKind::Int)
+    {
         let (left_tag, left_raw) =
             encode_helper_val_operand(builder, remap, registers, register_kinds, left)?;
         let (right_tag, right_raw) =
