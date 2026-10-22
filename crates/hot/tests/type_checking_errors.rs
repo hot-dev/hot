@@ -1324,6 +1324,28 @@ mod integration_tests {
         );
     }
 
+    /// An open literal union doesn't open a closed enum that has the same
+    /// short name in another namespace, so matching the enum still needs no
+    /// default arm.
+    #[test]
+    fn test_open_union_does_not_open_a_same_named_enum() {
+        let source = r#"
+            ::a ns
+            Role type open "user" | "assistant"
+
+            ::b ns
+            Role enum { User, Assistant }
+            describe fn (r: Role): Str {
+                match r {
+                    Role.User => { "user" }
+                    Role.Assistant => { "assistant" }
+                }
+            }
+        "#;
+        let errors = compile_and_get_type_errors(source);
+        assert!(errors.is_empty(), "Expected no errors. Got: {:?}", errors);
+    }
+
     /// `and`, `or`, `if` and `not` infer the union of their result types, so
     /// a definite mismatch with a binding's annotation is reported.
     #[test]

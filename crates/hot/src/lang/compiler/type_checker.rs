@@ -191,10 +191,14 @@ pub struct Implementation {
 /// are registered; closed enums freeze it at declaration time.
 #[derive(Debug, Clone, Default)]
 pub struct TypeDefinition {
-    /// True for `enum open { ... }` declarations. Open enums require a
-    /// `_` default arm at every `match` site. Always `false` for
-    /// non-enum types and for closed enums.
+    /// True for an `open` declaration: `enum open { ... }` or an open
+    /// literal union. Entries are keyed by short name, so this can merge
+    /// types from different namespaces; enum checks use `enum_is_open`.
     pub is_open: bool,
+    /// True for `enum open { ... }` declarations only. Open enums require
+    /// a `_` default arm at every `match` site. An open literal union with
+    /// the same short name in another namespace doesn't set it.
+    pub enum_is_open: bool,
     /// Whether this `TypeDef` came from an `enum` declaration at all.
     /// Closed enums must be exhaustively matched (covered variants must
     /// equal the declared variant set); non-enum types skip that check.
@@ -1372,7 +1376,7 @@ impl TypeChecker {
         };
 
         let (is_enum, is_open, declared_variants) = match self.context.types.get(&short_name) {
-            Some(td) if td.is_enum => (true, td.is_open, td.variants.clone()),
+            Some(td) if td.is_enum => (true, td.enum_is_open, td.variants.clone()),
             _ => return,
         };
         if !is_enum {
@@ -1575,6 +1579,7 @@ impl TypeChecker {
         {
             let entry = self.context.types.entry(short.to_string()).or_default();
             entry.is_open = entry.is_open || type_def.is_open;
+            entry.enum_is_open = entry.enum_is_open || (is_enum && type_def.is_open);
             entry.is_enum = entry.is_enum || is_enum;
             if is_struct {
                 entry.is_struct = true;
@@ -1627,6 +1632,7 @@ impl TypeChecker {
         let qualified = format!("{}/{}", ns_str, short);
         let entry = self.context.types.entry(qualified).or_default();
         entry.is_open = entry.is_open || type_def.is_open;
+        entry.enum_is_open = entry.enum_is_open || (is_enum && type_def.is_open);
         entry.is_enum = entry.is_enum || is_enum;
         entry.is_struct = entry.is_struct || is_struct;
         if is_struct {
@@ -2093,7 +2099,7 @@ impl TypeChecker {
         if let Some((enum_fqn, variant_name)) = key.1.split_once('.')
             && let enum_short = Self::short_type_name(enum_fqn)
             && let Some(td) = self.context.types.get_mut(&enum_short)
-            && td.is_open
+            && td.enum_is_open
         {
             td.variants.insert(variant_name.to_string());
             // Record the source as the variant's payload type so that
@@ -2264,7 +2270,7 @@ impl TypeChecker {
         if let Some((src_enum_fqn, src_variant)) = src_fqn.split_once('.')
             && src_enum_fqn == target_fqn
             && let Some(td) = self.context.types.get(&Self::short_type_name(src_enum_fqn))
-            && (td.is_open || td.variants.contains(src_variant))
+            && (td.enum_is_open || td.variants.contains(src_variant))
         {
             return true;
         }
@@ -2857,7 +2863,9 @@ impl TypeChecker {
             }
             TypeExpr::Named(name) => {
                 if let Some(type_def) = self.named_type_definition(name) {
-                    if type_def.is_enum && (type_def.is_open || type_def.variants.contains(key)) {
+                    if type_def.is_enum
+                        && (type_def.enum_is_open || type_def.variants.contains(key))
+                    {
                         return base.clone();
                     }
 
@@ -3864,7 +3872,7 @@ impl TypeChecker {
                 .context
                 .types
                 .get(enum_name)
-                .filter(|td| td.is_enum && (td.is_open || td.variants.contains(variant_name)))
+                .filter(|td| td.is_enum && (td.enum_is_open || td.variants.contains(variant_name)))
                 .is_some();
             if known_enum
                 && let Some(enum_type) = self
