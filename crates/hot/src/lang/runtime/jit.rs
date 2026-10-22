@@ -4,7 +4,7 @@ use crate::lang::bytecode::{
 };
 use crate::lang::runtime::vm::{VirtualMachine, VmError, VmResult};
 use crate::val::Val;
-use ahash::AHashMap;
+use ahash::{AHashMap, AHashSet};
 use cranelift_codegen::ir::{
     AbiParam, FuncRef, InstBuilder, MemFlagsData, StackSlotData, StackSlotKind, Type, UserFuncName,
     types,
@@ -972,6 +972,73 @@ pub fn is_retryable_jit_bailout(error: &str) -> bool {
     jit_bailout_reason(error).starts_with("unsupported.")
 }
 
+/// Whether this function, or a lambda it creates, calls a function that reads
+/// one of its locals by name. A local function such as hot-ai's `item-text`
+/// in `fit` does: called directly, it finds the values it captured in its
+/// caller's scope, and compiled code doesn't keep its locals in the VM.
+fn calls_read_caller_locals(
+    program: &BytecodeProgram,
+    function_id: FunctionId,
+    function_info: &FunctionInfo,
+) -> bool {
+    let names = |instructions: &[Instruction], store: bool| -> AHashSet<String> {
+        instructions
+            .iter()
+            .filter_map(|inst| match inst {
+                Instruction::StoreVar { var_name, .. } if store => Some(*var_name),
+                Instruction::LoadVar { var_name, .. } if !store => Some(*var_name),
+                _ => None,
+            })
+            .filter_map(|name| constant_string(program, name).ok().map(str::to_string))
+            .collect()
+    };
+    let locals = names(&function_info.instructions, true);
+    if locals.is_empty() {
+        return false;
+    }
+    let mut bodies: Vec<&[Instruction]> = vec![&function_info.instructions];
+    let mut seen = 0usize;
+    while let Some(body) = bodies.pop() {
+        seen += 1;
+        if seen > 256 {
+            return true;
+        }
+        for inst in body {
+            match inst {
+                Instruction::LoadConst { constant, .. } => {
+                    if let Some(Constant::Val(Val::Box(boxed))) =
+                        program.constants.get(*constant as usize)
+                        && let Some(lambda) = boxed
+                            .as_any()
+                            .downcast_ref::<crate::lang::bytecode::LambdaInfo>()
+                    {
+                        bodies.push(&lambda.instructions);
+                    }
+                }
+                Instruction::CallUserFunction {
+                    function_id: callee_id,
+                    ..
+                } if *callee_id != function_id => {
+                    let Some(callee) = program.functions.get(*callee_id as usize) else {
+                        continue;
+                    };
+                    let own = names(&callee.instructions, true);
+                    let reads = names(&callee.instructions, false);
+                    if reads.iter().any(|name| {
+                        locals.contains(name)
+                            && !own.contains(name)
+                            && !callee.param_names.contains(name)
+                    }) {
+                        return true;
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    false
+}
+
 fn unsupported_jit_bailout(reason: &'static str, message: impl Into<String>) -> String {
     format!("unsupported.{}: {}", reason, message.into())
 }
@@ -1241,6 +1308,12 @@ fn compile_supported_function(
         return Err(unsupported_jit_bailout(
             "hotlib_policy",
             "JIT policy marks a hotlib dependency as interpreter-only",
+        ));
+    }
+    if calls_read_caller_locals(program, function_id, function_info) {
+        return Err(unsupported_jit_bailout(
+            "caller_locals",
+            "a function this calls reads its locals by name",
         ));
     }
     for tag in &signature.args {

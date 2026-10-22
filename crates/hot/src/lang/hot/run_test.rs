@@ -418,6 +418,35 @@ probe()"#;
         }
     }
 
+    /// A local function reads its caller's local by name, called directly
+    /// and from a lambda the caller creates. The caller stays on the
+    /// interpreter, where that local is in scope: once hot-ai's `fit`
+    /// compiled, it failed with "Variable 'field' not found".
+    #[test]
+    fn jit_local_function_reads_its_callers_locals() {
+        let src = r#"::t ns
+outer fn (opts: Map): Str {
+    field get(opts, "field", "none")
+    helper fn (item: Any): Str { `${field}:${item}` }
+    direct helper(1)
+    via-lambda first(map([2], (n) { helper(n) }))
+    `${direct} ${via-lambda}`
+}
+probe fn (): Vec { [outer({field: "x"}), outer({})] }
+probe()
+probe()
+probe()"#;
+        let expected = crate::val!(["x:1 x:2", "none:1 none:2"]);
+        for conf in [
+            crate::val!({"jit": {"threshold": 1}}),
+            crate::val!({"jit": {"mode": "off"}}),
+        ] {
+            let out = compile_and_run_with_std_conf(src, Some(conf.clone()))
+                .expect("local functions run");
+            assert_eq!(out, expected, "with {conf:?}");
+        }
+    }
+
     #[test]
     fn tagged_metadata_names_resolve_in_the_payload() {
         let src = r#"::t ns
