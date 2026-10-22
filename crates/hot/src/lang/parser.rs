@@ -5962,6 +5962,18 @@ impl Parser {
                             TokenType::Keyword(KeywordKind::Type) => true, // identifier type { ... } / identifier type "a" | "b"
                             TokenType::Keyword(KeywordKind::Enum) => true, // identifier enum { Variant, ... }
                             // Be more conservative with these patterns
+                            //
+                            // `name other` alone on its line binds `other` to
+                            // `name`. The next line is a new statement, so it
+                            // can't turn this into a call or a path.
+                            TokenType::Identifier(_)
+                                if next_token.line == token.line
+                                    && self.peek_n(lookahead_index + 1).is_none_or(|after| {
+                                        matches!(after.token_type, TokenType::Newline)
+                                    }) =>
+                            {
+                                true
+                            }
                             TokenType::Identifier(_) => {
                                 // This is a pattern like: var_name function_name(args)
                                 // This should be treated as a variable assignment where the value is a function call
