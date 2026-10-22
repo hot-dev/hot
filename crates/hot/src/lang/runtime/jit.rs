@@ -4094,9 +4094,28 @@ fn prescan_return_kind(
     }
 
     let mut return_kind: Option<JitValueKind> = None;
+    // Each open flow: whether it accumulates (Map/Vec), and the kinds its
+    // branches produce.
+    let mut flows: Vec<(bool, Vec<Option<RawKind>>)> = Vec::new();
 
     for (inst_ip, inst) in instructions.iter().enumerate() {
         match inst {
+            Instruction::BeginFlow {
+                result_modifier, ..
+            } => {
+                flows.push((
+                    matches!(
+                        result_modifier,
+                        FlowResultModifier::Map | FlowResultModifier::Vec
+                    ),
+                    Vec::new(),
+                ));
+            }
+            Instruction::CondBranchEnd { result, .. } => {
+                if let Some((_, kinds)) = flows.last_mut() {
+                    kinds.push(reg_kinds.get(result).copied());
+                }
+            }
             Instruction::LoadConst { dest, constant } => {
                 let kind = match program.constants.get(*constant as usize) {
                     Some(Constant::Val(Val::Int(_))) => Some(RawKind::Int),
@@ -4326,8 +4345,26 @@ fn prescan_return_kind(
             Instruction::MergeMaps { dest, .. } => {
                 reg_kinds.insert(*dest, RawKind::OwnedVal);
             }
-            Instruction::EndFlow { dest } if !reg_kinds.contains_key(dest) => {
-                reg_kinds.insert(*dest, RawKind::OwnedVal);
+            // A flow's branches define its result, not the default loaded
+            // into the register before them: reading that `Null` made a
+            // self-call's result `Null`.
+            Instruction::EndFlow { dest } => {
+                let kind = match flows.pop() {
+                    Some((true, _)) => Some(RawKind::OwnedVal),
+                    Some((false, kinds)) if !kinds.is_empty() => Some(match kinds[0] {
+                        Some(first) if kinds.iter().all(|kind| *kind == Some(first)) => first,
+                        _ => RawKind::OwnedVal,
+                    }),
+                    _ => None,
+                };
+                match kind {
+                    Some(kind) => {
+                        reg_kinds.insert(*dest, kind);
+                    }
+                    None => {
+                        reg_kinds.entry(*dest).or_insert(RawKind::OwnedVal);
+                    }
+                }
             }
             Instruction::Return { value } => {
                 let kind = reg_kinds.get(value).copied()?;
@@ -4564,6 +4601,9 @@ struct EmitCtx<'a> {
     thunk_registry: AHashMap<u32, crate::lang::bytecode::LambdaInfo>,
     scope_snapshots: Vec<AHashMap<String, (Variable, RawKind)>>,
     error_capture_active: bool,
+    /// Code was emitted that reads a self-call's result as
+    /// `expected_return_kind`, so the body must return that kind.
+    relies_on_expected_return: bool,
 }
 
 enum EmitResult {
@@ -4915,6 +4955,8 @@ impl<'a> EmitCtx<'a> {
                 &self.thunk_registry,
             )?
         {
+            // An inlined lazy branch may call this function back.
+            self.relies_on_expected_return = true;
             self.define_register(builder, dest, result_kind, result_val)?;
             self.jump_to_next(builder, ip)?;
             return Ok(true);
@@ -4924,6 +4966,7 @@ impl<'a> EmitCtx<'a> {
             && called_fid as u32 == self.function_id
             && let Some(ret_kind) = self.expected_return_kind
         {
+            self.relies_on_expected_return = true;
             let (result_kind, raw, error_info) = emit_self_recursive_call(
                 builder,
                 self.ptr_ty,
@@ -5009,6 +5052,8 @@ impl<'a> EmitCtx<'a> {
             &self.register_kinds,
             &self.thunk_registry,
         )? {
+            // An inlined lazy branch may call this function back.
+            self.relies_on_expected_return = true;
             self.define_register(builder, dest, result_kind, result_val)?;
             self.jump_to_next(builder, ip)?;
             return Ok(true);
@@ -5067,6 +5112,7 @@ impl<'a> EmitCtx<'a> {
         let ret_kind = self.expected_return_kind.ok_or_else(|| {
             "JIT cannot determine return kind for self-recursive call".to_string()
         })?;
+        self.relies_on_expected_return = true;
         let (result_kind, raw, error_info) = emit_self_recursive_call(
             builder,
             self.ptr_ty,
@@ -6649,6 +6695,7 @@ fn build_supported_body(
         thunk_registry: AHashMap::new(),
         scope_snapshots: Vec::new(),
         error_capture_active: false,
+        relies_on_expected_return: false,
     };
 
     // Stack guard: compare a stack slot address (proxy for current SP) against
@@ -7197,7 +7244,16 @@ fn build_supported_body(
     }
 
     builder.seal_all_blocks();
-    return_kind.ok_or_else(|| "JIT function has no return".to_string())
+    let return_kind = return_kind.ok_or_else(|| "JIT function has no return".to_string())?;
+    // Self-calls read their results as the prescan's kind, so the body must
+    // return exactly that kind.
+    if ctx.relies_on_expected_return && ctx.expected_return_kind != Some(return_kind) {
+        return Err(format!(
+            "JIT return kind {return_kind:?} differs from the predicted {:?}",
+            ctx.expected_return_kind
+        ));
+    }
+    Ok(return_kind)
 }
 
 fn constant_string(program: &BytecodeProgram, constant: u32) -> Result<&str, String> {
@@ -8714,6 +8770,7 @@ fn compile_thunk_inline(
         thunk_registry: AHashMap::new(),
         scope_snapshots: Vec::new(),
         error_capture_active: false,
+        relies_on_expected_return: false,
     };
 
     let mut return_kind: Option<RawKind> = None;

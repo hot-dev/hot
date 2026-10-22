@@ -377,6 +377,47 @@ probe()"#;
         }
     }
 
+    /// A non-tail self-call bound inside a `cond` branch: the compiled call
+    /// must read its result as the function's real return kind. The JIT took
+    /// the flow's pre-loaded `Null` default for its result, so hot-sql's
+    /// placeholder scanner kept only a name's first character.
+    #[test]
+    fn jit_self_call_reads_the_real_return_kind() {
+        let src = r#"::t ns
+collect fn (s: Str, i: Int): Map {
+    cond {
+        gte(i, length(s)) => { {name: "", next: i} }
+        ne(slice(s, i, add(i, 1)), " ") => {
+            rest collect(s, add(i, 1))
+            {name: concat(slice(s, i, add(i, 1)), rest.name), next: rest.next}
+        }
+        => { {name: "", next: i} }
+    }
+}
+count fn (s: Str, i: Int): Int {
+    cond {
+        gte(i, length(s)) => { 0 }
+        => {
+            rest count(s, add(i, 1))
+            add(rest, 1)
+        }
+    }
+}
+probe fn (): Vec { [collect("name x", 0), count("abc", 0)] }
+probe()
+probe()
+probe()"#;
+        let expected = crate::val!([{"name": "name", "next": 4}, 3]);
+        for conf in [
+            crate::val!({"jit": {"threshold": 1}}),
+            crate::val!({"jit": {"mode": "off"}}),
+        ] {
+            let out = compile_and_run_with_std_conf(src, Some(conf.clone()))
+                .expect("self-calls run");
+            assert_eq!(out, expected, "with {conf:?}");
+        }
+    }
+
     #[test]
     fn tagged_metadata_names_resolve_in_the_payload() {
         let src = r#"::t ns
