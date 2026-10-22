@@ -127,6 +127,79 @@ fn load_hot_std_from_path(
     Ok(program)
 }
 
+/// Compile `files` (path, source) after hot-std the way the engine does: each
+/// file parsed with its path and merged member-wise, so namespaces can span
+/// files. Returns the compile errors.
+fn compile_files_and_get_errors(files: &[(&str, &str)]) -> Vec<CompilerError> {
+    use hot::lang::engine::discover::merge_program_namespaces_strict;
+
+    let hot_std_src = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../hot/pkg/hot-std/src");
+    let hot_std_files =
+        hot::lang::engine::Engine::discover_hot_files(&hot_std_src.to_string_lossy()).unwrap();
+    assert!(
+        !hot_std_files.is_empty(),
+        "no hot-std files in {:?}",
+        hot_std_src
+    );
+
+    let mut sources = Vec::new();
+    for path in &hot_std_files {
+        sources.push((path.clone(), std::fs::read_to_string(path).unwrap()));
+    }
+    for (path, source) in files {
+        sources.push((path.to_string(), source.to_string()));
+    }
+
+    let mut program = hot::lang::ast::Program {
+        namespaces: Default::default(),
+        current_namespace: hot::lang::ast::NsPath::new(),
+    };
+    for (path, source) in &sources {
+        let parsed = parser::parse_hot_file(source, path)
+            .unwrap_or_else(|e| panic!("Parse error in {}: {}", path, e));
+        merge_program_namespaces_strict(&mut program.namespaces, parsed.namespaces).unwrap();
+    }
+
+    match Compiler::new().compile_program(&mut program) {
+        Ok(()) => vec![],
+        Err(errors) => errors.errors,
+    }
+}
+
+/// Assert `errors` has a nested-placeholder error on `nested_line` and a
+/// no-`Fn`-slot `%` error at `loose_line:loose_column`, both in `file`.
+fn assert_placeholder_errors_in(
+    errors: &[CompilerError],
+    file: &str,
+    nested_line: usize,
+    (loose_line, loose_column): (usize, usize),
+) {
+    let find = |predicate: fn(&CompilerError) -> bool| {
+        errors
+            .iter()
+            .find(|e| predicate(e))
+            .and_then(|e| e.location())
+            .map(|l| (l.file.clone(), l.line, l.column))
+    };
+    let file = Some(std::path::PathBuf::from(file));
+
+    let nested = find(|e| matches!(e, CompilerError::NestedPlaceholder { .. }));
+    assert_eq!(
+        nested.map(|(f, line, _)| (f, line)),
+        Some((file.clone(), nested_line)),
+        "nested-placeholder location. Errors: {:?}",
+        errors
+    );
+    let loose =
+        find(|e| matches!(e, CompilerError::CallLibError { func_name, .. } if func_name == "%"));
+    assert_eq!(
+        loose,
+        Some((file, loose_line, loose_column)),
+        "no-`Fn`-slot `%` location. Errors: {:?}",
+        errors
+    );
+}
+
 /// Helper function to check if errors contain a specific error type
 fn has_error_type<F>(errors: &[CompilerError], predicate: F) -> bool
 where
@@ -1059,6 +1132,31 @@ mod integration_tests {
                 errors
             );
         }
+    }
+
+    /// Both placeholder errors name the file the `%` is in. Every file
+    /// without an `ns` declaration shares the root namespace `::`, which a
+    /// hot-std file creates first, so the namespace's own file is wrong.
+    #[test]
+    fn test_placeholder_errors_name_file_in_root_namespace() {
+        let errors = compile_files_and_get_errors(&[(
+            "probe/no-ns.hot",
+            "nested map([[1, -2]], filter(%, gt(%, 0)))\nloose add(%, 1)\n",
+        )]);
+        assert_placeholder_errors_in(&errors, "probe/no-ns.hot", 1, (2, 11));
+    }
+
+    /// Same for a namespace whose code is split across several files.
+    #[test]
+    fn test_placeholder_errors_name_file_in_split_namespace() {
+        let errors = compile_files_and_get_errors(&[
+            ("probe/split-a.hot", "::probe::split ns\n\nfirst 1\n"),
+            (
+                "probe/split-b.hot",
+                "::probe::split ns\n\nnested map([[1, -2]], filter(%, gt(%, 0)))\nloose add(%, 1)\n",
+            ),
+        ]);
+        assert_placeholder_errors_in(&errors, "probe/split-b.hot", 3, (4, 11));
     }
 
     /// An explicit inner function, `%(...)` or `(x) { ... }`, is allowed
