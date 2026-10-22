@@ -431,7 +431,7 @@ pub struct VirtualMachine {
     /// Constraint specs of named types, from the program's table.
     constraint_spec_cache: constraints::ConstraintSpecCache,
     /// Set by `ProvenArgs` for the call that follows it.
-    pending_proven: Option<(FunctionId, u64)>,
+    pub(crate) pending_proven: Option<(FunctionId, u64)>,
     /// The running call's proven arguments: its function, and the
     /// parameters whose prologue checks it skips (see `ProvenArgs`).
     entry_proven: Option<(FunctionId, u64)>,
@@ -10725,7 +10725,7 @@ mod tests {
 
     /// `compile_test_vm`, through the checked compile that builds `where`
     /// checks.
-    fn compile_checked_test_vm(source: &str, jit: &str) -> VirtualMachine {
+    fn compile_checked_test_vm(source: &str, conf: Val) -> VirtualMachine {
         let mut program = parse_hot(source).expect("test source should parse");
         let mut compiler = Compiler::new();
         compiler
@@ -10738,7 +10738,7 @@ mod tests {
             compiler.get_core_functions_arc(),
             compiler.get_type_implementations_arc(),
             Arc::new(CoreVariableRegistry::new()),
-            Some(crate::val!({"jit": jit})),
+            Some(conf),
         );
         vm.execute().expect("module init should run");
         vm
@@ -10757,7 +10757,7 @@ open fn (port: Port): Int { port }
 also fn (port: Port): Int { port }
 "#;
         for jit in ["off", "on"] {
-            let mut vm = compile_checked_test_vm(source, jit);
+            let mut vm = compile_checked_test_vm(source, crate::val!({"jit": jit}));
             let id = |vm: &VirtualMachine, name: &str| {
                 vm.program
                     .functions
@@ -10789,6 +10789,40 @@ also fn (port: Port): Int { port }
                 "another function's proof, jit={jit}"
             );
             assert!(vm.pending_proven.is_none() && vm.entry_proven.is_none());
+        }
+    }
+
+    // Constrained functions compile: a raw parameter's prologue check keeps
+    // the parameter raw and returns its failure, and a return check runs.
+    #[test]
+    fn jit_compiles_constrained_functions() {
+        let source = r#"
+::test ns
+
+Port type Int where ::hot::cmp/lte(%, 65535)
+
+open fn (port: Port): Int { port }
+capped fn (n: Int): Int where ::hot::cmp/lte(%, 10) { n }
+"#;
+        let mut vm = compile_checked_test_vm(source, crate::val!({"jit": {"threshold": 1}}));
+        let mut call = |name: &str, arg: i64| {
+            vm.call_function_bypassing_unified_lookup(name, &[Val::Int(arg)])
+                .expect("the call runs")
+        };
+        for _ in 0..3 {
+            assert_eq!(call("::test/open", 80), Val::Int(80));
+            assert_eq!(call("::test/capped", 3), Val::Int(3));
+        }
+        assert!(call("::test/open", 70000).is_err(), "a failing parameter");
+        assert!(call("::test/capped", 11).is_err(), "a failing return");
+        for name in ["::test/open", "::test/capped"] {
+            let id = vm
+                .program
+                .functions
+                .iter()
+                .position(|f| f.name == name)
+                .expect("function is compiled") as FunctionId;
+            assert!(vm.jit.has_compiled_function(id), "{name} runs compiled");
         }
     }
 
