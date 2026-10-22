@@ -151,6 +151,65 @@ fn test_spaced_paren_in_function_body_binds_a_lambda() {
 }
 
 #[test]
+fn test_name_and_reference_alone_on_a_line_is_a_binding() {
+    // `moved server` binds `moved` even when the next line starts with a
+    // call or a deep path. Before, the parser read past the newline, kept
+    // `moved` as a bare reference, and bound `server` to the next line.
+    for next_line in ["take(moved)", "moved.port 2", "moved"] {
+        let source =
+            format!("g fn () {{\n    server {{port: 1}}\n    moved server\n    {next_line}\n}}");
+        let program = parse_hot(&source).expect("parses");
+        let default_ns = &program.namespaces[&NsPath::new()];
+        let body = default_ns
+            .scope
+            .vars
+            .iter()
+            .find_map(|(var, value)| match value {
+                Value::Fn(defs) if var.sym.name() == "g" => Some(&defs[0].body),
+                _ => None,
+            })
+            .expect("g is a function");
+        let Value::Flow(flow) = body else {
+            panic!("expected a serial body, got {:?}", body)
+        };
+        assert_eq!(
+            flow.expressions.len(),
+            3,
+            "three statements before `{next_line}`"
+        );
+        match &flow.expressions[1] {
+            Value::MultipleValues(values) => {
+                assert!(
+                    matches!(&values[0], Value::Ref(Ref::Var(v)) if v.var.sym.name() == "moved")
+                );
+                assert!(
+                    matches!(&values[1], Value::Ref(Ref::Var(v)) if v.var.sym.name() == "server"),
+                    "moved should be bound to server before `{next_line}`, got {:?}",
+                    values[1]
+                );
+            }
+            other => panic!(
+                "expected `moved server` to be a binding before `{next_line}`, got {:?}",
+                other
+            ),
+        }
+    }
+
+    // Names on separate lines stay separate expressions.
+    let program = parse_hot("g fn () {\n    x 1\n    x\n    y\n}").expect("parses");
+    let default_ns = &program.namespaces[&NsPath::new()];
+    let Some(Value::Fn(defs)) = default_ns.scope.vars.values().next() else {
+        panic!("g is a function")
+    };
+    let Value::Flow(flow) = &defs[0].body else {
+        panic!("expected a serial body")
+    };
+    assert_eq!(flow.expressions.len(), 3);
+    assert!(matches!(&flow.expressions[1], Value::Ref(Ref::Var(v)) if v.var.sym.name() == "x"));
+    assert!(matches!(&flow.expressions[2], Value::Ref(Ref::Var(v)) if v.var.sym.name() == "y"));
+}
+
+#[test]
 fn test_parameter_lists_can_span_lines() {
     // Parameter lists break across lines like call arguments do, with an
     // optional trailing comma, in function definitions and lambdas alike.

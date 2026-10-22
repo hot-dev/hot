@@ -304,3 +304,32 @@ fn () {
     assert(is-str(home), "Namespace alias should work alongside var aliases")
     assert-eq("MIXED", upper, "Var alias should work alongside namespace aliases")
 }
+
+// ----------------------------------------------------------------------------
+// Local Value Aliases
+// ----------------------------------------------------------------------------
+
+// `copy original` binds one local to another, even when the next line starts
+// with a call or a deep path.
+
+forced fn (lazy value: Any): Any {
+    do value
+}
+
+test-local-alias-passed-to-lazy-parameter
+meta ["test"]
+fn () {
+    original {port: 1}
+    copy original
+    assert-eq({port: 1}, forced(copy), "A lazy argument should see the alias")
+}
+
+test-local-alias-then-deep-path
+meta ["test"]
+fn () {
+    original {port: 1}
+    copy original
+    copy.port 2
+    assert-eq(2, copy.port, "The deep path should update the alias")
+    assert-eq(1, original.port, "The original should be unchanged")
+}
