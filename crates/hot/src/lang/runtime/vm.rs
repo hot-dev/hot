@@ -10826,6 +10826,40 @@ capped fn (n: Int): Int where ::hot::cmp/lte(%, 10) { n }
         }
     }
 
+    /// A recursive function with a return check compiles: its non-tail
+    /// self-calls read their results as the predicted return kind, which the
+    /// compiled return check has to agree with.
+    #[test]
+    fn jit_compiles_self_calls_through_a_return_check() {
+        let source = format!(
+            "{CORE_IF_PRELUDE}
+::test ns
+
+fib fn (n: Int): Int where ::hot::cmp/lte(0, %) {{
+    if(::hot::cmp/lte(n, 1), n, ::hot::math/add(fib(::hot::math/sub(n, 1)), fib(::hot::math/sub(n, 2))))
+}}
+"
+        );
+        let mut vm = compile_checked_test_vm(&source, crate::val!({"jit": {"threshold": 1}}));
+        for _ in 0..3 {
+            let result = vm
+                .call_function_bypassing_unified_lookup("::test/fib", &[Val::Int(15)])
+                .expect("the call runs");
+            assert_eq!(result, Val::Int(610));
+        }
+        let failed = vm
+            .call_function_bypassing_unified_lookup("::test/fib", &[Val::Int(-1)])
+            .expect("the call runs");
+        assert!(failed.is_err(), "a failing return check");
+        let id = vm
+            .program
+            .functions
+            .iter()
+            .position(|f| f.name == "::test/fib")
+            .expect("fib is defined") as FunctionId;
+        assert!(vm.jit.has_compiled_function(id), "fib runs compiled");
+    }
+
     const CORE_IF_PRELUDE: &str = r#"
 ::my::bool ns
 
