@@ -1680,6 +1680,8 @@ impl Parser {
         let mut args = Vec::new();
         let mut variadic = false;
 
+        // A parameter list may span lines, like a call's arguments.
+        self.skip_newlines();
         while !self.check(&TokenType::RightParen) {
             // Check for lazy keyword first (can precede both regular and variadic params)
             let lazy = if let Some(token) = self.peek() {
@@ -1792,12 +1794,15 @@ impl Parser {
                 type_annotation,
             });
 
+            self.skip_newlines();
             if !self.check(&TokenType::Comma) {
                 break;
             }
             self.next(); // consume comma
+            self.skip_newlines();
         }
 
+        self.skip_newlines();
         self.expect_token(&TokenType::RightParen)?;
 
         // Parse optional return type annotation: ): ReturnType
@@ -2503,6 +2508,8 @@ impl Parser {
         let mut args = Vec::new();
         let mut variadic = false;
 
+        // A parameter list may span lines, like a call's arguments.
+        self.skip_newlines();
         while !self.check(&TokenType::RightParen) {
             // Check for lazy keyword first (can precede both regular and variadic params)
             let lazy = if let Some(token) = self.peek() {
@@ -2615,12 +2622,15 @@ impl Parser {
                 type_annotation,
             });
 
+            self.skip_newlines();
             if !self.check(&TokenType::Comma) {
                 break;
             }
             self.next(); // consume comma
+            self.skip_newlines();
         }
 
+        self.skip_newlines();
         self.expect_token(&TokenType::RightParen)?;
 
         // Parse optional return type annotation: ): ReturnType
@@ -5354,8 +5364,9 @@ impl Parser {
 
     /// Parse lambda function like (x) { body } or (x: Int): Str { body }
     fn parse_lambda_function(&mut self) -> ParseResult<Value> {
-        // Parse parameter list
+        // Parse parameter list. It may span lines, like a call's arguments.
         let mut params = Vec::new();
+        self.skip_newlines();
 
         // Parse first parameter (if not immediately closing paren)
         if !self.check(&TokenType::RightParen) {
@@ -5388,8 +5399,10 @@ impl Parser {
             }
 
             // Parse additional parameters
+            self.skip_newlines();
             while self.check(&TokenType::Comma) {
                 self.next(); // consume comma
+                self.skip_newlines();
                 // Trailing comma: if next token is ), stop
                 if self.check(&TokenType::RightParen) {
                     break;
@@ -5421,9 +5434,11 @@ impl Parser {
                         return Err(self.error("Expected parameter name in lambda"));
                     }
                 }
+                self.skip_newlines();
             }
         }
 
+        self.skip_newlines();
         self.expect_token(&TokenType::RightParen)?;
 
         // Parse optional return type annotation: ): ReturnType {
@@ -5502,8 +5517,9 @@ impl Parser {
     fn parse_flow_based_lambda(&mut self, flow_type: FlowType) -> ParseResult<Value> {
         self.expect_token(&TokenType::LeftParen)?;
 
-        // Parse parameter list
+        // Parse parameter list. It may span lines, like a call's arguments.
         let mut params = Vec::new();
+        self.skip_newlines();
 
         // Parse first parameter (if not immediately closing paren)
         if !self.check(&TokenType::RightParen) {
@@ -5536,8 +5552,10 @@ impl Parser {
             }
 
             // Parse additional parameters
+            self.skip_newlines();
             while self.check(&TokenType::Comma) {
                 self.next(); // consume comma
+                self.skip_newlines();
                 // Trailing comma: if next token is ), stop
                 if self.check(&TokenType::RightParen) {
                     break;
@@ -5569,9 +5587,11 @@ impl Parser {
                         return Err(self.error("Expected parameter name in flow-based lambda"));
                     }
                 }
+                self.skip_newlines();
             }
         }
 
+        self.skip_newlines();
         self.expect_token(&TokenType::RightParen)?;
 
         // Parse optional return type annotation: ): ReturnType {

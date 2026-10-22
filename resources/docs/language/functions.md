@@ -77,6 +77,15 @@ Use `?` for types that accept null (shorthand for `Type | Null`):
 
 {{result:functions#nullable-params}}
 
+## Long Parameter Lists
+
+A parameter list can span lines, like a call's arguments. A trailing comma
+after the last parameter is optional:
+
+{{snippet:functions#multiline-params}}
+
+{{result:functions#multiline-params}}
+
 ## Function Overloading
 
 Define multiple versions of a function with different parameter counts (arity):
