@@ -31,7 +31,7 @@ impl CacheType {
     /// These are separate because the formats evolve independently
     pub fn format_version(&self) -> u32 {
         match self {
-            CacheType::Bytecode => 10, // Bumped for `where` refinements in the AST and CheckConstraint
+            CacheType::Bytecode => 11, // Bumped for ProvenArgs
             CacheType::Ast => 4, // Bumped for `where` refinements on TypeDef, FnDef and Lambda
         }
     }

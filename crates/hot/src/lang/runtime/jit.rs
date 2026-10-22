@@ -6677,6 +6677,12 @@ impl<'a> EmitCtx<'a> {
                 self.jump_to_next(builder, ip)?;
                 Ok(EmitResult::Handled)
             }
+            // Proofs for an interpreted call's prologue. A compiled caller
+            // passes none, so its callee checks the arguments itself.
+            Instruction::ProvenArgs { .. } => {
+                self.jump_to_next(builder, ip)?;
+                Ok(EmitResult::Handled)
+            }
             // Flow-level instructions (BeginFlow, EndFlow, CondBranch*, Pipe,
             // DeferredVarExpr, Return, ReturnIfErr, TailCall) are handled by the
             // second-phase dispatch in build_supported_body. Unrecognized instructions

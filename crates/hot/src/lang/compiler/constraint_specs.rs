@@ -27,7 +27,7 @@ use crate::lang::ast::{
     BuiltinType, LiteralType, Refinement, TypeDef, TypeExpr, WHERE_TYPE_PREFIX,
     is_inline_refinement_type,
 };
-use crate::lang::bytecode::{Constant, ConstantId, Instruction, RegisterId};
+use crate::lang::bytecode::{Constant, ConstantId, FunctionId, Instruction, RegisterId};
 use crate::lang::parser::parse_type_annotation;
 use crate::val::Val;
 
@@ -39,6 +39,9 @@ pub(super) struct Boundary<'a> {
     pub parameter: Option<&'a str>,
     pub binding: Option<&'a str>,
     pub declared_type: Option<&'a str>,
+    /// For a prologue check: the function and the parameter's index, which
+    /// a call site's `ProvenArgs` names to skip the check.
+    pub proof: Option<(FunctionId, usize)>,
 }
 
 impl<'a> Boundary<'a> {
@@ -49,6 +52,7 @@ impl<'a> Boundary<'a> {
             parameter: None,
             binding: None,
             declared_type: None,
+            proof: None,
         }
     }
 }
@@ -139,6 +143,7 @@ impl Compiler {
         }
         self.constrained_types.clear();
         self.constraint_spec_ids = self.program.constraint_types.iter().cloned().collect();
+        self.collect_param_annotations(program);
     }
 
     /// The constraint spec for the type `annotation` names in the current
@@ -563,12 +568,12 @@ fn refine_node(base: Val, refinement: &Refinement, constraint: &str) -> Val {
 pub(super) struct SignatureChecks {
     function: String,
     /// Refined parameters: name, spec, declared type.
-    params: Vec<(String, Val, String)>,
+    pub(super) params: Vec<(String, Val, String)>,
     /// All parameter names, for the precondition's record of arguments.
     param_names: Vec<String>,
     precondition: Option<Val>,
     /// Return spec and declared type.
-    ret: Option<(Val, String)>,
+    pub(super) ret: Option<(Val, String)>,
 }
 
 impl Compiler {
@@ -646,10 +651,15 @@ impl Compiler {
                 dest: reg,
                 var_name,
             });
+            let index = checks.param_names.iter().position(|n| n == name);
             let boundary = Boundary {
                 function: Some(&checks.function),
                 parameter: Some(name),
                 declared_type: Some(annotation),
+                proof: self
+                    .current_function_id
+                    .zip(index)
+                    .filter(|(_, index)| *index < 64),
                 ..Boundary::new("parameter")
             };
             let checked = self.emit_constraint_check(reg, spec.clone(), &boundary, false);
@@ -717,6 +727,7 @@ impl Compiler {
     pub(super) fn constrain_binding(
         &mut self,
         var: &crate::lang::ast::Var,
+        value: &crate::lang::ast::Value,
         reg: RegisterId,
     ) -> RegisterId {
         let Some(annotation) = var.type_annotation.clone() else {
@@ -725,6 +736,9 @@ impl Compiler {
         let Some(spec) = self.constraint_spec_for_annotation(&annotation) else {
             return reg;
         };
+        if self.is_proven(value, &spec) {
+            return reg;
+        }
         let declared_type = self.display_annotation(&annotation);
         let boundary = Boundary {
             binding: Some(var.sym.name()),
@@ -796,6 +810,12 @@ impl Compiler {
             if let Some(value) = value {
                 entries.push((Val::from(key), Val::from(value)));
             }
+        }
+        if let Some((function, index)) = boundary.proof {
+            entries.push((
+                Val::from("proof"),
+                Val::Vec(vec![Val::Int(i64::from(function)), Val::Int(index as i64)]),
+            ));
         }
         self.program
             .add_constant(Constant::Val(Val::map_from_iter(entries)))

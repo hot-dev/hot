@@ -430,6 +430,11 @@ pub struct VirtualMachine {
     constraint: Option<constraints::ConstraintGuard>,
     /// Constraint specs of named types, from the program's table.
     constraint_spec_cache: constraints::ConstraintSpecCache,
+    /// Set by `ProvenArgs` for the call that follows it.
+    pending_proven: Option<(FunctionId, u64)>,
+    /// The running call's proven arguments: its function, and the
+    /// parameters whose prologue checks it skips (see `ProvenArgs`).
+    entry_proven: Option<(FunctionId, u64)>,
     /// User context storage for ctx-set/ctx-get functions (VM-specific)
     pub context_storage: AHashMap<String, Val>,
     /// Set of context keys that are secrets (should be masked in logs/db)
@@ -566,6 +571,8 @@ impl VirtualMachine {
             suppress_result_checking: false,
             constraint: None,
             constraint_spec_cache: Default::default(),
+            pending_proven: None,
+            entry_proven: None,
             context_storage: AHashMap::new(),
             secret_keys: AHashSet::new(),
             secret_value_hashes: AHashSet::new(),
@@ -3359,6 +3366,10 @@ impl VirtualMachine {
                 let spec = self.get_constant(spec)?;
                 let result = self.execute_check_constraint(value, &spec, test)?;
                 self.set_register(dest, result)?;
+                self.instruction_pointer += 1;
+            }
+            Instruction::ProvenArgs { function_id, mask } => {
+                self.pending_proven = Some((*function_id, *mask));
                 self.instruction_pointer += 1;
             }
 
@@ -7808,9 +7819,16 @@ impl VirtualMachine {
             *slot += 1;
         }
 
+        // Arguments the call site proved, for this call's prologue only.
+        let proven = self
+            .pending_proven
+            .take()
+            .filter(|(id, _)| *id == function_id);
+        let saved_proven = std::mem::replace(&mut self.entry_proven, proven);
         self.user_function_depth += 1;
         let result = self.execute_user_function_impl(function_id, args);
         self.user_function_depth -= 1;
+        self.entry_proven = saved_proven;
 
         if let Some(slot) = self.function_active_depth.get_mut(fid) {
             *slot = slot.saturating_sub(1);
@@ -8258,6 +8276,13 @@ impl VirtualMachine {
                                     // Execute as a regular call
                                     break self.execute_user_function(tail_fn_id, &new_args)?;
                                 }
+
+                                // The next iteration's prologue skips the
+                                // arguments this tail call proved.
+                                self.entry_proven = self
+                                    .pending_proven
+                                    .take()
+                                    .filter(|(id, _)| *id == function_id);
 
                                 // TCO cleanup: Reset flow contexts and skip flags from previous iteration
                                 // The previous iteration may have left stale flow contexts if it exited
@@ -10696,6 +10721,75 @@ mod tests {
         );
         vm.execute().expect("module init should run");
         vm
+    }
+
+    /// `compile_test_vm`, through the checked compile that builds `where`
+    /// checks.
+    fn compile_checked_test_vm(source: &str, jit: &str) -> VirtualMachine {
+        let mut program = parse_hot(source).expect("test source should parse");
+        let mut compiler = Compiler::new();
+        compiler
+            .compile_program(&mut program)
+            .expect("test source should compile");
+        let mut vm = VirtualMachine::new(
+            compiler.get_program_arc(),
+            None,
+            compiler.get_function_mapping_arc(),
+            compiler.get_core_functions_arc(),
+            compiler.get_type_implementations_arc(),
+            Arc::new(CoreVariableRegistry::new()),
+            Some(crate::val!({"jit": jit})),
+        );
+        vm.execute().expect("module init should run");
+        vm
+    }
+
+    // A call site's proof skips the parameter check of that call only: not
+    // another function's, and not a later call's.
+    #[test]
+    fn proven_arguments_skip_only_their_calls_checks() {
+        let source = r#"
+::test ns
+
+Port type Int where ::hot::cmp/lte(%, 65535)
+
+open fn (port: Port): Int { port }
+also fn (port: Port): Int { port }
+"#;
+        for jit in ["off", "on"] {
+            let mut vm = compile_checked_test_vm(source, jit);
+            let id = |vm: &VirtualMachine, name: &str| {
+                vm.program
+                    .functions
+                    .iter()
+                    .position(|f| f.name == name)
+                    .expect("function is compiled") as FunctionId
+            };
+            let open = id(&vm, "::test/open");
+            let also = id(&vm, "::test/also");
+            let call = |vm: &mut VirtualMachine, name: &str| {
+                vm.call_function_bypassing_unified_lookup(name, &[Val::Int(70000)])
+                    .expect("the call runs")
+            };
+
+            assert!(call(&mut vm, "::test/open").is_err(), "checked, jit={jit}");
+            vm.pending_proven = Some((open, 1));
+            assert_eq!(
+                call(&mut vm, "::test/open"),
+                Val::Int(70000),
+                "proven, jit={jit}"
+            );
+            assert!(
+                call(&mut vm, "::test/open").is_err(),
+                "used once, jit={jit}"
+            );
+            vm.pending_proven = Some((also, 1));
+            assert!(
+                call(&mut vm, "::test/open").is_err(),
+                "another function's proof, jit={jit}"
+            );
+            assert!(vm.pending_proven.is_none() && vm.entry_proven.is_none());
+        }
     }
 
     const CORE_IF_PRELUDE: &str = r#"

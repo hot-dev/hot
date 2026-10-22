@@ -90,6 +90,23 @@ is-match fn (value: Str, pattern: Str): Bool {
 
 Exact type Str where is-match(%, "^a")
 
+Score type Int where between(%, 0, 100)
+
+score-total fn (scores: Vec<Score>): Int {
+    reduce(scores, add(%1, %2), 0)
+}
+
+// `scores` reaches `score-total` unchanged, so that call skips its check.
+pass-scores fn (scores: Vec<Score>): Int {
+    score-total(scores)
+}
+
+// A rebound parameter is no longer proven.
+rebind-scores fn (scores: Vec<Score>): Int {
+    scores concat(scores, [dynamic(500)])
+    score-total(scores)
+}
+
 listen fn (port: Port): Str {
     `listening on ${port}`
 }
@@ -264,4 +281,11 @@ meta ["test"] fn () {
     assert-eq("evaluation-failed", constraint-kind(Tagged(dynamic(5))), "is-match on a value that isn't a Str")
     assert-eq("^a", Exact("^a"), "a local is-match keeps its meaning")
     assert-eq("violation", constraint-kind(Exact(dynamic("abc"))), "not a regex")
+}
+
+test-proven-arguments
+meta ["test"] fn () {
+    assert-eq(6, pass-scores([1, 2, 3]), "a proven argument")
+    assert-eq("violation", constraint-kind(pass-scores(dynamic([1, 200]))), "the first call still checks")
+    assert-eq("violation", constraint-kind(rebind-scores([1, 2])), "a rebound parameter is checked again")
 }

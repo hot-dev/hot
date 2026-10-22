@@ -240,6 +240,18 @@ impl VirtualMachine {
         if value.is_err() {
             return Ok(if test { Val::Bool(false) } else { value });
         }
+        // A parameter whose argument the call site proved: each proof is
+        // used once, by the prologue of the call it was made for.
+        if let Some(Val::Vec(proof)) = get(spec, "proof")
+            && let [Val::Int(function), Val::Int(index)] = proof.as_slice()
+            && let Some((id, mask)) = &mut self.entry_proven
+            && i64::from(*id) == *function
+            && (0..64).contains(index)
+            && *mask & (1 << index) != 0
+        {
+            *mask &= !(1 << index);
+            return Ok(value);
+        }
         let boundary = Boundary::from_spec(spec);
         let type_spec = get(spec, "type").cloned().unwrap_or(Val::Null);
         let mut path = Vec::new();

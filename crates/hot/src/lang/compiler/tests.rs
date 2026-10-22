@@ -2025,3 +2025,72 @@ fn regex_predicates_get_a_pattern_fast_form() {
         "a local is-match keeps the call"
     );
 }
+
+#[test]
+fn proven_parameters_skip_repeated_checks() {
+    let mut program = parse_hot(
+        r#"
+            ::test ns
+            Score type Int where ::hot::cmp/lte(%, 100)
+            total fn (scores: Vec<Score>): Int { 0 }
+            middle fn (scores: Vec<Score>): Int { total(scores) }
+            rebinds fn (scores: Vec<Score>): Int {
+                scores [101]
+                total(scores)
+            }
+            other fn (scores: Vec<Int where ::hot::cmp/lte(%, 100)>): Int { total(scores) }
+            same fn (score: Score): Score { score }
+            bound fn (score: Score): Int {
+                copy: Score score
+                0
+            }
+        "#,
+    )
+    .expect("parses");
+    let mut compiler = Compiler::new();
+    compiler.compile_program(&mut program).expect("compiles");
+    let program = compiler.get_program();
+    let body = |name: &str| {
+        &program
+            .functions
+            .iter()
+            .find(|f| f.name == format!("::test/{name}"))
+            .unwrap_or_else(|| panic!("{name} is compiled"))
+            .instructions
+    };
+    let masks = |name: &str| -> Vec<u64> {
+        body(name)
+            .iter()
+            .filter_map(|i| match i {
+                Instruction::ProvenArgs { mask, .. } => Some(*mask),
+                _ => None,
+            })
+            .collect()
+    };
+    let checks = |name: &str| {
+        body(name)
+            .iter()
+            .filter(|i| matches!(i, Instruction::CheckConstraint { .. }))
+            .count()
+    };
+    assert_eq!(
+        masks("middle"),
+        vec![1],
+        "`scores` reaches `total` unchanged"
+    );
+    assert!(masks("rebinds").is_empty(), "rebinding ends the proof");
+    assert!(
+        masks("other").is_empty(),
+        "a separately written refinement is another definition"
+    );
+    assert_eq!(
+        checks("same"),
+        1,
+        "returning the proven parameter skips the return check"
+    );
+    assert_eq!(
+        checks("bound"),
+        1,
+        "binding it to the same type skips the binding check"
+    );
+}
