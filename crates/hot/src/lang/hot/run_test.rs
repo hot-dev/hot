@@ -334,6 +334,244 @@ probe()"#;
         }
     }
 
+    /// A flow whose branches end in a raw scalar and an owned value: the
+    /// compiled result must be boxed, or the function declined, never a raw
+    /// `true` or `Int` read as a pointer. All three crashed with a JIT
+    /// threshold of 1: the prescan took the `eq` and `length` intrinsics for
+    /// owned values, and `add`'s kind depends on its operands.
+    #[test]
+    fn jit_flows_with_mixed_branch_kinds() {
+        let src = r#"::t ns
+check fn (entries: Vec, prefix: Str, id: Str): Any {
+    find-first(entries, (e) {
+        and(starts-with(e.key, prefix), eq(e.value.id, id))
+    })
+}
+size-or-label fn (items: Vec, count: Bool): Any {
+    if(count, length(items), "none")
+}
+next-or-label fn (n: Int, more: Bool): Any {
+    if(more, add(n, 1), "none")
+}
+entries [{key: "u1:1", value: {id: "a"}}, {key: "u1:2", value: {id: "b"}}]
+probe fn (): Vec {
+    [
+        check(entries, "u1:", "b"),
+        size-or-label([1, 2], true),
+        size-or-label([1], false),
+        next-or-label(1, true),
+        next-or-label(1, false)
+    ]
+}
+probe()
+probe()
+probe()"#;
+        let expected = crate::val!([{"key": "u1:2", "value": {"id": "b"}}, 2, "none", 2, "none"]);
+        for conf in [
+            crate::val!({"jit": {"threshold": 1}}),
+            crate::val!({"jit": {"mode": "off"}}),
+        ] {
+            let out = compile_and_run_with_std_conf(src, Some(conf.clone()))
+                .expect("mixed-kind flows run");
+            assert_eq!(out, expected, "with {conf:?}");
+        }
+    }
+
+    /// A non-tail self-call bound inside a `cond` branch: the compiled call
+    /// must read its result as the function's real return kind. The JIT took
+    /// the flow's pre-loaded `Null` default for its result, so hot-sql's
+    /// placeholder scanner kept only a name's first character.
+    #[test]
+    fn jit_self_call_reads_the_real_return_kind() {
+        let src = r#"::t ns
+collect fn (s: Str, i: Int): Map {
+    cond {
+        gte(i, length(s)) => { {name: "", next: i} }
+        ne(slice(s, i, add(i, 1)), " ") => {
+            rest collect(s, add(i, 1))
+            {name: concat(slice(s, i, add(i, 1)), rest.name), next: rest.next}
+        }
+        => { {name: "", next: i} }
+    }
+}
+count fn (s: Str, i: Int): Int {
+    cond {
+        gte(i, length(s)) => { 0 }
+        => {
+            rest count(s, add(i, 1))
+            add(rest, 1)
+        }
+    }
+}
+probe fn (): Vec { [collect("name x", 0), count("abc", 0)] }
+probe()
+probe()
+probe()"#;
+        let expected = crate::val!([{"name": "name", "next": 4}, 3]);
+        for conf in [
+            crate::val!({"jit": {"threshold": 1}}),
+            crate::val!({"jit": {"mode": "off"}}),
+        ] {
+            let out = compile_and_run_with_std_conf(src, Some(conf.clone()))
+                .expect("self-calls run");
+            assert_eq!(out, expected, "with {conf:?}");
+        }
+    }
+
+    /// A local function reads its caller's local by name, called directly
+    /// and from a lambda the caller creates. The caller stays on the
+    /// interpreter, where that local is in scope: once hot-ai's `fit`
+    /// compiled, it failed with "Variable 'field' not found".
+    #[test]
+    fn jit_local_function_reads_its_callers_locals() {
+        let src = r#"::t ns
+outer fn (opts: Map): Str {
+    field get(opts, "field", "none")
+    helper fn (item: Any): Str { `${field}:${item}` }
+    direct helper(1)
+    via-lambda first(map([2], (n) { helper(n) }))
+    `${direct} ${via-lambda}`
+}
+probe fn (): Vec { [outer({field: "x"}), outer({})] }
+probe()
+probe()
+probe()"#;
+        let expected = crate::val!(["x:1 x:2", "none:1 none:2"]);
+        for conf in [
+            crate::val!({"jit": {"threshold": 1}}),
+            crate::val!({"jit": {"mode": "off"}}),
+        ] {
+            let out = compile_and_run_with_std_conf(src, Some(conf.clone()))
+                .expect("local functions run");
+            assert_eq!(out, expected, "with {conf:?}");
+        }
+    }
+
+    /// `cond-all` and `match-all` key their results by branch label. Compiled
+    /// code kept the compiler's uniqueness suffix on the label, so a field
+    /// such as `result.a` was missing.
+    #[test]
+    fn jit_collecting_flows_key_results_by_label() {
+        let src = r#"::t ns
+flags-of fn cond-all (flags: Map) {
+    flags.a => a { "a-result" }
+    flags.b => b { "b-result" }
+    flags.c => c { "c-result" }
+}
+inline fn (flags: Map): Map {
+    cond-all {
+        flags.a => a { 1 }
+        flags.b => b { 2 }
+    }
+}
+probe fn (): Vec {
+    [flags-of({a: true, b: true, c: false}), inline({a: true, b: false})]
+}
+probe()
+probe()
+probe()"#;
+        let expected = crate::val!([{"a": "a-result", "b": "b-result"}, {"a": 1}]);
+        for conf in [
+            crate::val!({"jit": {"threshold": 1}}),
+            crate::val!({"jit": {"mode": "off"}}),
+        ] {
+            let out = compile_and_run_with_std_conf(src, Some(conf.clone()))
+                .expect("collecting flows run");
+            assert_eq!(out, expected, "with {conf:?}");
+        }
+    }
+
+    /// `div` of two Ints that divides evenly is an Int, as the interpreter
+    /// returns it, and a Dec otherwise. Compiled code always made a Dec, so
+    /// `eq(div(10, 2), 5)` was false.
+    #[test]
+    fn jit_int_division_keeps_the_interpreters_type() {
+        let src = r#"::t ns
+halve fn (a: Int, b: Int): Any { div(a, b) }
+probe fn (): Vec {
+    [
+        halve(10, 2),
+        is-int(halve(10, 2)),
+        eq(halve(3, 2), 1.5),
+        is-dec(halve(3, 2)),
+        is-err(halve(1, 0))
+    ]
+}
+probe()
+probe()
+probe()"#;
+        let expected = crate::val!([5, true, true, true, true]);
+        for conf in [
+            crate::val!({"jit": {"threshold": 1}}),
+            crate::val!({"jit": {"mode": "off"}}),
+        ] {
+            let out = compile_and_run_with_std_conf(src, Some(conf.clone()))
+                .expect("division runs");
+            assert_eq!(out, expected, "with {conf:?}");
+        }
+    }
+
+    /// A `fail()` in one of `pmap`'s parallel workers reaches a `contain`
+    /// around a compiled caller as the structured Failure. It arrived as
+    /// plain text, so `failure.msg` was null.
+    #[test]
+    fn jit_pmap_halt_keeps_its_failure() {
+        let src = r#"::t ns
+boom fn (): Any {
+    ::hot::coll/pmap(range(0, 200), (x: Int) {
+        cond {
+            eq(x, 7) => { fail("boom on 7") }
+            => { x }
+        }
+    })
+}
+probe fn (): Vec {
+    attempt ::hot::internal::exec/contain(boom, [])
+    failure if-err(attempt, (failure) { failure })
+    [is-err(attempt), failure.msg]
+}
+probe()
+probe()
+probe()"#;
+        let expected = crate::val!([true, "boom on 7"]);
+        for conf in [
+            crate::val!({"jit": {"threshold": 1}}),
+            crate::val!({"jit": {"mode": "off"}}),
+        ] {
+            let out = compile_and_run_with_std_conf(src, Some(conf.clone()))
+                .expect("contained pmap halts run");
+            assert_eq!(out, expected, "with {conf:?}");
+        }
+    }
+
+    /// A body returning `All<Vec>` or `All<Map>` collects its bindings. The
+    /// compiled version returned an empty collection.
+    #[test]
+    fn jit_collecting_serial_bodies() {
+        let src = r#"::t ns
+values fn (): All<Vec> {
+    a 1
+    b 2
+}
+named fn (): All<Map> {
+    a 1
+    b 2
+}
+probe fn (): Vec { [values(), named()] }
+probe()
+probe()
+probe()"#;
+        let expected = crate::val!([[1, 2], {"a": 1, "b": 2}]);
+        for conf in [
+            crate::val!({"jit": {"threshold": 1}}),
+            crate::val!({"jit": {"mode": "off"}}),
+        ] {
+            let out = compile_and_run_with_std_conf(src, Some(conf.clone()))
+                .expect("collecting bodies run");
+            assert_eq!(out, expected, "with {conf:?}");
+        }
+    }
+
     #[test]
     fn tagged_metadata_names_resolve_in_the_payload() {
         let src = r#"::t ns
