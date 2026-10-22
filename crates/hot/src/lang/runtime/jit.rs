@@ -972,6 +972,63 @@ pub fn is_retryable_jit_bailout(error: &str) -> bool {
     jit_bailout_reason(error).starts_with("unsupported.")
 }
 
+/// Whether a thunk, or one nested in it, calls `function_id`.
+fn thunk_calls_function(
+    program: &BytecodeProgram,
+    function_id: FunctionId,
+    thunk: &crate::lang::bytecode::LambdaInfo,
+) -> bool {
+    let mut bodies: Vec<&[Instruction]> = vec![&thunk.instructions];
+    let mut seen = 0usize;
+    while let Some(body) = bodies.pop() {
+        seen += 1;
+        if seen > 256 {
+            return true;
+        }
+        for (ip, inst) in body.iter().enumerate() {
+            match inst {
+                Instruction::CallUserFunction {
+                    function_id: callee,
+                    ..
+                }
+                | Instruction::TailCall {
+                    function_id: callee,
+                    ..
+                } if *callee == function_id => return true,
+                Instruction::Call {
+                    function,
+                    args_count,
+                    ..
+                } => {
+                    let callee = resolve_const_function_name(body, program, ip, *function)
+                        .and_then(|name| {
+                            if name.starts_with("::") {
+                                find_function_exact(program, &name, Some(*args_count))
+                            } else {
+                                find_function_by_suffix(program, &name, Some(*args_count))
+                            }
+                        });
+                    if callee == Some(function_id as usize) {
+                        return true;
+                    }
+                }
+                Instruction::LoadConst { constant, .. } => {
+                    if let Some(Constant::Val(Val::Box(boxed))) =
+                        program.constants.get(*constant as usize)
+                        && let Some(lambda) = boxed
+                            .as_any()
+                            .downcast_ref::<crate::lang::bytecode::LambdaInfo>()
+                    {
+                        bodies.push(&lambda.instructions);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    false
+}
+
 /// Whether this function, or a lambda it creates, calls a function that reads
 /// one of its locals by name. A local function such as hot-ai's `item-text`
 /// in `fit` does: called directly, it finds the values it captured in its
@@ -5028,8 +5085,15 @@ impl<'a> EmitCtx<'a> {
                 &self.thunk_registry,
             )?
         {
-            // An inlined lazy branch may call this function back.
-            self.relies_on_expected_return = true;
+            // An inlined branch that calls this function back reads that
+            // call's result as the predicted return kind.
+            if (args_start..args_start + u32::from(args_count)).any(|reg| {
+                self.thunk_registry.get(&reg).is_some_and(|thunk| {
+                    thunk_calls_function(self.program, self.function_id, thunk)
+                })
+            }) {
+                self.relies_on_expected_return = true;
+            }
             self.define_register(builder, dest, result_kind, result_val)?;
             self.jump_to_next(builder, ip)?;
             return Ok(true);
@@ -5125,8 +5189,15 @@ impl<'a> EmitCtx<'a> {
             &self.register_kinds,
             &self.thunk_registry,
         )? {
-            // An inlined lazy branch may call this function back.
-            self.relies_on_expected_return = true;
+            // An inlined branch that calls this function back reads that
+            // call's result as the predicted return kind.
+            if (args_start..args_start + u32::from(args_count)).any(|reg| {
+                self.thunk_registry.get(&reg).is_some_and(|thunk| {
+                    thunk_calls_function(self.program, self.function_id, thunk)
+                })
+            }) {
+                self.relies_on_expected_return = true;
+            }
             self.define_register(builder, dest, result_kind, result_val)?;
             self.jump_to_next(builder, ip)?;
             return Ok(true);
@@ -7337,11 +7408,13 @@ fn build_supported_body(
     builder.seal_all_blocks();
     let return_kind = return_kind.ok_or_else(|| "JIT function has no return".to_string())?;
     // Self-calls read their results as the prescan's kind, so the body must
-    // return exactly that kind.
-    if ctx.relies_on_expected_return && ctx.expected_return_kind != Some(return_kind) {
+    // return exactly that kind. With no prediction, none were emitted.
+    if ctx.relies_on_expected_return
+        && let Some(expected) = ctx.expected_return_kind
+        && expected != return_kind
+    {
         return Err(format!(
-            "JIT return kind {return_kind:?} differs from the predicted {:?}",
-            ctx.expected_return_kind
+            "JIT return kind {return_kind:?} differs from the predicted {expected:?}"
         ));
     }
     Ok(return_kind)
