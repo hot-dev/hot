@@ -4,7 +4,7 @@
 
 AuthChannel type "sms" | "whatsapp"
 CodeChallengeMethod type "plain" | "s256"
-OtpType type "signup" | "recovery" | "invite" | "magiclink" | "email_change" | "sms" | "phone_change"
+OtpType type "signup" | "recovery" | "invite" | "magiclink" | "email_change" | "email" | "sms" | "phone_change"
 SignOutScope type "global" | "local" | "others"
 
 User type {
@@ -184,7 +184,7 @@ VerifyOtpRequest type {
 verify-otp
 meta {
     doc: """
-Verify an OTP or magic link token. `type` can be: "signup", "recovery", "invite", "magiclink", "email_change", "sms", "phone_change".
+Verify an OTP or magic link token. `type` can be: "signup", "recovery", "invite", "magiclink", "email_change", "email", "sms", "phone_change".
 
 For SMS/phone OTP, provide `phone` + `token`. For email magic link, provide `email` + `token` or `token_hash`.
 

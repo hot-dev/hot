@@ -14,7 +14,7 @@ is-ok-response ::hot::http/is-ok-response
 // ============================================================================
 
 // Literal union for chat message roles
-Role type open "user" | "system" | "assistant" | "tool"
+Role type open "user" | "system" | "developer" | "assistant" | "tool"
 
 // Literal union for finish reasons
 FinishReason type open "stop" | "length" | "tool_calls" | "content_filter" | "function_call"
