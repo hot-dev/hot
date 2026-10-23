@@ -10926,9 +10926,9 @@ capped fn (n: Int): Int where ::hot::cmp/lte(%, 10) { n }
         }
     }
 
-    /// A recursive function with a return check compiles: its non-tail
-    /// self-calls read their results as the predicted return kind, which the
-    /// compiled return check has to agree with.
+    /// A recursive function with a return check compiles on raw values: its
+    /// non-tail self-calls read their results as the predicted `Int`, and the
+    /// return check keeps the raw result.
     #[test]
     fn jit_compiles_self_calls_through_a_return_check() {
         let source = format!(
@@ -10957,7 +10957,99 @@ fib fn (n: Int): Int where ::hot::cmp/lte(0, %) {{
             .iter()
             .position(|f| f.name == "::test/fib")
             .expect("fib is defined") as FunctionId;
-        assert!(vm.jit.has_compiled_function(id), "fib runs compiled");
+        assert_eq!(
+            vm.jit.compiled_result_kinds(id),
+            vec![crate::lang::runtime::jit::JitValueKind::Int],
+            "fib runs compiled on raw Ints"
+        );
+    }
+
+    /// A self-recursive body compiles on the raw kind its other branches
+    /// return. A guess the compiled body can't keep falls back to owned
+    /// values: a nested flow's result is boxed, so `nested` compiles owned.
+    #[test]
+    fn jit_compiles_self_recursion_on_raw_values() {
+        use crate::lang::runtime::jit::JitValueKind;
+        let source = format!(
+            "{CORE_IF_PRELUDE}
+::test ns
+
+lazy-if fn (n: Int): Int {{
+    if(::hot::cmp/lte(n, 1), n, ::hot::math/add(lazy-if(::hot::math/sub(n, 1)), lazy-if(::hot::math/sub(n, 2))))
+}}
+
+cond-flow fn cond (n: Int): Int {{
+    ::hot::cmp/lte(n, 1) => {{ n }}
+    => {{ ::hot::math/add(cond-flow(::hot::math/sub(n, 1)), cond-flow(::hot::math/sub(n, 2))) }}
+}}
+
+checked fn (n: Int): Int where ::hot::cmp/lte(0, %) {{
+    cond {{
+        ::hot::cmp/lte(n, 1) => {{ n }}
+        => {{ ::hot::math/add(checked(::hot::math/sub(n, 1)), checked(::hot::math/sub(n, 2))) }}
+    }}
+}}
+
+halves fn cond (n: Int): Dec {{
+    ::hot::cmp/lte(n, 0) => {{ 0.5 }}
+    => {{ ::hot::math/add(halves(::hot::math/sub(n, 1)), 0.5) }}
+}}
+
+mixed fn cond (n: Int): Any {{
+    ::hot::cmp/lte(n, 0) => {{ 0 }}
+    => {{ ::hot::math/add(mixed(::hot::math/sub(n, 1)), 0.5) }}
+}}
+
+nested fn cond (n: Int): Int {{
+    ::hot::cmp/lte(n, 1) => {{ n }}
+    => {{
+        cond {{
+            ::hot::cmp/lte(n, 3) => {{ ::hot::math/add(nested(::hot::math/sub(n, 1)), 1) }}
+            => {{ ::hot::math/add(nested(::hot::math/sub(n, 2)), 2) }}
+        }}
+    }}
+}}
+"
+        );
+        let mut vm = compile_checked_test_vm(&source, crate::val!({"jit": {"threshold": 1}}));
+        let cases = [
+            ("lazy-if", 15, Val::Int(610), JitValueKind::Int),
+            ("cond-flow", 15, Val::Int(610), JitValueKind::Int),
+            ("checked", 15, Val::Int(610), JitValueKind::Int),
+            (
+                "halves",
+                4,
+                Val::Dec(fastnum::D256::from(5) / fastnum::D256::from(2)),
+                JitValueKind::Dec,
+            ),
+            (
+                "mixed",
+                4,
+                Val::Dec(fastnum::D256::from(2)),
+                JitValueKind::OwnedVal,
+            ),
+            ("nested", 9, Val::Int(9), JitValueKind::OwnedVal),
+        ];
+        for (name, arg, expected, kind) in cases {
+            let name = format!("::test/{name}");
+            for _ in 0..3 {
+                let result = vm
+                    .call_function_bypassing_unified_lookup(&name, &[Val::Int(arg)])
+                    .expect("the call runs");
+                assert_eq!(result, expected, "{name}");
+            }
+            let id = vm
+                .program
+                .functions
+                .iter()
+                .position(|f| f.name == name)
+                .expect("the function is defined") as FunctionId;
+            assert_eq!(vm.jit.compiled_result_kinds(id), vec![kind], "{name}");
+        }
+        let failed = vm
+            .call_function_bypassing_unified_lookup("::test/checked", &[Val::Int(-1)])
+            .expect("the call runs");
+        assert!(failed.is_err(), "a failing return check");
     }
 
     const CORE_IF_PRELUDE: &str = r#"
