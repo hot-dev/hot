@@ -1294,12 +1294,22 @@ impl CompilerErrors {
             "<source>".to_string()
         };
 
-        // Try to find source content
-        let source = self
-            .source_cache
-            .get(&source_name)
-            .or_else(|| self.source_cache.get("<source>"))
-            .or_else(|| self.source_cache.get("<input>"))?;
+        // Try to find source content. A file from a cached parse was never
+        // added to the cache, so read it rather than show another source.
+        let read_from_disk;
+        let source = match self.source_cache.get(&source_name) {
+            Some(source) => source,
+            None => match location.file.as_ref().and_then(|file| std::fs::read_to_string(file).ok()) {
+                Some(content) => {
+                    read_from_disk = content;
+                    &read_from_disk
+                }
+                None => self
+                    .source_cache
+                    .get("<source>")
+                    .or_else(|| self.source_cache.get("<input>"))?,
+            },
+        };
 
         let mut colors = ColorGenerator::new();
         let label_color = colors.next();
@@ -2106,6 +2116,33 @@ mod diagnostic_tests {
         assert_eq!(d.code, "unknown-field");
         assert_eq!(d.severity, DiagnosticSeverity::Warning.as_lsp_number());
         assert!(d.message.contains("known field `b`"));
+    }
+
+    /// A file from a cached parse was never added to the source cache. Its
+    /// report still shows the line, read from the file itself.
+    #[test]
+    fn report_reads_a_file_missing_from_the_source_cache() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("probe.hot");
+        let source = "::probe ns\n\nf fn (): Int {\n    add(missing-var, 1)\n}\n";
+        std::fs::write(&path, source).unwrap();
+        let mut errors = CompilerErrors::new();
+        errors.add(CompilerError::UnresolvedVariable {
+            var_name: "missing-var".to_string(),
+            namespace: "::probe".to_string(),
+            message: "Variable 'missing-var' cannot be resolved".to_string(),
+            location: Some(ErrorLocation {
+                line: 4,
+                column: 9,
+                position: source.find("missing-var").unwrap(),
+                length: "missing-var".len(),
+                file: Some(path.clone()),
+            }),
+        });
+
+        let report = errors.format_error(false);
+        assert!(report.contains("add(missing-var, 1)"), "{report}");
+        assert!(report.contains(&format!("{}:4:9", path.display())), "{report}");
     }
 
     #[test]

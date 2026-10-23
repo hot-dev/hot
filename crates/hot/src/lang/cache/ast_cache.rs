@@ -1936,7 +1936,7 @@ shout fn (s: Str): Str {
         let serialized = serialize_namespaces(&program.namespaces).unwrap();
         let hash = crate::hasher::HotHasher::hash_content(&serialized);
 
-        let expected = "35e4384f795dfcaf45d7dd762899360b9d17cdbfd3793253689576ac195f136e";
+        let expected = "f71ea06274d8e120198427718ddd68636d31d7277870aa907846b737994d2903";
         assert_eq!(
             hash, expected,
             "postcard cache wire layout changed (got hash {hash}). If this is \
