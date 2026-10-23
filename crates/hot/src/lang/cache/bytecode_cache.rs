@@ -456,15 +456,24 @@ struct MemoryCacheEntry {
     last_accessed: std::time::Instant,
 }
 
+/// Manifest content keys are supplied by deployed bundles. They are not an
+/// authorization boundary: different builds can claim the same content key.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+struct ScopedCacheKey {
+    directory: PathBuf,
+    content_key: String,
+}
+
 /// Type alias for the global memory cache
-type MemoryCache = Arc<Mutex<AHashMap<String, MemoryCacheEntry>>>;
+type MemoryCache = Arc<Mutex<AHashMap<ScopedCacheKey, MemoryCacheEntry>>>;
 
 /// Type alias for compilation locks
-type CompilationLocks = Arc<Mutex<AHashMap<String, Arc<Mutex<()>>>>>;
+type CompilationLocks = Arc<Mutex<AHashMap<ScopedCacheKey, Arc<Mutex<()>>>>>;
 
 /// Global in-memory bytecode cache shared across all BytecodeCache instances.
-/// This ensures that loaded bytecode is reused even when new BytecodeCache
-/// instances are created (e.g., for bundle builds with different cache directories).
+/// Entries are shared only by instances using the same cache directory. Each
+/// extracted build has its own directory, so another tenant's manifest cannot
+/// replace the bytecode executed with this build's runtime context.
 static GLOBAL_MEMORY_CACHE: std::sync::LazyLock<MemoryCache> =
     std::sync::LazyLock::new(|| Arc::new(Mutex::new(AHashMap::new())));
 
@@ -484,9 +493,28 @@ pub struct BytecodeCache {
 
 impl BytecodeCache {
     /// Create a new cache manager with the specified directory.
-    /// The in-memory cache is shared globally across all instances.
+    /// Resolve directory identity once so relative paths do not change meaning
+    /// if the process working directory changes. Resolve the nearest existing
+    /// ancestor as well, so a not-yet-created cache under a symlink has the same
+    /// identity as a later instance opened after directory creation.
     pub fn new(cache_dir: PathBuf) -> Self {
+        let absolute = std::path::absolute(&cache_dir).unwrap_or(cache_dir);
+        let cache_dir = absolute
+            .ancestors()
+            .find_map(|ancestor| {
+                ancestor.canonicalize().ok().map(|resolved| {
+                    resolved.join(absolute.strip_prefix(ancestor).expect("ancestor prefix"))
+                })
+            })
+            .unwrap_or(absolute);
         Self { cache_dir }
+    }
+
+    fn memory_key(&self, cache_key: &str) -> ScopedCacheKey {
+        ScopedCacheKey {
+            directory: self.cache_dir.clone(),
+            content_key: cache_key.to_string(),
+        }
     }
 
     /// Get or create an in-process compilation lock for a cache key.
@@ -494,7 +522,7 @@ impl BytecodeCache {
     pub fn get_compilation_lock(&self, cache_key: &str) -> Arc<Mutex<()>> {
         let mut locks = GLOBAL_COMPILATION_LOCKS.lock();
         locks
-            .entry(cache_key.to_string())
+            .entry(self.memory_key(cache_key))
             .or_insert_with(|| Arc::new(Mutex::new(())))
             .clone()
     }
@@ -534,7 +562,7 @@ impl BytecodeCache {
     /// parameter is ignored. Use this constructor for API compatibility.
     #[allow(unused_variables)]
     pub fn with_memory_limit(cache_dir: PathBuf, max_entries: usize) -> Self {
-        Self { cache_dir }
+        Self::new(cache_dir)
     }
 
     /// Get the cache directory path
@@ -649,10 +677,11 @@ impl BytecodeCache {
     /// Load cached bytecode (checks global memory first, then disk)
     /// Returns Arc<CachedBytecode> to avoid expensive clones on each access
     pub fn load(&self, cache_key: &str) -> Result<Arc<CachedBytecode>, String> {
+        let memory_key = self.memory_key(cache_key);
         // Check global in-memory cache first
         {
             let mut cache = GLOBAL_MEMORY_CACHE.lock();
-            if let Some(entry) = cache.get_mut(cache_key) {
+            if let Some(entry) = cache.get_mut(&memory_key) {
                 if validate_cache_metadata(&entry.bytecode.metadata, cache_key).is_ok() {
                     // Update last accessed time
                     entry.last_accessed = std::time::Instant::now();
@@ -665,7 +694,7 @@ impl BytecodeCache {
                     );
                     return Ok(Arc::clone(&entry.bytecode));
                 }
-                cache.remove(cache_key);
+                cache.remove(&memory_key);
             }
         }
 
@@ -811,6 +840,9 @@ impl BytecodeCache {
                 // arbitrary victim. Only a well-formed cache key qualifies.
                 if previous != cache_key && super::is_cache_key(previous) {
                     super::remove_invalid_cache_entry(&self.cache_file_path(previous));
+                    GLOBAL_MEMORY_CACHE
+                        .lock()
+                        .remove(&self.memory_key(previous));
                 }
             }
             // Atomic replacement: a torn marker would either strand the
@@ -844,10 +876,11 @@ impl BytecodeCache {
 
     /// Store bytecode in memory cache with LRU eviction
     fn store_in_memory(&self, cache_key: &str, bytecode: Arc<CachedBytecode>) {
+        let memory_key = self.memory_key(cache_key);
         let mut cache = GLOBAL_MEMORY_CACHE.lock();
         // If at capacity, evict the least recently used entry
         if cache.len() >= MAX_GLOBAL_MEMORY_ENTRIES
-            && !cache.contains_key(cache_key)
+            && !cache.contains_key(&memory_key)
             && let Some((lru_key, _)) = cache
                 .iter()
                 .min_by_key(|(_, entry)| entry.last_accessed)
@@ -856,12 +889,12 @@ impl BytecodeCache {
             cache.remove(&lru_key);
             tracing::debug!(
                 "Evicted LRU entry from global memory cache: {}",
-                &lru_key[..12]
+                &lru_key.content_key[..12.min(lru_key.content_key.len())]
             );
         }
 
         cache.insert(
-            cache_key.to_string(),
+            memory_key,
             MemoryCacheEntry {
                 bytecode,
                 last_accessed: std::time::Instant::now(),
@@ -875,18 +908,27 @@ impl BytecodeCache {
         );
     }
 
-    /// Clear the global in-memory cache (useful for testing or memory management)
+    /// Clear this directory's in-memory entries without evicting other builds.
     pub fn clear_memory(&self) {
         let mut cache = GLOBAL_MEMORY_CACHE.lock();
-        let count = cache.len();
-        cache.clear();
-        tracing::debug!("Cleared {} entries from global memory cache", count);
+        let before = cache.len();
+        cache.retain(|key, _| key.directory != self.cache_dir);
+        tracing::debug!(
+            "Cleared {} entries from bytecode memory cache",
+            before - cache.len()
+        );
     }
 
-    /// Get memory cache statistics
+    /// Get this directory's entry count and the shared process capacity.
     pub fn memory_stats(&self) -> (usize, usize) {
         let cache = GLOBAL_MEMORY_CACHE.lock();
-        (cache.len(), MAX_GLOBAL_MEMORY_ENTRIES)
+        (
+            cache
+                .keys()
+                .filter(|key| key.directory == self.cache_dir)
+                .count(),
+            MAX_GLOBAL_MEMORY_ENTRIES,
+        )
     }
 
     /// Create file hashes for a list of file paths
@@ -981,6 +1023,10 @@ impl BytecodeCache {
             tracing::debug!("Deleted cache file: {}", cache_path.display());
         }
 
+        GLOBAL_MEMORY_CACHE
+            .lock()
+            .remove(&self.memory_key(cache_key));
+
         Ok(())
     }
 
@@ -1012,15 +1058,9 @@ impl BytecodeCache {
         Ok(count)
     }
 
-    /// Clear the global in-memory cache only (useful when builds change)
+    /// Clear this directory's in-memory cache only (useful when builds change).
     pub fn clear_memory_cache(&self) {
-        let mut cache = GLOBAL_MEMORY_CACHE.lock();
-        let count = cache.len();
-        cache.clear();
-        tracing::debug!(
-            "Cleared {} entries from global bytecode memory cache",
-            count
-        );
+        self.clear_memory();
     }
 
     /// Invalidate cache entries for a specific project (both memory and disk)
@@ -1029,10 +1069,13 @@ impl BytecodeCache {
         // Clear matching entries from global memory cache
         {
             let mut cache = GLOBAL_MEMORY_CACHE.lock();
-            let keys_to_remove: Vec<String> = cache
-                .keys()
-                .filter(|k| k.starts_with(&format!("bytecode-{}-", project_name)))
-                .cloned()
+            let keys_to_remove: Vec<ScopedCacheKey> = cache
+                .iter()
+                .filter(|(key, entry)| {
+                    key.directory == self.cache_dir
+                        && entry.bytecode.metadata.project_name == project_name
+                })
+                .map(|(key, _)| key.clone())
                 .collect();
 
             for key in &keys_to_remove {
@@ -1264,6 +1307,115 @@ mod tests {
         let path = cache.cache_file_path(requested_key);
         std::fs::write(&path, compressed).expect("write payload");
         path
+    }
+
+    #[test]
+    fn identical_manifest_keys_cannot_share_bytecode_between_build_directories() {
+        let root = tempfile::tempdir().expect("tempdir");
+        // Construct before the directories exist to cover first compilation.
+        let a = BytecodeCache::new(root.path().join("build-a/cache"));
+        let b = BytecodeCache::new(root.path().join("build-b/cache"));
+        let key = "shared-manifest-key-12345";
+        let lock_a = a.get_compilation_lock(key);
+        let lock_b = b.get_compilation_lock(key);
+        assert!(!Arc::ptr_eq(&lock_a, &lock_b));
+
+        for (cache, marker) in [(&a, "tenant-a"), (&b, "tenant-b")] {
+            std::fs::create_dir_all(cache.cache_dir()).unwrap();
+            let mut program = BytecodeProgram::new();
+            program.add_constant(Constant::Val(Val::from(marker)));
+            let hot_ast = crate::lang::ast::HotAst::new();
+            let payload = CacheFilePayload {
+                metadata: create_cache_metadata("same-project", Vec::new(), key.to_string()),
+                program_data: program.serialize().unwrap(),
+                ast_program_namespaces: crate::lang::cache::ast_cache::serialize_namespaces(
+                    &indexmap::IndexMap::new(),
+                )
+                .unwrap(),
+                hot_ast_namespaces: None,
+                var_index: crate::lang::cache::ast_cache::serialize_var_index(&hot_ast.var_index)
+                    .unwrap(),
+                function_mapping: Vec::new(),
+                core_functions: Vec::new(),
+                type_implementations: Vec::new(),
+                tool_specs: Default::default(),
+                skill_specs: Default::default(),
+                ctx_defaults: [("account.default".to_string(), Val::from(marker))]
+                    .into_iter()
+                    .collect(),
+                secret_keys: Vec::new(),
+            };
+            let bytes = postcard::to_allocvec(&payload).unwrap();
+            let compressed = zstd::encode_all(bytes.as_slice(), 1).unwrap();
+            std::fs::write(cache.cache_file_path(key), compressed).unwrap();
+        }
+
+        // Alternate disk and memory hits. The second build must not receive
+        // either the first build's executable constants or its context defaults.
+        for (cache, expected) in [
+            (&a, "tenant-a"),
+            (&b, "tenant-b"),
+            (&a, "tenant-a"),
+            (&b, "tenant-b"),
+        ] {
+            let loaded = cache.load(key).unwrap();
+            assert_eq!(
+                loaded.program.constants[0],
+                Constant::Val(Val::from(expected))
+            );
+            assert_eq!(
+                loaded.runtime_ctx_defaults.get("account.default"),
+                Some(&Val::from(expected))
+            );
+        }
+        let reopened = BytecodeCache::new(root.path().join("build-a/./cache"));
+        assert!(Arc::ptr_eq(&lock_a, &reopened.get_compilation_lock(key)));
+        assert_eq!(a.memory_key(key), reopened.memory_key(key));
+
+        a.invalidate_project("same-project");
+        assert_eq!(a.memory_stats().0, 0);
+        assert_eq!(
+            b.load(key)
+                .unwrap()
+                .runtime_ctx_defaults
+                .get("account.default"),
+            Some(&Val::from("tenant-b"))
+        );
+        a.load(key).unwrap();
+        a.clear_memory_cache();
+        assert_eq!(a.memory_stats().0, 0);
+        a.load(key).unwrap();
+        a.delete(key).unwrap();
+        assert!(
+            a.load(key).is_err(),
+            "deleted entries must not survive in memory"
+        );
+        assert_eq!(
+            b.load(key).unwrap().program.constants[0],
+            Constant::Val(Val::from("tenant-b"))
+        );
+        b.clear_memory();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cache_directory_aliases_share_identity_before_and_after_creation() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let real = root.path().join("real");
+        let alias = root.path().join("alias");
+        std::fs::create_dir(&real).unwrap();
+        std::os::unix::fs::symlink(&real, &alias).unwrap();
+        let through_alias = BytecodeCache::new(alias.join("new/cache"));
+        std::fs::create_dir_all(real.join("new/cache")).unwrap();
+        let through_real = BytecodeCache::new(real.join("new/cache"));
+        assert_eq!(
+            through_alias.memory_key("same-key"),
+            through_real.memory_key("same-key")
+        );
+        assert!(Arc::ptr_eq(
+            &through_alias.get_compilation_lock("same-key"),
+            &through_real.get_compilation_lock("same-key")
+        ));
     }
 
     #[test]

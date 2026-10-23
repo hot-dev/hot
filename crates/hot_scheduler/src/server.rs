@@ -2,7 +2,10 @@ use ahash::AHashMap;
 use chrono::Utc;
 use hot::data::msg::Message;
 use hot::data::serialization::Serialization;
-use hot::db::{DatabasePool, Schedule, ScheduleLog, SchedulePolicy, SchedulerState};
+use hot::db::{
+    DatabasePool, DatabaseScope, MaintenanceOperation, Schedule, ScheduleLog, SchedulePolicy,
+    SchedulerState,
+};
 use hot::env::is_local_dev;
 use hot::lang::event::{Event, EventMessage, EventMessageBody, ExecutionContext};
 use hot::queue::{Queue, QueueType, mem::MemQueue, sqlite::SqliteQueue, streams::RedisStreamQueue};
@@ -70,38 +73,37 @@ pub const DEFAULT_SYNC_INTERVAL_SECONDS: u64 = 30; // Sync with database every 3
 pub const DEFAULT_RETRY_INTERVAL_SECONDS: u64 = 1;
 pub const DEFAULT_AT_INTERVAL_SECONDS: u64 = 1;
 const SCHEDULER_ADVISORY_LOCK_ID: i64 = 4_849_672_113_597_841;
-
-enum SchedulerSingletonGuard {
-    Postgres {
-        // Held for the scheduler lifetime so the session-level advisory lock stays active.
-        _conn: sqlx::pool::PoolConnection<sqlx::Postgres>,
-    },
-}
+/// How often the scheduler confirms it still holds its singleton lock.
+const SINGLETON_CHECK_INTERVAL: Duration = Duration::from_secs(30);
 
 async fn acquire_scheduler_singleton_guard(
     db: &DatabasePool,
-) -> Result<Option<SchedulerSingletonGuard>, Box<dyn std::error::Error + Send + Sync>> {
-    match db {
-        DatabasePool::Postgres(pool) => {
-            let mut conn = pool.acquire().await?;
-            let acquired: bool = sqlx::query_scalar("SELECT pg_try_advisory_lock($1)")
-                .bind(SCHEDULER_ADVISORY_LOCK_ID)
-                .fetch_one(&mut *conn)
-                .await?;
-            if !acquired {
-                return Err(
-                    "another hot_scheduler instance already holds the scheduler singleton lock"
-                        .into(),
-                );
-            }
-            debug!("hot.dev: SCHEDULER acquired Postgres singleton lock");
-            Ok(Some(SchedulerSingletonGuard::Postgres { _conn: conn }))
-        }
-        DatabasePool::Sqlite(_) => {
-            debug!("hot.dev: SCHEDULER singleton lock is best-effort for SQLite local development");
-            Ok(None)
-        }
+) -> Result<Option<hot::db::AdvisoryLock>, Box<dyn std::error::Error + Send + Sync>> {
+    if matches!(db, DatabasePool::Sqlite(_)) {
+        return Ok(None);
     }
+    let guard = hot::db::try_acquire_advisory_lock(db, SCHEDULER_ADVISORY_LOCK_ID)
+        .await?
+        .ok_or("another hot_scheduler instance already holds the scheduler singleton lock")?;
+    Ok(Some(guard))
+}
+
+/// Resolve durable ownership before any scheduler-produced execution data is written.
+async fn admitted_environment_db(
+    db: &DatabasePool,
+    env_id: Uuid,
+) -> Result<(DatabasePool, Uuid), Box<dyn std::error::Error + Send + Sync>> {
+    if !hot::db::Org::is_environment_admitted(db, &env_id).await? {
+        return Err("environment is suspended; scheduled work remains pending".into());
+    }
+    let env = hot::db::Env::get_env_uncached(db, &env_id).await?;
+    Ok((
+        db.with_scope(DatabaseScope::Environment {
+            org_id: env.org_id,
+            env_id,
+        }),
+        env.org_id,
+    ))
 }
 
 pub fn get_resolved_conf(conf: Val) -> Val {
@@ -218,6 +220,9 @@ pub async fn run(
     // Create shutdown signal for background tasks
     let (shutdown_tx, _) = tokio::sync::broadcast::channel::<()>(1);
 
+    // Held until shutdown: dropping the guard closes its session and frees the lock.
+    let mut singleton_guard = None;
+
     // If database is provided, start the sync loop and retry processor
     if let Some(db) = db {
         if !singleton {
@@ -226,8 +231,11 @@ pub async fn run(
                     .into(),
             );
         }
-        let _singleton_guard = acquire_scheduler_singleton_guard(&db).await?;
-        let db = Arc::new(db);
+        singleton_guard = acquire_scheduler_singleton_guard(&db).await?;
+        let db = Arc::new(db.with_scope(DatabaseScope::Maintenance {
+            operation: MaintenanceOperation::Scheduler,
+            org_id: None,
+        }));
         let sync_interval = sync_interval_seconds
             .unwrap_or(DEFAULT_SYNC_INTERVAL_SECONDS)
             .max(1);
@@ -241,6 +249,24 @@ pub async fn run(
             "hot.dev: SCHEDULER intervals: sync={}s retry={}s at={}s",
             sync_interval, retry_interval, at_interval
         );
+
+        // Reconciliation checks one counter per short transaction and applies
+        // relative deltas; it never holds the account lock used by admission.
+        let usage_db = Arc::clone(&db);
+        let mut usage_shutdown = shutdown_tx.subscribe();
+        tokio::spawn(async move {
+            let mut timer = interval(Duration::from_secs(3600));
+            loop {
+                tokio::select! {
+                    _ = timer.tick() => {
+                        if let Err(error) = hot::db::usage::reconcile_accounts(&usage_db).await {
+                            error!(%error, "hot.dev: SCHEDULER usage reconciliation failed");
+                        }
+                    }
+                    _ = usage_shutdown.recv() => break,
+                }
+            }
+        });
 
         // Start the database sync task
         let scheduler_clone = scheduler.clone();
@@ -473,16 +499,62 @@ pub async fn run(
         warn!("hot.dev: SCHEDULER running without database - no schedule sync will occur");
     }
 
+    // The singleton lock lives on its own session, which can end silently
+    // (failover, termination, idle timeout). Stop scheduling if it is lost so a
+    // replacement scheduler never runs alongside this one.
+    let (lock_lost_tx, lock_lost_rx) = tokio::sync::oneshot::channel::<()>();
+    let guard_task = singleton_guard.map(|mut guard| {
+        let mut shutdown_rx = shutdown_tx.subscribe();
+        tokio::spawn(async move {
+            let mut timer = interval(SINGLETON_CHECK_INTERVAL);
+            timer.tick().await;
+            loop {
+                tokio::select! {
+                    _ = timer.tick() => match guard.ensure_held().await {
+                        Ok(true) => {}
+                        outcome => {
+                            error!(?outcome, "hot.dev: SCHEDULER lost its singleton lock; stopping");
+                            let _ = lock_lost_tx.send(());
+                            return None;
+                        }
+                    },
+                    _ = shutdown_rx.recv() => return Some(guard),
+                }
+            }
+        })
+    });
+
     // Start the scheduler
     scheduler.start().await?;
 
     info!("hot.dev: SCHEDULER started and running");
 
-    // Wait for SIGINT or SIGTERM
-    hot::signal::shutdown_signal().await;
+    // Wait for SIGINT or SIGTERM, or the loss of the singleton lock.
+    let watching_lock = guard_task.is_some();
+    let lock_lost = async move {
+        if watching_lock {
+            let _ = lock_lost_rx.await;
+        } else {
+            std::future::pending::<()>().await;
+        }
+    };
+    let lost = tokio::select! {
+        _ = hot::signal::shutdown_signal() => false,
+        _ = lock_lost => true,
+    };
     info!("hot.dev: SCHEDULER shutting down gracefully");
     let _ = shutdown_tx.send(());
     scheduler.shutdown().await?;
+    if let Some(task) = guard_task
+        && let Ok(Some(guard)) = task.await
+    {
+        guard.release().await;
+    }
+    if lost {
+        return Err(
+            "scheduler singleton lock was lost; stopping to avoid duplicate scheduling".into(),
+        );
+    }
 
     Ok(())
 }
@@ -797,175 +869,18 @@ async fn create_scheduled_job(
     // This ensures the Job constructor gets a valid cron expression
     let scheduler_cron = convert_to_scheduler_cron(&cron)?;
 
-    // Clone data for the job closure
     let queue_clone = Arc::clone(event_queue);
     let db_clone = Arc::clone(db);
-    let ns_clone = ns.clone();
-    let var_clone = var.clone();
-    let schedule_id_clone = schedule_id;
-    let build_id_clone = build_id;
-
-    // Create the scheduled job using the converted cron expression
+    let schedule_clone = schedule.clone();
     let job = Job::new_async(&scheduler_cron, move |_uuid, _lock| {
         let queue = Arc::clone(&queue_clone);
         let db = Arc::clone(&db_clone);
-        let ns = ns_clone.clone();
-        let var = var_clone.clone();
-        let schedule_id = schedule_id_clone;
-        let build_id = build_id_clone;
-
+        let schedule = schedule_clone.clone();
         Box::pin(async move {
-            // Create a scheduled event message
-            let event_id = Uuid::now_v7();
-            let run_id = Uuid::now_v7();
-
-            // Look up the environment ID for this build
-            let env_id = match hot::db::Build::get_env_id_for_build(&db, &build_id).await {
-                Ok(env_id) => env_id,
-                Err(e) => {
-                    error!(
-                        "hot.dev: SCHEDULER failed to get environment for build {}: {}. Skipping scheduled event.",
-                        build_id, e
-                    );
-                    return;
-                }
-            };
-
-            // Get the build details to access the created_by_user_id
-            let build = match hot::db::Build::get_build(&db, &build_id).await {
-                Ok(build) => build,
-                Err(e) => {
-                    error!(
-                        "hot.dev: SCHEDULER failed to get build {} details: {}",
-                        build_id, e
-                    );
-                    return; // Skip this scheduled event if we can't get build details
-                }
-            };
-
-            // Create a new stream ID for this scheduled event (scheduled events start new streams)
-            let stream_id = Uuid::now_v7();
-
-            // Create the execution context for the schedule
-            let execution_context = ExecutionContext {
-                run_id,
-                stream_id,
-                run_type_id: hot::db::run::RunType::Schedule.as_id(),
-                env_id: Some(env_id),  // Now we have the actual environment ID
-                env_name: None, // Will be populated later if needed
-                user_id: None, // Will be set by worker from build.created_by_user_id
-                org_id: None,  // Will be set when processed by worker
-                org_slug: None, // Will be populated later if needed
-                build_id: Some(build_id),
-                build_hash: None, // Will be populated later if needed
-                project_id: None, // Will be populated later if needed
-                project_name: None, // Will be populated later if needed
-                event_id: Some(event_id), // Now set since event is inserted into DB
-                origin_run_id: None, // No origin_run_id for scheduled events
-                retry_attempt: 0,
-                secret_keys: ahash::AHashSet::new(), // Will be populated from ctx metadata
-                secret_value_hashes: ahash::AHashSet::new(),
-                access_id: None, // Scheduler-initiated, no API access log
-                agent_type: None,
-                queue_timing: None,
-                // Enqueue-only producer context; the worker stamps deadline_at at admission
-                deadline_at: None,
-            };
-
-            // Create the event data for the generic schedule-event-handler
-            // The handler will call the scheduled function with args
-            let event_data = val!({
-                "fn": format!("{}/{}", ns, var),
-                "args": [val!({
-                    "type": "hot:schedule",
-                    "schedule_id": schedule_id.to_string(),
-                    "scheduled_at": Utc::now().to_rfc3339()
-                })]
-            });
-
-            // Create the event
-            let event = Event {
-                event_id,
-                env_id, // Now using the actual environment ID
-                stream_id,
-                event_type: "hot:schedule".to_string(),
-                event_data,
-                event_time: Utc::now(),
-                // Target project from build for routing tie-breaker
-                target_project_id: Some(build.project_id),
-                target_project_name: None, // Will be resolved by worker if needed
-            };
-
-            // Insert the event into the database before sending to worker
-            // This ensures the event exists when the worker creates the run record
-            match hot::db::event::Event::insert_event(
-                &db,
-                &event_id,
-                &env_id,
-                &stream_id,
-                "hot:schedule",
-                &serde_json::Value::from(&event.event_data),
-                event.event_time,
-                &build.created_by_user_id, // Use the build creator as the event creator
-                None,
-            ).await {
-                Ok(_) => {
-                    // Event successfully inserted, continue to send message
-                }
-                Err(e) => {
-                    error!(
-                        "hot.dev: SCHEDULER failed to insert event for {}/{}: {}",
-                        ns, var, e
-                    );
-                    return; // Skip sending message if event insertion failed
-                }
-            }
-
-            // Create event message head
-            let mut head = AHashMap::new();
-            head.insert("source".to_string(), "scheduler".to_string());
-            head.insert("event_type".to_string(), "hot:schedule".to_string());
-            head.insert("schedule_id".to_string(), schedule_id.to_string());
-            head.insert("function".to_string(), format!("{}/{}", ns, var));
-            head.insert("timestamp".to_string(), Utc::now().to_rfc3339());
-
-            // Create the EventMessage
-            let event_message = EventMessage {
-                id: event_id,
-                head,
-                body: EventMessageBody {
-                    event,
-                    execution_context,
-                },
-            };
-
-            // Convert to unified Message format
-            let message: Message = event_message.into();
-
-            // Send to event queue for worker processing
-            match queue.enqueue(message).await {
-                Ok(_) => {
-                    debug!(
-                        "hot.dev: SCHEDULER sent scheduled event for {}/{} to hot:event queue",
-                        ns, var
-                    );
-
-                    // Log the execution to schedule_log
-                    let now = Utc::now();
-                    if let Err(e) = ScheduleLog::insert(&db, &schedule_id, Some(&event_id), now, false).await {
-                        error!(
-                            "hot.dev: SCHEDULER failed to log execution for {}/{}: {}",
-                            ns, var, e
-                        );
-                        // Don't fail the job - the execution still happened
-                    }
-                }
-                Err(e) => {
-                    error!(
-                        "hot.dev: SCHEDULER failed to send scheduled event for {}/{}: {}",
-                        ns, var, e
-                    );
-                }
+            if let Err(error) =
+                queue_schedule_execution(&db, &queue, &schedule, Utc::now(), false).await
+            {
+                warn!(schedule_id = %schedule.schedule_id, %error, "Scheduled execution deferred");
             }
         })
     })
@@ -1211,9 +1126,16 @@ async fn queue_schedule_execution(
                 "Failed to get environment for build {}: {}. Skipping scheduled event.",
                 schedule.build_id, e
             );
-            return Ok(());
+            return Err(format!(
+                "schedule build {} cannot be resolved: {}",
+                schedule.build_id, e
+            )
+            .into());
         }
     };
+
+    let (scoped_db, org_id) = admitted_environment_db(db, env_id).await?;
+    let db = &Arc::new(scoped_db);
 
     // Get the build details
     let build = hot::db::Build::get_build(db, &schedule.build_id)
@@ -1237,7 +1159,7 @@ async fn queue_schedule_execution(
         env_id: Some(env_id),
         env_name: None, // Will be populated later if needed
         user_id: None,
-        org_id: None,
+        org_id: Some(org_id),
         org_slug: None, // Will be populated later if needed
         build_id: Some(schedule.build_id),
         build_hash: None,   // Will be populated later if needed
@@ -1409,6 +1331,21 @@ async fn process_pending_retries(
     );
 
     for run in pending_runs {
+        let (scoped_db, org_id) = match admitted_environment_db(db, run.env_id).await {
+            Ok(scope) => scope,
+            Err(error) => {
+                // Leave the due window instead of re-occupying every batch: a
+                // suspended tenant's backlog is re-checked with growing backoff.
+                let until = run.deferred_retry_at(Utc::now());
+                if let Err(e) = hot::db::run::Run::defer_pending_retry(db, &run.run_id, until).await
+                {
+                    warn!(run_id = %run.run_id, error = %e, "Failed to defer pending retry");
+                }
+                debug!(run_id = %run.run_id, %error, %until, "Retry remains pending until environment is admitted");
+                continue;
+            }
+        };
+        let db = &Arc::new(scoped_db);
         // Get the original event to re-send
         let event_id = match run.event_id {
             Some(id) => id,
@@ -1473,7 +1410,7 @@ async fn process_pending_retries(
             env_id: Some(run.env_id),
             env_name: None,
             user_id: run.by_user_id,
-            org_id: None,
+            org_id: Some(org_id),
             org_slug: None,
             build_id: run.build_id,
             build_hash: None,
@@ -1754,6 +1691,28 @@ mod tests {
             deactivated_at: None,
         };
 
+        let DatabasePool::Sqlite(pool) = db.as_ref() else {
+            unreachable!()
+        };
+        sqlx::query("UPDATE org SET lifecycle_state = 'suspended' WHERE org_id = ?")
+            .bind(data.org_id)
+            .execute(pool)
+            .await
+            .unwrap();
+        assert!(
+            queue_schedule_execution(&db, &queue, &schedule, Utc::now(), false)
+                .await
+                .is_err()
+        );
+        assert!(
+            queue.is_empty().await.unwrap(),
+            "Suspended schedules must not enqueue execution"
+        );
+        sqlx::query("UPDATE org SET lifecycle_state = 'active' WHERE org_id = ?")
+            .bind(data.org_id)
+            .execute(pool)
+            .await
+            .unwrap();
         queue_schedule_execution(&db, &queue, &schedule, Utc::now(), false)
             .await
             .expect("queue_schedule_execution should succeed");
@@ -1835,5 +1794,57 @@ mod tests {
             Some(data.run_id)
         );
         assert_eq!(event_message.body.execution_context.retry_attempt, 1);
+    }
+
+    #[tokio::test]
+    async fn suspended_retries_are_deferred_out_of_the_due_batch() {
+        let db = Arc::new(hot::db::test_db().await);
+        let data = hot::db::insert_test_data(&db).await.unwrap();
+        let hot::db::DatabasePool::Sqlite(pool) = db.as_ref() else {
+            panic!("test_db should be SQLite");
+        };
+        let due = Utc::now() - chrono::Duration::seconds(60);
+        sqlx::query(
+            "UPDATE run SET status_id = ?, retry_attempt = 1, next_retry_at = ? WHERE run_id = ?",
+        )
+        .bind(hot::db::run::RunStatus::PendingRetry.as_id())
+        .bind(due)
+        .bind(data.run_id)
+        .execute(pool)
+        .await
+        .unwrap();
+        sqlx::query("UPDATE env SET active = 0 WHERE env_id = ?")
+            .bind(data.env_id)
+            .execute(pool)
+            .await
+            .unwrap();
+        let queue: Arc<dyn Queue<Message>> = Arc::new(
+            MemQueue::new(format!("test:retry-suspended:{}", Uuid::now_v7()))
+                .expect("memory queue"),
+        );
+
+        process_pending_retries(&db, &queue).await.unwrap();
+
+        assert!(
+            queue.dequeue().await.unwrap().is_none(),
+            "suspended work is not enqueued"
+        );
+        let (status, next): (i16, Option<chrono::DateTime<Utc>>) =
+            sqlx::query_as("SELECT status_id, next_retry_at FROM run WHERE run_id = ?")
+                .bind(data.run_id)
+                .fetch_one(pool)
+                .await
+                .unwrap();
+        assert_eq!(status, hot::db::run::RunStatus::PendingRetry.as_id());
+        assert!(
+            next.is_some_and(|next| next > Utc::now()),
+            "retry left the due window"
+        );
+        assert!(
+            hot::db::run::Run::get_pending_retries(&db, 50)
+                .await
+                .unwrap()
+                .is_empty()
+        );
     }
 }

@@ -3130,6 +3130,7 @@ dependencies = [
  "ammonia",
  "ariadne",
  "async-channel",
+ "async-stream",
  "async-trait",
  "aws-config",
  "aws-lc-rs",
@@ -3398,6 +3399,7 @@ dependencies = [
  "reqwest 0.13.5",
  "serde",
  "serde_json",
+ "sqlx",
  "tempfile",
  "tokio",
  "tracing",
@@ -7556,6 +7558,7 @@ dependencies = [
  "getrandom 0.4.3",
  "js-sys",
  "serde_core",
+ "sha1_smol",
  "wasm-bindgen",
 ]
 

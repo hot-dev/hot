@@ -198,7 +198,7 @@
                         <script>
                             // Auto-refresh after a short delay to check subscription status
                             setTimeout(function() {
-                                window.location.href = window.location.pathname;
+                                window.location.href = window.hotScopeUrl(window.location.pathname);
                             }, 3000);
                         </script>
                     {% else %}

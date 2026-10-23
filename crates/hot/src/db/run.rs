@@ -7,10 +7,20 @@ use uuid::Uuid;
 
 use super::search::{IdSearch, pg_placeholders, sqlite_placeholders};
 
+pub(crate) mod quota;
+
 #[derive(Error, Debug)]
 pub enum RunError {
     #[error("Database error: {0}")]
     Database(#[from] sqlx::Error),
+    #[error("Run admission denied: {0}")]
+    QuotaExceeded(String),
+    /// The environment or account is not admitting work; accepted work stays
+    /// pending until it is.
+    #[error("Run admission deferred: {0}")]
+    Suspended(String),
+    #[error("Run scope does not match its environment owner")]
+    ScopeDenied,
     #[error("Run not found")]
     NotFound,
 }
@@ -1565,6 +1575,50 @@ impl Run {
                 })?;
         }
 
+        Ok(())
+    }
+
+    /// Finish a host-managed run only while it is still running. The environment
+    /// predicate protects SQLite callers too; already-terminal emitter results win.
+    pub async fn finish_if_running(
+        db: &crate::db::DatabasePool,
+        env_id: &Uuid,
+        run_id: &Uuid,
+        status: &RunStatus,
+    ) -> Result<(), RunError> {
+        if !matches!(
+            status,
+            RunStatus::Succeeded | RunStatus::Failed | RunStatus::Cancelled
+        ) {
+            return Err(RunError::ScopeDenied);
+        }
+        if let crate::db::DatabasePool::Postgres(pool) = db
+            && !matches!(pool.scope()?, crate::db::DatabaseScope::Environment { env_id: scoped_env, .. } if scoped_env == *env_id)
+        {
+            return Err(RunError::ScopeDenied);
+        }
+        let run = Self::get_run(db, run_id).await?;
+        if run.env_id != *env_id {
+            return Err(RunError::ScopeDenied);
+        }
+        let stop_time = Utc::now();
+        let changed = match db {
+            crate::db::DatabasePool::Postgres(pool) => sqlx::query(
+                "UPDATE run SET stop_time=$3, status_id=$4 WHERE run_id=$1 AND env_id=$2 AND status_id=$5",
+            )
+            .bind(run_id).bind(env_id).bind(stop_time).bind(status.as_id())
+            .bind(RunStatus::Running.as_id()).execute(pool).await?.rows_affected(),
+            crate::db::DatabasePool::Sqlite(pool) => sqlx::query(
+                "UPDATE run SET stop_time=$3, status_id=$4 WHERE run_id=$1 AND env_id=$2 AND status_id=$5",
+            )
+            .bind(run_id).bind(env_id).bind(stop_time).bind(status.as_id())
+            .bind(RunStatus::Running.as_id()).execute(pool).await?.rows_affected(),
+        };
+        if changed > 0 {
+            crate::db::stream::Stream::update_metrics(db, &run.stream_id)
+                .await
+                .map_err(|error| RunError::Database(sqlx::Error::Protocol(error.to_string())))?;
+        }
         Ok(())
     }
 
@@ -3289,7 +3343,10 @@ impl Run {
     }
 
     /// Get runs that are pending retry and ready to be retried (next_retry_at <= now)
-    /// Limited to batch_size runs to avoid overwhelming the system
+    /// Limited to batch_size runs to avoid overwhelming the system. The
+    /// scheduler defers retries whose environment is not admitting work (see
+    /// [`Run::deferred_retry_at`]), so a suspended tenant's backlog leaves the
+    /// due set instead of occupying every batch or slowing this indexed scan.
     pub async fn get_pending_retries(
         db: &crate::db::DatabasePool,
         batch_size: i64,
@@ -3419,6 +3476,40 @@ impl Run {
         }
     }
 
+    /// When to look again at a pending retry whose environment is not
+    /// admitting work. The wait is half the run's age, between one minute and
+    /// one day, so a suspended tenant's backlog is re-checked rarely instead of
+    /// staying at the head of the due set. A reactivated environment's old
+    /// retries resume within that wait.
+    pub fn deferred_retry_at(&self, now: DateTime<Utc>) -> DateTime<Utc> {
+        retry_deferral(self.stop_time.unwrap_or(self.start_time), now)
+    }
+
+    /// Move a pending retry out of the due window until `until`.
+    pub async fn defer_pending_retry(
+        db: &crate::db::DatabasePool,
+        run_id: &Uuid,
+        until: DateTime<Utc>,
+    ) -> Result<(), RunError> {
+        match db {
+            crate::db::DatabasePool::Postgres(pg_pool) => {
+                sqlx::query("UPDATE hot.run SET next_retry_at = $2 WHERE run_id = $1 AND status_id = 5 AND next_retry_at IS NOT NULL")
+                    .bind(run_id)
+                    .bind(until)
+                    .execute(pg_pool)
+                    .await?;
+            }
+            crate::db::DatabasePool::Sqlite(sqlite_pool) => {
+                sqlx::query("UPDATE run SET next_retry_at = ? WHERE run_id = ? AND status_id = 5 AND next_retry_at IS NOT NULL")
+                    .bind(until)
+                    .bind(run_id)
+                    .execute(sqlite_pool)
+                    .await?;
+            }
+        }
+        Ok(())
+    }
+
     /// Mark a pending retry run as failed (exhausted retries or manual cancellation)
     pub async fn mark_retry_as_failed(
         db: &crate::db::DatabasePool,
@@ -3444,9 +3535,61 @@ impl Run {
     }
 }
 
+fn retry_deferral(failed_at: DateTime<Utc>, now: DateTime<Utc>) -> DateTime<Utc> {
+    let age = (now - failed_at).max(chrono::Duration::zero());
+    now + (age / 2).clamp(chrono::Duration::minutes(1), chrono::Duration::days(1))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn deferred_retries_leave_the_due_batch() {
+        let db = crate::db::test_db().await;
+        let data = crate::db::insert_test_data(&db).await.unwrap();
+        let crate::db::DatabasePool::Sqlite(pool) = &db else {
+            unreachable!()
+        };
+        sqlx::query("UPDATE run SET status_id = 5, next_retry_at = ? WHERE run_id = ?")
+            .bind(chrono::Utc::now() - chrono::Duration::minutes(1))
+            .bind(data.run_id)
+            .execute(pool)
+            .await
+            .unwrap();
+        let due = Run::get_pending_retries(&db, 50).await.unwrap();
+        let run = due
+            .into_iter()
+            .find(|run| run.run_id == data.run_id)
+            .unwrap();
+
+        let now = chrono::Utc::now();
+        Run::defer_pending_retry(&db, &run.run_id, run.deferred_retry_at(now))
+            .await
+            .unwrap();
+        let due = Run::get_pending_retries(&db, 50).await.unwrap();
+        assert!(due.iter().all(|due| due.run_id != data.run_id));
+        let deferred: chrono::DateTime<chrono::Utc> =
+            sqlx::query_scalar("SELECT next_retry_at FROM run WHERE run_id = ?")
+                .bind(data.run_id)
+                .fetch_one(pool)
+                .await
+                .unwrap();
+        assert!(deferred >= now + chrono::Duration::minutes(1));
+    }
+
+    #[test]
+    fn deferred_retry_wait_grows_with_age_and_is_bounded() {
+        let now = chrono::Utc::now();
+        let wait = |age: chrono::Duration| retry_deferral(now - age, now) - now;
+        assert_eq!(wait(chrono::Duration::zero()), chrono::Duration::minutes(1));
+        assert_eq!(
+            wait(-chrono::Duration::hours(1)),
+            chrono::Duration::minutes(1)
+        );
+        assert_eq!(wait(chrono::Duration::hours(4)), chrono::Duration::hours(2));
+        assert_eq!(wait(chrono::Duration::days(30)), chrono::Duration::days(1));
+    }
 
     #[tokio::test]
     async fn sqlite_update_info_matches_postgres_shallow_merge_semantics() {

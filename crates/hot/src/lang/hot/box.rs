@@ -188,6 +188,13 @@ pub fn start(vm: &mut crate::lang::runtime::vm::VirtualMachine, args: &[Val]) ->
     };
 
     let start_result = tokio::runtime::Handle::current().block_on(async {
+        if !crate::db::Org::is_environment_admitted(&db, &env_id)
+            .await
+            .unwrap_or(false)
+        {
+            return Err("The workspace is suspended or unavailable".to_string());
+        }
+
         match tokio::time::timeout(
             BOX_START_IO_TIMEOUT,
             crate::db::run::Run::ensure_run_exists(
@@ -707,6 +714,10 @@ async fn enforce_cus_quota(
     db: &crate::db::DatabasePool,
     org_id: &uuid::Uuid,
 ) -> Result<(), String> {
+    let root_id = crate::db::Org::billing_owner_id_for(db, org_id)
+        .await
+        .map_err(|_| "Unable to resolve account quota".to_string())?;
+    let org_id = &root_id;
     if let Some(cached) = cached_quota_decision(org_id) {
         return cached;
     }
@@ -757,14 +768,15 @@ async fn enforce_cus_quota_uncached(
         .and_then(|s| s.current_period_start)
         .unwrap_or_else(chrono::Utc::now);
 
-    let usage = crate::db::subscription::OrgUsageStats::calculate(
+    let usage = crate::db::subscription::OrgUsageStats::calculate_account(
         db,
         org_id,
         period_start,
         features.call_retention_days(),
     )
     .await
-    .ok();
+    .map(Some)
+    .map_err(|_| "Unable to check account compute usage".to_string())?;
 
     let cus_used = usage.as_ref().map(|u| u.compute_units).unwrap_or(0);
 
@@ -1089,7 +1101,7 @@ pub fn quota(vm: &mut crate::lang::runtime::vm::VirtualMachine, args: &[Val]) ->
                 .and_then(|s| s.current_period_start)
                 .unwrap_or_else(chrono::Utc::now);
 
-            let usage = crate::db::subscription::OrgUsageStats::calculate(
+            let usage = crate::db::subscription::OrgUsageStats::calculate_account(
                 &db,
                 &org_id,
                 period_start,

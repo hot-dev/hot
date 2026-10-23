@@ -15,6 +15,9 @@ use uuid::Uuid;
 // Simple in-memory session store for temporary API key data
 #[derive(Clone)]
 struct ApiKeySession {
+    user_id: Uuid,
+    org_id: Uuid,
+    env_id: Uuid,
     key_hash: String,
     created_at: Instant,
 }
@@ -37,13 +40,22 @@ async fn cleanup_expired_sessions() {
 }
 
 // Store API key data in session
-async fn store_api_key_session(api_key_id: Uuid, key_hash: String) {
+async fn store_api_key_session(
+    api_key_id: Uuid,
+    user_id: Uuid,
+    org_id: Uuid,
+    env_id: Uuid,
+    key_hash: String,
+) {
     cleanup_expired_sessions().await; // Clean up old sessions
     let store = get_session_store();
     let mut sessions = store.write().await;
     sessions.insert(
         api_key_id,
         ApiKeySession {
+            user_id,
+            org_id,
+            env_id,
             key_hash,
             created_at: Instant::now(),
         },
@@ -51,13 +63,23 @@ async fn store_api_key_session(api_key_id: Uuid, key_hash: String) {
 }
 
 // Retrieve and remove API key data from session
-async fn take_api_key_session(api_key_id: &Uuid) -> Option<String> {
+async fn take_api_key_session(
+    api_key_id: &Uuid,
+    user_id: Uuid,
+    org_id: Uuid,
+    env_id: Uuid,
+) -> Option<String> {
     let store = get_session_store();
     let mut sessions = store.write().await;
 
     // Check if session exists and is not expired
     if let Some(session) = sessions.get(api_key_id) {
         if Instant::now().duration_since(session.created_at) < Duration::from_secs(300) {
+            // A pending credential belongs to the identity and execution scope
+            // that saw its secret. A mismatched request must not consume it.
+            if (session.user_id, session.org_id, session.env_id) != (user_id, org_id, env_id) {
+                return None;
+            }
             // Session is valid, remove and return the key_hash
             let key_hash = session.key_hash.clone();
             sessions.remove(api_key_id);
@@ -88,6 +110,16 @@ pub struct ApiKeyEditForm {
     pub access_level: String,
     #[serde(default)]
     pub permissions: String,
+}
+
+fn keys_list_redirect(session: &Session) -> Redirect {
+    // A different tab can change navigation cookies before this redirect is
+    // followed. Keep the destination bound to the workspace that handled it.
+    let target = match &session.current_env {
+        Some(env) => format!("/keys?org_id={}&env_id={}", env.org_id, env.env_id),
+        None => "/keys".to_string(),
+    };
+    Redirect::to(&target)
 }
 
 pub async fn keys_list_handler(
@@ -181,7 +213,14 @@ pub async fn keys_new_handler(
     };
 
     // Store the key hash in the session
-    store_api_key_session(api_key_id, key_hash.clone()).await;
+    store_api_key_session(
+        api_key_id,
+        session.current_user_id(),
+        current_env.org_id,
+        current_env.env_id,
+        key_hash,
+    )
+    .await;
 
     let (mcp_tools_json, webhooks_json) =
         super::build_permission_path_options(&db, &current_env.env_id).await;
@@ -222,7 +261,7 @@ pub async fn keys_edit_handler(
     let current_env = match &session.current_env {
         Some(env) => env,
         None => {
-            return Redirect::to("/keys").into_response();
+            return keys_list_redirect(&session).into_response();
         }
     };
 
@@ -231,7 +270,7 @@ pub async fn keys_edit_handler(
         Ok(api_key) => {
             // SECURITY: Verify the API key belongs to the current environment
             if api_key.env_id != current_env.env_id {
-                return Redirect::to("/keys").into_response();
+                return keys_list_redirect(&session).into_response();
             }
 
             // Determine access level from permissions
@@ -279,7 +318,7 @@ pub async fn keys_edit_handler(
         }
         Err(_) => {
             // API key not found, redirect to keys list
-            Redirect::to("/keys").into_response()
+            keys_list_redirect(&session).into_response()
         }
     }
 }
@@ -313,7 +352,14 @@ pub async fn keys_create_handler(
     }
 
     // Retrieve the key hash from the session store
-    let key_hash = match take_api_key_session(&form.api_key_id).await {
+    let key_hash = match take_api_key_session(
+        &form.api_key_id,
+        session.current_user_id(),
+        current_env.org_id,
+        current_env.env_id,
+    )
+    .await
+    {
         Some(hash) => hash,
         None => {
             return Err(render_keys_new_with_error(
@@ -387,7 +433,7 @@ pub async fn keys_create_handler(
     {
         Ok(_) => {
             // Redirect to the keys list
-            Ok(Redirect::to("/keys"))
+            Ok(keys_list_redirect(&session))
         }
         Err(_) => Err(render_keys_new_with_error(
             &session,
@@ -420,12 +466,12 @@ pub async fn keys_update_handler(
     // Get the API key
     let api_key = match hot::db::api_key::ApiKey::get_api_key(&db, &api_key_id).await {
         Ok(key) => key,
-        Err(_) => return Ok(Redirect::to("/keys")),
+        Err(_) => return Ok(keys_list_redirect(&session)),
     };
 
     // Check if API key belongs to current environment
     if api_key.env_id != current_env.env_id {
-        return Ok(Redirect::to("/keys"));
+        return Ok(keys_list_redirect(&session));
     }
 
     // Validate form data
@@ -517,7 +563,7 @@ pub async fn keys_update_handler(
     }
 
     // Redirect to the keys list
-    Ok(Redirect::to("/keys"))
+    Ok(keys_list_redirect(&session))
 }
 
 // Helper function to render keys new page with error

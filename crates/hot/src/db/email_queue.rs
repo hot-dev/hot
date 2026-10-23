@@ -80,6 +80,12 @@ impl EmailQueueEntry {
         from_address: &str,
     ) -> Result<Uuid, EmailQueueError> {
         let id = Uuid::now_v7();
+        // The outbox is platform infrastructure: tenant request scopes cannot
+        // insert into it, so every enqueue runs as the email operation.
+        let db = &db.with_scope(crate::db::DatabaseScope::Maintenance {
+            operation: crate::db::MaintenanceOperation::Email,
+            org_id: None,
+        });
 
         match db {
             crate::db::DatabasePool::Postgres(pool) => {

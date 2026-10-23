@@ -108,7 +108,7 @@ function storeDetailFilters() {
 
             // On mobile, do full page navigation since HTMX only swaps the desktop content.
             if (window.innerWidth < 768) {
-                window.location.href = url;
+                window.location.href = window.hotScopeUrl(url);
                 return;
             }
 
@@ -120,7 +120,7 @@ function storeDetailFilters() {
                     swap: 'innerHTML'
                 });
             } else {
-                window.location.href = url;
+                window.location.href = window.hotScopeUrl(url);
             }
         }
     };

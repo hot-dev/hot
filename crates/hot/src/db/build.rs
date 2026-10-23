@@ -14,6 +14,8 @@ type ManifestVersions = (Option<String>, Option<String>);
 pub enum BuildError {
     #[error("Database error: {0}")]
     Database(#[from] sqlx::Error),
+    #[error("Build admission denied: {0}")]
+    Admission(String),
     #[error("Build not found")]
     NotFound,
 }
@@ -108,7 +110,9 @@ impl Build {
         db: &crate::db::DatabasePool,
         build_id: &Uuid,
     ) -> Result<Build, BuildError> {
-        if let Some(build) = BUILD_CACHE.get(build_id) {
+        if matches!(db, crate::db::DatabasePool::Sqlite(_))
+            && let Some(build) = BUILD_CACHE.get(build_id)
+        {
             return Ok(build);
         }
 
@@ -1064,10 +1068,15 @@ impl Build {
 
         let env_id = Self::get_env_id_for_build(db, build_id).await?;
 
-        let activated = match db {
-            crate::db::DatabasePool::Postgres(pg_pool) => {
-                let mut tx = pg_pool.begin().await?;
-
+        let admission = super::schedule::quota::Admission::begin(db, build_id, -1)
+            .await
+            .map_err(|e| BuildError::Admission(e.to_string()))?;
+        let activated = match admission {
+            super::schedule::quota::Admission::Postgres {
+                mut tx,
+                root,
+                limit,
+            } => {
                 let current_sequence: i64 = sqlx::query_scalar(
                     "SELECT deployment_sequence FROM project WHERE project_id = $1 AND active = true"
                 )
@@ -1113,12 +1122,17 @@ impl Build {
                 .execute(&mut *tx)
                 .await?;
 
+                super::schedule::quota::validate_postgres(&mut tx, root, limit)
+                    .await
+                    .map_err(|e| BuildError::Admission(e.to_string()))?;
                 tx.commit().await?;
                 true
             }
-            crate::db::DatabasePool::Sqlite(sqlite_pool) => {
-                let mut tx = sqlite_pool.begin().await?;
-
+            super::schedule::quota::Admission::Sqlite {
+                mut tx,
+                root,
+                limit,
+            } => {
                 let current_sequence: i64 = sqlx::query_scalar(
                     "SELECT deployment_sequence FROM project WHERE project_id = ? AND active = 1",
                 )
@@ -1164,6 +1178,9 @@ impl Build {
                 .execute(&mut *tx)
                 .await?;
 
+                super::schedule::quota::validate_sqlite(&mut tx, root, limit)
+                    .await
+                    .map_err(|e| BuildError::Admission(e.to_string()))?;
                 tx.commit().await?;
                 true
             }
@@ -1188,10 +1205,16 @@ impl Build {
         // Get env_id for cache invalidation
         let env_id = Self::get_env_id_for_build(db, build_id).await?;
 
-        match db {
-            crate::db::DatabasePool::Postgres(pg_pool) => {
+        let admission = super::schedule::quota::Admission::begin(db, build_id, -1)
+            .await
+            .map_err(|e| BuildError::Admission(e.to_string()))?;
+        match admission {
+            super::schedule::quota::Admission::Postgres {
+                mut tx,
+                root,
+                limit,
+            } => {
                 // Start a transaction
-                let mut tx = pg_pool.begin().await?;
 
                 let deployment_sequence: i64 = sqlx::query_scalar(
                     "UPDATE project SET deployment_sequence = deployment_sequence + 1, updated_at = NOW(), updated_by_user_id = $2 WHERE project_id = $1 RETURNING deployment_sequence"
@@ -1229,11 +1252,17 @@ impl Build {
                 .await?;
 
                 // Commit the transaction
+                super::schedule::quota::validate_postgres(&mut tx, root, limit)
+                    .await
+                    .map_err(|e| BuildError::Admission(e.to_string()))?;
                 tx.commit().await?;
             }
-            crate::db::DatabasePool::Sqlite(sqlite_pool) => {
+            super::schedule::quota::Admission::Sqlite {
+                mut tx,
+                root,
+                limit,
+            } => {
                 // Start a transaction
-                let mut tx = sqlite_pool.begin().await?;
 
                 sqlx::query(
                     "UPDATE project SET deployment_sequence = deployment_sequence + 1, updated_at = CURRENT_TIMESTAMP, updated_by_user_id = ? WHERE project_id = ?"
@@ -1278,6 +1307,9 @@ impl Build {
                 .await?;
 
                 // Commit the transaction
+                super::schedule::quota::validate_sqlite(&mut tx, root, limit)
+                    .await
+                    .map_err(|e| BuildError::Admission(e.to_string()))?;
                 tx.commit().await?;
             }
         }
@@ -1639,6 +1671,16 @@ mod tests {
         let org_id = Uuid::now_v7();
         let env_id = Uuid::now_v7();
         let project_id = Uuid::now_v7();
+        crate::db::Org::insert_org(
+            db,
+            &org_id,
+            "Build test",
+            &org_id.to_string(),
+            "organization",
+            user_id,
+        )
+        .await
+        .unwrap();
 
         crate::db::Env::insert_env(db, &env_id, &org_id, "test-env", user_id)
             .await

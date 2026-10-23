@@ -1,6 +1,6 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use sqlx::{FromRow, Pool, Postgres, Sqlite};
+use sqlx::{FromRow, Pool, Sqlite};
 use std::error::Error;
 use std::fmt;
 use uuid::Uuid;
@@ -116,7 +116,7 @@ impl ApiKey {
     }
 
     async fn get_api_key_postgres(
-        db: &Pool<Postgres>,
+        db: &crate::db::ScopedPgPool,
         api_key_id: &Uuid,
     ) -> Result<ApiKey, ApiKeyError> {
         let row = sqlx::query_as::<_, ApiKey>(
@@ -186,7 +186,7 @@ impl ApiKey {
     }
 
     async fn get_api_keys_by_env_postgres(
-        db: &Pool<Postgres>,
+        db: &crate::db::ScopedPgPool,
         env_id: &Uuid,
         limit: Option<i64>,
         offset: Option<i64>,
@@ -299,7 +299,7 @@ impl ApiKey {
     }
 
     async fn get_api_keys_by_org_postgres(
-        db: &Pool<Postgres>,
+        db: &crate::db::ScopedPgPool,
         org_id: &Uuid,
         limit: Option<i64>,
         offset: Option<i64>,
@@ -402,7 +402,7 @@ impl ApiKey {
 
     #[allow(clippy::too_many_arguments)]
     async fn insert_api_key_postgres(
-        db: &Pool<Postgres>,
+        db: &crate::db::ScopedPgPool,
         api_key_id: &Uuid,
         env_id: &Uuid,
         description: &str,
@@ -513,7 +513,7 @@ impl ApiKey {
     }
 
     async fn update_description_postgres(
-        db: &Pool<Postgres>,
+        db: &crate::db::ScopedPgPool,
         api_key_id: &Uuid,
         description: &str,
         updated_by_user_id: &Uuid,
@@ -578,7 +578,7 @@ impl ApiKey {
     }
 
     async fn toggle_active_postgres(
-        db: &Pool<Postgres>,
+        db: &crate::db::ScopedPgPool,
         api_key_id: &Uuid,
         active: bool,
         updated_by_user_id: &Uuid,

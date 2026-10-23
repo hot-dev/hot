@@ -1,5 +1,5 @@
 use crate::val::Val;
-use sqlx::{Executor, Pool, Postgres, Sqlite, postgres::PgPoolOptions};
+use sqlx::{Executor, Pool, Sqlite, postgres::PgPoolOptions};
 use std::path::PathBuf;
 use thiserror::Error;
 use tracing::debug;
@@ -129,15 +129,19 @@ pub mod file;
 pub mod file_upload;
 pub mod hierarchy;
 pub mod invite;
+pub mod management_key;
 pub mod mcp_tool;
 pub mod org;
 pub mod org_note;
 pub mod port;
 pub mod project;
+pub mod rls;
 pub mod run;
 pub mod schedule;
 pub mod schedule_log;
 pub mod scheduler_state;
+pub mod scope;
+pub mod scoped_postgres;
 pub(crate) mod search;
 pub mod service_key;
 pub mod session;
@@ -146,6 +150,7 @@ pub mod stream;
 pub mod subscription;
 pub mod task;
 pub mod team;
+pub mod usage;
 pub mod user;
 pub mod webhook;
 pub mod workflow;
@@ -178,6 +183,11 @@ pub use schedule::{
 };
 pub use schedule_log::{ScheduleLog, ScheduleLogError};
 pub use scheduler_state::{SchedulerState, SchedulerStateError};
+pub use scope::{
+    BootstrapOperation, DatabaseScope, MaintenanceOperation, current_database_scope,
+    with_database_scope,
+};
+pub use scoped_postgres::ScopedPgPool;
 pub use service_key::{ServiceKey, ServiceKeyError};
 pub use session::{Session, SessionError};
 pub use stream::{Stream, StreamError, StreamSummary};
@@ -250,7 +260,18 @@ pub enum DatabaseType {
 #[derive(Clone)]
 pub enum DatabasePool {
     Sqlite(Pool<Sqlite>),
-    Postgres(Pool<Postgres>),
+    Postgres(ScopedPgPool),
+}
+
+impl DatabasePool {
+    /// Bind trusted scope to a cloned handle for work crossing task boundaries.
+    /// SQLite repositories retain explicit application scope predicates.
+    pub fn with_scope(&self, scope: DatabaseScope) -> Self {
+        match self {
+            Self::Postgres(pool) => Self::Postgres(pool.with_scope(scope)),
+            Self::Sqlite(pool) => Self::Sqlite(pool.clone()),
+        }
+    }
 }
 
 /// A held cross-process coordination lock returned by [`try_acquire_advisory_lock`].
@@ -259,9 +280,15 @@ pub enum DatabasePool {
 /// the lock is released when [`AdvisoryLock::release`] is called (or when the
 /// connection is dropped / the session ends). On SQLite there is no fleet to
 /// coordinate, so the lock is a no-op marker that simply lets the caller proceed.
-pub enum AdvisoryLock {
+pub struct AdvisoryLock {
+    inner: AdvisoryLockInner,
+}
+
+// Keep the raw session private: callers receive only the lifetime/release
+// guard, never an alternate executor around ScopedPgPool.
+enum AdvisoryLockInner {
     Postgres {
-        conn: Option<sqlx::pool::PoolConnection<Postgres>>,
+        conn: Option<sqlx::PgConnection>,
         lock_id: i64,
     },
     /// SQLite (local, single process): no coordination needed, caller proceeds.
@@ -273,7 +300,7 @@ impl AdvisoryLock {
     /// critical section completes so the pooled connection is returned promptly
     /// rather than held for the lifetime of the process.
     pub async fn release(mut self) {
-        let AdvisoryLock::Postgres { conn, lock_id } = &mut self else {
+        let AdvisoryLockInner::Postgres { conn, lock_id } = &mut self.inner else {
             return;
         };
         let Some(mut conn) = conn.take() else {
@@ -282,26 +309,34 @@ impl AdvisoryLock {
 
         if let Err(e) = sqlx::query("SELECT pg_advisory_unlock($1)")
             .bind(*lock_id)
-            .execute(&mut *conn)
+            .execute(&mut conn)
             .await
         {
             tracing::warn!(lock_id = *lock_id, "failed to release advisory lock: {e}");
-            conn.close_on_drop();
         }
+        let _ = sqlx::Connection::close(conn).await;
     }
-}
 
-impl Drop for AdvisoryLock {
-    fn drop(&mut self) {
-        if let AdvisoryLock::Postgres { conn, .. } = self
-            && let Some(conn) = conn
-        {
-            // Session-level advisory locks are held by the underlying Postgres
-            // session. If a guard is dropped before explicit unlock (for example
-            // task cancellation), do not return that session to the pool still
-            // holding the lock.
-            conn.close_on_drop();
-        }
+    /// Whether this guard's session still holds the lock. A session advisory
+    /// lock disappears silently when its backend ends (failover, termination,
+    /// an idle timeout), so long-lived holders must check before relying on it.
+    /// An error means the session is gone.
+    pub async fn ensure_held(&mut self) -> Result<bool, sqlx::Error> {
+        let AdvisoryLockInner::Postgres { conn, lock_id } = &mut self.inner else {
+            return Ok(true);
+        };
+        let Some(conn) = conn.as_mut() else {
+            return Ok(false);
+        };
+        // A bigint key is stored as classid (high 32 bits) and objid (low 32 bits).
+        sqlx::query_scalar(
+            "SELECT EXISTS (SELECT 1 FROM pg_locks WHERE locktype = 'advisory' AND granted \
+             AND pid = pg_backend_pid() AND objsubid = 1 \
+             AND classid = (($1 >> 32) & 4294967295)::oid AND objid = ($1 & 4294967295)::oid)",
+        )
+        .bind(*lock_id)
+        .fetch_one(conn)
+        .await
     }
 }
 
@@ -322,21 +357,25 @@ pub async fn try_acquire_advisory_lock(
 ) -> Result<Option<AdvisoryLock>, sqlx::Error> {
     match db {
         DatabasePool::Postgres(pool) => {
-            let mut conn = pool.acquire().await?;
+            let mut conn = pool.acquire_advisory_connection().await?;
             let acquired: bool = sqlx::query_scalar("SELECT pg_try_advisory_lock($1)")
                 .bind(lock_id)
-                .fetch_one(&mut *conn)
+                .fetch_one(&mut conn)
                 .await?;
             if acquired {
-                Ok(Some(AdvisoryLock::Postgres {
-                    conn: Some(conn),
-                    lock_id,
+                Ok(Some(AdvisoryLock {
+                    inner: AdvisoryLockInner::Postgres {
+                        conn: Some(conn),
+                        lock_id,
+                    },
                 }))
             } else {
                 Ok(None)
             }
         }
-        DatabasePool::Sqlite(_) => Ok(Some(AdvisoryLock::NotRequired)),
+        DatabasePool::Sqlite(_) => Ok(Some(AdvisoryLock {
+            inner: AdvisoryLockInner::NotRequired,
+        })),
     }
 }
 
@@ -412,6 +451,16 @@ pub fn get_db_uri_from_conf(conf: &Val) -> String {
 
     // Default to SQLite if no URI is configured
     DEFAULT_DB_URI.to_string()
+}
+
+/// Production PostgreSQL is role-validated by default. Disabling this is only
+/// for explicit privileged fixtures/isolated development; scoped queries and
+/// database policies still apply. SQLite does not use PostgreSQL role checks.
+pub fn rls_enforcement_required(conf: &Val) -> bool {
+    conf.get_bool_or_default(
+        "db.rls.enforce",
+        conf.get_bool_or_default("rls.enforce", true),
+    )
 }
 
 /// Redact password from database URI for safe display
@@ -508,6 +557,12 @@ pub async fn create_db_pool(conf: &Val) -> Result<DatabasePool, DatabaseError> {
                 }
             };
             tracing::debug!("Using Postgres schema: {}", schema);
+            if rls_enforcement_required(conf) && schema != DEFAULT_DB_SCHEMA {
+                return Err(DatabaseError::Migration(
+                    "The public PostgreSQL migration chain currently requires schema 'hot'; custom-schema RLS installations are not supported".into()
+                ));
+            }
+            let validation_schema = schema.clone();
 
             let statement_timeout_ms = conf
                 .get_int_or_default(
@@ -562,7 +617,14 @@ pub async fn create_db_pool(conf: &Val) -> Result<DatabasePool, DatabaseError> {
                     DatabaseError::Connection(e)
                 })?;
             tracing::debug!("Successfully connected to Postgres database");
-            Ok(DatabasePool::Postgres(db))
+            if rls_enforcement_required(conf) {
+                rls::validate_runtime_role(&db, &validation_schema).await?;
+            } else {
+                tracing::warn!(
+                    "PostgreSQL runtime role validation is explicitly disabled; this connection is not qualified for production RLS isolation"
+                );
+            }
+            Ok(DatabasePool::Postgres(ScopedPgPool::new(db)))
         }
     }
 }
@@ -574,15 +636,62 @@ pub async fn test_connection(db: &DatabasePool) -> Result<(), DatabaseError> {
             let _row = sqlx::query("SELECT 1").fetch_one(db).await?;
         }
         DatabasePool::Postgres(db) => {
-            let _row = sqlx::query("SELECT 1").fetch_one(db).await?;
+            let health_db = db.with_scope(DatabaseScope::Bootstrap(BootstrapOperation::Health));
+            let _row = sqlx::query("SELECT 1").fetch_one(&health_db).await?;
         }
     }
     Ok(())
 }
 
+/// Schema-owner credentials (`db.migration-uri`, or `migration-uri` in a
+/// resolved database section); empty when not configured.
+fn get_migration_uri_from_conf(conf: &Val) -> String {
+    conf.get_str_or_default(
+        "db.migration-uri",
+        &conf.get_str_or_default("migration-uri", ""),
+    )
+}
+
+/// Whether this process may change the schema. Enforced PostgreSQL keeps
+/// migration credentials out of long-running services, so there only a process
+/// configured with `db.migration-uri` migrates and bootstraps.
+pub fn schema_changes_enabled(conf: &Val) -> bool {
+    !get_migration_uri_from_conf(conf).is_empty()
+        || !matches!(
+            DatabaseType::from_uri(&get_db_uri_from_conf(conf)),
+            Ok(DatabaseType::Postgres)
+        )
+        || !rls_enforcement_required(conf)
+}
+
+/// Configuration for a schema bootstrap provider. Bootstrap runs right after
+/// migrations and may create tables or seed reference data, so it connects with
+/// the migration credentials, which are not a qualified runtime login.
+pub fn bootstrap_conf(conf: &Val) -> Val {
+    let migration_uri = get_migration_uri_from_conf(conf);
+    if migration_uri.is_empty() {
+        return conf.clone();
+    }
+    conf.set_str("db.uri", Some(migration_uri), "")
+        .set_bool("db.rls.enforce", Some(false), false)
+}
+
 /// Run database migrations
 pub async fn run_migrations(conf: &Val) -> Result<(), DatabaseError> {
-    let uri = get_db_uri_from_conf(conf);
+    let runtime_uri = get_db_uri_from_conf(conf);
+    let migration_uri = get_migration_uri_from_conf(conf);
+    let uri = if migration_uri.is_empty() {
+        if matches!(
+            DatabaseType::from_uri(&runtime_uri)?,
+            DatabaseType::Postgres
+        ) && rls_enforcement_required(conf)
+        {
+            return Err(DatabaseError::Migration("PostgreSQL requires a separate db.migration-uri for schema changes; runtime credentials must not own tables".into()));
+        }
+        runtime_uri
+    } else {
+        migration_uri
+    };
     let db_type = DatabaseType::from_uri(&uri)?;
     let migration_path = db_type.migration_dir()?;
 
@@ -774,6 +883,8 @@ fn translate_migrate_error(
 
 /// Check if there are any existing organizations and users in the database
 pub async fn check_default_data_exists(db: &DatabasePool) -> Result<(i64, i64), DatabaseError> {
+    let scoped = db.with_scope(DatabaseScope::Bootstrap(BootstrapOperation::Onboarding));
+    let db = &scoped;
     let org_count = Org::get_count(db).await?;
     let user_count = User::get_count(db).await?;
     Ok((org_count, user_count))
@@ -784,6 +895,9 @@ pub async fn insert_default_data(
     db: &DatabasePool,
 ) -> Result<(uuid::Uuid, uuid::Uuid, uuid::Uuid), DatabaseError> {
     use uuid::Uuid;
+
+    let scoped = db.with_scope(DatabaseScope::Bootstrap(BootstrapOperation::Onboarding));
+    let db = &scoped;
 
     // Generate new UUIDs
     let org_id = Uuid::now_v7();
@@ -879,9 +993,12 @@ pub async fn insert_test_data(db: &DatabasePool) -> Result<TestData, DatabaseErr
     // First insert the default data (user, org, env)
     let (org_id, user_id, _org_user_id) = insert_default_data(db).await?;
 
-    // Get the env that was created
-    let env = Env::get_default_env(db).await?;
+    // Resolve the fixture's own environment before switching to execution scope.
+    let metadata = db.with_scope(DatabaseScope::Organization { org_id });
+    let env = Env::get_default_env_by_org(&metadata, &org_id).await?;
     let env_id = env.env_id;
+    let scoped = db.with_scope(DatabaseScope::Environment { org_id, env_id });
+    let db = &scoped;
 
     // Create a test project
     let project_id = Uuid::now_v7();

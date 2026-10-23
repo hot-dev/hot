@@ -35,7 +35,17 @@ pub async fn checkout_form_handler(
     // session snapshot can be a beat behind on a freshly-created org. Users
     // with no org yet are sent to /claim-handle to pick a handle first.
     let org_slug: Option<String> = if let Some(org) = session.current_org.as_ref() {
-        Some(org.slug.clone())
+        if org.is_child() {
+            let lookup = db.with_scope(hot::db::DatabaseScope::Bootstrap(
+                hot::db::BootstrapOperation::Membership,
+            ));
+            hot::db::Org::get_org_uncached(&lookup, &org.billing_owner_id())
+                .await
+                .ok()
+                .map(|root| root.slug)
+        } else {
+            Some(org.slug.clone())
+        }
     } else {
         hot::db::org::Org::get_orgs_by_user(&db, &session.current_user_id())
             .await
@@ -79,16 +89,16 @@ pub async fn org_checkout_form_handler(
     // Check via a direct membership query rather than `session.user_orgs`
     // because the session snapshot can be a beat behind on freshly-created
     // orgs. Billing management still requires an org admin.
-    let org_user =
-        hot::db::org::OrgUser::get_org_user(&db, &org.org_id, &session.current_user_id())
-            .await
-            .map_err(|_| (StatusCode::FORBIDDEN, "Access denied".to_string()))?;
-    if org_user.org_user_role_id != 2 {
+    if !super::billing::is_org_admin(&db, &session.current_user_id(), &org.org_id).await {
         return Err((
             StatusCode::FORBIDDEN,
             "Only organization admins can manage billing".to_string(),
         ));
     }
+    let db = Arc::new(db.with_scope(hot::db::DatabaseScope::Maintenance {
+        operation: hot::db::MaintenanceOperation::Billing,
+        org_id: Some(org.org_id),
+    }));
 
     // Get all active plans for plan selection
     let all_plans: Vec<Plan> = Plan::get_all_active(&db)
@@ -218,16 +228,16 @@ pub async fn org_create_checkout_handler(
         .await
         .map_err(|_| (StatusCode::NOT_FOUND, "Organization not found".to_string()))?;
 
-    let org_user =
-        hot::db::org::OrgUser::get_org_user(&db, &org.org_id, &session.current_user_id())
-            .await
-            .map_err(|_| (StatusCode::FORBIDDEN, "Access denied".to_string()))?;
-    if org_user.org_user_role_id != 2 {
+    if !super::billing::is_org_admin(&db, &session.current_user_id(), &org.org_id).await {
         return Err((
             StatusCode::FORBIDDEN,
             "Only organization admins can manage billing".to_string(),
         ));
     }
+    let db = Arc::new(db.with_scope(hot::db::DatabaseScope::Maintenance {
+        operation: hot::db::MaintenanceOperation::Billing,
+        org_id: Some(org.org_id),
+    }));
 
     let plan_id = form
         .get("plan_id")

@@ -41,6 +41,10 @@ pub(crate) async fn run_db(
                 }
             }
         }
+        "provision-store-indexes" => {
+            let created = hot::db::rls::provision_store_indexes(conf).await?;
+            println!("Store index provisioning completed: {created} index(es) created");
+        }
         "port-v1-to-v2" => {
             let uri = get_db_uri_from_conf(conf);
             let db_type = DatabaseType::from_uri(&uri).map_err(|e| e.to_string())?;
@@ -66,7 +70,7 @@ pub(crate) async fn run_db(
         }
         _ => {
             return Err(format!(
-                "Unknown database command: {}. Available commands: status, migrate, port-v1-to-v2",
+                "Unknown database command: {}. Available commands: status, migrate, provision-store-indexes, port-v1-to-v2",
                 db_cmd
             ));
         }

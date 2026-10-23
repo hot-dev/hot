@@ -255,6 +255,10 @@ pub async fn create_domain(
     let domain = Domain::create(&db, &api_key.env_id, &body.domain)
         .await
         .map_err(|e| match e {
+            hot::db::domain::DomainError::QuotaExceeded => (
+                StatusCode::FORBIDDEN,
+                Json(ApiErrorResponse::new("domain_limit_reached", "Account custom-domain limit reached")),
+            ),
             hot::db::domain::DomainError::AlreadyExists => (
                 StatusCode::CONFLICT,
                 Json(ApiErrorResponse::new(

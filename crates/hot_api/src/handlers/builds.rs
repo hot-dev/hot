@@ -16,7 +16,10 @@ use tokio::io::AsyncWriteExt;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use uuid::Uuid;
 
-use super::{ListQueryParams, get_and_ensure_active_project, get_and_verify_project};
+use super::{
+    ListQueryParams, get_and_ensure_active_project, get_and_verify_project,
+    get_and_verify_project_including_inactive,
+};
 use crate::ApiStateData;
 use crate::auth::AuthContext;
 use crate::models::*;
@@ -363,7 +366,8 @@ pub async fn deploy_build(
 ) -> Result<Json<ApiResponse<BuildResponse>>, (StatusCode, Json<ApiErrorResponse>)> {
     super::require_api_key(&auth, "Only API keys can deploy builds.")?;
 
-    let project = get_and_ensure_active_project(&db, &api_key, &project_id_or_slug).await?;
+    let project =
+        get_and_verify_project_including_inactive(&db, &api_key, &project_id_or_slug).await?;
 
     // Get the build and verify it belongs to this project
     let build = Build::get_build(&db, &build_id)
@@ -386,6 +390,10 @@ pub async fn deploy_build(
             Json(ApiErrorResponse::not_found("Build")),
         ));
     }
+
+    // A grant to execute this build must not reactivate a different project
+    // supplied in the URL, even when the deployment ultimately returns 404.
+    let project = get_and_ensure_active_project(&db, &api_key, &project_id_or_slug).await?;
 
     // Validate ctx requirements for bundle builds before deploying
     if build.is_bundle() {
@@ -1080,6 +1088,102 @@ pub async fn download_build(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn scoped_deploy_cannot_reactivate_an_unrelated_project() {
+        use axum::{Router, body::Body, middleware, routing::post};
+        use tower::ServiceExt;
+
+        let db = Arc::new(hot::db::test_db().await);
+        let data = hot::db::insert_test_data(&db).await.unwrap();
+        let other_id = Uuid::now_v7();
+        Project::insert_project(&db, &other_id, &data.env_id, "unrelated", &data.user_id)
+            .await
+            .unwrap();
+        for project_id in [other_id, data.project_id] {
+            Project::toggle_active(&db, &project_id, false, &data.user_id)
+                .await
+                .unwrap();
+        }
+        let key_id = Uuid::now_v7();
+        let (token, hash) = ApiKey::generate_api_key(&key_id).unwrap();
+        ApiKey::insert_api_key(
+            &db,
+            &key_id,
+            &data.env_id,
+            "one build",
+            &serde_json::from_str(&hash).unwrap(),
+            &data.user_id,
+            &serde_json::json!({format!("build:{}", data.build_id): ["execute"]}),
+        )
+        .await
+        .unwrap();
+        let storage_dir = tempfile::tempdir().unwrap();
+        let state: ApiStateData = (
+            db.clone(),
+            Arc::new(Box::new(hot::storage::LocalBuildStorage::new(
+                storage_dir.path().to_path_buf(),
+            ))),
+            Arc::new(hot::val!({})),
+            None,
+        );
+        let app = Router::new()
+            .route(
+                "/v1/projects/{project_id_or_slug}/builds/{build_id}/deploy",
+                post(deploy_build),
+            )
+            .route_layer(middleware::from_fn_with_state(
+                state.clone(),
+                crate::auth::api_key_auth_middleware,
+            ))
+            .with_state(state);
+        for selector in ["unrelated".to_string(), other_id.to_string()] {
+            let response = app
+                .clone()
+                .oneshot(
+                    axum::http::Request::builder()
+                        .method("POST")
+                        .uri(format!(
+                            "/v1/projects/{selector}/builds/{}/deploy",
+                            data.build_id
+                        ))
+                        .header("authorization", format!("Bearer {token}"))
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::NOT_FOUND);
+            assert!(
+                !Project::get_project_including_inactive(&db, &other_id)
+                    .await
+                    .unwrap()
+                    .active
+            );
+        }
+        // The authorized build still brings its own project online.
+        let response = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri(format!(
+                        "/v1/projects/{}/builds/{}/deploy",
+                        data.project_id, data.build_id
+                    ))
+                    .header("authorization", format!("Bearer {token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert!(
+            Project::get_project(&db, &data.project_id)
+                .await
+                .unwrap()
+                .active
+        );
+    }
 
     #[test]
     fn build_upload_concurrency_limit_releases_on_drop() {

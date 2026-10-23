@@ -208,6 +208,19 @@ pub async fn subscribe_to_env(
     }
 
     // Create the SSE stream with push from pub/sub
+    let stream_scope = crate::auth::runtime_database_scope(&db, auth.env_id())
+        .await
+        .map_err(|status| {
+            (
+                status,
+                Json(ApiErrorResponse::new(
+                    "forbidden",
+                    "Environment is not admitting requests",
+                )),
+            )
+        })?;
+    let stream_auth = auth.clone();
+    let stream_db = db.clone();
     let stream = async_stream::stream! {
         let _connection_guard = connection_guard;
         let mut subscriber = subscriber;
@@ -247,7 +260,13 @@ pub async fn subscribe_to_env(
     };
 
     // KeepAlive sends a comment every 15 seconds by default, preventing ALB idle timeout
-    Ok(Sse::new(stream).keep_alive(KeepAlive::default()))
+    Ok(Sse::new(crate::auth::guard_stream(
+        stream,
+        stream_db,
+        Some(stream_auth),
+        stream_scope,
+    ))
+    .keep_alive(KeepAlive::default()))
 }
 
 /// Convert pub/sub EnvEvent to SSE event

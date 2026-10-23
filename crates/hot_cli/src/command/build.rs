@@ -93,10 +93,10 @@ pub(crate) async fn run_build(
 
     // Extract and resolve profile IDs for execution context
     let (user_id, env_id, org_id) =
-        if let Some((user_email, org_slug, env_name)) = extract_profile_identifiers(conf) {
+        if let Some((user_email, org_slug, env_name)) = extract_profile_identifiers(conf)? {
             if !db_uri.is_empty() {
                 // Connect to database to resolve profile identifiers
-                let db = match hot::db::create_db_pool(conf).await {
+                let db = match crate::profile::create_cli_db_pool(conf).await {
                     Ok(db) => db,
                     Err(e) => {
                         return Err(format!(
@@ -139,6 +139,8 @@ pub(crate) async fn run_build(
         jit_threshold: None,
         jit_hof_fusion: None,
         db_uri: None,
+        db_migration_uri: None,
+        profile: None,
         log_level: None,
         log_target: None,
         log_dir: None,
@@ -167,7 +169,7 @@ pub(crate) async fn run_build(
     // Note: Compilation validation is handled inside hot::build::build_create
 
     // Create database connection
-    let db = hot::db::create_db_pool(conf)
+    let db = crate::profile::create_cli_db_pool(conf)
         .await
         .map_err(|e| format!("Failed to connect to database: {}", e))?;
 

@@ -182,10 +182,10 @@ async fn run_builds_local(
 
     // Extract and resolve profile IDs for execution context
     let (_user_id, env_id, _org_id) =
-        if let Some((user_email, org_slug, env_name)) = extract_profile_identifiers(conf) {
+        if let Some((user_email, org_slug, env_name)) = extract_profile_identifiers(conf)? {
             if !db_uri.is_empty() {
                 // Connect to database to resolve profile identifiers
-                let db = match hot::db::create_db_pool(conf).await {
+                let db = match crate::profile::create_cli_db_pool(conf).await {
                     Ok(db) => db,
                     Err(e) => {
                         return Err(format!(
@@ -225,7 +225,7 @@ async fn run_builds_local(
     };
 
     // Create database connection
-    let db = hot::db::create_db_pool(conf)
+    let db = crate::profile::create_cli_db_pool(conf)
         .await
         .map_err(|e| format!("Failed to connect to database: {}", e))?;
 
@@ -268,7 +268,7 @@ async fn run_builds_local(
         print_builds_table(builds_with_projects);
     } else {
         // Get all builds for the environment (across all bundles)
-        let builds = match hot::db::Build::get_recent_builds(&db, limit).await {
+        let builds = match hot::db::Build::get_builds_by_env(&db, &env_id, limit, offset).await {
             Ok(builds) => builds,
             Err(e) => {
                 return Err(format!("Failed to get recent builds: {}", e));

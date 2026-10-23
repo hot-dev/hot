@@ -1256,7 +1256,7 @@ async function retryRun(runId) {
 
         if (data.success) {
             // Redirect to the new run
-            window.location.href = `/runs/${data.run_id}`;
+            window.location.href = window.hotScopeUrl(`/runs/${data.run_id}`);
         } else {
             await showAlert('Retry Failed', `Failed to retry: ${data.error}`, 'error');
         }
@@ -1284,7 +1284,7 @@ async function rerunRun(runId) {
 
         if (data.success) {
             // Redirect to the new run
-            window.location.href = `/runs/${data.run_id}`;
+            window.location.href = window.hotScopeUrl(`/runs/${data.run_id}`);
         } else {
             await showAlert('Re-run Failed', `Failed to re-run: ${data.error}`, 'error');
         }

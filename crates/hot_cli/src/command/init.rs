@@ -103,7 +103,9 @@ pub(crate) async fn check_and_run_init_if_needed(
     use hot::db::{check_default_data_exists, create_db_pool};
 
     let db = match create_db_pool(conf).await {
-        Ok(db) => db,
+        Ok(db) => db.with_scope(hot::db::DatabaseScope::Bootstrap(
+            hot::db::BootstrapOperation::Onboarding,
+        )),
         Err(_) => {
             info!("Database connection failed, running initialization...");
             run_init_impl(conf, true, None, providers).await?;
@@ -150,12 +152,8 @@ async fn run_init_impl(
     path: Option<&str>,
     providers: &crate::CliProviders,
 ) -> Result<(), String> {
-    use hot::db::{
-        Env, Org, User, check_default_data_exists, create_db_pool, get_db_uri_from_conf,
-        insert_default_data, redact_password,
-    };
+    use hot::db::{create_db_pool, get_db_uri_from_conf, redact_password};
     use std::fs;
-    use uuid;
 
     macro_rules! init_msg {
         ($($arg:tt)*) => {
@@ -215,107 +213,19 @@ async fn run_init_impl(
     init_msg!("Checking for default organization, user, and environment...");
 
     let db = match create_db_pool(conf).await {
-        Ok(db) => db,
+        Ok(db) => db.with_scope(hot::db::DatabaseScope::Bootstrap(
+            hot::db::BootstrapOperation::Onboarding,
+        )),
         Err(e) => return Err(format!("Failed to connect to database: {}", e)),
     };
 
-    let (org_count, user_count) = match check_default_data_exists(&db).await {
-        Ok((org_count, user_count)) => (org_count, user_count),
-        Err(e) => return Err(format!("Failed to check existing data: {}", e)),
-    };
-
-    let existing_profile = parse_existing_conf_profile();
-
-    let profile_email = existing_profile
-        .as_ref()
-        .and_then(|p| p.user_email.as_ref())
-        .map(|s| s.as_str())
-        .unwrap_or("local@hot.dev");
-    let profile_slug = existing_profile
-        .as_ref()
-        .and_then(|p| p.org_slug.as_ref())
-        .map(|s| s.as_str())
-        .unwrap_or("local");
-    let profile_env_name = existing_profile
-        .as_ref()
-        .and_then(|p| p.env_name.as_ref())
-        .map(|s| s.as_str())
-        .unwrap_or("development");
-
-    if org_count == 0 && user_count == 0 {
-        init_msg!("  No organizations or users found, creating defaults...");
-
-        let (org_id, user_id, _org_user_id) = match insert_default_data(&db).await {
-            Ok(ids) => ids,
-            Err(e) => return Err(format!("Failed to insert default data: {}", e)),
-        };
-
-        let default_env = match Env::get_default_env_by_org(&db, &org_id).await {
-            Ok(env) => env,
-            Err(e) => return Err(format!("Failed to get default environment: {}", e)),
-        };
-
-        init_msg!("  Created default organization: Local ({})", org_id);
-        init_msg!("  Created default user: local@hot.dev ({})", user_id);
-        init_msg!(
-            "  Created default environment: development ({})",
-            default_env.env_id
-        );
-        init_msg!("  Linked user to organization");
-    } else {
-        let env_count = match Env::get_count(&db).await {
-            Ok(count) => count,
-            Err(e) => return Err(format!("Failed to check environment count: {}", e)),
-        };
-
-        if env_count == 0 {
-            init_msg!(
-                "  Found existing organizations and users, but no environments. Creating default environment..."
-            );
-
-            let org = match Org::get_org_by_slug(&db, profile_slug).await {
-                Ok(org) => org,
-                Err(_) => return Err(format!("Organization '{}' not found", profile_slug)),
-            };
-
-            let user = match User::get_user_by_email(&db, profile_email).await {
-                Ok(user) => user,
-                Err(_) => return Err(format!("User '{}' not found", profile_email)),
-            };
-
-            let env_id = uuid::Uuid::now_v7();
-            match Env::insert_env(&db, &env_id, &org.org_id, profile_env_name, &user.user_id).await
-            {
-                Ok(_) => {
-                    init_msg!(
-                        "  Created default environment: {} ({})",
-                        profile_env_name,
-                        env_id
-                    );
-                }
-                Err(e) => return Err(format!("Failed to create default environment: {}", e)),
-            }
-        }
-
-        init_msg!(
-            "  Found existing organizations ({}) and users ({}), validating profile configuration...",
-            org_count,
-            user_count
-        );
-
-        if let Err(e) =
-            resolve_profile_to_uuids(&db, profile_email, profile_slug, profile_env_name).await
-        {
-            return Err(format!("Profile validation failed: {}", e));
-        }
-
-        init_msg!(
-            "  Using existing data - User: {}, Org: {}, Env: {}",
-            profile_email,
-            profile_slug,
-            profile_env_name
-        );
-    }
+    let (profile_email, profile_slug, profile_env_name) = initialize_profile(&db, conf).await?;
+    init_msg!(
+        "  Using authorized profile - User: {}, Org: {}, Env: {}",
+        profile_email,
+        profile_slug,
+        profile_env_name
+    );
 
     let project_name = std::env::current_dir()
         .ok()
@@ -331,9 +241,9 @@ async fn run_init_impl(
 
         let conf_content = template
             .replace("{{PROJECT_NAME}}", &project_name)
-            .replace("{{USER_EMAIL}}", profile_email)
-            .replace("{{ORG_SLUG}}", profile_slug)
-            .replace("{{ENV_NAME}}", profile_env_name);
+            .replace("{{USER_EMAIL}}", &profile_email)
+            .replace("{{ORG_SLUG}}", &profile_slug)
+            .replace("{{ENV_NAME}}", &profile_env_name);
 
         if let Err(e) = fs::write(conf_file, conf_content) {
             return Err(format!("Failed to write hot.hot: {}", e));
@@ -398,93 +308,98 @@ async fn run_init_impl(
     Ok(())
 }
 
-/// Profile information parsed from an existing `hot.hot` file (best-effort).
-#[derive(Debug)]
-struct ProfileInfo {
-    #[allow(dead_code)]
-    user_id: Option<String>,
-    user_email: Option<String>,
-    #[allow(dead_code)]
-    org_id: Option<String>,
-    org_slug: Option<String>,
-    #[allow(dead_code)]
-    env_id: Option<String>,
-    env_name: Option<String>,
+/// Initialization may seed the documented local development identity into an
+/// empty database. Every other profile must already have its exact membership
+/// and environment; init never grants access to an existing organization.
+async fn initialize_profile(
+    db: &hot::db::DatabasePool,
+    conf: &Val,
+) -> Result<hot::profile::ProfileIdentifiers, String> {
+    let identity = crate::profile::extract_profile_identifiers(conf)?
+        .unwrap_or_else(|| ("local@hot.dev".into(), "local".into(), "development".into()));
+    let (org_count, user_count) = hot::db::check_default_data_exists(db)
+        .await
+        .map_err(|e| format!("Failed to check existing data: {e}"))?;
+    if org_count == 0 && user_count == 0 {
+        if identity != ("local@hot.dev".into(), "local".into(), "development".into()) {
+            return Err("The selected profile must be provisioned before initialization. An empty database can bootstrap only the local-dev identity (local@hot.dev / local / development); select it explicitly or provision the selected account first".into());
+        }
+        hot::db::insert_default_data(db)
+            .await
+            .map_err(|e| format!("Failed to insert local development data: {e}"))?;
+    }
+    resolve_profile_to_uuids(db, &identity.0, &identity.1, &identity.2)
+        .await
+        .map_err(|e| format!("Profile validation failed: {e}"))?;
+    Ok(identity)
 }
 
-/// Best-effort parse of an existing `hot.hot` file's `profile.local-dev`
-/// section so `hot init` can re-use the user's existing identity instead of
-/// silently overwriting it with defaults.
-fn parse_existing_conf_profile() -> Option<ProfileInfo> {
-    use std::fs;
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use hot::db::{Org, User, check_default_data_exists};
+    use uuid::Uuid;
 
-    let conf_file = std::path::Path::new("hot.hot");
-    if !conf_file.exists() {
-        return None;
+    fn profile(email: &str, org: &str, env: &str) -> Val {
+        hot::val!({"set":{"profile":"selected"},"profile":{"selected":{
+            "user":{"email":email},"org":{"slug":org},"env":{"name":env}
+        }}})
     }
 
-    let content = match fs::read_to_string(conf_file) {
-        Ok(content) => content,
-        Err(_) => return None,
-    };
-
-    let mut profile = ProfileInfo {
-        user_id: None,
-        user_email: None,
-        org_id: None,
-        org_slug: None,
-        env_id: None,
-        env_name: None,
-    };
-
-    if let Some(user_start) = content.find(r#""user": {"#) {
-        let user_section = &content[user_start..];
-        if let Some(id_start) = user_section.find(r#""id": ""#) {
-            let id_start = id_start + 7;
-            if let Some(id_end) = user_section[id_start..].find('"') {
-                profile.user_id = Some(user_section[id_start..id_start + id_end].to_string());
-            }
-        }
-        if let Some(email_start) = user_section.find(r#""email": ""#) {
-            let email_start = email_start + 10;
-            if let Some(email_end) = user_section[email_start..].find('"') {
-                profile.user_email =
-                    Some(user_section[email_start..email_start + email_end].to_string());
-            }
-        }
+    #[tokio::test]
+    async fn init_honors_loaded_profile_and_never_seeds_a_different_identity() {
+        let db = hot::db::test_db().await;
+        let custom = profile("custom@example.test", "custom", "production");
+        assert!(
+            initialize_profile(&db, &custom)
+                .await
+                .unwrap_err()
+                .contains("must be provisioned")
+        );
+        assert_eq!(check_default_data_exists(&db).await.unwrap(), (0, 0));
+        let local = hot::profile::get_resolved_conf(hot::val!({}));
+        assert_eq!(initialize_profile(&db, &local).await.unwrap().1, "local");
+        assert!(initialize_profile(&db, &custom).await.is_err());
+        assert_eq!(check_default_data_exists(&db).await.unwrap(), (1, 1));
     }
 
-    if let Some(org_start) = content.find(r#""org": {"#) {
-        let org_section = &content[org_start..];
-        if let Some(id_start) = org_section.find(r#""id": ""#) {
-            let id_start = id_start + 7;
-            if let Some(id_end) = org_section[id_start..].find('"') {
-                profile.org_id = Some(org_section[id_start..id_start + id_end].to_string());
-            }
-        }
-        if let Some(slug_start) = org_section.find(r#""slug": ""#) {
-            let slug_start = slug_start + 9;
-            if let Some(slug_end) = org_section[slug_start..].find('"') {
-                profile.org_slug = Some(org_section[slug_start..slug_start + slug_end].to_string());
-            }
-        }
+    #[tokio::test]
+    async fn init_requires_existing_membership_for_the_selected_profile() {
+        let db = hot::db::test_db().await;
+        let fixture = hot::db::insert_test_data(&db).await.unwrap();
+        let user = User::get_user(&db, &fixture.user_id).await.unwrap();
+        let outsider = Uuid::now_v7();
+        User::insert_user(
+            &db,
+            &outsider,
+            "outsider@example.test",
+            None,
+            Some(&outsider),
+        )
+        .await
+        .unwrap();
+        let org = Org::get_org_uncached(&db, &fixture.org_id).await.unwrap();
+        let selected = profile("outsider@example.test", &org.slug, "development");
+        assert!(initialize_profile(&db, &selected).await.is_err());
+        assert!(
+            Org::resolve_user_access(&db, &org.org_id, &outsider)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(
+            initialize_profile(&db, &profile(&user.email, &org.slug, "development"))
+                .await
+                .unwrap()
+                .0,
+            user.email
+        );
+        // Existing membership is retained, and a missing environment is never
+        // silently replaced by the organization's default.
+        assert!(
+            initialize_profile(&db, &profile(&user.email, &org.slug, "missing"))
+                .await
+                .is_err()
+        );
     }
-
-    if let Some(env_start) = content.find(r#""env": {"#) {
-        let env_section = &content[env_start..];
-        if let Some(id_start) = env_section.find(r#""id": ""#) {
-            let id_start = id_start + 7;
-            if let Some(id_end) = env_section[id_start..].find('"') {
-                profile.env_id = Some(env_section[id_start..id_start + id_end].to_string());
-            }
-        }
-        if let Some(name_start) = env_section.find(r#""name": ""#) {
-            let name_start = name_start + 9;
-            if let Some(name_end) = env_section[name_start..].find('"') {
-                profile.env_name = Some(env_section[name_start..name_start + name_end].to_string());
-            }
-        }
-    }
-
-    Some(profile)
 }

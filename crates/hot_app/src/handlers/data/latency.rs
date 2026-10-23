@@ -220,7 +220,7 @@ type PostgresLatencyRow = (
 );
 
 async fn query_postgres_latency(
-    pool: &sqlx::PgPool,
+    pool: &hot::db::ScopedPgPool,
     env_id: uuid::Uuid,
     filters: &LatencyFilters,
     display_timezone: &str,
@@ -912,8 +912,11 @@ mod tests {
             .expect("run latency fixture should insert");
         }
 
+        let scoped = hot::db::ScopedPgPool::new(pool.clone()).with_scope(
+            hot::db::DatabaseScope::Bootstrap(hot::db::BootstrapOperation::Health),
+        );
         let result = query_postgres_latency(
-            &pool,
+            &scoped,
             env_id,
             &LatencyFilters {
                 days: None,

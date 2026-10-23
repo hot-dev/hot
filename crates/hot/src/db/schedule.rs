@@ -1,7 +1,9 @@
+pub(crate) mod quota;
+
 use ariadne::{ColorGenerator, Config, Label, Report, ReportKind, Source};
 use chrono::{DateTime, Utc};
 use serde_json::Value as JsonValue;
-use sqlx::{FromRow, Pool, Postgres, Sqlite};
+use sqlx::{FromRow, Pool, Sqlite};
 use std::path::PathBuf;
 use thiserror::Error;
 use uuid::Uuid;
@@ -473,7 +475,7 @@ impl ScheduleError {
     }
 }
 
-#[derive(Debug, FromRow)]
+#[derive(Clone, Debug, FromRow)]
 pub struct Schedule {
     pub schedule_id: Uuid,
     pub build_id: Uuid,
@@ -542,7 +544,7 @@ impl Schedule {
     }
 
     async fn get_schedule_postgres(
-        db: &Pool<Postgres>,
+        db: &crate::db::ScopedPgPool,
         schedule_id: &Uuid,
     ) -> Result<Schedule, ScheduleError> {
         let schedule = sqlx::query_as::<_, Schedule>(
@@ -589,7 +591,7 @@ impl Schedule {
     }
 
     async fn get_active_schedule_by_build_fn_postgres(
-        db: &Pool<Postgres>,
+        db: &crate::db::ScopedPgPool,
         build_id: &Uuid,
         ns: &str,
         var: &str,
@@ -643,7 +645,7 @@ impl Schedule {
     }
 
     async fn get_schedules_by_build_postgres(
-        db: &Pool<Postgres>,
+        db: &crate::db::ScopedPgPool,
         build_id: &Uuid,
         limit: Option<i64>,
         offset: Option<i64>,
@@ -700,7 +702,7 @@ impl Schedule {
     }
 
     async fn get_schedules_by_cron_postgres(
-        db: &Pool<Postgres>,
+        db: &crate::db::ScopedPgPool,
         cron: &str,
         limit: Option<i64>,
         offset: Option<i64>,
@@ -770,7 +772,7 @@ impl Schedule {
     }
 
     async fn get_schedules_by_build_and_cron_postgres(
-        db: &Pool<Postgres>,
+        db: &crate::db::ScopedPgPool,
         build_id: &Uuid,
         cron: &str,
         limit: Option<i64>,
@@ -877,10 +879,15 @@ impl Schedule {
         column: Option<i32>,
         position: Option<i32>,
     ) -> Result<(), ScheduleError> {
-        match db {
-            crate::db::DatabasePool::Postgres(pg_pool) => {
+        let admission = quota::Admission::begin(db, build_id, -1).await?;
+        match admission {
+            quota::Admission::Postgres {
+                mut tx,
+                root,
+                limit,
+            } => {
                 Self::insert_schedule_postgres(
-                    pg_pool,
+                    &mut tx,
                     schedule_id,
                     build_id,
                     cron,
@@ -893,11 +900,18 @@ impl Schedule {
                     column,
                     position,
                 )
-                .await
+                .await?;
+                quota::validate_postgres(&mut tx, root, limit).await?;
+                tx.commit().await?;
+                Ok(())
             }
-            crate::db::DatabasePool::Sqlite(sqlite_pool) => {
+            quota::Admission::Sqlite {
+                mut tx,
+                root,
+                limit,
+            } => {
                 Self::insert_schedule_sqlite(
-                    sqlite_pool,
+                    &mut tx,
                     schedule_id,
                     build_id,
                     cron,
@@ -910,14 +924,17 @@ impl Schedule {
                     column,
                     position,
                 )
-                .await
+                .await?;
+                quota::validate_sqlite(&mut tx, root, limit).await?;
+                tx.commit().await?;
+                Ok(())
             }
         }
     }
 
     #[allow(clippy::too_many_arguments)]
     async fn insert_schedule_sqlite(
-        db: &Pool<Sqlite>,
+        db: &mut sqlx::SqliteConnection,
         schedule_id: &Uuid,
         build_id: &Uuid,
         cron: &str,
@@ -960,7 +977,7 @@ impl Schedule {
 
     #[allow(clippy::too_many_arguments)]
     async fn insert_schedule_postgres(
-        db: &Pool<Postgres>,
+        db: &mut sqlx::PgConnection,
         schedule_id: &Uuid,
         build_id: &Uuid,
         cron: &str,
@@ -1112,8 +1129,13 @@ impl Schedule {
         column: Option<i32>,
         position: Option<i32>,
     ) -> Result<(), ScheduleError> {
-        match db {
-            crate::db::DatabasePool::Postgres(pg_pool) => {
+        let admission = quota::Admission::begin(db, build_id, -1).await?;
+        match admission {
+            quota::Admission::Postgres {
+                mut tx,
+                root,
+                limit,
+            } => {
                 sqlx::query(
                     "INSERT INTO schedule (schedule_id, build_id, cron, ns, var, meta, value, file, line, \"column\", position, active, created_at, deactivated_at)
                      VALUES (uuidv7(), $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, true, NOW(), NULL)
@@ -1138,10 +1160,16 @@ impl Schedule {
                 .bind(line)
                 .bind(column)
                 .bind(position)
-                .execute(pg_pool)
+                .execute(&mut *tx)
                 .await?;
+                quota::validate_postgres(&mut tx, root, limit).await?;
+                tx.commit().await?;
             }
-            crate::db::DatabasePool::Sqlite(sqlite_pool) => {
+            quota::Admission::Sqlite {
+                mut tx,
+                root,
+                limit,
+            } => {
                 let meta_json = meta
                     .map(serde_json::to_string)
                     .transpose()
@@ -1176,8 +1204,10 @@ impl Schedule {
                 .bind(line)
                 .bind(column)
                 .bind(position)
-                .execute(sqlite_pool)
+                .execute(&mut *tx)
                 .await?;
+                quota::validate_sqlite(&mut tx, root, limit).await?;
+                tx.commit().await?;
             }
         }
         Ok(())
@@ -1698,6 +1728,23 @@ impl Schedule {
         }
     }
 
+    pub async fn get_active_count_by_account(
+        db: &crate::db::DatabasePool,
+        org_id: &Uuid,
+    ) -> Result<i64, ScheduleError> {
+        let root = crate::db::Org::billing_owner_id_for(db, org_id)
+            .await
+            .map_err(|e| ScheduleError::PolicyError(e.to_string()))?;
+        let db = db.with_scope(crate::db::DatabaseScope::Maintenance {
+            operation: crate::db::MaintenanceOperation::Billing,
+            org_id: Some(root),
+        });
+        match &db {
+            crate::db::DatabasePool::Postgres(pool)=>Ok(sqlx::query_scalar("SELECT COUNT(*) FROM schedule s JOIN build b ON b.build_id=s.build_id JOIN project p ON p.project_id=b.project_id JOIN env e ON e.env_id=p.env_id JOIN org o ON o.org_id=e.org_id WHERE s.active AND b.deployed  AND (o.org_id=$1 OR o.parent_org_id=$1)").bind(root).fetch_one(pool).await?),
+            crate::db::DatabasePool::Sqlite(pool)=>Ok(sqlx::query_scalar("SELECT COUNT(*) FROM schedule s JOIN build b ON b.build_id=s.build_id JOIN project p ON p.project_id=b.project_id JOIN env e ON e.env_id=p.env_id JOIN org o ON o.org_id=e.org_id WHERE s.active=1 AND b.deployed=1  AND (o.org_id=? OR o.parent_org_id=?)").bind(root).bind(root).fetch_one(pool).await?),
+        }
+    }
+
     pub async fn enforce_active_count_for_org_replacing_project(
         db: &crate::db::DatabasePool,
         org_id: &Uuid,
@@ -1709,7 +1756,7 @@ impl Schedule {
             return Ok(());
         }
 
-        let current_org = Self::get_active_count_by_org(db, org_id).await?;
+        let current_org = Self::get_active_count_by_account(db, org_id).await?;
         let current_project = Self::get_active_count_by_project(db, project_id).await?;
         let projected = current_org - current_project + new_project_schedules.max(0);
         if projected > policy.max_active_per_org {
@@ -1732,7 +1779,7 @@ impl Schedule {
             return Ok(());
         }
 
-        let current = Self::get_active_count_by_org(db, org_id).await?;
+        let current = Self::get_active_count_by_account(db, org_id).await?;
         let projected = current + additional_schedules.max(0);
         if projected > policy.max_active_per_org {
             return Err(ScheduleError::PolicyError(format!(
@@ -2021,8 +2068,13 @@ impl Schedule {
 
         let cron_field = schedule_type.to_cron_field();
 
-        match db {
-            crate::db::DatabasePool::Postgres(pg_pool) => {
+        let admission = quota::Admission::begin(db, build_id, policy.max_active_per_org).await?;
+        match admission {
+            quota::Admission::Postgres {
+                mut tx,
+                root,
+                limit,
+            } => {
                 sqlx::query(
                     "INSERT INTO schedule (schedule_id, build_id, cron, ns, var, meta, value, active) VALUES ($1, $2, $3, $4, $5, $6, $7, true)"
                 )
@@ -2033,10 +2085,16 @@ impl Schedule {
                 .bind(var)
                 .bind(meta)
                 .bind(args)
-                .execute(pg_pool)
+                .execute(&mut *tx)
                 .await?;
+                quota::validate_postgres(&mut tx, root, limit).await?;
+                tx.commit().await?;
             }
-            crate::db::DatabasePool::Sqlite(sqlite_pool) => {
+            quota::Admission::Sqlite {
+                mut tx,
+                root,
+                limit,
+            } => {
                 let meta_json = meta
                     .map(serde_json::to_string)
                     .transpose()
@@ -2056,8 +2114,10 @@ impl Schedule {
                 .bind(var)
                 .bind(meta_json)
                 .bind(args_json)
-                .execute(sqlite_pool)
+                .execute(&mut *tx)
                 .await?;
+                quota::validate_sqlite(&mut tx, root, limit).await?;
+                tx.commit().await?;
             }
         }
         Ok(())

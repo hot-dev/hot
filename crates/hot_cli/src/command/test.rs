@@ -63,8 +63,11 @@ pub(crate) async fn run_test(
         .await;
     }
 
-    // Create or update live build for development (consistent with run/eval/repl/check)
-    setup_live_build_for_dev(conf, global_options, &src_paths, &test_paths).await?;
+    // Ordinary unit tests may explicitly disable the configured database and
+    // use only the engine's private ephemeral fixture.
+    if !hot::db::get_db_uri_from_conf(conf).is_empty() {
+        setup_live_build_for_dev(conf, global_options, &src_paths, &test_paths).await?;
+    }
 
     // Use the enhanced pipeline with dependency loading and context storage
     match hot::lang::engine::Engine::run_tests_with_direct_discovery(
@@ -75,6 +78,7 @@ pub(crate) async fn run_test(
         Some(conf),
         Some(&project_name),
         context_storage,
+        None, // Private ephemeral database for ordinary unit tests
         None, // No task queue
         None, // No stream publisher
         hot::env::is_local_dev(),
@@ -167,6 +171,41 @@ fn parse_integration_services(integration_conf: &Val) -> Vec<String> {
         .unwrap_or_default()
 }
 
+/// Resolve the selected profile once and carry its exact live build into the VM.
+async fn prepare_integration_execution(
+    conf: &Val,
+    project_name: &str,
+) -> Result<
+    (
+        std::sync::Arc<hot::db::DatabasePool>,
+        hot::lang::event::ExecutionContext,
+    ),
+    String,
+> {
+    let db = std::sync::Arc::new(crate::profile::create_cli_db_pool(conf).await?);
+    let (user_id, env, org) = crate::profile::resolve_cli_environment(&db, conf).await?;
+    let project = hot::db::Project::get_project_by_env_and_name(&db, &env.env_id, project_name)
+        .await
+        .map_err(|error| error.to_string())?
+        .ok_or("Integration project is missing from the selected environment")?;
+    let build = hot::db::Build::get_live_build_by_project(&db, &project.project_id)
+        .await
+        .map_err(|error| error.to_string())?
+        .ok_or("Integration project has no live build in the selected environment")?;
+    let ctx = hot::lang::event::ExecutionContext::new(
+        uuid::Uuid::now_v7(),
+        uuid::Uuid::now_v7(),
+        hot::db::run::RunType::Run.as_id(),
+        Some(env.env_id),
+        Some(user_id),
+        Some(org.org_id),
+        Some(build.build_id),
+    )
+    .with_env_name(Some(env.name))
+    .with_org_slug(Some(org.slug));
+    Ok((db, ctx))
+}
+
 /// Run integration tests by booting a mini dev stack, running tests, and tearing down.
 #[allow(clippy::too_many_arguments)]
 async fn run_integration_test(
@@ -236,6 +275,7 @@ async fn run_integration_test(
     // 4. Setup live build (needed for task worker to compile and execute code)
     info!("hot.test: Setting up live build...");
     setup_live_build_for_dev(&merged_conf, global_options, src_paths, test_paths).await?;
+    let integration_execution = prepare_integration_execution(&merged_conf, project_name).await?;
 
     // 5. Generate a unique queue name per test run to avoid stale shared-memory data
     let id = uuid::Uuid::now_v7().to_string().replace('-', "");
@@ -361,6 +401,7 @@ async fn run_integration_test(
         Some(&merged_conf),
         Some(project_name),
         context_storage,
+        Some(integration_execution),
         task_queue,
         shared_stream_pubsub,
         hot::env::is_local_dev(),
@@ -376,27 +417,9 @@ async fn run_integration_test(
         let _ = handle.await;
     }
 
-    // 12. Clean up ephemeral resources
-    let file_storage_path = merged_conf.get_str("file.storage.path");
-    if !file_storage_path.is_empty()
-        && file_storage_path != "null"
-        && file_storage_path.contains("test-integration")
-    {
-        info!(
-            "hot.test: Cleaning up test file storage: {}",
-            file_storage_path
-        );
-        let _ = std::fs::remove_dir_all(&file_storage_path);
-    }
-
-    let db_path = merged_conf.get_str("db.uri");
-    if db_path.starts_with("sqlite:") && db_path.contains("test-integration") {
-        let sqlite_path = db_path.trim_start_matches("sqlite:");
-        info!("hot.test: Cleaning up test database: {}", sqlite_path);
-        let _ = std::fs::remove_file(sqlite_path);
-        let _ = std::fs::remove_file(format!("{}-shm", sqlite_path));
-        let _ = std::fs::remove_file(format!("{}-wal", sqlite_path));
-    }
+    // The configured database and file backend may be shared with other
+    // environments. Only the engine's privately created unit-test artifacts
+    // are automatically removed; a path substring is not proof of ownership.
 
     info!("hot.test: Integration test run complete.");
 
@@ -416,6 +439,202 @@ async fn run_integration_test(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn integration_runner_uses_selected_child_without_task_worker_or_shared_fixtures() {
+        use hot::db::org::CreateChild;
+        use hot::db::{Build, Org, Project};
+        use hot::store::Store;
+        use std::sync::Arc;
+
+        let dir = tempfile::tempdir().unwrap();
+        let database_path = dir.path().join("managed.db");
+        let conf = hot::val!({"db":{"uri":format!("sqlite:{}", database_path.display())}});
+        hot::db::run_migrations(&conf).await.unwrap();
+        let db = hot::db::create_db_pool(&conf).await.unwrap();
+        let fixture = hot::db::insert_test_data(&db).await.unwrap();
+        let user = hot::db::User::get_user(&db, &fixture.user_id)
+            .await
+            .unwrap();
+        let root_project = Project::get_project(&db, &fixture.project_id)
+            .await
+            .unwrap();
+        let account_id = uuid::Uuid::new_v4();
+        hot::db::Org::insert_org(
+            &db,
+            &account_id,
+            "Test account",
+            "integration-account",
+            "organization",
+            &fixture.user_id,
+        )
+        .await
+        .unwrap();
+        hot::db::OrgUser::insert_org_user(
+            &db,
+            &uuid::Uuid::new_v4(),
+            &account_id,
+            &fixture.user_id,
+            Some(2),
+            &fixture.user_id,
+        )
+        .await
+        .unwrap();
+        let child = Org::create_child(
+            &db,
+            &account_id,
+            &fixture.user_id,
+            &CreateChild {
+                name: "Integration child".into(),
+                slug: "integration-child".into(),
+                external_id: None,
+                idempotency_key: "integration-child".into(),
+                hosted: false,
+            },
+        )
+        .await
+        .unwrap();
+        let child_project = Project::insert_or_get_project(
+            &db,
+            &uuid::Uuid::new_v4(),
+            &child.env_id,
+            &root_project.name,
+            &fixture.user_id,
+        )
+        .await
+        .unwrap();
+        let live = Build::insert_or_update_live_build(
+            &db,
+            &child_project.project_id,
+            "selected-child-live",
+            0,
+            &fixture.user_id,
+        )
+        .await
+        .unwrap();
+        let conf = conf.merge(&hot::val!({
+            "set":{"profile":"child"},
+            "profile":{"child":{
+                "user":{"email":user.email}, "org":{"slug":child.org.slug},
+                "env":{"name":"development"}
+            }},
+            "file":{"storage":{"path":dir.path().join("files").to_string_lossy().to_string()}}
+        }));
+        let root_store = hot::store::sqlite::SqliteStore::new(
+            Arc::new(db.clone()),
+            fixture.org_id,
+            fixture.env_id,
+        );
+        root_store
+            .put(
+                "scope-regression",
+                serde_json::json!("key"),
+                serde_json::json!("root"),
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+        let (selected_db, ctx) = prepare_integration_execution(&conf, &root_project.name)
+            .await
+            .unwrap();
+        assert_eq!(ctx.env_id, Some(child.env_id));
+        assert_eq!(ctx.org_id, Some(child.org.org_id));
+        assert_eq!(ctx.build_id, Some(live.build_id));
+        let run_id = ctx.run_id;
+        let source = dir.path().join("scope.hot");
+        std::fs::write(
+            &source,
+            r#"
+            ::integration_scope ns
+            selected ::hot::store/Map({name: "scope-regression"})
+            selected-scope meta ["test"] fn () {
+                ::hot::store/put(selected, "key", "selected")
+                assert(eq(::hot::store/get(selected, "key"), "selected"), "selected store value")
+            }
+        "#,
+        )
+        .unwrap();
+        let paths = vec![dir.path().to_string_lossy().to_string()];
+        let result = hot::lang::engine::Engine::run_tests_with_direct_discovery(
+            None,
+            true,
+            &paths,
+            &[],
+            Some(&conf),
+            Some(&root_project.name),
+            None,
+            Some((selected_db.clone(), ctx.clone())),
+            None,
+            None,
+            false,
+        )
+        .await
+        .unwrap();
+        assert!(matches!(result, hot::lang::engine::TestRunStatus::Passed));
+        let child_store = hot::store::sqlite::SqliteStore::new(
+            selected_db.clone(),
+            child.org.org_id,
+            child.env_id,
+        );
+        assert_eq!(
+            child_store
+                .get("scope-regression", &serde_json::json!("key"))
+                .await
+                .unwrap()
+                .map(|entry| entry.value),
+            Some(serde_json::json!("selected"))
+        );
+        assert_eq!(
+            root_store
+                .get("scope-regression", &serde_json::json!("key"))
+                .await
+                .unwrap()
+                .map(|entry| entry.value),
+            Some(serde_json::json!("root"))
+        );
+        let persisted = hot::db::Run::get_run(&db, &run_id).await.unwrap();
+        assert_eq!(persisted.env_id, child.env_id);
+        assert_eq!(
+            persisted.status_id,
+            hot::db::run::RunStatus::Succeeded.as_id()
+        );
+        assert_eq!(
+            Org::get_all_orgs(&db, Some(100), None).await.unwrap().len(),
+            3,
+            "integration execution must not seed another organization"
+        );
+        assert!(
+            database_path.exists(),
+            "the configured database remains available"
+        );
+
+        let mut wrong_build = ctx;
+        wrong_build.run_id = uuid::Uuid::now_v7();
+        wrong_build.stream_id = uuid::Uuid::now_v7();
+        wrong_build.build_id = Some(fixture.build_id);
+        let error = hot::lang::engine::Engine::run_tests_with_direct_discovery(
+            None,
+            true,
+            &paths,
+            &[],
+            Some(&conf),
+            Some(&root_project.name),
+            None,
+            Some((selected_db, wrong_build.clone())),
+            None,
+            None,
+            false,
+        )
+        .await
+        .unwrap_err();
+        assert!(error.contains("current live build"), "{error}");
+        assert!(
+            hot::db::Run::get_run(&db, &wrong_build.run_id)
+                .await
+                .is_err()
+        );
+    }
 
     #[test]
     fn empty_test_run_fails_by_default() {

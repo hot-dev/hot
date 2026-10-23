@@ -169,17 +169,8 @@ impl Engine {
             .compiler
             .extract_mcp_tools(&program)
             .map_err(|e| e.format_error(color))?;
-        // Populate the runtime tool-schema registry so that
-        // ::hot::internal::mcp/schema-from-fn (and ::ai::tool/schema-from-fn)
-        // can resolve any Hot function to its {input-schema, output-schema}.
-        engine
-            .compiler
-            .extract_tool_specs(&program)
-            .map_err(|e| e.format_error(color))?;
-        engine
-            .compiler
-            .extract_skill_specs(&program)
-            .map_err(|e| e.format_error(color))?;
+        // Artifact extraction does not install runtime metadata. Execution
+        // entry points derive their own exact registries from the AST or cache.
         engine
             .compiler
             .extract_webhooks(&program)
@@ -1094,23 +1085,14 @@ impl Engine {
 
         tracing::debug!(" Compilation successful!");
 
-        // Populate the runtime tool-schema registry so that
-        // ::hot::internal::mcp/schema-from-fn (and ::ai::tool/schema-from-fn)
-        // resolve any Hot function to its {input-schema, output-schema}
-        // during execution. Done after successful compilation so we have
-        // the full combined program AST available.
-        if let Err(e) = compiler.extract_tool_specs(&combined_program) {
-            tracing::warn!(
-                "Tool spec extraction failed (continuing): {}",
-                e.format_error(color)
-            );
-        }
-        if let Err(e) = compiler.extract_skill_specs(&combined_program) {
-            tracing::warn!(
-                "Skill spec extraction failed (continuing): {}",
-                e.format_error(color)
-            );
-        }
+        // Registry authority is the complete program, never the additive
+        // process-global tooling registry shared with other builds.
+        let _tool_scope = crate::lang::hot::internal_mcp::ThreadRegistryGuard::install(Arc::new(
+            compiler.build_tool_specs(&combined_program),
+        ));
+        let _skill_scope = crate::lang::hot::internal_skill::ThreadRegistryGuard::install(
+            Arc::new(compiler.build_skill_specs(&combined_program)),
+        );
 
         tracing::debug!(" Unified Pipeline: Phase 3 - Executing program...");
 
@@ -1413,6 +1395,48 @@ impl Engine {
         embedding_provider: Option<Arc<dyn crate::store::embedding::EmbeddingProvider>>,
         color: bool,
     ) -> Result<ExecutionWithArtifacts, String> {
+        Self::run_unified_pipeline_artifacts_internal(
+            src_paths,
+            test_paths,
+            conf,
+            project_name,
+            target_file,
+            eval_code,
+            emitter,
+            execution_context,
+            event_publisher,
+            context_storage,
+            database_pool,
+            file_storage,
+            stream_publisher,
+            store,
+            embedding_provider,
+            color,
+            true,
+        )
+    }
+
+    /// Compilation can stop before initialization when no execution scope exists.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn run_unified_pipeline_artifacts_internal(
+        src_paths: &[String],
+        test_paths: &[String],
+        conf: Option<&crate::val::Val>,
+        project_name: Option<&str>,
+        target_file: Option<&str>,
+        eval_code: Option<&str>,
+        emitter: Option<Arc<dyn crate::lang::emitter::EngineEventEmitter>>,
+        execution_context: Option<crate::lang::event::ExecutionContext>,
+        event_publisher: Option<Arc<dyn crate::lang::event::EventPublisher>>,
+        context_storage: Option<AHashMap<String, crate::val::Val>>,
+        database_pool: Option<Arc<crate::db::DatabasePool>>,
+        file_storage: Option<Arc<dyn crate::file_storage::FileStorage>>,
+        stream_publisher: Option<Arc<crate::stream::StreamPubSub>>,
+        store: Option<Arc<dyn crate::store::Store>>,
+        embedding_provider: Option<Arc<dyn crate::store::embedding::EmbeddingProvider>>,
+        color: bool,
+        execute_program: bool,
+    ) -> Result<ExecutionWithArtifacts, String> {
         tracing::debug!(" Unified Pipeline (with artifacts): Loading Hot dependencies...");
 
         // Collect all .hot files in the correct loading order
@@ -1564,26 +1588,14 @@ impl Engine {
             .compile_program(&mut combined_program)
             .map_err(|errors| format!("Compilation errors:\n{}", errors.format_error(color)))?;
 
-        // Populate the runtime tool-schema and skill-spec registries so that
-        // ::hot::internal::mcp/schema-from-fn (and ::ai::tool/schema-from-fn)
-        // resolve any Hot function to its {input-schema, output-schema}
-        // during phase-3 execution. Without this, module-level statements
-        // like `agent-tools [::tool/from-fn(::ns/fn, ...)]` evaluated during
-        // `vm.execute()` below would error out with
-        // "no schema registered for ...". Mirrors the same step in
-        // `run_unified_pipeline`.
-        if let Err(e) = compiler.extract_tool_specs(&combined_program) {
-            tracing::warn!(
-                "Tool spec extraction failed (continuing): {}",
-                e.format_error(color)
-            );
-        }
-        if let Err(e) = compiler.extract_skill_specs(&combined_program) {
-            tracing::warn!(
-                "Skill spec extraction failed (continuing): {}",
-                e.format_error(color)
-            );
-        }
+        // Registry authority is the complete program, never the additive
+        // process-global tooling registry shared with other builds.
+        let _tool_scope = crate::lang::hot::internal_mcp::ThreadRegistryGuard::install(Arc::new(
+            compiler.build_tool_specs(&combined_program),
+        ));
+        let _skill_scope = crate::lang::hot::internal_skill::ThreadRegistryGuard::install(
+            Arc::new(compiler.build_skill_specs(&combined_program)),
+        );
 
         tracing::debug!(" Base compilation successful, extracting artifacts for caching...");
 
@@ -1597,6 +1609,16 @@ impl Engine {
             ast_program: combined_program.clone(),
             hot_ast: crate::lang::ast::HotAst::from_program(combined_program.clone()),
         };
+
+        // Cache construction has no runtime principal or service handles. Even
+        // module initializers are user code: defer them until the cached program
+        // is invoked with its authorized scope and configured storage services.
+        if !execute_program {
+            return Ok(ExecutionWithArtifacts {
+                result: crate::val::Val::Null,
+                artifacts: Some(artifacts),
+            });
+        }
 
         // Eval extends the base through the same seeded compiler path used by
         // persisted bytecode cache hits. Cacheable artifacts remain base-only.

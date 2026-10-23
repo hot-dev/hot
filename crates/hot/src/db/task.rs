@@ -5,12 +5,21 @@ use std::str::FromStr;
 use thiserror::Error;
 use uuid::Uuid;
 
+mod quota;
+pub use quota::TaskQuotaReservation;
+
 use super::search::{IdSearch, pg_placeholders, sqlite_placeholders};
 
 #[derive(Error, Debug)]
 pub enum TaskError {
     #[error("Database error: {0}")]
     Database(#[from] sqlx::Error),
+    #[error("Task quota exceeded: {0}")]
+    QuotaExceeded(String),
+    /// Retrying cannot admit this task within the current billing period
+    /// (or ever, for an invalid request); the claimant should fail it.
+    #[error("Task quota exhausted: {0}")]
+    QuotaExhausted(String),
     #[error("Task not found")]
     NotFound,
 }
@@ -699,7 +708,7 @@ impl Task {
         let rows_affected = match db {
             crate::db::DatabasePool::Postgres(pg_pool) => {
                 sqlx::query(
-                    "UPDATE task SET task_status_id = $1, stop_time = $2, duration_ms = CASE WHEN start_time IS NOT NULL THEN EXTRACT(EPOCH FROM ($2 - start_time)) * 1000 ELSE 0 END WHERE task_id = $3 AND task_status_id IN ($4, $5)",
+                    "UPDATE task SET reserved_compute_units=CASE WHEN task_status_id=2 AND task_type='container' AND reserved_compute_units=0 THEN ((GREATEST(timeout_ms,0)*32+999)/1000) ELSE reserved_compute_units END, reserved_duration_ms=CASE WHEN task_status_id=2 AND reserved_duration_ms=0 THEN GREATEST(timeout_ms,0) ELSE reserved_duration_ms END, task_status_id = $1, stop_time = $2, duration_ms = CASE WHEN start_time IS NOT NULL THEN EXTRACT(EPOCH FROM ($2 - start_time)) * 1000 ELSE 0 END WHERE task_id = $3 AND task_status_id IN ($4, $5)",
                 )
                 .bind(cancelled_id)
                 .bind(now)
@@ -712,7 +721,7 @@ impl Task {
             }
             crate::db::DatabasePool::Sqlite(sqlite_pool) => {
                 sqlx::query(
-                    "UPDATE task SET task_status_id = ?, stop_time = ?, duration_ms = CASE WHEN start_time IS NOT NULL THEN CAST((julianday(?) - julianday(start_time)) * 86400000 AS INTEGER) ELSE 0 END WHERE task_id = ? AND task_status_id IN (?, ?)",
+                    "UPDATE task SET reserved_compute_units=CASE WHEN task_status_id=2 AND task_type='container' AND reserved_compute_units=0 THEN ((MAX(timeout_ms,0)*32+999)/1000) ELSE reserved_compute_units END, reserved_duration_ms=CASE WHEN task_status_id=2 AND reserved_duration_ms=0 THEN MAX(timeout_ms,0) ELSE reserved_duration_ms END, task_status_id = ?, stop_time = ?, duration_ms = CASE WHEN start_time IS NOT NULL THEN CAST((julianday(?) - julianday(start_time)) * 86400000 AS INTEGER) ELSE 0 END WHERE task_id = ? AND task_status_id IN (?, ?)",
                 )
                 .bind(cancelled_id)
                 .bind(now)
@@ -754,6 +763,15 @@ impl Task {
         duration_ms_override: Option<i64>,
         fence_worker: Option<&str>,
     ) -> Result<bool, TaskError> {
+        // Cancellation requests are terminal to callers, but keep their quota
+        // reservation until the owning worker confirms termination and usage.
+        let settles_cancelled = *status == TaskStatus::Cancelled
+            && fence_worker.is_some()
+            && duration_ms_override.is_some_and(|duration| duration >= 0)
+            && result
+                .and_then(|value| value.get("compute-units"))
+                .and_then(serde_json::Value::as_i64)
+                .is_some_and(|units| units >= 0);
         let now = Utc::now();
         let queued_id = TaskStatus::Queued.as_id();
         let running_id = TaskStatus::Running.as_id();
@@ -763,9 +781,11 @@ impl Task {
                         task_status_id = $1,
                         stop_time = $2,
                         duration_ms = COALESCE($8::bigint, EXTRACT(EPOCH FROM ($2 - start_time)) * 1000),
-                        result = $3
+                        result = $3,
+                        reserved_compute_units = CASE WHEN $9 THEN 0 ELSE reserved_compute_units END,
+                        reserved_duration_ms = CASE WHEN $9 THEN 0 ELSE reserved_duration_ms END
                     WHERE task_id = $4
-                      AND task_status_id IN ($5, $6)
+                      AND (task_status_id IN ($5, $6) OR ($9 AND task_status_id=5 AND reserved_duration_ms>0))
                       AND ($7::text IS NULL OR worker_id = $7)"#,
             )
             .bind(status.as_id())
@@ -776,6 +796,7 @@ impl Task {
             .bind(running_id)
             .bind(fence_worker)
             .bind(duration_ms_override)
+            .bind(settles_cancelled)
             .execute(pg_pool)
             .await?
             .rows_affected(),
@@ -783,24 +804,25 @@ impl Task {
                 let result_str = result.map(|r| serde_json::to_string(r).unwrap_or_default());
                 sqlx::query(
                     r#"UPDATE task SET
-                        task_status_id = ?,
-                        stop_time = ?,
-                        duration_ms = COALESCE(?, CAST((julianday(?) - julianday(start_time)) * 86400000 AS INTEGER)),
-                        result = ?
-                    WHERE task_id = ?
-                      AND task_status_id IN (?, ?)
-                      AND (? IS NULL OR worker_id = ?)"#,
+                        task_status_id = ?1,
+                        stop_time = ?2,
+                        duration_ms = COALESCE(?8, CAST((julianday(?2) - julianday(start_time)) * 86400000 AS INTEGER)),
+                        result = ?3,
+                        reserved_compute_units = CASE WHEN ?9 THEN 0 ELSE reserved_compute_units END,
+                        reserved_duration_ms = CASE WHEN ?9 THEN 0 ELSE reserved_duration_ms END
+                    WHERE task_id = ?4
+                      AND (task_status_id IN (?5, ?6) OR (?9 AND task_status_id=5 AND reserved_duration_ms>0))
+                      AND (?7 IS NULL OR worker_id = ?7)"#,
                 )
                 .bind(status.as_id())
-                .bind(now)
-                .bind(duration_ms_override)
                 .bind(now)
                 .bind(result_str)
                 .bind(task_id)
                 .bind(queued_id)
                 .bind(running_id)
                 .bind(fence_worker)
-                .bind(fence_worker)
+                .bind(duration_ms_override)
+                .bind(settles_cancelled)
                 .execute(sqlite_pool)
                 .await?
                 .rows_affected()
@@ -1359,50 +1381,6 @@ impl Task {
                 Ok((
                     total, queued, running, completed, failed, cancelled, timed_out,
                 ))
-            }
-        }
-    }
-
-    /// Get total CUS (Compute Unit Seconds) and total duration_ms for an environment.
-    /// Returns (total_cus, total_duration_ms).
-    pub async fn get_compute_stats_by_env(
-        db: &crate::db::DatabasePool,
-        env_id: &Uuid,
-    ) -> Result<(i64, i64), TaskError> {
-        match db {
-            crate::db::DatabasePool::Postgres(pg_pool) => {
-                let row: (Option<i64>, Option<i64>) = sqlx::query_as(
-                    "SELECT COALESCE(SUM(CASE
-                        WHEN result->'$val'->'err'->>'compute-units' IS NOT NULL
-                            THEN (result->'$val'->'err'->>'compute-units')::bigint
-                        WHEN result->>'compute-units' IS NOT NULL
-                            THEN (result->>'compute-units')::bigint
-                        ELSE 0
-                    END), 0)::bigint,
-                    COALESCE(SUM(duration_ms), 0)::bigint
-                    FROM task WHERE env_id = $1",
-                )
-                .bind(env_id)
-                .fetch_one(pg_pool)
-                .await?;
-                Ok((row.0.unwrap_or(0), row.1.unwrap_or(0)))
-            }
-            crate::db::DatabasePool::Sqlite(sqlite_pool) => {
-                let row: (Option<i64>, Option<i64>) = sqlx::query_as(
-                    "SELECT COALESCE(SUM(CASE
-                        WHEN json_extract(result, '$.\"$val\".\"err\".\"compute-units\"') IS NOT NULL
-                            THEN CAST(json_extract(result, '$.\"$val\".\"err\".\"compute-units\"') AS INTEGER)
-                        WHEN json_extract(result, '$.\"compute-units\"') IS NOT NULL
-                            THEN CAST(json_extract(result, '$.\"compute-units\"') AS INTEGER)
-                        ELSE 0
-                    END), 0),
-                    COALESCE(SUM(duration_ms), 0)
-                    FROM task WHERE env_id = ?",
-                )
-                .bind(env_id)
-                .fetch_one(sqlite_pool)
-                .await?;
-                Ok((row.0.unwrap_or(0), row.1.unwrap_or(0)))
             }
         }
     }

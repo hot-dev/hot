@@ -71,7 +71,13 @@ async fn rerun_event_handler_run_reemits_original_event() {
     link_event_and_set_status(client.db(), &td.run_id, &event_id, RunStatus::Succeeded).await;
 
     let resp = client
-        .post_form(&format!("/runs/{}/rerun", td.run_id), &[])
+        .post_form(
+            &format!(
+                "/runs/{}/rerun?org_id={}&env_id={}",
+                td.run_id, td.org_id, td.env_id
+            ),
+            &[],
+        )
         .await;
 
     resp.assert_status(axum::http::StatusCode::OK);
@@ -133,7 +139,13 @@ async fn retry_event_handler_run_attaches_retry_context() {
     link_event_and_set_status(client.db(), &td.run_id, &event_id, RunStatus::Failed).await;
 
     let resp = client
-        .post_form(&format!("/runs/{}/retry", td.run_id), &[])
+        .post_form(
+            &format!(
+                "/runs/{}/retry?org_id={}&env_id={}",
+                td.run_id, td.org_id, td.env_id
+            ),
+            &[],
+        )
         .await;
 
     resp.assert_status(axum::http::StatusCode::OK);
@@ -195,7 +207,13 @@ async fn rerun_function_call_run_redispatches_hot_call() {
     link_event_and_set_status(client.db(), &td.run_id, &event_id, RunStatus::Succeeded).await;
 
     let resp = client
-        .post_form(&format!("/runs/{}/rerun", td.run_id), &[])
+        .post_form(
+            &format!(
+                "/runs/{}/rerun?org_id={}&env_id={}",
+                td.run_id, td.org_id, td.env_id
+            ),
+            &[],
+        )
         .await;
 
     resp.assert_status(axum::http::StatusCode::OK);
@@ -233,7 +251,13 @@ async fn rerun_run_without_event_returns_bad_request() {
 
     // Seeded run has no event_id linked.
     let resp = client
-        .post_form(&format!("/runs/{}/rerun", td.run_id), &[])
+        .post_form(
+            &format!(
+                "/runs/{}/rerun?org_id={}&env_id={}",
+                td.run_id, td.org_id, td.env_id
+            ),
+            &[],
+        )
         .await;
 
     resp.assert_status(axum::http::StatusCode::BAD_REQUEST);

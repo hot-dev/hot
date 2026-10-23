@@ -138,6 +138,11 @@ impl FileStorageContext {
             .user_id
             .ok_or_else(|| "No user_id in execution context".to_string())?;
 
+        let scope = exec_ctx
+            .env_id
+            .map(|env_id| crate::db::DatabaseScope::Environment { org_id, env_id })
+            .unwrap_or(crate::db::DatabaseScope::Organization { org_id });
+        let db = std::sync::Arc::new(db.with_scope(scope));
         Ok(Self {
             db,
             org_id,
@@ -161,6 +166,10 @@ impl FileStorageContext {
         env_id: Option<Uuid>,
         user_id: Uuid,
     ) -> Self {
+        let scope = env_id
+            .map(|env_id| crate::db::DatabaseScope::Environment { org_id, env_id })
+            .unwrap_or(crate::db::DatabaseScope::Organization { org_id });
+        let db = std::sync::Arc::new(db.with_scope(scope));
         Self {
             db,
             org_id,
@@ -417,7 +426,6 @@ pub trait FileStorage: Send + Sync {
 /// Quota checks shared by the conditional write path (mirrors write_file).
 async fn check_write_quota(ctx: &FileStorageContext, content_len: i64) -> Result<(), String> {
     use crate::db::Features;
-    use crate::db::file::get_storage_usage_by_org;
 
     let features = Features::resolve_for_org(&ctx.db, &ctx.org_id).await;
     let max_file_bytes = ctx.effective_file_max_bytes(features.file_upload_max_bytes());
@@ -427,18 +435,8 @@ async fn check_write_quota(ctx: &FileStorageContext, content_len: i64) -> Result
             content_len, max_file_bytes
         ));
     }
-    let storage_limit = features.storage_bytes();
-    if storage_limit >= 0 {
-        let current_usage = get_storage_usage_by_org(&ctx.db, ctx.org_id)
-            .await
-            .unwrap_or(0);
-        if current_usage + content_len > storage_limit {
-            return Err(format!(
-                "Storage quota exceeded: current usage {} + file {} > limit {}",
-                current_usage, content_len, storage_limit
-            ));
-        }
-    }
+    // Account storage is checked atomically with the metadata commit, using
+    // the replacement delta. A pre-upload total cannot reserve sibling capacity.
     Ok(())
 }
 
@@ -3604,6 +3602,7 @@ mod tests {
         let db_arc = std::sync::Arc::new(db);
 
         let org_id = uuid::Uuid::now_v7();
+        crate::db::file::seed_storage_quota_test_org(&db_arc, org_id).await;
         let env_id = uuid::Uuid::now_v7();
         let user_id = uuid::Uuid::now_v7();
 
@@ -3618,6 +3617,38 @@ mod tests {
         };
 
         (storage, ctx, temp_dir)
+    }
+
+    #[tokio::test]
+    async fn rejected_storage_growth_preserves_committed_bytes() {
+        let (storage, ctx, _temp) = setup_test_storage().await;
+        let crate::db::DatabasePool::Sqlite(pool) = ctx.db.as_ref() else {
+            unreachable!()
+        };
+        sqlx::query("UPDATE org SET features=? WHERE org_id=?")
+            .bind(r#"{"storage_bytes":5}"#)
+            .bind(ctx.org_id)
+            .execute(pool)
+            .await
+            .unwrap();
+        storage
+            .write_file("same.txt", b"first", None, &ctx)
+            .await
+            .unwrap();
+        assert!(
+            storage
+                .write_file("same.txt", b"too long", None, &ctx)
+                .await
+                .is_err()
+        );
+        let bytes = storage.read_file("same.txt", &ctx).await.unwrap();
+        assert_eq!(bytes, b"first");
+        storage
+            .write_file("same.txt", b"short", None, &ctx)
+            .await
+            .unwrap();
+        let bytes = storage.read_file("same.txt", &ctx).await.unwrap();
+        assert_eq!(bytes, b"short");
     }
 
     #[tokio::test]

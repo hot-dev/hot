@@ -21,28 +21,15 @@ pub async fn list_projects(
 ) -> Result<Json<ApiListResponse<ProjectResponse>>, (StatusCode, Json<ApiErrorResponse>)> {
     super::require_api_key(&auth, "Only API keys can list projects.")?;
 
-    let projects = Project::get_projects_by_env(
-        &db,
-        &api_key.env_id,
-        Some(params.limit),
-        Some(params.offset),
-    )
-    .await
-    .map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ApiErrorResponse::internal_error(&e.to_string())),
-        )
-    })?;
-
-    let total = Project::get_count_by_env(&db, &api_key.env_id)
-        .await
-        .map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ApiErrorResponse::internal_error(&e.to_string())),
-            )
-        })?;
+    let (projects, total) =
+        Project::get_page_by_env(&db, api_key.env_id, params.limit, params.offset)
+            .await
+            .map_err(|e| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(ApiErrorResponse::internal_error(&e.to_string())),
+                )
+            })?;
 
     let project_responses: Vec<ProjectResponse> = projects
         .into_iter()

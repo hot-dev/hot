@@ -4,8 +4,7 @@
 //!
 //!   * `prewarm_package_cache` — discovers and parses every project
 //!     dependency up front so REPL/test/eval first-input latency goes
-//!     away. Also gates `cleanup_stale_test_artifacts`, which sweeps
-//!     `.hot/test-*.db` files left behind by crashed test runs.
+//!     away.
 //!
 //!   * `eval_code_with_cached_bytecode`,
 //!     `call_function_with_cached_bytecode[_and_task]` — fast path that
@@ -95,40 +94,34 @@ impl Engine {
         conf: Option<&crate::val::Val>,
         project_name: Option<&str>,
         context_storage: Option<AHashMap<String, crate::val::Val>>,
+        integration_execution: Option<(
+            Arc<crate::db::DatabasePool>,
+            crate::lang::event::ExecutionContext,
+        )>,
         task_queue: Option<Arc<crate::queue::ProcessingQueue<crate::lang::hot::task::TaskRequest>>>,
         stream_publisher: Option<Arc<crate::stream::StreamPubSub>>,
         color: bool,
     ) -> Result<super::TestRunStatus, String> {
-        // Integration mode: task_queue.is_some() means services are running and we must
-        // share the same DB they're using (from conf). Otherwise create an ephemeral DB.
-        let is_integration = task_queue.is_some();
-
-        // Clean up stale test artifacts, but skip in integration mode to avoid
-        // deleting the shared DB that was already set up by the integration orchestrator
-        if !is_integration {
-            Self::cleanup_stale_test_artifacts();
+        // A selected, authorized context identifies integration mode, including runs
+        // that do not start a task worker. Never infer shared database authority
+        // from the presence of a queue or seed fixtures into a configured database.
+        let is_integration = integration_execution.is_some();
+        if task_queue.is_some() && !is_integration {
+            return Err("Integration services require an explicit execution scope".into());
         }
+        let integration_execution = match integration_execution {
+            Some((db, ctx)) => {
+                let ctx = Self::prepare_integration_test_context(&db, ctx, project_name).await?;
+                Some((db, ctx))
+            }
+            None => None,
+        };
 
         // Generate unique test ID for this test run
         let test_id = uuid::Uuid::now_v7().simple().to_string();
 
-        let (temp_db_path, database_pool) = if is_integration {
-            // Use the DB from conf — the same one the task worker is using
-            let conf_val = conf.unwrap_or(&crate::val::Val::Null);
-            tracing::debug!(
-                "Integration mode: using shared database: {}",
-                crate::db::get_db_uri_from_conf(conf_val)
-            );
-            let pool = match crate::db::create_db_pool(conf_val).await {
-                Ok(db) => Some(Arc::new(db)),
-                Err(e) => {
-                    return Err(format!(
-                        "Failed to create integration test database pool: {}",
-                        e
-                    ));
-                }
-            };
-            (None, pool)
+        let (temp_db_path, database_pool) = if let Some((db, _)) = &integration_execution {
+            (None, Some(db.clone()))
         } else {
             let path = format!(".hot/test-{}.db", test_id);
             tracing::debug!("Creating temporary test database: {}", path);
@@ -158,25 +151,12 @@ impl Engine {
             Option<String>,
             Option<Arc<dyn crate::file_storage::FileStorage>>,
         ) = if is_integration {
-            let storage_path_str = conf
-                .and_then(|c| {
-                    let s = c.get_str("file.storage.path");
-                    if s.is_empty() || s == "null" {
-                        None
-                    } else {
-                        Some(s)
-                    }
-                })
-                .unwrap_or_else(|| format!(".hot/test-integration-files-{}", test_id));
-            tracing::debug!(
-                "Integration mode: using file storage at {}",
-                storage_path_str
-            );
-            let storage_path = std::path::PathBuf::from(&storage_path_str);
-            let storage: Arc<dyn crate::file_storage::FileStorage> =
-                Arc::new(crate::file_storage::LocalFileStorage::new(storage_path));
-            // Don't clean up integration file storage — the caller handles it
-            (None, Some(storage))
+            let storage = crate::file_storage::file_storage_from_config(
+                conf.unwrap_or(&crate::val::Val::Null),
+            )
+            .await
+            .map_err(|error| format!("Integration file storage initialization failed: {error}"))?;
+            (None, Some(Arc::from(storage)))
         } else {
             let path = format!(".hot/test-files-{}", test_id);
             tracing::debug!("Creating temporary test file storage: {}", path);
@@ -186,61 +166,44 @@ impl Engine {
             (Some(path), Some(storage))
         };
 
-        // Create a test execution context (needed for file operations with org/env isolation)
-        // Use insert_test_data which creates user, org, env, project, build, and run
-        let test_execution_context = if database_pool.is_some() && file_storage.is_some() {
-            if let Some(ref db) = database_pool {
-                match crate::db::insert_test_data(db).await {
-                    Ok(test_data) => {
-                        tracing::debug!(
-                            "Test data created: run_id={}, env_id={}, build_id={}",
-                            test_data.run_id,
-                            test_data.env_id,
-                            test_data.build_id
-                        );
-
-                        Some(crate::lang::event::ExecutionContext::new(
-                            test_data.run_id,
-                            test_data.stream_id,
-                            crate::db::run::RunType::Run.as_id(),
-                            Some(test_data.env_id),
-                            Some(test_data.user_id),
-                            Some(test_data.org_id),
-                            Some(test_data.build_id),
-                        ))
-                    }
-                    Err(e) => {
-                        tracing::warn!("Failed to create test data: {}", e);
-                        return Err(format!("Test setup failed: {}", e));
-                    }
-                }
-            } else {
-                None
-            }
+        let test_execution_context = if let Some((_, ctx)) = &integration_execution {
+            Some(ctx.clone())
+        } else if let Some(db) = &database_pool {
+            // Only the private ephemeral database receives standalone fixtures.
+            let data = crate::db::insert_test_data(db)
+                .await
+                .map_err(|error| format!("Test setup failed: {error}"))?;
+            Some(crate::lang::event::ExecutionContext::new(
+                data.run_id,
+                data.stream_id,
+                crate::db::run::RunType::Run.as_id(),
+                Some(data.env_id),
+                Some(data.user_id),
+                Some(data.org_id),
+                Some(data.build_id),
+            ))
         } else {
             None
         };
 
-        // Create a temporary store for tests so ::hot::store functions work.
-        // Scope to the test execution context's org/env so the local SQLite backend
-        // matches the multi-tenant semantics of the Postgres backend. The store
-        // shares the test database pool — its tables live alongside everything
-        // else in the main migrations.
         let store: Option<Arc<dyn crate::store::Store>> =
             match (&database_pool, &test_execution_context) {
                 (Some(pool), Some(ctx)) => {
-                    let oid = ctx.org_id.unwrap_or_else(uuid::Uuid::new_v4);
-                    let eid = ctx.env_id.unwrap_or_else(uuid::Uuid::new_v4);
-                    Some(Arc::new(crate::store::sqlite::SqliteStore::new(
-                        pool.clone(),
-                        oid,
-                        eid,
-                    )))
+                    let org_id = ctx
+                        .org_id
+                        .ok_or("Test execution requires an organization")?;
+                    let env_id = ctx.env_id.ok_or("Test execution requires an environment")?;
+                    let store: Arc<dyn crate::store::Store> = match pool.as_ref() {
+                        crate::db::DatabasePool::Postgres(_) => Arc::new(
+                            crate::store::postgres::PgStore::new(pool.clone(), org_id, env_id),
+                        ),
+                        crate::db::DatabasePool::Sqlite(_) => Arc::new(
+                            crate::store::sqlite::SqliteStore::new(pool.clone(), org_id, env_id),
+                        ),
+                    };
+                    Some(store)
                 }
-                _ => {
-                    tracing::debug!("Test store not available: no db pool or execution context");
-                    None
-                }
+                _ => None,
             };
 
         // VM execution is CPU-intensive and must run on a blocking thread.
@@ -279,7 +242,7 @@ impl Engine {
             )
         })
         .await
-        .map_err(|e| format!("Task failed: {}", e))?;
+        .unwrap_or_else(|error| Err(format!("Task failed: {error}")));
 
         let result = match pipeline_result {
             Ok(crate::val::Val::Bool(true)) => Ok(super::TestRunStatus::Passed),
@@ -290,6 +253,17 @@ impl Engine {
             Ok(_) => Ok(super::TestRunStatus::Failed),
             Err(e) => Err(e),
         };
+
+        if let Some((db, ctx)) = &integration_execution {
+            let status = if matches!(result, Ok(super::TestRunStatus::Passed)) {
+                crate::db::run::RunStatus::Succeeded
+            } else {
+                crate::db::run::RunStatus::Failed
+            };
+            crate::db::Run::update_stop_time_and_status(db, &ctx.run_id, None, &status)
+                .await
+                .map_err(|error| format!("Cannot persist integration test result: {error}"))?;
+        }
 
         // Clean up ephemeral test artifacts (only for non-integration mode)
         if let Some(ref path) = temp_db_path {
@@ -311,45 +285,77 @@ impl Engine {
         result
     }
 
-    /// Clean up stale test artifacts from previous failed/crashed test runs.
-    /// This removes any `.hot/test-*.db` files and `.hot/test-files-*` directories
-    /// that may have been left behind if the test runner crashed or was killed.
-    fn cleanup_stale_test_artifacts() {
-        let hot_dir = std::path::Path::new(".hot");
-        if !hot_dir.exists() {
-            return;
-        }
-
-        let entries = match std::fs::read_dir(hot_dir) {
-            Ok(entries) => entries,
-            Err(_) => return,
+    /// Validate the caller's selected identity against durable ownership before
+    /// creating a run. SQLite needs the same explicit checks as PostgreSQL RLS.
+    async fn prepare_integration_test_context(
+        db: &crate::db::DatabasePool,
+        mut ctx: crate::lang::event::ExecutionContext,
+        project_name: Option<&str>,
+    ) -> Result<crate::lang::event::ExecutionContext, String> {
+        use crate::db::{Build, DatabasePool, DatabaseScope, Env, Org, Project, Run};
+        let (Some(org_id), Some(env_id), Some(user_id), Some(build_id)) =
+            (ctx.org_id, ctx.env_id, ctx.user_id, ctx.build_id)
+        else {
+            return Err("Integration execution requires an exact user, organization, environment, and build".into());
         };
-
-        for entry in entries.flatten() {
-            let path = entry.path();
-            let file_name = match path.file_name().and_then(|n| n.to_str()) {
-                Some(name) => name,
-                None => continue,
-            };
-
-            // Clean up stale test database files (test-*.db, test-*.db-shm, test-*.db-wal)
-            if file_name.starts_with("test-") && file_name.contains(".db") {
-                tracing::debug!("Cleaning up stale test database: {}", path.display());
-                let _ = std::fs::remove_file(&path);
-            }
-
-            // Clean up stale test file storage directories (test-files-*)
-            if file_name.starts_with("test-files-") && path.is_dir() {
-                tracing::debug!("Cleaning up stale test file storage: {}", path.display());
-                let _ = std::fs::remove_dir_all(&path);
-            }
-
-            // Clean up stale test store directories (test-store-*)
-            if file_name.starts_with("test-store-") && path.is_dir() {
-                tracing::debug!("Cleaning up stale test store: {}", path.display());
-                let _ = std::fs::remove_dir_all(&path);
-            }
+        if [org_id, env_id, user_id, build_id, ctx.run_id, ctx.stream_id]
+            .iter()
+            .any(uuid::Uuid::is_nil)
+        {
+            return Err("Integration execution identifiers must be nonzero".into());
         }
+        if let DatabasePool::Postgres(pool) = db
+            && pool.scope().map_err(|error| error.to_string())?
+                != (DatabaseScope::Environment { org_id, env_id })
+        {
+            return Err(
+                "Integration execution requires an exact environment database scope".into(),
+            );
+        }
+        Org::resolve_user_access(db, &org_id, &user_id)
+            .await
+            .map_err(|error| error.to_string())?
+            .filter(|access| access.runtime_allowed)
+            .ok_or("Integration user cannot execute in the selected organization")?;
+        let env = Env::get_env_uncached(db, &env_id)
+            .await
+            .map_err(|error| error.to_string())?;
+        if env.org_id != org_id || !env.active {
+            return Err(
+                "Integration environment is inactive or belongs to another organization".into(),
+            );
+        }
+        let project_name = project_name.ok_or("Integration execution requires a project")?;
+        let project = Project::get_project_by_env_and_name(db, &env_id, project_name)
+            .await
+            .map_err(|error| error.to_string())?
+            .filter(|project| project.active)
+            .ok_or("Integration project is not active in the selected environment")?;
+        let build = Build::get_live_build_by_project(db, &project.project_id)
+            .await
+            .map_err(|error| error.to_string())?
+            .filter(|build| build.build_id == build_id)
+            .ok_or("Integration build is not the selected environment's current live build")?;
+        ctx.env_name = Some(env.name);
+        ctx.project_id = Some(project.project_id);
+        ctx.project_name = Some(project.name);
+        ctx.build_hash = Some(build.hash);
+        ctx.run_type_id = crate::db::run::RunType::Run.as_id();
+        Run::insert_run(
+            db,
+            &ctx.run_id,
+            &env_id,
+            &ctx.stream_id,
+            Some(&build_id),
+            ctx.run_type_id,
+            None,
+            &user_id,
+            None,
+            None,
+        )
+        .await
+        .map_err(|error| format!("Cannot persist integration run before execution: {error}"))?;
+        Ok(ctx)
     }
 
     fn eval_namespace(execution_context: Option<&crate::lang::event::ExecutionContext>) -> String {
@@ -426,8 +432,12 @@ impl Engine {
 
         // Rebuild from the merged AST so eval-defined and shadowed functions
         // are visible without dropping cached base entries.
-        crate::lang::hot::internal_mcp::set_registry(compiler.build_tool_specs(&merged_ast));
-        crate::lang::hot::internal_skill::set_registry(compiler.build_skill_specs(&merged_ast));
+        let _tool_scope = crate::lang::hot::internal_mcp::ThreadRegistryGuard::install(Arc::new(
+            compiler.build_tool_specs(&merged_ast),
+        ));
+        let _skill_scope = crate::lang::hot::internal_skill::ThreadRegistryGuard::install(
+            Arc::new(compiler.build_skill_specs(&merged_ast)),
+        );
 
         let mut vm = crate::lang::runtime::vm::VirtualMachine::new(
             compiler.get_program_arc(),
@@ -659,18 +669,30 @@ impl Engine {
         // BEFORE module-init runs. Module-level statements like
         // `agent-tools [::tool/from-fn(::ns/fn, ...)]` call
         // `::hot::internal::mcp/schema-from-fn` which reads the
-        // process-global registry; without this hydration, cache
+        // execution-scoped registry; without this hydration, cache
         // hits in fresh worker processes (and zip-build deployments)
         // would error out with
         // `no schema registered for '...'`.
         let registry_started = std::time::Instant::now();
-        crate::lang::hot::internal_mcp::set_registry(cached.tool_specs.clone());
-        crate::lang::hot::internal_skill::set_registry(cached.skill_specs.clone());
+        let _tool_scope = crate::lang::hot::internal_mcp::ThreadRegistryGuard::install(Arc::new(
+            cached.tool_specs.clone(),
+        ));
+        let _skill_scope = crate::lang::hot::internal_skill::ThreadRegistryGuard::install(
+            Arc::new(cached.skill_specs.clone()),
+        );
         tracing::debug!(
             "TIMING [{}]: vm_registry_install: {:?}",
             timing_id,
             registry_started.elapsed()
         );
+
+        // Canonical authority and admission apply to module initialization too;
+        // leaving the emitter absent still avoids recording a separate init run.
+        if let Some(ref context) = execution_context {
+            vm.set_execution_context(context.clone());
+        }
+        vm.admit_execution()
+            .map_err(crate::lang::runtime::vm::admission_failure)?;
 
         // Initialize global state WITHOUT emitter (don't record initialization as a run)
         if instruction_count > 0 {
@@ -1008,8 +1030,20 @@ impl Engine {
         // Install tool/skill spec registries from cached bytecode
         // before module-init runs. Same rationale as
         // `call_function_with_cached_bytecode`.
-        crate::lang::hot::internal_mcp::set_registry(cached.tool_specs.clone());
-        crate::lang::hot::internal_skill::set_registry(cached.skill_specs.clone());
+        let _tool_scope = crate::lang::hot::internal_mcp::ThreadRegistryGuard::install(Arc::new(
+            cached.tool_specs.clone(),
+        ));
+        let _skill_scope = crate::lang::hot::internal_skill::ThreadRegistryGuard::install(
+            Arc::new(cached.skill_specs.clone()),
+        );
+
+        // Canonical authority and admission apply to module initialization too;
+        // leaving the emitter absent still avoids recording a separate init run.
+        if let Some(ref context) = execution_context {
+            vm.set_execution_context(context.clone());
+        }
+        vm.admit_execution()
+            .map_err(crate::lang::runtime::vm::admission_failure)?;
 
         // Initialize global state WITHOUT emitter
         if instruction_count > 0 {
@@ -1163,8 +1197,8 @@ impl Engine {
             project_name
         );
 
-        // Use the unified pipeline with NO eval code - just compile project sources
-        let result = Self::run_unified_pipeline_with_artifacts(
+        // Stop after compilation; module initialization requires runtime authority.
+        let result = Self::run_unified_pipeline_artifacts_internal(
             src_paths,
             &[], // No test paths for event handlers
             conf,
@@ -1181,6 +1215,7 @@ impl Engine {
             None, // No store
             None, // No embedding provider
             false,
+            false, // Never execute module initializers while populating a cache.
         )?;
 
         match result.artifacts {
@@ -1391,6 +1426,68 @@ mod tests {
             None,
             None,
         )
+    }
+
+    #[test]
+    fn cache_compilation_defers_module_side_effects_until_scoped_execution() {
+        let directory = tempfile::tempdir().unwrap();
+        let source = directory.path().join("src");
+        std::fs::create_dir_all(&source).unwrap();
+        let marker = directory.path().join("initializer.txt");
+        let marker_literal = serde_json::to_string(&marker.to_string_lossy()).unwrap();
+        std::fs::write(
+            source.join("initializer.hot"),
+            format!(
+                "::initializer ns\nwritten ::hot::file/write-file({marker_literal}, \"initialized\")\nrun fn () {{ written }}\n"
+            ),
+        )
+        .unwrap();
+        let cache =
+            crate::lang::cache::bytecode_cache::BytecodeCache::new(directory.path().join("cache"));
+        Engine::compile_to_cache(
+            &[source.to_string_lossy().to_string()],
+            &cache,
+            "initializer",
+            Some("initializer-cache"),
+            None,
+            None,
+        )
+        .unwrap();
+        assert!(
+            !marker.exists(),
+            "precompilation must not execute user code"
+        );
+        let cached = cache.load("initializer-cache").unwrap();
+        let managed_conf = crate::val!({"file": {"mode": "service"}});
+        let invoke = |conf: Option<&Val>| {
+            Engine::call_function_with_cached_bytecode(
+                "::initializer/run",
+                &[],
+                cached.clone(),
+                conf,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
+        };
+        let managed = invoke(Some(&managed_conf));
+        assert!(managed.is_err() || managed.as_ref().is_ok_and(|value| value.is_err()));
+        assert!(
+            !marker.exists(),
+            "managed invocation must not use direct host files"
+        );
+        // A standalone invocation still performs normal module initialization.
+        let direct = invoke(None).unwrap();
+        assert!(!direct.is_err(), "{direct:?}");
+        assert_eq!(std::fs::read_to_string(&marker).unwrap(), "initialized");
     }
 
     #[test]

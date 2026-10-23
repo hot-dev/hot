@@ -5,6 +5,7 @@ pub mod build_info;
 pub mod database_bootstrap;
 pub mod email;
 pub mod handlers;
+mod local_build;
 pub mod oauth;
 pub mod rate_limit;
 pub mod routes;

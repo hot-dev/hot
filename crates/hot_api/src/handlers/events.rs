@@ -102,10 +102,13 @@ pub(super) fn require_external_event_type(
 /// 3. Enqueuing the event for worker processing
 ///
 /// The stream must already exist before calling this function.
+// Keep the effective credential separate from historical actor attribution.
+#[allow(clippy::too_many_arguments)]
 pub async fn publish_event_internal(
     db: &DatabasePool,
     conf: &Val,
-    api_key: &ApiKey,
+    auth: &AuthContext,
+    actor_user_id: Uuid,
     event_type: &str,
     event_data: &serde_json::Value,
     stream_id: Uuid,
@@ -117,12 +120,12 @@ pub async fn publish_event_internal(
     Event::insert_event(
         db,
         &event_id,
-        &api_key.env_id,
+        &auth.env_id(),
         &stream_id,
         event_type,
         event_data,
         event_time,
-        &api_key.created_by_user_id,
+        &actor_user_id,
         access_id.as_ref(),
     )
     .await
@@ -135,7 +138,7 @@ pub async fn publish_event_internal(
 
     // Enqueue event to hot:event queue for worker processing
     // Get org_id for execution context
-    let env = hot::db::Env::get_env(db, &api_key.env_id)
+    let env = hot::db::Env::get_env(db, &auth.env_id())
         .await
         .map_err(|e| {
             (
@@ -153,9 +156,9 @@ pub async fn publish_event_internal(
         run_id,
         stream_id,
         run_type_id: hot::db::run::RunType::Event.as_id(),
-        env_id: Some(api_key.env_id),
+        env_id: Some(auth.env_id()),
         env_name: None, // Will be populated later if needed
-        user_id: Some(api_key.created_by_user_id),
+        user_id: Some(actor_user_id),
         org_id: Some(env.org_id),
         org_slug: None,     // Will be populated later if needed
         build_id: None,     // Will be resolved by worker
@@ -178,7 +181,7 @@ pub async fn publish_event_internal(
     let event_data_val: Val = serde_json::from_value(event_data.clone()).unwrap_or(Val::Null);
     let hot_event = hot::lang::event::Event {
         event_id,
-        env_id: api_key.env_id,
+        env_id: auth.env_id(),
         stream_id,
         event_type: event_type.to_string(),
         event_data: event_data_val,
@@ -191,7 +194,7 @@ pub async fn publish_event_internal(
     let event_message = hot::lang::event::EventMessage {
         id: event_id,
         head: AHashMap::from_iter([
-            ("env_id".to_string(), api_key.env_id.to_string()),
+            ("env_id".to_string(), auth.env_id().to_string()),
             ("event_type".to_string(), event_type.to_string()),
         ]),
         body: hot::lang::event::EventMessageBody {
@@ -284,7 +287,8 @@ pub async fn publish_event(
     let published = publish_event_internal(
         &db,
         &_conf,
-        &api_key,
+        &auth,
+        api_key.created_by_user_id,
         &req.event_type,
         &req.event_data,
         stream_id,
@@ -589,7 +593,8 @@ mod tests {
         let published = publish_event_internal(
             &db,
             &conf,
-            &api_key,
+            &AuthContext::ApiKey(api_key.clone()),
+            api_key.created_by_user_id,
             "order:created",
             &serde_json::json!({"answer": 42}),
             Uuid::now_v7(),

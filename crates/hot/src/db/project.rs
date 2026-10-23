@@ -1,5 +1,5 @@
 use chrono::{DateTime, Utc};
-use sqlx::{FromRow, Pool, Postgres, Sqlite};
+use sqlx::{FromRow, Pool, Sqlite};
 use std::sync::LazyLock;
 use thiserror::Error;
 use uuid::Uuid;
@@ -12,13 +12,23 @@ static PROJECT_CACHE: LazyLock<EntityCache<Uuid, Project>> =
 #[derive(Error, Debug)]
 pub enum ProjectError {
     #[error("Database error: {0}")]
-    Database(#[from] sqlx::Error),
+    Database(#[source] sqlx::Error),
     #[error("Project not found")]
     NotFound,
     #[error("Project already exists")]
     AlreadyExists,
     #[error("{0}")]
     Other(String),
+}
+
+impl From<sqlx::Error> for ProjectError {
+    fn from(error: sqlx::Error) -> Self {
+        match error {
+            // RLS-hidden rows have the same absence contract as unknown IDs.
+            sqlx::Error::RowNotFound => Self::NotFound,
+            error => Self::Database(error),
+        }
+    }
 }
 
 #[derive(Debug, Clone, FromRow)]
@@ -37,12 +47,60 @@ pub struct Project {
 }
 
 impl Project {
+    /// List rows and their count with one scoped database transaction.
+    pub async fn get_page_by_env(
+        db: &crate::db::DatabasePool,
+        env_id: Uuid,
+        limit: i64,
+        offset: i64,
+    ) -> Result<(Vec<Self>, i64), ProjectError> {
+        const ROWS: &str = "SELECT project_id,env_id,name,active,created_by_user_id,created_at,updated_at,updated_by_user_id,active_toggle_at,active_toggle_by_user_id,deployment_sequence FROM project WHERE env_id=$1 ORDER BY active DESC,created_at DESC LIMIT $2 OFFSET $3";
+        const COUNT: &str = "SELECT COUNT(*) FROM project WHERE env_id=$1";
+        match db {
+            crate::db::DatabasePool::Postgres(pool) => {
+                pool.transaction(move |connection| {
+                    Box::pin(async move {
+                        let rows = sqlx::query_as(ROWS)
+                            .bind(env_id)
+                            .bind(limit)
+                            .bind(offset)
+                            .fetch_all(&mut *connection)
+                            .await?;
+                        let count = sqlx::query_scalar(COUNT)
+                            .bind(env_id)
+                            .fetch_one(&mut *connection)
+                            .await?;
+                        Ok((rows, count))
+                    })
+                })
+                .await
+            }
+            crate::db::DatabasePool::Sqlite(pool) => {
+                let mut tx = pool.begin().await?;
+                let rows = sqlx::query_as(ROWS)
+                    .bind(env_id)
+                    .bind(limit)
+                    .bind(offset)
+                    .fetch_all(&mut *tx)
+                    .await?;
+                let count = sqlx::query_scalar(COUNT)
+                    .bind(env_id)
+                    .fetch_one(&mut *tx)
+                    .await?;
+                tx.commit().await?;
+                Ok((rows, count))
+            }
+        }
+    }
+
     /// Get a project by its ID
     pub async fn get_project(
         db: &crate::db::DatabasePool,
         project_id: &Uuid,
     ) -> Result<Project, ProjectError> {
-        if let Some(project) = PROJECT_CACHE.get(project_id) {
+        if matches!(db, crate::db::DatabasePool::Sqlite(_))
+            && let Some(project) = PROJECT_CACHE.get(project_id)
+        {
             return Ok(project);
         }
 
@@ -185,7 +243,7 @@ impl Project {
     }
 
     async fn get_project_postgres(
-        db: &Pool<Postgres>,
+        db: &crate::db::ScopedPgPool,
         project_id: &Uuid,
     ) -> Result<Project, ProjectError> {
         let row = sqlx::query_as::<_, Project>(
@@ -206,7 +264,7 @@ impl Project {
     }
 
     async fn get_project_including_inactive_postgres(
-        db: &Pool<Postgres>,
+        db: &crate::db::ScopedPgPool,
         project_id: &Uuid,
     ) -> Result<Project, ProjectError> {
         let row = sqlx::query_as::<_, Project>(
@@ -265,7 +323,7 @@ impl Project {
     }
 
     async fn get_project_by_env_and_name_postgres(
-        db: &Pool<Postgres>,
+        db: &crate::db::ScopedPgPool,
         env_id: &Uuid,
         name: &str,
     ) -> Result<Option<Project>, ProjectError> {
@@ -377,7 +435,7 @@ impl Project {
     }
 
     async fn get_projects_by_env_postgres(
-        db: &Pool<Postgres>,
+        db: &crate::db::ScopedPgPool,
         env_id: &Uuid,
         limit: Option<i64>,
         offset: Option<i64>,
@@ -486,7 +544,7 @@ impl Project {
     }
 
     async fn insert_project_postgres(
-        db: &Pool<Postgres>,
+        db: &crate::db::ScopedPgPool,
         project_id: &Uuid,
         env_id: &Uuid,
         name: &str,
@@ -552,7 +610,7 @@ impl Project {
     }
 
     async fn update_name_postgres(
-        db: &Pool<Postgres>,
+        db: &crate::db::ScopedPgPool,
         project_id: &Uuid,
         name: &str,
         updated_by_user_id: &Uuid,
@@ -683,7 +741,7 @@ impl Project {
     }
 
     async fn toggle_active_postgres(
-        db: &Pool<Postgres>,
+        db: &crate::db::ScopedPgPool,
         project_id: &Uuid,
         active: bool,
         toggled_by_user_id: &Uuid,
@@ -821,6 +879,34 @@ mod tests {
     async fn cleanup_test_db(_db: &crate::db::DatabasePool) {
         // In a real test environment, we might want to clean up test data
         // For now, we're using in-memory SQLite so cleanup happens automatically
+    }
+
+    #[tokio::test]
+    async fn missing_and_inactive_project_lookups_report_not_found() {
+        let db = crate::db::test_db().await;
+        let data = crate::db::insert_test_data(&db).await.unwrap();
+        Project::toggle_active(&db, &data.project_id, false, &data.user_id)
+            .await
+            .unwrap();
+        assert!(matches!(
+            Project::get_project(&db, &data.project_id).await,
+            Err(ProjectError::NotFound)
+        ));
+        assert!(
+            !Project::get_project_including_inactive(&db, &data.project_id)
+                .await
+                .unwrap()
+                .active
+        );
+        let missing = Uuid::new_v4();
+        assert!(matches!(
+            Project::get_project(&db, &missing).await,
+            Err(ProjectError::NotFound)
+        ));
+        assert!(matches!(
+            Project::get_project_including_inactive(&db, &missing).await,
+            Err(ProjectError::NotFound)
+        ));
     }
 
     #[tokio::test]

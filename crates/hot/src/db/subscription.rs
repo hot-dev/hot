@@ -1,3 +1,5 @@
+mod runtime_usage;
+
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
@@ -15,6 +17,8 @@ pub enum PlanError {
     NotFound,
     #[error("Invalid plan")]
     InvalidPlan,
+    #[error("Invalid organization: {0}")]
+    InvalidOrganization(String),
 }
 
 /// Subscription Plan
@@ -280,6 +284,15 @@ impl OrgPlan {
 
     /// Get subscription by organization ID
     pub async fn get_by_org_id(db: &DatabasePool, org_id: &Uuid) -> Result<Self, PlanError> {
+        let root_id = super::org::Org::billing_owner_id_for(db, org_id)
+            .await
+            .map_err(|error| PlanError::InvalidOrganization(error.to_string()))?;
+        let db = db.with_scope(super::DatabaseScope::Maintenance {
+            operation: super::MaintenanceOperation::Billing,
+            org_id: Some(root_id),
+        });
+        let org_id = &root_id;
+        let db = &db;
         match db {
             DatabasePool::Postgres(pool) => {
                 let subscription =
@@ -310,6 +323,15 @@ impl OrgPlan {
         billing_period: BillingPeriod,
         created_by_user_id: &Uuid,
     ) -> Result<Self, PlanError> {
+        if super::org::Org::billing_owner_id_for(db, org_id)
+            .await
+            .map_err(|error| PlanError::InvalidOrganization(error.to_string()))?
+            != *org_id
+        {
+            return Err(PlanError::InvalidOrganization(
+                "child subscriptions are managed by the root".into(),
+            ));
+        }
         let org_plan_id = Uuid::now_v7();
         let billing_period_str = billing_period.as_str();
 
@@ -652,29 +674,25 @@ impl OrgPlan {
 ///
 /// Returns -1 for unlimited (never delete).
 pub async fn call_deletion_days_for_org(db: &DatabasePool, org_id: &Uuid) -> i32 {
+    // A failed lookup must keep data: 0 would make retention delete everything.
+    let root_id = match super::org::Org::billing_owner_id_for(db, org_id).await {
+        Ok(id) => id,
+        Err(_) => return -1,
+    };
+    let db = db.with_scope(super::DatabaseScope::Maintenance {
+        operation: super::MaintenanceOperation::Billing,
+        org_id: Some(root_id),
+    });
+    let db = &db;
+    let org_id = &root_id;
+
     use super::features::keys;
 
-    // Check for an explicit per-org override (not merged with plan)
-    let org_features_json = match db {
-        DatabasePool::Postgres(pool) => {
-            sqlx::query_scalar::<_, Option<JsonValue>>("SELECT features FROM org WHERE org_id = $1")
-                .bind(org_id)
-                .fetch_optional(pool)
-                .await
-                .ok()
-                .flatten()
-                .flatten()
-        }
-        DatabasePool::Sqlite(pool) => {
-            sqlx::query_scalar::<_, Option<String>>("SELECT features FROM org WHERE org_id = ?")
-                .bind(org_id)
-                .fetch_optional(pool)
-                .await
-                .ok()
-                .flatten()
-                .flatten()
-                .and_then(|s| serde_json::from_str::<JsonValue>(&s).ok())
-        }
+    // Check for an explicit per-org override (not merged with plan). An
+    // unreadable override keeps data rather than falling back to the plan.
+    let org_features_json = match super::features::Features::get_org_features(db, org_id).await {
+        Ok(features) => features,
+        Err(_) => return -1,
     };
 
     if let Some(JsonValue::Object(ref map)) = org_features_json
@@ -710,7 +728,8 @@ pub async fn call_deletion_days_for_org(db: &DatabasePool, org_id: &Uuid) -> i32
                 next_retention
             }
         }
-        Err(_) => retention * 2, // top tier, no next plan
+        Err(PlanError::NotFound) => retention * 2, // top tier, no next plan
+        Err(_) => -1,                              // lookup failed: keep data
     }
 }
 
@@ -836,14 +855,73 @@ pub struct OrgUsageStats {
     pub tasks_this_period: i64,
     /// Total task duration in milliseconds (current billing period)
     pub task_duration_ms: i64,
-    /// Total compute unit seconds (CUS) consumed this billing period.
-    /// Extracted from `result."compute-units"` on completed container tasks.
+    /// Total compute unit seconds (CUS) consumed this billing period: the
+    /// validated container metering that the usage counters charge.
     pub compute_units: i64,
     /// Active schedules attached to active deployed builds in this org.
     pub active_schedules: i64,
 }
 
 impl OrgUsageStats {
+    /// Account usage for authorized billing and quota operations. Runtime data
+    /// remains attributed to its actual org; root directory seats are counted once.
+    pub async fn calculate_account(
+        db: &DatabasePool,
+        org_id: &Uuid,
+        period_start: DateTime<Utc>,
+        retention_days: i32,
+    ) -> Result<Self, PlanError> {
+        let root_id = super::org::Org::billing_owner_id_for(db, org_id)
+            .await
+            .map_err(|error| PlanError::InvalidOrganization(error.to_string()))?;
+        let db = db.with_scope(super::DatabaseScope::Maintenance {
+            operation: super::MaintenanceOperation::Billing,
+            org_id: Some(root_id),
+        });
+        let mut total = Self::calculate(&db, &root_id, period_start, retention_days).await?;
+        let children = super::org::Org::list_children(&db, &root_id)
+            .await
+            .map_err(|error| PlanError::InvalidOrganization(error.to_string()))?;
+        for child in children {
+            let usage = Self::calculate(&db, &child.org_id, period_start, retention_days).await?;
+            total.runs_this_period += usage.runs_this_period;
+            total.file_storage_bytes += usage.file_storage_bytes;
+            total.call_storage_bytes += usage.call_storage_bytes;
+            total.call_count += usage.call_count;
+            total.oldest_call_time = match (total.oldest_call_time, usage.oldest_call_time) {
+                (Some(a), Some(b)) => Some(a.min(b)),
+                (a, b) => a.or(b),
+            };
+            total.store_storage_bytes += usage.store_storage_bytes;
+            total.blob_storage_bytes += usage.blob_storage_bytes;
+            total.tasks_this_period += usage.tasks_this_period;
+            total.task_duration_ms += usage.task_duration_ms;
+            total.compute_units += usage.compute_units;
+            total.active_schedules += usage.active_schedules;
+        }
+        // Admission, not retained history, is the account's quota consumption.
+        // Include task runs and reservations whose run:start was not persisted;
+        // respect the caller's billing/calendar window without resetting on retention.
+        total.runs_this_period =
+            match &db {
+                DatabasePool::Postgres(pool) => sqlx::query_scalar(
+                    "SELECT COUNT(*) FROM run_admission WHERE root_org_id=$1 AND admitted_at >= $2",
+                )
+                .bind(root_id)
+                .bind(period_start)
+                .fetch_one(pool)
+                .await?,
+                DatabasePool::Sqlite(pool) => sqlx::query_scalar(
+                    "SELECT COUNT(*) FROM run_admission WHERE root_org_id=$1 AND admitted_at >= $2",
+                )
+                .bind(root_id)
+                .bind(period_start)
+                .fetch_one(pool)
+                .await?,
+            };
+        Ok(total)
+    }
+
     /// Calculate real-time usage statistics for an organization
     pub async fn calculate(
         db: &DatabasePool,
@@ -862,7 +940,7 @@ impl OrgUsageStats {
     }
 
     async fn calculate_postgres(
-        pool: &sqlx::PgPool,
+        pool: &crate::db::ScopedPgPool,
         org_id: &Uuid,
         period_start: DateTime<Utc>,
         retention_days: i32,
@@ -938,16 +1016,10 @@ impl OrgUsageStats {
         .fetch_one(pool);
 
         let task_fut = sqlx::query_as::<_, (i64, Option<i64>, Option<i64>)>(
-            "SELECT COUNT(*)::bigint, COALESCE(SUM(duration_ms), 0)::bigint,
-                    COALESCE(SUM(CASE
-                        WHEN result->'$val'->'err'->>'compute-units' IS NOT NULL
-                            THEN (result->'$val'->'err'->>'compute-units')::bigint
-                        WHEN result->>'compute-units' IS NOT NULL
-                            THEN (result->>'compute-units')::bigint
-                        ELSE 0
-                    END), 0)::bigint
-             FROM task
-             WHERE env_id = ANY($1) AND created_at >= $2",
+            "SELECT COUNT(*)::bigint, COALESCE(SUM(t.duration_ms), 0)::bigint,
+                    COALESCE(SUM(u.compute_units), 0)::bigint
+             FROM task t CROSS JOIN LATERAL hot.task_usage(t) u
+             WHERE t.env_id = ANY($1) AND t.created_at >= $2",
         )
         .bind(&env_ids)
         .bind(period_start)
@@ -1063,16 +1135,9 @@ impl OrgUsageStats {
         };
 
         let task_q = format!(
-            "SELECT COUNT(*), COALESCE(SUM(duration_ms), 0),
-                    COALESCE(SUM(CASE
-                        WHEN json_extract(result, '$.\"$val\".\"err\".\"compute-units\"') IS NOT NULL
-                            THEN CAST(json_extract(result, '$.\"$val\".\"err\".\"compute-units\"') AS INTEGER)
-                        WHEN json_extract(result, '$.\"compute-units\"') IS NOT NULL
-                            THEN CAST(json_extract(result, '$.\"compute-units\"') AS INTEGER)
-                        ELSE 0
-                    END), 0)
-             FROM task
-             WHERE {ENV_SUB} AND created_at >= ?",
+            "SELECT COUNT(*), COALESCE(SUM(t.duration_ms), 0), COALESCE(SUM(u.compute_units), 0)
+             FROM task t JOIN task_usage u ON u.task_id = t.task_id
+             WHERE t.{ENV_SUB} AND t.created_at >= ?",
         );
         let task_fut = sqlx::query_as::<_, (i64, Option<i64>, Option<i64>)>(sqlx::AssertSqlSafe(
             task_q.as_str(),

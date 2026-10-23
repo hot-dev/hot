@@ -27,7 +27,7 @@
         <tbody class="divide-y divide-gray-200 dark:divide-gray-700">
             {% for task in tasks %}
             <tr class="hover:bg-gray-100 dark:hover:bg-gray-700 transition-colors duration-150 cursor-pointer"
-                onclick="window.location.href='/tasks/{{ task.task_id }}'">
+                onclick="window.location.href=window.hotScopeUrl('/tasks/{{ task.task_id }}')">
                 <td class="px-3 md:px-6 py-4 whitespace-nowrap text-xs font-medium text-gray-900 dark:text-white">
                     <div class="uuid-container inline-flex items-center gap-1">
                         <a href="/tasks/{{ task.task_id }}" class="uuid-display uuid-link link transition-all" data-full-uuid="{{ task.task_id }}" title="{{ task.task_id }}" onclick="event.stopPropagation()">{{ task.task_id|shortuuid }}</a>

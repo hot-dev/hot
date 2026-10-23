@@ -58,10 +58,14 @@ pub mod resource_types {
     pub const KEY: &str = "key";
     pub const SESSION: &str = "session";
     pub const ENV: &str = "env";
+    pub const FILE: &str = "file";
+    pub const BLOB: &str = "blob";
+    pub const DOMAIN: &str = "domain";
 
     /// All known resource types
     pub const ALL: &[&str] = &[
-        MCP, WEBHOOK, STREAM, EVENT, RUN, PROJECT, BUILD, CONTEXT, KEY, SESSION, ENV,
+        MCP, WEBHOOK, STREAM, EVENT, RUN, PROJECT, BUILD, CONTEXT, KEY, SESSION, ENV, FILE, BLOB,
+        DOMAIN,
     ];
 
     /// Resource types that service keys are allowed to use.
@@ -90,6 +94,9 @@ pub mod resource_types {
             KEY => Some(&[CREATE, READ, UPDATE, DELETE]),
             SESSION => Some(&[CREATE, READ, DELETE]),
             ENV => Some(&[READ]),
+            FILE => Some(&[CREATE, READ, DELETE]),
+            BLOB => Some(&[READ]),
+            DOMAIN => Some(&[CREATE, READ, UPDATE, DELETE]),
             _ => None,
         }
     }
@@ -103,8 +110,22 @@ pub mod resource_types {
 ///
 /// Resource URN format: `type:path` where path can contain `*` suffix wildcard.
 /// Actions: create, read, update, delete, execute, * (all).
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Permissions(HashMap<String, Vec<String>>);
+
+/// Grants compare as sets: action order and duplicates carry no meaning, and
+/// revalidation compares independently built values.
+impl PartialEq for Permissions {
+    fn eq(&self, other: &Self) -> bool {
+        self.0.len() == other.0.len()
+            && self.0.iter().all(|(resource, actions)| {
+                other.0.get(resource).is_some_and(|other_actions| {
+                    actions.iter().all(|action| other_actions.contains(action))
+                        && other_actions.iter().all(|action| actions.contains(action))
+                })
+            })
+    }
+}
 
 #[derive(Debug)]
 pub enum PermissionError {
@@ -234,6 +255,53 @@ impl Permissions {
     /// Check if empty (no permissions)
     pub fn is_empty(&self) -> bool {
         self.0.is_empty()
+    }
+
+    /// Permissions allowed by both grant sets. Resource patterns use only exact
+    /// matching and suffix wildcards, so overlapping patterns are represented
+    /// by their narrower pattern. This also preserves restrictions for list and
+    /// discovery endpoints instead of checking only individual operations.
+    pub fn intersection(&self, other: &Self) -> Self {
+        let mut grants: HashMap<String, Vec<String>> = HashMap::new();
+        for (left, left_actions) in &self.0 {
+            for (right, right_actions) in &other.0 {
+                let resource = if resource_matches(left, right) {
+                    right
+                } else if resource_matches(right, left) {
+                    left
+                } else {
+                    continue;
+                };
+                let allowed: Vec<String> = if left_actions.iter().any(|a| a == "*")
+                    && right_actions.iter().any(|a| a == "*")
+                {
+                    vec!["*".to_string()]
+                } else {
+                    actions::ALL
+                        .iter()
+                        .filter(|action| {
+                            action_matches(left_actions, action)
+                                && action_matches(right_actions, action)
+                        })
+                        .map(|action| (*action).to_string())
+                        .collect()
+                };
+                if !allowed.is_empty() {
+                    let entry = grants.entry(resource.clone()).or_default();
+                    for action in allowed {
+                        if !entry.contains(&action) {
+                            entry.push(action);
+                        }
+                    }
+                }
+            }
+        }
+        // Several pattern pairs can feed one resource in hash-map order; keep
+        // the serialized grants deterministic.
+        for actions in grants.values_mut() {
+            actions.sort();
+        }
+        Self(grants)
     }
 
     /// Validate all permissions: actions are valid, resource URNs are well-formed,
@@ -495,6 +563,65 @@ mod tests {
             );
         }
         Permissions(map)
+    }
+
+    #[test]
+    fn intersection_narrows_resources_actions_and_discovery() {
+        let child = perms(&[
+            ("event:orders:*", &["create", "read"]),
+            ("stream:*", &["read"]),
+        ]);
+        let issuer = perms(&[("event:orders:paid", &["read"]), ("stream:one", &["read"])]);
+        let effective = child.intersection(&issuer);
+        assert!(effective.has_permission("event:orders:paid", "read"));
+        assert!(!effective.has_permission("event:orders:paid", "create"));
+        assert!(!effective.has_permission("event:orders:cancelled", "read"));
+        assert_eq!(
+            effective.stream_restrictions(),
+            Some(vec!["one".to_string()])
+        );
+        assert_eq!(effective, issuer.intersection(&child));
+    }
+
+    #[test]
+    fn intersection_equality_ignores_overlap_iteration_order() {
+        // Two issuer patterns contribute different actions to one resource,
+        // so the merged list order follows each fresh map's iteration order.
+        let issuer = serde_json::json!({"*:*": ["read"], "event:*": ["create"]});
+        let child = serde_json::json!({"event:*": ["create", "read"]});
+        let expected = Permissions::from_json(&child)
+            .unwrap()
+            .intersection(&Permissions::from_json(&issuer).unwrap());
+        for _ in 0..64 {
+            let current = Permissions::from_json(&child)
+                .unwrap()
+                .intersection(&Permissions::from_json(&issuer).unwrap());
+            assert_eq!(current, expected);
+            assert_eq!(current.to_json(), expected.to_json());
+        }
+        assert_eq!(
+            perms(&[("event:*", &["read", "create"])]),
+            perms(&[("event:*", &["create", "read"])])
+        );
+        assert_ne!(
+            perms(&[("event:*", &["read"])]),
+            perms(&[("event:*", &["read", "create"])])
+        );
+    }
+
+    #[test]
+    fn intersection_does_not_restore_removed_or_unissued_grants() {
+        let child = perms(&[("mcp:weather/*", &["execute"])]);
+        let full = perms(&[("*:*", &["*"])]);
+        let disjoint = perms(&[("mcp:payments/*", &["execute"])]);
+        assert_eq!(child.intersection(&full), child);
+        assert!(child.intersection(&disjoint).is_empty());
+        assert!(child.intersection(&Permissions::new()).is_empty());
+        assert!(
+            !child
+                .intersection(&full)
+                .has_permission("mcp:payments/send", "execute")
+        );
     }
 
     // ========================================================================

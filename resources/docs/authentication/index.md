@@ -4,13 +4,20 @@ description: "Use API keys, service keys, and sessions with the Hot API, includi
 
 # Authentication
 
-The [Hot API](/docs/api) supports three credential types for authenticating requests. All are passed in the `Authorization` header as Bearer tokens and scoped to an environment.
+The [Hot runtime API](/docs/api) supports three credential types for authenticating requests. All are passed in the `Authorization` header as Bearer tokens and scoped to an environment.
 
 | Credential | Token Format | Lifetime | Purpose |
 |-----------|-------------|----------|---------|
 | **API Key** | `hot_<uuid>_<secret>` | Long-lived | Full environment access for you and your team |
 | **Service Key** | `<uuid>_<secret>` | Long-lived (optional expiry) | Permission-scoped access for your customers and integrations |
 | **Session** | `s_<uuid>_<secret>` | Short-lived (1h default, 24h max) | Ephemeral, permission-scoped access for browser clients |
+
+Children own independent environments and deployments. Use a child's environment
+credential to access its resources. A parent's runtime key does not inherit child
+access, and service-key metadata cannot change scope. Root administrators can
+issue separate `hm_` [management credentials](/docs/api/management) for child
+provisioning and delegated runtime-key issuance; those tokens cannot execute
+workflows or access runtime endpoints.
 
 ```bash
 curl -H "Authorization: Bearer $TOKEN" https://api.hot.dev/v1/projects
@@ -28,7 +35,7 @@ curl -H "Authorization: Bearer $TOKEN" https://api.hot.dev/v1/projects
 
 When creating or editing an API key, you choose between two access levels:
 
-- **Full Access** — Unrestricted access to all API endpoints (the default)
+- **Full Access** — All runtime API capabilities in the key's environment (the default)
 - **Restricted** — Limit the key to specific capabilities using the [permissions model](#permissions-model)
 
 ## Service Keys
@@ -86,12 +93,17 @@ API keys, service keys, and sessions all share the same permissions model. Permi
 | **MCP** | `{"mcp:*": ["execute"]}` | Invoke MCP tools across all services |
 | **MCP (specific)** | `{"mcp:weather": ["execute"]}` | Invoke MCP tools in a specific service only |
 | **Events** | `{"event:*": ["create", "read"]}` | Publish and read events |
-| **Builds** | `{"build:*": ["create", "read"]}` | Upload builds and deploy them |
+| **Builds** | `{"build:*": ["create", "read", "execute"]}` | Upload, read, and deploy builds |
 | **Context Variables** | `{"context:*": ["create", "read", "update", "delete"]}` | Manage context variables |
 | **Webhooks** | `{"webhook:*": ["execute"]}` | Access webhook endpoints that require API key authentication |
 | **Webhooks (specific)** | `{"webhook:internal": ["execute"]}` | Webhook access for a specific service only |
 
 This allows you to create credentials narrowly scoped to just the capabilities needed—useful for giving an AI agent access to specific MCP tools, or restricting a webhook caller to a single service.
+
+Private API routes enforce these permissions too: being an API key does not
+bypass its grants. See the [API permission matrix](/docs/api/management) for
+administrative resources, collection requirements, file/domain/blob permissions,
+and the separate permissions required to issue sessions or service keys.
 
 ### Permissions Builder
 

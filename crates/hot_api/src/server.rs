@@ -247,6 +247,74 @@ pub async fn run_with_stream_pubsub(conf: Val, shared_stream_pubsub: Option<Arc<
         stream_pubsub,
     );
 
+    let app = build_router(
+        state,
+        file_storage,
+        blob_store,
+        client_ip_policy,
+        max_body_size,
+        public_concurrency_limit,
+    );
+
+    debug!("hot.dev: API max body size: {} bytes", max_body_size);
+    debug!(
+        "hot.dev: API public concurrency limit: {}",
+        public_concurrency_limit
+    );
+
+    // Bind every address the configured host resolves to: "localhost" can
+    // resolve to 127.0.0.1 and ::1, and single-address clients (the JDK,
+    // .NET) fail when only one loopback family is bound.
+    let listeners = hot::net::bind_all(&host, port).await.unwrap();
+    for listener in &listeners {
+        info!(
+            "hot.dev: API listening on http://{}",
+            listener.local_addr().unwrap()
+        );
+    }
+
+    // Graceful shutdown handler shared across listeners
+    let (shutdown_tx, shutdown_watch) = tokio::sync::watch::channel(false);
+    tokio::spawn(async move {
+        hot::signal::shutdown_signal().await;
+        info!("hot.dev: API received shutdown signal");
+        let _ = shutdown_tx.send(true);
+    });
+
+    let mut serve_tasks = Vec::new();
+    for listener in listeners {
+        let app = app.clone();
+        let mut shutdown_watch = shutdown_watch.clone();
+        serve_tasks.push(tokio::spawn(async move {
+            axum::serve(
+                listener,
+                app.into_make_service_with_connect_info::<SocketAddr>(),
+            )
+            .with_graceful_shutdown(async move {
+                let _ = shutdown_watch.wait_for(|shutdown| *shutdown).await;
+            })
+            .await
+            .unwrap();
+        }));
+    }
+    for task in serve_tasks {
+        task.await.unwrap();
+    }
+
+    info!("hot.dev: API shutdown complete");
+}
+
+/// Assemble the production routes independently of listener startup so runtime
+/// role integration tests exercise the same middleware and routing boundaries.
+pub(crate) fn build_router(
+    state: crate::ApiStateData,
+    file_storage: Arc<Box<dyn hot::file_storage::FileStorage>>,
+    blob_store: Option<Arc<hot::blob::BlobStore>>,
+    client_ip_policy: Arc<ClientIpPolicy>,
+    max_body_size: usize,
+    public_concurrency_limit: usize,
+) -> Router {
+    let db = state.0.clone();
     // Create routes that don't require authentication
     let public_routes = Router::new()
         .route("/", get(root_handler))
@@ -453,14 +521,17 @@ pub async fn run_with_stream_pubsub(conf: Val, shared_stream_pubsub: Option<Arc<
             api_key_auth_middleware,
         ));
 
+    let management_routes = crate::handlers::management::router(state.clone());
+
     // Domain resolution cache for custom domains (mcp.example.com, etc.)
     let domain_cache = DomainCache::new();
 
     // Combine all routes with middleware layers (outermost → innermost):
     //   Trace → BodyLimit → DomainResolution → Router → (auth → rate_limit → access_log → handler)
-    let app = Router::new()
+    Router::new()
         .merge(public_routes)
         .merge(api_v1_routes)
+        .merge(management_routes)
         .layer(middleware::from_fn_with_state(
             client_ip_policy,
             client_ip_middleware,
@@ -493,54 +564,7 @@ pub async fn run_with_stream_pubsub(conf: Val, shared_stream_pubsub: Option<Arc<
                 .on_request(trace::DefaultOnRequest::new().level(tracing::Level::DEBUG))
                 .on_response(trace::DefaultOnResponse::new().level(tracing::Level::DEBUG)),
         )
-        .with_state(state);
-
-    debug!("hot.dev: API max body size: {} bytes", max_body_size);
-    debug!(
-        "hot.dev: API public concurrency limit: {}",
-        public_concurrency_limit
-    );
-
-    // Bind every address the configured host resolves to: "localhost" can
-    // resolve to 127.0.0.1 and ::1, and single-address clients (the JDK,
-    // .NET) fail when only one loopback family is bound.
-    let listeners = hot::net::bind_all(&host, port).await.unwrap();
-    for listener in &listeners {
-        info!(
-            "hot.dev: API listening on http://{}",
-            listener.local_addr().unwrap()
-        );
-    }
-
-    // Graceful shutdown handler shared across listeners
-    let (shutdown_tx, shutdown_watch) = tokio::sync::watch::channel(false);
-    tokio::spawn(async move {
-        hot::signal::shutdown_signal().await;
-        info!("hot.dev: API received shutdown signal");
-        let _ = shutdown_tx.send(true);
-    });
-
-    let mut serve_tasks = Vec::new();
-    for listener in listeners {
-        let app = app.clone();
-        let mut shutdown_watch = shutdown_watch.clone();
-        serve_tasks.push(tokio::spawn(async move {
-            axum::serve(
-                listener,
-                app.into_make_service_with_connect_info::<SocketAddr>(),
-            )
-            .with_graceful_shutdown(async move {
-                let _ = shutdown_watch.wait_for(|shutdown| *shutdown).await;
-            })
-            .await
-            .unwrap();
-        }));
-    }
-    for task in serve_tasks {
-        task.await.unwrap();
-    }
-
-    info!("hot.dev: API shutdown complete");
+        .with_state(state)
 }
 
 pub async fn handler() -> &'static str {

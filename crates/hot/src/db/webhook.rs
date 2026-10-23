@@ -1,5 +1,5 @@
 use serde_json::Value as JsonValue;
-use sqlx::{FromRow, Pool, Postgres, Sqlite};
+use sqlx::{FromRow, Pool, Sqlite};
 use thiserror::Error;
 use uuid::Uuid;
 
@@ -66,12 +66,17 @@ pub struct WebhookWithProject {
     pub project_name: String,
 }
 
-/// Extract auth_mode from webhook meta JSON. Defaults to "none".
-fn webhook_auth_mode_from_meta(meta: Option<&JsonValue>) -> &str {
-    meta.and_then(|m| m.get("webhook"))
+/// Omission preserves the public webhook default. An explicit but invalid
+/// auth value must not silently disable the caller's authentication intent.
+fn webhook_auth_mode_from_meta(meta: Option<&JsonValue>) -> &'static str {
+    match meta
+        .and_then(|m| m.get("webhook"))
         .and_then(|w| w.get("auth"))
-        .and_then(|a| a.as_str())
-        .unwrap_or("none")
+    {
+        None => "none",
+        Some(JsonValue::String(mode)) if mode == "none" => "none",
+        Some(_) => "required",
+    }
 }
 
 /// Extract user-declared secret header names from top-level `meta.secret-headers`.
@@ -131,7 +136,7 @@ impl Webhook {
     }
 
     async fn get_webhook_postgres(
-        db: &Pool<Postgres>,
+        db: &crate::db::ScopedPgPool,
         webhook_id: &Uuid,
     ) -> Result<Webhook, WebhookError> {
         let endpoint = sqlx::query_as::<_, Webhook>(
@@ -213,7 +218,7 @@ impl Webhook {
     }
 
     async fn get_by_env_service_path_method_postgres(
-        db: &Pool<Postgres>,
+        db: &crate::db::ScopedPgPool,
         env_id: &Uuid,
         service: &str,
         path: &str,
@@ -290,7 +295,7 @@ impl Webhook {
     }
 
     async fn get_by_env_and_service_postgres(
-        db: &Pool<Postgres>,
+        db: &crate::db::ScopedPgPool,
         env_id: &Uuid,
         service: &str,
     ) -> Result<Vec<Webhook>, WebhookError> {
@@ -354,7 +359,7 @@ impl Webhook {
     }
 
     async fn get_by_env_postgres(
-        db: &Pool<Postgres>,
+        db: &crate::db::ScopedPgPool,
         env_id: &Uuid,
     ) -> Result<Vec<WebhookWithProject>, WebhookError> {
         let endpoints = sqlx::query_as::<_, WebhookWithProject>(
@@ -501,7 +506,7 @@ impl Webhook {
 
     #[allow(clippy::too_many_arguments)]
     async fn insert_webhook_postgres(
-        db: &Pool<Postgres>,
+        db: &crate::db::ScopedPgPool,
         webhook_id: &Uuid,
         build_id: &Uuid,
         service: &str,
@@ -687,7 +692,7 @@ impl Webhook {
     }
 
     async fn find_existing_webhook_id_postgres(
-        db: &Pool<Postgres>,
+        db: &crate::db::ScopedPgPool,
         build_id: &Uuid,
         service: &str,
         path: &str,
@@ -1047,6 +1052,26 @@ mod tests {
             "webhook": {"service": "test", "path": "/test", "auth": "required"}
         })));
         assert_eq!(wh.auth_mode(), "required");
+    }
+
+    #[test]
+    fn explicit_invalid_auth_modes_require_credentials() {
+        for auth in [
+            json!("Required"),
+            json!("optional"),
+            json!(""),
+            json!(null),
+            json!(false),
+            json!({}),
+        ] {
+            let webhook = make_webhook(Some(json!({"webhook":{"auth":auth}})));
+            assert_eq!(webhook.auth_mode(), "required");
+        }
+        assert_eq!(make_webhook(None).auth_mode(), "none");
+        assert_eq!(
+            make_webhook(Some(json!({"webhook":{"auth":"none"}}))).auth_mode(),
+            "none"
+        );
     }
 
     #[test]

@@ -7,7 +7,6 @@ use crate::command::deploy::{is_ad_hoc_default_db, setup_live_build_for_dev_with
 use crate::conf::{
     create_emitter, create_event_publisher, get_merged_src_paths, get_merged_test_paths,
 };
-use crate::profile::{extract_profile_identifiers, resolve_profile_to_uuids};
 
 pub(crate) async fn run_eval(
     code: &str,
@@ -67,33 +66,23 @@ pub(crate) async fn run_eval(
     let has_queue_config =
         !queue_type_str.is_empty() && queue_type_str != "null" && queue_type_str != "none";
 
-    // Only build a database pool when an emitter or event publisher will
-    // actually use it. Ad-hoc default-DB evals skip live-build compilation,
-    // so keep DB-backed providers absent and let Execute validate first.
+    // A managed database always participates in execution admission, even
+    // when emitters and queues are disabled. Ad-hoc local eval stays ephemeral.
     let db_pool = if ad_hoc_default_db {
         None
-    } else if has_emitter_config || has_queue_config {
-        match hot::db::create_db_pool(conf).await {
-            Ok(pool) => Some(std::sync::Arc::new(pool)),
-            Err(e) => {
-                tracing::warn!("Failed to create database pool for eval: {}", e);
-                None
-            }
-        }
     } else {
-        None
+        Some(std::sync::Arc::new(
+            crate::profile::create_cli_db_pool(conf)
+                .await
+                .map_err(|e| format!("Cannot evaluate against configured database: {e}"))?,
+        ))
     };
 
     let emitter = if has_emitter_config {
         if let Some(ref pool) = db_pool {
-            match create_emitter(conf, pool.as_ref()).await {
-                Ok(Some(emitter)) => Some(emitter),
-                Ok(None) => None,
-                Err(e) => {
-                    tracing::warn!("Failed to create emitter for eval: {}", e);
-                    None
-                }
-            }
+            create_emitter(conf, pool.as_ref())
+                .await
+                .map_err(|e| format!("Cannot initialize configured emitter: {e}"))?
         } else {
             tracing::warn!("Cannot create emitter without database connection");
             None
@@ -104,14 +93,9 @@ pub(crate) async fn run_eval(
 
     let event_publisher = if has_queue_config {
         if let Some(ref pool) = db_pool {
-            match create_event_publisher(conf, pool.as_ref()).await {
-                Ok(Some(publisher)) => Some(publisher),
-                Ok(None) => None,
-                Err(e) => {
-                    tracing::warn!("Failed to create event publisher for eval: {}", e);
-                    None
-                }
-            }
+            create_event_publisher(conf, pool.as_ref())
+                .await
+                .map_err(|e| format!("Cannot initialize configured event publisher: {e}"))?
         } else {
             tracing::warn!("Cannot create event publisher without database connection");
             None
@@ -120,84 +104,45 @@ pub(crate) async fn run_eval(
         None
     };
 
-    // Create execution context with proper profile and build resolution
-    let execution_context = if emitter.is_some() || event_publisher.is_some() {
-        let run_id = uuid::Uuid::now_v7();
-
-        // The live build was already set up unconditionally above.
-
-        // Create execution context manually with proper profile resolution
-        let db_uri = conf.get_str("db.uri");
-        if !db_uri.is_empty() {
-            if let Some((user_email, org_slug, env_name)) = extract_profile_identifiers(conf) {
-                // Connect to database to resolve profile identifiers
-                let db = hot::db::create_db_pool(conf)
-                    .await
-                    .map_err(|e| format!("Failed to connect to database: {}", e))?;
-
-                // Resolve profile identifiers to UUIDs
-                let (user_id, env_id, org_id) =
-                    resolve_profile_to_uuids(&db, &user_email, &org_slug, &env_name)
-                        .await
-                        .map_err(|e| format!("Failed to resolve profile: {}", e))?;
-
-                // Bind eval to this project's live build. A global "latest
-                // build" can belong to another project in a shared profile,
-                // corrupting event routing metadata for cross-process sends.
-                let project =
-                    hot::db::Project::get_project_by_env_and_name(&db, &env_id, &project_name)
-                        .await
-                        .map_err(|e| {
-                            format!("Failed to resolve project '{}': {}", project_name, e)
-                        })?
-                        .ok_or_else(|| {
-                            format!(
-                                "Project '{}' was not found after live-build setup",
-                                project_name
-                            )
-                        })?;
-                let build =
-                    hot::db::build::Build::get_live_build_by_project(&db, &project.project_id)
-                        .await
-                        .map_err(|e| {
-                            format!("Failed to resolve live build for '{}': {}", project_name, e)
-                        })?
-                        .ok_or_else(|| {
-                            format!(
-                                "No live build exists for project '{}' after live-build setup",
-                                project_name
-                            )
-                        })?;
-                let build_id = Some(build.build_id);
-                let build_hash = Some(build.hash);
-                let project_id = Some(project.project_id);
-
-                let stream_id = uuid::Uuid::now_v7(); // CLI runs start new streams
-                let execution_context = hot::lang::event::ExecutionContext::new(
-                    run_id,
-                    stream_id,
-                    hot::db::run::RunType::Run.as_id(),
-                    Some(env_id),
-                    Some(user_id),
-                    Some(org_id),
-                    build_id,
-                )
-                .with_build_hash(build_hash)
-                .with_project(project_id, Some(project_name.clone()))
-                .with_env_name(Some(env_name.clone()))
-                .with_org_slug(Some(org_slug.clone()));
-
-                Some(execution_context)
-            } else {
-                None
-            }
-        } else {
-            None
-        }
+    // Resolve metadata through the same handle that execution will receive.
+    let execution_context = if let Some(db) = &db_pool {
+        let (user_id, env, org) =
+            crate::profile::resolve_cli_environment(db.as_ref(), conf).await?;
+        let project =
+            hot::db::Project::get_project_by_env_and_name(db.as_ref(), &env.env_id, &project_name)
+                .await
+                .map_err(|e| format!("Cannot resolve selected project: {e}"))?
+                .ok_or_else(|| {
+                    format!("Project '{project_name}' is missing after live-build setup")
+                })?;
+        let build = hot::db::Build::get_live_build_by_project(db.as_ref(), &project.project_id)
+            .await
+            .map_err(|e| format!("Cannot resolve selected live build: {e}"))?
+            .ok_or_else(|| {
+                format!("Project '{project_name}' has no live build in the selected environment")
+            })?;
+        Some(
+            hot::lang::event::ExecutionContext::new(
+                uuid::Uuid::now_v7(),
+                uuid::Uuid::now_v7(),
+                hot::db::run::RunType::Eval.as_id(),
+                Some(env.env_id),
+                Some(user_id),
+                Some(org.org_id),
+                Some(build.build_id),
+            )
+            .with_build_hash(Some(build.hash))
+            .with_project(Some(project.project_id), Some(project_name.clone()))
+            .with_env_name(Some(env.name))
+            .with_org_slug(Some(org.slug)),
+        )
     } else {
         // For configuration loading and simple eval commands, skip live build setup entirely
         None
     };
+
+    crate::command::run::begin_managed_cli_run(db_pool.as_deref(), execution_context.as_ref())
+        .await?;
 
     // Use the pipeline with emitter, event publisher, and context storage support
     // IMPORTANT: VM execution runs in spawn_blocking to avoid blocking the tokio runtime.
@@ -210,43 +155,66 @@ pub(crate) async fn run_eval(
     let emitter_clone = emitter.clone();
     let execution_context_clone = execution_context.clone();
     let event_publisher_clone = event_publisher.clone();
+    let db_pool_clone = db_pool.clone();
 
     // Same Tokio-handle dance as `run_run` — see comment there.
     let tokio_handle = tokio::runtime::Handle::current();
 
     let (result_tx, result_rx) = tokio::sync::oneshot::channel();
-    std::thread::Builder::new()
+    let spawned = std::thread::Builder::new()
         .name("hot-vm-eval".into())
         .stack_size(64 * 1024 * 1024)
         .spawn(move || {
             let _runtime_guard = tokio_handle.enter();
-            let r = hot::lang::engine::Engine::eval_code_pipeline_with_all_features(
-                &code_owned,
+            let r = hot::lang::engine::Engine::run_unified_pipeline(
                 &src_paths_clone,
                 &test_paths_clone,
                 Some(&conf_for_blocking),
                 Some(&project_name_clone),
+                None,
+                Some(&code_owned),
+                hot::lang::engine::PipelineMode::Execute,
                 emitter_clone,
                 execution_context_clone,
                 event_publisher_clone,
                 context_storage,
+                db_pool_clone,
+                None,
+                None,
+                None,
+                None,
+                None,
+                false,
+                None,
             );
             let _ = result_tx.send(r);
-        })
-        .map_err(|e| format!("Failed to spawn VM thread: {}", e))?;
-    let result = result_rx
-        .await
-        .map_err(|e| format!("VM thread failed: {}", e))?;
+        });
+    let result = match spawned {
+        Ok(_) => result_rx
+            .await
+            .unwrap_or_else(|error| Err(format!("VM thread failed: {error}"))),
+        Err(error) => Err(format!("Failed to spawn VM thread: {error}")),
+    };
 
     // Shutdown emitter and event publisher if present
-    if let Some(emitter) = &emitter {
-        let _ = emitter.shutdown().await;
-    }
+    let emitter_error = if let Some(emitter) = &emitter {
+        emitter.shutdown().await.err()
+    } else {
+        None
+    };
     let publisher_error = if let Some(event_publisher) = &event_publisher {
         event_publisher.shutdown().await.err()
     } else {
         None
     };
+
+    let emitter_error = crate::command::run::finalize_cli_delivery(
+        db_pool.as_deref(),
+        execution_context.as_ref(),
+        &result,
+        emitter_error,
+    )
+    .await;
 
     let result = match result {
         Ok(result) => {
@@ -264,5 +232,9 @@ pub(crate) async fn run_eval(
         }
         Err(e) => Err(format!("Evaluation error: {}", e)),
     };
-    crate::command::run::combine_execution_and_publisher_results(result, publisher_error)
+    crate::command::run::combine_execution_and_delivery_results(
+        result,
+        emitter_error,
+        publisher_error,
+    )
 }

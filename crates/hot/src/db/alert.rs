@@ -412,6 +412,14 @@ impl AlertDestination {
         db: &crate::db::DatabasePool,
         token: &str,
     ) -> Result<AlertDestination, AlertError> {
+        // Token possession is the authorization for this public verification
+        // flow. Discovery is a trusted alert operation, then the write narrows
+        // to the destination's resolved owner.
+        let lookup = db.with_scope(crate::db::DatabaseScope::Maintenance {
+            operation: crate::db::MaintenanceOperation::Alerts,
+            org_id: None,
+        });
+        let db = &lookup;
         // Find destination by token
         let dest = match db {
             crate::db::DatabasePool::Postgres(pool) => {
@@ -447,6 +455,10 @@ impl AlertDestination {
             ));
         }
 
+        let owner = db.with_scope(crate::db::DatabaseScope::Organization {
+            org_id: dest.org_id,
+        });
+        let db = &owner;
         // Mark as verified, clear token
         let now = Utc::now();
         match db {
@@ -2318,7 +2330,15 @@ impl DeliveryInfo {
         let destination =
             AlertDestination::get_by_id_for_org(db, &delivery.destination_id, &alert.org_id)
                 .await?;
-        AlertSubscription::get_by_id_for_org(db, &delivery.subscription_id, &alert.org_id).await?;
+        let subscription =
+            AlertSubscription::get_by_id_for_org(db, &delivery.subscription_id, &alert.org_id)
+                .await?;
+        if subscription
+            .env_id
+            .is_some_and(|env_id| env_id != alert.env_id)
+        {
+            return Err(AlertError::NotFound);
+        }
         if let Some(user_id) = delivery.resolved_user_id {
             crate::db::org::OrgUser::get_org_user(db, &alert.org_id, &user_id)
                 .await
@@ -2999,6 +3019,37 @@ mod tests {
         Uuid::parse_str("00000000-0000-0000-0000-000000000002").unwrap()
     }
 
+    async fn delivery_targets(
+        db: &crate::db::DatabasePool,
+        org_id: &Uuid,
+        env_id: Option<&Uuid>,
+    ) -> (Uuid, Uuid) {
+        let destination = AlertDestination::create(
+            db,
+            org_id,
+            &Uuid::now_v7().to_string(),
+            DestinationType::Webhook,
+            &serde_json::json!({"url": "https://example.test/hook"}),
+            &test_user_id(),
+        )
+        .await
+        .unwrap();
+        let subscription = AlertSubscription::create(
+            db,
+            org_id,
+            env_id,
+            &[],
+            &[destination.alert_destination_id],
+            &test_user_id(),
+        )
+        .await
+        .unwrap();
+        (
+            subscription.alert_subscription_id,
+            destination.alert_destination_id,
+        )
+    }
+
     #[tokio::test]
     async fn test_alert_subscription_uses_subscription_id_mappings() {
         let db = setup_test_db().await;
@@ -3073,8 +3124,8 @@ mod tests {
         )
         .await
         .unwrap();
-        let alert_subscription_id = Uuid::now_v7();
-        let destination_id = Uuid::now_v7();
+        let (alert_subscription_id, destination_id) =
+            delivery_targets(&db, &alert.org_id, None).await;
 
         let delivery = AlertDelivery::create(
             &db,
@@ -3499,10 +3550,16 @@ mod tests {
         )
         .await
         .unwrap();
-        let delivery =
-            AlertDelivery::create(&db, &alert.alert_id, &Uuid::now_v7(), &Uuid::now_v7(), None)
-                .await
-                .unwrap();
+        let (subscription_id, destination_id) = delivery_targets(&db, &alert.org_id, None).await;
+        let delivery = AlertDelivery::create(
+            &db,
+            &alert.alert_id,
+            &subscription_id,
+            &destination_id,
+            None,
+        )
+        .await
+        .unwrap();
         let error = format!(
             "HTTP 502 from https://admin:pw@example.test/hook?token=query-secret\nAuthorization: Bearer header-secret\nresponse body: {{\"secret\":\"body-secret\"}} {}",
             "x".repeat(800)
@@ -3533,5 +3590,69 @@ mod tests {
             MAX_PERSISTED_DELIVERY_ERROR_CHARS + 1
         );
         assert!(truncated.ends_with('…'));
+    }
+
+    #[tokio::test]
+    async fn deliveries_reject_foreign_org_and_environment_targets() {
+        let db = setup_test_db().await;
+        let org_id = Uuid::now_v7();
+        let env_id = Uuid::now_v7();
+        let alert = Alert::create(&db, &org_id, &env_id, "test", &serde_json::json!({}))
+            .await
+            .unwrap();
+        let (subscription, destination) = delivery_targets(&db, &org_id, Some(&env_id)).await;
+        let (org_subscription, _) = delivery_targets(&db, &org_id, None).await;
+        let (other_env_subscription, _) =
+            delivery_targets(&db, &org_id, Some(&Uuid::now_v7())).await;
+        let (foreign_subscription, foreign_destination) =
+            delivery_targets(&db, &Uuid::now_v7(), None).await;
+        for (target_subscription, target_destination) in [
+            (other_env_subscription, destination),
+            (foreign_subscription, destination),
+            (subscription, foreign_destination),
+        ] {
+            assert!(
+                AlertDelivery::create(
+                    &db,
+                    &alert.alert_id,
+                    &target_subscription,
+                    &target_destination,
+                    None
+                )
+                .await
+                .is_err()
+            );
+        }
+        // Exact environment and explicit organization-wide subscriptions work.
+        let delivery =
+            AlertDelivery::create(&db, &alert.alert_id, &subscription, &destination, None)
+                .await
+                .unwrap();
+        AlertDelivery::create(&db, &alert.alert_id, &org_subscription, &destination, None)
+            .await
+            .unwrap();
+        DeliveryInfo::fetch(&db, delivery.clone()).await.unwrap();
+        let crate::db::DatabasePool::Sqlite(pool) = &db else {
+            unreachable!()
+        };
+        assert!(
+            sqlx::query("UPDATE alert_delivery SET subscription_id=? WHERE alert_delivery_id=?")
+                .bind(other_env_subscription)
+                .bind(delivery.alert_delivery_id)
+                .execute(pool)
+                .await
+                .is_err()
+        );
+        // The sender independently rejects a mismatched record from old data or
+        // an in-memory queue payload, even before a database update is attempted.
+        let mut forged = delivery.clone();
+        forged.subscription_id = other_env_subscription;
+        assert!(matches!(
+            DeliveryInfo::fetch(&db, forged).await,
+            Err(AlertError::NotFound)
+        ));
+        AlertDelivery::mark_sent(&db, &delivery.alert_delivery_id)
+            .await
+            .unwrap();
     }
 }

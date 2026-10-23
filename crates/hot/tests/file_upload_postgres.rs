@@ -1,9 +1,16 @@
 //! Run upload retry state against Postgres when HOT_TEST_POSTGRES_URI is set.
 //! Uses the same dedicated test database as the other Postgres integration tests.
 use chrono::{Duration, Utc};
-use hot::db::{self, DatabasePool, env::Env, file_upload};
+use hot::db::{self, DatabasePool, DatabaseScope, file_upload};
 use hot::file_storage::{FileStorage, FileStorageContext, LocalFileStorage};
 use std::sync::Arc;
+use uuid::Uuid;
+
+struct Fixture {
+    org_id: Uuid,
+    env_id: Uuid,
+    created_by_user_id: Uuid,
+}
 
 #[tokio::test]
 async fn postgres_upload_retry_state() {
@@ -11,19 +18,51 @@ async fn postgres_upload_retry_state() {
         eprintln!("skipping: HOT_TEST_POSTGRES_URI not set");
         return;
     };
-    let conf = hot::val!({"uri": uri, "schema": "hot"});
+    // The dedicated admin test URI; restricted-role qualification is covered
+    // by postgres_rls.
+    let conf = hot::val!({"uri": uri, "schema": "hot", "rls": {"enforce": false}});
     db::run_migrations(&conf).await.unwrap();
-    let db = Arc::new(db::create_db_pool(&conf).await.unwrap());
-    // The test database is shared with the other Postgres integration tests,
-    // so default data may already exist; seed it only when it is missing.
-    let env = match Env::get_default_env(&db).await {
-        Ok(env) => env,
-        Err(_) => {
-            // Another test may seed concurrently; its row is just as good.
-            let _ = db::insert_default_data(&db).await;
-            Env::get_default_env(&db).await.unwrap()
-        }
+    let pool = Arc::new(db::create_db_pool(&conf).await.unwrap());
+    // The shared test database survives runs, so the fixture gets its own
+    // identity instead of relying on default data.
+    let env = Fixture {
+        org_id: Uuid::now_v7(),
+        env_id: Uuid::now_v7(),
+        created_by_user_id: Uuid::now_v7(),
     };
+    let onboarding = pool.with_scope(DatabaseScope::Bootstrap(db::BootstrapOperation::Onboarding));
+    let user = env.created_by_user_id;
+    db::User::insert_user(
+        &onboarding,
+        &user,
+        &format!("upload-{user}@example.test"),
+        None,
+        Some(&user),
+    )
+    .await
+    .unwrap();
+    db::Org::insert_org(
+        &onboarding,
+        &env.org_id,
+        "Upload fixture",
+        &format!("upload-{}", env.org_id),
+        "individual",
+        &user,
+    )
+    .await
+    .unwrap();
+    db::Env::insert_env(&onboarding, &env.env_id, &env.org_id, "development", &user)
+        .await
+        .unwrap();
+    let db = Arc::new(pool.with_scope(DatabaseScope::Environment {
+        org_id: env.org_id,
+        env_id: env.env_id,
+    }));
+    // Expired uploads are swept across accounts by the worker's retention job.
+    let retention = pool.with_scope(DatabaseScope::Maintenance {
+        operation: db::MaintenanceOperation::Retention,
+        org_id: None,
+    });
     let dir = tempfile::TempDir::new().unwrap();
     let storage = LocalFileStorage::new(dir.path().to_path_buf());
     let ctx = FileStorageContext::minimal(
@@ -162,7 +201,7 @@ async fn postgres_upload_retry_state() {
         .await
         .unwrap();
     assert!(
-        file_upload::cleanup_expired_uploads(&db)
+        file_upload::cleanup_expired_uploads(&retention)
             .await
             .unwrap()
             .is_empty()
@@ -176,10 +215,12 @@ async fn postgres_upload_retry_state() {
         .execute(pool)
         .await
         .unwrap();
-    let swept = file_upload::cleanup_expired_uploads(&db).await.unwrap();
+    let swept = file_upload::cleanup_expired_uploads(&retention)
+        .await
+        .unwrap();
     assert_eq!(swept.len(), 1);
     assert!(
-        file_upload::cleanup_expired_uploads(&db)
+        file_upload::cleanup_expired_uploads(&retention)
             .await
             .unwrap()
             .is_empty()

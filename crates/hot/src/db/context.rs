@@ -1,5 +1,5 @@
 use chrono::{DateTime, Utc};
-use sqlx::{FromRow, Pool, Postgres, Sqlite};
+use sqlx::{FromRow, Pool, Sqlite};
 use thiserror::Error;
 use uuid::Uuid;
 
@@ -65,7 +65,10 @@ impl Context {
         Ok(row)
     }
 
-    async fn get_by_id_postgres(db: &Pool<Postgres>, id: &Uuid) -> Result<Context, ContextError> {
+    async fn get_by_id_postgres(
+        db: &crate::db::ScopedPgPool,
+        id: &Uuid,
+    ) -> Result<Context, ContextError> {
         let row = sqlx::query_as::<_, Context>(
             r#"
             SELECT context_id, env_id, project_id, key, value, description, active,
@@ -113,7 +116,7 @@ impl Context {
     }
 
     async fn get_by_env_postgres(
-        db: &Pool<Postgres>,
+        db: &crate::db::ScopedPgPool,
         env_id: &Uuid,
     ) -> Result<Vec<Context>, ContextError> {
         let rows = sqlx::query_as::<_, Context>(
@@ -168,7 +171,7 @@ impl Context {
     }
 
     async fn get_by_project_postgres(
-        db: &Pool<Postgres>,
+        db: &crate::db::ScopedPgPool,
         project_id: &Uuid,
     ) -> Result<Vec<Context>, ContextError> {
         let rows = sqlx::query_as::<_, Context>(
@@ -240,7 +243,7 @@ impl Context {
     }
 
     async fn get_by_project_paginated_postgres(
-        db: &Pool<Postgres>,
+        db: &crate::db::ScopedPgPool,
         project_id: &Uuid,
         limit: Option<i64>,
         offset: Option<i64>,
@@ -311,7 +314,7 @@ impl Context {
     }
 
     async fn get_by_env_and_key_postgres(
-        db: &Pool<Postgres>,
+        db: &crate::db::ScopedPgPool,
         env_id: &Uuid,
         key: &str,
     ) -> Result<Option<Context>, ContextError> {
@@ -369,7 +372,7 @@ impl Context {
     }
 
     async fn get_by_project_and_key_postgres(
-        db: &Pool<Postgres>,
+        db: &crate::db::ScopedPgPool,
         project_id: &Uuid,
         key: &str,
     ) -> Result<Option<Context>, ContextError> {
@@ -459,7 +462,7 @@ impl Context {
     }
 
     async fn insert_env_postgres(
-        db: &Pool<Postgres>,
+        db: &crate::db::ScopedPgPool,
         context_id: &Uuid,
         env_id: &Uuid,
         key: &str,
@@ -559,7 +562,7 @@ impl Context {
     }
 
     async fn insert_project_postgres(
-        db: &Pool<Postgres>,
+        db: &crate::db::ScopedPgPool,
         context_id: &Uuid,
         project_id: &Uuid,
         key: &str,
@@ -655,7 +658,7 @@ impl Context {
     }
 
     async fn update_postgres(
-        db: &Pool<Postgres>,
+        db: &crate::db::ScopedPgPool,
         context_id: &Uuid,
         value: &str,
         description: Option<&str>,
@@ -704,7 +707,10 @@ impl Context {
         Ok(())
     }
 
-    async fn delete_postgres(db: &Pool<Postgres>, context_id: &Uuid) -> Result<(), ContextError> {
+    async fn delete_postgres(
+        db: &crate::db::ScopedPgPool,
+        context_id: &Uuid,
+    ) -> Result<(), ContextError> {
         sqlx::query(
             r#"
             UPDATE context
@@ -760,7 +766,7 @@ impl Context {
     }
 
     async fn get_count_by_env_postgres(
-        db: &Pool<Postgres>,
+        db: &crate::db::ScopedPgPool,
         env_id: &Uuid,
     ) -> Result<i64, ContextError> {
         let count: i64 = sqlx::query_scalar(
@@ -809,7 +815,7 @@ impl Context {
     }
 
     async fn get_count_by_project_postgres(
-        db: &Pool<Postgres>,
+        db: &crate::db::ScopedPgPool,
         project_id: &Uuid,
     ) -> Result<i64, ContextError> {
         let count: i64 = sqlx::query_scalar(

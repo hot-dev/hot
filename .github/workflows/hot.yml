@@ -69,6 +69,9 @@ jobs:
       - name: Cargo clippy
         run: cargo clippy --workspace --all-targets --locked -j 4 -- -D warnings
 
+      - name: Browser scope contract
+        run: node --test scripts/test-app-scope.mjs
+
       - name: Checkout published AI skill mirror
         uses: actions/checkout@v5
         with:
@@ -135,6 +138,29 @@ jobs:
           docker exec "${{ job.services.postgres.id }}" \
             bash -lc 'apt-get update && apt-get install -y postgresql-18-pgvector'
 
+      - name: Install psql for upgrade provisioning tests
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y postgresql-client
+
+      # Cargo runs crate tests outside the workspace root. Expose checkout
+      # assets through executable-relative discovery without changing the
+      # default database/profile behavior via HOT_HOME.
+      - name: Prepare checkout runtime for Rust tests
+        run: |
+          runtime_assets="$RUNNER_TEMP/hot-rust-test-resources"
+          mkdir -p "$runtime_assets" target/debug/deps
+          for entry in "$GITHUB_WORKSPACE/resources/"*; do
+            ln -s "$entry" "$runtime_assets/${entry##*/}"
+          done
+          ln -s "$GITHUB_WORKSPACE/hot/pkg" "$runtime_assets/pkg"
+          for destination in target/debug/resources target/debug/deps/resources; do
+            if [[ -L "$destination" ]]; then
+              rm "$destination"
+            fi
+            ln -s "$runtime_assets" "$destination"
+          done
+
       - name: Run Rust tests
         env:
           REDIS_URL: redis://localhost:6379
@@ -199,18 +225,29 @@ jobs:
           docker exec "${{ job.services.postgres.id }}" \
             bash -lc 'apt-get update && apt-get install -y postgresql-18-pgvector'
 
+      - name: Provision restricted PostgreSQL runtime
+        env:
+          HOT_TEST_POSTGRES_URI: postgres://hot_runtime:hot_runtime@localhost:5432/hot
+        run: |
+          docker exec "${{ job.services.postgres.id }}" psql -U hot -d hot -v ON_ERROR_STOP=1 \
+            -c "CREATE ROLE hot_runtime LOGIN PASSWORD 'hot_runtime' NOSUPERUSER NOBYPASSRLS NOINHERIT NOCREATEDB NOCREATEROLE"
+          cargo run --locked --bin hot -- db migrate -c hot.test.hot --ctx hot/ci.ctx.hot \
+            --db.migration-uri=postgres://hot:hot@localhost:5432/hot
+          docker exec -i "${{ job.services.postgres.id }}" psql -U hot -d hot \
+            -v runtime_role=hot_runtime -v schema=hot < resources/db/postgres/provision_runtime.sql
+
       - name: Run Hot init (full suite, Postgres + Redis)
         env:
-          HOT_TEST_POSTGRES_URI: postgres://hot:hot@localhost:5432/hot
+          HOT_TEST_POSTGRES_URI: postgres://hot_runtime:hot_runtime@localhost:5432/hot
           HOT_TEST_FILE_STORAGE_PATH: ./.hot/pg-full/file
           HOT_REDIS_URI: redis://localhost:6379
           HOT_QUEUE_TYPE: redis
-        run: cargo run --locked --bin hot -- init -c hot.test.hot --ctx hot/ci.ctx.hot
+        run: cargo run --locked --bin hot -- init -c hot.test.hot --ctx hot/ci.ctx.hot --db.migration-uri=postgres://hot:hot@localhost:5432/hot
 
       - name: Run Hot tests (full suite, Postgres + Redis)
         env:
           HOT_TEST_VAR: "set so that :hot.env/vars() is not empty"
-          HOT_TEST_POSTGRES_URI: postgres://hot:hot@localhost:5432/hot
+          HOT_TEST_POSTGRES_URI: postgres://hot_runtime:hot_runtime@localhost:5432/hot
           HOT_TEST_FILE_STORAGE_PATH: ./.hot/pg-full/file
           HOT_REDIS_URI: redis://localhost:6379
           HOT_QUEUE_TYPE: redis
@@ -218,18 +255,18 @@ jobs:
 
       - name: Run Postgres queue smoke init
         env:
-          HOT_TEST_POSTGRES_URI: postgres://hot:hot@localhost:5432/hot
+          HOT_TEST_POSTGRES_URI: postgres://hot_runtime:hot_runtime@localhost:5432/hot
           HOT_REDIS_URI: redis://localhost:6379
           HOT_QUEUE_TYPE: redis
-        run: cargo run --locked --bin hot -- init -c pg.redis.test.hot --ctx hot/ci.ctx.hot
+        run: cargo run --locked --bin hot -- init -c pg.redis.test.hot --ctx hot/ci.ctx.hot --profile local-dev --db.migration-uri=postgres://hot:hot@localhost:5432/hot
 
       - name: Run Postgres queue smoke tests
         env:
           HOT_TEST_VAR: "set so that :hot.env/vars() is not empty"
-          HOT_TEST_POSTGRES_URI: postgres://hot:hot@localhost:5432/hot
+          HOT_TEST_POSTGRES_URI: postgres://hot_runtime:hot_runtime@localhost:5432/hot
           HOT_REDIS_URI: redis://localhost:6379
           HOT_QUEUE_TYPE: redis
-        run: cargo run --locked --bin hot -- test -c pg.redis.test.hot --ctx hot/ci.ctx.hot
+        run: cargo run --locked --bin hot -- test -c pg.redis.test.hot --ctx hot/ci.ctx.hot --profile local-dev
 
       - name: Run Hot Box tests (Docker integration)
         env:
@@ -239,7 +276,7 @@ jobs:
       - name: Run Hot Box tests (full suite, Postgres + Redis)
         env:
           HOT_BOX_ENABLED: true
-          HOT_TEST_POSTGRES_URI: postgres://hot:hot@localhost:5432/hot
+          HOT_TEST_POSTGRES_URI: postgres://hot_runtime:hot_runtime@localhost:5432/hot
           HOT_TEST_FILE_STORAGE_PATH: ./.hot/pg-full/file
           HOT_REDIS_URI: redis://localhost:6379
           HOT_QUEUE_TYPE: redis

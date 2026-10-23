@@ -41,8 +41,9 @@ fn resolve_local_build_storage_path(
 }
 
 pub(crate) fn is_ad_hoc_default_db(conf: &Val) -> bool {
-    let db_uri = conf.get_str("db.uri");
+    let db_uri = hot::db::get_db_uri_from_conf(conf);
     !hot::lang::cache::paths::has_project_config()
+        && conf.get_bool_or_default("__host.ad-hoc-default-db", false)
         && (db_uri == hot::db::DEFAULT_DB_URI || db_uri.starts_with("sqlite:.hot/"))
 }
 
@@ -199,50 +200,6 @@ enum DevLiveBuildValidation {
     RuntimePreflight(ahash::AHashSet<String>),
 }
 
-#[derive(Clone, Copy)]
-enum LiveBuildEarlyReturn {
-    AdHocDefaultDb,
-    MissingProfileIdentifiers,
-    ProfileResolutionFailed,
-    DatabaseUnavailable,
-}
-
-fn should_run_standalone_runtime_preflight(
-    validation: &DevLiveBuildValidation,
-    reason: LiveBuildEarlyReturn,
-) -> bool {
-    matches!(validation, DevLiveBuildValidation::RuntimePreflight(_))
-        && matches!(
-            reason,
-            LiveBuildEarlyReturn::MissingProfileIdentifiers
-                | LiveBuildEarlyReturn::ProfileResolutionFailed
-        )
-}
-
-fn standalone_runtime_preflight_for_early_return(
-    validation: &DevLiveBuildValidation,
-    reason: LiveBuildEarlyReturn,
-    src_paths: &[String],
-    project_name: &str,
-    conf: &Val,
-    color: bool,
-) -> Result<(), String> {
-    if !should_run_standalone_runtime_preflight(validation, reason) {
-        return Ok(());
-    }
-
-    let DevLiveBuildValidation::RuntimePreflight(available_context_keys) = validation else {
-        unreachable!("runtime preflight policy checked above");
-    };
-    hot::build::preflight_runtime_metadata_from_sources(
-        src_paths,
-        project_name,
-        conf,
-        available_context_keys,
-        color,
-    )
-}
-
 async fn setup_live_build_for_dev_with_validation(
     conf: &Val,
     global_options: &GlobalOptions,
@@ -264,14 +221,6 @@ async fn setup_live_build_for_dev_with_validation(
     // doomed connection attempts.
     if is_ad_hoc_default_db(conf) {
         tracing::debug!("Out-of-project run with default sqlite db, skipping live build setup");
-        standalone_runtime_preflight_for_early_return(
-            &validation,
-            LiveBuildEarlyReturn::AdHocDefaultDb,
-            src_paths,
-            &project_name,
-            conf,
-            color,
-        )?;
         return Ok(());
     }
 
@@ -301,78 +250,23 @@ async fn setup_live_build_for_dev_with_validation(
     hot::build::scan_build_inputs(&scan_context, Some(conf))?;
 
     // Check if database is configured
-    let db_uri = conf.get_str("db.uri");
+    let db_uri = hot::db::get_db_uri_from_conf(conf);
     if db_uri.is_empty() {
-        // No database configured - skip live build creation
-        tracing::debug!("No database configured, skipping live build creation");
-        return Ok(());
+        return Err("Configured database URI is empty".into());
     }
 
-    tracing::debug!("Database configured: {}, setting up live build", db_uri);
-
-    // Extract profile identifiers
-    let (user_email, org_slug, env_name) = match extract_profile_identifiers(conf) {
-        Some(profile) => {
-            tracing::debug!(
-                "Profile configured: user={}, org={}, env={}",
-                profile.0,
-                profile.1,
-                profile.2
-            );
-            profile
-        }
-        None => {
-            tracing::debug!("No profile configured, skipping live build creation");
-            standalone_runtime_preflight_for_early_return(
-                &validation,
-                LiveBuildEarlyReturn::MissingProfileIdentifiers,
-                src_paths,
-                &project_name,
-                conf,
-                color,
-            )?;
-            return Ok(());
-        }
-    };
+    tracing::debug!(
+        "Database configured: {}, setting up live build",
+        hot::db::redact_password(&db_uri)
+    );
 
     // Connect to database
-    let db = match hot::db::create_db_pool(conf).await {
-        Ok(pool) => pool,
-        Err(e) => {
-            tracing::debug!("Failed to connect to database: {}, skipping live build", e);
-            standalone_runtime_preflight_for_early_return(
-                &validation,
-                LiveBuildEarlyReturn::DatabaseUnavailable,
-                src_paths,
-                &project_name,
-                conf,
-                color,
-            )?;
-            return Ok(());
-        }
-    };
+    let db = crate::profile::create_cli_db_pool(conf)
+        .await
+        .map_err(|e| format!("Cannot prepare live build against configured database: {e}"))?;
 
-    // Resolve profile identifiers to UUIDs
-    // If resolution fails, skip live build (non-fatal for CLI usage without proper project setup)
-    let (user_id, env_id, org_id) =
-        match resolve_profile_to_uuids(&db, &user_email, &org_slug, &env_name).await {
-            Ok(ids) => ids,
-            Err(e) => {
-                tracing::debug!(
-                    "Profile resolution failed: {}, skipping live build creation",
-                    e
-                );
-                standalone_runtime_preflight_for_early_return(
-                    &validation,
-                    LiveBuildEarlyReturn::ProfileResolutionFailed,
-                    src_paths,
-                    &project_name,
-                    conf,
-                    color,
-                )?;
-                return Ok(());
-            }
-        };
+    // Preserve the selected identity; an unambiguous local database may omit a profile.
+    let (user_id, env_id, org_id) = crate::profile::resolve_cli_identity(&db, conf).await?;
 
     // Create build context
     let build_context = hot::build::BuildContext::new(
@@ -432,7 +326,7 @@ pub(crate) async fn run_deploy(
         // Create a new bundle build from current source
         info!("No build ID provided, creating new bundle build from current source...");
 
-        let db = hot::db::create_db_pool(conf)
+        let db = crate::profile::create_cli_db_pool(conf)
             .await
             .map_err(|e| format!("Failed to connect to local database: {}", e))?;
 
@@ -447,16 +341,7 @@ pub(crate) async fn run_deploy(
             &global_options.src_paths,
         );
 
-        // Get profile info (org_id and env_id) for build context
-        let (org_id_opt, env_id_opt) =
-            if let Some((user_email, org_slug, env_name)) = extract_profile_identifiers(conf) {
-                match resolve_profile_to_uuids(&db, &user_email, &org_slug, &env_name).await {
-                    Ok((_user_uuid, env_uuid, org_uuid)) => (Some(org_uuid), Some(env_uuid)),
-                    Err(_) => (None, None),
-                }
-            } else {
-                (None, None)
-            };
+        let (user_id, env_id, org_id) = crate::profile::resolve_cli_identity(&db, conf).await?;
 
         let secret_scan_opts = build_secret_scan_opts(conf, allow_secret_shape);
         let (resource_paths, respect_gitignore, resource_excludes) = resource_bundle_options(
@@ -467,9 +352,9 @@ pub(crate) async fn run_deploy(
         );
 
         let build_context = hot::build::BuildContext::new(
-            None, // user_id - will be inferred from context
-            env_id_opt,
-            org_id_opt,
+            Some(user_id),
+            Some(env_id),
+            Some(org_id),
             None, // Will generate new project_id if needed
             project_name,
             src_paths.clone(),
@@ -776,7 +661,7 @@ async fn upload_via_api(build_uuid: Uuid, conf: &Val) -> Result<Uuid, String> {
     info!("Uploading build {} to remote environment...", build_uuid);
 
     // Get the build from local database
-    let db = hot::db::create_db_pool(conf)
+    let db = crate::profile::create_cli_db_pool(conf)
         .await
         .map_err(|e| format!("Failed to connect to local database: {}", e))?;
 
@@ -786,7 +671,7 @@ async fn upload_via_api(build_uuid: Uuid, conf: &Val) -> Result<Uuid, String> {
 
     // Get profile info (org_id and env_id) for storage operations
     let (org_id, env_id) =
-        if let Some((user_email, org_slug, env_name)) = extract_profile_identifiers(conf) {
+        if let Some((user_email, org_slug, env_name)) = extract_profile_identifiers(conf)? {
             match resolve_profile_to_uuids(&db, &user_email, &org_slug, &env_name).await {
                 Ok((_user_uuid, env_uuid, org_uuid)) => (org_uuid, env_uuid),
                 Err(e) => return Err(format!("Failed to resolve profile: {}", e)),
@@ -794,6 +679,7 @@ async fn upload_via_api(build_uuid: Uuid, conf: &Val) -> Result<Uuid, String> {
         } else {
             return Err("Profile configuration required for build upload".to_string());
         };
+    crate::profile::ensure_build_environment(&db, &build_uuid, &env_id).await?;
 
     // Check if this is a live build
     let (actual_build_uuid, upload_build, build_data) = if build.is_live() {
@@ -1059,11 +945,11 @@ async fn upload_via_api(build_uuid: Uuid, conf: &Val) -> Result<Uuid, String> {
 async fn deploy_via_database(build_uuid: Uuid, conf: &Val, strict: bool) -> Result<(), String> {
     // Extract and resolve profile IDs for execution context
     let (user_id, env_id, org_id) =
-        if let Some((user_email, org_slug, env_name)) = extract_profile_identifiers(conf) {
+        if let Some((user_email, org_slug, env_name)) = extract_profile_identifiers(conf)? {
             let db_uri = conf.get_str("db.uri");
             if !db_uri.is_empty() {
                 // Connect to database to resolve profile identifiers
-                let db = match hot::db::create_db_pool(conf).await {
+                let db = match crate::profile::create_cli_db_pool(conf).await {
                     Ok(db) => db,
                     Err(e) => {
                         return Err(format!(
@@ -1094,7 +980,7 @@ async fn deploy_via_database(build_uuid: Uuid, conf: &Val, strict: bool) -> Resu
     let env_id = env_id.ok_or("Environment ID is required for deploy command")?;
 
     // Create database connection
-    let db = hot::db::create_db_pool(conf)
+    let db = crate::profile::create_cli_db_pool(conf)
         .await
         .map_err(|e| format!("Failed to connect to database: {}", e))?;
 
@@ -1108,6 +994,7 @@ async fn deploy_via_database(build_uuid: Uuid, conf: &Val, strict: bool) -> Resu
         Ok(build) => build,
         Err(_) => return Err(format!("Build not found: {}", build_uuid)),
     };
+    crate::profile::ensure_build_environment(&db, &build_uuid, &env_id).await?;
 
     // Validate requirements for bundle builds before deploying
     if build.is_bundle() {
@@ -1185,28 +1072,15 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_standalone_runtime_preflight_only_runs_for_usable_db_profile_edges() {
-        let runtime = DevLiveBuildValidation::RuntimePreflight(ahash::AHashSet::new());
-        assert!(should_run_standalone_runtime_preflight(
-            &runtime,
-            LiveBuildEarlyReturn::MissingProfileIdentifiers,
+    fn explicit_profile_never_uses_ad_hoc_database_fallback() {
+        assert!(!is_ad_hoc_default_db(
+            &hot::val!({"profile":{"set":"missing"}})
         ));
-        assert!(should_run_standalone_runtime_preflight(
-            &runtime,
-            LiveBuildEarlyReturn::ProfileResolutionFailed,
+        assert!(!is_ad_hoc_default_db(
+            &hot::val!({"db":{"uri":"postgres://localhost/example"}})
         ));
-        assert!(!should_run_standalone_runtime_preflight(
-            &runtime,
-            LiveBuildEarlyReturn::AdHocDefaultDb,
-        ));
-        assert!(!should_run_standalone_runtime_preflight(
-            &runtime,
-            LiveBuildEarlyReturn::DatabaseUnavailable,
-        ));
-
-        assert!(!should_run_standalone_runtime_preflight(
-            &DevLiveBuildValidation::Structural,
-            LiveBuildEarlyReturn::MissingProfileIdentifiers,
+        assert!(!is_ad_hoc_default_db(
+            &hot::val!({"uri":"postgresql://localhost/example"})
         ));
     }
 

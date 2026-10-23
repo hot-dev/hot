@@ -1,6 +1,7 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
+    {% include "scope_controls.html" %}
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>{{ title }} - hot.dev</title>
@@ -389,9 +390,13 @@
         <!-- Breadcrumb Bar (always rendered — contains org/env selectors + page breadcrumbs) -->
         <nav class="flex flex-col md:flex-row mb-4 md:justify-between md:items-center sticky top-0 z-10 bg-white dark:bg-black py-2 -mx-4 px-4 border-b border-gray-200 dark:border-gray-700/50" aria-label="Breadcrumb" {% block sse_data_attrs %}{% endblock %}>
             <div class="inline-flex items-center min-w-0">
+                {% match page_context.current_org %}{% when Some with (selected) %}
+                {% match selected.parent_org_id %}{% when Some with (parent_id) %}
+                {% for parent in page_context.user_orgs %}{% if parent.org_id == *parent_id %}<a href="/@{{ parent.slug }}" class="text-sm text-gray-500 mr-2">{{ parent.name }} /</a>{% endif %}{% endfor %}
+                {% when None %}{% endmatch %}{% when None %}{% endmatch %}
                 <!-- Organization Selector -->
                 {% if page_context.user_orgs.len() > 0 %}
-                <div class="relative inline-flex items-center" x-data="{ open: false }">
+                <div class="relative inline-flex items-center" x-data="{ open: false, query: '' }">
                     <button @click="open = !open" :aria-expanded="open" aria-haspopup="true" class="inline-flex items-center text-lg font-semibold text-gray-700 dark:text-gray-300 hover:text-gray-900 dark:hover:text-white transition-colors duration-200 px-1 gap-1 focus-ring rounded">
                         <span class="truncate max-w-[200px]">{% match page_context.current_org %}{% when Some with (org) %}{{ org.name }}{% when None %}Select Org{% endmatch %}</span>
                         <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" class="w-4 h-4 flex-shrink-0 opacity-50">
@@ -399,13 +404,15 @@
                         </svg>
                     </button>
                     <div x-cloak x-show="open" @click.away="open = false" @keydown.escape.window="open = false" class="absolute left-0 top-full mt-2 w-64 bg-white dark:bg-gray-800 text-gray-800 dark:text-white rounded-md shadow-lg py-1 z-50 border border-gray-200 dark:border-gray-700">
+                        <input type="search" x-model="query" placeholder="Find organization" aria-label="Find organization" class="w-full px-4 py-2 bg-transparent">
+                        <div style="max-height: 20rem; overflow-y: auto">
                         {% for org in page_context.user_orgs %}
-                        <form action="/switch-org/{{ org.org_id }}" method="post">
+                        <form action="/switch-org/{{ org.org_id }}" method="post" x-show="$el.textContent.toLowerCase().includes(query.toLowerCase())">
                             <button type="submit" class="block w-full text-left px-4 py-2 text-sm text-gray-800 dark:text-white hover:bg-gray-100 dark:hover:bg-gray-700 transition-colors duration-200 focus-ring {% match page_context.current_org %}{% when Some with (current) %}{% if current.org_id == org.org_id %}bg-hot-red-700 text-white hover:bg-hot-red-800 hover:text-white{% endif %}{% when None %}{% endmatch %}">
                                 <div class="flex items-center justify-between">
                                     <div class="min-w-0">
-                                        <span class="truncate block">{{ org.name }}{% if org.is_individual() %} <span class="ml-1 inline-flex items-center px-1.5 py-0.5 rounded text-xs font-medium bg-gray-100 dark:bg-gray-700 text-gray-600 dark:text-gray-300 align-middle">Individual</span>{% endif %}</span>
-                                        <span class="truncate block text-xs opacity-60 font-mono">@{{ org.slug }}</span>
+                                        <span class="truncate block">{% if org.is_child() %}↳ {% endif %}{{ org.name }}{% if org.is_individual() %} <span class="ml-1 inline-flex items-center px-1.5 py-0.5 rounded text-xs font-medium bg-gray-100 dark:bg-gray-700 text-gray-600 dark:text-gray-300 align-middle">Individual</span>{% endif %}</span>
+                                        <span class="truncate block text-xs opacity-60 font-mono">@{{ org.slug }} · {{ org.lifecycle_state }}</span>
                                     </div>
                                     {% match page_context.current_org %}{% when Some with (current) %}{% if current.org_id == org.org_id %}
                                     <svg xmlns="http://www.w3.org/2000/svg" class="h-4 w-4 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor">
@@ -416,6 +423,7 @@
                             </button>
                         </form>
                         {% endfor %}
+                        </div>
                         <div class="border-t border-gray-200 dark:border-gray-700 my-1"></div>
                         <a href="/orgs" class="block px-4 py-2 text-sm text-gray-800 dark:text-white hover:bg-gray-100 dark:hover:bg-gray-700 transition-colors duration-200">
                             <div class="flex items-center gap-2">

@@ -5,7 +5,8 @@
 //! looks up the verified domain record and injects the resolved `env_id`
 //! so downstream handlers know which environment to operate against.
 //!
-//! Uses a simple in-memory cache with TTL to avoid DB lookups on every request.
+//! Caches negative lookups and environment ownership, but verifies live domain
+//! ownership on every positive request so another instance can revoke a route.
 
 use ahash::AHashMap;
 use axum::{
@@ -183,8 +184,8 @@ fn is_known_host(host: &str) -> bool {
 /// For each incoming request:
 /// 1. Extract the `Host` header
 /// 2. Skip if it's a known API host (api.hot.dev, localhost, configured hosts, etc.)
-/// 3. Check the domain cache
-/// 4. On cache miss, query the DB for a verified domain record
+/// 3. Check the negative cache
+/// 4. Query the DB for the current verified domain record
 /// 5. If found, inject `ResolvedDomain` into request extensions
 /// 6. If not found, return 404
 pub async fn domain_resolution_middleware(
@@ -192,6 +193,9 @@ pub async fn domain_resolution_middleware(
     mut request: Request,
     next: Next,
 ) -> Result<Response, StatusCode> {
+    let db = Arc::new(db.with_scope(hot::db::DatabaseScope::Bootstrap(
+        hot::db::BootstrapOperation::Routing,
+    )));
     // Extract host header
     let host = request
         .headers()
@@ -216,39 +220,36 @@ pub async fn domain_resolution_middleware(
         return Ok(next.run(request).await);
     }
 
-    // Check cache
-    match cache.get(&host) {
-        Some(Some(ids)) => {
-            debug!("Domain cache hit: {} -> env {}", host, ids.env_id);
-            request.extensions_mut().insert(ResolvedDomain {
-                domain: host,
-                env_id: ids.env_id,
-                org_id: ids.org_id,
-            });
-            return Ok(next.run(request).await);
-        }
+    // A positive entry is not routing authority: deletion/verification changes
+    // on another API instance do not invalidate this process's cache.
+    let cached_ids = match cache.get(&host) {
+        Some(Some(ids)) => Some(ids),
         Some(None) => {
             debug!("Domain cache hit (negative): {}", host);
             return Err(StatusCode::NOT_FOUND);
         }
-        None => {
-            // Cache miss: query DB
-        }
-    }
+        None => None,
+    };
 
     // Query DB for the domain, then look up the env to get org_id
     match Domain::get_by_domain_name(&db, &host).await {
         Ok(domain) => {
             let env_id = domain.env_id;
-            let org_id = match hot::db::Env::get_env(&db, &env_id).await {
-                Ok(env) => env.org_id,
-                Err(_) => {
-                    debug!(
-                        "Domain {} resolved to env {} but env lookup failed",
-                        host, env_id
-                    );
-                    cache.insert(host, None);
-                    return Err(StatusCode::NOT_FOUND);
+            // Environment ownership is immutable. Reuse it only when the live
+            // domain still points to the cached environment.
+            let org_id = if let Some(ids) = cached_ids.filter(|ids| ids.env_id == env_id) {
+                ids.org_id
+            } else {
+                match hot::db::Env::get_env(&db, &env_id).await {
+                    Ok(env) => env.org_id,
+                    Err(_) => {
+                        debug!(
+                            "Domain {} resolved to env {} but env lookup failed",
+                            host, env_id
+                        );
+                        cache.insert(host, None);
+                        return Err(StatusCode::NOT_FOUND);
+                    }
                 }
             };
             debug!(
@@ -281,6 +282,97 @@ pub async fn domain_resolution_middleware(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn cached_domain_rechecks_remote_reassignment_and_revocation() {
+        use axum::{
+            Extension, Router,
+            body::{Body, to_bytes},
+            middleware,
+            routing::get,
+        };
+        use tower::ServiceExt;
+
+        let db = Arc::new(hot::db::test_db().await);
+        let data = hot::db::insert_test_data(&db).await.unwrap();
+        let other_org = Uuid::now_v7();
+        let other_env = Uuid::now_v7();
+        hot::db::Org::insert_org(
+            &db,
+            &other_org,
+            "Other",
+            &other_org.to_string(),
+            "organization",
+            &data.user_id,
+        )
+        .await
+        .unwrap();
+        hot::db::Env::insert_env(&db, &other_env, &other_org, "production", &data.user_id)
+            .await
+            .unwrap();
+        let DatabasePool::Sqlite(pool) = db.as_ref() else {
+            unreachable!()
+        };
+        sqlx::query("UPDATE org SET features = ? WHERE org_id IN (?, ?)")
+            .bind(r#"{"custom_domains": 2}"#)
+            .bind(data.org_id)
+            .bind(other_org)
+            .execute(pool)
+            .await
+            .unwrap();
+        let host = "routed.example.com";
+        let original = Domain::create(&db, &data.env_id, host).await.unwrap();
+        Domain::mark_verified(&db, &original.domain_id)
+            .await
+            .unwrap();
+        let app = Router::new()
+            .route(
+                "/scope",
+                get(|Extension(domain): Extension<ResolvedDomain>| async move {
+                    format!("{}:{}", domain.org_id, domain.env_id)
+                }),
+            )
+            .layer(middleware::from_fn_with_state(
+                (db.clone(), DomainCache::new()),
+                domain_resolution_middleware,
+            ));
+        let request = || {
+            axum::http::Request::builder()
+                .uri("/scope")
+                .header("host", host)
+                .body(Body::empty())
+                .unwrap()
+        };
+        let response = app.clone().oneshot(request()).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            to_bytes(response.into_body(), 1024).await.unwrap(),
+            format!("{}:{}", data.org_id, data.env_id)
+        );
+
+        // Simulate deletion, cleanup and reassignment on another server. The
+        // warmed local cache receives no invalidation message.
+        Domain::soft_delete(&db, &original.domain_id).await.unwrap();
+        Domain::hard_delete(&db, &original.domain_id).await.unwrap();
+        let replacement = Domain::create(&db, &other_env, host).await.unwrap();
+        Domain::mark_verified(&db, &replacement.domain_id)
+            .await
+            .unwrap();
+        let response = app.clone().oneshot(request()).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            to_bytes(response.into_body(), 1024).await.unwrap(),
+            format!("{other_org}:{other_env}")
+        );
+
+        Domain::soft_delete(&db, &replacement.domain_id)
+            .await
+            .unwrap();
+        assert_eq!(
+            app.oneshot(request()).await.unwrap().status(),
+            StatusCode::NOT_FOUND
+        );
+    }
 
     #[test]
     fn test_known_hosts() {

@@ -1,0 +1,84 @@
+<script>
+// The page's scope is immutable. Cookies only choose the next navigation default.
+(() => {
+    const orgId = '{% match page_context.current_org %}{% when Some with (org) %}{{ org.org_id }}{% when None %}{% endmatch %}';
+    const envId = '{% match page_context.current_env %}{% when Some with (env) %}{{ env.env_id }}{% when None %}{% endmatch %}';
+    function localScope(raw) {
+        const url = new URL(raw, window.location.href);
+        if (url.origin !== window.location.origin || !orgId || url.pathname.startsWith('/@') ||
+            /^\/(switch-org|switch-env|auth|signout)(\/|$)/.test(url.pathname) ||
+            /^\/envs\/[^/]+\/switch$/.test(url.pathname)) return null;
+        return url;
+    }
+    function scopedUrl(raw) {
+        const url = localScope(raw);
+        if (!url) return raw;
+        if (!url.searchParams.has('org_id')) url.searchParams.set('org_id', orgId);
+        if (envId && !url.searchParams.has('env_id')) url.searchParams.set('env_id', envId);
+        return url.pathname + url.search + url.hash;
+    }
+    // Programmatic navigation must carry the same immutable scope as links.
+    window.hotScopeUrl = scopedUrl;
+    function bindGetForm(form) {
+        const url = localScope(form.action);
+        if (form.method.toLowerCase() !== 'get' || !url) return;
+        for (const [name, value] of [['org_id', url.searchParams.get('org_id') || orgId], ['env_id', url.searchParams.get('env_id') || envId]]) {
+            if (!value || form.querySelector(`[name="${name}"]`)) continue;
+            const input = document.createElement('input');
+            input.type = 'hidden'; input.name = name; input.value = value;
+            form.appendChild(input);
+        }
+    }
+    function bindScope(root) {
+        root.querySelectorAll('a[href], form[action]').forEach(element => {
+            if (element.tagName === 'FORM') bindGetForm(element);
+            const attribute = element.tagName === 'FORM' ? 'action' : 'href';
+            const original = element.getAttribute(attribute);
+            if (!original || original.startsWith('#') || /^(mailto|tel|javascript):/.test(original)) return;
+            const scoped = scopedUrl(original);
+            if (scoped !== original) element.setAttribute(attribute, scoped);
+        });
+    }
+    document.addEventListener('DOMContentLoaded', () => {
+        // Reloads and copied links must keep the rendered workspace as well.
+        const current = scopedUrl(window.location.href);
+        if (current !== window.location.href) window.history.replaceState(window.history.state, '', current);
+        bindScope(document);
+    });
+    // Charts, inspectors, and client-side search can insert links after load.
+    document.addEventListener('click', event => {
+        const anchor = event.target.closest?.('a[href]');
+        if (!anchor) return;
+        const original = anchor.getAttribute('href');
+        if (!original || original.startsWith('#') || /^(mailto|tel|javascript):/.test(original)) return;
+        anchor.setAttribute('href', scopedUrl(original));
+    }, true);
+    document.addEventListener('htmx:afterSwap', () => bindScope(document));
+    document.addEventListener('submit', event => {
+        if (event.target instanceof HTMLFormElement) {
+            bindGetForm(event.target);
+            event.target.action = scopedUrl(event.target.action);
+        }
+    }, true);
+    document.addEventListener('htmx:configRequest', event => {
+        const url = localScope(event.detail.path);
+        if (!url) return;
+        event.detail.headers['X-Hot-Org-Id'] = url.searchParams.get('org_id') || orgId;
+        if (envId) event.detail.headers['X-Hot-Env-Id'] = url.searchParams.get('env_id') || envId;
+    });
+    const originalFetch = window.fetch;
+    window.fetch = function(input, init = {}) {
+        const url = localScope(input instanceof Request ? input.url : input);
+        if (!url) return originalFetch.call(this, input, init);
+        const headers = new Headers(input instanceof Request ? input.headers : undefined);
+        new Headers(init.headers).forEach((value, name) => headers.set(name, value));
+        if (!headers.has('X-Hot-Org-Id')) headers.set('X-Hot-Org-Id', url.searchParams.get('org_id') || orgId);
+        if (envId && !headers.has('X-Hot-Env-Id')) headers.set('X-Hot-Env-Id', url.searchParams.get('env_id') || envId);
+        return originalFetch.call(this, input, { ...init, headers });
+    };
+    const OriginalEventSource = window.EventSource;
+    window.EventSource = class extends OriginalEventSource {
+        constructor(url, options) { super(scopedUrl(url), options); }
+    };
+})();
+</script>

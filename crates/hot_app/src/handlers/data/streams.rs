@@ -469,14 +469,9 @@ pub async fn stream_metrics_handler(
                     COUNT(*) FILTER (WHERE t.task_status_id = 2) as running,
                     COUNT(*) FILTER (WHERE t.task_status_id = 3) as completed,
                     COUNT(*) FILTER (WHERE t.task_status_id = 4) as failed,
-                    COALESCE(SUM(CASE
-                        WHEN t.result->'$val'->'err'->>'compute-units' IS NOT NULL
-                            THEN (t.result->'$val'->'err'->>'compute-units')::bigint
-                        WHEN t.result->>'compute-units' IS NOT NULL
-                            THEN (t.result->>'compute-units')::bigint
-                        ELSE 0
-                    END), 0)::bigint as cus
+                    COALESCE(SUM(u.compute_units), 0)::bigint as cus
                 FROM task t
+                CROSS JOIN LATERAL hot.task_usage(t) u
                 {project_join_task}
                 WHERE t.env_id = $1 {project_clause_task} {time_clause_task}"#,
             );
@@ -657,14 +652,9 @@ pub async fn stream_metrics_handler(
                     SUM(CASE WHEN t.task_status_id = 2 THEN 1 ELSE 0 END) as running,
                     SUM(CASE WHEN t.task_status_id = 3 THEN 1 ELSE 0 END) as completed,
                     SUM(CASE WHEN t.task_status_id = 4 THEN 1 ELSE 0 END) as failed,
-                    COALESCE(SUM(CASE
-                        WHEN json_extract(t.result, '$."$val"."err"."compute-units"') IS NOT NULL
-                            THEN CAST(json_extract(t.result, '$."$val"."err"."compute-units"') AS INTEGER)
-                        WHEN json_extract(t.result, '$."compute-units"') IS NOT NULL
-                            THEN CAST(json_extract(t.result, '$."compute-units"') AS INTEGER)
-                        ELSE 0
-                    END), 0) as cus
+                    COALESCE(SUM(u.compute_units), 0) as cus
                 FROM task t
+                JOIN task_usage u ON u.task_id = t.task_id
                 {project_join_task}
                 WHERE t.env_id = ? {project_clause_task} {time_clause_task}"#,
             );

@@ -123,7 +123,7 @@ pub async fn docs_index_handler(
                 // Check if docs are currently being generated
                 let is_generating = if let Some(cache) = crate::build_cache::get_build_docs_cache()
                 {
-                    cache.is_generating(&project.name).await
+                    cache.is_generating(&build.build_id).await
                 } else {
                     false
                 };
@@ -207,7 +207,7 @@ pub async fn docs_index_handler(
                 // Check if docs are generating now (after the get_build_docs call which may trigger generation)
                 let is_generating_now =
                     if let Some(cache) = crate::build_cache::get_build_docs_cache() {
-                        cache.is_generating(&project.name).await
+                        cache.is_generating(&build.build_id).await
                     } else {
                         false
                     };

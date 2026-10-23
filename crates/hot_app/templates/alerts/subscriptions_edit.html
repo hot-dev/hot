@@ -92,10 +92,11 @@
                 <!-- Scope Option -->
                 <div>
                     <label class="flex items-center space-x-3 cursor-pointer">
-                        <input type="checkbox" name="env_specific" value="true"
+                        {% if subscription.env_id.is_some() %}<input type="hidden" name="env_specific" value="true">{% endif %}
+                    <input type="checkbox" disabled name="env_specific" value="true"
                             {% if subscription.env_id.is_some() %}checked{% endif %}
                             class="h-4 w-4 text-hot-red-600 focus:ring-hot-red-500 border-gray-300 dark:border-gray-600 rounded">
-                        <span class="text-sm text-gray-900 dark:text-white">Environment-specific</span>
+                        <span class="text-sm text-gray-900 dark:text-white">Environment-specific (scope is fixed)</span>
                     </label>
                     <p class="mt-1 ml-7 text-sm text-gray-500 dark:text-gray-400">
                         If checked, this subscription only applies to the currently selected environment. 

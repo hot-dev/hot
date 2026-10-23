@@ -6,7 +6,7 @@
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use sqlx::{FromRow, Pool, Postgres, Sqlite};
+use sqlx::{FromRow, Pool, Sqlite};
 use std::error::Error;
 use std::fmt;
 use uuid::Uuid;
@@ -287,7 +287,7 @@ impl Access {
     }
 
     async fn get_access_postgres(
-        db: &Pool<Postgres>,
+        db: &crate::db::ScopedPgPool,
         access_id: &Uuid,
     ) -> Result<Access, AccessError> {
         sqlx::query_as::<_, Access>(

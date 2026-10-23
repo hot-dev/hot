@@ -8,7 +8,7 @@
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use sqlx::{FromRow, Pool, Postgres, Sqlite};
+use sqlx::{FromRow, Pool, Sqlite};
 use std::error::Error;
 use std::fmt;
 use uuid::Uuid;
@@ -373,7 +373,7 @@ impl ServiceKey {
 
     #[allow(clippy::too_many_arguments)]
     async fn insert_postgres(
-        db: &Pool<Postgres>,
+        db: &crate::db::ScopedPgPool,
         service_key_id: &Uuid,
         api_key_id: &Uuid,
         env_id: &Uuid,
@@ -445,7 +445,7 @@ impl ServiceKey {
     }
 
     async fn get_service_key_postgres(
-        db: &Pool<Postgres>,
+        db: &crate::db::ScopedPgPool,
         service_key_id: &Uuid,
     ) -> Result<ServiceKey, ServiceKeyError> {
         let row = sqlx::query_as::<_, PostgresServiceKeyRow>(
@@ -544,7 +544,7 @@ impl ServiceKey {
     }
 
     async fn list_by_api_key_postgres(
-        db: &Pool<Postgres>,
+        db: &crate::db::ScopedPgPool,
         api_key_id: &Uuid,
         limit: Option<i64>,
         offset: Option<i64>,
@@ -604,7 +604,7 @@ impl ServiceKey {
     }
 
     async fn list_by_env_postgres(
-        db: &Pool<Postgres>,
+        db: &crate::db::ScopedPgPool,
         env_id: &Uuid,
     ) -> Result<Vec<ServiceKey>, ServiceKeyError> {
         let rows = sqlx::query_as::<_, PostgresServiceKeyRow>(
@@ -671,7 +671,7 @@ impl ServiceKey {
     }
 
     async fn list_active_by_env_postgres(
-        db: &Pool<Postgres>,
+        db: &crate::db::ScopedPgPool,
         env_id: &Uuid,
         limit: Option<i64>,
         offset: Option<i64>,
@@ -731,7 +731,7 @@ impl ServiceKey {
     }
 
     async fn revoke_postgres(
-        db: &Pool<Postgres>,
+        db: &crate::db::ScopedPgPool,
         service_key_id: &Uuid,
     ) -> Result<(), ServiceKeyError> {
         sqlx::query(
@@ -780,7 +780,7 @@ impl ServiceKey {
     }
 
     async fn revoke_all_by_api_key_postgres(
-        db: &Pool<Postgres>,
+        db: &crate::db::ScopedPgPool,
         api_key_id: &Uuid,
     ) -> Result<u64, ServiceKeyError> {
         let result = sqlx::query(

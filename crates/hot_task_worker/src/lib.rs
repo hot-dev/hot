@@ -11,6 +11,7 @@
 
 pub mod box_limits;
 pub mod build_info;
+mod cancellation_quota;
 #[cfg(all(target_os = "linux", feature = "kata"))]
 mod cni;
 mod data_volume;
@@ -28,7 +29,9 @@ use executor::ExecutorError;
 use base64::Engine;
 use base64::engine::general_purpose;
 use hot::data::serialization::Serialization;
-use hot::db::{self, Build, DatabasePool, Env, Project, Task, TaskStatus};
+use hot::db::{
+    self, Build, DatabasePool, DatabaseScope, Env, MaintenanceOperation, Project, Task, TaskStatus,
+};
 use hot::env::retry::RetryConfig;
 use hot::lang::cache::bytecode_cache::{BytecodeCache, CachedBytecode};
 use hot::lang::emitter::EngineEventEmitter;
@@ -88,6 +91,12 @@ async fn cached_usage_stats(
     retention_days: i32,
     cache: &UsageStatsCache,
 ) -> Option<hot::db::subscription::OrgUsageStats> {
+    let org_id = hot::db::Org::billing_owner_id_for(db, &org_id).await.ok()?;
+    let scoped_db = db.with_scope(DatabaseScope::Maintenance {
+        operation: MaintenanceOperation::Billing,
+        org_id: Some(org_id),
+    });
+    let db = &scoped_db;
     if let Some(stats) = fresh_cached_usage(cache, &org_id).await {
         return Some(stats);
     }
@@ -100,7 +109,12 @@ async fn cached_usage_stats(
 
     let stats = match tokio::time::timeout(
         DB_CALL_TIMEOUT,
-        hot::db::subscription::OrgUsageStats::calculate(db, &org_id, period_start, retention_days),
+        hot::db::subscription::OrgUsageStats::calculate_account(
+            db,
+            &org_id,
+            period_start,
+            retention_days,
+        ),
     )
     .await
     {
@@ -126,6 +140,31 @@ async fn cached_usage_stats(
 }
 
 const USAGE_STATS_CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// Failure for a free-plan container task whose monthly compute units or task
+/// minutes are already used up. `None` when usage is unknown.
+fn exhausted_free_plan_message(
+    features: &hot::db::features::Features,
+    usage: Option<&hot::db::subscription::OrgUsageStats>,
+) -> Option<String> {
+    let usage = usage?;
+    let cus_limit = features.compute_units_per_month();
+    if cus_limit > 0 && usage.compute_units >= cus_limit {
+        return Some(format!(
+            "Monthly compute unit limit reached ({}/{}). Upgrade your plan for more compute.",
+            usage.compute_units, cus_limit
+        ));
+    }
+    let minutes_limit = i64::from(features.task_minutes_per_month());
+    let minutes_used = usage.task_duration_ms / 60_000;
+    if minutes_limit > 0 && minutes_used >= minutes_limit {
+        return Some(format!(
+            "Monthly task minutes exhausted ({}/{}). Upgrade your plan.",
+            minutes_used, minutes_limit
+        ));
+    }
+    None
+}
 
 /// Maximum time to spend on per-task post-execution cleanup (DB writes,
 /// stream publishes, retry enqueue). When this fires we log + drop the rest
@@ -546,23 +585,35 @@ async fn reconcile_dead_lettered_task_request(
         tracing::warn!(task_id = %task_id, stream_id = request.stream_id, "Dead-lettered task message has an invalid stream ID");
         return false;
     };
-    let duration_override = match Task::get(db, &task_id).await {
-        Ok(task) if task.task_status_id == TaskStatus::Queued.as_id() => Some(0),
-        Ok(_) => None,
-        Err(hot::db::TaskError::NotFound) => return false,
+    let task = match Task::get(db, &task_id).await {
+        Ok(task) => task,
         Err(error) => {
-            tracing::warn!(task_id = %task_id, "Could not inspect dead-lettered task: {}", error);
+            tracing::warn!(task_id = %task_id, "Cannot inspect dead-lettered task: {error}");
             return false;
         }
     };
+    if task.env_id != env_id || task.stream_id != stream_id {
+        tracing::warn!(task_id = %task_id, "Rejecting dead-lettered task with forged execution scope");
+        return false;
+    }
+    let env = match Env::get_env_uncached(db, &task.env_id).await {
+        Ok(env) => env,
+        Err(_) => return false,
+    };
+    let scoped_db = db.with_scope(DatabaseScope::Environment {
+        org_id: env.org_id,
+        env_id: task.env_id,
+    });
+    let db = &scoped_db;
+    let duration_override = (task.task_status_id == TaskStatus::Queued.as_id()).then_some(0);
     if !complete_task_with_event(
         db,
         publisher,
         &task_id,
         env_id,
         stream_id,
-        &request.function_name,
-        &request.task_type,
+        &task.function_name,
+        &task.task_type,
         TaskStatus::Failed,
         Some(&failure),
         duration_override,
@@ -572,11 +623,15 @@ async fn reconcile_dead_lettered_task_request(
     {
         return false;
     }
-    let org_id = request
-        .org_id
-        .as_deref()
-        .and_then(|id| Uuid::parse_str(id).ok());
-    publish_task_alert(db, org_id, env_id, &task_id, "task:failed", &failure).await;
+    publish_task_alert(
+        db,
+        Some(env.org_id),
+        env_id,
+        &task_id,
+        "task:failed",
+        &failure,
+    )
+    .await;
     true
 }
 
@@ -908,7 +963,10 @@ pub async fn run(config: TaskWorkerConfig) -> Result<(), Box<dyn std::error::Err
     }
 
     let db = db::create_db_pool(&config.worker_conf).await?;
-    let db = Arc::new(db);
+    let db = Arc::new(db.with_scope(DatabaseScope::Maintenance {
+        operation: MaintenanceOperation::Queue,
+        org_id: None,
+    }));
 
     // Initialize global alert queue so publish_alert() can enqueue delivery messages
     let alert_queue = ProcessingQueue::<hot::data::msg::Message>::new_with_cluster(
@@ -1065,6 +1123,8 @@ pub async fn run(config: TaskWorkerConfig) -> Result<(), Box<dyn std::error::Err
 
     let task_queue_arc = Arc::new(task_queue);
 
+    cancellation_quota::reap(&db, &container_executor, &coordinator, &worker_id).await;
+
     // Adopt orphaned containers from a previous worker, or clean them up
     let adopted = adopt_orphaned_containers(
         &container_executor,
@@ -1132,6 +1192,8 @@ pub async fn run(config: TaskWorkerConfig) -> Result<(), Box<dyn std::error::Err
         let reaper_pub = Arc::clone(&stream_publisher);
         let reaper_queue = Arc::clone(&task_queue_arc);
         let reaper_coordinator = Arc::clone(&coordinator);
+        let reaper_executor = Arc::clone(&container_executor);
+        let reaper_worker_id = worker_id.clone();
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(ZOMBIE_REAPER_INTERVAL);
             interval.tick().await; // first tick is immediate; we already reaped at startup
@@ -1142,6 +1204,13 @@ pub async fn run(config: TaskWorkerConfig) -> Result<(), Box<dyn std::error::Err
                 }
                 reap_zombie_tasks(&reaper_db, &reaper_pub, &reaper_queue, &reaper_coordinator)
                     .await;
+                cancellation_quota::reap(
+                    &reaper_db,
+                    &reaper_executor,
+                    &reaper_coordinator,
+                    &reaper_worker_id,
+                )
+                .await;
             }
         });
     }
@@ -1941,24 +2010,99 @@ async fn load_task_for_execution(
     }
 }
 
+/// Result of the atomic task claim.
+#[derive(Debug)]
+enum TaskClaim {
+    Claimed,
+    /// Already claimed, finished or cancelled elsewhere.
+    NotClaimable,
+    /// The account cannot admit this task during its billing period, so
+    /// retrying would cycle it forever; the caller fails it instead.
+    Refused(String),
+}
+
+/// Fail a task its account refused outright, like the free-plan pre-checks.
+async fn fail_refused_task(
+    db: &DatabasePool,
+    stream_publisher: &StreamPubSub,
+    request: &TaskRequest,
+    task_id: &Uuid,
+    env_id: Uuid,
+    stream_id: Uuid,
+    reason: &str,
+) {
+    let error = task_failure_json(reason, None);
+    if complete_task_with_event(
+        db,
+        stream_publisher,
+        task_id,
+        env_id,
+        stream_id,
+        &request.function_name,
+        &request.task_type,
+        TaskStatus::Failed,
+        Some(&error),
+        None,
+        None,
+    )
+    .await
+    {
+        let org_id = request
+            .org_id
+            .as_deref()
+            .and_then(|s| Uuid::parse_str(s).ok());
+        publish_task_alert(db, org_id, env_id, task_id, "task:failed", &error).await;
+    }
+}
+
 async fn claim_task_for_execution(
     db: &DatabasePool,
     task_id: &Uuid,
     worker_id: &str,
     backoff: std::time::Duration,
-) -> Result<bool, QueueInfrastructureError> {
+    reservation: hot::db::task::TaskQuotaReservation,
+) -> Result<TaskClaim, QueueInfrastructureError> {
+    let task = Task::get(db, task_id).await.map_err(|error| {
+        QueueInfrastructureError::new(
+            format!("Cannot resolve task before claim: {error}"),
+            backoff,
+        )
+    })?;
+    match hot::db::Org::is_environment_admitted(db, &task.env_id).await {
+        Ok(true) => {}
+        Ok(false) => {
+            return Err(QueueInfrastructureError::new(
+                "environment is suspended; task remains pending",
+                backoff.max(std::time::Duration::from_secs(5)),
+            ));
+        }
+        Err(error) => {
+            return Err(QueueInfrastructureError::new(
+                format!("Cannot verify task admission: {error}"),
+                backoff,
+            ));
+        }
+    }
     match tokio::time::timeout(
         DB_CALL_TIMEOUT,
-        Task::claim_for_worker(db, task_id, worker_id),
+        Task::claim_for_worker_with_quota(db, task_id, worker_id, reservation),
     )
     .await
     {
-        Ok(Ok(true)) => Ok(true),
-        Ok(Ok(false)) => Ok(false),
-        Ok(Err(e)) => Err(QueueInfrastructureError::new(
-            format!("failed to atomically claim task {}: {}", task_id, e),
-            backoff,
-        )),
+        Ok(Ok(true)) => Ok(TaskClaim::Claimed),
+        Ok(Ok(false)) => Ok(TaskClaim::NotClaimable),
+        Ok(Err(hot::db::TaskError::QuotaExhausted(reason))) => Ok(TaskClaim::Refused(reason)),
+        Ok(Err(e)) => {
+            let backoff = if matches!(e, hot::db::TaskError::QuotaExceeded(_)) {
+                backoff.max(std::time::Duration::from_secs(5))
+            } else {
+                backoff
+            };
+            Err(QueueInfrastructureError::new(
+                format!("failed to atomically claim task {}: {}", task_id, e),
+                backoff,
+            ))
+        }
         Err(_) => Err(QueueInfrastructureError::new(
             format!("timed out atomically claiming task {}", task_id),
             backoff,
@@ -2046,7 +2190,6 @@ async fn process_task(
     let stream_id = Uuid::parse_str(&request.stream_id)?;
     let env_id = Uuid::parse_str(&request.env_id)?;
     let build_id = Uuid::parse_str(&request.build_id)?;
-    let timeout_ms = request.timeout_ms.max(1000);
     let infra_retry_backoff_ms = worker_conf
         .get_int_or_default("queue.infra-retry-backoff-ms", 1_000)
         .max(0) as u64;
@@ -2106,6 +2249,44 @@ async fn process_task(
         );
         return Ok(());
     }
+
+    // Queue fields are claims, never runtime authority. Rebuild the complete
+    // request from durable task/build/project ownership before side effects.
+    let env = Env::get_env_uncached(&db, &task.env_id)
+        .await
+        .map_err(|error| {
+            QueueInfrastructureError::new(
+                format!("Cannot resolve task environment: {error}"),
+                std::time::Duration::from_millis(infra_retry_backoff_ms),
+            )
+        })?;
+    if request
+        .org_id
+        .as_deref()
+        .is_some_and(|id| id.parse::<Uuid>().ok() != Some(env.org_id))
+    {
+        return Err("Queued task organization does not match durable ownership".into());
+    }
+    if !hot::db::Org::is_environment_admitted(&db, &env.env_id).await? {
+        return Err(Box::new(QueueInfrastructureError::new(
+            "environment is suspended; task remains pending",
+            std::time::Duration::from_millis(infra_retry_backoff_ms.max(5_000)),
+        )));
+    }
+    let db = Arc::new(db.with_scope(DatabaseScope::Environment {
+        org_id: env.org_id,
+        env_id: env.env_id,
+    }));
+    let build = Build::get_build(&db, &task.build_id).await?;
+    let project = Project::get_project(&db, &build.project_id).await?;
+    if project.env_id != task.env_id {
+        return Err("Task build does not belong to durable task environment".into());
+    }
+    let mut request = synthesize_task_request_from_row(&task);
+    request.org_id = Some(env.org_id.to_string());
+    request.project_id = Some(project.project_id.to_string());
+    request.project_name = Some(project.name);
+    let timeout_ms = request.timeout_ms;
 
     let queue_wait_ms = queue_timing.queue_wait.as_millis().min(i64::MAX as u128) as i64;
     let publish_wait_ms = queue_timing.enqueued_at.map(|enqueued_at| {
@@ -2326,11 +2507,28 @@ async fn process_task(
                 &task_id,
                 &worker_id,
                 std::time::Duration::from_millis(infra_retry_backoff_ms),
+                hot::db::task::TaskQuotaReservation {
+                    compute_units: 0,
+                    duration_ms: timeout_ms.min(i64::MAX as u64) as i64,
+                },
             )
             .await
             {
-                Ok(true) => {}
-                Ok(false) => return Ok(()),
+                Ok(TaskClaim::Claimed) => {}
+                Ok(TaskClaim::NotClaimable) => return Ok(()),
+                Ok(TaskClaim::Refused(reason)) => {
+                    fail_refused_task(
+                        &db,
+                        &stream_publisher,
+                        &request,
+                        &task_id,
+                        env_id,
+                        stream_id,
+                        &reason,
+                    )
+                    .await;
+                    return Ok(());
+                }
                 Err(e) => {
                     return Err(Box::new(e) as Box<dyn std::error::Error + Send + Sync>);
                 }
@@ -2628,135 +2826,66 @@ async fn process_container_task(
 
     // -- Pre-start quota checks --
     if let Some(oid) = &org_id {
-        // Check concurrent container limit
-        let concurrent_limit = features.box_concurrent_tasks();
-        if concurrent_limit > 0 {
-            match Task::count_running_containers_for_org(
-                &db,
-                oid,
-                hot::db::task::QUOTA_HEARTBEAT_FRESH_SECS,
-            )
-            .await
-            {
-                Ok(running) if running >= concurrent_limit => {
-                    let msg = format!(
-                        "Concurrent container limit reached ({}/{})",
-                        running, concurrent_limit
-                    );
-                    let error = task_failure_json(&msg, None);
-                    if complete_task_with_event(
-                        &db,
-                        &stream_publisher,
-                        &task_id,
-                        env_id,
-                        stream_id,
-                        &function_name,
-                        &request.task_type,
-                        TaskStatus::Failed,
-                        Some(&error),
-                        None,
-                        None,
+        // Concurrent slots and execution reservations are admitted atomically
+        // under the billing-root lock when the task is claimed below.
+        // Hosted billing failures defer admission; local/self-host deployments
+        // can operate without a subscription row.
+        if hot::product::billing_enabled(&worker_conf) {
+            let subscription = hot::db::subscription::OrgPlan::get_by_org_id(&db, oid)
+                .await
+                .map_err(|error| {
+                    QueueInfrastructureError::new(
+                        format!("Cannot verify account subscription: {error}"),
+                        std::time::Duration::from_secs(5),
                     )
-                    .await
-                    {
-                        publish_task_alert(&db, org_id, env_id, &task_id, "task:failed", &error)
-                            .await;
-                    }
-                    return Ok(());
-                }
-                Err(e) => {
-                    tracing::warn!(task_id = %task_id, "Failed to check concurrent limit: {}", e);
-                }
-                _ => {}
-            }
-        }
-
-        // Check monthly task quotas (hard cap for free plans, informational for paid)
-        if let Ok(subscription) = hot::db::subscription::OrgPlan::get_by_org_id(&db, oid).await {
+                })?;
             let is_free = hot::db::subscription::Plan::get_by_id(&db, &subscription.plan_uuid)
                 .await
-                .map(|plan| plan.is_free_plan())
-                .unwrap_or(false);
-            let period_start = subscription
-                .current_period_start
-                .unwrap_or_else(chrono::Utc::now);
-
-            if let Some(usage) = cached_usage_stats(
-                &db,
-                *oid,
-                period_start,
-                features.call_retention_days(),
-                &usage_stats_cache,
-            )
-            .await
-            {
-                // CUS (compute units) per month — hard gate for free plans
-                let cus_limit = features.compute_units_per_month();
-                if cus_limit > 0 && usage.compute_units >= cus_limit && is_free {
-                    let msg = format!(
-                        "Monthly compute unit limit reached ({}/{}). Upgrade your plan for more compute.",
-                        usage.compute_units, cus_limit
-                    );
-                    let error = task_failure_json(&msg, None);
-                    if complete_task_with_event(
-                        &db,
-                        &stream_publisher,
-                        &task_id,
-                        env_id,
-                        stream_id,
-                        &function_name,
-                        &request.task_type,
-                        TaskStatus::Failed,
-                        Some(&error),
-                        None,
-                        None,
+                .map_err(|error| {
+                    QueueInfrastructureError::new(
+                        format!("Cannot verify account plan: {error}"),
+                        std::time::Duration::from_secs(5),
                     )
-                    .await
-                    {
-                        publish_task_alert(&db, org_id, env_id, &task_id, "task:failed", &error)
-                            .await;
-                    }
-                    return Ok(());
+                })?
+                .is_free_plan();
+            // Claim-time admission enforces these limits atomically against the
+            // usage counters. This early check only gives an exhausted free plan
+            // a clear failure, so usage that cannot be read skips it.
+            let usage = if is_free {
+                let period_start = subscription
+                    .current_period_start
+                    .unwrap_or_else(chrono::Utc::now);
+                cached_usage_stats(
+                    &db,
+                    *oid,
+                    period_start,
+                    features.call_retention_days(),
+                    &usage_stats_cache,
+                )
+                .await
+            } else {
+                None
+            };
+            if let Some(msg) = exhausted_free_plan_message(&features, usage.as_ref()) {
+                let error = task_failure_json(&msg, None);
+                if complete_task_with_event(
+                    &db,
+                    &stream_publisher,
+                    &task_id,
+                    env_id,
+                    stream_id,
+                    &function_name,
+                    &request.task_type,
+                    TaskStatus::Failed,
+                    Some(&error),
+                    None,
+                    None,
+                )
+                .await
+                {
+                    publish_task_alert(&db, org_id, env_id, &task_id, "task:failed", &error).await;
                 }
-
-                // Task minutes per month
-                let minutes_limit = features.task_minutes_per_month();
-                if minutes_limit > 0 {
-                    let minutes_used = usage.task_duration_ms / 60_000;
-                    if minutes_used >= minutes_limit as i64 && is_free {
-                        let msg = format!(
-                            "Monthly task minutes exhausted ({}/{}). Upgrade your plan.",
-                            minutes_used, minutes_limit
-                        );
-                        let error = task_failure_json(&msg, None);
-                        if complete_task_with_event(
-                            &db,
-                            &stream_publisher,
-                            &task_id,
-                            env_id,
-                            stream_id,
-                            &function_name,
-                            &request.task_type,
-                            TaskStatus::Failed,
-                            Some(&error),
-                            None,
-                            None,
-                        )
-                        .await
-                        {
-                            publish_task_alert(
-                                &db,
-                                org_id,
-                                env_id,
-                                &task_id,
-                                "task:failed",
-                                &error,
-                            )
-                            .await;
-                        }
-                        return Ok(());
-                    }
-                }
+                return Ok(());
             }
         }
     }
@@ -2878,16 +3007,44 @@ async fn process_container_task(
                 .get_int_or_default("queue.infra-retry-backoff-ms", 1_000)
                 .max(0) as u64,
         ),
+        hot::db::task::TaskQuotaReservation {
+            compute_units: limits.size.compute_units(
+                limits
+                    .timeout_secs
+                    .saturating_mul(1000)
+                    .min(i64::MAX as u64) as i64,
+            ),
+            duration_ms: limits
+                .timeout_secs
+                .saturating_mul(1000)
+                .min(i64::MAX as u64) as i64,
+        },
     )
     .await
     {
-        Ok(true) => {}
-        Ok(false) => {
+        Ok(TaskClaim::Claimed) => {}
+        Ok(TaskClaim::NotClaimable) => {
             // Not ours to run: clean the just-created volume via the bounded
             // helper rather than an implicit (synchronous) Drop.
             if let Some(vol) = data_volume {
                 cleanup_data_volume_with_timeout(&task_id, vol).await;
             }
+            return Ok(());
+        }
+        Ok(TaskClaim::Refused(reason)) => {
+            if let Some(vol) = data_volume {
+                cleanup_data_volume_with_timeout(&task_id, vol).await;
+            }
+            fail_refused_task(
+                &db,
+                &stream_publisher,
+                &request,
+                &task_id,
+                env_id,
+                stream_id,
+                &reason,
+            )
+            .await;
             return Ok(());
         }
         Err(e) => {
@@ -2908,8 +3065,8 @@ async fn process_container_task(
 
     let trace_id = request.task_id.clone();
 
-    // -- Generate run_id early so files written via hotbox are linked to this run --
-    let run_id = Uuid::now_v7();
+    // Match the durable run identity reserved atomically with this task claim.
+    let run_id = task_id;
     let user_id = request
         .user_id
         .as_deref()
@@ -3812,6 +3969,38 @@ async fn process_container_task(
     // Release resource budget
     drop(resource_guard);
 
+    // The user may have cancelled while this executor was still running.
+    // Preserve that terminal state, and release quota only after proven exit.
+    if Task::get(&db, &task_id)
+        .await
+        .is_ok_and(|task| task.task_status_id == TaskStatus::Cancelled.as_id())
+    {
+        let terminated = match &execution_result {
+            Ok(Ok(output)) if !output.timed_out => true,
+            Ok(Ok(output)) => {
+                cancellation_quota::runtime_stopped(&executor, &output.container_id).await
+            }
+            _ => match Task::get(&db, &task_id)
+                .await
+                .ok()
+                .and_then(|task| task.container_id)
+            {
+                Some(id) => cancellation_quota::runtime_stopped(&executor, &id).await,
+                None => false,
+            },
+        };
+        let compute_units = limits.size.compute_units(duration_ms);
+        cancellation_quota::settle(
+            &db,
+            &task_id,
+            &worker_id,
+            terminated,
+            Some((compute_units, duration_ms)),
+        )
+        .await;
+        return Ok(());
+    }
+
     match execution_result {
         Ok(Ok(output)) => {
             persist_container_timings(
@@ -4532,8 +4721,8 @@ async fn process_code_task(
         }
     });
 
-    // Build execution context
-    let run_id = Uuid::now_v7();
+    // One durable identity across queue redelivery and its atomic run reservation.
+    let run_id = task_id;
     let user_id = request
         .user_id
         .as_deref()
@@ -4591,7 +4780,8 @@ async fn process_code_task(
     coordinator.set_cancel_token(&task_id, Arc::clone(&vm_cancel_token));
 
     let panic_label = format!("task_worker:{}:{}", fn_name_exec, task_id);
-    let resource_registry_for_task = hot::lang::hot::resource::get_build_registry(&build_id);
+    let resource_registry_for_task = hot::lang::hot::resource::get_build_registry(&build_id)
+        .unwrap_or_else(|| Arc::new(hot::lang::hot::resource::ResourceRegistry::default()));
     let workload_started_at = chrono::Utc::now();
     let task_handle = tokio::task::spawn_blocking(move || {
         // Hold the blocking-execution slot for the lifetime of the THREAD,
@@ -4603,10 +4793,10 @@ async fn process_code_task(
         // produced its bytecode. The guard installs the per-build registry
         // as a thread-local before user code runs and restores the prior
         // value (typically `None`) on drop, so panics still leave the
-        // thread in a clean state. When `None` (live builds, missing
-        // manifest, dev mode), the global registry stays in effect.
+        // thread in a clean state. Missing bundle metadata must never fall
+        // through to another project's process-global host resources.
         let _resource_guard =
-            resource_registry_for_task.map(hot::lang::hot::resource::ThreadRegistryGuard::install);
+            hot::lang::hot::resource::ThreadRegistryGuard::install(resource_registry_for_task);
         // Wrap user-code execution in run_user_code so any panic from the
         // user's Hot code becomes a structured UserCodePanic that we surface
         // as a typed task failure (with location, thread, optional backtrace)
@@ -5643,12 +5833,6 @@ async fn load_bytecode(
 ) -> Result<(Arc<CachedBytecode>, tokio::sync::OwnedSemaphorePermit), String> {
     let cache_key = build_id.to_string();
 
-    // Fast path: bytecode already in local cache
-    if let Ok(cached) = cache.load(&cache_key) {
-        tracing::debug!(build_id = %build_id, "Bytecode cache hit");
-        return Ok((cached, blocking_execution_permit));
-    }
-
     let (db, conf) = match (db, worker_conf) {
         (Some(d), Some(c)) => (d, c),
         _ => {
@@ -5668,6 +5852,17 @@ async fn load_bytecode(
         .map_err(|e| format!("Failed to fetch project: {}", e))?;
 
     if build.is_live() {
+        hot::profile::authorized_live_project(db, conf, &build).await?;
+        // Only an authorized local live build may inherit this host's resources.
+        hot::lang::hot::resource::set_build_registry(
+            *build_id,
+            Arc::new(hot::lang::hot::resource::get_registry()),
+        );
+        if let Ok(cached) = cache.load(&cache_key) {
+            tracing::debug!(build_id = %build_id, "Bytecode cache hit");
+            return Ok((cached, blocking_execution_permit));
+        }
+
         let build_id = *build_id;
         let cache_for_task = Arc::clone(&cache);
         let conf = conf.clone();
@@ -5992,18 +6187,10 @@ async fn load_bytecode_bundle(
 
     let build_id = *build_id;
     let project = project.clone();
-    let conf = conf.clone();
     let cache_for_task = Arc::clone(&cache);
     let (loaded, permit) =
         run_blocking_with_execution_permit(blocking_execution_permit, move || {
-            compile_bundle_bytecode(
-                build_id,
-                cache_key,
-                cache_for_task,
-                project,
-                conf,
-                extract_dir,
-            )
+            compile_bundle_bytecode(build_id, cache_key, cache_for_task, project, extract_dir)
         })
         .await?;
     Ok((loaded?, permit))
@@ -6017,38 +6204,24 @@ fn compile_bundle_bytecode(
     cache_key: String,
     cache: Arc<BytecodeCache>,
     project: hot::db::Project,
-    conf: Val,
     extract_dir: std::path::PathBuf,
 ) -> Result<Arc<CachedBytecode>, String> {
-    // Build a per-build resource registry from the manifest and cache it so
-    // task threads can install it as a thread-local override during
-    // `::hot::resource/*` calls. We do this once per bundle build (idempotent
-    // on the per-build cache) so concurrent tasks for the same build share an
-    // `Arc<ResourceRegistry>` without re-walking the bundle. Failures here are
-    // logged but non-fatal — bytecode loading still proceeds, and Hot code
-    // that calls `::hot::resource/*` will see an empty registry (treated as
-    // "resource not found").
-    match hot::bundle::read_bundle_resources(&extract_dir) {
-        Ok(resources_val) => {
-            let registry =
-                std::sync::Arc::new(hot::lang::hot::resource::build_registry_from_manifest(
-                    &resources_val,
-                    &extract_dir,
-                ));
-            tracing::debug!(
-                build_id = %build_id,
-                resource_count = registry.entries.len(),
-                "Installed per-build resource registry"
-            );
-            hot::lang::hot::resource::set_build_registry(build_id, registry);
+    // Registry hydration precedes even a warm bytecode cache hit: the disk
+    // cache can survive a process restart while the registry cannot.
+    let registry = match hot::bundle::read_bundle_resources(&extract_dir) {
+        Ok(resources) => {
+            hot::lang::hot::resource::build_registry_from_manifest(&resources, &extract_dir)
         }
-        Err(e) => {
-            tracing::warn!(
-                build_id = %build_id,
-                "Failed to read bundle manifest for resources (continuing without resource registry): {}",
-                e
-            );
+        Err(error) => {
+            tracing::warn!(%build_id, %error, "Invalid bundle resources; using an empty registry");
+            hot::lang::hot::resource::ResourceRegistry::default()
         }
+    };
+    let registry = Arc::new(registry);
+    hot::lang::hot::resource::set_build_registry(build_id, registry.clone());
+    let _resource_guard = hot::lang::hot::resource::ThreadRegistryGuard::install(registry);
+    if let Ok(cached) = cache.load(&cache_key) {
+        return Ok(cached);
     }
 
     let src_dir = extract_dir.join("hot/src");
@@ -6076,7 +6249,7 @@ fn compile_bundle_bytecode(
         &project.name,
         Some(&cache_key),
         None,
-        Some(&conf),
+        None, // Bundle dependencies are already included in hot/pkg.
     )
     .map_err(|e| format!("Failed to compile build: {}", e))?;
 
@@ -7190,12 +7363,25 @@ mod tests {
     #[tokio::test]
     async fn dead_lettered_queue_request_terminally_fails_running_task() {
         let db = hot::db::test_db().await;
-        let (request, task, _, _, _) = make_task_request_and_row();
+        let data = hot::db::insert_test_data(&db).await.unwrap();
+        let (mut request, mut task, _, _, _) = make_task_request_and_row();
+        task.env_id = data.env_id;
+        task.build_id = data.build_id;
+        request.env_id = data.env_id.to_string();
+        request.build_id = data.build_id.to_string();
+        request.org_id = Some(data.org_id.to_string());
         insert_test_task(&db, &task).await;
         Task::mark_running(&db, &task.task_id).await.unwrap();
         let publisher =
             StreamPubSub::new(hot::stream::StreamPubSubType::Memory, None, false).unwrap();
 
+        let mut forged = request.clone();
+        forged.env_id = Uuid::now_v7().to_string();
+        assert!(!reconcile_dead_lettered_task_request(&db, &publisher, &forged).await);
+        assert_eq!(
+            Task::get(&db, &task.task_id).await.unwrap().task_status_id,
+            TaskStatus::Running.as_id()
+        );
         assert!(reconcile_dead_lettered_task_request(&db, &publisher, &request).await);
         let failed = Task::get(&db, &task.task_id).await.unwrap();
         assert_eq!(failed.task_status_id, TaskStatus::Failed.as_id());
@@ -7205,6 +7391,246 @@ mod tests {
                 .as_ref()
                 .is_some_and(|result| result.to_string().contains("queue retry limit"))
         );
+    }
+
+    #[tokio::test]
+    async fn suspended_account_defers_task_claim_until_resumed() {
+        let db = hot::db::test_db().await;
+        let data = hot::db::insert_test_data(&db).await.unwrap();
+        let (_, mut task, _, _, _) = make_task_request_and_row();
+        task.env_id = data.env_id;
+        task.build_id = data.build_id;
+        insert_test_task(&db, &task).await;
+        let DatabasePool::Sqlite(pool) = &db else {
+            unreachable!()
+        };
+        sqlx::query("UPDATE org SET lifecycle_state = 'suspended' WHERE org_id = ?")
+            .bind(data.org_id)
+            .execute(pool)
+            .await
+            .unwrap();
+        let result = claim_task_for_execution(
+            &db,
+            &task.task_id,
+            "worker-test",
+            std::time::Duration::ZERO,
+            hot::db::task::TaskQuotaReservation {
+                compute_units: 0,
+                duration_ms: 1000,
+            },
+        )
+        .await;
+        assert!(result.unwrap_err().to_string().contains("suspended"));
+        assert_eq!(
+            Task::get(&db, &task.task_id).await.unwrap().task_status_id,
+            TaskStatus::Queued.as_id()
+        );
+        sqlx::query("UPDATE org SET lifecycle_state = 'active' WHERE org_id = ?")
+            .bind(data.org_id)
+            .execute(pool)
+            .await
+            .unwrap();
+        assert!(matches!(
+            claim_task_for_execution(
+                &db,
+                &task.task_id,
+                "worker-test",
+                std::time::Duration::ZERO,
+                hot::db::task::TaskQuotaReservation {
+                    compute_units: 0,
+                    duration_ms: 1000
+                }
+            )
+            .await
+            .unwrap(),
+            TaskClaim::Claimed
+        ));
+    }
+
+    #[tokio::test]
+    async fn cached_live_bytecode_requires_current_host_profile_scope() {
+        let db = hot::db::test_db().await;
+        let fixture = hot::db::insert_test_data(&db).await.unwrap();
+        let directory = std::env::temp_dir().join(format!("hot-live-scope-{}", Uuid::new_v4()));
+        let source = directory.join("src");
+        std::fs::create_dir_all(&source).unwrap();
+        std::fs::write(source.join("scope.hot"), "::scope ns\nvalue 1\n").unwrap();
+        let cache = Arc::new(BytecodeCache::new(directory.join("cache")));
+        let conf = val!({
+            "set": {"profile": "selected"},
+            "profile": {"selected": {
+                "user": {"email": "local@hot.dev"}, "org": {"slug": "local"},
+                "env": {"name": "development"}
+            }},
+            "project": {"test-project": {"src": {"paths": [source.to_string_lossy().to_string()]}}}
+        });
+        let slots = Arc::new(Semaphore::new(1));
+        let (_, permit) = load_bytecode(
+            &fixture.build_id,
+            cache.clone(),
+            Some(&db),
+            Some(&conf),
+            slots.clone().acquire_owned().await.unwrap(),
+        )
+        .await
+        .unwrap();
+        drop(permit);
+        assert!(cache.load(&fixture.build_id.to_string()).is_ok());
+
+        let sibling_env = Uuid::now_v7();
+        Env::insert_env(
+            &db,
+            &sibling_env,
+            &fixture.org_id,
+            "sibling",
+            &fixture.user_id,
+        )
+        .await
+        .unwrap();
+        let sibling_conf =
+            conf.merge(&val!({"profile": {"selected": {"env": {"name": "sibling"}}}}));
+        let result = load_bytecode(
+            &fixture.build_id,
+            cache.clone(),
+            Some(&db),
+            Some(&sibling_conf),
+            slots.clone().acquire_owned().await.unwrap(),
+        )
+        .await;
+        assert!(result.unwrap_err().contains("selected environment"));
+        let result = load_bytecode(
+            &fixture.build_id,
+            cache,
+            None,
+            None,
+            slots.acquire_owned().await.unwrap(),
+        )
+        .await;
+        assert!(
+            result.is_err(),
+            "a warm cache cannot replace scope authorization"
+        );
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[tokio::test]
+    async fn cached_bundle_bytecode_rehydrates_resources_without_host_dependencies() {
+        use hot::lang::hot::resource;
+
+        let db = hot::db::test_db().await;
+        let fixture = hot::db::insert_test_data(&db).await.unwrap();
+        let build_id = Uuid::now_v7();
+        hot::db::Build::insert_build(
+            &db,
+            &build_id,
+            &fixture.project_id,
+            "bundle",
+            0,
+            hot::db::Build::BUILD_TYPE_BUNDLE,
+            &fixture.user_id,
+        )
+        .await
+        .unwrap();
+        let directory = std::env::temp_dir().join(format!("hot-bundle-scope-{build_id}"));
+        let source = directory.join("src");
+        let resources = directory.join("resources");
+        let host_dependency = directory.join("host-dependency");
+        for path in [&source, &resources, &host_dependency] {
+            std::fs::create_dir_all(path).unwrap();
+        }
+        std::fs::write(source.join("scope.hot"), "::bundled ns\nvalue fn () {1}\n").unwrap();
+        std::fs::write(resources.join("own.txt"), "bundle resource").unwrap();
+        std::fs::write(
+            host_dependency.join("private.hot"),
+            "::privatehost ns\nsecret fn () {41}\n",
+        )
+        .unwrap();
+        let bundle = hot::bundle::create_bundle(
+            "test-project",
+            &[source.to_string_lossy().to_string()],
+            &[],
+            &[resources],
+            false,
+            &[],
+        )
+        .unwrap();
+        let zip = hot::bundle::write_bundle_zip(&bundle, &directory).unwrap();
+        let extract_dir = bundle_extract_dir(&build_id);
+        hot::bundle::extract_bundle_to_dir(&zip, &extract_dir).unwrap();
+        let conf = val!({"project": {"test-project": {"deps": {"host-private": {
+            "local": host_dependency.to_string_lossy().to_string()
+        }}}}});
+        assert!(
+            hot::project::get_resolved_project_dependencies(&conf, "test-project")
+                .unwrap()
+                .iter()
+                .any(
+                    |dependency| dependency.resolved_path.canonicalize().unwrap()
+                        == host_dependency.canonicalize().unwrap()
+                )
+        );
+        let cache = Arc::new(BytecodeCache::new(directory.join("cache")));
+        let slots = Arc::new(Semaphore::new(1));
+        let (compiled, permit) = load_bytecode(
+            &build_id,
+            cache.clone(),
+            Some(&db),
+            Some(&conf),
+            slots.clone().acquire_owned().await.unwrap(),
+        )
+        .await
+        .unwrap();
+        drop(permit);
+        assert!(
+            compiled
+                .function_mapping
+                .keys()
+                .all(|name| !name.contains("privatehost")),
+            "deployed code must not compile the similarly named host project's dependencies"
+        );
+
+        // Model a process restart: bytecode remains warm but the in-memory
+        // resource registry is gone. Removing sources proves no recompile occurs.
+        resource::remove_build_registry(&build_id);
+        std::fs::remove_dir_all(extract_dir.join("hot/src")).unwrap();
+        let (_, permit) = load_bytecode(
+            &build_id,
+            cache.clone(),
+            Some(&db),
+            Some(&conf),
+            slots.clone().acquire_owned().await.unwrap(),
+        )
+        .await
+        .unwrap();
+        drop(permit);
+        let registry = resource::get_build_registry(&build_id).unwrap();
+        assert_eq!(registry.entries.len(), 1);
+        {
+            let _guard = resource::ThreadRegistryGuard::install(registry);
+            assert!(matches!(resource::load_str(&[Val::from("own.txt")]),
+                hot::lang::hot::r#type::HotResult::Ok(Val::Str(value)) if value.as_ref() == "bundle resource"));
+        }
+        resource::remove_build_registry(&build_id);
+        std::fs::write(extract_dir.join("manifest.hot"), "invalid @@ manifest").unwrap();
+        let (_, permit) = load_bytecode(
+            &build_id,
+            cache,
+            Some(&db),
+            Some(&conf),
+            slots.acquire_owned().await.unwrap(),
+        )
+        .await
+        .unwrap();
+        drop(permit);
+        assert!(
+            resource::get_build_registry(&build_id)
+                .unwrap()
+                .entries
+                .is_empty()
+        );
+        resource::remove_build_registry(&build_id);
+        std::fs::remove_dir_all(extract_dir).unwrap();
+        std::fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]
@@ -9348,5 +9774,46 @@ mod tests {
         let json_str = serde_json::to_string(&original).unwrap();
         let deserialized: serde_json::Value = serde_json::from_str(&json_str).unwrap();
         assert_eq!(deserialized, original);
+    }
+
+    #[test]
+    fn free_plan_usage_check_skips_unknown_usage() {
+        let features = hot::db::features::Features::resolve(
+            Some(&serde_json::json!({
+                "compute_units_per_month": 100,
+                "task_minutes_per_month": 10
+            })),
+            None,
+        );
+        let usage = |compute_units, task_duration_ms| hot::db::subscription::OrgUsageStats {
+            runs_this_period: 0,
+            file_storage_bytes: 0,
+            team_members_count: 0,
+            call_storage_bytes: 0,
+            call_count: 0,
+            oldest_call_time: None,
+            store_storage_bytes: 0,
+            blob_storage_bytes: 0,
+            tasks_this_period: 0,
+            task_duration_ms,
+            compute_units,
+            active_schedules: 0,
+        };
+        // Claim-time admission still enforces the limits against the counters.
+        assert_eq!(exhausted_free_plan_message(&features, None), None);
+        assert_eq!(
+            exhausted_free_plan_message(&features, Some(&usage(99, 9 * 60_000))),
+            None
+        );
+        assert!(
+            exhausted_free_plan_message(&features, Some(&usage(100, 0)))
+                .unwrap()
+                .starts_with("Monthly compute unit limit reached (100/100)")
+        );
+        assert!(
+            exhausted_free_plan_message(&features, Some(&usage(0, 10 * 60_000)))
+                .unwrap()
+                .starts_with("Monthly task minutes exhausted (10/10)")
+        );
     }
 }

@@ -399,7 +399,23 @@ async fn webhook_handler_inner(
     );
 
     let url_path = source.url_path(&endpoint_path);
-    let ctx = source.resolve(db, endpoint_path.clone()).await?;
+    let routing_db = db.with_scope(hot::db::DatabaseScope::Bootstrap(
+        hot::db::BootstrapOperation::Routing,
+    ));
+    let ctx = source.resolve(&routing_db, endpoint_path.clone()).await?;
+    let scope = crate::auth::runtime_database_scope(db, ctx.env.env_id)
+        .await
+        .map_err(|status| {
+            (
+                status,
+                Json(ApiErrorResponse::new(
+                    "forbidden",
+                    "Environment is not admitting requests",
+                )),
+            )
+        })?;
+    let scoped_db = Arc::new(db.with_scope(scope));
+    let db = &scoped_db;
 
     // Apply the org RPS limit before the endpoint query so random paths and
     // invalid tokens cannot turn the webhook table into an unbounded oracle.
@@ -562,24 +578,41 @@ async fn webhook_handler_inner(
     let stream_id = Uuid::now_v7();
     let run_id = Uuid::now_v7();
 
-    // Fetch build and project info for execution context
-    let (build_hash, project_id, project_name) =
-        match Build::get_build(db, &endpoint.build_id).await {
-            Ok(build) => {
-                let project_name = Project::get_project(db, &build.project_id)
-                    .await
-                    .ok()
-                    .map(|p| p.name);
-                (Some(build.hash), Some(build.project_id), project_name)
-            }
-            Err(_) => (None, None, None),
-        };
-
-    // Get the default user for this env (for event attribution)
-    let user_id = hot::db::User::get_default_user(db)
+    // Resolve the selected deployment completely before persisting or queuing
+    // work. Child organizations keep their member directory at the root, so an
+    // environment-scoped query cannot choose a "default" user under RLS.
+    let build = Build::get_build(db, &endpoint.build_id)
         .await
-        .map(|u| u.user_id)
-        .unwrap_or_else(|_| Uuid::nil());
+        .map_err(|_| {
+            (
+                StatusCode::NOT_FOUND,
+                Json(ApiErrorResponse::not_found("Webhook deployment")),
+            )
+        })?;
+    let project = Project::get_project(db, &build.project_id)
+        .await
+        .map_err(|_| {
+            (
+                StatusCode::NOT_FOUND,
+                Json(ApiErrorResponse::not_found("Webhook deployment")),
+            )
+        })?;
+    if project.env_id != ctx.env.env_id {
+        return Err((
+            StatusCode::NOT_FOUND,
+            Json(ApiErrorResponse::not_found("Webhook deployment")),
+        ));
+    }
+    // Authenticated calls retain their credential's creator; public capability
+    // calls belong to the deployment creator. Neither selects an unrelated
+    // global user or invents a UUID when the member directory is not visible.
+    let user_id = auth_result
+        .as_ref()
+        .map(|(_, key)| key.created_by_user_id)
+        .unwrap_or(build.created_by_user_id);
+    let build_hash = Some(build.hash);
+    let project_id = Some(build.project_id);
+    let project_name = Some(project.name);
 
     let mut execution_context = hot::lang::event::ExecutionContext {
         run_id,
@@ -787,6 +820,39 @@ async fn webhook_handler_inner(
         }
     }
 
+    // Response delivery is data access even when durable execution was already
+    // accepted. Do not return a result after revocation or org suspension.
+    crate::auth::runtime_database_scope(db, ctx.env.env_id)
+        .await
+        .map_err(|status| {
+            (
+                status,
+                Json(ApiErrorResponse::new(
+                    "forbidden",
+                    "Environment is not admitting requests",
+                )),
+            )
+        })?;
+    if let Some((auth, _)) = &auth_result {
+        let current = auth.revalidate(db).await.map_err(|status| {
+            (
+                status,
+                Json(ApiErrorResponse::new(
+                    "unauthorized",
+                    "Credential is no longer valid",
+                )),
+            )
+        })?;
+        if current.get_permissions() != auth.get_permissions() {
+            return Err((
+                StatusCode::FORBIDDEN,
+                Json(ApiErrorResponse::new(
+                    "forbidden",
+                    "Credential permissions changed",
+                )),
+            ));
+        }
+    }
     // Convert the outcome to an HTTP response
     match outcome {
         Some(Outcome::Stopped { result }) => build_webhook_response(result),
@@ -910,6 +976,9 @@ fn build_webhook_response(
     }
     Ok((StatusCode::OK, Json(result)).into_response())
 }
+
+#[cfg(test)]
+pub(crate) mod postgres_lifecycle;
 
 #[cfg(test)]
 mod tests {

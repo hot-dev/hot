@@ -592,7 +592,7 @@ document.addEventListener('alpine:init', () => {
                             url.searchParams.delete('search');
                         }
                         url.searchParams.set('tab', 'all');
-                        window.location.href = url.toString();
+                        window.location.href = window.hotScopeUrl(url.toString());
                     }, 400);
                 });
             },
@@ -604,7 +604,7 @@ document.addEventListener('alpine:init', () => {
                     url.searchParams.delete('status');
                 }
                 url.searchParams.set('tab', 'all');
-                window.location.href = url.toString();
+                window.location.href = window.hotScopeUrl(url.toString());
             }
         };
     });

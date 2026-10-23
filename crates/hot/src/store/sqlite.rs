@@ -47,6 +47,93 @@ impl SqliteStore {
         }
     }
 
+    /// All writes in a batch share one account lock and commit together.
+    async fn write_batch(
+        &self,
+        store_name: &str,
+        entries: Vec<super::StoreWrite>,
+        only_missing: bool,
+    ) -> Result<Vec<StoreEntry>, String> {
+        let (mut tx, mut budget) = super::quota::begin_sqlite(
+            &self.pool,
+            self.org_id,
+            self.env_id,
+            super::quota::QuotaKind::Store,
+        )
+        .await?;
+        let mut written = Vec::with_capacity(entries.len());
+        for (key, value, embedding, text_content) in entries {
+            let key_data = serde_json::to_string(&key).map_err(|e| e.to_string())?;
+            let value_data = serde_json::to_string(&value).map_err(|e| e.to_string())?;
+            let embedding_data = embedding.as_ref().map(|e| Self::embedding_to_bytes(e));
+            let now = Utc::now().to_rfc3339();
+            let old:Option<i64>=sqlx::query_scalar("SELECT size FROM store_map_entry WHERE org_id=$1 AND env_id=$2 AND store_name=$3 AND key=$4")
+                .bind(self.org_id).bind(self.env_id).bind(store_name).bind(&key_data).fetch_optional(&mut *tx).await.map_err(|e|e.to_string())?;
+            if only_missing && old.is_some() {
+                continue;
+            }
+            let embedding_bytes = embedding
+                .as_ref()
+                .map_or(Some(0), |e| e.len().checked_mul(4))
+                .ok_or("Store embedding is too large")?;
+            let size = super::quota::entry_size(
+                key.to_string().len(),
+                value.to_string().len(),
+                text_content.as_ref().map_or(0, |s| s.len()),
+                embedding_bytes,
+            )?;
+            budget.replace(old.unwrap_or(0), size)?;
+            let query = if only_missing {
+                "INSERT INTO store_map_entry (org_id, env_id, store_name, key, value, embedding, text_content, size, created_at, updated_at)
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$9)
+             ON CONFLICT (org_id,env_id,store_name,key) DO NOTHING
+             RETURNING seq,created_at,updated_at"
+            } else {
+                "INSERT INTO store_map_entry (org_id, env_id, store_name, key, value, embedding, text_content, size, created_at, updated_at)
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$9)
+             ON CONFLICT (org_id,env_id,store_name,key) DO UPDATE SET value=EXCLUDED.value,embedding=EXCLUDED.embedding,text_content=EXCLUDED.text_content,size=EXCLUDED.size,updated_at=EXCLUDED.updated_at
+             RETURNING seq,created_at,updated_at"
+            };
+            let row = sqlx::query(query)
+                .bind(self.org_id)
+                .bind(self.env_id)
+                .bind(store_name)
+                .bind(&key_data)
+                .bind(&value_data)
+                .bind(&embedding_data)
+                .bind(&text_content)
+                .bind(size)
+                .bind(&now)
+                .fetch_optional(&mut *tx)
+                .await
+                .map_err(|e| format!("store write failed: {e}"))?;
+            let Some(row) = row else {
+                continue;
+            };
+            let seq: i64 = row.try_get("seq").map_err(|e| e.to_string())?;
+            let created_at = Self::parse_datetime(
+                &row.try_get::<String, _>("created_at")
+                    .map_err(|e| e.to_string())?,
+            );
+            let updated_at = Self::parse_datetime(
+                &row.try_get::<String, _>("updated_at")
+                    .map_err(|e| e.to_string())?,
+            );
+            written.push(StoreEntry {
+                key,
+                value,
+                seq,
+                embedding,
+                created_at,
+                updated_at,
+            });
+        }
+        tx.commit()
+            .await
+            .map_err(|e| format!("store commit failed: {e}"))?;
+        Ok(written)
+    }
+
     fn row_to_entry(row: &sqlx::sqlite::SqliteRow) -> Result<StoreEntry, String> {
         let key_str: String = row.try_get("key").map_err(|e| e.to_string())?;
         let value_str: String = row.try_get("value").map_err(|e| e.to_string())?;
@@ -207,54 +294,14 @@ impl Store for SqliteStore {
         embedding: Option<Vec<f32>>,
         text_content: Option<String>,
     ) -> Result<StoreEntry, String> {
-        let pool = self.sqlite_pool()?;
-        let key_str = serde_json::to_string(&key).map_err(|e| e.to_string())?;
-        let value_str = serde_json::to_string(&value).map_err(|e| e.to_string())?;
-        let embedding_bytes = embedding.as_ref().map(|e| Self::embedding_to_bytes(e));
-        let now = Utc::now().to_rfc3339();
-
-        let size: i64 = key_str.len() as i64
-            + value_str.len() as i64
-            + text_content.as_ref().map_or(0, |s| s.len() as i64)
-            + embedding.as_ref().map_or(0, |e| (e.len() * 4) as i64);
-
-        let result = sqlx::query(
-            "INSERT INTO store_map_entry (org_id, env_id, store_name, key, value, embedding, text_content, size, created_at, updated_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-             ON CONFLICT(org_id, env_id, store_name, key) DO UPDATE SET
-                value = excluded.value,
-                embedding = excluded.embedding,
-                text_content = excluded.text_content,
-                size = excluded.size,
-                updated_at = excluded.updated_at
-             RETURNING seq, created_at, updated_at",
+        self.write_batch(
+            store_name,
+            vec![(key, value, embedding, text_content)],
+            false,
         )
-        .bind(self.org_id)
-        .bind(self.env_id)
-        .bind(store_name)
-        .bind(&key_str)
-        .bind(&value_str)
-        .bind(&embedding_bytes)
-        .bind(&text_content)
-        .bind(size)
-        .bind(&now)
-        .bind(&now)
-        .fetch_one(pool)
-        .await
-        .map_err(|e| format!("store put failed: {e}"))?;
-
-        let seq: i64 = result.try_get("seq").map_err(|e| e.to_string())?;
-        let created_at: String = result.try_get("created_at").unwrap_or_else(|_| now.clone());
-        let updated_at: String = result.try_get("updated_at").unwrap_or(now);
-
-        Ok(StoreEntry {
-            key,
-            value,
-            seq,
-            embedding,
-            created_at: Self::parse_datetime(&created_at),
-            updated_at: Self::parse_datetime(&updated_at),
-        })
+        .await?
+        .pop()
+        .ok_or_else(|| "Store write returned no entry".into())
     }
 
     async fn put_if_missing(
@@ -265,37 +312,14 @@ impl Store for SqliteStore {
         embedding: Option<Vec<f32>>,
         text_content: Option<String>,
     ) -> Result<bool, String> {
-        let pool = self.sqlite_pool()?;
-        let key_str = serde_json::to_string(&key).map_err(|e| e.to_string())?;
-        let value_str = serde_json::to_string(&value).map_err(|e| e.to_string())?;
-        let embedding_bytes = embedding.as_ref().map(|e| Self::embedding_to_bytes(e));
-        let now = Utc::now().to_rfc3339();
-
-        let size: i64 = key_str.len() as i64
-            + value_str.len() as i64
-            + text_content.as_ref().map_or(0, |s| s.len() as i64)
-            + embedding.as_ref().map_or(0, |e| (e.len() * 4) as i64);
-
-        let result = sqlx::query(
-            "INSERT INTO store_map_entry (org_id, env_id, store_name, key, value, embedding, text_content, size, created_at, updated_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-             ON CONFLICT(org_id, env_id, store_name, key) DO NOTHING",
-        )
-        .bind(self.org_id)
-        .bind(self.env_id)
-        .bind(store_name)
-        .bind(&key_str)
-        .bind(&value_str)
-        .bind(&embedding_bytes)
-        .bind(&text_content)
-        .bind(size)
-        .bind(&now)
-        .bind(&now)
-        .execute(pool)
-        .await
-        .map_err(|e| format!("store put-if-missing failed: {e}"))?;
-
-        Ok(result.rows_affected() == 1)
+        Ok(!self
+            .write_batch(
+                store_name,
+                vec![(key, value, embedding, text_content)],
+                true,
+            )
+            .await?
+            .is_empty())
     }
 
     async fn get(
@@ -578,20 +602,9 @@ impl Store for SqliteStore {
     async fn put_many(
         &self,
         store_name: &str,
-        entries: Vec<(
-            serde_json::Value,
-            serde_json::Value,
-            Option<Vec<f32>>,
-            Option<String>,
-        )>,
+        entries: Vec<super::StoreWrite>,
     ) -> Result<usize, String> {
-        let mut count = 0usize;
-        for (key, value, embedding, text_content) in entries {
-            self.put(store_name, key, value, embedding, text_content)
-                .await?;
-            count += 1;
-        }
-        Ok(count)
+        Ok(self.write_batch(store_name, entries, false).await?.len())
     }
 
     async fn search(
@@ -947,11 +960,10 @@ pub async fn maybe_import_legacy_store(
         return Ok(());
     }
 
-    let target_pool = match main_pool.as_ref() {
-        DatabasePool::Sqlite(p) => p,
-        // Postgres deployments never had a local legacy file; nothing to import.
-        _ => return Ok(()),
-    };
+    // Postgres deployments never had a local legacy file.
+    if !matches!(main_pool.as_ref(), DatabasePool::Sqlite(_)) {
+        return Ok(());
+    }
 
     tracing::warn!(
         "Importing legacy ::hot::store data from {} into the main hot SQLite DB (org={}, env={:?})",
@@ -981,10 +993,9 @@ pub async fn maybe_import_legacy_store(
     .await
     .map_err(|e| format!("Failed to read legacy store_map: {e}"))?;
 
-    let mut tx = target_pool
-        .begin()
-        .await
-        .map_err(|e| format!("Failed to begin import tx: {e}"))?;
+    let (mut tx, mut budget) =
+        super::quota::begin_sqlite(main_pool, org_id, env_id, super::quota::QuotaKind::Store)
+            .await?;
 
     let mut maps_imported = 0usize;
     for row in &map_rows {
@@ -1046,7 +1057,19 @@ pub async fn maybe_import_legacy_store(
         let value: String = row.try_get("value").map_err(|e| e.to_string())?;
         let embedding: Option<Vec<u8>> = row.try_get("embedding").ok();
         let text_content: Option<String> = row.try_get("text_content").ok();
-        let size: i64 = row.try_get("size").unwrap_or(0);
+        // Imported size metadata is untrusted; account for the actual payload.
+        let size = super::quota::entry_size(
+            key.len(),
+            value.len(),
+            text_content.as_ref().map_or(0, |s| s.len()),
+            embedding.as_ref().map_or(0, |e| e.len()),
+        )?;
+        let exists:bool=sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM store_map_entry WHERE org_id=$1 AND env_id=$2 AND store_name=$3 AND key=$4)")
+            .bind(org_id).bind(env_id).bind(&store_name).bind(&key).fetch_one(&mut *tx).await.map_err(|e|e.to_string())?;
+        if exists {
+            continue;
+        }
+        budget.replace(0, size)?;
         let created_at: Option<String> = row.try_get("created_at").ok();
         let updated_at: Option<String> = row.try_get("updated_at").ok();
 
@@ -1489,6 +1512,19 @@ mod tests {
             .await
             .unwrap();
 
+        let DatabasePool::Sqlite(sqlite) = pool.as_ref() else {
+            unreachable!()
+        };
+        for env in [env_b1, env_b2] {
+            sqlx::query("INSERT INTO env(env_id,org_id,name,created_by_user_id) VALUES (?,?,?,?)")
+                .bind(env)
+                .bind(org_b)
+                .bind(env.to_string())
+                .bind(org_a)
+                .execute(sqlite)
+                .await
+                .unwrap();
+        }
         let s_a = SqliteStore::new(pool.clone(), org_a, env_a);
         let s_b1 = SqliteStore::new(pool.clone(), org_b, env_b1);
         let s_b2 = SqliteStore::new(pool.clone(), org_b, env_b2);
@@ -1782,5 +1818,144 @@ mod tests {
         maybe_import_legacy_store(&pool, dir.path().to_str().unwrap(), org_id, env_id)
             .await
             .unwrap();
+    }
+
+    async fn quota_siblings(limit: i64) -> (Arc<DatabasePool>, Uuid, SqliteStore, SqliteStore) {
+        let (db, root, _) = temp_pool().await;
+        let DatabasePool::Sqlite(pool) = db.as_ref() else {
+            unreachable!()
+        };
+        sqlx::query("UPDATE org SET org_type='organization',features=? WHERE org_id=?")
+            .bind(format!("{{\"store_storage_bytes\":{limit}}}"))
+            .bind(root)
+            .execute(pool)
+            .await
+            .unwrap();
+        let mut stores = Vec::new();
+        for _ in 0..2 {
+            let child = Uuid::now_v7();
+            let env = Uuid::now_v7();
+            sqlx::query("INSERT INTO org(org_id,parent_org_id,name,slug,org_type,features,created_by_user_id) VALUES (?,?,'Child',?,'organization','{\"store_storage_bytes\":-1}',?)")
+                .bind(child).bind(root).bind(child.to_string()).bind(root).execute(pool).await.unwrap();
+            sqlx::query("INSERT INTO env(env_id,org_id,name,created_by_user_id) VALUES (?,?,'development',?)")
+                .bind(env).bind(child).bind(root).execute(pool).await.unwrap();
+            let store = SqliteStore::new(db.clone(), child, env);
+            store.ensure_store(&plain_config("quota")).await.unwrap();
+            stores.push(store);
+        }
+        let b = stores.pop().unwrap();
+        let a = stores.pop().unwrap();
+        (db, root, a, b)
+    }
+
+    #[tokio::test]
+    async fn account_store_quota_serializes_siblings_and_counts_embedding_text() {
+        // key (3), value (3), one f32 (4), text (2) = 12 bytes.
+        let (_db, _root, a, b) = quota_siblings(12).await;
+        let (one, two) = tokio::join!(
+            a.put(
+                "quota",
+                json!("k"),
+                json!("v"),
+                Some(vec![1.0]),
+                Some("ab".into())
+            ),
+            b.put(
+                "quota",
+                json!("k"),
+                json!("v"),
+                Some(vec![1.0]),
+                Some("ab".into())
+            )
+        );
+        assert_eq!(usize::from(one.is_ok()) + usize::from(two.is_ok()), 1);
+        assert_eq!(
+            a.storage_bytes().await.unwrap() + b.storage_bytes().await.unwrap(),
+            12
+        );
+    }
+
+    #[tokio::test]
+    async fn account_store_quota_replacement_missing_and_batch_rollback() {
+        let (db, root, a, b) = quota_siblings(12).await;
+        let first = a
+            .put("quota", json!("k"), json!("v"), None, None)
+            .await
+            .unwrap();
+        let same = a
+            .put("quota", json!("k"), json!("v"), None, None)
+            .await
+            .unwrap();
+        assert_eq!(first.seq, same.seq);
+        assert!(
+            !a.put_if_missing("quota", json!("k"), json!("much larger"), None, None)
+                .await
+                .unwrap()
+        );
+        assert!(
+            b.put_if_missing("quota", json!("b"), json!("v"), None, None)
+                .await
+                .unwrap()
+        );
+        assert!(
+            a.put("quota", json!("k"), json!("larger"), None, None)
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            a.get("quota", &json!("k")).await.unwrap().unwrap().value,
+            json!("v")
+        );
+        assert!(
+            a.put_many(
+                "quota",
+                vec![
+                    (json!("k"), json!(0), None, None),
+                    (json!("other"), json!("too large"), None, None)
+                ]
+            )
+            .await
+            .is_err()
+        );
+        assert_eq!(
+            a.get("quota", &json!("k")).await.unwrap().unwrap().value,
+            json!("v"),
+            "failed batch rolls back the preceding replacement"
+        );
+        let DatabasePool::Sqlite(pool) = db.as_ref() else {
+            unreachable!()
+        };
+        sqlx::query("UPDATE org SET features='{\"store_storage_bytes\":1}' WHERE org_id=?")
+            .bind(root)
+            .execute(pool)
+            .await
+            .unwrap();
+        a.put("quota", json!("k"), json!(0), None, None)
+            .await
+            .unwrap();
+        assert_eq!(
+            a.storage_bytes().await.unwrap(),
+            4,
+            "shrinking over-quota data remains possible"
+        );
+        sqlx::query(
+            "UPDATE org SET features='{\"store_storage_bytes\":\"unlimited\"}' WHERE org_id=?",
+        )
+        .bind(root)
+        .execute(pool)
+        .await
+        .unwrap();
+        assert!(
+            a.put("quota", json!("k"), json!(0), None, None)
+                .await
+                .is_err()
+        );
+        let forged = SqliteStore::new(db.clone(), b.org_id, a.env_id);
+        assert!(
+            forged
+                .put("quota", json!("k"), json!(0), None, None)
+                .await
+                .is_err()
+        );
     }
 }

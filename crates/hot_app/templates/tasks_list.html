@@ -394,7 +394,7 @@ document.addEventListener('alpine:init', () => {
 
                 // On mobile, do full page navigation since HTMX only updates the desktop table
                 if (window.innerWidth < 768) {
-                    window.location.href = url;
+                    window.location.href = window.hotScopeUrl(url);
                     return;
                 }
 

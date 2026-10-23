@@ -31,7 +31,7 @@ curl https://api.hot.dev/v1/projects \
   -H "Authorization: Bearer <token>"
 ```
 
-Hot supports three credential types — **API keys**, **service keys**, and **sessions** — all used the same way. All credentials are scoped to an environment, and resources are automatically filtered to that environment's context.
+Runtime endpoints support **API keys**, **service keys**, and **sessions**. These credentials are scoped to one environment, and resources are filtered to that environment's context. Separate root [management credentials](/docs/api/management) authenticate only `/v1/management/*`, for child provisioning, environment creation, delegated key issuance, and account usage.
 
 See the [Authentication](/docs/authentication) documentation for full details on credential types, the permissions model, and the permissions builder.
 

@@ -18,9 +18,7 @@ pub(crate) async fn run_key_create(
     providers: &crate::CliProviders,
 ) -> Result<(), String> {
     use hot::db::api_key::ApiKey;
-    use hot::db::env::Env;
-    use hot::db::user::User;
-    use hot::db::{create_db_pool, get_db_uri_from_conf, redact_password};
+    use hot::db::{get_db_uri_from_conf, redact_password};
 
     // Idempotent: brings a fresh project's database up to schema and seeds the
     // default org/env/user, so `hot key create` works before the first
@@ -29,19 +27,11 @@ pub(crate) async fn run_key_create(
         .await
         .map_err(|e| format!("Failed to prepare database: {}", e))?;
 
-    let db = create_db_pool(conf)
+    let db = crate::profile::create_cli_db_pool(conf)
         .await
         .map_err(|e| format!("Failed to open database: {}", e))?;
 
-    let env = Env::get_default_env(&db).await.map_err(|e| {
-        format!(
-            "Failed to load default environment: {} (is this an initialized Hot project? run `hot init` first)",
-            e
-        )
-    })?;
-    let user = User::get_default_user(&db)
-        .await
-        .map_err(|e| format!("Failed to load default user: {}", e))?;
+    let (user_id, env, _) = crate::profile::resolve_cli_environment(&db, conf).await?;
 
     let api_key_id = uuid::Uuid::now_v7();
     let (key, key_data) = ApiKey::generate_api_key(&api_key_id)
@@ -56,7 +46,7 @@ pub(crate) async fn run_key_create(
         &env.env_id,
         description,
         &key_data,
-        &user.user_id,
+        &user_id,
         &permissions,
     )
     .await

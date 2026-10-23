@@ -93,8 +93,18 @@ pub(crate) fn get_blob_resolved_conf(conf: Val, in_project: bool, managed_runtim
     conf.set_str("mode", Some(resolved_mode.to_string()), "")
 }
 
+/// Hyphenated keys that deployments commonly set from the environment;
+/// underscores alone cannot spell them.
+const HYPHENATED_ENV_KEYS: &[(&str, &str)] = &[("HOT_DB_MIGRATION_URI", "db.migration-uri")];
+
 // Helper function to convert environment variable name to dot notation conf key
 fn env_var_to_conf_key(env_var: &str) -> String {
+    if let Some((_, key)) = HYPHENATED_ENV_KEYS
+        .iter()
+        .find(|(name, _)| *name == env_var)
+    {
+        return (*key).to_string();
+    }
     env_var
         .strip_prefix("HOT_")
         .unwrap_or(env_var)
@@ -265,6 +275,22 @@ pub(crate) fn create_default_conf() -> Val {
     })
 }
 
+pub(crate) fn implicit_local_scope_allowed(
+    no_config_files: bool,
+    options: &GlobalOptions,
+    provider_defaults: &Val,
+    explicit_scope_environment: bool,
+) -> bool {
+    no_config_files
+        && options.db_uri.is_none()
+        && options.db_migration_uri.is_none()
+        && options.profile.is_none()
+        && provider_defaults.get("db").is_none()
+        && provider_defaults.get("profile").is_none()
+        && provider_defaults.get("set.profile").is_none()
+        && !explicit_scope_environment
+}
+
 pub(crate) fn load_dotenv_files() {
     if Path::new(".env").exists() {
         match dotenvy::from_path(Path::new(".env")) {
@@ -272,6 +298,17 @@ pub(crate) fn load_dotenv_files() {
             Err(e) => tracing::warn!("Failed to load .env: {}", e),
         }
     }
+}
+
+pub(crate) fn environment_configures_scope(key: &str) -> bool {
+    if !key.starts_with("HOT_") {
+        return false;
+    }
+    let path = env_var_to_conf_key(key);
+    matches!(path.as_str(), "db" | "profile" | "set" | "set.profile")
+        || path.starts_with("db.")
+        || path.starts_with("profile.")
+        || path.starts_with("set.profile.")
 }
 
 pub(crate) fn reload_dotenv_files() {
@@ -689,6 +726,7 @@ pub(crate) fn extract_options_from_command(command: &Command) -> ExtractedOption
                 conf_files: vec![],
                 ctx_files: vec![],
                 project: None,
+                profile: None,
                 src_paths: vec![],
 
                 test_paths: vec![],
@@ -700,6 +738,7 @@ pub(crate) fn extract_options_from_command(command: &Command) -> ExtractedOption
                 jit_threshold: None,
                 jit_hof_fusion: None,
                 db_uri: None,
+                db_migration_uri: None,
                 log_level: None,
                 log_target: None,
                 log_dir: None,
@@ -759,6 +798,7 @@ pub(crate) fn extract_options_from_command(command: &Command) -> ExtractedOption
                 conf_files: vec![],
                 ctx_files: vec![],
                 project: None,
+                profile: None,
                 src_paths: vec![],
                 test_paths: vec![],
                 resource_paths: vec![],
@@ -768,6 +808,7 @@ pub(crate) fn extract_options_from_command(command: &Command) -> ExtractedOption
                 jit_threshold: None,
                 jit_hof_fusion: None,
                 db_uri: None,
+                db_migration_uri: None,
                 log_level: None,
                 log_target: None,
                 log_dir: None,
@@ -816,6 +857,12 @@ pub(crate) fn apply_configuration_options(
     }
     if let Some(ref db_uri) = global.db_uri {
         conf = conf.set_str("db.uri", Some(db_uri.clone()), "");
+    }
+    if let Some(ref uri) = global.db_migration_uri {
+        conf = conf.set_str("db.migration-uri", Some(uri.clone()), "");
+    }
+    if let Some(ref profile) = global.profile {
+        conf = conf.set_str("set.profile", Some(profile.clone()), "");
     }
     // Cache configuration removed - will be reimplemented with  bytecode caching
 
@@ -1107,7 +1154,13 @@ fn preserve_runtime_overrides_after_init(mut conf: Val, base_conf: &Val) -> Val 
         }
     }
 
+    // Keep identity definitions together with their selector across auto-init.
+    // A generated template must not erase or retarget an external profile.
+    if let Some(profiles) = base_conf.get("profile") {
+        conf = conf.set("profile", profiles);
+    }
     for path in [
+        "set.profile",
         "redis.uri",
         "queue.type",
         "serialization.type",
@@ -1520,8 +1573,11 @@ fn config_key_segment(key: &Val) -> String {
 
 fn is_uri_config_path(path: &str) -> bool {
     path.eq_ignore_ascii_case("db.uri")
+        || path.eq_ignore_ascii_case("migration-uri")
+        || path.eq_ignore_ascii_case("db.migration-uri")
         || path.eq_ignore_ascii_case("redis.uri")
         || path.ends_with(".db.uri")
+        || path.ends_with(".db.migration-uri")
         || path.ends_with(".redis.uri")
 }
 
@@ -1606,7 +1662,8 @@ pub(crate) async fn create_event_publisher(
 ) -> Result<Option<std::sync::Arc<dyn hot::lang::event::EventPublisher>>, String> {
     // Extract queue configuration
     let queue_type_str = conf.get_str_or_default("queue.type", "sqlite");
-    let queue_type = QueueType::from_str(&queue_type_str).unwrap_or(QueueType::Memory);
+    let queue_type = QueueType::from_str(&queue_type_str)
+        .map_err(|e| format!("Invalid configured queue type: {e}"))?;
 
     let redis_uri_str = conf.get_str("redis.uri");
     let redis_uri = if redis_uri_str == "null" || redis_uri_str.is_empty() {
@@ -1686,8 +1743,8 @@ pub(crate) fn apply_command_specific_defaults(mut conf: Val, command: &Option<Co
                     conf = conf.set_str("emitter.type", Some("none".to_string()), "");
                 }
             }
-            Command::Test { global, .. } => {
-                if global.db_uri.is_none() {
+            Command::Test { global, test, .. } => {
+                if !test.integration && global.db_uri.is_none() {
                     conf = conf.set_str("db.uri", Some("".to_string()), "");
                 }
                 if global.emitter.emitter_type.is_none() {
@@ -1704,6 +1761,149 @@ pub(crate) fn apply_command_specific_defaults(mut conf: Val, command: &Option<Co
 mod tests {
     use super::*;
     use hot::val;
+
+    #[test]
+    fn migration_uri_environment_variable_maps_to_its_hyphenated_key() {
+        assert_eq!(
+            env_var_to_conf_key("HOT_DB_MIGRATION_URI"),
+            "db.migration-uri"
+        );
+        assert_eq!(env_var_to_conf_key("HOT_DB_URI"), "db.uri");
+    }
+
+    #[test]
+    fn whole_map_environment_overrides_are_explicit_scope() {
+        for key in [
+            "HOT_DB",
+            "HOT_DB_URI",
+            "HOT_PROFILE",
+            "HOT_PROFILE_CHILD_ORG_SLUG",
+            "HOT_SET",
+            "HOT_SET_PROFILE",
+            "HOT_SET_PROFILE_EXTRA",
+        ] {
+            assert!(environment_configures_scope(key), "{key}");
+        }
+        for key in ["HOT_LOG_LEVEL", "HOT_SET_PROJECT", "OTHER_DB_URI"] {
+            assert!(!environment_configures_scope(key), "{key}");
+        }
+    }
+
+    #[test]
+    fn reload_preserves_selected_profile_identity_and_validation() {
+        let original = val!({"set": {"profile": "child"}, "profile": {"child": {
+            "user": {"email": "root@example.com"}, "org": {"slug": "child-a"},
+            "env": {"name": "prod"}
+        }}});
+        let template = val!({"set": {"profile": "local-dev"}, "profile": {"child": {
+            "user": {"email": "other@example.com"}, "org": {"slug": "sibling"},
+            "env": {"name": "other"}
+        }}});
+        let reloaded = preserve_runtime_overrides_after_init(template, &original);
+        assert_eq!(
+            hot::profile::selected_profile_identifiers(&reloaded).unwrap(),
+            Some(("root@example.com".into(), "child-a".into(), "prod".into()))
+        );
+        let invalid = original.set_str("profile.set", Some("different".into()), "");
+        let reloaded = preserve_runtime_overrides_after_init(Val::map_empty(), &invalid);
+        assert!(hot::profile::selected_profile_identifiers(&reloaded).is_err());
+    }
+
+    #[test]
+    fn migration_password_is_redacted_at_root_and_nested_paths() {
+        let db = val!({"migration-uri": "postgres://owner:owner-secret@localhost/hot"});
+        let config = val!({"migration-uri": "postgres://owner:owner-secret@localhost/hot", "db": db.clone(), "nested": {"db": db}});
+        let redacted = redact_sensitive_config(&config);
+        for path in [
+            "migration-uri",
+            "db.migration-uri",
+            "nested.db.migration-uri",
+        ] {
+            assert!(redacted.get_str(path).contains("***"));
+            assert!(!redacted.get_str(path).contains("owner-secret"));
+        }
+    }
+
+    #[test]
+    fn unit_tests_disable_shared_database_but_integration_preserves_it() {
+        use clap::Parser;
+        let base = val!({"db": {"uri": "sqlite:/tmp/selected.db"}});
+        let ordinary = crate::cli::Cli::try_parse_from(["hot", "test"]).unwrap();
+        assert!(
+            apply_command_specific_defaults(base.clone(), &ordinary.command)
+                .get_str("db.uri")
+                .is_empty()
+        );
+        let integration =
+            crate::cli::Cli::try_parse_from(["hot", "test", "--integration"]).unwrap();
+        assert_eq!(
+            apply_command_specific_defaults(base, &integration.command).get_str("db.uri"),
+            "sqlite:/tmp/selected.db"
+        );
+    }
+
+    #[test]
+    fn explicit_scope_never_uses_implicit_local_fallback() {
+        let defaults = GlobalOptions::default();
+        let empty = Val::map_empty();
+        assert!(implicit_local_scope_allowed(true, &defaults, &empty, false));
+        assert!(!implicit_local_scope_allowed(
+            false, &defaults, &empty, false
+        ));
+        assert!(!implicit_local_scope_allowed(true, &defaults, &empty, true));
+        for options in [
+            GlobalOptions {
+                profile: Some("child".into()),
+                ..Default::default()
+            },
+            GlobalOptions {
+                db_uri: Some(hot::db::DEFAULT_DB_URI.into()),
+                ..Default::default()
+            },
+            GlobalOptions {
+                db_migration_uri: Some("postgres://owner/db".into()),
+                ..Default::default()
+            },
+        ] {
+            assert!(!implicit_local_scope_allowed(true, &options, &empty, false));
+        }
+        for provider in [
+            val!({"db": {"uri": "sqlite:.hot/local.db"}}),
+            val!({"profile": {"child": {"org": "child"}}}),
+            val!({"set": {"profile": "child"}}),
+        ] {
+            assert!(!implicit_local_scope_allowed(
+                true, &defaults, &provider, false
+            ));
+        }
+    }
+
+    #[test]
+    fn explicit_profile_and_migration_login_override_configuration() {
+        let options = GlobalOptions {
+            profile: Some("child".into()),
+            db_migration_uri: Some("postgres://owner/migrations".into()),
+            ..Default::default()
+        };
+        let conf = apply_configuration_options(
+            create_default_conf(),
+            &options,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        );
+        assert_eq!(conf.get_str("set.profile"), "child");
+        assert_eq!(
+            conf.get_str("db.migration-uri"),
+            "postgres://owner/migrations"
+        );
+        let reloaded =
+            preserve_runtime_overrides_after_init(val!({"set": {"profile": "local-dev"}}), &conf);
+        assert_eq!(reloaded.get_str("set.profile"), "child");
+    }
 
     #[test]
     fn test_redact_sensitive_config_masks_keys_and_uri_passwords() {

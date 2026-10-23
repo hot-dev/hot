@@ -1,0 +1,187 @@
+//! Deployment validation for the runtime login. This uses a raw pool only
+//! before it is wrapped as a scoped executor; it does not expose that pool.
+
+use sqlx::PgPool;
+
+const REFERENCE_TABLES: &[&str] = &[
+    "build_type",
+    "email_verification_status",
+    "invite_status",
+    "org_user_role",
+    "run_status",
+    "run_type",
+    "task_status",
+    "team_user_role",
+    "org_plan_status",
+    "alert_delivery_status",
+    "alert_destination_type",
+    "plan",
+];
+
+pub async fn validate_runtime_role(pool: &PgPool, schema: &str) -> Result<(), sqlx::Error> {
+    let privileged: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM pg_roles r WHERE (r.rolsuper OR r.rolbypassrls OR r.rolcreaterole OR r.rolcreatedb OR r.rolreplication OR r.rolname IN ('pg_read_server_files','pg_write_server_files','pg_execute_server_program')) AND (r.rolname = current_user OR pg_has_role(current_user, r.oid, 'MEMBER')))"
+    ).fetch_one(pool).await?;
+    if privileged {
+        return Err(sqlx::Error::Protocol("RLS runtime login must not be superuser, BYPASSRLS, CREATEROLE, CREATEDB, REPLICATION, or a member of a privileged server-file, server-program, or administrative role".into()));
+    }
+    // Include memberships that require SET ROLE, not only privileges currently
+    // inherited by this login. A NOINHERIT login must not pass qualification
+    // and then recover unsafe privileges through a non-owner group role.
+    let can_create: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM pg_roles r WHERE pg_has_role(current_user, r.oid, 'MEMBER') AND has_schema_privilege(r.oid, $1, 'CREATE'))",
+    )
+    .bind(schema)
+    .fetch_one(pool)
+    .await?;
+    if can_create {
+        return Err(sqlx::Error::Protocol(
+            "RLS runtime login must not have CREATE on the application schema".into(),
+        ));
+    }
+    let owns_tables: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = $1 AND c.relkind IN ('r','p') AND pg_has_role(current_user, c.relowner, 'MEMBER'))"
+    ).bind(schema).fetch_one(pool).await?;
+    if owns_tables {
+        return Err(sqlx::Error::Protocol(
+            "RLS runtime login must not own or be able to assume ownership of application tables"
+                .into(),
+        ));
+    }
+    let unsafe_table_privileges: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace JOIN pg_roles r ON pg_has_role(current_user, r.oid, 'MEMBER') WHERE n.nspname = $1 AND c.relkind IN ('r','p') AND (has_table_privilege(r.oid, c.oid, 'TRUNCATE,REFERENCES,TRIGGER') OR has_any_column_privilege(r.oid, c.oid, 'REFERENCES')))"
+    ).bind(schema).fetch_one(pool).await?;
+    if unsafe_table_privileges {
+        return Err(sqlx::Error::Protocol(
+            "RLS runtime login must not have TRUNCATE, REFERENCES, or TRIGGER privileges".into(),
+        ));
+    }
+    let writable_reference_tables: Vec<String> = sqlx::query_scalar(
+        "SELECT DISTINCT c.relname FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+         JOIN pg_roles r ON pg_has_role(current_user, r.oid, 'MEMBER')
+         WHERE n.nspname = $1 AND c.relkind IN ('r','p') AND c.relname = ANY($2)
+           AND (has_table_privilege(r.oid, c.oid, 'INSERT,UPDATE,DELETE,REFERENCES,TRIGGER')
+                OR has_any_column_privilege(r.oid, c.oid, 'INSERT,UPDATE,REFERENCES'))
+         ORDER BY c.relname",
+    )
+    .bind(schema)
+    .bind(REFERENCE_TABLES)
+    .fetch_all(pool)
+    .await?;
+    if !writable_reference_tables.is_empty() {
+        return Err(sqlx::Error::Protocol(format!(
+            "RLS runtime login must have read-only reference table access: {}",
+            writable_reference_tables.join(", ")
+        )));
+    }
+    let migration_access: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+         JOIN pg_roles r ON pg_has_role(current_user, r.oid, 'MEMBER')
+         WHERE n.nspname = $1 AND c.relname = '_sqlx_migrations'
+           AND (has_table_privilege(r.oid, c.oid, 'SELECT,INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER')
+                OR has_any_column_privilege(r.oid, c.oid, 'SELECT,INSERT,UPDATE,REFERENCES')))"
+    ).bind(schema).fetch_one(pool).await?;
+    if migration_access {
+        return Err(sqlx::Error::Protocol(
+            "RLS runtime login must not have access to SQLx migration metadata".into(),
+        ));
+    }
+    let uncovered: Vec<String> = sqlx::query_scalar(
+        // Tables the login cannot reach (for example an embedding application's
+        // own tables in this schema) do not weaken isolation.
+        "SELECT c.relname FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+         WHERE n.nspname = $1 AND c.relkind IN ('r','p')
+           AND c.relname <> '_sqlx_migrations' AND NOT (c.relname = ANY($2))
+           AND (NOT c.relrowsecurity OR NOT c.relforcerowsecurity)
+           AND EXISTS (SELECT 1 FROM pg_roles r WHERE pg_has_role(current_user, r.oid, 'MEMBER')
+               AND (has_table_privilege(r.oid, c.oid, 'SELECT,INSERT,UPDATE,DELETE')
+                    OR has_any_column_privilege(r.oid, c.oid, 'SELECT,INSERT,UPDATE')))
+         ORDER BY c.relname",
+    )
+    .bind(schema)
+    .bind(REFERENCE_TABLES)
+    .fetch_all(pool)
+    .await?;
+    if !uncovered.is_empty() {
+        return Err(sqlx::Error::Protocol(format!(
+            "RLS coverage is incomplete for: {}",
+            uncovered.join(", ")
+        )));
+    }
+    let helper_exists: bool = sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace WHERE n.nspname = $1 AND p.proname = 'apply_scope')"
+    ).bind(schema).fetch_one(pool).await?;
+    if !helper_exists {
+        return Err(sqlx::Error::Protocol(
+            "RLS migrations must be applied before starting runtime services".into(),
+        ));
+    }
+    Ok(())
+}
+
+/// Provision per-store HNSW indexes using separately configured migration
+/// credentials. Runtime ensure_store never performs DDL. This administrative
+/// path exposes no pool and needs no runtime BYPASSRLS privilege.
+pub async fn provision_store_indexes(conf: &crate::val::Val) -> Result<usize, String> {
+    use super::{DatabaseScope, MaintenanceOperation};
+    use sqlx::Row;
+    let uri = conf.get_str_or_default(
+        "db.migration-uri",
+        &conf.get_str_or_default("migration-uri", ""),
+    );
+    if uri.is_empty()
+        || !matches!(
+            super::DatabaseType::from_uri(&uri),
+            Ok(super::DatabaseType::Postgres)
+        )
+    {
+        return Err("Store index provisioning requires a PostgreSQL db.migration-uri".into());
+    }
+    let schema = conf.get_str_or_default("db.schema", &conf.get_str_or_default("schema", "hot"));
+    if schema != "hot" {
+        return Err("PostgreSQL RLS currently supports only the hot schema".into());
+    }
+    let pool = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(1)
+        .connect(&uri)
+        .await
+        .map_err(|e| format!("Cannot connect index provisioner: {e}"))?;
+    let result = async {
+        let mut tx = pool.begin().await.map_err(|e| e.to_string())?;
+        DatabaseScope::Maintenance { operation: MaintenanceOperation::StoreProvisioning, org_id: None }
+            .apply_to_connection(&mut tx).await.map_err(|e| e.to_string())?;
+        let stores = sqlx::query("SELECT org_id, env_id, name, quote_literal(name) AS quoted_name, embedding_conf FROM hot.store_map WHERE embedding_conf IS NOT NULL")
+            .fetch_all(&mut *tx).await.map_err(|e| e.to_string())?;
+        tx.commit().await.map_err(|e| e.to_string())?;
+        let mut count = 0;
+        for store in stores {
+            let org_id: uuid::Uuid = store.try_get("org_id").map_err(|e| e.to_string())?;
+            let env_id: uuid::Uuid = store.try_get("env_id").map_err(|e| e.to_string())?;
+            let name: String = store.try_get("name").map_err(|e| e.to_string())?;
+            let config: serde_json::Value = store.try_get("embedding_conf").map_err(|e| e.to_string())?;
+            let dimensions = config.get("dimensions").and_then(serde_json::Value::as_u64)
+                .ok_or_else(|| format!("Store {name:?} has no positive embedding dimensions"))?;
+            if !(1..=2000).contains(&dimensions) {
+                return Err(format!("Store {name:?} uses {dimensions} dimensions; vector HNSW supports 1 through 2000"));
+            }
+            let identity = format!("{org_id}/{env_id}/{name}/{dimensions}");
+            let digest = blake3::hash(identity.as_bytes()).to_hex();
+            let index_name = format!("store_hnsw_{}", &digest.as_str()[..32]);
+            let valid: Option<bool> = sqlx::query_scalar("SELECT i.indisvalid FROM pg_index i JOIN pg_class c ON c.oid = i.indexrelid JOIN pg_namespace n ON n.oid = c.relnamespace WHERE n.nspname = 'hot' AND c.relname = $1")
+                .bind(&index_name).fetch_optional(&pool).await.map_err(|e| e.to_string())?;
+            if valid == Some(true) { continue; }
+            if valid == Some(false) {
+                return Err(format!("Index hot.{index_name} is invalid after an interrupted build; drop that invalid index and rerun provisioning"));
+            }
+            // PostgreSQL quotes the arbitrary literal; UUID/dimensions are
+            // typed and the identifier contains a fixed prefix + hex hash.
+            let literal: String = store.try_get("quoted_name").map_err(|e| e.to_string())?;
+            let statement = format!("CREATE INDEX CONCURRENTLY {index_name} ON hot.store_map_entry USING hnsw ((embedding::hot.vector({dimensions})) hot.vector_cosine_ops) WHERE org_id = '{org_id}'::uuid AND env_id = '{env_id}'::uuid AND store_name = {literal} AND embedding IS NOT NULL AND hot.vector_dims(embedding) = {dimensions}");
+            sqlx::query(sqlx::AssertSqlSafe(statement.as_str())).execute(&pool).await.map_err(|e| format!("Cannot provision store {name:?}: {e}"))?;
+            count += 1;
+        }
+        Ok(count)
+    }.await;
+    pool.close().await;
+    result
+}

@@ -119,7 +119,10 @@ impl WorkerExecutionServices {
 
         let store = match hot::store::store_from_config_with_db(
             conf,
-            Some(Arc::clone(&self.db)),
+            Some(Arc::new(
+                self.db
+                    .with_scope(DatabaseScope::Environment { org_id, env_id }),
+            )),
             Some(org_id),
             Some(env_id),
         )
@@ -177,10 +180,14 @@ impl WorkerExecutionServices {
             }
         }
 
+        let db = self.db.with_scope(DatabaseScope::Environment {
+            org_id: key.org_id,
+            env_id: key.env_id,
+        });
         let mut values = AHashMap::new();
         let mut cacheable = true;
 
-        match Context::get_by_env(self.db.as_ref(), &key.env_id).await {
+        match Context::get_by_env(&db, &key.env_id).await {
             Ok(context_vars) => {
                 for context_var in context_vars.into_iter().filter(|value| value.active) {
                     match context_var.get_decrypted_value(encryption, &key.org_id) {
@@ -211,7 +218,7 @@ impl WorkerExecutionServices {
             }
         }
 
-        match Context::get_by_project(self.db.as_ref(), &key.project_id).await {
+        match Context::get_by_project(&db, &key.project_id).await {
             Ok(context_vars) => {
                 for context_var in context_vars.into_iter().filter(|value| value.active) {
                     match context_var.get_decrypted_value(encryption, &key.org_id) {
@@ -532,7 +539,10 @@ fn spawn_worker_queue_claimer(
 }
 
 // Add imports for database operations and event handler execution
-use hot::db::{Build, Context, DatabasePool, Env, EventHandler, Project, Schedule};
+use hot::db::{
+    Build, Context, DatabasePool, DatabaseScope, Env, EventHandler, MaintenanceOperation, Project,
+    Schedule,
+};
 use hot::lang::event::ExecutionContext;
 use serde_json::Value as JsonValue;
 
@@ -903,6 +913,51 @@ impl BuildPathCache {
     }
 }
 
+/// Bundle execution must never inherit the host's process-global resources,
+/// including when a legacy bundle has no resource manifest.
+fn install_event_resource_scope(
+    is_bundle: bool,
+    extract_dir: Option<&std::path::Path>,
+) -> Option<hot::lang::hot::resource::ThreadRegistryGuard> {
+    if !is_bundle {
+        return None;
+    }
+    let registry = extract_dir
+        .map(|directory| {
+            let resources = hot::bundle::read_bundle_resources(directory).unwrap_or_else(|error| {
+                tracing::warn!(%error, "Cannot read bundle resources; using an empty registry");
+                Val::Null
+            });
+            hot::lang::hot::resource::build_registry_from_manifest(&resources, directory)
+        })
+        .unwrap_or_default();
+    Some(hot::lang::hot::resource::ThreadRegistryGuard::install(
+        Arc::new(registry),
+    ))
+}
+
+/// Keep bundle resource authority around the compiler entry point as well as
+/// handler execution. The guard belongs on the synchronous compiler thread,
+/// including callers running in `spawn_blocking`.
+fn compile_event_bundle_to_cache(
+    extract_dir: &std::path::Path,
+    src_paths: &[String],
+    cache: &hot::lang::cache::bytecode_cache::BytecodeCache,
+    project_name: &str,
+    cache_key: Option<&str>,
+    file_hashes: Option<Vec<hot::lang::cache::bytecode_cache::FileHash>>,
+) -> Result<(), String> {
+    let _resource_guard = install_event_resource_scope(true, Some(extract_dir));
+    hot::lang::engine::Engine::compile_to_cache(
+        src_paths,
+        cache,
+        project_name,
+        cache_key,
+        file_hashes,
+        None, // Deployed dependencies are already included in the bundle.
+    )
+}
+
 struct PreparedEventBundle {
     src_paths: Vec<String>,
     extract_dir: std::path::PathBuf,
@@ -952,13 +1007,13 @@ fn extract_and_precompile_event_bundle(
         ),
         Err(_) => (fallback_project_name, None, None),
     };
-    hot::lang::engine::Engine::compile_to_cache(
+    compile_event_bundle_to_cache(
+        &extract_dir,
         &src_paths,
         &bundle_cache,
         &project_name,
         cache_key.as_deref(),
         file_hashes,
-        None,
     )
     .map_err(|error| format!("Failed to pre-compile bundle {build_id}: {error}"))?;
 
@@ -1253,11 +1308,15 @@ fn is_event_setup_timeout_error(error: &str) -> bool {
     error.contains("[event-setup-timeout]")
 }
 
-/// Whether a failed handler execution should leave the event un-ACKed for
-/// redelivery. Only safe when the failure is the blocking-slot admission
-/// timeout (the handler produced no run side effects) AND no earlier handler
-/// for the same event already started a run — redelivering after a run
-/// started would duplicate its side effects.
+/// Whether a failed handler should stay pending without spending a delivery:
+/// only for the engine's own run-admission deferral (a suspended account or a
+/// transient lookup), which happens before any user code, and only when no
+/// earlier handler for the same event already started a run. Redelivering after
+/// a run started would duplicate its side effects.
+fn should_defer_run_admission(error: &str, started_any_handler: bool) -> bool {
+    error.starts_with(hot::lang::runtime::vm::RUN_ADMISSION_DEFERRED) && !started_any_handler
+}
+
 fn should_redeliver_event_after_handler_error(error: &str, started_any_handler: bool) -> bool {
     (is_blocking_slot_timeout_error(error) || is_event_setup_timeout_error(error))
         && !started_any_handler
@@ -1716,6 +1775,42 @@ async fn hydrate_event_message_from_db(
             infra_retry_backoff_ms,
         )
     })?;
+    if !hot::db::Org::is_environment_admitted(db, &stored_env.env_id)
+        .await
+        .map_err(|e| {
+            worker_infrastructure_retry_error(
+                format!("Failed to verify execution admission: {e}"),
+                infra_retry_backoff_ms,
+            )
+        })?
+    {
+        return Err(worker_infrastructure_retry_error(
+            "environment is suspended; event remains pending",
+            infra_retry_backoff_ms.max(5_000),
+        ));
+    }
+    if event_message
+        .body
+        .execution_context
+        .org_id
+        .is_some_and(|id| id != stored_env.org_id)
+        || event_message
+            .body
+            .execution_context
+            .env_id
+            .is_some_and(|id| id != stored_env.env_id)
+        || event_message.body.event.stream_id != stored_event.stream_id
+        || event_message.body.execution_context.stream_id != stored_event.stream_id
+    {
+        return Err(worker_error(
+            "Queued event scope does not match durable event ownership",
+        ));
+    }
+    let scoped_db = db.with_scope(DatabaseScope::Environment {
+        org_id: stored_env.org_id,
+        env_id: stored_env.env_id,
+    });
+    let db = &scoped_db;
     let org_slug = hot::db::org::Org::get_org(db, &stored_env.org_id)
         .await
         .ok()
@@ -1996,6 +2091,10 @@ async fn process_alert_delivery_message(
     worker_conf: Val,
     message: Message,
 ) -> Result<(), WorkerError> {
+    let db = Arc::new(db.with_scope(DatabaseScope::Maintenance {
+        operation: MaintenanceOperation::Alerts,
+        org_id: None,
+    }));
     let alert_msg: hot::lang::event::queue::AlertDeliveryMessage =
         message.try_into().map_err(|e: String| worker_error(e))?;
 
@@ -2057,6 +2156,10 @@ async fn process_email_message(
     worker_conf: Val,
     message: Message,
 ) -> Result<(), WorkerError> {
+    let db = Arc::new(db.with_scope(DatabaseScope::Maintenance {
+        operation: MaintenanceOperation::Email,
+        org_id: None,
+    }));
     let email_msg: hot::lang::event::queue::EmailMessage =
         message.try_into().map_err(|e: String| worker_error(e))?;
 
@@ -2396,13 +2499,13 @@ fn recompile_bundle_cache(
     let bundle_cache = hot::lang::cache::bytecode_cache::BytecodeCache::new(bundle_cache_dir);
 
     // Recompile
-    match hot::lang::engine::Engine::compile_to_cache(
+    match compile_event_bundle_to_cache(
+        extracted_path,
         &paths,
         &bundle_cache,
         &manifest.bundle_name,
         manifest.cache_key.as_deref(),
         Some(manifest.file_hashes.clone()),
-        None, // Bundle builds have deps pre-bundled
     ) {
         Ok(()) => {
             tracing::debug!(
@@ -2530,13 +2633,13 @@ async fn compile_bundle_cache(
         clear_bundle_bytecode_cache(&bundle_cache_dir);
 
         let bundle_cache = hot::lang::cache::bytecode_cache::BytecodeCache::new(bundle_cache_dir);
-        hot::lang::engine::Engine::compile_to_cache(
+        compile_event_bundle_to_cache(
+            &extracted_path,
             &paths,
             &bundle_cache,
             &manifest.bundle_name,
             manifest.cache_key.as_deref(),
             Some(manifest.file_hashes.clone()),
-            None, // Bundle builds have deps pre-bundled
         )
         .map_err(|e| {
             format!(
@@ -2833,6 +2936,11 @@ async fn backfill_deployed_bundle_manifest_versions(
                 continue;
             }
         };
+        let scoped_db = db.with_scope(DatabaseScope::Environment {
+            org_id: env.org_id,
+            env_id: env.env_id,
+        });
+        let db = &scoped_db;
 
         match prepare_bundle_runtime(
             db,
@@ -2874,6 +2982,12 @@ async fn resolve_build_project_env(
     let env = Env::get_env(db, &project.env_id)
         .await
         .map_err(|e| format!("env lookup failed: {e}"))?;
+    if !hot::db::Org::is_environment_admitted(db, &env.env_id)
+        .await
+        .map_err(|error| error.to_string())?
+    {
+        return Err("environment is suspended; deployment remains pending".into());
+    }
     Ok((project, env))
 }
 
@@ -2921,6 +3035,11 @@ async fn warm_ready_bundle_runtimes(
                 continue;
             }
         };
+        let scoped_db = db.with_scope(DatabaseScope::Environment {
+            org_id: env.org_id,
+            env_id: env.env_id,
+        });
+        let db = &scoped_db;
 
         match prepare_bundle_runtime(
             db,
@@ -2995,6 +3114,11 @@ async fn recover_interrupted_bundle_deployments(
                 continue;
             }
         };
+        let scoped_db = db.with_scope(DatabaseScope::Environment {
+            org_id: env.org_id,
+            env_id: env.env_id,
+        });
+        let db = &scoped_db;
 
         let prepared = match prepare_bundle_runtime(
             db,
@@ -3536,6 +3660,12 @@ async fn find_build_for_function(
                 }
             }
             "live" => {
+                if let Err(error) =
+                    hot::profile::authorized_live_project(db, worker_conf, &build).await
+                {
+                    tracing::warn!(build_id = %build.build_id, %error, "Skipping live build outside host profile");
+                    continue;
+                }
                 // LIVE BUILD: Calculate cache key from discovered source files
                 let src_paths = hot::project::get_project_src_paths(worker_conf, &project.name);
 
@@ -3769,6 +3899,22 @@ async fn execute_single_event_handler(
     .await
 }
 
+async fn validate_event_origin_scope(
+    db: &DatabasePool,
+    env_id: Uuid,
+    origin_run_id: Option<Uuid>,
+) -> Result<(), String> {
+    if let Some(origin_run_id) = origin_run_id {
+        let origin = hot::db::Run::get_run(db, &origin_run_id)
+            .await
+            .map_err(|error| format!("Cannot resolve event origin run: {error}"))?;
+        if origin.env_id != env_id {
+            return Err("Event origin run belongs to another environment".into());
+        }
+    }
+    Ok(())
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn execute_single_event_handler_inner(
     db: &DatabasePool,
@@ -3795,6 +3941,20 @@ async fn execute_single_event_handler_inner(
     // The caller already registered `run_id`; from here this guard owns
     // unregistration on every exit path (see `RunRegistration` docs).
     let _run_registration = RunRegistration::new(Arc::clone(&shutdown_coordinator), run_id);
+
+    let org_id = event_message
+        .body
+        .execution_context
+        .org_id
+        .ok_or("Hydrated event has no organization scope")?;
+    if event_message.body.event.env_id != *_env_id {
+        return Err("Execution environment does not match hydrated event".into());
+    }
+    let scoped_db = db.with_scope(DatabaseScope::Environment {
+        org_id,
+        env_id: *_env_id,
+    });
+    let db = &scoped_db;
 
     // TIMING: Track execution phases
     let timing_start = std::time::Instant::now();
@@ -3866,6 +4026,11 @@ async fn execute_single_event_handler_inner(
         // otherwise None (for API-published events where run_id is just a new UUID placeholder)
         event_message.body.execution_context.origin_run_id
     };
+
+    // Payload retry metadata can override the queue context checked during
+    // hydration. Validate the final origin before any execution/trace writes,
+    // including on SQLite where a scoped handle does not filter reads.
+    validate_event_origin_scope(db, project.env_id, origin_run_id).await?;
 
     // For stream_id: use the stream_id from the event
     // The event was already created with a stream_id by the scheduler/publisher
@@ -3989,9 +4154,13 @@ async fn execute_single_event_handler_inner(
     // CRITICAL: If ANY error occurs between here and VM.execute(), run:start will NEVER be emitted!
     // This means the run won't exist in the database even though the event was attempted.
 
+    // A live build may use host files and development context only after
+    // matching the current profile. Deployed bundles must resolve their own bytes.
+    if build.is_live() {
+        hot::profile::authorized_live_project(db, worker_conf, build).await?;
+    }
+
     // Get source paths for the project
-    // CRITICAL: If this build was extracted from storage, use the extracted path
-    // Otherwise fall back to the config paths
     // Also track if this is a bundle build so we skip global dependency resolution
     // and use the bundle's own cache directory
     let (src_paths, is_bundle_build, bundle_extract_path, bundle_manifest) = if build.is_live() {
@@ -4082,139 +4251,36 @@ async fn execute_single_event_handler_inner(
                     build.build_id
                 );
 
-                // Get environment for this build to retrieve from storage
-                match hot::db::Env::get_env(db, &project.env_id).await {
-                    Ok(env) => {
-                        // Try to retrieve and extract the build
-                        match hot::storage::build_storage_from_config(worker_conf).await {
-                            Ok(storage) => {
-                                match storage
-                                    .retrieve_build(&build.build_id, &env.org_id, &project.env_id)
-                                    .await
-                                {
-                                    Ok(build_data) => {
-                                        debug!(
-                                            "Retrieved build {} from storage ({} bytes), extracting...",
-                                            build.build_id,
-                                            build_data.len()
-                                        );
-                                        let prep_permit = acquire_blocking_execution_slot(
-                                            Arc::clone(&blocking_execution_slots),
-                                            run_id,
-                                            BLOCKING_SLOT_ACQUIRE_TIMEOUT,
-                                        )
-                                        .await?;
-                                        let prep_extract_dir = extract_dir.clone();
-                                        let prep_build_id = build.build_id;
-                                        let prep_project_name = project.name.clone();
-                                        match tokio::task::spawn_blocking(move || {
-                                            let _prep_permit = prep_permit;
-                                            extract_and_precompile_event_bundle(
-                                                build_data,
-                                                prep_extract_dir,
-                                                prep_build_id,
-                                                prep_project_name,
-                                            )
-                                        })
-                                        .await
-                                        {
-                                            Ok(Ok(prepared)) => {
-                                                build_path_cache.insert(
-                                                    build.build_id,
-                                                    prepared.extract_dir.clone(),
-                                                );
-                                                (
-                                                    prepared.src_paths,
-                                                    true,
-                                                    Some(prepared.extract_dir),
-                                                    prepared.manifest,
-                                                )
-                                            }
-                                            Ok(Err(e)) => {
-                                                error!("{}. Falling back to config paths", e);
-                                                (
-                                                    hot::project::get_project_src_paths(
-                                                        worker_conf,
-                                                        &project.name,
-                                                    ),
-                                                    false,
-                                                    None,
-                                                    None,
-                                                )
-                                            }
-                                            Err(e) => {
-                                                error!(
-                                                    "Bundle preparation task failed for {}: {}. Falling back to config paths",
-                                                    build.build_id, e
-                                                );
-                                                (
-                                                    hot::project::get_project_src_paths(
-                                                        worker_conf,
-                                                        &project.name,
-                                                    ),
-                                                    false,
-                                                    None,
-                                                    None,
-                                                )
-                                            }
-                                        }
-                                    }
-                                    Err(e) => {
-                                        // In local dev mode, build storage is not expected to exist
-                                        // Log at debug level to avoid noise
-                                        if hot::env::is_local_dev() {
-                                            debug!(
-                                                "Build {} not in storage (expected in local dev), using config paths: {}",
-                                                build.build_id, e
-                                            );
-                                        } else {
-                                            error!(
-                                                "Failed to retrieve build {} from storage: {}. Falling back to config paths",
-                                                build.build_id, e
-                                            );
-                                        }
-                                        // Fall back to config paths (not a bundle)
-                                        (
-                                            hot::project::get_project_src_paths(
-                                                worker_conf,
-                                                &project.name,
-                                            ),
-                                            false,
-                                            None,
-                                            None,
-                                        )
-                                    }
-                                }
-                            }
-                            Err(e) => {
-                                error!(
-                                    "Failed to create storage client: {}. Falling back to config paths",
-                                    e
-                                );
-                                // Fall back to config paths (not a bundle)
-                                (
-                                    hot::project::get_project_src_paths(worker_conf, &project.name),
-                                    false,
-                                    None,
-                                    None,
-                                )
-                            }
-                        }
-                    }
-                    Err(e) => {
-                        error!(
-                            "Failed to get environment for build {}: {}. Falling back to config paths",
-                            build.build_id, e
-                        );
-                        // Fall back to config paths (not a bundle)
-                        (
-                            hot::project::get_project_src_paths(worker_conf, &project.name),
-                            false,
-                            None,
-                            None,
-                        )
-                    }
-                }
+                let env = Env::get_env(db, &project.env_id)
+                    .await
+                    .map_err(|error| format!("Cannot resolve bundle environment: {error}"))?;
+                let build_data = retrieve_build_data(build, &project, &env, worker_conf).await?;
+                let prep_permit = acquire_blocking_execution_slot(
+                    Arc::clone(&blocking_execution_slots),
+                    run_id,
+                    BLOCKING_SLOT_ACQUIRE_TIMEOUT,
+                )
+                .await?;
+                let prep_build_id = build.build_id;
+                let prep_project_name = project.name.clone();
+                let prepared = tokio::task::spawn_blocking(move || {
+                    let _prep_permit = prep_permit;
+                    extract_and_precompile_event_bundle(
+                        build_data,
+                        extract_dir,
+                        prep_build_id,
+                        prep_project_name,
+                    )
+                })
+                .await
+                .map_err(|error| format!("Bundle preparation task failed: {error}"))??;
+                build_path_cache.insert(build.build_id, prepared.extract_dir.clone());
+                (
+                    prepared.src_paths,
+                    true,
+                    Some(prepared.extract_dir),
+                    prepared.manifest,
+                )
             } // Close the else block for marker file check
         } // Close the else block for in-memory cache check
     };
@@ -4409,7 +4475,9 @@ async fn execute_single_event_handler_inner(
         let mut storage = AHashMap::new();
 
         // 1. First, load dev context storage (from hot/ctx.hot) as the base/fallback
-        if let Some(ref dev_ctx_storage) = dev_context_storage {
+        if build.is_live()
+            && let Some(ref dev_ctx_storage) = dev_context_storage
+        {
             match dev_ctx_storage.read() {
                 Ok(dev_ctx_guard) => {
                     if let Some(ref dev_ctx) = *dev_ctx_guard {
@@ -4607,6 +4675,8 @@ async fn execute_single_event_handler_inner(
         let spawn_scheduled = std::time::Instant::now();
         tokio::task::spawn_blocking(move || {
             let _blocking_execution_permit = blocking_execution_permit;
+            let _resource_scope =
+                install_event_resource_scope(is_bundle_build, bundle_extract_path.as_deref());
             let spawn_entered = std::time::Instant::now();
             debug!(
                 "TIMING [{}]: spawn_blocking entered",
@@ -5408,6 +5478,15 @@ pub async fn run_with_components_shared_context_and_db(
             }
         },
     };
+
+    // The worker coordinator discovers durable queue work globally. Execution
+    // receives a fresh exact-environment handle after hydration below.
+    let db = db.map(|db| {
+        Arc::new(db.with_scope(DatabaseScope::Maintenance {
+            operation: MaintenanceOperation::Queue,
+            org_id: None,
+        }))
+    });
 
     // Shared blob store for spilling large payloads on write (emitter/event
     // publisher) and rehydrating BlobRefs when events are loaded for execution.
@@ -6753,6 +6832,11 @@ pub async fn run_with_components_shared_context_and_db(
                                                         infra_retry_backoff_ms,
                                                     )
                                                     .await?;
+                                                let scoped_db = Arc::new(db.with_scope(DatabaseScope::Environment {
+                                                    org_id: event_message.body.execution_context.org_id.ok_or_else(|| worker_error("Hydrated event has no org scope"))?,
+                                                    env_id: event_message.body.event.env_id,
+                                                }));
+                                                let db = &scoped_db;
                                                 event_message.body.execution_context.queue_timing =
                                                     Some(hot::lang::event::QueueExecutionTiming {
                                                         backend: if queue_lease_timing
@@ -6954,36 +7038,39 @@ pub async fn run_with_components_shared_context_and_db(
                                                         debug!("hot.dev: WORKER {} executing {} handler(s) for event type '{}'",
                                                             worker_id, handlers_to_execute.len(), event_message.body.event.event_type);
 
+                                                        // Resolve and reserve the entire event fan-out before any
+                                                        // handler can execute. Durable IDs prevent infra redelivery
+                                                        // from consuming additional monthly run slots.
+                                                        let mut admitted_handlers = Vec::new();
+                                                        for event_handler in handlers_to_execute {
+                                                            let handler_build = Build::get_build(db, &event_handler.build_id).await
+                                                                .map_err(|e| worker_infrastructure_retry_error(format!("Cannot resolve handler build: {e}"), infra_retry_backoff_ms.max(5_000)))?;
+                                                            if !handler_build.deployed || !handler_build.active || handler_build.runtime_status != Build::RUNTIME_STATUS_READY {
+                                                                continue;
+                                                            }
+                                                            let identity = format!("{}:{}:{}", event_message.body.event.event_id, event_handler.event_handler_id, event_message.body.execution_context.retry_attempt);
+                                                            let run_id = Uuid::new_v5(&Uuid::NAMESPACE_OID, identity.as_bytes());
+                                                            admitted_handlers.push((event_handler, handler_build, run_id));
+                                                        }
+                                                        let run_ids: Vec<Uuid> = admitted_handlers.iter().map(|(_, _, id)| *id).collect();
+                                                        let org_id = event_message.body.execution_context.org_id.ok_or_else(|| worker_error("Hydrated event has no organization"))?;
+                                                        hot::db::run::Run::admit_executions(db, &org_id, &env_id, &run_ids).await
+                                                            .map_err(|e| match e {
+                                                                // Suspension and database errors leave accepted work pending.
+                                                                hot::db::run::RunError::Suspended(_) | hot::db::run::RunError::Database(_) => {
+                                                                    worker_infrastructure_retry_error(e.to_string(), infra_retry_backoff_ms.max(5_000))
+                                                                }
+                                                                // A reached account limit cannot clear by redelivery: use the
+                                                                // bounded retry path so the event dead-letters visibly.
+                                                                _ => worker_error(e.to_string()),
+                                                            })?;
+
                                                         // Step 4: Execute the selected handlers
                                                         let execution_result: (Result<(), String>, bool) = {
                                                             let mut all_success = true;
                                                             let mut started_any_handler = false;
                                                             let mut is_first_handler = true;
-                                                            for event_handler in handlers_to_execute {
-                                                                // Get the build for this handler
-                                                                let handler_build = match Build::get_build(db, &event_handler.build_id).await {
-                                                                    Ok(b) => b,
-                                                                    Err(e) => {
-                                                                        error!("hot.dev: WORKER {} failed to get build for handler {}: {}",
-                                                                            worker_id, event_handler.event_handler_id, e);
-                                                                        all_success = false;
-                                                                        continue;
-                                                                    }
-                                                                };
-
-                                                                // Skip if build is no longer runtime-visible (deactivated or superseded while event was in queue).
-                                                                if !handler_build.deployed
-                                                                    || !handler_build.active
-                                                                    || handler_build.runtime_status
-                                                                        != Build::RUNTIME_STATUS_READY
-                                                                {
-                                                                    warn!("hot.dev: WORKER {} skipping handler {}/{} - build {} is not deployed and ready",
-                                                                        worker_id, event_handler.ns, event_handler.var, handler_build.build_id);
-                                                                    continue;
-                                                                }
-
-                                                                // Generate run_id here so the handler can register cancellation state before execution.
-                                                                let run_id = Uuid::now_v7();
+                                                            for (event_handler, handler_build, run_id) in admitted_handlers {
                                                                 shutdown_coord_ref.register_run(run_id);
 
                                                                 debug!("hot.dev: WORKER {} executing {}/{} (event_id={}, run_id={}, event_handler_id={}, build_id={})",
@@ -7021,6 +7108,12 @@ pub async fn run_with_components_shared_context_and_db(
                                                                                                             && let Err(e) = hot::db::run::Run::update_info(db, &run_id, Some(warning_info)).await {
                                                                                                                 warn!("hot.dev: WORKER {} failed to update run {} info with routing warning: {}", worker_id, run_id, e);
                                                                                                             }
+                                                                                                }
+                                                                                                Err(e) if should_defer_run_admission(&e, started_any_handler) => {
+                                                                                                    // No bytecode or run:start was emitted. A suspension
+                                                                                                    // or transient quota lookup must leave accepted work
+                                                                                                    // pending without exhausting its delivery budget.
+                                                                                                    return Err(worker_infrastructure_retry_error(e, infra_retry_backoff_ms.max(5_000)));
                                                                                                 }
                                                                                                 Err(e) if should_redeliver_event_after_handler_error(&e, started_any_handler) => {
                                                                                                     // Setup or blocking-slot admission timed out before any run side
@@ -7123,6 +7216,11 @@ pub async fn run_with_components_shared_context_and_db(
                                                                 // Get environment to derive org_id
                                                                 match hot::db::Env::get_env(db, &project.env_id).await {
                                                                     Ok(env) => {
+                                                                        if !hot::db::Org::is_environment_admitted(db, &env.env_id).await.map_err(|error| worker_infrastructure_retry_error(error.to_string(), 5_000))? {
+                                                                            return Err(worker_infrastructure_retry_error("environment is suspended; deployment remains pending", 5_000));
+                                                                        }
+                                                                        let scoped_db = Arc::new(db.with_scope(DatabaseScope::Environment { org_id: env.org_id, env_id: env.env_id }));
+                                                                        let db = &scoped_db;
                                                                         debug!("hot.dev: WORKER {} processing deployment for build {} (env: {}, org: {})",
                                                                             worker_id,
                                                                             build.build_id,
@@ -7223,13 +7321,13 @@ pub async fn run_with_components_shared_context_and_db(
 
                                                                                                         let bundle_cache = hot::lang::cache::bytecode_cache::BytecodeCache::new(bundle_cache_dir);
                                                                                                         debug!("Pre-compiling bundle {} to generate bytecode cache", build.build_id);
-                                                                                                        match hot::lang::engine::Engine::compile_to_cache(
+                                                                                                        match compile_event_bundle_to_cache(
+                                                                                                            &extract_dir,
                                                                                                             &paths,
                                                                                                             &bundle_cache,
                                                                                                             &proj_name,
                                                                                                             cache_key.as_deref(),
                                                                                                             file_hashes,
-                                                                                                            None, // Bundle builds have deps pre-bundled
                                                                                                         ) {
                                                                                                             Ok(()) => {
                                                                                                                 debug!("Bundle {} pre-compiled successfully", build.build_id);
@@ -7448,6 +7546,13 @@ pub async fn run_with_components_shared_context_and_db(
 
                                             if let Some(ref db) = db_ref {
                                                 for task in &maint_message.body.tasks {
+                                                    let operation = match task.as_str() {
+                                                        "session_cleanup" | "inactive_schedule_cleanup" | "upload_cleanup" | "call_retention_cleanup" => MaintenanceOperation::Retention,
+                                                        "blob_cleanup" => MaintenanceOperation::BlobGc,
+                                                        _ => MaintenanceOperation::Queue,
+                                                    };
+                                                    let scoped_db = Arc::new(db.with_scope(DatabaseScope::Maintenance { operation, org_id: None }));
+                                                    let db = &scoped_db;
                                                     match task.as_str() {
                                                         "session_cleanup" => {
                                                             match hot::db::session::Session::cleanup_expired(db).await {
@@ -7763,7 +7868,7 @@ pub async fn run_with_components_shared_context_and_db(
                                                                         }
                                                                     }
                                                                     let cutoff = chrono::Utc::now() - chrono::Duration::days(days as i64);
-                                                                    match hot::db::blob::deactivate_refs_older_than(db, None, CALL_REF_KINDS, cutoff).await {
+                                                                    match hot::db::blob::deactivate_refs_older_than(&db.with_scope(DatabaseScope::Maintenance { operation: MaintenanceOperation::BlobGc, org_id: None }), None, CALL_REF_KINDS, cutoff).await {
                                                                         Ok(n) if n > 0 => {
                                                                             info!("hot.dev: WORKER {} maintenance: deactivated {} expired call blob ref(s)", worker_id, n);
                                                                         }
@@ -7774,7 +7879,14 @@ pub async fn run_with_components_shared_context_and_db(
                                                                     }
                                                                 }
                                                             } else {
-                                                                let org_ids = hot::db::subscription::OrgPlan::get_all_active_org_ids(db).await.unwrap_or_default();
+                                                                let mut org_ids = hot::db::subscription::OrgPlan::get_all_active_org_ids(db).await.unwrap_or_default();
+                                                                for root_id in org_ids.clone() {
+                                                                    if let Ok(children) = hot::db::Org::list_children(db, &root_id).await {
+                                                                        org_ids.extend(children.into_iter().map(|child| child.org_id));
+                                                                    }
+                                                                }
+                                                                org_ids.sort_unstable();
+                                                                org_ids.dedup();
                                                                 for org_id in &org_ids {
                                                                     let days = hot::db::subscription::call_deletion_days_for_org(db, org_id).await;
                                                                     if days < 0 { continue; }
@@ -7794,7 +7906,7 @@ pub async fn run_with_components_shared_context_and_db(
                                                                     }
 
                                                                     let cutoff = chrono::Utc::now() - chrono::Duration::days(days as i64);
-                                                                    match hot::db::blob::deactivate_refs_older_than(db, Some(*org_id), CALL_REF_KINDS, cutoff).await {
+                                                                    match hot::db::blob::deactivate_refs_older_than(&db.with_scope(DatabaseScope::Maintenance { operation: MaintenanceOperation::BlobGc, org_id: None }), Some(*org_id), CALL_REF_KINDS, cutoff).await {
                                                                         Ok(n) if n > 0 => {
                                                                             info!("hot.dev: WORKER {} maintenance: deactivated {} expired call blob ref(s) for org {}", worker_id, n, org_id);
                                                                         }
@@ -8425,6 +8537,33 @@ mod tests {
     }
 
     #[test]
+    fn run_admission_defers_only_before_any_handler_side_effects() {
+        assert!(should_defer_run_admission(
+            "[run-admission] Account suspended",
+            false
+        ));
+        assert!(!should_defer_run_admission(
+            "[run-admission] Account suspended",
+            true
+        ));
+        assert!(!should_defer_run_admission("User handler failed", false));
+        // User code can put the tag in its own error text; only the engine's
+        // admission step may begin an error with it.
+        assert!(!should_defer_run_admission(
+            "Failed to call function 'handler': Runtime error: Function '[run-admission] x' not found",
+            false
+        ));
+        let admission = hot::lang::runtime::vm::admission_failure(
+            hot::lang::runtime::vm::VmError::runtime("[run-admission] Account suspended".into()),
+        );
+        assert!(should_defer_run_admission(&admission, false));
+        let quota = hot::lang::runtime::vm::admission_failure(
+            hot::lang::runtime::vm::VmError::runtime("[run-quota] Monthly limit".into()),
+        );
+        assert!(!should_defer_run_admission(&quota, false));
+    }
+
+    #[test]
     fn slot_admission_timeout_redelivers_only_side_effect_free_events() {
         let timeout_error = format!("{} after 30s", BLOCKING_SLOT_TIMEOUT_ERROR);
         let setup_timeout_error = format!("{} after 30s", EVENT_SETUP_TIMEOUT_ERROR);
@@ -8855,6 +8994,317 @@ mod tests {
         let _ = std::fs::remove_dir_all(cache_dir);
     }
 
+    #[tokio::test]
+    async fn missing_deployed_bundle_never_falls_back_to_host_sources() {
+        let (db, db_path) = migrated_sqlite_file_db().await;
+        let test_data = hot::db::insert_test_data(&db)
+            .await
+            .expect("test data should insert");
+        let bundle_id = Uuid::now_v7();
+        Build::insert_build(
+            &db,
+            &bundle_id,
+            &test_data.project_id,
+            "missing-bundle",
+            0,
+            Build::BUILD_TYPE_BUNDLE,
+            &test_data.user_id,
+        )
+        .await
+        .unwrap();
+        let build = Build::get_build(&db, &bundle_id)
+            .await
+            .expect("test build should exist");
+
+        // A matching project name on the host is never a fallback for a deployed bundle.
+        let event_env_id = test_data.env_id;
+        let event_id = Uuid::now_v7();
+        let stream_id = Uuid::now_v7();
+        let event_message = EventMessage {
+            id: event_id,
+            head: AHashMap::new(),
+            body: hot::lang::event::queue::EventMessageBody {
+                event: hot::lang::event::Event {
+                    event_id,
+                    env_id: event_env_id,
+                    stream_id,
+                    event_type: "hot:call".to_string(),
+                    event_data: val!({
+                        "fn": "demo/handler",
+                        "args": [],
+                    }),
+                    event_time: chrono::Utc::now(),
+                    target_project_id: None,
+                    target_project_name: None,
+                },
+                execution_context: ExecutionContext::new(
+                    Uuid::now_v7(),
+                    stream_id,
+                    hot::db::run::RunType::Call.as_id(),
+                    Some(event_env_id),
+                    Some(test_data.user_id),
+                    Some(test_data.org_id),
+                    None,
+                ),
+            },
+        };
+        let event_handler = EventHandler {
+            event_handler_id: Uuid::now_v7(),
+            build_id: build.build_id,
+            event_type: "hot:call".to_string(),
+            ns: "demo".to_string(),
+            var: "handler".to_string(),
+            meta: None,
+            value: None,
+            file: None,
+            line: None,
+            column: None,
+            position: None,
+        };
+
+        let worker_conf = get_resolved_conf(val!({
+            "project": {"test-project": {"src": {"paths": ["hot/src"]}}}
+        }));
+        let cache_dir =
+            std::env::temp_dir().join(format!("hot-worker-test-cache-{}", Uuid::new_v4()));
+        let cache = Arc::new(hot::lang::cache::bytecode_cache::BytecodeCache::new(
+            cache_dir.clone(),
+        ));
+        let task_queue = Arc::new(
+            ProcessingQueue::<TaskRequest>::new(
+                QueueType::Memory,
+                format!("worker-run-unregister-test-{}", Uuid::new_v4()),
+                None,
+                Serialization::Json,
+            )
+            .expect("task queue should build"),
+        );
+        let execution_services =
+            Arc::new(WorkerExecutionServices::new(Arc::new(db.clone()), &worker_conf).await);
+
+        // Mirror the event executor: the caller registers the run, then hands
+        // unregistration responsibility to execute_single_event_handler.
+        let shutdown_coordinator = Arc::new(ShutdownCoordinator::new(1));
+        let run_id = Uuid::now_v7();
+        shutdown_coordinator.register_run(run_id);
+        assert_eq!(shutdown_coordinator.active_run_count(), 1);
+
+        let result = execute_single_event_handler(
+            &db,
+            &build,
+            &event_env_id,
+            &worker_conf,
+            &event_handler,
+            &event_message,
+            None,
+            None,
+            None,
+            cache,
+            Arc::clone(&shutdown_coordinator),
+            run_id,
+            Arc::new(BuildPathCache::new()),
+            None,
+            None,
+            task_queue,
+            execution_services,
+            Arc::new(Semaphore::new(1)),
+        )
+        .await;
+
+        assert!(
+            result.unwrap_err().contains("Failed to retrieve build"),
+            "missing bundle must stop source resolution before host source compilation"
+        );
+        assert_eq!(
+            shutdown_coordinator.active_run_count(),
+            0,
+            "an error exit must unregister the run so shutdown does not hang"
+        );
+
+        if let DatabasePool::Sqlite(pool) = &db {
+            pool.close().await;
+        }
+        let _ = std::fs::remove_file(db_path);
+        let _ = std::fs::remove_dir_all(cache_dir);
+    }
+
+    #[tokio::test]
+    async fn payload_retry_origin_cannot_cross_environment_scope() {
+        let db = hot::db::test_db().await;
+        let fixture = hot::db::insert_test_data(&db).await.unwrap();
+        let retry = hot::env::retry::RetryContext::from_event_data(
+            &val!({"retry": {"origin-run-id": fixture.run_id.to_string(), "attempt": 1}}),
+            &val!({}),
+        )
+        .unwrap();
+        validate_event_origin_scope(&db, fixture.env_id, retry.origin_run_id)
+            .await
+            .unwrap();
+        let other_env = Uuid::now_v7();
+        Env::insert_env(&db, &other_env, &fixture.org_id, "other", &fixture.user_id)
+            .await
+            .unwrap();
+        assert!(
+            validate_event_origin_scope(&db, other_env, retry.origin_run_id)
+                .await
+                .unwrap_err()
+                .contains("another environment")
+        );
+        assert!(
+            validate_event_origin_scope(&db, fixture.env_id, Some(Uuid::now_v7()))
+                .await
+                .is_err()
+        );
+        validate_event_origin_scope(&db, other_env, None)
+            .await
+            .unwrap();
+    }
+
+    #[test]
+    fn event_bundles_never_inherit_host_resources() {
+        use hot::lang::hot::resource::{self, ThreadRegistryGuard};
+        let host = tempfile::tempdir().unwrap();
+        std::fs::write(host.path().join("host-secret.txt"), "host-only").unwrap();
+        let _host = ThreadRegistryGuard::install(Arc::new(resource::build_registry(
+            &[host.path().to_path_buf()],
+            false,
+            &[],
+        )));
+        assert!(
+            resource::get_registry()
+                .entries
+                .contains_key("host-secret.txt")
+        );
+        let bundle = tempfile::tempdir().unwrap();
+        {
+            let _bundle = install_event_resource_scope(true, Some(bundle.path()));
+            assert!(resource::get_registry().entries.is_empty());
+        }
+        assert!(
+            resource::get_registry()
+                .entries
+                .contains_key("host-secret.txt")
+        );
+        std::fs::create_dir_all(bundle.path().join("resources")).unwrap();
+        std::fs::write(bundle.path().join("resources/bundle.txt"), "bundle-only").unwrap();
+        std::fs::write(
+            bundle.path().join("manifest.hot"),
+            r#"{"hot.bundle.test":{"resources":[{"path":"bundle.txt","hash":"","size":11}]}}"#,
+        )
+        .unwrap();
+        let _bundle = install_event_resource_scope(true, Some(bundle.path()));
+        let registry = resource::get_registry();
+        assert!(registry.entries.contains_key("bundle.txt"));
+        assert!(!registry.entries.contains_key("host-secret.txt"));
+    }
+
+    #[tokio::test]
+    async fn event_bundle_initializers_use_bundle_resources_on_every_cache_path() {
+        use hot::lang::cache::bytecode_cache::BytecodeCache;
+        use hot::lang::hot::resource::{self, ThreadRegistryGuard};
+
+        fn invoke_initializer(
+            extract_dir: &std::path::Path,
+            manifest: &hot::bundle::BundleManifest,
+            host_registry: Arc<resource::ResourceRegistry>,
+            expected: &str,
+        ) {
+            let _host = ThreadRegistryGuard::install(host_registry);
+            let _bundle = install_event_resource_scope(true, Some(extract_dir));
+            let cache = BytecodeCache::new(extract_dir.join(".hot/cache"));
+            let cached = cache.load(manifest.cache_key.as_deref().unwrap()).unwrap();
+            let result = hot::lang::engine::Engine::call_function_with_cached_bytecode(
+                "::bundle_scope/handler",
+                &[],
+                cached,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+            assert_eq!(result.unwrap_ok().unwrap_or(&result), &Val::from(expected));
+        }
+
+        let directory = tempfile::tempdir().unwrap();
+        let host = directory.path().join("host");
+        std::fs::create_dir_all(&host).unwrap();
+        std::fs::write(host.join("scope.txt"), "host-only-secret").unwrap();
+        let host_registry = Arc::new(resource::build_registry(&[host], false, &[]));
+        let source = directory.path().join("src");
+        let resources = directory.path().join("resources");
+        std::fs::create_dir_all(&source).unwrap();
+        std::fs::create_dir_all(&resources).unwrap();
+        std::fs::write(resources.join("scope.txt"), "bundle-only").unwrap();
+        std::fs::write(
+            source.join("scope.hot"),
+            r#"::bundle_scope ns
+initialized ::hot::resource/load-str("scope.txt") |> if-err("missing")
+handler fn () { initialized }
+"#,
+        )
+        .unwrap();
+
+        for include_resources in [true, false] {
+            let resource_roots = if include_resources {
+                vec![resources.clone()]
+            } else {
+                Vec::new()
+            };
+            let bundle = hot::bundle::create_bundle(
+                "scope-project",
+                &[source.to_string_lossy().into_owned()],
+                &[],
+                &resource_roots,
+                false,
+                &[],
+            )
+            .unwrap();
+            let zip = hot::bundle::write_bundle_zip(&bundle, directory.path()).unwrap();
+            let extract_dir = directory.path().join(format!("build-{include_resources}"));
+            let prepared = {
+                let _host = ThreadRegistryGuard::install(host_registry.clone());
+                extract_and_precompile_event_bundle(
+                    std::fs::read(zip).unwrap(),
+                    extract_dir.clone(),
+                    Uuid::now_v7(),
+                    "scope-project".into(),
+                )
+                .unwrap()
+            };
+            let manifest = prepared.manifest.unwrap();
+            let expected = if include_resources {
+                "bundle-only"
+            } else {
+                "missing"
+            };
+            invoke_initializer(&extract_dir, &manifest, host_registry.clone(), expected);
+
+            // Older bundles can have no resources manifest. Recompilation and
+            // warmup must preserve an explicit empty scope for those too.
+            if !include_resources {
+                std::fs::remove_file(extract_dir.join("manifest.hot")).unwrap();
+            }
+            {
+                let _host = ThreadRegistryGuard::install(host_registry.clone());
+                assert!(recompile_bundle_cache(&extract_dir, &manifest));
+            }
+            invoke_initializer(&extract_dir, &manifest, host_registry.clone(), expected);
+            compile_bundle_cache(extract_dir.clone(), manifest.clone())
+                .await
+                .unwrap();
+            invoke_initializer(&extract_dir, &manifest, host_registry.clone(), expected);
+        }
+    }
+
     #[test]
     fn local_dev_shutdown_still_gets_a_drain_window() {
         assert_eq!(
@@ -8956,11 +9406,39 @@ mod tests {
                     hot::db::run::RunType::Call.as_id(),
                     Some(test_data.env_id),
                     Some(Uuid::now_v7()),
-                    Some(Uuid::now_v7()),
+                    Some(test_data.org_id),
                     None,
                 ),
             },
         };
+
+        let mut wrong_org = thin_message.clone();
+        wrong_org.body.execution_context.org_id = Some(Uuid::now_v7());
+        assert!(
+            hydrate_event_message_from_db(0, &db, None, wrong_org, 0)
+                .await
+                .is_err()
+        );
+        let DatabasePool::Sqlite(pool) = &db else {
+            unreachable!()
+        };
+        sqlx::query("UPDATE org SET lifecycle_state = 'suspended' WHERE org_id = ?")
+            .bind(test_data.org_id)
+            .execute(pool)
+            .await
+            .unwrap();
+        let held = hydrate_event_message_from_db(0, &db, None, thin_message.clone(), 0)
+            .await
+            .unwrap_err();
+        assert!(
+            held.downcast_ref::<QueueInfrastructureError>().is_some(),
+            "Suspension must defer work without consuming the poison-message retry budget"
+        );
+        sqlx::query("UPDATE org SET lifecycle_state = 'active' WHERE org_id = ?")
+            .bind(test_data.org_id)
+            .execute(pool)
+            .await
+            .unwrap();
 
         let hydrated = hydrate_event_message_from_db(0, &db, None, thin_message, 0)
             .await
@@ -8981,6 +9459,107 @@ mod tests {
         );
         assert_eq!(hydrated.body.execution_context.build_id, None);
 
+        if let DatabasePool::Sqlite(pool) = &db {
+            pool.close().await;
+        }
+        let _ = std::fs::remove_file(db_path);
+    }
+
+    #[tokio::test]
+    async fn webhook_url_hints_restore_after_real_queue_roundtrip_and_db_hydration() {
+        let (db, db_path) = migrated_sqlite_file_db().await;
+        let data = hot::db::insert_test_data(&db).await.unwrap();
+        let event_id = Uuid::now_v7();
+        let stream_id = Uuid::now_v7();
+        let raw_url = "https://hooks.example.test/webhook/svc/path/abcdef123456?x=1";
+        let request = val!({"original-url":raw_url,"body":"authoritative body"});
+        let original = val!({
+            "fn":"::durable/handler",
+            "args": Val::Vec(vec![request.clone()]),
+            "caller":request
+        });
+        let stored = hot::webhook_url::redact_event_data_original_urls(&original);
+        let stored_json = serde_json::to_value(stored.to_hot_data_repr()).unwrap();
+        assert!(!stored_json.to_string().contains("abcdef123456"));
+        hot::db::Event::insert_event(
+            &db,
+            &event_id,
+            &data.env_id,
+            &stream_id,
+            "hot:call",
+            &stored_json,
+            chrono::Utc::now(),
+            &data.user_id,
+            None,
+        )
+        .await
+        .unwrap();
+
+        for (hint_url, accepted) in [
+            (raw_url, true),
+            (
+                "https://sibling.example.test/webhook/svc/path/abcdef123456?x=1",
+                false,
+            ),
+        ] {
+            let hint_request = val!({"original-url":hint_url,"body":"untrusted body"});
+            let envelope = EventMessage {
+                id: event_id,
+                head: AHashMap::new(),
+                body: hot::lang::event::EventMessageBody {
+                    event: hot::lang::event::Event {
+                        event_id,
+                        env_id: data.env_id,
+                        stream_id,
+                        event_type: "hot:call".into(),
+                        event_data: val!({
+                            "fn":"::untrusted/handler",
+                            "args":Val::Vec(vec![hint_request.clone()]),
+                            "caller":hint_request
+                        }),
+                        event_time: chrono::Utc::now(),
+                        target_project_id: None,
+                        target_project_name: None,
+                    },
+                    execution_context: ExecutionContext::new(
+                        Uuid::now_v7(),
+                        stream_id,
+                        hot::db::run::RunType::Call.as_id(),
+                        Some(data.env_id),
+                        Some(data.user_id),
+                        Some(data.org_id),
+                        None,
+                    ),
+                },
+            };
+            let serialized: hot::data::msg::Message = envelope.into();
+            let parsed = EventMessage::try_from(serialized).unwrap();
+            let hydrated = hydrate_event_message_from_db(0, &db, None, parsed, 0)
+                .await
+                .unwrap();
+            assert_eq!(
+                hydrated.body.event.event_data.get_str("fn"),
+                "::durable/handler"
+            );
+            let caller = hydrated.body.event.event_data.get("caller").unwrap();
+            assert_eq!(caller.get_str("body"), "authoritative body");
+            if accepted {
+                assert_eq!(hydrated.body.event.event_data, original);
+            } else {
+                assert!(caller.get("original-url").is_none());
+                let Val::Vec(args) = hydrated.body.event.event_data.get("args").unwrap() else {
+                    panic!("hydrated arguments must remain intact");
+                };
+                assert!(args[0].get("original-url").is_none());
+            }
+            assert_eq!(
+                hot::db::Event::get_event(&db, &event_id)
+                    .await
+                    .unwrap()
+                    .event_data,
+                stored_json
+            );
+        }
         if let DatabasePool::Sqlite(pool) = &db {
             pool.close().await;
         }

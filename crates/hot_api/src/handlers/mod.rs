@@ -9,6 +9,7 @@ mod event_handlers;
 mod events;
 mod files;
 mod health;
+pub mod management;
 mod mcp;
 mod org;
 mod projects;
@@ -160,8 +161,9 @@ pub async fn get_and_verify_project(
     Ok(project)
 }
 
-/// Helper for write paths that should bring an inactive project back online.
-pub async fn get_and_ensure_active_project(
+/// Resolve ownership without mutating an inactive project before its related
+/// resource has been authorized.
+pub(super) async fn get_and_verify_project_including_inactive(
     db: &DatabasePool,
     api_key: &ApiKey,
     project_id_or_slug: &str,
@@ -181,6 +183,18 @@ pub async fn get_and_ensure_active_project(
             Json(ApiErrorResponse::not_found("Project")),
         ));
     }
+
+    Ok(project)
+}
+
+/// Helper for write paths that should bring an inactive project back online.
+pub async fn get_and_ensure_active_project(
+    db: &DatabasePool,
+    api_key: &ApiKey,
+    project_id_or_slug: &str,
+) -> Result<Project, (StatusCode, Json<ApiErrorResponse>)> {
+    let project =
+        get_and_verify_project_including_inactive(db, api_key, project_id_or_slug).await?;
 
     if project.active {
         return Ok(project);
