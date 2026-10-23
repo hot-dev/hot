@@ -2446,7 +2446,13 @@ impl Parser {
 
                         // Check if the next token is NOT a call/operator (i.e., this is var assignment)
                         // Look for patterns that indicate this is NOT a variable assignment
-                        let is_function_call = self.check(&TokenType::LeftParen);
+                        // `name(…)` is a call. `name (…)` binds the
+                        // parenthesized value, a lambda `(x) { … }`, as in
+                        // a function body.
+                        let is_function_call = self.peek().is_some_and(|t| {
+                            matches!(t.token_type, TokenType::LeftParen)
+                                && Some(t.position) == ident_token_end
+                        });
                         let is_method_access = self.check(&TokenType::Dot);
                         let is_pipe = self.check(&TokenType::Pipe);
                         let is_newline_or_end = self.check(&TokenType::Newline)
@@ -4544,8 +4550,12 @@ impl Parser {
                 continue;
             }
 
-            let expr = self.parse_value()?;
-            expressions.push(expr);
+            if self.at_spaced_paren_binding() {
+                self.parse_spaced_paren_binding(&mut expressions)?;
+            } else {
+                let expr = self.parse_value()?;
+                expressions.push(expr);
+            }
 
             // Skip newlines after expression
             while self.check(&TokenType::Newline) {
@@ -6183,6 +6193,19 @@ impl Parser {
                     continue;
                 }
 
+                if matches!(flow_type, FlowType::Serial | FlowType::Parallel)
+                    && self.at_spaced_paren_binding()
+                {
+                    self.parse_spaced_paren_binding(&mut expressions)?;
+                    while self.check(&TokenType::Newline) {
+                        self.next();
+                    }
+                    if self.check(&TokenType::Comma) {
+                        self.next();
+                    }
+                    continue;
+                }
+
                 // Parse conditional branch: condition => result OR => result (default) OR _ => result (default)
                 let is_default = self.check(&TokenType::Arrow)
                     || (self.check(&TokenType::Underscore)
@@ -6263,6 +6286,37 @@ impl Parser {
     }
 
     // Helper methods
+
+    /// Whether the next statement is `name (…)` on one line: it binds the
+    /// parenthesized value, a lambda `(x) { … }`, to `name`, as in a function
+    /// body. A call has no space before its `(`.
+    fn at_spaced_paren_binding(&self) -> bool {
+        match (self.peek(), self.peek_n(1)) {
+            (Some(name), Some(paren)) => {
+                matches!(name.token_type, TokenType::Identifier(_))
+                    && matches!(paren.token_type, TokenType::LeftParen)
+                    && paren.line == name.line
+                    && paren.position > name.position + name.length
+            }
+            _ => false,
+        }
+    }
+
+    /// Parse `name (…)` as a binding: the name, then its value.
+    fn parse_spaced_paren_binding(&mut self, expressions: &mut Vec<Value>) -> ParseResult<()> {
+        let name = self.expect_identifier()?;
+        let var = Var {
+            sym: Sym::String(name),
+            deep_set: None,
+            deep_path: None,
+            meta: None,
+            type_annotation: None,
+            src: None,
+        };
+        expressions.push(Value::Ref(Ref::Var(VarRef { var, src: None })));
+        expressions.push(self.parse_value()?);
+        Ok(())
+    }
 
     /// Consume a deep-path suffix (`.field`, `[0]`, `[key]`, `["key"]`, `[]`)
     /// starting at the current token. `last_token_end` is the source end

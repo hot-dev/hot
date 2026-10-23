@@ -597,6 +597,38 @@ meta ["test"] fn () {
     assert-eq([2, 3], bump-all([1, 2]), "local lambda inside a lambda body")
 }
 
+// `name (x) { ... }` binds a lambda in a flow branch or a flow body too.
+test-lambda-local-binding-in-flows
+meta ["test"] fn () {
+    in-cond cond {
+        is-empty([1]) => { 0 }
+        => {
+            minus (a, b) { sub(a, b) }
+            minus(5, 1)
+        }
+    }
+
+    assert-eq(4, in-cond, "local lambda in a cond branch")
+
+    picked "b"
+    in-match match picked {
+        "a" => { 0 }
+        _ => {
+            twice (x) { mul(x, 2) }
+            twice(3)
+        }
+    }
+
+    assert-eq(6, in-match, "local lambda in a match arm")
+
+    in-serial serial {
+        inc (x) { add(x, 1) }
+        inc(1)
+    }
+
+    assert-eq(2, in-serial, "local lambda in a serial flow")
+}
+
 // Parameter lists may span lines, like call arguments.
 describe-count fn (
     name: Str,

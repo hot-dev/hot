@@ -2376,3 +2376,79 @@ Roll type open 1 | 2 | 3
         other => panic!("expected Union of ints, got {:?}", other),
     }
 }
+
+#[test]
+fn test_spaced_paren_in_a_flow_branch_binds_a_lambda() {
+    // `name (…)` with a space binds the parenthesized value in a flow branch,
+    // as in a function body; `name(…)` stays a call.
+    let source = "g fn cond (n: Int): Int {\n    lte(n, 1) => { n }\n    => {\n        h (x) { add(x, 1) }\n        h(n)\n    }\n}";
+    let program = parse_hot(source).expect("parses");
+    let default_ns = &program.namespaces[&NsPath::new()];
+    let body = default_ns
+        .scope
+        .vars
+        .iter()
+        .find_map(|(var, value)| match value {
+            Value::Fn(defs) if var.sym.name() == "g" => Some(&defs[0].body),
+            _ => None,
+        })
+        .expect("g is a function");
+    let Value::Flow(cond) = body else {
+        panic!("expected a cond body, got {:?}", body)
+    };
+    let branch = match cond.expressions.last() {
+        Some(Value::Cond(_, _, flow)) | Some(Value::CondDefault(flow)) => flow,
+        other => panic!("expected the default branch, got {:?}", other),
+    };
+    let Some(Value::Flow(block)) = branch.expressions.first() else {
+        panic!("expected the branch's block, got {:?}", branch.expressions)
+    };
+    assert!(
+        matches!(&block.expressions[0], Value::Ref(Ref::Var(v)) if v.var.sym.name() == "h"),
+        "h should be bound, got {:?}",
+        block.expressions
+    );
+    assert!(
+        matches!(&block.expressions[1], Value::Lambda(_)),
+        "h should be bound to a lambda, got {:?}",
+        block.expressions[1]
+    );
+    assert!(
+        matches!(&block.expressions[2], Value::FnCall(_)),
+        "h(n) is a call"
+    );
+}
+
+#[test]
+fn test_spaced_paren_in_a_flow_body_binds_a_lambda() {
+    // Serial and parallel flow bodies bind `name (…)` too.
+    for flow_type in ["serial", "parallel"] {
+        let source = format!("v {flow_type} {{\n    h (x) {{ add(x, 1) }}\n    k(2)\n}}");
+        let program = parse_hot(&source).expect("parses");
+        let default_ns = &program.namespaces[&NsPath::new()];
+        let flow = default_ns
+            .scope
+            .vars
+            .iter()
+            .find_map(|(var, value)| match value {
+                Value::Flow(flow) if var.sym.name() == "v" => Some(flow),
+                _ => None,
+            })
+            .expect("v is a flow");
+        assert!(
+            matches!(&flow.expressions[0], Value::Ref(Ref::Var(v)) if v.var.sym.name() == "h"),
+            "{flow_type}: h should be bound, got {:?}",
+            flow.expressions
+        );
+        assert!(
+            matches!(&flow.expressions[1], Value::Lambda(_)),
+            "{flow_type}: h should be bound to a lambda, got {:?}",
+            flow.expressions[1]
+        );
+        assert!(
+            matches!(&flow.expressions[2], Value::FnCall(_)),
+            "{flow_type}: k(2) is a call, got {:?}",
+            flow.expressions
+        );
+    }
+}
