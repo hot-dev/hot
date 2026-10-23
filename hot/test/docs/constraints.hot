@@ -59,6 +59,15 @@ withdraw fn (amount: Int, balance: Int)
 }
 // @end: preconditions
 
+// @doc: rest-parameters
+tag-count fn (...tags: Str where not(is-empty(%)))
+  where lte(length(%.tags), 3)
+  : Int
+{
+  length(tags)
+}
+// @end: rest-parameters
+
 // @doc: nullable
 nickname: Username? null
 
@@ -175,6 +184,20 @@ meta ["test"] fn () {
 // withdraw(10, 100)  → 90
 // withdraw(150, 100) → Err(ConstraintError.Violation), boundary "arguments"
 // @end: preconditions
+
+test-rest-parameters
+meta ["test"] fn () {
+  assert-eq(2, tag-count("a", "b"), "valid")
+  bad-tag err-value(tag-count("a", dynamic("")))
+  assert-eq("parameter", bad-tag.boundary, "each argument is checked")
+  assert-eq([1], bad-tag.path, "the failing argument's index")
+  assert-eq("arguments", err-value(tag-count("a", "b", "c", dynamic("d"))).boundary, "precondition")
+}
+// @result: rest-parameters
+// tag-count("a", "b")           → 2
+// tag-count("a", "")            → Err(ConstraintError.Violation), boundary "parameter", path [1]
+// tag-count("a", "b", "c", "d") → Err(ConstraintError.Violation), boundary "arguments"
+// @end: rest-parameters
 
 test-nullable
 meta ["test"] fn () {

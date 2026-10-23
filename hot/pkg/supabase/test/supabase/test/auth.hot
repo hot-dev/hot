@@ -1,0 +1,11 @@
+::supabase::test::auth ns
+meta ["test"]
+
+::auth ::supabase::auth
+
+test-verify-otp-takes-the-email-type
+meta ["test"]
+fn () {
+  request ::auth/VerifyOtpRequest({type: "email", email: "user@example.com", token: "123456"})
+  assert-eq("email", get(request, "type"))
+}

@@ -1,0 +1,13 @@
+::postmark::test::edit ns
+meta ["test"]
+
+::edit ::postmark::edit
+
+test-edit-requests-take-every-server-color
+meta ["test"]
+fn () {
+  server ::edit/EditServerConfigurationRequest({Color: "turquoise"})
+  current ::edit/EditCurrentServerConfigurationRequest({Color: "orange"})
+  assert-eq("turquoise", server.Color)
+  assert-eq("orange", current.Color)
+}
