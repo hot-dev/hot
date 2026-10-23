@@ -164,9 +164,8 @@ impl CallGraph {
     /// declaration shares the root namespace, which a hot-std file creates first.
     pub fn identify_user_roots(&self, program: &Program) -> Vec<String> {
         let mut roots = Vec::new();
-        let is_user_code = |fqn: &str| {
-            !is_package_path(self.fn_source_files.get(fqn).map_or("", String::as_str))
-        };
+        let is_user_code =
+            |fqn: &str| !is_package_path(self.fn_source_files.get(fqn).map_or("", String::as_str));
 
         for (ns_path, namespace) in &program.namespaces {
             let ns_str = ns_path.to_string();
