@@ -1159,6 +1159,26 @@ mod integration_tests {
         assert_placeholder_errors_in(&errors, "probe/split-b.hot", 3, (4, 11));
     }
 
+    /// An unresolved name points at the name itself. A variable, a path's
+    /// base and a call all used to take the position of the token after it.
+    #[test]
+    fn test_unresolved_names_point_at_the_name() {
+        let errors = compile_files_and_get_errors(&[(
+            "probe/names.hot",
+            "::probe::names ns\n\nf fn (): Int {\n    add(missing-var, 1)\n}\n\ng fn (): Int {\n    missing-fn(1)\n}\n\nh fn (): Any {\n    missing-map.field\n}\n",
+        )]);
+        let at = |name: &str| {
+            errors
+                .iter()
+                .find(|e| e.to_string().contains(name))
+                .and_then(|e| e.location())
+                .map(|l| (l.line, l.column, l.length))
+        };
+        assert_eq!(at("missing-var"), Some((4, 9, 11)), "errors: {errors:?}");
+        assert_eq!(at("missing-fn"), Some((8, 5, 10)), "errors: {errors:?}");
+        assert_eq!(at("missing-map"), Some((12, 5, 11)), "errors: {errors:?}");
+    }
+
     /// An explicit inner function, `%(...)` or `(x) { ... }`, is allowed
     /// inside an implicit `%` lambda.
     #[test]

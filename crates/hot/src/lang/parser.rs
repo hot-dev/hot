@@ -4780,6 +4780,11 @@ impl Parser {
         // Save identifier token info before consuming (for adjacency check)
         let ident_token = self.peek().cloned();
         self.next(); // consume identifier
+        // Where the identifier starts: the spans of the reference or call
+        // below begin there, not at the token after it.
+        let ident_start = ident_token.as_ref().map_or((1, 1, 0), |tok| {
+            (tok.line as usize, tok.column as usize, tok.position)
+        });
 
         // Check for common control flow syntax mistakes from other languages
         // Users may try: `if { ... }` or `if { ... } else { ... }`
@@ -4850,10 +4855,10 @@ impl Parser {
             if is_lambda {
                 // Parse as lambda function: name (params) { body }
                 // For now, treat as function call - lambda parsing can be added later
-                self.parse_function_call(name)
+                self.parse_function_call(name, ident_start)
             } else {
                 // Parse as function call: name(args)
-                self.parse_function_call(name)
+                self.parse_function_call(name, ident_start)
             }
         } else if self.check(&TokenType::Dot)
             || (self.check(&TokenType::LeftBracket) && is_adjacent(&ident_token, self.peek()))
@@ -4861,16 +4866,11 @@ impl Parser {
             // Property access: obj.prop or obj[0] or obj.prop[0].field
             // Note: For brackets, only treat as index access if immediately adjacent (no whitespace)
             // e.g., data[0] is index access, but data [0] is a separate vector literal
-            self.parse_property_access(name)
+            self.parse_property_access(name, ident_start)
         } else {
             // Simple variable reference
             let span_len = name.len();
-            let cur = self.peek();
-            let (line, col, pos) = if let Some(tok) = cur {
-                (tok.line as usize, tok.column as usize, tok.position)
-            } else {
-                (1, 1, 0)
-            };
+            let (line, col, pos) = ident_start;
             Ok(Value::Ref(Ref::Var(VarRef {
                 var: Var {
                     sym: Sym::String(name.clone()),
@@ -4892,12 +4892,13 @@ impl Parser {
     }
 
     /// Parse property access like obj.$prop or obj.field or obj[0] or obj.field[0].prop
-    fn parse_property_access(&mut self, base_name: String) -> ParseResult<Value> {
+    /// `start` is the base identifier's line, column and position.
+    fn parse_property_access(
+        &mut self,
+        base_name: String,
+        (start_line, start_column, start_position): (usize, usize, usize),
+    ) -> ParseResult<Value> {
         let mut deep_path_parts = Vec::new();
-        // Capture source at the start of the base identifier for accurate span
-        let start_line = self.peek().map(|t| t.line as usize).unwrap_or(1);
-        let start_column = self.peek().map(|t| t.column as usize).unwrap_or(1);
-        let start_position = self.peek().map(|t| t.position).unwrap_or(0);
 
         // Parse dot-separated property access chain and bracket indexing
         loop {
@@ -5263,8 +5264,12 @@ impl Parser {
         }))
     }
 
-    fn parse_function_call(&mut self, function_name: String) -> ParseResult<Value> {
-        let start_token = self.peek().cloned();
+    /// `start` is the function name's line, column and position.
+    fn parse_function_call(
+        &mut self,
+        function_name: String,
+        (start_line, start_column, start_position): (usize, usize, usize),
+    ) -> ParseResult<Value> {
         self.expect_token(&TokenType::LeftParen)?;
 
         let mut args = Vec::new();
@@ -5351,6 +5356,16 @@ impl Parser {
 
         self.expect_token(&TokenType::RightParen)?;
 
+        let src = Some(Source::new(
+            self.file_path.as_ref().map(|p| p.display().to_string()),
+            start_line,
+            start_column,
+            start_position,
+            function_name.len(), // Length of the function name
+        ));
+
+        // The callee reference spans the name too, so an unresolved name
+        // reports where it is.
         let function = Box::new(Value::Ref(Ref::Var(VarRef {
             var: Var {
                 sym: Sym::String(function_name.clone()),
@@ -5360,18 +5375,8 @@ impl Parser {
                 type_annotation: None,
                 src: None,
             },
-            src: None,
+            src: src.clone(),
         })));
-
-        let src = start_token.map(|t| {
-            Source::new(
-                self.file_path.as_ref().map(|p| p.display().to_string()),
-                t.line as usize,
-                t.column as usize,
-                t.position,
-                function_name.len(), // Length of the function name
-            )
-        });
 
         // Check for result path access: fn()[0] or fn().prop
         let result_path = self.parse_optional_deep_path()?;
