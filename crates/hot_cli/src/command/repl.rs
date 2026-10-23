@@ -12,6 +12,7 @@ pub(crate) async fn run_repl(
     global_options: &GlobalOptions,
     context_storage: Option<ahash::AHashMap<String, hot::val::Val>>,
     value_format: Option<&str>,
+    providers: &crate::CliProviders,
 ) -> Result<(), String> {
     // Future work: emit run/var events for each REPL input once the eval
     // pipeline accepts an emitter.
@@ -53,6 +54,8 @@ pub(crate) async fn run_repl(
         .unwrap_or_else(|| hot::project::get_default_project_name(conf));
 
     // Create or update live build for development
+    // A fresh checkout's local SQLite database is created on first use.
+    crate::command::init::initialize_missing_local_database(conf, providers).await?;
     setup_live_build_for_dev(conf, global_options, &src_paths, &test_paths).await?;
 
     // Pre-warm the package cache before starting the REPL loop

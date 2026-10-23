@@ -152,7 +152,6 @@ async fn run_init_impl(
     path: Option<&str>,
     providers: &crate::CliProviders,
 ) -> Result<(), String> {
-    use hot::db::{create_db_pool, get_db_uri_from_conf, redact_password};
     use std::fs;
 
     macro_rules! init_msg {
@@ -196,36 +195,8 @@ async fn run_init_impl(
         return Err(format!("Failed to create .hot/db directory: {}", e));
     }
 
-    init_msg!("Running database migrations...");
-    init_msg!(
-        "  Database URI: {}",
-        redact_password(&get_db_uri_from_conf(conf))
-    );
-
-    match crate::run_migrations_with_bootstrap(conf, providers).await {
-        Ok(_) => init_msg!("  Migrations completed successfully"),
-        Err(e) => {
-            crate::report_migration_failure("Migration failed", &e);
-            return Err("Migration failed".to_string());
-        }
-    }
-
-    init_msg!("Checking for default organization, user, and environment...");
-
-    let db = match create_db_pool(conf).await {
-        Ok(db) => db.with_scope(hot::db::DatabaseScope::Bootstrap(
-            hot::db::BootstrapOperation::Onboarding,
-        )),
-        Err(e) => return Err(format!("Failed to connect to database: {}", e)),
-    };
-
-    let (profile_email, profile_slug, profile_env_name) = initialize_profile(&db, conf).await?;
-    init_msg!(
-        "  Using authorized profile - User: {}, Org: {}, Env: {}",
-        profile_email,
-        profile_slug,
-        profile_env_name
-    );
+    let (profile_email, profile_slug, profile_env_name) =
+        initialize_database(conf, use_logging, providers).await?;
 
     let project_name = std::env::current_dir()
         .ok()
@@ -308,6 +279,108 @@ async fn run_init_impl(
     Ok(())
 }
 
+/// The database part of `hot init`: run the migrations, then make sure the
+/// selected profile's organization, user and environment exist.
+async fn initialize_database(
+    conf: &Val,
+    use_logging: bool,
+    providers: &crate::CliProviders,
+) -> Result<hot::profile::ProfileIdentifiers, String> {
+    use hot::db::{create_db_pool, get_db_uri_from_conf, redact_password};
+
+    macro_rules! init_msg {
+        ($($arg:tt)*) => {
+            if use_logging {
+                info!($($arg)*);
+            } else {
+                println!($($arg)*);
+            }
+        };
+    }
+
+    init_msg!("Running database migrations...");
+    init_msg!(
+        "  Database URI: {}",
+        redact_password(&get_db_uri_from_conf(conf))
+    );
+
+    match crate::run_migrations_with_bootstrap(conf, providers).await {
+        Ok(_) => init_msg!("  Migrations completed successfully"),
+        Err(e) => {
+            crate::report_migration_failure("Migration failed", &e);
+            return Err("Migration failed".to_string());
+        }
+    }
+
+    init_msg!("Checking for default organization, user, and environment...");
+
+    let db = match create_db_pool(conf).await {
+        Ok(db) => db.with_scope(hot::db::DatabaseScope::Bootstrap(
+            hot::db::BootstrapOperation::Onboarding,
+        )),
+        Err(e) => return Err(format!("Failed to connect to database: {}", e)),
+    };
+
+    let identity = initialize_profile(&db, conf).await?;
+    init_msg!(
+        "  Using authorized profile - User: {}, Org: {}, Env: {}",
+        identity.0,
+        identity.1,
+        identity.2
+    );
+    Ok(identity)
+}
+
+/// Create a project's local SQLite database the first time a command needs
+/// it, as `hot init` would, so `hot run` works in a fresh checkout. Only a
+/// local SQLite file that doesn't exist yet qualifies. PostgreSQL, an
+/// existing database, and authorization or profile errors still fail.
+pub(crate) async fn initialize_missing_local_database(
+    conf: &Val,
+    providers: &crate::CliProviders,
+) -> Result<(), String> {
+    initialize_local_database_if_missing(
+        conf,
+        hot::lang::cache::paths::has_project_config(),
+        providers,
+    )
+    .await
+}
+
+async fn initialize_local_database_if_missing(
+    conf: &Val,
+    in_project: bool,
+    providers: &crate::CliProviders,
+) -> Result<(), String> {
+    let Some(path) = missing_local_sqlite_database(conf, in_project) else {
+        return Ok(());
+    };
+    if let Some(dir) = path.parent().filter(|dir| !dir.as_os_str().is_empty()) {
+        std::fs::create_dir_all(dir)
+            .map_err(|e| format!("Failed to create {}: {}", dir.display(), e))?;
+    }
+    eprintln!("Creating the project database at {}", path.display());
+    initialize_database(conf, true, providers).await?;
+    Ok(())
+}
+
+/// The configured database file to create on first use: a local SQLite file,
+/// inside a project, that doesn't exist yet. The path is read as
+/// `hot::db::create_db_pool` reads it.
+fn missing_local_sqlite_database(conf: &Val, in_project: bool) -> Option<std::path::PathBuf> {
+    if !in_project {
+        return None;
+    }
+    let uri = hot::db::get_db_uri_from_conf(conf);
+    let path = uri.strip_prefix("sqlite:")?;
+    let path = path.split('?').next().unwrap_or(path);
+    if path.is_empty() || path.contains(":memory:") {
+        return None;
+    }
+    let path = std::path::PathBuf::from(path);
+    (!path.exists()).then_some(path)
+}
+
 /// Initialization may seed the documented local development identity into an
 /// empty database. Every other profile must already have its exact membership
 /// and environment; init never grants access to an existing organization.
@@ -344,6 +417,75 @@ mod tests {
         hot::val!({"set":{"profile":"selected"},"profile":{"selected":{
             "user":{"email":email},"org":{"slug":org},"env":{"name":env}
         }}})
+    }
+
+    fn sqlite_conf(conf: Val, path: &std::path::Path) -> Val {
+        conf.merge(&hot::val!({"db": {"uri": format!("sqlite:{}", path.display())}}))
+    }
+
+    #[test]
+    fn only_a_missing_local_sqlite_file_in_a_project_is_created_on_first_use() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join(".hot/db/hot.sqlite.db");
+        let conf = sqlite_conf(hot::val!({}), &missing);
+        assert_eq!(missing_local_sqlite_database(&conf, true), Some(missing));
+        assert_eq!(
+            missing_local_sqlite_database(&conf, false),
+            None,
+            "outside a project"
+        );
+        let existing = dir.path().join("existing.db");
+        std::fs::write(&existing, b"").unwrap();
+        let conf = sqlite_conf(hot::val!({}), &existing);
+        assert_eq!(
+            missing_local_sqlite_database(&conf, true),
+            None,
+            "an existing file"
+        );
+        for uri in ["sqlite::memory:", "postgres://127.0.0.1:1/hot"] {
+            let conf = hot::val!({"db": {"uri": uri}});
+            assert_eq!(missing_local_sqlite_database(&conf, true), None, "{uri}");
+        }
+    }
+
+    #[tokio::test]
+    async fn first_use_creates_the_database_and_the_local_profile() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(".hot/db/hot.sqlite.db");
+        let conf = sqlite_conf(hot::profile::get_resolved_conf(hot::val!({})), &path);
+        let providers = crate::CliProviders::default();
+        initialize_local_database_if_missing(&conf, true, &providers)
+            .await
+            .unwrap();
+        assert!(path.exists(), "the database file is created");
+        let db = crate::profile::create_cli_db_pool(&conf).await.unwrap();
+        crate::profile::resolve_cli_identity(&db, &conf)
+            .await
+            .expect("the local profile resolves, as commands resolve it");
+
+        // A second run leaves the existing database alone.
+        initialize_local_database_if_missing(&conf, true, &providers)
+            .await
+            .unwrap();
+        let bootstrap = db.with_scope(hot::db::DatabaseScope::Bootstrap(
+            hot::db::BootstrapOperation::Onboarding,
+        ));
+        assert_eq!(check_default_data_exists(&bootstrap).await.unwrap(), (1, 1));
+    }
+
+    #[tokio::test]
+    async fn first_use_still_fails_for_an_unprovisioned_profile() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(".hot/db/hot.sqlite.db");
+        let conf = sqlite_conf(
+            profile("custom@example.test", "custom", "production"),
+            &path,
+        );
+        let error =
+            initialize_local_database_if_missing(&conf, true, &crate::CliProviders::default())
+                .await
+                .unwrap_err();
+        assert!(error.contains("must be provisioned"), "{error}");
     }
 
     #[tokio::test]

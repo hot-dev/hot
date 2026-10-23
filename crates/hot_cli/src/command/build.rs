@@ -80,6 +80,7 @@ pub(crate) fn resource_bundle_options(
     (resource_paths, respect_gitignore, resource_excludes)
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn run_build(
     bundle_name: &str,
     src_paths: &[String],
@@ -88,6 +89,7 @@ pub(crate) async fn run_build(
     extra_resource_paths: &[String],
     force_no_gitignore: bool,
     allow_secret_shape: bool,
+    providers: &crate::CliProviders,
 ) -> Result<(), String> {
     let db_uri = conf.get_str("db.uri");
 
@@ -154,6 +156,8 @@ pub(crate) async fn run_build(
 
     let secret_scan_opts = build_secret_scan_opts(conf, allow_secret_shape);
 
+    // A fresh checkout's local SQLite database is created on first use.
+    crate::command::init::initialize_missing_local_database(conf, providers).await?;
     if let Err(e) = setup_live_build_for_dev_with_secret_scan_opts(
         conf,
         &global_options,

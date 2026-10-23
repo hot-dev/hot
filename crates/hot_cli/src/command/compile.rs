@@ -12,10 +12,13 @@ pub(crate) async fn run_compile(
     test_paths: &[String],
     conf: &Val,
     _global_options: &GlobalOptions,
+    providers: &crate::CliProviders,
 ) -> Result<(), String> {
     info!("Compiling project '{}'...", project_name);
 
     // Create or update live build for development
+    // A fresh checkout's local SQLite database is created on first use.
+    crate::command::init::initialize_missing_local_database(conf, providers).await?;
     setup_live_build_for_dev(conf, _global_options, src_paths, test_paths).await?;
 
     // Use the structural pipeline, which loads hot-std and project dependencies

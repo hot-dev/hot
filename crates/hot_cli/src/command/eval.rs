@@ -14,6 +14,7 @@ pub(crate) async fn run_eval(
     global_options: &GlobalOptions,
     context_storage: Option<ahash::AHashMap<String, hot::val::Val>>,
     value_format: Option<&str>,
+    providers: &crate::CliProviders,
 ) -> Result<(), String> {
     // Get paths for dependency resolution - eval should load packages like run and test
     let src_paths = get_merged_src_paths(
@@ -46,6 +47,8 @@ pub(crate) async fn run_eval(
         .as_ref()
         .map(|storage| storage.keys().cloned().collect())
         .unwrap_or_default();
+    // A fresh checkout's local SQLite database is created on first use.
+    crate::command::init::initialize_missing_local_database(conf, providers).await?;
     setup_live_build_for_dev_with_context(
         conf,
         global_options,

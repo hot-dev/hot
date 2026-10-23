@@ -66,6 +66,8 @@ pub(crate) async fn run_test(
     // Ordinary unit tests may explicitly disable the configured database and
     // use only the engine's private ephemeral fixture.
     if !hot::db::get_db_uri_from_conf(conf).is_empty() {
+        // A fresh checkout's local SQLite database is created on first use.
+        crate::command::init::initialize_missing_local_database(conf, providers).await?;
         setup_live_build_for_dev(conf, global_options, &src_paths, &test_paths).await?;
     }
 
