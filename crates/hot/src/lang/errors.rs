@@ -1299,7 +1299,11 @@ impl CompilerErrors {
         let read_from_disk;
         let source = match self.source_cache.get(&source_name) {
             Some(source) => source,
-            None => match location.file.as_ref().and_then(|file| std::fs::read_to_string(file).ok()) {
+            None => match location
+                .file
+                .as_ref()
+                .and_then(|file| std::fs::read_to_string(file).ok())
+            {
                 Some(content) => {
                     read_from_disk = content;
                     &read_from_disk
@@ -2142,7 +2146,10 @@ mod diagnostic_tests {
 
         let report = errors.format_error(false);
         assert!(report.contains("add(missing-var, 1)"), "{report}");
-        assert!(report.contains(&format!("{}:4:9", path.display())), "{report}");
+        assert!(
+            report.contains(&format!("{}:4:9", path.display())),
+            "{report}"
+        );
     }
 
     #[test]
