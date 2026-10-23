@@ -710,6 +710,52 @@ probe()"#;
         assert_eq!(jit, expected, "compiled");
     }
 
+    /// A local function bound in a flow branch or flow body gets its
+    /// arguments, compiled or not. The parser took `minus (a, b) { … }` there
+    /// for a call to `minus` with `a` and `b`, so `a` was "not found".
+    #[test]
+    fn local_functions_bound_in_flows_run() {
+        let src = r#"::t ns
+countdown fn (n: Int): Int {
+    cond {
+        lte(n, 1) => { n }
+        => {
+            minus (a, b) { sub(a, b) }
+            minus(countdown(sub(n, 1)), 1)
+        }
+    }
+}
+arm fn (n: Int): Int {
+    match n {
+        1 => { 0 }
+        _ => {
+            twice (x) { mul(x, 2) }
+            twice(n)
+        }
+    }
+}
+steps fn (n: Int): Int {
+    total serial {
+        inc (x) { add(x, 1) }
+        inc(n)
+    }
+    total
+}
+probe fn (): Vec { [countdown(5), arm(3), steps(4)] }
+probe()
+probe()
+probe()"#;
+        let expected = crate::val!([-3, 6, 5]);
+        for conf in [
+            crate::val!({"jit": {"threshold": 1}}),
+            crate::val!({"jit": {"mode": "off"}}),
+        ] {
+            let out = compile_and_run_with_std_conf(src, Some(conf.clone()))
+                .expect("local functions run");
+            assert_eq!(out, expected, "with {conf:?}");
+        }
+    }
+
     #[test]
     fn tagged_metadata_names_resolve_in_the_payload() {
         let src = r#"::t ns
