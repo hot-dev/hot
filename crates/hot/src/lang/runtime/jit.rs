@@ -721,6 +721,15 @@ impl JitRuntimeState {
             .is_some_and(|entries| !entries.is_empty())
     }
 
+    /// The result kind of each of a function's compiled signatures.
+    #[cfg(test)]
+    pub(crate) fn compiled_result_kinds(&self, function_id: FunctionId) -> Vec<JitValueKind> {
+        self.compiled_functions
+            .get(function_id as usize)
+            .map(|entries| entries.iter().map(|entry| entry.result_kind).collect())
+            .unwrap_or_default()
+    }
+
     pub fn try_call_compiled(
         &mut self,
         function_id: FunctionId,
@@ -980,7 +989,16 @@ fn thunk_calls_function(
     function_id: FunctionId,
     thunk: &crate::lang::bytecode::LambdaInfo,
 ) -> bool {
-    let mut bodies: Vec<&[Instruction]> = vec![&thunk.instructions];
+    body_calls_function(program, function_id, &thunk.instructions)
+}
+
+/// Whether `instructions`, or a thunk nested in them, call `function_id`.
+fn body_calls_function(
+    program: &BytecodeProgram,
+    function_id: FunctionId,
+    instructions: &[Instruction],
+) -> bool {
+    let mut bodies: Vec<&[Instruction]> = vec![instructions];
     let mut seen = 0usize;
     while let Some(body) = bodies.pop() {
         seen += 1;
@@ -1384,6 +1402,41 @@ fn compile_supported_function(
         }
     }
 
+    // Self-calls read their results as the predicted return kind. A raw
+    // guess for a self-recursive body comes first, then the conservative
+    // prediction, so a wrong guess costs a retry rather than the compile.
+    let predictions = predict_return_kinds(
+        &function_info.instructions,
+        program,
+        function_id,
+        signature,
+        &function_info.param_names,
+    );
+    let mut failure = String::new();
+    for expected_return_kind in predictions {
+        match compile_with_return_kind(
+            program,
+            function_id,
+            function_info,
+            signature,
+            expected_return_kind,
+        ) {
+            Ok(compiled) => return Ok(compiled),
+            Err(error) => failure = error,
+        }
+    }
+    Err(failure)
+}
+
+/// Compile a body whose self-calls read their results as
+/// `expected_return_kind`.
+fn compile_with_return_kind(
+    program: &BytecodeProgram,
+    function_id: FunctionId,
+    function_info: &FunctionInfo,
+    signature: &TypeSig,
+    expected_return_kind: Option<JitValueKind>,
+) -> Result<JitCompiledFunction, String> {
     let mut flag_builder = settings::builder();
     flag_builder
         .set("use_colocated_libcalls", "false")
@@ -1540,14 +1593,6 @@ fn compile_supported_function(
     ctx.func.name = UserFuncName::user(0, func_id.as_u32());
     let self_func_ref = module.declare_func_in_func(func_id, &mut ctx.func);
     let helper_refs = declare_jit_helpers(&mut module, &mut ctx.func, ptr_ty)?;
-
-    let expected_return_kind = prescan_return_kind(
-        &function_info.instructions,
-        program,
-        function_id,
-        signature,
-        &function_info.param_names,
-    );
 
     let mut fb_ctx = FunctionBuilderContext::new();
     let result_kind = {
@@ -4252,12 +4297,61 @@ fn collect_used_registers(instructions: &[Instruction]) -> std::collections::BTr
 /// Pre-scan instructions to determine the function's return kind without generating IR.
 /// Tracks register kinds through the instruction stream and returns the kind of
 /// Return instruction values. Returns None if the return kind cannot be determined.
+/// The return kinds to compile a body against, best first. The forward
+/// prescan can't type a branch that ends in a self-call, so a self-recursive
+/// body that comes back owned tries each raw kind: one the prescan
+/// reproduces, with self-calls assumed to return it, is a consistent guess.
+/// The conservative prediction always follows.
+fn predict_return_kinds(
+    instructions: &[Instruction],
+    program: &BytecodeProgram,
+    function_id: FunctionId,
+    signature: &TypeSig,
+    param_names: &[String],
+) -> Vec<Option<JitValueKind>> {
+    let conservative = prescan_return_kind(
+        instructions,
+        program,
+        function_id,
+        signature,
+        param_names,
+        None,
+    );
+    let mut predictions = Vec::with_capacity(2);
+    if matches!(conservative, None | Some(JitValueKind::OwnedVal))
+        && body_calls_function(program, function_id, instructions)
+    {
+        let raw = [
+            (RawKind::Int, JitValueKind::Int),
+            (RawKind::Dec, JitValueKind::Dec),
+            (RawKind::Bool, JitValueKind::Bool),
+        ];
+        if let Some((_, kind)) = raw.into_iter().find(|&(assumed, kind)| {
+            prescan_return_kind(
+                instructions,
+                program,
+                function_id,
+                signature,
+                param_names,
+                Some(assumed),
+            ) == Some(kind)
+        }) {
+            predictions.push(Some(kind));
+        }
+    }
+    predictions.push(conservative);
+    predictions
+}
+
+/// `assumed_self_kind` is what a self-call returns before any `Return` has
+/// typed the body.
 fn prescan_return_kind(
     instructions: &[Instruction],
     program: &BytecodeProgram,
     function_id: FunctionId,
     signature: &TypeSig,
     param_names: &[String],
+    assumed_self_kind: Option<RawKind>,
 ) -> Option<JitValueKind> {
     let mut reg_kinds: AHashMap<u32, RawKind> = AHashMap::new();
     let mut var_kinds: AHashMap<u32, RawKind> = AHashMap::new();
@@ -4282,6 +4376,12 @@ fn prescan_return_kind(
     }
 
     let mut return_kind: Option<JitValueKind> = None;
+    let assumed_self_jvk = match assumed_self_kind {
+        Some(RawKind::Int) => Some(JitValueKind::Int),
+        Some(RawKind::Dec) => Some(JitValueKind::Dec),
+        Some(RawKind::Bool) => Some(JitValueKind::Bool),
+        _ => None,
+    };
     // Each open flow: whether it accumulates (Map/Vec), and the kinds its
     // branches produce.
     let mut flows: Vec<(bool, Vec<Option<RawKind>>)> = Vec::new();
@@ -4355,13 +4455,11 @@ fn prescan_return_kind(
             Instruction::Add { dest, left, right }
             | Instruction::Sub { dest, left, right }
             | Instruction::Mul { dest, left, right } => {
-                let lk = reg_kinds.get(left).copied();
-                let rk = reg_kinds.get(right).copied();
-                let kind = match (lk, rk) {
-                    (Some(RawKind::Dec), _) | (_, Some(RawKind::Dec)) => RawKind::Dec,
-                    (Some(RawKind::Int), Some(RawKind::Int)) => RawKind::Int,
-                    _ => RawKind::OwnedVal,
-                };
+                let kind = arithmetic_result_kind(
+                    reg_kinds.get(left).copied(),
+                    reg_kinds.get(right).copied(),
+                )
+                .unwrap_or(RawKind::OwnedVal);
                 reg_kinds.insert(*dest, kind);
             }
             Instruction::Eq { dest, .. }
@@ -4377,8 +4475,8 @@ fn prescan_return_kind(
                 args_count,
             } => {
                 if *fid == function_id {
-                    if let Some(k) = return_kind {
-                        reg_kinds.insert(*dest, k.raw_kind());
+                    if let Some(k) = return_kind.map(|k| k.raw_kind()).or(assumed_self_kind) {
+                        reg_kinds.insert(*dest, k);
                     }
                 } else {
                     // Check if this is a call with thunk args that we can analyze
@@ -4397,7 +4495,7 @@ fn prescan_return_kind(
                                     function_id,
                                     signature,
                                     param_names,
-                                    return_kind,
+                                    return_kind.or(assumed_self_jvk),
                                 )
                             {
                                 inferred_kind = Some(k);
@@ -4425,7 +4523,7 @@ fn prescan_return_kind(
                                         function_id,
                                         signature,
                                         param_names,
-                                        return_kind.or(provisional),
+                                        return_kind.or(assumed_self_jvk).or(provisional),
                                     )
                                     && k2 != k
                                 {
@@ -4441,7 +4539,10 @@ fn prescan_return_kind(
                             reg_kinds.insert(*dest, RawKind::OwnedVal);
                         }
                     } else {
-                        reg_kinds.insert(*dest, RawKind::OwnedVal);
+                        // A call the emitter lowers to an intrinsic.
+                        let name = callee.map(|f| f.name.as_str());
+                        let kind = intrinsic_call_kind(name, *args_start, *args_count, &reg_kinds);
+                        reg_kinds.insert(*dest, kind.unwrap_or(RawKind::OwnedVal));
                     }
                 }
             }
@@ -4470,7 +4571,7 @@ fn prescan_return_kind(
                                 function_id,
                                 signature,
                                 param_names,
-                                return_kind,
+                                return_kind.or(assumed_self_jvk),
                             )
                         {
                             inferred_kind = Some(k);
@@ -4496,7 +4597,7 @@ fn prescan_return_kind(
                                     function_id,
                                     signature,
                                     param_names,
-                                    return_kind.or(provisional),
+                                    return_kind.or(assumed_self_jvk).or(provisional),
                                 )
                                 && k2 != k
                             {
@@ -4511,8 +4612,28 @@ fn prescan_return_kind(
                     } else {
                         reg_kinds.insert(*dest, RawKind::OwnedVal);
                     }
+                } else if callee_idx == Some(function_id as usize) {
+                    // This function, called by name.
+                    if let Some(k) = return_kind.map(|k| k.raw_kind()).or(assumed_self_kind) {
+                        reg_kinds.insert(*dest, k);
+                    }
                 } else {
-                    reg_kinds.insert(*dest, RawKind::OwnedVal);
+                    // A call the emitter lowers to an intrinsic, unless the
+                    // name is a parameter holding a function.
+                    let through_param = fn_name.as_deref().is_some_and(|n| {
+                        !n.starts_with("::") && param_names.iter().any(|p| p == n)
+                    });
+                    let kind = if through_param {
+                        None
+                    } else {
+                        intrinsic_call_kind(
+                            fn_name.as_deref(),
+                            *args_start,
+                            *args_count,
+                            &reg_kinds,
+                        )
+                    };
+                    reg_kinds.insert(*dest, kind.unwrap_or(RawKind::OwnedVal));
                 }
             }
             Instruction::MakeVec { dest, .. }
@@ -4530,8 +4651,34 @@ fn prescan_return_kind(
             Instruction::StrStartsWith { dest, .. } => {
                 reg_kinds.insert(*dest, RawKind::Bool);
             }
-            Instruction::MergeMaps { dest, .. } | Instruction::CheckConstraint { dest, .. } => {
+            Instruction::MergeMaps { dest, .. } => {
                 reg_kinds.insert(*dest, RawKind::OwnedVal);
+            }
+            // A check the emitter fuses with its `ReturnIfErr` keeps a raw
+            // value's kind (see `CheckConstraint` in `emit_instruction`).
+            Instruction::CheckConstraint {
+                dest,
+                src,
+                spec,
+                test,
+            } => {
+                let fused_kind = reg_kinds.get(src).copied().filter(|&kind| {
+                    !*test
+                        && matches!(kind, RawKind::Int | RawKind::Dec | RawKind::Bool)
+                        && matches!(
+                            instructions.get(inst_ip + 1),
+                            Some(
+                                Instruction::ReturnIfErr { src: checked }
+                                    | Instruction::Return { value: checked }
+                            ) if checked == dest
+                        )
+                        && matches!(
+                            program.constants.get(*spec as usize),
+                            Some(Constant::Val(spec_val)) if get_val(spec_val, "type")
+                                .is_some_and(|node| spec_keeps_raw_kind(program, node, kind, 0))
+                        )
+                });
+                reg_kinds.insert(*dest, fused_kind.unwrap_or(RawKind::OwnedVal));
             }
             // A flow's branches define its result, not the default loaded
             // into the register before them: reading that `Null` made a
@@ -4643,13 +4790,11 @@ fn prescan_thunk_return_kind(
             Instruction::Add { dest, left, right }
             | Instruction::Sub { dest, left, right }
             | Instruction::Mul { dest, left, right } => {
-                let lk = reg_kinds.get(left).copied();
-                let rk = reg_kinds.get(right).copied();
-                let kind = match (lk, rk) {
-                    (Some(RawKind::Dec), _) | (_, Some(RawKind::Dec)) => RawKind::Dec,
-                    (Some(RawKind::Int), Some(RawKind::Int)) => RawKind::Int,
-                    _ => RawKind::OwnedVal,
-                };
+                let kind = arithmetic_result_kind(
+                    reg_kinds.get(left).copied(),
+                    reg_kinds.get(right).copied(),
+                )
+                .unwrap_or(RawKind::OwnedVal);
                 reg_kinds.insert(*dest, kind);
             }
             Instruction::Lt { dest, .. } | Instruction::Gt { dest, .. } => {
@@ -4658,14 +4803,20 @@ fn prescan_thunk_return_kind(
             Instruction::CallUserFunction {
                 dest,
                 function_id: fid,
-                ..
+                args_start,
+                args_count,
             } => {
                 if *fid == parent_function_id {
                     if let Some(k) = parent_return_kind {
                         reg_kinds.insert(*dest, k.raw_kind());
                     }
                 } else {
-                    reg_kinds.insert(*dest, RawKind::OwnedVal);
+                    let name = program
+                        .functions
+                        .get(*fid as usize)
+                        .map(|f| f.name.as_str());
+                    let kind = intrinsic_call_kind(name, *args_start, *args_count, &reg_kinds);
+                    reg_kinds.insert(*dest, kind.unwrap_or(RawKind::OwnedVal));
                 }
             }
             Instruction::Call {
@@ -4675,44 +4826,9 @@ fn prescan_thunk_return_kind(
                 args_count,
             } => {
                 let fn_name = resolve_const_function_name(instructions, program, inst_ip, *fn_reg);
-                let name_str = fn_name.as_deref().unwrap_or("");
-                let is_known_arith = matches!(
-                    name_str,
-                    "add"
-                        | "sub"
-                        | "mul"
-                        | "div"
-                        | "mod"
-                        | "::hot::math/add"
-                        | "::hot::math/sub"
-                        | "::hot::math/mul"
-                        | "::hot::math/div"
-                        | "::hot::math/mod"
-                );
-                let is_known_cmp = matches!(
-                    name_str,
-                    "lt" | "gt"
-                        | "lte"
-                        | "gte"
-                        | "eq"
-                        | "ne"
-                        | "::hot::cmp/lt"
-                        | "::hot::cmp/gt"
-                        | "::hot::cmp/lte"
-                        | "::hot::cmp/gte"
-                        | "::hot::cmp/eq"
-                        | "::hot::cmp/ne"
-                );
-                if is_known_cmp {
-                    reg_kinds.insert(*dest, RawKind::Bool);
-                } else if is_known_arith && usize::from(*args_count) == 2 {
-                    let lk = reg_kinds.get(args_start).copied();
-                    let rk = reg_kinds.get(&(args_start + 1)).copied();
-                    let kind = match (lk, rk) {
-                        (Some(RawKind::Dec), _) | (_, Some(RawKind::Dec)) => RawKind::Dec,
-                        (Some(RawKind::Int), Some(RawKind::Int)) => RawKind::Int,
-                        _ => RawKind::OwnedVal,
-                    };
+                if let Some(kind) =
+                    intrinsic_call_kind(fn_name.as_deref(), *args_start, *args_count, &reg_kinds)
+                {
                     reg_kinds.insert(*dest, kind);
                 } else {
                     // Detect self-recursive calls by name (qualified names only)
@@ -6759,17 +6875,20 @@ impl<'a> EmitCtx<'a> {
                     _ => return Err(format!("CheckConstraint: invalid spec constant {}", spec)),
                 };
                 let src_kind = self.register_kind(*src)?;
-                // A function's prologue check of a raw parameter whose spec
-                // can't convert it: a pass keeps the raw value, so the
-                // parameter keeps its kind, and a failure returns the
-                // `ConstraintError` here, as the `ReturnIfErr` after it would.
+                // A function's prologue or return check of a raw value whose
+                // spec can't convert it: a pass keeps the raw value, so it
+                // keeps its kind, and a failure returns the `ConstraintError`
+                // here, as the `ReturnIfErr` or `Return` after it would.
                 let fused = !*test
                     && self.function_body
                     && !self.error_capture_active
                     && matches!(src_kind, RawKind::Int | RawKind::Dec | RawKind::Bool)
                     && matches!(
                         instructions.get(ip + 1),
-                        Some(Instruction::ReturnIfErr { src: checked }) if checked == dest
+                        Some(
+                            Instruction::ReturnIfErr { src: checked }
+                                | Instruction::Return { value: checked }
+                        ) if checked == dest
                     )
                     && get_val(spec_val, "type")
                         .is_some_and(|node| spec_keeps_raw_kind(self.program, node, src_kind, 0));
@@ -7112,6 +7231,8 @@ fn build_supported_body(
                             end_ip,
                             &seed,
                             &ctx.locals,
+                            ctx.expected_return_kind
+                                .map(|kind| (ctx.function_id, kind.raw_kind())),
                         )
                     };
                 active_flows.push(ActiveFlowState {
@@ -7724,6 +7845,7 @@ fn flow_branches_have_mixed_kinds(
     end_ip: usize,
     seed_reg_kinds: &AHashMap<u32, RawKind>,
     locals: &AHashMap<String, (Variable, RawKind)>,
+    self_call: Option<(FunctionId, RawKind)>,
 ) -> bool {
     let mut reg_kinds: AHashMap<u32, RawKind> = seed_reg_kinds.clone();
 
@@ -7784,13 +7906,11 @@ fn flow_branches_have_mixed_kinds(
             Instruction::Add { dest, left, right }
             | Instruction::Sub { dest, left, right }
             | Instruction::Mul { dest, left, right } => {
-                let lk = reg_kinds.get(left).copied();
-                let rk = reg_kinds.get(right).copied();
-                let kind = match (lk, rk) {
-                    (Some(RawKind::Dec), _) | (_, Some(RawKind::Dec)) => RawKind::Dec,
-                    (Some(RawKind::Int), Some(RawKind::Int)) => RawKind::Int,
-                    _ => RawKind::OwnedVal,
-                };
+                let kind = arithmetic_result_kind(
+                    reg_kinds.get(left).copied(),
+                    reg_kinds.get(right).copied(),
+                )
+                .unwrap_or(RawKind::OwnedVal);
                 reg_kinds.insert(*dest, kind);
             }
             Instruction::Eq { dest, .. }
@@ -7810,13 +7930,18 @@ fn flow_branches_have_mixed_kinds(
                 args_start,
                 args_count,
             } => {
-                let name = program
-                    .functions
-                    .get(*function_id as usize)
-                    .map(|f| f.name.as_str());
-                let kind = intrinsic_call_kind(name, *args_start, *args_count, &reg_kinds)
-                    .unwrap_or(RawKind::OwnedVal);
-                reg_kinds.insert(*dest, kind);
+                let kind = match self_call {
+                    // A self-call reads its result as the predicted kind.
+                    Some((self_id, kind)) if *function_id == self_id => Some(kind),
+                    _ => {
+                        let name = program
+                            .functions
+                            .get(*function_id as usize)
+                            .map(|f| f.name.as_str());
+                        intrinsic_call_kind(name, *args_start, *args_count, &reg_kinds)
+                    }
+                };
+                reg_kinds.insert(*dest, kind.unwrap_or(RawKind::OwnedVal));
             }
             Instruction::Call {
                 dest,
@@ -7871,10 +7996,38 @@ fn intrinsic_call_kind(
 ) -> Option<RawKind> {
     use KnownCoreCall::*;
     let first = reg_kinds.get(&args_start).copied();
+    let second = reg_kinds.get(&(args_start + 1)).copied();
     match (known_core_call(name?)?, args_count) {
         (Eq | Ne | Gt | Gte | Lt | Lte, 2) | (Not | IsNull | IsSome, 1) => Some(RawKind::Bool),
         (IsZero, 1) if first == Some(RawKind::Int) => Some(RawKind::Bool),
         (Length, 1) if first == Some(RawKind::OwnedVal) => Some(RawKind::Int),
+        (Add | Sub | Mul | Mod, 2) => arithmetic_result_kind(first, second),
+        (Div, 2) => division_result_kind(first, second),
+        _ => None,
+    }
+}
+
+/// The kind `numeric_binop` and `numeric_binop_int_guarded` give two
+/// operands: `Int` for two `Int`s, an owned value when either is owned, else
+/// `Dec`. `None` when an operand's kind is unknown or not numeric.
+fn arithmetic_result_kind(left: Option<RawKind>, right: Option<RawKind>) -> Option<RawKind> {
+    use RawKind::*;
+    match (left?, right?) {
+        (Int, Int) => Some(Int),
+        (OwnedVal, Int | Dec | OwnedVal) | (Int | Dec, OwnedVal) => Some(OwnedVal),
+        (Int | Dec, Int | Dec) => Some(Dec),
+        _ => None,
+    }
+}
+
+/// The kind `numeric_binop_dec_only` gives: owned for two `Int`s (the
+/// interpreter's division decides between `Int` and `Dec`) or an owned
+/// operand, else `Dec`.
+fn division_result_kind(left: Option<RawKind>, right: Option<RawKind>) -> Option<RawKind> {
+    use RawKind::*;
+    match (left?, right?) {
+        (Int, Int) | (OwnedVal, Int | Dec | OwnedVal) | (Int | Dec, OwnedVal) => Some(OwnedVal),
+        (Int | Dec, Int | Dec) => Some(Dec),
         _ => None,
     }
 }

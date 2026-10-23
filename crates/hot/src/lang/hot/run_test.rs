@@ -418,6 +418,71 @@ probe()"#;
         }
     }
 
+    /// Self-recursion compiled on raw values gives the interpreter's results:
+    /// `Int`, `Dec` and `Bool` recursion, one that mixes `Int` and `Dec`, a
+    /// nested flow whose raw guess falls back, and a return check that passes
+    /// or fails.
+    #[test]
+    fn jit_raw_self_recursion_matches_the_interpreter() {
+        let src = r#"::t ns
+outcome fn (lazy result: Any): Any {
+    forced do result
+    if(is-ok(forced), forced, "err")
+}
+fib fn (n: Int): Int {
+    if(lte(n, 1), n, add(fib(sub(n, 1)), fib(sub(n, 2))))
+}
+halves fn (n: Int): Dec {
+    if(lte(n, 0), 0.5, add(halves(sub(n, 1)), 0.5))
+}
+even-depth fn (n: Int): Bool {
+    if(lte(n, 0), true, not(even-depth(sub(n, 1))))
+}
+mixed fn (n: Int): Any {
+    if(lte(n, 0), 0, add(mixed(sub(n, 1)), 0.5))
+}
+nested fn (n: Int): Int {
+    cond {
+        lte(n, 1) => { n }
+        => { if(lte(n, 3), add(nested(sub(n, 1)), 1), add(nested(sub(n, 2)), 2)) }
+    }
+}
+checked fn (n: Int): Int where gte(%, 0) {
+    if(lte(n, 1), n, add(checked(sub(n, 1)), checked(sub(n, 2))))
+}
+probe fn (): Vec {
+    [
+        fib(15),
+        halves(4),
+        even-depth(5),
+        mixed(4),
+        nested(9),
+        checked(15),
+        outcome(checked(-1))
+    ]
+}
+probe()
+probe()
+probe()"#;
+        let expected = Val::Vec(vec![
+            Val::Int(610),
+            Val::Dec(fastnum::D256::from(5) / fastnum::D256::from(2)),
+            Val::Bool(false),
+            Val::Dec(fastnum::D256::from(2)),
+            Val::Int(9),
+            Val::Int(610),
+            Val::from("err"),
+        ]);
+        for conf in [
+            crate::val!({"jit": {"threshold": 1}}),
+            crate::val!({"jit": {"mode": "off"}}),
+        ] {
+            let out = compile_and_run_with_std_conf(src, Some(conf.clone()))
+                .expect("recursive functions run");
+            assert_eq!(out, expected, "with {conf:?}");
+        }
+    }
+
     /// A local function reads its caller's local by name, called directly
     /// and from a lambda the caller creates. The caller stays on the
     /// interpreter, where that local is in scope: once hot-ai's `fit`
