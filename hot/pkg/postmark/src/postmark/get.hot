@@ -22,7 +22,7 @@ MessageClickSearchResponse type {
     Clicks: Vec<ExtendedMessageClickEventInformation>?
 }
 
-ServerColor type open "purple" | "blue" | "turqoise" | "green" | "red" | "yellow" | "grey"
+ServerColor type open "purple" | "blue" | "turquoise" | "green" | "red" | "yellow" | "grey" | "orange"
 LinkTracking type open "None" | "HtmlAndText" | "HtmlOnly" | "TextOnly"
 
 ServerConfigurationResponse type {

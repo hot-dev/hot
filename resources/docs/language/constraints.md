@@ -80,6 +80,16 @@ on later lines:
 
 Parameter checks run first, then the precondition, then the body.
 
+## Rest Parameters
+
+A `where` on a rest parameter checks each argument it collects. A failing
+argument's index is the error's `path`. A precondition sees the rest parameter
+as a `Vec`:
+
+{{snippet:constraints#rest-parameters}}
+
+{{result:constraints#rest-parameters}}
+
 ## Nullable Types
 
 `Username?` accepts `null`. A non-null value must satisfy `Username`. A `where`

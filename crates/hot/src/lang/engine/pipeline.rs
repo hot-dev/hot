@@ -1861,6 +1861,44 @@ fn (): Str { "unused" }
         vec![src_dir.to_string_lossy().to_string()]
     }
 
+    /// A function in a file with no `ns` declaration lives in the root
+    /// namespace, which a hot-std file creates first. It is still project
+    /// code, so its required context value warns.
+    #[test]
+    fn warning_check_reports_missing_ctx_in_the_root_namespace() {
+        let temp = tempfile::tempdir().unwrap();
+        let src_dir = temp.path().join("src");
+        std::fs::create_dir_all(&src_dir).unwrap();
+        std::fs::write(
+            src_dir.join("no_ns.hot"),
+            r#"needs-root-key
+meta {ctx: {"root.key": {required: true}}}
+fn (): Str { "unused" }
+"#,
+        )
+        .unwrap();
+
+        let mut warnings = crate::lang::errors::CompilerErrors::new();
+        Engine::check_sources_pipeline_with_context_warnings(
+            &[src_dir.to_string_lossy().to_string()],
+            &[],
+            None,
+            None,
+            Some(&AHashMap::new()),
+            false,
+            Some(&mut warnings),
+        )
+        .expect("an unset context value should not fail `hot check`");
+        let reported: Vec<_> = warnings
+            .warnings
+            .iter()
+            .filter(|w| w.code() == "missing-context")
+            .map(|w| w.to_string())
+            .collect();
+        assert_eq!(reported.len(), 1, "warnings: {:?}", warnings.warnings);
+        assert!(reported[0].contains("'root.key'"), "{reported:?}");
+    }
+
     #[test]
     fn warning_check_reports_missing_ctx_without_failing() {
         let temp = tempfile::tempdir().unwrap();

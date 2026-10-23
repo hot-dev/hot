@@ -94,6 +94,7 @@ hot.project.hot-pkg-all.test.paths [
     "./hot/pkg/pinecone/test",
     "./hot/pkg/plaid/test",
     "./hot/pkg/playwright/test",
+    "./hot/pkg/postmark/test",
     "./hot/pkg/qdrant/test",
     "./hot/pkg/redis/test",
     "./hot/pkg/salesforce/test",

@@ -56,9 +56,15 @@ impl CallGraph {
                 let var_name = var.sym.to_string();
                 let fqn = format!("{}/{}", ns_str, var_name);
 
-                // Record source file for this function
-                if let Some(ref sf) = source_file {
-                    graph.fn_source_files.insert(fqn.clone(), sf.clone());
+                // Record the function's own file: `Namespace::source_file`
+                // names only the first file merged into the namespace.
+                if let Some(sf) = var
+                    .src
+                    .as_ref()
+                    .and_then(|src| src.file.clone())
+                    .or_else(|| source_file.clone())
+                {
+                    graph.fn_source_files.insert(fqn.clone(), sf);
                 }
 
                 // Extract function-level ctx requirements from var.meta
@@ -153,30 +159,24 @@ impl CallGraph {
     /// Identify root functions: all functions defined in user source files (not packages).
     ///
     /// User source files are identified by their path NOT containing common package
-    /// directory patterns (e.g., `/pkg/` or `hot-std`). This is a heuristic;
-    /// the source_file paths from the namespace tell us where the code lives.
+    /// directory patterns (e.g., `/pkg/` or `hot-std`). This is a heuristic. Each
+    /// binding's own file decides, not its namespace's: every file without an `ns`
+    /// declaration shares the root namespace, which a hot-std file creates first.
     pub fn identify_user_roots(&self, program: &Program) -> Vec<String> {
         let mut roots = Vec::new();
+        let is_user_code =
+            |fqn: &str| !is_package_path(self.fn_source_files.get(fqn).map_or("", String::as_str));
 
         for (ns_path, namespace) in &program.namespaces {
             let ns_str = ns_path.to_string();
-            let source_file = namespace
-                .source_file
-                .as_ref()
-                .map(|p| p.display().to_string())
-                .unwrap_or_default();
-
-            // Skip package namespaces -- they contain /pkg/ in their source path
-            // User source files are in /src/ directories of the project root
-            if is_package_path(&source_file) {
-                continue;
-            }
 
             for (var, value) in &namespace.scope.vars {
                 // Only include functions (not types, constants, etc.)
                 if matches!(value, Value::Fn(_)) {
                     let fqn = format!("{}/{}", ns_str, var.sym);
-                    roots.push(fqn);
+                    if is_user_code(&fqn) {
+                        roots.push(fqn);
+                    }
                 }
             }
 
@@ -186,7 +186,7 @@ impl CallGraph {
                 if !matches!(value, Value::Fn(_)) {
                     let fqn = format!("{}/{}", ns_str, var.sym);
                     // Only if we recorded edges for it (it made function calls)
-                    if self.edges.contains_key(&fqn) {
+                    if self.edges.contains_key(&fqn) && is_user_code(&fqn) {
                         roots.push(fqn);
                     }
                 }

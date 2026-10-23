@@ -6,7 +6,7 @@ is-ok-response ::hot::http/is-ok-response
 
 EditServerConfigurationRequest type {
     Name: Str?,
-    Color: "purple" | "blue" | "turqoise" | "green" | "red" | "yellow" | "grey"?,
+    Color: "purple" | "blue" | "turquoise" | "green" | "red" | "yellow" | "grey" | "orange"?,
     RawEmailEnabled: Bool?,
     DeliveryHookUrl: Str?,
     SmtpApiActivated: Bool?,
@@ -21,7 +21,7 @@ EditServerConfigurationRequest type {
     InboundSpamThreshold: Int?
 }
 
-ServerColor type open "purple" | "blue" | "turqoise" | "green" | "red" | "yellow" | "grey"
+ServerColor type open "purple" | "blue" | "turquoise" | "green" | "red" | "yellow" | "grey" | "orange"
 LinkTracking type open "None" | "HtmlAndText" | "HtmlOnly" | "TextOnly"
 
 ServerConfigurationResponse type {
@@ -48,7 +48,7 @@ ServerConfigurationResponse type {
 
 EditCurrentServerConfigurationRequest type {
     Name: Str?,
-    Color: "purple" | "blue" | "turqoise" | "green" | "red" | "yellow" | "grey"?,
+    Color: "purple" | "blue" | "turquoise" | "green" | "red" | "yellow" | "grey" | "orange"?,
     RawEmailEnabled: Bool?,
     DeliveryHookUrl: Str?,
     SmtpApiActivated: Bool?,

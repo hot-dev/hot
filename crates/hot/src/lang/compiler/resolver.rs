@@ -991,7 +991,7 @@ fn resolve_var_refs_in_value(
             if let Some(resolved_value) =
                 resolve_variable_to_namespace_function(&var_ref.var, containing_ns, namespace_data)
             {
-                tracing::warn!(
+                tracing::debug!(
                     "RESOLVING var '{}' to {:?}",
                     var_ref.var.sym.name(),
                     resolved_value
