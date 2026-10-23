@@ -2451,4 +2451,39 @@ fn test_spaced_paren_in_a_flow_body_binds_a_lambda() {
             flow.expressions
         );
     }
+
+    // So do `fn serial` and `fn parallel` bodies, which name each bare
+    // expression's value.
+    for flow_type in ["serial", "parallel"] {
+        let source = format!("g fn {flow_type} () {{\n    h (x) {{ add(x, 1) }}\n    k(2)\n}}");
+        let program = parse_hot(&source).expect("parses");
+        let default_ns = &program.namespaces[&NsPath::new()];
+        let body = default_ns
+            .scope
+            .vars
+            .iter()
+            .find_map(|(var, value)| match value {
+                Value::Fn(defs) if var.sym.name() == "g" => Some(&defs[0].body),
+                _ => None,
+            })
+            .expect("g is a function");
+        let Value::Flow(flow) = body else {
+            panic!("{flow_type}: expected a flow body, got {:?}", body)
+        };
+        assert!(
+            matches!(&flow.expressions[0], Value::Ref(Ref::Var(v)) if v.var.sym.name() == "h"),
+            "fn {flow_type}: h should be bound, got {:?}",
+            flow.expressions
+        );
+        assert!(
+            matches!(&flow.expressions[1], Value::Lambda(_)),
+            "fn {flow_type}: h should be bound to a lambda, got {:?}",
+            flow.expressions[1]
+        );
+        assert!(
+            matches!(&flow.expressions[3], Value::FnCall(_)),
+            "fn {flow_type}: k(2) is a call, got {:?}",
+            flow.expressions
+        );
+    }
 }
