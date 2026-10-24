@@ -260,6 +260,8 @@ The project name is taken from the directory name. Creates three things alongsid
 - `hot/src/<project>/hi.hot` — Starter file with tutorial
 - `.hot/` — Local data: cache, database, logs (gitignored)
 
+In a fresh checkout of a project, the first command that needs its local SQLite database, such as `hot run`, creates it as `hot init` would.
+
 ### hot project
 
 Manage projects:

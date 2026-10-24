@@ -122,6 +122,7 @@ pub(crate) async fn run_run(
     global_options: &GlobalOptions,
     context_storage: Option<ahash::AHashMap<String, hot::val::Val>>,
     value_format: Option<&str>,
+    providers: &crate::CliProviders,
 ) -> Result<(), String> {
     // Check if target file exists
     let path = std::path::Path::new(file_path);
@@ -172,6 +173,8 @@ pub(crate) async fn run_run(
         .as_ref()
         .map(|storage| storage.keys().cloned().collect())
         .unwrap_or_default();
+    // A fresh checkout's local SQLite database is created on first use.
+    crate::command::init::initialize_missing_local_database(conf, providers).await?;
     setup_live_build_for_dev_with_context(
         conf,
         global_options,
@@ -539,10 +542,18 @@ mod tests {
             src_paths: vec![source_dir.to_string_lossy().to_string()],
             ..Default::default()
         };
-        run_run(source.to_str().unwrap(), &conf, &options, None, None)
-            .await
-            .unwrap();
-        crate::command::eval::run_eval("add(2, 3)", &conf, &options, None, None)
+        let providers = crate::CliProviders::default();
+        run_run(
+            source.to_str().unwrap(),
+            &conf,
+            &options,
+            None,
+            None,
+            &providers,
+        )
+        .await
+        .unwrap();
+        crate::command::eval::run_eval("add(2, 3)", &conf, &options, None, None, &providers)
             .await
             .unwrap();
         let runs = Run::get_runs_by_env(&db, &selected_env, Some(10), None)

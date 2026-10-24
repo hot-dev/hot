@@ -970,6 +970,7 @@ async fn async_main(providers: CliProviders) {
                 &global_options,
                 context_storage.clone(),
                 value_format.as_deref(),
+                &providers,
             )
             .await
             {
@@ -986,6 +987,7 @@ async fn async_main(providers: CliProviders) {
                 &global_options,
                 context_storage.clone(),
                 value_format.as_deref(),
+                &providers,
             )
             .await
             {
@@ -999,6 +1001,7 @@ async fn async_main(providers: CliProviders) {
                 &global_options,
                 context_storage.clone(),
                 value_format.as_deref(),
+                &providers,
             )
             .await
             {
@@ -1316,6 +1319,7 @@ async fn async_main(providers: CliProviders) {
                 &global.resource_paths,
                 global.no_gitignore,
                 allow_secret_shape,
+                &providers,
             )
             .await
             {
@@ -1393,6 +1397,7 @@ async fn async_main(providers: CliProviders) {
                 &cmd_test_paths,
                 &conf,
                 &global_options,
+                &providers,
             )
             .await
             {
@@ -1659,6 +1664,7 @@ async fn async_main(providers: CliProviders) {
                 &global_options,
                 context_storage.clone(),
                 None, // No value_format override for stdin
+                &providers,
             )
             .await
             {
