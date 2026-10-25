@@ -361,6 +361,7 @@ async fn webhook_handler_inner(
     body: Bytes,
     source: WebhookRouteSource,
 ) -> Result<axum::response::Response, (StatusCode, Json<ApiErrorResponse>)> {
+    let on_custom_domain = matches!(source, WebhookRouteSource::Domain { .. });
     let normalized = path.trim_end_matches('/');
     let (endpoint_path, token) = if let Some((prefix, last)) = normalized.rsplit_once('/') {
         if last.len() == 12 && last.chars().all(|c| c.is_ascii_hexdigit()) {
@@ -855,7 +856,7 @@ async fn webhook_handler_inner(
     }
     // Convert the outcome to an HTTP response
     match outcome {
-        Some(Outcome::Stopped { result }) => build_webhook_response(result),
+        Some(Outcome::Stopped { result }) => build_webhook_response(result, on_custom_domain),
         Some(Outcome::Failed { error }) => {
             let error_text =
                 error.unwrap_or_else(|| "Webhook function execution failed".to_string());
@@ -900,8 +901,26 @@ async fn webhook_handler_inner(
 ///
 /// If the return value is an HttpResponse-shaped map (with status, and optionally headers/body),
 /// use those fields. Otherwise, wrap the raw result as a 200 JSON response.
+///
+/// On the shared API host, which is same-site with the app, a tenant's
+/// response can't set cookies, and a browser renders it sandboxed: no
+/// scripts, no form posts, no content sniffing. A custom domain is the
+/// tenant's own site, so its headers pass through unchanged.
+fn shared_host_response_headers(response: &mut axum::response::Response) {
+    let headers = response.headers_mut();
+    headers.insert(
+        axum::http::header::CONTENT_SECURITY_POLICY,
+        axum::http::HeaderValue::from_static("sandbox"),
+    );
+    headers.insert(
+        axum::http::header::X_CONTENT_TYPE_OPTIONS,
+        axum::http::HeaderValue::from_static("nosniff"),
+    );
+}
+
 fn build_webhook_response(
     result: Option<serde_json::Value>,
+    on_custom_domain: bool,
 ) -> Result<axum::response::Response, (StatusCode, Json<ApiErrorResponse>)> {
     let result = match result {
         Some(r) => r,
@@ -954,9 +973,19 @@ fn build_webhook_response(
                         axum::http::HeaderValue::from_str(v),
                     )
                 {
+                    if !on_custom_domain
+                        && (header_name == axum::http::header::SET_COOKIE
+                            || header_name == axum::http::header::CONTENT_SECURITY_POLICY
+                            || header_name == axum::http::header::X_CONTENT_TYPE_OPTIONS)
+                    {
+                        continue;
+                    }
                     response.headers_mut().insert(header_name, header_value);
                 }
             }
+        }
+        if !on_custom_domain {
+            shared_host_response_headers(&mut response);
         }
 
         return Ok(response);
@@ -999,7 +1028,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_build_response_none_returns_null_200() {
-        let response = build_webhook_response(None).unwrap();
+        let response = build_webhook_response(None, false).unwrap();
         assert_eq!(response.status(), StatusCode::OK);
         let body = to_bytes(response.into_body(), 1024).await.unwrap();
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
@@ -1009,7 +1038,7 @@ mod tests {
     #[tokio::test]
     async fn test_build_response_plain_value_returns_200_json() {
         let result = serde_json::json!({"message": "hello"});
-        let response = build_webhook_response(Some(result.clone())).unwrap();
+        let response = build_webhook_response(Some(result.clone()), false).unwrap();
         assert_eq!(response.status(), StatusCode::OK);
         let body = to_bytes(response.into_body(), 1024).await.unwrap();
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
@@ -1024,11 +1053,48 @@ mod tests {
             "headers": {},
             "body": {"created": true}
         });
-        let response = build_webhook_response(Some(result)).unwrap();
+        let response = build_webhook_response(Some(result), false).unwrap();
         assert_eq!(response.status(), StatusCode::CREATED);
         let body = to_bytes(response.into_body(), 1024).await.unwrap();
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(json, serde_json::json!({"created": true}));
+    }
+
+    #[test]
+    fn test_shared_host_responses_set_no_cookies_and_render_sandboxed() {
+        let result = serde_json::json!({
+            "status": 200,
+            "headers": {
+                "Content-Type": "text/html",
+                "Set-Cookie": "session=attacker; Domain=hot.dev",
+                "Content-Security-Policy": "script-src *",
+                "X-Custom": "kept"
+            },
+            "body": "<form method=post></form>"
+        });
+        let shared = build_webhook_response(Some(result.clone()), false).unwrap();
+        let headers = shared.headers();
+        assert!(headers.get(axum::http::header::SET_COOKIE).is_none());
+        assert_eq!(
+            headers[axum::http::header::CONTENT_SECURITY_POLICY],
+            "sandbox"
+        );
+        assert_eq!(
+            headers[axum::http::header::X_CONTENT_TYPE_OPTIONS],
+            "nosniff"
+        );
+        assert_eq!(headers["x-custom"], "kept");
+
+        let custom = build_webhook_response(Some(result), true).unwrap();
+        let headers = custom.headers();
+        assert_eq!(
+            headers[axum::http::header::SET_COOKIE],
+            "session=attacker; Domain=hot.dev"
+        );
+        assert_eq!(
+            headers[axum::http::header::CONTENT_SECURITY_POLICY],
+            "script-src *"
+        );
     }
 
     #[tokio::test]
@@ -1042,7 +1108,7 @@ mod tests {
                 "body": {"created": true}
             }
         });
-        let response = build_webhook_response(Some(result)).unwrap();
+        let response = build_webhook_response(Some(result), false).unwrap();
         assert_eq!(response.status(), StatusCode::CREATED);
         let body = to_bytes(response.into_body(), 1024).await.unwrap();
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
@@ -1059,7 +1125,7 @@ mod tests {
                 "body": "ok"
             }
         });
-        let response = build_webhook_response(Some(result)).unwrap();
+        let response = build_webhook_response(Some(result), false).unwrap();
         assert_eq!(response.status(), StatusCode::OK);
         let body = to_bytes(response.into_body(), 1024).await.unwrap();
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
@@ -1079,7 +1145,7 @@ mod tests {
                 "body": "ok"
             }
         });
-        let response = build_webhook_response(Some(result)).unwrap();
+        let response = build_webhook_response(Some(result), false).unwrap();
         assert_eq!(response.status(), StatusCode::OK);
         assert_eq!(
             response.headers().get("x-custom-header").unwrap(),
@@ -1095,7 +1161,7 @@ mod tests {
             "$type": "::myapp/MyResult",
             "$val": {"data": "hello"}
         });
-        let response = build_webhook_response(Some(result)).unwrap();
+        let response = build_webhook_response(Some(result), false).unwrap();
         assert_eq!(response.status(), StatusCode::OK);
         let body = to_bytes(response.into_body(), 1024).await.unwrap();
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
@@ -1108,7 +1174,7 @@ mod tests {
             "status": 404,
             "body": {"error": "not found"}
         });
-        let response = build_webhook_response(Some(result)).unwrap();
+        let response = build_webhook_response(Some(result), false).unwrap();
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
     }
 
@@ -1117,7 +1183,7 @@ mod tests {
         let result = serde_json::json!({
             "status": 204
         });
-        let response = build_webhook_response(Some(result)).unwrap();
+        let response = build_webhook_response(Some(result), false).unwrap();
         assert_eq!(response.status(), StatusCode::NO_CONTENT);
         let body = to_bytes(response.into_body(), 1024).await.unwrap();
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
@@ -1127,7 +1193,7 @@ mod tests {
     #[tokio::test]
     async fn test_build_response_string_value() {
         let result = serde_json::json!("plain text response");
-        let response = build_webhook_response(Some(result)).unwrap();
+        let response = build_webhook_response(Some(result), false).unwrap();
         assert_eq!(response.status(), StatusCode::OK);
         let body = to_bytes(response.into_body(), 1024).await.unwrap();
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
@@ -1137,7 +1203,7 @@ mod tests {
     #[tokio::test]
     async fn test_build_response_array_value() {
         let result = serde_json::json!([1, 2, 3]);
-        let response = build_webhook_response(Some(result.clone())).unwrap();
+        let response = build_webhook_response(Some(result.clone()), false).unwrap();
         assert_eq!(response.status(), StatusCode::OK);
         let body = to_bytes(response.into_body(), 1024).await.unwrap();
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
@@ -1151,7 +1217,7 @@ mod tests {
             "status": 202,
             "body": "accepted"
         });
-        let response = build_webhook_response(Some(result)).unwrap();
+        let response = build_webhook_response(Some(result), false).unwrap();
         assert_eq!(response.status(), StatusCode::ACCEPTED);
     }
 

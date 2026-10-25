@@ -1999,6 +1999,41 @@ impl Schedule {
         }
     }
 
+    /// Cancel a schedule by ID only if its build belongs to `env_id`.
+    /// Returns false when the schedule is unknown, inactive, or in another
+    /// environment, so user code cannot cancel another tenant's schedules.
+    pub async fn cancel_schedule_in_env(
+        db: &crate::db::DatabasePool,
+        schedule_id: &Uuid,
+        env_id: &Uuid,
+    ) -> Result<bool, ScheduleError> {
+        let now = chrono::Utc::now();
+        match db {
+            crate::db::DatabasePool::Postgres(pg_pool) => {
+                let result = sqlx::query(
+                    "UPDATE schedule SET active = false, deactivated_at = $1 WHERE schedule_id = $2 AND active = true AND build_id IN (SELECT b.build_id FROM build b JOIN project p ON p.project_id = b.project_id WHERE p.env_id = $3)"
+                )
+                .bind(now)
+                .bind(schedule_id)
+                .bind(env_id)
+                .execute(pg_pool)
+                .await?;
+                Ok(result.rows_affected() > 0)
+            }
+            crate::db::DatabasePool::Sqlite(sqlite_pool) => {
+                let result = sqlx::query(
+                    "UPDATE schedule SET active = 0, deactivated_at = ? WHERE schedule_id = ? AND active = 1 AND build_id IN (SELECT b.build_id FROM build b JOIN project p ON p.project_id = b.project_id WHERE p.env_id = ?)"
+                )
+                .bind(now)
+                .bind(schedule_id)
+                .bind(env_id)
+                .execute(sqlite_pool)
+                .await?;
+                Ok(result.rows_affected() > 0)
+            }
+        }
+    }
+
     /// Cancel schedules by function name for a build
     /// Returns the number of schedules cancelled
     pub async fn cancel_schedules_by_function(

@@ -30,6 +30,22 @@ pub(crate) async fn run_db(
                     return Ok(());
                 }
             }
+            let uri = get_db_uri_from_conf(conf);
+            if matches!(DatabaseType::from_uri(&uri), Ok(DatabaseType::Sqlite)) {
+                match hot::db::pending_sqlite_migrations(&uri).await {
+                    Ok(pending) if pending.is_empty() => println!("  Migrations: up to date"),
+                    Ok(pending) => {
+                        let versions: Vec<String> =
+                            pending.iter().map(|v| format!("{v:03}")).collect();
+                        println!(
+                            "  Migrations: {} pending ({}). Run `hot db migrate`.",
+                            pending.len(),
+                            versions.join(", ")
+                        );
+                    }
+                    Err(e) => println!("  Migrations: unknown - {}", e),
+                }
+            }
         }
         "migrate" => {
             info!("Running database migrations...");
@@ -60,8 +76,7 @@ pub(crate) async fn run_db(
                     return Err(
                         "hot db port-v1-to-v2 is implemented for SQLite only. Hot 2 does not \
                          auto-port Postgres databases; point Hot 2 at a fresh Postgres database \
-                         (or schema). For Hot Cloud production environments, the v1\u{2192}v2 \
-                         backfill is owned by the private cloud repository. \
+                         (or schema). \
                          See https://hot.dev/docs/migrations#upgrading-from-hot-1x-to-hot-2"
                             .to_string(),
                     );

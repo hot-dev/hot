@@ -25,8 +25,13 @@ fn release_base_url(target_version: Option<&str>) -> Option<String> {
     match std::env::var("HOT_UPDATE_BASE_URL") {
         Ok(value) if value.trim().is_empty() => None,
         Ok(value) => Some(value.trim_end_matches('/').to_string()),
+        // A release's own folder is named by its bare version, as the release
+        // workflow uploads it: releases/2.6.11/hot_2.6.11_macos_arm64.pkg.
         Err(_) => Some(match target_version {
-            Some(version) => format!("https://get.hot.dev/releases/v{}", version.trim()),
+            Some(version) => format!(
+                "https://get.hot.dev/releases/{}",
+                version.trim().trim_start_matches('v')
+            ),
             None => DEFAULT_RELEASE_BASE_URL.to_string(),
         }),
     }
@@ -54,6 +59,16 @@ impl PlatformInfo {
     /// without version numbers for stable download URLs.
     /// Naming convention matches .github/workflows/build-and-package.yml
     pub fn detect_with_base_url(release_base_url: &str) -> Option<Self> {
+        Self::detect(release_base_url, None)
+    }
+
+    /// Like `detect_with_base_url`, for a specific release: its folder names
+    /// packages with the version, as `hot_2.6.11_macos_arm64.pkg`.
+    pub fn detect_for_version(release_base_url: &str, version: &str) -> Option<Self> {
+        Self::detect(release_base_url, Some(version.trim_start_matches('v')))
+    }
+
+    fn detect(release_base_url: &str, version: Option<&str>) -> Option<Self> {
         let os = std::env::consts::OS;
         let arch = std::env::consts::ARCH;
 
@@ -72,20 +87,15 @@ impl PlatformInfo {
             _ => return None, // Unsupported OS
         };
 
-        let package_name = match os {
-            "macos" => {
-                // macOS uses: hot_macos_{arch}.pkg
-                format!("hot_{}_{}.pkg", package_os, package_arch)
-            }
-            "linux" => {
-                // Linux uses: hot_linux_{arch}.deb
-                format!("hot_{}_{}.deb", package_os, package_arch)
-            }
-            "windows" => {
-                // Windows uses: hot_windows_{arch}.exe
-                format!("hot_{}_{}.exe", package_os, package_arch)
-            }
-            _ => return None, // Unsupported OS
+        let extension = match os {
+            "macos" => "pkg",   // hot_macos_{arch}.pkg
+            "linux" => "deb",   // hot_linux_{arch}.deb
+            "windows" => "exe", // hot_windows_{arch}.exe
+            _ => return None,   // Unsupported OS
+        };
+        let package_name = match version {
+            Some(version) => format!("hot_{version}_{package_os}_{package_arch}.{extension}"),
+            None => format!("hot_{package_os}_{package_arch}.{extension}"),
         };
 
         let download_url = format!(
@@ -209,6 +219,35 @@ fn is_newer_version(current: &str, latest: &str) -> bool {
     }
 }
 
+/// Whether moving from `current` to `latest` crosses a major version.
+pub fn is_major_upgrade(current: &str, latest: &str) -> bool {
+    matches!(
+        (parse_version(current), parse_version(latest)),
+        (Some(current), Some(latest)) if latest.0 > current.0
+    )
+}
+
+/// Ask before `hot update` moves to a new major version. Without a terminal
+/// to ask on, it doesn't upgrade and prints the explicit command instead.
+pub fn confirm_major_upgrade(latest: &str) -> bool {
+    use is_terminal::IsTerminal;
+    use std::io::Write;
+    println!("Hot {latest} is a new major version. Read the upgrade notes first:");
+    println!("  https://hot.dev/docs/migrations");
+    println!();
+    if !std::io::stdin().is_terminal() {
+        println!("Run `hot update --version {latest}` to upgrade.");
+        return false;
+    }
+    print!("Upgrade to {latest}? [y/N] ");
+    let _ = std::io::stdout().flush();
+    let mut answer = String::new();
+    if std::io::stdin().read_line(&mut answer).is_err() {
+        return false;
+    }
+    matches!(answer.trim(), "y" | "Y" | "yes" | "Yes")
+}
+
 fn is_valid_requested_version(version: &str) -> bool {
     parse_version(version).is_some()
         && version
@@ -238,7 +277,13 @@ pub async fn check_for_updates(target_version: Option<&str>) -> UpdateCheckResul
     };
 
     if let Some(version) = target_version {
-        let platform = match PlatformInfo::detect_with_base_url(&release_base_url) {
+        // A custom base URL keeps the latest-folder package names.
+        let platform = if std::env::var("HOT_UPDATE_BASE_URL").is_ok() {
+            PlatformInfo::detect_with_base_url(&release_base_url)
+        } else {
+            PlatformInfo::detect_for_version(&release_base_url, version)
+        };
+        let platform = match platform {
             Some(p) => p,
             None => {
                 return UpdateCheckResult::UnsupportedPlatform {
@@ -534,6 +579,14 @@ mod tests {
     }
 
     #[test]
+    fn test_major_upgrade_detection() {
+        assert!(is_major_upgrade("2.6.11", "3.0.0"));
+        assert!(!is_major_upgrade("2.6.11", "2.7.0"));
+        assert!(!is_major_upgrade("3.0.0", "3.0.1"));
+        assert!(!is_major_upgrade("3.0.0", "garbage"));
+    }
+
+    #[test]
     fn test_requested_version_validation() {
         assert!(is_valid_requested_version("1.4.0"));
         assert!(is_valid_requested_version("2.0.0-beta.1"));
@@ -555,5 +608,22 @@ mod tests {
         assert!(info.download_url.starts_with(DEFAULT_RELEASE_BASE_URL));
         // Verify no version number in package name (latest folder uses versionless names)
         assert!(!info.package_name.contains("0."));
+    }
+
+    #[test]
+    fn test_platform_info_for_a_release_uses_its_folder_names() {
+        let base = "https://get.hot.dev/releases/2.6.11";
+        let info = PlatformInfo::detect_for_version(base, "v2.6.11").unwrap();
+        assert!(
+            info.package_name.starts_with("hot_2.6.11_"),
+            "{}",
+            info.package_name
+        );
+        assert!(
+            info.download_url
+                .starts_with("https://get.hot.dev/releases/2.6.11/hot_2.6.11_"),
+            "{}",
+            info.download_url
+        );
     }
 }

@@ -86,9 +86,13 @@ pub enum StreamEvent {
     },
     /// Inbound message to a running task, sent via ::hot::task/send.
     /// Routed via pub/sub using the task_id as the channel key.
+    /// `env_id` names the sender's environment; the task worker drops
+    /// messages from any environment other than the task's own.
     #[serde(rename = "task:message")]
     TaskMessage {
         task_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        env_id: Option<Uuid>,
         payload: serde_json::Value,
     },
 }
@@ -257,8 +261,9 @@ impl StreamEvent {
             | StreamEvent::RunStop { env_id, .. }
             | StreamEvent::RunFail { env_id, .. }
             | StreamEvent::RunCancel { env_id, .. } => Some(*env_id),
-            StreamEvent::StreamData { env_id, .. } => *env_id,
-            StreamEvent::TaskMessage { .. } => None,
+            StreamEvent::StreamData { env_id, .. } | StreamEvent::TaskMessage { env_id, .. } => {
+                *env_id
+            }
         }
     }
 
@@ -678,6 +683,7 @@ mod tests {
         let uuid = Uuid::now_v7();
         let event = StreamEvent::TaskMessage {
             task_id: uuid.to_string(),
+            env_id: None,
             payload: serde_json::json!({"data": 1}),
         };
         assert_eq!(event.stream_id(), uuid);
@@ -687,6 +693,7 @@ mod tests {
     fn test_task_message_stream_id_invalid_uuid() {
         let event = StreamEvent::TaskMessage {
             task_id: "not-a-uuid".to_string(),
+            env_id: None,
             payload: serde_json::json!(null),
         };
         assert_eq!(event.stream_id(), Uuid::nil());
@@ -696,6 +703,7 @@ mod tests {
     fn test_task_message_event_id_is_none() {
         let event = StreamEvent::TaskMessage {
             task_id: Uuid::now_v7().to_string(),
+            env_id: None,
             payload: serde_json::json!(null),
         };
         assert_eq!(event.event_id(), None);
@@ -705,6 +713,7 @@ mod tests {
     fn test_task_message_run_id_is_nil() {
         let event = StreamEvent::TaskMessage {
             task_id: Uuid::now_v7().to_string(),
+            env_id: None,
             payload: serde_json::json!(null),
         };
         assert_eq!(event.run_id(), Uuid::nil());
@@ -712,18 +721,26 @@ mod tests {
 
     #[test]
     fn test_task_message_serde_round_trip() {
+        let env_id = Uuid::now_v7();
         let event = StreamEvent::TaskMessage {
             task_id: "019506ab-1234-7000-8000-000000000001".to_string(),
+            env_id: Some(env_id),
             payload: serde_json::json!({"command": "stop", "reason": "user request"}),
         };
 
         let json = serde_json::to_string(&event).unwrap();
         assert!(json.contains("\"type\":\"task:message\""));
+        assert_eq!(event.env_id(), Some(env_id));
 
         let deserialized: StreamEvent = serde_json::from_str(&json).unwrap();
         match deserialized {
-            StreamEvent::TaskMessage { task_id, payload } => {
+            StreamEvent::TaskMessage {
+                task_id,
+                env_id: received_env,
+                payload,
+            } => {
                 assert_eq!(task_id, "019506ab-1234-7000-8000-000000000001");
+                assert_eq!(received_env, Some(env_id));
                 assert_eq!(payload["command"], "stop");
                 assert_eq!(payload["reason"], "user request");
             }

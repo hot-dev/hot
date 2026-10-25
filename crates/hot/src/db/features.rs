@@ -115,6 +115,23 @@ impl Features {
         }
     }
 
+    /// An account's features: its plan's, over conservative cloud defaults,
+    /// or, with no plan (self-hosted and local), unlimited ones. Overrides
+    /// apply on top either way, so overriding one limit never zeroes the
+    /// others.
+    pub fn for_account(plan: Option<&JsonValue>, overrides: Option<&JsonValue>) -> Self {
+        if plan.is_some() {
+            return Self::resolve(plan, overrides);
+        }
+        let mut features = Self::unlimited();
+        if let Some(JsonValue::Object(org)) = overrides {
+            for (k, v) in org {
+                features.inner.insert(k.clone(), v.clone());
+            }
+        }
+        features
+    }
+
     /// Create unlimited features (for self-hosted / local dev).
     pub fn unlimited() -> Self {
         let mut inner = serde_json::Map::new();
@@ -394,12 +411,9 @@ impl Features {
             }
         };
 
-        // If no subscription at all, return unlimited (self-hosted / local dev)
-        if plan_features.is_none() && org_features.is_none() {
-            return Self::unlimited();
-        }
-
-        Self::resolve(plan_features.as_ref(), org_features.as_ref())
+        // With no plan (self-hosted / local dev), the account is unlimited
+        // apart from its overrides.
+        Self::for_account(plan_features.as_ref(), org_features.as_ref())
     }
 
     /// Resolve features for an organization in hosted billing mode.

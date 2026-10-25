@@ -152,7 +152,7 @@ fn limit(plan: Option<String>, overrides: Option<String>, kind: QuotaKind) -> Re
     if plan.is_none() && overrides.is_none() {
         return Ok(-1);
     }
-    Features::resolve(plan.as_ref(), overrides.as_ref())
+    Features::for_account(plan.as_ref(), overrides.as_ref())
         .get_i64(kind.key())
         .ok_or_else(|| "Missing account store limit".into())
 }
@@ -246,7 +246,9 @@ mod tests {
                 )
                 .is_err()
             );
-            assert_eq!(limit(None, Some("{}".into()), kind).unwrap(), 0);
+            // Overrides without a plan leave every other limit unlimited.
+            assert_eq!(limit(None, Some("{}".into()), kind).unwrap(), -1);
+            assert_eq!(limit(Some("{}".into()), None, kind).unwrap(), 0);
         }
     }
 

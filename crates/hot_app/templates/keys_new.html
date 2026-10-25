@@ -144,6 +144,9 @@
                                                     <option value="key">key</option>
                                                     <option value="session">session</option>
                                                     <option value="env">env</option>
+                                                    <option value="file">file</option>
+                                                    <option value="blob">blob</option>
+                                                    <option value="domain">domain</option>
                                                 </select>
                                             </div>
                                             <div class="sm:w-48 shrink-0">
@@ -317,6 +320,9 @@ function permissionBuilder() {
         'key':     ['create', 'read', 'update', 'delete'],
         'session': ['create', 'read', 'delete'],
         'env':     ['read'],
+        'file':    ['create', 'read', 'delete'],
+        'blob':    ['read'],
+        'domain':  ['create', 'read', 'update', 'delete'],
     };
 
     const PRESETS = {

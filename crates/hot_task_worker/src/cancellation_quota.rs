@@ -106,18 +106,26 @@ pub(super) async fn reap(
                 .then(|| task.container_id.clone())
                 .flatten()
         });
-        let Some(container_id) = container_id else {
-            tracing::warn!(task_id=%task.task_id, worker_id=%owner, "Cancelled quota needs recovery on its owning runtime; no local ownership evidence");
-            continue;
+        let terminated = match container_id {
+            Some(container_id) => {
+                if !runtime_stopped(executor, &container_id).await {
+                    let _ = tokio::time::timeout(
+                        CONTAINER_KILL_TIMEOUT,
+                        executor.cleanup_orphan(&container_id),
+                    )
+                    .await;
+                }
+                runtime_stopped(executor, &container_id).await
+            }
+            // This generation ran the task, never recorded a container for
+            // it, and has none labelled for it: setup failed before one
+            // started, so nothing is running.
+            None if owner == current_worker && task.container_id.is_none() => true,
+            None => {
+                tracing::warn!(task_id=%task.task_id, worker_id=%owner, "Cancelled quota needs recovery on its owning runtime; no local ownership evidence");
+                continue;
+            }
         };
-        if !runtime_stopped(executor, &container_id).await {
-            let _ = tokio::time::timeout(
-                CONTAINER_KILL_TIMEOUT,
-                executor.cleanup_orphan(&container_id),
-            )
-            .await;
-        }
-        let terminated = runtime_stopped(executor, &container_id).await;
         let Ok(env) = Env::get_env_uncached(db, &task.env_id).await else {
             continue;
         };
@@ -129,6 +137,15 @@ pub(super) async fn reap(
             tracing::info!(task_id=%task.task_id, "Recovered cancelled execution; charged reserved maximum and released concurrency");
         }
     }
+}
+
+/// Whether this worker's runtime has no container labelled for `task_id`.
+/// Every container a worker starts carries that label, so for the worker
+/// generation that ran the task, absence means none was started or it is gone.
+pub(super) async fn no_local_container(executor: &executor::BoxExecutor, task_id: &Uuid) -> bool {
+    local_containers(executor)
+        .await
+        .is_ok_and(|local| !local.contains_key(task_id))
 }
 
 async fn local_containers(
@@ -181,10 +198,11 @@ mod tests {
     async fn claimed_cancelled() -> (DatabasePool, Uuid) {
         let db = hot::db::test_db().await;
         let id = Uuid::now_v7();
+        let env = Uuid::now_v7();
         Task::insert(
             &db,
             &id,
-            &Uuid::now_v7(),
+            &env,
             &Uuid::now_v7(),
             &Uuid::now_v7(),
             None,
@@ -208,7 +226,7 @@ mod tests {
         .execute(pool)
         .await
         .unwrap();
-        assert!(Task::cancel(&db, &id).await.unwrap());
+        assert!(Task::cancel(&db, &id, &env).await.unwrap());
         (db, id)
     }
     #[test]

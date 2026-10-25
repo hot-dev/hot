@@ -303,7 +303,11 @@ async fn postgres_task_lifecycle_smoke() {
     )
     .await
     .expect("cancel-race task should insert");
-    assert!(Task::cancel(&db, &cancelled_task_id).await.unwrap());
+    assert!(
+        Task::cancel(&db, &cancelled_task_id, &test_data.env_id)
+            .await
+            .unwrap()
+    );
     assert!(
         !Task::claim_for_worker(&db, &cancelled_task_id, "late-worker")
             .await

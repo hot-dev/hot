@@ -25,9 +25,11 @@ pub struct FileRecord {
     pub updated_by_user_id: Option<Uuid>,
 }
 
-/// Metadata is the commit point for a file upload. Every size-increasing write
-/// holds the billing root row lock across the account total and metadata update.
-/// Staged object bytes are never counted as committed storage.
+/// Metadata is the commit point for a file upload. On a limited account,
+/// every size-increasing write holds the billing root row lock across the
+/// account total and metadata update; an unlimited account takes neither the
+/// lock nor the total. Staged object bytes are never counted as committed
+/// storage.
 enum StorageWriteTransaction {
     Postgres(sqlx::Transaction<'static, sqlx::Postgres>),
     Sqlite(sqlx::Transaction<'static, sqlx::Sqlite>),
@@ -70,19 +72,48 @@ async fn begin_storage_write(
     match &billing {
         DatabasePool::Postgres(pool) => {
             let mut tx = pool.begin().await.map_err(fwe)?;
+            // Decide on the plan before locking: an unlimited account needs
+            // neither the root lock nor a total over every active file.
+            let plan: Option<serde_json::Value> = sqlx::query_scalar(
+                "SELECT COALESCE(p.features,'{}'::jsonb) FROM org_plan op JOIN plan p ON p.plan_uuid=op.plan_uuid WHERE op.org_id=$1"
+            ).bind(root_id).fetch_optional(&mut *tx).await.map_err(fwe)?.flatten();
             let overrides: Option<serde_json::Value> =
-                sqlx::query_scalar("SELECT features FROM org WHERE org_id=$1 FOR UPDATE")
+                sqlx::query_scalar("SELECT features FROM org WHERE org_id=$1")
                     .bind(root_id)
                     .fetch_one(&mut *tx)
                     .await
                     .map_err(fwe)?;
-            let plan: Option<serde_json::Value> = sqlx::query_scalar(
-                "SELECT COALESCE(p.features,'{}'::jsonb) FROM org_plan op JOIN plan p ON p.plan_uuid=op.plan_uuid WHERE op.org_id=$1"
-            ).bind(root_id).fetch_optional(&mut *tx).await.map_err(fwe)?.flatten();
-            let usage: i64 = sqlx::query_scalar(
-                "SELECT COALESCE(SUM(f.size),0)::bigint FROM file f JOIN org o ON o.org_id=f.org_id WHERE f.active AND (o.org_id=$1 OR o.parent_org_id=$1) AND ($2::uuid IS NULL OR f.file_id<>$2)"
-            ).bind(root_id).bind(file_id).fetch_one(&mut *tx).await.map_err(fwe)?;
-            validate_storage_limit(plan.as_ref(), overrides.as_ref(), usage, new_size)?;
+            if storage_limit(plan.as_ref(), overrides.as_ref()) >= 0 {
+                // NO KEY UPDATE serializes quota writers without blocking the
+                // foreign-key checks of inserts that reference the org.
+                let overrides: Option<serde_json::Value> = sqlx::query_scalar(
+                    "SELECT features FROM org WHERE org_id=$1 FOR NO KEY UPDATE",
+                )
+                .bind(root_id)
+                .fetch_one(&mut *tx)
+                .await
+                .map_err(fwe)?;
+                let usage: i64 = sqlx::query_scalar(
+                    "SELECT COALESCE(SUM(f.size),0)::bigint FROM file f JOIN org o ON o.org_id=f.org_id WHERE f.active AND (o.org_id=$1 OR o.parent_org_id=$1) AND ($2::uuid IS NULL OR f.file_id<>$2)"
+                ).bind(root_id).bind(file_id).fetch_one(&mut *tx).await.map_err(fwe)?;
+                let replaced: Option<i64> = match file_id {
+                    Some(file_id) => {
+                        sqlx::query_scalar("SELECT size FROM file WHERE file_id=$1 AND active")
+                            .bind(file_id)
+                            .fetch_optional(&mut *tx)
+                            .await
+                            .map_err(fwe)?
+                    }
+                    None => None,
+                };
+                validate_storage_limit(
+                    plan.as_ref(),
+                    overrides.as_ref(),
+                    usage,
+                    new_size,
+                    replaced,
+                )?;
+            }
             let scope = match env_id {
                 Some(env_id) => DatabaseScope::Environment { org_id, env_id },
                 None => DatabaseScope::Organization { org_id },
@@ -92,52 +123,84 @@ async fn begin_storage_write(
         }
         DatabasePool::Sqlite(pool) => {
             let mut tx = pool.begin().await.map_err(fwe)?;
-            sqlx::query("UPDATE org SET org_id=org_id WHERE org_id=?")
-                .bind(root_id)
-                .execute(&mut *tx)
-                .await
-                .map_err(fwe)?;
-            let overrides: Option<String> =
-                sqlx::query_scalar("SELECT features FROM org WHERE org_id=?")
+            let read_limits = async |tx: &mut sqlx::Transaction<'static, sqlx::Sqlite>| {
+                let overrides: Option<String> =
+                    sqlx::query_scalar("SELECT features FROM org WHERE org_id=?")
+                        .bind(root_id)
+                        .fetch_one(&mut **tx)
+                        .await
+                        .map_err(fwe)?;
+                let plan: Option<String> = sqlx::query_scalar(
+                    "SELECT COALESCE(p.features,'{}') FROM org_plan op JOIN plan p ON p.plan_uuid=op.plan_uuid WHERE op.org_id=?"
+                ).bind(root_id).fetch_optional(&mut **tx).await.map_err(fwe)?.flatten();
+                let parse = |raw: Option<String>| {
+                    raw.map(|s| serde_json::from_str::<serde_json::Value>(&s))
+                        .transpose()
+                        .map_err(fwe)
+                };
+                Ok::<_, FileWriteError>((parse(plan)?, parse(overrides)?))
+            };
+            let (plan, overrides) = read_limits(&mut tx).await?;
+            if storage_limit(plan.as_ref(), overrides.as_ref()) >= 0 {
+                // Take the write lock, then read the limits again under it.
+                sqlx::query("UPDATE org SET org_id=org_id WHERE org_id=?")
                     .bind(root_id)
-                    .fetch_one(&mut *tx)
+                    .execute(&mut *tx)
                     .await
                     .map_err(fwe)?;
-            let plan: Option<String> = sqlx::query_scalar(
-                "SELECT COALESCE(p.features,'{}') FROM org_plan op JOIN plan p ON p.plan_uuid=op.plan_uuid WHERE op.org_id=?"
-            ).bind(root_id).fetch_optional(&mut *tx).await.map_err(fwe)?.flatten();
-            let overrides = overrides
-                .map(|s| serde_json::from_str(&s))
-                .transpose()
-                .map_err(fwe)?;
-            let plan = plan
-                .map(|s| serde_json::from_str(&s))
-                .transpose()
-                .map_err(fwe)?;
-            let usage: i64 = sqlx::query_scalar(
-                "SELECT COALESCE(SUM(f.size),0) FROM file f JOIN org o ON o.org_id=f.org_id WHERE f.active=1 AND (o.org_id=? OR o.parent_org_id=?) AND (? IS NULL OR f.file_id<>?)"
-            ).bind(root_id).bind(root_id).bind(file_id).bind(file_id).fetch_one(&mut *tx).await.map_err(fwe)?;
-            validate_storage_limit(plan.as_ref(), overrides.as_ref(), usage, new_size)?;
+                let (plan, overrides) = read_limits(&mut tx).await?;
+                let usage: i64 = sqlx::query_scalar(
+                    "SELECT COALESCE(SUM(f.size),0) FROM file f JOIN org o ON o.org_id=f.org_id WHERE f.active=1 AND (o.org_id=? OR o.parent_org_id=?) AND (? IS NULL OR f.file_id<>?)"
+                ).bind(root_id).bind(root_id).bind(file_id).bind(file_id).fetch_one(&mut *tx).await.map_err(fwe)?;
+                let replaced: Option<i64> = match file_id {
+                    Some(file_id) => {
+                        sqlx::query_scalar("SELECT size FROM file WHERE file_id=? AND active=1")
+                            .bind(file_id)
+                            .fetch_optional(&mut *tx)
+                            .await
+                            .map_err(fwe)?
+                    }
+                    None => None,
+                };
+                validate_storage_limit(
+                    plan.as_ref(),
+                    overrides.as_ref(),
+                    usage,
+                    new_size,
+                    replaced,
+                )?;
+            }
             Ok(StorageWriteTransaction::Sqlite(tx))
         }
     }
 }
 
+/// Prefix of the error a write gets when it would exceed the account's file
+/// storage limit. API handlers match it to answer 413 rather than 500.
+pub const STORAGE_QUOTA_EXCEEDED: &str = "Storage quota exceeded";
+
+/// The account's file storage limit in bytes; negative means unlimited.
+fn storage_limit(plan: Option<&serde_json::Value>, overrides: Option<&serde_json::Value>) -> i64 {
+    super::Features::for_account(plan, overrides).storage_bytes()
+}
+
+/// `usage` excludes the file a write replaces, whose size is `replaced`. A
+/// replacement that doesn't grow the file always passes, so an account over
+/// its limit (after the limit was lowered) can still rewrite or shrink files.
 fn validate_storage_limit(
     plan: Option<&serde_json::Value>,
     overrides: Option<&serde_json::Value>,
     usage: i64,
     size: i64,
+    replaced: Option<i64>,
 ) -> Result<(), FileWriteError> {
-    let features = if plan.is_none() && overrides.is_none() {
-        super::Features::unlimited()
-    } else {
-        super::Features::resolve(plan, overrides)
-    };
-    let limit = features.storage_bytes();
+    if replaced.is_some_and(|replaced| size <= replaced) {
+        return Ok(());
+    }
+    let limit = storage_limit(plan, overrides);
     if limit >= 0 && usage.checked_add(size).is_none_or(|total| total > limit) {
         return Err(fwe(format!(
-            "Storage quota exceeded: account usage {} + file {} > limit {}",
+            "{STORAGE_QUOTA_EXCEEDED}: account usage {} + file {} > limit {}",
             usage, size, limit
         )));
     }
@@ -1088,33 +1151,46 @@ pub async fn get_file_by_id(db: &DatabasePool, file_id: Uuid) -> Result<FileReco
     }
 }
 
-/// Mark file as inactive (soft delete)
+/// Mark one version of a file inactive (soft delete).
+///
+/// A compare-and-swap on `expected_storage_path`, like the write path's
+/// record swap: it deactivates the record only while it still names the
+/// version the caller read. Returns false when a concurrent overwrite (or
+/// delete) moved the record first; the caller re-reads, so it never
+/// deactivates bytes it won't delete.
 pub async fn mark_file_inactive(
     db: &DatabasePool,
-    path: &str,
-    org_id: Uuid,
-    env_id: Option<Uuid>,
+    file_id: Uuid,
+    expected_storage_path: &str,
     updated_by_user_id: Uuid,
     updated_by_run_id: Option<Uuid>,
-) -> Result<(), String> {
+) -> Result<bool, String> {
     let now = Utc::now();
 
-    let query = match db {
-        DatabasePool::Postgres(_) => {
+    let rows_affected = match db {
+        DatabasePool::Postgres(pool) => sqlx::query(
             r#"
             UPDATE file SET
                 active = false,
-                active_toggle_at = $5,
-                active_toggle_by_user_id = $4,
-                updated_by_run_id = $6,
-                updated_at = $7
-            WHERE path = $1
-              AND org_id = $2
-              AND (env_id = $3 OR (env_id IS NULL AND $3 IS NULL))
+                active_toggle_at = $4,
+                active_toggle_by_user_id = $3,
+                updated_by_run_id = $5,
+                updated_at = $4
+            WHERE file_id = $1
+              AND storage_path = $2
               AND active = true
-            "#
-        }
-        DatabasePool::Sqlite(_pool) => {
+            "#,
+        )
+        .bind(file_id)
+        .bind(expected_storage_path)
+        .bind(updated_by_user_id)
+        .bind(now)
+        .bind(updated_by_run_id)
+        .execute(pool)
+        .await
+        .map_err(|e| format!("Failed to mark file inactive: {}", e))?
+        .rows_affected(),
+        DatabasePool::Sqlite(pool) => sqlx::query(
             r#"
             UPDATE file SET
                 active = 0,
@@ -1122,45 +1198,24 @@ pub async fn mark_file_inactive(
                 active_toggle_by_user_id = ?,
                 updated_by_run_id = ?,
                 updated_at = ?
-            WHERE path = ?
-              AND org_id = ?
-              AND (env_id = ? OR (env_id IS NULL AND ? IS NULL))
+            WHERE file_id = ?
+              AND storage_path = ?
               AND active = 1
-            "#
-        }
+            "#,
+        )
+        .bind(now)
+        .bind(updated_by_user_id)
+        .bind(updated_by_run_id)
+        .bind(now)
+        .bind(file_id)
+        .bind(expected_storage_path)
+        .execute(pool)
+        .await
+        .map_err(|e| format!("Failed to mark file inactive: {}", e))?
+        .rows_affected(),
     };
 
-    match db {
-        DatabasePool::Postgres(pool) => {
-            sqlx::query(query)
-                .bind(path)
-                .bind(org_id)
-                .bind(env_id)
-                .bind(updated_by_user_id)
-                .bind(now)
-                .bind(updated_by_run_id)
-                .bind(now)
-                .execute(pool)
-                .await
-                .map_err(|e| format!("Failed to mark file inactive: {}", e))?;
-        }
-        DatabasePool::Sqlite(pool) => {
-            sqlx::query(query)
-                .bind(now)
-                .bind(updated_by_user_id)
-                .bind(updated_by_run_id)
-                .bind(now)
-                .bind(path)
-                .bind(org_id)
-                .bind(env_id)
-                .bind(env_id)
-                .execute(pool)
-                .await
-                .map_err(|e| format!("Failed to mark file inactive: {}", e))?;
-        }
-    }
-
-    Ok(())
+    Ok(rows_affected == 1)
 }
 
 /// List files by prefix
@@ -2353,6 +2408,20 @@ pub(crate) async fn seed_storage_quota_test_org(db: &DatabasePool, org_id: Uuid)
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn replacements_that_dont_grow_pass_an_exceeded_limit() {
+        let plan = serde_json::json!({"storage_bytes": 100});
+        let check = |usage, size, replaced| {
+            validate_storage_limit(Some(&plan), None, usage, size, replaced).is_ok()
+        };
+        // Usage (excluding the replaced file) is already over the limit.
+        assert!(check(150, 10, Some(10)));
+        assert!(check(150, 10, Some(20)));
+        assert!(!check(150, 11, Some(10)));
+        assert!(check(50, 50, None));
+        assert!(!check(50, 51, None));
+    }
 
     /// SQLite DB with FK enforcement on and a `run` table, mirroring the
     /// production race: the file insert carries a run id whose run row has

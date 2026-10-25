@@ -405,15 +405,18 @@ impl DatabaseType {
     }
 }
 
+/// The default database URI: the project's `.hot/db/hot.sqlite.db`, or
+/// `$HOT_HOME/db/hot.sqlite.db` when `HOT_HOME` is set.
+pub fn default_db_uri() -> String {
+    let db_path = crate::lang::cache::paths::get_db_dir().join("hot.sqlite.db");
+    format!("sqlite:{}", db_path.to_string_lossy())
+}
+
 /// Create a resolved database configuration from the full config using dotted paths
 pub fn get_resolved_conf(conf: Val) -> Val {
     // Database is always project-local (.hot/db/), never system-level.
     // This ensures project state is isolated and never accidentally shared.
-    let default_db_uri = {
-        let db_dir = crate::lang::cache::paths::get_db_dir();
-        let db_path = db_dir.join("hot.sqlite.db");
-        format!("sqlite:{}", db_path.to_string_lossy())
-    };
+    let default_db_uri = default_db_uri();
 
     // Create db defaults
     let db_defaults = crate::val!({
@@ -645,11 +648,24 @@ pub async fn test_connection(db: &DatabasePool) -> Result<(), DatabaseError> {
 
 /// Schema-owner credentials (`db.migration-uri`, or `migration-uri` in a
 /// resolved database section); empty when not configured.
+/// The separate schema-owner login, which only a PostgreSQL runtime database
+/// uses. A SQLite database migrates itself, so a `db.migration-uri` meant for
+/// a deployment never redirects a local project's migrations elsewhere.
 fn get_migration_uri_from_conf(conf: &Val) -> String {
-    conf.get_str_or_default(
+    let migration_uri = conf.get_str_or_default(
         "db.migration-uri",
         &conf.get_str_or_default("migration-uri", ""),
-    )
+    );
+    if !migration_uri.is_empty()
+        && !matches!(
+            DatabaseType::from_uri(&get_db_uri_from_conf(conf)),
+            Ok(DatabaseType::Postgres)
+        )
+    {
+        tracing::debug!("Ignoring db.migration-uri: the runtime database isn't PostgreSQL");
+        return String::new();
+    }
+    migration_uri
 }
 
 /// Whether this process may change the schema. Enforced PostgreSQL keeps
@@ -674,6 +690,34 @@ pub fn bootstrap_conf(conf: &Val) -> Val {
     }
     conf.set_str("db.uri", Some(migration_uri), "")
         .set_bool("db.rls.enforce", Some(false), false)
+}
+
+/// The migrations this release has that a SQLite database hasn't applied,
+/// by version. A database with no migration table has applied none.
+pub async fn pending_sqlite_migrations(uri: &str) -> Result<Vec<i64>, DatabaseError> {
+    use sqlx::ConnectOptions;
+    use std::str::FromStr;
+    let migrator = sqlx::migrate::Migrator::new(DatabaseType::Sqlite.migration_dir()?)
+        .await
+        .map_err(|e| DatabaseError::Migration(e.to_string()))?;
+    let mut conn = sqlx::sqlite::SqliteConnectOptions::from_str(uri)?
+        .read_only(true)
+        .connect()
+        .await?;
+    let applied: Vec<i64> =
+        match sqlx::query_scalar("SELECT version FROM _sqlx_migrations WHERE success = 1")
+            .fetch_all(&mut conn)
+            .await
+        {
+            Ok(applied) => applied,
+            Err(sqlx::Error::Database(e)) if e.message().contains("no such table") => Vec::new(),
+            Err(e) => return Err(e.into()),
+        };
+    Ok(migrator
+        .iter()
+        .map(|m| m.version)
+        .filter(|version| !applied.contains(version))
+        .collect())
 }
 
 /// Run database migrations
@@ -764,9 +808,10 @@ pub async fn run_migrations(conf: &Val) -> Result<(), DatabaseError> {
                 })?;
 
             tracing::debug!("Executing SQLite migrations");
+            let latest = migrator.iter().map(|m| m.version).max();
             migrator.run(&db).await.map_err(|e| {
                 tracing::error!("SQLite migration failed: {:?}", e);
-                translate_migrate_error(&DatabaseType::Sqlite, e)
+                translate_migrate_error(&DatabaseType::Sqlite, e, latest)
             })?;
 
             // Explicitly close the pool to ensure all connections are released
@@ -823,9 +868,10 @@ pub async fn run_migrations(conf: &Val) -> Result<(), DatabaseError> {
                 })?;
 
             tracing::debug!("Executing Postgres migrations");
+            let latest = migrator.iter().map(|m| m.version).max();
             migrator.run(&db).await.map_err(|e| {
                 tracing::error!("Postgres migration failed: {:?}", e);
-                translate_migrate_error(&DatabaseType::Postgres, e)
+                translate_migrate_error(&DatabaseType::Postgres, e, latest)
             })?;
 
             // Explicitly close the pool to ensure all connections are released
@@ -848,8 +894,21 @@ pub async fn run_migrations(conf: &Val) -> Result<(), DatabaseError> {
 fn translate_migrate_error(
     db_type: &DatabaseType,
     err: sqlx::migrate::MigrateError,
+    latest_known: Option<i64>,
 ) -> DatabaseError {
     use sqlx::migrate::MigrateError;
+    // A migration newer than any this release knows means a newer Hot
+    // migrated the database: a downgrade, not a Hot 1.x database.
+    if let MigrateError::VersionMissing(version) = err
+        && let Some(latest) = latest_known.filter(|latest| version > *latest)
+    {
+        return DatabaseError::Migration(format!(
+            "{err}\n\nThis database was migrated by a newer Hot release: it has migration {version}, \
+             and this Hot knows migrations up to {latest}. Downgrading isn't supported. Upgrade Hot \
+             to that release, or restore a backup taken before the upgrade. Don't delete the \
+             database. See https://hot.dev/docs/migrations"
+        ));
+    }
     let needs_hint = matches!(
         err,
         MigrateError::VersionMissing(_)
@@ -873,8 +932,7 @@ fn translate_migrate_error(
         }
         DatabaseType::Postgres => {
             "Hot 2 detected a Hot 1.x Postgres database. Hot 2 does not auto-port Postgres data; \
-             point Hot 2 at a fresh Postgres database (or schema). For Hot Cloud production \
-             environments, the v1→v2 backfill is owned by the private cloud repository. \
+             point Hot 2 at a fresh Postgres database (or schema). \
              See https://hot.dev/docs/migrations#upgrading-from-hot-1x-to-hot-2"
         }
     };
@@ -1371,7 +1429,7 @@ mod tests {
     #[test]
     fn test_translate_migrate_error_adds_sqlite_hint() {
         let err = sqlx::migrate::MigrateError::VersionMissing(2);
-        let translated = translate_migrate_error(&DatabaseType::Sqlite, err);
+        let translated = translate_migrate_error(&DatabaseType::Sqlite, err, None);
         let msg = translated.to_string();
         assert!(msg.contains("migration 2"), "preserves original wording");
         assert!(msg.contains("hot db port-v1-to-v2"), "got: {msg}");
@@ -1382,7 +1440,7 @@ mod tests {
     #[test]
     fn test_translate_migrate_error_adds_postgres_hint() {
         let err = sqlx::migrate::MigrateError::VersionMismatch(5);
-        let translated = translate_migrate_error(&DatabaseType::Postgres, err);
+        let translated = translate_migrate_error(&DatabaseType::Postgres, err, None);
         let msg = translated.to_string();
         assert!(msg.contains("fresh Postgres"), "got: {msg}");
         assert!(
@@ -1396,10 +1454,19 @@ mod tests {
     }
 
     #[test]
+    fn test_translate_migrate_error_names_a_newer_database() {
+        let err = sqlx::migrate::MigrateError::VersionMissing(15);
+        let msg = translate_migrate_error(&DatabaseType::Sqlite, err, Some(14)).to_string();
+        assert!(msg.contains("newer Hot release"), "got: {msg}");
+        assert!(msg.contains("Don't delete"), "got: {msg}");
+        assert!(!msg.contains("port-v1-to-v2"), "not a 1.x database: {msg}");
+    }
+
+    #[test]
     fn test_translate_migrate_error_passes_through_unrelated() {
         let inner = sqlx::Error::RowNotFound;
         let err = sqlx::migrate::MigrateError::Execute(inner);
-        let translated = translate_migrate_error(&DatabaseType::Sqlite, err);
+        let translated = translate_migrate_error(&DatabaseType::Sqlite, err, None);
         let msg = translated.to_string();
         assert!(
             !msg.contains("hot.dev/docs/migrations"),

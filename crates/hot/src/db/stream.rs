@@ -108,6 +108,37 @@ impl Stream {
         }
     }
 
+    /// Whether `stream_id` names a stream in `env_id`. A caller-supplied ID
+    /// can name another environment's stream: PostgreSQL RLS hides that row,
+    /// and `create_or_get_stream` leaves it alone, so ingress checks here.
+    pub async fn belongs_to_env(
+        db: &crate::db::DatabasePool,
+        stream_id: Uuid,
+        env_id: Uuid,
+    ) -> Result<bool, StreamError> {
+        let owned = match db {
+            crate::db::DatabasePool::Postgres(pg_pool) => {
+                sqlx::query_scalar(
+                    "SELECT EXISTS(SELECT 1 FROM stream WHERE stream_id = $1 AND env_id = $2)",
+                )
+                .bind(stream_id)
+                .bind(env_id)
+                .fetch_one(pg_pool)
+                .await?
+            }
+            crate::db::DatabasePool::Sqlite(sqlite_pool) => {
+                sqlx::query_scalar(
+                    "SELECT EXISTS(SELECT 1 FROM stream WHERE stream_id = ? AND env_id = ?)",
+                )
+                .bind(stream_id)
+                .bind(env_id)
+                .fetch_one(sqlite_pool)
+                .await?
+            }
+        };
+        Ok(owned)
+    }
+
     /// Update stream metrics (called after run/event changes)
     pub async fn update_metrics(
         db: &crate::db::DatabasePool,

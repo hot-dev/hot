@@ -753,6 +753,40 @@ async fn fetch_current<'a, T>(
     Err(format!("File not found in storage: {}", normalized_path))
 }
 
+/// Deactivate the current version of `normalized_path` and return it, so the
+/// caller deletes exactly the bytes it deactivated; None when no file exists.
+/// An overwrite committing between the lookup and the deactivation moves the
+/// record to new bytes, so the compare-and-swap fails and the lookup repeats:
+/// deactivating by path alone would retire the new version and orphan its
+/// bytes outside the quota.
+async fn deactivate_current(
+    ctx: &FileStorageContext,
+    normalized_path: &str,
+) -> Result<Option<FileRecord>, String> {
+    for _ in 0..COMMIT_ATTEMPTS {
+        let record = match get_file_by_path(&ctx.db, normalized_path, ctx.org_id, ctx.env_id).await
+        {
+            Ok(record) => record,
+            Err(_) => return Ok(None), // File didn't exist
+        };
+        if mark_file_inactive(
+            &ctx.db,
+            record.file_id,
+            &record.storage_path,
+            ctx.user_id,
+            ctx.run_id,
+        )
+        .await?
+        {
+            return Ok(Some(record));
+        }
+    }
+    Err(format!(
+        "File {} kept changing during delete; try again",
+        normalized_path
+    ))
+}
+
 /// Refuse to operate on bytes persisted by a different backend. Changing the
 /// configured backend does not migrate data, and silently routing an old
 /// reference through the new backend would read or delete the wrong object.
@@ -956,9 +990,11 @@ impl LocalFileStorage {
 
     /// Create from environment or use default
     pub fn from_env() -> Self {
-        let path =
-            std::env::var("HOT_FILE_STORAGE_PATH").unwrap_or_else(|_| "./.hot/file".to_string());
-        Self::new(PathBuf::from(path))
+        Self::new(
+            std::env::var("HOT_FILE_STORAGE_PATH")
+                .map(PathBuf::from)
+                .unwrap_or_else(|_| crate::lang::cache::paths::get_file_storage_dir()),
+        )
     }
 
     /// Get the full filesystem path for a relative file path with multi-tenant isolation
@@ -1254,23 +1290,9 @@ impl FileStorage for LocalFileStorage {
         let normalized_path = normalize_path(path)?;
         validate_path_security(&normalized_path)?;
 
-        // Check if file exists in database first
-        let record = match get_file_by_path(&ctx.db, &normalized_path, ctx.org_id, ctx.env_id).await
-        {
-            Ok(record) => record,
-            Err(_) => return Ok(false), // File didn't exist
+        let Some(record) = deactivate_current(ctx, &normalized_path).await? else {
+            return Ok(false);
         };
-
-        // Mark inactive in database
-        mark_file_inactive(
-            &ctx.db,
-            &normalized_path,
-            ctx.org_id,
-            ctx.env_id,
-            ctx.user_id,
-            ctx.run_id,
-        )
-        .await?;
 
         // Delete from the filesystem: the recorded storage path (which may be
         // a conditional-write staged blob) plus the deterministic location.
@@ -2073,23 +2095,9 @@ pub mod s3 {
             let normalized_path = normalize_path(path)?;
             validate_path_security(&normalized_path)?;
 
-            // Check if file exists in database first
-            let record =
-                match get_file_by_path(&ctx.db, &normalized_path, ctx.org_id, ctx.env_id).await {
-                    Ok(record) => record,
-                    Err(_) => return Ok(false), // File didn't exist
-                };
-
-            // Mark inactive in database
-            mark_file_inactive(
-                &ctx.db,
-                &normalized_path,
-                ctx.org_id,
-                ctx.env_id,
-                ctx.user_id,
-                ctx.run_id,
-            )
-            .await?;
+            let Some(record) = deactivate_current(ctx, &normalized_path).await? else {
+                return Ok(false);
+            };
 
             // Delete from S3 at the recorded storage path (which may be a
             // conditional-write staged key), falling back to the
@@ -2913,21 +2921,9 @@ pub mod gcs {
         async fn delete_file(&self, path: &str, ctx: &FileStorageContext) -> Result<bool, String> {
             let normalized_path = normalize_path(path)?;
             validate_path_security(&normalized_path)?;
-            let record =
-                match get_file_by_path(&ctx.db, &normalized_path, ctx.org_id, ctx.env_id).await {
-                    Ok(record) => record,
-                    Err(_) => return Ok(false),
-                };
-
-            mark_file_inactive(
-                &ctx.db,
-                &normalized_path,
-                ctx.org_id,
-                ctx.env_id,
-                ctx.user_id,
-                ctx.run_id,
-            )
-            .await?;
+            let Some(record) = deactivate_current(ctx, &normalized_path).await? else {
+                return Ok(false);
+            };
 
             match self.record_key(&record) {
                 Ok(key) => {
@@ -3410,12 +3406,14 @@ pub async fn file_storage_from_config(conf: &Val) -> Result<Box<dyn FileStorage>
     match storage_type {
         FileStorageType::Local => {
             // Try to get path from config, fallback to environment or default
-            let path: String = if let Some(Val::Str(path_str)) = conf.get("file.storage.path") {
-                (*path_str).to_string()
+            let path = if let Some(Val::Str(path_str)) = conf.get("file.storage.path") {
+                PathBuf::from(&*path_str)
             } else {
-                std::env::var("HOT_FILE_STORAGE_PATH").unwrap_or_else(|_| "./.hot/file".to_string())
+                std::env::var("HOT_FILE_STORAGE_PATH")
+                    .map(PathBuf::from)
+                    .unwrap_or_else(|_| crate::lang::cache::paths::get_file_storage_dir())
             };
-            Ok(Box::new(LocalFileStorage::new(PathBuf::from(path))))
+            Ok(Box::new(LocalFileStorage::new(path)))
         }
         #[cfg(feature = "s3-storage")]
         FileStorageType::S3 => {

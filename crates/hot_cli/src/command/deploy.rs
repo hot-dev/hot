@@ -44,7 +44,16 @@ pub(crate) fn is_ad_hoc_default_db(conf: &Val) -> bool {
     let db_uri = hot::db::get_db_uri_from_conf(conf);
     !hot::lang::cache::paths::has_project_config()
         && conf.get_bool_or_default("__host.ad-hoc-default-db", false)
-        && (db_uri == hot::db::DEFAULT_DB_URI || db_uri.starts_with("sqlite:.hot/"))
+        && (db_uri == hot::db::DEFAULT_DB_URI
+            || db_uri.starts_with("sqlite:.hot/")
+            // With `HOT_HOME` set, the default lives at `$HOT_HOME/db`.
+            || db_uri == hot::db::default_db_uri())
+}
+
+/// Whether a command runs without a database: an ad hoc run on the default
+/// database, or a configuration that opts out with an empty `db.uri`.
+pub(crate) fn runs_without_database(conf: &Val) -> bool {
+    is_ad_hoc_default_db(conf) || hot::db::get_db_uri_from_conf(conf).is_empty()
 }
 
 async fn handle_auto_deploy(
@@ -219,8 +228,8 @@ async fn setup_live_build_for_dev_with_validation(
     // create_db_pool refuses to create .hot/db and profile resolution has no
     // rows. Skip the whole setup instead of paying for source scanning and
     // doomed connection attempts.
-    if is_ad_hoc_default_db(conf) {
-        tracing::debug!("Out-of-project run with default sqlite db, skipping live build setup");
+    if runs_without_database(conf) {
+        tracing::debug!("Ad hoc run or no database configured, skipping live build setup");
         return Ok(());
     }
 
@@ -249,11 +258,7 @@ async fn setup_live_build_for_dev_with_validation(
 
     hot::build::scan_build_inputs(&scan_context, Some(conf))?;
 
-    // Check if database is configured
     let db_uri = hot::db::get_db_uri_from_conf(conf);
-    if db_uri.is_empty() {
-        return Err("Configured database URI is empty".into());
-    }
 
     tracing::debug!(
         "Database configured: {}, setting up live build",

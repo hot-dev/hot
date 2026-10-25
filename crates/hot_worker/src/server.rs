@@ -1308,6 +1308,29 @@ fn is_event_setup_timeout_error(error: &str) -> bool {
     error.contains("[event-setup-timeout]")
 }
 
+/// Whether to log now that an account's events wait for run admission: at
+/// most once a minute per account, so a pending backlog can't flood the logs.
+fn admission_wait_log_due(org_id: Uuid) -> bool {
+    static LAST_LOGGED: OnceLock<std::sync::Mutex<AHashMap<Uuid, std::time::Instant>>> =
+        OnceLock::new();
+    const INTERVAL: std::time::Duration = std::time::Duration::from_secs(60);
+    let mut last = LAST_LOGGED
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let now = std::time::Instant::now();
+    if last.len() > 10_000 {
+        last.retain(|_, at| now.duration_since(*at) < INTERVAL);
+    }
+    match last.get(&org_id) {
+        Some(at) if now.duration_since(*at) < INTERVAL => false,
+        _ => {
+            last.insert(org_id, now);
+            true
+        }
+    }
+}
+
 /// Whether a failed handler should stay pending without spending a delivery:
 /// only for the engine's own run-admission deferral (a suspended account or a
 /// transient lookup), which happens before any user code, and only when no
@@ -7056,12 +7079,25 @@ pub async fn run_with_components_shared_context_and_db(
                                                         let org_id = event_message.body.execution_context.org_id.ok_or_else(|| worker_error("Hydrated event has no organization"))?;
                                                         hot::db::run::Run::admit_executions(db, &org_id, &env_id, &run_ids).await
                                                             .map_err(|e| match e {
-                                                                // Suspension and database errors leave accepted work pending.
-                                                                hot::db::run::RunError::Suspended(_) | hot::db::run::RunError::Database(_) => {
+                                                                // Database errors leave accepted work pending.
+                                                                hot::db::run::RunError::Database(_) => {
                                                                     worker_infrastructure_retry_error(e.to_string(), infra_retry_backoff_ms.max(5_000))
                                                                 }
-                                                                // A reached account limit cannot clear by redelivery: use the
-                                                                // bounded retry path so the event dead-letters visibly.
+                                                                // A suspended account or environment, or a reached account
+                                                                // limit, also leaves the event pending: it runs once the
+                                                                // account resumes, the period rolls over or the limit is raised.
+                                                                hot::db::run::RunError::Suspended(_) | hot::db::run::RunError::QuotaExceeded(_) => {
+                                                                    if admission_wait_log_due(org_id) {
+                                                                        warn!(
+                                                                            event_id = %event_message.body.event.event_id,
+                                                                            %org_id,
+                                                                            "hot.dev: WORKER {} events wait for run admission: {}",
+                                                                            worker_id,
+                                                                            e
+                                                                        );
+                                                                    }
+                                                                    worker_infrastructure_retry_error(e.to_string(), infra_retry_backoff_ms.max(60_000))
+                                                                }
                                                                 _ => worker_error(e.to_string()),
                                                             })?;
 
@@ -7547,7 +7583,7 @@ pub async fn run_with_components_shared_context_and_db(
                                             if let Some(ref db) = db_ref {
                                                 for task in &maint_message.body.tasks {
                                                     let operation = match task.as_str() {
-                                                        "session_cleanup" | "inactive_schedule_cleanup" | "upload_cleanup" | "call_retention_cleanup" => MaintenanceOperation::Retention,
+                                                        "session_cleanup" | "inactive_schedule_cleanup" | "upload_cleanup" | "call_retention_cleanup" | "run_admission_cleanup" => MaintenanceOperation::Retention,
                                                         "blob_cleanup" => MaintenanceOperation::BlobGc,
                                                         _ => MaintenanceOperation::Queue,
                                                     };
@@ -7563,6 +7599,18 @@ pub async fn run_with_components_shared_context_and_db(
                                                                 }
                                                                 Err(e) => {
                                                                     error!("hot.dev: WORKER {} maintenance: session cleanup failed: {}", worker_id, e);
+                                                                }
+                                                            }
+                                                        }
+                                                        "run_admission_cleanup" => {
+                                                            match hot::db::Run::delete_admissions_older_than(db, hot::db::run::ADMISSION_RETENTION_DAYS, 10_000).await {
+                                                                Ok(count) => {
+                                                                    if count > 0 {
+                                                                        debug!("hot.dev: WORKER {} maintenance: pruned {} run admission(s)", worker_id, count);
+                                                                    }
+                                                                }
+                                                                Err(e) => {
+                                                                    error!("hot.dev: WORKER {} maintenance: run admission cleanup failed: {}", worker_id, e);
                                                                 }
                                                             }
                                                         }
@@ -8534,6 +8582,14 @@ mod tests {
         .await
         .expect("freed capacity must admit immediately");
         drop(permit);
+    }
+
+    #[test]
+    fn admission_wait_logs_once_a_minute_per_account() {
+        let (a, b) = (Uuid::now_v7(), Uuid::now_v7());
+        assert!(admission_wait_log_due(a));
+        assert!(!admission_wait_log_due(a));
+        assert!(admission_wait_log_due(b));
     }
 
     #[test]

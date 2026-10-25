@@ -10,7 +10,7 @@ use tracing::{debug, error, info};
 use crate::Env;
 use crate::build_info;
 
-pub(crate) async fn run_scheduler(_env: Env, conf: Val) {
+pub(crate) async fn run_scheduler(env: Env, conf: Val) {
     info!(
         "hot.dev: SCHEDULER starting, version: {} ({})",
         build_info::VERSION,
@@ -90,6 +90,9 @@ pub(crate) async fn run_scheduler(_env: Env, conf: Val) {
 
     let schedule_policy = hot::db::SchedulePolicy::from_conf(&conf);
 
+    // A standalone scheduler that stops on an error, such as losing its
+    // singleton lock, exits non-zero so its supervisor restarts it.
+    let exit_on_error = matches!(env, Env::Production);
     let server = tokio::spawn(async move {
         match hot_scheduler::server::run(
             queue_type,
@@ -107,7 +110,12 @@ pub(crate) async fn run_scheduler(_env: Env, conf: Val) {
         .await
         {
             Ok(_) => info!("hot.dev: SCHEDULER shut down"),
-            Err(e) => error!("hot.dev: Scheduler error: {}", e),
+            Err(e) => {
+                error!("hot.dev: Scheduler error: {}", e);
+                if exit_on_error {
+                    std::process::exit(1);
+                }
+            }
         }
     });
 

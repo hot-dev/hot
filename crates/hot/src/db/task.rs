@@ -697,9 +697,14 @@ impl Task {
         Ok(rows_affected == 1)
     }
 
-    /// Cancel a task. Only affects tasks in queued or running state.
-    /// Returns true if the task was actually cancelled, false if already in a terminal state.
-    pub async fn cancel(db: &crate::db::DatabasePool, task_id: &Uuid) -> Result<bool, TaskError> {
+    /// Cancel a task in `env_id`. Only affects tasks in queued or running state.
+    /// Returns true if the task was actually cancelled, false if it is already
+    /// in a terminal state or belongs to another environment.
+    pub async fn cancel(
+        db: &crate::db::DatabasePool,
+        task_id: &Uuid,
+        env_id: &Uuid,
+    ) -> Result<bool, TaskError> {
         let now = Utc::now();
         let cancelled_id = TaskStatus::Cancelled.as_id();
         let queued_id = TaskStatus::Queued.as_id();
@@ -708,25 +713,27 @@ impl Task {
         let rows_affected = match db {
             crate::db::DatabasePool::Postgres(pg_pool) => {
                 sqlx::query(
-                    "UPDATE task SET reserved_compute_units=CASE WHEN task_status_id=2 AND task_type='container' AND reserved_compute_units=0 THEN ((GREATEST(timeout_ms,0)*32+999)/1000) ELSE reserved_compute_units END, reserved_duration_ms=CASE WHEN task_status_id=2 AND reserved_duration_ms=0 THEN GREATEST(timeout_ms,0) ELSE reserved_duration_ms END, task_status_id = $1, stop_time = $2, duration_ms = CASE WHEN start_time IS NOT NULL THEN EXTRACT(EPOCH FROM ($2 - start_time)) * 1000 ELSE 0 END WHERE task_id = $3 AND task_status_id IN ($4, $5)",
+                    "UPDATE task SET reserved_compute_units=CASE WHEN task_status_id=2 AND task_type='container' AND reserved_compute_units=0 THEN ((GREATEST(timeout_ms,0)*32+999)/1000) ELSE reserved_compute_units END, reserved_duration_ms=CASE WHEN task_status_id=2 AND reserved_duration_ms=0 THEN GREATEST(timeout_ms,0) ELSE reserved_duration_ms END, task_status_id = $1, stop_time = $2, duration_ms = CASE WHEN start_time IS NOT NULL THEN EXTRACT(EPOCH FROM ($2 - start_time)) * 1000 ELSE 0 END WHERE task_id = $3 AND env_id = $6 AND task_status_id IN ($4, $5)",
                 )
                 .bind(cancelled_id)
                 .bind(now)
                 .bind(task_id)
                 .bind(queued_id)
                 .bind(running_id)
+                .bind(env_id)
                 .execute(pg_pool)
                 .await?
                 .rows_affected()
             }
             crate::db::DatabasePool::Sqlite(sqlite_pool) => {
                 sqlx::query(
-                    "UPDATE task SET reserved_compute_units=CASE WHEN task_status_id=2 AND task_type='container' AND reserved_compute_units=0 THEN ((MAX(timeout_ms,0)*32+999)/1000) ELSE reserved_compute_units END, reserved_duration_ms=CASE WHEN task_status_id=2 AND reserved_duration_ms=0 THEN MAX(timeout_ms,0) ELSE reserved_duration_ms END, task_status_id = ?, stop_time = ?, duration_ms = CASE WHEN start_time IS NOT NULL THEN CAST((julianday(?) - julianday(start_time)) * 86400000 AS INTEGER) ELSE 0 END WHERE task_id = ? AND task_status_id IN (?, ?)",
+                    "UPDATE task SET reserved_compute_units=CASE WHEN task_status_id=2 AND task_type='container' AND reserved_compute_units=0 THEN ((MAX(timeout_ms,0)*32+999)/1000) ELSE reserved_compute_units END, reserved_duration_ms=CASE WHEN task_status_id=2 AND reserved_duration_ms=0 THEN MAX(timeout_ms,0) ELSE reserved_duration_ms END, task_status_id = ?, stop_time = ?, duration_ms = CASE WHEN start_time IS NOT NULL THEN CAST((julianday(?) - julianday(start_time)) * 86400000 AS INTEGER) ELSE 0 END WHERE task_id = ? AND env_id = ? AND task_status_id IN (?, ?)",
                 )
                 .bind(cancelled_id)
                 .bind(now)
                 .bind(now)
                 .bind(task_id)
+                .bind(env_id)
                 .bind(queued_id)
                 .bind(running_id)
                 .execute(sqlite_pool)
@@ -1015,6 +1022,46 @@ impl Task {
                 );
                 let task = sqlx::query_as::<_, Task>(sqlx::AssertSqlSafe(q.as_str()))
                     .bind(task_id)
+                    .fetch_optional(sqlite_pool)
+                    .await?;
+                task.ok_or(TaskError::NotFound)
+            }
+        }
+    }
+
+    /// Get a task only if it belongs to `env_id`.
+    ///
+    /// User code reaches tasks by ID, so lookups on its behalf must not depend
+    /// on RLS alone: SQLite has none, and PostgreSQL can run without it.
+    /// Another environment's task is reported as `TaskError::NotFound`.
+    pub async fn get_in_env(
+        db: &crate::db::DatabasePool,
+        task_id: &Uuid,
+        env_id: &Uuid,
+    ) -> Result<Task, TaskError> {
+        match db {
+            crate::db::DatabasePool::Postgres(pg_pool) => {
+                let q = format!(
+                    "SELECT t.*, ts.name as status, {TASK_ORIGIN_FN_PG} \
+                     FROM task t JOIN task_status ts ON t.task_status_id = ts.task_status_id \
+                     {TASK_ORIGIN_JOIN} WHERE t.task_id = $1 AND t.env_id = $2"
+                );
+                let task = sqlx::query_as::<_, Task>(sqlx::AssertSqlSafe(q.as_str()))
+                    .bind(task_id)
+                    .bind(env_id)
+                    .fetch_optional(pg_pool)
+                    .await?;
+                task.ok_or(TaskError::NotFound)
+            }
+            crate::db::DatabasePool::Sqlite(sqlite_pool) => {
+                let q = format!(
+                    "SELECT t.*, ts.name as status, {TASK_ORIGIN_FN_SQLITE} \
+                     FROM task t JOIN task_status ts ON t.task_status_id = ts.task_status_id \
+                     {TASK_ORIGIN_JOIN} WHERE t.task_id = ? AND t.env_id = ?"
+                );
+                let task = sqlx::query_as::<_, Task>(sqlx::AssertSqlSafe(q.as_str()))
+                    .bind(task_id)
+                    .bind(env_id)
                     .fetch_optional(sqlite_pool)
                     .await?;
                 task.ok_or(TaskError::NotFound)
@@ -2098,12 +2145,13 @@ impl Task {
         Ok(())
     }
 
-    /// Retrieve checkpoint data for a task.
+    /// Retrieve checkpoint data for a task in `env_id`.
     pub async fn get_checkpoint(
         db: &crate::db::DatabasePool,
         task_id: &Uuid,
+        env_id: &Uuid,
     ) -> Result<Option<serde_json::Value>, TaskError> {
-        let task = Self::get(db, task_id).await?;
+        let task = Self::get_in_env(db, task_id, env_id).await?;
         Ok(task.info)
     }
 
@@ -2733,7 +2781,7 @@ mod tests {
         )
         .await
         .unwrap();
-        assert!(Task::cancel(&db, &task_id).await.unwrap());
+        assert!(Task::cancel(&db, &task_id, &env_id).await.unwrap());
 
         assert!(
             !Task::claim_for_worker(&db, &task_id, "late-worker")
@@ -3363,7 +3411,7 @@ mod tests {
         .unwrap();
 
         // No checkpoint initially
-        let checkpoint = Task::get_checkpoint(&db, &task_id).await.unwrap();
+        let checkpoint = Task::get_checkpoint(&db, &task_id, &env_id).await.unwrap();
         assert!(checkpoint.is_none());
 
         // Save checkpoint
@@ -3371,14 +3419,14 @@ mod tests {
         Task::set_checkpoint(&db, &task_id, &data).await.unwrap();
 
         // Restore checkpoint
-        let restored = Task::get_checkpoint(&db, &task_id).await.unwrap();
+        let restored = Task::get_checkpoint(&db, &task_id, &env_id).await.unwrap();
         assert_eq!(restored.unwrap(), data);
 
         // Overwrite checkpoint
         let data2 = serde_json::json!({"offset": 1000, "processed": 1000});
         Task::set_checkpoint(&db, &task_id, &data2).await.unwrap();
 
-        let restored2 = Task::get_checkpoint(&db, &task_id).await.unwrap();
+        let restored2 = Task::get_checkpoint(&db, &task_id, &env_id).await.unwrap();
         assert_eq!(restored2.unwrap(), data2);
     }
 

@@ -914,6 +914,46 @@ fn is_org_control_path(path: &str) -> bool {
 }
 
 /// Only attached to the known authentication/onboarding routers, never runtime routes.
+/// Reject a state-changing request that a browser sent from another
+/// origin. The session cookie is `SameSite=Lax`, which still accompanies a
+/// form posted from a same-site page (another host under the same domain),
+/// so the browser's fetch metadata decides: only `same-origin` requests may
+/// change state. Without that header, a mismatched `Origin` is rejected. A
+/// request with neither header didn't come from a browser page.
+pub async fn reject_cross_origin_writes(request: Request, next: Next) -> Response {
+    use axum::http::{Method, header};
+    if matches!(
+        *request.method(),
+        Method::GET | Method::HEAD | Method::OPTIONS
+    ) {
+        return next.run(request).await;
+    }
+    let headers = request.headers();
+    let text = |name: &str| headers.get(name).and_then(|value| value.to_str().ok());
+    let cross_origin = match text("sec-fetch-site") {
+        Some(site) => !matches!(site, "same-origin" | "none"),
+        None => match headers.get(header::ORIGIN).and_then(|v| v.to_str().ok()) {
+            None => false,
+            Some(origin) => {
+                let origin_host = origin.split_once("://").map_or(origin, |(_, host)| host);
+                ![text("host"), text("x-forwarded-host")]
+                    .into_iter()
+                    .flatten()
+                    .any(|host| origin_host.eq_ignore_ascii_case(host))
+            }
+        },
+    };
+    if cross_origin {
+        tracing::warn!(
+            method = %request.method(),
+            path = %request.uri().path(),
+            "Rejected a cross-origin request"
+        );
+        return (StatusCode::FORBIDDEN, "Cross-origin request rejected").into_response();
+    }
+    next.run(request).await
+}
+
 pub async fn onboarding_scope_middleware(request: Request, next: Next) -> Response {
     with_database_scope(
         DatabaseScope::Bootstrap(BootstrapOperation::Onboarding),
@@ -1219,6 +1259,69 @@ pub async fn guest_only_middleware(
 
 #[cfg(test)]
 mod scope_contract_tests {
+
+    #[tokio::test]
+    async fn cross_origin_writes_are_rejected() {
+        use axum::body::Body;
+        use axum::http::Request as HttpRequest;
+        use tower::ServiceExt;
+
+        let app = axum::Router::new()
+            .route(
+                "/write",
+                axum::routing::post(|| async { "ok" }).get(|| async { "read" }),
+            )
+            .layer(axum::middleware::from_fn(reject_cross_origin_writes));
+        let status = |method: &str, headers: &[(&str, &str)]| {
+            let app = app.clone();
+            let mut request = HttpRequest::builder()
+                .method(method)
+                .uri("/write")
+                .header("host", "app.example.com");
+            for (name, value) in headers {
+                request = request.header(*name, *value);
+            }
+            async move {
+                app.oneshot(request.body(Body::empty()).unwrap())
+                    .await
+                    .unwrap()
+                    .status()
+            }
+        };
+
+        assert_eq!(
+            status("POST", &[("sec-fetch-site", "same-origin")]).await,
+            StatusCode::OK
+        );
+        assert_eq!(
+            status("POST", &[("sec-fetch-site", "same-site")]).await,
+            StatusCode::FORBIDDEN,
+            "a page on another host of the same site"
+        );
+        assert_eq!(
+            status("POST", &[("sec-fetch-site", "cross-site")]).await,
+            StatusCode::FORBIDDEN
+        );
+        assert_eq!(
+            status("POST", &[("origin", "https://api.example.com")]).await,
+            StatusCode::FORBIDDEN
+        );
+        assert_eq!(
+            status("POST", &[("origin", "https://app.example.com")]).await,
+            StatusCode::OK
+        );
+        assert_eq!(
+            status("POST", &[]).await,
+            StatusCode::OK,
+            "not from a browser page"
+        );
+        assert_eq!(
+            status("GET", &[("sec-fetch-site", "cross-site")]).await,
+            StatusCode::OK,
+            "reads pass"
+        );
+    }
+
     use super::*;
     use hot::db::org::{CreateChild, Org, OrgLifecycle};
 

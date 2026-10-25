@@ -6,7 +6,50 @@ use uuid::Uuid;
 use super::{Run, RunError};
 use crate::db::{DatabasePool, DatabaseScope, Features, MaintenanceOperation};
 
+/// Days the admission ledger keeps a row. Nothing reads older rows: billing
+/// periods, annual ones included, start later, and a redelivery of the same
+/// run comes long before.
+pub const ADMISSION_RETENTION_DAYS: i64 = 400;
+
 impl Run {
+    /// Trusted retention maintenance: delete admission ledger rows older than
+    /// `days`, `batch_size` rows at a time. Run counters are kept separately
+    /// and don't decrease when ledger rows go.
+    pub async fn delete_admissions_older_than(
+        db: &DatabasePool,
+        days: i64,
+        batch_size: i64,
+    ) -> Result<u64, RunError> {
+        let cutoff = Utc::now() - chrono::Duration::days(days);
+        let mut total = 0;
+        loop {
+            let deleted = match db {
+                DatabasePool::Postgres(pool) => {
+                    sqlx::query("DELETE FROM run_admission WHERE run_id IN (SELECT run_id FROM run_admission WHERE admitted_at < $1 LIMIT $2)")
+                        .bind(cutoff)
+                        .bind(batch_size)
+                        .execute(pool)
+                        .await?
+                        .rows_affected()
+                }
+                // Backfilled rows store SQLite's timestamp format, so compare
+                // as julian days, as the usage counters do.
+                DatabasePool::Sqlite(pool) => {
+                    sqlx::query("DELETE FROM run_admission WHERE run_id IN (SELECT run_id FROM run_admission WHERE julianday(admitted_at) < julianday($1) LIMIT $2)")
+                        .bind(cutoff)
+                        .bind(batch_size)
+                        .execute(pool)
+                        .await?
+                        .rows_affected()
+                }
+            };
+            total += deleted;
+            if deleted < batch_size as u64 {
+                return Ok(total);
+            }
+        }
+    }
+
     /// Reserve one execution before running any user bytecode. Reusing the same
     /// immutable run identity does not consume another slot. A new VM still
     /// checks lifecycle, even when a previous delivery reserved that identity.
@@ -47,11 +90,9 @@ impl Run {
         });
         match &billing {
             DatabasePool::Postgres(pool) => {
+                // `admit_postgres` locks the account root only when the account
+                // has a run limit; the lock then holds across the whole group.
                 let mut tx = pool.begin().await?;
-                sqlx::query("SELECT org_id FROM org WHERE org_id=$1 FOR UPDATE")
-                    .bind(root_id)
-                    .execute(&mut *tx)
-                    .await?;
                 for run_id in run_ids {
                     admit_postgres(&mut tx, *org_id, *env_id, *run_id).await?;
                 }
@@ -76,8 +117,15 @@ impl Run {
 
 // These helpers deliberately take the caller's transaction connection. Task
 // claims reserve execution time and the run slot together, or neither commits.
+//
+// `$lock` serializes admissions against the account's run count. SQLite must
+// take its writer lock before reading, so it always locks first. PostgreSQL
+// locks with NO KEY UPDATE, which doesn't block the foreign-key checks of
+// inserts that reference the org, and only when the account has a run limit:
+// an unlimited account has no count to protect, and a racing delivery of the
+// same run is settled by the ledger's primary key.
 macro_rules! admission {
-    ($name:ident, $connection:ty, $lock:literal, $usage:ident) => {
+    ($name:ident, $connection:ty, $lock:literal, $lock_first:literal, $usage:ident) => {
         pub(crate) async fn $name(
             conn: &mut $connection,
             org_id: Uuid,
@@ -88,18 +136,8 @@ macro_rules! admission {
                 "SELECT COALESCE(o.parent_org_id,o.org_id) FROM env e JOIN org o ON o.org_id=e.org_id WHERE e.env_id=$1 AND e.org_id=$2"
             ).bind(env_id).bind(org_id).fetch_optional(&mut *conn).await?;
             let root_id = root_id.ok_or(RunError::ScopeDenied)?;
-            sqlx::query($lock).bind(root_id).execute(&mut *conn).await?;
-            let admitted: bool = sqlx::query_scalar(
-                "SELECT e.active AND o.active AND o.lifecycle_state='active' AND r.active AND r.lifecycle_state='active' AND r.parent_org_id IS NULL FROM env e JOIN org o ON o.org_id=e.org_id JOIN org r ON r.org_id=COALESCE(o.parent_org_id,o.org_id) WHERE e.env_id=$1 AND e.org_id=$2"
-            ).bind(env_id).bind(org_id).fetch_one(&mut *conn).await?;
-            if !admitted {
-                return Err(RunError::Suspended("Run environment or account is suspended".into()));
-            }
-            let prior: Option<(Uuid, Uuid)> = sqlx::query_as(
-                "SELECT org_id,env_id FROM run_admission WHERE run_id=$1"
-            ).bind(run_id).fetch_optional(&mut *conn).await?;
-            if let Some((prior_org, prior_env)) = prior {
-                return if prior_org == org_id && prior_env == env_id { Ok(()) } else { Err(RunError::ScopeDenied) };
+            if $lock_first {
+                sqlx::query($lock).bind(root_id).execute(&mut *conn).await?;
             }
             let overrides: Option<String> = sqlx::query_scalar(
                 "SELECT CAST(features AS TEXT) FROM org WHERE org_id=$1"
@@ -113,14 +151,39 @@ macro_rules! admission {
             let overrides = parse_features(overrides)?;
             let plan_features = parse_features(plan.and_then(|p| p.0))?;
             let limit = run_limit(plan_features.as_ref(), overrides.as_ref())?;
+            if limit >= 0 && !$lock_first {
+                sqlx::query($lock).bind(root_id).execute(&mut *conn).await?;
+            }
+            let admitted: bool = sqlx::query_scalar(
+                "SELECT e.active AND o.active AND o.lifecycle_state='active' AND r.active AND r.lifecycle_state='active' AND r.parent_org_id IS NULL FROM env e JOIN org o ON o.org_id=e.org_id JOIN org r ON r.org_id=COALESCE(o.parent_org_id,o.org_id) WHERE e.env_id=$1 AND e.org_id=$2"
+            ).bind(env_id).bind(org_id).fetch_one(&mut *conn).await?;
+            if !admitted {
+                return Err(RunError::Suspended("Run environment or account is suspended".into()));
+            }
+            let prior: Option<(Uuid, Uuid)> = sqlx::query_as(
+                "SELECT org_id,env_id FROM run_admission WHERE run_id=$1"
+            ).bind(run_id).fetch_optional(&mut *conn).await?;
+            if let Some((prior_org, prior_env)) = prior {
+                return if prior_org == org_id && prior_env == env_id { Ok(()) } else { Err(RunError::ScopeDenied) };
+            }
             if limit >= 0 {
                 let used = crate::db::usage::$usage(conn, root_id, period).await?;
                 if used >= limit {
                     return Err(RunError::QuotaExceeded("Account monthly run limit reached".into()));
                 }
             }
-            sqlx::query("INSERT INTO run_admission (run_id,root_org_id,org_id,env_id,admitted_at) VALUES ($1,$2,$3,$4,$5)")
-                .bind(run_id).bind(root_id).bind(org_id).bind(env_id).bind(now).execute(&mut *conn).await?;
+            let inserted = sqlx::query("INSERT INTO run_admission (run_id,root_org_id,org_id,env_id,admitted_at) VALUES ($1,$2,$3,$4,$5) ON CONFLICT (run_id) DO NOTHING")
+                .bind(run_id).bind(root_id).bind(org_id).bind(env_id).bind(now).execute(&mut *conn).await?.rows_affected();
+            if inserted == 0 {
+                // Another delivery of this run admitted it first.
+                let prior: Option<(Uuid, Uuid)> = sqlx::query_as(
+                    "SELECT org_id,env_id FROM run_admission WHERE run_id=$1"
+                ).bind(run_id).fetch_optional(&mut *conn).await?;
+                return match prior {
+                    Some((prior_org, prior_env)) if prior_org == org_id && prior_env == env_id => Ok(()),
+                    _ => Err(RunError::ScopeDenied),
+                };
+            }
             Ok(())
         }
     };
@@ -129,13 +192,15 @@ macro_rules! admission {
 admission!(
     admit_postgres,
     sqlx::PgConnection,
-    "SELECT org_id FROM org WHERE org_id=$1 FOR UPDATE",
+    "SELECT org_id FROM org WHERE org_id=$1 FOR NO KEY UPDATE",
+    false,
     run_usage_postgres
 );
 admission!(
     admit_sqlite,
     sqlx::SqliteConnection,
     "UPDATE org SET org_id=org_id WHERE org_id=$1",
+    true,
     run_usage_sqlite
 );
 
@@ -174,7 +239,7 @@ fn parse_features(json: Option<String>) -> Result<Option<Value>, RunError> {
     .transpose()
 }
 
-fn run_limit(plan: Option<&Value>, overrides: Option<&Value>) -> Result<i64, RunError> {
+pub(crate) fn run_limit(plan: Option<&Value>, overrides: Option<&Value>) -> Result<i64, RunError> {
     if plan.is_none() && overrides.is_none() {
         return Ok(-1); // Preserve self-hosted / local unlimited defaults.
     }
@@ -187,9 +252,10 @@ fn run_limit(plan: Option<&Value>, overrides: Option<&Value>) -> Result<i64, Run
             return Err(RunError::QuotaExceeded("Invalid monthly run limit".into()));
         }
     }
-    Ok(Features::resolve(plan, overrides)
+    // With no plan, a missing limit is unlimited, not the cloud default of 0.
+    Ok(Features::for_account(plan, overrides)
         .get_i64("runs_per_month")
-        .unwrap_or(0))
+        .unwrap_or(-1))
 }
 
 #[cfg(test)]
@@ -215,6 +281,35 @@ mod tests {
             *slot = (org, env);
         }
         (db, root, children)
+    }
+
+    #[tokio::test]
+    async fn retention_prunes_only_admissions_past_the_window() {
+        let (db, root, children) = fixture(-1).await;
+        let DatabasePool::Sqlite(pool) = &db else {
+            unreachable!()
+        };
+        let (org, env) = children[0];
+        let old = Uuid::now_v7();
+        sqlx::query("INSERT INTO run_admission(run_id,root_org_id,org_id,env_id,admitted_at) VALUES (?,?,?,?,?)")
+            .bind(old).bind(root).bind(org).bind(env)
+            .bind(Utc::now() - chrono::Duration::days(ADMISSION_RETENTION_DAYS + 1))
+            .execute(pool).await.unwrap();
+        let recent = Uuid::now_v7();
+        Run::admit_execution(&db, &org, &env, &recent)
+            .await
+            .unwrap();
+        assert_eq!(
+            Run::delete_admissions_older_than(&db, ADMISSION_RETENTION_DAYS, 1)
+                .await
+                .unwrap(),
+            1
+        );
+        let left: Vec<Uuid> = sqlx::query_scalar("SELECT run_id FROM run_admission")
+            .fetch_all(pool)
+            .await
+            .unwrap();
+        assert_eq!(left, vec![recent]);
     }
 
     #[tokio::test]

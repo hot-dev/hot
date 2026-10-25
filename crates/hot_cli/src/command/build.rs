@@ -157,7 +157,7 @@ pub(crate) async fn run_build(
     let secret_scan_opts = build_secret_scan_opts(conf, allow_secret_shape);
 
     // A fresh checkout's local SQLite database is created on first use.
-    crate::command::init::initialize_missing_local_database(conf, providers).await?;
+    crate::command::init::prepare_local_database(conf, providers).await?;
     if let Err(e) = setup_live_build_for_dev_with_secret_scan_opts(
         conf,
         &global_options,

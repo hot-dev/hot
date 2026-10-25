@@ -94,7 +94,7 @@ fn resolve_limit(
         .map_err(|_| ScheduleError::PolicyError("Malformed schedule entitlements".into()))?;
     Ok(stricter_limit(
         configured,
-        Features::resolve(plan.as_ref(), overrides.as_ref()).active_schedules_per_org(),
+        Features::for_account(plan.as_ref(), overrides.as_ref()).active_schedules_per_org(),
     ))
 }
 pub(crate) async fn validate_postgres(

@@ -9,7 +9,7 @@ use axum::{
 use hot::db::DatabasePool;
 use hot::db::api_key::ApiKey;
 use hot::db::event::Event;
-use hot::db::stream::{Stream as DbStream, StreamError, StreamSummary};
+use hot::db::stream::{Stream as DbStream, StreamError};
 use hot::permission::actions;
 use hot::val::Val;
 use once_cell::sync::OnceCell;
@@ -257,31 +257,25 @@ pub async fn publish_event(
 
     // Use provided stream_id or create a new one, then bind it to the caller env.
     let stream_id = req.stream_id.unwrap_or_else(Uuid::now_v7);
-    if req.stream_id.is_some() {
-        match StreamSummary::get_stream(&db, &stream_id).await {
-            Ok(stream) if stream.env_id != auth.env_id() => {
-                return Err((
-                    StatusCode::NOT_FOUND,
-                    Json(ApiErrorResponse::not_found("Stream")),
-                ));
-            }
-            Ok(_) | Err(StreamError::NotFound) => {}
-            Err(e) => {
-                return Err((
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(ApiErrorResponse::internal_error(&e.to_string())),
-                ));
-            }
-        }
-    }
+    let internal = |e: StreamError| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ApiErrorResponse::internal_error(&e.to_string())),
+        )
+    };
     DbStream::create_or_get_stream(&db, stream_id, auth.env_id())
         .await
-        .map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ApiErrorResponse::internal_error(&e.to_string())),
-            )
-        })?;
+        .map_err(internal)?;
+    if req.stream_id.is_some()
+        && !DbStream::belongs_to_env(&db, stream_id, auth.env_id())
+            .await
+            .map_err(internal)?
+    {
+        return Err((
+            StatusCode::NOT_FOUND,
+            Json(ApiErrorResponse::not_found("Stream")),
+        ));
+    }
 
     // Publish the event using the internal function
     let published = publish_event_internal(

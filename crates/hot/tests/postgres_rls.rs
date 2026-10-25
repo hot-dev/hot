@@ -1651,6 +1651,13 @@ async fn scoped_pool_enforces_isolation_under_a_restricted_login()
         operation: db::MaintenanceOperation::Billing,
         org_id: Some(root),
     }));
+    // Reconciliation checks only accounts with an enforced limit.
+    sqlx::query(
+        "UPDATE hot.org SET features='{\"runs_per_month\":1000000}'::jsonb WHERE org_id=$1",
+    )
+    .bind(root)
+    .execute(&admin)
+    .await?;
     db::usage::reconcile_account(&billing_db, root).await?;
     sqlx::query("UPDATE hot.usage_storage SET call_bytes=call_bytes+29 WHERE env_id=$1 AND slot=(SELECT min(slot) FROM hot.usage_storage WHERE env_id=$1)").bind(env_a).execute(&admin).await?;
     let writer = a.clone();

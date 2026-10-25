@@ -697,17 +697,26 @@ pub async fn subscribe_with_event(
 
     // Step 3: Create the stream record in the database BEFORE subscribing
     // This ensures the stream exists for the subscription and avoids race conditions
+    let create_error = |e: StreamError| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ApiErrorResponse::internal_error(&format!(
+                "Failed to create stream: {}",
+                e
+            ))),
+        )
+    };
     DbStream::create_or_get_stream(&db, stream_id, env_id)
         .await
-        .map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ApiErrorResponse::internal_error(&format!(
-                    "Failed to create stream: {}",
-                    e
-                ))),
-            )
-        })?;
+        .map_err(create_error)?;
+    // PostgreSQL RLS hides another environment's stream from the lookup above.
+    if req.stream_id.is_some()
+        && !DbStream::belongs_to_env(&db, stream_id, env_id)
+            .await
+            .map_err(create_error)?
+    {
+        return Err(stream_not_found());
+    }
 
     // Step 4: Subscribe to pub/sub BEFORE publishing the event
     // This is the key to eliminating race conditions

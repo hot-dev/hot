@@ -433,6 +433,12 @@ async fn async_main(providers: CliProviders) {
                 println!("  Package:  {}", platform.package_name);
                 println!();
 
+                if update::is_major_upgrade(&current_version, &latest_version)
+                    && !update::confirm_major_upgrade(&latest_version)
+                {
+                    return;
+                }
+
                 match update::run_installer(&platform, None).await {
                     Ok(()) => {
                         println!();
@@ -1489,6 +1495,14 @@ async fn async_main(providers: CliProviders) {
             strict,
             ..
         }) => {
+            // A deploy that builds from source records the build locally first.
+            if build_id.is_none()
+                && let Err(e) =
+                    crate::command::init::prepare_local_database(&conf, &providers).await
+            {
+                eprintln!("Error: {}", e);
+                std::process::exit(1);
+            }
             if let Err(e) = run_deploy(
                 build_id.as_deref(),
                 &conf,

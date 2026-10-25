@@ -273,6 +273,100 @@ async fn test_task_queue_empty_returns_none() {
 }
 
 // ---------------------------------------------------------------------------
+// Task and schedule IDs only name rows in the caller's environment
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn test_task_lookups_are_scoped_to_the_callers_env() {
+    let (db, td) = create_test_db_with_data().await;
+    let (task_id, _) = make_task_request(&td);
+    Task::insert(
+        &db,
+        &task_id,
+        &td.env_id,
+        &td.stream_id,
+        &td.build_id,
+        Some(&td.run_id),
+        "::app/worker",
+        None,
+        None,
+        "code",
+        300_000,
+        Some(&td.user_id),
+    )
+    .await
+    .unwrap();
+    Task::set_checkpoint(&db, &task_id, &serde_json::json!({"step": 3}))
+        .await
+        .unwrap();
+
+    // SQLite has no RLS, so another environment must be refused by the query.
+    let other_env = Uuid::now_v7();
+    assert!(matches!(
+        Task::get_in_env(&db, &task_id, &other_env).await,
+        Err(db::TaskError::NotFound)
+    ));
+    assert!(matches!(
+        Task::get_checkpoint(&db, &task_id, &other_env).await,
+        Err(db::TaskError::NotFound)
+    ));
+    assert!(!Task::cancel(&db, &task_id, &other_env).await.unwrap());
+    assert_eq!(
+        Task::get(&db, &task_id).await.unwrap().status(),
+        Some(TaskStatus::Queued)
+    );
+
+    assert_eq!(
+        Task::get_in_env(&db, &task_id, &td.env_id)
+            .await
+            .unwrap()
+            .task_id,
+        task_id
+    );
+    assert_eq!(
+        Task::get_checkpoint(&db, &task_id, &td.env_id)
+            .await
+            .unwrap(),
+        Some(serde_json::json!({"step": 3}))
+    );
+    assert!(Task::cancel(&db, &task_id, &td.env_id).await.unwrap());
+}
+
+#[tokio::test]
+async fn test_schedule_cancel_is_scoped_to_the_callers_env() {
+    use hot::db::schedule::{Schedule, SchedulePolicy, ScheduleType};
+
+    let (db, td) = create_test_db_with_data().await;
+    let schedule_id = Uuid::now_v7();
+    Schedule::insert_dynamic_schedule(
+        &db,
+        &schedule_id,
+        &td.build_id,
+        &ScheduleType::Cron("0 * * * *".to_string()),
+        Some(&td.org_id),
+        SchedulePolicy::self_hosted_default(),
+        "::app",
+        "hourly",
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+
+    let other_env = Uuid::now_v7();
+    assert!(
+        !Schedule::cancel_schedule_in_env(&db, &schedule_id, &other_env)
+            .await
+            .unwrap()
+    );
+    assert!(
+        Schedule::cancel_schedule_in_env(&db, &schedule_id, &td.env_id)
+            .await
+            .unwrap()
+    );
+}
+
+// ---------------------------------------------------------------------------
 // StreamEvent::TaskMessage pub/sub round-trip
 // ---------------------------------------------------------------------------
 
@@ -288,6 +382,7 @@ async fn test_task_message_pubsub_round_trip() {
     // Publish a TaskMessage
     let event = StreamEvent::TaskMessage {
         task_id: task_id.to_string(),
+        env_id: None,
         payload: serde_json::json!({"command": "process", "data": [1, 2, 3]}),
     };
     pubsub.publish(event).await.unwrap();
@@ -301,6 +396,7 @@ async fn test_task_message_pubsub_round_trip() {
         StreamNext::Event(StreamEvent::TaskMessage {
             task_id: tid,
             payload,
+            ..
         }) => {
             assert_eq!(tid, task_id.to_string());
             assert_eq!(payload["command"], "process");
@@ -320,6 +416,7 @@ async fn test_task_message_multiple_messages() {
     for i in 0..3 {
         let event = StreamEvent::TaskMessage {
             task_id: task_id.to_string(),
+            env_id: None,
             payload: serde_json::json!({"seq": i}),
         };
         pubsub.publish(event).await.unwrap();

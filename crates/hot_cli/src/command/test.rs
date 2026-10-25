@@ -67,7 +67,7 @@ pub(crate) async fn run_test(
     // use only the engine's private ephemeral fixture.
     if !hot::db::get_db_uri_from_conf(conf).is_empty() {
         // A fresh checkout's local SQLite database is created on first use.
-        crate::command::init::initialize_missing_local_database(conf, providers).await?;
+        crate::command::init::prepare_local_database(conf, providers).await?;
         setup_live_build_for_dev(conf, global_options, &src_paths, &test_paths).await?;
     }
 
@@ -272,6 +272,9 @@ async fn run_integration_test(
             crate::report_migration_failure("Failed to run integration test DB migrations", &e);
             return Err("Failed to run integration test DB migrations".to_string());
         }
+        // A fresh integration database needs the local identity the live
+        // build runs as, as `hot init` would create.
+        crate::command::init::seed_empty_database(&merged_conf).await?;
     }
 
     // 4. Setup live build (needed for task worker to compile and execute code)

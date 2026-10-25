@@ -9,8 +9,7 @@
 //! that an in-place "ledger rewrite" adoption would carry forward (extra v1-only
 //! tables, column ordering, default expressions, indexes, constraint names).
 //!
-//! Postgres has no equivalent path in Hot 2; the Hot Cloud v1→v2 backfill is owned
-//! by the private cloud repository.
+//! Postgres has no equivalent path in Hot 2.
 
 use crate::db::{
     DatabaseError, DatabaseType, get_db_uri_from_conf, redact_password, run_migrations,

@@ -156,7 +156,7 @@ fn domain_limit(plan: Option<String>, overrides: Option<String>) -> Result<i32, 
                 "Malformed account domain entitlements".into(),
             ))
         })?;
-    Ok(crate::db::Features::resolve(plan.as_ref(), overrides.as_ref()).max_custom_domains())
+    Ok(crate::db::Features::for_account(plan.as_ref(), overrides.as_ref()).max_custom_domains())
 }
 
 impl Domain {
