@@ -47,7 +47,20 @@ impl std::fmt::Display for ParseError {
     }
 }
 
+/// Diagnostic codes a parse error can carry. A `where` misuse names its
+/// code in its message, as `(duplicate-where)`.
+const PARSE_ERROR_CODES: &[&str] = &["duplicate-where", "where-requires-type"];
+
 impl ParseError {
+    /// The diagnostic code: one named in the message, or `parse-error`.
+    pub fn code(&self) -> &'static str {
+        PARSE_ERROR_CODES
+            .iter()
+            .copied()
+            .find(|code| self.message.contains(&format!("({code})")))
+            .unwrap_or("parse-error")
+    }
+
     /// Format this error using ariadne source context.
     /// When `color` is true, output includes ANSI color codes for terminal display.
     pub fn format_error(&self, source: &str, color: bool) -> Option<String> {
@@ -78,7 +91,7 @@ impl ParseError {
             (source_name.as_str(), span_start..span_end),
         )
         .with_config(Config::default().with_color(color))
-        .with_code("parse-error")
+        .with_code(self.code())
         .with_message("Parse Error")
         .with_label(
             Label::new((source_name.as_str(), span_start..span_end))
@@ -122,6 +135,13 @@ pub struct Parser {
     /// A `where` error. It has no other reading, so a fallback that
     /// re-parses the statement another way reports it instead.
     where_error: Option<ParseError>,
+    /// Template expressions parsed so far, to name each one's `where`
+    /// declarations uniquely.
+    template_expressions: usize,
+    /// Mixed into `where` declaration names. A template expression's parser
+    /// counts lines and columns from the start of the expression, so its
+    /// positions alone don't tell its declarations apart.
+    where_salt: Option<String>,
 }
 
 /// A parsed `where <predicate>` clause.
@@ -220,6 +240,8 @@ impl Parser {
             var_counter: 0,
             pending_hidden: Vec::new(),
             where_error: None,
+            template_expressions: 0,
+            where_salt: None,
         }
     }
 
@@ -834,10 +856,12 @@ impl Parser {
                         match &next_token.token_type {
                             TokenType::LeftParen => {
                                 // No whitespace before `(` means this is a call.
+                                // Columns count characters, so measure the name in
+                                // characters too (a name can be non-ASCII).
                                 let var_name_len = if let TokenType::Identifier(name) =
                                     &current_token.token_type
                                 {
-                                    name.len()
+                                    name.chars().count()
                                 } else {
                                     0
                                 };
@@ -848,10 +872,12 @@ impl Parser {
                             TokenType::LeftBracket => {
                                 // Check for whitespace: a[0] (access or deep assignment)
                                 // vs a [0] (ordinary variable assignment).
+                                // Columns count characters, so measure the name in
+                                // characters too (a name can be non-ASCII).
                                 let var_name_len = if let TokenType::Identifier(name) =
                                     &current_token.token_type
                                 {
-                                    name.len()
+                                    name.chars().count()
                                 } else {
                                     0
                                 };
@@ -4130,6 +4156,15 @@ impl Parser {
             if self.check(&TokenType::RightBrace) {
                 break;
             }
+            let arm_src = self.peek().map(|token| {
+                Source::new(
+                    self.file_path.as_ref().map(|p| p.display().to_string()),
+                    token.line as usize,
+                    token.column as usize,
+                    token.position,
+                    token.length,
+                )
+            });
 
             // Check for default branch: => { result } or _ => { result } (no type/variant, just arrow)
             let is_default_arm = self.check(&TokenType::Arrow)
@@ -4205,7 +4240,7 @@ impl Parser {
                 alternatives,
                 binding,
                 body,
-                src: None,
+                src: arm_src,
             });
 
             // Skip newlines after arm
@@ -4760,7 +4795,22 @@ impl Parser {
     fn parse_expression_from_string(&mut self, expr_str: &str) -> ParseResult<Value> {
         // Create a new lexer for the expression string
         let mut expr_lexer = crate::lang::lexer::Lexer::new(expr_str);
-        let expr_tokens = expr_lexer.tokenize();
+        let mut expr_tokens = expr_lexer.tokenize();
+        // Report lines and columns from the template's place in the file
+        // (columns on its first line only approximately). Positions stay
+        // relative to the expression, whose text the parser reads.
+        if let Some(template) = self
+            .token_index
+            .checked_sub(1)
+            .and_then(|i| self.tokens.get(i))
+        {
+            for token in &mut expr_tokens {
+                if token.line == 1 {
+                    token.column += template.column;
+                }
+                token.line += template.line.saturating_sub(1);
+            }
+        }
 
         // Check for lexer errors
         if !expr_lexer.errors().is_empty() {
@@ -4778,11 +4828,23 @@ impl Parser {
             });
         }
 
-        // Create a new parser for the expression tokens
+        // Create a new parser for the expression tokens. A `where` clause in
+        // it declares hidden definitions in this namespace, like any other.
+        self.template_expressions += 1;
         let mut expr_parser = Parser::new();
         expr_parser.tokens = expr_tokens;
         expr_parser.token_index = 0;
-        expr_parser.parse_value()
+        expr_parser.current_namespace = self.current_namespace.clone();
+        expr_parser.file_path = self.file_path.clone();
+        expr_parser.source_content = Some(expr_str.to_string());
+        expr_parser.where_salt = Some(format!(
+            "{}template{}",
+            self.where_salt.as_deref().unwrap_or(""),
+            self.template_expressions
+        ));
+        let value = expr_parser.parse_value();
+        self.pending_hidden.append(&mut expr_parser.pending_hidden);
+        value
     }
 
     /// Parse a reference or call.
@@ -5469,37 +5531,32 @@ impl Parser {
             lookahead_index += 1;
         }
 
-        // If we found the closing paren, check if it's followed by { or : ReturnType { (skipping newlines)
-        if found_closing_paren {
-            while let Some(token) = self.peek_n(lookahead_index) {
-                match &token.token_type {
-                    TokenType::Newline => {
-                        lookahead_index += 1;
-                    }
-                    TokenType::LeftBrace => {
-                        return true; // Found pattern (...) { so it's a lambda
-                    }
-                    TokenType::Colon => {
-                        // Could be return type annotation: (...): ReturnType {
-                        // Skip past the colon and type to look for {
-                        lookahead_index += 1;
-                        // Skip over the type expression (simple heuristic: skip until { or newline)
-                        while let Some(type_token) = self.peek_n(lookahead_index) {
-                            match &type_token.token_type {
-                                TokenType::LeftBrace => return true,
-                                TokenType::Newline => {
-                                    lookahead_index += 1;
-                                }
-                                _ => {
-                                    lookahead_index += 1;
-                                }
+        // If we found the closing paren, check if it's followed by { or : ReturnType {.
+        // A lambda's `{` is on the line of its closing `)`: `name (x)` followed
+        // by a `{ … }` on the next line is a binding and then a block, as
+        // `parse_lambda_function` reads it.
+        if found_closing_paren && let Some(token) = self.peek_n(lookahead_index) {
+            match &token.token_type {
+                TokenType::LeftBrace => {
+                    return true; // Found pattern (...) { so it's a lambda
+                }
+                TokenType::Colon => {
+                    // Could be return type annotation: (...): ReturnType {
+                    // Skip past the colon and type to look for { on the same line
+                    lookahead_index += 1;
+                    while let Some(type_token) = self.peek_n(lookahead_index) {
+                        match &type_token.token_type {
+                            TokenType::LeftBrace => return true,
+                            TokenType::Newline => return false,
+                            _ => {
+                                lookahead_index += 1;
                             }
                         }
-                        return false;
                     }
-                    _ => {
-                        return false; // Found something else, not a lambda
-                    }
+                    return false;
+                }
+                _ => {
+                    return false; // Found something else, not a lambda
                 }
             }
         }
@@ -5833,7 +5890,8 @@ impl Parser {
             // Be more conservative - only detect clear assignment patterns
             let is_var_assignment = if let Some(token) = self.peek().cloned() {
                 if let TokenType::Identifier(var_name) = &token.token_type {
-                    let var_name_len = var_name.len();
+                    // Columns count characters, as does the name's width.
+                    let var_name_len = var_name.chars().count();
                     let var_column = token.column;
 
                     // Look ahead to see what follows the identifier, skipping newlines
@@ -6053,7 +6111,15 @@ impl Parser {
 
             if is_var_assignment {
                 // Parse as variable assignment
-                let (var, value) = self.parse_var_definition()?;
+                let spaced_paren = self.at_spaced_paren_binding();
+                let src = self.peek().map(|token| self.token_source(token));
+                let (mut var, value) = self.parse_var_definition()?;
+                if spaced_paren && var.meta.is_none() {
+                    var.meta = Some(crate::lang::ast::spaced_paren_binding_meta());
+                    if var.src.is_none() {
+                        var.src = src;
+                    }
+                }
                 tracing::trace!(
                     "Parser: Variable assignment - name: '{}', value: {:?}",
                     var.sym.name(),
@@ -6290,6 +6356,17 @@ impl Parser {
     /// Whether the next statement is `name (…)` on one line: it binds the
     /// parenthesized value, a lambda `(x) { … }`, to `name`, as in a function
     /// body. A call has no space before its `(`.
+    /// The source span of a token.
+    fn token_source(&self, token: &Token) -> Source {
+        Source::new(
+            self.file_path.as_ref().map(|p| p.display().to_string()),
+            token.line as usize,
+            token.column as usize,
+            token.position,
+            token.length,
+        )
+    }
+
     fn at_spaced_paren_binding(&self) -> bool {
         match (self.peek(), self.peek_n(1)) {
             (Some(name), Some(paren)) => {
@@ -6304,14 +6381,15 @@ impl Parser {
 
     /// Parse `name (…)` as a binding: the name, then its value.
     fn parse_spaced_paren_binding(&mut self, expressions: &mut Vec<Value>) -> ParseResult<()> {
+        let src = self.peek().map(|token| self.token_source(token));
         let name = self.expect_identifier()?;
         let var = Var {
             sym: Sym::String(name),
             deep_set: None,
             deep_path: None,
-            meta: None,
+            meta: Some(crate::lang::ast::spaced_paren_binding_meta()),
             type_annotation: None,
-            src: None,
+            src,
         };
         expressions.push(Value::Ref(Ref::Var(VarRef { var, src: None })));
         expressions.push(self.parse_value()?);
@@ -6602,10 +6680,21 @@ impl Parser {
         }
         let start = self.peek().map_or(where_token.position, |t| t.position);
         let predicate = self.parse_value()?;
-        let end = self
-            .token_index
-            .checked_sub(1)
-            .and_then(|i| self.tokens.get(i))
+        // The predicate ends at its last real token: parsing a value can
+        // consume trailing newlines and comments, which aren't part of it.
+        let end = self.tokens[..self.token_index.min(self.tokens.len())]
+            .iter()
+            .rev()
+            .find(|t| {
+                !matches!(
+                    t.token_type,
+                    TokenType::Newline
+                        | TokenType::Eof
+                        | TokenType::LineComment(_)
+                        | TokenType::BlockComment(_)
+                )
+            })
+            .filter(|t| t.position >= start)
             .map_or(start, |t| t.position + t.length);
         let source = self.source_text(start, end);
         let src = Source::new(
@@ -6651,7 +6740,10 @@ impl Parser {
             .map(|p| p.display().to_string())
             .unwrap_or_default();
         let mut hash: u32 = 0x811c_9dc5;
-        for byte in file.bytes() {
+        for byte in file
+            .bytes()
+            .chain(self.where_salt.iter().flat_map(|salt| salt.bytes()))
+        {
             hash ^= u32::from(byte);
             hash = hash.wrapping_mul(0x0100_0193);
         }

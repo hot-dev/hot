@@ -483,6 +483,45 @@ probe()"#;
         }
     }
 
+    /// A refinement violation deep in raw self-recursion halts the run when
+    /// the caller adds to the result, compiled or not. The JIT used to hand
+    /// the Err back up its frames, where a `match` could handle it.
+    #[test]
+    fn jit_raw_self_recursion_halts_on_a_consumed_violation() {
+        let src = r#"::t ns
+Small type Int where lte(%, 10)
+grow fn (n: Int): Small {
+    if(eq(n, 0), 11, add(0, grow(sub(n, 1))))
+}
+outcome fn (lazy result: Any): Any {
+    forced do result
+    if(is-ok(forced), forced, "err")
+}
+warm fn (): Vec {
+    map(range(0, 3), (i) { outcome(grow(0)) })
+}
+warm()
+r grow(5)
+match r {
+    Result.Err => { "handled" }
+    _ => { "ok" }
+}"#;
+        for conf in [
+            crate::val!({"jit": {"threshold": 1}}),
+            crate::val!({"jit": {"mode": "off"}}),
+        ] {
+            let out = compile_and_run_with_std_conf(src, Some(conf.clone()));
+            let text = match &out {
+                Ok(v) => format!("OK:{v:?}"),
+                Err(e) => e.clone(),
+            };
+            assert!(
+                text.contains("ConstraintError") && !text.contains("handled"),
+                "with {conf:?}, expected a halt on the violation, got {text}"
+            );
+        }
+    }
+
     /// A local function reads its caller's local by name, called directly
     /// and from a lambda the caller creates. The caller stays on the
     /// interpreter, where that local is in scope: once hot-ai's `fit`

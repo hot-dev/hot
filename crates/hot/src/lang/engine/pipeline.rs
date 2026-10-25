@@ -530,11 +530,24 @@ impl Engine {
                                     .clone()
                                     .or_else(|| Some(std::path::PathBuf::from(file_path))),
                             };
-                            errs.add(CompilerError::InvalidFunctionCall {
-                                func_name: "<parse>".to_string(),
-                                message: parse_err.message.clone(),
-                                location: Some(location),
-                            });
+                            let code = parse_err.code();
+                            if code == "parse-error" {
+                                errs.add(CompilerError::InvalidFunctionCall {
+                                    func_name: "<parse>".to_string(),
+                                    message: parse_err.message.clone(),
+                                    location: Some(location),
+                                });
+                            } else {
+                                // A `where` misuse keeps its own code, as the
+                                // constraint diagnostics do.
+                                errs.add(CompilerError::Constraint {
+                                    code,
+                                    message: parse_err.message.clone(),
+                                    help: None,
+                                    warning: false,
+                                    location: Some(location),
+                                });
+                            }
                         }
                     }
                 }

@@ -793,7 +793,7 @@ impl Backend {
                 },
             },
             severity: Some(DiagnosticSeverity::ERROR),
-            code: Some(NumberOrString::String("parse-error".to_string())),
+            code: Some(NumberOrString::String(parse_error.code().to_string())),
             code_description: None,
             source: Some("hot".to_string()),
             message,

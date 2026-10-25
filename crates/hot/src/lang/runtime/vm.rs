@@ -7857,6 +7857,13 @@ impl VirtualMachine {
     /// native stack overflow (which bypasses catch_unwind) instead of
     /// returning a structured error.
     fn execute_user_function(&mut self, function_id: u32, args: &[Val]) -> VmResult<Val> {
+        // Arguments the call site proved, for this call's prologue only. Take
+        // them before anything can return early, so a failed call can't leave
+        // them for a later one.
+        let proven = self
+            .pending_proven
+            .take()
+            .filter(|(id, _)| *id == function_id);
         let max_depth = max_recursion_depth();
         if self.user_function_depth >= max_depth {
             return Err(VmError::runtime(format!(
@@ -7902,16 +7909,16 @@ impl VirtualMachine {
             *slot += 1;
         }
 
-        // Arguments the call site proved, for this call's prologue only.
-        let proven = self
-            .pending_proven
-            .take()
-            .filter(|(id, _)| *id == function_id);
         let saved_proven = std::mem::replace(&mut self.entry_proven, proven);
         self.user_function_depth += 1;
         let result = self.execute_user_function_impl(function_id, args);
         self.user_function_depth -= 1;
         self.entry_proven = saved_proven;
+        if result.is_err() {
+            // A call that failed after its `ProvenArgs` never reached the
+            // callee; its proof must not reach whatever the caller runs next.
+            self.pending_proven = None;
+        }
 
         if let Some(slot) = self.function_active_depth.get_mut(fid) {
             *slot = slot.saturating_sub(1);
@@ -10080,7 +10087,7 @@ impl VirtualMachine {
                     );
                     // An update keeps a typed value's type, so it must keep
                     // the type's constraints too.
-                    return self.check_updated_value(function_name, val);
+                    return self.check_updated_value(function_name, args, val);
                 }
                 crate::lang::hot::r#type::HotResult::Err(err) => {
                     tracing::trace!("VM: Hotlib function '{}' failed: {:?}", function_name, err);

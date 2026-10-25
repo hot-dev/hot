@@ -260,6 +260,34 @@ impl std::fmt::Display for LiteralType {
     }
 }
 
+impl LiteralType {
+    /// Parse a literal as `Display` renders it (`"a"`, `42`, `1.5`, `true`,
+    /// `null`). Function and binding annotations are stored in that form.
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "true" => return Some(LiteralType::Bool(true)),
+            "false" => return Some(LiteralType::Bool(false)),
+            "null" => return Some(LiteralType::Null),
+            _ => {}
+        }
+
+        if let Some(inner) = s.strip_prefix('"').and_then(|rest| rest.strip_suffix('"')) {
+            return Some(LiteralType::Str(inner.to_string()));
+        }
+
+        let unsigned = s.strip_prefix('-').unwrap_or(s);
+        if !unsigned.starts_with(|c: char| c.is_ascii_digit()) {
+            return None;
+        }
+        if let Ok(n) = s.parse::<i64>() {
+            return Some(LiteralType::Int(n));
+        }
+        s.parse::<fastnum::D256>()
+            .ok()
+            .map(|_| LiteralType::Dec(s.to_string()))
+    }
+}
+
 // Type expressions for type checking
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum TypeExpr {
@@ -292,6 +320,32 @@ impl std::fmt::Display for TypeExpr {
             TypeExpr::Any => write!(f, "Any"),
         }
     }
+}
+
+/// Split a rendered type annotation at each top-level `sep`, trimming the
+/// parts. A separator inside `<...>` or a string literal (`"a | b"`) does
+/// not split.
+pub fn split_top_level(annotation: &str, sep: char) -> Vec<&str> {
+    let mut parts = Vec::new();
+    let mut start = 0;
+    let mut depth = 0;
+    let mut in_str = false;
+
+    for (i, ch) in annotation.char_indices() {
+        match ch {
+            '"' => in_str = !in_str,
+            _ if in_str => {}
+            '<' => depth += 1,
+            '>' => depth -= 1,
+            _ if ch == sep && depth == 0 => {
+                parts.push(annotation[start..i].trim());
+                start = i + ch.len_utf8();
+            }
+            _ => {}
+        }
+    }
+    parts.push(annotation[start..].trim());
+    parts
 }
 
 // Built-in types
@@ -1156,6 +1210,24 @@ pub const WHERE_TYPE_PREFIX: &str = "$Where-";
 pub fn is_inline_refinement_type(name: &str) -> bool {
     let short = name.rsplit('/').next().unwrap_or(name);
     short.starts_with(WHERE_TYPE_PREFIX)
+}
+
+/// Metadata key marking a binding written `name (…)`. A call never has a
+/// space before `(`, so such a binding that hides a function is usually a
+/// mistaken call, which `hot check` reports as `binding-shadows-function`.
+pub const SPACED_PAREN_BINDING: &str = "spaced-paren-binding";
+
+/// The metadata that marks a binding written `name (…)`.
+pub fn spaced_paren_binding_meta() -> Meta {
+    Meta {
+        val: crate::val!({"spaced-paren-binding": true}),
+    }
+}
+
+/// Whether `meta` is the `name (…)` binding marker.
+pub fn is_spaced_paren_binding_meta(meta: &Meta) -> bool {
+    matches!(&meta.val, crate::val::Val::Map(map)
+        if map.len() == 1 && map.contains_key(&crate::val::Val::from(SPACED_PAREN_BINDING)))
 }
 
 /// True for the hidden function that holds a `where` predicate.

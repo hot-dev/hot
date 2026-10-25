@@ -450,6 +450,7 @@ struct JitHelperRefs {
     cmp_general: FuncRef,
     is_err: FuncRef,
     failure_err: FuncRef,
+    consume_self_call_err: FuncRef,
     call_vm_by_name: FuncRef,
     promote_to_owned: FuncRef,
     make_vec: FuncRef,
@@ -1485,6 +1486,10 @@ fn compile_with_return_kind(
     builder.symbol("hot_jit_is_err", hot_jit_is_err as *const u8);
     builder.symbol("hot_jit_failure_err", hot_jit_failure_err as *const u8);
     builder.symbol(
+        "hot_jit_consume_self_call_err",
+        hot_jit_consume_self_call_err as *const u8,
+    );
+    builder.symbol(
         "hot_jit_call_vm_by_name",
         hot_jit_call_vm_by_name as *const u8,
     );
@@ -2095,6 +2100,26 @@ unsafe extern "C" fn hot_jit_is_err(raw: i64) -> i64 {
     if val.is_err() { 1 } else { 0 }
 }
 
+/// A raw self-call came back as an error, and the caller uses its result
+/// strictly (raw arithmetic or a comparison). Treat it as the interpreter
+/// treats an `Err` argument: halt the run (`unwrap_result_if_ok`), or pass it
+/// through while result checking is suppressed. Takes ownership of `raw`.
+unsafe extern "C" fn hot_jit_consume_self_call_err(raw: i64) -> i64 {
+    let vm_ptr = get_jit_vm_ptr();
+    if vm_ptr.is_null() || raw == 0 || raw == HALT_SENTINEL || raw == JIT_STACK_EXHAUSTED {
+        return raw;
+    }
+    let vm = unsafe { &mut *vm_ptr };
+    let value = unsafe { &*(raw as *const Val) }.clone();
+    if vm.unwrap_result_if_ok(&value).is_ok() {
+        return raw;
+    }
+    // The run now holds the failure. Return it from the frame as an Err, as
+    // the halt blocks do (`emit_halt_return`).
+    unsafe { hot_jit_drop_owned_val(raw) };
+    unsafe { hot_jit_failure_err() }
+}
+
 unsafe extern "C" fn hot_jit_drop_owned_val(raw: i64) {
     if owned_trace_enabled() {
         eprintln!("DROP {raw:#x} from {:#x}", owned_trace_caller());
@@ -2230,7 +2255,11 @@ unsafe extern "C" fn hot_jit_call_vm(
     let error_capture = vm.error_capture_active;
     let args = match prepare_jit_call_args(vm, args) {
         Ok(args) => args,
-        Err(err) => return vm_error_to_owned_val(err, error_capture),
+        Err(err) => {
+            // The callee never ran, so the proof set for it is spent.
+            vm.pending_proven = None;
+            return vm_error_to_owned_val(err, error_capture);
+        }
     };
     match vm.execute_compiled_user_function(function_id as u32, &args) {
         Ok(result) => new_owned_val(result),
@@ -3338,6 +3367,14 @@ fn declare_jit_helpers(
             ptr_ty,
             "hot_jit_failure_err",
             &[],
+            &[types::I64],
+        )?,
+        consume_self_call_err: declare_helper_func(
+            module,
+            func,
+            ptr_ty,
+            "hot_jit_consume_self_call_err",
+            &[types::I64],
             &[types::I64],
         )?,
         call_vm_by_name: declare_helper_func(
@@ -5466,8 +5503,9 @@ impl<'a> EmitCtx<'a> {
         Ok(())
     }
 
-    /// Handle the error block from a self-recursive call by cleaning up owned
-    /// values and returning the error from the current JIT function.
+    /// Handle the error block from a self-recursive call: halt as the
+    /// interpreter does when its result is used (see
+    /// `hot_jit_consume_self_call_err`), clean up owned values, and return.
     fn handle_recursive_call_error(
         &self,
         builder: &mut FunctionBuilder<'_>,
@@ -5476,8 +5514,14 @@ impl<'a> EmitCtx<'a> {
     ) {
         builder.switch_to_block(error_block);
         builder.seal_block(error_block);
+        // The call's result feeds a strict use, where the interpreter halts
+        // on an Err rather than returning it.
+        let call = builder
+            .ins()
+            .call(self.helper_refs.consume_self_call_err, &[error_val]);
+        let result = builder.inst_results(call)[0];
         self.emit_cleanup_owned(builder);
-        builder.ins().return_(&[error_val]);
+        builder.ins().return_(&[result]);
     }
 
     /// Fill a comparison halt block (see `emit_halt_check`): a Result.Err

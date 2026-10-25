@@ -3064,6 +3064,7 @@ impl TypeChecker {
             (TypeExpr::Literal(LiteralType::Int(_)), TypeExpr::Int) => true,
             (TypeExpr::Literal(LiteralType::Dec(_)), TypeExpr::Dec) => true,
             (TypeExpr::Literal(LiteralType::Bool(_)), TypeExpr::Bool) => true,
+            (TypeExpr::Literal(LiteralType::Null), TypeExpr::Null) => true,
 
             // Union types: the actual type is compatible with the expected union
             // if it matches any variant.  Standard subtyping rule.
@@ -3793,14 +3794,20 @@ impl TypeChecker {
             return TypeExpr::Optional(Box::new(inner_type));
         }
 
-        // Handle union types with pipe syntax (e.g., "Int | Dec" -> Union([Int, Dec]))
-        if annotation.contains(" | ") {
-            let parts: Vec<&str> = annotation.split(" | ").collect();
+        // Handle union types with pipe syntax (e.g., "Int | Dec" -> Union([Int, Dec])).
+        // A `|` inside `<...>` or a string literal doesn't split.
+        let parts = crate::lang::ast::split_top_level(annotation, '|');
+        if parts.len() > 1 {
             let type_exprs: Vec<TypeExpr> = parts
                 .iter()
-                .map(|part| self.parse_type_annotation(part.trim(), source))
+                .map(|part| self.parse_type_annotation(part, source))
                 .collect();
             return TypeExpr::Union(type_exprs);
+        }
+
+        // Handle literal types (e.g., "\"fast\"", "42", "null")
+        if let Some(literal) = crate::lang::ast::LiteralType::parse(annotation) {
+            return Self::ast_type_to_type_expr(&crate::lang::ast::TypeExpr::Literal(literal));
         }
 
         // Handle generic types with angle bracket syntax (e.g., "Vec<Str>" -> Vec(Str))
@@ -3818,7 +3825,7 @@ impl TypeChecker {
                 }
                 "Map" => {
                     // Parse Map<Key, Value>
-                    let parts: Vec<&str> = params_str.split(',').map(|s| s.trim()).collect();
+                    let parts = crate::lang::ast::split_top_level(params_str, ',');
                     if parts.len() == 2 {
                         let key_type = self.parse_type_annotation(parts[0], source);
                         let value_type = self.parse_type_annotation(parts[1], source);
@@ -5697,6 +5704,105 @@ mod tests {
             "nested open literal-union extension must emit OpenLiteralUnionMismatch: {:?}",
             checker.errors.errors
         );
+    }
+
+    #[test]
+    fn test_inline_literal_unions_in_annotations() {
+        use crate::lang::parser::parse_hot;
+
+        let source = r#"
+        ::test::inline ns
+        pick fn (mode: "fast" | "slow", size: "s" | "m" | null, tags: Vec<"x" | "y">): "ok" | "no" { "ok" }
+        picked pick("fast", null, ["x"])
+        speed: "fast" | "slow" "fast"
+        lam (m: 1 | 2 | 3) { m }
+        lam-result lam(2)
+        maybe fn (s: Str | null): Str { "ok" }
+        maybe-result maybe(null)
+        "#;
+        let mut checker = TypeChecker::new();
+        let _ = checker.check_program(&parse_hot(source).expect("parse"));
+        assert!(
+            checker.errors.errors.is_empty(),
+            "inline literal annotations should resolve: {:?}",
+            checker.errors.errors
+        );
+
+        // The literals are real types, not `Any`: a wrong base type is rejected.
+        let source = r#"
+        ::test::inline ns
+        pick fn (mode: "fast" | "slow"): Str { mode }
+        picked pick(1)
+        "#;
+        let mut checker = TypeChecker::new();
+        let _ = checker.check_program(&parse_hot(source).expect("parse"));
+        assert!(
+            !checker.errors.errors.is_empty()
+                && !checker
+                    .errors
+                    .errors
+                    .iter()
+                    .any(|e| matches!(e, CompilerError::UnresolvedType { .. })),
+            "an Int argument should mismatch a string literal union: {:?}",
+            checker.errors.errors
+        );
+    }
+
+    #[test]
+    fn test_type_annotation_splits_at_top_level() {
+        let mut checker = TypeChecker::new();
+        let lit = |s: &str| TypeExpr::Literal(LiteralType::Str(s.to_string()));
+        let cases = [
+            (
+                r#""a | b" | "c""#,
+                TypeExpr::Union(vec![lit("a | b"), lit("c")]),
+            ),
+            (
+                "Vec<Int | Str>",
+                TypeExpr::Vec(Box::new(TypeExpr::Union(vec![
+                    TypeExpr::Int,
+                    TypeExpr::Str,
+                ]))),
+            ),
+            (
+                "Map<Str, Int | Dec>",
+                TypeExpr::Map(
+                    Box::new(TypeExpr::Str),
+                    Box::new(TypeExpr::Union(vec![TypeExpr::Int, TypeExpr::Dec])),
+                ),
+            ),
+            (
+                r#"Map<Str, "x,y">"#,
+                TypeExpr::Map(Box::new(TypeExpr::Str), Box::new(lit("x,y"))),
+            ),
+            (
+                "Str | null",
+                TypeExpr::Union(vec![TypeExpr::Str, TypeExpr::Literal(LiteralType::Null)]),
+            ),
+        ];
+        for (annotation, expected) in cases {
+            assert_eq!(
+                checker.parse_type_annotation(annotation, None),
+                expected,
+                "{annotation}"
+            );
+        }
+        assert!(
+            checker.errors.errors.is_empty(),
+            "{:?}",
+            checker.errors.errors
+        );
+    }
+
+    #[test]
+    fn test_null_literal_accepts_null() {
+        let checker = TypeChecker::new();
+        let null_lit = TypeExpr::Literal(LiteralType::Null);
+        assert!(checker.types_are_compatible(&null_lit, &TypeExpr::Null));
+        assert!(checker.types_are_compatible(
+            &TypeExpr::Union(vec![TypeExpr::Str, null_lit]),
+            &TypeExpr::Null
+        ));
     }
 
     #[test]

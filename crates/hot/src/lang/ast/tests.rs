@@ -597,3 +597,42 @@ fn test_all_value_variants_covered() {
         assert_roundtrip(&value, &format!("Value::{} (coverage test)", variant));
     }
 }
+
+#[test]
+fn test_literal_type_parse_round_trips_display() {
+    let literals = [
+        LiteralType::Str("fast".to_string()),
+        LiteralType::Str("a | b".to_string()),
+        LiteralType::Int(42),
+        LiteralType::Int(-7),
+        LiteralType::Dec("1.25".to_string()),
+        LiteralType::Bool(true),
+        LiteralType::Bool(false),
+        LiteralType::Null,
+    ];
+    for literal in literals {
+        assert_eq!(LiteralType::parse(&literal.to_string()), Some(literal));
+    }
+
+    for not_literal in ["Str", "Null", "Fruit", "Vec<Str>", "-", "\""] {
+        assert_eq!(LiteralType::parse(not_literal), None, "{not_literal}");
+    }
+}
+
+#[test]
+fn test_split_top_level() {
+    assert_eq!(split_top_level("Int | Str", '|'), ["Int", "Str"]);
+    assert_eq!(
+        split_top_level("Vec<Int | Str> | Null", '|'),
+        ["Vec<Int | Str>", "Null"]
+    );
+    assert_eq!(
+        split_top_level(r#""a | b" | "c""#, '|'),
+        [r#""a | b""#, r#""c""#]
+    );
+    assert_eq!(
+        split_top_level(r#"Str, Map<Str, "x,y">"#, ','),
+        ["Str", r#"Map<Str, "x,y">"#]
+    );
+    assert_eq!(split_top_level("Str", '|'), ["Str"]);
+}

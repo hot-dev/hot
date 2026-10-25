@@ -45,7 +45,8 @@ fn () {
             tests: empty-test-counter,
             current-test: empty-test-counter,
             failed-tests: [],
-            failed-assertions: []
+            failed-assertions: [],
+            no-assertion-tests: []
         })
 }
 
@@ -126,6 +127,16 @@ fn (test-name) {
     set-test-counters({
         ...counters,
         failed-tests: concat(counters.failed-tests, [enhanced-test-name])
+    })
+}
+
+test-made-no-assertions
+meta {doc: """Record a passing test that made no assertions."""}
+fn (test-name) {
+    counters get-test-counters()
+    set-test-counters({
+        ...counters,
+        no-assertion-tests: concat(or(counters.no-assertion-tests, []), [test-name])
     })
 }
 
@@ -361,6 +372,13 @@ fn (f, capture-output) {
     cond {
         did-pass => {
         test-passed()
+        // A test with no assertions passes without checking anything, which
+        // usually means a mistake such as `assert (…)`, a binding, not a call.
+        cond {
+            is-zero(get-test-counters().current-test.total) => { test-made-no-assertions(f-str) }
+            => { false }
+        }
+
         cond {
             capture-output => { println(`${bright-green(pad-start("ok", 4))}`) }
             => { println(`... ${bright-green(pad-start("ok", 48))}\n`) }
@@ -441,6 +459,15 @@ fn () {
             print(`${::hot::term/bright-red(pad-start(Str(tests-failed), 6))} ${::hot::term/bright-red("failed")}`)
             println(`${pad-start(Str(tests-total), 9)} total`)
         }
+    }
+
+    no-assertion-tests or(counters.no-assertion-tests, [])
+    cond {
+        not(is-empty(no-assertion-tests)) => {
+            println(`\n${bright-yellow("warning:")} ${length(no-assertion-tests)} tests made no assertions:`)
+            map(no-assertion-tests, println(`  ${bright-yellow(%)}`))
+        }
+        => { false }
     }
 
     cond {

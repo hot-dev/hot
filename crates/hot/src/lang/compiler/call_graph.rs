@@ -277,6 +277,16 @@ fn is_package_path(path: &str) -> bool {
         || path.contains("/hot-std/")
         || path.starts_with("hot-std/")
         || path.contains(".hot/cache/")
+        || is_in_package_cache(path)
+}
+
+/// Whether `path` is inside a downloaded-package cache. With `HOT_HOME` set,
+/// the caches live at `$HOT_HOME/cache/...`, which the patterns above miss.
+fn is_in_package_cache(path: &str) -> bool {
+    use crate::lang::cache::paths::{get_cdn_cache_dir, get_git_cache_dir};
+    [get_cdn_cache_dir(), get_git_cache_dir()]
+        .iter()
+        .any(|dir| dir.is_absolute() && path.starts_with(&*dir.to_string_lossy()))
 }
 
 /// Extract ctx requirements from a function's variable metadata.

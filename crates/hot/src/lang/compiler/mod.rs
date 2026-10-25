@@ -148,9 +148,12 @@ pub struct Compiler {
     /// Namespaces that define a function named like a canonical predicate
     /// function (`gt`, `between`, ...), whose predicates get no fast form.
     shadowing_namespaces: AHashSet<String>,
-    /// `where` predicates that call an `is-match` other than
-    /// `::hot::regex/is-match`, whose patterns get no fast form.
-    foreign_regex_predicates: AHashSet<String>,
+    /// `where` predicates that call a lookalike of a standard predicate
+    /// function (`gt`, `length`, `is-match`, ...), which get no fast form.
+    non_canonical_predicates: AHashSet<String>,
+    /// Each namespace's aliases, so `::alias/Type` in a constraint resolves
+    /// against the namespace that wrote it.
+    constraint_ns_aliases: AHashMap<String, crate::lang::ast::NamespaceAliases>,
     /// Parameters of the function body being compiled that stay proven, with
     /// their specs (see `constraint_proofs`).
     proven_params: AHashMap<String, Val>,
@@ -180,6 +183,7 @@ pub struct CompilerSeed {
     known_functions: AHashSet<String>,
     next_cond_id: u64,
     constraint_type_defs: AHashMap<String, crate::lang::ast::TypeDef>,
+    constraint_ns_aliases: AHashMap<String, crate::lang::ast::NamespaceAliases>,
 }
 
 impl CompilerSeed {
@@ -273,7 +277,8 @@ impl Compiler {
             constraint_spec_ids: AHashMap::new(),
             constraint_predicates: AHashMap::new(),
             shadowing_namespaces: AHashSet::new(),
-            foreign_regex_predicates: AHashSet::new(),
+            non_canonical_predicates: AHashSet::new(),
+            constraint_ns_aliases: AHashMap::new(),
             proven_params: AHashMap::new(),
             param_annotations: AHashMap::new(),
             callee_param_specs: AHashMap::new(),
@@ -298,6 +303,7 @@ impl Compiler {
             known_functions: self.known_functions.clone(),
             next_cond_id: self.next_cond_id,
             constraint_type_defs: self.constraint_type_defs.clone(),
+            constraint_ns_aliases: self.constraint_ns_aliases.clone(),
         }
     }
 
@@ -318,6 +324,7 @@ impl Compiler {
         compiler.known_functions = seed.known_functions;
         compiler.next_cond_id = seed.next_cond_id;
         compiler.constraint_type_defs = seed.constraint_type_defs;
+        compiler.constraint_ns_aliases = seed.constraint_ns_aliases;
         compiler
     }
 
@@ -6740,7 +6747,9 @@ impl Compiler {
             name: name.to_string(),
             namespace: self.current_namespace.clone(),
             static_scope: Some(self.current_namespace.clone()), // Use namespace as static scope for now
-            meta: ast_meta.map(|m| m.val.clone()),
+            meta: ast_meta
+                .filter(|m| !crate::lang::ast::is_spaced_paren_binding_meta(m))
+                .map(|m| m.val.clone()),
             source: self.current_source_location.clone(),
         }));
 
