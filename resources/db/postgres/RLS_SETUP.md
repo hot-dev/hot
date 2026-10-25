@@ -1,5 +1,8 @@
 # PostgreSQL scoped runtime setup
 
+The operator guide is [Self-Hosted PostgreSQL](../../docs/configuration/postgres.md).
+This note covers the same setup in more depth.
+
 PostgreSQL runtime connections require a validated backend scope for every
 query. Migration 013 forces RLS on scoped platform tables; later migrations must
 extend that coverage. Missing scope fails closed. SQLite continues to use the
@@ -47,10 +50,12 @@ transactions (such as RDS Proxy, which pins sessions on `SET` and direct
 its singleton is a session advisory lock held on a dedicated connection, so
 connect it directly or with a pinned session. It checks the lock every 30
 seconds and exits if the lock is lost, so a replacement never runs alongside
-it. Set the runtime login's
-`search_path`, `statement_timeout` and `lock_timeout` as role defaults
-(`ALTER ROLE ... SET`) or in the proxy's initialization query: the connection
-setup otherwise issues session-level `SET` statements, which pin.
+it. Set the runtime login's `search_path`, `statement_timeout` and
+`lock_timeout` as role defaults (`ALTER ROLE ... SET`) or in the proxy's
+initialization query, so every server connection starts with them. The
+connection setup also issues session-level `SET` statements for the same
+settings, which some proxies, such as RDS Proxy, treat as a reason to pin;
+verify multiplexing with the proxy in use.
 Task-local scope is not inherited by Tokio spawned tasks: bind a cloned database
 handle with `DatabasePool::with_scope` or explicitly establish scope inside the
 new task. Pool-bound authority takes precedence over task-local authority.
@@ -113,10 +118,11 @@ The schema-owner login can be NOSUPERUSER and NOBYPASSRLS. Install required
 extensions (`vector` and `pg_trgm`) into schema `hot` using an administrative
 deployment connection first if that owner lacks extension-installation rights.
 Only then start runtime services with the restricted login and enforcement
-enabled. The public CLI's bootstrap provider is a no-op. A private provider
-runs right after migrations under the onboarding operation, and its
-configuration's `db.uri` is the migration URI with runtime-role qualification
-off, so it can create its own tables and seed reference rows such as `plan`.
+enabled. The public CLI's database bootstrap provider is a no-op. A binary that
+embeds Hot can supply its own `DatabaseBootstrap` provider. It runs right after
+migrations under the onboarding operation. Its configuration's `db.uri` is the
+migration URI with runtime-role qualification off, so it can create its own
+tables and seed reference rows such as `plan`.
 With enforcement on, `hot app` migrates and bootstraps at startup only when it
 is configured with `db.migration-uri`; otherwise run `hot db migrate` (or set
 `HOT_DB_MIGRATION_URI`) from the deployment's migration job.
@@ -134,7 +140,7 @@ can allow `hot.scope_bootstrap('billing_webhook')`) and the org plan, then uses
 For an existing database:
 
 1. Restore a recent backup into a separate database and rehearse migrations
-   012–014 with the intended owner/runtime roles, including a non-superuser,
+   012–015 with the intended owner/runtime roles, including a non-superuser,
    non-BYPASSRLS schema owner. Check duplicate environment
    names within each org before migration 012 adds its unique index. Inspect
    migration 013's ownership preflight and resolve any reported mismatch in a
@@ -157,7 +163,7 @@ For an existing database:
    and initializes active task counters; period usage is initialized on the
    first limited claim. Run counters stay lazy, backed by the admission ledger.
 3. Drain work and stop every old process using the database, including workers,
-   scheduler, direct CLI sessions and private provider jobs. Take a recoverable
+   scheduler, direct CLI sessions and bootstrap provider jobs. Take a recoverable
    backup. Apply the additive migrations and rerun the grant script as the
    owner. Do not mix older unscoped services with the new database policies.
    Test the grant script twice to verify idempotence. Table-level revocation
@@ -230,16 +236,16 @@ to an RLS error.
 
 ## Deployment verification outside this repository
 
-The public repository's local PostgreSQL and SQLite tests do not qualify private
-cloud bootstrap implementations, deployed database role inheritance, managed
-connection proxies, provider billing/usage reconciliation, remote object stores,
-or hosted queue variants. Those integrations remain deployment release gates.
-Run the same positive/negative scope and cancellation checks against each
-deployed connection path, and verify that private jobs use named operations and
-never inherit migration credentials. Shared deployments across child orgs remain
-deferred; each child currently owns its environments and deployments.
+This repository's PostgreSQL and SQLite tests do not qualify custom bootstrap
+providers, deployed database role inheritance, managed connection proxies,
+billing provider usage reconciliation, remote object stores, or other queue
+backends. Qualify those integrations in each deployment. Run the same positive
+and negative scope and cancellation checks against each deployed connection
+path. Verify that provider jobs use named operations and never inherit
+migration credentials. Shared deployments across child orgs are not supported;
+each child owns its environments and deployments.
 
-## Usage counters and development migration revisions
+## Usage counters
 
 [Maintained usage counters](USAGE_COUNTERS.md) replace history scans in quota
 admission. Include their initialization and the first billing-period task/run
@@ -248,11 +254,3 @@ identify source/counter drift, applied deltas, and a retry after an error.
 Reconciliation retains ordinary writes and does not hold the admission root
 lock. It checks one counter per short transaction, but still reads account
 history, so budget for that hourly background load.
-
-Migrations 012–014 on this development branch are unshipped and were revised in
-place, including combining earlier revisions 012–020. A scratch database
-that already applied an earlier revision will fail SQLx checksum validation.
-Recreate only disposable development/test databases with known ownership and
-retain any needed data first. Never edit the SQLx ledger to conceal a checksum
-mismatch, and never use this development reset procedure on a deployed database.
-A deployed revision requires a new forward migration instead.

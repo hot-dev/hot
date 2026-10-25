@@ -38,6 +38,12 @@ Call functions with arguments in parentheses:
 
 {{snippet:functions#calling-functions}}
 
+A call never has a space before `(`. With a space, `name (...)` binds a
+variable named `name` to the value in the parentheses, wherever it appears.
+So `assert (x)` and `if (x) { ... }` bind variables named `assert` and `if`
+instead of calling those functions. `hot check` warns with
+`binding-shadows-function` when such a binding shadows a function.
+
 ## Qualified Calls
 
 Call functions from other namespaces using the full path:
@@ -96,12 +102,20 @@ See [Constraints](/docs/language/constraints).
 
 ## Long Parameter Lists
 
-A parameter list can span lines, like a call's arguments. A trailing comma
-after the last parameter is optional:
+A parameter list can span lines, like a call's arguments. A line can hold one
+parameter or several, and the return type and `{` can follow the closing `)`
+on the same line. A trailing comma after the last parameter is optional:
 
 {{snippet:functions#multiline-params}}
 
 {{result:functions#multiline-params}}
+
+A lambda's parameter list can span lines too. Its `{` must be on the same line
+as its closing `)`:
+
+{{snippet:functions#multiline-lambda-params}}
+
+{{result:functions#multiline-lambda-params}}
 
 ## Function Overloading
 

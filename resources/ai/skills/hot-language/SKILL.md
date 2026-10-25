@@ -9,7 +9,7 @@ description: >
   languages - always check these references before writing Hot code.
 metadata:
   author: hotdev
-  version: "1.1.1"
+  version: "1.2.0"
   license: Apache-2.0
 ---
 
@@ -26,18 +26,27 @@ provides detailed reference documentation for the Hot programming language.
 
 ## Critical Syntax Rules
 
-**These are non-negotiable - violating them causes parse errors:**
+**These are non-negotiable - violating them causes parse errors or silently
+wrong code:**
 
 | ❌ Wrong | ✅ Correct | Rule |
 |----------|-----------|------|
 | `name = "Alice"` | `name "Alice"` | No `=` for assignment |
 | `a + b` | `add(a, b)` | No infix operators |
 | `a == b` | `eq(a, b)` | Comparison is a function |
-| `if (x) { } else { }` | `if(x, then, else)` or `cond` flow | No if/else blocks |
+| `if (x) { } else { }` | `if(x, then, else)` or `cond` flow | No if/else blocks: `if` is a function, and `if (x) {` binds a variable named `if` |
 | `for x in items` | `map(items, ...)` or `for-each(iter, ...)` | No loops |
 | `items.0` | `items[0]` | Use brackets for array indexing |
-| `add (1, 2)` | `add(1, 2)` | No space before `(` when calling |
+| `add (1, 2)` | `add(1, 2)` | A space before `(` never calls: `add (1, 2)` binds a variable named `add` |
 | `{x}` for a map | `{x,}` or `{x: x}` | Single-key punning needs comma |
+| `map(gs, filter(%, gt(%, 0)))` | `map(gs, filter(%, (n) { gt(n, 0) }))` | No nested implicit `%` lambdas (`nested-placeholder`) |
+| `(a, b)` then `{` on the next line | `(a, b) {` | A lambda's `{` goes on the line of its `)` |
+
+`hot check` warns (`binding-shadows-function`) when a spaced-paren binding
+shadows a function, and `hot test` warns about a test with no assertions.
+Parameter lists can span lines, in named functions and lambdas: put one or
+more parameters per line, then `): Ret {` on the closing line. A named
+function's `{` may also start the next line; a lambda's may not.
 
 ## Semantic Rules Agents Must Preserve
 
@@ -67,6 +76,13 @@ provides detailed reference documentation for the Hot programming language.
   may be expensive or effectful.
 - Prefer `map`, `filter`, `reduce`, iterators, and `for-each` for iteration.
   Recursive calls are stack-safe only when they are genuinely in tail position.
+- Closed literal unions are enforced at runtime at every boundary
+  (parameters, typed fields, constructors, returns, updates). A value outside
+  the union is `Err(ConstraintError.Violation)`. Declare a union `open` when
+  its values come from outside your code, such as API responses or JSON.
+- `where` predicates run at namespace scope: they can use top-level values
+  and functions, but not parameters or locals. `where` is reserved and can't
+  name a binding or function.
 
 ## File Structure
 

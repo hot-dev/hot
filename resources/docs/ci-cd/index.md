@@ -170,6 +170,11 @@ Your `hot.hot` config reads the key automatically:
 hot.remote.hot-dev.key ::env/get("HOT_API_KEY", "")
 ```
 
+A restricted deploy key needs `build:*` with `create`, `read`, and `execute`,
+which is the **Build/Deploy** preset in the app. If `hot deploy` creates the
+project, the key also needs `project:*` with `create`. See
+[Authentication](/docs/authentication).
+
 ### Pin Versions for Stability
 
 In production pipelines, pin the Hot CLI version to avoid unexpected changes:

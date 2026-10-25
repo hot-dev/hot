@@ -116,6 +116,10 @@ HttpResponse type {
 
 Only `status` is required. Omit `headers` and `body` when not needed (e.g., a `204 No Content` response).
 
+On the shared API host, Hot drops any `Set-Cookie` header from a webhook
+response. To set cookies, serve the webhook from a
+[custom domain](#custom-domain-urls).
+
 If your function returns a plain value (not an `HttpResponse`), Hot wraps it as a `200 OK` JSON response automatically.
 
 ```hot
@@ -163,7 +167,7 @@ If you have a [custom domain](/docs/domains) configured for your environment, yo
 https://your-domain.com/webhook/{service}/{path}/{token}
 ```
 
-The organization and environment are resolved from the domain automatically. Both the standard URL and the custom domain URL work identically—the custom domain version is just shorter and branded.
+The organization and environment are resolved from the domain automatically. Both the standard URL and the custom domain URL run the same handler. The custom domain version is shorter and branded, and only a custom domain can set cookies.
 
 | Metadata | Default URL | Custom Domain URL |
 |----------|------------|-------------------|

@@ -100,10 +100,16 @@ on a nullable type sees `null` too, so its predicate has to handle it:
 ## Writing Predicates
 
 A predicate is either a `%` expression or a lambda with one parameter:
-`Int where gt(%, 2)` and `Int where (x) { gt(x, 2) }` are the same. It can
-call your own functions:
+`Int where gt(%, 2)` and `Int where (x) { gt(x, 2) }` are the same. As with
+any lambda, its `{` goes on the same line as its `)`. A predicate can call
+your own functions:
 
 {{snippet:constraints#helper-predicates}}
+
+A predicate runs at namespace scope. It can use the functions and top-level
+values of its namespace, but not a function's parameters or local bindings,
+even when its `where` appears inside that function. To relate one parameter to
+another, use a [precondition](#preconditions).
 
 A predicate must:
 
@@ -112,6 +118,9 @@ A predicate must:
   files, stores, HTTP, events, tasks, or sockets, directly or through the
   functions it calls.
 - **Finish quickly.** Each check has an instruction and call-depth budget.
+
+`length` of a `Str` counts UTF-8 bytes, not characters, so `length("café")` is
+`5`. Keep that in mind when you bound text length.
 
 A `where` predicate is an ordinary function argument under Hot's `%` rule, so
 an implicit `%` lambda can't appear inside it. Write an inner function
@@ -129,10 +138,25 @@ A failed check is a `Result.Err` whose value is one of these:
 | `ConstraintError.EvaluationFailed` | The predicate errored, returned a non-`Bool`, or called a function a predicate can't use |
 | `ConstraintError.BudgetExceeded` | The predicate ran out of its budget |
 
-Each holds a `message`, the `constraint` and `predicate`, the `boundary`
-(`binding`, `constructor`, `parameter`, `arguments`, `return`, or `update`),
-the `path` to the part that failed, and the `function`, `parameter` and
-`location` where they apply. The rejected value itself is never included.
+Each holds these fields:
+
+| Field | Value |
+| --- | --- |
+| `message` | A summary of the failure |
+| `constraint` | The named refinement, such as `::shop/Port`, or `<inline>` |
+| `predicate` | The predicate's source text |
+| `boundary` | Where the check ran: `binding`, `constructor`, `parameter`, `arguments`, `return`, or `update` |
+| `path` | Steps from the checked value to the part that failed. Empty when the value itself failed |
+| `declared-type` | The declared type at the boundary, when there is one |
+| `value-type` | The type of the rejected value |
+| `function` | The function, for parameter, argument, and return checks |
+| `parameter` | The parameter name, for parameter checks |
+| `location` | The source location of the `where` clause |
+
+`ConstraintError.EvaluationFailed` adds `cause`: the underlying error, or a
+description of what the predicate returned. `ConstraintError.BudgetExceeded`
+adds `budget` (`"instructions"` or `"depth"`) and `limit`. The rejected value
+itself is never included.
 
 {{snippet:constraints#handling-errors}}
 
@@ -142,9 +166,12 @@ the `path` to the part that failed, and the `function`, `parameter` and
 
 ## Literal Unions
 
-A literal union is a constraint too. A closed union accepts only its members.
-An `open` union also accepts unknown values of the same type, which suits
-values an external service may add to over time.
+A literal union is a constraint too. A closed union accepts only its members,
+at every boundary: parameters, typed fields, constructors, return values, and
+updates. Any other value is `Err(ConstraintError.Violation)` when it arrives
+at run time. An `open` union also accepts unknown values of the same type,
+which suits values an external service may add to over time. Use `open` for
+values that come from outside your code, such as API responses.
 
 {{snippet:constraints#literal-unions}}
 
@@ -158,6 +185,10 @@ keep a typed value's type, so they check its constraints too:
 {{snippet:constraints#updates}}
 
 {{result:constraints#updates}}
+
+The checks reach typed values nested inside the one you change. `assoc-in`,
+`update-in`, and `merge` check every typed value along the way, not only the
+outermost one. `postwalk` and `prewalk` check each typed value they rebuild.
 
 Map spread (`{...server}`) and transforms like `map-vals` and `delete` return
 plain maps, which claim no type and are not checked.
@@ -181,6 +212,7 @@ program:
 | `constraint-not-bool` | Error | A predicate definitely returns something other than a `Bool` |
 | `impure-constraint` | Error | A predicate calls a function a predicate can't use |
 | `unsupported-constraint` | Error | A `lazy` parameter has a constraint, or a function with `lazy` parameters has a precondition |
+| `invalid-constraint` | Error | A predicate isn't a function of one value, or a parameter's predicate uses another parameter |
 | `duplicate-where` | Error | A binding or type has more than one `where` clause |
 | `where-requires-type` | Error | A `where` follows a binding without a declared type |
 | `nested-placeholder` | Error | An implicit `%` lambda inside a predicate |
@@ -189,12 +221,20 @@ program:
 
 ## Tool Schemas
 
-MCP and agent tool schemas include a constraint's common shapes. Comparisons
-with a literal bound and `between` become `minimum` and `maximum`, length
-bounds become `minLength` and `maxLength` (or `minItems` and `maxItems`),
-`::hot::regex/is-match` with a literal pattern becomes `pattern`, and `in` with
-a literal list becomes `enum`. Other predicates are still enforced; the schema
-describes them. A precondition goes in the tool's description.
+MCP and agent tool schemas include a constraint's common shapes:
+
+- Comparisons with a literal bound, and `between`, become `minimum` and
+  `maximum`.
+- Length bounds on a `Vec` become `minItems` and `maxItems`.
+- `::hot::regex/is-match` with a literal pattern becomes `pattern`.
+- `in` with a literal list becomes `enum`.
+- A literal union becomes a typed `enum`, such as
+  `{"type": "string", "enum": ["USD", "EUR", "GBP"]}`.
+
+Length bounds on a `Str` don't become `minLength` or `maxLength`, because
+`length` counts bytes and JSON Schema counts characters. Like every other
+predicate, they are still enforced, and the schema's description states them.
+A precondition goes in the tool's description.
 
 ## Summary
 
@@ -204,3 +244,4 @@ describes them. A precondition goes in the tool's description.
 - A failed check is a `Result.Err` holding a `ConstraintError`
 - Predicates are pure, return a `Bool`, and run within a budget
 - Literal unions are constraints; `open` unions accept unknown values
+- Predicates run at namespace scope and can't see parameters or locals

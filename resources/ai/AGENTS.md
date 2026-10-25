@@ -34,17 +34,22 @@ by Hot version; run `hot ai list` to inspect the installed catalog.
 
 ## Critical Syntax Rules
 
-**These are non-negotiable - violating them causes parse errors:**
+**These are non-negotiable - violating them causes parse errors or silently wrong code:**
 
 | ❌ Wrong | ✅ Correct | Rule |
 |----------|-----------|------|
 | `name = "Alice"` | `name "Alice"` | No `=` for assignment |
 | `a + b` | `add(a, b)` | No infix operators |
 | `a == b` | `eq(a, b)` | Comparison is a function |
-| `if (x) { } else { }` | `if(x, then, else)` or `cond` flow | No if/else blocks. Use `if()` for inline 2-3 way branching; use `cond` for multi-branch logic |
+| `if (x) { } else { }` | `if(x, then, else)` or `cond` flow | No if/else blocks. `if` is a function, so `if (x) {` binds a variable named `if`. Use `if()` for inline 2-3 way branching; use `cond` for multi-branch logic |
 | `for x in items` | `map(items, ...)` or `for-each(...)` | No loops |
 | `items.0` | `items[0]` | Use brackets for array indexing |
-| `fn(x)` no space | `fn (x)` space | Space before `(` = assignment |
+| `add (1, 2)` | `add(1, 2)` | A space before `(` never calls: `add (1, 2)` binds a variable named `add`. Write definitions as `fn (x)` |
+| `map(gs, filter(%, gt(%, 0)))` | `map(gs, filter(%, (n) { gt(n, 0) }))` | No nested implicit `%` lambdas |
+| `(a, b)` then `{` on the next line | `(a, b) {` | A lambda's `{` goes on the line of its `)` |
+
+`hot check` warns (`binding-shadows-function`) when a spaced-paren binding
+shadows a function, and `hot test` warns about a test with no assertions.
 
 ## Data Literals & Key Differences
 
@@ -56,6 +61,7 @@ by Hot version; run `hot ai list` to inspect the installed catalog.
 - **No return statement** — the last expression in a function body is the return value
 - **Shadowing creates a new binding**, not mutation — `x 1` then `x add(x, 1)` creates a new `x`, doesn't mutate
 - **Trailing commas** are accepted in all list contexts — `[1, 2, 3,]`, `{a: 1,}`, `add(1, 2,)`, `fn (a: Int,)`, `(x,) { ... }`
+- **Parameter lists can span lines** in named functions and lambdas: put one or more parameters per line and `): Ret {` on the closing line. A lambda's `{` must be on the same line as its `)`
 - **Map field punning** — bare identifiers desugar to key-value pairs: `{name, email}` → `{name: name, email: email}`. **IMPORTANT**: `{x}` is a block expression (returns the value of `x`), NOT a punned map. Use `{x,}` (trailing comma) for single-key punning, or `{x: x}` to be explicit
 - **Vec spread** — `...` flattens vectors in a vec literal: `[...a, ...b]` concatenates, `[0, ...a, 99]` mixes spread and literals
 - **Map spread** — `...` spreads an existing map: `{...base, c: 3}`. Later keys win: `{...base, a: 99}` overrides `a`

@@ -45,20 +45,13 @@ The `hot.hot` file is the central configuration for your Hot project. It defines
 A minimal `hot.hot` file (created by `hot init`) looks like:
 
 ```hot
-// hot.hot - Project Configuration File
+// Hot Configuration File
 ::hot::conf ns
 
 ::env ::hot::env
 
-// Profile and Project Settings
-hot.set.profile "local-dev"
 hot.set.project "my-app"
 hot.set.remote "hot-dev"
-
-// Local Development Profile
-hot.profile.local-dev.user.email "dev@example.com"
-hot.profile.local-dev.org.slug "dev"
-hot.profile.local-dev.env.name "development"
 
 // Remote API (hot.dev)
 hot.remote.hot-dev.url ::env/get("HOT_API_URL", "https://api.hot.dev")
@@ -67,7 +60,11 @@ hot.remote.hot-dev.key ::env/get("HOT_API_KEY", "")
 // Project Configuration
 hot.project.my-app.src.paths ["./hot/src"]
 hot.project.my-app.test.paths ["./hot/test"]
+hot.project.my-app.resources.paths ["./hot/resources"]
 hot.project.my-app.deps {}
+
+// Open the browser to the app when running `hot dev`
+hot.dev.open false
 ```
 
 That's all you need for local development. Database, logging, and other services use sensible defaults.
@@ -90,6 +87,33 @@ hot.project.my-app.deps {
 ```
 
 Run `hot conf generate all` to see all available options.
+
+To run on PostgreSQL, see [Self-Hosted PostgreSQL](/docs/configuration/postgres).
+It uses a second URI, `hot.db.migration-uri`, for migrations.
+
+## Profiles
+
+A profile names the user, organization, and environment that CLI commands use
+with the local database. Without one, Hot uses the local identity that
+`hot init` creates: user `local@hot.dev`, organization `local`, and
+environment `development`. This profile selects it explicitly:
+
+```hot
+hot.set.profile "local-dev"
+
+hot.profile.local-dev.user.email "local@hot.dev"
+hot.profile.local-dev.org.slug "local"
+hot.profile.local-dev.env.name "development"
+```
+
+Pass `--profile NAME` to select a profile for one command.
+
+`hot init`, and the first command in a fresh checkout, create only the local
+identity, and only in an empty database. Any other profile must already exist
+in the database: an active user, an organization the user belongs to, and an
+existing environment in it. Hot doesn't create them for you. The older
+`hot.profile.set` key still works, but it is an error if it names a different
+profile than `hot.set.profile`.
 
 ## Minimum Version Requirement
 
@@ -201,3 +225,5 @@ hot.project.my-app.deps {
 
 - **[Dependencies](/docs/configuration/dependencies)** - How to declare and manage package dependencies
 - **[Projects](/docs/configuration/projects)** - Configuring multiple projects in one workspace
+- **[Storage](/docs/configuration/storage)** - Where Hot stores files, blobs, and build artifacts
+- **[Self-Hosted PostgreSQL](/docs/configuration/postgres)** - Running Hot on PostgreSQL with row-level security

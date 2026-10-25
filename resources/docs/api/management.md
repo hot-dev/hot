@@ -15,6 +15,14 @@ Send them as `Authorization: Bearer <management-token>`. Runtime tokens cannot
 call management endpoints. Management credentials cannot issue other management
 credentials or assign human access.
 
+A management credential's lifetime bounds everything it issued. When it
+expires or is revoked, the runtime API keys it issued stop working, and so do
+the service keys and sessions those keys created. Expiry can't be extended, so
+issue a new management credential and new runtime keys before the old one
+expires. A management credential also stops working, with everything it
+issued, while the administrator who created it isn't a root administrator, for
+example after they leave the account or their role changes.
+
 | Method and route | Required capability |
 | --- | --- |
 | `GET /v1/management/children` | `children:read` |
@@ -120,9 +128,11 @@ run does not consume another slot. A run that was admitted still consumes its
 slot if later setup or execution fails. Deleting retained run history, suspending
 and resuming a child, or retrying admission does not reset account usage. The
 admission ledger is separate from run history and is seeded with existing usage
-when the migration is applied. The billing period start controls the monthly
-window; accounts without a subscription use the calendar month. Local accounts
-without a plan or feature overrides retain unlimited execution.
+when the migration is applied. Daily maintenance prunes ledger rows older than
+400 days, longer than any billing period. The billing period start controls the monthly
+window; accounts without a subscription use the calendar month. An account
+without a plan has unlimited execution. If it has feature overrides but no
+plan, any limit the overrides leave out stays unlimited.
 
 ## Runtime usage visibility
 
@@ -155,5 +165,5 @@ object-store bill. Blob storage remains separately attributed and retained.
 Cancelling a container does not immediately release its capacity. The worker
 first confirms termination and persists measured usage; unconfirmed cleanup
 keeps the reservation for recovery. API request-per-second limits are shared
-across processes. In-flight and SSE connection guards are local to each service
-process.
+across processes, and management requests count against them too. In-flight and
+SSE connection guards are local to each service process.

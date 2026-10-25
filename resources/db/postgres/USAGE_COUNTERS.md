@@ -158,8 +158,8 @@ work, not end-to-end request latency or a production throughput promise.
 ### Local comparison, 2026-10-20
 
 PostgreSQL 18/pgvector in Docker on macOS, loopback TCP, runtime login with
-NOSUPERUSER/NOBYPASSRLS. Baseline: `68bfc41` (review fixes plus current main,
-before maintained counters). One account has two child environments and 100,000
+NOSUPERUSER/NOBYPASSRLS. Baseline: the same code before maintained counters.
+One account has two child environments and 100,000
 rows in **each** of `call`, `store_map_entry`, `task`, and `run_admission`;
 tasks/admissions span two periods. Three noise accounts add 1,000 rows each per
 source table. Both copies were vacuumed/analyzed. No builds/tests ran during
@@ -215,12 +215,3 @@ That measurement predates per-environment initialization, which now runs before
 the claim takes the account lock and scans only each environment's tasks in the
 period; still include it in billing-period rollover and first-enforcement
 rehearsals.
-
-The final public workspace run passed 2,586 Rust tests (10 intentionally
-ignored), formatting, Clippy with warnings denied, and five browser scope tests.
-Both SQLite and restricted PostgreSQL/Valkey CLI runs passed 915 Hot tests and
-2,509 assertions each. Hot static checks passed, and AGENTS/bundled AI assets
-match a fresh published mirror after integrating main's terminology update
-(#103). The paired provider workspace passed its 54 tests, including actual
-owner bootstrap and restricted runtime billing, plus Clippy and three mocked
-migration-task tests. No hosted deployment or production change was performed.

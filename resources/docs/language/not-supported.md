@@ -51,6 +51,10 @@ Hot has no `if`/`else` statement syntax.
 | `if (x) { a } else { b }` | `if(x, a, b)` |
 | `if (x) { a }` | `if(x, a)` |
 
+`if` is a function, and a call has no space before `(`. So `if (x) { a }`
+doesn't fail to parse: it binds a variable named `if` to `x`, then runs the
+block. `hot check` warns about such a binding with `binding-shadows-function`.
+
 Or use `cond` for multiple conditions:
 
 ```hot

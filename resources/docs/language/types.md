@@ -98,14 +98,29 @@ pick-fruit fn (fruit: Fruit): Str {
 
 apple: Fruit "apple"   // Valid
 pick-fruit("banana")   // Valid
-pick-fruit("grape")    // Type error
+pick-fruit("grape")    // constraint-violation: not a Fruit
 ```
 
 Literal unions let you restrict values to a specific set of allowed values. A
-closed union is checked at runtime too: a value from outside the set, such as
-one parsed from JSON, fails where it enters the type. An `open` union also
-accepts unknown values of the same type. Literal union values stay plain
-values, with no type tag. See [Constraints](/docs/language/constraints).
+literal outside a closed union, as in `pick-fruit("grape")`, is a compile-time
+`constraint-violation` error from `hot check`. A closed union is checked at
+runtime too: a computed value from outside the set, such as one parsed from
+JSON, fails where it enters the type with `Err(ConstraintError.Violation)`. An
+`open` union also accepts unknown values of the same type. Literal union values
+stay plain values, with no type tag. See
+[Constraints](/docs/language/constraints).
+
+They also work inline, without a named type:
+
+```hot
+set-speed fn (mode: "fast" | "slow", retries: 0 | 1 | 3, note: Str | null): Str {
+  `Running ${mode} with ${retries} retries`
+}
+
+set-speed("fast", 3, null)   // "Running fast with 3 retries"
+```
+
+Name the type when you reuse it or extend it with `open`.
 
 ## Constraints
 
@@ -119,9 +134,11 @@ listen fn (port: Port): Str {
 }
 ```
 
-A value that fails, such as `listen(70000)`, becomes a `Result.Err` holding a
-`ConstraintError`. See [Constraints](/docs/language/constraints) for fields,
-invariants, preconditions, and how checks run.
+A literal argument that fails, such as `listen(70000)`, is a compile-time
+`constraint-violation` error from `hot check`. A computed value that fails
+becomes a `Result.Err` holding a `ConstraintError` at run time. See
+[Constraints](/docs/language/constraints) for fields, invariants,
+preconditions, and how checks run.
 
 ## Nullable Types
 

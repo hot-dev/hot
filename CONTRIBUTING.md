@@ -90,6 +90,13 @@ For schema changes, add the next numbered migration under
 the change applies to both databases. Follow the public/private migration
 boundary in [`resources/db/V2_MIGRATIONS.md`](resources/db/V2_MIGRATIONS.md).
 
+A new PostgreSQL table needs row-level security: enable and force RLS with its
+policies in the same migration, and list the table in
+[`RLS_COVERAGE.md`](resources/db/postgres/RLS_COVERAGE.md). Runtime services
+refuse to start when the runtime login can reach a table without RLS, and
+operators rerun `provision_runtime.sql` to grant it. See
+[Self-Hosted PostgreSQL](resources/docs/configuration/postgres.md).
+
 ## Style and Conventions
 
 - **Rust:** `cargo fmt` and `cargo clippy` must pass with no warnings.

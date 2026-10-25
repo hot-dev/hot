@@ -301,5 +301,5 @@ S3 uses the standard AWS credential chain unless `access-key-id` and
 
 | Setting | Environment variable | Default |
 |---------|----------------------|---------|
-| `hot.file.storage.path` | `HOT_FILE_STORAGE_PATH` | `./.hot/file` |
+| `hot.file.storage.path` | `HOT_FILE_STORAGE_PATH` | `./.hot/file`, or `$HOT_HOME/file` when `HOT_HOME` is set |
 | none | `HOT_BUILD_STORAGE_PATH` | `.hot/build` |

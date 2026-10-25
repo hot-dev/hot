@@ -375,22 +375,6 @@ environment with shared limits and do not describe remaining account capacity.
 `usage.team_members` is zero because directory seats belong to the account.
 Use the management client's `usage` operation for the root-and-children aggregate.
 
-### Isolation Tests
-
-Each SDK repository includes a `PostgreSQL Sub-org Isolation` CI job and an
-`integration/suborg_fixture.py` harness for local runs. The job builds the exact
-Hot revision in `integration/hot-server.ref`, compares the SDK fixture with the
-server's live OpenAPI operations, and runs sub-org tests against PostgreSQL.
-Migrations use a separate schema owner; the API uses a non-owner
-`NOSUPERUSER NOBYPASSRLS` login with RLS enforcement enabled.
-
-The tests cover parent and sibling isolation, management/runtime credential
-separation, scoped API keys and their service/session descendants, issuer
-revocation and permission narrowing, environment usage, and child lifecycle.
-See each repository's `integration/VALIDATION.md` and README for results and
-local commands. Keep the server revision and OpenAPI fixture aligned across
-all five SDKs when changing the API contract.
-
 ## Call a Hot Function
 
 Every SDK wraps the publish-and-wait flow for `hot:call` events. The helper

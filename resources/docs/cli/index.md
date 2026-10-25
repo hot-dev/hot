@@ -149,6 +149,10 @@ fn () {
 }
 ```
 
+`hot test` warns about a test that makes no assertions. A common cause is a
+call written with a space before `(`, as in `assert (x)`, which binds a
+variable named `assert` instead of calling it.
+
 ### hot check
 
 Analyze code for errors without executing:
@@ -169,6 +173,14 @@ so JSON mode is safe to drive from CI:
 
 ```bash
 hot check --check.format json-min > diagnostics.json || cat diagnostics.json
+```
+
+Warnings, such as a deprecated API or a binding that shadows a function, don't
+fail the check by default. Pass `--check.deny-warnings` (or set
+`hot.check.deny-warnings true`) to exit non-zero on warnings too:
+
+```bash
+hot check --check.deny-warnings
 ```
 
 ### hot watch
@@ -260,7 +272,13 @@ The project name is taken from the directory name. Creates three things alongsid
 - `hot/src/<project>/hi.hot` — Starter file with tutorial
 - `.hot/` — Local data: cache, database, logs (gitignored)
 
-In a fresh checkout of a project, the first command that needs its local SQLite database, such as `hot run`, creates it as `hot init` would.
+In a project, the first command that needs the local SQLite database (`hot run`, `hot eval`, `hot repl`, `hot compile`, `hot build`, `hot test`, or `hot deploy`) prepares it:
+
+- A missing database is created, as `hot init` would.
+- An outdated database is migrated, with a one-line notice.
+- An empty database gets the local identity: user `local@hot.dev`, organization `local`, and environment `development`.
+
+A profile other than the local identity must already exist in the database. See [Profiles](/docs/configuration#profiles). Hot never migrates a PostgreSQL database implicitly; use `hot db migrate`.
 
 ### hot project
 
@@ -328,6 +346,47 @@ Available templates:
 - **app** — App server configuration (for self-hosting)
 - **worker** — Worker configuration (for self-hosting)
 - **scheduler** — Scheduler configuration (for self-hosting)
+
+### hot db
+
+Manage the database in `hot.db.uri`:
+
+```bash
+hot db status                    # Show the connection and pending migrations
+hot db migrate                   # Apply pending migrations
+hot db provision-store-indexes   # Create PostgreSQL vector indexes for stores
+hot db port-v1-to-v2             # Port a Hot 1.x SQLite database to Hot 2
+```
+
+On PostgreSQL, `hot db migrate` and `hot db provision-store-indexes` connect
+with the schema owner in `--db.migration-uri` (or `HOT_DB_MIGRATION_URI`).
+Services keep using the restricted runtime login in `--db.uri`:
+
+```bash
+hot db migrate \
+  --db.uri "postgres://hot_runtime:<password>@db.example.com/hot" \
+  --db.migration-uri "postgres://hot_owner:<password>@db.example.com/hot"
+```
+
+See [Self-Hosted PostgreSQL](/docs/configuration/postgres) for the setup, and
+[Migrations and Upgrades](/docs/migrations) for `port-v1-to-v2`.
+
+### hot key
+
+Create a full-access API key in the configured database:
+
+```bash
+hot key create                          # Description defaults to "cli"
+hot key create --description "ci"
+KEY=$(hot key create --description "ci")
+```
+
+The key belongs to the selected profile's environment. `hot key create`
+prints the key once to stdout and everything else to stderr, so you can
+capture it in a script. It writes to the database directly, which suits local
+development, CI against a local `hot dev`, and self-hosted installations. On
+Hot Cloud, create keys in the app instead. See
+[Authentication](/docs/authentication).
 
 ## Tooling
 
@@ -399,6 +458,10 @@ Update Hot to the latest version:
 hot update
 ```
 
+When the latest version is a new major version, `hot update` asks before
+installing it. Without a terminal to ask on, it installs nothing and prints the
+`hot update --version` command to run.
+
 Install a specific release:
 
 ```bash
@@ -439,10 +502,12 @@ These options work with most commands:
 | `-c, --conf <FILE>` | Configuration file(s) |
 | `--ctx <FILE>` | Context file(s) for variables |
 | `-p, --project <NAME>` | Project name to use |
+| `--profile <NAME>` | User, organization, and environment profile to use (see [Profiles](/docs/configuration#profiles)) |
 | `-s, --src.path <DIR>` | Source directory |
 | `-t, --test.path <DIR>` | Test directory |
 | `--engine.threads <N>` | Engine threads (default: 4) |
 | `--db.uri <URI>` | Database connection URI |
+| `--db.migration-uri <URI>` | Schema-owner URI for migrations on PostgreSQL (see [Self-Hosted PostgreSQL](/docs/configuration/postgres)) |
 | `--log.level <LEVEL>` | Log level: off, trace, debug, error, warn, info |
 | `--log.target <TARGET>` | Log output: stdout, file, none |
 | `--log.dir <DIR>` | Directory for log files |
@@ -450,7 +515,7 @@ These options work with most commands:
 | `--log.retention <COUNT>` | Number of log files to keep, 0 = keep all (default: 7) |
 | `--deploy.auto <BOOL>` | Auto-deploy on CLI commands (default: true) |
 | `--emitter.type <TYPE>` | Emitter: none, console, db (default: db in project, none otherwise) |
-| `--with-tests <BOOL>` | Include test files in compile/check/watch (default: false) |
+| `--with-tests <BOOL>` | Include test files in compile/check/watch (default: true for check, false for watch) |
 | `--show-conf` | Show configuration and exit |
 
 ## Environment Variables
@@ -458,9 +523,15 @@ These options work with most commands:
 The CLI reads configuration from environment variables prefixed with `HOT_`:
 
 ```bash
-export HOT_DB_URI="postgres://localhost/hot"
 export HOT_LOG_LEVEL="debug"
 export HOT_API_PORT="8080"
+
+# PostgreSQL: a restricted runtime login, plus the schema owner for migrations
+export HOT_DB_URI="postgres://hot_runtime:<password>@db.example.com/hot"
+export HOT_DB_MIGRATION_URI="postgres://hot_owner:<password>@db.example.com/hot"
 ```
+
+Give `HOT_DB_MIGRATION_URI` only to migration jobs, not to long-running
+services.
 
 See [Configuration](/docs/configuration) for more details.

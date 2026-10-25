@@ -136,11 +136,12 @@
 		pattern: /::[a-zA-Z_][a-zA-Z0-9_\-?!]*(?:::[a-zA-Z_][a-zA-Z0-9_\-?!]*)*/,
 		greedy: true
 	},
-	// Keywords: fn, type, ns, meta are declarations; lazy, do are control; serial, parallel, cond, cond-all, match, match-all are flow
+	// Keywords: fn, type, ns, meta are declarations; lazy, do are control; serial, parallel, cond, cond-all, match, match-all are flow;
+	// where introduces a constraint predicate
 	// Note: '->' (implements) is handled separately
 	// Use explicit lookbehind/lookahead to prevent matching keywords within hyphenated identifiers like 'is-null' or 'some-type'
 	'keyword': [
-		/(?<![a-zA-Z0-9_-])(?:meta|type|enum|fn|ns|lazy|do|serial|parallel|cond-all|cond|match-all|match)(?![a-zA-Z0-9_-])/,
+		/(?<![a-zA-Z0-9_-])(?:meta|type|enum|fn|ns|lazy|do|serial|parallel|cond-all|cond|match-all|match|where)(?![a-zA-Z0-9_-])/,
 		/\|>/  // Pipe operator
 	],
 		'boolean': /(?<![a-zA-Z0-9_-])(?:true|false)(?![a-zA-Z0-9_-])/,

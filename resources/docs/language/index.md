@@ -27,6 +27,7 @@ message greet("Hot")
 | `name = "Ada"` | `name "Ada"` |
 | `a + b` | `add(a, b)` |
 | `if (x) { } else { }` | `if(x, then, else)` or `cond { x => then => else }` |
+| `f (x)` | `f(x)`: a call has no space before `(` |
 | `return value` | The final expression is the value |
 | `for x in items` | `map(items, ...)` or `for-each(iter, ...)` |
 

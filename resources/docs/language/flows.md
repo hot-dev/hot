@@ -501,10 +501,13 @@ last: Int parallel {
 Bare `All` is accepted only on natural collect-all flows (`parallel`,
 `cond-all`, and `match-all`). Use `All<Vec>` or `All<Map>` on other flows.
 
-Annotations are not enforced at runtime, but `hot check` reports an
-`annotation-mismatch` warning when an annotation names a type the value
-can never be (for example `x: Int parallel { ... }` whose final value is
-a `Str`).
+A plain type annotation such as `Int` is not enforced at runtime, but
+`hot check` reports an `annotation-mismatch` warning when an annotation names
+a type the value can never be (for example `x: Int parallel { ... }` whose
+final value is a `Str`). An annotation with a constraint is enforced: a
+[`where` refinement](/docs/language/constraints) or a closed literal union
+checks the flow's value at runtime, and a value that fails becomes
+`Err(ConstraintError.Violation)`.
 
 ### Default Flow Shapes
 
