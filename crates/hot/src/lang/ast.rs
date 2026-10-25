@@ -1212,6 +1212,68 @@ pub fn is_inline_refinement_type(name: &str) -> bool {
     short.starts_with(WHERE_TYPE_PREFIX)
 }
 
+/// How an inline refinement type reads in source, such as `Int where gt(%, 0)`.
+pub fn inline_refinement_display(def: &TypeDef) -> Option<String> {
+    Some(format!(
+        "{} where {}",
+        def.type_alias.as_ref()?,
+        def.refinement.as_ref()?.source
+    ))
+}
+
+/// How each hidden inline-refinement type in `namespaces` reads in source,
+/// keyed by its short `$Where-…` name.
+pub fn inline_refinement_displays<'a>(
+    namespaces: impl IntoIterator<Item = &'a Namespace>,
+) -> AHashMap<String, String> {
+    let mut displays = AHashMap::new();
+    for namespace in namespaces {
+        for (var, value) in &namespace.scope.vars {
+            if let Value::TypeDef(def) = value
+                && is_inline_refinement_type(var.sym.name())
+                && let Some(shown) = inline_refinement_display(def)
+            {
+                displays.insert(var.sym.name().to_string(), shown);
+            }
+        }
+    }
+    displays
+}
+
+/// `annotation` with each hidden inline-refinement type name, bare or
+/// namespace-qualified, replaced by how it reads in source, so messages and
+/// docs show `x: Int where gt(%, 0)` rather than `x: $Where-…`. A name
+/// missing from `displays` stays as it is.
+pub fn display_inline_refinements(annotation: &str, displays: &AHashMap<String, String>) -> String {
+    if !annotation.contains(WHERE_TYPE_PREFIX) {
+        return annotation.to_string();
+    }
+    let is_name_char = |c: char| c.is_alphanumeric() || matches!(c, '-' | '_' | ':' | '/' | '.');
+    let mut out = String::with_capacity(annotation.len());
+    let mut rest = annotation;
+    while let Some(start) = rest.find(WHERE_TYPE_PREFIX) {
+        // Include a `::ns/` qualifier written directly before the name.
+        let qualified_start = rest[..start]
+            .char_indices()
+            .rev()
+            .take_while(|(_, c)| is_name_char(*c))
+            .last()
+            .map_or(start, |(i, _)| i);
+        let after_prefix = start + WHERE_TYPE_PREFIX.len();
+        let end = rest[after_prefix..]
+            .find(|c: char| !(c.is_ascii_alphanumeric() || c == '-'))
+            .map_or(rest.len(), |i| after_prefix + i);
+        out.push_str(&rest[..qualified_start]);
+        match displays.get(&rest[start..end]) {
+            Some(shown) => out.push_str(shown),
+            None => out.push_str(&rest[qualified_start..end]),
+        }
+        rest = &rest[end..];
+    }
+    out.push_str(rest);
+    out
+}
+
 /// Metadata key marking a binding written `name (…)`. A call never has a
 /// space before `(`, so such a binding that hides a function is usually a
 /// mistaken call, which `hot check` reports as `binding-shadows-function`.

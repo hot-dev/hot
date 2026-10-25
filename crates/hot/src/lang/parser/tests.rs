@@ -2487,3 +2487,30 @@ fn test_spaced_paren_in_a_flow_body_binds_a_lambda() {
         );
     }
 }
+
+/// A `where` declares hidden helpers before the declaration it belongs to,
+/// so a file's last value is never one of them, even when the clause is on
+/// the line after the closing brace.
+#[test]
+fn where_helpers_precede_their_declaration() {
+    for source in [
+        "::t ns\n\nServer type {\n    port: Int\n}\nwhere gt(%.port, 0)\n",
+        "::t ns\n\nServer type {\n    port: Int\n} where gt(%.port, 0)\n",
+        "::t ns\n\nn: Int 3\nwhere gt(%, 0)\n",
+        "::t ns\n\nf fn (n: Int where gt(%, 0)): Int { n }\n",
+    ] {
+        let program = parse_hot_file(source, "t.hot").unwrap();
+        let namespace = program
+            .namespaces
+            .values()
+            .find(|ns| ns.path.to_string() == "::t")
+            .unwrap();
+        let names: Vec<&str> = namespace.scope.vars.keys().map(|v| v.sym.name()).collect();
+        let last = *names.last().unwrap();
+        assert!(
+            !crate::lang::ast::is_where_predicate(last)
+                && !crate::lang::ast::is_inline_refinement_type(last),
+            "{source:?} ends with {last}: {names:?}"
+        );
+    }
+}

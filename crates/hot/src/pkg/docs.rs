@@ -5,7 +5,7 @@
 //!
 //! Uses the actual Hot parser for reliable AST-based extraction.
 
-use crate::lang::ast::{Meta, NsPath, Ref, TypeDef, Value};
+use crate::lang::ast::{FnDef, Meta, NsPath, Ref, TypeDef, Value};
 use crate::lang::parser::parse_hot_file;
 use crate::val::Val;
 use ahash::{AHashMap, AHashSet};
@@ -136,6 +136,9 @@ pub struct DocFunction {
 pub struct FunctionSignature {
     pub params: Vec<FunctionParam>,
     pub return_type: Option<String>,
+    /// The argument-list `where` predicate: `fn (a, b) where lte(%.a, %.b)`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub precondition: Option<String>,
 }
 
 /// A function parameter
@@ -158,6 +161,10 @@ pub struct DocType {
     /// For literal union types like `"user" | "assistant"`, the type expression as a string
     #[serde(skip_serializing_if = "Option::is_none")]
     pub type_alias: Option<String>,
+    /// The declaration's `where` predicate: a refinement of an alias, or an
+    /// invariant of a struct or enum.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub refinement: Option<String>,
     /// Set when this type is documented through a public alias.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub alias_of: Option<String>,
@@ -1124,6 +1131,7 @@ fn doc_type_from_function_alias(alias: &DocFunction, target: &DocType) -> DocTyp
         fields: Vec::new(),
         constructors: Vec::new(),
         type_alias: None,
+        refinement: None,
         alias_of: alias.alias_of.clone(),
     };
     hydrate_type_alias(&mut typ, target);
@@ -1138,6 +1146,7 @@ fn doc_type_from_unresolved_function_alias(alias: &DocFunction) -> DocType {
         fields: Vec::new(),
         constructors: Vec::new(),
         type_alias: None,
+        refinement: None,
         alias_of: alias.alias_of.clone(),
     }
 }
@@ -1198,6 +1207,9 @@ fn hydrate_type_alias(alias: &mut DocType, target: &DocType) {
     }
     if alias.type_alias.is_none() {
         alias.type_alias = target.type_alias.clone();
+    }
+    if alias.refinement.is_none() {
+        alias.refinement = target.refinement.clone();
     }
 }
 
@@ -1742,8 +1754,12 @@ pub fn parse_namespace_from_ast(path: &Path) -> Result<DocNamespace, String> {
         let var_name = var.sym.name().to_string();
         let var_meta = &var.meta;
 
-        // Skip items marked with no-doc
-        if is_no_doc_from_meta(var_meta) {
+        // Skip items marked with no-doc, and the hidden predicates and
+        // types that `where` clauses declare.
+        if is_no_doc_from_meta(var_meta)
+            || crate::lang::ast::is_where_predicate(&var_name)
+            || crate::lang::ast::is_inline_refinement_type(&var_name)
+        {
             continue;
         }
 
@@ -1791,26 +1807,7 @@ pub fn parse_namespace_from_ast(path: &Path) -> Result<DocNamespace, String> {
 
                 let signatures = fn_defs
                     .iter()
-                    .map(|fn_def| FunctionSignature {
-                        params: fn_def
-                            .args
-                            .args
-                            .iter()
-                            .map(|arg| FunctionParam {
-                                name: arg.var.sym.name().to_string(),
-                                type_annotation: arg
-                                    .type_annotation
-                                    .as_ref()
-                                    .map(|t| clean_type_annotation(t, &resolver)),
-                                is_lazy: arg.lazy,
-                                is_variadic: false,
-                            })
-                            .collect(),
-                        return_type: fn_def
-                            .return_type
-                            .as_ref()
-                            .map(|t| clean_type_annotation(t, &resolver)),
-                    })
+                    .map(|fn_def| signature_from_fn_def(fn_def, &resolver))
                     .collect();
 
                 functions.push(DocFunction {
@@ -1895,6 +1892,7 @@ pub fn parse_namespace_from_ast(path: &Path) -> Result<DocNamespace, String> {
                         fields: Vec::new(),
                         constructors: Vec::new(),
                         type_alias: None,
+                        refinement: None,
                         alias_of: Some(alias_of),
                     });
                     continue;
@@ -2014,21 +2012,8 @@ fn doc_type_from_type_def(
             ctors
                 .iter()
                 .map(|fn_def| FunctionSignature {
-                    params: fn_def
-                        .args
-                        .args
-                        .iter()
-                        .map(|arg| FunctionParam {
-                            name: arg.var.sym.name().to_string(),
-                            type_annotation: arg
-                                .type_annotation
-                                .as_ref()
-                                .map(|t| clean_type_annotation(t, resolver)),
-                            is_lazy: arg.lazy,
-                            is_variadic: false,
-                        })
-                        .collect(),
                     return_type: Some(name.clone()),
+                    ..signature_from_fn_def(fn_def, resolver)
                 })
                 .collect()
         })
@@ -2046,6 +2031,7 @@ fn doc_type_from_type_def(
         fields,
         constructors,
         type_alias,
+        refinement: type_def.refinement.as_ref().map(|r| r.source.clone()),
         alias_of,
     }
 }
@@ -2170,26 +2156,7 @@ fn signatures_from_ref(
     match target_value {
         Some(Value::Fn(fn_defs)) => fn_defs
             .iter()
-            .map(|fn_def| FunctionSignature {
-                params: fn_def
-                    .args
-                    .args
-                    .iter()
-                    .map(|arg| FunctionParam {
-                        name: arg.var.sym.name().to_string(),
-                        type_annotation: arg
-                            .type_annotation
-                            .as_ref()
-                            .map(|t| clean_type_annotation(t, resolver)),
-                        is_lazy: arg.lazy,
-                        is_variadic: false,
-                    })
-                    .collect(),
-                return_type: fn_def
-                    .return_type
-                    .as_ref()
-                    .map(|t| clean_type_annotation(t, resolver)),
-            })
+            .map(|fn_def| signature_from_fn_def(fn_def, resolver))
             .collect(),
         _ => Vec::new(),
     }
@@ -2434,6 +2401,8 @@ struct TypeResolver {
     aliases: Vec<(String, String)>,
     /// Bare-identifier replacements, e.g. `"Session" -> "::ai::session/Session"`.
     var_imports: AHashMap<String, String>,
+    /// How each hidden inline-refinement type (`$Where-…`) reads in source.
+    refinements: AHashMap<String, String>,
 }
 
 impl TypeResolver {
@@ -2465,6 +2434,7 @@ impl TypeResolver {
         Self {
             aliases,
             var_imports,
+            refinements: crate::lang::ast::inline_refinement_displays(std::iter::once(ns)),
         }
     }
 }
@@ -2479,7 +2449,35 @@ impl TypeResolver {
 /// `Session` becomes `::ai::session/Session`. Built-in types (`Str`, `Int`,
 /// ...) and locally-defined names that aren't imports are left untouched.
 fn clean_type_annotation(s: &str, resolver: &TypeResolver) -> String {
-    resolve_type_aliases(s, resolver)
+    crate::lang::ast::display_inline_refinements(
+        &resolve_type_aliases(s, resolver),
+        &resolver.refinements,
+    )
+}
+
+/// A function definition's documented signature.
+fn signature_from_fn_def(fn_def: &FnDef, resolver: &TypeResolver) -> FunctionSignature {
+    FunctionSignature {
+        params: fn_def
+            .args
+            .args
+            .iter()
+            .map(|arg| FunctionParam {
+                name: arg.var.sym.name().to_string(),
+                type_annotation: arg
+                    .type_annotation
+                    .as_ref()
+                    .map(|t| clean_type_annotation(t, resolver)),
+                is_lazy: arg.lazy,
+                is_variadic: false,
+            })
+            .collect(),
+        return_type: fn_def
+            .return_type
+            .as_ref()
+            .map(|t| clean_type_annotation(t, resolver)),
+        precondition: fn_def.precondition.as_ref().map(|r| r.source.clone()),
+    }
 }
 
 /// Apply the namespace alias map to a single `NsPath`, returning its
@@ -2724,6 +2722,7 @@ fn try_parse_item(lines: &[&str], start: usize) -> Option<(ParsedItem, usize)> {
                 fields,
                 constructors: Vec::new(), // Text parser doesn't extract constructors
                 type_alias: None,         // Text parser doesn't extract type aliases
+                refinement: None,
                 alias_of: None,
             }),
             end_line,
@@ -2884,6 +2883,7 @@ fn parse_function_signatures(lines: &[&str], start: usize, end: usize) -> Vec<Fu
                     signatures.push(FunctionSignature {
                         params: current_params.clone(),
                         return_type: current_return.clone(),
+                        precondition: None,
                     });
 
                     current_params.clear();
@@ -2912,6 +2912,7 @@ fn parse_function_signatures(lines: &[&str], start: usize, end: usize) -> Vec<Fu
         signatures.push(FunctionSignature {
             params: Vec::new(),
             return_type: None,
+            precondition: None,
         });
     }
 
@@ -3288,6 +3289,7 @@ mod tests {
         TypeResolver {
             aliases,
             var_imports,
+            refinements: AHashMap::new(),
         }
     }
 
@@ -3398,6 +3400,51 @@ mod tests {
         let mut file = fs::File::create(&path).expect("create");
         file.write_all(source.as_bytes()).expect("write");
         parse_namespace_from_ast(&path).expect("parse namespace")
+    }
+
+    #[test]
+    fn where_clauses_appear_in_docs_without_hidden_entries() {
+        let ns = parse_doc_namespace(
+            r#"
+::shop ns
+
+Port type Int where between(%, 1, 65535)
+
+Window type {
+    start: Int,
+    finish: Int
+} where lte(%.start, %.finish)
+
+clamp fn (n: Int where gte(%, 0), hi: Int) where lte(%.n, %.hi): Int where gte(%, 0) {
+    n
+}
+"#,
+        );
+        let names: Vec<&str> = ns
+            .functions
+            .iter()
+            .map(|f| f.name.as_str())
+            .chain(ns.types.iter().map(|t| t.name.as_str()))
+            .collect();
+        assert!(
+            names.iter().all(|name| !name.starts_with('$')),
+            "hidden `where` declarations are documented: {names:?}"
+        );
+        let clamp = ns.functions.iter().find(|f| f.name == "clamp").unwrap();
+        let signature = &clamp.signatures[0];
+        assert_eq!(
+            signature.params[0].type_annotation.as_deref(),
+            Some("Int where gte(%, 0)")
+        );
+        assert_eq!(signature.precondition.as_deref(), Some("lte(%.n, %.hi)"));
+        assert_eq!(
+            signature.return_type.as_deref(),
+            Some("Int where gte(%, 0)")
+        );
+        let port = ns.types.iter().find(|t| t.name == "Port").unwrap();
+        assert_eq!(port.refinement.as_deref(), Some("between(%, 1, 65535)"));
+        let window = ns.types.iter().find(|t| t.name == "Window").unwrap();
+        assert_eq!(window.refinement.as_deref(), Some("lte(%.start, %.finish)"));
     }
 
     #[test]
@@ -3731,6 +3778,7 @@ Response meta { doc: "response type" } type {
                     fields: Vec::new(),
                     constructors: Vec::new(),
                     type_alias: None,
+                    refinement: None,
                     alias_of: Some("::aws::lambda::invoke/InvokeResponse".to_string()),
                 }],
                 values: Vec::new(),
@@ -3754,6 +3802,7 @@ Response meta { doc: "response type" } type {
                             is_variadic: false,
                         }],
                         return_type: Some("InvokeResponse".to_string()),
+                        precondition: None,
                     }],
                     ctx: None,
                     box_req: None,
@@ -3774,6 +3823,7 @@ Response meta { doc: "response type" } type {
                     }],
                     constructors: Vec::new(),
                     type_alias: None,
+                    refinement: None,
                     alias_of: None,
                 }],
                 values: Vec::new(),

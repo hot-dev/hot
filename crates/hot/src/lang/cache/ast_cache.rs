@@ -1623,7 +1623,7 @@ pub struct CacheEntry {
 }
 
 /// Current cache format version
-pub const CACHE_VERSION: u32 = 7; // Bumped for `where` refinements on TypeDef, FnDef and Lambda
+pub const CACHE_VERSION: u32 = 8; // Bumped for template `where` predicates, match-arm sources and spaced-paren binding markers
 
 /// Serialize namespaces to cacheable binary (postcard)
 pub fn serialize_namespaces(
@@ -1936,7 +1936,7 @@ shout fn (s: Str): Str {
         let serialized = serialize_namespaces(&program.namespaces).unwrap();
         let hash = crate::hasher::HotHasher::hash_content(&serialized);
 
-        let expected = "f71ea06274d8e120198427718ddd68636d31d7277870aa907846b737994d2903";
+        let expected = "78d20a1e727571e35a184e7f32e9cd43afd005a4357496ad19821372ace24731";
         assert_eq!(
             hash, expected,
             "postcard cache wire layout changed (got hash {hash}). If this is \

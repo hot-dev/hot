@@ -558,6 +558,9 @@ pub struct TypeChecker {
     /// both declarations when a second arrow with the same
     /// `(source, target)` short-name pair is encountered.
     impl_locations: AHashMap<(String, String), Option<ErrorLocation>>,
+    /// How each hidden inline-refinement type (`$Where-…`) reads in source,
+    /// so diagnostics show `Int where gt(%, 0)` instead of its hidden name.
+    refinement_displays: AHashMap<String, String>,
     /// Fully-qualified variable registry: `::ns/var-name` → inferred `TypeExpr`.
     ///
     /// Populated by the pre-pass in `check_program` so that a `Ref::Ns`
@@ -635,6 +638,7 @@ impl TypeChecker {
             core_types: AHashMap::new(),
             impl_registry: AHashSet::new(),
             impl_locations: AHashMap::new(),
+            refinement_displays: AHashMap::new(),
             qualified_variables: AHashMap::new(),
             pending_dependency: std::cell::Cell::new(false),
             core_variables: AHashMap::new(),
@@ -970,6 +974,8 @@ impl TypeChecker {
 
     /// Collect all type names from the program for type resolution
     fn collect_known_types(&mut self, program: &Program) {
+        self.refinement_displays =
+            crate::lang::ast::inline_refinement_displays(program.namespaces.values());
         for (ns_path, namespace) in &program.namespaces {
             let ns_str = ns_path.to_string();
             for (var, value) in &namespace.scope.vars {
@@ -2682,7 +2688,7 @@ impl TypeChecker {
     }
 
     /// Warn when an annotation names a type the value can never be
-    /// (`annotation-mismatch`). Annotations are not enforced at runtime,
+    /// (`annotation-mismatch`). Plain annotations are not enforced at runtime,
     /// so a definite mismatch means either the annotation or the value is
     /// wrong. Conservative by construction: both sides must be definite
     /// (see `type_is_definite`), a union warns only when *no* member is
@@ -2720,7 +2726,10 @@ impl TypeChecker {
         let location = src.map(|s| self.source_to_error_location(s));
         self.errors.add_warning(CompilerError::AnnotationMismatch {
             name: name.to_string(),
-            annotation: annotation.to_string(),
+            annotation: crate::lang::ast::display_inline_refinements(
+                annotation,
+                &self.refinement_displays,
+            ),
             inferred: inferred.to_string(),
             location,
         });

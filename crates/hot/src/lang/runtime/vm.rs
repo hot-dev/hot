@@ -211,6 +211,10 @@ pub struct LexicalScope {
     local_types: IndexMap<String, String>,
     /// Local type implementations in this scope: (source_type, target_type) -> implementation_function_name
     local_implementations: IndexMap<(String, String), String>,
+    /// Namespace entries this scope's local bindings overwrote, with their
+    /// previous values: `(namespace, name, previous)`. Restored when the
+    /// scope ends, so a local never outlives its scope in the namespace.
+    ns_shadows: Vec<(String, String, Option<Val>)>,
 }
 
 /// Flow execution context
@@ -325,6 +329,7 @@ impl LexicalScope {
             variables: IndexMap::new(),
             local_types: IndexMap::new(),
             local_implementations: IndexMap::new(),
+            ns_shadows: Vec::new(),
         }
     }
 
@@ -2675,72 +2680,11 @@ impl VirtualMachine {
                 parts_count,
             } => {
                 let dest = *dest;
-                let parts_start = *parts_start;
-                let parts_count = *parts_count;
-                // Check for template literal recursion
-                if self.template_recursion_depth > 15 {
-                    tracing::warn!(
-                        "Template recursion limit hit at depth {}",
-                        self.template_recursion_depth
-                    );
-                    self.set_register(dest, Val::from("<template-recursion>"))?;
-                    self.instruction_pointer += 1;
-                    return Ok(());
-                }
-
-                // Execute template literal interpolation
-                let mut result = String::new();
-                let max_template_bytes = crate::lang::runtime::limits::max_string_bytes();
-
-                // Temporarily increment recursion depth
-                self.template_recursion_depth += 1;
-
-                for i in 0..parts_count {
-                    let part_reg = parts_start + i as RegisterId;
-                    let part_val = self.get_register(part_reg)?.clone();
-
-                    // Automatically unwrap Results in template literals
-                    let unwrapped_val = self.unwrap_result_if_ok(&part_val)?;
-
-                    // Convert value to string using Str constructor (supports type implementations)
-                    let string_repr: String =
-                        match crate::lang::hot::r#type::str_constructor(self, &[unwrapped_val]) {
-                            crate::lang::hot::r#type::HotResult::Ok(Val::Str(s)) => (*s).to_owned(),
-                            crate::lang::hot::r#type::HotResult::Ok(other) => other.to_string(),
-                            crate::lang::hot::r#type::HotResult::Err(e) => e.to_string(),
-                        };
-                    // Bound the produced template length up-front using checked
-                    // arithmetic so a single template can't drive an unbounded
-                    // String allocation (which would call the allocator and
-                    // potentially abort on OOM).
-                    let projected_len =
-                        result.len().checked_add(string_repr.len()).ok_or_else(|| {
-                            VmError::runtime("Template literal length overflows usize".to_string())
-                        })?;
-                    if projected_len > max_template_bytes {
-                        // Restore recursion depth before bailing out.
-                        self.template_recursion_depth -= 1;
-                        return Err(VmError::runtime(format!(
-                            "Template literal too large: would produce {} bytes (limit {}). \
-                             Raise HOT_MAX_STRING_BYTES if this is intentional.",
-                            projected_len, max_template_bytes
-                        )));
-                    }
-                    if let Err(e) = crate::lang::runtime::limits::try_reserve_string(
-                        "template literal",
-                        &mut result,
-                        string_repr.len(),
-                    ) {
-                        self.template_recursion_depth -= 1;
-                        return Err(VmError::runtime(e.to_string()));
-                    }
-                    result.push_str(&string_repr);
-                }
-
-                // Restore recursion depth
-                self.template_recursion_depth -= 1;
-
-                self.set_register(dest, Val::from(result))?;
+                let parts = (0..*parts_count)
+                    .map(|i| self.get_register(parts_start + i as RegisterId).cloned())
+                    .collect::<VmResult<Vec<Val>>>()?;
+                let value = self.interpolate_template(&parts)?;
+                self.set_register(dest, value)?;
                 self.instruction_pointer += 1;
             }
 
@@ -2977,7 +2921,7 @@ impl VirtualMachine {
             Instruction::ExitScope => {
                 if self.scope_stack.len() > 1 {
                     // Keep at least the global scope
-                    self.scope_stack.pop();
+                    self.truncate_scopes(self.scope_stack.len() - 1);
                 }
                 self.instruction_pointer += 1;
             }
@@ -5024,6 +4968,63 @@ impl VirtualMachine {
     ///
     /// Call this only at ordinary Result-consumption boundaries. Callers that
     /// support non-consuming inspection must handle those exceptions first.
+    /// Interpolate a template literal's parts, for the interpreter and the
+    /// JIT alike: each part's Result is consumed, so an Err halts, and each
+    /// value converts with `Str` (which honors type implementations).
+    pub(crate) fn interpolate_template(&mut self, parts: &[Val]) -> VmResult<Val> {
+        // Check for template literal recursion
+        if self.template_recursion_depth > 15 {
+            tracing::warn!(
+                "Template recursion limit hit at depth {}",
+                self.template_recursion_depth
+            );
+            return Ok(Val::from("<template-recursion>"));
+        }
+        self.template_recursion_depth += 1;
+        let result = self.interpolate_template_parts(parts);
+        self.template_recursion_depth -= 1;
+        result.map(Val::from)
+    }
+
+    fn interpolate_template_parts(&mut self, parts: &[Val]) -> VmResult<String> {
+        let mut result = String::new();
+        let max_template_bytes = crate::lang::runtime::limits::max_string_bytes();
+        for part_val in parts {
+            // Automatically unwrap Results in template literals
+            let unwrapped_val = self.unwrap_result_if_ok(part_val)?;
+
+            // Convert value to string using Str constructor (supports type implementations)
+            let string_repr: String =
+                match crate::lang::hot::r#type::str_constructor(self, &[unwrapped_val]) {
+                    crate::lang::hot::r#type::HotResult::Ok(Val::Str(s)) => (*s).to_owned(),
+                    crate::lang::hot::r#type::HotResult::Ok(other) => other.to_string(),
+                    crate::lang::hot::r#type::HotResult::Err(e) => e.to_string(),
+                };
+            // Bound the produced template length up-front using checked
+            // arithmetic so a single template can't drive an unbounded
+            // String allocation (which would call the allocator and
+            // potentially abort on OOM).
+            let projected_len = result.len().checked_add(string_repr.len()).ok_or_else(|| {
+                VmError::runtime("Template literal length overflows usize".to_string())
+            })?;
+            if projected_len > max_template_bytes {
+                return Err(VmError::runtime(format!(
+                    "Template literal too large: would produce {} bytes (limit {}). \
+                     Raise HOT_MAX_STRING_BYTES if this is intentional.",
+                    projected_len, max_template_bytes
+                )));
+            }
+            crate::lang::runtime::limits::try_reserve_string(
+                "template literal",
+                &mut result,
+                string_repr.len(),
+            )
+            .map_err(|e| VmError::runtime(e.to_string()))?;
+            result.push_str(&string_repr);
+        }
+        Ok(result)
+    }
+
     pub(crate) fn unwrap_result_if_ok(&mut self, val: &Val) -> VmResult<Val> {
         // Cache the debug-env check: this runs per argument per call, and
         // std::env::var is far too expensive for that hot path.
@@ -7721,12 +7722,12 @@ impl VirtualMachine {
         // Pop the lambda scope. An error also leaves the scopes and flow
         // contexts the body opened, so drop those too.
         if body.is_err() {
-            self.scope_stack.truncate(saved_scope_depth);
+            self.truncate_scopes(saved_scope_depth);
             self.flow_contexts.truncate(saved_flow_context_depth);
             self.skip_until_branch_end = saved_skip_flag;
             self.skip_remaining_cond_flow = saved_skip_cond_flow;
         } else {
-            self.scope_stack.pop();
+            self.truncate_scopes(self.scope_stack.len().saturating_sub(1));
         }
 
         // Restore original namespace
@@ -8223,7 +8224,7 @@ impl VirtualMachine {
 
                 // Ensure the function's namespace has a ns variable pointing to itself
                 if let Err(err) = self.ensure_namespace_has_ns_variable(namespace) {
-                    self.scope_stack.truncate(saved_scope_depth);
+                    self.truncate_scopes(saved_scope_depth);
                     self.current_namespace = saved_namespace;
                     return Err(err);
                 }
@@ -8444,7 +8445,7 @@ impl VirtualMachine {
             // Restore scope stack to pre-function depth.
             // This pops the function scope AND any scopes leaked by flow constructs
             // (cond, match, etc.) during instruction execution.
-            self.scope_stack.truncate(saved_scope_depth);
+            self.truncate_scopes(saved_scope_depth);
 
             // Restore skip flags after function execution
             self.skip_until_branch_end = saved_skip_flag;
@@ -8922,7 +8923,7 @@ impl VirtualMachine {
                 let result = self.execute_thunk(thunk)?;
 
                 // Pop the temporary scope
-                self.scope_stack.pop();
+                self.truncate_scopes(self.scope_stack.len().saturating_sub(1));
 
                 self.store_variable(var_name, result.clone())?;
 
@@ -9277,20 +9278,53 @@ impl VirtualMachine {
             // Lexical scope variable (function parameter, local variable)
             tracing::trace!("VM: Storing lexical variable '{}' in scope", name);
             if let Some(scope) = self.scope_stack.last_mut() {
-                scope.variables.insert(name.to_string(), value);
-                // Mirror local variable into current namespace registry for resilient lookups within flows
-                self.namespace_variables
+                scope.variables.insert(name.to_string(), value.clone());
+                // Mirror local variable into current namespace registry for resilient lookups within flows.
+                // The scope records what it overwrote, and restores it when it ends.
+                let previous = self
+                    .namespace_variables
                     .entry(self.current_namespace.clone())
                     .or_default()
-                    .insert(
+                    .insert(name.to_string(), value);
+                if !scope
+                    .ns_shadows
+                    .iter()
+                    .any(|(ns, shadowed, _)| shadowed == name && *ns == self.current_namespace)
+                {
+                    scope.ns_shadows.push((
+                        self.current_namespace.clone(),
                         name.to_string(),
-                        scope.variables.get(name).cloned().unwrap_or(Val::Null),
-                    );
+                        previous,
+                    ));
+                }
                 Ok(())
             } else {
                 Err(VmError::runtime(
                     "No scope available for variable storage".to_string(),
                 ))
+            }
+        }
+    }
+
+    /// Pop scopes down to `depth`, restoring the namespace entries their
+    /// local bindings overwrote, innermost scope and latest binding first.
+    fn truncate_scopes(&mut self, depth: usize) {
+        while self.scope_stack.len() > depth {
+            let Some(scope) = self.scope_stack.pop() else {
+                break;
+            };
+            for (namespace, name, previous) in scope.ns_shadows.into_iter().rev() {
+                let Some(entries) = self.namespace_variables.get_mut(&namespace) else {
+                    continue;
+                };
+                match previous {
+                    Some(value) => {
+                        entries.insert(name, value);
+                    }
+                    None => {
+                        entries.shift_remove(&name);
+                    }
+                }
             }
         }
     }

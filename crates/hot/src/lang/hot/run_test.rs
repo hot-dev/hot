@@ -522,6 +522,82 @@ match r {
         }
     }
 
+    /// A `where` on a type declares a hidden predicate function, which must
+    /// not become the file's value: `hot run` printed `::t/$where-…`. It
+    /// still calls the namespace's own functions, declared before it.
+    #[test]
+    fn where_predicate_is_never_the_last_value() {
+        let src = r#"::t ns
+gt fn (a: Int, b: Int): Bool { lte(a, b) }
+answer 42
+Small type {
+    n: Int
+}
+where gt(%.n, 5)"#;
+        assert_eq!(compile_and_run_with_std_conf(src, None), Ok(crate::val!(42)));
+    }
+
+    /// A local binding ends with its function call: after `callee` binds a
+    /// local `label`, its caller still calls the namespace's `label`. The
+    /// local stayed in the namespace, so the call failed with "Function 'x'
+    /// not found".
+    #[test]
+    fn callee_local_does_not_outlive_the_call() {
+        let src = r#"::t ns
+label fn (s: Str): Str { `[${s}]` }
+callee fn (): Str {
+    label "x"
+    label
+}
+caller fn (): Str {
+    a callee()
+    label("hi")
+}
+caller()"#;
+        for conf in [
+            crate::val!({"jit": {"threshold": 1}}),
+            crate::val!({"jit": {"mode": "off"}}),
+        ] {
+            assert_eq!(
+                compile_and_run_with_std_conf(src, Some(conf.clone())),
+                Ok(crate::val!("[hi]")),
+                "with {conf:?}"
+            );
+        }
+    }
+
+    /// A template consumes each interpolated value's Result, so an Err part
+    /// halts compiled code too, and values render as the interpreter renders
+    /// them. Compiled templates wrote `Result.Err(…)` into the string and
+    /// rendered maps as JSON.
+    #[test]
+    fn jit_template_halts_on_an_err_part_and_renders_like_the_interpreter() {
+        let ok = r#"::t ns
+show fn (v: Any): Str { `<${first(v)}|${v}|${{a: 1}}>` }
+warm map(range(0, 3), (i) { show([i]) })
+show([7])"#;
+        let bad = r#"::t ns
+show fn (v: Any): Str { `<${first(v)}>` }
+warm map(range(0, 3), (i) { show([i]) })
+show(5)"#;
+        for conf in [
+            crate::val!({"jit": {"threshold": 1}}),
+            crate::val!({"jit": {"mode": "off"}}),
+        ] {
+            assert_eq!(
+                compile_and_run_with_std_conf(ok, Some(conf.clone())),
+                Ok(crate::val!("<7|[7]|{a: 1}>")),
+                "with {conf:?}"
+            );
+            let out = compile_and_run_with_std_conf(bad, Some(conf.clone()));
+            assert!(
+                out.as_ref()
+                    .is_err_and(|e| e.contains("first requires a collection")),
+                "with {conf:?}, expected a halt, got {out:?}"
+            );
+        }
+    }
+
     /// A local function reads its caller's local by name, called directly
     /// and from a lambda the caller creates. The caller stays on the
     /// interpreter, where that local is in scope: once hot-ai's `fit`

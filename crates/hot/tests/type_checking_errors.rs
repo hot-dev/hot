@@ -1119,13 +1119,26 @@ mod integration_tests {
 
             piped [[1, -2]] |> map(filter(%, gt(%, 0)))
             "#,
+            // A lambda written around the inner `%` doesn't separate them.
+            r#"
+            ::test ns
+
+            grouped map([[1, -2]], apply(%, (g) { filter(g, gt(%, 0)) }))
+            "#,
         ] {
             let errors = compile_and_get_type_errors(source);
             assert!(
                 has_error_type(&errors, |e| matches!(
                     e,
-                    CompilerError::NestedPlaceholder { function, parameter, .. }
-                        if function == "map" && parameter.as_deref() == Some("func")
+                    CompilerError::NestedPlaceholder {
+                        function,
+                        parameter,
+                        inner_function: Some(inner),
+                        inner_location: Some(_),
+                        ..
+                    } if function == "map"
+                        && parameter.as_deref() == Some("func")
+                        && inner == "filter"
                 )),
                 "Expected a nested-placeholder error for {}. Got: {:?}",
                 source,

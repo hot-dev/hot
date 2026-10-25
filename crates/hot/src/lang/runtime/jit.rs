@@ -2456,23 +2456,27 @@ unsafe extern "C" fn hot_jit_merge_maps(target_ptr: i64, source_ptr: i64) -> i64
 /// JIT helper: template string interpolation.
 /// `parts_ptr` - pointer to array of (kind: i64, raw: i64) pairs
 /// `parts_count` - number of parts
-/// Returns an OwnedVal handle to the concatenated Val::Str.
+/// Returns an OwnedVal handle to the concatenated Val::Str, or
+/// `HALT_SENTINEL` when a part is an Err: it shares the interpreter's
+/// interpolation, which consumes each part's Result.
 unsafe extern "C" fn hot_jit_template_interpolate(parts_ptr: *const i64, parts_count: i64) -> i64 {
     let vm_ptr = get_jit_vm_ptr();
     let count = parts_count as usize;
-    let mut result = String::new();
-    for i in 0..count {
-        let kind = unsafe { *parts_ptr.add(i * 2) };
-        let raw = unsafe { *parts_ptr.add(i * 2 + 1) };
-        let val = unsafe { decode_helper_val(kind, raw) };
-        if !vm_ptr.is_null() {
-            let vm = unsafe { &*vm_ptr };
-            result.push_str(&vm.value_to_string(&val));
-        } else if !matches!(val, Val::Null) {
+    let parts: Vec<Val> = (0..count)
+        .map(|i| unsafe { decode_helper_val(*parts_ptr.add(i * 2), *parts_ptr.add(i * 2 + 1)) })
+        .collect();
+    if vm_ptr.is_null() {
+        let mut result = String::new();
+        for val in parts.iter().filter(|val| !matches!(val, Val::Null)) {
             result.push_str(&val.to_string());
         }
+        return new_owned_val(Val::Str(result.into()));
     }
-    new_owned_val(Val::Str(result.into()))
+    let vm = unsafe { &mut *vm_ptr };
+    match vm.interpolate_template(&parts) {
+        Ok(value) => new_owned_val(value),
+        Err(error) => vm_runtime_error_to_halt(vm, error),
+    }
 }
 
 /// JIT helper: extract $val from a typed map (for match arms on typed values).
@@ -6352,8 +6356,11 @@ impl<'a> EmitCtx<'a> {
                     &[parts_ptr, count_val],
                 );
                 let result = builder.inst_results(call)[0];
+                // An Err part halts, as in the interpreter.
+                let halt_block = emit_halt_check(builder, result);
                 self.define_register(builder, *dest, RawKind::OwnedVal, result)?;
                 self.jump_to_next(builder, ip)?;
+                self.emit_halt_return(builder, halt_block);
                 Ok(EmitResult::Handled)
             }
             Instruction::ExtractInnerVal { dest, src } => {

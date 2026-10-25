@@ -1229,6 +1229,7 @@ impl Compiler {
             // Compile all variable declarations in source order (preserved by IndexMap)
             // This ensures that variables are available when referenced by later variables
             // TypeDefs are skipped here as they are handled in pass 1
+            let mut last_value = None;
             for (var, value) in &namespace.scope.vars {
                 if matches!(value, Value::TypeDef(_)) {
                     continue; // TypeDefs already handled in pass 1
@@ -1247,7 +1248,8 @@ impl Compiler {
                 // Set source location from AST node
                 self.set_source_location_from_var(var);
 
-                self.compile_variable_declaration(var, value)?;
+                let reg = self.compile_variable_declaration(var, value)?;
+                self.track_last_value(var, reg, &mut last_value);
             }
         }
 
@@ -1472,10 +1474,32 @@ impl Compiler {
         );
 
         // Compile each variable in the namespace
+        let mut last_value = None;
         for (var, value) in &namespace.scope.vars {
-            self.compile_variable_declaration(var, value)?;
+            let reg = self.compile_variable_declaration(var, value)?;
+            self.track_last_value(var, reg, &mut last_value);
         }
         Ok(())
+    }
+
+    /// A hidden `where` predicate only defines a function, so it must not
+    /// become the namespace's last value: a file's or REPL input's result.
+    /// After one, the previous declaration's value is made the last again.
+    /// The predicates stay in source order, where the names they call resolve.
+    fn track_last_value(
+        &mut self,
+        var: &Var,
+        reg: RegisterId,
+        last_value: &mut Option<RegisterId>,
+    ) {
+        if !crate::lang::ast::is_where_predicate(var.sym.name()) {
+            *last_value = Some(reg);
+        } else if let Some(previous) = *last_value {
+            self.emit_instruction(Instruction::Move {
+                dest: previous,
+                src: previous,
+            });
+        }
     }
 
     /// Run the static `where` constraint checks. Errors fail compilation;
@@ -1751,7 +1775,23 @@ impl Compiler {
                     "Compiler: About to store function variable '{}'",
                     var.sym.name()
                 );
-                self.store_variable_with_meta(var.sym.name(), reg, var.meta.as_ref());
+                if crate::lang::ast::is_where_predicate(var.sym.name()) {
+                    // A hidden `where` predicate is stored without a variable
+                    // event: it isn't a declaration the user wrote.
+                    let namespace = self
+                        .program
+                        .add_constant(Constant::Val(Val::from(self.current_namespace.clone())));
+                    let name = self
+                        .program
+                        .add_constant(Constant::Val(Val::from(var.sym.name().to_string())));
+                    self.emit_instruction(Instruction::StoreGlobal {
+                        namespace,
+                        var_name: name,
+                        value: reg,
+                    });
+                } else {
+                    self.store_variable_with_meta(var.sym.name(), reg, var.meta.as_ref());
+                }
                 Ok(reg)
             }
             Value::FnCall(fn_call) => {

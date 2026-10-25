@@ -1344,7 +1344,12 @@ pub async fn docs_search_handler(
                     .as_ref()
                     .map(|r| format!(": {}", r))
                     .unwrap_or_default();
-                format!("fn ({}){}", params.join(", "), ret)
+                let precondition = sig
+                    .precondition
+                    .as_ref()
+                    .map(|p| format!(" where {}", p))
+                    .unwrap_or_default();
+                format!("fn ({}){}{}", params.join(", "), precondition, ret)
             });
 
             items.push(SearchItem {
@@ -1420,7 +1425,12 @@ pub async fn docs_search_handler(
                         .as_ref()
                         .map(|r| format!(": {}", r))
                         .unwrap_or_default();
-                    format!("fn ({}){}", params.join(", "), ret)
+                    let precondition = sig
+                        .precondition
+                        .as_ref()
+                        .map(|p| format!(" where {}", p))
+                        .unwrap_or_default();
+                    format!("fn ({}){}{}", params.join(", "), precondition, ret)
                 });
 
                 items.push(SearchItem {
