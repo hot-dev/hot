@@ -47,18 +47,71 @@ if [ -z "$CLOUDFRONT_DISTRIBUTION_ID" ]; then
     echo "Warning: CLOUDFRONT_DISTRIBUTION_ID not set, skipping cache invalidation"
 fi
 
+echo "=== Checking published versions ==="
+# A published <package>/<version>.tar.gz is immutable: users who pin that
+# version must keep getting the same package. Each build regenerates every
+# tarball, so compare contents (not bytes, which carry timestamps) with the
+# published copy. Identical: skip it. Different: fail, because the package
+# changed without a version bump.
+WORK_DIR=$(mktemp -d)
+trap 'rm -rf "$WORK_DIR"' EXIT
+SYNC_EXCLUDES=()
+CHANGED=()
+while IFS= read -r -d '' tarball; do
+    key="${tarball#$CDN_OUTPUT_DIR/}"
+    case "$key" in
+        releases/beta/*) continue ;; # beta builds may republish a version
+    esac
+    if ! aws s3api head-object --bucket "$S3_BUCKET" --key "$key" > /dev/null 2>&1; then
+        continue # a new version
+    fi
+    rm -rf "$WORK_DIR/published" "$WORK_DIR/built"
+    mkdir -p "$WORK_DIR/published" "$WORK_DIR/built"
+    aws s3 cp --quiet "s3://$S3_BUCKET/$key" "$WORK_DIR/published.tar.gz"
+    tar -xzf "$WORK_DIR/published.tar.gz" -C "$WORK_DIR/published"
+    tar -xzf "$tarball" -C "$WORK_DIR/built"
+    if diff -r -q -x docs.json "$WORK_DIR/published" "$WORK_DIR/built" > /dev/null; then
+        SYNC_EXCLUDES+=(--exclude "$key")
+    else
+        CHANGED+=("$key")
+    fi
+done < <(find "$CDN_OUTPUT_DIR" -name '*.tar.gz' -print0)
+
+if [ "${#CHANGED[@]}" -gt 0 ]; then
+    echo "Error: these package versions are already published with different contents:"
+    for key in "${CHANGED[@]}"; do
+        echo "  $key"
+    done
+    echo "Bump each package's version in its pkg.hot before releasing."
+    exit 1
+fi
+
+# versions.json lists every published version. A build lists only the current
+# one, so merge it with the published list rather than replace it.
+while IFS= read -r -d '' versions_file; do
+    key="${versions_file#$CDN_OUTPUT_DIR/}"
+    if aws s3 cp --quiet "s3://$S3_BUCKET/$key" "$WORK_DIR/versions.json" 2>/dev/null; then
+        jq -s '
+            def semver: split(".") | map(tonumber? // 0);
+            ((.[0].versions // []) + (.[1].versions // []) | unique | sort_by(semver)) as $all
+            | {latest: ($all | last), versions: $all}
+        ' "$WORK_DIR/versions.json" "$versions_file" > "$WORK_DIR/merged.json"
+        mv "$WORK_DIR/merged.json" "$versions_file"
+    fi
+done < <(find "$CDN_OUTPUT_DIR" -name 'versions.json' -print0)
+
 echo "=== Uploading to S3 ==="
 echo "Source: $CDN_OUTPUT_DIR"
 echo "Bucket: s3://$S3_BUCKET"
 echo ""
 
-# Sync to S3
-# --size-only: Only update if size differs (versioned files are immutable)
-# --delete: Remove files from S3 that don't exist locally (careful with this)
+# Sync to S3. Published tarballs with unchanged contents are excluded above;
+# everything else (new versions, docs, versions.json) is uploaded.
 aws s3 sync "$CDN_OUTPUT_DIR" "s3://$S3_BUCKET" \
     --size-only \
     --exclude ".DS_Store" \
-    --exclude "*.tmp"
+    --exclude "*.tmp" \
+    "${SYNC_EXCLUDES[@]}"
 
 echo ""
 echo "✓ S3 sync complete"

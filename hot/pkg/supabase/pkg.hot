@@ -2,7 +2,7 @@
 
 hot.pkg.supabase {
   name: "hot.dev/supabase",
-  version: "1.0.0",
+  version: "1.0.1",
   hot-min-version: "2.0.3",
   description: "Supabase client SDK for Hot. Database queries (PostgREST), authentication (GoTrue), file storage, and edge function invocation.",
   author: "Hot Dev",
