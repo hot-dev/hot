@@ -457,6 +457,7 @@ struct JitHelperRefs {
     is_err: FuncRef,
     failure_err: FuncRef,
     consume_err: FuncRef,
+    owned_int_arg: FuncRef,
     call_vm_by_name: FuncRef,
     promote_to_owned: FuncRef,
     make_vec: FuncRef,
@@ -500,7 +501,7 @@ impl JitHelperRefs {
     /// The helpers that never look up a name in the calling frame or run
     /// Hot code that could. A call to a top-level function runs in its own
     /// frame.
-    fn scope_free(&self) -> [FuncRef; 39] {
+    fn scope_free(&self) -> [FuncRef; 40] {
         [
             self.call_vm,
             self.template_interpolate,
@@ -528,6 +529,7 @@ impl JitHelperRefs {
             self.is_err,
             self.failure_err,
             self.consume_err,
+            self.owned_int_arg,
             self.promote_to_owned,
             self.make_vec,
             self.merge_maps,
@@ -1599,6 +1601,7 @@ fn compile_with_return_kind(
     builder.symbol("hot_jit_is_err", hot_jit_is_err as *const u8);
     builder.symbol("hot_jit_failure_err", hot_jit_failure_err as *const u8);
     builder.symbol("hot_jit_consume_err", hot_jit_consume_err as *const u8);
+    builder.symbol("hot_jit_owned_int_arg", hot_jit_owned_int_arg as *const u8);
     builder.symbol(
         "hot_jit_call_vm_by_name",
         hot_jit_call_vm_by_name as *const u8,
@@ -2234,6 +2237,28 @@ unsafe extern "C" fn hot_jit_consume_err(raw: i64) -> i64 {
     // the halt blocks do (`emit_halt_return`).
     unsafe { hot_jit_drop_owned_val(raw) };
     unsafe { hot_jit_failure_err() }
+}
+
+/// A self tail call passes an owned value to an Int parameter: prepare it as
+/// the interpreter's call would. Writes the Int to `out` and returns 0, halts
+/// on an Err (`HALT_SENTINEL`), or returns 1 for any other value, which the
+/// call passes through the VM. Borrows `raw`.
+unsafe extern "C" fn hot_jit_owned_int_arg(raw: i64, out: *mut i64) -> i64 {
+    let vm_ptr = get_jit_vm_ptr();
+    if vm_ptr.is_null() || raw == 0 || out.is_null() {
+        return 1;
+    }
+    let vm = unsafe { &mut *vm_ptr };
+    let value = unsafe { &*(raw as *const Val) };
+    match vm.unwrap_result_if_ok(value) {
+        Ok(Val::Int(n)) => {
+            unsafe { *out = n };
+            0
+        }
+        Ok(_) => 1,
+        // The run now holds the failure.
+        Err(_) => HALT_SENTINEL,
+    }
 }
 
 unsafe extern "C" fn hot_jit_drop_owned_val(raw: i64) {
@@ -3524,6 +3549,14 @@ fn declare_jit_helpers(
             ptr_ty,
             "hot_jit_consume_err",
             &[types::I64],
+            &[types::I64],
+        )?,
+        owned_int_arg: declare_helper_func(
+            module,
+            func,
+            ptr_ty,
+            "hot_jit_owned_int_arg",
+            &[types::I64, ptr_ty],
             &[types::I64],
         )?,
         call_vm_by_name: declare_helper_func(
@@ -5841,6 +5874,49 @@ impl<'a> EmitCtx<'a> {
         }
     }
 
+    /// Before a self tail call jumps back, drop what this call made that the
+    /// next one doesn't take over: its owned registers and locals, except the
+    /// parameters, which the tail call replaces, and the result register of a
+    /// flow still open here, which no branch on this path has written. Each
+    /// is reset to null, since code on another path may drop it again (a
+    /// register or local holds null or a value it owns).
+    fn emit_drop_iteration_owned(
+        &self,
+        builder: &mut FunctionBuilder<'_>,
+        active_flows: &[ActiveFlowState],
+        param_locals: &[(Variable, RawKind)],
+    ) -> Result<(), String> {
+        let mut open_results = Vec::new();
+        for flow in active_flows {
+            if let Some(reg) = flow.result_reg {
+                open_results.push(self.remap_reg(reg)?);
+            }
+        }
+        let mut dropped = Vec::new();
+        for (idx, kind) in self.register_kinds.iter().enumerate() {
+            if *kind == Some(RawKind::OwnedVal)
+                && !self.compile_time_owned.contains(&idx)
+                && !open_results.contains(&idx)
+            {
+                dropped.push(self.registers[idx]);
+            }
+        }
+        for (var, kind) in self.locals.values() {
+            if *kind == RawKind::OwnedVal && !param_locals.iter().any(|(param, _)| param == var) {
+                dropped.push(*var);
+            }
+        }
+        if dropped.is_empty() {
+            return Ok(());
+        }
+        let null = builder.ins().iconst(types::I64, 0);
+        for var in dropped {
+            drop_owned_var(builder, &self.helper_refs, var);
+            builder.def_var(var, null);
+        }
+        Ok(())
+    }
+
     /// Emit shared instructions that are identical between body and thunk.
     /// Returns `EmitResult::Handled` if the instruction was compiled,
     /// `EmitResult::Unhandled` for caller-specific instructions.
@@ -7789,7 +7865,12 @@ fn build_supported_body(
                     return Err("JIT tail-call arity mismatch".to_string());
                 }
 
+                // An owned argument for an Int parameter, such as a numeric
+                // op's result kept as a value, is prepared here as the
+                // interpreter's call would, so the loop goes on. Any other
+                // kind mismatch calls through the VM.
                 let mut kind_mismatch = false;
+                let mut owned_ints = Vec::new();
                 for (idx, &(_, param_kind)) in param_locals
                     .iter()
                     .enumerate()
@@ -7797,33 +7878,55 @@ fn build_supported_body(
                 {
                     let reg = *args_start + idx as u32;
                     let actual_kind = ctx.register_kind(reg)?;
-                    if actual_kind != param_kind {
-                        kind_mismatch = true;
-                        break;
+                    if actual_kind == param_kind {
+                        continue;
                     }
+                    if actual_kind == RawKind::OwnedVal
+                        && param_kind == RawKind::Int
+                        && !ctx.error_capture_active
+                    {
+                        owned_ints.push(idx);
+                        continue;
+                    }
+                    kind_mismatch = true;
+                    break;
                 }
                 if kind_mismatch {
-                    let flow = active_flows
-                        .last()
-                        .ok_or_else(|| "JIT TailCall outside flow".to_string())?;
-                    let result_reg = flow
-                        .result_reg
-                        .ok_or_else(|| "JIT flow result register not set".to_string())?;
-                    let end_ip = flow.end_ip;
-                    let halt_block = ctx.emit_vm_callback(
+                    emit_tail_call_through_vm(
+                        &mut ctx,
                         builder,
-                        result_reg,
+                        &active_flows,
                         function_id,
                         *args_start,
                         *args_count,
                         instructions,
                     )?;
-                    let end_target = ctx.blocks[end_ip];
-                    builder.ins().jump(end_target, &[]);
-                    if let Some(halt_block) = halt_block {
-                        ctx.emit_halt_return(builder, halt_block);
-                    }
                     continue;
+                }
+                let mut through_vm = None;
+                let mut halts = Vec::new();
+                let mut unboxed = AHashMap::new();
+                for &idx in &owned_ints {
+                    let reg = *args_start + idx as u32;
+                    let raw = ctx.reg_value(builder, reg)?;
+                    let slot = builder.create_sized_stack_slot(StackSlotData::new(
+                        StackSlotKind::ExplicitSlot,
+                        mem::size_of::<i64>() as u32,
+                        3,
+                    ));
+                    let out = builder.ins().stack_addr(ptr_ty, slot, 0);
+                    let call = builder
+                        .ins()
+                        .call(ctx.helper_refs.owned_int_arg, &[raw, out]);
+                    let status = builder.inst_results(call)[0];
+                    halts.push(emit_halt_check(builder, status));
+                    let other_block = *through_vm.get_or_insert_with(|| builder.create_block());
+                    let int_block = builder.create_block();
+                    builder.ins().brif(status, other_block, &[], int_block, &[]);
+                    builder.switch_to_block(int_block);
+                    builder.seal_block(int_block);
+                    let value = builder.ins().load(types::I64, MemFlagsData::new(), out, 0);
+                    unboxed.insert(idx, value);
                 }
                 let mut new_values = Vec::with_capacity(param_locals.len());
                 for (idx, &(param_var, param_kind)) in param_locals
@@ -7831,6 +7934,10 @@ fn build_supported_body(
                     .enumerate()
                     .take(usize::from(*args_count))
                 {
+                    if let Some(&value) = unboxed.get(&idx) {
+                        new_values.push((param_var, param_kind, value));
+                        continue;
+                    }
                     let reg = *args_start + idx as u32;
                     let raw = ctx.reg_value(builder, reg)?;
                     let new_val = match param_kind {
@@ -7858,6 +7965,8 @@ fn build_supported_body(
                     new_values.push((param_var, param_kind, new_val));
                 }
 
+                // Nothing else this call made outlives the jump back.
+                ctx.emit_drop_iteration_owned(builder, &active_flows, &param_locals)?;
                 for &(param_var, param_kind, _) in &new_values {
                     if param_kind == RawKind::OwnedVal {
                         drop_owned_var(builder, &ctx.helper_refs, param_var);
@@ -7868,6 +7977,22 @@ fn build_supported_body(
                     builder.def_var(param_var, new_val);
                 }
                 builder.ins().jump(ctx.blocks[0], &[]);
+                for halt_block in halts {
+                    ctx.emit_halt_return(builder, halt_block);
+                }
+                if let Some(other_block) = through_vm {
+                    builder.switch_to_block(other_block);
+                    builder.seal_block(other_block);
+                    emit_tail_call_through_vm(
+                        &mut ctx,
+                        builder,
+                        &active_flows,
+                        function_id,
+                        *args_start,
+                        *args_count,
+                        instructions,
+                    )?;
+                }
             }
             Instruction::ReturnIfErr { src } => {
                 if ctx.error_capture_active {
@@ -8085,6 +8210,40 @@ fn remap_reg(remap: &AHashMap<u32, usize>, global_id: u32) -> Result<usize, Stri
         .get(&global_id)
         .copied()
         .ok_or_else(|| format!("Unmapped JIT register r{}", global_id))
+}
+
+/// A self tail call whose arguments don't fit the compiled parameters calls
+/// through the VM, and its result is the open flow's.
+fn emit_tail_call_through_vm(
+    ctx: &mut EmitCtx<'_>,
+    builder: &mut FunctionBuilder<'_>,
+    active_flows: &[ActiveFlowState],
+    function_id: u32,
+    args_start: u32,
+    args_count: u8,
+    instructions: &[Instruction],
+) -> Result<(), String> {
+    let flow = active_flows
+        .last()
+        .ok_or_else(|| "JIT TailCall outside flow".to_string())?;
+    let result_reg = flow
+        .result_reg
+        .ok_or_else(|| "JIT flow result register not set".to_string())?;
+    let end_ip = flow.end_ip;
+    let halt_block = ctx.emit_vm_callback(
+        builder,
+        result_reg,
+        function_id,
+        args_start,
+        args_count,
+        instructions,
+    )?;
+    let end_target = ctx.blocks[end_ip];
+    builder.ins().jump(end_target, &[]);
+    if let Some(halt_block) = halt_block {
+        ctx.emit_halt_return(builder, halt_block);
+    }
+    Ok(())
 }
 
 #[allow(clippy::too_many_arguments)]

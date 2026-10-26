@@ -2375,6 +2375,56 @@ show fn (r: Result) { if(is-err(r), `Err ${err-message(r)}`, r) }
         }
     }
 
+    /// A compiled self tail call loops, without leaking what each call made,
+    /// whatever its arguments: numeric ops whose Errs halt at the op or are
+    /// kept as values, a call in between, owned temporaries and locals made
+    /// before or inside the flow.
+    #[test]
+    fn compiled_tail_calls_loop_whatever_their_arguments() {
+        let src = r#"::t ns
+sum-three fn (i: Int, acc: Int): Int {
+    if(lte(i, 0), acc, sum-three(sub(i, 1), add(add(acc, i), 1)))
+}
+mixed fn (i: Int, acc: Int, m: Int): Int {
+    if(lte(i, 0), acc, mixed(sub(i, 1), add(mod(acc, m), i), m))
+}
+score fn (i: Int): Int { mul(mod(i, 7), 3) }
+with-call fn (i: Int, acc: Int): Int {
+    if(lte(i, 0), acc, with-call(sub(i, 1), add(acc, score(i))))
+}
+pre-local fn (i: Int, acc: Int): Int {
+    s `x${i}`
+    if(lte(i, 0), acc, pre-local(sub(i, 1), add(acc, length(s))))
+}
+nested fn (i: Int, acc: Int): Int {
+    cond {
+        lte(i, 0) => acc
+        => {
+            t `z${i}`
+            cond {
+                eq(mod(i, 2), 0) => nested(sub(i, 1), add(acc, length(t)))
+                => nested(sub(i, 1), add(mod(acc, 1000003), 1))
+            }
+        }
+    }
+}
+str-acc fn (i: Int, acc: Str): Str {
+    if(lte(i, 0), acc, str-acc(sub(i, 1), if(eq(mod(i, 2), 0), acc, `${acc}`)))
+}
+[
+    sum-three(100000, 0), mixed(100000, 0, 7), with-call(100000, 0),
+    pre-local(100000, 0), nested(100000, 0), str-acc(100000, "s"),
+]"#;
+        let expected = val!([5000150000_i64, 1, 900000, 588895, 344450, "s"]);
+        for conf in [
+            val!({"jit": {"mode": "disabled"}}),
+            val!({"jit": {"threshold": 1}}),
+        ] {
+            let out = compile_and_run_with_std_conf(src, Some(conf.clone())).expect("run");
+            assert_eq!(out, expected, "{conf:?}");
+        }
+    }
+
     /// A capture a local function couldn't resolve when it was created (a
     /// binding made after it) comes from the call that created it, while
     /// that call runs, and never from the frames of a later caller.

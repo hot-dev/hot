@@ -14,7 +14,8 @@
 //! Any other use needs the Err as a value (`Kept`). Acting at the op instead
 //! of where the result is used is the same only when nothing between them
 //! can be observed, so those instructions must neither run other code nor
-//! halt for another reason.
+//! halt for another reason. Halting on another numeric op's Err with the
+//! same message, as in `add(add(a, b), 1)` after the op, is the same halt.
 
 use super::{
     KnownCoreCall, find_function_by_suffix, find_function_exact, known_core_call,
@@ -38,6 +39,41 @@ pub(super) enum NumericErrUse {
     Kept,
 }
 
+/// The Err a compiled numeric op gives, by the message it halts with
+/// wherever it is consumed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NumericErr {
+    Overflow,
+    ModuloByZero,
+    DivisionByZero,
+}
+
+impl NumericErr {
+    fn of(core: KnownCoreCall) -> Option<Self> {
+        match core {
+            KnownCoreCall::Add | KnownCoreCall::Sub | KnownCoreCall::Mul => Some(Self::Overflow),
+            KnownCoreCall::Mod => Some(Self::ModuloByZero),
+            KnownCoreCall::Div => Some(Self::DivisionByZero),
+            _ => None,
+        }
+    }
+
+    /// The Err of the numeric op at `ip`, if it is one.
+    fn at(scope: &ErrUseScope<'_>, ip: usize) -> Option<Self> {
+        match scope.instructions.get(ip)? {
+            Instruction::Add { .. } | Instruction::Sub { .. } | Instruction::Mul { .. } => {
+                Some(Self::Overflow)
+            }
+            Instruction::Call { function, .. } => {
+                let name =
+                    resolve_const_function_name(scope.instructions, scope.program, ip, *function)?;
+                Self::of(known_core_call(&name)?)
+            }
+            _ => None,
+        }
+    }
+}
+
 /// What the analysis knows about the code around the op.
 pub(super) struct ErrUseScope<'a> {
     pub program: &'a BytecodeProgram,
@@ -59,7 +95,7 @@ const MAX_STEPS: usize = 512;
 
 /// How the result of the numeric op at `ip`, written to `dest`, is used.
 pub(super) fn numeric_err_use(scope: &ErrUseScope<'_>, ip: usize, dest: u32) -> NumericErrUse {
-    let mut pending = vec![ErrPath::new(ip + 1, dest)];
+    let mut pending = vec![ErrPath::new(ip + 1, dest, NumericErr::at(scope, ip))];
     let mut outcome = None;
     let mut paths = 1;
     let mut steps = 0;
@@ -76,7 +112,7 @@ pub(super) fn numeric_err_use(scope: &ErrUseScope<'_>, ip: usize, dest: u32) -> 
                     if paths > MAX_PATHS {
                         return NumericErrUse::Kept;
                     }
-                    pending.push(other);
+                    pending.push(*other);
                 }
                 Step::Done(path_use) => break path_use,
             }
@@ -95,7 +131,7 @@ pub(super) fn numeric_err_use(scope: &ErrUseScope<'_>, ip: usize, dest: u32) -> 
 enum Step {
     Next,
     /// Go on, and also follow this other path.
-    Split(ErrPath),
+    Split(Box<ErrPath>),
     Done(NumericErrUse),
 }
 
@@ -110,6 +146,11 @@ struct ErrPath {
     vars: Vec<(u32, i32)>,
     /// Registers set since the op, and whether they can't hold an Err.
     set: AHashMap<u32, bool>,
+    /// The op's own Err.
+    err: Option<NumericErr>,
+    /// Registers set since the op that can hold only another numeric op's
+    /// Err.
+    numeric: AHashMap<u32, NumericErr>,
     /// Registers set since the op to `true`.
     truths: Vec<u32>,
     /// Variables bound to something else since the op.
@@ -121,12 +162,14 @@ struct ErrPath {
 }
 
 impl ErrPath {
-    fn new(ip: usize, dest: u32) -> Self {
+    fn new(ip: usize, dest: u32, err: Option<NumericErr>) -> Self {
         Self {
             ip,
             regs: vec![dest],
             vars: Vec::new(),
             set: AHashMap::new(),
+            err,
+            numeric: AHashMap::new(),
             truths: Vec::new(),
             rebound: Vec::new(),
             flows: Vec::new(),
@@ -148,14 +191,31 @@ impl ErrPath {
                 .unwrap_or_else(|| (scope.plain_register)(reg))
     }
 
+    /// Whether consuming `reg` can't halt, or halts as the result's Err
+    /// would.
+    fn halts_like_result(&self, reg: u32, scope: &ErrUseScope<'_>) -> bool {
+        self.plain(reg, scope)
+            || (self.err.is_some() && self.numeric.get(&reg) == self.err.as_ref())
+    }
+
     fn set_register(&mut self, reg: u32, plain: bool) {
         self.regs.retain(|held| *held != reg);
         self.truths.retain(|held| *held != reg);
+        self.numeric.remove(&reg);
         self.set.insert(reg, plain);
+    }
+
+    /// `reg` holds the result of a numeric op, which may be its Err.
+    fn set_numeric(&mut self, reg: u32, err: Option<NumericErr>) {
+        self.set_register(reg, false);
+        if let Some(err) = err {
+            self.numeric.insert(reg, err);
+        }
     }
 
     fn set_result(&mut self, reg: u32) {
         self.truths.retain(|held| *held != reg);
+        self.numeric.remove(&reg);
         self.set.remove(&reg);
         if !self.regs.contains(&reg) {
             self.regs.push(reg);
@@ -200,9 +260,13 @@ impl ErrPath {
                 } else {
                     let plain = self.plain(*src, scope);
                     let truth = self.truths.contains(src);
+                    let numeric = self.numeric.get(src).copied();
                     self.set_register(*dest, plain);
                     if truth {
                         self.truths.push(*dest);
+                    }
+                    if let Some(err) = numeric {
+                        self.numeric.insert(*dest, err);
                     }
                 }
                 Step::Next
@@ -289,7 +353,7 @@ impl ErrPath {
                 };
                 let mut skipped = self.clone();
                 skipped.ip = end + 1;
-                Step::Split(skipped)
+                Step::Split(Box::new(skipped))
             }
             Instruction::CondBranchEnd { result, .. } => {
                 // The branch's value is the flow's, and the flow ends.
@@ -338,7 +402,7 @@ impl ErrPath {
                 let mut returned = self.clone();
                 returned.regs.clear();
                 returned.vars.clear();
-                Step::Split(returned)
+                Step::Split(Box::new(returned))
             }
             Instruction::Call {
                 dest,
@@ -384,10 +448,11 @@ impl ErrPath {
             // The VM's own arithmetic and comparisons halt on an Err operand.
             Instruction::Add { dest, left, right }
             | Instruction::Sub { dest, left, right }
-            | Instruction::Mul { dest, left, right }
-            | Instruction::Gt { dest, left, right }
-            | Instruction::Lt { dest, left, right } => {
-                self.operands(scope, *dest, &[*left, *right])
+            | Instruction::Mul { dest, left, right } => {
+                self.operands(scope, *dest, &[*left, *right], Some(NumericErr::Overflow))
+            }
+            Instruction::Gt { dest, left, right } | Instruction::Lt { dest, left, right } => {
+                self.operands(scope, *dest, &[*left, *right], None)
             }
             _ => Step::Done(Kept),
         }
@@ -411,26 +476,39 @@ impl ErrPath {
         {
             return Step::Done(NumericErrUse::Kept);
         }
-        self.operands(scope, dest, &args)
+        self.operands(scope, dest, &args, NumericErr::of(core))
     }
 
-    /// An operation that consumes `operands` in order and writes `dest`.
-    fn operands(&mut self, scope: &ErrUseScope<'_>, dest: u32, operands: &[u32]) -> Step {
+    /// An operation that consumes `operands` in order and writes `dest`,
+    /// which may be its own Err `own`.
+    fn operands(
+        &mut self,
+        scope: &ErrUseScope<'_>,
+        dest: u32,
+        operands: &[u32],
+        own: Option<NumericErr>,
+    ) -> Step {
         match operands.iter().position(|reg| self.holds_result(*reg)) {
             Some(first) => {
-                // An earlier operand that may be an Err would halt first.
-                if operands[..first].iter().any(|reg| !self.plain(*reg, scope)) {
+                // An earlier operand that may be another Err would halt first.
+                if operands[..first]
+                    .iter()
+                    .any(|reg| !self.halts_like_result(*reg, scope))
+                {
                     return Step::Done(NumericErrUse::Kept);
                 }
                 Step::Done(NumericErrUse::Consumed)
             }
             None => {
-                // Of plain values it can't halt or run code, though its own
-                // result can be an Err.
-                if operands.iter().any(|reg| !self.plain(*reg, scope)) {
+                // It can't run code, and can halt only as the result's Err
+                // would, though its own result can be an Err.
+                if operands
+                    .iter()
+                    .any(|reg| !self.halts_like_result(*reg, scope))
+                {
                     return Step::Done(NumericErrUse::Kept);
                 }
-                self.set_register(dest, false);
+                self.set_numeric(dest, own);
                 Step::Next
             }
         }
@@ -457,7 +535,7 @@ impl ErrPath {
         }
         // Arguments before it are consumed first.
         let earlier_may_halt = args.take(first).enumerate().any(|(index, reg)| {
-            !scope.program.keeps_param(callee, index) && !self.plain(reg, scope)
+            !scope.program.keeps_param(callee, index) && !self.halts_like_result(reg, scope)
         });
         Step::Done(if earlier_may_halt {
             NumericErrUse::Kept
@@ -542,6 +620,9 @@ mod tests {
             program.constants.push(Constant::Val(Val::Str(name.into())));
         }
         program.constants.push(Constant::Val(Val::Bool(true)));
+        program
+            .constants
+            .push(Constant::Val(Val::Str("mod".into())));
         program.functions.push(FunctionInfo {
             name: "::t/f".to_string(),
             namespace: "::t".to_string(),
@@ -566,6 +647,7 @@ mod tests {
     const Y: u32 = 4;
     const N: u32 = 5;
     const TRUE: u32 = 6;
+    const MOD: u32 = 7;
 
     /// The use of the result of the op at 0, writing register 0, followed by
     /// `rest`. Registers set before the op are plain unless listed in
@@ -584,6 +666,26 @@ mod tests {
                 plain_local: &plain_local,
             },
             0,
+            0,
+        )
+    }
+
+    /// The use of the result of `<op>(r2, r3)`, a core numeric op called at 1
+    /// and writing register 0, followed by `rest`.
+    fn use_of_core_op(program: &BytecodeProgram, op: u32, rest: Vec<Instruction>) -> NumericErrUse {
+        let mut instructions = vec![load(98, op), call(0, 98, 2, 2)];
+        instructions.extend(rest);
+        let plain_register = |_: u32| true;
+        let plain_local = |_: &str| None;
+        numeric_err_use(
+            &ErrUseScope {
+                program,
+                instructions: &instructions,
+                returned: NumericErrUse::Returned,
+                plain_register: &plain_register,
+                plain_local: &plain_local,
+            },
+            1,
             0,
         )
     }
@@ -866,5 +968,35 @@ mod tests {
         ];
         assert_eq!(use_of(&program, rest.clone(), &[7]), NumericErrUse::Kept);
         assert_eq!(use_of(&program, rest, &[]), NumericErrUse::Returned);
+    }
+    #[test]
+    fn a_later_op_halting_with_the_same_err_consumes_the_result() {
+        let program = program(false);
+        // mul(mul(r2, r3), <op>), as in the tail call
+        // `f(sub(i, 1), add(add(acc, i), 1))`
+        let rest = vec![
+            load(4, MUL),
+            call(6, 4, 2, 2),
+            Instruction::Move { dest: 10, src: 6 },
+            Instruction::Move { dest: 11, src: 0 },
+            call(12, 4, 10, 2),
+            Instruction::Return { value: 12 },
+        ];
+        assert_eq!(use_of_core_op(&program, MUL, rest), NumericErrUse::Consumed);
+    }
+
+    #[test]
+    fn a_later_op_halting_with_another_err_keeps_the_result() {
+        let program = program(false);
+        // mul(mul(r2, r3), mod(r2, r3)): an overflow would halt first.
+        let rest = vec![
+            load(4, MUL),
+            call(6, 4, 2, 2),
+            Instruction::Move { dest: 10, src: 6 },
+            Instruction::Move { dest: 11, src: 0 },
+            call(12, 4, 10, 2),
+            Instruction::Return { value: 12 },
+        ];
+        assert_eq!(use_of_core_op(&program, MOD, rest), NumericErrUse::Kept);
     }
 }
