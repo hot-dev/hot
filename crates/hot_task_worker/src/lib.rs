@@ -3992,11 +3992,16 @@ async fn process_container_task(
             },
         };
         let compute_units = limits.size.compute_units(duration_ms);
+        let termination = if terminated {
+            cancellation_quota::Termination::Confirmed
+        } else {
+            cancellation_quota::Termination::Unconfirmed
+        };
         cancellation_quota::settle(
             &db,
             &task_id,
             &worker_id,
-            terminated,
+            termination,
             Some((compute_units, duration_ms)),
         )
         .await;
