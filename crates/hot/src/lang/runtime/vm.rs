@@ -425,6 +425,134 @@ impl LexicalScope {
 /// Default number of engine threads for parallel execution
 pub const DEFAULT_ENGINE_THREADS: usize = 4;
 
+/// One overload in a same-arity overload set (see `OverloadSet`).
+struct OverloadCandidate {
+    function_id: FunctionId,
+    /// Declared parameter types as written (`Str`, `Int | Dec`, `Str?`, ...).
+    param_types: Vec<String>,
+    lazy_params: Vec<bool>,
+}
+
+/// The same-arity overloads registered under one `name/N` key prefix: those
+/// with typed signature keys (`name/N:T1,T2`) plus the untyped one that owns
+/// `name/N`.
+struct OverloadSet {
+    prefix: String,
+    arity: usize,
+    candidates: Vec<OverloadCandidate>,
+}
+
+/// How specifically a declared parameter type accepts an argument; lower is
+/// more specific.
+const OVERLOAD_RANK_EXACT: u32 = 0;
+const OVERLOAD_RANK_LOOSE: u32 = 1;
+const OVERLOAD_RANK_ANY: u32 = 2;
+
+impl OverloadCandidate {
+    /// Summed rank over the parameters, or `None` when a parameter does not
+    /// accept its argument. `names` are the arguments' dispatch type names.
+    fn rank(&self, names: &[std::borrow::Cow<'_, str>], args: &[Val]) -> Option<u32> {
+        if self.param_types.len() != names.len() {
+            return None;
+        }
+        let mut total = 0;
+        for (i, (declared, name)) in self.param_types.iter().zip(names).enumerate() {
+            total += if self.lazy_params.get(i).copied().unwrap_or(false) {
+                // Lazy arguments arrive as thunks, so their type is unknown.
+                OVERLOAD_RANK_ANY
+            } else {
+                overload_param_rank(declared, name, matches!(args.get(i), Some(Val::Map(_))))?
+            };
+        }
+        Some(total)
+    }
+}
+
+/// Rank how the declared parameter type `declared` accepts an argument with
+/// dispatch type name `actual`. Only builtin type names reject: a custom name
+/// may be a type alias, a literal union of builtin values, or the target of a
+/// coercion arrow, so it accepts without preference.
+fn overload_param_rank(declared: &str, actual: &str, is_map: bool) -> Option<u32> {
+    let declared = declared.trim();
+    if declared.is_empty() || declared == "Any" || actual == "Any" {
+        return Some(OVERLOAD_RANK_ANY);
+    }
+    let (body, nullable) = match declared.strip_suffix('?') {
+        Some(body) => (body, true),
+        None => (declared, false),
+    };
+    if nullable && actual == "Null" {
+        return Some(OVERLOAD_RANK_LOOSE);
+    }
+    let members = split_top_level(body, '|');
+    let single = members.len() == 1 && !nullable;
+    let mut best: Option<u32> = None;
+    let mut unknown = false;
+    for member in members {
+        let name = member.split('<').next().unwrap_or(member).trim();
+        let name = name.rsplit('/').next().unwrap_or(name);
+        let rank = if name == "Any" {
+            Some(OVERLOAD_RANK_ANY)
+        } else if name == actual
+            || actual
+                .strip_prefix(name)
+                .is_some_and(|rest| rest.starts_with('.'))
+        {
+            // The same type, or a variant of the declared enum (`Shape.Circle`).
+            Some(if single {
+                OVERLOAD_RANK_EXACT
+            } else {
+                OVERLOAD_RANK_LOOSE
+            })
+        } else if name == "Map" && is_map {
+            // A typed record is structurally a Map.
+            Some(OVERLOAD_RANK_LOOSE)
+        } else {
+            unknown |= !matches!(
+                name,
+                "Str"
+                    | "Int"
+                    | "Dec"
+                    | "Bool"
+                    | "Null"
+                    | "Vec"
+                    | "Map"
+                    | "Bytes"
+                    | "Byte"
+                    | "Fn"
+                    | "Namespace"
+                    | "Var"
+            );
+            None
+        };
+        best = match (best, rank) {
+            (Some(best), Some(rank)) => Some(best.min(rank)),
+            (best, rank) => best.or(rank),
+        };
+    }
+    best.or(unknown.then_some(OVERLOAD_RANK_ANY))
+}
+
+/// Split `s` on `sep` outside `<...>`, where type parameters can contain it.
+fn split_top_level(s: &str, sep: char) -> Vec<&str> {
+    let mut parts = Vec::new();
+    let mut depth = 0usize;
+    let mut start = 0;
+    for (i, c) in s.char_indices() {
+        match c {
+            '<' => depth += 1,
+            '>' => depth = depth.saturating_sub(1),
+            c if c == sep && depth == 0 => {
+                parts.push(&s[start..i]);
+                start = i + c.len_utf8();
+            }
+            _ => {}
+        }
+    }
+    parts.push(&s[start..]);
+    parts
+}
+
 /// High-performance virtual machine for Hot bytecode
 pub struct VirtualMachine {
     pub program: Arc<BytecodeProgram>,
@@ -538,6 +666,16 @@ pub struct VirtualMachine {
     /// `Source -> Target` coercions when the runtime arg types differ from
     /// the declared param types (the type checker has already vetted the call).
     coercion_param_cache: AHashMap<FunctionId, Option<Vec<String>>>,
+    /// Per-function-id cache of the same-arity overload set a function belongs
+    /// to (`None` when it has no same-arity siblings), used for runtime
+    /// overload dispatch (`overload_for_args`).
+    overload_set_cache: AHashMap<FunctionId, Option<std::rc::Rc<OverloadSet>>>,
+    /// Overload chosen per (resolved function, runtime argument type names)
+    /// hash, so repeated calls skip ranking.
+    overload_choice_cache: AHashMap<u64, FunctionId>,
+    /// Indices into `function_mapping` sorted by key, so the keys sharing a
+    /// `name/N` prefix are found by binary search. Built on first use.
+    sorted_key_indices: Option<Vec<usize>>,
     /// JIT configuration, code-memory status, and per-function profiling state.
     jit: JitRuntimeState,
     /// Per-function cache of detected HOF fusion pipelines. The plans depend
@@ -658,6 +796,9 @@ impl VirtualMachine {
             parallel_flow_context: None,
             dispatch_cache: AHashMap::new(),
             coercion_param_cache: AHashMap::new(),
+            overload_set_cache: AHashMap::new(),
+            overload_choice_cache: AHashMap::new(),
+            sorted_key_indices: None,
             jit,
             hof_plan_cache: AHashMap::new(),
             function_active_depth: vec![0; function_count],
@@ -2641,7 +2782,7 @@ impl VirtualMachine {
                 args_count,
             } => {
                 let dest = *dest;
-                let function_id = *function_id;
+                let mut function_id = *function_id;
                 let args_start = *args_start;
                 let args_count = *args_count;
                 tracing::trace!(
@@ -2659,15 +2800,20 @@ impl VirtualMachine {
                 }
                 let mut args = self.prepare_call_args(CallTarget::Function(function_id), args)?;
 
-                // Implicit coercion at the static-dispatch boundary. The
-                // compiler may have picked `function_id` from the arity-only
-                // key (because compile-time arg types weren't known); if a
-                // typed signature exists and the actual arg types differ but
-                // a unique `Source -> Target` arrow exists, coerce in place.
+                // Overload dispatch and implicit coercion at the
+                // static-dispatch boundary. The compiler may have picked
+                // `function_id` from the arity-only key (because compile-time
+                // arg types weren't known), so a same-arity sibling that fits
+                // the actual arg types better is called instead (see
+                // `overload_for_args`). Otherwise, if a typed signature exists
+                // and the actual arg types differ but a unique
+                // `Source -> Target` arrow exists, coerce in place.
                 // The type checker has already vetted the call, so any miss
                 // here just falls back to invoking the function with the
                 // original args (preserves prior behavior).
-                if let Some(expected) = self.lookup_typed_param_signature(function_id) {
+                if let Some(chosen) = self.overload_for_args(function_id, &args) {
+                    function_id = chosen;
+                } else if let Some(expected) = self.lookup_typed_param_signature(function_id) {
                     let actual: Vec<String> =
                         args.iter().map(|a| self.get_val_type_name(a)).collect();
                     if actual != expected {
@@ -5451,11 +5597,20 @@ impl VirtualMachine {
             {
                 type_name.hash(&mut hasher);
             }
+            if let Val::Box(_) = arg {
+                // Overload dispatch tells boxed functions, namespaces and
+                // iterators apart (see `dispatch_type_name`).
+                Self::dispatch_type_name(arg).hash(&mut hasher);
+            }
         }
         hasher.finish()
     }
 
-    /// Execute a user function and cache the dispatch for future calls
+    /// Execute a user function and cache the dispatch for future calls.
+    /// Name lookups resolve bare and arity-only keys, which ignore argument
+    /// types, so the same-arity sibling that best fits the runtime argument
+    /// types is called instead (see `overload_for_args`). The cache key
+    /// distinguishes argument types at least as finely as that choice.
     #[inline(always)]
     fn execute_user_function_cached(
         &mut self,
@@ -5463,6 +5618,9 @@ impl VirtualMachine {
         function_id: FunctionId,
         args: &[Val],
     ) -> VmResult<Val> {
+        let function_id = self
+            .overload_for_args(function_id, args)
+            .unwrap_or(function_id);
         self.dispatch_cache.insert(cache_key, function_id);
         self.execute_user_function(function_id, args)
     }
@@ -6029,19 +6187,22 @@ impl VirtualMachine {
         // Resolve to a function name for normal dispatch paths.
         // Arc<str> so the common Val::Str case is a refcount bump, not a
         // fresh String allocation on every dispatched call.
-        let function_name: Arc<str> = match function_val {
-            Val::Str(name) => name,
-            Val::Box(boxed_val) => {
+        let function_name: Arc<str> = match &function_val {
+            Val::Str(name) => Arc::clone(name),
+            Val::Box(boxed_val)
                 if let Some(function_ref) = boxed_val
                     .as_any()
                     .downcast_ref::<crate::lang::runtime::function_ref::FunctionRef>(
-                ) {
-                    Arc::from(function_ref.name.as_str())
-                } else {
-                    return Ok(Val::Null);
-                }
+                ) =>
+            {
+                Arc::from(function_ref.name.as_str())
             }
-            _ => return Ok(Val::Null),
+            _ => {
+                // Not a function: neither a name nor a dispatch function, so
+                // the depth taken above is given back.
+                self.decrement_function_call_depth("");
+                return Ok(self.not_callable(&function_val));
+            }
         };
         let function_name: &str = &function_name;
 
@@ -6753,6 +6914,266 @@ impl VirtualMachine {
         found
     }
 
+    /// The same-arity overload set `function_id` belongs to: the overloads
+    /// registered under its `name/N` key prefix. `None` for the common case of
+    /// a function without same-arity siblings, and for variadic functions.
+    /// Cached per function.
+    fn overload_set(&mut self, function_id: FunctionId) -> Option<std::rc::Rc<OverloadSet>> {
+        if let Some(cached) = self.overload_set_cache.get(&function_id) {
+            return cached.clone();
+        }
+        if self.sorted_key_indices.is_none() {
+            let mapping = &self.function_mapping;
+            let mut order: Vec<usize> = (0..mapping.len()).collect();
+            order.sort_unstable_by(|&a, &b| {
+                let key = |i| mapping.get_index(i).map(|(key, _)| key.as_str());
+                key(a).cmp(&key(b))
+            });
+            self.sorted_key_indices = Some(order);
+        }
+        let set = self.build_overload_set(function_id).map(std::rc::Rc::new);
+        self.overload_set_cache.insert(function_id, set.clone());
+        set
+    }
+
+    fn build_overload_set(&self, function_id: FunctionId) -> Option<OverloadSet> {
+        let info = self.program.functions.get(function_id as usize)?;
+        if info.is_variadic {
+            return None;
+        }
+        let arity = info.arity as usize;
+        let prefix = format!("{}/{}", info.name, arity);
+        // Declared types per overload, from its longest typed key: the
+        // signature as written (constructors also register a key that keeps
+        // only the first member of a union).
+        let order = self.sorted_key_indices.as_deref().unwrap_or(&[]);
+        let key_at = |i: usize| self.function_mapping.get_index(i);
+        let start = order
+            .partition_point(|&i| key_at(i).is_some_and(|(key, _)| key.as_str() < prefix.as_str()));
+        let mut typed: IndexMap<FunctionId, &str> = IndexMap::new();
+        let mut arity_key_owner = None;
+        for &i in &order[start..] {
+            let Some((key, &id)) = key_at(i) else {
+                continue;
+            };
+            // Keys with this prefix are contiguous in sorted order.
+            let Some(rest) = key.strip_prefix(prefix.as_str()) else {
+                break;
+            };
+            if rest.is_empty() {
+                arity_key_owner = Some(id);
+            } else if let Some(types) = rest.strip_prefix(':') {
+                let entry = typed.entry(id).or_insert(types);
+                if types.len() > entry.len() {
+                    *entry = types;
+                }
+            }
+        }
+        // An untyped overload has no typed key; it owns the arity-only key.
+        let untyped = arity_key_owner.filter(|id| !typed.contains_key(id));
+        let mut candidates: Vec<OverloadCandidate> = typed
+            .iter()
+            .map(|(&id, types)| {
+                let params = split_top_level(types, ',')
+                    .into_iter()
+                    .map(|t| t.trim().to_string())
+                    .collect();
+                (id, params)
+            })
+            .chain(untyped.map(|id| (id, vec!["Any".to_string(); arity])))
+            .filter_map(|(id, param_types): (FunctionId, Vec<String>)| {
+                let overload = self.program.functions.get(id as usize)?;
+                (!overload.is_variadic && param_types.len() == arity).then(|| OverloadCandidate {
+                    function_id: id,
+                    param_types,
+                    lazy_params: overload.lazy_params.clone(),
+                })
+            })
+            .collect();
+        candidates.sort_by_key(|c| c.function_id);
+        candidates.dedup_by_key(|c| c.function_id);
+        let belongs = candidates.iter().any(|c| c.function_id == function_id);
+        (candidates.len() > 1 && belongs).then_some(OverloadSet {
+            prefix,
+            arity,
+            candidates,
+        })
+    }
+
+    /// The type name overload dispatch matches declared parameter types
+    /// against: as `get_val_type_name`, but boxed functions, namespaces and
+    /// iterators are told apart so that `Fn` parameters can be selected.
+    fn dispatch_type_name(val: &Val) -> std::borrow::Cow<'_, str> {
+        let name = match val {
+            Val::Str(_) => "Str",
+            Val::Int(_) => "Int",
+            Val::Dec(_) => "Dec",
+            Val::Bool(_) => "Bool",
+            Val::Vec(_) => "Vec",
+            Val::Bytes(_) => "Bytes",
+            Val::Byte(_) => "Byte",
+            Val::Null => "Null",
+            Val::Map(map) => match crate::val::tagged_type_name(map) {
+                Some(type_name) => {
+                    return std::borrow::Cow::Borrowed(
+                        type_name.rsplit('/').next().unwrap_or(type_name),
+                    );
+                }
+                None => "Map",
+            },
+            Val::Box(boxed) => {
+                let any = boxed.as_any();
+                if any.is::<crate::lang::runtime::function_ref::FunctionRef>()
+                    || any.is::<crate::lang::bytecode::LambdaInfo>()
+                {
+                    "Fn"
+                } else if any.is::<crate::lang::refs::NamespaceRef>() {
+                    "Namespace"
+                } else if any.is::<crate::lang::hot::iter::IteratorBox>() {
+                    "Iter"
+                } else {
+                    "Any"
+                }
+            }
+        };
+        std::borrow::Cow::Borrowed(name)
+    }
+
+    /// Runtime overload dispatch for a call resolved without the argument
+    /// types. The compiler only knows literal argument types, so it falls back
+    /// to the arity-only key (the untyped overload, else the one declared
+    /// last), and name lookups ignore types entirely. Among the same-arity
+    /// overloads, the one declared with exactly the runtime argument types
+    /// wins, as it does at compile time; failing that, the most specific one
+    /// that accepts them (a single type, then a union or nullable type, then
+    /// `Any`). The resolved overload is kept on ties and when nothing else
+    /// accepts the arguments, so implicit coercion still applies to it.
+    /// Returns the overload to call instead, if any.
+    pub(crate) fn overload_for_args(
+        &mut self,
+        function_id: FunctionId,
+        args: &[Val],
+    ) -> Option<FunctionId> {
+        let set = self.overload_set(function_id)?;
+        if args.len() != set.arity {
+            return None;
+        }
+        let names: Vec<std::borrow::Cow<'_, str>> =
+            args.iter().map(Self::dispatch_type_name).collect();
+        let cache_key = {
+            use std::hash::{Hash, Hasher};
+            let mut hasher = ahash::AHasher::default();
+            function_id.hash(&mut hasher);
+            for name in &names {
+                name.hash(&mut hasher);
+            }
+            hasher.finish()
+        };
+        let chosen = match self.overload_choice_cache.get(&cache_key) {
+            Some(&chosen) => chosen,
+            None => {
+                let chosen = self.choose_overload(&set, function_id, &names, args);
+                self.overload_choice_cache.insert(cache_key, chosen);
+                chosen
+            }
+        };
+        (chosen != function_id).then_some(chosen)
+    }
+
+    fn choose_overload(
+        &self,
+        set: &OverloadSet,
+        function_id: FunctionId,
+        names: &[std::borrow::Cow<'_, str>],
+        args: &[Val],
+    ) -> FunctionId {
+        let exact_key = format!("{}:{}", set.prefix, names.join(","));
+        if let Some(&id) = self.function_mapping.get(&exact_key)
+            && set.candidates.iter().any(|c| c.function_id == id)
+        {
+            return id;
+        }
+        let mut best = set
+            .candidates
+            .iter()
+            .find(|c| c.function_id == function_id)
+            .and_then(|c| c.rank(names, args))
+            .map(|rank| (rank, function_id));
+        for candidate in &set.candidates {
+            if candidate.function_id == function_id {
+                continue;
+            }
+            if let Some(rank) = candidate.rank(names, args)
+                && best.is_none_or(|(best_rank, _)| rank < best_rank)
+            {
+                best = Some((rank, candidate.function_id));
+            }
+        }
+        best.map_or(function_id, |(_, id)| id)
+    }
+
+    /// Compiled code makes self calls natively, skipping the runtime overload
+    /// dispatch in `overload_for_args`. A function that calls itself while
+    /// sharing its arity with sibling overloads therefore stays interpreted
+    /// (marked do-not-JIT) so those calls keep dispatching on the runtime
+    /// argument types.
+    fn jit_blocked_by_overload_dispatch(&mut self, function_id: FunctionId) -> bool {
+        if self.overload_set(function_id).is_none() {
+            return false;
+        }
+        let program = Arc::clone(&self.program);
+        let blocked = program
+            .functions
+            .get(function_id as usize)
+            .is_some_and(|info| {
+                Self::instructions_call_function(&program, &info.instructions, function_id, 0)
+            });
+        if blocked {
+            self.jit.mark_do_not_jit(function_id);
+        }
+        blocked
+    }
+
+    /// Whether `instructions`, or a lambda or lazy thunk they load, call
+    /// `function_id` directly (`CallUserFunction` or `TailCall`).
+    fn instructions_call_function(
+        program: &BytecodeProgram,
+        instructions: &[Instruction],
+        function_id: FunctionId,
+        depth: usize,
+    ) -> bool {
+        // Lambda constants nest finitely; the cap only bounds pathological
+        // bytecode.
+        const MAX_LAMBDA_DEPTH: usize = 16;
+        instructions.iter().any(|instruction| match instruction {
+            Instruction::CallUserFunction {
+                function_id: callee,
+                ..
+            }
+            | Instruction::TailCall {
+                function_id: callee,
+                ..
+            } => *callee == function_id,
+            Instruction::LoadConst { constant, .. } if depth < MAX_LAMBDA_DEPTH => {
+                match program.constants.get(*constant as usize) {
+                    Some(Constant::Val(Val::Box(boxed))) => boxed
+                        .as_any()
+                        .downcast_ref::<crate::lang::bytecode::LambdaInfo>()
+                        .is_some_and(|lambda| {
+                            Self::instructions_call_function(
+                                program,
+                                &lambda.instructions,
+                                function_id,
+                                depth + 1,
+                            )
+                        }),
+                    _ => false,
+                }
+            }
+            _ => false,
+        })
+    }
+
     /// Look up a coercion arrow whose source type matches `src` and whose
     /// target type is either `tgt` exactly or a variant of it (`tgt.X`).
     /// Returns the actual target key (used to resolve the impl function via
@@ -6869,6 +7290,11 @@ impl VirtualMachine {
                 qualified_name,
                 function_id
             );
+            // An arity-only match ignores the argument types; prefer the
+            // same-arity overload that fits them (no coercion here).
+            let function_id = self
+                .overload_for_args(function_id, args)
+                .unwrap_or(function_id);
             return self.execute_user_function(function_id, args);
         } else {
             tracing::trace!(
@@ -8174,7 +8600,9 @@ impl VirtualMachine {
             })?;
             let function_name = &function_info.name;
 
-            if self.jit.should_compile_now(function_id, args) {
+            if self.jit.should_compile_now(function_id, args)
+                && !self.jit_blocked_by_overload_dispatch(function_id)
+            {
                 let compile_result =
                     self.jit
                         .compile_function(&program, function_id, function_info, args);
@@ -8543,7 +8971,9 @@ impl VirtualMachine {
                                 // as ONE call and never compiles.
                                 if self.jit.config.is_enabled() && !self.in_constraint_predicate() {
                                     self.jit.record_call(function_id, &new_args);
-                                    if self.jit.should_compile_now(function_id, &new_args) {
+                                    if self.jit.should_compile_now(function_id, &new_args)
+                                        && !self.jit_blocked_by_overload_dispatch(function_id)
+                                    {
                                         match self.jit.compile_function(
                                             &program,
                                             function_id,
@@ -10444,10 +10874,19 @@ impl VirtualMachine {
                 let new_args =
                     self.prepare_call_args(CallTarget::Function(*function_id), new_args)?;
 
+                // The compiler only emits TailCall for a call it resolved to
+                // the current function, but runtime args can still select a
+                // same-arity sibling (e.g. an `(x: Vec)` overload passing a
+                // Str element back to its own name). The TCO loop runs that
+                // as a regular call.
+                let function_id = self
+                    .overload_for_args(*function_id, &new_args)
+                    .unwrap_or(*function_id);
+
                 // Restore instruction pointer before returning tail call request
                 self.instruction_pointer = saved_instruction_pointer;
                 return Ok(FunctionExecutionResult::TailCall {
-                    function_id: *function_id,
+                    function_id,
                     args: new_args,
                 });
             }

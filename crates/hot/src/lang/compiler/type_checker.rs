@@ -249,6 +249,10 @@ pub struct TypeContext {
     /// lambda body push their own scope and pop it on exit. Variable lookup
     /// walks innermost-out.
     scopes: Vec<AHashMap<String, TypeExpr>>,
+    /// Lazy parameter names per scope (parallel to `scopes`). A lazy
+    /// parameter holds a thunk, which a call by its name skips, so it does
+    /// not shadow a function of the same name.
+    lazy_names: Vec<AHashSet<String>>,
     functions: AHashMap<String, Vec<FunctionSignature>>,
     types: AHashMap<String, TypeDefinition>,
     implementations: AHashMap<String, Vec<Implementation>>, // Type -> [Implementation]
@@ -271,6 +275,7 @@ impl TypeContext {
             // here too — `enter_namespace` clears them on entry. Function /
             // lambda body scopes are pushed on top.
             scopes: vec![AHashMap::new()],
+            lazy_names: vec![AHashSet::new()],
             functions: AHashMap::new(),
             types: AHashMap::new(),
             implementations: AHashMap::new(),
@@ -287,12 +292,14 @@ impl TypeContext {
     /// Push a new lexical scope (function/lambda body).
     pub fn push_scope(&mut self) {
         self.scopes.push(AHashMap::new());
+        self.lazy_names.push(AHashSet::new());
     }
 
     /// Pop the topmost lexical scope. No-op if only the global scope is left.
     pub fn pop_scope(&mut self) {
         if self.scopes.len() > 1 {
             self.scopes.pop();
+            self.lazy_names.pop();
         }
     }
 
@@ -302,6 +309,8 @@ impl TypeContext {
     pub fn enter_namespace(&mut self, namespace: String) {
         self.scopes.clear();
         self.scopes.push(AHashMap::new());
+        self.lazy_names.clear();
+        self.lazy_names.push(AHashSet::new());
         self.current_namespace = namespace;
     }
 
@@ -475,6 +484,25 @@ impl TypeContext {
 
     pub fn add_type(&mut self, name: String, type_def: TypeDefinition) {
         self.types.insert(name, type_def);
+    }
+
+    /// Mark `name`, bound in the topmost scope, as a lazy parameter.
+    pub fn mark_lazy_param(&mut self, name: &str) {
+        if let Some(top) = self.lazy_names.last_mut() {
+            top.insert(name.to_string());
+        }
+    }
+
+    /// Whether `name` is bound by a function or lambda body (a parameter or
+    /// local binding, not a namespace-level var), so it shadows any function
+    /// of the same name. Lazy parameters do not shadow.
+    pub fn is_shadowing_local(&self, name: &str) -> bool {
+        for (scope, lazy) in self.scopes.iter().zip(&self.lazy_names).skip(1).rev() {
+            if scope.contains_key(name) {
+                return !lazy.contains(name);
+            }
+        }
+        false
     }
 
     /// Walk the lexical scope stack innermost-out.
@@ -3357,6 +3385,21 @@ impl TypeChecker {
         // Continue with regular function call type inference
         let function_name = self.extract_function_name(fn_call);
 
+        // A call by the name of a parameter or local calls that local, which
+        // shadows any function of the same name (as compiled). Check the
+        // arguments and type the result by the local's own function type.
+        if let Value::Ref(Ref::Var(var_ref)) = &*fn_call.function
+            && self.context.is_shadowing_local(var_ref.var.sym.name())
+        {
+            for arg in &fn_call.args {
+                let _ = self.infer_value_type(&arg.value);
+            }
+            return match self.context.get_variable_type(var_ref.var.sym.name()) {
+                Some(TypeExpr::Function(_, return_type)) => (**return_type).clone(),
+                _ => TypeExpr::Any,
+            };
+        }
+
         if let Some(func_name) = function_name {
             // Resolve a leading namespace alias if the call is written as `::alias/fn`.
             // E.g. with `::ctx ::hot::ctx` declared, `::ctx/get` becomes `::hot::ctx/get`.
@@ -3542,6 +3585,9 @@ impl TypeChecker {
                 parameter_types.push(param_type.clone());
 
                 let name = arg.var.sym.name().to_string();
+                if arg.lazy {
+                    self.context.mark_lazy_param(&name);
+                }
                 self.context.add_variable(name, param_type);
             }
 
@@ -4919,6 +4965,37 @@ mod tests {
             has_warning,
             "expected DeprecatedUsage warning, got: {:?}",
             checker.errors.warnings
+        );
+    }
+
+    #[test]
+    fn test_local_callee_shadows_function_signature() {
+        use crate::lang::errors::CompilerError;
+        use crate::lang::parser::parse_hot;
+
+        // `g(x)` in `use-g` calls the `g` parameter, so the two-arity
+        // namespace `g` must not produce an arity mismatch there; `caller`
+        // has no such local and keeps the diagnostic.
+        let source = r#"
+        ::t ns
+        g fn (a: Int, b: Int): Int { add(a, b) }
+        use-g fn (x: Int, g: Fn): Any { g(x) }
+        caller fn (x: Int): Int { g(x) }
+        "#;
+        let program = parse_hot(source).expect("parse");
+        let mut checker = TypeChecker::new();
+        let _ = checker.check_program(&program);
+
+        let arity_errors = checker
+            .errors
+            .errors
+            .iter()
+            .filter(|e| matches!(e, CompilerError::ArityMismatch { .. }))
+            .count();
+        assert_eq!(
+            arity_errors, 1,
+            "only `caller` should mismatch, got: {:?}",
+            checker.errors.errors
         );
     }
 

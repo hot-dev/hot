@@ -68,7 +68,9 @@ is-active user.active
 
 ### Custom Constructors
 
-Override the default constructor with a function:
+Add constructor functions with `type fn`. A Map argument still goes to the
+type's default Map constructor, which is how a custom constructor builds its
+value:
 
 ```hot
 Point type fn (x: Int, y: Int): Point {
@@ -85,9 +87,13 @@ Custom constructors can have multiple arities:
 
 ```hot
 Email type fn
-(value: Str): Email { Email({value}) },
+(value: Str): Email { Email({value,}) },
 (local: Str, domain: Str): Email { Email({value: `${local}@${domain}`}) }
 ```
+
+Write `{value,}` with a trailing comma for a one-field map. `{value}` is a
+block that returns `value`, so `Email({value})` would call the
+`(value: Str)` constructor again and never return.
 
 Empty marker types are useful for tags and capabilities:
 

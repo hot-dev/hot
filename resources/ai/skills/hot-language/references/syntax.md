@@ -249,6 +249,19 @@ meta {webhook: {service: "leads", path: "/signup"}}
 handle-signup
 ```
 
+### Local Names Shadow Functions
+
+A parameter or local binding shadows any function with the same name inside
+its body, for calls and references:
+
+```hot
+scale fn (x: Int): Int { mul(x, 2) }
+
+apply fn (x: Int, scale: Fn): Int { scale(x) }   // calls the parameter
+```
+
+A `lazy` parameter does not shadow: calling its name calls the function.
+
 ## Operators as Functions
 
 Hot has no infix operators. Use functions instead:

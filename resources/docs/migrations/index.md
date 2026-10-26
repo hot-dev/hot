@@ -105,6 +105,15 @@ setup-hot `version` input so pipelines move to 3.0 when you do. See
   `limit` parameter instead. Now it reads the namespace value. Lambdas and
   functions defined in a function body still see the bindings around them. To
   give a function a caller's value, pass it as an argument.
+- **A parameter or local shadows a function of its name.** `scale(x)` inside
+  `apply fn (x: Int, scale: Fn)` calls the parameter. Through 2.6.11, it called
+  a function named `scale` declared before `apply`. A `lazy` parameter doesn't
+  shadow.
+- **Same-arity overloads dispatch on argument types.** A call picks the
+  overload declared with the argument's types, else the most specific one that
+  accepts them: a single type, then a union or nullable type, then `Any`.
+  Through 2.6.11, a variable or call result as the argument reached whichever
+  overload was declared last.
 - **Result checks never catch a halt.** `is-err`, `is-ok`, `if-err`, and
   `if-ok` used to treat a halt in their argument (`fail()`, `cancel()`, an
   `Err` consumed inside it) as an `Err`. Now they check the value only, and the

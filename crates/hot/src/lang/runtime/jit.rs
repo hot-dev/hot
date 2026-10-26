@@ -2378,7 +2378,11 @@ unsafe extern "C" fn hot_jit_call_vm(
             return vm_error_to_owned_val(err, error_capture);
         }
     };
-    match vm.execute_compiled_user_function(function_id as u32, &args) {
+    // Same runtime overload dispatch as the interpreter's CallUserFunction.
+    let function_id = vm
+        .overload_for_args(function_id as u32, &args)
+        .unwrap_or(function_id as u32);
+    match vm.execute_compiled_user_function(function_id, &args) {
         Ok(result) => new_owned_val(result),
         Err(err) => vm_error_to_owned_val(err, error_capture),
     }
@@ -3234,23 +3238,20 @@ unsafe extern "C" fn hot_jit_call_vm_by_name(
                     Err(err) => vm_error_to_owned_val(err, error_capture),
                 }
             } else {
-                new_owned_val(Val::err(Val::Str(
-                    format!("Cannot call non-function value: {:?}", name_val).into(),
-                )))
+                call_value(vm, name_val, &args, error_capture)
             }
         }
-        // A typed `Fn` or a function alias.
-        Val::Map(_) => match vm.call_function_value(name_val, &args) {
-            Ok(result) => new_owned_val(result),
-            Err(err) => vm_error_to_owned_val(err, error_capture),
-        },
-        _ => {
-            let name_str = vm.value_to_string(name_val);
-            match vm.execute_function_call_by_name(&name_str, &args) {
-                Ok(result) => new_owned_val(result),
-                Err(err) => vm_error_to_owned_val(err, error_capture),
-            }
-        }
+        // A typed `Fn` or a function alias, or a value that isn't a function,
+        // which gives the interpreter's Err.
+        _ => call_value(vm, name_val, &args, error_capture),
+    }
+}
+
+/// Call `function` as the interpreter calls a value.
+fn call_value(vm: &mut VirtualMachine, function: &Val, args: &[Val], error_capture: bool) -> i64 {
+    match vm.call_function_value(function, args) {
+        Ok(result) => new_owned_val(result),
+        Err(err) => vm_error_to_owned_val(err, error_capture),
     }
 }
 
@@ -7229,7 +7230,7 @@ impl<'a> EmitCtx<'a> {
         ip: usize,
         var_name: u32,
         thunk: u32,
-        accumulator_var: Option<Variable>,
+        accumulator: Option<(Variable, FlowResultModifier)>,
         flow_result_reg: Option<u32>,
     ) -> Result<EmitResult, String> {
         let (thunk_ptr, thunk_temp) = self.owned_operand(builder, thunk)?;
@@ -7246,14 +7247,22 @@ impl<'a> EmitCtx<'a> {
         let halt_block = emit_halt_check(builder, result);
         self.drop_owned_temps(builder, &[thunk_temp]);
 
-        if let Some(acc_var) = accumulator_var {
-            let name_str = constant_string(self.program, var_name)?;
-            let key_val = new_owned_val(Val::Str(name_str.to_string().into()));
-            let key_raw = builder.ins().iconst(types::I64, key_val);
+        if let Some((acc_var, modifier)) = accumulator {
             let acc_val = builder.use_var(acc_var);
-            let call = builder
-                .ins()
-                .call(self.helper_refs.set_element, &[acc_val, key_raw, result]);
+            // `All<Vec>` collects the values in order; `All<Map>` keys them
+            // by binding name.
+            let call = if modifier == FlowResultModifier::Vec {
+                builder
+                    .ins()
+                    .call(self.helper_refs.vec_push, &[acc_val, result])
+            } else {
+                let name_str = constant_string(self.program, var_name)?;
+                let key_val = new_owned_val(Val::Str(name_str.to_string().into()));
+                let key_raw = builder.ins().iconst(types::I64, key_val);
+                builder
+                    .ins()
+                    .call(self.helper_refs.set_element, &[acc_val, key_raw, result])
+            };
             let new_acc = builder.inst_results(call)[0];
             builder.def_var(acc_var, new_acc);
         } else if let Some(reg) = flow_result_reg {
@@ -7414,6 +7423,46 @@ fn build_supported_body(
 
     for (ip, instruction) in instructions.iter().enumerate() {
         builder.switch_to_block(ctx.blocks[ip]);
+
+        // A collecting serial flow (`All<Vec>` / `All<Map>`) gathers each
+        // binding made directly in its body, as the interpreter's StoreVar
+        // tracking does: the values in order, or name -> value. (Parallel
+        // flows bind through DeferredVarExpr instead.)
+        if let Instruction::StoreVar {
+            var_name, value, ..
+        } = instruction
+            && let Some(flow) = active_flows.last()
+            && flow.flow_type == FlowType::Serial
+            && let Some(acc_var) = flow.accumulator_var
+        {
+            let kind = ctx.register_kind(*value)?;
+            let raw = ctx.reg_value(builder, *value)?;
+            let value_owned = if kind == RawKind::OwnedVal {
+                clone_owned_raw(builder, &ctx.helper_refs, raw)
+            } else {
+                promote_to_owned(builder, &ctx.helper_refs, kind, raw)?
+            };
+            let acc_val = builder.use_var(acc_var);
+            let call = match flow.result_modifier {
+                FlowResultModifier::Map => {
+                    let name = constant_string(program, *var_name)?;
+                    let key_val = new_owned_val(Val::Str(name.to_string().into()));
+                    let key_raw = builder.ins().iconst(types::I64, key_val);
+                    builder.ins().call(
+                        ctx.helper_refs.set_element,
+                        &[acc_val, key_raw, value_owned],
+                    )
+                }
+                FlowResultModifier::Vec => builder
+                    .ins()
+                    .call(ctx.helper_refs.vec_push, &[acc_val, value_owned]),
+                FlowResultModifier::One => {
+                    unreachable!("flow accumulator only created for Map/Vec modifiers")
+                }
+            };
+            let new_acc = builder.inst_results(call)[0];
+            builder.def_var(acc_var, new_acc);
+        }
 
         match ctx.emit_instruction(builder, ip, instruction, instructions)? {
             EmitResult::Handled => {
@@ -7930,7 +7979,10 @@ fn build_supported_body(
             }
             Instruction::DeferredVarExpr { var_name, thunk } => {
                 let (acc, result_reg) = if let Some(flow) = active_flows.last() {
-                    (flow.accumulator_var, flow.result_reg)
+                    (
+                        flow.accumulator_var.map(|var| (var, flow.result_modifier)),
+                        flow.result_reg,
+                    )
                 } else {
                     (None, None)
                 };
@@ -8606,8 +8658,9 @@ fn try_lower_known_core_call(
             if args_count != 2 {
                 return Err(format!("JIT intrinsic '{}' expects 2 args", callee_name));
             }
-            // Division always goes through the Dec trampoline because:
-            // 1. Int / Int can produce Dec (e.g. 3/2 = 1.5)
+            // Division never uses a native Int path because:
+            // 1. Int / Int can produce Dec (e.g. 3/2 = 1.5), so it takes the
+            //    boxed general path; a Dec operand always yields a Dec
             // 2. Division by zero must return an error, not trap
             {
                 let (kind, value, op_exits) = numeric_binop_dec_only(

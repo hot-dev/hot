@@ -209,6 +209,393 @@ make-error(3)"#;
         );
     }
 
+    /// Run `src` interpreted and with the JIT compiling after one call; both
+    /// must produce `expected`.
+    fn assert_same_with_and_without_jit(src: &str, expected: &Val) {
+        for conf in [None, Some(crate::val!({"jit": {"threshold": 1}}))] {
+            let label = if conf.is_some() { "jit" } else { "interpreter" };
+            let out = compile_and_run_with_std_conf(src, conf)
+                .unwrap_or_else(|e| panic!("{label} run failed: {e}\n{src}"));
+            assert_eq!(&out, expected, "{label} result for:\n{src}");
+        }
+    }
+
+    fn strs(values: &[&str]) -> Val {
+        Val::Vec(values.iter().map(|s| Val::from(*s)).collect())
+    }
+
+    /// `Name({...})` inside a custom constructor of a field-less `Name type fn`
+    /// type reaches the default Map constructor. These types had no default
+    /// constructor, so the inner call resolved back to a custom overload and
+    /// never returned (the shipped `Email` and `Point` examples hung).
+    #[test]
+    fn field_less_type_fn_constructor_builds_through_default_map_constructor() {
+        let email = r#"::t ns
+Email type fn
+(value: Str): Email { Email({value,}) },
+(local: Str, domain: Str): Email { Email({value: `${local}@${domain}`}) }
+a Email("a@b.com")
+b Email("x", "y.com")
+c Email({value: "m@b.com"})
+[a.value, b.value, c.value, Str(is-type(a, Email))]"#;
+        assert_same_with_and_without_jit(
+            email,
+            &strs(&["a@b.com", "x@y.com", "m@b.com", "true"]),
+        );
+
+        let point = r#"::t ns
+Point type fn (x: Int, y: Int): Point { Point({x, y}) }
+p Point(10, 20)
+[p.x, p.y]"#;
+        assert_same_with_and_without_jit(point, &Val::Vec(vec![Val::Int(10), Val::Int(20)]));
+    }
+
+    /// A Map that is not a literal (a variable or a call result) selects the
+    /// type's default Map constructor at runtime, as a literal does at compile
+    /// time. It used to be coerced into the `(value: Str)` overload, which
+    /// stored the stringified Map; inside the constructor's own body the
+    /// by-name call re-entered that overload until the recursion limit.
+    #[test]
+    fn non_literal_map_arg_reaches_default_map_constructor() {
+        let struct_form = r#"::t ns
+Email type { value: Str }
+Email fn (value: Str): Email { Email({value,}) }
+m {value: "var@b.com"}
+get-m fn (): Map { {value: "call@b.com"} }
+[Email(m).value, Email(get-m()).value, Email("str@b.com").value]"#;
+        assert_same_with_and_without_jit(
+            struct_form,
+            &strs(&["var@b.com", "call@b.com", "str@b.com"]),
+        );
+
+        let own_body = r#"::t ns
+Slug type fn (value: Str): Slug {
+    data {value: lowercase(value)}
+    Slug(data)
+}
+[Slug("Hello").value, Slug("World").value, Slug("Again").value]"#;
+        assert_same_with_and_without_jit(own_body, &strs(&["hello", "world", "again"]));
+    }
+
+    /// Same-arity overloads dispatch on runtime argument types whichever
+    /// overload is declared last (the compiler's arity-only fallback key), for
+    /// direct calls, self tail calls, and calls made from JIT-compiled code.
+    #[test]
+    fn same_arity_overloads_dispatch_on_runtime_arg_types() {
+        let direct = r#"::t ns
+f fn
+(x: Str): Str { "str" },
+(x: Map): Str { "map" }
+g fn
+(x: Map): Str { "map" },
+(x: Str): Str { "str" }
+m {a: 1}
+s "hi"
+[f(m), f(s), g(m), g(s), f({a: 1}), g("lit")]"#;
+        assert_same_with_and_without_jit(
+            direct,
+            &strs(&["map", "str", "map", "str", "map", "str"]),
+        );
+
+        // The Vec overload's `kind(first(x))` resolves statically to itself
+        // and is a tail call; at runtime its Str argument selects the Str
+        // overload. Compiled code would make that self call natively, so the
+        // function must stay interpreted.
+        let self_tail_call = r#"::t ns
+kind fn
+(x: Str): Str { `str:${x}` },
+(x: Vec): Str {
+    cond {
+        is-vec(x) => { kind(first(x)) }
+        => { "vec-overload-got-non-vec" }
+    }
+}
+[kind(["abc"]), kind(["def"]), kind(["ghi"]), kind("jkl")]"#;
+        assert_same_with_and_without_jit(
+            self_tail_call,
+            &strs(&["str:abc", "str:def", "str:ghi", "str:jkl"]),
+        );
+
+        // `pick` is compiled after one call; its call to `g` goes through the
+        // JIT's VM trampoline, which must dispatch the same way.
+        let from_compiled_caller = r#"::t ns
+g fn
+(x: Map): Str { "map" },
+(x: Str): Str { "str" }
+pick fn (v: Any): Str { g(v) }
+m {a: 1}
+[pick(m), pick(m), pick(m), pick(m)]"#;
+        assert_same_with_and_without_jit(
+            from_compiled_caller,
+            &strs(&["map", "map", "map", "map"]),
+        );
+    }
+
+    /// An untyped (`Any`) overload is reachable whichever order it is
+    /// declared in, and the most specific overload that accepts the arguments
+    /// wins: a single type, then a union or nullable type, then `Any`. The
+    /// untyped overload's key used to be taken over by a later same-arity
+    /// overload, so `k("x")` reached `(x: Map)`.
+    #[test]
+    fn untyped_overload_is_reachable_and_most_specific_wins() {
+        let src = r#"::t ns
+k fn
+(x: Any): Str { "any" },
+(x: Map): Str { "map" }
+k2 fn
+(x: Map): Str { "map" },
+(x: Any): Str { "any" }
+u fn
+(x: Any): Str { "any" },
+(x: Int | Dec): Str { "num" }
+n fn
+(x: Str?): Str { "opt-str" },
+(x: Any): Str { "any" }
+h fn
+(x: Fn): Str { "fn" },
+(x: Any): Str { "any" }
+w fn
+(x: Map): Str { "map" },
+(x: Any): Str { "any" }
+Email type { value: Str }
+s "hi"
+m {a: 1}
+i 1
+f (v) { v }
+e Email({value: "a@b.com"})
+[
+    k("x"), k(s), k(1), k({a: 1}), k(m),
+    k2("x"), k2(s), k2(1), k2({a: 1}), k2(m),
+    u(1), u(1.5), u(i), u("s"),
+    n(null), n("a"), n(1),
+    h(f), h((v) { v }), h(1),
+    w(m), w(e), w(s),
+]"#;
+        assert_same_with_and_without_jit(
+            src,
+            &strs(&[
+                "any", "any", "any", "map", "map", //
+                "any", "any", "any", "map", "map", //
+                "num", "num", "num", "any", //
+                "opt-str", "opt-str", "any", //
+                "fn", "fn", "any", //
+                "map", "map", "any",
+            ]),
+        );
+    }
+
+    /// A parameter or local binding shadows a function of the same name, for
+    /// calls and references and whatever the declaration order. The compiler
+    /// used to bind the name to a function registered before the body was
+    /// compiled (a namespace or core function), so `before(x)` ignored the
+    /// parameter while `after(x)` used it. A lazy parameter does not shadow.
+    #[test]
+    fn locals_shadow_functions_with_and_without_jit() {
+        let src = r#"::t ns
+before fn (x: Any): Int { 0 }
+call-before fn (x: Int, before: Fn): Any { before(x) }
+call-after fn (x: Int, after: Fn): Any { after(x) }
+after fn (x: Any): Int { 0 }
+local-call fn (x: Int): Int {
+    before: Fn (v) { mul(v, 5) }
+    before(x)
+}
+local-ref fn (xs: Vec): Vec {
+    before: Fn (v) { mul(v, 5) }
+    map(xs, before)
+}
+apply-first fn (xs: Vec, first: Fn): Any { first(xs) }
+in-lambda fn (xs: Vec, before: Fn): Vec { map(xs, (v) { before(v) }) }
+lazy-param fn (lazy before: Any): Int { before(7) }
+[
+    call-before(4, (v) { mul(v, 3) }),
+    call-after(4, (v) { mul(v, 3) }),
+    local-call(2),
+    local-ref([1, 2]),
+    apply-first([1, 2], (v) { "custom" }),
+    in-lambda([1], (v) { add(v, 100) }),
+    lazy-param(1),
+    before(1),
+]"#;
+        assert_same_with_and_without_jit(
+            src,
+            &Val::Vec(vec![
+                Val::Int(12),
+                Val::Int(12),
+                Val::Int(10),
+                Val::Vec(vec![Val::Int(5), Val::Int(10)]),
+                Val::from("custom"),
+                Val::Vec(vec![Val::Int(101)]),
+                Val::Int(0),
+                Val::Int(0),
+            ]),
+        );
+    }
+
+    /// `div` of two Ints is an Int when the quotient is whole, in compiled
+    /// code as in the interpreter. The JIT used to always produce a Dec, so
+    /// `eq(5, safe-divide(10, 2))` was false.
+    #[test]
+    fn int_division_matches_with_and_without_jit() {
+        let src = r#"::t ns
+direct fn (a: Int, b: Int): Int { div(a, b) }
+in-branch fn (a: Int, b: Int): Any { if(eq(b, 0), 0, div(a, b)) }
+safe-divide fn (a: Int, b: Int): Int {
+    if(eq(b, 0), err("Division by zero"), ok(div(a, b)))
+}
+dec-div fn (a: Dec, b: Int): Dec { div(a, b) }
+[
+    Str(is-int(direct(10, 2))),
+    Str(is-dec(direct(3, 2))),
+    Str(is-int(in-branch(10, 2))),
+    Str(is-dec(in-branch(3, 2))),
+    Str(eq(5, safe-divide(10, 2))),
+    Str(eq(10, mul(direct(20, 4), 2))),
+    Str(is-dec(dec-div(4.0, 2))),
+]"#;
+        assert_same_with_and_without_jit(
+            src,
+            &strs(&["true", "true", "true", "true", "true", "true", "true"]),
+        );
+    }
+
+    /// Calling a parameter or local binding by name (`f(x)` for `f: Fn`)
+    /// calls that local in compiled code too. The JIT used to look the name
+    /// up through the VM, which cannot see compiled locals (and found any
+    /// unrelated function named `f` in another namespace instead).
+    #[test]
+    fn calls_through_local_fns_match_with_and_without_jit() {
+        let src = r#"::t ns
+apply-twice fn (x: Int, f: Fn): Int { f(f(x)) }
+invoke fn (x: Int, f: Fn): Any { f(x) }
+with-local fn (x: Int): Int {
+    triple: Fn (v) { mul(v, 3) }
+    triple(x)
+}
+sq %(mul(%, %))
+[apply-twice(3, add(%, 2)), invoke(4, sq), invoke(4, (v) { mul(v, 3) }), with-local(5)]"#;
+        assert_same_with_and_without_jit(
+            src,
+            &Val::Vec(vec![Val::Int(7), Val::Int(16), Val::Int(12), Val::Int(15)]),
+        );
+    }
+
+    /// `All<Vec>` and `All<Map>` serial bodies collect their bindings, and an
+    /// `All<Vec>` parallel flow collects values, in compiled code too. The JIT
+    /// returned `[]` / `{}` for serial bodies and keyed a Vec by name.
+    #[test]
+    fn collecting_serial_and_parallel_bodies_match_with_and_without_jit() {
+        let src = r#"::t ns
+all-vec fn (): All<Vec> {
+    a 1
+    b 2
+    c 3
+}
+all-map fn (): All<Map> {
+    a 1
+    b 2
+}
+par-vec fn (n: Int): Vec {
+    data: All<Vec> parallel {
+        a add(n, 1)
+        b mul(n, 2)
+    }
+    data
+}
+ser-map fn (n: Int): Map {
+    data: All<Map> serial {
+        a add(n, 1)
+        b mul(n, 2)
+    }
+    data
+}
+[all-vec(), all-map(), par-vec(3), ser-map(3)]"#;
+        assert_same_with_and_without_jit(
+            src,
+            &Val::Vec(vec![
+                Val::Vec(vec![Val::Int(1), Val::Int(2), Val::Int(3)]),
+                crate::val!({"a": 1, "b": 2}),
+                Val::Vec(vec![Val::Int(4), Val::Int(6)]),
+                crate::val!({"a": 4, "b": 6}),
+            ]),
+        );
+    }
+
+    /// A `fail()` inside a `pmap` callback stays a halt when the caller is
+    /// compiled, so containment returns the worker's `Failure`. The JIT
+    /// boundary used to clear the re-raised halt and pass on a plain error
+    /// string instead.
+    #[test]
+    fn pmap_halt_is_contained_with_and_without_jit() {
+        let src = r#"::t ns
+pmap-halt fn (): Vec<Int> {
+    inputs ::hot::coll/map(range(1, 41), (x: Int) { x })
+    ::hot::coll/pmap(inputs, (x: Int) {
+        cond {
+            eq(x, 7) => { fail("pmap boom on 7") }
+            => { mul(x, 10) }
+        }
+    })
+}
+attempt ::hot::internal::exec/contain(pmap-halt, [])
+failure if-err(attempt, (failure) { failure })
+[Str(is-err(attempt)), failure.msg]"#;
+        assert_same_with_and_without_jit(src, &strs(&["true", "pmap boom on 7"]));
+    }
+
+    /// Compiled `match-all` and `cond-all` flows build their result maps with
+    /// the same branch keys as the interpreter. The JIT used to keep the
+    /// compiler's internal `\0c<id>` suffix, so `get(result, "Critter.Bird")`
+    /// found nothing.
+    #[test]
+    fn collect_all_map_keys_match_with_and_without_jit() {
+        let src = r#"::t ns
+Critter enum open {
+    Dog,
+    Cat
+}
+Avian type {
+    species: Str,
+    wingspan: Dec
+}
+Avian -> Critter.Bird
+categorize fn match-all (a: Critter): All<Map> {
+    Critter.Bird => { "flies" }
+    Critter.Dog => { "walks" }
+}
+sizes fn cond-all (n: Int): All<Map> {
+    gt(n, 0) => positive { "positive" }
+    gt(n, 10) => big { "big" }
+}
+[
+    keys(categorize(Critter.Bird({species: "Eagle", wingspan: 2.1}))),
+    keys(categorize(Critter.Dog)),
+    keys(sizes(20)),
+]"#;
+        assert_same_with_and_without_jit(
+            src,
+            &Val::Vec(vec![
+                strs(&["Critter.Bird"]),
+                strs(&["Critter.Dog"]),
+                strs(&["positive", "big"]),
+            ]),
+        );
+    }
+
+    /// Core types keep their conversion constructors: a Map argument is not
+    /// routed to a default Map constructor. `Map` is qualified because hot-std
+    /// also defines a core `::hot::store/Map` type.
+    #[test]
+    fn core_type_constructors_still_convert_map_args() {
+        let src = r#"::t ns
+m {a: 1}
+[Str(m), to-json(::hot::type/Map(m)), to-json(Vec(m)), Str(is-err(Int(m))), Str(is-err(Uuid(m)))]"#;
+        assert_same_with_and_without_jit(
+            src,
+            &strs(&["{a: 1}", r#"{"a":1}"#, r#"[["a",1]]"#, "true", "true"]),
+        );
+    }
+
     #[test]
     fn jit_user_call_halts_on_strict_err_argument() {
         // The halt now propagates out of the JIT frame as a run failure

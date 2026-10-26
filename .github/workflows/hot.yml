@@ -220,6 +220,14 @@ jobs:
           HOT_TEST_VAR: "set so that :hot.env/vars() is not empty"
         run: cargo run --locked --bin hot -- test -c hot.test.hot --ctx hot/ci.ctx.hot
 
+      # The same suite with every function JIT-compiled on its first call.
+      # At the default threshold most test code never reaches the JIT, so a
+      # compiled result that differs from the interpreter's would go unseen.
+      - name: Run Hot tests (JIT threshold 1)
+        env:
+          HOT_TEST_VAR: "set so that :hot.env/vars() is not empty"
+        run: cargo run --locked --bin hot -- test -c hot.test.hot --ctx hot/ci.ctx.hot --jit.threshold 1
+
       - name: Install pgvector for Postgres tests
         run: |
           docker exec "${{ job.services.postgres.id }}" \

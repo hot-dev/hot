@@ -44,6 +44,20 @@ So `assert (x)` and `if (x) { ... }` bind variables named `assert` and `if`
 instead of calling those functions. `hot check` warns with
 `binding-shadows-function` when such a binding shadows a function.
 
+A parameter or local binding shadows any function with the same name inside
+its body, so a higher-order function can name its function parameter freely:
+
+```hot
+scale fn (x: Int): Int { mul(x, 2) }
+
+apply fn (x: Int, scale: Fn): Int { scale(x) }   // calls the parameter
+
+apply(3, add(%, 1))   // 4
+```
+
+A `lazy` parameter is the exception. It holds a deferred argument, so calling
+its name still calls the function.
+
 ## Qualified Calls
 
 Call functions from other namespaces using the full path:
@@ -333,6 +347,7 @@ sum-acc fn cond (xs: Vec, acc: Int): Int {
 - `fn` modifies a flow to become a function (default is `serial`, omittable)
 - Use `fn cond` for conditional functions, `fn parallel` for concurrent execution
 - Call with no space before `(`: `func(args)`
+- Parameters and local bindings shadow functions with the same name
 - Overload by arity or type
 - Use lambdas `(x) { body }` for inline functions, or `%` for concise single-param lambdas
 - Mark parameters `lazy` to defer evaluation of their arguments

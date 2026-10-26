@@ -109,6 +109,13 @@ pub struct Compiler {
     /// parameters and locals), innermost last. A lambda captures one of
     /// these even when a core function has the same name.
     enclosing_bindings: Vec<String>,
+    /// Names that shadow functions where code is being compiled: the
+    /// non-lazy parameters, lambda parameters and locals of the bodies being
+    /// compiled, innermost last, but not the functions and types they define
+    /// (block scopes are not tracked, so a name stays listed after its block
+    /// ends). A call or reference by such a name resolves at runtime, where
+    /// the lexical scope is checked before any function of the same name.
+    local_names: Vec<String>,
     /// Current file being compiled (for error reporting)
     current_file: Option<std::path::PathBuf>,
     /// Phase 1: Symbol table for function aliases (alias_name -> target_function_name)
@@ -285,6 +292,7 @@ impl Compiler {
             current_function_params: Vec::new(),
             local_function_names: Vec::new(),
             enclosing_bindings: Vec::new(),
+            local_names: Vec::new(),
             current_file: None,
             symbol_table: IndexMap::new(),
             file_contents: AHashMap::new(),
@@ -1706,12 +1714,27 @@ impl Compiler {
                 //         any arity can call any sibling arity during body compilation.
                 // Pass 2: Compile ALL function bodies.
 
+                // An untyped (all-`Any`) overload's signature key is the arity
+                // key itself, so a typed overload of the same arity must not
+                // take that key over: the untyped overload is the fallback for
+                // arguments that no typed overload declares.
+                let untyped_arities: Vec<usize> = function_defs
+                    .iter()
+                    .filter(|fn_def| {
+                        self.create_function_signature(&function_name, fn_def)
+                            == format!("{}/{}", function_name, fn_def.args.args.len())
+                    })
+                    .map(|fn_def| fn_def.args.args.len())
+                    .collect();
+
                 // Pass 1: Pre-register all arities with placeholder IDs
-                let mut arity_registrations: Vec<(String, String, FunctionId)> = Vec::new();
+                let mut arity_registrations: Vec<(String, String, FunctionId, bool)> = Vec::new();
                 for fn_def in function_defs.iter() {
                     let arity = fn_def.args.args.len();
                     let arity_key = format!("{}/{}", function_name, arity);
                     let signature = self.create_function_signature(&function_name, fn_def);
+                    let owns_arity_key =
+                        signature == arity_key || !untyped_arities.contains(&arity);
 
                     // Reserve a slot in program.functions with a placeholder FunctionInfo.
                     // This ensures the ID is stable even if sibling body compilation
@@ -1737,7 +1760,9 @@ impl Compiler {
                     };
                     let reserved_id = self.program.add_function(placeholder_info);
 
-                    self.function_mapping.insert(arity_key.clone(), reserved_id);
+                    if owns_arity_key {
+                        self.function_mapping.insert(arity_key.clone(), reserved_id);
+                    }
                     self.function_mapping.insert(signature.clone(), reserved_id);
 
                     tracing::trace!(
@@ -1748,12 +1773,13 @@ impl Compiler {
                         signature
                     );
 
-                    arity_registrations.push((arity_key, signature, reserved_id));
+                    arity_registrations.push((arity_key, signature, reserved_id, owns_arity_key));
                 }
 
                 // Pass 2: Compile all function bodies using pre-reserved IDs
                 for (i, fn_def) in function_defs.iter().enumerate() {
-                    let (ref arity_key, ref signature, reserved_id) = arity_registrations[i];
+                    let (ref arity_key, ref signature, reserved_id, owns_arity_key) =
+                        arity_registrations[i];
 
                     let function_id = self.compile_function_definition_with_reserved_id(
                         &function_name,
@@ -1770,7 +1796,9 @@ impl Compiler {
                     // (should not happen with pre-reserved IDs, but safety check)
                     if function_id != reserved_id {
                         self.function_mapping.insert(signature.clone(), function_id);
-                        self.function_mapping.insert(arity_key.clone(), function_id);
+                        if owns_arity_key {
+                            self.function_mapping.insert(arity_key.clone(), function_id);
+                        }
                     }
 
                     // If this is a core function, also register it in core_functions
@@ -1827,7 +1855,7 @@ impl Compiler {
                         value: reg,
                     });
                 } else {
-                    self.store_variable_with_meta(var.sym.name(), reg, var.meta.as_ref());
+                    self.store_definition(var.sym.name(), reg, var.meta.as_ref());
                 }
                 Ok(reg)
             }
@@ -1967,11 +1995,7 @@ impl Compiler {
                         type_constructor_reg,
                     );
                 } else {
-                    self.store_variable_with_meta(
-                        var.sym.name(),
-                        type_constructor_reg,
-                        var.meta.as_ref(),
-                    );
+                    self.store_definition(var.sym.name(), type_constructor_reg, var.meta.as_ref());
 
                     // Also add to the namespace registry for compile-time type resolution
                     // (store_variable_global does this automatically, but store_variable_with_meta doesn't)
@@ -2411,6 +2435,9 @@ impl Compiler {
         self.current_function_params = param_names;
         // Local functions defined in this body stay local to it.
         let saved_local_functions = self.local_function_names.len();
+        let saved_local_names = self.local_names.len();
+        let local_params = self.non_lazy_param_names(actual_function_id);
+        self.local_names.extend(local_params);
 
         // TCO: Set current function context for tail call detection
         let saved_function_name = self.current_function_name.take();
@@ -2436,6 +2463,7 @@ impl Compiler {
         self.current_function_params = saved_params;
         self.local_function_names.truncate(saved_local_functions);
         self.enclosing_bindings.truncate(saved_bindings);
+        self.local_names.truncate(saved_local_names);
 
         // Update the function info with the compiled instructions
         if let Some(func_info) = self.program.functions.get_mut(actual_function_id as usize) {
@@ -2557,6 +2585,9 @@ impl Compiler {
         self.current_function_params = param_names;
         // Local functions defined in this body stay local to it.
         let saved_local_functions = self.local_function_names.len();
+        let saved_local_names = self.local_names.len();
+        let local_params = self.non_lazy_param_names(reserved_id);
+        self.local_names.extend(local_params);
 
         // TCO: Set current function context for tail call detection
         let saved_function_name = self.current_function_name.take();
@@ -2582,6 +2613,7 @@ impl Compiler {
         self.current_function_params = saved_params;
         self.local_function_names.truncate(saved_local_functions);
         self.enclosing_bindings.truncate(saved_bindings);
+        self.local_names.truncate(saved_local_names);
 
         // Update the reserved slot with the compiled instructions
         if let Some(func_info) = self.program.functions.get_mut(reserved_id as usize) {
@@ -2834,7 +2866,14 @@ impl Compiler {
                         } else {
                             let value_reg =
                                 self.constrain_binding(&var_ref.var, &values[1], value_reg);
-                            self.store_variable(var_name, value_reg);
+                            if matches!(
+                                &values[1],
+                                Value::Fn(_) | Value::TypeDef(_) | Value::TypeImplementation(_)
+                            ) {
+                                self.store_definition(var_name, value_reg, None);
+                            } else {
+                                self.store_variable(var_name, value_reg);
+                            }
                         }
 
                         // If the variable has metadata in the AST, also store a hidden
@@ -3905,8 +3944,13 @@ impl Compiler {
                 let mut function_id: FunctionId = 0;
                 let mut lookup_key = String::new();
 
+                // A parameter or local of the same name shadows functions: the
+                // call goes by name, and the runtime lookup checks the lexical
+                // scope before any function.
+                let shadowed_by_local = self.is_local_name(function_name);
+
                 // If we have type info for all args, try type-based lookup first
-                if compile_time_types.iter().all(|t| t.is_some()) {
+                if !shadowed_by_local && compile_time_types.iter().all(|t| t.is_some()) {
                     let type_strs: Vec<&str> = compile_time_types
                         .iter()
                         .map(|t| t.as_ref().unwrap().as_str())
@@ -3930,7 +3974,7 @@ impl Compiler {
                 }
 
                 // Fallback to arity-based lookup (qualified first for correct scoping)
-                if function_id == 0 {
+                if !shadowed_by_local && function_id == 0 {
                     let arity_key = format!("{}/{}", function_name, arity);
                     let qualified_arity_key = format!("{}/{}", qualified_function_name, arity);
 
@@ -3998,6 +4042,31 @@ impl Compiler {
                         qualified_function_name,
                         function_name_reg,
                         spread_mask
+                    );
+                } else if shadowed_by_local {
+                    // Call the local's value. A call by name would also reach
+                    // it, but the VM's by-name fast paths for core functions
+                    // (`first`, `length`, ...) run before the scope lookup.
+                    // If the local's block has ended, LoadVar falls back to
+                    // the function of that name.
+                    let function_reg = self.allocate_register();
+                    let name_constant = self
+                        .program
+                        .add_constant(Constant::Val(Val::from(function_name.to_string())));
+                    self.emit_instruction(Instruction::LoadVar {
+                        dest: function_reg,
+                        var_name: name_constant,
+                    });
+                    self.emit_instruction(Instruction::Call {
+                        dest: dest_reg,
+                        function: function_reg,
+                        args_start,
+                        args_count: fn_call.args.len() as u8,
+                    });
+
+                    tracing::trace!(
+                        "Compiler: Generated Call of local '{}', which shadows functions of that name",
+                        function_name
                     );
                 } else if function_id != 0 {
                     // Arguments that already satisfy the callee's parameter
@@ -4578,6 +4647,10 @@ impl Compiler {
         self.enclosing_bindings.extend(parameters.iter().cloned());
         self.in_tail_position = false;
         self.emitting_function_body = true;
+        // The lambda's parameters are locals in its body; names of the
+        // enclosing body stay listed (they are captured).
+        let saved_local_names_len = self.local_names.len();
+        self.local_names.extend(parameters.iter().cloned());
 
         // `where` checks on the lambda's parameters and return type.
         let label = match &saved_function_name {
@@ -4608,6 +4681,7 @@ impl Compiler {
         self.emitting_function_body = saved_emitting_function_body;
         self.proven_params = saved_proven;
         self.enclosing_bindings.truncate(saved_bindings);
+        self.local_names.truncate(saved_local_names_len);
         let lambda_instructions = lambda_instructions?;
 
         // Create closure environment by capturing current variable values
@@ -4717,6 +4791,8 @@ impl Compiler {
         // Save register state and reset for thunk compilation
         let saved_next_register = self.next_register;
         self.next_register = 0;
+        // Bindings inside the thunk are its own locals.
+        let saved_local_names_len = self.local_names.len();
 
         let thunk_instructions: Result<Vec<Instruction>, String> = (|| {
             let body_reg = self.compile_value(expr)?;
@@ -4724,6 +4800,7 @@ impl Compiler {
             Ok(std::mem::take(&mut self.program.entry_point))
         })();
 
+        self.local_names.truncate(saved_local_names_len);
         self.program.entry_point = saved_instructions;
         self.current_function_name = saved_function_name;
         self.current_function_id = saved_function_id;
@@ -5102,11 +5179,17 @@ impl Compiler {
         // FIX #1: For types with struct fields, ALWAYS create a default Map-based constructor.
         // This must be registered BEFORE explicit constructors so that calls to TypeName({...})
         // inside explicit constructor bodies can resolve to the default Map constructor.
+        // Field-less `Name type fn ...` types get one too, or `Name({...})` inside their
+        // own constructors resolves back to a custom overload and recurses forever. Core
+        // types (`Str`, `Int`, `Uuid`, ...) are excluded: their constructors are
+        // conversions, so a Map argument must keep reaching them.
         let has_struct_fields = type_def.fields.is_some();
+        let has_default_map_constructor =
+            has_struct_fields || (type_def.constructor_functions.is_some() && !is_core_type);
 
-        if has_struct_fields {
+        if has_default_map_constructor {
             tracing::trace!(
-                "Compiler: Creating default Map constructor for struct type '{}'",
+                "Compiler: Creating default Map constructor for type '{}'",
                 constructor_name
             );
             let default_fn_id =
@@ -5147,6 +5230,16 @@ impl Compiler {
 
         // If the type has explicit constructor functions defined, compile ALL overloads
         if let Some(constructor_functions) = &type_def.constructor_functions {
+            // As for plain functions, an untyped constructor overload keeps the
+            // arity key even when a typed overload of the same arity follows.
+            let untyped_arities: Vec<usize> = constructor_functions
+                .iter()
+                .filter(|fn_def| {
+                    self.create_function_signature(&constructor_name, fn_def)
+                        == format!("{}/{}", constructor_name, fn_def.args.args.len())
+                })
+                .map(|fn_def| fn_def.args.args.len())
+                .collect();
             for fn_def in constructor_functions {
                 // Type constructors don't have Var source, use None
                 let function_id =
@@ -5159,7 +5252,9 @@ impl Compiler {
                 let arity = fn_def.args.args.len();
                 let arity_key = format!("{}/{}", constructor_name, arity);
                 // Register at arity key (may override default for non-Map types)
-                self.function_mapping.insert(arity_key, function_id);
+                if signature == arity_key || !untyped_arities.contains(&arity) {
+                    self.function_mapping.insert(arity_key, function_id);
+                }
 
                 // Also add a type-based signature using parameter type names for better matching
                 let param_types: Vec<String> = fn_def
@@ -6887,6 +6982,15 @@ impl Compiler {
         self.store_variable_with_meta(name, register, None);
     }
 
+    /// Store a named function, type constructor or type implementation that
+    /// a body defines. Those resolve statically under their qualified names,
+    /// so the name is not recorded as a shadowing local (see `local_names`).
+    fn store_definition(&mut self, name: &str, register: RegisterId, ast_meta: Option<&Meta>) {
+        let local_names_len = self.local_names.len();
+        self.store_variable_with_meta(name, register, ast_meta);
+        self.local_names.truncate(local_names_len);
+    }
+
     /// Store a variable with optional AST metadata for emitter events
     fn store_variable_with_meta(
         &mut self,
@@ -6897,6 +7001,10 @@ impl Compiler {
         tracing::trace!("Storing variable '{}' in register {}", name, register);
         if self.emitting_function_body {
             self.enclosing_bindings.push(name.to_string());
+        }
+
+        if self.emitting_function_body {
+            self.local_names.push(name.to_string());
         }
 
         // Store the variable name as a constant
@@ -7178,6 +7286,30 @@ impl Compiler {
     }
 
     /// Check if a variable should be excluded from closure capture
+    /// Whether `name` may be bound as a local where code is being compiled
+    /// (see `local_names`).
+    fn is_local_name(&self, name: &str) -> bool {
+        self.local_names.iter().any(|local| local == name)
+    }
+
+    /// The parameter names of `function_id` that bind values: lazy
+    /// parameters hold thunks, which the runtime's name lookup skips so that
+    /// a function of the same name is still called.
+    fn non_lazy_param_names(&self, function_id: FunctionId) -> Vec<String> {
+        self.program
+            .functions
+            .get(function_id as usize)
+            .map(|info| {
+                info.param_names
+                    .iter()
+                    .zip(&info.lazy_params)
+                    .filter(|(_, lazy)| !**lazy)
+                    .map(|(name, _)| name.clone())
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
     fn should_exclude_from_capture(
         &self,
         var_name: &str,
@@ -7560,6 +7692,11 @@ impl Compiler {
                         .or(var_ref.var.deep_path.as_ref())
                     {
                         self.compile_deep_set_assignment(var_name, deep_set_path, value_reg)?;
+                    } else if matches!(
+                        value_expr,
+                        Value::Fn(_) | Value::TypeDef(_) | Value::TypeImplementation(_)
+                    ) {
+                        self.store_definition(var_name, value_reg, None);
                     } else {
                         let value_reg = self.constrain_binding(&var_ref.var, value_expr, value_reg);
                         self.store_variable(var_name, value_reg);
@@ -7700,6 +7837,10 @@ impl Compiler {
                     // Compile the value expression as a thunk (zero-arg lambda)
                     let thunk_reg = self.compile_expression_as_thunk(value_expr)?;
 
+                    if self.emitting_function_body {
+                        self.local_names.push(var_name.to_string());
+                    }
+
                     // Emit DeferredVarExpr instruction - VM will evaluate this in parallel
                     let var_name_constant = self
                         .program
@@ -7796,7 +7937,7 @@ impl Compiler {
                             if let Value::Fn(function_defs) = value_expr {
                                 let value_reg =
                                     self.compile_named_function_in_flow(var_name, function_defs)?;
-                                self.store_variable(var_name, value_reg);
+                                self.store_definition(var_name, value_reg, None);
                                 last_reg = value_reg;
                                 i += 2;
                                 continue;
@@ -7811,7 +7952,7 @@ impl Compiler {
                                 );
                                 let value_reg =
                                     self.compile_type_constructor(var_name, type_def, false)?;
-                                self.store_variable(var_name, value_reg);
+                                self.store_definition(var_name, value_reg, None);
                                 last_reg = value_reg;
                                 i += 2;
                                 continue;
@@ -7825,7 +7966,7 @@ impl Compiler {
                                     type_impl.target_type
                                 );
                                 let value_reg = self.compile_type_implementation(type_impl)?;
-                                self.store_variable(var_name, value_reg);
+                                self.store_definition(var_name, value_reg, None);
                                 last_reg = value_reg;
                                 i += 2;
                                 continue;
@@ -8032,6 +8173,7 @@ impl Compiler {
                         .is_some_and(|ns_info| ns_info.variables.contains_key(&local_type_path));
 
                     if !self.current_function_params.contains(&var_name.to_string())
+                        && !self.is_local_name(var_name)
                         && !local_type_exists
                         && let Some(core_info) = self.core_variables.get(var_name)
                         && let crate::lang::ast::Value::TypeDef(type_def) = &core_info.value
@@ -8078,13 +8220,15 @@ impl Compiler {
                     // Regular variable reference without deep path
                     let reg = self.allocate_register();
 
-                    // Check if this is a function parameter, or a function
-                    // defined in an enclosing body: either is a local value.
+                    // Check if this is a function parameter, a function defined
+                    // in an enclosing body, or another local: each is a local
+                    // value, which shadows a function of the same name.
                     if self.current_function_params.contains(&var_name.to_string())
                         || self
                             .local_function_names
                             .iter()
                             .any(|name| name == var_name)
+                        || self.is_local_name(var_name)
                     {
                         // This is a function parameter - generate LoadVar instruction for parameter
                         let var_name_constant = self
