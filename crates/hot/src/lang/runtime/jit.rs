@@ -2805,24 +2805,25 @@ unsafe extern "C" fn hot_jit_get_type_path(val_ptr: i64) -> i64 {
     new_owned_val(Val::Str(type_path.into()))
 }
 
-/// JIT helper: look up a variable by name through the VM.
-/// Returns an OwnedVal handle to the resolved value, or Val::Null if not found.
-/// Lenient by design: used only for closure capture, where the interpreter
-/// also skips names it cannot resolve. `LoadVar` uses the strict variant.
+/// JIT helper: look up a variable by name through the VM, for a closure's
+/// capture. Returns an OwnedVal handle to the resolved value, or 0 when the
+/// name doesn't resolve: `hot_jit_populate_closure` leaves that capture out,
+/// as the interpreter does, rather than capturing a Null. `LoadVar` uses the
+/// strict variant.
 unsafe extern "C" fn hot_jit_lookup_var(name_ptr: i64) -> i64 {
     let vm_ptr = get_jit_vm_ptr();
     if vm_ptr.is_null() {
-        return new_owned_val(Val::Null);
+        return 0;
     }
     let vm = unsafe { &mut *vm_ptr };
     let name_val = unsafe { &*(name_ptr as *const Val) };
     let name = match name_val {
         Val::Str(s) => s.as_ref(),
-        _ => return new_owned_val(Val::Null),
+        _ => return 0,
     };
     match vm.lookup_variable(name) {
         Ok(val) => new_owned_val(val),
-        Err(_) => new_owned_val(Val::Null),
+        Err(_) => 0,
     }
 }
 
@@ -2870,7 +2871,8 @@ unsafe extern "C" fn hot_jit_lookup_var_or_default(name_ptr: i64) -> i64 {
 /// JIT helper: clone a lambda and populate its closure_env with captured variable values.
 /// `lambda_ptr` is an OwnedVal pointer to a Val::Box(LambdaInfo).
 /// `names_ptr` points to an array of i64 OwnedVal pointers (each a Val::Str).
-/// `values_ptr` points to an array of i64 OwnedVal pointers (the captured values).
+/// `values_ptr` points to an array of i64 OwnedVal pointers (the captured
+/// values), 0 for a name that didn't resolve.
 /// `count` is the number of captured variables.
 /// Returns an OwnedVal pointer to the new lambda with populated closure_env.
 unsafe extern "C" fn hot_jit_populate_closure(
@@ -2886,10 +2888,18 @@ unsafe extern "C" fn hot_jit_populate_closure(
             .downcast_ref::<crate::lang::bytecode::LambdaInfo>()
     {
         let mut captured = lambda_info.clone();
+        // The compiler's placeholders give way to what this creation
+        // captures, as in the interpreter.
+        captured.closure_env.clear();
         let n = count as usize;
         for i in 0..n {
             let name_raw = unsafe { *names_ptr.add(i) };
             let value_raw = unsafe { *values_ptr.add(i) };
+            // A name that didn't resolve stays uncaptured (see
+            // `hot_jit_lookup_var`).
+            if value_raw == 0 {
+                continue;
+            }
             let name_val = unsafe { &*(name_raw as *const Val) };
             let value_val = unsafe { &*(value_raw as *const Val) };
             if let Val::Str(name) = name_val {
@@ -3963,29 +3973,21 @@ fn raw_type_token(kind: RawKind) -> Result<i64, String> {
     }
 }
 
-/// Convert a VM error to an OwnedVal, matching the VM's error_capture_active behavior.
-/// When error capture is active, wraps as {error: "msg"} map (like the VM does).
-/// Otherwise: a halt (failure or cancellation state on the VM) becomes
-/// HALT_SENTINEL so emitted code aborts the frame — the interpreter would
-/// have unwound the caller with Err(VmError) — while ordinary errors keep
-/// the Val::err channel for ReturnIfErr to catch.
-fn vm_error_to_owned_val(err: impl std::fmt::Display, error_capture_active: bool) -> i64 {
-    if !error_capture_active {
-        let vm_ptr = get_jit_vm_ptr();
-        if !vm_ptr.is_null() {
-            let vm = unsafe { &*vm_ptr };
-            if vm.has_failed() || vm.has_cancelled() {
-                return HALT_SENTINEL;
-            }
-        }
-    }
+/// The result of a VM call that failed. Under an error capture the error is
+/// captured as `{error: message}`; otherwise it halts, as the interpreter's
+/// error unwinds the calling frame: an Err value is a call's result, never
+/// its failure.
+fn vm_error_to_owned_val(err: VmError, error_capture_active: bool) -> i64 {
     if error_capture_active {
         let mut m = indexmap::IndexMap::new();
         m.insert(Val::from("error"), Val::from(err.to_string()));
-        new_owned_val(Val::Map(Box::new(m)))
-    } else {
-        new_owned_val(Val::err(Val::Str(err.to_string().into())))
+        return new_owned_val(Val::Map(Box::new(m)));
     }
+    let vm_ptr = get_jit_vm_ptr();
+    if vm_ptr.is_null() {
+        return new_owned_val(Val::err(Val::Str(err.to_string().into())));
+    }
+    vm_runtime_error_to_halt(unsafe { &*vm_ptr }, err)
 }
 
 /// Property helpers represent interpreter `VmError` unwinding with the JIT's

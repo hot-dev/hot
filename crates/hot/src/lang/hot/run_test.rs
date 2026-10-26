@@ -2375,6 +2375,46 @@ show fn (r: Result) { if(is-err(r), `Err ${err-message(r)}`, r) }
         }
     }
 
+    /// A capture a local function couldn't resolve when it was created (a
+    /// binding made after it) comes from the call that created it, while
+    /// that call runs, and never from the frames of a later caller.
+    #[test]
+    fn unresolved_capture_comes_from_the_definer_only() {
+        let in_definer = r#"::t ns
+make fn () {
+    h fn () { `${later} via h` }
+    later "definer later"
+    h()
+}
+caller fn () {
+    later "caller later"
+    make()
+}
+caller()"#;
+        let escaped = r#"::t ns
+make fn () {
+    h fn () { `${later} via h` }
+    later "definer later"
+    h
+}
+caller fn () {
+    later "caller later"
+    f make()
+    f()
+}
+caller()"#;
+        for conf in [
+            val!({"jit": {"mode": "disabled"}}),
+            val!({"jit": {"threshold": 1}}),
+        ] {
+            let out = compile_and_run_with_std_conf(in_definer, Some(conf.clone())).expect("run");
+            assert_eq!(out, Val::from("definer later via h"), "{conf:?}");
+            let err = compile_and_run_with_std_conf(escaped, Some(conf.clone()))
+                .expect_err("the definer's binding is gone");
+            assert!(err.contains("Variable 'later' not found"), "{conf:?}: {err}");
+        }
+    }
+
     /// A consumed overflow halts with the same message either way.
     #[test]
     fn consumed_overflow_halts_in_interpreter_and_compiled_code() {

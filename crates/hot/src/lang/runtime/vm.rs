@@ -255,6 +255,9 @@ pub struct LexicalScope {
     /// For a lambda call's frame, where the lambda was created: lookups
     /// continue there instead of in the caller's frames.
     link: Option<crate::lang::bytecode::FrameLink>,
+    /// The frame of a call (a function's or a lambda's), not a scope a call
+    /// opens inside its frame, such as a flow's.
+    call: bool,
 }
 
 /// Flow execution context
@@ -364,7 +367,7 @@ struct ParallelFlowContext {
 }
 
 impl LexicalScope {
-    pub fn new(_scope_type: ScopeType, _parent_depth: Option<usize>) -> Self {
+    pub fn new(scope_type: ScopeType, _parent_depth: Option<usize>) -> Self {
         Self {
             variables: IndexMap::new(),
             local_types: IndexMap::new(),
@@ -372,6 +375,7 @@ impl LexicalScope {
             is_boundary: false,
             frame_id: NEXT_FRAME_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
             link: None,
+            call: scope_type == ScopeType::Function,
         }
     }
 
@@ -4882,6 +4886,35 @@ impl VirtualMachine {
         self.lookup_from(target + 1, name)
     }
 
+    /// A binding in the call that created a lambda, whose innermost scope
+    /// then was `definer`: the scopes that call has opened since (a parallel
+    /// flow's, holding its branches' results), then `definer` and what it
+    /// sees. A scope above another call's frame belongs to that call.
+    fn lookup_in_definer_call(&self, definer: usize, name: &str) -> Option<Val> {
+        let opened_since = self.scope_stack.get(definer + 1..).unwrap_or_default();
+        let opened_since = &opened_since[..opened_since
+            .iter()
+            .position(|scope| scope.call)
+            .unwrap_or(opened_since.len())];
+        opened_since
+            .iter()
+            .rev()
+            .find_map(|scope| scope.variables.get(name).cloned())
+            .or_else(|| self.lookup_from(definer + 1, name))
+    }
+
+    /// A name's value in `namespace` or core, where no call's frame is in
+    /// scope.
+    fn lookup_outside_calls(&self, namespace: &str, name: &str) -> Option<Val> {
+        if name.starts_with("::") && name.contains('/') {
+            return self.lookup_qualified_variable_immutable(name);
+        }
+        self.namespace_variables
+            .get(namespace)
+            .and_then(|vars| vars.get(name).cloned())
+            .or_else(|| self.lookup_core_variable(name))
+    }
+
     /// The frames a lambda created now is defined in.
     fn current_frame_link(&self) -> Option<crate::lang::bytecode::FrameLink> {
         let innermost = self.scope_stack.len().checked_sub(1)?;
@@ -4925,16 +4958,6 @@ impl VirtualMachine {
             }
         }
         Val::Box(Box::new(lambda))
-    }
-
-    /// A binding in any frame on the stack, innermost first, regardless of
-    /// call boundaries. Only for captures a lambda couldn't resolve when it
-    /// was created; ordinary lookups stop at the current call's frame.
-    fn lookup_in_any_frame(&self, name: &str) -> Option<Val> {
-        self.scope_stack
-            .iter()
-            .rev()
-            .find_map(|scope| scope.variables.get(name).cloned())
     }
 
     /// Get a variable from the VM's namespace registry (similar to lang1's get_var)
@@ -7924,11 +7947,12 @@ impl VirtualMachine {
 
                 // Fill the captures that creation couldn't resolve, such as a
                 // local function that calls one defined after it. Those
-                // bindings sit in the definer's frames: look there first, then,
-                // when those frames are gone or unknown (a lambda returned from
-                // a parallel branch, or one compiled code created), in every
-                // frame. A value captured at creation is kept; one genuinely
-                // captured as Null and no longer resolvable stays Null.
+                // bindings sit in the definer's frames while its call is live.
+                // Once they are gone (a lambda returned from its definer, or
+                // one compiled code created), the name means what it means in
+                // the lambda's namespace: no other call's frame is searched. A
+                // value captured at creation is kept; one genuinely captured as
+                // Null and no longer resolvable stays Null.
                 for var_name in &lambda_info_owned.capture_vars.clone() {
                     if lambda_info_owned
                         .closure_env
@@ -7940,10 +7964,8 @@ impl VirtualMachine {
                     let from_definer = lambda_info_owned
                         .defining_frame
                         .and_then(|link| self.live_link_target(link))
-                        .and_then(|target| self.lookup_from(target + 1, var_name));
-                    if let Some(var_value) =
-                        from_definer.or_else(|| self.lookup_in_any_frame(var_name))
-                    {
+                        .and_then(|target| self.lookup_in_definer_call(target, var_name));
+                    if let Some(var_value) = from_definer {
                         lambda_info_owned
                             .closure_env
                             .insert(var_name.clone(), var_value);
@@ -7954,14 +7976,20 @@ impl VirtualMachine {
                         );
                         continue;
                     }
-
-                    if let Ok(var_value) = self.unified_variable_lookup(var_name) {
-                        // Fall back to unified lookup (namespace + core variables)
+                    // The lambda's namespace and core. The frames on the stack
+                    // now are its caller's, which it doesn't see. (Code with no
+                    // namespace declaration runs in the current one.)
+                    let namespace = if lambda_info_owned.defining_namespace.is_empty() {
+                        self.current_namespace.as_str()
+                    } else {
+                        lambda_info_owned.defining_namespace.as_str()
+                    };
+                    if let Some(var_value) = self.lookup_outside_calls(namespace, var_name) {
                         lambda_info_owned
                             .closure_env
                             .insert(var_name.clone(), var_value);
                         tracing::trace!(
-                            "VM: Captured variable '{}' from unified lookup = {:?}",
+                            "VM: Captured variable '{}' from its namespace = {:?}",
                             var_name,
                             lambda_info_owned.closure_env.get(var_name)
                         );
