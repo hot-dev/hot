@@ -1005,6 +1005,7 @@ mod tests {
             is_lazy_param: true,
             used_registers: vec![],
             structural_hash_cache: Default::default(),
+            defining_frame: None,
         };
 
         let args = Val::Vec(vec![
@@ -1052,6 +1053,7 @@ mod tests {
             is_lazy_param: true,
             used_registers: vec![],
             structural_hash_cache: Default::default(),
+            defining_frame: None,
         };
 
         emitter.emit(EngineEvent::call_start(

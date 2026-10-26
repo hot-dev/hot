@@ -631,6 +631,21 @@ pub struct LambdaInfo {
     /// equality/ordering/hashing; skipped in serialization.
     #[serde(skip)]
     pub structural_hash_cache: LambdaHashCache,
+    /// The frames this lambda was created in, set when the VM creates it.
+    /// Its calls look names up there rather than in their caller's frames.
+    /// Runtime-only: not part of equality, hashing or serialization.
+    #[serde(skip)]
+    pub defining_frame: Option<FrameLink>,
+}
+
+/// Where a lambda was created: the innermost scope at the time, and the frame
+/// of the top-level function call it was in, each as (stack index, frame id).
+/// A lookup follows the link only while the frame at that index still has
+/// that id, that is, while the defining call hasn't returned.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FrameLink {
+    pub scope: (usize, u64),
+    pub boundary: Option<(usize, u64)>,
 }
 
 impl PartialEq for LambdaInfo {
@@ -1029,6 +1044,10 @@ pub struct BytecodeProgram {
     /// holding its constraint spec. `CheckConstraint` specs refer to named
     /// types through this table.
     pub constraint_types: Vec<(String, ConstantId)>,
+    /// Functions defined inside another function's body. A call to one sees
+    /// its definer's locals; a call to any other function sees only its own
+    /// frame, its namespace and core.
+    pub local_functions: AHashSet<FunctionId>,
     /// Content-hash index over `constants` so `add_constant` dedup is O(1)
     /// instead of a linear scan (which made pool construction quadratic on
     /// large programs). Values are candidate ids sharing a hash; equality is
@@ -1469,6 +1488,7 @@ impl BytecodeProgram {
             source_map: SourceMap::new(),
             variable_metadata: AHashMap::new(),
             constraint_types: Vec::new(),
+            local_functions: AHashSet::new(),
             constant_index: AHashMap::new(),
         }
     }

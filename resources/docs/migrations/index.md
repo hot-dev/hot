@@ -98,6 +98,13 @@ setup-hot `version` input so pipelines move to 3.0 when you do. See
   calls. Look for `not (x)`, `assert (...)`, and `if (x) { ... }`. `hot check`
   now warns with `binding-shadows-function` when such a binding shadows a
   function, and `hot test` warns about a test that makes no assertions.
+- **Functions are lexically scoped.** A function reads its own parameters and
+  locals, then its namespace, then core. Through 2.6.11, a caller's parameter
+  or local hid a namespace binding of the same name inside every function it
+  called: a `check` that reads the namespace's `limit` saw its caller's
+  `limit` parameter instead. Now it reads the namespace value. Lambdas and
+  functions defined in a function body still see the bindings around them. To
+  give a function a caller's value, pass it as an argument.
 - **New: parameter lists can span lines**, in functions and in lambdas. A
   lambda's `{` must be on the same line as its closing `)`. See
   [Long Parameter Lists](/docs/language/functions#long-parameter-lists).

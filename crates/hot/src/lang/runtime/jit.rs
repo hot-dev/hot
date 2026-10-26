@@ -9904,6 +9904,7 @@ mod tests {
             is_lazy_param: false,
             used_registers: vec![0, 1, 2],
             structural_hash_cache: Default::default(),
+            defining_frame: None,
         };
 
         let conf = val!({"jit": {"mode": "enabled", "threshold": 1}});
@@ -9951,6 +9952,7 @@ mod tests {
             is_lazy_param: false,
             used_registers: vec![0, 1, 2],
             structural_hash_cache: Default::default(),
+            defining_frame: None,
         };
 
         let conf = val!({"jit": {"mode": "enabled", "threshold": 1}});
@@ -10007,6 +10009,7 @@ mod tests {
             is_lazy_param: false,
             used_registers: vec![0, 1, 2, 3],
             structural_hash_cache: Default::default(),
+            defining_frame: None,
         };
 
         let conf = val!({"jit": {"mode": "enabled", "threshold": 1}});
@@ -10031,6 +10034,7 @@ mod tests {
             is_lazy_param: true,
             used_registers: vec![0],
             structural_hash_cache: Default::default(),
+            defining_frame: None,
         };
 
         let conf = val!({"jit": {"mode": "enabled", "threshold": 1}});
@@ -11577,6 +11581,7 @@ mod tests {
             is_lazy_param: false,
             used_registers: vec![0],
             structural_hash_cache: Default::default(),
+            defining_frame: None,
         }));
 
         let make_vm = |conf| {
@@ -12856,6 +12861,7 @@ mod tests {
             is_lazy_param: true,
             used_registers: vec![0],
             structural_hash_cache: Default::default(),
+            defining_frame: None,
         };
 
         // Thunk for "else" branch: { b }
@@ -12875,6 +12881,7 @@ mod tests {
             is_lazy_param: true,
             used_registers: vec![0],
             structural_hash_cache: Default::default(),
+            defining_frame: None,
         };
 
         let then_const = program.constants.len() as u32;
@@ -13001,6 +13008,7 @@ mod tests {
             is_lazy_param: true,
             used_registers: vec![0],
             structural_hash_cache: Default::default(),
+            defining_frame: None,
         };
 
         // "else" thunk: { add(fib(sub(n, 1)), fib(sub(n, 2))) }
@@ -13059,6 +13067,7 @@ mod tests {
             is_lazy_param: true,
             used_registers: vec![0, 1, 2, 3, 4, 5, 6, 7, 8],
             structural_hash_cache: Default::default(),
+            defining_frame: None,
         };
 
         let then_const = program.constants.len() as u32;
@@ -13192,6 +13201,7 @@ mod tests {
             is_lazy_param: true,
             used_registers: vec![0],
             structural_hash_cache: Default::default(),
+            defining_frame: None,
         };
         let else_thunk = LambdaInfo {
             parameters: vec![],
@@ -13209,6 +13219,7 @@ mod tests {
             is_lazy_param: true,
             used_registers: vec![0],
             structural_hash_cache: Default::default(),
+            defining_frame: None,
         };
         let then_const = program.constants.len() as u32;
         program
@@ -13312,6 +13323,7 @@ mod tests {
             is_lazy_param: true,
             used_registers: vec![0],
             structural_hash_cache: Default::default(),
+            defining_frame: None,
         };
         let lazy_const = program.constants.len() as u32;
         program
@@ -13402,6 +13414,7 @@ mod tests {
             is_lazy_param: true,
             used_registers: vec![0],
             structural_hash_cache: Default::default(),
+            defining_frame: None,
         };
         let thunk_const = program.constants.len() as u32;
         program
@@ -13462,6 +13475,7 @@ mod tests {
             is_lazy_param: true,
             used_registers: vec![0],
             structural_hash_cache: Default::default(),
+            defining_frame: None,
         };
         let thunk_const = program.constants.len() as u32;
         program

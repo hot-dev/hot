@@ -1805,7 +1805,9 @@ fn pmap_vec(
     let type_implementations = vm.get_type_implementations_arc();
     let core_variables = vm.get_core_variables_arc();
     let conf = vm.get_conf().clone();
-    let function_val_clone = function_val.clone();
+    // Workers are fresh VMs without this call's frames, so the callback
+    // takes the captures it couldn't resolve at creation from here.
+    let function_val_clone = vm.with_captures_resolved(function_val);
 
     // Worker VMs need the same realized namespace state as the parent because
     // callbacks can call package functions that switch namespaces and read

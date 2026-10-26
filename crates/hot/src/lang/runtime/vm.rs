@@ -202,6 +202,9 @@ impl VmError {
     }
 }
 
+/// Source of `LexicalScope::frame_id`.
+static NEXT_FRAME_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
 /// Lexical scope for proper variable resolution
 #[derive(Debug, Clone)]
 pub struct LexicalScope {
@@ -211,10 +214,17 @@ pub struct LexicalScope {
     local_types: IndexMap<String, String>,
     /// Local type implementations in this scope: (source_type, target_type) -> implementation_function_name
     local_implementations: IndexMap<(String, String), String>,
-    /// Namespace entries this scope's local bindings overwrote, with their
-    /// previous values: `(namespace, name, previous)`. Restored when the
-    /// scope ends, so a local never outlives its scope in the namespace.
-    ns_shadows: Vec<(String, String, Option<Val>)>,
+    /// The frame of a call to a top-level function. A name lookup that
+    /// reaches it goes on to the namespace, never into the caller's frames.
+    /// Frames of lambdas and of functions defined in another function's body
+    /// aren't boundaries: their lookups continue into their definer's frames.
+    is_boundary: bool,
+    /// Unique across VMs, so a `FrameLink` can tell whether this scope is
+    /// still the one it was created in.
+    frame_id: u64,
+    /// For a lambda call's frame, where the lambda was created: lookups
+    /// continue there instead of in the caller's frames.
+    link: Option<crate::lang::bytecode::FrameLink>,
 }
 
 /// Flow execution context
@@ -329,8 +339,24 @@ impl LexicalScope {
             variables: IndexMap::new(),
             local_types: IndexMap::new(),
             local_implementations: IndexMap::new(),
-            ns_shadows: Vec::new(),
+            is_boundary: false,
+            frame_id: NEXT_FRAME_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+            link: None,
         }
+    }
+
+    /// The frame of a call: its parameters bound to `args`, missing ones to
+    /// Null. Compiled code keeps its locals in registers, so this frame only
+    /// gives its name lookups their parameters and boundary.
+    fn call_frame(param_names: &[String], args: &[Val], is_boundary: bool) -> Self {
+        let mut frame = Self::new(ScopeType::Function, None);
+        frame.is_boundary = is_boundary;
+        for (idx, name) in param_names.iter().enumerate() {
+            frame
+                .variables
+                .insert(name.clone(), args.get(idx).cloned().unwrap_or(Val::Null));
+        }
+        frame
     }
 
     /// Add a local type constructor to this scope
@@ -1740,6 +1766,7 @@ impl VirtualMachine {
                         // Clone and populate the closure environment
                         let mut captured_lambda = lambda_info.clone();
                         captured_lambda.closure_env.clear();
+                        captured_lambda.defining_frame = self.current_frame_link();
 
                         for var_name in &captured_lambda.capture_vars {
                             // In parallel flow context, skip variable capture - defer to execution time
@@ -2921,7 +2948,7 @@ impl VirtualMachine {
             Instruction::ExitScope => {
                 if self.scope_stack.len() > 1 {
                     // Keep at least the global scope
-                    self.truncate_scopes(self.scope_stack.len() - 1);
+                    self.scope_stack.pop();
                 }
                 self.instruction_pointer += 1;
             }
@@ -4659,6 +4686,117 @@ impl VirtualMachine {
         self.unified_variable_lookup(name)
     }
 
+    /// A binding visible from the current frame: what a lambda created here
+    /// would capture.
+    fn lookup_in_current_call(&self, name: &str) -> Option<Val> {
+        self.lookup_from(self.scope_stack.len(), name)
+    }
+
+    /// A binding in the scopes below `start`, innermost first. The walk
+    /// stops at the frame of a top-level function call, and at a lambda
+    /// call's frame it continues in the frames the lambda was created in,
+    /// while they are live, rather than in its caller's.
+    fn lookup_from(&self, start: usize, name: &str) -> Option<Val> {
+        let mut idx = start.min(self.scope_stack.len());
+        while idx > 0 {
+            idx -= 1;
+            let scope = &self.scope_stack[idx];
+            if let Some(value) = scope.variables.get(name) {
+                return Some(value.clone());
+            }
+            if scope.is_boundary {
+                return None;
+            }
+            if let Some(link) = scope.link {
+                match self.live_link_target(link) {
+                    // Continue at the target: the loop steps down to it.
+                    Some(target) if target < idx => idx = target + 1,
+                    _ => return None,
+                }
+            }
+        }
+        None
+    }
+
+    /// The live scope a lambda's frame link points at: where it was created,
+    /// or failing that its defining top-level call's frame.
+    fn live_link_target(&self, link: crate::lang::bytecode::FrameLink) -> Option<usize> {
+        let live = |(index, frame_id): (usize, u64)| {
+            self.scope_stack
+                .get(index)
+                .is_some_and(|scope| scope.frame_id == frame_id)
+                .then_some(index)
+        };
+        live(link.scope).or_else(|| link.boundary.and_then(live))
+    }
+
+    /// A binding visible where `lambda` was created, while that call is
+    /// live. A native given a lazy argument uses it to see the caller's
+    /// locals, as the argument's own code would.
+    pub(crate) fn lookup_in_lambda_definer(
+        &self,
+        lambda: &crate::lang::bytecode::LambdaInfo,
+        name: &str,
+    ) -> Option<Val> {
+        let target = self.live_link_target(lambda.defining_frame?)?;
+        self.lookup_from(target + 1, name)
+    }
+
+    /// The frames a lambda created now is defined in.
+    fn current_frame_link(&self) -> Option<crate::lang::bytecode::FrameLink> {
+        let innermost = self.scope_stack.len().checked_sub(1)?;
+        let boundary = self
+            .scope_stack
+            .iter()
+            .enumerate()
+            .rev()
+            .find(|(_, scope)| scope.is_boundary)
+            .map(|(index, scope)| (index, scope.frame_id));
+        Some(crate::lang::bytecode::FrameLink {
+            scope: (innermost, self.scope_stack[innermost].frame_id),
+            boundary,
+        })
+    }
+
+    /// `value` with every capture it couldn't resolve at creation filled from
+    /// the current call's frames, if it is a lambda. For running it on a
+    /// fresh VM (a parallel branch, `pmap`), which has none of these frames.
+    pub(crate) fn with_captures_resolved(&self, value: &Val) -> Val {
+        let Val::Box(boxed) = value else {
+            return value.clone();
+        };
+        let Some(lambda) = boxed
+            .as_any()
+            .downcast_ref::<crate::lang::bytecode::LambdaInfo>()
+        else {
+            return value.clone();
+        };
+        let mut lambda = lambda.clone();
+        for name in &lambda.capture_vars {
+            if lambda
+                .closure_env
+                .get(name)
+                .is_some_and(|value| !matches!(value, Val::Null))
+            {
+                continue;
+            }
+            if let Some(found) = self.lookup_in_current_call(name) {
+                lambda.closure_env.insert(name.clone(), found);
+            }
+        }
+        Val::Box(Box::new(lambda))
+    }
+
+    /// A binding in any frame on the stack, innermost first, regardless of
+    /// call boundaries. Only for captures a lambda couldn't resolve when it
+    /// was created; ordinary lookups stop at the current call's frame.
+    fn lookup_in_any_frame(&self, name: &str) -> Option<Val> {
+        self.scope_stack
+            .iter()
+            .rev()
+            .find_map(|scope| scope.variables.get(name).cloned())
+    }
+
     /// Get a variable from the VM's namespace registry (similar to lang1's get_var)
     /// This is used to extract variables after execution is complete
     pub fn get_var(&self, namespace_path: Option<&str>, var_name: &str) -> Option<Val> {
@@ -5646,15 +5784,10 @@ impl VirtualMachine {
             return self.lookup_qualified_variable(var_name);
         }
 
-        // 2a) Lexical scope (innermost first)
-        let mut lexical_found: Option<Val> = None;
-        for scope in self.scope_stack.iter().rev() {
-            if let Some(val) = scope.variables.get(var_name) {
-                lexical_found = Some(val.clone());
-                break;
-            }
-        }
-        if let Some(val) = lexical_found {
+        // 2a) Lexical scope: the current call's frames, then (for a lambda
+        // or local function) its definer's, down to the frame of a top-level
+        // function call. Never the frames of an unrelated caller.
+        if let Some(val) = self.lookup_in_current_call(var_name) {
             // Strings are just strings - no automatic resolution to function references
             return Ok(val);
         }
@@ -7330,14 +7463,28 @@ impl VirtualMachine {
                 // Slow path: need to populate closure_env, so clone
                 let mut lambda_info_owned = lambda_info_ref.clone();
 
-                // Populate or refresh placeholder compile-time captures. If a
-                // value genuinely captured as Null is no longer resolvable in
-                // the active scope, keep the existing Null.
-
-                // Populate closure environment with current variable values
+                // Fill the captures that creation couldn't resolve, such as a
+                // local function that calls one defined after it. Those
+                // bindings sit in the definer's frames: look there first, then,
+                // when those frames are gone or unknown (a lambda returned from
+                // a parallel branch, or one compiled code created), in every
+                // frame. A value captured at creation is kept; one genuinely
+                // captured as Null and no longer resolvable stays Null.
                 for var_name in &lambda_info_owned.capture_vars.clone() {
-                    // Try to capture from current lexical scope first
-                    if let Ok(var_value) = self.lookup_variable(var_name) {
+                    if lambda_info_owned
+                        .closure_env
+                        .get(var_name)
+                        .is_some_and(|value| !matches!(value, Val::Null))
+                    {
+                        continue;
+                    }
+                    let from_definer = lambda_info_owned
+                        .defining_frame
+                        .and_then(|link| self.live_link_target(link))
+                        .and_then(|target| self.lookup_from(target + 1, var_name));
+                    if let Some(var_value) =
+                        from_definer.or_else(|| self.lookup_in_any_frame(var_name))
+                    {
                         lambda_info_owned
                             .closure_env
                             .insert(var_name.clone(), var_value);
@@ -7407,8 +7554,10 @@ impl VirtualMachine {
                 std::borrow::Cow::Owned(lambda_info_owned)
             };
 
-        // Create a new lexical scope for lambda execution
+        // Create a new lexical scope for lambda execution. Its lookups
+        // continue in the frames the lambda was created in.
         let mut lambda_scope = LexicalScope::new(ScopeType::Function, Some(self.scope_stack.len()));
+        lambda_scope.link = lambda_info.defining_frame;
 
         // Bind captured variables to closure environment FIRST
         // (so parameters can shadow them if names conflict)
@@ -7566,6 +7715,7 @@ impl VirtualMachine {
                             ) {
                                 let mut captured_lambda = inner_lambda_info.clone();
                                 captured_lambda.closure_env.clear();
+                                captured_lambda.defining_frame = self.current_frame_link();
 
                                 for var_name in &captured_lambda.capture_vars {
                                     if let Ok(var_value) = self.lookup_variable(var_name) {
@@ -7722,12 +7872,12 @@ impl VirtualMachine {
         // Pop the lambda scope. An error also leaves the scopes and flow
         // contexts the body opened, so drop those too.
         if body.is_err() {
-            self.truncate_scopes(saved_scope_depth);
+            self.scope_stack.truncate(saved_scope_depth);
             self.flow_contexts.truncate(saved_flow_context_depth);
             self.skip_until_branch_end = saved_skip_flag;
             self.skip_remaining_cond_flow = saved_skip_cond_flow;
         } else {
-            self.truncate_scopes(self.scope_stack.len().saturating_sub(1));
+            self.scope_stack.pop();
         }
 
         // Restore original namespace
@@ -7758,41 +7908,23 @@ impl VirtualMachine {
                 )
             });
         let saved_namespace = self.current_namespace.clone();
-        let mut saved_namespace_bindings: Vec<(String, Option<Val>)> = Vec::new();
+        let saved_scope_depth = self.scope_stack.len();
         if let Some((namespace, param_names)) = &function_info {
             self.current_namespace = namespace.clone();
             if let Err(err) = self.ensure_namespace_has_ns_variable(namespace) {
                 self.current_namespace = saved_namespace;
                 return Err(err.to_string());
             }
-            let namespace_vars = self
-                .namespace_variables
-                .entry(namespace.clone())
-                .or_default();
-            saved_namespace_bindings.reserve(param_names.len());
-            for (idx, param_name) in param_names.iter().enumerate() {
-                let arg_value = args.get(idx).cloned().unwrap_or(Val::Null);
-                saved_namespace_bindings.push((
-                    param_name.clone(),
-                    namespace_vars.insert(param_name.clone(), arg_value),
-                ));
-            }
+            // The compiled call's frame, as an interpreted call has.
+            let is_boundary = !self.program.local_functions.contains(&function_id);
+            self.scope_stack
+                .push(LexicalScope::call_frame(param_names, args, is_boundary));
         }
 
         let prev = crate::lang::runtime::jit::set_jit_vm_ptr(self as *mut VirtualMachine);
         let result = self.jit.try_call_compiled(function_id, args);
         crate::lang::runtime::jit::set_jit_vm_ptr(prev);
-        if let Some((namespace, _)) = &function_info
-            && let Some(namespace_vars) = self.namespace_variables.get_mut(namespace)
-        {
-            for (name, previous) in saved_namespace_bindings {
-                if let Some(value) = previous {
-                    namespace_vars.insert(name, value);
-                } else {
-                    namespace_vars.shift_remove(&name);
-                }
-            }
-        }
+        self.scope_stack.truncate(saved_scope_depth);
         self.current_namespace = saved_namespace;
         result
     }
@@ -7834,12 +7966,25 @@ impl VirtualMachine {
         let program = Arc::clone(&self.program);
         let saved_namespace = self.current_namespace.clone();
         self.current_namespace = lambda_info.defining_namespace.clone();
+        // The compiled lambda's frame, as an interpreted lambda call has:
+        // what it captured, then its parameters.
+        let saved_scope_depth = self.scope_stack.len();
+        let mut frame = LexicalScope::call_frame(&lambda_info.parameters, &normalized_args, false);
+        frame.link = lambda_info.defining_frame;
+        for (name, value) in &lambda_info.closure_env {
+            frame
+                .variables
+                .entry(name.clone())
+                .or_insert_with(|| value.clone());
+        }
+        self.scope_stack.push(frame);
         let was_halted = self.has_failed() || self.has_cancelled();
         let prev = crate::lang::runtime::jit::set_jit_vm_ptr(self as *mut VirtualMachine);
         let result =
             self.jit
                 .try_call_compiled_lambda(&program, lambda_info, &normalized_args, &captures);
         crate::lang::runtime::jit::set_jit_vm_ptr(prev);
+        self.scope_stack.truncate(saved_scope_depth);
         self.current_namespace = saved_namespace;
 
         let result = result.map_err(|msg| VmError::RuntimeError(RuntimeError::new(msg)))?;
@@ -8152,6 +8297,8 @@ impl VirtualMachine {
                 crate::lang::bytecode::ScopeType::Function,
                 Some(self.scope_stack.len()),
             );
+            let is_boundary = !self.program.local_functions.contains(&function_id);
+            function_scope.is_boundary = is_boundary;
 
             // Bind parameters to arguments (handle argument count mismatch gracefully)
             // For variadic functions, the last param collects all remaining args as a Vec
@@ -8206,14 +8353,6 @@ impl VirtualMachine {
                 .rfind('/')
                 .map(|namespace_end| function_name[..namespace_end].to_string());
 
-            // Snapshot of namespace-registry entries we shadow with the
-            // function's parameters, so we can restore them after the call.
-            // Without this, calling `::hot::coll/get(map: Map<K,V>, ...)`
-            // leaves the *function* slot for `map` permanently overwritten
-            // by the caller's Map literal, which then breaks any later
-            // function in the same namespace that references `map`.
-            let mut ns_param_shadows: Vec<(String, Option<Val>)> = Vec::new();
-
             if let Some(ref namespace) = function_namespace {
                 tracing::trace!(
                     "VM: Switching to function namespace '{}' for function '{}'",
@@ -8224,45 +8363,13 @@ impl VirtualMachine {
 
                 // Ensure the function's namespace has a ns variable pointing to itself
                 if let Err(err) = self.ensure_namespace_has_ns_variable(namespace) {
-                    self.truncate_scopes(saved_scope_depth);
+                    self.scope_stack.truncate(saved_scope_depth);
                     self.current_namespace = saved_namespace;
                     return Err(err);
                 }
-
-                // Mirror all current function parameters/locals into the namespace registry
-                // so closures and VM-aware hotlibs can resolve them when needed.
-                // We capture each prior value first so the call can be unwound
-                // cleanly without leaking parameter bindings across invocations.
-                if let Some(scope) = self.scope_stack.last() {
-                    let ns_entry = self
-                        .namespace_variables
-                        .entry(self.current_namespace.clone())
-                        .or_default();
-                    for (k, v) in &scope.variables {
-                        let prev = ns_entry.insert(k.clone(), v.clone());
-                        ns_param_shadows.push((k.clone(), prev));
-                    }
-                }
-            } else if !function_param_names.is_empty()
-                && let Some(scope) = self.scope_stack.last()
-            {
-                // Unqualified function name: historically the first TCO-loop
-                // iteration mirrored params into the *caller's* namespace
-                // without shadow capture. Preserve that behavior now that the
-                // loop only rebinds on actual tail calls.
-                let params: Vec<(String, Val)> = scope
-                    .variables
-                    .iter()
-                    .map(|(k, v)| (k.clone(), v.clone()))
-                    .collect();
-                let ns_entry = self
-                    .namespace_variables
-                    .entry(self.current_namespace.clone())
-                    .or_default();
-                for (k, v) in params {
-                    ns_entry.insert(k, v);
-                }
             }
+            // Parameters live in the function scope only. They are never
+            // written to the namespace, where other functions would see them.
 
             // Execute function instructions
             // Snapshot register usage to avoid unbounded growth across many function calls
@@ -8299,10 +8406,8 @@ impl VirtualMachine {
 
                 // TCO Loop: Execute instructions, and if we get a TailCall result,
                 // update parameters and re-execute instead of recursing.
-                // Parameters were already bound into the function scope (and
-                // mirrored into the namespace registry) above, so only actual
-                // tail-call iterations rebind — the previous version re-bound
-                // and re-mirrored every parameter a second time on every call.
+                // Parameters were already bound into the function scope above,
+                // so only actual tail-call iterations rebind.
                 let mut tail_args: Option<Vec<Val>> = None;
                 // The body runs in a closure so that an error still reaches
                 // the cleanup below. A caller that contains the error (a JIT
@@ -8311,38 +8416,29 @@ impl VirtualMachine {
                 (|| -> VmResult<Val> {
                     Ok(loop {
                         if let Some(current_args) = tail_args.take() {
-                            // Update parameter bindings with the tail call's args
-                            let mut namespace_param_updates: Vec<(String, Val)> =
-                                Vec::with_capacity(function_param_names.len());
-                            if let Some(scope) = self.scope_stack.last_mut() {
-                                for (i, param_name) in function_param_names.iter().enumerate() {
-                                    let value = if function_is_variadic && i == variadic_param_index
-                                    {
-                                        // Variadic parameter - collect remaining args
-                                        let variadic_args: Vec<Val> = if i < current_args.len() {
-                                            current_args[i..].to_vec()
-                                        } else {
-                                            vec![]
-                                        };
-                                        Val::Vec(variadic_args)
-                                    } else if i < current_args.len() {
-                                        current_args[i].clone()
+                            // A tail call is a new call: a fresh frame with the
+                            // tail call's args, without the previous
+                            // iteration's locals or leftover flow scopes.
+                            self.scope_stack.truncate(saved_scope_depth);
+                            let mut frame = LexicalScope::new(ScopeType::Function, None);
+                            frame.is_boundary = is_boundary;
+                            for (i, param_name) in function_param_names.iter().enumerate() {
+                                let value = if function_is_variadic && i == variadic_param_index {
+                                    // Variadic parameter - collect remaining args
+                                    let variadic_args: Vec<Val> = if i < current_args.len() {
+                                        current_args[i..].to_vec()
                                     } else {
-                                        Val::Null
+                                        vec![]
                                     };
-                                    scope.variables.insert(param_name.clone(), value.clone());
-                                    namespace_param_updates.push((param_name.clone(), value));
-                                }
+                                    Val::Vec(variadic_args)
+                                } else if i < current_args.len() {
+                                    current_args[i].clone()
+                                } else {
+                                    Val::Null
+                                };
+                                frame.variables.insert(param_name.clone(), value);
                             }
-                            if !namespace_param_updates.is_empty() {
-                                let ns_entry = self
-                                    .namespace_variables
-                                    .entry(self.current_namespace.clone())
-                                    .or_default();
-                                for (param_name, value) in namespace_param_updates {
-                                    ns_entry.insert(param_name, value);
-                                }
-                            }
+                            self.scope_stack.push(frame);
                         }
 
                         // Execute the function instructions - borrow from outer Arc clone
@@ -8410,6 +8506,13 @@ impl VirtualMachine {
                                     // call like try_jit_call does or a mid-loop
                                     // switch to compiled code sees no VM.
                                     let was_halted = self.has_failed() || self.has_cancelled();
+                                    // The compiled iteration's frame, as in `try_jit_call`.
+                                    self.scope_stack.truncate(saved_scope_depth);
+                                    self.scope_stack.push(LexicalScope::call_frame(
+                                        function_param_names,
+                                        &new_args,
+                                        is_boundary,
+                                    ));
                                     let prev =
                                         super::jit::set_jit_vm_ptr(self as *mut VirtualMachine);
                                     let call_result =
@@ -8445,7 +8548,7 @@ impl VirtualMachine {
             // Restore scope stack to pre-function depth.
             // This pops the function scope AND any scopes leaked by flow constructs
             // (cond, match, etc.) during instruction execution.
-            self.truncate_scopes(saved_scope_depth);
+            self.scope_stack.truncate(saved_scope_depth);
 
             // Restore skip flags after function execution
             self.skip_until_branch_end = saved_skip_flag;
@@ -8454,25 +8557,6 @@ impl VirtualMachine {
             // Restore register usage to pre-call values to prevent accumulation
             if self.registers.len() > saved_register_count_for_call {
                 self.registers.truncate(saved_register_count_for_call);
-            }
-
-            // Unwind the namespace-registry shadows installed for this
-            // call's parameters. Restore prior bindings (or remove if there
-            // was none) so caller-frame parameters never leak into siblings
-            // or future calls in the same namespace.
-            if let Some(ref namespace) = function_namespace
-                && let Some(ns_entry) = self.namespace_variables.get_mut(namespace)
-            {
-                for (k, prev) in ns_param_shadows.into_iter().rev() {
-                    match prev {
-                        Some(v) => {
-                            ns_entry.insert(k, v);
-                        }
-                        None => {
-                            ns_entry.shift_remove(&k);
-                        }
-                    }
-                }
             }
 
             // Restore the saved namespace
@@ -8923,7 +9007,7 @@ impl VirtualMachine {
                 let result = self.execute_thunk(thunk)?;
 
                 // Pop the temporary scope
-                self.truncate_scopes(self.scope_stack.len().saturating_sub(1));
+                self.scope_stack.pop();
 
                 self.store_variable(var_name, result.clone())?;
 
@@ -8945,6 +9029,16 @@ impl VirtualMachine {
                 level_thunks.len(),
                 self.thread_count
             );
+
+            // Task VMs have none of this call's frames, so each branch takes
+            // the parameters and locals it uses from here.
+            let level_thunks: Vec<(String, Val)> = level_thunks
+                .into_iter()
+                .map(|(name, thunk)| {
+                    let thunk = self.with_captures_resolved(&thunk);
+                    (name, thunk)
+                })
+                .collect();
 
             // Get the current namespace so task VMs use the same one
             let main_namespace = self.current_namespace.clone();
@@ -9278,53 +9372,14 @@ impl VirtualMachine {
             // Lexical scope variable (function parameter, local variable)
             tracing::trace!("VM: Storing lexical variable '{}' in scope", name);
             if let Some(scope) = self.scope_stack.last_mut() {
-                scope.variables.insert(name.to_string(), value.clone());
-                // Mirror local variable into current namespace registry for resilient lookups within flows.
-                // The scope records what it overwrote, and restores it when it ends.
-                let previous = self
-                    .namespace_variables
-                    .entry(self.current_namespace.clone())
-                    .or_default()
-                    .insert(name.to_string(), value);
-                if !scope
-                    .ns_shadows
-                    .iter()
-                    .any(|(ns, shadowed, _)| shadowed == name && *ns == self.current_namespace)
-                {
-                    scope.ns_shadows.push((
-                        self.current_namespace.clone(),
-                        name.to_string(),
-                        previous,
-                    ));
-                }
+                // A local stays in its scope. It is never written to the
+                // namespace, where other functions would see it.
+                scope.variables.insert(name.to_string(), value);
                 Ok(())
             } else {
                 Err(VmError::runtime(
                     "No scope available for variable storage".to_string(),
                 ))
-            }
-        }
-    }
-
-    /// Pop scopes down to `depth`, restoring the namespace entries their
-    /// local bindings overwrote, innermost scope and latest binding first.
-    fn truncate_scopes(&mut self, depth: usize) {
-        while self.scope_stack.len() > depth {
-            let Some(scope) = self.scope_stack.pop() else {
-                break;
-            };
-            for (namespace, name, previous) in scope.ns_shadows.into_iter().rev() {
-                let Some(entries) = self.namespace_variables.get_mut(&namespace) else {
-                    continue;
-                };
-                match previous {
-                    Some(value) => {
-                        entries.insert(name, value);
-                    }
-                    None => {
-                        entries.shift_remove(&name);
-                    }
-                }
             }
         }
     }

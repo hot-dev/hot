@@ -1720,6 +1720,7 @@ mod tests {
             is_lazy_param: true,
             used_registers: Vec::new(),
             structural_hash_cache: Default::default(),
+            defining_frame: None,
         };
         let lambda_val = Val::Box(Box::new(lambda.clone()));
         let restored = Val::try_from(TaggedVal::from(&lambda_val)).expect("lambda must decode");

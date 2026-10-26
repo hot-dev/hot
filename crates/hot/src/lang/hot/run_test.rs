@@ -566,6 +566,108 @@ caller()"#;
         }
     }
 
+    /// A top-level function is lexically scoped: `check` reads its
+    /// namespace's `limit`, never a caller's parameter or local of that
+    /// name. Lookups walked every caller frame, so both callers saw 100.
+    #[test]
+    fn callee_reads_its_own_scope_not_its_callers() {
+        let src = r#"::t ns
+limit 10
+check fn (v: Int): Bool { lte(v, limit) }
+by-param fn (limit: Int): Bool { check(50) }
+by-local fn (): Bool {
+    limit 100
+    check(50)
+}
+[by-param(100), by-local(), check(5)]"#;
+        for conf in [
+            crate::val!({"jit": {"threshold": 1}}),
+            crate::val!({"jit": {"mode": "off"}}),
+        ] {
+            assert_eq!(
+                compile_and_run_with_std_conf(src, Some(conf.clone())),
+                Ok(crate::val!([false, false, true])),
+                "with {conf:?}"
+            );
+        }
+    }
+
+    /// A lambda or lazy argument captures an enclosing binding even when a
+    /// core function has the same name, as `data` does. Without the
+    /// capture, a lambda that `map` calls read the core function instead.
+    #[test]
+    fn closures_capture_bindings_named_like_core_functions() {
+        let src = r#"::t ns
+by-param fn (data: Map): Vec { map(keys(data), (key) { get(data, key) }) }
+by-local fn (m: Map): Vec {
+    data m
+    map(keys(data), (key) { get(data, key) })
+}
+nested fn (ms: Vec): Vec { map(ms, (data) { map(keys(data), (k) { get(data, k) }) }) }
+called fn (inc: Fn, xs: Vec): Vec { map(xs, (x) { inc(x) }) }
+getter fn (data: Map): Fn { (k) { get(data, k) } }
+twice fn (lazy v: Int): Int {
+    forced do v
+    add(forced, forced)
+}
+lazy-local fn (): Int {
+    data "abc"
+    twice(length(data))
+}
+probe fn (): Vec {
+    get-a getter({a: 6})
+    [
+        by-param({a: 1, b: 2}),
+        by-local({a: 3}),
+        nested([{a: 4}, {b: 5}]),
+        called((x) { mul(x, 10) }, [1, 2]),
+        get-a("a"),
+        lazy-local()
+    ]
+}
+probe()
+probe()"#;
+        let expected = crate::val!([[1, 2], [3], [[4], [5]], [10, 20], 6, 6]);
+        for conf in [
+            crate::val!({"jit": {"threshold": 1}}),
+            crate::val!({"jit": {"mode": "off"}}),
+        ] {
+            assert_eq!(
+                compile_and_run_with_std_conf(src, Some(conf.clone())),
+                Ok(expected.clone()),
+                "with {conf:?}"
+            );
+        }
+    }
+
+    /// A local function passed to a top-level function keeps its definer's
+    /// locals, and the callee's parameter of the same name calls the value
+    /// it was given. hot-ai's `fit` passes `item-text` this way.
+    #[test]
+    fn local_function_passed_to_a_top_level_function_keeps_its_scope() {
+        let src = r##"::t ns
+outer fn (opts: Map): Vec {
+    prefix get(opts, "prefix", "-")
+    show fn (item: Any): Str { `${prefix}${item}` }
+    apply-all([1, 2], show)
+}
+apply-all fn (items: Vec, show: Fn): Vec { map(items, (item) { show(item) }) }
+probe fn (): Vec { [outer({prefix: "#"}), outer({})] }
+probe()
+probe()"##;
+        let expected = crate::val!([["#1", "#2"], ["-1", "-2"]]);
+        for conf in [
+            crate::val!({"jit": {"threshold": 1}}),
+            crate::val!({"jit": {"mode": "off"}}),
+        ] {
+            assert_eq!(
+                compile_and_run_with_std_conf(src, Some(conf.clone())),
+                Ok(expected.clone()),
+                "with {conf:?}"
+            );
+        }
+    }
+
     /// A template consumes each interpolated value's Result, so an Err part
     /// halts compiled code too, and values render as the interpreter renders
     /// them. Compiled templates wrote `Result.Err(…)` into the string and
