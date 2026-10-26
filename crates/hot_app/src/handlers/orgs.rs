@@ -407,7 +407,7 @@ pub async fn orgs_create_handler(
 
             // Set the current org cookie so user is on this org after checkout
             let org_cookie = axum_extra::extract::cookie::Cookie::build((
-                crate::auth::CURRENT_ORG_COOKIE_NAME,
+                crate::auth::current_org_cookie_name(),
                 org_id.to_string(),
             ))
             .path("/")
@@ -419,7 +419,7 @@ pub async fn orgs_create_handler(
 
             // Set the environment cookie to the new development env
             let env_cookie = axum_extra::extract::cookie::Cookie::build((
-                crate::auth::CURRENT_ENV_COOKIE_NAME,
+                crate::auth::current_env_cookie_name(),
                 env_id.to_string(),
             ))
             .path("/")

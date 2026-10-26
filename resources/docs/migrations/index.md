@@ -183,6 +183,9 @@ reject real API values on Hot 3.0, so upgrade them:
 - **Webhook responses can't set cookies on the shared API host.** Hot drops
   `Set-Cookie` from webhook responses there. Webhooks on a
   [custom domain](/docs/domains) are unchanged.
+- **App sign-in cookies are `__Host-` cookies.** Outside local development,
+  the app's session cookies carry the `__Host-` prefix, so no other host can
+  set or replace them. Everyone signs in again once after the upgrade.
 - **Usage is per environment.** `GET /v1/org/usage` reports the credential's
   environment and adds `env_id`, `usage_scope`, and `limits_scope`.
   `team_members` is `0`. A request whose `org_id` or `env_id` doesn't match

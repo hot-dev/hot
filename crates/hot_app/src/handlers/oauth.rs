@@ -1,4 +1,4 @@
-use crate::auth::{JWT_COOKIE_NAME, generate_token};
+use crate::auth::{generate_token, jwt_cookie_name};
 use crate::handlers::{add_presence_cookie, process_invite_code};
 use crate::oauth::{
     OAuthConfig, create_github_client, create_google_client, exchange_code_for_token,
@@ -219,7 +219,7 @@ async fn complete_oauth_signin(
 
     // Set JWT cookie
     let jwt_cookie = crate::auth::build_cookie(
-        JWT_COOKIE_NAME,
+        jwt_cookie_name(),
         token,
         time::Duration::days(crate::auth::SESSION_COOKIE_DAYS),
     );

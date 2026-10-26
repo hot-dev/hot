@@ -49,7 +49,7 @@ async fn checkout_success_redirect(
     org_slug: &str,
 ) -> (axum_extra::extract::CookieJar, Redirect) {
     let org_cookie = axum_extra::extract::cookie::Cookie::build((
-        crate::auth::CURRENT_ORG_COOKIE_NAME,
+        crate::auth::current_org_cookie_name(),
         org_id.to_string(),
     ))
     .path("/")
@@ -65,7 +65,7 @@ async fn checkout_success_redirect(
         && let Some(first_env) = envs.first()
     {
         let env_cookie = axum_extra::extract::cookie::Cookie::build((
-            crate::auth::CURRENT_ENV_COOKIE_NAME,
+            crate::auth::current_env_cookie_name(),
             first_env.env_id.to_string(),
         ))
         .path("/")
