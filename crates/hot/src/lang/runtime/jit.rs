@@ -449,6 +449,9 @@ struct JitHelperRefs {
     clone_owned_val: FuncRef,
     drop_owned_val: FuncRef,
     call_vm: FuncRef,
+    /// `call_vm` for a local function, whose lookups go on into the frame of
+    /// the call that defined it: see `needs_vm_scope`.
+    call_vm_local: FuncRef,
     binop_general: FuncRef,
     cmp_general: FuncRef,
     is_err: FuncRef,
@@ -493,6 +496,77 @@ struct JitHelperRefs {
     check_consumable: FuncRef,
 }
 
+impl JitHelperRefs {
+    /// The helpers that never look up a name in the calling frame or run
+    /// Hot code that could. A call to a top-level function runs in its own
+    /// frame.
+    fn scope_free(&self) -> [FuncRef; 39] {
+        [
+            self.call_vm,
+            self.template_interpolate,
+            self.dot_access,
+            self.dot_access_or_default,
+            self.get_stack_limit,
+            self.copy_dec,
+            self.add_numeric,
+            self.sub_numeric,
+            self.mul_numeric,
+            self.div_numeric,
+            self.mod_numeric,
+            self.ne_numeric,
+            self.eq_numeric,
+            self.eq_general,
+            self.gt_numeric,
+            self.gte_numeric,
+            self.lt_numeric,
+            self.lte_numeric,
+            self.truthy_general,
+            self.clone_owned_val,
+            self.drop_owned_val,
+            self.binop_general,
+            self.cmp_general,
+            self.is_err,
+            self.failure_err,
+            self.consume_err,
+            self.promote_to_owned,
+            self.make_vec,
+            self.merge_maps,
+            self.extract_inner_val,
+            self.set_element,
+            self.vec_push,
+            self.str_ends_with,
+            self.str_starts_with,
+            self.make_vec_with_spread,
+            self.set_pending_proven,
+            self.length,
+            self.is_null,
+            self.check_consumable,
+        ]
+    }
+}
+
+/// Whether compiled code calls a helper that looks up a name or runs other
+/// Hot code, and so needs its call's frame and namespace set up in the VM.
+fn needs_vm_scope(
+    func: &cranelift_codegen::ir::Function,
+    helper_refs: &JitHelperRefs,
+    self_func_ref: FuncRef,
+) -> bool {
+    use cranelift_codegen::ir::InstructionData;
+    let scope_free = helper_refs.scope_free();
+    func.layout.blocks().any(|block| {
+        func.layout
+            .block_insts(block)
+            .any(|inst| match func.dfg.insts[inst] {
+                InstructionData::Call { func_ref, .. } => {
+                    func_ref != self_func_ref && !scope_free.contains(&func_ref)
+                }
+                InstructionData::CallIndirect { .. } => true,
+                _ => false,
+            })
+    })
+}
+
 #[derive(Debug, Clone)]
 struct ActiveFlowState {
     flow_type: FlowType,
@@ -520,6 +594,8 @@ struct ActiveFlowState {
 pub struct JitCompiledFunction {
     signature: TypeSig,
     result_kind: JitValueKind,
+    /// See `needs_vm_scope`.
+    needs_vm_scope: bool,
     module: JITModule,
     func_id: FuncId,
     /// Argument ABI layout, computed once at compile time. Rebuilding it per
@@ -541,6 +617,22 @@ impl JitCompiledFunction {
                 .iter()
                 .zip(args.iter())
                 .all(|(tag, val)| tag.matches_val(val))
+    }
+
+    /// Whether the code needs its call's frame and namespace set up in the VM
+    /// (see `needs_vm_scope`).
+    pub fn needs_vm_scope(&self) -> bool {
+        self.needs_vm_scope
+    }
+
+    /// Run the code: `None` when it ran out of stack before starting, for the
+    /// interpreter to run the call instead.
+    pub fn try_call(&self, args: &[Val]) -> Result<Option<Val>, String> {
+        match self.call(args) {
+            Ok(val) => Ok(Some(val)),
+            Err(e) if e == "JIT_STACK_EXHAUSTED" => Ok(None),
+            Err(e) => Err(e),
+        }
     }
 
     pub fn call(&self, args: &[Val]) -> Result<Val, String> {
@@ -740,33 +832,37 @@ impl JitRuntimeState {
         function_id: FunctionId,
         args: &[Val],
     ) -> Result<Option<Val>, String> {
-        // Clone the Rc out so no borrow into `compiled_functions` is held
-        // while the compiled code runs: the JIT'd code can re-enter this VM
-        // and mutate the JIT state (e.g. compile another function).
-        let Some(entries) = self.compiled_functions.get(function_id as usize) else {
-            return Ok(None);
-        };
-        if entries.is_empty() {
-            return Ok(None);
+        match self.compiled_function(function_id, args) {
+            Some(entry) => entry.try_call(args),
+            None => Ok(None),
         }
+    }
 
+    /// The compiled code for calling `function_id` with `args`, if any.
+    ///
+    /// The `Rc` is cloned out so no borrow into `compiled_functions` is held
+    /// while the code runs: it can re-enter this VM and change the JIT state
+    /// (e.g. compile another function).
+    pub fn compiled_function(
+        &mut self,
+        function_id: FunctionId,
+        args: &[Val],
+    ) -> Option<Rc<JitCompiledFunction>> {
+        let entries = self.compiled_functions.get(function_id as usize)?;
+        if entries.is_empty() {
+            return None;
+        }
         if let Some(entry) = entries
             .iter()
             .find(|entry| entry.matches_args(args))
             .map(Rc::clone)
         {
-            return match entry.call(args) {
-                Ok(val) => Ok(Some(val)),
-                Err(e) if e == "JIT_STACK_EXHAUSTED" => Ok(None),
-                Err(e) => Err(e),
-            };
+            return Some(entry);
         }
-
         if let Some(profile) = self.function_profiles.get_mut(function_id as usize) {
             profile.guard_failures = profile.guard_failures.saturating_add(1);
         }
-
-        Ok(None)
+        None
     }
 
     pub fn should_compile_now(&self, function_id: FunctionId, args: &[Val]) -> bool {
@@ -848,6 +944,21 @@ impl JitRuntimeState {
         args: &[Val],
         captures: &[Val],
     ) -> Result<Option<Val>, String> {
+        match self.compiled_lambda(program, lambda, args, captures)? {
+            Some((compiled, effective_args)) => call_compiled_lambda(&compiled, &effective_args),
+            None => Ok(None),
+        }
+    }
+
+    /// The compiled code for calling `lambda`, compiled once the lambda is
+    /// hot, with the arguments it takes: its captures, then `args`.
+    pub fn compiled_lambda(
+        &mut self,
+        program: &BytecodeProgram,
+        lambda: &LambdaInfo,
+        args: &[Val],
+        captures: &[Val],
+    ) -> Result<Option<CompiledLambdaCall>, String> {
         if !self.config.is_enabled()
             || matches!(
                 self.code_memory_status.availability,
@@ -871,17 +982,7 @@ impl JitRuntimeState {
         // entries out from under a held reference.
         if let Some(compiled) = self.compiled_lambdas.get(&key).map(Rc::clone) {
             if compiled.matches_args(&effective_args) {
-                return match compiled.call(&effective_args) {
-                    Ok(val) => {
-                        GLOBAL_LAMBDA_JIT_CALL_COUNT.fetch_add(1, Ordering::Relaxed);
-                        Ok(Some(val))
-                    }
-                    Err(e) if e == "JIT_STACK_EXHAUSTED" => {
-                        GLOBAL_LAMBDA_JIT_FALLBACK_COUNT.fetch_add(1, Ordering::Relaxed);
-                        Ok(None)
-                    }
-                    Err(e) => Err(e),
-                };
+                return Ok(Some((compiled, effective_args)));
             }
 
             if let Some(profile) = self.lambda_profiles.get_mut(&key) {
@@ -924,17 +1025,7 @@ impl JitRuntimeState {
                 let compiled = Rc::new(compiled);
                 self.compiled_lambdas
                     .insert(key.clone(), Rc::clone(&compiled));
-                match compiled.call(&effective_args) {
-                    Ok(val) => {
-                        GLOBAL_LAMBDA_JIT_CALL_COUNT.fetch_add(1, Ordering::Relaxed);
-                        Ok(Some(val))
-                    }
-                    Err(e) if e == "JIT_STACK_EXHAUSTED" => {
-                        GLOBAL_LAMBDA_JIT_FALLBACK_COUNT.fetch_add(1, Ordering::Relaxed);
-                        Ok(None)
-                    }
-                    Err(e) => Err(e),
-                }
+                Ok(Some((compiled, effective_args)))
             }
             Err(err) => {
                 tracing::debug!(
@@ -959,6 +1050,23 @@ impl JitRuntimeState {
             profile.do_not_jit = true;
         }
     }
+}
+
+/// A compiled lambda and the arguments it takes: its captures, then the call's.
+pub type CompiledLambdaCall = (Rc<JitCompiledFunction>, Vec<Val>);
+
+/// Run a compiled lambda, counting the call in the JIT stats.
+pub fn call_compiled_lambda(
+    compiled: &JitCompiledFunction,
+    effective_args: &[Val],
+) -> Result<Option<Val>, String> {
+    let result = compiled.try_call(effective_args);
+    match result {
+        Ok(Some(_)) => GLOBAL_LAMBDA_JIT_CALL_COUNT.fetch_add(1, Ordering::Relaxed),
+        Ok(None) => GLOBAL_LAMBDA_JIT_FALLBACK_COUNT.fetch_add(1, Ordering::Relaxed),
+        Err(_) => 0,
+    };
+    result
 }
 
 pub fn global_jit_compile_count() -> usize {
@@ -1485,6 +1593,7 @@ fn compile_with_return_kind(
         hot_jit_drop_owned_val as *const u8,
     );
     builder.symbol("hot_jit_call_vm", hot_jit_call_vm as *const u8);
+    builder.symbol("hot_jit_call_vm_local", hot_jit_call_vm as *const u8);
     builder.symbol("hot_jit_binop_general", hot_jit_binop_general as *const u8);
     builder.symbol("hot_jit_cmp_general", hot_jit_cmp_general as *const u8);
     builder.symbol("hot_jit_is_err", hot_jit_is_err as *const u8);
@@ -1621,6 +1730,7 @@ fn compile_with_return_kind(
         fbx.finalize(module.target_config());
         result_kind
     };
+    let needs_vm_scope = needs_vm_scope(&ctx.func, &helper_refs, self_func_ref);
 
     tracing::trace!("[JIT-IR] {} ->\n{}", function_info.name, ctx.func.display());
 
@@ -1635,6 +1745,7 @@ fn compile_with_return_kind(
     Ok(JitCompiledFunction {
         signature: signature.clone(),
         result_kind,
+        needs_vm_scope,
         module,
         func_id,
         arg_layout,
@@ -3352,6 +3463,14 @@ fn declare_jit_helpers(
             func,
             ptr_ty,
             "hot_jit_call_vm",
+            &[types::I64, ptr_ty, types::I64],
+            &[types::I64],
+        )?,
+        call_vm_local: declare_helper_func(
+            module,
+            func,
+            ptr_ty,
+            "hot_jit_call_vm_local",
             &[types::I64, ptr_ty, types::I64],
             &[types::I64],
         )?,
@@ -5211,10 +5330,14 @@ impl<'a> EmitCtx<'a> {
         let args_buf_ptr = builder.ins().stack_addr(self.ptr_ty, pairs_slot, 0);
         let fn_id_val = builder.ins().iconst(types::I64, called_function_id as i64);
         let count_val = builder.ins().iconst(types::I64, count as i64);
-        let call = builder.ins().call(
-            self.helper_refs.call_vm,
-            &[fn_id_val, args_buf_ptr, count_val],
-        );
+        let helper = if self.program.local_functions.contains(&called_function_id) {
+            self.helper_refs.call_vm_local
+        } else {
+            self.helper_refs.call_vm
+        };
+        let call = builder
+            .ins()
+            .call(helper, &[fn_id_val, args_buf_ptr, count_val]);
         let result_handle = builder.inst_results(call)[0];
         let halt_block = emit_halt_check(builder, result_handle);
         self.define_register(builder, dest, RawKind::OwnedVal, result_handle)?;

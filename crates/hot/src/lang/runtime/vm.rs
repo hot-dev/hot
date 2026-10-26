@@ -7928,6 +7928,17 @@ impl VirtualMachine {
 
     /// Execute a user function
     fn try_jit_call(&mut self, function_id: u32, args: &[Val]) -> Result<Option<Val>, String> {
+        let Some(compiled) = self.jit.compiled_function(function_id, args) else {
+            return Ok(None);
+        };
+        // Code that never looks up a name or runs other Hot code needs
+        // neither the call's frame nor its namespace.
+        if !compiled.needs_vm_scope() {
+            let prev = crate::lang::runtime::jit::set_jit_vm_ptr(self as *mut VirtualMachine);
+            let result = compiled.try_call(args);
+            crate::lang::runtime::jit::set_jit_vm_ptr(prev);
+            return result;
+        }
         let function_info = self
             .program
             .functions
@@ -7953,7 +7964,7 @@ impl VirtualMachine {
         }
 
         let prev = crate::lang::runtime::jit::set_jit_vm_ptr(self as *mut VirtualMachine);
-        let result = self.jit.try_call_compiled(function_id, args);
+        let result = compiled.try_call(args);
         crate::lang::runtime::jit::set_jit_vm_ptr(prev);
         self.scope_stack.truncate(saved_scope_depth);
         self.current_namespace = saved_namespace;
@@ -7995,28 +8006,44 @@ impl VirtualMachine {
         }
 
         let program = Arc::clone(&self.program);
-        let saved_namespace = self.current_namespace.clone();
-        self.current_namespace = lambda_info.defining_namespace.clone();
-        // The compiled lambda's frame, as an interpreted lambda call has:
-        // what it captured, then its parameters.
-        let saved_scope_depth = self.scope_stack.len();
-        let mut frame = LexicalScope::call_frame(&lambda_info.parameters, &normalized_args, false);
-        frame.link = lambda_info.defining_frame;
-        for (name, value) in &lambda_info.closure_env {
-            frame
-                .variables
-                .entry(name.clone())
-                .or_insert_with(|| value.clone());
-        }
-        self.scope_stack.push(frame);
+        let Some((compiled, effective_args)) = self
+            .jit
+            .compiled_lambda(&program, lambda_info, &normalized_args, &captures)
+            .map_err(|msg| VmError::RuntimeError(RuntimeError::new(msg)))?
+        else {
+            return Ok(None);
+        };
         let was_halted = self.has_failed() || self.has_cancelled();
         let prev = crate::lang::runtime::jit::set_jit_vm_ptr(self as *mut VirtualMachine);
-        let result =
-            self.jit
-                .try_call_compiled_lambda(&program, lambda_info, &normalized_args, &captures);
+        let result = if compiled.needs_vm_scope() {
+            let saved_namespace = std::mem::replace(
+                &mut self.current_namespace,
+                lambda_info.defining_namespace.clone(),
+            );
+            // The compiled lambda's frame, as an interpreted lambda call has:
+            // what it captured, then its parameters.
+            let saved_scope_depth = self.scope_stack.len();
+            let mut frame =
+                LexicalScope::call_frame(&lambda_info.parameters, &normalized_args, false);
+            frame.link = lambda_info.defining_frame;
+            for (name, value) in &lambda_info.closure_env {
+                frame
+                    .variables
+                    .entry(name.clone())
+                    .or_insert_with(|| value.clone());
+            }
+            self.scope_stack.push(frame);
+            let result =
+                crate::lang::runtime::jit::call_compiled_lambda(&compiled, &effective_args);
+            self.scope_stack.truncate(saved_scope_depth);
+            self.current_namespace = saved_namespace;
+            result
+        } else {
+            // Code that never looks up a name or runs other Hot code needs
+            // neither the call's frame nor its namespace.
+            crate::lang::runtime::jit::call_compiled_lambda(&compiled, &effective_args)
+        };
         crate::lang::runtime::jit::set_jit_vm_ptr(prev);
-        self.scope_stack.truncate(saved_scope_depth);
-        self.current_namespace = saved_namespace;
 
         let result = result.map_err(|msg| VmError::RuntimeError(RuntimeError::new(msg)))?;
         self.propagate_jit_halt(was_halted)?;
