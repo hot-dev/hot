@@ -22,6 +22,10 @@ tags used by matching, serialization, and dispatch.
 | `Byte` | Single byte (0-255) | - |
 | `Result` | Success/Error union | `ok(v)`, `err(e)` |
 
+Int arithmetic whose result doesn't fit in 64 bits returns
+`Err("Integer overflow")`, as `div(1, 0)` returns `Err("Division by zero")`
+and `mod(1, 0)` returns `Err("Modulo by zero")`. Use `Dec` for larger numbers.
+
 ## Type Annotations
 
 Annotations are optional but can be added for clarity:

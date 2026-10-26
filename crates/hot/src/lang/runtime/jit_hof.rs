@@ -688,8 +688,8 @@ fn fast_op(op: PureOp, vals: &[PureValue]) -> Option<EvalOutcome> {
     match op {
         PureOp::Add => {
             let (a, b) = (vals[0].as_int()?, vals[1].as_int()?);
-            // Overflow falls through to the hotlib for identical wrap/panic
-            // behavior in the current build.
+            // Overflow falls through to the hotlib, whose overflow Err
+            // de-opts the pipeline.
             a.checked_add(b)
                 .map(|r| EvalOutcome::Value(PureValue::Int(r)))
         }
@@ -709,7 +709,8 @@ fn fast_op(op: PureOp, vals: &[PureValue]) -> Option<EvalOutcome> {
                 // Zero divisor produces an error value; defer to the hotlib.
                 None
             } else {
-                ok(PureValue::Int(a % b))
+                // Only `i64::MIN % -1` wraps, and its remainder is 0.
+                ok(PureValue::Int(a.wrapping_rem(b)))
             }
         }
         PureOp::IsZero => ok(PureValue::Bool(vals[0].as_int()? == 0)),

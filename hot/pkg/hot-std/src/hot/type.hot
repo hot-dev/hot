@@ -64,7 +64,8 @@ Int
 meta {
     core: true,
     doc: """
-    Integer type. Convert numeric values to integer (truncates decimals).
+    Integer type. Convert numeric values to integer (truncates decimals). A Dec
+    too large for an Int gives `Err("Integer overflow")`.
 
     **Example**
 

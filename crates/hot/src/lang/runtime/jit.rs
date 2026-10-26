@@ -22,6 +22,9 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+mod numeric_err;
+use numeric_err::{ErrUseScope, NumericErrUse, numeric_err_use};
+
 static GLOBAL_JIT_COMPILE_COUNT: AtomicUsize = AtomicUsize::new(0);
 static GLOBAL_JIT_BAILOUT_COUNT: AtomicUsize = AtomicUsize::new(0);
 static GLOBAL_LAMBDA_INTERPRETER_CALL_COUNT: AtomicUsize = AtomicUsize::new(0);
@@ -450,7 +453,7 @@ struct JitHelperRefs {
     cmp_general: FuncRef,
     is_err: FuncRef,
     failure_err: FuncRef,
-    consume_self_call_err: FuncRef,
+    consume_err: FuncRef,
     call_vm_by_name: FuncRef,
     promote_to_owned: FuncRef,
     make_vec: FuncRef,
@@ -1486,10 +1489,7 @@ fn compile_with_return_kind(
     builder.symbol("hot_jit_cmp_general", hot_jit_cmp_general as *const u8);
     builder.symbol("hot_jit_is_err", hot_jit_is_err as *const u8);
     builder.symbol("hot_jit_failure_err", hot_jit_failure_err as *const u8);
-    builder.symbol(
-        "hot_jit_consume_self_call_err",
-        hot_jit_consume_self_call_err as *const u8,
-    );
+    builder.symbol("hot_jit_consume_err", hot_jit_consume_err as *const u8);
     builder.symbol(
         "hot_jit_call_vm_by_name",
         hot_jit_call_vm_by_name as *const u8,
@@ -2105,11 +2105,11 @@ unsafe extern "C" fn hot_jit_is_err(raw: i64) -> i64 {
     if val.is_err() { 1 } else { 0 }
 }
 
-/// A raw self-call came back as an error, and the caller uses its result
-/// strictly (raw arithmetic or a comparison). Treat it as the interpreter
-/// treats an `Err` argument: halt the run (`unwrap_result_if_ok`), or pass it
-/// through while result checking is suppressed. Takes ownership of `raw`.
-unsafe extern "C" fn hot_jit_consume_self_call_err(raw: i64) -> i64 {
+/// Compiled code consumes an Err (a raw self-call's result, or a numeric op's
+/// overflow or zero divisor): halt the run as the interpreter does when it
+/// consumes one (`unwrap_result_if_ok`), and return the failure for the frame
+/// to return. Takes ownership of `raw`.
+unsafe extern "C" fn hot_jit_consume_err(raw: i64) -> i64 {
     let vm_ptr = get_jit_vm_ptr();
     if vm_ptr.is_null() || raw == 0 || raw == HALT_SENTINEL || raw == JIT_STACK_EXHAUSTED {
         return raw;
@@ -3387,11 +3387,11 @@ fn declare_jit_helpers(
             &[],
             &[types::I64],
         )?,
-        consume_self_call_err: declare_helper_func(
+        consume_err: declare_helper_func(
             module,
             func,
             ptr_ty,
-            "hot_jit_consume_self_call_err",
+            "hot_jit_consume_err",
             &[types::I64],
             &[types::I64],
         )?,
@@ -3780,6 +3780,8 @@ fn write_numeric_result(
             *result_ptr = D256::from(value);
             0
         },
+        // An Err value, such as `Division by zero`, is the op's result.
+        crate::lang::hot::r#type::HotResult::Ok(other) if other.is_err() => new_owned_val(other),
         crate::lang::hot::r#type::HotResult::Ok(other) => new_owned_val(Val::err(Val::Str(
             format!("numeric operation returned unexpected type: {:?}", other).into(),
         ))),
@@ -4973,6 +4975,9 @@ struct EmitCtx<'a> {
     relies_on_expected_return: bool,
     /// A function body, which may return early; an inlined thunk may not.
     function_body: bool,
+    /// What returning a numeric op's result amounts to (see
+    /// `numeric_err::ErrUseScope::returned`).
+    returned_use: NumericErrUse,
 }
 
 enum EmitResult {
@@ -5274,7 +5279,8 @@ impl<'a> EmitCtx<'a> {
             return Ok(true);
         }
         // 1. Try core intrinsic (explicit allowlist — deterministic)
-        if let Some((result_kind, raw, cmp_halt_block)) = try_lower_known_core_call(
+        let err_use = self.intrinsic_err_use(&fn_name, instructions, ip, dest);
+        if let Some((result_kind, raw, exits)) = try_lower_known_core_call(
             builder,
             self.ptr_ty,
             self.helper_refs,
@@ -5285,12 +5291,11 @@ impl<'a> EmitCtx<'a> {
             &fn_name,
             args_start,
             args_count,
+            err_use,
         )? {
             self.define_register(builder, dest, result_kind, raw)?;
             self.jump_to_next(builder, ip)?;
-            if let Some(halt_block) = cmp_halt_block {
-                self.emit_halt_return(builder, halt_block);
-            }
+            self.finish_numeric_exits(builder, exits);
             return Ok(true);
         }
         // For qualified names (e.g. "::hot::core/do"), resolve deterministically
@@ -5322,6 +5327,7 @@ impl<'a> EmitCtx<'a> {
                 &self.registers,
                 &self.register_kinds,
                 &self.thunk_registry,
+                self.numeric_err_use(instructions, ip, dest),
             )?
         {
             // An inlined branch that calls this function back reads that
@@ -5357,10 +5363,11 @@ impl<'a> EmitCtx<'a> {
                 args_start,
                 args_count,
             )?;
+            let returned = self.numeric_err_use(instructions, ip, dest) == NumericErrUse::Returned;
             self.define_register(builder, dest, result_kind, raw)?;
             self.jump_to_next(builder, ip)?;
             if let Some((error_block, error_val)) = error_info {
-                self.handle_recursive_call_error(builder, error_block, error_val);
+                self.handle_recursive_call_error(builder, error_block, error_val, returned);
             }
             return Ok(true);
         }
@@ -5427,6 +5434,7 @@ impl<'a> EmitCtx<'a> {
             &self.registers,
             &self.register_kinds,
             &self.thunk_registry,
+            self.numeric_err_use(instructions, ip, dest),
         )? {
             // An inlined branch that calls this function back reads that
             // call's result as the predicted return kind.
@@ -5448,7 +5456,8 @@ impl<'a> EmitCtx<'a> {
             .get(called_function_id as usize)
             .map(|f| f.name.as_str())
             .unwrap_or("");
-        if let Some((result_kind, raw, cmp_halt_block)) = try_lower_known_core_call(
+        let err_use = self.intrinsic_err_use(callee_fn_name, instructions, ip, dest);
+        if let Some((result_kind, raw, exits)) = try_lower_known_core_call(
             builder,
             self.ptr_ty,
             self.helper_refs,
@@ -5459,12 +5468,11 @@ impl<'a> EmitCtx<'a> {
             callee_fn_name,
             args_start,
             args_count,
+            err_use,
         )? {
             self.define_register(builder, dest, result_kind, raw)?;
             self.jump_to_next(builder, ip)?;
-            if let Some(halt_block) = cmp_halt_block {
-                self.emit_halt_return(builder, halt_block);
-            }
+            self.finish_numeric_exits(builder, exits);
             return Ok(true);
         }
         // Fall back to VM callback. The VM's call entry takes the proofs of
@@ -5502,6 +5510,7 @@ impl<'a> EmitCtx<'a> {
         dest: u32,
         args_start: u32,
         args_count: u8,
+        instructions: &[Instruction],
     ) -> Result<(), String> {
         let ret_kind = self.expected_return_kind.ok_or_else(|| {
             "JIT cannot determine return kind for self-recursive call".to_string()
@@ -5521,31 +5530,37 @@ impl<'a> EmitCtx<'a> {
             args_start,
             args_count,
         )?;
+        let returned = self.numeric_err_use(instructions, ip, dest) == NumericErrUse::Returned;
         self.define_register(builder, dest, result_kind, raw)?;
         self.jump_to_next(builder, ip)?;
         if let Some((error_block, error_val)) = error_info {
-            self.handle_recursive_call_error(builder, error_block, error_val);
+            self.handle_recursive_call_error(builder, error_block, error_val, returned);
         }
         Ok(())
     }
 
-    /// Handle the error block from a self-recursive call: halt as the
-    /// interpreter does when its result is used (see
-    /// `hot_jit_consume_self_call_err`), clean up owned values, and return.
+    /// Handle the error block from a self-recursive call, whose raw result
+    /// can't hold the Err it returned: return the Err when the caller returns
+    /// the result anyway, else halt as the interpreter does where a result
+    /// is consumed (see `hot_jit_consume_err`). A raw self-call returns an Err
+    /// only for a numeric op's overflow or zero divisor, or a halt.
     fn handle_recursive_call_error(
         &self,
         builder: &mut FunctionBuilder<'_>,
         error_block: cranelift_codegen::ir::Block,
         error_val: cranelift_codegen::ir::Value,
+        returned: bool,
     ) {
         builder.switch_to_block(error_block);
         builder.seal_block(error_block);
-        // The call's result feeds a strict use, where the interpreter halts
-        // on an Err rather than returning it.
-        let call = builder
-            .ins()
-            .call(self.helper_refs.consume_self_call_err, &[error_val]);
-        let result = builder.inst_results(call)[0];
+        let result = if returned {
+            error_val
+        } else {
+            let call = builder
+                .ins()
+                .call(self.helper_refs.consume_err, &[error_val]);
+            builder.inst_results(call)[0]
+        };
         self.emit_cleanup_owned(builder);
         builder.ins().return_(&[result]);
     }
@@ -5574,6 +5589,70 @@ impl<'a> EmitCtx<'a> {
         let err_val = builder.inst_results(call)[0];
         self.emit_cleanup_owned_excluding(builder, excluded_registers);
         builder.ins().return_(&[err_val]);
+    }
+
+    /// Finish the exits a numeric op left: return the failure of a halt, or
+    /// the value an Err exit carries.
+    fn finish_numeric_exits(&self, builder: &mut FunctionBuilder<'_>, exits: NumericExits) {
+        if let Some(halt_block) = exits.halt {
+            self.emit_halt_return(builder, halt_block);
+        }
+        if let Some((block, value)) = exits.ret {
+            builder.switch_to_block(block);
+            builder.seal_block(block);
+            let value = builder.use_var(value);
+            self.emit_cleanup_owned(builder);
+            builder.ins().return_(&[value]);
+        }
+    }
+
+    /// How the result of the numeric op at `ip` is used (see `numeric_err`).
+    fn numeric_err_use(&self, instructions: &[Instruction], ip: usize, dest: u32) -> NumericErrUse {
+        // Under an error capture, a consumed Err doesn't halt.
+        if self.error_capture_active {
+            return NumericErrUse::Kept;
+        }
+        let plain_register = |reg: u32| {
+            register_kind(&self.remap, &self.register_kinds, reg)
+                .is_ok_and(|kind| kind != RawKind::OwnedVal)
+        };
+        let plain_local = |name: &str| {
+            self.locals
+                .get(name)
+                .map(|(_, kind)| *kind != RawKind::OwnedVal)
+        };
+        numeric_err_use(
+            &ErrUseScope {
+                program: self.program,
+                instructions,
+                returned: self.returned_use,
+                plain_register: &plain_register,
+                plain_local: &plain_local,
+            },
+            ip,
+            dest,
+        )
+    }
+
+    /// `numeric_err_use` for a call to an arithmetic intrinsic; any other
+    /// call makes no Err of its own.
+    fn intrinsic_err_use(
+        &self,
+        callee: &str,
+        instructions: &[Instruction],
+        ip: usize,
+        dest: u32,
+    ) -> NumericErrUse {
+        match known_core_call(callee) {
+            Some(
+                KnownCoreCall::Add
+                | KnownCoreCall::Sub
+                | KnownCoreCall::Mul
+                | KnownCoreCall::Mod
+                | KnownCoreCall::Div,
+            ) => self.numeric_err_use(instructions, ip, dest),
+            _ => NumericErrUse::Kept,
+        }
     }
 
     /// Emit an error check for ReturnIfErr. If the source register is not OwnedVal,
@@ -5899,7 +5978,8 @@ impl<'a> EmitCtx<'a> {
                 Ok(EmitResult::Handled)
             }
             Instruction::Add { dest, left, right } => {
-                let (kind, value, halt_block) = numeric_binop(
+                let err_use = self.numeric_err_use(instructions, ip, *dest);
+                let (kind, value, exits) = numeric_binop(
                     builder,
                     self.ptr_ty,
                     self.helper_refs.add_numeric,
@@ -5910,17 +5990,16 @@ impl<'a> EmitCtx<'a> {
                     &self.register_kinds,
                     *left,
                     *right,
-                    |b, l, r| b.ins().iadd(l, r),
+                    err_use,
                 )?;
                 self.define_register(builder, *dest, kind, value)?;
                 self.jump_to_next(builder, ip)?;
-                if let Some(halt_block) = halt_block {
-                    self.emit_halt_return(builder, halt_block);
-                }
+                self.finish_numeric_exits(builder, exits);
                 Ok(EmitResult::Handled)
             }
             Instruction::Sub { dest, left, right } => {
-                let (kind, value, halt_block) = numeric_binop(
+                let err_use = self.numeric_err_use(instructions, ip, *dest);
+                let (kind, value, exits) = numeric_binop(
                     builder,
                     self.ptr_ty,
                     self.helper_refs.sub_numeric,
@@ -5931,17 +6010,16 @@ impl<'a> EmitCtx<'a> {
                     &self.register_kinds,
                     *left,
                     *right,
-                    |b, l, r| b.ins().isub(l, r),
+                    err_use,
                 )?;
                 self.define_register(builder, *dest, kind, value)?;
                 self.jump_to_next(builder, ip)?;
-                if let Some(halt_block) = halt_block {
-                    self.emit_halt_return(builder, halt_block);
-                }
+                self.finish_numeric_exits(builder, exits);
                 Ok(EmitResult::Handled)
             }
             Instruction::Mul { dest, left, right } => {
-                let (kind, value, halt_block) = numeric_binop(
+                let err_use = self.numeric_err_use(instructions, ip, *dest);
+                let (kind, value, exits) = numeric_binop(
                     builder,
                     self.ptr_ty,
                     self.helper_refs.mul_numeric,
@@ -5952,13 +6030,11 @@ impl<'a> EmitCtx<'a> {
                     &self.register_kinds,
                     *left,
                     *right,
-                    |b, l, r| b.ins().imul(l, r),
+                    err_use,
                 )?;
                 self.define_register(builder, *dest, kind, value)?;
                 self.jump_to_next(builder, ip)?;
-                if let Some(halt_block) = halt_block {
-                    self.emit_halt_return(builder, halt_block);
-                }
+                self.finish_numeric_exits(builder, exits);
                 Ok(EmitResult::Handled)
             }
             Instruction::Eq { dest, left, right } => {
@@ -7180,6 +7256,7 @@ fn build_supported_body(
         error_capture_active: false,
         relies_on_expected_return: false,
         function_body: true,
+        returned_use: NumericErrUse::Returned,
     };
 
     // Stack guard: compare a stack slot address (proxy for current SP) against
@@ -7523,7 +7600,7 @@ fn build_supported_body(
                 args_count,
                 ..
             } => {
-                ctx.emit_self_call(builder, ip, *dest, *args_start, *args_count)?;
+                ctx.emit_self_call(builder, ip, *dest, *args_start, *args_count, instructions)?;
             }
             Instruction::TailCall {
                 function_id: called_function_id,
@@ -8242,20 +8319,14 @@ fn try_lower_known_core_call(
     callee_name: &str,
     args_start: u32,
     args_count: u8,
-) -> Result<
-    Option<(
-        RawKind,
-        cranelift_codegen::ir::Value,
-        Option<cranelift_codegen::ir::Block>,
-    )>,
-    String,
-> {
+    err_use: NumericErrUse,
+) -> Result<Option<(RawKind, cranelift_codegen::ir::Value, NumericExits)>, String> {
     let Some(core_call) = known_core_call(callee_name) else {
         return Ok(None);
     };
-    // Set by the comparison lowerings: a halt block the caller must finish
-    // with emit_halt_return (strict-argument halt on a Result operand).
-    let mut cmp_halt_block: Option<cranelift_codegen::ir::Block> = None;
+    // Exits the caller must finish: a comparison's strict-argument halt on a
+    // Result operand, or an arithmetic op's Err.
+    let mut exits = NumericExits::default();
 
     let arg = |idx: usize| args_start + idx as u32;
     let lowered = match core_call {
@@ -8264,7 +8335,7 @@ fn try_lower_known_core_call(
                 return Err(format!("JIT intrinsic '{}' expects 2 args", callee_name));
             }
             {
-                let (kind, value, halt_block) = numeric_binop(
+                let (kind, value, op_exits) = numeric_binop(
                     builder,
                     ptr_ty,
                     helper_refs.add_numeric,
@@ -8275,9 +8346,9 @@ fn try_lower_known_core_call(
                     register_kinds,
                     arg(0),
                     arg(1),
-                    |b, l, r| b.ins().iadd(l, r),
+                    err_use,
                 )?;
-                cmp_halt_block = halt_block;
+                exits = op_exits;
                 (kind, value)
             }
         }
@@ -8286,7 +8357,7 @@ fn try_lower_known_core_call(
                 return Err(format!("JIT intrinsic '{}' expects 2 args", callee_name));
             }
             {
-                let (kind, value, halt_block) = numeric_binop(
+                let (kind, value, op_exits) = numeric_binop(
                     builder,
                     ptr_ty,
                     helper_refs.sub_numeric,
@@ -8297,9 +8368,9 @@ fn try_lower_known_core_call(
                     register_kinds,
                     arg(0),
                     arg(1),
-                    |b, l, r| b.ins().isub(l, r),
+                    err_use,
                 )?;
-                cmp_halt_block = halt_block;
+                exits = op_exits;
                 (kind, value)
             }
         }
@@ -8308,7 +8379,7 @@ fn try_lower_known_core_call(
                 return Err(format!("JIT intrinsic '{}' expects 2 args", callee_name));
             }
             {
-                let (kind, value, halt_block) = numeric_binop(
+                let (kind, value, op_exits) = numeric_binop(
                     builder,
                     ptr_ty,
                     helper_refs.mul_numeric,
@@ -8319,9 +8390,9 @@ fn try_lower_known_core_call(
                     register_kinds,
                     arg(0),
                     arg(1),
-                    |b, l, r| b.ins().imul(l, r),
+                    err_use,
                 )?;
-                cmp_halt_block = halt_block;
+                exits = op_exits;
                 (kind, value)
             }
         }
@@ -8340,7 +8411,7 @@ fn try_lower_known_core_call(
                     arg(0),
                     arg(1),
                 )?;
-                cmp_halt_block = halt_block;
+                exits.halt = halt_block;
                 (RawKind::Bool, value)
             }
         }
@@ -8357,7 +8428,7 @@ fn try_lower_known_core_call(
                 arg(1),
                 cranelift_codegen::ir::condcodes::IntCC::SignedGreaterThan,
             )?;
-            cmp_halt_block = halt_block;
+            exits.halt = halt_block;
             (RawKind::Bool, value)
         }
         KnownCoreCall::Gte => {
@@ -8373,7 +8444,7 @@ fn try_lower_known_core_call(
                 arg(1),
                 cranelift_codegen::ir::condcodes::IntCC::SignedGreaterThanOrEqual,
             )?;
-            cmp_halt_block = halt_block;
+            exits.halt = halt_block;
             (RawKind::Bool, value)
         }
         KnownCoreCall::Lt => {
@@ -8389,7 +8460,7 @@ fn try_lower_known_core_call(
                 arg(1),
                 cranelift_codegen::ir::condcodes::IntCC::SignedLessThan,
             )?;
-            cmp_halt_block = halt_block;
+            exits.halt = halt_block;
             (RawKind::Bool, value)
         }
         KnownCoreCall::Lte => {
@@ -8405,7 +8476,7 @@ fn try_lower_known_core_call(
                 arg(1),
                 cranelift_codegen::ir::condcodes::IntCC::SignedLessThanOrEqual,
             )?;
-            cmp_halt_block = halt_block;
+            exits.halt = halt_block;
             (RawKind::Bool, value)
         }
         KnownCoreCall::Div => {
@@ -8416,7 +8487,7 @@ fn try_lower_known_core_call(
             // 1. Int / Int can produce Dec (e.g. 3/2 = 1.5)
             // 2. Division by zero must return an error, not trap
             {
-                let (kind, value, halt_block) = numeric_binop_dec_only(
+                let (kind, value, op_exits) = numeric_binop_dec_only(
                     builder,
                     ptr_ty,
                     helper_refs.div_numeric,
@@ -8427,8 +8498,9 @@ fn try_lower_known_core_call(
                     register_kinds,
                     arg(0),
                     arg(1),
+                    err_use,
                 )?;
-                cmp_halt_block = halt_block;
+                exits = op_exits;
                 (kind, value)
             }
         }
@@ -8437,10 +8509,9 @@ fn try_lower_known_core_call(
                 return Err(format!("JIT intrinsic '{}' expects 2 args", callee_name));
             }
             // Mod uses a zero-guarded Int path so Int%Int returns Int
-            // (not Dec). The guard branches to the trampoline on zero
-            // to produce a proper error instead of trapping.
+            // (not Dec), with a zero divisor's Err routed instead of trapping.
             {
-                let (kind, value, halt_block) = numeric_binop_int_guarded(
+                let (kind, value, op_exits) = numeric_binop_int_guarded(
                     builder,
                     ptr_ty,
                     helper_refs.mod_numeric,
@@ -8451,9 +8522,9 @@ fn try_lower_known_core_call(
                     register_kinds,
                     arg(0),
                     arg(1),
-                    |builder, l, r| builder.ins().srem(l, r),
+                    err_use,
                 )?;
-                cmp_halt_block = halt_block;
+                exits = op_exits;
                 (kind, value)
             }
         }
@@ -8470,7 +8541,7 @@ fn try_lower_known_core_call(
                 arg(1),
                 cranelift_codegen::ir::condcodes::IntCC::NotEqual,
             )?;
-            cmp_halt_block = halt_block;
+            exits.halt = halt_block;
             (RawKind::Bool, value)
         }
         KnownCoreCall::Not => {
@@ -8522,7 +8593,7 @@ fn try_lower_known_core_call(
                 | RawKind::TypeTag => zero,
                 RawKind::OwnedVal => {
                     let raw = builder.use_var(registers[remap_reg(remap, arg(0))?]);
-                    cmp_halt_block = Some(emit_consume_check(builder, &helper_refs, raw));
+                    exits.halt = Some(emit_consume_check(builder, &helper_refs, raw));
                     let call = builder.ins().call(helper_refs.is_null, &[raw]);
                     builder.inst_results(call)[0]
                 }
@@ -8545,7 +8616,7 @@ fn try_lower_known_core_call(
                 | RawKind::TypeTag => one,
                 RawKind::OwnedVal => {
                     let raw = builder.use_var(registers[remap_reg(remap, arg(0))?]);
-                    cmp_halt_block = Some(emit_consume_check(builder, &helper_refs, raw));
+                    exits.halt = Some(emit_consume_check(builder, &helper_refs, raw));
                     let call = builder.ins().call(helper_refs.is_null, &[raw]);
                     let is_null = builder.inst_results(call)[0];
                     let cmp = builder.ins().icmp_imm_s(
@@ -8642,14 +8713,14 @@ fn try_lower_known_core_call(
                 return Ok(None);
             }
             let raw = builder.use_var(registers[remap_reg(remap, arg(0))?]);
-            cmp_halt_block = Some(emit_consume_check(builder, &helper_refs, raw));
+            exits.halt = Some(emit_consume_check(builder, &helper_refs, raw));
             let call = builder.ins().call(helper_refs.length, &[raw]);
             let result = builder.inst_results(call)[0];
             (RawKind::Int, result)
         }
     };
 
-    Ok(Some((lowered.0, lowered.1, cmp_halt_block)))
+    Ok(Some((lowered.0, lowered.1, exits)))
 }
 
 fn known_core_call(name: &str) -> Option<KnownCoreCall> {
@@ -8680,29 +8751,153 @@ fn known_core_call(name: &str) -> Option<KnownCoreCall> {
     }
 }
 
-fn int_binop(
+/// Exits a numeric op leaves its caller to finish
+/// (`EmitCtx::finish_numeric_exits`).
+#[derive(Debug, Default, Clone, Copy)]
+struct NumericExits {
+    /// A halt was recorded: return the failure.
+    halt: Option<cranelift_codegen::ir::Block>,
+    /// Return the variable's value from the frame: the op's Err, or the
+    /// failure consuming it recorded.
+    ret: Option<(cranelift_codegen::ir::Block, Variable)>,
+}
+
+impl NumericExits {
+    fn halt(halt: Option<cranelift_codegen::ir::Block>) -> Self {
+        Self { halt, ret: None }
+    }
+}
+
+/// End the current block by taking `err`, an owned Err a numeric op made,
+/// out of the frame as `err_use` says: consumed, it halts; returned, it is
+/// the frame's result.
+fn route_numeric_err(
     builder: &mut FunctionBuilder<'_>,
+    helper_refs: &JitHelperRefs,
+    err: cranelift_codegen::ir::Value,
+    err_use: NumericErrUse,
+    exits: &mut NumericExits,
+) {
+    let value = if err_use == NumericErrUse::Consumed {
+        let call = builder.ins().call(helper_refs.consume_err, &[err]);
+        builder.inst_results(call)[0]
+    } else {
+        err
+    };
+    let (block, var) = *exits
+        .ret
+        .get_or_insert_with(|| (builder.create_block(), builder.declare_var(types::I64)));
+    builder.def_var(var, value);
+    builder.ins().jump(block, &[]);
+}
+
+/// A numeric op run as the interpreter runs it, giving an owned value: an
+/// Int, a Dec or an Err.
+#[allow(clippy::too_many_arguments)]
+fn owned_numeric_binop(
+    builder: &mut FunctionBuilder<'_>,
+    helper_refs: &JitHelperRefs,
+    binop_op_code: i64,
     remap: &AHashMap<u32, usize>,
     registers: &[Variable],
     register_kinds: &[Option<RawKind>],
     left: u32,
     right: u32,
-    op: impl FnOnce(
-        &mut FunctionBuilder<'_>,
-        cranelift_codegen::ir::Value,
-        cranelift_codegen::ir::Value,
-    ) -> cranelift_codegen::ir::Value,
-) -> Result<cranelift_codegen::ir::Value, String> {
-    if register_kind(remap, register_kinds, left)? != RawKind::Int
-        || register_kind(remap, register_kinds, right)? != RawKind::Int
-    {
-        return Err("JIT arithmetic currently supports Int operands only".to_string());
-    }
-    let left_val = builder.use_var(registers[remap_reg(remap, left)?]);
-    let right_val = builder.use_var(registers[remap_reg(remap, right)?]);
-    Ok(op(builder, left_val, right_val))
+) -> Result<(RawKind, cranelift_codegen::ir::Value, NumericExits), String> {
+    let (left_tag, left_raw) =
+        encode_helper_val_operand(builder, remap, registers, register_kinds, left)?;
+    let (right_tag, right_raw) =
+        encode_helper_val_operand(builder, remap, registers, register_kinds, right)?;
+    let op_val = builder.ins().iconst(types::I64, binop_op_code);
+    let call = builder.ins().call(
+        helper_refs.binop_general,
+        &[op_val, left_tag, left_raw, right_tag, right_raw],
+    );
+    let result_handle = builder.inst_results(call)[0];
+    // A strict-argument halt cannot ride the OwnedVal result channel (that
+    // channel carries native error values like div-by-zero, which must keep
+    // flowing); the sentinel routes the frame to its error return instead.
+    let halt_block = emit_halt_check(builder, result_handle);
+    Ok((
+        RawKind::OwnedVal,
+        result_handle,
+        NumericExits::halt(Some(halt_block)),
+    ))
 }
 
+/// The Err of an Int op that failed (an overflow or a zero divisor): the
+/// interpreter's op makes it.
+fn int_op_err(
+    builder: &mut FunctionBuilder<'_>,
+    helper_refs: &JitHelperRefs,
+    binop_op_code: i64,
+    left: cranelift_codegen::ir::Value,
+    right: cranelift_codegen::ir::Value,
+) -> cranelift_codegen::ir::Value {
+    let op_val = builder.ins().iconst(types::I64, binop_op_code);
+    let int_kind = builder.ins().iconst(types::I64, HELPER_VAL_KIND_INT);
+    let call = builder.ins().call(
+        helper_refs.binop_general,
+        &[op_val, int_kind, left, int_kind, right],
+    );
+    builder.inst_results(call)[0]
+}
+
+/// A numeric op of Int and Dec operands through `helper`, which writes a Dec
+/// to the frame or returns an owned Err (a zero divisor).
+#[allow(clippy::too_many_arguments)]
+fn dec_numeric_binop(
+    builder: &mut FunctionBuilder<'_>,
+    ptr_ty: Type,
+    helper: FuncRef,
+    helper_refs: &JitHelperRefs,
+    remap: &AHashMap<u32, usize>,
+    registers: &[Variable],
+    register_kinds: &[Option<RawKind>],
+    left: u32,
+    right: u32,
+    err_use: NumericErrUse,
+) -> Result<(RawKind, cranelift_codegen::ir::Value, NumericExits), String> {
+    let slot = builder.create_sized_stack_slot(StackSlotData::new(
+        StackSlotKind::ExplicitSlot,
+        mem::size_of::<D256>() as u32,
+        3,
+    ));
+    let out_ptr = builder.ins().stack_addr(ptr_ty, slot, 0);
+    let (left_tag, left_raw) =
+        encode_numeric_operand(builder, remap, registers, register_kinds, left)?;
+    let (right_tag, right_raw) =
+        encode_numeric_operand(builder, remap, registers, register_kinds, right)?;
+    let call = builder
+        .ins()
+        .call(helper, &[out_ptr, left_tag, left_raw, right_tag, right_raw]);
+    let err_code = builder.inst_results(call)[0];
+
+    let mut exits = NumericExits::default();
+    if err_use == NumericErrUse::Unread {
+        // Nothing reads the result: drop an Err.
+        builder.ins().call(helper_refs.drop_owned_val, &[err_code]);
+        return Ok((RawKind::Dec, out_ptr, exits));
+    }
+    let is_err = builder.ins().icmp_imm_s(
+        cranelift_codegen::ir::condcodes::IntCC::NotEqual,
+        err_code,
+        0,
+    );
+    let ok_block = builder.create_block();
+    let err_block = builder.create_block();
+    builder.ins().brif(is_err, err_block, &[], ok_block, &[]);
+    builder.switch_to_block(err_block);
+    builder.seal_block(err_block);
+    route_numeric_err(builder, helper_refs, err_code, err_use, &mut exits);
+    builder.switch_to_block(ok_block);
+    builder.seal_block(ok_block);
+    Ok((RawKind::Dec, out_ptr, exits))
+}
+
+/// `add`, `sub` or `mul`. Two Ints give an Int unless the result is kept
+/// (`err_use`), where an overflow's Err has to be a value; an owned operand
+/// gives an owned result; otherwise a Dec.
 #[allow(clippy::too_many_arguments)]
 fn numeric_binop(
     builder: &mut FunctionBuilder<'_>,
@@ -8715,101 +8910,80 @@ fn numeric_binop(
     register_kinds: &[Option<RawKind>],
     left: u32,
     right: u32,
-    int_op: impl FnOnce(
-        &mut FunctionBuilder<'_>,
-        cranelift_codegen::ir::Value,
-        cranelift_codegen::ir::Value,
-    ) -> cranelift_codegen::ir::Value,
-) -> Result<
-    (
-        RawKind,
-        cranelift_codegen::ir::Value,
-        Option<cranelift_codegen::ir::Block>,
-    ),
-    String,
-> {
+    err_use: NumericErrUse,
+) -> Result<(RawKind, cranelift_codegen::ir::Value, NumericExits), String> {
     let left_kind = register_kind(remap, register_kinds, left)?;
     let right_kind = register_kind(remap, register_kinds, right)?;
-    if left_kind == RawKind::Int && right_kind == RawKind::Int {
-        return Ok((
-            RawKind::Int,
-            int_binop(
-                builder,
-                remap,
-                registers,
-                register_kinds,
-                left,
-                right,
-                int_op,
-            )?,
-            None,
-        ));
-    }
     if !matches!(left_kind, RawKind::Int | RawKind::Dec | RawKind::OwnedVal)
         || !matches!(right_kind, RawKind::Int | RawKind::Dec | RawKind::OwnedVal)
     {
         return Err("JIT arithmetic supports Int/Dec operands only".to_string());
     }
-
-    // When OwnedVal is involved, use the general helper that preserves result types
-    if left_kind == RawKind::OwnedVal || right_kind == RawKind::OwnedVal {
-        let (left_tag, left_raw) =
-            encode_helper_val_operand(builder, remap, registers, register_kinds, left)?;
-        let (right_tag, right_raw) =
-            encode_helper_val_operand(builder, remap, registers, register_kinds, right)?;
-        let op_val = builder.ins().iconst(types::I64, binop_op_code);
-        let call = builder.ins().call(
-            helper_refs.binop_general,
-            &[op_val, left_tag, left_raw, right_tag, right_raw],
-        );
-        let result_handle = builder.inst_results(call)[0];
-        // A strict-argument halt cannot ride the OwnedVal result channel
-        // (that channel legitimately carries native error VALUES like
-        // div-by-zero, which must keep flowing); the sentinel routes the
-        // frame to its error return instead.
-        let halt_block = emit_halt_check(builder, result_handle);
-        return Ok((RawKind::OwnedVal, result_handle, Some(halt_block)));
+    let ints = left_kind == RawKind::Int && right_kind == RawKind::Int;
+    if ints && err_use != NumericErrUse::Kept {
+        let left_val = builder.use_var(registers[remap_reg(remap, left)?]);
+        let right_val = builder.use_var(registers[remap_reg(remap, right)?]);
+        if err_use == NumericErrUse::Unread {
+            // Nothing reads the result, so an overflow can't be seen.
+            let value = match binop_op_code {
+                BINOP_ADD => builder.ins().iadd(left_val, right_val),
+                BINOP_SUB => builder.ins().isub(left_val, right_val),
+                BINOP_MUL => builder.ins().imul(left_val, right_val),
+                _ => return Err(format!("JIT Int arithmetic has no op {binop_op_code}")),
+            };
+            return Ok((RawKind::Int, value, NumericExits::default()));
+        }
+        let (value, overflow) = match binop_op_code {
+            BINOP_ADD => builder.ins().sadd_overflow(left_val, right_val),
+            BINOP_SUB => builder.ins().ssub_overflow(left_val, right_val),
+            BINOP_MUL => builder.ins().smul_overflow(left_val, right_val),
+            _ => return Err(format!("JIT Int arithmetic has no op {binop_op_code}")),
+        };
+        let overflow_block = builder.create_block();
+        let cont_block = builder.create_block();
+        builder
+            .ins()
+            .brif(overflow, overflow_block, &[], cont_block, &[]);
+        builder.switch_to_block(overflow_block);
+        builder.seal_block(overflow_block);
+        let err = int_op_err(builder, helper_refs, binop_op_code, left_val, right_val);
+        let mut exits = NumericExits::default();
+        route_numeric_err(builder, helper_refs, err, err_use, &mut exits);
+        builder.switch_to_block(cont_block);
+        builder.seal_block(cont_block);
+        return Ok((RawKind::Int, value, exits));
     }
-
-    let slot = builder.create_sized_stack_slot(StackSlotData::new(
-        StackSlotKind::ExplicitSlot,
-        mem::size_of::<D256>() as u32,
-        3,
-    ));
-    let out_ptr = builder.ins().stack_addr(ptr_ty, slot, 0);
-    let (left_tag, left_raw) =
-        encode_numeric_operand(builder, remap, registers, register_kinds, left)?;
-    let (right_tag, right_raw) =
-        encode_numeric_operand(builder, remap, registers, register_kinds, right)?;
-    let call = builder
-        .ins()
-        .call(helper, &[out_ptr, left_tag, left_raw, right_tag, right_raw]);
-    let err_code = builder.inst_results(call)[0];
-
-    let zero = builder.ins().iconst(types::I64, 0);
-    let is_err = builder.ins().icmp(
-        cranelift_codegen::ir::condcodes::IntCC::NotEqual,
-        err_code,
-        zero,
-    );
-    let ok_block = builder.create_block();
-    let err_block = builder.create_block();
-    builder.ins().brif(is_err, err_block, &[], ok_block, &[]);
-
-    builder.switch_to_block(err_block);
-    builder.seal_block(err_block);
-    builder.ins().return_(&[err_code]);
-
-    builder.switch_to_block(ok_block);
-    builder.seal_block(ok_block);
-    Ok((RawKind::Dec, out_ptr, None))
+    if ints || left_kind == RawKind::OwnedVal || right_kind == RawKind::OwnedVal {
+        return owned_numeric_binop(
+            builder,
+            helper_refs,
+            binop_op_code,
+            remap,
+            registers,
+            register_kinds,
+            left,
+            right,
+        );
+    }
+    // Adding, subtracting or multiplying Decs can't fail.
+    dec_numeric_binop(
+        builder,
+        ptr_ty,
+        helper,
+        helper_refs,
+        remap,
+        registers,
+        register_kinds,
+        left,
+        right,
+        NumericErrUse::Returned,
+    )
 }
 
-/// Like `numeric_binop` but for Int/Int, guards against a zero right operand
-/// by branching to the trampoline instead of executing the raw Cranelift
-/// instruction (which would trap on srem/sdiv by zero). Returns `Int` when
-/// both operands are `Int` (unlike `numeric_binop_dec_only` which always
-/// returns `Dec`).
+/// `mod`. Two Ints give an Int, guarded against a zero divisor (on which
+/// `srem` would trap), unless the result is kept (`err_use`), where the zero
+/// divisor's Err has to be a value; an owned operand gives an owned result;
+/// otherwise a Dec.
 #[allow(clippy::too_many_arguments)]
 fn numeric_binop_int_guarded(
     builder: &mut FunctionBuilder<'_>,
@@ -8822,116 +8996,80 @@ fn numeric_binop_int_guarded(
     register_kinds: &[Option<RawKind>],
     left: u32,
     right: u32,
-    int_op: impl FnOnce(
-        &mut FunctionBuilder<'_>,
-        cranelift_codegen::ir::Value,
-        cranelift_codegen::ir::Value,
-    ) -> cranelift_codegen::ir::Value,
-) -> Result<
-    (
-        RawKind,
-        cranelift_codegen::ir::Value,
-        Option<cranelift_codegen::ir::Block>,
-    ),
-    String,
-> {
+    err_use: NumericErrUse,
+) -> Result<(RawKind, cranelift_codegen::ir::Value, NumericExits), String> {
     let left_kind = register_kind(remap, register_kinds, left)?;
     let right_kind = register_kind(remap, register_kinds, right)?;
-
-    if left_kind == RawKind::Int && right_kind == RawKind::Int {
-        let left_val = builder.use_var(registers[remap_reg(remap, left)?]);
-        let right_val = builder.use_var(registers[remap_reg(remap, right)?]);
-
-        let zero = builder.ins().iconst(types::I64, 0);
-        let is_zero_rhs = builder.ins().icmp(
-            cranelift_codegen::ir::condcodes::IntCC::Equal,
-            right_val,
-            zero,
-        );
-
-        let safe_block = builder.create_block();
-        let err_block = builder.create_block();
-        builder
-            .ins()
-            .brif(is_zero_rhs, err_block, &[], safe_block, &[]);
-
-        // Zero case: delegate to the trampoline which returns a proper error
-        builder.switch_to_block(err_block);
-        builder.seal_block(err_block);
-        let out_addr = builder.ins().iconst(ptr_ty, 0); // dummy; trampoline will return error
-        let (lt, lr) = encode_numeric_operand(builder, remap, registers, register_kinds, left)?;
-        let (rt, rr) = encode_numeric_operand(builder, remap, registers, register_kinds, right)?;
-        let call = builder.ins().call(helper, &[out_addr, lt, lr, rt, rr]);
-        let err_code = builder.inst_results(call)[0];
-        builder.ins().return_(&[err_code]);
-
-        // Non-zero case: safe to use the native instruction
-        builder.switch_to_block(safe_block);
-        builder.seal_block(safe_block);
-        let result = int_op(builder, left_val, right_val);
-        return Ok((RawKind::Int, result, None));
-    }
-
-    // Non Int/Int: delegate to the Dec trampoline path (same as numeric_binop)
     if !matches!(left_kind, RawKind::Int | RawKind::Dec | RawKind::OwnedVal)
         || !matches!(right_kind, RawKind::Int | RawKind::Dec | RawKind::OwnedVal)
     {
         return Err("JIT arithmetic supports Int/Dec operands only".to_string());
     }
-    if left_kind == RawKind::OwnedVal || right_kind == RawKind::OwnedVal {
-        let (left_tag, left_raw) =
-            encode_helper_val_operand(builder, remap, registers, register_kinds, left)?;
-        let (right_tag, right_raw) =
-            encode_helper_val_operand(builder, remap, registers, register_kinds, right)?;
-        let op_val = builder.ins().iconst(types::I64, binop_op_code);
-        let call = builder.ins().call(
-            helper_refs.binop_general,
-            &[op_val, left_tag, left_raw, right_tag, right_raw],
-        );
-        let result_handle = builder.inst_results(call)[0];
-        // A strict-argument halt cannot ride the OwnedVal result channel
-        // (that channel legitimately carries native error VALUES like
-        // div-by-zero, which must keep flowing); the sentinel routes the
-        // frame to its error return instead.
-        let halt_block = emit_halt_check(builder, result_handle);
-        return Ok((RawKind::OwnedVal, result_handle, Some(halt_block)));
+    let ints = left_kind == RawKind::Int && right_kind == RawKind::Int;
+    if ints && err_use != NumericErrUse::Kept {
+        let left_val = builder.use_var(registers[remap_reg(remap, left)?]);
+        let right_val = builder.use_var(registers[remap_reg(remap, right)?]);
+        let is_zero =
+            builder
+                .ins()
+                .icmp_imm_s(cranelift_codegen::ir::condcodes::IntCC::Equal, right_val, 0);
+        if err_use == NumericErrUse::Unread {
+            // Nothing reads the result: a zero divisor only must not trap.
+            let one = builder.ins().iconst(types::I64, 1);
+            let divisor = builder.ins().select(is_zero, one, right_val);
+            let value = builder.ins().srem(left_val, divisor);
+            return Ok((RawKind::Int, value, NumericExits::default()));
+        }
+        let zero_block = builder.create_block();
+        let cont_block = builder.create_block();
+        builder
+            .ins()
+            .brif(is_zero, zero_block, &[], cont_block, &[]);
+        builder.switch_to_block(zero_block);
+        builder.seal_block(zero_block);
+        let err = int_op_err(builder, helper_refs, binop_op_code, left_val, right_val);
+        let mut exits = NumericExits::default();
+        route_numeric_err(builder, helper_refs, err, err_use, &mut exits);
+        builder.switch_to_block(cont_block);
+        builder.seal_block(cont_block);
+        // `i64::MIN % -1` is 0 here; srem traps only on a zero divisor.
+        let value = builder.ins().srem(left_val, right_val);
+        return Ok((RawKind::Int, value, exits));
     }
-    let slot = builder.create_sized_stack_slot(StackSlotData::new(
-        StackSlotKind::ExplicitSlot,
-        mem::size_of::<D256>() as u32,
-        3,
-    ));
-    let out_ptr = builder.ins().stack_addr(ptr_ty, slot, 0);
-    let (left_tag, left_raw) =
-        encode_numeric_operand(builder, remap, registers, register_kinds, left)?;
-    let (right_tag, right_raw) =
-        encode_numeric_operand(builder, remap, registers, register_kinds, right)?;
-    let call = builder
-        .ins()
-        .call(helper, &[out_ptr, left_tag, left_raw, right_tag, right_raw]);
-    let err_code = builder.inst_results(call)[0];
-    let z = builder.ins().iconst(types::I64, 0);
-    let is_err = builder.ins().icmp(
-        cranelift_codegen::ir::condcodes::IntCC::NotEqual,
-        err_code,
-        z,
-    );
-    let ok_block = builder.create_block();
-    let err_ret_block = builder.create_block();
-    builder
-        .ins()
-        .brif(is_err, err_ret_block, &[], ok_block, &[]);
-    builder.switch_to_block(err_ret_block);
-    builder.seal_block(err_ret_block);
-    builder.ins().return_(&[err_code]);
-    builder.switch_to_block(ok_block);
-    builder.seal_block(ok_block);
-    Ok((RawKind::Dec, out_ptr, None))
+    if ints
+        || err_use == NumericErrUse::Kept
+        || left_kind == RawKind::OwnedVal
+        || right_kind == RawKind::OwnedVal
+    {
+        return owned_numeric_binop(
+            builder,
+            helper_refs,
+            binop_op_code,
+            remap,
+            registers,
+            register_kinds,
+            left,
+            right,
+        );
+    }
+    dec_numeric_binop(
+        builder,
+        ptr_ty,
+        helper,
+        helper_refs,
+        remap,
+        registers,
+        register_kinds,
+        left,
+        right,
+        err_use,
+    )
 }
 
-/// Like `numeric_binop` but always routes through the Dec trampoline,
-/// even for Int/Int operands. Used for division where Int/Int can produce
-/// Dec results (e.g. 3/2 = 1.5) and div-by-zero must return an error.
+/// `div`. Two Ints divide to an Int when they divide evenly and a Dec
+/// otherwise, so their quotient is owned, as is one with an owned operand;
+/// otherwise a Dec, unless the result is kept (`err_use`), where a zero
+/// divisor's Err has to be a value.
 #[allow(clippy::too_many_arguments)]
 fn numeric_binop_dec_only(
     builder: &mut FunctionBuilder<'_>,
@@ -8944,14 +9082,8 @@ fn numeric_binop_dec_only(
     register_kinds: &[Option<RawKind>],
     left: u32,
     right: u32,
-) -> Result<
-    (
-        RawKind,
-        cranelift_codegen::ir::Value,
-        Option<cranelift_codegen::ir::Block>,
-    ),
-    String,
-> {
+    err_use: NumericErrUse,
+) -> Result<(RawKind, cranelift_codegen::ir::Value, NumericExits), String> {
     let left_kind = register_kind(remap, register_kinds, left)?;
     let right_kind = register_kind(remap, register_kinds, right)?;
     if !matches!(left_kind, RawKind::Int | RawKind::Dec | RawKind::OwnedVal)
@@ -8959,63 +9091,34 @@ fn numeric_binop_dec_only(
     {
         return Err("JIT arithmetic supports Int/Dec operands only".to_string());
     }
-
-    // `div` of two Ints is an Int when it divides evenly and a Dec otherwise,
-    // so its kind isn't fixed; the interpreter's division decides.
-    if left_kind == RawKind::OwnedVal
+    if err_use == NumericErrUse::Kept
+        || left_kind == RawKind::OwnedVal
         || right_kind == RawKind::OwnedVal
         || (left_kind == RawKind::Int && right_kind == RawKind::Int)
     {
-        let (left_tag, left_raw) =
-            encode_helper_val_operand(builder, remap, registers, register_kinds, left)?;
-        let (right_tag, right_raw) =
-            encode_helper_val_operand(builder, remap, registers, register_kinds, right)?;
-        let op_val = builder.ins().iconst(types::I64, binop_op_code);
-        let call = builder.ins().call(
-            helper_refs.binop_general,
-            &[op_val, left_tag, left_raw, right_tag, right_raw],
+        return owned_numeric_binop(
+            builder,
+            helper_refs,
+            binop_op_code,
+            remap,
+            registers,
+            register_kinds,
+            left,
+            right,
         );
-        let result_handle = builder.inst_results(call)[0];
-        // A strict-argument halt cannot ride the OwnedVal result channel
-        // (that channel legitimately carries native error VALUES like
-        // div-by-zero, which must keep flowing); the sentinel routes the
-        // frame to its error return instead.
-        let halt_block = emit_halt_check(builder, result_handle);
-        return Ok((RawKind::OwnedVal, result_handle, Some(halt_block)));
     }
-
-    let slot = builder.create_sized_stack_slot(StackSlotData::new(
-        StackSlotKind::ExplicitSlot,
-        mem::size_of::<D256>() as u32,
-        3,
-    ));
-    let out_ptr = builder.ins().stack_addr(ptr_ty, slot, 0);
-    let (left_tag, left_raw) =
-        encode_numeric_operand(builder, remap, registers, register_kinds, left)?;
-    let (right_tag, right_raw) =
-        encode_numeric_operand(builder, remap, registers, register_kinds, right)?;
-    let call = builder
-        .ins()
-        .call(helper, &[out_ptr, left_tag, left_raw, right_tag, right_raw]);
-    let err_code = builder.inst_results(call)[0];
-
-    let zero = builder.ins().iconst(types::I64, 0);
-    let is_err = builder.ins().icmp(
-        cranelift_codegen::ir::condcodes::IntCC::NotEqual,
-        err_code,
-        zero,
-    );
-    let ok_block = builder.create_block();
-    let err_block = builder.create_block();
-    builder.ins().brif(is_err, err_block, &[], ok_block, &[]);
-
-    builder.switch_to_block(err_block);
-    builder.seal_block(err_block);
-    builder.ins().return_(&[err_code]);
-
-    builder.switch_to_block(ok_block);
-    builder.seal_block(ok_block);
-    Ok((RawKind::Dec, out_ptr, None))
+    dec_numeric_binop(
+        builder,
+        ptr_ty,
+        helper,
+        helper_refs,
+        remap,
+        registers,
+        register_kinds,
+        left,
+        right,
+        err_use,
+    )
 }
 
 fn int_compare(
@@ -9328,6 +9431,7 @@ fn compile_thunk_inline(
     _parent_thunk_registry: &AHashMap<u32, crate::lang::bytecode::LambdaInfo>,
     result_var: Variable,
     merge_block: cranelift_codegen::ir::Block,
+    returned_use: NumericErrUse,
 ) -> Result<RawKind, String> {
     let instructions = &lambda.instructions;
     if instructions.is_empty() {
@@ -9385,6 +9489,7 @@ fn compile_thunk_inline(
         error_capture_active: false,
         relies_on_expected_return: false,
         function_body: false,
+        returned_use,
     };
 
     let mut return_kind: Option<RawKind> = None;
@@ -9406,7 +9511,7 @@ fn compile_thunk_inline(
                 args_count,
                 ..
             } => {
-                ctx.emit_self_call(builder, ip, *dest, *args_start, *args_count)?;
+                ctx.emit_self_call(builder, ip, *dest, *args_start, *args_count, instructions)?;
             }
             Instruction::ReturnIfErr { src } => match ctx.emit_err_check(builder, ip, *src)? {
                 None => {}
@@ -9678,6 +9783,9 @@ fn try_inline_lazy_branch_call(
     registers: &[Variable],
     register_kinds: &[Option<RawKind>],
     thunk_registry: &AHashMap<u32, crate::lang::bytecode::LambdaInfo>,
+    // How the call's result is used: what returning a value from a branch
+    // amounts to.
+    result_use: NumericErrUse,
 ) -> Result<Option<(RawKind, cranelift_codegen::ir::Value)>, String> {
     let callee = match program.functions.get(called_function_id as usize) {
         Some(f) => f,
@@ -9763,6 +9871,7 @@ fn try_inline_lazy_branch_call(
             thunk_registry,
             result_var,
             then_merge,
+            result_use,
         )?;
 
         // Compile else-branch (writes to result_var, jumps to else_merge)
@@ -9783,6 +9892,7 @@ fn try_inline_lazy_branch_call(
                 thunk_registry,
                 result_var,
                 else_merge,
+                result_use,
             )?
         } else {
             builder.def_var(result_var, zero);

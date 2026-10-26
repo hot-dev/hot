@@ -1944,6 +1944,66 @@ caller(true)"#;
         vm.execute().map_err(|e| format!("{:?}", e))
     }
 
+    /// An Int op's overflow, a zero divisor, and a call of a value that isn't
+    /// a function give the same values in compiled code as in the
+    /// interpreter: checked, dropped, returned, kept in a collection.
+    #[test]
+    fn numeric_errs_match_in_interpreter_and_compiled_code() {
+        let src = r#"::t ns
+big 9223372036854775807
+smallest sub(sub(0, big), 1)
+add-ints fn (a: Int, b: Int) { add(a, b) }
+mul-ints fn (a: Int, b: Int) { mul(a, b) }
+pow-ints fn (a: Int, b: Int) { pow(a, b) }
+mod-ints fn (a: Int, b: Int) { mod(a, b) }
+div-decs fn (a: Dec, b: Dec) { div(a, b) }
+checked fn (a: Int, b: Int) { r add(a, b)  if(is-err(r), "caught", r) }
+dropped fn (a: Int, b: Int) { r mod(a, b)  "dropped" }
+kept fn (a: Int, b: Int) { [mul(a, b), 1] }
+call-value fn (v) { v(1) }
+show fn (r: Result) { if(is-err(r), `Err ${err-message(r)}`, r) }
+[
+    show(add-ints(1, 2)), show(add-ints(big, 1)), show(mul-ints(big, 2)),
+    show(pow-ints(10, 18)), show(pow-ints(10, 19)), show(pow-ints(3, 39)),
+    show(mod-ints(5, 0)), show(mod-ints(smallest, -1)), show(div-decs(1.5, 0.0)),
+    show(checked(big, 1)), show(checked(1, 1)), show(dropped(5, 0)),
+    show(first(kept(big, 2))), show(abs(smallest)), show(floor(1000000000000000000000.5)),
+    show(Int(10000000000000000000.5)), show(call-value(5)),
+]"#;
+        let overflow = "Err Integer overflow";
+        let expected = val!([
+            3, overflow, overflow,
+            1000000000000000000_i64, overflow, 4052555153018976267_i64,
+            "Err Modulo by zero", 0, "Err Division by zero",
+            "caught", 2, "dropped",
+            overflow, overflow, overflow,
+            overflow, "Err Cannot call a value of type Int"
+        ]);
+        for conf in [
+            val!({"jit": {"mode": "disabled"}}),
+            val!({"jit": {"threshold": 1}}),
+        ] {
+            let out = compile_and_run_with_std_conf(src, Some(conf.clone())).expect("run");
+            assert_eq!(out, expected, "{conf:?}");
+        }
+    }
+
+    /// A consumed overflow halts with the same message either way.
+    #[test]
+    fn consumed_overflow_halts_in_interpreter_and_compiled_code() {
+        let src = r#"::t ns
+grow fn (a: Int) { mul(add(a, 1), 2) }
+grow(9223372036854775807)"#;
+        for conf in [
+            val!({"jit": {"mode": "disabled"}}),
+            val!({"jit": {"threshold": 1}}),
+        ] {
+            let err = compile_and_run_with_std_conf(src, Some(conf.clone()))
+                .expect_err("the overflow halts");
+            assert!(err.contains("Result error: Integer overflow"), "{conf:?}: {err}");
+        }
+    }
+
     fn load_hot_std_from_path(
         hot_std_path: &str,
     ) -> Result<crate::lang::ast::Program, Box<dyn std::error::Error>> {

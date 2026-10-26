@@ -122,6 +122,14 @@ setup-hot `version` input so pipelines move to 3.0 when you do. See
   `add("x", 1)` halted on the spot in the interpreter, while
   `::hot::math/add("x", 1)` and compiled code returned the `Err`. Now all three
   return it, and it halts where it's consumed.
+- **Int overflow returns an `Err`.** `add`, `sub`, `mul`, `pow`, and `abs`
+  wrapped around when an Int result didn't fit in 64 bits, and `pow` rounded
+  large results. Now an overflow gives `Err("Integer overflow")`, as
+  `div(1, 0)` gives `Err("Division by zero")`. So do `floor`, `ceil`, `round`,
+  and `Int` of a `Dec` too large for an Int. Use a `Dec` for larger numbers.
+- **Calling a value that isn't a function returns an `Err`.** With `v` bound
+  to `5`, a map, or `null`, `v(1)` returned `1`, and other calls returned
+  `null`. Now they give `Err("Cannot call a value of type Int")`.
 - **`lazy` only defers evaluation.** Consuming an `Err` inside a lazy argument
   halts as it does anywhere else; it used to pass the `Err` along as data.
 - **New: parameter lists can span lines**, in functions and in lambdas. A

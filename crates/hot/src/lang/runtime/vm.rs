@@ -6275,16 +6275,10 @@ impl VirtualMachine {
             && let (Val::Int(a), Val::Int(b)) = (&args[0], &args[1])
         {
             let result = match function_name {
-                "add" => Some(Val::Int(a.wrapping_add(*b))),
-                "sub" => Some(Val::Int(a.wrapping_sub(*b))),
-                "mul" => Some(Val::Int(a.wrapping_mul(*b))),
-                "mod" => {
-                    if *b == 0 {
-                        None
-                    } else {
-                        Some(Val::Int(a % b))
-                    }
-                }
+                "add" => Some(crate::lang::hot::math::fast_add_int(*a, *b)),
+                "sub" => Some(crate::lang::hot::math::fast_sub_int(*a, *b)),
+                "mul" => Some(crate::lang::hot::math::fast_mul_int(*a, *b)),
+                "mod" => crate::lang::hot::math::fast_mod_int(*a, *b),
                 "lt" => Some(Val::Bool(a < b)),
                 "gt" => Some(Val::Bool(a > b)),
                 "lte" => Some(Val::Bool(a <= b)),
@@ -6493,18 +6487,7 @@ impl VirtualMachine {
                     return self.call_function_value(&inner.clone(), args);
                 }
 
-                // Not a callable wrapper. Single-arg "construction" sugar: a non-callable
-                // map called with one arg yields that arg unchanged. Multi-arg calls on a
-                // non-callable map are a no-op returning Null.
-                if args.len() == 1 {
-                    tracing::trace!(
-                        "VM: Non-callable map value with single arg - returning arg as constructed value"
-                    );
-                    return Ok(args[0].clone());
-                }
-
-                tracing::trace!("VM: Attempted to call non-callable map value; returning Null");
-                Ok(Val::Null)
+                Ok(self.not_callable(function_val))
             }
             Val::Str(function_name) => {
                 // String function name - call directly
@@ -6515,23 +6498,18 @@ impl VirtualMachine {
                     self.execute_function_call_by_name(function_name, args)
                 }
             }
-            _ => {
-                // Non-callable values are returned unchanged when "called" with 1 arg,
-                // enabling type constructor maps like `City({ ... })` to just yield
-                // the provided map as the constructed value. This matches Hot semantics
-                // for user-defined types where constructors simply tag values.
-                if args.len() == 1 {
-                    tracing::trace!(
-                        "VM: Non-callable function value with single arg - returning arg as constructed value"
-                    );
-                    return Ok(args[0].clone());
-                }
-
-                // Otherwise, attempting to call a non-callable is a no-op -> null
-                tracing::trace!("VM: Attempted to call non-callable value; returning Null");
-                Ok(Val::Null)
-            }
+            _ => Ok(self.not_callable(function_val)),
         }
+    }
+
+    /// The Err a call gets when the value it calls isn't a function, as a
+    /// native's type error does.
+    fn not_callable(&self, value: &Val) -> Val {
+        let type_path = self.get_value_type_path(value);
+        let type_name = type_path.strip_prefix("::hot::type/").unwrap_or(&type_path);
+        Val::err(Val::from(format!(
+            "Cannot call a value of type {type_name}"
+        )))
     }
 
     /// Find the best matching function overload based on arity and type compatibility

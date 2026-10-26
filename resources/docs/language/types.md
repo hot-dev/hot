@@ -31,6 +31,14 @@ The model is deliberately hybrid:
 | `Any` | Any type | anything |
 | `Bytes` | Binary data | — |
 
+## Numbers
+
+An `Int` is a 64-bit integer, from -9223372036854775808 to
+9223372036854775807. Arithmetic whose result doesn't fit in an `Int` returns
+`Err("Integer overflow")`, as dividing by zero returns
+`Err("Division by zero")`. A `Dec` is an exact 256-bit decimal, so
+`add(0.1, 0.2)` is `0.3`. Mixing an `Int` and a `Dec` gives a `Dec`.
+
 ## Type Annotations
 
 Add types to variables:

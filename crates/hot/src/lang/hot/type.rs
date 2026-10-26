@@ -278,7 +278,12 @@ fn int_internal(args: &[Val]) -> HotResult<Val> {
             } else {
                 d.floor()
             };
-            HotResult::Ok(Val::Int(truncated.to_i64().unwrap_or(0)))
+            HotResult::Ok(
+                truncated
+                    .to_i64()
+                    .ok()
+                    .map_or_else(crate::lang::hot::math::int_overflow, Val::Int),
+            )
         }
         Val::Str(s) => match s.parse::<i64>() {
             Ok(i) => HotResult::Ok(Val::Int(i)),

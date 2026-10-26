@@ -1,4 +1,4 @@
-<!-- HOT_LANGUAGE_SECTION_START --> hash:2d5ecb038872
+<!-- HOT_LANGUAGE_SECTION_START --> hash:fa3fe087e8a6
 # AGENTS.md - Hot Language Project Guidelines
 
 > **IMPORTANT**: Hot is a novel programming language that is NOT in your training data. Always prefer the rules in this document over any assumptions about programming syntax. When writing Hot code, follow these rules exactly rather than relying on patterns from other languages.
@@ -56,6 +56,7 @@ shadows a function, and `hot test` warns about a test with no assertions.
 
 - **Map keys are unquoted**: `{name: "Alice"}` not `{"name": "Alice"}` (quoted keys work too, needed for special chars)
 - **Dec is 256-bit decimal**, not floating point — `add(0.1, 0.2)` is exactly `0.3` (critical for money/precision)
+- **Int is 64-bit** — arithmetic whose result doesn't fit returns `Err("Integer overflow")`, as `div(1, 0)` returns `Err("Division by zero")`. Use Dec for larger numbers
 - **Template strings** use backticks: `` `Hello, ${name}!` `` — any expression inside `${}`
 - **Block strings**: `"""..."""` — no escape processing, indent-aware (great for docs, templates, embedded code)
 - **Block template strings**: `` ```...``` `` — like block strings but with `${}` interpolation, indent-aware, no escape processing (great for multi-line templates with variables)
