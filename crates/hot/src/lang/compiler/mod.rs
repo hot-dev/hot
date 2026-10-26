@@ -5184,19 +5184,28 @@ impl Compiler {
         // types (`Str`, `Int`, `Uuid`, ...) are excluded: their constructors are
         // conversions, so a Map argument must keep reaching them.
         let has_struct_fields = type_def.fields.is_some();
-        let has_default_map_constructor =
-            has_struct_fields || (type_def.constructor_functions.is_some() && !is_core_type);
+        let map_typed_key = format!("{}/1:Map", constructor_name);
+        // A type declared as `Name type { ... }` and again as `Name type fn ...`
+        // compiles each declaration. The custom constructors keep the default
+        // constructor of the declaration with the fields.
+        let custom_with_default = type_def.constructor_functions.is_some() && !is_core_type;
+        let declared_default = if has_struct_fields || !custom_with_default {
+            None
+        } else {
+            self.function_mapping.get(&map_typed_key).copied()
+        };
+        let mut default_map_constructor = declared_default;
 
-        if has_default_map_constructor {
+        if has_struct_fields || (custom_with_default && declared_default.is_none()) {
             tracing::trace!(
                 "Compiler: Creating default Map constructor for type '{}'",
                 constructor_name
             );
             let default_fn_id =
                 self.create_default_type_constructor(&constructor_name, type_def)?;
+            default_map_constructor = Some(default_fn_id);
 
             // Register with type-specific key so it can be found when arg is a Map
-            let map_typed_key = format!("{}/1:Map", constructor_name);
             self.function_mapping
                 .insert(map_typed_key.clone(), default_fn_id);
 
@@ -5226,6 +5235,14 @@ impl Compiler {
                 map_typed_key,
                 default_fn_id
             );
+        }
+
+        // `Name(data)` in a custom constructor's body calls the default
+        // constructor directly, as runtime dispatch would choose it for a Map.
+        // A 1-argument custom constructor takes the key below.
+        if custom_with_default && let Some(default_fn_id) = default_map_constructor {
+            self.function_mapping
+                .insert(format!("{}/1", constructor_name), default_fn_id);
         }
 
         // If the type has explicit constructor functions defined, compile ALL overloads

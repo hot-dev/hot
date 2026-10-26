@@ -27,6 +27,22 @@ Label type {
 
 Label fn (text: Str): Label { Label({text,}) }
 
+// Declared twice: fields, then custom constructors. The custom constructors
+// build through the default constructor of the declaration with the fields,
+// which checks them.
+Spot type {
+    x: Int,
+    y: Int
+}
+
+Spot type fn (x: Int, y: Int): Spot { Spot({x: mul(x, 10), y}) }
+
+// Field-less, building a Map in a variable for its own default constructor.
+Pair type fn (a: Int, b: Int): Pair {
+    m {a, b}
+    Pair(m)
+}
+
 label-data fn (): Map { {text: "from-call"} }
 
 describe fn
@@ -76,4 +92,12 @@ meta ["test"] fn () {
     assert-eq("{a: 1}", Str(m), "Str(Map)")
     assert-eq({a: 1}, Map(m), "Map(Map)")
     assert(is-err(Int(m)), "Int(Map) is still an Err")
+}
+
+test-a-type-declared-twice-keeps-its-field-checks
+meta ["test"] fn () {
+    assert(is-err(Spot({x: 1})), "a missing field is an Err")
+    assert-eq(10, Spot(1, 2).x, "custom constructor")
+    assert-eq(1, Spot({x: 1, y: 2}).x, "default constructor")
+    assert-eq(2, Pair(1, 2).b, "Map in a variable in a custom constructor")
 }
