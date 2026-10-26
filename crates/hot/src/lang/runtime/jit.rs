@@ -2369,7 +2369,12 @@ unsafe extern "C" fn hot_jit_call_vm(
     }
 
     let error_capture = vm.error_capture_active;
-    let target = crate::lang::runtime::vm::CallTarget::Function(function_id as u32);
+    // Same runtime overload dispatch as the interpreter's CallUserFunction,
+    // with the arguments prepared for the overload called.
+    let function_id = vm
+        .overload_for_args(function_id as u32, &args)
+        .unwrap_or(function_id as u32);
+    let target = crate::lang::runtime::vm::CallTarget::Function(function_id);
     let args = match vm.prepare_call_args(target, args) {
         Ok(args) => args,
         Err(err) => {
@@ -2378,10 +2383,6 @@ unsafe extern "C" fn hot_jit_call_vm(
             return vm_error_to_owned_val(err, error_capture);
         }
     };
-    // Same runtime overload dispatch as the interpreter's CallUserFunction.
-    let function_id = vm
-        .overload_for_args(function_id as u32, &args)
-        .unwrap_or(function_id as u32);
     match vm.execute_compiled_user_function(function_id, &args) {
         Ok(result) => new_owned_val(result),
         Err(err) => vm_error_to_owned_val(err, error_capture),
@@ -9977,6 +9978,16 @@ fn try_inline_lazy_branch_call(
         return Ok(None);
     }
     if !is_known_lazy_branch_selector(callee) {
+        return Ok(None);
+    }
+    // A same-arity sibling is chosen at run time by the argument types (see
+    // `VirtualMachine::overload_for_args`), which an inlined body would skip.
+    if program.functions.iter().enumerate().any(|(id, f)| {
+        id != called_function_id as usize
+            && !f.is_variadic
+            && f.arity == callee.arity
+            && f.name == callee.name
+    }) {
         return Ok(None);
     }
 

@@ -454,8 +454,9 @@ const OVERLOAD_RANK_ANY: u32 = 2;
 
 impl OverloadCandidate {
     /// Summed rank over the parameters, or `None` when a parameter does not
-    /// accept its argument. `names` are the arguments' dispatch type names.
-    fn rank(&self, names: &[std::borrow::Cow<'_, str>], args: &[Val]) -> Option<u32> {
+    /// accept its argument. `names` are the arguments' dispatch type names,
+    /// and `maps` whether each is structurally a Map.
+    fn rank(&self, names: &[std::borrow::Cow<'_, str>], maps: &[bool]) -> Option<u32> {
         if self.param_types.len() != names.len() {
             return None;
         }
@@ -465,7 +466,7 @@ impl OverloadCandidate {
                 // Lazy arguments arrive as thunks, so their type is unknown.
                 OVERLOAD_RANK_ANY
             } else {
-                overload_param_rank(declared, name, matches!(args.get(i), Some(Val::Map(_))))?
+                overload_param_rank(declared, name, maps.get(i).copied().unwrap_or(false))?
             };
         }
         Some(total)
@@ -2795,29 +2796,34 @@ impl VirtualMachine {
                     args_count
                 );
 
-                // Collect arguments from consecutive registers, prepared for
-                // the function's parameters
+                // Collect arguments from consecutive registers
                 let mut args = Vec::with_capacity(args_count as usize);
                 for i in 0..args_count {
                     let arg_reg = args_start + i as RegisterId;
                     args.push(self.get_register(arg_reg)?.clone());
                 }
-                let mut args = self.prepare_call_args(CallTarget::Function(function_id), args)?;
 
                 // Overload dispatch and implicit coercion at the
                 // static-dispatch boundary. The compiler may have picked
                 // `function_id` from the arity-only key (because compile-time
                 // arg types weren't known), so a same-arity sibling that fits
                 // the actual arg types better is called instead (see
-                // `overload_for_args`). Otherwise, if a typed signature exists
-                // and the actual arg types differ but a unique
-                // `Source -> Target` arrow exists, coerce in place.
+                // `overload_for_args`), with the arguments prepared for its
+                // parameters: one that declares a `Result` receives an Err.
+                // Otherwise, if a typed signature exists and the actual arg
+                // types differ but a unique `Source -> Target` arrow exists,
+                // coerce in place.
                 // The type checker has already vetted the call, so any miss
                 // here just falls back to invoking the function with the
                 // original args (preserves prior behavior).
-                if let Some(chosen) = self.overload_for_args(function_id, &args) {
+                let dispatched = self.overload_for_args(function_id, &args);
+                if let Some(chosen) = dispatched {
                     function_id = chosen;
-                } else if let Some(expected) = self.lookup_typed_param_signature(function_id) {
+                }
+                let mut args = self.prepare_call_args(CallTarget::Function(function_id), args)?;
+                if dispatched.is_none()
+                    && let Some(expected) = self.lookup_typed_param_signature(function_id)
+                {
                     let actual: Vec<String> =
                         args.iter().map(|a| self.get_val_type_name(a)).collect();
                     if actual != expected {
@@ -5487,7 +5493,14 @@ impl VirtualMachine {
                 }
                 let name = self.resolve_function_name(&name).unwrap_or(name);
                 match self.find_best_function_overload(&name, args) {
-                    Some(function_id) => self.kept_args(CallTarget::Function(function_id), args),
+                    // The sibling a by-name call dispatches to (see
+                    // `execute_user_function_cached`) decides.
+                    Some(function_id) => {
+                        let function_id = self
+                            .overload_for_args(function_id, args)
+                            .unwrap_or(function_id);
+                        self.kept_args(CallTarget::Function(function_id), args)
+                    }
                     None => self.kept_args(CallTarget::Native(&name), args),
                 }
             }
@@ -5620,9 +5633,10 @@ impl VirtualMachine {
             {
                 type_name.hash(&mut hasher);
             }
-            if let Val::Box(_) = arg {
+            if let Val::Map(_) | Val::Box(_) = arg {
                 // Overload dispatch tells boxed functions, namespaces and
-                // iterators apart (see `dispatch_type_name`).
+                // iterators apart, and an Ok by its value's type (see
+                // `dispatch_type_name`).
                 Self::dispatch_type_name(arg).hash(&mut hasher);
             }
         }
@@ -7024,9 +7038,12 @@ impl VirtualMachine {
     }
 
     /// The type name overload dispatch matches declared parameter types
-    /// against: as `get_val_type_name`, but boxed functions, namespaces and
-    /// iterators are told apart so that `Fn` parameters can be selected.
-    fn dispatch_type_name(val: &Val) -> std::borrow::Cow<'_, str> {
+    /// against, and whether the value is structurally a Map: as
+    /// `get_val_type_name`, but boxed functions, namespaces and iterators are
+    /// told apart so that `Fn` parameters can be selected. An Ok is matched
+    /// by its value, which any parameter but a `Result` one receives; an Err
+    /// matches `Result`, and isn't a Map.
+    fn dispatch_type_name(val: &Val) -> (std::borrow::Cow<'_, str>, bool) {
         let name = match val {
             Val::Str(_) => "Str",
             Val::Int(_) => "Int",
@@ -7037,12 +7054,23 @@ impl VirtualMachine {
             Val::Byte(_) => "Byte",
             Val::Null => "Null",
             Val::Map(map) => match crate::val::tagged_type_name(map) {
+                Some("::hot::type/Result.Ok") => {
+                    return match map.get(&Val::from("$val")) {
+                        Some(value) => Self::dispatch_type_name(value),
+                        None => (std::borrow::Cow::Borrowed("Null"), false),
+                    };
+                }
                 Some(type_name) => {
-                    return std::borrow::Cow::Borrowed(
-                        type_name.rsplit('/').next().unwrap_or(type_name),
+                    // A typed record or variant is structurally a Map; an Err
+                    // is not.
+                    return (
+                        std::borrow::Cow::Borrowed(
+                            type_name.rsplit('/').next().unwrap_or(type_name),
+                        ),
+                        type_name != "::hot::type/Result.Err",
                     );
                 }
-                None => "Map",
+                None => return (std::borrow::Cow::Borrowed("Map"), true),
             },
             Val::Box(boxed) => {
                 let any = boxed.as_any();
@@ -7059,7 +7087,7 @@ impl VirtualMachine {
                 }
             }
         };
-        std::borrow::Cow::Borrowed(name)
+        (std::borrow::Cow::Borrowed(name), false)
     }
 
     /// Runtime overload dispatch for a call resolved without the argument
@@ -7081,21 +7109,22 @@ impl VirtualMachine {
         if args.len() != set.arity {
             return None;
         }
-        let names: Vec<std::borrow::Cow<'_, str>> =
-            args.iter().map(Self::dispatch_type_name).collect();
+        let (names, maps): (Vec<std::borrow::Cow<'_, str>>, Vec<bool>) =
+            args.iter().map(Self::dispatch_type_name).unzip();
         let cache_key = {
             use std::hash::{Hash, Hasher};
             let mut hasher = ahash::AHasher::default();
             function_id.hash(&mut hasher);
-            for name in &names {
+            for (name, is_map) in names.iter().zip(&maps) {
                 name.hash(&mut hasher);
+                is_map.hash(&mut hasher);
             }
             hasher.finish()
         };
         let chosen = match self.overload_choice_cache.get(&cache_key) {
             Some(&chosen) => chosen,
             None => {
-                let chosen = self.choose_overload(&set, function_id, &names, args);
+                let chosen = self.choose_overload(&set, function_id, &names, &maps);
                 self.overload_choice_cache.insert(cache_key, chosen);
                 chosen
             }
@@ -7108,25 +7137,31 @@ impl VirtualMachine {
         set: &OverloadSet,
         function_id: FunctionId,
         names: &[std::borrow::Cow<'_, str>],
-        args: &[Val],
+        maps: &[bool],
     ) -> FunctionId {
+        // The call site evaluated its arguments for the resolved overload's
+        // lazy parameters, so only a sibling that defers the same ones can
+        // take them.
+        let Some(resolved) = set.candidates.iter().find(|c| c.function_id == function_id) else {
+            return function_id;
+        };
+        let eligible = |c: &&OverloadCandidate| c.lazy_params == resolved.lazy_params;
         let exact_key = format!("{}:{}", set.prefix, names.join(","));
         if let Some(&id) = self.function_mapping.get(&exact_key)
-            && set.candidates.iter().any(|c| c.function_id == id)
+            && set
+                .candidates
+                .iter()
+                .filter(eligible)
+                .any(|c| c.function_id == id)
         {
             return id;
         }
-        let mut best = set
-            .candidates
-            .iter()
-            .find(|c| c.function_id == function_id)
-            .and_then(|c| c.rank(names, args))
-            .map(|rank| (rank, function_id));
-        for candidate in &set.candidates {
+        let mut best = resolved.rank(names, maps).map(|rank| (rank, function_id));
+        for candidate in set.candidates.iter().filter(eligible) {
             if candidate.function_id == function_id {
                 continue;
             }
-            if let Some(rank) = candidate.rank(names, args)
+            if let Some(rank) = candidate.rank(names, maps)
                 && best.is_none_or(|(best_rank, _)| rank < best_rank)
             {
                 best = Some((rank, candidate.function_id));
@@ -10892,24 +10927,24 @@ impl VirtualMachine {
                 args_count,
             } = instruction
             {
-                // Collect new argument values from registers, prepared for
-                // the function's parameters
+                // Collect new argument values from registers
                 let mut new_args = Vec::with_capacity(*args_count as usize);
                 for i in 0..*args_count {
                     let arg_reg = args_start + i as RegisterId;
                     new_args.push(self.get_register(arg_reg)?.clone());
                 }
-                let new_args =
-                    self.prepare_call_args(CallTarget::Function(*function_id), new_args)?;
 
                 // The compiler only emits TailCall for a call it resolved to
                 // the current function, but runtime args can still select a
                 // same-arity sibling (e.g. an `(x: Vec)` overload passing a
                 // Str element back to its own name). The TCO loop runs that
-                // as a regular call.
+                // as a regular call. The args are prepared for the function
+                // called.
                 let function_id = self
                     .overload_for_args(*function_id, &new_args)
                     .unwrap_or(*function_id);
+                let new_args =
+                    self.prepare_call_args(CallTarget::Function(function_id), new_args)?;
 
                 // Restore instruction pointer before returning tail call request
                 self.instruction_pointer = saved_instruction_pointer;

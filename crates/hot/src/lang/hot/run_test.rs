@@ -2415,6 +2415,35 @@ caller()"#;
         }
     }
 
+    /// Overload dispatch chooses on the arguments as passed, then prepares
+    /// them for the overload it calls: a sibling that declares a `Result`
+    /// receives an Err, and an Ok is matched by its value. A sibling whose
+    /// parameter is eager never receives a thunk built for a lazy one.
+    #[test]
+    fn overload_dispatch_prepares_args_for_the_overload_called() {
+        let src = r#"::t ns
+f fn
+(x: Result): Str { if(is-err(x), "result-err", "result-ok") },
+(x: Str): Str { "str" }
+h fn
+(x: Fn): Str { "fn" },
+(lazy x: Int): Str { `lazy ${do x}` }
+probe fn (): Str {
+    r err("boom")
+    o ok("hi")
+    s "hi"
+    `${f(r)} ${f(o)} ${f(s)} ${h(add(1, 2))}`
+}
+probe()"#;
+        for conf in [
+            val!({"jit": {"mode": "disabled"}}),
+            val!({"jit": {"threshold": 1}}),
+        ] {
+            let out = compile_and_run_with_std_conf(src, Some(conf.clone())).expect("run");
+            assert_eq!(out, Val::from("result-err str str lazy 3"), "{conf:?}");
+        }
+    }
+
     /// A consumed overflow halts with the same message either way.
     #[test]
     fn consumed_overflow_halts_in_interpreter_and_compiled_code() {
