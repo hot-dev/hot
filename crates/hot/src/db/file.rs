@@ -93,9 +93,11 @@ async fn begin_storage_write(
                 .fetch_one(&mut *tx)
                 .await
                 .map_err(fwe)?;
-                let usage: i64 = sqlx::query_scalar(
-                    "SELECT COALESCE(SUM(f.size),0)::bigint FROM file f JOIN org o ON o.org_id=f.org_id WHERE f.active AND (o.org_id=$1 OR o.parent_org_id=$1) AND ($2::uuid IS NULL OR f.file_id<>$2)"
-                ).bind(root_id).bind(file_id).fetch_one(&mut *tx).await.map_err(fwe)?;
+                // The account's active file bytes, kept per environment and
+                // organization by triggers on `file` (migration 016).
+                let counted: i64 = sqlx::query_scalar(
+                    "SELECT COALESCE(SUM(u.active_bytes),0)::bigint FROM usage_file u JOIN org o ON o.org_id=u.org_id WHERE o.org_id=$1 OR o.parent_org_id=$1"
+                ).bind(root_id).fetch_one(&mut *tx).await.map_err(fwe)?;
                 let replaced: Option<i64> = match file_id {
                     Some(file_id) => {
                         sqlx::query_scalar("SELECT size FROM file WHERE file_id=$1 AND active")
@@ -106,6 +108,8 @@ async fn begin_storage_write(
                     }
                     None => None,
                 };
+                // The usage besides the file this write replaces.
+                let usage = counted - replaced.unwrap_or(0);
                 validate_storage_limit(
                     plan.as_ref(),
                     overrides.as_ref(),

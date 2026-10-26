@@ -46,7 +46,7 @@ this section before you upgrade.
 - **Back up your database.** For a local project, stop `hot dev` and any
   other Hot process, then copy the `.hot/db/` directory. For PostgreSQL, take
   a snapshot. See [Backups](/docs/configuration/postgres#backups).
-- **Hot 3.0 applies migrations 012, 013, and 014, and 015 on PostgreSQL.**
+- **Hot 3.0 applies migrations 012 to 016 on PostgreSQL.**
   Hot 2.6.11 added 010 and 011. Downgrading a migrated database is not
   supported. To go back, restore your backup.
 - **Ignore the "Hot 1.x database" hint.** A 2.x release that opens a migrated

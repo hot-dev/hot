@@ -115,9 +115,10 @@ starting the new version.
 
 ## Upgrading from Hot 2.x {#upgrading-from-hot-2x}
 
-Hot 3.0 adds migrations 012 to 015. They add organization hierarchy, install
-the RLS policies, add usage accounting, and let retention prune the run
-admission ledger. Plan the upgrade as a maintenance window.
+Hot 3.0 adds migrations 012 to 016. They add organization hierarchy, install
+the RLS policies, add usage accounting, let retention prune the run admission
+ledger, and count each account's file storage. Plan the upgrade as a
+maintenance window.
 
 1. **Rehearse first.** Restore a recent backup into a separate database, and
    run the whole upgrade there with the same logins you plan to use.

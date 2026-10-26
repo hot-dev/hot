@@ -1088,6 +1088,134 @@ async fn scoped_pool_enforces_isolation_under_a_restricted_login()
         serde_json::json!("v")
     );
 
+    // Files share the account's storage budget the same way, counted by the
+    // usage_file triggers (migration 016) rather than a sum over every file.
+    sqlx::query("UPDATE hot.org SET features=$1 WHERE org_id=$2")
+        .bind(serde_json::json!({
+            "store_storage_bytes": 12,
+            "call_storage_bytes": 60,
+            "storage_bytes": 10
+        }))
+        .bind(root)
+        .execute(&admin)
+        .await?;
+    let file_bytes = async || -> Result<i64, sqlx::Error> {
+        sqlx::query_scalar(
+            "SELECT COALESCE(SUM(active_bytes),0)::bigint FROM hot.usage_file WHERE org_id=ANY($1)",
+        )
+        .bind(vec![child_a, child_b])
+        .fetch_one(&admin)
+        .await
+    };
+    use hot::db::file::{insert_file_record, mark_file_inactive, update_file_record};
+    let (file_a, file_b) = tokio::join!(
+        insert_file_record(
+            &quota_a,
+            "quota/a",
+            6,
+            None,
+            None,
+            "local",
+            "quota/a",
+            child_a,
+            Some(env_a),
+            user,
+            None
+        ),
+        insert_file_record(
+            &quota_b,
+            "quota/b",
+            6,
+            None,
+            None,
+            "local",
+            "quota/b",
+            child_b,
+            Some(env_b),
+            user,
+            None
+        )
+    );
+    assert_ne!(
+        file_a.is_ok(),
+        file_b.is_ok(),
+        "siblings must share the file budget"
+    );
+    assert_eq!(file_bytes().await?, 6);
+    let (file_db, other_db, other_org, other_env) = if file_a.is_ok() {
+        (&quota_a, &quota_b, child_b, env_b)
+    } else {
+        (&quota_b, &quota_a, child_a, env_a)
+    };
+    let file = file_a.or(file_b)?;
+    // A replacement counts its growth; the budget then fills exactly.
+    update_file_record(
+        file_db,
+        file.file_id,
+        7,
+        None,
+        None,
+        "quota/new",
+        user,
+        None,
+    )
+    .await?;
+    insert_file_record(
+        other_db,
+        "quota/other",
+        3,
+        None,
+        None,
+        "local",
+        "quota/other",
+        other_org,
+        Some(other_env),
+        user,
+        None,
+    )
+    .await?;
+    assert_eq!(file_bytes().await?, 10);
+    assert!(
+        update_file_record(
+            file_db,
+            file.file_id,
+            8,
+            None,
+            None,
+            "quota/bigger",
+            user,
+            None
+        )
+        .await
+        .is_err(),
+        "a replacement past the budget is refused"
+    );
+    // Deactivating a file frees its bytes for the account.
+    assert!(mark_file_inactive(file_db, file.file_id, "quota/new", user, None).await?);
+    assert_eq!(file_bytes().await?, 3);
+    insert_file_record(
+        file_db,
+        "quota/after",
+        7,
+        None,
+        None,
+        "local",
+        "quota/after",
+        file.org_id,
+        file.env_id,
+        user,
+        None,
+    )
+    .await?;
+    assert_eq!(file_bytes().await?, 10);
+    let summed: i64 = sqlx::query_scalar(
+        "SELECT COALESCE(SUM(size),0)::bigint FROM hot.file WHERE active AND org_id=ANY($1)",
+    )
+    .bind(vec![child_a, child_b])
+    .fetch_one(&admin)
+    .await?;
+    assert_eq!(summed, 10, "the counters agree with the files");
+
     // A full trace budget rejects trace payloads while both terminal run writes
     // still persist. The SQL size includes JSONB formatting and UTF-8 errors.
     sqlx::query("UPDATE hot.run SET status_id=1,stop_time=NULL WHERE run_id=ANY($1)")
@@ -1875,7 +2003,11 @@ async fn scoped_pool_enforces_isolation_under_a_restricted_login()
         .bind(vec![env_a, env_b])
         .execute(&admin)
         .await?;
-    for table in ["usage_storage", "usage_task"] {
+    sqlx::query("DELETE FROM hot.file WHERE org_id=ANY($1)")
+        .bind(vec![child_a, child_b])
+        .execute(&admin)
+        .await?;
+    for table in ["usage_storage", "usage_task", "usage_file"] {
         sqlx::query(sqlx::AssertSqlSafe(format!(
             "DELETE FROM hot.{table} WHERE org_id=ANY($1)"
         )))
