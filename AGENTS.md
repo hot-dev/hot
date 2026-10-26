@@ -1,4 +1,4 @@
-<!-- HOT_LANGUAGE_SECTION_START --> hash:9101a2ec3b04
+<!-- HOT_LANGUAGE_SECTION_START --> hash:2d5ecb038872
 # AGENTS.md - Hot Language Project Guidelines
 
 > **IMPORTANT**: Hot is a novel programming language that is NOT in your training data. Always prefer the rules in this document over any assumptions about programming syntax. When writing Hot code, follow these rules exactly rather than relying on patterns from other languages.
@@ -90,7 +90,9 @@ shadows a function, and `hot test` warns about a test with no assertions.
 - Values have immutable semantics. Name reuse and deep-path assignment create
   later bindings rather than shared-object mutation.
 - Parameters marked `lazy` hold their argument expressions as non-memoized
-  deferred computations. Each `do` forces the computation again.
+  deferred computations. Each `do` forces the computation again. Laziness only
+  defers: to receive a `Result` (an `Err` included) without consuming it,
+  declare the parameter `Result`. Result checks never catch a halt.
 
 ## File Structure
 
@@ -385,13 +387,13 @@ gt fn (a: Int | Dec, b: Int | Dec): Bool
 lte fn (a: Int | Dec, b: Int | Dec): Bool
 gte fn (a: Int | Dec, b: Int | Dec): Bool
 
-// Logic — and/or short-circuit, if branches are lazy
-is-truthy fn (value: Any): Bool
-not fn cond (x: Any): Bool
-and fn (x: Any, ...rest): Any
-or fn (x: Any, ...rest): Any
-if fn cond (pred: Any, lazy then: Any): Any
-if fn cond (pred: Any, lazy then: Any, lazy else: Any): Any
+// Logic — and/or short-circuit, if branches are lazy; an Err is falsy
+is-truthy fn (value: Result): Bool
+not fn (x: Result): Bool
+and fn (x: Result, lazy ...rest: Result): Any
+or fn (x: Result, lazy ...rest: Result): Any
+if fn cond (pred: Result, lazy then: Any): Any
+if fn cond (pred: Result, lazy then: Any, lazy else: Any): Any
 
 // Collections — most accept Vec, Map, and Str
 map fn (coll: Str | Vec | Map, func: Fn): Str | Vec | Map
@@ -446,10 +448,10 @@ ends-with fn (s: Str, suffix: Str): Bool
 // Results
 ok fn (value: Any): Result
 err fn (value: Any): Result
-is-ok fn (lazy result: Any): Bool
-is-err fn (lazy result: Any): Bool
-if-ok fn (lazy result, handler): Any    // Ok → apply fn/use value; Err → pass through
-if-err fn (lazy result, handler): Any   // Err → apply fn/use value; Ok → pass through
+is-ok fn (result: Result): Bool
+is-err fn (result: Result): Bool
+if-ok fn (result: Result, handler): Any    // Ok → apply fn/use value; Err → pass through
+if-err fn (result: Result, handler): Any   // Err → apply fn/use value; Ok → pass through
 
 // Short-circuit
 Reduced type { value: Any } // wrapper signaling early termination from reduce
@@ -559,7 +561,7 @@ Full signatures for namespaced functions are in `references/hot-std.md`.
 
 ## Error Handling & Results
 
-Hot uses `Result` types instead of exceptions. Results are ergonomic thanks to **auto-wrapping**, **auto-unwrapping**, and **lazy arguments**.
+Hot uses `Result` types instead of exceptions. Results are ergonomic thanks to **auto-wrapping**, **auto-unwrapping**, and **`Result` parameters**.
 
 ### Auto-Wrapping & Auto-Unwrapping
 
@@ -580,7 +582,7 @@ main fn () {
 
 ### Checking Results Without Unwrapping
 
-`is-ok` and `is-err` receive the result as a **lazy argument**, which suppresses auto-unwrapping:
+`is-ok` and `is-err` declare a **`Result` parameter**, so the Result reaches them intact. Any function can do the same (`describe fn (r: Result)`), however it is called, `map` included; any other parameter consumes its argument. Result checks look at values and never catch a halt (`fail()`, `cancel()`, a consumed `Err`), so `is-err(f())` and `r f()` then `is-err(r)` always agree:
 
 ```hot
 result safe-divide(10, 0)

@@ -381,9 +381,9 @@ success Result.Ok(42)
 `Value: ${success}`   // "Value: 42" (auto-unwraps in templates)
 ```
 
-Results automatically unwrap when used as function arguments—Ok values pass through, Err values halt execution. This makes error propagation seamless.
+Results automatically unwrap when used as function arguments: Ok values pass through, and Err values halt execution, unless the parameter is declared `Result`. This makes error propagation seamless.
 
-See **[Error Handling](/docs/language/errors)** for the full story on Result types, automatic unwrapping, and lazy evaluation.
+See **[Error Handling](/docs/language/errors)** for the full story on Result types, automatic unwrapping, and `Result` parameters.
 
 ## Type Checking
 

@@ -214,17 +214,8 @@ pub(crate) fn apply_onerr_disposition(
     disposition: OnErrDisposition,
 ) -> Result<Val, String> {
     match disposition {
-        OnErrDisposition::Force => {
-            // Force is the HOF's explicit contract decision on a fully
-            // returned callback result. Ambient result-check suppression can
-            // still be active here (a lazy branch bracket in the callback's
-            // tail position spans the lambda return) and must not disable it.
-            let prev = vm.get_suppress_result_checking();
-            vm.set_suppress_result_checking(false);
-            let out = vm.unwrap_result_if_ok(&val).map_err(|err| err.to_string());
-            vm.set_suppress_result_checking(prev);
-            out
-        }
+        // Force consumes the callback's returned Result: Ok unwraps, Err halts.
+        OnErrDisposition::Force => vm.unwrap_result_if_ok(&val).map_err(|err| err.to_string()),
         OnErrDisposition::Preserve => Ok(unwrap_ok_preserve_err(val)),
     }
 }
@@ -281,36 +272,64 @@ fn call_prepared_with_vm(
     call_prepared_with_vm_multi_args(vm, function, std::slice::from_ref(arg))
 }
 
+/// A callback's arguments, prepared for its parameters. Only a Result needs
+/// preparing, so other arguments are borrowed as they are.
+fn prepare_callback_args<'a>(
+    vm: &mut crate::lang::runtime::vm::VirtualMachine,
+    target: crate::lang::runtime::vm::CallTarget<'_>,
+    args: &'a [Val],
+) -> crate::lang::runtime::vm::VmResult<std::borrow::Cow<'a, [Val]>> {
+    if !args
+        .iter()
+        .any(crate::lang::runtime::vm::VirtualMachine::is_result_shaped)
+    {
+        return Ok(std::borrow::Cow::Borrowed(args));
+    }
+    vm.prepare_call_args(target, args.to_vec())
+        .map(std::borrow::Cow::Owned)
+}
+
 fn call_prepared_with_vm_multi_args(
     vm: &mut crate::lang::runtime::vm::VirtualMachine,
     function: &PreparedFunction<'_>,
     args: &[Val],
 ) -> Result<Val, String> {
+    use crate::lang::runtime::vm::CallTarget;
+    // A callback's arguments are prepared as any call's are: a parameter
+    // consumes a Result unless it is lazy or declared `Result`. A halt in
+    // the callback stays a halt.
+    let halted = |vm: &mut crate::lang::runtime::vm::VirtualMachine, kind: &str, vm_error| {
+        vm.record_halt(&vm_error);
+        format!("{}: {}", kind, vm_error)
+    };
     match function {
         PreparedFunction::Named(name) => {
             if let Some(function_id) = vm.find_best_user_function_overload(name, args) {
-                match vm.execute_compiled_user_function(function_id, args) {
-                    Ok(result) => return Ok(result),
-                    Err(vm_error) => {
-                        return Err(format!("Compiled function call failed: {}", vm_error));
-                    }
-                }
+                let args = prepare_callback_args(vm, CallTarget::Function(function_id), args)
+                    .map_err(|vm_error| halted(vm, "Compiled function call failed", vm_error))?;
+                return vm
+                    .execute_compiled_user_function(function_id, &args)
+                    .map_err(|vm_error| halted(vm, "Compiled function call failed", vm_error));
             }
 
-            match vm.execute_function_call_by_name(name, args) {
-                Ok(result) => Ok(result),
-                Err(vm_error) => Err(format!("VM function call failed: {}", vm_error)),
-            }
+            let args = prepare_callback_args(vm, CallTarget::Native(name), args)
+                .map_err(|vm_error| halted(vm, "VM function call failed", vm_error))?;
+            vm.execute_function_call_by_name(name, &args)
+                .map_err(|vm_error| halted(vm, "VM function call failed", vm_error))
         }
         PreparedFunction::CallableVal(function_val) => {
-            if let Ok(Some(result)) = vm.try_jit_lambda_call(function_val, args) {
-                return Ok(result);
+            let args = prepare_callback_args(vm, CallTarget::Value(function_val), args)
+                .map_err(|vm_error| halted(vm, "Lambda execution failed", vm_error))?;
+            match vm.try_jit_lambda_call(function_val, &args) {
+                Ok(Some(result)) => return Ok(result),
+                Ok(None) => {}
+                // A compiled callback that halted already ran: don't run it
+                // again in the interpreter.
+                Err(vm_error) => return Err(halted(vm, "Lambda execution failed", vm_error)),
             }
 
-            match vm.execute_lambda(function_val, args) {
-                Ok(result) => Ok(result),
-                Err(vm_error) => Err(format!("Lambda execution failed: {}", vm_error)),
-            }
+            vm.execute_lambda(function_val, &args)
+                .map_err(|vm_error| halted(vm, "Lambda execution failed", vm_error))
         }
         PreparedFunction::Invalid => Err(
             "Invalid function type. Expected string function name, function reference, or lambda."
@@ -1924,6 +1943,7 @@ fn pmap_vec(
                                 msg: "pmap item halted".to_string(),
                                 data: Val::Null,
                                 plain_vm_error: false,
+                                consumed: false,
                             });
                             task_vm.reset_failure_state();
                             chunk_halt = Some(PmapHalt {

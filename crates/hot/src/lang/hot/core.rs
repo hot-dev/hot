@@ -7,36 +7,27 @@ use crate::validate_args;
 /// VM-aware `do` that forces evaluation of lazy values (lambdas)
 pub fn do_eval(vm: &mut crate::lang::runtime::vm::VirtualMachine, args: &[Val]) -> HotResult<Val> {
     validate_args!("::hot::core/do", args, 1);
-    let v = &args[0];
-
-    // If it's a boxed lambda (zero-argument lambda for lazy evaluation), call it
-    if let Val::Box(b) = v {
-        // Try to downcast to LambdaInfo
-        if let Some(lambda_info) = b
+    let value = &args[0];
+    // `do` evaluates a lazy argument, or calls a function of no arguments,
+    // as if written here: an Err value comes back as a value, and a halt
+    // inside it propagates.
+    if let Val::Box(boxed) = value
+        && let Some(lambda) = boxed
             .as_any()
             .downcast_ref::<crate::lang::bytecode::LambdaInfo>()
-        {
-            if lambda_info.parameters.is_empty() {
-                // Zero-argument lambda - call it
-                // Note: We DO evaluate lazy parameter lambdas when `do` is explicitly called
-                // The is_lazy_param flag prevents AUTO-evaluation, but `do` is EXPLICIT evaluation
-                match vm.execute_lambda(v, &[]) {
-                    Ok(result) => {
-                        return HotResult::Ok(result);
-                    }
-                    Err(e) => {
-                        return HotResult::Err(Val::from(e.to_string()));
-                    }
-                }
-            } else {
-                // Has parameters, not a lazy thunk
-                return HotResult::Ok(v.clone());
+        && lambda.parameters.is_empty()
+    {
+        return match vm.execute_lambda(value, &[]) {
+            Ok(result) => HotResult::Ok(result),
+            Err(err) => {
+                vm.record_halt(&err);
+                HotResult::Err(Val::from(
+                    crate::lang::runtime::vm::VirtualMachine::halt_message(&err),
+                ))
             }
-        }
+        };
     }
-
-    // Not a lazy value: return as-is
-    HotResult::Ok(v.clone())
+    HotResult::Ok(value.clone())
 }
 
 /// Check if a value is null

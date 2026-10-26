@@ -96,6 +96,21 @@ pub struct FailureState {
     /// errors here (they unwind natively), so this is always false outside
     /// the JIT helper path.
     pub plain_vm_error: bool,
+    /// True when the halt is a consumed `Result.Err` (an Err used where a
+    /// value is needed), as opposed to `fail()` or a runtime error.
+    pub consumed: bool,
+}
+
+impl FailureState {
+    /// The halt's message as a run reports it: a consumed Err reads
+    /// `Result error: <message>`; any other halt, its message alone.
+    pub fn halt_message(&self) -> String {
+        if self.consumed {
+            format!("Result error: {}", self.msg)
+        } else {
+            self.msg.clone()
+        }
+    }
 }
 
 /// Thread-safe failure state holder
@@ -200,6 +215,21 @@ impl VmError {
     pub fn runtime_with_ip(message: String, ip: usize) -> Self {
         VmError::RuntimeError(RuntimeError::new(message).with_instruction_pointer(ip))
     }
+}
+
+/// The callee of a call, for preparing its arguments
+/// (`VirtualMachine::prepare_call_args`).
+#[derive(Clone, Copy)]
+pub(crate) enum CallTarget<'a> {
+    /// A compiled user function.
+    Function(FunctionId),
+    /// A lambda.
+    Lambda(&'a crate::lang::bytecode::LambdaInfo),
+    /// A function value (name, reference, lambda or typed `Fn`), resolved
+    /// the way the call dispatches it.
+    Value(&'a Val),
+    /// A native, by name.
+    Native(&'a str),
 }
 
 /// Source of `LexicalScope::frame_id`.
@@ -473,7 +503,6 @@ pub struct VirtualMachine {
     /// If true, convert runtime errors into Result-style maps instead of aborting
     pub(crate) error_capture_active: bool,
     /// Suppress automatic Result checking during lazy thunk evaluation
-    suppress_result_checking: bool,
     /// Set while a `where` predicate runs (see `constraints`).
     constraint: Option<constraints::ConstraintGuard>,
     /// Constraint specs of named types, from the program's table.
@@ -617,7 +646,6 @@ impl VirtualMachine {
             user_function_depth: 0,
             call_function_depth: 0,
             error_capture_active: false,
-            suppress_result_checking: false,
             constraint: None,
             constraint_spec_cache: Default::default(),
             pending_proven: None,
@@ -1189,16 +1217,6 @@ impl VirtualMachine {
         &self,
     ) -> Option<Arc<parking_lot::Mutex<tokio::sync::mpsc::Receiver<Val>>>> {
         self.task_receiver.clone()
-    }
-
-    /// Get the suppress_result_checking flag
-    pub fn get_suppress_result_checking(&self) -> bool {
-        self.suppress_result_checking
-    }
-
-    /// Set the suppress_result_checking flag
-    pub fn set_suppress_result_checking(&mut self, suppress: bool) {
-        self.suppress_result_checking = suppress;
     }
 
     /// Set the execution context for emitter events
@@ -2438,14 +2456,16 @@ impl VirtualMachine {
                     args_count
                 );
 
-                // Collect arguments from consecutive registers and unwrap Results if they are "ok"
+                // Collect arguments from consecutive registers, prepared
+                // for the callee's parameters
                 let mut args = Vec::with_capacity(args_count as usize);
                 for i in 0..args_count {
                     let arg_reg = args_start + i as RegisterId;
                     let arg_val = self.get_register(arg_reg)?.clone();
                     tracing::trace!("VM: Call arg {}: {:?}", i, arg_val);
-                    args.push(self.prepare_call_arg(arg_val)?);
+                    args.push(arg_val);
                 }
+                let args = self.prepare_args_for_register(function as RegisterId, args)?;
 
                 // Get function information from the program
                 tracing::trace!(
@@ -2486,14 +2506,12 @@ impl VirtualMachine {
                     let arg_val = self.get_register(arg_reg)?.clone();
                     tracing::trace!("VM: CallWithSpread arg {}: {:?}", i, arg_val);
 
-                    // Automatically unwrap "ok" Results for function arguments
-                    let unwrapped_arg = self.unwrap_result_if_ok(&arg_val)?;
-                    // Evaluate boxed AstNodes in the argument (e.g., in maps/vectors)
-                    let resolved_arg = self.resolve_variable_references_in_val(&unwrapped_arg)?;
-
                     // Check if this argument should be spread
                     if (spread_mask >> i) & 1 == 1 {
-                        // Spread this argument - it should be a Vec
+                        // The spread operand is consumed: it must be a Vec.
+                        let unwrapped_arg = self.unwrap_result_if_ok(&arg_val)?;
+                        let resolved_arg =
+                            self.resolve_variable_references_in_val(&unwrapped_arg)?;
                         match &resolved_arg {
                             Val::Vec(elements) => {
                                 tracing::trace!(
@@ -2513,9 +2531,11 @@ impl VirtualMachine {
                             }
                         }
                     } else {
-                        args.push(resolved_arg);
+                        args.push(arg_val);
                     }
                 }
+                // Every argument, spread or not, is prepared for the callee.
+                let args = self.prepare_args_for_register(function as RegisterId, args)?;
 
                 tracing::trace!("VM: CallWithSpread final args count: {}", args.len());
 
@@ -2536,18 +2556,6 @@ impl VirtualMachine {
                 let function = *function;
                 let args_start = *args_start;
                 let args_count = *args_count;
-                // Collect arguments from consecutive registers and unwrap Results if they are "ok"
-                let mut args = Vec::with_capacity(args_count as usize);
-                for i in 0..args_count {
-                    let arg_reg = args_start + i as RegisterId;
-                    let arg_val = self.get_register(arg_reg)?.clone();
-                    // Automatically unwrap "ok" Results for function arguments
-                    let unwrapped_arg = self.unwrap_result_if_ok(&arg_val)?;
-                    // Evaluate boxed AstNodes in the argument (e.g., in maps/vectors)
-                    let resolved_arg = self.resolve_variable_references_in_val(&unwrapped_arg)?;
-                    args.push(resolved_arg);
-                }
-
                 // Get function information to determine if this is a variable lookup
                 let function_info =
                     self.program
@@ -2562,6 +2570,15 @@ impl VirtualMachine {
 
                 // This is a direct native function call
                 let function_name = format!("{}/{}", namespace, name);
+
+                // Collect arguments from consecutive registers, prepared for
+                // the native
+                let mut args = Vec::with_capacity(args_count as usize);
+                for i in 0..args_count {
+                    let arg_reg = args_start + i as RegisterId;
+                    args.push(self.get_register(arg_reg)?.clone());
+                }
+                let args = self.prepare_call_args(CallTarget::Native(&function_name), args)?;
                 let result = match self.call_hotlib_function(&function_name, &args) {
                     Ok(v) => v,
                     Err(e) => {
@@ -2591,17 +2608,14 @@ impl VirtualMachine {
                 // Get the lambda from the register
                 let lambda_val = self.get_register(lambda)?.clone();
 
-                // Collect arguments from consecutive registers (no lazy metadata for lambdas yet)
+                // Collect arguments from consecutive registers, prepared for
+                // the lambda's parameters
                 let mut args = Vec::with_capacity(args_count as usize);
                 for i in 0..args_count {
                     let arg_reg = args_start + i as RegisterId;
-                    let arg_val = self.get_register(arg_reg)?.clone();
-                    // Automatically unwrap "ok" Results for function arguments
-                    let unwrapped_arg = self.unwrap_result_if_ok(&arg_val)?;
-                    // Evaluate boxed AstNodes in the argument (e.g., in maps/vectors)
-                    let resolved_arg = self.resolve_variable_references_in_val(&unwrapped_arg)?;
-                    args.push(resolved_arg);
+                    args.push(self.get_register(arg_reg)?.clone());
                 }
+                let args = self.prepare_call_args(CallTarget::Value(&lambda_val), args)?;
 
                 // Execute the lambda
                 let result = match self.execute_lambda(&lambda_val, &args) {
@@ -2636,17 +2650,14 @@ impl VirtualMachine {
                     args_count
                 );
 
-                // Collect arguments from consecutive registers
+                // Collect arguments from consecutive registers, prepared for
+                // the function's parameters
                 let mut args = Vec::with_capacity(args_count as usize);
                 for i in 0..args_count {
                     let arg_reg = args_start + i as RegisterId;
-                    let arg_val = self.get_register(arg_reg)?.clone();
-                    // Automatically unwrap "ok" Results for function arguments
-                    let unwrapped_arg = self.unwrap_result_if_ok(&arg_val)?;
-                    // Evaluate boxed AstNodes in the argument (e.g., in maps/vectors)
-                    let resolved_arg = self.resolve_variable_references_in_val(&unwrapped_arg)?;
-                    args.push(resolved_arg);
+                    args.push(self.get_register(arg_reg)?.clone());
                 }
+                let mut args = self.prepare_call_args(CallTarget::Function(function_id), args)?;
 
                 // Implicit coercion at the static-dispatch boundary. The
                 // compiler may have picked `function_id` from the arity-only
@@ -3159,27 +3170,10 @@ impl VirtualMachine {
                 let value = *value;
                 let val = self.get_register(value)?.clone();
 
-                // If the value is a lazy thunk (LambdaInfo), force-evaluate it
-                // with Result auto-unwrapping suppressed so the Result stays intact.
-                // This handles `fn match (r: Result) { Result.Ok => ... Result.Err => ... }`
-                // where the parameter was marked lazy to preserve the Result through
-                // the call boundary.
-                let val = if let Val::Box(ref b) = val {
-                    if b.as_any()
-                        .downcast_ref::<crate::lang::bytecode::LambdaInfo>()
-                        .is_some()
-                    {
-                        let prev = self.suppress_result_checking;
-                        self.suppress_result_checking = true;
-                        let evaluated = self.execute_lambda(&val, &[]);
-                        self.suppress_result_checking = prev;
-                        evaluated?
-                    } else {
-                        val
-                    }
-                } else {
-                    val
-                };
+                // A lazy value (a `fn match` over Result arms takes its first
+                // parameter lazily) is forced here: an Err value comes back
+                // intact, and a halt while computing it propagates.
+                let val = self.force_lazy(&val)?;
 
                 let type_path = self.get_value_type_path(&val);
                 // If already a Result type, leave unchanged
@@ -5066,16 +5060,6 @@ impl VirtualMachine {
     /// Extract a human-readable message from a Result.Err payload so the
     /// escalation halt carries the underlying failure (a connect error,
     /// an HTTP status, ...) instead of an opaque placeholder.
-    /// The user-facing message for a hotlib error payload. Val's Display
-    /// renders strings Hot-literal-style (quoted), so extract Str content
-    /// directly to avoid quote-wrapped messages.
-    fn hotlib_err_message(err_val: &Val) -> String {
-        match err_val {
-            Val::Str(msg) => (**msg).to_owned(),
-            other => other.to_string(),
-        }
-    }
-
     fn result_err_message(err_val: &Val) -> String {
         match err_val {
             Val::Str(s) => (**s).to_owned(),
@@ -5169,10 +5153,7 @@ impl VirtualMachine {
         static DBG_UNWRAP: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
         let dbg_unwrap = *DBG_UNWRAP.get_or_init(|| std::env::var("HOT_DBG_UNWRAP").is_ok());
         if dbg_unwrap && val.is_err() {
-            eprintln!(
-                "DBG unwrap_result_if_ok on Err (suppress={})",
-                self.suppress_result_checking
-            );
+            eprintln!("DBG unwrap_result_if_ok on Err");
         }
         // Don't unwrap if this is a lambda - lazy values should not be unwrapped
         if let Val::Box(b) = val
@@ -5180,11 +5161,6 @@ impl VirtualMachine {
                 .downcast_ref::<crate::lang::bytecode::LambdaInfo>()
                 .is_some()
         {
-            return Ok(val.clone());
-        }
-
-        // Skip Result checking if suppressed (e.g., during lazy thunk evaluation)
-        if self.suppress_result_checking {
             return Ok(val.clone());
         }
 
@@ -5207,7 +5183,7 @@ impl VirtualMachine {
                 // Set VM failure state and return error. The run/task boundary
                 // emits terminal status if this halt is not explicitly
                 // contained by try-call / if-err.
-                self.set_failure(msg.clone(), err_val.clone());
+                self.set_consumed_failure(msg.clone(), err_val.clone());
 
                 return Err(VmError::runtime(format!("Result error: {}", msg)));
             }
@@ -5215,6 +5191,138 @@ impl VirtualMachine {
 
         // Not a Result type, return as-is
         Ok(val.clone())
+    }
+
+    /// Prepare a call's arguments for its callee. A parameter that is lazy or
+    /// declared `Result`, or an argument of a Result-aware native, receives
+    /// its argument as it is; every other parameter consumes it: Ok unwraps,
+    /// Err halts. Every call path prepares arguments here, so a function
+    /// treats its arguments the same however it is called.
+    pub(crate) fn prepare_call_args(
+        &mut self,
+        target: CallTarget<'_>,
+        args: Vec<Val>,
+    ) -> VmResult<Vec<Val>> {
+        // Only a Result needs the callee's parameters; any other value is
+        // prepared the same way for every callee.
+        let keeps = if args.iter().any(Self::is_result_shaped) {
+            self.kept_args(target, &args)
+        } else {
+            Vec::new()
+        };
+        args.into_iter()
+            .enumerate()
+            .map(|(index, arg)| {
+                if keeps.get(index).copied().unwrap_or(false) {
+                    self.resolve_variable_references_in_val(&arg)
+                } else {
+                    self.prepare_call_arg(arg)
+                }
+            })
+            .collect()
+    }
+
+    /// Keep a halt that a native saw while running Hot code (a callback, a
+    /// forced lazy argument) a halt. Unless `fail()`, `cancel()` or a
+    /// consumed Err already recorded it, record it here, so the native's
+    /// error return escalates at its boundary instead of becoming an Err
+    /// value.
+    pub(crate) fn record_halt(&self, err: &VmError) {
+        if !self.has_failed() && !self.has_cancelled() {
+            self.set_failure_plain_vm_error(Self::halt_message(err), Val::Null);
+        }
+    }
+
+    /// A halt's message without the error kind's prefix.
+    pub(crate) fn halt_message(err: &VmError) -> String {
+        match err {
+            VmError::RuntimeError(error) if error.location.is_none() => error.message.clone(),
+            other => other.to_string(),
+        }
+    }
+
+    /// The value of a lazy argument: its thunk is evaluated as if its
+    /// expression were written here (an Err value comes back as a value; a
+    /// halt inside it propagates). Any other value, a function value
+    /// included, is returned as it is.
+    pub(crate) fn force_lazy(&mut self, value: &Val) -> VmResult<Val> {
+        if let Val::Box(boxed) = value
+            && let Some(lambda) = boxed
+                .as_any()
+                .downcast_ref::<crate::lang::bytecode::LambdaInfo>()
+            && lambda.is_lazy_param
+            && lambda.parameters.is_empty()
+        {
+            return self.execute_lambda(value, &[]);
+        }
+        Ok(value.clone())
+    }
+
+    /// `prepare_call_args` for a callee held in a register, read only when
+    /// an argument is a Result.
+    fn prepare_args_for_register(
+        &mut self,
+        function_register: RegisterId,
+        args: Vec<Val>,
+    ) -> VmResult<Vec<Val>> {
+        if !args.iter().any(Self::is_result_shaped) {
+            return args
+                .into_iter()
+                .map(|arg| self.prepare_call_arg(arg))
+                .collect();
+        }
+        let callee = self.get_register(function_register)?.clone();
+        self.prepare_call_args(CallTarget::Value(&callee), args)
+    }
+
+    /// Which arguments of a call to `target` pass as they are.
+    fn kept_args(&mut self, target: CallTarget<'_>, args: &[Val]) -> Vec<bool> {
+        match target {
+            CallTarget::Function(function_id) => (0..args.len())
+                .map(|index| self.program.keeps_param(function_id, index))
+                .collect(),
+            CallTarget::Lambda(lambda) => (0..args.len())
+                .map(|index| lambda.keeps_param(index))
+                .collect(),
+            CallTarget::Native(name) => vec![Self::is_result_aware_native(name); args.len()],
+            CallTarget::Value(value) => {
+                let mut value = value;
+                if let Val::Map(map) = value
+                    && crate::val::tagged_type_name(map) == Some("::hot::type/Fn")
+                    && let Some(inner) = map.get(&Val::from("$val"))
+                {
+                    value = inner;
+                }
+                let name = match value {
+                    Val::Box(boxed) => {
+                        if let Some(lambda) = boxed
+                            .as_any()
+                            .downcast_ref::<crate::lang::bytecode::LambdaInfo>()
+                        {
+                            return self.kept_args(CallTarget::Lambda(lambda), args);
+                        }
+                        match boxed
+                            .as_any()
+                            .downcast_ref::<crate::lang::runtime::function_ref::FunctionRef>()
+                        {
+                            Some(function_ref) => function_ref.name.clone(),
+                            None => return Vec::new(),
+                        }
+                    }
+                    Val::Str(name) => name.to_string(),
+                    _ => return Vec::new(),
+                };
+                // `call-lib` and `call` hand their arguments on themselves.
+                if name == "call-lib" || name == "call" {
+                    return Vec::new();
+                }
+                let name = self.resolve_function_name(&name).unwrap_or(name);
+                match self.find_best_function_overload(&name, args) {
+                    Some(function_id) => self.kept_args(CallTarget::Function(function_id), args),
+                    None => self.kept_args(CallTarget::Native(&name), args),
+                }
+            }
+        }
     }
 
     fn prepare_call_arg(&mut self, val: Val) -> VmResult<Val> {
@@ -5474,7 +5582,7 @@ impl VirtualMachine {
                     crate::lang::hot::libmap::HotLibFn::LibFn(f) => match f(args) {
                         crate::lang::hot::r#type::HotResult::Ok(val) => Ok(val),
                         crate::lang::hot::r#type::HotResult::Err(err_val) => {
-                            Err(VmError::runtime(Self::hotlib_err_message(&err_val)))
+                            self.dispatch_hotlib_err(err_val)
                         }
                     },
                     crate::lang::hot::libmap::HotLibFn::VmAwareFn(f)
@@ -5482,7 +5590,7 @@ impl VirtualMachine {
                     {
                         crate::lang::hot::r#type::HotResult::Ok(val) => Ok(val),
                         crate::lang::hot::r#type::HotResult::Err(err_val) => {
-                            Err(VmError::runtime(Self::hotlib_err_message(&err_val)))
+                            self.dispatch_hotlib_err(err_val)
                         }
                     },
                 };
@@ -5647,7 +5755,7 @@ impl VirtualMachine {
                     crate::lang::hot::libmap::HotLibFn::LibFn(f) => match f(args) {
                         crate::lang::hot::r#type::HotResult::Ok(val) => Ok(val),
                         crate::lang::hot::r#type::HotResult::Err(err_val) => {
-                            Err(VmError::runtime(Self::hotlib_err_message(&err_val)))
+                            self.dispatch_hotlib_err(err_val)
                         }
                     },
                     crate::lang::hot::libmap::HotLibFn::VmAwareFn(f)
@@ -5655,7 +5763,7 @@ impl VirtualMachine {
                     {
                         crate::lang::hot::r#type::HotResult::Ok(val) => Ok(val),
                         crate::lang::hot::r#type::HotResult::Err(err_val) => {
-                            Err(VmError::runtime(Self::hotlib_err_message(&err_val)))
+                            self.dispatch_hotlib_err(err_val)
                         }
                     },
                 };
@@ -5697,14 +5805,14 @@ impl VirtualMachine {
                 crate::lang::hot::libmap::HotLibFn::LibFn(f) => match f(args) {
                     crate::lang::hot::r#type::HotResult::Ok(val) => Ok(val),
                     crate::lang::hot::r#type::HotResult::Err(err_val) => {
-                        Err(VmError::runtime(err_val.to_string()))
+                        self.dispatch_hotlib_err(err_val)
                     }
                 },
                 crate::lang::hot::libmap::HotLibFn::VmAwareFn(f)
                 | crate::lang::hot::libmap::HotLibFn::VmAwareJitFn(f, _) => match f(self, args) {
                     crate::lang::hot::r#type::HotResult::Ok(val) => Ok(val),
                     crate::lang::hot::r#type::HotResult::Err(err_val) => {
-                        Err(VmError::runtime(err_val.to_string()))
+                        self.dispatch_hotlib_err(err_val)
                     }
                 },
             };
@@ -5969,6 +6077,7 @@ impl VirtualMachine {
                     return Ok($val);
                 }};
             }
+            // A native's failure is an Err value, as through `call-lib`.
             macro_rules! fast_return_hr {
                 ($hr:expr) => {
                     match $hr {
@@ -5977,7 +6086,7 @@ impl VirtualMachine {
                             if !is_dispatch_function {
                                 self.decrement_function_call_depth(function_name);
                             }
-                            return Err(VmError::runtime(err_val.to_string()));
+                            return self.dispatch_hotlib_err(err_val);
                         }
                     }
                 };
@@ -6275,10 +6384,7 @@ impl VirtualMachine {
                         match func(args) {
                             crate::lang::hot::r#type::HotResult::Ok(val) => return Ok(val),
                             crate::lang::hot::r#type::HotResult::Err(err) => {
-                                return Err(VmError::runtime_with_ip(
-                                    format!("Hotlib function '{}' error: {:?}", function_name, err),
-                                    self.instruction_pointer,
-                                ));
+                                return self.dispatch_hotlib_err(err);
                             }
                         }
                     }
@@ -6288,13 +6394,7 @@ impl VirtualMachine {
                         match func(self, args) {
                             crate::lang::hot::r#type::HotResult::Ok(val) => return Ok(val),
                             crate::lang::hot::r#type::HotResult::Err(err) => {
-                                return Err(VmError::runtime_with_ip(
-                                    format!(
-                                        "VM-aware hotlib function '{}' error: {:?}",
-                                        function_name, err
-                                    ),
-                                    self.instruction_pointer,
-                                ));
+                                return self.dispatch_hotlib_err(err);
                             }
                         }
                     }
@@ -7185,15 +7285,13 @@ impl VirtualMachine {
         Ok(args)
     }
 
-    /// The `::hot::type` Result natives take Result values as arguments by
-    /// contract (the sanctioned inspection points of the error model), and
-    /// the `::hot::bool` truthiness natives do too: Err is falsy in the
-    /// unified truthiness (matching `if`/`cond`, whose lazy conditions
-    /// already receive Errs), so or/and/not/is-truthy must see the value.
+    /// The natives whose hot-std signatures declare `Result` parameters,
+    /// and so receive a Result as it is: the Result inspectors, `is-type`,
+    /// `tap`, and the truthiness natives (an Err is falsy).
     fn is_result_aware_native(function_name: &str) -> bool {
-        let name = function_name
-            .strip_prefix("::hot::type/")
-            .or_else(|| function_name.strip_prefix("::hot::bool/"))
+        let name = ["::hot::type/", "::hot::bool/", "::hot::io/"]
+            .iter()
+            .find_map(|prefix| function_name.strip_prefix(prefix))
             .unwrap_or(function_name);
         matches!(
             name,
@@ -7204,6 +7302,8 @@ impl VirtualMachine {
                 | "is-result"
                 | "ok-value"
                 | "err-value"
+                | "is-type"
+                | "tap"
                 | "is-truthy"
                 | "not"
                 | "or"
@@ -7211,7 +7311,7 @@ impl VirtualMachine {
         )
     }
 
-    fn is_result_shaped(val: &Val) -> bool {
+    pub(crate) fn is_result_shaped(val: &Val) -> bool {
         if let Val::Map(map) = val
             && let Some(type_str) = crate::val::tagged_type_name(map)
         {
@@ -7325,53 +7425,8 @@ impl VirtualMachine {
                 }
                 crate::lang::hot::r#type::HotResult::Err(err) => {
                     tracing::trace!("VM: Hotlib function '{}' failed: {:?}", function_name, err);
-
-                    // Extract clean error message from Val::Str if possible
-                    let clean_message: String = match &err {
-                        Val::Str(msg) => (**msg).to_owned(),
-                        _ => format!("{:?}", err),
-                    };
-
-                    // Create a RuntimeError with function context and source location if available
-                    let mut runtime_error = RuntimeError::new(clean_message)
-                        .with_function(function_name.to_string())
-                        .with_instruction_pointer(self.instruction_pointer);
-
-                    // Try to get source location from the source map
-                    tracing::trace!(
-                        "Looking for source location at instruction pointer {}",
-                        self.instruction_pointer
-                    );
-                    if let Some(source_location) = self
-                        .program
-                        .source_map
-                        .get_location(self.instruction_pointer)
-                    {
-                        tracing::trace!(
-                            "Found source location: {}:{}:{}",
-                            source_location
-                                .file
-                                .as_ref()
-                                .unwrap_or(&"<unknown>".to_string()),
-                            source_location.line,
-                            source_location.column
-                        );
-                        let runtime_source_location = crate::lang::runtime::error::SourceLocation {
-                            file: source_location.file.as_ref().map(std::path::PathBuf::from),
-                            line: source_location.line,
-                            column: source_location.column,
-                            position: source_location.position,
-                            length: source_location.length,
-                        };
-                        runtime_error.location = Some(runtime_source_location);
-                    } else {
-                        tracing::trace!(
-                            "No source location found for instruction pointer {}",
-                            self.instruction_pointer
-                        );
-                    }
-
-                    Err(VmError::RuntimeError(runtime_error))
+                    // A native's failure is an Err value, as through `call-lib`.
+                    self.dispatch_hotlib_err(err)
                 }
             }
         } else {
@@ -7807,17 +7862,15 @@ impl VirtualMachine {
                         args_count,
                     } => {
                         // Mirror the main interpreter loop's Call handler:
-                        // arguments follow the normal auto-unwrap rules (Ok
-                        // unwraps, Err escalates with its payload message).
-                        // Without this, an Err bound inside a lambda body
-                        // reached natives raw and produced misleading type
-                        // errors instead of the Err's own message.
+                        // arguments are prepared for the callee's parameters
+                        // (Ok unwraps, Err escalates with its payload message,
+                        // unless the parameter is lazy or declared `Result`).
                         let mut args = Vec::new();
                         for i in 0..*args_count {
                             let arg_reg = args_start + i as RegisterId;
-                            let arg_val = self.get_register(arg_reg)?.clone();
-                            args.push(self.prepare_call_arg(arg_val)?);
+                            args.push(self.get_register(arg_reg)?.clone());
                         }
+                        let args = self.prepare_args_for_register(*function as RegisterId, args)?;
                         let result = self.execute_function_call(*function, &args)?;
                         self.set_register(*dest, result)?;
                         last_result = self.get_register(*dest)?.clone();
@@ -9449,17 +9502,28 @@ impl VirtualMachine {
     /// Set the VM failure state (thread-safe, first failure wins)
     /// Returns true if this was the first failure, false if already failed
     pub fn set_failure(&self, msg: String, data: Val) -> bool {
-        self.set_failure_state(msg, data, false)
+        self.set_failure_state(msg, data, false, false)
     }
 
     /// Record a plain `VmError` halt raised inside a JIT'd frame. Same
     /// first-failure-wins semantics as `set_failure`, but marks the entry so
     /// the JIT boundary re-raises the message without the Result prefix.
     pub(crate) fn set_failure_plain_vm_error(&self, msg: String, data: Val) -> bool {
-        self.set_failure_state(msg, data, true)
+        self.set_failure_state(msg, data, true, false)
     }
 
-    fn set_failure_state(&self, msg: String, data: Val, plain_vm_error: bool) -> bool {
+    /// Record the halt of a consumed `Result.Err`.
+    fn set_consumed_failure(&self, msg: String, data: Val) -> bool {
+        self.set_failure_state(msg, data, false, true)
+    }
+
+    fn set_failure_state(
+        &self,
+        msg: String,
+        data: Val,
+        plain_vm_error: bool,
+        consumed: bool,
+    ) -> bool {
         // Use compare_exchange to atomically check and set failed flag
         if self
             .failure_state
@@ -9473,6 +9537,7 @@ impl VirtualMachine {
                     msg,
                     data,
                     plain_vm_error,
+                    consumed,
                 });
             }
             tracing::trace!("VM: Failure state set (first failure)");
@@ -9502,21 +9567,19 @@ impl VirtualMachine {
         }
         if self.has_failed() {
             let failure = self.get_failure();
-            // Plain VmErrors re-raise verbatim (the interpreter never
-            // prefixes them); Result.Err consumption halts carry the same
-            // `Result error:` prefix `unwrap_result_if_ok` raises.
+            // The same message the interpreter raises: a consumed Err reads
+            // `Result error: <message>`, `fail()` its message alone.
             let msg = match &failure {
                 Some(f) if f.plain_vm_error => {
                     // Plain helper failures are only the JIT's transport for
-                    // an ordinary VmError. Once reconstructed, clear that
-                    // transport state so HOF callers do not mistake it for an
-                    // explicit `fail()` raised by the callback.
+                    // an ordinary VmError, re-raised verbatim; once it is
+                    // reconstructed as one, clear that transport state.
                     let msg = f.msg.clone();
                     self.reset_failure_state();
                     msg
                 }
-                Some(f) => format!("Result error: {}", f.msg),
-                None => "Result error: halted".to_string(),
+                Some(f) => f.halt_message(),
+                None => "halted".to_string(),
             };
             return Err(VmError::runtime_with_ip(msg, self.instruction_pointer));
         }
@@ -9861,16 +9924,10 @@ impl VirtualMachine {
         }
     }
 
-    /// Assignment always consumes a Result, even while a surrounding lazy
-    /// Result-aware call temporarily suppresses ordinary argument unwrapping.
-    /// Restore normal checking for this boundary and return the propagation
-    /// error instead of assuming the helper must fail and panicking the VM.
+    /// Assignment always consumes a Result: return the propagation error
+    /// instead of assuming the helper must fail and panicking the VM.
     fn propagate_assignment_result_err(&mut self, value: &Val) -> VmResult<()> {
-        let previous = self.suppress_result_checking;
-        self.suppress_result_checking = false;
-        let result = self.unwrap_result_if_ok(value).map(|_| ());
-        self.suppress_result_checking = previous;
-        result
+        self.unwrap_result_if_ok(value).map(|_| ())
     }
 
     /// Access a property of a value (supports both map keys and vector indices)
@@ -10087,7 +10144,7 @@ impl VirtualMachine {
         if self.has_failed() {
             let msg = self
                 .get_failure()
-                .map(|f| f.msg)
+                .map(|f| f.halt_message())
                 .unwrap_or_else(|| match &err {
                     Val::Str(s) => (**s).to_owned(),
                     other => format!("{:?}", other),
@@ -10372,17 +10429,15 @@ impl VirtualMachine {
                 args_count,
             } = instruction
             {
-                // Collect new argument values from registers
+                // Collect new argument values from registers, prepared for
+                // the function's parameters
                 let mut new_args = Vec::with_capacity(*args_count as usize);
                 for i in 0..*args_count {
                     let arg_reg = args_start + i as RegisterId;
-                    let arg_val = self.get_register(arg_reg)?.clone();
-                    // Unwrap Results if they are "ok"
-                    let unwrapped_arg = self.unwrap_result_if_ok(&arg_val)?;
-                    // Resolve variable references
-                    let resolved_arg = self.resolve_variable_references_in_val(&unwrapped_arg)?;
-                    new_args.push(resolved_arg);
+                    new_args.push(self.get_register(arg_reg)?.clone());
                 }
+                let new_args =
+                    self.prepare_call_args(CallTarget::Function(*function_id), new_args)?;
 
                 // Restore instruction pointer before returning tail call request
                 self.instruction_pointer = saved_instruction_pointer;

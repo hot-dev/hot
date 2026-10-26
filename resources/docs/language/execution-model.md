@@ -19,7 +19,7 @@ describes **how a flow schedules its contents**.
 | Function arguments | Evaluated before the call | A `lazy` parameter defers one argument | [Functions](/docs/language/functions#lazy-arguments) |
 | Function bodies | Implicit `serial` flow | `parallel`, `cond`, `match`, and other flows | [Flows](/docs/language/flows) |
 | Bindings and values | Immutable lexical bindings | Name reuse and deep paths create later bindings | [Vars and Values](/docs/language/vars-and-values) |
-| Failure | A bound `Result` remains intact; ordinary consumption propagates an `Err` | Lazy Result helpers or `match` inspect failure explicitly | [Error Handling](/docs/language/errors) |
+| Failure | A bound `Result` remains intact; ordinary consumption propagates an `Err` | `Result` parameters (as in `is-err`) or `match` inspect failure explicitly | [Error Handling](/docs/language/errors) |
 | Types | Gradual checking with structural records and tagged constructed values | Annotations narrow known contracts; `Any` remains dynamic | [Types](/docs/language/types) |
 
 ## How the Rules Compose

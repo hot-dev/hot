@@ -29,99 +29,47 @@ fn cancellation_type(vm: &crate::lang::runtime::vm::VirtualMachine) -> &'static 
     }
 }
 
-/// Evaluate lazy thunks (handles both Val::Box lambdas and serialized Map forms)
-pub(crate) fn evaluate_lazy(vm: &mut crate::lang::runtime::vm::VirtualMachine, val: &Val) -> Val {
-    match val {
-        Val::Box(b) => {
-            if let Some(lambda_info) = b
-                .as_any()
-                .downcast_ref::<crate::lang::bytecode::LambdaInfo>()
-            {
-                if lambda_info.parameters.is_empty() {
-                    let saved_suppress = if lambda_info.is_lazy_param {
-                        let current = vm.get_suppress_result_checking();
-                        vm.set_suppress_result_checking(true);
-                        Some(current)
-                    } else {
-                        None
-                    };
-
-                    let result = match vm.execute_lambda(val, &[]) {
-                        Ok(result) => result,
-                        Err(e) => {
-                            if let Some(saved) = saved_suppress {
-                                vm.set_suppress_result_checking(saved);
-                            }
-                            tracing::warn!("Failed to evaluate lazy argument: {}", e);
-                            return val.clone();
-                        }
-                    };
-
-                    if let Some(saved) = saved_suppress {
-                        vm.set_suppress_result_checking(saved);
-                    }
-
-                    result
-                } else {
-                    val.clone()
-                }
-            } else {
-                val.clone()
+/// The value of a lazy argument (`VirtualMachine::force_lazy`), including
+/// a thunk that arrives in its serialized Map form. A halt while computing
+/// it is returned, to propagate at the native's boundary.
+pub(crate) fn evaluate_lazy(
+    vm: &mut crate::lang::runtime::vm::VirtualMachine,
+    val: &Val,
+) -> Result<Val, HotResult<Val>> {
+    let halt = |vm: &mut crate::lang::runtime::vm::VirtualMachine,
+                err: crate::lang::runtime::vm::VmError| {
+        vm.record_halt(&err);
+        HotResult::Err(Val::from(
+            crate::lang::runtime::vm::VirtualMachine::halt_message(&err),
+        ))
+    };
+    if let Val::Map(m) = val
+        && m.contains_key(&Val::from("parameters"))
+        && m.contains_key(&Val::from("instructions"))
+        && m.contains_key(&Val::from("register_count"))
+    {
+        let lambda = serde_json::to_value(m).ok().and_then(|json| {
+            serde_json::from_value::<crate::lang::bytecode::LambdaInfo>(json).ok()
+        });
+        return match lambda {
+            Some(lambda) if lambda.parameters.is_empty() => {
+                let boxed = Val::Box(Box::new(lambda));
+                vm.execute_lambda(&boxed, &[]).map_err(|err| halt(vm, err))
             }
-        }
-        Val::Map(m) => {
-            if m.contains_key(&Val::from("parameters"))
-                && m.contains_key(&Val::from("instructions"))
-                && m.contains_key(&Val::from("register_count"))
-            {
-                match serde_json::to_value(m) {
-                    Ok(json_val) => {
-                        match serde_json::from_value::<crate::lang::bytecode::LambdaInfo>(json_val)
-                        {
-                            Ok(lambda_info) => {
-                                if lambda_info.parameters.is_empty() {
-                                    let boxed_lambda = Val::Box(Box::new(lambda_info));
-                                    match vm.execute_lambda(&boxed_lambda, &[]) {
-                                        Ok(result) => result,
-                                        Err(e) => {
-                                            tracing::warn!(
-                                                "Failed to evaluate reconstructed lazy argument: {}",
-                                                e
-                                            );
-                                            val.clone()
-                                        }
-                                    }
-                                } else {
-                                    val.clone()
-                                }
-                            }
-                            Err(e) => {
-                                tracing::warn!("Failed to deserialize lambda from map: {}", e);
-                                val.clone()
-                            }
-                        }
-                    }
-                    Err(e) => {
-                        tracing::warn!(
-                            "Failed to convert map to JSON for lambda reconstruction: {}",
-                            e
-                        );
-                        val.clone()
-                    }
-                }
-            } else {
-                val.clone()
-            }
-        }
-        _ => val.clone(),
+            _ => Ok(val.clone()),
+        };
     }
+    vm.force_lazy(val).map_err(|err| halt(vm, err))
 }
 
 /// Context-aware fail: produces `::hot::run/Failure` or `::hot::task/Failure`
 pub fn fail(vm: &mut crate::lang::runtime::vm::VirtualMachine, args: &[Val]) -> HotResult<Val> {
     let (msg, err) = match args.len() {
         1 => {
-            let err_data = evaluate_lazy(vm, &args[0]);
+            let err_data = match evaluate_lazy(vm, &args[0]) {
+                Ok(value) => value,
+                Err(halt) => return halt,
+            };
             let msg: String = match &err_data {
                 Val::Str(s) => (**s).to_owned(),
                 Val::Map(m) => m
@@ -146,7 +94,10 @@ pub fn fail(vm: &mut crate::lang::runtime::vm::VirtualMachine, args: &[Val]) -> 
                     ));
                 }
             };
-            let err_data = evaluate_lazy(vm, &args[1]);
+            let err_data = match evaluate_lazy(vm, &args[1]) {
+                Ok(value) => value,
+                Err(halt) => return halt,
+            };
             (msg, err_data)
         }
         _ => {
@@ -200,7 +151,10 @@ pub fn cancel(vm: &mut crate::lang::runtime::vm::VirtualMachine, args: &[Val]) -
                     ));
                 }
             };
-            let data = evaluate_lazy(vm, &args[1]);
+            let data = match evaluate_lazy(vm, &args[1]) {
+                Ok(value) => value,
+                Err(halt) => return halt,
+            };
             (msg, data)
         }
         _ => {

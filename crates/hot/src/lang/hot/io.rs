@@ -420,7 +420,10 @@ pub fn tap(vm: &mut crate::lang::runtime::vm::VirtualMachine, args: &[Val]) -> H
 
     // The value parameter is lazy so Results reach tap intact instead of
     // halting at the call boundary; force the thunk here.
-    let value = &super::exec::evaluate_lazy(vm, &args[0]);
+    let value = &match super::exec::evaluate_lazy(vm, &args[0]) {
+        Ok(value) => value,
+        Err(halt) => return halt,
+    };
 
     if !crate::env::is_local_dev() {
         return HotResult::Ok(value.clone());

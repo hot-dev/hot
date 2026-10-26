@@ -640,6 +640,188 @@ probe()"#;
         }
     }
 
+    /// A failure is an Err value on every call path, and checking it gives
+    /// the same answer bound or not. A bare core call such as `add` used to
+    /// halt on the interpreter's fast path while `::hot::math/add` and
+    /// compiled code returned the Err.
+    #[test]
+    fn a_failure_checks_the_same_bound_or_not() {
+        let src = r#"::t ns
+probe fn (x: Any): Vec {
+    a add(x, 1)
+    q ::hot::math/add(x, 1)
+    d div(1, 0)
+    e err("bad")
+    [
+        is-err(add(x, 1)), is-err(a),
+        is-err(::hot::math/add(x, 1)), is-err(q),
+        is-err(div(1, 0)), is-err(d),
+        is-err(err("bad")), is-err(e),
+        if-err(add(x, 1), (m) { "handled" }),
+        or(add(x, 1), "default"),
+        if(add(x, 1), "yes", "no"),
+        length([add(x, 1), 1])
+    ]
+}
+probe("x")
+probe("x")"#;
+        let expected = crate::val!([
+            true, true, true, true, true, true, true, true, "handled", "default", "no", 2
+        ]);
+        for conf in [
+            crate::val!({"jit": {"threshold": 1}}),
+            crate::val!({"jit": {"mode": "off"}}),
+        ] {
+            assert_eq!(
+                compile_and_run_with_std_conf(src, Some(conf.clone())),
+                Ok(expected.clone()),
+                "with {conf:?}"
+            );
+        }
+    }
+
+    /// An inspector looks at a value and catches nothing: `fail()`, and an
+    /// Err consumed inside its argument, halt there as anywhere else.
+    #[test]
+    fn inspectors_never_catch_a_halt() {
+        let cases = [
+            ("is-err(fail(\"boom\"))", "boom"),
+            ("if-err(fail(\"boom\"), (e) { 1 })", "boom"),
+            ("is-ok(id(err(\"bad\")))", "Result error: bad"),
+            ("is-err(length(err(\"bad\")))", "Result error: bad"),
+            ("is-err(map([1], (v) { fail(\"in callback\") }))", "in callback"),
+        ];
+        for (expr, message) in cases {
+            let src = format!(
+                "::t ns\nid fn (v: Any): Any {{ v }}\nprobe fn (): Any {{ {expr} }}\nprobe()\nprobe()"
+            );
+            for conf in [
+                crate::val!({"jit": {"threshold": 1}}),
+                crate::val!({"jit": {"mode": "off"}}),
+            ] {
+                let out = compile_and_run_with_std_conf(&src, Some(conf.clone()));
+                assert!(
+                    out.as_ref().is_err_and(|e| e.contains(message)),
+                    "`{expr}` with {conf:?}: expected a halt with {message:?}, got {out:?}"
+                );
+            }
+        }
+    }
+
+    /// A parameter declared `Result` receives its argument as it is, however
+    /// the function is called: directly, through a HOF, or with `call`. Any
+    /// other parameter consumes it, through a HOF too.
+    #[test]
+    fn result_parameters_receive_results_on_every_call_path() {
+        let src = r#"::t ns
+describe fn (r: Result): Str { if(is-err(r), "failed", "succeeded") }
+count-errs fn (...rest: Result): Int { length(filter(rest, is-err)) }
+probe fn (): Vec {
+    results map([1, 2], (i) { if(eq(i, 2), err("bad"), i) }, OnErr.Preserve)
+    [
+        describe(err("x")),
+        map(results, describe),
+        map(results, (r: Result) { describe(r) }),
+        call(describe, [err("y")]),
+        count-errs(1, err("a"), err("b"))
+    ]
+}
+probe()
+probe()"#;
+        let consuming = r#"::t ns
+probe fn (): Vec {
+    results map([1, 2], (i) { if(eq(i, 2), err("bad"), i) }, OnErr.Preserve)
+    map(results, (r) { r })
+}
+probe()
+probe()"#;
+        let expected = crate::val!([
+            "failed",
+            ["succeeded", "failed"],
+            ["succeeded", "failed"],
+            "failed",
+            2
+        ]);
+        for conf in [
+            crate::val!({"jit": {"threshold": 1}}),
+            crate::val!({"jit": {"mode": "off"}}),
+        ] {
+            assert_eq!(
+                compile_and_run_with_std_conf(src, Some(conf.clone())),
+                Ok(expected.clone()),
+                "with {conf:?}"
+            );
+            let out = compile_and_run_with_std_conf(consuming, Some(conf.clone()));
+            assert!(
+                out.as_ref()
+                    .is_err_and(|e| e.contains("Result error: bad")),
+                "an untyped callback parameter consumes an Err, with {conf:?}: {out:?}"
+            );
+        }
+    }
+
+    /// Compiled code reads `OnErr.Preserve` as the variant (it read Null, so
+    /// `map` rejected its trailing argument), and its `length`, `is-null`
+    /// and `is-some` consume an Err argument like the interpreter's.
+    #[test]
+    fn compiled_code_reads_variants_and_consumes_errs() {
+        let preserve = r#"::t ns
+probe fn (): Vec { map([1, 2], (i) { if(eq(i, 2), err("bad"), i) }, OnErr.Preserve) }
+probe()
+probe()"#;
+        for conf in [
+            crate::val!({"jit": {"threshold": 1}}),
+            crate::val!({"jit": {"mode": "off"}}),
+        ] {
+            let out = compile_and_run_with_std_conf(preserve, Some(conf.clone()))
+                .expect("Preserve keeps the Err slot");
+            let Val::Vec(slots) = &out else {
+                panic!("expected a Vec with {conf:?}, got {out:?}");
+            };
+            assert_eq!(slots[0], Val::Int(1), "with {conf:?}");
+            assert!(slots[1].is_err(), "with {conf:?}: {out:?}");
+            for intrinsic in ["length", "is-null", "is-some"] {
+                let src = format!(
+                    "::t ns\nprobe fn (v: Any): Any {{ {intrinsic}(v) }}\nprobe([1])\nprobe(err(\"bad\"))"
+                );
+                let out = compile_and_run_with_std_conf(&src, Some(conf.clone()));
+                assert!(
+                    out.as_ref()
+                        .is_err_and(|e| e.contains("Result error: bad")),
+                    "{intrinsic} with {conf:?}: {out:?}"
+                );
+            }
+        }
+    }
+
+    /// A lambda captures a local it reads through a pipe. Capture analysis
+    /// took `cited |> some(…)` for a binding of `cited`, so a lambda that
+    /// compiled code created couldn't find it. (A HOF re-ran the failed
+    /// compiled callback in the interpreter, which hid this.)
+    #[test]
+    fn lambdas_capture_locals_read_through_pipes() {
+        let src = r#"::t ns
+probe fn (observations: Vec, ids: Vec): Any {
+    cited ids |> map(Str)
+    observations
+        |> filter((observation) {
+            cited |> some((id) { eq(id, observation.id) })
+        })
+}
+[probe([{id: "a"}, {id: "b"}], ["a"]), probe([{id: "a"}], [])]"#;
+        let expected = crate::val!([[{"id": "a"}], []]);
+        for conf in [
+            crate::val!({"jit": {"threshold": 1}}),
+            crate::val!({"jit": {"mode": "off"}}),
+        ] {
+            assert_eq!(
+                compile_and_run_with_std_conf(src, Some(conf.clone())),
+                Ok(expected.clone()),
+                "with {conf:?}"
+            );
+        }
+    }
+
     /// A local function passed to a top-level function keeps its definer's
     /// locals, and the callee's parameter of the same name calls the value
     /// it was given. hot-ai's `fit` passes `item-text` this way.
@@ -2003,10 +2185,11 @@ caller(true)"#;
     }
 
     #[test]
-    fn test_fail_in_pmap_recovers_via_if_err() {
+    fn test_err_in_pmap_recovers_via_if_err() {
         // The idiomatic way to keep going past a failing per-item call
         // is `if-err` inside the callback. The callback returns a
-        // domain-typed fallback and pmap completes normally.
+        // domain-typed fallback and pmap completes normally. (`if-err`
+        // handles an Err value; a `fail()` would halt.)
 
         let source = r#"
             ::test ns
@@ -2015,7 +2198,7 @@ caller(true)"#;
                 ::hot::type/if-err(
                     ::hot::bool/if(
                         ::hot::cmp/eq(x, 5),
-                        ::hot::exec/fail("Found 5", x),
+                        ::hot::type/err("Found 5"),
                         ::hot::math/mul(x, 2)
                     ),
                     (e: Any) { -1 }
@@ -2050,24 +2233,18 @@ process fn (x: Int): Vec {
 }
 pmap([1, 2, 3, 4, 5, 6, 7, 8], process)"#;
 
-        let interpreter = compile_and_run_with_std_conf(
-            source,
-            Some(crate::val!({"engine": {"threads": 2}, "jit": {"mode": "off"}})),
-        )
-        .expect("interpreter pmap should return a callback error value");
-        let jit = compile_and_run_with_std_conf(
-            source,
-            Some(crate::val!({"engine": {"threads": 2}, "jit": {"threshold": 1}})),
-        )
-        .expect("JIT pmap should return the same callback error value");
-
-        assert_eq!(jit, interpreter);
-        assert!(jit.is_err(), "expected Result.Err, got {jit:?}");
-        assert!(
-            jit.unwrap_err()
-                .is_some_and(|error| error.to_string().contains("Vector index cannot be negative")),
-            "unexpected pmap error: {jit:?}"
-        );
+        // A runtime error in a callback halts pmap, in both modes.
+        for conf in [
+            crate::val!({"engine": {"threads": 2}, "jit": {"mode": "off"}}),
+            crate::val!({"engine": {"threads": 2}, "jit": {"threshold": 1}}),
+        ] {
+            let out = compile_and_run_with_std_conf(source, Some(conf.clone()));
+            assert!(
+                out.as_ref()
+                    .is_err_and(|e| e.contains("Vector index cannot be negative")),
+                "with {conf:?}: expected the callback's halt, got {out:?}"
+            );
+        }
     }
 
     /// Helper to create a test VM
@@ -2264,6 +2441,7 @@ mod parallel_failure_tests {
                         msg: first_msg.clone(),
                         data: first_data.clone(),
                         plain_vm_error: false,
+                        consumed: false,
                     });
                 }
                 true
@@ -2283,6 +2461,7 @@ mod parallel_failure_tests {
                         msg: second_msg,
                         data: second_data,
                         plain_vm_error: false,
+                        consumed: false,
                     });
                 }
                 true

@@ -64,8 +64,11 @@ function's `{` may also start the next line; a lambda's may not.
 - Function return annotations name the successful value, not a visible
   `Result` wrapper. Do not add `ok(...)` around every successful return.
 - Binding a `Result` preserves it. Ordinary consumption unwraps `Ok` or
-  propagates `Err`. Lazy helpers inspect the intact Result; `match` selects by
-  variant and exposes its payload inside the selected arm.
+  propagates `Err`. A parameter declared `Result` (as in `is-err`) receives the
+  intact Result, however the function is called; `match` selects by variant and
+  exposes its payload inside the selected arm. Result checks never catch a
+  halt (`fail()`, `cancel()`, a consumed `Err`), and `lazy` only defers
+  evaluation.
 - Records are structurally compatible where their fields are known. Custom
   types and enum variants also carry nominal tags used for matching and
   dispatch.
@@ -302,7 +305,7 @@ This skill includes detailed reference files:
 | [references/hot-std.md](references/hot-std.md) | Full standard library documentation |
 | [references/flows.md](references/flows.md) | Flow patterns, `if()` vs `cond`, flow result shapes |
 | [references/types.md](references/types.md) | Type system, type coercion |
-| [references/error-handling.md](references/error-handling.md) | Auto-unwrapping, lazy arguments, Result patterns |
+| [references/error-handling.md](references/error-handling.md) | Auto-unwrapping, `Result` parameters, lazy arguments, Result patterns |
 | [references/sequences.md](references/sequences.md) | Eager collections, lazy iterators, the `Next` type |
 | [references/meta.md](references/meta.md) | Metadata for tests, events, schedules, MCP tools, webhooks, and context |
 
@@ -312,7 +315,7 @@ See the [examples/](examples/) directory for working Hot code:
 - `basic.hot` - Variables, functions, conditionals, pipes
 - `types-and-enums.hot` - Custom types, enums (closed + open), literal unions (closed + open), arrow enrollment, exhaustive match, type coercion
 - `flows.hot` - Parallel, cond-all, match-all, flow result shapes
-- `error-handling.hot` - Auto-unwrapping, lazy arguments, Result patterns
+- `error-handling.hot` - Auto-unwrapping, `Result` parameters, lazy arguments, Result patterns
 - `sequences.hot` - Eager collections, lazy iterators, range functions
 - `event-handlers.hot` - Events, schedules, retry patterns
 - `http-service.hot` - HTTP requests, API integration

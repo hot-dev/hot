@@ -210,10 +210,10 @@ the function forces it with `do`. This enables short-circuit evaluation:
 
 ```hot
 if fn
-cond (pred: Any, lazy then: Any): Any {
+cond (pred: Result, lazy then: Any): Any {
   pred => { do then }
 },
-cond (pred: Any, lazy then: Any, lazy else: Any): Any {
+cond (pred: Result, lazy then: Any, lazy else: Any): Any {
   pred => { do then }
   => { do else }
 }
@@ -238,6 +238,19 @@ use-twice fn (lazy value: Any): Vec {
 
 This argument-level laziness is separate from `Iter`: a lazy parameter defers
 one expression, while an iterator produces sequence elements on demand.
+
+Laziness changes only when an argument is evaluated, not how a `Result` is
+handled. To receive a `Result` without consuming it, declare the parameter
+`Result`.
+
+## Result Parameters
+
+A parameter declared `Result` receives its argument as it is, an `Err`
+included. Any other parameter consumes it: an `Ok` unwraps, and an `Err` halts
+before the body runs. This holds however the function is called, directly or
+through a higher-order function such as `map`. `if` declares its condition
+this way, so an `Err` condition is falsy. See
+[Accepting a Result](/docs/language/errors#accepting-a-result).
 
 ## Metadata on Functions
 

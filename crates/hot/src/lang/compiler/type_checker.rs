@@ -2923,10 +2923,22 @@ impl TypeChecker {
 
     /// Check if two types are compatible (for assignment, parameter passing, etc.)
     #[allow(clippy::only_used_in_recursion)]
+    /// Whether `ty` is the `Result` type itself (not one of its variants).
+    fn names_result(ty: &TypeExpr) -> bool {
+        let name = match ty {
+            TypeExpr::Named(name) | TypeExpr::Generic(name, _) => name.as_str(),
+            _ => return false,
+        };
+        name.strip_prefix("::hot::type/").unwrap_or(name) == "Result"
+    }
+
     pub fn types_are_compatible(&self, expected: &TypeExpr, actual: &TypeExpr) -> bool {
         match (expected, actual) {
             // Any is compatible with everything
             (TypeExpr::Any, _) | (_, TypeExpr::Any) => true,
+
+            // Any value is implicitly an Ok, so every type is a `Result`.
+            (expected, _) if Self::names_result(expected) => true,
 
             // Exact matches
             (TypeExpr::Null, TypeExpr::Null) => true,

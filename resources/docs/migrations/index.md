@@ -105,6 +105,25 @@ setup-hot `version` input so pipelines move to 3.0 when you do. See
   `limit` parameter instead. Now it reads the namespace value. Lambdas and
   functions defined in a function body still see the bindings around them. To
   give a function a caller's value, pass it as an argument.
+- **Result checks never catch a halt.** `is-err`, `is-ok`, `if-err`, and
+  `if-ok` used to treat a halt in their argument (`fail()`, `cancel()`, an
+  `Err` consumed inside it) as an `Err`. Now they check the value only, and the
+  halt propagates, so `is-err(f())` agrees with `r f()` then `is-err(r)`. Code
+  that used `if-err(may-fail(), fallback)` to catch a `fail()` should return
+  `err(...)` instead, or run the work as a task. See
+  [Checks Never Catch Halts](/docs/language/errors#checks-never-catch-halts).
+- **A parameter declared `Result` receives an `Err`.** Any other parameter
+  consumes its argument, also when a function is called through `map` and
+  other higher-order functions; callbacks used to receive `Err` elements
+  unconsumed. A callback over `OnErr.Preserve` results declares its parameter
+  `Result`: `map(results, (r: Result) { ... })`. See
+  [Accepting a Result](/docs/language/errors#accepting-a-result).
+- **A failing core call returns an `Err` on every path.** A bare call such as
+  `add("x", 1)` halted on the spot in the interpreter, while
+  `::hot::math/add("x", 1)` and compiled code returned the `Err`. Now all three
+  return it, and it halts where it's consumed.
+- **`lazy` only defers evaluation.** Consuming an `Err` inside a lazy argument
+  halts as it does anywhere else; it used to pass the `Err` along as data.
 - **New: parameter lists can span lines**, in functions and in lambdas. A
   lambda's `{` must be on the same line as its closing `)`. See
   [Long Parameter Lists](/docs/language/functions#long-parameter-lists).

@@ -2,7 +2,7 @@ use crate::lang::bytecode::{
     BytecodeProgram, Constant, FlowResultModifier, FlowType, FunctionId, FunctionInfo, Instruction,
     LambdaInfo,
 };
-use crate::lang::runtime::vm::{VirtualMachine, VmError, VmResult};
+use crate::lang::runtime::vm::{VirtualMachine, VmError};
 use crate::val::Val;
 use ahash::{AHashMap, AHashSet};
 use cranelift_codegen::ir::{
@@ -487,6 +487,7 @@ struct JitHelperRefs {
     capture_var: FuncRef,
     length: FuncRef,
     is_null: FuncRef,
+    check_consumable: FuncRef,
 }
 
 #[derive(Debug, Clone)]
@@ -1576,6 +1577,10 @@ fn compile_with_return_kind(
     builder.symbol("hot_jit_capture_var", hot_jit_capture_var as *const u8);
     builder.symbol("hot_jit_length", hot_jit_length as *const u8);
     builder.symbol("hot_jit_is_null", hot_jit_is_null as *const u8);
+    builder.symbol(
+        "hot_jit_check_consumable",
+        hot_jit_check_consumable as *const u8,
+    );
     let mut module = JITModule::new(builder);
 
     let ptr_ty = module.target_config().pointer_type();
@@ -2253,7 +2258,8 @@ unsafe extern "C" fn hot_jit_call_vm(
     }
 
     let error_capture = vm.error_capture_active;
-    let args = match prepare_jit_call_args(vm, args) {
+    let target = crate::lang::runtime::vm::CallTarget::Function(function_id as u32);
+    let args = match vm.prepare_call_args(target, args) {
         Ok(args) => args,
         Err(err) => {
             // The callee never ran, so the proof set for it is spent.
@@ -2265,17 +2271,6 @@ unsafe extern "C" fn hot_jit_call_vm(
         Ok(result) => new_owned_val(result),
         Err(err) => vm_error_to_owned_val(err, error_capture),
     }
-}
-
-/// Apply the same strict-argument preparation as interpreter `Call*`
-/// instructions before a JIT trampoline dispatches a callee. Lazy arguments
-/// arrive as `LambdaInfo` thunks and are intentionally preserved by
-/// `unwrap_result_if_ok`.
-fn prepare_jit_call_args(vm: &mut VirtualMachine, mut args: Vec<Val>) -> VmResult<Vec<Val>> {
-    for arg in &mut args {
-        *arg = vm.unwrap_result_if_ok(arg)?;
-    }
-    Ok(args)
 }
 
 /// JIT helper: promote a typed value to an OwnedVal.
@@ -2499,31 +2494,17 @@ unsafe extern "C" fn hot_jit_extract_inner_val(src_ptr: i64) -> i64 {
 unsafe extern "C" fn hot_jit_ensure_result(val_ptr: i64) -> i64 {
     let val = unsafe { &*(val_ptr as *const Val) };
 
-    // Evaluate lazy thunks with result-checking suppressed
-    let val = if let Val::Box(b) = val {
-        if b.as_any()
-            .downcast_ref::<crate::lang::bytecode::LambdaInfo>()
-            .is_some()
-        {
-            let vm_ptr = get_jit_vm_ptr();
-            if !vm_ptr.is_null() {
-                let vm = unsafe { &mut *vm_ptr };
-                let prev = vm.get_suppress_result_checking();
-                vm.set_suppress_result_checking(true);
-                let result = vm.execute_lambda(val, &[]);
-                vm.set_suppress_result_checking(prev);
-                match result {
-                    Ok(v) => v,
-                    Err(_) => val.clone(),
-                }
-            } else {
-                val.clone()
-            }
-        } else {
-            val.clone()
-        }
-    } else {
+    // A lazy value is forced as the interpreter forces it; a halt while
+    // computing it halts the compiled frame too.
+    let vm_ptr = get_jit_vm_ptr();
+    let val = if vm_ptr.is_null() {
         val.clone()
+    } else {
+        let vm = unsafe { &mut *vm_ptr };
+        match vm.force_lazy(val) {
+            Ok(value) => value,
+            Err(err) => return vm_runtime_error_to_halt(vm, err),
+        }
     };
 
     // Check if already a Result type
@@ -3031,7 +3012,7 @@ unsafe extern "C" fn hot_jit_capture_var(name_ptr: i64, scope_depth: i64) -> i64
 /// JIT helper: compute length of a Vec, Str, Map, or Bytes value.
 /// Takes an OwnedVal pointer and returns the length as an i64 Int.
 unsafe extern "C" fn hot_jit_length(val_ptr: i64) -> i64 {
-    let val = unsafe { &*(val_ptr as *const Val) };
+    let val = ok_payload(unsafe { &*(val_ptr as *const Val) });
     match crate::val::as_fields(val) {
         Val::Vec(v) => v.len() as i64,
         Val::Str(s) => s.len() as i64,
@@ -3046,8 +3027,40 @@ unsafe extern "C" fn hot_jit_is_null(val_ptr: i64) -> i64 {
     if val_ptr == 0 {
         return 1;
     }
-    let val = unsafe { &*(val_ptr as *const Val) };
+    let val = ok_payload(unsafe { &*(val_ptr as *const Val) });
     if matches!(val, Val::Null) { 1 } else { 0 }
+}
+
+/// The value an argument consumes to: an Ok's payload, anything else as is.
+/// (An Err never gets here: `hot_jit_check_consumable` halts on it first.)
+fn ok_payload(val: &Val) -> &Val {
+    if let Val::Map(map) = val
+        && crate::val::tagged_type_name(map) == Some("::hot::type/Result.Ok")
+    {
+        return map.get(&Val::from("$val")).unwrap_or(&Val::Null);
+    }
+    val
+}
+
+/// JIT helper: consuming an Err argument halts, as at an interpreted call.
+/// Returns HALT_SENTINEL (with the halt recorded) for an Err, 0 otherwise.
+unsafe extern "C" fn hot_jit_check_consumable(val_ptr: i64) -> i64 {
+    if val_ptr == 0 {
+        return 0;
+    }
+    let val = unsafe { &*(val_ptr as *const Val) };
+    if !val.is_err() {
+        return 0;
+    }
+    let vm_ptr = get_jit_vm_ptr();
+    if vm_ptr.is_null() {
+        return 0;
+    }
+    let vm = unsafe { &mut *vm_ptr };
+    match vm.unwrap_result_if_ok(val) {
+        Ok(_) => 0,
+        Err(err) => vm_runtime_error_to_halt(vm, err),
+    }
 }
 
 /// Call a function by name through the VM. Used when the function isn't in
@@ -3076,7 +3089,8 @@ unsafe extern "C" fn hot_jit_call_vm_by_name(
     }
 
     let error_capture = vm.error_capture_active;
-    let args = match prepare_jit_call_args(vm, args) {
+    let target = crate::lang::runtime::vm::CallTarget::Value(name_val);
+    let args = match vm.prepare_call_args(target, args) {
         Ok(args) => args,
         Err(err) => return vm_error_to_owned_val(err, error_capture),
     };
@@ -3666,6 +3680,14 @@ fn declare_jit_helpers(
             func,
             ptr_ty,
             "hot_jit_is_null",
+            &[types::I64],
+            &[types::I64],
+        )?,
+        check_consumable: declare_helper_func(
+            module,
+            func,
+            ptr_ty,
+            "hot_jit_check_consumable",
             &[types::I64],
             &[types::I64],
         )?,
@@ -6380,9 +6402,11 @@ impl<'a> EmitCtx<'a> {
                     .ins()
                     .call(self.helper_refs.ensure_result, &[val_ptr]);
                 let result = builder.inst_results(call)[0];
+                let halt_block = emit_halt_check(builder, result);
                 self.drop_owned_temps(builder, &[val_temp]);
                 self.define_register(builder, *dest, RawKind::OwnedVal, result)?;
                 self.jump_to_next(builder, ip)?;
+                self.emit_halt_return(builder, halt_block);
                 Ok(EmitResult::Handled)
             }
             Instruction::SetElement {
@@ -6472,8 +6496,15 @@ impl<'a> EmitCtx<'a> {
                 Ok(EmitResult::Handled)
             }
             Instruction::LoadTypeRef { dest, type_ref } => {
+                // The same values the interpreter's `load_constant` makes: a
+                // variant type such as `OnErr` is a boxed TypeRef, so that
+                // `OnErr.Preserve` reads a variant rather than Null.
                 let val = match self.program.constants.get(*type_ref as usize) {
                     Some(Constant::Val(v)) => new_owned_val(v.clone()),
+                    Some(Constant::VariantTypeRef(type_ref)) => {
+                        new_owned_val(Val::Box(Box::new(type_ref.clone())))
+                    }
+                    Some(Constant::TypeRef(name)) => new_owned_val(Val::Str(name.clone())),
                     _ => new_owned_val(Val::Null),
                 };
                 let value = builder.ins().iconst(types::I64, val);
@@ -8491,6 +8522,7 @@ fn try_lower_known_core_call(
                 | RawKind::TypeTag => zero,
                 RawKind::OwnedVal => {
                     let raw = builder.use_var(registers[remap_reg(remap, arg(0))?]);
+                    cmp_halt_block = Some(emit_consume_check(builder, &helper_refs, raw));
                     let call = builder.ins().call(helper_refs.is_null, &[raw]);
                     builder.inst_results(call)[0]
                 }
@@ -8513,6 +8545,7 @@ fn try_lower_known_core_call(
                 | RawKind::TypeTag => one,
                 RawKind::OwnedVal => {
                     let raw = builder.use_var(registers[remap_reg(remap, arg(0))?]);
+                    cmp_halt_block = Some(emit_consume_check(builder, &helper_refs, raw));
                     let call = builder.ins().call(helper_refs.is_null, &[raw]);
                     let is_null = builder.inst_results(call)[0];
                     let cmp = builder.ins().icmp_imm_s(
@@ -8609,6 +8642,7 @@ fn try_lower_known_core_call(
                 return Ok(None);
             }
             let raw = builder.use_var(registers[remap_reg(remap, arg(0))?]);
+            cmp_halt_block = Some(emit_consume_check(builder, &helper_refs, raw));
             let call = builder.ins().call(helper_refs.length, &[raw]);
             let result = builder.inst_results(call)[0];
             (RawKind::Int, result)
@@ -9072,6 +9106,18 @@ fn numeric_compare(
 /// continuation block; the returned block must be finished with
 /// `emit_halt_return` by a method context that can clean up owned
 /// registers.
+/// Consuming an OwnedVal argument: halt on an Err, as an interpreted call
+/// does. Returns the halt block the caller finishes with `emit_halt_return`.
+fn emit_consume_check(
+    builder: &mut FunctionBuilder<'_>,
+    helper_refs: &JitHelperRefs,
+    raw: cranelift_codegen::ir::Value,
+) -> cranelift_codegen::ir::Block {
+    let call = builder.ins().call(helper_refs.check_consumable, &[raw]);
+    let checked = builder.inst_results(call)[0];
+    emit_halt_check(builder, checked)
+}
+
 fn emit_halt_check(
     builder: &mut FunctionBuilder<'_>,
     result: cranelift_codegen::ir::Value,
@@ -9905,6 +9951,7 @@ mod tests {
             used_registers: vec![0, 1, 2],
             structural_hash_cache: Default::default(),
             defining_frame: None,
+            result_params: Vec::new(),
         };
 
         let conf = val!({"jit": {"mode": "enabled", "threshold": 1}});
@@ -9953,6 +10000,7 @@ mod tests {
             used_registers: vec![0, 1, 2],
             structural_hash_cache: Default::default(),
             defining_frame: None,
+            result_params: Vec::new(),
         };
 
         let conf = val!({"jit": {"mode": "enabled", "threshold": 1}});
@@ -10010,6 +10058,7 @@ mod tests {
             used_registers: vec![0, 1, 2, 3],
             structural_hash_cache: Default::default(),
             defining_frame: None,
+            result_params: Vec::new(),
         };
 
         let conf = val!({"jit": {"mode": "enabled", "threshold": 1}});
@@ -10035,6 +10084,7 @@ mod tests {
             used_registers: vec![0],
             structural_hash_cache: Default::default(),
             defining_frame: None,
+            result_params: Vec::new(),
         };
 
         let conf = val!({"jit": {"mode": "enabled", "threshold": 1}});
@@ -11582,6 +11632,7 @@ mod tests {
             used_registers: vec![0],
             structural_hash_cache: Default::default(),
             defining_frame: None,
+            result_params: Vec::new(),
         }));
 
         let make_vm = |conf| {
@@ -12862,6 +12913,7 @@ mod tests {
             used_registers: vec![0],
             structural_hash_cache: Default::default(),
             defining_frame: None,
+            result_params: Vec::new(),
         };
 
         // Thunk for "else" branch: { b }
@@ -12882,6 +12934,7 @@ mod tests {
             used_registers: vec![0],
             structural_hash_cache: Default::default(),
             defining_frame: None,
+            result_params: Vec::new(),
         };
 
         let then_const = program.constants.len() as u32;
@@ -13009,6 +13062,7 @@ mod tests {
             used_registers: vec![0],
             structural_hash_cache: Default::default(),
             defining_frame: None,
+            result_params: Vec::new(),
         };
 
         // "else" thunk: { add(fib(sub(n, 1)), fib(sub(n, 2))) }
@@ -13068,6 +13122,7 @@ mod tests {
             used_registers: vec![0, 1, 2, 3, 4, 5, 6, 7, 8],
             structural_hash_cache: Default::default(),
             defining_frame: None,
+            result_params: Vec::new(),
         };
 
         let then_const = program.constants.len() as u32;
@@ -13202,6 +13257,7 @@ mod tests {
             used_registers: vec![0],
             structural_hash_cache: Default::default(),
             defining_frame: None,
+            result_params: Vec::new(),
         };
         let else_thunk = LambdaInfo {
             parameters: vec![],
@@ -13220,6 +13276,7 @@ mod tests {
             used_registers: vec![0],
             structural_hash_cache: Default::default(),
             defining_frame: None,
+            result_params: Vec::new(),
         };
         let then_const = program.constants.len() as u32;
         program
@@ -13324,6 +13381,7 @@ mod tests {
             used_registers: vec![0],
             structural_hash_cache: Default::default(),
             defining_frame: None,
+            result_params: Vec::new(),
         };
         let lazy_const = program.constants.len() as u32;
         program
@@ -13415,6 +13473,7 @@ mod tests {
             used_registers: vec![0],
             structural_hash_cache: Default::default(),
             defining_frame: None,
+            result_params: Vec::new(),
         };
         let thunk_const = program.constants.len() as u32;
         program
@@ -13476,6 +13535,7 @@ mod tests {
             used_registers: vec![0],
             structural_hash_cache: Default::default(),
             defining_frame: None,
+            result_params: Vec::new(),
         };
         let thunk_const = program.constants.len() as u32;
         program

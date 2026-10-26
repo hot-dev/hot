@@ -80,10 +80,10 @@ fn () {
     jobs ::lifecycle/run-session-job(rt, "fan-out", handler)
     assert-eq(3, length(jobs))
 
-    // Every slot is a real LifecycleJob — `run-session-job` recovers
-    // halts inside the callback via `if-err`, so halts never escape
+    // Every slot is a real LifecycleJob — `run-session-job` contains
+    // halts inside the callback with `contain`, so halts never escape
     // and the output is uniformly typed.
-    map(jobs, (j) {
+    map(jobs, (j: Result) {
         assert(not(is-err(j)), "slot must be a LifecycleJob, not a Result.Err")
         assert(not(is-null(j.session-id)), "slot must have a session-id")
     })

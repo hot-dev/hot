@@ -1255,7 +1255,7 @@ meta ["test"] fn () {
 map-with-if-err-recovery fn (): Vec<Int> {
     ::hot::coll/map([1, 2, 3], (x: Int) {
         if-err(cond {
-            eq(x, 2) => { fail("boom on 2") }
+            eq(x, 2) => { err("bad item 2") }
             => { mul(x, 10) }
         }, (e: Any) { -1 })
     })
@@ -1264,7 +1264,26 @@ map-with-if-err-recovery fn (): Vec<Int> {
 test-map-if-err-recovers-per-item
 meta ["test"] fn () {
     result map-with-if-err-recovery()
-    assert-eq([10, -1, 30], result, "if-err inside the callback recovers without halting map")
+    assert-eq([10, -1, 30], result, "if-err inside the callback recovers a domain Err per item")
+}
+
+// `if-err` handles an Err value; it doesn't catch a halt. A `fail()` in
+// its argument still halts the run.
+map-with-if-err-around-fail fn (): Vec<Int> {
+    ::hot::coll/map([1, 2, 3], (x: Int) {
+        if-err(cond {
+            eq(x, 2) => { fail("boom on 2") }
+            => { mul(x, 10) }
+        }, (e: Any) { -1 })
+    })
+}
+
+test-if-err-does-not-catch-fail
+meta ["test"] fn () {
+    attempt ::hot::internal::exec/contain(map-with-if-err-around-fail, [])
+    assert(is-err(attempt), "fail() inside if-err halts")
+    failure if-err(attempt, (failure) { failure })
+    assert(contains(failure.msg, "boom on 2"))
 }
 
 map-with-domain-err-default fn () {
@@ -1403,7 +1422,7 @@ pmap-with-if-err-recovery fn (): Vec<Int> {
     inputs ::hot::coll/map([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40], (x: Int) { x })
     ::hot::coll/pmap(inputs, (x: Int) {
         if-err(cond {
-            eq(x, 7) => { fail("pmap boom on 7") }
+            eq(x, 7) => { err("pmap bad item 7") }
             => { mul(x, 10) }
         }, (e: Any) { -1 })
     })

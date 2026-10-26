@@ -1006,6 +1006,7 @@ mod tests {
             used_registers: vec![],
             structural_hash_cache: Default::default(),
             defining_frame: None,
+            result_params: Vec::new(),
         };
 
         let args = Val::Vec(vec![
@@ -1054,6 +1055,7 @@ mod tests {
             used_registers: vec![],
             structural_hash_cache: Default::default(),
             defining_frame: None,
+            result_params: Vec::new(),
         };
 
         emitter.emit(EngineEvent::call_start(

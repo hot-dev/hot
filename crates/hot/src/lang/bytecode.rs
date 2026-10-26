@@ -636,6 +636,25 @@ pub struct LambdaInfo {
     /// Runtime-only: not part of equality, hashing or serialization.
     #[serde(skip)]
     pub defining_frame: Option<FrameLink>,
+    /// Which parameters are declared `Result`. Such a parameter receives its
+    /// argument as it is, an Err included; any other parameter consumes it.
+    #[serde(default)]
+    pub result_params: Vec<bool>,
+}
+
+impl LambdaInfo {
+    /// Whether parameter `index` receives its argument as it is.
+    pub fn keeps_param(&self, index: usize) -> bool {
+        self.result_params.get(index).copied().unwrap_or(false)
+    }
+}
+
+/// Whether a parameter annotation declares a `Result`: `Result`,
+/// `::hot::type/Result`, a variant such as `Result.Err`, optionally `?`.
+pub fn is_result_annotation(annotation: &str) -> bool {
+    let base = annotation.trim().trim_end_matches('?');
+    let base = base.strip_prefix("::hot::type/").unwrap_or(base);
+    base == "Result" || base.starts_with("Result.") || base.starts_with("Result<")
 }
 
 /// Where a lambda was created: the innermost scope at the time, and the frame
@@ -656,6 +675,7 @@ impl PartialEq for LambdaInfo {
             && self.capture_vars == other.capture_vars
             && self.defining_namespace == other.defining_namespace
             && self.used_registers == other.used_registers
+            && self.result_params == other.result_params
         // Skip closure_env comparison for now
     }
 }
@@ -668,6 +688,7 @@ impl std::hash::Hash for LambdaInfo {
         self.instructions.hash(state);
         self.register_count.hash(state);
         self.capture_vars.hash(state);
+        self.result_params.hash(state);
         // Skip closure_env for hashing
     }
 }
@@ -685,6 +706,7 @@ impl Ord for LambdaInfo {
             .then_with(|| self.instructions.cmp(&other.instructions))
             .then_with(|| self.register_count.cmp(&other.register_count))
             .then_with(|| self.capture_vars.cmp(&other.capture_vars))
+            .then_with(|| self.result_params.cmp(&other.result_params))
         // Skip closure_env for ordering
     }
 }
@@ -1048,6 +1070,9 @@ pub struct BytecodeProgram {
     /// its definer's locals; a call to any other function sees only its own
     /// frame, its namespace and core.
     pub local_functions: AHashSet<FunctionId>,
+    /// For each function with a parameter declared `Result`, which ones are.
+    /// Such a parameter receives its argument as it is, an Err included.
+    pub result_params: AHashMap<FunctionId, Vec<bool>>,
     /// Content-hash index over `constants` so `add_constant` dedup is O(1)
     /// instead of a linear scan (which made pool construction quadratic on
     /// large programs). Values are candidate ids sharing a hash; equality is
@@ -1489,6 +1514,7 @@ impl BytecodeProgram {
             variable_metadata: AHashMap::new(),
             constraint_types: Vec::new(),
             local_functions: AHashSet::new(),
+            result_params: AHashMap::new(),
             constant_index: AHashMap::new(),
         }
     }
@@ -1609,6 +1635,28 @@ impl BytecodeProgram {
         let id = self.functions.len() as FunctionId;
         self.functions.push(function);
         id
+    }
+
+    /// Whether a call to `function_id` passes argument `index` as it is: the
+    /// parameter is lazy or declared `Result`. A variadic function's last
+    /// parameter covers every argument from its position on.
+    pub fn keeps_param(&self, function_id: FunctionId, index: usize) -> bool {
+        let Some(function) = self.functions.get(function_id as usize) else {
+            return false;
+        };
+        let last = function.lazy_params.len().max(function.arity as usize);
+        let index = if function.is_variadic && last > 0 {
+            index.min(last - 1)
+        } else {
+            index
+        };
+        function.lazy_params.get(index).copied().unwrap_or(false)
+            || self
+                .result_params
+                .get(&function_id)
+                .and_then(|flags| flags.get(index))
+                .copied()
+                .unwrap_or(false)
     }
 
     /// Get the size in bytes of the bytecode program

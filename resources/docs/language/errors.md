@@ -1,10 +1,10 @@
 ---
-description: "Understand Hot Result values, automatic wrapping and unwrapping, lazy result checks, short-circuiting, and fail handling."
+description: "Understand Hot Result values, automatic wrapping and unwrapping, Result parameters, lazy arguments, short-circuiting, and fail handling."
 ---
 
 # Error Handling
 
-Operations that can fail return `Result` values. Hot makes working with Results ergonomic through **automatic wrapping**, **automatic unwrapping**, and **lazy argument evaluation**.
+Operations that can fail return `Result` values. Hot makes working with Results ergonomic through **automatic wrapping**, **automatic unwrapping**, and **`Result` parameters**.
 
 ## The Result Type
 
@@ -48,13 +48,14 @@ ordinary code consumes it:
 
 ```hot
 result fetch-user(id) // Result remains intact in this binding
-valid is-ok(result)   // inspected by a lazy Result-aware function
+valid is-ok(result)   // inspects the Result without consuming it
 page render(result)   // Ok unwraps; Err halts and propagates here
 ```
 
 Ordinary function arguments, template interpolation, and ordinary field or
-index access are consumption boundaries. `is-ok` and `is-err` inspect the
-wrapper without consuming it. `if-ok` and `if-err` pass the selected variant's
+index access are consumption boundaries. A parameter declared `Result`
+receives the Result without consuming it, which is how `is-ok` and `is-err`
+inspect the wrapper (see [Accepting a Result](#accepting-a-result)). `if-ok` and `if-err` pass the selected variant's
 unwrapped payload to a handler, then return a Result; the unmatched variant
 passes through unchanged. `match` also handles Result variants explicitly, as
 described in
@@ -79,7 +80,7 @@ Use `is-ok` and `is-err` to inspect Results without triggering automatic unwrapp
 
 {{result:errors#is-ok-check}}
 
-These functions receive the Result as a **lazy argument**, which prevents automatic unwrapping during the check.
+These functions declare a `Result` parameter, so the Result reaches them intact. They check the value their argument produces; they don't catch a halt while it is computed (see [Checks Never Catch Halts](#checks-never-catch-halts)).
 
 You can also use `match` for pattern matching on Result variants:
 
@@ -95,70 +96,88 @@ message match result {
 The `match` chooses an arm using the `Result.Ok` or `Result.Err` tag. Within the
 selected arm, `result` evaluates to that variant's payload.
 
-## Lazy Arguments and Result Checking
+## Accepting a Result
 
-When a function parameter is marked `lazy`, its argument expression is deferred
-until the function forces it with `do`. This is how Hot enables safe Result
-inspection.
-
-```hot
-// The if function declares lazy parameters for its branches
-if fn cond (pred: Any, lazy then: Any, lazy else: Any): Any {
-  pred => { do then }
-  => { do else }
-}
-```
-
-When a lazy argument is forced, ordinary Result consumption remains
-**suppressed** inside that lazy context. This means:
-
-1. The argument is not evaluated or consumed at the ordinary call boundary
-2. `do` forces the expression inside the lazy context and preserves any Result
-3. The function can inspect that Result without auto-unwrapping or propagating it
+A parameter declared `Result` receives its argument as it is, an `Err`
+included. Any other parameter consumes its argument: an `Ok` unwraps, and an
+`Err` halts before the function body runs. This holds however the function is
+called: directly, through a higher-order function such as `map`, or with
+`call`.
 
 ```hot
-// Safe division that returns a Result
-safe-divide fn (a, b) {
-  if(eq(b, 0), err("Division by zero"), ok(div(a, b)))
-}
-
-// is-ok receives the Result without triggering auto-unwrap
-result safe-divide(10, 0)
-if(is-ok(result),
-  `Result: ${result}`,
-  "Cannot divide by zero")  // This branch runs
-```
-
-### Writing Your Own Result-Inspecting Functions
-
-The same rule applies to your own functions. A regular parameter auto-unwraps its argument, so passing an `Err` Result to it triggers the halt **before your function body runs**. Mark the parameter `lazy` and evaluate it with `do` — inside a lazy context, `do` preserves the Result instead of unwrapping it:
-
-```hot
-// ❌ Regular parameter: an Err argument halts before the body executes
+// ❌ An `Any` parameter consumes its argument: an Err halts at the call
 describe fn (r: Any): Str {
   if(is-err(r), "failed", "succeeded")   // never reached for Err values
 }
 
-describe(err("boom"))   // Runtime error: boom
+describe(err("boom"))   // Runtime error: Result error: boom
 
-// ✅ lazy parameter + do: receives and inspects the Result safely
-describe fn (lazy r: Any): Str {
-  v do r
-  if(is-err(v), "failed", "succeeded")
+// ✅ A `Result` parameter receives the Result as it is
+describe fn (r: Result): Str {
+  if(is-err(r), "failed", "succeeded")
 }
 
 describe(err("boom"))   // "failed"
 describe(ok(42))        // "succeeded"
+describe(42)            // "succeeded": any value is an implicit Ok
 ```
 
 This composes with `OnErr.Preserve` (see Pattern 5) to classify per-item outcomes without halting the batch:
 
 ```hot
 results map(items, process-item(%), OnErr.Preserve)  // Errs stay as values
-labels map(results, describe(%))                     // ["succeeded", "failed", ...]
+labels map(results, describe)                        // ["succeeded", "failed", ...]
 ```
 
-If a halt fires when you hand a preserved `Result.Err` to a helper function, the fix is almost always marking the receiving parameter `lazy`.
+A lambda that receives preserved Errs declares its parameter the same way:
+`map(results, (r: Result) { ... })`. If a halt fires when you hand a preserved
+`Result.Err` to a function, the fix is almost always declaring the receiving
+parameter `Result`.
+
+## Lazy Arguments
+
+A parameter marked `lazy` defers its argument: the expression runs when the
+function forces it with `do`, if it does, exactly as if it were written at
+that point. Laziness changes only when an argument is evaluated. An `Err` value
+comes back from `do` as a value, and an `Err` consumed while computing it halts
+as it would anywhere else.
+
+```hot
+// The if function declares lazy parameters for its branches
+if fn cond (pred: Result, lazy then: Any, lazy else: Any): Any {
+  pred => { do then }
+  => { do else }
+}
+```
+
+`if` declares its condition `Result`, so an `Err` condition is falsy instead
+of halting. Only the selected branch runs.
+
+## Checks Never Catch Halts
+
+`is-err`, `if-err`, and the other Result checks look at a value. They don't
+catch a halt: `fail()`, `cancel()`, or an `Err` consumed while computing their
+argument halts the same as anywhere else. So checking a result directly and
+binding it first always agree:
+
+```hot
+is-err(load-user(42))   // true when load-user returns an Err
+
+user load-user(42)      // the same Err, bound
+is-err(user)            // true
+```
+
+When `load-user` halts instead, for example by reading a field of a failed
+response, both forms halt. To make a failure checkable, return it as an `Err`
+instead of consuming it, for example with `if-ok` or `match`:
+
+```hot
+load-user fn (id: Int): Any {
+  if-ok(fetch-user(id), (response) { response.body.user })
+}
+```
+
+To survive halts in code you don't control, run it as a task (Pattern 7).
 
 ## Short-Circuit Evaluation
 
@@ -303,5 +322,7 @@ without keeping the originating run alive.
 - Return independent task ids to clients and wait with the SDK task resource
 - Use `match` for pattern matching on `Result.Ok` and `Result.Err` variants
 - Dot access on Results automatically accesses fields within the payload: `result.name`
-- **Lazy arguments** suppress Result checking, enabling safe inspection and short-circuit evaluation
+- Declare a parameter `Result` to receive a Result without consuming it; any other parameter consumes it, however the function is called
+- `lazy` only defers evaluation; it gives `if`, `and`, and `or` their short-circuiting
+- Result checks look at values and never catch a halt: `fail()`, `cancel()`, or a consumed `Err`
 - Most code can ignore error handling; errors propagate automatically

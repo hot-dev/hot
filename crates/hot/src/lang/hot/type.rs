@@ -944,64 +944,17 @@ fn get_value_type_path(value: &Val) -> Option<String> {
 /// Check if a value is of a given type.
 /// Handles primitives, custom types, enum variants, and type-level matching.
 ///
-/// The first argument is lazy to prevent auto-unwrapping of Result.Err values.
+/// The hot-std wrapper declares the first argument `Result`, so a
+/// Result.Err reaches it intact.
 pub fn is_type(vm: &mut crate::lang::runtime::vm::VirtualMachine, args: &[Val]) -> HotResult<Val> {
     tracing::debug!("is_type called with {} args: {:?}", args.len(), args);
     validate_args!("::hot::type/is-type", args, 2);
 
-    // First, evaluate any lazy thunks to get the actual value (without auto-unwrapping)
-    let value = match &args[0] {
-        Val::Box(b) => {
-            // Check if this is a zero-argument lambda (lazy evaluation)
-            if let Some(lambda_info) = b
-                .as_any()
-                .downcast_ref::<crate::lang::bytecode::LambdaInfo>()
-            {
-                if lambda_info.parameters.is_empty() {
-                    // For lazy parameter lambdas, suppress Result checking during evaluation
-                    // This allows them to evaluate and return Result types without triggering automatic failures
-                    let saved_suppress = if lambda_info.is_lazy_param {
-                        let current = vm.get_suppress_result_checking();
-                        vm.set_suppress_result_checking(true);
-                        Some(current)
-                    } else {
-                        None
-                    };
-
-                    // Evaluate the lazy thunk
-                    let result = match vm.execute_lambda(&args[0], &[]) {
-                        Ok(val) => val,
-                        Err(err) => {
-                            // Restore Result checking
-                            if let Some(saved) = saved_suppress {
-                                vm.set_suppress_result_checking(saved);
-                            }
-                            return HotResult::Err(Val::from(format!(
-                                "Failed to evaluate lazy value: {:?}",
-                                err
-                            )));
-                        }
-                    };
-
-                    // Restore Result checking
-                    if let Some(saved) = saved_suppress {
-                        vm.set_suppress_result_checking(saved);
-                    }
-
-                    result
-                } else {
-                    // Has parameters, use as-is
-                    args[0].clone()
-                }
-            } else {
-                // Not a lambda, use as-is
-                args[0].clone()
-            }
-        }
-        _ => {
-            // Not boxed, use as-is
-            args[0].clone()
-        }
+    // The argument's value. A halt while computing it propagates: an
+    // inspector looks at a value and catches nothing.
+    let value = match inspected_value(vm, &args[0]) {
+        Ok(value) => value,
+        Err(halt) => return halt,
     };
 
     let type_ref = &args[1]; // Second arg: type reference
@@ -1182,64 +1135,11 @@ pub fn result_is_ok(
 ) -> HotResult<Val> {
     validate_args!("::hot::type/is-ok", args, 1);
 
-    // First, evaluate any lazy thunks to get the actual result value
-    let evaluated_val = match &args[0] {
-        Val::Box(b) => {
-            // Check if this is a zero-argument lambda (lazy evaluation)
-            if let Some(lambda_info) = b
-                .as_any()
-                .downcast_ref::<crate::lang::bytecode::LambdaInfo>()
-            {
-                if lambda_info.parameters.is_empty() {
-                    // For lazy parameter lambdas, suppress Result checking during evaluation
-                    // This allows them to evaluate and return Result types without triggering automatic failures
-                    let saved_suppress = if lambda_info.is_lazy_param {
-                        let current = vm.get_suppress_result_checking();
-                        vm.set_suppress_result_checking(true);
-                        Some(current)
-                    } else {
-                        None
-                    };
-
-                    // Evaluate the lazy thunk
-                    let result = match vm.execute_lambda(&args[0], &[]) {
-                        Ok(val) => val,
-                        Err(_err) => {
-                            // Restore Result checking
-                            if let Some(saved) = saved_suppress {
-                                vm.set_suppress_result_checking(saved);
-                            }
-                            // is-ok is a halt boundary for its lazy arg (like
-                            // if-err): the halt is consumed here, so clear the
-                            // halt state or every later JIT-frame boundary
-                            // would treat its own halt as pre-existing and
-                            // suppress it.
-                            vm.reset_failure_state();
-                            vm.reset_cancellation_state();
-                            // If evaluation failed, consider it an error result (not ok)
-                            return HotResult::Ok(Val::Bool(false));
-                        }
-                    };
-
-                    // Restore Result checking
-                    if let Some(saved) = saved_suppress {
-                        vm.set_suppress_result_checking(saved);
-                    }
-
-                    result
-                } else {
-                    // Has parameters, use as-is
-                    args[0].clone()
-                }
-            } else {
-                // Not a lambda, use as-is
-                args[0].clone()
-            }
-        }
-        _ => {
-            // Not boxed, use as-is
-            args[0].clone()
-        }
+    // The argument's value. A halt while computing it propagates: an
+    // inspector looks at a value and catches nothing.
+    let evaluated_val = match inspected_value(vm, &args[0]) {
+        Ok(value) => value,
+        Err(halt) => return halt,
     };
 
     // Now check if the evaluated result is Ok
@@ -1285,64 +1185,11 @@ pub fn result_is_err(
 ) -> HotResult<Val> {
     validate_args!("::hot::type/is-err", args, 1);
 
-    // First, evaluate any lazy thunks to get the actual result value
-    let evaluated_val = match &args[0] {
-        Val::Box(b) => {
-            // Check if this is a zero-argument lambda (lazy evaluation)
-            if let Some(lambda_info) = b
-                .as_any()
-                .downcast_ref::<crate::lang::bytecode::LambdaInfo>()
-            {
-                if lambda_info.parameters.is_empty() {
-                    // For lazy parameter lambdas, suppress Result checking during evaluation
-                    // This allows them to evaluate and return Result types without triggering automatic failures
-                    let saved_suppress = if lambda_info.is_lazy_param {
-                        let current = vm.get_suppress_result_checking();
-                        vm.set_suppress_result_checking(true);
-                        Some(current)
-                    } else {
-                        None
-                    };
-
-                    // Evaluate the lazy thunk
-                    let result = match vm.execute_lambda(&args[0], &[]) {
-                        Ok(val) => val,
-                        Err(_err) => {
-                            // Restore Result checking
-                            if let Some(saved) = saved_suppress {
-                                vm.set_suppress_result_checking(saved);
-                            }
-                            // is-err is a halt boundary for its lazy arg (like
-                            // if-err): the halt is consumed here, so clear the
-                            // halt state or every later JIT-frame boundary
-                            // would treat its own halt as pre-existing and
-                            // suppress it.
-                            vm.reset_failure_state();
-                            vm.reset_cancellation_state();
-                            // If evaluation failed, consider it an error result (is err)
-                            return HotResult::Ok(Val::Bool(true));
-                        }
-                    };
-
-                    // Restore Result checking
-                    if let Some(saved) = saved_suppress {
-                        vm.set_suppress_result_checking(saved);
-                    }
-
-                    result
-                } else {
-                    // Has parameters, use as-is
-                    args[0].clone()
-                }
-            } else {
-                // Not a lambda, use as-is
-                args[0].clone()
-            }
-        }
-        _ => {
-            // Not boxed, use as-is
-            args[0].clone()
-        }
+    // The argument's value. A halt while computing it propagates: an
+    // inspector looks at a value and catches nothing.
+    let evaluated_val = match inspected_value(vm, &args[0]) {
+        Ok(value) => value,
+        Err(halt) => return halt,
     };
 
     // Now check if the evaluated result is Err
@@ -1392,36 +1239,19 @@ pub fn result_err(args: &[Val]) -> HotResult<Val> {
     HotResult::Ok(Val::err(args[0].clone()))
 }
 
-/// Evaluate a possibly-lazy argument with Result checking suppressed, so a
-/// Result value reaches the caller unchanged instead of re-triggering a halt.
-/// Returns Err(()) when the thunk itself fails to evaluate.
-fn eval_result_arg(
+/// The value an inspector looks at: its argument, forced if it arrives as a
+/// lazy thunk (`VirtualMachine::force_lazy`). A halt while computing it
+/// isn't caught here: it is returned to propagate at the native's boundary.
+fn inspected_value(
     vm: &mut crate::lang::runtime::vm::VirtualMachine,
     arg: &Val,
-) -> Result<Val, ()> {
-    if let Val::Box(b) = arg
-        && let Some(lambda_info) = b
-            .as_any()
-            .downcast_ref::<crate::lang::bytecode::LambdaInfo>()
-        && lambda_info.parameters.is_empty()
-    {
-        let saved_suppress = if lambda_info.is_lazy_param {
-            let current = vm.get_suppress_result_checking();
-            vm.set_suppress_result_checking(true);
-            Some(current)
-        } else {
-            None
-        };
-
-        let result = vm.execute_lambda(arg, &[]);
-
-        if let Some(saved) = saved_suppress {
-            vm.set_suppress_result_checking(saved);
-        }
-
-        return result.map_err(|_| ());
-    }
-    Ok(arg.clone())
+) -> Result<Val, HotResult<Val>> {
+    vm.force_lazy(arg).map_err(|err| {
+        vm.record_halt(&err);
+        HotResult::Err(Val::from(
+            crate::lang::runtime::vm::VirtualMachine::halt_message(&err),
+        ))
+    })
 }
 
 /// Classify an evaluated value: Some(true) = Result.Ok, Some(false) = Result.Err,
@@ -1451,15 +1281,15 @@ fn classify_result(val: &Val) -> (Option<bool>, Option<Val>) {
     (None, None)
 }
 
-/// is-result: true only for Result.Ok / Result.Err values (lazy-aware)
+/// is-result: true only for Result.Ok / Result.Err values
 pub fn result_is_result(
     vm: &mut crate::lang::runtime::vm::VirtualMachine,
     args: &[Val],
 ) -> HotResult<Val> {
     validate_args!("::hot::type/is-result", args, 1);
-    let val = match eval_result_arg(vm, &args[0]) {
+    let val = match inspected_value(vm, &args[0]) {
         Ok(v) => v,
-        Err(()) => return HotResult::Ok(Val::Bool(false)),
+        Err(halt) => return halt,
     };
     let (kind, _) = classify_result(&val);
     HotResult::Ok(Val::Bool(kind.is_some()))
@@ -1472,9 +1302,9 @@ pub fn result_ok_value(
     args: &[Val],
 ) -> HotResult<Val> {
     validate_args!("::hot::type/ok-value", args, 1);
-    let val = match eval_result_arg(vm, &args[0]) {
+    let val = match inspected_value(vm, &args[0]) {
         Ok(v) => v,
-        Err(()) => return HotResult::Ok(Val::Null),
+        Err(halt) => return halt,
     };
     match classify_result(&val) {
         (Some(true), payload) => HotResult::Ok(payload.unwrap_or(Val::Null)),
@@ -1489,9 +1319,9 @@ pub fn result_err_value(
     args: &[Val],
 ) -> HotResult<Val> {
     validate_args!("::hot::type/err-value", args, 1);
-    let val = match eval_result_arg(vm, &args[0]) {
+    let val = match inspected_value(vm, &args[0]) {
         Ok(v) => v,
-        Err(()) => return HotResult::Ok(Val::Null),
+        Err(halt) => return halt,
     };
     match classify_result(&val) {
         (Some(false), payload) => HotResult::Ok(payload.unwrap_or(Val::Null)),
@@ -1500,7 +1330,7 @@ pub fn result_err_value(
 }
 
 /// if-ok: if Result is Ok, apply fn or use value; if Err, pass through
-/// if-ok(result, fn-or-value) — VM-aware for lazy eval + fn dispatch
+/// if-ok(result, fn-or-value) — VM-aware for fn dispatch
 pub fn result_if_ok(
     vm: &mut crate::lang::runtime::vm::VirtualMachine,
     args: &[Val],
@@ -1511,66 +1341,11 @@ pub fn result_if_ok(
         ));
     }
 
-    // Evaluate lazy first arg (same pattern as result_is_ok)
-    let evaluated_val = match &args[0] {
-        Val::Box(b) => {
-            if let Some(lambda_info) = b
-                .as_any()
-                .downcast_ref::<crate::lang::bytecode::LambdaInfo>()
-            {
-                if lambda_info.parameters.is_empty() {
-                    let saved_suppress = if lambda_info.is_lazy_param {
-                        let current = vm.get_suppress_result_checking();
-                        vm.set_suppress_result_checking(true);
-                        Some(current)
-                    } else {
-                        None
-                    };
-                    let result = match vm.execute_lambda(&args[0], &[]) {
-                        Ok(val) => val,
-                        Err(err) => {
-                            if let Some(saved) = saved_suppress {
-                                vm.set_suppress_result_checking(saved);
-                            }
-                            // if-ok is a halt boundary for its lazy first arg
-                            // (mirror of if-err): capture the structured
-                            // failure payload and clear the halt state so
-                            // downstream code (and later JIT-frame halt
-                            // boundaries) run normally.
-                            let err_val = if let Some(f) = vm.get_failure() {
-                                vm.reset_failure_state();
-                                vm.reset_cancellation_state();
-                                if matches!(f.data, Val::Null) {
-                                    Val::from(f.msg)
-                                } else {
-                                    f.data
-                                }
-                            } else if let Some(c) = vm.get_cancellation() {
-                                vm.reset_failure_state();
-                                vm.reset_cancellation_state();
-                                if matches!(c.data, Val::Null) {
-                                    Val::from(c.msg)
-                                } else {
-                                    c.data
-                                }
-                            } else {
-                                Val::from(err.to_string())
-                            };
-                            return HotResult::Ok(Val::err(err_val));
-                        }
-                    };
-                    if let Some(saved) = saved_suppress {
-                        vm.set_suppress_result_checking(saved);
-                    }
-                    result
-                } else {
-                    args[0].clone()
-                }
-            } else {
-                args[0].clone()
-            }
-        }
-        _ => args[0].clone(),
+    // The argument's value. A halt while computing it propagates: an
+    // inspector looks at a value and catches nothing.
+    let evaluated_val = match inspected_value(vm, &args[0]) {
+        Ok(value) => value,
+        Err(halt) => return halt,
     };
 
     // Unwrap Raw wrappers
@@ -1620,7 +1395,7 @@ pub fn result_if_ok(
 }
 
 /// if-err: if Result is Err, apply fn or use value; if Ok, pass through
-/// if-err(result, fn-or-value) — VM-aware for lazy eval + fn dispatch
+/// if-err(result, fn-or-value) — VM-aware for fn dispatch
 pub fn result_if_err(
     vm: &mut crate::lang::runtime::vm::VirtualMachine,
     args: &[Val],
@@ -1631,68 +1406,11 @@ pub fn result_if_err(
         ));
     }
 
-    // Evaluate lazy first arg (same pattern as result_is_ok)
-    let evaluated_val = match &args[0] {
-        Val::Box(b) => {
-            if let Some(lambda_info) = b
-                .as_any()
-                .downcast_ref::<crate::lang::bytecode::LambdaInfo>()
-            {
-                if lambda_info.parameters.is_empty() {
-                    let saved_suppress = if lambda_info.is_lazy_param {
-                        let current = vm.get_suppress_result_checking();
-                        vm.set_suppress_result_checking(true);
-                        Some(current)
-                    } else {
-                        None
-                    };
-                    let result = match vm.execute_lambda(&args[0], &[]) {
-                        Ok(val) => val,
-                        Err(err) => {
-                            if let Some(saved) = saved_suppress {
-                                vm.set_suppress_result_checking(saved);
-                            }
-                            // if-err is a halt boundary for its lazy first arg:
-                            // if evaluating the result expression halts via
-                            // `fail()` / `cancel()`, capture the structured
-                            // failure payload (preferring `fail()` data over
-                            // the runtime error string), clear the halt state
-                            // so the handler and downstream code can run, and
-                            // dispatch the handler branch.
-                            let err_val = if let Some(f) = vm.get_failure() {
-                                vm.reset_failure_state();
-                                vm.reset_cancellation_state();
-                                if matches!(f.data, Val::Null) {
-                                    Val::from(f.msg)
-                                } else {
-                                    f.data
-                                }
-                            } else if let Some(c) = vm.get_cancellation() {
-                                vm.reset_failure_state();
-                                vm.reset_cancellation_state();
-                                if matches!(c.data, Val::Null) {
-                                    Val::from(c.msg)
-                                } else {
-                                    c.data
-                                }
-                            } else {
-                                Val::from(err.to_string())
-                            };
-                            return handle_err_branch(vm, &args[1], &err_val);
-                        }
-                    };
-                    if let Some(saved) = saved_suppress {
-                        vm.set_suppress_result_checking(saved);
-                    }
-                    result
-                } else {
-                    args[0].clone()
-                }
-            } else {
-                args[0].clone()
-            }
-        }
-        _ => args[0].clone(),
+    // The argument's value. A halt while computing it propagates: an
+    // inspector looks at a value and catches nothing.
+    let evaluated_val = match inspected_value(vm, &args[0]) {
+        Ok(value) => value,
+        Err(halt) => return halt,
     };
 
     // Unwrap Raw wrappers
