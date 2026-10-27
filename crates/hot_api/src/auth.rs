@@ -47,6 +47,60 @@ pub enum AuthContext {
     },
 }
 
+// A credential the database could not check is unavailable, not invalid:
+// clients retry a 503 but discard a credential that got a 401.
+fn api_key_status(error: hot::db::api_key::ApiKeyError) -> StatusCode {
+    match error {
+        hot::db::api_key::ApiKeyError::Database(_) => StatusCode::SERVICE_UNAVAILABLE,
+        _ => StatusCode::UNAUTHORIZED,
+    }
+}
+
+fn session_status(error: hot::db::session::SessionError) -> StatusCode {
+    match error {
+        hot::db::session::SessionError::Database(_) => StatusCode::SERVICE_UNAVAILABLE,
+        _ => StatusCode::UNAUTHORIZED,
+    }
+}
+
+fn service_key_status(error: hot::db::service_key::ServiceKeyError) -> StatusCode {
+    match error {
+        hot::db::service_key::ServiceKeyError::Database(_) => StatusCode::SERVICE_UNAVAILABLE,
+        _ => StatusCode::UNAUTHORIZED,
+    }
+}
+
+fn management_key_status(error: hot::db::management_key::ManagementKeyError) -> StatusCode {
+    match error {
+        hot::db::management_key::ManagementKeyError::Database(_) => StatusCode::SERVICE_UNAVAILABLE,
+        _ => StatusCode::UNAUTHORIZED,
+    }
+}
+
+/// A missing or RLS-hidden environment or org is forbidden; any other
+/// database failure is unavailable.
+fn scope_lookup_status(error: &sqlx::Error) -> StatusCode {
+    if matches!(error, sqlx::Error::RowNotFound) {
+        StatusCode::FORBIDDEN
+    } else {
+        StatusCode::SERVICE_UNAVAILABLE
+    }
+}
+
+fn env_scope_status(error: hot::db::env::EnvError) -> StatusCode {
+    match error {
+        hot::db::env::EnvError::Database(error) => scope_lookup_status(&error),
+        hot::db::env::EnvError::NotFound => StatusCode::FORBIDDEN,
+    }
+}
+
+fn org_scope_status(error: hot::db::org::OrgError) -> StatusCode {
+    match error {
+        hot::db::org::OrgError::Database(error) => scope_lookup_status(&error),
+        _ => StatusCode::FORBIDDEN,
+    }
+}
+
 impl AuthContext {
     /// Re-read a previously authenticated principal without retaining its secret.
     /// Used by long-lived connections; scope and issuer lineage cannot change.
@@ -58,7 +112,7 @@ impl AuthContext {
             async {
                 let mut parent = ApiKey::get_api_key(db, &self.api_key_id())
                     .await
-                    .map_err(|_| StatusCode::UNAUTHORIZED)?;
+                    .map_err(api_key_status)?;
                 if !parent.active || parent.env_id != self.env_id() {
                     return Err(StatusCode::UNAUTHORIZED);
                 }
@@ -67,14 +121,14 @@ impl AuthContext {
                         db, &parent,
                     )
                     .await
-                    .map_err(|_| StatusCode::UNAUTHORIZED)?;
+                    .map_err(management_key_status)?;
                 parent.permissions = issuer_permissions.to_json();
                 let current = match self {
                     Self::ApiKey(_) => Self::ApiKey(parent),
                     Self::Session { session, .. } => {
                         let current = Session::get_session(db, &session.session_id)
                             .await
-                            .map_err(|_| StatusCode::UNAUTHORIZED)?;
+                            .map_err(session_status)?;
                         if current.is_expired()
                             || current.is_revoked()
                             || current.env_id != self.env_id()
@@ -91,7 +145,7 @@ impl AuthContext {
                     Self::ServiceKey { service_key, .. } => {
                         let current = ServiceKey::get_service_key(db, &service_key.service_key_id)
                             .await
-                            .map_err(|_| StatusCode::UNAUTHORIZED)?;
+                            .map_err(service_key_status)?;
                         if current.is_expired()
                             || current.is_revoked()
                             || current.env_id != self.env_id()
@@ -299,17 +353,17 @@ pub async fn runtime_database_scope(
         async {
             let env = hot::db::Env::get_env_uncached(db, &env_id)
                 .await
-                .map_err(|_| StatusCode::FORBIDDEN)?;
+                .map_err(env_scope_status)?;
             let org = hot::db::Org::get_org_uncached(db, &env.org_id)
                 .await
-                .map_err(|_| StatusCode::FORBIDDEN)?;
+                .map_err(org_scope_status)?;
             if !env.active || !org.is_admitting() {
                 return Err(StatusCode::FORBIDDEN);
             }
             if let Some(root_id) = org.parent_org_id {
                 let root = hot::db::Org::get_org_uncached(db, &root_id)
                     .await
-                    .map_err(|_| StatusCode::FORBIDDEN)?;
+                    .map_err(org_scope_status)?;
                 if !root.is_admitting() || root.parent_org_id.is_some() {
                     return Err(StatusCode::FORBIDDEN);
                 }
@@ -439,7 +493,7 @@ async fn authenticate_token_inner(
         // ================================================================
         let session = Session::verify_token(db, token).await.map_err(|e| {
             debug!("Session token validation failed: {}", e);
-            StatusCode::UNAUTHORIZED
+            session_status(e)
         })?;
 
         let api_key_id = session.api_key_id;
@@ -447,7 +501,7 @@ async fn authenticate_token_inner(
         // Verify parent API key is still active
         let mut parent_key = ApiKey::get_api_key(db, &api_key_id).await.map_err(|e| {
             debug!("Parent API key not found for session: {:?}", e);
-            StatusCode::UNAUTHORIZED
+            api_key_status(e)
         })?;
 
         if !parent_key.active || parent_key.env_id != session.env_id {
@@ -466,7 +520,7 @@ async fn authenticate_token_inner(
         parent_key.permissions =
             hot::db::management_key::ManagementKey::effective_runtime_permissions(db, &parent_key)
                 .await
-                .map_err(|_| StatusCode::UNAUTHORIZED)?
+                .map_err(management_key_status)?
                 .to_json();
         let auth_ctx = AuthContext::Session {
             session: session.clone(),
@@ -486,7 +540,7 @@ async fn authenticate_token_inner(
                 key.permissions =
                     hot::db::management_key::ManagementKey::effective_runtime_permissions(db, &key)
                         .await
-                        .map_err(|_| StatusCode::UNAUTHORIZED)?
+                        .map_err(management_key_status)?
                         .to_json();
                 debug!("API key validated successfully for env: {}", key.env_id);
 
@@ -509,7 +563,7 @@ async fn authenticate_token_inner(
         // ================================================================
         let service_key = ServiceKey::verify_token(db, token).await.map_err(|e| {
             debug!("Service key validation failed: {}", e);
-            StatusCode::UNAUTHORIZED
+            service_key_status(e)
         })?;
 
         let api_key_id = service_key.api_key_id;
@@ -517,7 +571,7 @@ async fn authenticate_token_inner(
         // Verify parent API key is still active
         let mut parent_key = ApiKey::get_api_key(db, &api_key_id).await.map_err(|e| {
             debug!("Parent API key not found for service key: {:?}", e);
-            StatusCode::UNAUTHORIZED
+            api_key_status(e)
         })?;
 
         if !parent_key.active || parent_key.env_id != service_key.env_id {
@@ -536,7 +590,7 @@ async fn authenticate_token_inner(
         parent_key.permissions =
             hot::db::management_key::ManagementKey::effective_runtime_permissions(db, &parent_key)
                 .await
-                .map_err(|_| StatusCode::UNAUTHORIZED)?
+                .map_err(management_key_status)?
                 .to_json();
         let auth_ctx = AuthContext::ServiceKey {
             service_key: service_key.clone(),
@@ -722,6 +776,27 @@ mod scope_tests {
         let auth = session_context(json!({"mcp:weather/*": ["execute"]}), json!({"*:*": ["*"]}));
         assert!(auth.has_permission("mcp:weather/forecast", "execute"));
         assert!(!auth.has_permission("mcp:payments/send", "execute"));
+    }
+
+    #[test]
+    fn database_failures_are_unavailable_but_missing_rows_deny() {
+        use hot::db::{env::EnvError, org::OrgError, session::SessionError};
+        assert_eq!(
+            session_status(SessionError::Database(sqlx::Error::PoolTimedOut)),
+            StatusCode::SERVICE_UNAVAILABLE
+        );
+        assert_eq!(
+            session_status(SessionError::NotFound),
+            StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(
+            env_scope_status(EnvError::Database(sqlx::Error::RowNotFound)),
+            StatusCode::FORBIDDEN
+        );
+        assert_eq!(
+            org_scope_status(OrgError::Database(sqlx::Error::PoolTimedOut)),
+            StatusCode::SERVICE_UNAVAILABLE
+        );
     }
     #[tokio::test]
     async fn authentication_reloads_issuer_and_rejects_cross_environment_lineage() {
