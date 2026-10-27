@@ -733,14 +733,11 @@ pub async fn switch_org_handler(
         ));
         format!("/dashboard?org_id={}&env_id={}", org_id, env.env_id)
     } else {
-        cookies = cookies.remove(
-            axum_extra::extract::cookie::Cookie::build((
-                crate::auth::current_env_cookie_name(),
-                "",
-            ))
-            .path("/")
-            .build(),
-        );
+        // A `__Host-` cookie is only cleared by a removal that is `Secure`,
+        // as `build_removal_cookie` makes it outside local development.
+        cookies = cookies.add(crate::auth::build_removal_cookie(
+            crate::auth::current_env_cookie_name(),
+        ));
         format!("/@{}", org.slug)
     };
     Ok((cookies, Redirect::to(&redirect)))
