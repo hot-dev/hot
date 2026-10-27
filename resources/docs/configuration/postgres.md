@@ -138,9 +138,11 @@ maintenance window.
    the tables. Keep that login, or the current table owner, as the schema
    owner, and create a new runtime login as shown above.
 
-4. **Stop every 2.x process.** Stop the API, app, workers, task workers,
-   scheduler, and any CLI sessions that use the database. There is no rolling
-   upgrade: 2.x processes can't run against the migrated database.
+4. **Stop every 2.x process.** Stop the API, app, and scheduler first, and let
+   the workers and task workers finish the work already queued: 3.0 can't run
+   work queued for a 2.x build. Then stop them, and any CLI sessions that use
+   the database. There is no rolling upgrade: 2.x processes can't run against
+   the migrated database.
 
 5. **Take a backup.** See [Backups](#backups). Downgrading after the migration
    is not supported, so this backup is your way back.
@@ -166,7 +168,8 @@ maintenance window.
    `hot db provision-store-indexes`. See
    [Store Search Indexes](#store-search-indexes).
 
-10. **Redeploy your projects** with the 3.0 CLI. See
+10. **Redeploy your projects** with the 3.0 CLI, or all at once with
+    `hot db redeploy` (start with `--dry-run`). See
     [Upgrading to Hot 3.0](/docs/migrations#upgrading-to-hot-30).
 
 Multipart file uploads started before the upgrade can't complete afterward.

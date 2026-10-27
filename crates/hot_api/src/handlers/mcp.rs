@@ -2226,6 +2226,20 @@ async fn handle_tools_call_streaming(
 
     // Fetch build and project info for the execution context
     let (build_hash, project_id, project_name) = match Build::get_build(db, &tool.build_id).await {
+        // A deployment this runtime can't run, made with another major
+        // version of Hot, is unavailable until the project is redeployed.
+        Ok(build) if build.runtime_version_error_message().is_some() => {
+            return Ok(Json(JsonRpcResponse::error(
+                id,
+                INTERNAL_ERROR,
+                format!(
+                    "Tool '{}' is unavailable until its project is redeployed for this version of Hot",
+                    call_params.name
+                ),
+                None,
+            ))
+            .into_response());
+        }
         Ok(build) => {
             let project_name = Project::get_project(db, &build.project_id)
                 .await

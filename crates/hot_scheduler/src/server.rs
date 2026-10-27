@@ -601,6 +601,9 @@ async fn sync_with_database(
             );
             e
         })?;
+    // A deployment this runtime can't run, made with another major version
+    // of Hot, keeps its schedules paused until the project is redeployed.
+    let schedules = without_builds_awaiting_redeploy(db, schedules).await;
 
     // Get current running jobs
     let mut jobs_map = running_jobs.write().await;
@@ -1021,6 +1024,44 @@ async fn check_and_backfill_missed_executions(
     }
 
     Ok(missed_executions.len())
+}
+
+/// The schedules whose build this runtime can run. A build it can't, or
+/// can't look up now, keeps its schedules as they are.
+async fn without_builds_awaiting_redeploy(
+    db: &Arc<DatabasePool>,
+    schedules: Vec<Schedule>,
+) -> Vec<Schedule> {
+    static WARNED: std::sync::OnceLock<std::sync::Mutex<ahash::AHashSet<Uuid>>> =
+        std::sync::OnceLock::new();
+    let mut paused: AHashMap<Uuid, bool> = AHashMap::new();
+    for schedule in &schedules {
+        if paused.contains_key(&schedule.build_id) {
+            continue;
+        }
+        let reason = match hot::db::Build::get_build(db, &schedule.build_id).await {
+            Ok(build) => build.runtime_version_error_message(),
+            Err(_) => None,
+        };
+        if let Some(reason) = &reason {
+            let first = WARNED
+                .get_or_init(Default::default)
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .insert(schedule.build_id);
+            if first {
+                warn!(
+                    "hot.dev: SCHEDULER pauses the schedules of build {} until it's redeployed: {}",
+                    schedule.build_id, reason
+                );
+            }
+        }
+        paused.insert(schedule.build_id, reason.is_some());
+    }
+    schedules
+        .into_iter()
+        .filter(|schedule| !paused.get(&schedule.build_id).copied().unwrap_or(false))
+        .collect()
 }
 
 /// Get the schedule creation time (from schedule.created_at or fallback to build.created_at)

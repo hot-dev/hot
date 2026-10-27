@@ -72,12 +72,38 @@ in the database. A new or empty database no longer creates it. See
 
 ### Deploying
 
-<!-- TODO(curt): confirm 2.x bundle policy -->
-Builds are tied to a major version of Hot. Upgrade the server first, then
-redeploy every project with the 3.0 CLI. A 3.0 server doesn't run builds made
+Builds are tied to a major version of Hot. A 3.0 server doesn't run builds made
 with a 2.x CLI, and a 2.x CLI can't deploy to a 3.0 server. In CI, pin the
 setup-hot `version` input so pipelines move to 3.0 when you do. See
 [Pin a Specific Version](/docs/ci-cd#pin-a-specific-version).
+
+Before you stop the 2.x servers, let their queues drain. Work queued for a 2.x
+build can't run on 3.0.
+
+After you upgrade the server, redeploy every project with the 3.0 CLI. To
+redeploy them all at once, run `hot db redeploy` with the 3.0 CLI and the
+server's configuration:
+
+```bash
+hot db redeploy --dry-run   # Build and check each 2.x deployment, change nothing
+hot db redeploy             # Deploy the ones that pass
+hot db redeploy --notify    # Also email the admins of each account whose project fails
+```
+
+It builds each 2.x deployment's source again with 3.0 and checks it as
+`hot deploy` does. A project that passes gets a new build, and switches over
+when a worker activates it. A project that fails keeps its 2.x deployment.
+`--notify` also raises a `deploy:failed` alert for it. `--org <slug>` limits
+the run to one organization and its sub-organizations.
+
+Until a 2.x deployment is redeployed:
+
+- Its events and function calls wait, and run on the new deployment.
+- Its schedules are paused.
+- Its webhooks return HTTP 503, and its MCP tools return an error.
+- Its tasks, and calls already bound to its 2.x build, fail with a message to
+  redeploy.
+- Other projects that handle the same event still run their handlers.
 
 ### Language Changes
 

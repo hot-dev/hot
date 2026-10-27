@@ -4594,6 +4594,16 @@ async fn process_code_task(
         )
         .await;
 
+        // A build this runtime can't run, made with another major version of
+        // Hot, never runs here, even after its project is redeployed.
+        if let Ok(build) = Build::get_build(&db, &build_id).await
+            && let Some(reason) = build.runtime_version_error_message()
+        {
+            return Err(format!(
+                "{reason}. Redeploy the project, and start the task again"
+            ));
+        }
+
         let (cached, blocking_execution_permit) = load_bytecode(
             &build_id,
             Arc::clone(&bytecode_cache),

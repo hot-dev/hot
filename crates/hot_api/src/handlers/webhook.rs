@@ -590,6 +590,18 @@ async fn webhook_handler_inner(
                 Json(ApiErrorResponse::not_found("Webhook deployment")),
             )
         })?;
+    // A deployment this runtime can't run, made with another major version
+    // of Hot, is unavailable until the project is redeployed. A sender that
+    // retries delivers the request once it is.
+    if build.runtime_version_error_message().is_some() {
+        return Err((
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(ApiErrorResponse::new(
+                "redeploy_required",
+                "This webhook is unavailable until its project is redeployed for this version of Hot",
+            )),
+        ));
+    }
     let project = Project::get_project(db, &build.project_id)
         .await
         .map_err(|_| {

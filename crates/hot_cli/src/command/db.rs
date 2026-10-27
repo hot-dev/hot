@@ -1,4 +1,5 @@
-//! `hot db` — database administration (status, migrate, port-v1-to-v2).
+//! `hot db` — database administration (status, migrate, port-v1-to-v2,
+//! redeploy).
 
 use hot::val::Val;
 use tracing::info;
@@ -91,6 +92,77 @@ pub(crate) async fn run_db(
         }
     }
 
+    Ok(())
+}
+
+/// `hot db redeploy`: build and redeploy the deployments that another major
+/// version of Hot built (see `hot::redeploy`).
+pub(crate) async fn run_db_redeploy(
+    conf: &Val,
+    dry_run: bool,
+    notify: bool,
+    org: Option<String>,
+) -> Result<(), String> {
+    use hot::redeploy::RedeployResult;
+
+    let db = hot::db::create_db_pool(conf)
+        .await
+        .map_err(|e| format!("Cannot connect to the database: {e}"))?;
+    let options = hot::redeploy::RedeployOptions {
+        dry_run,
+        notify,
+        org,
+    };
+    let reports = hot::redeploy::redeploy(&db, conf, &options).await?;
+    let runtime = hot::version::current_runtime_version();
+    if reports.is_empty() {
+        println!("Every deployment runs on Hot {runtime}.");
+        return Ok(());
+    }
+
+    println!(
+        "Hot {runtime} doesn't run these {} deployment(s), built with another major version:",
+        reports.len()
+    );
+    let (mut redeployed, mut failed, mut skipped) = (0, 0, 0);
+    for report in &reports {
+        let name = format!(
+            "{}/{}/{} (Hot {})",
+            report.org_slug, report.env_name, report.project_name, report.engine_version
+        );
+        match &report.result {
+            RedeployResult::Redeployed { build_id: Some(id) } => {
+                redeployed += 1;
+                println!("  {name}: redeployed as build {id}");
+            }
+            RedeployResult::Redeployed { build_id: None } => {
+                redeployed += 1;
+                println!("  {name}: builds and checks");
+            }
+            RedeployResult::Failed { reason, notified } => {
+                failed += 1;
+                let first = reason.lines().next().unwrap_or_default();
+                if notify && !dry_run {
+                    println!("  {name}: FAILED, {notified} admin(s) emailed: {first}");
+                } else {
+                    println!("  {name}: FAILED: {first}");
+                }
+            }
+            RedeployResult::Skipped { reason } => {
+                skipped += 1;
+                println!("  {name}: skipped, {reason}");
+            }
+        }
+    }
+    if dry_run {
+        println!(
+            "Dry run: {redeployed} would redeploy, {failed} fail, {skipped} skipped. Nothing changed."
+        );
+    } else {
+        println!(
+            "Redeployed {redeployed}, failed {failed}, skipped {skipped}. A worker activates each new build, and the old one serves until then. A failed deployment's work waits until its project is redeployed."
+        );
+    }
     Ok(())
 }
 

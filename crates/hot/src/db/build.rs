@@ -119,7 +119,7 @@ impl Build {
         let build = match db {
             crate::db::DatabasePool::Postgres(pg_pool) => {
                 sqlx::query_as::<_, Build>(
-                    "SELECT b.build_id, b.project_id, b.hash, b.size, b.build_type_id, bt.build_type, b.deployed, b.active, b.created_by_user_id, b.created_at, b.updated_at, b.updated_by_user_id, b.active_toggle_at, b.active_toggle_by_user_id, b.storage_path, b.storage_backend, b.runtime_status, b.runtime_ready_at, b.runtime_error, b.deployment_sequence FROM build b JOIN build_type bt ON b.build_type_id = bt.build_type_id WHERE b.build_id = $1"
+                    "SELECT b.build_id, b.project_id, b.hash, b.size, b.build_type_id, bt.build_type, b.deployed, b.active, b.created_by_user_id, b.created_at, b.updated_at, b.updated_by_user_id, b.active_toggle_at, b.active_toggle_by_user_id, b.storage_path, b.storage_backend, b.runtime_status, b.runtime_ready_at, b.runtime_error, b.deployment_sequence, b.engine_version, b.hot_std_version FROM build b JOIN build_type bt ON b.build_type_id = bt.build_type_id WHERE b.build_id = $1"
                 )
                 .bind(build_id)
                 .fetch_one(pg_pool)
@@ -134,7 +134,7 @@ impl Build {
             }
             crate::db::DatabasePool::Sqlite(sqlite_pool) => {
                 sqlx::query_as::<_, Build>(
-                    "SELECT b.build_id, b.project_id, b.hash, b.size, b.build_type_id, bt.build_type, b.deployed, b.active, b.created_by_user_id, b.created_at, b.updated_at, b.updated_by_user_id, b.active_toggle_at, b.active_toggle_by_user_id, b.storage_path, b.storage_backend, b.runtime_status, b.runtime_ready_at, b.runtime_error, b.deployment_sequence FROM build b JOIN build_type bt ON b.build_type_id = bt.build_type_id WHERE b.build_id = ?"
+                    "SELECT b.build_id, b.project_id, b.hash, b.size, b.build_type_id, bt.build_type, b.deployed, b.active, b.created_by_user_id, b.created_at, b.updated_at, b.updated_by_user_id, b.active_toggle_at, b.active_toggle_by_user_id, b.storage_path, b.storage_backend, b.runtime_status, b.runtime_ready_at, b.runtime_error, b.deployment_sequence, b.engine_version, b.hot_std_version FROM build b JOIN build_type bt ON b.build_type_id = bt.build_type_id WHERE b.build_id = ?"
                 )
                 .bind(build_id)
                 .fetch_one(sqlite_pool)
@@ -179,9 +179,10 @@ impl Build {
 
     /// Best-effort metadata hydration for app/API display paths.
     ///
-    /// The broad build fetch methods intentionally do not select these columns:
-    /// workers, schedulers, and task workers must stay compatible during the
-    /// short rollout window before the app has applied the migration.
+    /// The broad build fetch methods don't select these columns. The ones
+    /// that decide whether this runtime can run a build do: `get_build`,
+    /// `get_deployed_build_by_project`, and the runtime warm-up and recovery
+    /// queries.
     pub async fn hydrate_manifest_versions(
         db: &crate::db::DatabasePool,
         build: &mut Build,
@@ -375,7 +376,7 @@ impl Build {
         let builds = match db {
             crate::db::DatabasePool::Postgres(pg_pool) => {
                 sqlx::query_as::<_, Build>(
-                    "SELECT b.build_id, b.project_id, b.hash, b.size, b.build_type_id, bt.build_type, b.deployed, b.active, b.created_by_user_id, b.created_at, b.updated_at, b.updated_by_user_id, b.active_toggle_at, b.active_toggle_by_user_id, b.storage_path, b.storage_backend, b.runtime_status, b.runtime_ready_at, b.runtime_error, b.deployment_sequence
+                    "SELECT b.build_id, b.project_id, b.hash, b.size, b.build_type_id, bt.build_type, b.deployed, b.active, b.created_by_user_id, b.created_at, b.updated_at, b.updated_by_user_id, b.active_toggle_at, b.active_toggle_by_user_id, b.storage_path, b.storage_backend, b.runtime_status, b.runtime_ready_at, b.runtime_error, b.deployment_sequence, b.engine_version, b.hot_std_version
                      FROM build b
                      JOIN build_type bt ON b.build_type_id = bt.build_type_id
                      JOIN project p ON b.project_id = p.project_id
@@ -396,7 +397,7 @@ impl Build {
             }
             crate::db::DatabasePool::Sqlite(sqlite_pool) => {
                 sqlx::query_as::<_, Build>(
-                    "SELECT b.build_id, b.project_id, b.hash, b.size, b.build_type_id, bt.build_type, b.deployed, b.active, b.created_by_user_id, b.created_at, b.updated_at, b.updated_by_user_id, b.active_toggle_at, b.active_toggle_by_user_id, b.storage_path, b.storage_backend, b.runtime_status, b.runtime_ready_at, b.runtime_error, b.deployment_sequence
+                    "SELECT b.build_id, b.project_id, b.hash, b.size, b.build_type_id, bt.build_type, b.deployed, b.active, b.created_by_user_id, b.created_at, b.updated_at, b.updated_by_user_id, b.active_toggle_at, b.active_toggle_by_user_id, b.storage_path, b.storage_backend, b.runtime_status, b.runtime_ready_at, b.runtime_error, b.deployment_sequence, b.engine_version, b.hot_std_version
                      FROM build b
                      JOIN build_type bt ON b.build_type_id = bt.build_type_id
                      JOIN project p ON b.project_id = p.project_id
@@ -440,7 +441,7 @@ impl Build {
         let builds = match db {
             crate::db::DatabasePool::Postgres(pg_pool) => {
                 sqlx::query_as::<_, Build>(
-                    "SELECT b.build_id, b.project_id, b.hash, b.size, b.build_type_id, bt.build_type, b.deployed, b.active, b.created_by_user_id, b.created_at, b.updated_at, b.updated_by_user_id, b.active_toggle_at, b.active_toggle_by_user_id, b.storage_path, b.storage_backend, b.runtime_status, b.runtime_ready_at, b.runtime_error, b.deployment_sequence
+                    "SELECT b.build_id, b.project_id, b.hash, b.size, b.build_type_id, bt.build_type, b.deployed, b.active, b.created_by_user_id, b.created_at, b.updated_at, b.updated_by_user_id, b.active_toggle_at, b.active_toggle_by_user_id, b.storage_path, b.storage_backend, b.runtime_status, b.runtime_ready_at, b.runtime_error, b.deployment_sequence, b.engine_version, b.hot_std_version
                      FROM build b
                      JOIN build_type bt ON b.build_type_id = bt.build_type_id
                      JOIN project p ON b.project_id = p.project_id
@@ -470,7 +471,7 @@ impl Build {
             }
             crate::db::DatabasePool::Sqlite(sqlite_pool) => {
                 sqlx::query_as::<_, Build>(
-                    "SELECT b.build_id, b.project_id, b.hash, b.size, b.build_type_id, bt.build_type, b.deployed, b.active, b.created_by_user_id, b.created_at, b.updated_at, b.updated_by_user_id, b.active_toggle_at, b.active_toggle_by_user_id, b.storage_path, b.storage_backend, b.runtime_status, b.runtime_ready_at, b.runtime_error, b.deployment_sequence
+                    "SELECT b.build_id, b.project_id, b.hash, b.size, b.build_type_id, bt.build_type, b.deployed, b.active, b.created_by_user_id, b.created_at, b.updated_at, b.updated_by_user_id, b.active_toggle_at, b.active_toggle_by_user_id, b.storage_path, b.storage_backend, b.runtime_status, b.runtime_ready_at, b.runtime_error, b.deployment_sequence, b.engine_version, b.hot_std_version
                      FROM build b
                      JOIN build_type bt ON b.build_type_id = bt.build_type_id
                      JOIN project p ON b.project_id = p.project_id
@@ -1504,7 +1505,7 @@ impl Build {
         match db {
             crate::db::DatabasePool::Postgres(pg_pool) => {
                 let build = sqlx::query_as::<_, Build>(
-                    "SELECT b.build_id, b.project_id, b.hash, b.size, b.build_type_id, bt.build_type, b.deployed, b.active, b.created_by_user_id, b.created_at, b.updated_at, b.updated_by_user_id, b.active_toggle_at, b.active_toggle_by_user_id, b.storage_path, b.storage_backend, b.runtime_status, b.runtime_ready_at, b.runtime_error, b.deployment_sequence FROM build b JOIN build_type bt ON b.build_type_id = bt.build_type_id WHERE b.project_id = $1 AND b.deployed = true AND b.runtime_status = 'ready'"
+                    "SELECT b.build_id, b.project_id, b.hash, b.size, b.build_type_id, bt.build_type, b.deployed, b.active, b.created_by_user_id, b.created_at, b.updated_at, b.updated_by_user_id, b.active_toggle_at, b.active_toggle_by_user_id, b.storage_path, b.storage_backend, b.runtime_status, b.runtime_ready_at, b.runtime_error, b.deployment_sequence, b.engine_version, b.hot_std_version FROM build b JOIN build_type bt ON b.build_type_id = bt.build_type_id WHERE b.project_id = $1 AND b.deployed = true AND b.runtime_status = 'ready'"
                 )
                 .bind(project_id)
                 .fetch_optional(pg_pool)
@@ -1513,7 +1514,7 @@ impl Build {
             }
             crate::db::DatabasePool::Sqlite(sqlite_pool) => {
                 let build = sqlx::query_as::<_, Build>(
-                    "SELECT b.build_id, b.project_id, b.hash, b.size, b.build_type_id, bt.build_type, b.deployed, b.active, b.created_by_user_id, b.created_at, b.updated_at, b.updated_by_user_id, b.active_toggle_at, b.active_toggle_by_user_id, b.storage_path, b.storage_backend, b.runtime_status, b.runtime_ready_at, b.runtime_error, b.deployment_sequence FROM build b JOIN build_type bt ON b.build_type_id = bt.build_type_id WHERE b.project_id = ? AND b.deployed = 1 AND b.runtime_status = 'ready'"
+                    "SELECT b.build_id, b.project_id, b.hash, b.size, b.build_type_id, bt.build_type, b.deployed, b.active, b.created_by_user_id, b.created_at, b.updated_at, b.updated_by_user_id, b.active_toggle_at, b.active_toggle_by_user_id, b.storage_path, b.storage_backend, b.runtime_status, b.runtime_ready_at, b.runtime_error, b.deployment_sequence, b.engine_version, b.hot_std_version FROM build b JOIN build_type bt ON b.build_type_id = bt.build_type_id WHERE b.project_id = ? AND b.deployed = 1 AND b.runtime_status = 'ready'"
                 )
                 .bind(project_id)
                 .fetch_optional(sqlite_pool)
