@@ -833,39 +833,8 @@ async fn webhook_handler_inner(
         }
     }
 
-    // Response delivery is data access even when durable execution was already
-    // accepted. Do not return a result after revocation or org suspension.
-    crate::auth::runtime_database_scope(db, ctx.env.env_id)
-        .await
-        .map_err(|status| {
-            (
-                status,
-                Json(ApiErrorResponse::new(
-                    "forbidden",
-                    "Environment is not admitting requests",
-                )),
-            )
-        })?;
-    if let Some((auth, _)) = &auth_result {
-        let current = auth.revalidate(db).await.map_err(|status| {
-            (
-                status,
-                Json(ApiErrorResponse::new(
-                    "unauthorized",
-                    "Credential is no longer valid",
-                )),
-            )
-        })?;
-        if current.get_permissions() != auth.get_permissions() {
-            return Err((
-                StatusCode::FORBIDDEN,
-                Json(ApiErrorResponse::new(
-                    "forbidden",
-                    "Credential permissions changed",
-                )),
-            ));
-        }
-    }
+    // Authorization was checked before durable acceptance. Return this
+    // execution's outcome so providers do not replay committed side effects.
     // Convert the outcome to an HTTP response
     match outcome {
         Some(Outcome::Stopped { result }) => build_webhook_response(result, on_custom_domain),

@@ -378,13 +378,39 @@ pub async fn runtime_database_scope(
 }
 
 /// Keep both database scope and revocation checks alive after HTTP middleware
-/// has returned the streaming body. A grant change closes the stream; reconnect
-/// performs the endpoint's full resource authorization against current grants.
+/// has returned the streaming body. The stream closes when its environment
+/// stops admitting or the principal loses one of `requirements` (the
+/// resource/action pairs the endpoint authorized); other grant changes don't
+/// affect it. A check the database can't answer leaves the stream open until
+/// the next one, so an outage doesn't drop every subscriber.
 pub fn guard_stream<S, T>(
     source: S,
     db: Arc<DatabasePool>,
     principal: Option<AuthContext>,
     scope: DatabaseScope,
+    requirements: Vec<(String, String)>,
+) -> impl futures::Stream<Item = T>
+where
+    S: futures::Stream<Item = T> + Send,
+    T: Send,
+{
+    guard_stream_every(
+        source,
+        db,
+        principal,
+        scope,
+        requirements,
+        std::time::Duration::from_secs(30),
+    )
+}
+
+fn guard_stream_every<S, T>(
+    source: S,
+    db: Arc<DatabasePool>,
+    principal: Option<AuthContext>,
+    scope: DatabaseScope,
+    requirements: Vec<(String, String)>,
+    period: std::time::Duration,
 ) -> impl futures::Stream<Item = T>
 where
     S: futures::Stream<Item = T> + Send,
@@ -393,21 +419,25 @@ where
     use futures::StreamExt;
     async_stream::stream! {
         futures::pin_mut!(source);
-        let expected = principal.as_ref().and_then(AuthContext::get_permissions);
-        let mut interval = tokio::time::interval(std::time::Duration::from_secs(30));
+        let mut interval = tokio::time::interval(period);
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
             tokio::select! {
                 biased;
                 _ = interval.tick() => {
                     let admitted = match &scope {
-                        DatabaseScope::Environment { env_id, .. } => runtime_database_scope(&db, *env_id).await.is_ok(),
+                        DatabaseScope::Environment { env_id, .. } => match runtime_database_scope(&db, *env_id).await {
+                            Ok(_) => true,
+                            Err(status) if status.is_server_error() => continue,
+                            Err(_) => false,
+                        },
                         _ => false,
                     };
                     if !admitted { break; }
                     if let Some(principal) = &principal {
                         match principal.revalidate(&db).await {
-                            Ok(current) if current.get_permissions() == expected => {}
+                            Ok(current) if requirements.iter().all(|(resource,action)|current.has_permission(resource,action)) => {}
+                            Err(status) if status.is_server_error() => continue,
                             _ => break,
                         }
                     }
@@ -843,6 +873,70 @@ mod scope_tests {
             org_scope_status(OrgError::Database(sqlx::Error::PoolTimedOut)),
             StatusCode::SERVICE_UNAVAILABLE
         );
+    }
+
+    #[tokio::test]
+    async fn stream_guard_tracks_the_required_permission_not_the_whole_grant() {
+        use futures::StreamExt;
+        let db = Arc::new(hot::db::test_db().await);
+        let data = hot::db::insert_test_data(&db).await.unwrap();
+        let api_key_id = Uuid::now_v7();
+        let (token, key_data) = ApiKey::generate_api_key(&api_key_id).unwrap();
+        ApiKey::insert_api_key(
+            &db,
+            &api_key_id,
+            &data.env_id,
+            "stream reader",
+            &serde_json::from_str(&key_data).unwrap(),
+            &data.user_id,
+            &json!({"stream:*": ["read"], "project:*": ["read"]}),
+        )
+        .await
+        .unwrap();
+        let authenticated = authenticate_token(&db, &token).await.unwrap();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<u32>();
+        let source = async_stream::stream! {
+            while let Some(item) = rx.recv().await {
+                yield item;
+            }
+        };
+        let period = std::time::Duration::from_millis(20);
+        let guarded = guard_stream_every(
+            source,
+            db.clone(),
+            Some(authenticated.auth_ctx),
+            authenticated.scope,
+            vec![("stream:orders".into(), "read".into())],
+            period,
+        );
+        futures::pin_mut!(guarded);
+        tx.send(1).unwrap();
+        assert_eq!(guarded.next().await, Some(1));
+
+        // After a period, the guard re-checks before it yields the next item.
+        ApiKey::update_permissions(
+            &db,
+            &api_key_id,
+            &json!({"stream:*": ["read"]}),
+            &data.user_id,
+        )
+        .await
+        .unwrap();
+        tokio::time::sleep(period * 3).await;
+        tx.send(2).unwrap();
+        assert_eq!(guarded.next().await, Some(2), "unrelated change");
+
+        ApiKey::update_permissions(
+            &db,
+            &api_key_id,
+            &json!({"project:*": ["read"]}),
+            &data.user_id,
+        )
+        .await
+        .unwrap();
+        tokio::time::sleep(period * 3).await;
+        tx.send(3).unwrap();
+        assert_eq!(guarded.next().await, None, "required permission removed");
     }
     #[tokio::test]
     async fn authentication_reloads_issuer_and_rejects_cross_environment_lineage() {

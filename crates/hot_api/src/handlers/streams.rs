@@ -261,6 +261,7 @@ pub async fn subscribe_to_stream(
             )
         })?;
     let stream_auth = auth.clone();
+    let guard_permissions = vec![(format!("stream:{}", stream_id), "read".into())];
     let stream_db = db.clone();
     let stream = async_stream::stream! {
         let _connection_guard = connection_guard;
@@ -524,6 +525,7 @@ pub async fn subscribe_to_stream(
         stream_db,
         Some(stream_auth),
         stream_scope,
+        guard_permissions,
     ))
     .keep_alive(KeepAlive::default()))
 }
@@ -695,6 +697,19 @@ pub async fn subscribe_with_event(
                 )
             })?;
 
+    // Resolve the stream's scope before publishing: failing after the event
+    // is accepted would make the caller retry and publish it twice.
+    let stream_scope = crate::auth::runtime_database_scope(&db, auth.env_id())
+        .await
+        .map_err(|status| {
+            (
+                status,
+                Json(ApiErrorResponse::new(
+                    "forbidden",
+                    "Environment is not admitting requests",
+                )),
+            )
+        })?;
     // Step 3: Create the stream record in the database BEFORE subscribing
     // This ensures the stream exists for the subscription and avoids race conditions
     let create_error = |e: StreamError| {
@@ -779,18 +794,8 @@ pub async fn subscribe_with_event(
     let event_type = published.event_type.clone();
 
     // Step 6: Create the SSE stream
-    let stream_scope = crate::auth::runtime_database_scope(&db, auth.env_id())
-        .await
-        .map_err(|status| {
-            (
-                status,
-                Json(ApiErrorResponse::new(
-                    "forbidden",
-                    "Environment is not admitting requests",
-                )),
-            )
-        })?;
     let stream_auth = auth.clone();
+    let guard_permissions = vec![(format!("stream:{}", stream_id), "read".into())];
     let stream_db = db.clone();
     let stream = async_stream::stream! {
         let _connection_guard = connection_guard;
@@ -1070,6 +1075,7 @@ pub async fn subscribe_with_event(
         stream_db,
         Some(stream_auth),
         stream_scope,
+        guard_permissions,
     ))
     .keep_alive(KeepAlive::default()))
 }
