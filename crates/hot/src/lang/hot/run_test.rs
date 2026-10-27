@@ -209,6 +209,393 @@ make-error(3)"#;
         );
     }
 
+    /// Run `src` interpreted and with the JIT compiling after one call; both
+    /// must produce `expected`.
+    fn assert_same_with_and_without_jit(src: &str, expected: &Val) {
+        for conf in [None, Some(crate::val!({"jit": {"threshold": 1}}))] {
+            let label = if conf.is_some() { "jit" } else { "interpreter" };
+            let out = compile_and_run_with_std_conf(src, conf)
+                .unwrap_or_else(|e| panic!("{label} run failed: {e}\n{src}"));
+            assert_eq!(&out, expected, "{label} result for:\n{src}");
+        }
+    }
+
+    fn strs(values: &[&str]) -> Val {
+        Val::Vec(values.iter().map(|s| Val::from(*s)).collect())
+    }
+
+    /// `Name({...})` inside a custom constructor of a field-less `Name type fn`
+    /// type reaches the default Map constructor. These types had no default
+    /// constructor, so the inner call resolved back to a custom overload and
+    /// never returned (the shipped `Email` and `Point` examples hung).
+    #[test]
+    fn field_less_type_fn_constructor_builds_through_default_map_constructor() {
+        let email = r#"::t ns
+Email type fn
+(value: Str): Email { Email({value,}) },
+(local: Str, domain: Str): Email { Email({value: `${local}@${domain}`}) }
+a Email("a@b.com")
+b Email("x", "y.com")
+c Email({value: "m@b.com"})
+[a.value, b.value, c.value, Str(is-type(a, Email))]"#;
+        assert_same_with_and_without_jit(
+            email,
+            &strs(&["a@b.com", "x@y.com", "m@b.com", "true"]),
+        );
+
+        let point = r#"::t ns
+Point type fn (x: Int, y: Int): Point { Point({x, y}) }
+p Point(10, 20)
+[p.x, p.y]"#;
+        assert_same_with_and_without_jit(point, &Val::Vec(vec![Val::Int(10), Val::Int(20)]));
+    }
+
+    /// A Map that is not a literal (a variable or a call result) selects the
+    /// type's default Map constructor at runtime, as a literal does at compile
+    /// time. It used to be coerced into the `(value: Str)` overload, which
+    /// stored the stringified Map; inside the constructor's own body the
+    /// by-name call re-entered that overload until the recursion limit.
+    #[test]
+    fn non_literal_map_arg_reaches_default_map_constructor() {
+        let struct_form = r#"::t ns
+Email type { value: Str }
+Email fn (value: Str): Email { Email({value,}) }
+m {value: "var@b.com"}
+get-m fn (): Map { {value: "call@b.com"} }
+[Email(m).value, Email(get-m()).value, Email("str@b.com").value]"#;
+        assert_same_with_and_without_jit(
+            struct_form,
+            &strs(&["var@b.com", "call@b.com", "str@b.com"]),
+        );
+
+        let own_body = r#"::t ns
+Slug type fn (value: Str): Slug {
+    data {value: lowercase(value)}
+    Slug(data)
+}
+[Slug("Hello").value, Slug("World").value, Slug("Again").value]"#;
+        assert_same_with_and_without_jit(own_body, &strs(&["hello", "world", "again"]));
+    }
+
+    /// Same-arity overloads dispatch on runtime argument types whichever
+    /// overload is declared last (the compiler's arity-only fallback key), for
+    /// direct calls, self tail calls, and calls made from JIT-compiled code.
+    #[test]
+    fn same_arity_overloads_dispatch_on_runtime_arg_types() {
+        let direct = r#"::t ns
+f fn
+(x: Str): Str { "str" },
+(x: Map): Str { "map" }
+g fn
+(x: Map): Str { "map" },
+(x: Str): Str { "str" }
+m {a: 1}
+s "hi"
+[f(m), f(s), g(m), g(s), f({a: 1}), g("lit")]"#;
+        assert_same_with_and_without_jit(
+            direct,
+            &strs(&["map", "str", "map", "str", "map", "str"]),
+        );
+
+        // The Vec overload's `kind(first(x))` resolves statically to itself
+        // and is a tail call; at runtime its Str argument selects the Str
+        // overload. Compiled code would make that self call natively, so the
+        // function must stay interpreted.
+        let self_tail_call = r#"::t ns
+kind fn
+(x: Str): Str { `str:${x}` },
+(x: Vec): Str {
+    cond {
+        is-vec(x) => { kind(first(x)) }
+        => { "vec-overload-got-non-vec" }
+    }
+}
+[kind(["abc"]), kind(["def"]), kind(["ghi"]), kind("jkl")]"#;
+        assert_same_with_and_without_jit(
+            self_tail_call,
+            &strs(&["str:abc", "str:def", "str:ghi", "str:jkl"]),
+        );
+
+        // `pick` is compiled after one call; its call to `g` goes through the
+        // JIT's VM trampoline, which must dispatch the same way.
+        let from_compiled_caller = r#"::t ns
+g fn
+(x: Map): Str { "map" },
+(x: Str): Str { "str" }
+pick fn (v: Any): Str { g(v) }
+m {a: 1}
+[pick(m), pick(m), pick(m), pick(m)]"#;
+        assert_same_with_and_without_jit(
+            from_compiled_caller,
+            &strs(&["map", "map", "map", "map"]),
+        );
+    }
+
+    /// An untyped (`Any`) overload is reachable whichever order it is
+    /// declared in, and the most specific overload that accepts the arguments
+    /// wins: a single type, then a union or nullable type, then `Any`. The
+    /// untyped overload's key used to be taken over by a later same-arity
+    /// overload, so `k("x")` reached `(x: Map)`.
+    #[test]
+    fn untyped_overload_is_reachable_and_most_specific_wins() {
+        let src = r#"::t ns
+k fn
+(x: Any): Str { "any" },
+(x: Map): Str { "map" }
+k2 fn
+(x: Map): Str { "map" },
+(x: Any): Str { "any" }
+u fn
+(x: Any): Str { "any" },
+(x: Int | Dec): Str { "num" }
+n fn
+(x: Str?): Str { "opt-str" },
+(x: Any): Str { "any" }
+h fn
+(x: Fn): Str { "fn" },
+(x: Any): Str { "any" }
+w fn
+(x: Map): Str { "map" },
+(x: Any): Str { "any" }
+Email type { value: Str }
+s "hi"
+m {a: 1}
+i 1
+f (v) { v }
+e Email({value: "a@b.com"})
+[
+    k("x"), k(s), k(1), k({a: 1}), k(m),
+    k2("x"), k2(s), k2(1), k2({a: 1}), k2(m),
+    u(1), u(1.5), u(i), u("s"),
+    n(null), n("a"), n(1),
+    h(f), h((v) { v }), h(1),
+    w(m), w(e), w(s),
+]"#;
+        assert_same_with_and_without_jit(
+            src,
+            &strs(&[
+                "any", "any", "any", "map", "map", //
+                "any", "any", "any", "map", "map", //
+                "num", "num", "num", "any", //
+                "opt-str", "opt-str", "any", //
+                "fn", "fn", "any", //
+                "map", "map", "any",
+            ]),
+        );
+    }
+
+    /// A parameter or local binding shadows a function of the same name, for
+    /// calls and references and whatever the declaration order. The compiler
+    /// used to bind the name to a function registered before the body was
+    /// compiled (a namespace or core function), so `before(x)` ignored the
+    /// parameter while `after(x)` used it. A lazy parameter does not shadow.
+    #[test]
+    fn locals_shadow_functions_with_and_without_jit() {
+        let src = r#"::t ns
+before fn (x: Any): Int { 0 }
+call-before fn (x: Int, before: Fn): Any { before(x) }
+call-after fn (x: Int, after: Fn): Any { after(x) }
+after fn (x: Any): Int { 0 }
+local-call fn (x: Int): Int {
+    before: Fn (v) { mul(v, 5) }
+    before(x)
+}
+local-ref fn (xs: Vec): Vec {
+    before: Fn (v) { mul(v, 5) }
+    map(xs, before)
+}
+apply-first fn (xs: Vec, first: Fn): Any { first(xs) }
+in-lambda fn (xs: Vec, before: Fn): Vec { map(xs, (v) { before(v) }) }
+lazy-param fn (lazy before: Any): Int { before(7) }
+[
+    call-before(4, (v) { mul(v, 3) }),
+    call-after(4, (v) { mul(v, 3) }),
+    local-call(2),
+    local-ref([1, 2]),
+    apply-first([1, 2], (v) { "custom" }),
+    in-lambda([1], (v) { add(v, 100) }),
+    lazy-param(1),
+    before(1),
+]"#;
+        assert_same_with_and_without_jit(
+            src,
+            &Val::Vec(vec![
+                Val::Int(12),
+                Val::Int(12),
+                Val::Int(10),
+                Val::Vec(vec![Val::Int(5), Val::Int(10)]),
+                Val::from("custom"),
+                Val::Vec(vec![Val::Int(101)]),
+                Val::Int(0),
+                Val::Int(0),
+            ]),
+        );
+    }
+
+    /// `div` of two Ints is an Int when the quotient is whole, in compiled
+    /// code as in the interpreter. The JIT used to always produce a Dec, so
+    /// `eq(5, safe-divide(10, 2))` was false.
+    #[test]
+    fn int_division_matches_with_and_without_jit() {
+        let src = r#"::t ns
+direct fn (a: Int, b: Int): Int { div(a, b) }
+in-branch fn (a: Int, b: Int): Any { if(eq(b, 0), 0, div(a, b)) }
+safe-divide fn (a: Int, b: Int): Int {
+    if(eq(b, 0), err("Division by zero"), ok(div(a, b)))
+}
+dec-div fn (a: Dec, b: Int): Dec { div(a, b) }
+[
+    Str(is-int(direct(10, 2))),
+    Str(is-dec(direct(3, 2))),
+    Str(is-int(in-branch(10, 2))),
+    Str(is-dec(in-branch(3, 2))),
+    Str(eq(5, safe-divide(10, 2))),
+    Str(eq(10, mul(direct(20, 4), 2))),
+    Str(is-dec(dec-div(4.0, 2))),
+]"#;
+        assert_same_with_and_without_jit(
+            src,
+            &strs(&["true", "true", "true", "true", "true", "true", "true"]),
+        );
+    }
+
+    /// Calling a parameter or local binding by name (`f(x)` for `f: Fn`)
+    /// calls that local in compiled code too. The JIT used to look the name
+    /// up through the VM, which cannot see compiled locals (and found any
+    /// unrelated function named `f` in another namespace instead).
+    #[test]
+    fn calls_through_local_fns_match_with_and_without_jit() {
+        let src = r#"::t ns
+apply-twice fn (x: Int, f: Fn): Int { f(f(x)) }
+invoke fn (x: Int, f: Fn): Any { f(x) }
+with-local fn (x: Int): Int {
+    triple: Fn (v) { mul(v, 3) }
+    triple(x)
+}
+sq %(mul(%, %))
+[apply-twice(3, add(%, 2)), invoke(4, sq), invoke(4, (v) { mul(v, 3) }), with-local(5)]"#;
+        assert_same_with_and_without_jit(
+            src,
+            &Val::Vec(vec![Val::Int(7), Val::Int(16), Val::Int(12), Val::Int(15)]),
+        );
+    }
+
+    /// `All<Vec>` and `All<Map>` serial bodies collect their bindings, and an
+    /// `All<Vec>` parallel flow collects values, in compiled code too. The JIT
+    /// returned `[]` / `{}` for serial bodies and keyed a Vec by name.
+    #[test]
+    fn collecting_serial_and_parallel_bodies_match_with_and_without_jit() {
+        let src = r#"::t ns
+all-vec fn (): All<Vec> {
+    a 1
+    b 2
+    c 3
+}
+all-map fn (): All<Map> {
+    a 1
+    b 2
+}
+par-vec fn (n: Int): Vec {
+    data: All<Vec> parallel {
+        a add(n, 1)
+        b mul(n, 2)
+    }
+    data
+}
+ser-map fn (n: Int): Map {
+    data: All<Map> serial {
+        a add(n, 1)
+        b mul(n, 2)
+    }
+    data
+}
+[all-vec(), all-map(), par-vec(3), ser-map(3)]"#;
+        assert_same_with_and_without_jit(
+            src,
+            &Val::Vec(vec![
+                Val::Vec(vec![Val::Int(1), Val::Int(2), Val::Int(3)]),
+                crate::val!({"a": 1, "b": 2}),
+                Val::Vec(vec![Val::Int(4), Val::Int(6)]),
+                crate::val!({"a": 4, "b": 6}),
+            ]),
+        );
+    }
+
+    /// A `fail()` inside a `pmap` callback stays a halt when the caller is
+    /// compiled, so containment returns the worker's `Failure`. The JIT
+    /// boundary used to clear the re-raised halt and pass on a plain error
+    /// string instead.
+    #[test]
+    fn pmap_halt_is_contained_with_and_without_jit() {
+        let src = r#"::t ns
+pmap-halt fn (): Vec<Int> {
+    inputs ::hot::coll/map(range(1, 41), (x: Int) { x })
+    ::hot::coll/pmap(inputs, (x: Int) {
+        cond {
+            eq(x, 7) => { fail("pmap boom on 7") }
+            => { mul(x, 10) }
+        }
+    })
+}
+attempt ::hot::internal::exec/contain(pmap-halt, [])
+failure if-err(attempt, (failure) { failure })
+[Str(is-err(attempt)), failure.msg]"#;
+        assert_same_with_and_without_jit(src, &strs(&["true", "pmap boom on 7"]));
+    }
+
+    /// Compiled `match-all` and `cond-all` flows build their result maps with
+    /// the same branch keys as the interpreter. The JIT used to keep the
+    /// compiler's internal `\0c<id>` suffix, so `get(result, "Critter.Bird")`
+    /// found nothing.
+    #[test]
+    fn collect_all_map_keys_match_with_and_without_jit() {
+        let src = r#"::t ns
+Critter enum open {
+    Dog,
+    Cat
+}
+Avian type {
+    species: Str,
+    wingspan: Dec
+}
+Avian -> Critter.Bird
+categorize fn match-all (a: Critter): All<Map> {
+    Critter.Bird => { "flies" }
+    Critter.Dog => { "walks" }
+}
+sizes fn cond-all (n: Int): All<Map> {
+    gt(n, 0) => positive { "positive" }
+    gt(n, 10) => big { "big" }
+}
+[
+    keys(categorize(Critter.Bird({species: "Eagle", wingspan: 2.1}))),
+    keys(categorize(Critter.Dog)),
+    keys(sizes(20)),
+]"#;
+        assert_same_with_and_without_jit(
+            src,
+            &Val::Vec(vec![
+                strs(&["Critter.Bird"]),
+                strs(&["Critter.Dog"]),
+                strs(&["positive", "big"]),
+            ]),
+        );
+    }
+
+    /// Core types keep their conversion constructors: a Map argument is not
+    /// routed to a default Map constructor. `Map` is qualified because hot-std
+    /// also defines a core `::hot::store/Map` type.
+    #[test]
+    fn core_type_constructors_still_convert_map_args() {
+        let src = r#"::t ns
+m {a: 1}
+[Str(m), to-json(::hot::type/Map(m)), to-json(Vec(m)), Str(is-err(Int(m))), Str(is-err(Uuid(m)))]"#;
+        assert_same_with_and_without_jit(
+            src,
+            &strs(&["{a: 1}", r#"{"a":1}"#, r#"[["a",1]]"#, "true", "true"]),
+        );
+    }
+
     #[test]
     fn jit_user_call_halts_on_strict_err_argument() {
         // The halt now propagates out of the JIT frame as a run failure
@@ -480,6 +867,405 @@ probe()"#;
             let out = compile_and_run_with_std_conf(src, Some(conf.clone()))
                 .expect("recursive functions run");
             assert_eq!(out, expected, "with {conf:?}");
+        }
+    }
+
+    /// A refinement violation deep in raw self-recursion halts the run when
+    /// the caller adds to the result, compiled or not. The JIT used to hand
+    /// the Err back up its frames, where a `match` could handle it.
+    #[test]
+    fn jit_raw_self_recursion_halts_on_a_consumed_violation() {
+        let src = r#"::t ns
+Small type Int where lte(%, 10)
+grow fn (n: Int): Small {
+    if(eq(n, 0), 11, add(0, grow(sub(n, 1))))
+}
+outcome fn (lazy result: Any): Any {
+    forced do result
+    if(is-ok(forced), forced, "err")
+}
+warm fn (): Vec {
+    map(range(0, 3), (i) { outcome(grow(0)) })
+}
+warm()
+r grow(5)
+match r {
+    Result.Err => { "handled" }
+    _ => { "ok" }
+}"#;
+        for conf in [
+            crate::val!({"jit": {"threshold": 1}}),
+            crate::val!({"jit": {"mode": "off"}}),
+        ] {
+            let out = compile_and_run_with_std_conf(src, Some(conf.clone()));
+            let text = match &out {
+                Ok(v) => format!("OK:{v:?}"),
+                Err(e) => e.clone(),
+            };
+            assert!(
+                text.contains("ConstraintError") && !text.contains("handled"),
+                "with {conf:?}, expected a halt on the violation, got {text}"
+            );
+        }
+    }
+
+    /// A `where` on a type declares a hidden predicate function, which must
+    /// not become the file's value: `hot run` printed `::t/$where-…`. It
+    /// still calls the namespace's own functions, declared before it.
+    #[test]
+    fn where_predicate_is_never_the_last_value() {
+        let src = r#"::t ns
+gt fn (a: Int, b: Int): Bool { lte(a, b) }
+answer 42
+Small type {
+    n: Int
+}
+where gt(%.n, 5)"#;
+        assert_eq!(compile_and_run_with_std_conf(src, None), Ok(crate::val!(42)));
+    }
+
+    /// A local binding ends with its function call: after `callee` binds a
+    /// local `label`, its caller still calls the namespace's `label`. The
+    /// local stayed in the namespace, so the call failed with "Function 'x'
+    /// not found".
+    #[test]
+    fn callee_local_does_not_outlive_the_call() {
+        let src = r#"::t ns
+label fn (s: Str): Str { `[${s}]` }
+callee fn (): Str {
+    label "x"
+    label
+}
+caller fn (): Str {
+    a callee()
+    label("hi")
+}
+caller()"#;
+        for conf in [
+            crate::val!({"jit": {"threshold": 1}}),
+            crate::val!({"jit": {"mode": "off"}}),
+        ] {
+            assert_eq!(
+                compile_and_run_with_std_conf(src, Some(conf.clone())),
+                Ok(crate::val!("[hi]")),
+                "with {conf:?}"
+            );
+        }
+    }
+
+    /// A top-level function is lexically scoped: `check` reads its
+    /// namespace's `limit`, never a caller's parameter or local of that
+    /// name. Lookups walked every caller frame, so both callers saw 100.
+    #[test]
+    fn callee_reads_its_own_scope_not_its_callers() {
+        let src = r#"::t ns
+limit 10
+check fn (v: Int): Bool { lte(v, limit) }
+by-param fn (limit: Int): Bool { check(50) }
+by-local fn (): Bool {
+    limit 100
+    check(50)
+}
+[by-param(100), by-local(), check(5)]"#;
+        for conf in [
+            crate::val!({"jit": {"threshold": 1}}),
+            crate::val!({"jit": {"mode": "off"}}),
+        ] {
+            assert_eq!(
+                compile_and_run_with_std_conf(src, Some(conf.clone())),
+                Ok(crate::val!([false, false, true])),
+                "with {conf:?}"
+            );
+        }
+    }
+
+    /// A lambda or lazy argument captures an enclosing binding even when a
+    /// core function has the same name, as `data` does. Without the
+    /// capture, a lambda that `map` calls read the core function instead.
+    #[test]
+    fn closures_capture_bindings_named_like_core_functions() {
+        let src = r#"::t ns
+by-param fn (data: Map): Vec { map(keys(data), (key) { get(data, key) }) }
+by-local fn (m: Map): Vec {
+    data m
+    map(keys(data), (key) { get(data, key) })
+}
+nested fn (ms: Vec): Vec { map(ms, (data) { map(keys(data), (k) { get(data, k) }) }) }
+called fn (inc: Fn, xs: Vec): Vec { map(xs, (x) { inc(x) }) }
+getter fn (data: Map): Fn { (k) { get(data, k) } }
+twice fn (lazy v: Int): Int {
+    forced do v
+    add(forced, forced)
+}
+lazy-local fn (): Int {
+    data "abc"
+    twice(length(data))
+}
+probe fn (): Vec {
+    get-a getter({a: 6})
+    [
+        by-param({a: 1, b: 2}),
+        by-local({a: 3}),
+        nested([{a: 4}, {b: 5}]),
+        called((x) { mul(x, 10) }, [1, 2]),
+        get-a("a"),
+        lazy-local()
+    ]
+}
+probe()
+probe()"#;
+        let expected = crate::val!([[1, 2], [3], [[4], [5]], [10, 20], 6, 6]);
+        for conf in [
+            crate::val!({"jit": {"threshold": 1}}),
+            crate::val!({"jit": {"mode": "off"}}),
+        ] {
+            assert_eq!(
+                compile_and_run_with_std_conf(src, Some(conf.clone())),
+                Ok(expected.clone()),
+                "with {conf:?}"
+            );
+        }
+    }
+
+    /// A failure is an Err value on every call path, and checking it gives
+    /// the same answer bound or not. A bare core call such as `add` used to
+    /// halt on the interpreter's fast path while `::hot::math/add` and
+    /// compiled code returned the Err.
+    #[test]
+    fn a_failure_checks_the_same_bound_or_not() {
+        let src = r#"::t ns
+probe fn (x: Any): Vec {
+    a add(x, 1)
+    q ::hot::math/add(x, 1)
+    d div(1, 0)
+    e err("bad")
+    [
+        is-err(add(x, 1)), is-err(a),
+        is-err(::hot::math/add(x, 1)), is-err(q),
+        is-err(div(1, 0)), is-err(d),
+        is-err(err("bad")), is-err(e),
+        if-err(add(x, 1), (m) { "handled" }),
+        or(add(x, 1), "default"),
+        if(add(x, 1), "yes", "no"),
+        length([add(x, 1), 1])
+    ]
+}
+probe("x")
+probe("x")"#;
+        let expected = crate::val!([
+            true, true, true, true, true, true, true, true, "handled", "default", "no", 2
+        ]);
+        for conf in [
+            crate::val!({"jit": {"threshold": 1}}),
+            crate::val!({"jit": {"mode": "off"}}),
+        ] {
+            assert_eq!(
+                compile_and_run_with_std_conf(src, Some(conf.clone())),
+                Ok(expected.clone()),
+                "with {conf:?}"
+            );
+        }
+    }
+
+    /// An inspector looks at a value and catches nothing: `fail()`, and an
+    /// Err consumed inside its argument, halt there as anywhere else.
+    #[test]
+    fn inspectors_never_catch_a_halt() {
+        let cases = [
+            ("is-err(fail(\"boom\"))", "boom"),
+            ("if-err(fail(\"boom\"), (e) { 1 })", "boom"),
+            ("is-ok(id(err(\"bad\")))", "Result error: bad"),
+            ("is-err(length(err(\"bad\")))", "Result error: bad"),
+            ("is-err(map([1], (v) { fail(\"in callback\") }))", "in callback"),
+        ];
+        for (expr, message) in cases {
+            let src = format!(
+                "::t ns\nid fn (v: Any): Any {{ v }}\nprobe fn (): Any {{ {expr} }}\nprobe()\nprobe()"
+            );
+            for conf in [
+                crate::val!({"jit": {"threshold": 1}}),
+                crate::val!({"jit": {"mode": "off"}}),
+            ] {
+                let out = compile_and_run_with_std_conf(&src, Some(conf.clone()));
+                assert!(
+                    out.as_ref().is_err_and(|e| e.contains(message)),
+                    "`{expr}` with {conf:?}: expected a halt with {message:?}, got {out:?}"
+                );
+            }
+        }
+    }
+
+    /// A parameter declared `Result` receives its argument as it is, however
+    /// the function is called: directly, through a HOF, or with `call`. Any
+    /// other parameter consumes it, through a HOF too.
+    #[test]
+    fn result_parameters_receive_results_on_every_call_path() {
+        let src = r#"::t ns
+describe fn (r: Result): Str { if(is-err(r), "failed", "succeeded") }
+count-errs fn (...rest: Result): Int { length(filter(rest, is-err)) }
+probe fn (): Vec {
+    results map([1, 2], (i) { if(eq(i, 2), err("bad"), i) }, OnErr.Preserve)
+    [
+        describe(err("x")),
+        map(results, describe),
+        map(results, (r: Result) { describe(r) }),
+        call(describe, [err("y")]),
+        count-errs(1, err("a"), err("b"))
+    ]
+}
+probe()
+probe()"#;
+        let consuming = r#"::t ns
+probe fn (): Vec {
+    results map([1, 2], (i) { if(eq(i, 2), err("bad"), i) }, OnErr.Preserve)
+    map(results, (r) { r })
+}
+probe()
+probe()"#;
+        let expected = crate::val!([
+            "failed",
+            ["succeeded", "failed"],
+            ["succeeded", "failed"],
+            "failed",
+            2
+        ]);
+        for conf in [
+            crate::val!({"jit": {"threshold": 1}}),
+            crate::val!({"jit": {"mode": "off"}}),
+        ] {
+            assert_eq!(
+                compile_and_run_with_std_conf(src, Some(conf.clone())),
+                Ok(expected.clone()),
+                "with {conf:?}"
+            );
+            let out = compile_and_run_with_std_conf(consuming, Some(conf.clone()));
+            assert!(
+                out.as_ref()
+                    .is_err_and(|e| e.contains("Result error: bad")),
+                "an untyped callback parameter consumes an Err, with {conf:?}: {out:?}"
+            );
+        }
+    }
+
+    /// Compiled code reads `OnErr.Preserve` as the variant (it read Null, so
+    /// `map` rejected its trailing argument), and its `length`, `is-null`
+    /// and `is-some` consume an Err argument like the interpreter's.
+    #[test]
+    fn compiled_code_reads_variants_and_consumes_errs() {
+        let preserve = r#"::t ns
+probe fn (): Vec { map([1, 2], (i) { if(eq(i, 2), err("bad"), i) }, OnErr.Preserve) }
+probe()
+probe()"#;
+        for conf in [
+            crate::val!({"jit": {"threshold": 1}}),
+            crate::val!({"jit": {"mode": "off"}}),
+        ] {
+            let out = compile_and_run_with_std_conf(preserve, Some(conf.clone()))
+                .expect("Preserve keeps the Err slot");
+            let Val::Vec(slots) = &out else {
+                panic!("expected a Vec with {conf:?}, got {out:?}");
+            };
+            assert_eq!(slots[0], Val::Int(1), "with {conf:?}");
+            assert!(slots[1].is_err(), "with {conf:?}: {out:?}");
+            for intrinsic in ["length", "is-null", "is-some"] {
+                let src = format!(
+                    "::t ns\nprobe fn (v: Any): Any {{ {intrinsic}(v) }}\nprobe([1])\nprobe(err(\"bad\"))"
+                );
+                let out = compile_and_run_with_std_conf(&src, Some(conf.clone()));
+                assert!(
+                    out.as_ref()
+                        .is_err_and(|e| e.contains("Result error: bad")),
+                    "{intrinsic} with {conf:?}: {out:?}"
+                );
+            }
+        }
+    }
+
+    /// A lambda captures a local it reads through a pipe. Capture analysis
+    /// took `cited |> some(…)` for a binding of `cited`, so a lambda that
+    /// compiled code created couldn't find it. (A HOF re-ran the failed
+    /// compiled callback in the interpreter, which hid this.)
+    #[test]
+    fn lambdas_capture_locals_read_through_pipes() {
+        let src = r#"::t ns
+probe fn (observations: Vec, ids: Vec): Any {
+    cited ids |> map(Str)
+    observations
+        |> filter((observation) {
+            cited |> some((id) { eq(id, observation.id) })
+        })
+}
+[probe([{id: "a"}, {id: "b"}], ["a"]), probe([{id: "a"}], [])]"#;
+        let expected = crate::val!([[{"id": "a"}], []]);
+        for conf in [
+            crate::val!({"jit": {"threshold": 1}}),
+            crate::val!({"jit": {"mode": "off"}}),
+        ] {
+            assert_eq!(
+                compile_and_run_with_std_conf(src, Some(conf.clone())),
+                Ok(expected.clone()),
+                "with {conf:?}"
+            );
+        }
+    }
+
+    /// A local function passed to a top-level function keeps its definer's
+    /// locals, and the callee's parameter of the same name calls the value
+    /// it was given. hot-ai's `fit` passes `item-text` this way.
+    #[test]
+    fn local_function_passed_to_a_top_level_function_keeps_its_scope() {
+        let src = r##"::t ns
+outer fn (opts: Map): Vec {
+    prefix get(opts, "prefix", "-")
+    show fn (item: Any): Str { `${prefix}${item}` }
+    apply-all([1, 2], show)
+}
+apply-all fn (items: Vec, show: Fn): Vec { map(items, (item) { show(item) }) }
+probe fn (): Vec { [outer({prefix: "#"}), outer({})] }
+probe()
+probe()"##;
+        let expected = crate::val!([["#1", "#2"], ["-1", "-2"]]);
+        for conf in [
+            crate::val!({"jit": {"threshold": 1}}),
+            crate::val!({"jit": {"mode": "off"}}),
+        ] {
+            assert_eq!(
+                compile_and_run_with_std_conf(src, Some(conf.clone())),
+                Ok(expected.clone()),
+                "with {conf:?}"
+            );
+        }
+    }
+
+    /// A template consumes each interpolated value's Result, so an Err part
+    /// halts compiled code too, and values render as the interpreter renders
+    /// them. Compiled templates wrote `Result.Err(…)` into the string and
+    /// rendered maps as JSON.
+    #[test]
+    fn jit_template_halts_on_an_err_part_and_renders_like_the_interpreter() {
+        let ok = r#"::t ns
+show fn (v: Any): Str { `<${first(v)}|${v}|${{a: 1}}>` }
+warm map(range(0, 3), (i) { show([i]) })
+show([7])"#;
+        let bad = r#"::t ns
+show fn (v: Any): Str { `<${first(v)}>` }
+warm map(range(0, 3), (i) { show([i]) })
+show(5)"#;
+        for conf in [
+            crate::val!({"jit": {"threshold": 1}}),
+            crate::val!({"jit": {"mode": "off"}}),
+        ] {
+            assert_eq!(
+                compile_and_run_with_std_conf(ok, Some(conf.clone())),
+                Ok(crate::val!("<7|[7]|{a: 1}>")),
+                "with {conf:?}"
+            );
+            let out = compile_and_run_with_std_conf(bad, Some(conf.clone()));
+            assert!(
+                out.as_ref()
+                    .is_err_and(|e| e.contains("first requires a collection")),
+                "with {conf:?}, expected a halt, got {out:?}"
+            );
         }
     }
 
@@ -1545,6 +2331,185 @@ caller(true)"#;
         vm.execute().map_err(|e| format!("{:?}", e))
     }
 
+    /// An Int op's overflow, a zero divisor, and a call of a value that isn't
+    /// a function give the same values in compiled code as in the
+    /// interpreter: checked, dropped, returned, kept in a collection.
+    #[test]
+    fn numeric_errs_match_in_interpreter_and_compiled_code() {
+        let src = r#"::t ns
+big 9223372036854775807
+smallest sub(sub(0, big), 1)
+add-ints fn (a: Int, b: Int) { add(a, b) }
+mul-ints fn (a: Int, b: Int) { mul(a, b) }
+pow-ints fn (a: Int, b: Int) { pow(a, b) }
+mod-ints fn (a: Int, b: Int) { mod(a, b) }
+div-decs fn (a: Dec, b: Dec) { div(a, b) }
+checked fn (a: Int, b: Int) { r add(a, b)  if(is-err(r), "caught", r) }
+dropped fn (a: Int, b: Int) { r mod(a, b)  "dropped" }
+kept fn (a: Int, b: Int) { [mul(a, b), 1] }
+call-value fn (v) { v(1) }
+show fn (r: Result) { if(is-err(r), `Err ${err-message(r)}`, r) }
+[
+    show(add-ints(1, 2)), show(add-ints(big, 1)), show(mul-ints(big, 2)),
+    show(pow-ints(10, 18)), show(pow-ints(10, 19)), show(pow-ints(3, 39)),
+    show(mod-ints(5, 0)), show(mod-ints(smallest, -1)), show(div-decs(1.5, 0.0)),
+    show(checked(big, 1)), show(checked(1, 1)), show(dropped(5, 0)),
+    show(first(kept(big, 2))), show(abs(smallest)), show(floor(1000000000000000000000.5)),
+    show(Int(10000000000000000000.5)), show(call-value(5)),
+]"#;
+        let overflow = "Err Integer overflow";
+        let expected = val!([
+            3, overflow, overflow,
+            1000000000000000000_i64, overflow, 4052555153018976267_i64,
+            "Err Modulo by zero", 0, "Err Division by zero",
+            "caught", 2, "dropped",
+            overflow, overflow, overflow,
+            overflow, "Err Cannot call a value of type Int"
+        ]);
+        for conf in [
+            val!({"jit": {"mode": "disabled"}}),
+            val!({"jit": {"threshold": 1}}),
+        ] {
+            let out = compile_and_run_with_std_conf(src, Some(conf.clone())).expect("run");
+            assert_eq!(out, expected, "{conf:?}");
+        }
+    }
+
+    /// A compiled self tail call loops, without leaking what each call made,
+    /// whatever its arguments: numeric ops whose Errs halt at the op or are
+    /// kept as values, a call in between, owned temporaries and locals made
+    /// before or inside the flow.
+    #[test]
+    fn compiled_tail_calls_loop_whatever_their_arguments() {
+        let src = r#"::t ns
+sum-three fn (i: Int, acc: Int): Int {
+    if(lte(i, 0), acc, sum-three(sub(i, 1), add(add(acc, i), 1)))
+}
+mixed fn (i: Int, acc: Int, m: Int): Int {
+    if(lte(i, 0), acc, mixed(sub(i, 1), add(mod(acc, m), i), m))
+}
+score fn (i: Int): Int { mul(mod(i, 7), 3) }
+with-call fn (i: Int, acc: Int): Int {
+    if(lte(i, 0), acc, with-call(sub(i, 1), add(acc, score(i))))
+}
+pre-local fn (i: Int, acc: Int): Int {
+    s `x${i}`
+    if(lte(i, 0), acc, pre-local(sub(i, 1), add(acc, length(s))))
+}
+nested fn (i: Int, acc: Int): Int {
+    cond {
+        lte(i, 0) => acc
+        => {
+            t `z${i}`
+            cond {
+                eq(mod(i, 2), 0) => nested(sub(i, 1), add(acc, length(t)))
+                => nested(sub(i, 1), add(mod(acc, 1000003), 1))
+            }
+        }
+    }
+}
+str-acc fn (i: Int, acc: Str): Str {
+    if(lte(i, 0), acc, str-acc(sub(i, 1), if(eq(mod(i, 2), 0), acc, `${acc}`)))
+}
+[
+    sum-three(100000, 0), mixed(100000, 0, 7), with-call(100000, 0),
+    pre-local(100000, 0), nested(100000, 0), str-acc(100000, "s"),
+]"#;
+        let expected = val!([5000150000_i64, 1, 900000, 588895, 344450, "s"]);
+        for conf in [
+            val!({"jit": {"mode": "disabled"}}),
+            val!({"jit": {"threshold": 1}}),
+        ] {
+            let out = compile_and_run_with_std_conf(src, Some(conf.clone())).expect("run");
+            assert_eq!(out, expected, "{conf:?}");
+        }
+    }
+
+    /// A capture a local function couldn't resolve when it was created (a
+    /// binding made after it) comes from the call that created it, while
+    /// that call runs, and never from the frames of a later caller.
+    #[test]
+    fn unresolved_capture_comes_from_the_definer_only() {
+        let in_definer = r#"::t ns
+make fn () {
+    h fn () { `${later} via h` }
+    later "definer later"
+    h()
+}
+caller fn () {
+    later "caller later"
+    make()
+}
+caller()"#;
+        let escaped = r#"::t ns
+make fn () {
+    h fn () { `${later} via h` }
+    later "definer later"
+    h
+}
+caller fn () {
+    later "caller later"
+    f make()
+    f()
+}
+caller()"#;
+        for conf in [
+            val!({"jit": {"mode": "disabled"}}),
+            val!({"jit": {"threshold": 1}}),
+        ] {
+            let out = compile_and_run_with_std_conf(in_definer, Some(conf.clone())).expect("run");
+            assert_eq!(out, Val::from("definer later via h"), "{conf:?}");
+            let err = compile_and_run_with_std_conf(escaped, Some(conf.clone()))
+                .expect_err("the definer's binding is gone");
+            assert!(err.contains("Variable 'later' not found"), "{conf:?}: {err}");
+        }
+    }
+
+    /// Overload dispatch chooses on the arguments as passed, then prepares
+    /// them for the overload it calls: a sibling that declares a `Result`
+    /// receives an Err, and an Ok is matched by its value. A sibling whose
+    /// parameter is eager never receives a thunk built for a lazy one.
+    #[test]
+    fn overload_dispatch_prepares_args_for_the_overload_called() {
+        let src = r#"::t ns
+f fn
+(x: Result): Str { if(is-err(x), "result-err", "result-ok") },
+(x: Str): Str { "str" }
+h fn
+(x: Fn): Str { "fn" },
+(lazy x: Int): Str { `lazy ${do x}` }
+probe fn (): Str {
+    r err("boom")
+    o ok("hi")
+    s "hi"
+    `${f(r)} ${f(o)} ${f(s)} ${h(add(1, 2))}`
+}
+probe()"#;
+        for conf in [
+            val!({"jit": {"mode": "disabled"}}),
+            val!({"jit": {"threshold": 1}}),
+        ] {
+            let out = compile_and_run_with_std_conf(src, Some(conf.clone())).expect("run");
+            assert_eq!(out, Val::from("result-err str str lazy 3"), "{conf:?}");
+        }
+    }
+
+    /// A consumed overflow halts with the same message either way.
+    #[test]
+    fn consumed_overflow_halts_in_interpreter_and_compiled_code() {
+        let src = r#"::t ns
+grow fn (a: Int) { mul(add(a, 1), 2) }
+grow(9223372036854775807)"#;
+        for conf in [
+            val!({"jit": {"mode": "disabled"}}),
+            val!({"jit": {"threshold": 1}}),
+        ] {
+            let err = compile_and_run_with_std_conf(src, Some(conf.clone()))
+                .expect_err("the overflow halts");
+            assert!(err.contains("Result error: Integer overflow"), "{conf:?}: {err}");
+        }
+    }
+
     fn load_hot_std_from_path(
         hot_std_path: &str,
     ) -> Result<crate::lang::ast::Program, Box<dyn std::error::Error>> {
@@ -1786,10 +2751,11 @@ caller(true)"#;
     }
 
     #[test]
-    fn test_fail_in_pmap_recovers_via_if_err() {
+    fn test_err_in_pmap_recovers_via_if_err() {
         // The idiomatic way to keep going past a failing per-item call
         // is `if-err` inside the callback. The callback returns a
-        // domain-typed fallback and pmap completes normally.
+        // domain-typed fallback and pmap completes normally. (`if-err`
+        // handles an Err value; a `fail()` would halt.)
 
         let source = r#"
             ::test ns
@@ -1798,7 +2764,7 @@ caller(true)"#;
                 ::hot::type/if-err(
                     ::hot::bool/if(
                         ::hot::cmp/eq(x, 5),
-                        ::hot::exec/fail("Found 5", x),
+                        ::hot::type/err("Found 5"),
                         ::hot::math/mul(x, 2)
                     ),
                     (e: Any) { -1 }
@@ -1833,24 +2799,18 @@ process fn (x: Int): Vec {
 }
 pmap([1, 2, 3, 4, 5, 6, 7, 8], process)"#;
 
-        let interpreter = compile_and_run_with_std_conf(
-            source,
-            Some(crate::val!({"engine": {"threads": 2}, "jit": {"mode": "off"}})),
-        )
-        .expect("interpreter pmap should return a callback error value");
-        let jit = compile_and_run_with_std_conf(
-            source,
-            Some(crate::val!({"engine": {"threads": 2}, "jit": {"threshold": 1}})),
-        )
-        .expect("JIT pmap should return the same callback error value");
-
-        assert_eq!(jit, interpreter);
-        assert!(jit.is_err(), "expected Result.Err, got {jit:?}");
-        assert!(
-            jit.unwrap_err()
-                .is_some_and(|error| error.to_string().contains("Vector index cannot be negative")),
-            "unexpected pmap error: {jit:?}"
-        );
+        // A runtime error in a callback halts pmap, in both modes.
+        for conf in [
+            crate::val!({"engine": {"threads": 2}, "jit": {"mode": "off"}}),
+            crate::val!({"engine": {"threads": 2}, "jit": {"threshold": 1}}),
+        ] {
+            let out = compile_and_run_with_std_conf(source, Some(conf.clone()));
+            assert!(
+                out.as_ref()
+                    .is_err_and(|e| e.contains("Vector index cannot be negative")),
+                "with {conf:?}: expected the callback's halt, got {out:?}"
+            );
+        }
     }
 
     /// Helper to create a test VM
@@ -2047,6 +3007,7 @@ mod parallel_failure_tests {
                         msg: first_msg.clone(),
                         data: first_data.clone(),
                         plain_vm_error: false,
+                        consumed: false,
                     });
                 }
                 true
@@ -2066,6 +3027,7 @@ mod parallel_failure_tests {
                         msg: second_msg,
                         data: second_data,
                         plain_vm_error: false,
+                        consumed: false,
                     });
                 }
                 true

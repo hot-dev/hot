@@ -113,12 +113,13 @@ When creating or editing a restricted API key or service key, the [Hot App](/doc
 
 | Preset | Adds |
 |--------|------|
-| Read Only | `run:*` → read, `stream:*` → read, `event:*` → read, `build:*` → read |
+| Read Only | `*:*` → read |
 | MCP Tools | `mcp:*` → execute |
-| Events | `event:*` → create, read |
-| Builds | `build:*` → create, read |
-| Context Vars | `context:*` → create, read, update, delete |
 | Webhooks | `webhook:*` → execute |
+| Streams | `stream:*` → read |
+| Events | `event:*` → create, read |
+| Runs | `run:*` → read |
+| Build/Deploy | `build:*` → create, read, execute |
 
 Presets add rules to the builder — they don't replace existing rules.
 

@@ -345,7 +345,11 @@ pub(crate) async fn run_dev(
         Ok(ran) => ran,
         Err(e) => {
             error!("Auto-initialization failed: {}", e);
-            error!("Please run 'hot init' manually to set up your environment");
+            // `hot init` can't help when the database is unreachable or refuses
+            // the configured credentials.
+            if !e.starts_with("Cannot connect to the database") {
+                error!("Please run 'hot init' manually to set up your environment");
+            }
             std::process::exit(1);
         }
     };

@@ -8,6 +8,7 @@ use uuid::Uuid;
 use super::search::{IdSearch, pg_placeholders, sqlite_placeholders};
 
 pub(crate) mod quota;
+pub use quota::ADMISSION_RETENTION_DAYS;
 
 #[derive(Error, Debug)]
 pub enum RunError {

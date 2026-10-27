@@ -210,7 +210,7 @@ meta ["test"] fn () {
 
     slots map([1, 2, 3], (n) { risky(n) }, OnErr.Preserve)
     assert-eq(1, length(filter(slots, is-err)), "Preserve then filter is-err")
-    assert-eq(2, length(filter(slots, (v) { not(is-err(v)) })), "negated form too")
+    assert-eq(2, length(filter(slots, (v: Result) { not(is-err(v)) })), "negated form too")
 }
 
 test-jit-warm-filter-callback-err-halts

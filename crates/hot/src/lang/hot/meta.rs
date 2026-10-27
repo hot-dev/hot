@@ -15,6 +15,19 @@ pub fn get(vm: &mut crate::lang::runtime::vm::VirtualMachine, args: &[Val]) -> H
 
     let input = &args[0];
     tracing::debug!("::hot::meta/get: Input type: {:?}", input);
+    // A lazy argument's locals are its caller's: look them up where it was
+    // created, not in this call's frame.
+    let lazy_arg = match input {
+        Val::Box(boxed) => boxed
+            .as_any()
+            .downcast_ref::<crate::lang::bytecode::LambdaInfo>(),
+        _ => None,
+    };
+    let lookup_local = |vm: &mut crate::lang::runtime::vm::VirtualMachine, name: &str| {
+        lazy_arg
+            .and_then(|lambda| vm.lookup_in_lambda_definer(lambda, name))
+            .or_else(|| vm.lookup_variable(name).ok())
+    };
 
     // Handle lazy lambdas (from lazy parameters)
     // For the `meta` function, we need special handling because we want to inspect the
@@ -209,12 +222,12 @@ pub fn get(vm: &mut crate::lang::runtime::vm::VirtualMachine, args: &[Val]) -> H
     if let Val::Str(var_name) = actual_input {
         // First check for a hidden metadata variable that the compiler emits for locals
         let hidden = format!("__meta__{}", var_name);
-        if let Ok(hidden_meta) = vm.lookup_variable(&hidden) {
+        if let Some(hidden_meta) = lookup_local(vm, &hidden) {
             return HotResult::Ok(hidden_meta);
         }
 
         // Check current lexical scope for inline $meta on map values
-        if let Ok(val) = vm.lookup_variable(var_name)
+        if let Some(val) = lookup_local(vm, var_name)
             && let Val::Map(m) = &val
             && let Some(meta) = m.get(&Val::from("$meta"))
         {
@@ -222,7 +235,7 @@ pub fn get(vm: &mut crate::lang::runtime::vm::VirtualMachine, args: &[Val]) -> H
         }
 
         // Fallback: return basic shape with name/type if variable exists
-        if let Ok(val) = vm.unified_variable_lookup(var_name) {
+        if let Some(val) = lookup_local(vm, var_name) {
             let mut map = IndexMap::new();
             map.insert(Val::from("name"), Val::from(var_name.clone()));
             let type_name = match &val {

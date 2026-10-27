@@ -300,14 +300,17 @@ pub(crate) fn load_dotenv_files() {
     }
 }
 
+/// Whether an environment variable chooses the database or identity a command
+/// runs against. Tuning variables such as `HOT_DB_LOCK_TIMEOUT_MS` don't.
 pub(crate) fn environment_configures_scope(key: &str) -> bool {
     if !key.starts_with("HOT_") {
         return false;
     }
     let path = env_var_to_conf_key(key);
-    matches!(path.as_str(), "db" | "profile" | "set" | "set.profile")
-        || path.starts_with("db.")
-        || path.starts_with("profile.")
+    matches!(
+        path.as_str(),
+        "db" | "db.uri" | "db.schema" | "profile" | "set" | "set.profile"
+    ) || path.starts_with("profile.")
         || path.starts_with("set.profile.")
 }
 
@@ -1161,15 +1164,24 @@ fn preserve_runtime_overrides_after_init(mut conf: Val, base_conf: &Val) -> Val 
     }
     for path in [
         "set.profile",
+        "db.migration-uri",
         "redis.uri",
         "queue.type",
         "serialization.type",
         "file.mode",
         "blob.mode",
+        "api.host",
+        "app.host",
     ] {
         let value = base_conf.get_str_or_default(path, "");
         if !value.is_empty() && value != "null" {
             conf = conf.set_str(path, Some(value), "");
+        }
+    }
+    // Ports are numbers, so they're carried over as values.
+    for path in ["api.port", "app.port"] {
+        if let Some(value @ Val::Int(_)) = base_conf.get(path) {
+            conf = conf.set(path, value);
         }
     }
 
@@ -1784,7 +1796,13 @@ mod tests {
         ] {
             assert!(environment_configures_scope(key), "{key}");
         }
-        for key in ["HOT_LOG_LEVEL", "HOT_SET_PROJECT", "OTHER_DB_URI"] {
+        for key in [
+            "HOT_LOG_LEVEL",
+            "HOT_SET_PROJECT",
+            "OTHER_DB_URI",
+            "HOT_DB_LOCK_TIMEOUT_MS",
+            "HOT_DB_SQLITE_SYNCHRONOUS",
+        ] {
             assert!(!environment_configures_scope(key), "{key}");
         }
     }

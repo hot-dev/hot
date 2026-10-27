@@ -87,6 +87,19 @@ format-price fn (
 }
 // @end: multiline-params
 
+// @doc: multiline-lambda-params
+order-total reduce(
+  [{price: 5, qty: 2}, {price: 3, qty: 1}],
+  (
+    sum: Int,
+    item: Map,
+  ): Int {
+    add(sum, mul(item.price, item.qty))
+  },
+  0,
+)
+// @end: multiline-lambda-params
+
 // @doc: function-overloading
 slice fn
 (coll: Vec, start: Int): Vec {
@@ -205,6 +218,14 @@ meta ["test"] fn () {
 // format-price(9.50, "USD", "$")   → "$9.50"
 // format-price(9.50, "EUR", null)  → "9.50 EUR"
 // @end: multiline-params
+
+test-multiline-lambda-params
+meta ["test"] fn () {
+  assert-eq(13, order-total, "a lambda with a multi-line parameter list")
+}
+// @result: multiline-lambda-params
+// order-total → 13
+// @end: multiline-lambda-params
 
 test-variadic
 meta ["test"] fn () {

@@ -30,6 +30,7 @@ pub mod product;
 pub mod profile;
 pub mod project;
 pub mod queue;
+pub mod redeploy;
 pub mod redis;
 pub mod resources;
 pub mod runtime_budget;

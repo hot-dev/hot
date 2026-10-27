@@ -41,7 +41,13 @@ shopping.items[] "apple"     // append to nested vector
 
 **Whitespace matters for function calls:**
 - `add(1, 2)` - calls the function `add`
-- `add (1, 2)` - assigns the tuple `(1, 2)` to variable `add`
+- `add (1, 2)` - binds a new variable named `add` to the value in the
+  parentheses; it never calls `add`
+
+This holds everywhere: at top level and in function bodies, blocks, branches,
+and flows. `assert (x)`, `not (x)`, and `if (x) { ... }` are bindings, not
+calls. `hot check` warns (`binding-shadows-function`) when such a binding
+shadows a function.
 
 ## Namespace Declaration
 
@@ -94,6 +100,21 @@ greet fn (name: Str): Str {
 }
 ```
 
+### Long Parameter Lists
+
+A parameter list can span lines. A line can hold one parameter or several,
+and `): ReturnType {` can close the list on its last line. The trailing comma
+is optional:
+
+```hot
+format-price fn (
+    amount: Dec,
+    currency: Str, symbol: Str?,
+): Str {
+    if(symbol, `${symbol}${amount}`, `${amount} ${currency}`)
+}
+```
+
 ### Multi-arity (Overloaded)
 
 ```hot
@@ -126,7 +147,18 @@ doubled map(numbers, (x) { mul(x, 2) })
 
 // Typed
 parsed map(strings, (s: Str): Int { Int(s) })
+
+// Parameters on several lines: `{` stays on the line of the closing `)`
+total reduce(items, (
+    sum: Int,
+    item: Map,
+): Int {
+    add(sum, item.price)
+}, 0)
 ```
+
+A lambda's `{` must be on the same line as its closing `)`. With `{` on the
+next line, the parentheses are not a parameter list.
 
 ### Placeholder Lambdas (`%`)
 
@@ -178,8 +210,11 @@ f fn (n: Int where gt(%, 0)) where lte(%.n, 9): Int where gte(%, 0) { n }
 max-retries: Int 3 where between(%, 0, 10)
 ```
 
-A long signature can continue on later lines: one parameter per line, then
-`where`, `: ReturnType`, and `{` each on their own line.
+A long signature can continue on later lines. The parameter list can hold
+one or more parameters per line, and the precondition `where`,
+`: ReturnType`, and `{` can each start their own line. `): ReturnType {` can
+also close the list on one line. A lambda's `{` must stay on the line of its
+`)`.
 
 ### Optional Arguments
 
@@ -213,6 +248,19 @@ signup-webhook
 meta {webhook: {service: "leads", path: "/signup"}}
 handle-signup
 ```
+
+### Local Names Shadow Functions
+
+A parameter or local binding shadows any function with the same name inside
+its body, for calls and references:
+
+```hot
+scale fn (x: Int): Int { mul(x, 2) }
+
+apply fn (x: Int, scale: Fn): Int { scale(x) }   // calls the parameter
+```
+
+A `lazy` parameter does not shadow: calling its name calls the function.
 
 ## Operators as Functions
 

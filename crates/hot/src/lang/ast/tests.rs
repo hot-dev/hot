@@ -597,3 +597,85 @@ fn test_all_value_variants_covered() {
         assert_roundtrip(&value, &format!("Value::{} (coverage test)", variant));
     }
 }
+
+#[test]
+fn test_literal_type_parse_round_trips_display() {
+    let literals = [
+        LiteralType::Str("fast".to_string()),
+        LiteralType::Str("a | b".to_string()),
+        LiteralType::Int(42),
+        LiteralType::Int(-7),
+        LiteralType::Dec("1.25".to_string()),
+        LiteralType::Bool(true),
+        LiteralType::Bool(false),
+        LiteralType::Null,
+    ];
+    for literal in literals {
+        assert_eq!(LiteralType::parse(&literal.to_string()), Some(literal));
+    }
+
+    for not_literal in ["Str", "Null", "Fruit", "Vec<Str>", "-", "\""] {
+        assert_eq!(LiteralType::parse(not_literal), None, "{not_literal}");
+    }
+}
+
+#[test]
+fn test_split_top_level() {
+    assert_eq!(split_top_level("Int | Str", '|'), ["Int", "Str"]);
+    assert_eq!(
+        split_top_level("Vec<Int | Str> | Null", '|'),
+        ["Vec<Int | Str>", "Null"]
+    );
+    assert_eq!(
+        split_top_level(r#""a | b" | "c""#, '|'),
+        [r#""a | b""#, r#""c""#]
+    );
+    assert_eq!(
+        split_top_level(r#"Str, Map<Str, "x,y">"#, ','),
+        ["Str", r#"Map<Str, "x,y">"#]
+    );
+    assert_eq!(split_top_level("Str", '|'), ["Str"]);
+}
+
+#[test]
+fn inline_refinements_display_as_written() {
+    let program = crate::lang::parser::parse_hot_file(
+        "::m ns\nf fn (x: Int where gt(%, 0), ys: Vec<Str where not(is-empty(%))>) { x }\n",
+        "m.hot",
+    )
+    .unwrap();
+    let displays = inline_refinement_displays(program.namespaces.values());
+    let namespace = program
+        .namespaces
+        .values()
+        .find(|ns| ToString::to_string(&ns.path) == "::m")
+        .unwrap();
+    let Some((_, Value::Fn(defs))) = namespace
+        .scope
+        .vars
+        .iter()
+        .find(|(var, _)| var.sym.name() == "f")
+    else {
+        panic!("f is a function");
+    };
+    let shown: Vec<String> = defs[0]
+        .args
+        .args
+        .iter()
+        .map(|arg| display_inline_refinements(arg.type_annotation.as_deref().unwrap(), &displays))
+        .collect();
+    assert_eq!(
+        shown,
+        ["Int where gt(%, 0)", "Vec<Str where not(is-empty(%))>"]
+    );
+    // A qualified name shows the same way; an unknown one stays as written.
+    let hidden = displays.keys().next().unwrap().clone();
+    assert_eq!(
+        display_inline_refinements(&format!("::m/{hidden}?"), &displays),
+        format!("{}?", displays[&hidden])
+    );
+    assert_eq!(
+        display_inline_refinements("::m/$Where-0-1-1 | Null", &displays),
+        "::m/$Where-0-1-1 | Null"
+    );
+}

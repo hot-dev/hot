@@ -109,22 +109,35 @@ impl Task {
                 let plan: Option<TaskAccountPlan<Value>> = sqlx::query_as(
                     "SELECT COALESCE(p.features,'{}'),p.plan_id,op.current_period_start FROM org_plan op JOIN plan p ON p.plan_uuid=op.plan_uuid WHERE op.org_id=$1"
                 ).bind(root_id).fetch_optional(pool).await?;
-                if usage_required(
+                let needs_usage = usage_required(
                     plan.as_ref().and_then(|p| p.0.as_ref()),
                     overrides.as_ref(),
                     plan.as_ref()
                         .is_some_and(|p| p.1.as_deref() == Some("hot-free")),
                     task.task_type == "container",
-                ) {
+                );
+                if needs_usage {
                     let period = plan.as_ref().and_then(|p| p.2).unwrap_or(month_start);
                     crate::db::usage::prepare_task_period(&billing, root_id, period).await?;
                 }
+                // Lock the account root only for a limit that reads usage. NO KEY
+                // UPDATE doesn't block foreign-key checks on inserts that
+                // reference the org. A malformed run limit counts as limited.
+                let lock_root = needs_usage
+                    || crate::db::run::quota::run_limit(
+                        plan.as_ref().and_then(|p| p.0.as_ref()),
+                        overrides.as_ref(),
+                    )
+                    .map_or(true, |limit| limit >= 0);
                 let mut tx = pool.begin().await?;
-                let overrides: Option<Value> =
-                    sqlx::query_scalar("SELECT features FROM org WHERE org_id=$1 FOR UPDATE")
-                        .bind(root_id)
-                        .fetch_one(&mut *tx)
-                        .await?;
+                let overrides: Option<Value> = sqlx::query_scalar(if lock_root {
+                    "SELECT features FROM org WHERE org_id=$1 FOR NO KEY UPDATE"
+                } else {
+                    "SELECT features FROM org WHERE org_id=$1"
+                })
+                .bind(root_id)
+                .fetch_one(&mut *tx)
+                .await?;
                 // Row locks also require UPDATE policy visibility. Billing
                 // authority can read sibling tasks, but may not mutate them.
                 // Lock this candidate under its verified environment first.
@@ -300,11 +313,7 @@ fn admission_error(error: crate::db::run::RunError) -> TaskError {
 }
 
 fn claim_features(plan: Option<&Value>, overrides: Option<&Value>) -> Features {
-    if plan.is_none() && overrides.is_none() {
-        Features::unlimited()
-    } else {
-        Features::resolve(plan, overrides)
-    }
+    Features::for_account(plan, overrides)
 }
 
 /// Whether any limit in `check_capacity` reads account usage; unlimited
@@ -626,7 +635,7 @@ mod tests {
         let a = queued(&db, e1).await;
         let b = queued(&db, e2).await;
         let unstarted = queued(&db, e1).await;
-        assert!(Task::cancel(&db, &unstarted).await.unwrap());
+        assert!(Task::cancel(&db, &unstarted, &e1).await.unwrap());
         let reservation = TaskQuotaReservation {
             compute_units: 60,
             duration_ms: 60000,
@@ -636,8 +645,8 @@ mod tests {
                 .await
                 .unwrap()
         );
-        assert!(Task::cancel(&db, &a).await.unwrap());
-        assert!(!Task::cancel(&db, &a).await.unwrap());
+        assert!(Task::cancel(&db, &a, &e1).await.unwrap());
+        assert!(!Task::cancel(&db, &a, &e1).await.unwrap());
         let DatabasePool::Sqlite(pool) = &db else {
             unreachable!()
         };

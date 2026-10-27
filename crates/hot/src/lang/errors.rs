@@ -317,6 +317,10 @@ pub enum CompilerError {
         /// That argument's parameter name, when the signature is known.
         parameter: Option<String>,
         location: Option<ErrorLocation>,
+        /// The call whose argument became the inner lambda, and where that
+        /// argument is.
+        inner_function: Option<String>,
+        inner_location: Option<ErrorLocation>,
     },
     /// A binding or return type annotation names a type the value can never
     /// be (e.g. `x: Int "hello"`). This is a *warning*: annotations are not
@@ -343,6 +347,49 @@ fn nested_placeholder_slot(function: &str, parameter: Option<&str>) -> String {
     match parameter {
         Some(name) => format!("the `{}` argument of `{}`", name, function),
         None => format!("an argument of `{}`", function),
+    }
+}
+
+/// A function name as diagnostics show it: `filter`, not `::hot::coll/filter`.
+fn nested_placeholder_name(function: &str) -> String {
+    format!("`{}`", function.rsplit('/').next().unwrap_or(function))
+}
+
+/// What the inner `%` of a nested-placeholder error binds to.
+fn nested_placeholder_inner(function: Option<&str>, location: Option<&ErrorLocation>) -> String {
+    match (function, location) {
+        (Some(function), Some(location)) => format!(
+            "{}'s function argument (line {}, column {})",
+            nested_placeholder_name(function),
+            location.line,
+            location.column
+        ),
+        (Some(function), None) => {
+            format!("{}'s function argument", nested_placeholder_name(function))
+        }
+        (None, _) => "an inner function argument".to_string(),
+    }
+}
+
+/// How to fix a nested-placeholder error. Naming the inner call matters: an
+/// explicit `(x) { … }` written around the inner `%` doesn't help, because
+/// the `%` still sits inside the outer implicit function.
+fn nested_placeholder_help(inner_function: Option<&str>, outer_function: &str) -> String {
+    let outer = if outer_function == WHERE_PREDICATE_WRAPPER {
+        "the predicate".to_string()
+    } else {
+        format!("{}'s function", nested_placeholder_name(outer_function))
+    };
+    match inner_function {
+        Some(inner) => format!(
+            "write {}'s function explicitly, as `%(...)` or `(x) {{ ... }}`, or write {} as `(x) {{ ... }}`",
+            nested_placeholder_name(inner),
+            outer
+        ),
+        None => format!(
+            "write the inner function explicitly, as `%(...)` or `(x) {{ ... }}`, or write {} as `(x) {{ ... }}`",
+            outer
+        ),
     }
 }
 
@@ -1101,13 +1148,19 @@ impl fmt::Display for CompilerError {
                 function,
                 parameter,
                 location,
+                inner_function,
+                inner_location,
             } => {
+                let inner =
+                    nested_placeholder_inner(inner_function.as_deref(), inner_location.as_ref());
+                let help = nested_placeholder_help(inner_function.as_deref(), function);
                 let body = format!(
-                    "Nested implicit `%` lambdas in {}: one `%` binds to an inner \
-                     function argument and another to {}. Write the inner \
-                     function explicitly with `%(...)` or `(x) {{ ... }}`",
+                    "Nested implicit `%` lambdas in {}: one `%` binds to {} and \
+                     another to {}. W{}",
                     nested_placeholder_slot(function, parameter.as_deref()),
-                    nested_placeholder_owner(function)
+                    inner,
+                    nested_placeholder_owner(function),
+                    help.strip_prefix('w').unwrap_or(&help)
                 );
                 if let Some(loc) = location {
                     write!(
@@ -1800,6 +1853,8 @@ impl CompilerErrors {
             CompilerError::NestedPlaceholder {
                 function,
                 parameter,
+                inner_function,
+                inner_location,
                 ..
             } => {
                 report = report
@@ -1808,14 +1863,31 @@ impl CompilerErrors {
                     .with_label(
                         Label::new((source_name.as_str(), span_start..span_end))
                             .with_message(format!(
-                                "one `%` in {} binds to an inner function argument, \
-                                 another to {}",
+                                "one `%` in {} binds to {}, another to {}",
                                 nested_placeholder_slot(function, parameter.as_deref()),
+                                nested_placeholder_inner(inner_function.as_deref(), None),
                                 nested_placeholder_owner(function)
                             ))
                             .with_color(label_color),
-                    )
-                    .with_help("write the inner function explicitly: `%(...)` or `(x) { ... }`");
+                    );
+                // Point at the inner function when it is in the same file.
+                if let (Some(inner), Some(inner_location)) = (inner_function, inner_location)
+                    && inner_location.file == location.file
+                    && inner_location.position + inner_location.length <= source.len()
+                {
+                    let inner_start = inner_location.position;
+                    let inner_end = inner_start + inner_location.length.max(1);
+                    report = report.with_label(
+                        Label::new((source_name.as_str(), inner_start..inner_end))
+                            .with_message(format!(
+                                "this `%` makes {}'s argument a function",
+                                nested_placeholder_name(inner)
+                            ))
+                            .with_color(colors.next()),
+                    );
+                }
+                report =
+                    report.with_help(nested_placeholder_help(inner_function.as_deref(), function));
             }
             CompilerError::AnnotationMismatch {
                 name,
@@ -1837,11 +1909,14 @@ impl CompilerErrors {
                             ))
                             .with_color(label_color),
                     )
-                    .with_help(
-                        "Annotations are not enforced at runtime, so a wrong one \
-                         silently misleads readers and tooling. Fix the annotation \
-                         or the value.",
-                    );
+                    .with_help(if annotation.contains(" where ") {
+                        "The `where` check rejects this value when the binding runs. \
+                         Fix the annotation or the value."
+                    } else {
+                        "Only `where` constraints and literal unions are checked at \
+                         runtime, so a wrong plain annotation silently misleads \
+                         readers and tooling. Fix the annotation or the value."
+                    });
             }
         }
 

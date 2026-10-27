@@ -1429,7 +1429,7 @@ async fn test_subscribe_to_task_returns_unsuccessful_terminal_snapshots() {
                 .await
                 .unwrap()
             ),
-            "cancelled" => assert!(Task::cancel(&db.0, &task_id).await.unwrap()),
+            "cancelled" => assert!(Task::cancel(&db.0, &task_id, &env.env_id).await.unwrap()),
             "timed_out" => assert!(
                 Task::complete(
                     &db.0,
@@ -3419,6 +3419,58 @@ fn file_router(
 /// Local storage that reports another backend id, standing in for an
 /// installation whose configured backend changed after uploads began.
 struct RelabeledStorage(LocalFileStorage, &'static str);
+
+/// A part that would overrun the declared size can never be recorded, so it
+/// is refused before its bytes reach storage: each retry used to stage
+/// another copy until the upload ended.
+#[tokio::test]
+async fn test_part_overrunning_expected_size_is_refused_before_staging() {
+    fn count_files(dir: &std::path::Path) -> usize {
+        std::fs::read_dir(dir)
+            .map(|entries| {
+                entries
+                    .flatten()
+                    .map(|entry| {
+                        let path = entry.path();
+                        if path.is_dir() { count_files(&path) } else { 1 }
+                    })
+                    .sum()
+            })
+            .unwrap_or(0)
+    }
+    let state = create_test_db().await;
+    let (_, api_key) = create_test_api_key(&state.0).await;
+    let dir = tempfile::TempDir::new().unwrap();
+    let app = file_router(
+        state,
+        Arc::new(Box::new(LocalFileStorage::new(dir.path().to_path_buf()))),
+    );
+    let (_, json) = make_request(
+        &app,
+        Method::POST,
+        "/v1/files/uploads",
+        &api_key,
+        Some(json!({"path":"small.bin", "expected_size":3})),
+    )
+    .await;
+    let id = json["data"]["upload_id"].as_str().unwrap();
+    let put = async |bytes: &[u8]| {
+        make_raw_request(
+            &app,
+            Method::PUT,
+            &format!("/v1/files/uploads/{id}/1"),
+            &api_key,
+            "application/octet-stream",
+            bytes.to_vec(),
+        )
+        .await
+        .0
+    };
+    let staged_before = count_files(dir.path());
+    assert_eq!(put(b"abcdef").await, StatusCode::PAYLOAD_TOO_LARGE);
+    assert_eq!(count_files(dir.path()), staged_before);
+    assert_eq!(put(b"abc").await, StatusCode::OK);
+}
 
 #[tokio::test]
 async fn test_part_retry_compares_content_instead_of_opaque_gcs_etags() {

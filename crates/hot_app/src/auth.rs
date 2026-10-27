@@ -142,9 +142,9 @@ fn handle_session_error(
         SessionError::Unusable(reason) => {
             tracing::info!(%user_id, %reason, "Clearing unusable session");
             Ok(cookies
-                .add(build_removal_cookie(JWT_COOKIE_NAME))
-                .add(build_removal_cookie(CURRENT_ORG_COOKIE_NAME))
-                .add(build_removal_cookie(CURRENT_ENV_COOKIE_NAME)))
+                .add(build_removal_cookie(jwt_cookie_name()))
+                .add(build_removal_cookie(current_org_cookie_name()))
+                .add(build_removal_cookie(current_env_cookie_name())))
         }
         SessionError::Unavailable(reason) => {
             tracing::error!(%user_id, %reason, "Session lookup failed");
@@ -621,23 +621,53 @@ pub struct Claims {
     pub iat: usize,  // issued at
 }
 
-// Cookie name for the JWT token
-pub const JWT_COOKIE_NAME: &str = "hot_auth_token";
+/// A cookie's name: `__Host-` and `base` outside local development. The
+/// prefix keeps a subdomain from setting or overwriting the cookie, but a
+/// browser takes it only on a secure cookie, and local development serves
+/// plain HTTP.
+fn cookie_name(base: &'static str, host_only: &'static str, local: bool) -> &'static str {
+    debug_assert_eq!(host_only.strip_prefix("__Host-"), Some(base));
+    if local { base } else { host_only }
+}
 
-// Cookie name for the current organization
-pub const CURRENT_ORG_COOKIE_NAME: &str = "hot_current_org";
+/// Name of the JWT token cookie.
+pub fn jwt_cookie_name() -> &'static str {
+    cookie_name(
+        "hot_auth_token",
+        "__Host-hot_auth_token",
+        hot::env::is_local_dev(),
+    )
+}
 
-// Cookie name for the current environment
-pub const CURRENT_ENV_COOKIE_NAME: &str = "hot_current_env";
+/// Name of the current organization cookie.
+pub fn current_org_cookie_name() -> &'static str {
+    cookie_name(
+        "hot_current_org",
+        "__Host-hot_current_org",
+        hot::env::is_local_dev(),
+    )
+}
+
+/// Name of the current environment cookie.
+pub fn current_env_cookie_name() -> &'static str {
+    cookie_name(
+        "hot_current_env",
+        "__Host-hot_current_env",
+        hot::env::is_local_dev(),
+    )
+}
 
 /// Session length in days for the JWT cookie and token (30-day sessions with
 /// sliding refresh in the session middleware; see `session_middleware`).
 pub const SESSION_COOKIE_DAYS: i64 = 30;
 
-/// Cookie name for the CSRF double-submit token used on guest auth forms
-/// (signin / signup). The same random value is set as a cookie and embedded
-/// as a hidden form field; a POST is only accepted when the two match.
-pub const CSRF_COOKIE_NAME: &str = "hot_csrf";
+/// Name of the cookie for the CSRF double-submit token used on guest auth
+/// forms (signin / signup). The same random value is set as a cookie and
+/// embedded as a hidden form field; a POST is only accepted when the two
+/// match.
+pub fn csrf_cookie_name() -> &'static str {
+    cookie_name("hot_csrf", "__Host-hot_csrf", hot::env::is_local_dev())
+}
 
 /// Generate a random CSRF token (double-submit pattern; the value carries no
 /// claims, it only has to be unguessable and match the cookie).
@@ -647,13 +677,13 @@ pub fn generate_csrf_token() -> String {
 
 /// Build the CSRF cookie for `token` (1h lifetime, enough for a form fill).
 pub fn build_csrf_cookie(token: String) -> axum_extra::extract::cookie::Cookie<'static> {
-    build_cookie(CSRF_COOKIE_NAME, token, time::Duration::hours(1))
+    build_cookie(csrf_cookie_name(), token, time::Duration::hours(1))
 }
 
 /// Validate a submitted form token against the CSRF cookie. Both must be
 /// present, non-empty, and equal.
 pub fn validate_csrf(cookies: &CookieJar, form_token: Option<&str>) -> bool {
-    let Some(cookie_value) = cookies.get(CSRF_COOKIE_NAME).map(|c| c.value()) else {
+    let Some(cookie_value) = cookies.get(csrf_cookie_name()).map(|c| c.value()) else {
         return false;
     };
     match form_token {
@@ -672,7 +702,8 @@ pub fn is_safe_next(next: &str) -> bool {
 }
 
 /// Build a session-scoped cookie with the hardened defaults used everywhere
-/// in hot_app: path `/`, HttpOnly, SameSite=Lax, Secure outside local dev.
+/// in hot_app: path `/`, HttpOnly, SameSite=Lax, and no domain; Secure
+/// outside local dev, as the `__Host-` names require there.
 ///
 /// Callers that need a JS-readable cookie (e.g. the cross-subdomain presence
 /// cookie) should call `.set_http_only(false)` on the result.
@@ -760,7 +791,7 @@ pub fn validate_token(token: &str) -> Result<Uuid, String> {
 /// Extract user_id from JWT cookie in request
 pub fn get_user_id_from_cookies(cookies: &CookieJar) -> Option<Uuid> {
     cookies
-        .get(JWT_COOKIE_NAME)
+        .get(jwt_cookie_name())
         .and_then(|cookie| validate_token(cookie.value()).ok())
 }
 
@@ -772,7 +803,7 @@ fn refresh_session_cookie(
     cookies: &CookieJar,
     conf: &Val,
 ) -> Option<axum_extra::extract::cookie::Cookie<'static>> {
-    let token = cookies.get(JWT_COOKIE_NAME)?.value();
+    let token = cookies.get(jwt_cookie_name())?.value();
     let secret = get_session_secret().ok()?;
     let key = DecodingKey::from_secret(secret.as_ref());
     let claims = decode::<Claims>(token, &key, &Validation::new(Algorithm::HS256))
@@ -788,7 +819,7 @@ fn refresh_session_cookie(
     let user_id = Uuid::parse_str(&claims.sub).ok()?;
     let new_token = generate_token(&user_id, conf).ok()?;
     Some(build_cookie(
-        JWT_COOKIE_NAME,
+        jwt_cookie_name(),
         new_token,
         time::Duration::days(SESSION_COOKIE_DAYS),
     ))
@@ -797,14 +828,14 @@ fn refresh_session_cookie(
 /// Extract current_org_id from cookie in request
 pub fn get_current_org_id_from_cookies(cookies: &CookieJar) -> Option<String> {
     cookies
-        .get(CURRENT_ORG_COOKIE_NAME)
+        .get(current_org_cookie_name())
         .map(|cookie| cookie.value().to_string())
 }
 
 /// Extract current_env_id from cookie in request
 pub fn get_current_env_id_from_cookies(cookies: &CookieJar) -> Option<String> {
     cookies
-        .get(CURRENT_ENV_COOKIE_NAME)
+        .get(current_env_cookie_name())
         .map(|cookie| cookie.value().to_string())
 }
 
@@ -914,6 +945,46 @@ fn is_org_control_path(path: &str) -> bool {
 }
 
 /// Only attached to the known authentication/onboarding routers, never runtime routes.
+/// Reject a state-changing request that a browser sent from another
+/// origin. The session cookie is `SameSite=Lax`, which still accompanies a
+/// form posted from a same-site page (another host under the same domain),
+/// so the browser's fetch metadata decides: only `same-origin` requests may
+/// change state. Without that header, a mismatched `Origin` is rejected. A
+/// request with neither header didn't come from a browser page.
+pub async fn reject_cross_origin_writes(request: Request, next: Next) -> Response {
+    use axum::http::{Method, header};
+    if matches!(
+        *request.method(),
+        Method::GET | Method::HEAD | Method::OPTIONS
+    ) {
+        return next.run(request).await;
+    }
+    let headers = request.headers();
+    let text = |name: &str| headers.get(name).and_then(|value| value.to_str().ok());
+    let cross_origin = match text("sec-fetch-site") {
+        Some(site) => !matches!(site, "same-origin" | "none"),
+        None => match headers.get(header::ORIGIN).and_then(|v| v.to_str().ok()) {
+            None => false,
+            Some(origin) => {
+                let origin_host = origin.split_once("://").map_or(origin, |(_, host)| host);
+                ![text("host"), text("x-forwarded-host")]
+                    .into_iter()
+                    .flatten()
+                    .any(|host| origin_host.eq_ignore_ascii_case(host))
+            }
+        },
+    };
+    if cross_origin {
+        tracing::warn!(
+            method = %request.method(),
+            path = %request.uri().path(),
+            "Rejected a cross-origin request"
+        );
+        return (StatusCode::FORBIDDEN, "Cross-origin request rejected").into_response();
+    }
+    next.run(request).await
+}
+
 pub async fn onboarding_scope_middleware(request: Request, next: Next) -> Response {
     with_database_scope(
         DatabaseScope::Bootstrap(BootstrapOperation::Onboarding),
@@ -1007,7 +1078,7 @@ pub async fn session_middleware(
                     if cookie_org_id.as_deref() != Some(&current_org.org_id.to_string()) {
                         // Update org_id cookie to match the fallback value
                         updated_cookies = updated_cookies.add(build_cookie(
-                            CURRENT_ORG_COOKIE_NAME,
+                            current_org_cookie_name(),
                             current_org.org_id.to_string(),
                             time::Duration::days(365),
                         ));
@@ -1025,7 +1096,7 @@ pub async fn session_middleware(
                     if cookie_env_id.as_deref() != Some(&current_env.env_id.to_string()) {
                         // Update env_id cookie to match the fallback value
                         updated_cookies = updated_cookies.add(build_cookie(
-                            CURRENT_ENV_COOKIE_NAME,
+                            current_env_cookie_name(),
                             current_env.env_id.to_string(),
                             time::Duration::days(365),
                         ));
@@ -1075,7 +1146,7 @@ pub async fn session_middleware(
                 match generate_token(&user.user_id, &conf) {
                     Ok(token) => {
                         let cookies_with_jwt = cookies.clone().add(build_cookie(
-                            JWT_COOKIE_NAME,
+                            jwt_cookie_name(),
                             token,
                             time::Duration::days(1),
                         ));
@@ -1219,6 +1290,85 @@ pub async fn guest_only_middleware(
 
 #[cfg(test)]
 mod scope_contract_tests {
+    #[test]
+    fn session_cookies_take_the_host_prefix_outside_local_dev() {
+        use super::{build_cookie, cookie_name, jwt_cookie_name};
+        assert_eq!(
+            cookie_name("hot_auth_token", "__Host-hot_auth_token", false),
+            "__Host-hot_auth_token"
+        );
+        assert_eq!(
+            cookie_name("hot_auth_token", "__Host-hot_auth_token", true),
+            "hot_auth_token"
+        );
+        // Tests run as local development, over plain HTTP: bare names.
+        assert_eq!(jwt_cookie_name(), "hot_auth_token");
+        let cookie = build_cookie(jwt_cookie_name(), String::new(), time::Duration::days(1));
+        assert_ne!(cookie.secure(), Some(true));
+    }
+
+    #[tokio::test]
+    async fn cross_origin_writes_are_rejected() {
+        use axum::body::Body;
+        use axum::http::Request as HttpRequest;
+        use tower::ServiceExt;
+
+        let app = axum::Router::new()
+            .route(
+                "/write",
+                axum::routing::post(|| async { "ok" }).get(|| async { "read" }),
+            )
+            .layer(axum::middleware::from_fn(reject_cross_origin_writes));
+        let status = |method: &str, headers: &[(&str, &str)]| {
+            let app = app.clone();
+            let mut request = HttpRequest::builder()
+                .method(method)
+                .uri("/write")
+                .header("host", "app.example.com");
+            for (name, value) in headers {
+                request = request.header(*name, *value);
+            }
+            async move {
+                app.oneshot(request.body(Body::empty()).unwrap())
+                    .await
+                    .unwrap()
+                    .status()
+            }
+        };
+
+        assert_eq!(
+            status("POST", &[("sec-fetch-site", "same-origin")]).await,
+            StatusCode::OK
+        );
+        assert_eq!(
+            status("POST", &[("sec-fetch-site", "same-site")]).await,
+            StatusCode::FORBIDDEN,
+            "a page on another host of the same site"
+        );
+        assert_eq!(
+            status("POST", &[("sec-fetch-site", "cross-site")]).await,
+            StatusCode::FORBIDDEN
+        );
+        assert_eq!(
+            status("POST", &[("origin", "https://api.example.com")]).await,
+            StatusCode::FORBIDDEN
+        );
+        assert_eq!(
+            status("POST", &[("origin", "https://app.example.com")]).await,
+            StatusCode::OK
+        );
+        assert_eq!(
+            status("POST", &[]).await,
+            StatusCode::OK,
+            "not from a browser page"
+        );
+        assert_eq!(
+            status("GET", &[("sec-fetch-site", "cross-site")]).await,
+            StatusCode::OK,
+            "reads pass"
+        );
+    }
+
     use super::*;
     use hot::db::org::{CreateChild, Org, OrgLifecycle};
 
@@ -1247,7 +1397,7 @@ mod scope_contract_tests {
         .await
         .unwrap();
         let cookies = CookieJar::new().add(build_cookie(
-            CURRENT_ORG_COOKIE_NAME,
+            current_org_cookie_name(),
             data.org_id.to_string(),
             time::Duration::days(1),
         ));
@@ -1287,7 +1437,10 @@ mod scope_contract_tests {
             .unwrap_err();
         assert!(matches!(inactive, SessionError::Unusable(_)));
         let cleared = handle_session_error(inactive, jar.clone(), &data.user_id).unwrap();
-        assert!(cleared.get(JWT_COOKIE_NAME).is_some(), "removal cookie set");
+        assert!(
+            cleared.get(jwt_cookie_name()).is_some(),
+            "removal cookie set"
+        );
 
         // A database failure says nothing about the token: keep the cookies.
         if let DatabasePool::Sqlite(pool) = &db {

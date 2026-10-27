@@ -204,6 +204,9 @@ struct Index<'a> {
     refinements: Vec<&'a Refinement>,
     /// Type declarations by qualified name.
     types: AHashMap<String, &'a TypeDef>,
+    /// Members of each literal union by qualified name, accumulated across
+    /// every declaration (an open union can be extended).
+    literal_members: AHashMap<String, Vec<Val>>,
 }
 
 impl<'a> Index<'a> {
@@ -214,6 +217,7 @@ impl<'a> Index<'a> {
             core,
             refinements: Vec::new(),
             types: AHashMap::new(),
+            literal_members: AHashMap::new(),
         };
         for (ns_path, namespace) in &program.namespaces {
             let ns = ns_path.to_string();
@@ -222,7 +226,16 @@ impl<'a> Index<'a> {
                 let name = var.sym.name().to_string();
                 match value {
                     Value::TypeDef(type_def) => {
-                        index.types.insert(format!("{ns}/{name}"), type_def);
+                        let qualified = format!("{ns}/{name}");
+                        if let Some(members) = union_members(type_def) {
+                            let known = index.literal_members.entry(qualified.clone()).or_default();
+                            for member in members {
+                                if !known.contains(&member) {
+                                    known.push(member);
+                                }
+                            }
+                        }
+                        index.types.insert(qualified, type_def);
                         if let Some(refinement) = &type_def.refinement {
                             index.refinements.push(refinement);
                         }
@@ -484,16 +497,36 @@ impl<'a> Index<'a> {
 
     /// The type declaration a type name refers to.
     fn type_def(&self, ns: &str, name: &str) -> Option<&'a TypeDef> {
-        if let Some(type_def) = self.types.get(name) {
-            return Some(type_def);
+        self.type_key(ns, name)
+            .and_then(|key| self.types.get(&key).copied())
+    }
+
+    /// The qualified name of the type `name` names in `ns`, through the
+    /// namespace's aliases (`::alias/Type`) when it uses one.
+    fn type_key(&self, ns: &str, name: &str) -> Option<String> {
+        if self.types.contains_key(name) {
+            return Some(name.to_string());
         }
-        if let Some(type_def) = self.types.get(&format!("{ns}/{name}")) {
-            return Some(type_def);
+        if let Some((alias, type_name)) = name
+            .strip_prefix("::")
+            .and_then(|rest| rest.rsplit_once('/'))
+            && let Some(source) = self
+                .aliases
+                .get(ns)
+                .and_then(|aliases| aliases.get(&crate::lang::ast::NsPath::from(alias)))
+        {
+            let key = format!("{source}/{type_name}");
+            if self.types.contains_key(&key) {
+                return Some(key);
+            }
+        }
+        let local = format!("{ns}/{name}");
+        if self.types.contains_key(&local) {
+            return Some(local);
         }
         let info = self.core.get(name)?;
-        self.types
-            .get(&format!("{}/{}", info.namespace_path, name))
-            .copied()
+        let core = format!("{}/{}", info.namespace_path, name);
+        self.types.contains_key(&core).then_some(core)
     }
 
     /// Whether an annotation names a type with a `where` clause.
@@ -643,24 +676,22 @@ impl<'a> Index<'a> {
                         self.check_call(&ns, call, out);
                         self.check_representation_call(&ns, call, &mut representation_warned, out);
                     }
+                    Value::Ref(Ref::Var(var_ref)) => {
+                        self.check_binding_shadows(&ns, &var_ref.var, out)
+                    }
                     Value::Match(m) => {
                         for arm in &m.arms {
                             self.check_representation_arm(
                                 &ns,
-                                arm.type_name.as_deref(),
-                                arm.variant.is_none(),
+                                arm,
                                 &mut representation_warned,
                                 out,
                             );
                         }
                     }
-                    Value::MatchArm(arm) => self.check_representation_arm(
-                        &ns,
-                        arm.type_name.as_deref(),
-                        arm.variant.is_none(),
-                        &mut representation_warned,
-                        out,
-                    ),
+                    Value::MatchArm(arm) => {
+                        self.check_representation_arm(&ns, arm, &mut representation_warned, out)
+                    }
                     _ => {}
                 });
             }
@@ -719,33 +750,45 @@ impl<'a> Index<'a> {
         else {
             return;
         };
-        let Some(type_def) = self.type_def(ns, &name) else {
+        let Some(key) = self.type_key(ns, &name) else {
             return;
         };
-        // An open union accepts unknown values, with a warning for a literal.
-        if type_def.is_open
-            && let Some(members) = union_members(type_def)
-        {
+        let Some(type_def) = self.types.get(&key).copied() else {
+            return;
+        };
+        let short_name = name.rsplit('/').next().unwrap_or(&name);
+        if let Some(members) = self.literal_members.get(&key) {
             if !members.contains(literal) {
-                out.warnings.push(diagnostic(
-                    "unknown-literal",
-                    format!(
-                        "{} isn't one of the known values of `{}`",
-                        val_text(literal),
-                        name.rsplit('/').next().unwrap_or(&name)
-                    ),
-                    Some("open unions accept unknown values; check the spelling"),
-                    true,
-                    location,
-                ));
+                // An open union accepts unknown values, with a warning for a
+                // literal; a closed one rejects them.
+                if type_def.is_open {
+                    out.warnings.push(diagnostic(
+                        "unknown-literal",
+                        format!(
+                            "{} isn't one of the known values of `{short_name}`",
+                            val_text(literal)
+                        ),
+                        Some("open unions accept unknown values; check the spelling"),
+                        true,
+                        location,
+                    ));
+                } else {
+                    let known = members.iter().map(val_text).collect::<Vec<_>>().join(" | ");
+                    out.errors.push(diagnostic(
+                        "constraint-violation",
+                        format!(
+                            "{} isn't one of the values of `{short_name}` ({known})",
+                            val_text(literal)
+                        ),
+                        Some("declare the union `open` to accept other values"),
+                        false,
+                        location,
+                    ));
+                }
             }
             return;
         }
-        let type_ns = if name.starts_with("::") {
-            name.rsplit_once('/').map_or(ns, |(n, _)| n).to_string()
-        } else {
-            ns.to_string()
-        };
+        let type_ns = key.rsplit_once('/').map_or(ns, |(n, _)| n).to_string();
         if let Some(failed) = self.literal_fails(&type_ns, type_def, literal, 0) {
             let shown = if name.contains(WHERE_TYPE_PREFIX) {
                 format!("`{failed}`")
@@ -811,7 +854,13 @@ impl<'a> Index<'a> {
         };
         let primitive = matches!(type_def.type_alias, Some(TypeExpr::Builtin(_)))
             || matches!(&type_def.type_alias, Some(TypeExpr::Named(n) | TypeExpr::Simple(n)) if matches!(n.as_str(), "Int" | "Dec" | "Str" | "Bool"));
-        if !primitive || type_def.refinement.is_none() || !warned.insert(name.to_string()) {
+        // One warning per type; one without a location can't be shown, so it
+        // doesn't count.
+        if !primitive
+            || type_def.refinement.is_none()
+            || location.is_none()
+            || !warned.insert(name.to_string())
+        {
             return;
         }
         out.warnings.push(diagnostic(
@@ -822,6 +871,38 @@ impl<'a> Index<'a> {
             None,
             true,
             location,
+        ));
+    }
+
+    /// `binding-shadows-function`: a binding written `name (…)` whose name is
+    /// a function. A call never has a space before `(`, so `if (x) {…}` or
+    /// `assert (…)` binds a local that hides the function instead of calling it.
+    fn check_binding_shadows(&self, ns: &str, var: &Var, out: &mut ConstraintDiagnostics) {
+        if !var
+            .meta
+            .as_ref()
+            .is_some_and(crate::lang::ast::is_spaced_paren_binding_meta)
+        {
+            return;
+        }
+        let name = var.sym.name();
+        let is_function = self.core.get(name).is_some_and(|info| {
+            info.variable_type == crate::lang::compiler::core_registry::CoreVariableType::Function
+        }) || matches!(
+            self.vars.get(&(ns.to_string(), name.to_string())),
+            Some((_, Value::Fn(_)))
+        );
+        if !is_function {
+            return;
+        }
+        let help =
+            format!("a call has no space before `(`: write `{name}(…)`, or rename the binding");
+        out.warnings.push(diagnostic(
+            "binding-shadows-function",
+            format!("`{name} (…)` binds a local named `{name}`, which hides the `{name}` function"),
+            Some(&help),
+            true,
+            var.src.as_ref().map(error_location),
         ));
     }
 
@@ -850,15 +931,15 @@ impl<'a> Index<'a> {
     fn check_representation_arm(
         &self,
         ns: &str,
-        type_name: Option<&str>,
-        whole_type: bool,
+        arm: &crate::lang::ast::MatchArm,
         warned: &mut AHashSet<String>,
         out: &mut ConstraintDiagnostics,
     ) {
-        if let Some(type_name) = type_name
-            && whole_type
+        if let Some(type_name) = arm.type_name.as_deref()
+            && arm.variant.is_none()
         {
-            self.warn_representation(ns, type_name, warned, out, None);
+            let location = arm.src.as_ref().map(error_location);
+            self.warn_representation(ns, type_name, warned, out, location);
         }
     }
 }

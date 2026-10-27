@@ -83,24 +83,14 @@ fn execute_lambda_for_call(
     args: &[Val],
     disposition: OnErrDisposition,
 ) -> Result<Val, String> {
-    let saved_suppress = if matches!(disposition, OnErrDisposition::Preserve) {
-        let current = vm.get_suppress_result_checking();
-        vm.set_suppress_result_checking(true);
-        Some(current)
-    } else {
-        None
-    };
-
-    let exec = vm.execute_lambda(function_val, args);
-
-    if let Some(saved) = saved_suppress {
-        vm.set_suppress_result_checking(saved);
-    }
-
+    let target = crate::lang::runtime::vm::CallTarget::Value(function_val);
+    let exec = vm
+        .prepare_call_args(target, args.to_vec())
+        .and_then(|args| vm.execute_lambda(function_val, &args));
     match exec {
         Ok(value) => apply_onerr_disposition(vm, value, disposition)
             .map(|value| wrap_preserved_call_result(value, disposition)),
-        Err(err) => handle_call_execution_error(vm, vm_error_message(&err), disposition),
+        Err(err) => Err(handle_call_execution_error(vm, &err)),
     }
 }
 
@@ -110,37 +100,25 @@ fn execute_user_function_for_call(
     args: &[Val],
     disposition: OnErrDisposition,
 ) -> Result<Val, String> {
-    let saved_suppress = if matches!(disposition, OnErrDisposition::Preserve) {
-        let current = vm.get_suppress_result_checking();
-        vm.set_suppress_result_checking(true);
-        Some(current)
-    } else {
-        None
-    };
-
-    let exec = vm.execute_compiled_user_function(function_id, args);
-
-    if let Some(saved) = saved_suppress {
-        vm.set_suppress_result_checking(saved);
-    }
-
+    let target = crate::lang::runtime::vm::CallTarget::Function(function_id);
+    let exec = vm
+        .prepare_call_args(target, args.to_vec())
+        .and_then(|args| vm.execute_compiled_user_function(function_id, &args));
     match exec {
         Ok(value) => apply_onerr_disposition(vm, value, disposition)
             .map(|value| wrap_preserved_call_result(value, disposition)),
-        Err(err) => handle_call_execution_error(vm, vm_error_message(&err), disposition),
+        Err(err) => Err(handle_call_execution_error(vm, &err)),
     }
 }
 
+/// A halt in the callee halts `call` too, whatever its `OnErr`: `OnErr`
+/// governs only an Err the callee returns.
 fn handle_call_execution_error(
     vm: &mut crate::lang::runtime::vm::VirtualMachine,
-    msg: String,
-    disposition: OnErrDisposition,
-) -> Result<Val, String> {
-    if matches!(disposition, OnErrDisposition::Force) && !vm.has_failed() && !vm.has_cancelled() {
-        vm.set_failure(msg.clone(), Val::from(msg.clone()));
-    }
-
-    Err(msg)
+    err: &crate::lang::runtime::vm::VmError,
+) -> String {
+    vm.record_halt(err);
+    vm_error_message(err)
 }
 
 fn wrap_preserved_call_result(val: Val, disposition: OnErrDisposition) -> Val {
@@ -514,9 +492,11 @@ pub fn call(vm: &mut crate::lang::runtime::vm::VirtualMachine, args: &[Val]) -> 
 
     let hotlib_map = super::get_hotlib_map();
     if hotlib_map.contains_key(&resolved_function_name) {
+        let target = crate::lang::runtime::vm::CallTarget::Native(&resolved_function_name);
         let exec = vm
-            .execute_call_lib(&resolved_function_name, &arg_vals)
-            .map_err(|err| vm_error_message(&err))
+            .prepare_call_args(target, arg_vals)
+            .and_then(|args| vm.execute_call_lib(&resolved_function_name, &args))
+            .map_err(|err| handle_call_execution_error(vm, &err))
             .and_then(|value| apply_onerr_disposition(vm, value, disposition))
             .map(|value| wrap_preserved_call_result(value, disposition));
         vm.decrement_call_depth();

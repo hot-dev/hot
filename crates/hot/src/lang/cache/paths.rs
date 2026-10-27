@@ -30,12 +30,13 @@ use std::path::PathBuf;
 /// Check if a project configuration file or directory exists in the current directory.
 /// This returns true if either:
 /// - `hot.hot` config file exists, OR
-/// - `.hot/` directory exists (indicating a project that was initialized)
+/// - `.hot/db/` exists (indicating a project that was initialized)
 ///
-/// This ensures that after `hot init` creates `.hot/`, subsequent operations
-/// use project-local paths rather than system cache.
+/// This ensures that after `hot init` creates `.hot/db/`, subsequent operations
+/// use project-local paths rather than system cache. A `.hot/` holding only
+/// caches doesn't make a directory a project.
 pub fn has_project_config() -> bool {
-    std::path::Path::new("hot.hot").exists() || std::path::Path::new(".hot").exists()
+    std::path::Path::new("hot.hot").exists() || std::path::Path::new(".hot/db").exists()
 }
 
 /// Get the base cache directory for Hot.
@@ -84,8 +85,8 @@ pub fn get_system_cache_dir() -> PathBuf {
     // Last resort: use a per-user temp directory rather than the current
     // working directory. Environments without HOME (cron, launchd, CI
     // runners, profilers) would otherwise scatter `.hot/` directories into
-    // whatever cwd the process happened to run from — and once `.hot/`
-    // exists, has_project_config() treats that directory as a project.
+    // whatever cwd the process happened to run from, where a stray `.hot/`
+    // is easily mistaken for a project's.
     let fallback = fallback_temp_cache_dir();
     tracing::warn!(
         "Could not determine system cache directory, using {}",
@@ -252,6 +253,18 @@ pub fn get_db_dir() -> PathBuf {
 
     // Always use project-local .hot/db/ - never system cache
     PathBuf::from(".hot/db")
+}
+
+/// Get the local file storage directory when no path is configured.
+///
+/// It sits beside the database, so a `HOT_HOME` that holds the database
+/// (`$HOT_HOME/db/`) holds the file bytes its records name too
+/// (`$HOT_HOME/file/`). Otherwise it is project-local (`.hot/file/`).
+pub fn get_file_storage_dir() -> PathBuf {
+    if let Ok(hot_home) = std::env::var("HOT_HOME") {
+        return PathBuf::from(hot_home).join("file");
+    }
+    PathBuf::from("./.hot/file")
 }
 
 #[cfg(test)]

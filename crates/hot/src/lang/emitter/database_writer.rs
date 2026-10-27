@@ -2902,6 +2902,8 @@ mod tests {
             is_lazy_param: true,
             used_registers: vec![],
             structural_hash_cache: Default::default(),
+            defining_frame: None,
+            result_params: Vec::new(),
         };
 
         let json = val_to_jsonb_string(&Val::Box(Box::new(lazy_thunk)));

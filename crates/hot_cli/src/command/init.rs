@@ -106,11 +106,15 @@ pub(crate) async fn check_and_run_init_if_needed(
         Ok(db) => db.with_scope(hot::db::DatabaseScope::Bootstrap(
             hot::db::BootstrapOperation::Onboarding,
         )),
-        Err(_) => {
-            info!("Database connection failed, running initialization...");
+        // Only a database that doesn't exist yet calls for initialization.
+        // Any other failure (an unreachable server, rejected credentials, a
+        // runtime role check) is the error to report.
+        Err(hot::db::DatabaseError::NotInitialized(_)) => {
+            info!("Database not initialized, running initialization...");
             run_init_impl(conf, true, None, providers).await?;
             return Ok(true);
         }
+        Err(e) => return Err(format!("Cannot connect to the database: {e}")),
     };
 
     match check_default_data_exists(&db).await {
@@ -331,15 +335,17 @@ async fn initialize_database(
     Ok(identity)
 }
 
-/// Create a project's local SQLite database the first time a command needs
-/// it, as `hot init` would, so `hot run` works in a fresh checkout. Only a
-/// local SQLite file that doesn't exist yet qualifies. PostgreSQL, an
-/// existing database, and authorization or profile errors still fail.
-pub(crate) async fn initialize_missing_local_database(
+/// Prepare a project's local SQLite database the first time a command needs
+/// it, as `hot init` would, so `hot run` works in a fresh checkout and after
+/// an upgrade: create a missing database, migrate an outdated one, and give an
+/// empty one the local identity. Only a project's local SQLite file
+/// qualifies. PostgreSQL is never migrated implicitly, and authorization or
+/// profile errors still fail.
+pub(crate) async fn prepare_local_database(
     conf: &Val,
     providers: &crate::CliProviders,
 ) -> Result<(), String> {
-    initialize_local_database_if_missing(
+    prepare_local_database_in(
         conf,
         hot::lang::cache::paths::has_project_config(),
         providers,
@@ -347,27 +353,73 @@ pub(crate) async fn initialize_missing_local_database(
     .await
 }
 
-async fn initialize_local_database_if_missing(
+async fn prepare_local_database_in(
     conf: &Val,
     in_project: bool,
     providers: &crate::CliProviders,
 ) -> Result<(), String> {
-    let Some(path) = missing_local_sqlite_database(conf, in_project) else {
+    let Some(path) = local_sqlite_database(conf, in_project) else {
         return Ok(());
     };
-    if let Some(dir) = path.parent().filter(|dir| !dir.as_os_str().is_empty()) {
-        std::fs::create_dir_all(dir)
-            .map_err(|e| format!("Failed to create {}: {}", dir.display(), e))?;
+    if !path.exists() {
+        if let Some(dir) = path.parent().filter(|dir| !dir.as_os_str().is_empty()) {
+            std::fs::create_dir_all(dir)
+                .map_err(|e| format!("Failed to create {}: {}", dir.display(), e))?;
+        }
+        eprintln!("Creating the project database at {}", path.display());
+        initialize_database(conf, true, providers).await?;
+        return Ok(());
     }
-    eprintln!("Creating the project database at {}", path.display());
-    initialize_database(conf, true, providers).await?;
+    let pending = hot::db::pending_sqlite_migrations(&hot::db::get_db_uri_from_conf(conf))
+        .await
+        .map_err(|e| {
+            format!(
+                "Cannot read the project database at {}: {e}",
+                path.display()
+            )
+        })?;
+    if !pending.is_empty() {
+        eprintln!(
+            "Migrating the project database at {} ({} pending migration{})",
+            path.display(),
+            pending.len(),
+            if pending.len() == 1 { "" } else { "s" }
+        );
+        initialize_database(conf, true, providers).await?;
+        return Ok(());
+    }
+    seed_empty_database(conf).await
+}
+
+/// Give a migrated database with no organizations or users the local
+/// identity, as `hot init` does. A database migrated by `hot db migrate`
+/// alone has none yet. A database with any data is left alone.
+pub(crate) async fn seed_empty_database(conf: &Val) -> Result<(), String> {
+    let db = hot::db::create_db_pool(conf)
+        .await
+        .map_err(|e| format!("Failed to connect to database: {e}"))?
+        .with_scope(hot::db::DatabaseScope::Bootstrap(
+            hot::db::BootstrapOperation::Onboarding,
+        ));
+    let (org_count, user_count) = hot::db::check_default_data_exists(&db)
+        .await
+        .map_err(|e| format!("Failed to check existing data: {e}"))?;
+    if org_count == 0 && user_count == 0 {
+        initialize_profile(&db, conf).await?;
+    }
     Ok(())
 }
 
 /// The configured database file to create on first use: a local SQLite file,
 /// inside a project, that doesn't exist yet. The path is read as
 /// `hot::db::create_db_pool` reads it.
+#[cfg(test)]
 fn missing_local_sqlite_database(conf: &Val, in_project: bool) -> Option<std::path::PathBuf> {
+    local_sqlite_database(conf, in_project).filter(|path| !path.exists())
+}
+
+/// The project's local SQLite database file, whether or not it exists yet.
+fn local_sqlite_database(conf: &Val, in_project: bool) -> Option<std::path::PathBuf> {
     if !in_project {
         return None;
     }
@@ -377,8 +429,7 @@ fn missing_local_sqlite_database(conf: &Val, in_project: bool) -> Option<std::pa
     if path.is_empty() || path.contains(":memory:") {
         return None;
     }
-    let path = std::path::PathBuf::from(path);
-    (!path.exists()).then_some(path)
+    Some(std::path::PathBuf::from(path))
 }
 
 /// Initialization may seed the documented local development identity into an
@@ -454,7 +505,7 @@ mod tests {
         let path = dir.path().join(".hot/db/hot.sqlite.db");
         let conf = sqlite_conf(hot::profile::get_resolved_conf(hot::val!({})), &path);
         let providers = crate::CliProviders::default();
-        initialize_local_database_if_missing(&conf, true, &providers)
+        prepare_local_database_in(&conf, true, &providers)
             .await
             .unwrap();
         assert!(path.exists(), "the database file is created");
@@ -464,7 +515,7 @@ mod tests {
             .expect("the local profile resolves, as commands resolve it");
 
         // A second run leaves the existing database alone.
-        initialize_local_database_if_missing(&conf, true, &providers)
+        prepare_local_database_in(&conf, true, &providers)
             .await
             .unwrap();
         let bootstrap = db.with_scope(hot::db::DatabaseScope::Bootstrap(
@@ -481,10 +532,9 @@ mod tests {
             profile("custom@example.test", "custom", "production"),
             &path,
         );
-        let error =
-            initialize_local_database_if_missing(&conf, true, &crate::CliProviders::default())
-                .await
-                .unwrap_err();
+        let error = prepare_local_database_in(&conf, true, &crate::CliProviders::default())
+            .await
+            .unwrap_err();
         assert!(error.contains("must be provisioned"), "{error}");
     }
 

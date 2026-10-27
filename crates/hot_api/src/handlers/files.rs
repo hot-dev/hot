@@ -311,6 +311,37 @@ pub async fn download_file(
     ))
 }
 
+/// The size of the active file at `path` that a write would replace, or 0.
+/// The commit charges only the difference, so the prechecks must too.
+async fn replaced_size(db: &hot::db::DatabasePool, path: &str, org_id: Uuid, env_id: Uuid) -> i64 {
+    match file_storage::normalize_path(path) {
+        Ok(normalized) => file::get_file_by_path(db, &normalized, org_id, Some(env_id))
+            .await
+            .map_or(0, |record| record.size),
+        Err(_) => 0,
+    }
+}
+
+/// The response for a failed file commit. The storage quota is checked
+/// again when the write commits, across the whole account (the root and its
+/// sub-organizations), so a write that passed the request's precheck can
+/// still be over quota.
+fn commit_error(context: &str, error: String) -> (StatusCode, Json<ApiErrorResponse>) {
+    if error.contains(file::STORAGE_QUOTA_EXCEEDED) {
+        return (
+            StatusCode::PAYLOAD_TOO_LARGE,
+            Json(ApiErrorResponse::new("storage_quota_exceeded", error)),
+        );
+    }
+    (
+        StatusCode::INTERNAL_SERVER_ERROR,
+        Json(ApiErrorResponse::internal_error(&format!(
+            "{}: {}",
+            context, error
+        ))),
+    )
+}
+
 pub async fn upload_file(
     State((db, _storage, conf, _stream_pubsub)): State<ApiStateData>,
     Extension(auth): Extension<AuthContext>,
@@ -352,7 +383,8 @@ pub async fn upload_file(
     if storage_limit >= 0 {
         let current_usage = file::get_storage_usage_by_org(&db, org_id)
             .await
-            .unwrap_or(0);
+            .unwrap_or(0)
+            - replaced_size(&db, &path, org_id, api_key.env_id).await;
         if current_usage + content_size > storage_limit {
             return Err((
                 StatusCode::PAYLOAD_TOO_LARGE,
@@ -379,15 +411,7 @@ pub async fn upload_file(
     let metadata = file_storage
         .write_file(&path, &body, content_type.as_deref(), &ctx)
         .await
-        .map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ApiErrorResponse::internal_error(&format!(
-                    "Failed to write file: {}",
-                    e
-                ))),
-            )
-        })?;
+        .map_err(|e| commit_error("Failed to write file", e))?;
 
     let normalized_path = file_storage::normalize_path(&path).unwrap_or_else(|_| path.clone());
 
@@ -544,7 +568,8 @@ pub async fn initiate_upload(
         if storage_limit >= 0 {
             let current_usage = file::get_storage_usage_by_org(&db, org_id)
                 .await
-                .unwrap_or(0);
+                .unwrap_or(0)
+                - replaced_size(&db, &normalized_path, org_id, api_key.env_id).await;
             if current_usage + expected_size > storage_limit {
                 return Err((
                     StatusCode::PAYLOAD_TOO_LARGE,
@@ -776,6 +801,20 @@ pub async fn upload_part_handler(
     {
         return Ok(part_response(part));
     }
+    // A new part that overruns the declared size can't be recorded, so
+    // refuse it before claiming the part or staging its bytes: each retry
+    // would stage another copy that stays until the upload ends.
+    if let Some(expected) = record.expected_size
+        && record.bytes_received.saturating_add(body.len() as i64) > expected
+    {
+        return Err((
+            StatusCode::PAYLOAD_TOO_LARGE,
+            Json(ApiErrorResponse::new(
+                "part_too_large",
+                format!("Parts would exceed the upload's expected size of {expected} bytes"),
+            )),
+        ));
+    }
     let claim_token = match file_upload::reserve_part(
         &db,
         upload_id,
@@ -996,7 +1035,8 @@ pub async fn complete_upload(
     if storage_limit >= 0 {
         let current_usage = file::get_storage_usage_by_org(&db, org_id)
             .await
-            .unwrap_or(0);
+            .unwrap_or(0)
+            - replaced_size(&db, &record.path, org_id, api_key.env_id).await;
         if current_usage + record.bytes_received > storage_limit {
             return Err((
                 StatusCode::PAYLOAD_TOO_LARGE,
@@ -1091,13 +1131,7 @@ pub async fn complete_upload(
             {
                 tracing::warn!(%upload_id, "Failed to release upload completion: {}", release_error);
             }
-            return Err((
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ApiErrorResponse::internal_error(&format!(
-                    "Failed to complete upload: {}",
-                    e
-                ))),
-            ));
+            return Err(commit_error("Failed to complete upload", e));
         }
     };
 

@@ -433,6 +433,12 @@ async fn async_main(providers: CliProviders) {
                 println!("  Package:  {}", platform.package_name);
                 println!();
 
+                if update::is_major_upgrade(&current_version, &latest_version)
+                    && !update::confirm_major_upgrade(&latest_version)
+                {
+                    return;
+                }
+
                 match update::run_installer(&platform, None).await {
                     Ok(()) => {
                         println!();
@@ -1152,14 +1158,24 @@ async fn async_main(providers: CliProviders) {
             }
         }
         Some(Command::Db { action, .. }) => {
-            let db_cmd = match action {
-                DbAction::Status => "status",
-                DbAction::Migrate => "migrate",
-                DbAction::ProvisionStoreIndexes => "provision-store-indexes",
-                DbAction::PortV1ToV2 => "port-v1-to-v2",
+            let result = match action {
+                DbAction::Redeploy {
+                    dry_run,
+                    notify,
+                    org,
+                } => command::db::run_db_redeploy(&conf, dry_run, notify, org).await,
+                action => {
+                    let db_cmd = match action {
+                        DbAction::Status => "status",
+                        DbAction::Migrate => "migrate",
+                        DbAction::ProvisionStoreIndexes => "provision-store-indexes",
+                        DbAction::PortV1ToV2 => "port-v1-to-v2",
+                        DbAction::Redeploy { .. } => unreachable!("handled above"),
+                    };
+                    run_db(db_cmd, &conf, &providers).await
+                }
             };
-
-            if let Err(e) = run_db(db_cmd, &conf, &providers).await {
+            if let Err(e) = result {
                 error!("Database command failed: {}", e);
                 std::process::exit(1);
             }
@@ -1489,6 +1505,14 @@ async fn async_main(providers: CliProviders) {
             strict,
             ..
         }) => {
+            // A deploy that builds from source records the build locally first.
+            if build_id.is_none()
+                && let Err(e) =
+                    crate::command::init::prepare_local_database(&conf, &providers).await
+            {
+                eprintln!("Error: {}", e);
+                std::process::exit(1);
+            }
             if let Err(e) = run_deploy(
                 build_id.as_deref(),
                 &conf,

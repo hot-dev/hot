@@ -31,6 +31,14 @@ The model is deliberately hybrid:
 | `Any` | Any type | anything |
 | `Bytes` | Binary data | — |
 
+## Numbers
+
+An `Int` is a 64-bit integer, from -9223372036854775808 to
+9223372036854775807. Arithmetic whose result doesn't fit in an `Int` returns
+`Err("Integer overflow")`, as dividing by zero returns
+`Err("Division by zero")`. A `Dec` is an exact 256-bit decimal, so
+`add(0.1, 0.2)` is `0.3`. Mixing an `Int` and a `Dec` gives a `Dec`.
+
 ## Type Annotations
 
 Add types to variables:
@@ -98,14 +106,29 @@ pick-fruit fn (fruit: Fruit): Str {
 
 apple: Fruit "apple"   // Valid
 pick-fruit("banana")   // Valid
-pick-fruit("grape")    // Type error
+pick-fruit("grape")    // constraint-violation: not a Fruit
 ```
 
 Literal unions let you restrict values to a specific set of allowed values. A
-closed union is checked at runtime too: a value from outside the set, such as
-one parsed from JSON, fails where it enters the type. An `open` union also
-accepts unknown values of the same type. Literal union values stay plain
-values, with no type tag. See [Constraints](/docs/language/constraints).
+literal outside a closed union, as in `pick-fruit("grape")`, is a compile-time
+`constraint-violation` error from `hot check`. A closed union is checked at
+runtime too: a computed value from outside the set, such as one parsed from
+JSON, fails where it enters the type with `Err(ConstraintError.Violation)`. An
+`open` union also accepts unknown values of the same type. Literal union values
+stay plain values, with no type tag. See
+[Constraints](/docs/language/constraints).
+
+They also work inline, without a named type:
+
+```hot
+set-speed fn (mode: "fast" | "slow", retries: 0 | 1 | 3, note: Str | null): Str {
+  `Running ${mode} with ${retries} retries`
+}
+
+set-speed("fast", 3, null)   // "Running fast with 3 retries"
+```
+
+Name the type when you reuse it or extend it with `open`.
 
 ## Constraints
 
@@ -119,9 +142,11 @@ listen fn (port: Port): Str {
 }
 ```
 
-A value that fails, such as `listen(70000)`, becomes a `Result.Err` holding a
-`ConstraintError`. See [Constraints](/docs/language/constraints) for fields,
-invariants, preconditions, and how checks run.
+A literal argument that fails, such as `listen(70000)`, is a compile-time
+`constraint-violation` error from `hot check`. A computed value that fails
+becomes a `Result.Err` holding a `ConstraintError` at run time. See
+[Constraints](/docs/language/constraints) for fields, invariants,
+preconditions, and how checks run.
 
 ## Nullable Types
 
@@ -364,9 +389,9 @@ success Result.Ok(42)
 `Value: ${success}`   // "Value: 42" (auto-unwraps in templates)
 ```
 
-Results automatically unwrap when used as function arguments—Ok values pass through, Err values halt execution. This makes error propagation seamless.
+Results automatically unwrap when used as function arguments: Ok values pass through, and Err values halt execution, unless the parameter is declared `Result`. This makes error propagation seamless.
 
-See **[Error Handling](/docs/language/errors)** for the full story on Result types, automatic unwrapping, and lazy evaluation.
+See **[Error Handling](/docs/language/errors)** for the full story on Result types, automatic unwrapping, and `Result` parameters.
 
 ## Type Checking
 

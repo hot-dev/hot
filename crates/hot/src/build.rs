@@ -1675,6 +1675,53 @@ pub async fn load_build_manifest_data(
         build_id
     );
 
+    // Open the zip file from memory
+    let cursor = Cursor::new(build_data);
+    let mut archive =
+        ZipArchive::new(cursor).map_err(|e| format!("Failed to read build zip: {}", e))?;
+
+    // Read the manifest.hot file
+    let manifest_file = archive
+        .by_name("manifest.hot")
+        .map_err(|_| "Build does not contain manifest.hot".to_string())?;
+
+    let manifest_result = crate::bundle::read_manifest_data(manifest_file)?;
+
+    // Refuse a build this runtime can't run before changing anything: the
+    // build's handlers and tools are its own until it is redeployed.
+    if let crate::val::Val::Map(map) = &manifest_result {
+        for (key, bundle_val) in map.iter() {
+            if let crate::val::Val::Str(key_str) = key
+                && key_str.starts_with("hot.bundle.")
+                && let crate::val::Val::Map(bundle_map) = bundle_val
+            {
+                let version_check = validate_build_version(bundle_map);
+                if !version_check.compatible {
+                    if let Err(e) = Build::update_manifest_versions(
+                        db,
+                        build_id,
+                        version_check.build_engine_version.as_deref(),
+                        version_check.build_hot_std_version.as_deref(),
+                    )
+                    .await
+                    {
+                        tracing::warn!(
+                            "Failed to persist manifest versions for build {}: {}",
+                            build_id,
+                            e
+                        );
+                    }
+                    let details = if version_check.warnings.is_empty() {
+                        "version compatibility check failed".to_string()
+                    } else {
+                        version_check.warnings.join("; ")
+                    };
+                    return Err(format!("Build {} is incompatible: {}", build_id, details));
+                }
+            }
+        }
+    }
+
     // Clear any existing event handlers for this build (prevents duplicates if handlers
     // were already inserted locally before upload)
     let deleted_handlers = crate::db::EventHandler::delete_event_handlers_by_build(db, build_id)
@@ -1728,18 +1775,6 @@ pub async fn load_build_manifest_data(
     // The insert uses ON CONFLICT (webhook_id) DO UPDATE, which atomically
     // upserts and preserves stable webhook URLs across deploys.
     // Deleting first would destroy the webhook_id that find_existing looks up.
-
-    // Open the zip file from memory
-    let cursor = Cursor::new(build_data);
-    let mut archive =
-        ZipArchive::new(cursor).map_err(|e| format!("Failed to read build zip: {}", e))?;
-
-    // Read the manifest.hot file
-    let manifest_file = archive
-        .by_name("manifest.hot")
-        .map_err(|_| "Build does not contain manifest.hot".to_string())?;
-
-    let manifest_result = crate::bundle::read_manifest_data(manifest_file)?;
 
     let mut total_handlers = 0;
     let mut total_schedules = 0;

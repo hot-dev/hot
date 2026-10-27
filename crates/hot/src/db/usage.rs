@@ -315,6 +315,21 @@ pub async fn reconcile_account(db: &DatabasePool, root: Uuid) -> Result<UsageDri
             if is_root != Some(true) {
                 return Err(root_required());
             }
+            let overrides: Option<serde_json::Value> =
+                sqlx::query_scalar("SELECT features FROM org WHERE org_id=$1")
+                    .bind(root)
+                    .fetch_one(pool)
+                    .await?;
+            let plan: Option<serde_json::Value> = sqlx::query_scalar(
+                "SELECT COALESCE(p.features,'{}'::jsonb) FROM org_plan op JOIN plan p ON p.plan_uuid=op.plan_uuid WHERE op.org_id=$1",
+            )
+            .bind(root)
+            .fetch_optional(pool)
+            .await?
+            .flatten();
+            if !counters_enforced(plan.as_ref(), overrides.as_ref()) {
+                return Ok(drift);
+            }
             let envs: Vec<(Uuid, Uuid, bool)> = sqlx::query_as(ACCOUNT_ENVS)
                 .bind(root)
                 .fetch_all(pool)
@@ -371,6 +386,29 @@ pub async fn reconcile_account(db: &DatabasePool, root: Uuid) -> Result<UsageDri
             if is_root != Some(true) {
                 return Err(root_required());
             }
+            let overrides: Option<String> =
+                sqlx::query_scalar("SELECT features FROM org WHERE org_id=$1")
+                    .bind(root)
+                    .fetch_one(pool)
+                    .await?;
+            let plan: Option<String> = sqlx::query_scalar(
+                "SELECT COALESCE(p.features,'{}') FROM org_plan op JOIN plan p ON p.plan_uuid=op.plan_uuid WHERE op.org_id=$1",
+            )
+            .bind(root)
+            .fetch_optional(pool)
+            .await?
+            .flatten();
+            let parse = |raw: Option<String>| {
+                raw.map(|s| serde_json::from_str::<serde_json::Value>(&s))
+                    .transpose()
+            };
+            let enforced = match (parse(plan), parse(overrides)) {
+                (Ok(plan), Ok(overrides)) => counters_enforced(plan.as_ref(), overrides.as_ref()),
+                _ => true,
+            };
+            if !enforced {
+                return Ok(drift);
+            }
             let envs: Vec<(Uuid, Uuid, bool)> = sqlx::query_as(ACCOUNT_ENVS)
                 .bind(root)
                 .fetch_all(pool)
@@ -408,6 +446,26 @@ pub async fn reconcile_account(db: &DatabasePool, root: Uuid) -> Result<UsageDri
     Ok(drift)
 }
 
+/// Whether any limit of the account reads a usage counter. An account
+/// without one (no plan, or every limit unlimited) has nothing to enforce, so
+/// reconciliation skips its full-history checks. Unreadable features count as
+/// limited.
+fn counters_enforced(
+    plan: Option<&serde_json::Value>,
+    overrides: Option<&serde_json::Value>,
+) -> bool {
+    use super::features::keys;
+    let features = super::Features::for_account(plan, overrides);
+    let limited = |key: &str| features.get_i64(key).is_none_or(|limit| limit >= 0);
+    limited(keys::STORE_STORAGE_BYTES)
+        || limited(keys::CALL_STORAGE_BYTES)
+        || limited(keys::RUNS_PER_MONTH)
+        || features.box_concurrent_tasks() >= 0
+        || features.compute_units_budget() > 0
+        || features.compute_units_per_month() >= 0
+        || features.task_minutes_per_month() >= 0
+}
+
 fn root_required() -> sqlx::Error {
     sqlx::Error::Protocol("Usage reconciliation requires a root account".into())
 }
@@ -442,6 +500,15 @@ pub async fn reconcile_accounts(db: &DatabasePool) -> Result<(), sqlx::Error> {
 mod tests {
     use super::*;
 
+    /// Reconciliation only checks accounts with an enforced limit.
+    async fn limit_runs(pool: &sqlx::SqlitePool, org: Uuid) {
+        sqlx::query("UPDATE org SET features='{\"runs_per_month\":1000}' WHERE org_id=?")
+            .bind(org)
+            .execute(pool)
+            .await
+            .unwrap();
+    }
+
     async fn storage_truth(pool: &sqlx::SqlitePool, env: Uuid) -> (i64, i64) {
         let actual:(i64,i64)=sqlx::query_as("SELECT COALESCE(SUM(store_bytes),0),COALESCE(SUM(call_bytes),0) FROM usage_storage WHERE env_id=?")
             .bind(env).fetch_one(pool).await.unwrap();
@@ -469,6 +536,7 @@ mod tests {
         let DatabasePool::Sqlite(pool) = &db else {
             unreachable!()
         };
+        limit_runs(pool, data.org_id).await;
         let calls: Vec<_> = (0..17).map(|_| Uuid::now_v7()).collect();
         for step in 0..120_i64 {
             let id = calls[(step as usize * 7) % calls.len()];
@@ -557,6 +625,7 @@ mod tests {
         let DatabasePool::Sqlite(pool) = &db else {
             unreachable!()
         };
+        limit_runs(pool, data.org_id).await;
         let task = Uuid::now_v7();
         sqlx::query("INSERT INTO task(task_id,env_id,stream_id,build_id,function_name,task_type) VALUES(?,?,?,?,'::counter/task','container')")
             .bind(task).bind(data.env_id).bind(data.stream_id).bind(data.build_id).execute(pool).await.unwrap();
@@ -704,6 +773,7 @@ mod tests {
         let DatabasePool::Sqlite(pool) = &db else {
             unreachable!()
         };
+        limit_runs(pool, data.org_id).await;
         let period = DateTime::parse_from_rfc3339("2000-01-01T00:00:00Z")
             .unwrap()
             .with_timezone(&Utc);
@@ -762,6 +832,36 @@ mod tests {
                 .await
                 .unwrap()
                 .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn reconciliation_skips_accounts_without_limits() {
+        let db = super::super::test_db().await;
+        let data = super::super::insert_test_data(&db).await.unwrap();
+        let DatabasePool::Sqlite(pool) = &db else {
+            unreachable!()
+        };
+        sqlx::query("INSERT INTO usage_storage(env_id,org_id,slot,store_bytes) VALUES(?,?,0,99) ON CONFLICT(env_id,slot) DO UPDATE SET store_bytes=store_bytes+99")
+            .bind(data.env_id)
+            .bind(data.org_id)
+            .execute(pool)
+            .await
+            .unwrap();
+        // Nothing is enforced without a plan or a limited override.
+        assert!(
+            reconcile_account(&db, data.org_id)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        limit_runs(pool, data.org_id).await;
+        assert_eq!(
+            reconcile_account(&db, data.org_id)
+                .await
+                .unwrap()
+                .storage_rows,
+            1
         );
     }
 }

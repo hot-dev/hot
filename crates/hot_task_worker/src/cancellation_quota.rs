@@ -1,35 +1,90 @@
 //! Cancellation is a user-visible terminal state, not proof of runtime exit.
-//! Reservations survive it until the owning runtime confirms termination.
+//! Reservations survive it until the owning runtime confirms termination, or
+//! until long after the task's deadline when nothing shows it still running.
 
 use super::{CONTAINER_KILL_TIMEOUT, DB_CALL_TIMEOUT, executor, shutdown};
+use chrono::{DateTime, Utc};
 use hot::db::{DatabasePool, DatabaseScope, Env, Task, TaskStatus};
 use std::collections::HashMap;
 use uuid::Uuid;
 
-fn stopped(result: Result<Option<i64>, executor::ExecutorError>) -> bool {
-    matches!(
-        result,
-        Ok(Some(_)) | Err(executor::ExecutorError::ContainerNotFound(_))
-    )
+/// How long after a cancelled container's deadline (its start plus its
+/// timeout) its reservation is released without proof that it stopped. A
+/// working runtime stops a container at its timeout, so one that nothing
+/// shows running this long after has lost its host or its worker.
+const UNCONFIRMED_RELEASE_GRACE: chrono::Duration = chrono::Duration::minutes(15);
+
+/// What a runtime says about a container.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum RuntimeState {
+    Stopped,
+    Running,
+    /// The runtime didn't answer.
+    Unknown,
 }
 
-pub(super) async fn runtime_stopped(executor: &executor::BoxExecutor, container_id: &str) -> bool {
-    match tokio::time::timeout(DB_CALL_TIMEOUT, executor.inspect_status(container_id)).await {
-        Ok(result) => stopped(result),
-        Err(_) => false,
+fn state(result: Result<Option<i64>, executor::ExecutorError>) -> RuntimeState {
+    match result {
+        Ok(Some(_)) | Err(executor::ExecutorError::ContainerNotFound(_)) => RuntimeState::Stopped,
+        Ok(None) => RuntimeState::Running,
+        Err(_) => RuntimeState::Unknown,
     }
 }
 
-/// The caller must establish termination on the runtime that owned this task.
-/// Missing measurements charge the full reserved maximum, never zero.
+pub(super) async fn runtime_state(
+    executor: &executor::BoxExecutor,
+    container_id: &str,
+) -> RuntimeState {
+    match tokio::time::timeout(DB_CALL_TIMEOUT, executor.inspect_status(container_id)).await {
+        Ok(result) => state(result),
+        Err(_) => RuntimeState::Unknown,
+    }
+}
+
+pub(super) async fn runtime_stopped(executor: &executor::BoxExecutor, container_id: &str) -> bool {
+    runtime_state(executor, container_id).await == RuntimeState::Stopped
+}
+
+/// How a cancelled execution's end is known.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Termination {
+    /// Nothing shows it stopped: the reservation stays.
+    Unconfirmed,
+    /// Its runtime confirmed it stopped.
+    Confirmed,
+    /// Nothing shows it running, and its deadline is long past.
+    PastDeadline,
+}
+
+/// How a cancelled container that started at `start` with `timeout_ms` is
+/// known to have ended, from its runtime's `state` (`None` when no runtime
+/// here knows the container).
+fn termination(
+    state: Option<RuntimeState>,
+    start: DateTime<Utc>,
+    timeout_ms: i64,
+    now: DateTime<Utc>,
+) -> Termination {
+    let past_deadline =
+        start + chrono::Duration::milliseconds(timeout_ms.max(0)) + UNCONFIRMED_RELEASE_GRACE < now;
+    match state {
+        Some(RuntimeState::Stopped) => Termination::Confirmed,
+        Some(RuntimeState::Running) => Termination::Unconfirmed,
+        Some(RuntimeState::Unknown) | None if past_deadline => Termination::PastDeadline,
+        Some(RuntimeState::Unknown) | None => Termination::Unconfirmed,
+    }
+}
+
+/// Settle a cancelled execution's quota. Missing measurements charge the
+/// full reserved maximum, never zero.
 pub(super) async fn settle(
     db: &DatabasePool,
     task_id: &Uuid,
     worker_id: &str,
-    terminated: bool,
+    termination: Termination,
     measured: Option<(i64, i64)>,
 ) -> bool {
-    if !terminated {
+    if termination == Termination::Unconfirmed {
         tracing::warn!(%task_id, "Cancelled execution termination is unconfirmed; retaining account quota reservation");
         return false;
     }
@@ -42,12 +97,18 @@ pub(super) async fn settle(
     if compute_units < 0 || duration_ms < 0 {
         return false;
     }
+    let msg = if termination == Termination::Confirmed {
+        "Task cancelled; execution termination confirmed"
+    } else {
+        "Task cancelled; quota released after the deadline without termination evidence"
+    };
     let result = serde_json::json!({
         "$type": "::hot::task/Cancellation",
-        "$val": {"msg": "Task cancelled; execution termination confirmed", "data": null},
+        "$val": {"msg": msg, "data": null},
         "compute-units": compute_units,
         "duration-ms": duration_ms,
         "quota-estimated": measured.is_none(),
+        "termination-confirmed": termination == Termination::Confirmed,
     });
     match Task::complete(
         db,
@@ -106,18 +167,42 @@ pub(super) async fn reap(
                 .then(|| task.container_id.clone())
                 .flatten()
         });
-        let Some(container_id) = container_id else {
-            tracing::warn!(task_id=%task.task_id, worker_id=%owner, "Cancelled quota needs recovery on its owning runtime; no local ownership evidence");
-            continue;
+        let state = match container_id {
+            Some(container_id) => {
+                if runtime_state(executor, &container_id).await != RuntimeState::Stopped {
+                    let _ = tokio::time::timeout(
+                        CONTAINER_KILL_TIMEOUT,
+                        executor.cleanup_orphan(&container_id),
+                    )
+                    .await;
+                }
+                Some(runtime_state(executor, &container_id).await)
+            }
+            // This generation ran the task, never recorded a container for
+            // it, and has none labelled for it: setup failed before one
+            // started, so nothing is running.
+            None if owner == current_worker && task.container_id.is_none() => {
+                Some(RuntimeState::Stopped)
+            }
+            // Another worker generation ran it: a lost host, or a restart.
+            None => None,
         };
-        if !runtime_stopped(executor, &container_id).await {
-            let _ = tokio::time::timeout(
-                CONTAINER_KILL_TIMEOUT,
-                executor.cleanup_orphan(&container_id),
-            )
-            .await;
+        let termination = termination(
+            state,
+            task.start_time.unwrap_or(task.created_at),
+            task.timeout_ms,
+            Utc::now(),
+        );
+        match termination {
+            Termination::Unconfirmed if state.is_none() => {
+                tracing::warn!(task_id=%task.task_id, worker_id=%owner, "Cancelled quota needs recovery on its owning runtime; no local ownership evidence");
+                continue;
+            }
+            Termination::PastDeadline => {
+                tracing::warn!(task_id=%task.task_id, worker_id=%owner, "Releasing a cancelled execution's quota after its deadline without termination evidence");
+            }
+            Termination::Unconfirmed | Termination::Confirmed => {}
         }
-        let terminated = runtime_stopped(executor, &container_id).await;
         let Ok(env) = Env::get_env_uncached(db, &task.env_id).await else {
             continue;
         };
@@ -125,10 +210,19 @@ pub(super) async fn reap(
             org_id: env.org_id,
             env_id: task.env_id,
         });
-        if settle(&exact, &task.task_id, owner, terminated, None).await {
+        if settle(&exact, &task.task_id, owner, termination, None).await {
             tracing::info!(task_id=%task.task_id, "Recovered cancelled execution; charged reserved maximum and released concurrency");
         }
     }
+}
+
+/// Whether this worker's runtime has no container labelled for `task_id`.
+/// Every container a worker starts carries that label, so for the worker
+/// generation that ran the task, absence means none was started or it is gone.
+pub(super) async fn no_local_container(executor: &executor::BoxExecutor, task_id: &Uuid) -> bool {
+    local_containers(executor)
+        .await
+        .is_ok_and(|local| !local.contains_key(task_id))
 }
 
 async fn local_containers(
@@ -181,10 +275,11 @@ mod tests {
     async fn claimed_cancelled() -> (DatabasePool, Uuid) {
         let db = hot::db::test_db().await;
         let id = Uuid::now_v7();
+        let env = Uuid::now_v7();
         Task::insert(
             &db,
             &id,
-            &Uuid::now_v7(),
+            &env,
             &Uuid::now_v7(),
             &Uuid::now_v7(),
             None,
@@ -208,25 +303,76 @@ mod tests {
         .execute(pool)
         .await
         .unwrap();
-        assert!(Task::cancel(&db, &id).await.unwrap());
+        assert!(Task::cancel(&db, &id, &env).await.unwrap());
         (db, id)
     }
     #[test]
     fn only_runtime_exit_or_missing_container_confirms_termination() {
-        assert!(!stopped(Ok(None)));
-        assert!(!stopped(Err(executor::ExecutorError::Other(
-            "daemon unavailable".into()
-        ))));
-        assert!(stopped(Ok(Some(137))));
-        assert!(stopped(Err(executor::ExecutorError::ContainerNotFound(
-            "known-local".into()
-        ))));
+        assert_eq!(state(Ok(None)), RuntimeState::Running);
+        assert_eq!(
+            state(Err(executor::ExecutorError::Other(
+                "daemon unavailable".into()
+            ))),
+            RuntimeState::Unknown
+        );
+        assert_eq!(state(Ok(Some(137))), RuntimeState::Stopped);
+        assert_eq!(
+            state(Err(executor::ExecutorError::ContainerNotFound(
+                "known-local".into()
+            ))),
+            RuntimeState::Stopped
+        );
+    }
+
+    #[test]
+    fn an_unknown_container_is_released_only_long_after_its_deadline() {
+        let start = Utc::now() - chrono::Duration::hours(1);
+        let timeout_ms = 60_000;
+        let within = start + chrono::Duration::minutes(10);
+        let after = start + chrono::Duration::minutes(20);
+        for state in [None, Some(RuntimeState::Unknown)] {
+            assert_eq!(
+                termination(state, start, timeout_ms, within),
+                Termination::Unconfirmed
+            );
+            assert_eq!(
+                termination(state, start, timeout_ms, after),
+                Termination::PastDeadline
+            );
+        }
+        // A runtime that says it runs keeps it, however late.
+        assert_eq!(
+            termination(Some(RuntimeState::Running), start, timeout_ms, after),
+            Termination::Unconfirmed
+        );
+        assert_eq!(
+            termination(Some(RuntimeState::Stopped), start, timeout_ms, within),
+            Termination::Confirmed
+        );
     }
     #[tokio::test]
     async fn termination_proof_and_owner_fence_control_cancellation_settlement() {
         let (db, id) = claimed_cancelled().await;
-        assert!(!settle(&db, &id, "owner", false, Some((10, 10000))).await);
-        assert!(!settle(&db, &id, "stale-worker", true, Some((10, 10000))).await);
+        assert!(
+            !settle(
+                &db,
+                &id,
+                "owner",
+                Termination::Unconfirmed,
+                Some((10, 10000))
+            )
+            .await
+        );
+        assert!(
+            !settle(
+                &db,
+                &id,
+                "stale-worker",
+                Termination::Confirmed,
+                Some((10, 10000))
+            )
+            .await
+        );
         assert_eq!(
             Task::quota_reservation(&db, &id)
                 .await
@@ -234,7 +380,7 @@ mod tests {
                 .compute_units,
             60
         );
-        assert!(settle(&db, &id, "owner", true, Some((10, 10000))).await);
+        assert!(settle(&db, &id, "owner", Termination::Confirmed, Some((10, 10000))).await);
         assert_eq!(
             Task::quota_reservation(&db, &id).await.unwrap().duration_ms,
             0
@@ -242,15 +388,33 @@ mod tests {
         let task = Task::get(&db, &id).await.unwrap();
         assert_eq!(task.task_status_id, TaskStatus::Cancelled.as_id());
         assert_eq!(task.result.unwrap()["compute-units"], 10);
-        assert!(!settle(&db, &id, "owner", true, Some((0, 0))).await);
+        assert!(!settle(&db, &id, "owner", Termination::Confirmed, Some((0, 0))).await);
     }
     #[tokio::test]
     async fn confirmed_orphan_termination_charges_reserved_maximum() {
         let (db, id) = claimed_cancelled().await;
-        assert!(settle(&db, &id, "owner", true, None).await);
+        assert!(settle(&db, &id, "owner", Termination::Confirmed, None).await);
         let task = Task::get(&db, &id).await.unwrap();
-        assert_eq!(task.result.unwrap()["compute-units"], 60);
+        let result = task.result.unwrap();
+        assert_eq!(result["compute-units"], 60);
+        assert_eq!(result["termination-confirmed"], true);
         assert_eq!(task.duration_ms, Some(60000));
+    }
+
+    #[tokio::test]
+    async fn a_release_past_the_deadline_charges_reserved_maximum() {
+        let (db, id) = claimed_cancelled().await;
+        assert!(settle(&db, &id, "owner", Termination::PastDeadline, None).await);
+        let task = Task::get(&db, &id).await.unwrap();
+        assert_eq!(task.task_status_id, TaskStatus::Cancelled.as_id());
+        let result = task.result.unwrap();
+        assert_eq!(result["compute-units"], 60);
+        assert_eq!(result["quota-estimated"], true);
+        assert_eq!(result["termination-confirmed"], false);
+        assert_eq!(
+            Task::quota_reservation(&db, &id).await.unwrap().duration_ms,
+            0
+        );
     }
     /// Run on a Docker host: cargo test -p hot_task_worker docker_cancellation_requires_exit_before_releasing_quota -- --ignored
     #[tokio::test]
@@ -282,7 +446,11 @@ mod tests {
                 &db,
                 &id,
                 "owner",
-                runtime_stopped(&executor, &container).await,
+                if runtime_stopped(&executor, &container).await {
+                    Termination::Confirmed
+                } else {
+                    Termination::Unconfirmed
+                },
                 None
             )
             .await
@@ -303,7 +471,11 @@ mod tests {
                 &db,
                 &id,
                 "owner",
-                runtime_stopped(&executor, &container).await,
+                if runtime_stopped(&executor, &container).await {
+                    Termination::Confirmed
+                } else {
+                    Termination::Unconfirmed
+                },
                 None
             )
             .await

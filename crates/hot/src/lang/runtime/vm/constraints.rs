@@ -293,19 +293,108 @@ impl VirtualMachine {
 
     /// Check the result of a native that updates a typed value (`assoc`,
     /// `merge`, ...) against the constraints of its type.
-    pub(crate) fn check_updated_value(&mut self, native: &str, value: Val) -> VmResult<Val> {
-        if !matches!(
-            native,
+    pub(crate) fn check_updated_value(
+        &mut self,
+        native: &str,
+        args: &[Val],
+        value: Val,
+    ) -> VmResult<Val> {
+        match native {
             "::hot::coll/assoc"
-                | "::hot::coll/assoc-in"
-                | "::hot::coll/assoc-some"
-                | "::hot::coll/update"
-                | "::hot::coll/update-in"
-                | "::hot::coll/merge"
-        ) {
+            | "::hot::coll/assoc-some"
+            | "::hot::coll/update"
+            | "::hot::coll/merge" => self.check_typed_value(value, "update"),
+            // A deep update can change a typed value at any level of its
+            // path, not only the outermost one.
+            "::hot::coll/assoc-in" | "::hot::coll/update-in" => match args.get(1) {
+                Some(Val::Vec(path)) => self.check_typed_values_on_path(value, path, "update"),
+                _ => self.check_typed_value(value, "update"),
+            },
+            // A walk can change a typed value anywhere in the result.
+            "::hot::coll/walk"
+            | "::hot::coll/prewalk"
+            | "::hot::coll/postwalk"
+            | "::hot::coll/postwalk-replace" => self.check_typed_values_within(value, "update"),
+            _ => Ok(value),
+        }
+    }
+
+    /// Check the typed values a deep update passed through, from the result
+    /// down along `path`; the result is the first `ConstraintError`, or
+    /// `value` when all of them pass.
+    fn check_typed_values_on_path(
+        &mut self,
+        value: Val,
+        path: &[Val],
+        boundary: &str,
+    ) -> VmResult<Val> {
+        if self.program.constraint_types.is_empty() {
             return Ok(value);
         }
-        self.check_typed_value(value, "update")
+        let mut current = value.clone();
+        for key in std::iter::once(None).chain(path.iter().map(Some)) {
+            if let Some(key) = key {
+                let Some(next) = path_step(&current, key) else {
+                    break;
+                };
+                current = next;
+            }
+            if let Val::Map(entries) = &current
+                && crate::val::tagged_type_name(entries).is_some()
+            {
+                let checked = self.check_typed_value(current.clone(), boundary)?;
+                if checked.is_err() {
+                    return Ok(checked);
+                }
+            }
+        }
+        Ok(value)
+    }
+
+    /// Check every typed value inside `value`, outermost first; the result is
+    /// the first `ConstraintError`, or `value` when all of them pass.
+    fn check_typed_values_within(&mut self, value: Val, boundary: &str) -> VmResult<Val> {
+        if self.program.constraint_types.is_empty() {
+            return Ok(value);
+        }
+        let mut failure = None;
+        self.find_typed_value_failure(&value, boundary, &mut failure)?;
+        Ok(failure.unwrap_or(value))
+    }
+
+    fn find_typed_value_failure(
+        &mut self,
+        value: &Val,
+        boundary: &str,
+        failure: &mut Option<Val>,
+    ) -> VmResult<()> {
+        match value {
+            Val::Map(entries) => {
+                if crate::val::tagged_type_name(entries).is_some() {
+                    let checked = self.check_typed_value(value.clone(), boundary)?;
+                    if checked.is_err() {
+                        *failure = Some(checked);
+                        return Ok(());
+                    }
+                }
+                for nested in entries.values() {
+                    self.find_typed_value_failure(nested, boundary, failure)?;
+                    if failure.is_some() {
+                        break;
+                    }
+                }
+            }
+            Val::Vec(items) => {
+                for nested in items.iter() {
+                    self.find_typed_value_failure(nested, boundary, failure)?;
+                    if failure.is_some() {
+                        break;
+                    }
+                }
+            }
+            _ => {}
+        }
+        Ok(())
     }
 
     /// Check a typed value against its type's constraints, at a boundary
@@ -869,6 +958,34 @@ fn with_field(value: &Val, field: Val, field_value: Val) -> Val {
     };
     fields.insert(field, field_value);
     crate::val::with_type_of(value, Val::Map(Box::new(fields)))
+}
+
+/// The value at `key` inside `value`, looking through a typed value's tag.
+fn path_step(value: &Val, key: &Val) -> Option<Val> {
+    match value {
+        Val::Map(entries) => {
+            let fields = match entries.get(&Val::from("$val")) {
+                Some(payload) if crate::val::tagged_type_name(entries).is_some() => payload,
+                _ => value,
+            };
+            match fields {
+                Val::Map(fields) => fields.get(key).cloned(),
+                Val::Vec(items) => vec_item(items, key),
+                _ => None,
+            }
+        }
+        Val::Vec(items) => vec_item(items, key),
+        _ => None,
+    }
+}
+
+fn vec_item(items: &[Val], key: &Val) -> Option<Val> {
+    match key {
+        Val::Int(index) => usize::try_from(*index)
+            .ok()
+            .and_then(|index| items.get(index).cloned()),
+        _ => None,
+    }
 }
 
 #[cfg(test)]

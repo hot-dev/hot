@@ -2,6 +2,8 @@
 meta {doc: """Runtime tests for `where` constraints."""}
 
 ::re ::hot::regex
+::own ::hot::test::constraints
+::lookalike ::hot::test::constraint-lookalikes
 
 // Values the tests pass through `dynamic` reach their boundary at run time,
 // where a literal would be rejected by `hot check` already.
@@ -288,4 +290,61 @@ meta ["test"] fn () {
     assert-eq(6, pass-scores([1, 2, 3]), "a proven argument")
     assert-eq("violation", constraint-kind(pass-scores(dynamic([1, 200]))), "the first call still checks")
     assert-eq("violation", constraint-kind(rebind-scores([1, 2])), "a rebound parameter is checked again")
+}
+
+aliased-port fn (port: ::own/Port): Int {
+    port
+}
+
+aliased-currency fn (currency: ::own/Currency): Str {
+    currency
+}
+
+test-types-through-a-namespace-alias
+meta ["test"] fn () {
+    assert-eq(8080, aliased-port(8080), "a refinement named through an alias")
+    assert-eq("violation", constraint-kind(aliased-port(dynamic(0))), "its predicate runs")
+    assert-eq("USD", aliased-currency("USD"), "a closed union named through an alias")
+    assert-eq("violation", constraint-kind(aliased-currency(dynamic("JPY"))), "its members are checked")
+}
+
+// `::lookalike/gt` means "at most"; the check must call it, not the standard `gt`.
+AtMostTen type Int where ::lookalike/gt(%, 10)
+
+test-a-lookalike-through-an-alias-keeps-its-meaning
+meta ["test"] fn () {
+    assert-eq(4, AtMostTen(dynamic(4)), "4 is at most 10")
+    assert-eq("violation", constraint-kind(AtMostTen(dynamic(11))), "11 isn't")
+}
+
+Positive type Int where gt(%, 0) // a trailing comment isn't part of the predicate
+
+test-predicate-text-ends-at-the-predicate
+meta ["test"] fn () {
+    assert-eq("gt(%, 0)", violation(Positive(dynamic(0))).predicate, "no comment in the predicate")
+}
+
+// Recurses `depth` times, passing `n` on as a proven argument.
+dig fn (n: Cents, depth: Int): Int {
+    if(eq(depth, 0), n, add(0, dig(n, sub(depth, 1))))
+}
+
+// A predicate that recurses past the predicate call-depth budget.
+TooDeep type Int where gt(dig(%, 1000), -1)
+
+test-a-failed-call-leaves-no-proof-behind
+meta ["test"] fn () {
+    assert-eq("budget-exceeded", constraint-kind(TooDeep(dynamic(1))), "the predicate runs out of budget")
+    assert-eq("violation", constraint-kind(dig(dynamic(-5), 0)), "the next call still checks its argument")
+}
+
+test-deep-updates-and-walks-keep-constraints
+meta ["test"] fn () {
+    holder {window: Window({start: 1, finish: 5}), note: "x"}
+    assert-eq("violation", constraint-kind(assoc-in(holder, ["window", "start"], 9)), "assoc-in inside a plain map")
+    assert-eq("violation", constraint-kind(update-in(holder, ["window", "finish"], (f) { sub(f, 10) })), "update-in inside a plain map")
+    assert(is-ok(assoc-in(holder, ["note"], "y")), "an update elsewhere passes")
+    server Server({host: "a", port: 8080})
+    assert-eq("violation", constraint-kind(postwalk((x) { if(eq(x, 8080), 0, x) }, server)), "postwalk")
+    assert-eq("violation", constraint-kind(prewalk((x) { if(eq(x, 1), 9, x) }, Window({start: 1, finish: 5}))), "prewalk")
 }

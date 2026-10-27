@@ -178,7 +178,7 @@ impl TestClient {
         let token = crate::auth::generate_token(user_id, &self.app.conf).expect("generate_token");
         self.cookies
             .inner
-            .insert(crate::auth::JWT_COOKIE_NAME.to_string(), token);
+            .insert(crate::auth::jwt_cookie_name().to_string(), token);
     }
 
     /// Get the current cookie jar as a read-only snapshot.
@@ -198,7 +198,7 @@ impl TestClient {
         let token = crate::auth::generate_csrf_token();
         self.cookies
             .inner
-            .insert(crate::auth::CSRF_COOKIE_NAME.to_string(), token.clone());
+            .insert(crate::auth::csrf_cookie_name().to_string(), token.clone());
         token
     }
 

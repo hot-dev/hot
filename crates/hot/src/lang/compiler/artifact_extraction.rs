@@ -561,14 +561,24 @@ impl Compiler {
                     continue;
                 };
                 if let Some((param, body)) = predicate_body(program, &refinement.predicate) {
-                    registry.set_refinement(
-                        &format!("{}/{}", ns_path, var.sym.name()),
+                    // A lookalike of a standard predicate function gets a
+                    // description, never the standard function's keywords.
+                    let schema = if crate::lang::json_schema::predicate_calls_are_canonical(
+                        &body, namespace,
+                    ) {
                         crate::lang::json_schema::refinement_schema(
                             &body,
                             &param,
                             &refinement.source,
-                        ),
-                    );
+                        )
+                    } else {
+                        crate::lang::json_schema::RefinementSchema {
+                            keywords: Vec::new(),
+                            source: refinement.source.clone(),
+                            describe: true,
+                        }
+                    };
+                    registry.set_refinement(&format!("{}/{}", ns_path, var.sym.name()), schema);
                 }
             }
         }

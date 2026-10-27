@@ -62,6 +62,35 @@ pub fn is_zero(args: &[Val]) -> HotResult<Val> {
     }
 }
 
+/// The Err an Int result gets when it doesn't fit in an Int, as `div(1, 0)`
+/// gets one for a zero divisor.
+#[cold]
+pub fn int_overflow() -> Val {
+    Val::err(Val::from("Integer overflow"))
+}
+
+/// An Int result, or the overflow Err when it doesn't fit.
+#[inline(always)]
+fn int_or_overflow(result: Option<i64>) -> Val {
+    match result {
+        Some(n) => Val::Int(n),
+        None => int_overflow(),
+    }
+}
+
+/// `base` to a non-negative Int power, exactly.
+fn int_pow(base: i64, exp: i64) -> Val {
+    match u32::try_from(exp) {
+        Ok(exp) => int_or_overflow(base.checked_pow(exp)),
+        // Only 0, 1 and -1 stay in range for an exponent this large.
+        Err(_) => match base {
+            0 | 1 => Val::Int(base),
+            -1 => Val::Int(if exp % 2 == 0 { 1 } else { -1 }),
+            _ => int_overflow(),
+        },
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Fast-path helpers for the VM hot loop.
 // These handle common type specializations with zero overhead (no
@@ -71,22 +100,27 @@ pub fn is_zero(args: &[Val]) -> HotResult<Val> {
 
 #[inline(always)]
 pub fn fast_add_int(a: i64, b: i64) -> Val {
-    Val::Int(a.wrapping_add(b))
+    int_or_overflow(a.checked_add(b))
 }
 
 #[inline(always)]
 pub fn fast_sub_int(a: i64, b: i64) -> Val {
-    Val::Int(a.wrapping_sub(b))
+    int_or_overflow(a.checked_sub(b))
 }
 
 #[inline(always)]
 pub fn fast_mul_int(a: i64, b: i64) -> Val {
-    Val::Int(a.wrapping_mul(b))
+    int_or_overflow(a.checked_mul(b))
 }
 
 #[inline(always)]
 pub fn fast_mod_int(a: i64, b: i64) -> Option<Val> {
-    if b != 0 { Some(Val::Int(a % b)) } else { None }
+    // Only `i64::MIN % -1` wraps, and its remainder is 0.
+    if b != 0 {
+        Some(Val::Int(a.wrapping_rem(b)))
+    } else {
+        None
+    }
 }
 
 #[inline(always)]
@@ -99,8 +133,9 @@ pub fn fast_div_int(a: i64, b: i64) -> Option<Val> {
     if b == 0 {
         return None;
     }
-    if a % b == 0 {
-        Some(Val::Int(a / b))
+    // `i64::MIN / -1` doesn't fit in an Int; `div` returns it as a Dec.
+    if a.wrapping_rem(b) == 0 {
+        a.checked_div(b).map(Val::Int)
     } else {
         None
     }
@@ -111,12 +146,7 @@ pub fn fast_pow_int(a: i64, b: i64) -> Option<Val> {
     if b < 0 {
         return None;
     }
-    let result = (a as f64).powi(b as i32);
-    if result.fract() == 0.0 && result.is_finite() {
-        Some(Val::Int(result as i64))
-    } else {
-        None
-    }
+    Some(int_pow(a, b))
 }
 
 /// Add two numbers
@@ -124,7 +154,7 @@ pub fn add(args: &[Val]) -> HotResult<Val> {
     validate_args!("::hot::math/add", args, 2);
 
     match (&args[0], &args[1]) {
-        (Val::Int(a), Val::Int(b)) => HotResult::Ok(Val::Int(a + b)),
+        (Val::Int(a), Val::Int(b)) => HotResult::Ok(int_or_overflow(a.checked_add(*b))),
         (Val::Dec(a), Val::Dec(b)) => HotResult::Ok(Val::Dec(*a + *b)),
         (Val::Int(a), Val::Dec(b)) => {
             use fastnum::decimal::Decimal;
@@ -145,7 +175,7 @@ pub fn sub(args: &[Val]) -> HotResult<Val> {
     validate_args!("::hot::math/sub", args, 2);
 
     match (&args[0], &args[1]) {
-        (Val::Int(a), Val::Int(b)) => HotResult::Ok(Val::Int(a - b)),
+        (Val::Int(a), Val::Int(b)) => HotResult::Ok(int_or_overflow(a.checked_sub(*b))),
         (Val::Dec(a), Val::Dec(b)) => HotResult::Ok(Val::Dec(*a - *b)),
         (Val::Int(a), Val::Dec(b)) => {
             use fastnum::decimal::Decimal;
@@ -166,7 +196,7 @@ pub fn mul(args: &[Val]) -> HotResult<Val> {
     validate_args!("::hot::math/mul", args, 2);
 
     match (&args[0], &args[1]) {
-        (Val::Int(a), Val::Int(b)) => HotResult::Ok(Val::Int(a * b)),
+        (Val::Int(a), Val::Int(b)) => HotResult::Ok(int_or_overflow(a.checked_mul(*b))),
         (Val::Dec(a), Val::Dec(b)) => HotResult::Ok(Val::Dec(*a * *b)),
         (Val::Int(a), Val::Dec(b)) => {
             use fastnum::decimal::Decimal;
@@ -235,7 +265,8 @@ pub fn modulo(args: &[Val]) -> HotResult<Val> {
             if *b == 0 {
                 return HotResult::Ok(Val::err(Val::from("Modulo by zero")));
             }
-            HotResult::Ok(Val::Int(a % b))
+            // Only `i64::MIN % -1` wraps, and its remainder is 0.
+            HotResult::Ok(Val::Int(a.wrapping_rem(*b)))
         }
         (Val::Dec(a), Val::Dec(b)) => {
             if b.is_zero() {
@@ -280,13 +311,7 @@ pub fn pow(args: &[Val]) -> HotResult<Val> {
                 let b_dec = Decimal::from(*b);
                 HotResult::Ok(Val::Dec(a_dec.pow(b_dec)))
             } else {
-                let result = (*a as f64).powi(*b as i32);
-                if result.fract() == 0.0 && result.is_finite() {
-                    HotResult::Ok(Val::Int(result as i64))
-                } else {
-                    use fastnum::decimal::Decimal;
-                    HotResult::Ok(Val::Dec(Decimal::from(result)))
-                }
+                HotResult::Ok(int_pow(*a, *b))
             }
         }
         (Val::Dec(a), Val::Dec(b)) => HotResult::Ok(Val::Dec(a.pow(*b))),
@@ -310,7 +335,7 @@ pub fn ceil(args: &[Val]) -> HotResult<Val> {
 
     match &args[0] {
         Val::Int(i) => HotResult::Ok(Val::Int(*i)), // Integer ceiling is itself
-        Val::Dec(d) => HotResult::Ok(Val::Int(d.ceil().to_i64().unwrap_or(0))),
+        Val::Dec(d) => HotResult::Ok(int_or_overflow(d.ceil().to_i64().ok())),
         _ => HotResult::Err(Val::from("ceil requires a number")),
     }
 }
@@ -321,7 +346,7 @@ pub fn floor(args: &[Val]) -> HotResult<Val> {
 
     match &args[0] {
         Val::Int(i) => HotResult::Ok(Val::Int(*i)), // Integer floor is itself
-        Val::Dec(d) => HotResult::Ok(Val::Int(d.floor().to_i64().unwrap_or(0))),
+        Val::Dec(d) => HotResult::Ok(int_or_overflow(d.floor().to_i64().ok())),
         _ => HotResult::Err(Val::from("floor requires a number")),
     }
 }
@@ -331,7 +356,7 @@ pub fn abs(args: &[Val]) -> HotResult<Val> {
     validate_args!("::hot::math/abs", args, 1);
 
     match &args[0] {
-        Val::Int(i) => HotResult::Ok(Val::Int(i.abs())),
+        Val::Int(i) => HotResult::Ok(int_or_overflow(i.checked_abs())),
         Val::Dec(d) => HotResult::Ok(Val::Dec(d.abs())),
         _ => HotResult::Err(Val::from("abs requires a number")),
     }
@@ -385,7 +410,7 @@ pub fn round(args: &[Val]) -> HotResult<Val> {
 
     match &args[0] {
         Val::Int(i) => HotResult::Ok(Val::Int(*i)), // Integer round is itself
-        Val::Dec(d) => HotResult::Ok(Val::Int(d.round(0).to_i64().unwrap_or(0))),
+        Val::Dec(d) => HotResult::Ok(int_or_overflow(d.round(0).to_i64().ok())),
         _ => HotResult::Err(Val::from("round requires a number")),
     }
 }

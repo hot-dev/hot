@@ -896,6 +896,18 @@ pub(crate) enum DbAction {
     /// Port a local Hot 1.x development database to the Hot 2.0 schema
     #[command(name = "port-v1-to-v2")]
     PortV1ToV2,
+    /// Build and redeploy the deployments that another major version of Hot built
+    Redeploy {
+        /// Build and check each deployment without changing anything
+        #[arg(long)]
+        dry_run: bool,
+        /// Email the admins of each account whose deployment fails, and alert it
+        #[arg(long)]
+        notify: bool,
+        /// Only the deployments of this organization and its sub-organizations
+        #[arg(long, value_name = "SLUG")]
+        org: Option<String>,
+    },
 }
 
 #[derive(Subcommand, Debug)]

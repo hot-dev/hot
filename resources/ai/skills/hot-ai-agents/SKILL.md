@@ -3,7 +3,7 @@ name: hot-ai-agents
 description: Build, review, and integrate production-quality AI agents on Hot using hot-ai, hot-ai-agent, provider packages, event handlers, streams, stores, tools, skills, memory, and the official Hot SDKs. Use for conversational agents, tool loops, durable event-driven workflows, multimodal analysis agents, browser or service clients, and upgrades of existing Hot agent code to current public APIs.
 metadata:
   author: hotdev
-  version: "1.0.0"
+  version: "1.0.1"
   license: Apache-2.0
 ---
 

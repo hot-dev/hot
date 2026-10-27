@@ -35,7 +35,7 @@ meta {
     ```
     """
 }
-fn (lazy val, type-ref) {
+fn (val: Result, type-ref) {
     call-lib(::hot::type/is-type, [val, type-ref])
 }
 
@@ -64,7 +64,8 @@ Int
 meta {
     core: true,
     doc: """
-    Integer type. Convert numeric values to integer (truncates decimals).
+    Integer type. Convert numeric values to integer (truncates decimals). A Dec
+    too large for an Int gives `Err("Integer overflow")`.
 
     **Example**
 
@@ -677,7 +678,7 @@ meta {
     ```
     """
 }
-fn (lazy result: Any): Bool {
+fn (result: Result): Bool {
     call-lib(::hot::type/is-ok, [result])
 }
 
@@ -699,7 +700,7 @@ meta {
     ```
     """
 }
-fn (lazy result: Any): Bool {
+fn (result: Result): Bool {
     call-lib(::hot::type/is-err, [result])
 }
 
@@ -727,7 +728,7 @@ meta {
     ```
     """
 }
-fn (lazy result, handler) {
+fn (result: Result, handler) {
     call-lib(::hot::type/if-ok, [result, handler])
 }
 
@@ -758,7 +759,7 @@ meta {
     ```
     """
 }
-fn (lazy result, handler) {
+fn (result: Result, handler) {
     call-lib(::hot::type/if-err, [result, handler])
 }
 
@@ -778,7 +779,7 @@ meta {
     ```
     """
 }
-fn (lazy value: Any): Bool {
+fn (value: Result): Bool {
     call-lib(::hot::type/is-result, [value])
 }
 
@@ -800,7 +801,7 @@ meta {
     ```
     """
 }
-fn (lazy result: Any): Any {
+fn (result: Result): Any {
     call-lib(::hot::type/ok-value, [result])
 }
 
@@ -823,7 +824,7 @@ meta {
     ```
     """
 }
-fn (lazy result: Any): Any {
+fn (result: Result): Any {
     call-lib(::hot::type/err-value, [result])
 }
 
@@ -848,13 +849,10 @@ meta {
     ```
     """
 }
-fn (lazy result: Any): Str {
-    // Force the lazy argument exactly once; lazy params re-evaluate on
-    // each use and leak as thunks into non-lazy positions.
-    forced do result
+fn (result: Result): Str {
     payload cond {
-        is-err(forced) => { err-value(forced) }
-        => { forced }
+        is-err(result) => { err-value(result) }
+        => { result }
     }
 
     cond {

@@ -22,6 +22,10 @@ tags used by matching, serialization, and dispatch.
 | `Byte` | Single byte (0-255) | - |
 | `Result` | Success/Error union | `ok(v)`, `err(e)` |
 
+Int arithmetic whose result doesn't fit in 64 bits returns
+`Err("Integer overflow")`, as `div(1, 0)` returns `Err("Division by zero")`
+and `mod(1, 0)` returns `Err("Modulo by zero")`. Use `Dec` for larger numbers.
+
 ## Type Annotations
 
 Annotations are optional but can be added for clarity:
@@ -64,7 +68,9 @@ is-active user.active
 
 ### Custom Constructors
 
-Override the default constructor with a function:
+Add constructor functions with `type fn`. A Map argument still goes to the
+type's default Map constructor, which is how a custom constructor builds its
+value:
 
 ```hot
 Point type fn (x: Int, y: Int): Point {
@@ -81,9 +87,13 @@ Custom constructors can have multiple arities:
 
 ```hot
 Email type fn
-(value: Str): Email { Email({value}) },
+(value: Str): Email { Email({value,}) },
 (local: Str, domain: Str): Email { Email({value: `${local}@${domain}`}) }
 ```
+
+Write `{value,}` with a trailing comma for a one-field map. `{value}` is a
+block that returns `value`, so `Email({value})` would call the
+`(value: Str)` constructor again and never return.
 
 Empty marker types are useful for tags and capabilities:
 
@@ -244,27 +254,39 @@ limit: Int fetch-limit() where gt(%, 0)   // binding; `where` may start the next
 - A value that fails is a `Result.Err` holding `ConstraintError.Violation`
   (or `EvaluationFailed`, `BudgetExceeded`) with `message`, `constraint`,
   `predicate`, `boundary`, `path` (e.g. `["items", 2, "price"]`),
-  `function`, `parameter`, `location`. It never contains the value.
+  `declared-type`, `value-type`, `function`, `parameter`, `location`.
+  `EvaluationFailed` adds `cause`; `BudgetExceeded` adds `budget` and
+  `limit`. It never contains the value.
   `match err-value(r) { ConstraintError.Violation => ... }` tells them apart.
 - Checks run at typed bindings, parameters (before the body), the
   precondition (after the parameters), return values (success only),
-  constructors, and updates (`assoc`, `merge`, deep-path assignment). Map
-  spread and transforms return plain maps and aren't checked.
+  constructors, and updates (`assoc`, `assoc-in`, `update`, `update-in`,
+  `merge`, deep-path assignment, `postwalk`, `prewalk`), including typed
+  values nested inside the one changed. Map spread and transforms return
+  plain maps and aren't checked.
 - Refinement values have no type tag: `add(port, 1)` is an `Int`,
   `is-type(443, Port)` runs the predicate, and a `Port =>` match arm is a
   guard. A struct keeps its tag.
 - Predicates return a `Bool` (truthy doesn't pass), are pure (no clock,
   random, env, ctx, files, stores, HTTP, events, tasks), and run within a
-  budget. They see only the value: use a precondition to relate parameters.
+  budget. They run at namespace scope: top-level values and functions are
+  visible, but parameters and locals are not, even for a `where` inside a
+  function body. Use a precondition to relate parameters.
+- `length` of a `Str` counts UTF-8 bytes (`length("café")` is `5`). Tool
+  schemas therefore don't turn `Str` length bounds into `minLength` or
+  `maxLength`; literal unions export as typed `enum`s.
 - The `%` rule applies: `where all(%, gt(%, 0))` is `nested-placeholder`;
   write `where all(%, (n) { gt(n, 0) })`.
 - At a constrained boundary only exact numbers convert: `5.0` becomes `5`;
   `7.9` and `"5"` fail. Convert explicitly (`Port(Int(s))`).
 - One `where` per binding or type (`duplicate-where`); a binding-level
   `where` needs a declared type (`where-requires-type`); refined `lazy`
-  parameters are `unsupported-constraint`. `hot check` reports literals
-  that fail (`constraint-violation`), non-Bool predicates
-  (`constraint-not-bool`), and impure ones (`impure-constraint`).
+  parameters are `unsupported-constraint`; a predicate that isn't a function
+  of one value, or a parameter predicate that uses another parameter, is
+  `invalid-constraint`. `hot check` reports literals that fail
+  (`constraint-violation`), non-Bool predicates (`constraint-not-bool`), and
+  impure ones (`impure-constraint`).
+- `where` is reserved: it can't name a binding or a function.
 
 ## Enum Types
 

@@ -587,11 +587,13 @@ pub fn routes(
         )
         .with_state(db.clone());
 
-    // Combine all routes and add conf as extension
+    // Combine all routes and add conf as extension. Browser-facing routes
+    // refuse cross-origin writes; the billing webhook is server-to-server.
     Router::new()
         .merge(protected_routes)
         .merge(guest_routes)
         .merge(public_routes)
+        .layer(middleware::from_fn(crate::auth::reject_cross_origin_writes))
         .merge(webhook_routes)
         .layer(axum::Extension(conf))
 }

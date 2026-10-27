@@ -218,6 +218,10 @@ def main():
 
     # Run from benchmarks/ so hot/hot.hot does not enable project runtime services.
     # The explicit emitter override keeps this true even if the cwd changes later.
+    # `hot run` loads every file under hot/src, so this one run also executes the
+    # Hot-only bench-constraints.hot and bench-fib-jit.hot. Their lines print
+    # first and don't use the "Nms (result: ...)" format, so they stay out of
+    # the comparison table.
     hot_bench = str(SCRIPT_DIR / "hot" / "src" / "benchmarks" / "bench.hot")
     results = run_command(
         [hot_cmd, "run", "--emitter.type", "none", hot_bench],

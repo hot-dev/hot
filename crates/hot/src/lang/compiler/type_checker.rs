@@ -249,6 +249,10 @@ pub struct TypeContext {
     /// lambda body push their own scope and pop it on exit. Variable lookup
     /// walks innermost-out.
     scopes: Vec<AHashMap<String, TypeExpr>>,
+    /// Lazy parameter names per scope (parallel to `scopes`). A lazy
+    /// parameter holds a thunk, which a call by its name skips, so it does
+    /// not shadow a function of the same name.
+    lazy_names: Vec<AHashSet<String>>,
     functions: AHashMap<String, Vec<FunctionSignature>>,
     types: AHashMap<String, TypeDefinition>,
     implementations: AHashMap<String, Vec<Implementation>>, // Type -> [Implementation]
@@ -271,6 +275,7 @@ impl TypeContext {
             // here too — `enter_namespace` clears them on entry. Function /
             // lambda body scopes are pushed on top.
             scopes: vec![AHashMap::new()],
+            lazy_names: vec![AHashSet::new()],
             functions: AHashMap::new(),
             types: AHashMap::new(),
             implementations: AHashMap::new(),
@@ -287,12 +292,14 @@ impl TypeContext {
     /// Push a new lexical scope (function/lambda body).
     pub fn push_scope(&mut self) {
         self.scopes.push(AHashMap::new());
+        self.lazy_names.push(AHashSet::new());
     }
 
     /// Pop the topmost lexical scope. No-op if only the global scope is left.
     pub fn pop_scope(&mut self) {
         if self.scopes.len() > 1 {
             self.scopes.pop();
+            self.lazy_names.pop();
         }
     }
 
@@ -302,6 +309,8 @@ impl TypeContext {
     pub fn enter_namespace(&mut self, namespace: String) {
         self.scopes.clear();
         self.scopes.push(AHashMap::new());
+        self.lazy_names.clear();
+        self.lazy_names.push(AHashSet::new());
         self.current_namespace = namespace;
     }
 
@@ -477,6 +486,25 @@ impl TypeContext {
         self.types.insert(name, type_def);
     }
 
+    /// Mark `name`, bound in the topmost scope, as a lazy parameter.
+    pub fn mark_lazy_param(&mut self, name: &str) {
+        if let Some(top) = self.lazy_names.last_mut() {
+            top.insert(name.to_string());
+        }
+    }
+
+    /// Whether `name` is bound by a function or lambda body (a parameter or
+    /// local binding, not a namespace-level var), so it shadows any function
+    /// of the same name. Lazy parameters do not shadow.
+    pub fn is_shadowing_local(&self, name: &str) -> bool {
+        for (scope, lazy) in self.scopes.iter().zip(&self.lazy_names).skip(1).rev() {
+            if scope.contains_key(name) {
+                return !lazy.contains(name);
+            }
+        }
+        false
+    }
+
     /// Walk the lexical scope stack innermost-out.
     pub fn get_variable_type(&self, name: &str) -> Option<&TypeExpr> {
         for scope in self.scopes.iter().rev() {
@@ -558,6 +586,9 @@ pub struct TypeChecker {
     /// both declarations when a second arrow with the same
     /// `(source, target)` short-name pair is encountered.
     impl_locations: AHashMap<(String, String), Option<ErrorLocation>>,
+    /// How each hidden inline-refinement type (`$Where-…`) reads in source,
+    /// so diagnostics show `Int where gt(%, 0)` instead of its hidden name.
+    refinement_displays: AHashMap<String, String>,
     /// Fully-qualified variable registry: `::ns/var-name` → inferred `TypeExpr`.
     ///
     /// Populated by the pre-pass in `check_program` so that a `Ref::Ns`
@@ -635,6 +666,7 @@ impl TypeChecker {
             core_types: AHashMap::new(),
             impl_registry: AHashSet::new(),
             impl_locations: AHashMap::new(),
+            refinement_displays: AHashMap::new(),
             qualified_variables: AHashMap::new(),
             pending_dependency: std::cell::Cell::new(false),
             core_variables: AHashMap::new(),
@@ -970,6 +1002,8 @@ impl TypeChecker {
 
     /// Collect all type names from the program for type resolution
     fn collect_known_types(&mut self, program: &Program) {
+        self.refinement_displays =
+            crate::lang::ast::inline_refinement_displays(program.namespaces.values());
         for (ns_path, namespace) in &program.namespaces {
             let ns_str = ns_path.to_string();
             for (var, value) in &namespace.scope.vars {
@@ -2682,7 +2716,7 @@ impl TypeChecker {
     }
 
     /// Warn when an annotation names a type the value can never be
-    /// (`annotation-mismatch`). Annotations are not enforced at runtime,
+    /// (`annotation-mismatch`). Plain annotations are not enforced at runtime,
     /// so a definite mismatch means either the annotation or the value is
     /// wrong. Conservative by construction: both sides must be definite
     /// (see `type_is_definite`), a union warns only when *no* member is
@@ -2720,7 +2754,10 @@ impl TypeChecker {
         let location = src.map(|s| self.source_to_error_location(s));
         self.errors.add_warning(CompilerError::AnnotationMismatch {
             name: name.to_string(),
-            annotation: annotation.to_string(),
+            annotation: crate::lang::ast::display_inline_refinements(
+                annotation,
+                &self.refinement_displays,
+            ),
             inferred: inferred.to_string(),
             location,
         });
@@ -2914,10 +2951,22 @@ impl TypeChecker {
 
     /// Check if two types are compatible (for assignment, parameter passing, etc.)
     #[allow(clippy::only_used_in_recursion)]
+    /// Whether `ty` is the `Result` type itself (not one of its variants).
+    fn names_result(ty: &TypeExpr) -> bool {
+        let name = match ty {
+            TypeExpr::Named(name) | TypeExpr::Generic(name, _) => name.as_str(),
+            _ => return false,
+        };
+        name.strip_prefix("::hot::type/").unwrap_or(name) == "Result"
+    }
+
     pub fn types_are_compatible(&self, expected: &TypeExpr, actual: &TypeExpr) -> bool {
         match (expected, actual) {
             // Any is compatible with everything
             (TypeExpr::Any, _) | (_, TypeExpr::Any) => true,
+
+            // Any value is implicitly an Ok, so every type is a `Result`.
+            (expected, _) if Self::names_result(expected) => true,
 
             // Exact matches
             (TypeExpr::Null, TypeExpr::Null) => true,
@@ -3064,6 +3113,7 @@ impl TypeChecker {
             (TypeExpr::Literal(LiteralType::Int(_)), TypeExpr::Int) => true,
             (TypeExpr::Literal(LiteralType::Dec(_)), TypeExpr::Dec) => true,
             (TypeExpr::Literal(LiteralType::Bool(_)), TypeExpr::Bool) => true,
+            (TypeExpr::Literal(LiteralType::Null), TypeExpr::Null) => true,
 
             // Union types: the actual type is compatible with the expected union
             // if it matches any variant.  Standard subtyping rule.
@@ -3335,6 +3385,21 @@ impl TypeChecker {
         // Continue with regular function call type inference
         let function_name = self.extract_function_name(fn_call);
 
+        // A call by the name of a parameter or local calls that local, which
+        // shadows any function of the same name (as compiled). Check the
+        // arguments and type the result by the local's own function type.
+        if let Value::Ref(Ref::Var(var_ref)) = &*fn_call.function
+            && self.context.is_shadowing_local(var_ref.var.sym.name())
+        {
+            for arg in &fn_call.args {
+                let _ = self.infer_value_type(&arg.value);
+            }
+            return match self.context.get_variable_type(var_ref.var.sym.name()) {
+                Some(TypeExpr::Function(_, return_type)) => (**return_type).clone(),
+                _ => TypeExpr::Any,
+            };
+        }
+
         if let Some(func_name) = function_name {
             // Resolve a leading namespace alias if the call is written as `::alias/fn`.
             // E.g. with `::ctx ::hot::ctx` declared, `::ctx/get` becomes `::hot::ctx/get`.
@@ -3520,6 +3585,9 @@ impl TypeChecker {
                 parameter_types.push(param_type.clone());
 
                 let name = arg.var.sym.name().to_string();
+                if arg.lazy {
+                    self.context.mark_lazy_param(&name);
+                }
                 self.context.add_variable(name, param_type);
             }
 
@@ -3793,14 +3861,20 @@ impl TypeChecker {
             return TypeExpr::Optional(Box::new(inner_type));
         }
 
-        // Handle union types with pipe syntax (e.g., "Int | Dec" -> Union([Int, Dec]))
-        if annotation.contains(" | ") {
-            let parts: Vec<&str> = annotation.split(" | ").collect();
+        // Handle union types with pipe syntax (e.g., "Int | Dec" -> Union([Int, Dec])).
+        // A `|` inside `<...>` or a string literal doesn't split.
+        let parts = crate::lang::ast::split_top_level(annotation, '|');
+        if parts.len() > 1 {
             let type_exprs: Vec<TypeExpr> = parts
                 .iter()
-                .map(|part| self.parse_type_annotation(part.trim(), source))
+                .map(|part| self.parse_type_annotation(part, source))
                 .collect();
             return TypeExpr::Union(type_exprs);
+        }
+
+        // Handle literal types (e.g., "\"fast\"", "42", "null")
+        if let Some(literal) = crate::lang::ast::LiteralType::parse(annotation) {
+            return Self::ast_type_to_type_expr(&crate::lang::ast::TypeExpr::Literal(literal));
         }
 
         // Handle generic types with angle bracket syntax (e.g., "Vec<Str>" -> Vec(Str))
@@ -3818,7 +3892,7 @@ impl TypeChecker {
                 }
                 "Map" => {
                     // Parse Map<Key, Value>
-                    let parts: Vec<&str> = params_str.split(',').map(|s| s.trim()).collect();
+                    let parts = crate::lang::ast::split_top_level(params_str, ',');
                     if parts.len() == 2 {
                         let key_type = self.parse_type_annotation(parts[0], source);
                         let value_type = self.parse_type_annotation(parts[1], source);
@@ -4895,6 +4969,37 @@ mod tests {
     }
 
     #[test]
+    fn test_local_callee_shadows_function_signature() {
+        use crate::lang::errors::CompilerError;
+        use crate::lang::parser::parse_hot;
+
+        // `g(x)` in `use-g` calls the `g` parameter, so the two-arity
+        // namespace `g` must not produce an arity mismatch there; `caller`
+        // has no such local and keeps the diagnostic.
+        let source = r#"
+        ::t ns
+        g fn (a: Int, b: Int): Int { add(a, b) }
+        use-g fn (x: Int, g: Fn): Any { g(x) }
+        caller fn (x: Int): Int { g(x) }
+        "#;
+        let program = parse_hot(source).expect("parse");
+        let mut checker = TypeChecker::new();
+        let _ = checker.check_program(&program);
+
+        let arity_errors = checker
+            .errors
+            .errors
+            .iter()
+            .filter(|e| matches!(e, CompilerError::ArityMismatch { .. }))
+            .count();
+        assert_eq!(
+            arity_errors, 1,
+            "only `caller` should mismatch, got: {:?}",
+            checker.errors.errors
+        );
+    }
+
+    #[test]
     fn test_annotation_mismatch_warns_on_definite_conflict() {
         use crate::lang::errors::CompilerError;
         use crate::lang::parser::parse_hot;
@@ -5697,6 +5802,105 @@ mod tests {
             "nested open literal-union extension must emit OpenLiteralUnionMismatch: {:?}",
             checker.errors.errors
         );
+    }
+
+    #[test]
+    fn test_inline_literal_unions_in_annotations() {
+        use crate::lang::parser::parse_hot;
+
+        let source = r#"
+        ::test::inline ns
+        pick fn (mode: "fast" | "slow", size: "s" | "m" | null, tags: Vec<"x" | "y">): "ok" | "no" { "ok" }
+        picked pick("fast", null, ["x"])
+        speed: "fast" | "slow" "fast"
+        lam (m: 1 | 2 | 3) { m }
+        lam-result lam(2)
+        maybe fn (s: Str | null): Str { "ok" }
+        maybe-result maybe(null)
+        "#;
+        let mut checker = TypeChecker::new();
+        let _ = checker.check_program(&parse_hot(source).expect("parse"));
+        assert!(
+            checker.errors.errors.is_empty(),
+            "inline literal annotations should resolve: {:?}",
+            checker.errors.errors
+        );
+
+        // The literals are real types, not `Any`: a wrong base type is rejected.
+        let source = r#"
+        ::test::inline ns
+        pick fn (mode: "fast" | "slow"): Str { mode }
+        picked pick(1)
+        "#;
+        let mut checker = TypeChecker::new();
+        let _ = checker.check_program(&parse_hot(source).expect("parse"));
+        assert!(
+            !checker.errors.errors.is_empty()
+                && !checker
+                    .errors
+                    .errors
+                    .iter()
+                    .any(|e| matches!(e, CompilerError::UnresolvedType { .. })),
+            "an Int argument should mismatch a string literal union: {:?}",
+            checker.errors.errors
+        );
+    }
+
+    #[test]
+    fn test_type_annotation_splits_at_top_level() {
+        let mut checker = TypeChecker::new();
+        let lit = |s: &str| TypeExpr::Literal(LiteralType::Str(s.to_string()));
+        let cases = [
+            (
+                r#""a | b" | "c""#,
+                TypeExpr::Union(vec![lit("a | b"), lit("c")]),
+            ),
+            (
+                "Vec<Int | Str>",
+                TypeExpr::Vec(Box::new(TypeExpr::Union(vec![
+                    TypeExpr::Int,
+                    TypeExpr::Str,
+                ]))),
+            ),
+            (
+                "Map<Str, Int | Dec>",
+                TypeExpr::Map(
+                    Box::new(TypeExpr::Str),
+                    Box::new(TypeExpr::Union(vec![TypeExpr::Int, TypeExpr::Dec])),
+                ),
+            ),
+            (
+                r#"Map<Str, "x,y">"#,
+                TypeExpr::Map(Box::new(TypeExpr::Str), Box::new(lit("x,y"))),
+            ),
+            (
+                "Str | null",
+                TypeExpr::Union(vec![TypeExpr::Str, TypeExpr::Literal(LiteralType::Null)]),
+            ),
+        ];
+        for (annotation, expected) in cases {
+            assert_eq!(
+                checker.parse_type_annotation(annotation, None),
+                expected,
+                "{annotation}"
+            );
+        }
+        assert!(
+            checker.errors.errors.is_empty(),
+            "{:?}",
+            checker.errors.errors
+        );
+    }
+
+    #[test]
+    fn test_null_literal_accepts_null() {
+        let checker = TypeChecker::new();
+        let null_lit = TypeExpr::Literal(LiteralType::Null);
+        assert!(checker.types_are_compatible(&null_lit, &TypeExpr::Null));
+        assert!(checker.types_are_compatible(
+            &TypeExpr::Union(vec![TypeExpr::Str, null_lit]),
+            &TypeExpr::Null
+        ));
     }
 
     #[test]

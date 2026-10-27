@@ -350,7 +350,9 @@ impl ManagementKey {
         if root.parent_org_id.is_some() || !root.is_admitting() {
             return Err(ManagementKeyError::Unauthorized);
         }
-        Ok(())
+        // A key acts with its creator's authority, so it stops working while
+        // the creator isn't a root administrator (removed or demoted).
+        Self::require_root_admin(db, self.root_org_id, self.created_by_user_id).await
     }
 
     pub async fn authorize_child(

@@ -1485,6 +1485,8 @@ mod tests {
             is_lazy_param: true,
             used_registers: vec![0],
             structural_hash_cache: Default::default(),
+            defining_frame: None,
+            result_params: Vec::new(),
         };
         let ctx_defaults = [(
             "test.default".to_string(),
@@ -1675,7 +1677,7 @@ mod tests {
         let bytes = program.serialize().expect("program must serialize");
         let hash = crate::hasher::HotHasher::hash_content(&bytes);
 
-        let expected = "70d8ab72d0ed92fbce1be1ad997127ebe99eff53b36cafbf1cadfd24519be2bc";
+        let expected = "c5ab2af9718bf681927106be484ad586a4c8d1862c54125f20b067150fe0645a";
         assert_eq!(
             hash, expected,
             "postcard bytecode wire layout changed (got hash {hash}). If \

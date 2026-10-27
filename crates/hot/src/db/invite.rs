@@ -104,7 +104,7 @@ fn seat_limit(plan: Option<String>, overrides: Option<String>) -> Result<i32, In
         .map(|value| serde_json::from_str(&value))
         .transpose()
         .map_err(|_| InviteError::Unauthorized)?;
-    Ok(crate::db::Features::resolve(plan.as_ref(), overrides.as_ref()).team_members())
+    Ok(crate::db::Features::for_account(plan.as_ref(), overrides.as_ref()).team_members())
 }
 
 impl Invite {

@@ -38,6 +38,26 @@ Call functions with arguments in parentheses:
 
 {{snippet:functions#calling-functions}}
 
+A call never has a space before `(`. With a space, `name (...)` binds a
+variable named `name` to the value in the parentheses, wherever it appears.
+So `assert (x)` and `if (x) { ... }` bind variables named `assert` and `if`
+instead of calling those functions. `hot check` warns with
+`binding-shadows-function` when such a binding shadows a function.
+
+A parameter or local binding shadows any function with the same name inside
+its body, so a higher-order function can name its function parameter freely:
+
+```hot
+scale fn (x: Int): Int { mul(x, 2) }
+
+apply fn (x: Int, scale: Fn): Int { scale(x) }   // calls the parameter
+
+apply(3, add(%, 1))   // 4
+```
+
+A `lazy` parameter is the exception. It holds a deferred argument, so calling
+its name still calls the function.
+
 ## Qualified Calls
 
 Call functions from other namespaces using the full path:
@@ -96,12 +116,20 @@ See [Constraints](/docs/language/constraints).
 
 ## Long Parameter Lists
 
-A parameter list can span lines, like a call's arguments. A trailing comma
-after the last parameter is optional:
+A parameter list can span lines, like a call's arguments. A line can hold one
+parameter or several, and the return type and `{` can follow the closing `)`
+on the same line. A trailing comma after the last parameter is optional:
 
 {{snippet:functions#multiline-params}}
 
 {{result:functions#multiline-params}}
+
+A lambda's parameter list can span lines too. Its `{` must be on the same line
+as its closing `)`:
+
+{{snippet:functions#multiline-lambda-params}}
+
+{{result:functions#multiline-lambda-params}}
 
 ## Function Overloading
 
@@ -196,10 +224,10 @@ the function forces it with `do`. This enables short-circuit evaluation:
 
 ```hot
 if fn
-cond (pred: Any, lazy then: Any): Any {
+cond (pred: Result, lazy then: Any): Any {
   pred => { do then }
 },
-cond (pred: Any, lazy then: Any, lazy else: Any): Any {
+cond (pred: Result, lazy then: Any, lazy else: Any): Any {
   pred => { do then }
   => { do else }
 }
@@ -224,6 +252,19 @@ use-twice fn (lazy value: Any): Vec {
 
 This argument-level laziness is separate from `Iter`: a lazy parameter defers
 one expression, while an iterator produces sequence elements on demand.
+
+Laziness changes only when an argument is evaluated, not how a `Result` is
+handled. To receive a `Result` without consuming it, declare the parameter
+`Result`.
+
+## Result Parameters
+
+A parameter declared `Result` receives its argument as it is, an `Err`
+included. Any other parameter consumes it: an `Ok` unwraps, and an `Err` halts
+before the body runs. This holds however the function is called, directly or
+through a higher-order function such as `map`. `if` declares its condition
+this way, so an `Err` condition is falsy. See
+[Accepting a Result](/docs/language/errors#accepting-a-result).
 
 ## Metadata on Functions
 
@@ -306,6 +347,7 @@ sum-acc fn cond (xs: Vec, acc: Int): Int {
 - `fn` modifies a flow to become a function (default is `serial`, omittable)
 - Use `fn cond` for conditional functions, `fn parallel` for concurrent execution
 - Call with no space before `(`: `func(args)`
+- Parameters and local bindings shadow functions with the same name
 - Overload by arity or type
 - Use lambdas `(x) { body }` for inline functions, or `%` for concise single-param lambdas
 - Mark parameters `lazy` to defer evaluation of their arguments

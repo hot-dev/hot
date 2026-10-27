@@ -1,0 +1,68 @@
+::hot::test::overload-dispatch ns
+meta ["test"]
+
+// Regression: same-arity overloads dispatch on the runtime argument types.
+// The overload declared with exactly those types wins; otherwise the most
+// specific one that accepts them (a single type, then a union or nullable
+// type, then `Any`). An untyped overload is reachable whichever order it is
+// declared in: a later typed overload used to take over its key, so
+// `any-first("x")` reached the `(x: Map)` overload.
+
+any-first fn
+(x: Any): Str { "any" },
+(x: Map): Str { "map" }
+
+any-last fn
+(x: Map): Str { "map" },
+(x: Any): Str { "any" }
+
+number fn
+(x: Any): Str { "any" },
+(x: Int | Dec): Str { "num" }
+
+optional fn
+(x: Str?): Str { "opt-str" },
+(x: Any): Str { "any" }
+
+callable fn
+(x: Fn): Str { "fn" },
+(x: Any): Str { "any" }
+
+record fn
+(x: Map): Str { "map" },
+(x: Any): Str { "any" }
+
+Point type {
+    x: Int,
+    y: Int
+}
+
+identity fn (v: Any): Any { v }
+
+test-untyped-overload-is-reachable
+meta ["test"] fn () {
+    s "hi"
+    m {a: 1}
+    assert-eq("any", any-first("x"), "Str literal, Any declared first")
+    assert-eq("any", any-first(s), "Str variable, Any declared first")
+    assert-eq("any", any-first(1), "Int literal, Any declared first")
+    assert-eq("map", any-first(m), "Map variable, Any declared first")
+    assert-eq("any", any-last("x"), "Str literal, Any declared last")
+    assert-eq("map", any-last(m), "Map variable, Any declared last")
+}
+
+test-most-specific-overload-wins
+meta ["test"] fn () {
+    i 1
+    assert-eq("num", number(i), "Int matches Int | Dec before Any")
+    assert-eq("num", number(1.5), "Dec matches Int | Dec before Any")
+    assert-eq("any", number("s"), "Str falls back to Any")
+    assert-eq("opt-str", optional(null), "null matches Str?")
+    assert-eq("opt-str", optional("a"), "Str matches Str?")
+    assert-eq("any", optional(1), "Int falls back to Any")
+    assert-eq("fn", callable(identity), "function value matches Fn")
+    assert-eq("fn", callable((v) { v }), "lambda matches Fn")
+    assert-eq("any", callable(1), "Int falls back to Any")
+    assert-eq("map", record(Point({x: 1, y: 2})), "typed record matches Map")
+    assert-eq("any", record("s"), "Str falls back to Any")
+}

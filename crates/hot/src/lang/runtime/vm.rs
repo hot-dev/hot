@@ -96,6 +96,21 @@ pub struct FailureState {
     /// errors here (they unwind natively), so this is always false outside
     /// the JIT helper path.
     pub plain_vm_error: bool,
+    /// True when the halt is a consumed `Result.Err` (an Err used where a
+    /// value is needed), as opposed to `fail()` or a runtime error.
+    pub consumed: bool,
+}
+
+impl FailureState {
+    /// The halt's message as a run reports it: a consumed Err reads
+    /// `Result error: <message>`; any other halt, its message alone.
+    pub fn halt_message(&self) -> String {
+        if self.consumed {
+            format!("Result error: {}", self.msg)
+        } else {
+            self.msg.clone()
+        }
+    }
 }
 
 /// Thread-safe failure state holder
@@ -202,6 +217,24 @@ impl VmError {
     }
 }
 
+/// The callee of a call, for preparing its arguments
+/// (`VirtualMachine::prepare_call_args`).
+#[derive(Clone, Copy)]
+pub(crate) enum CallTarget<'a> {
+    /// A compiled user function.
+    Function(FunctionId),
+    /// A lambda.
+    Lambda(&'a crate::lang::bytecode::LambdaInfo),
+    /// A function value (name, reference, lambda or typed `Fn`), resolved
+    /// the way the call dispatches it.
+    Value(&'a Val),
+    /// A native, by name.
+    Native(&'a str),
+}
+
+/// Source of `LexicalScope::frame_id`.
+static NEXT_FRAME_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
 /// Lexical scope for proper variable resolution
 #[derive(Debug, Clone)]
 pub struct LexicalScope {
@@ -211,6 +244,20 @@ pub struct LexicalScope {
     local_types: IndexMap<String, String>,
     /// Local type implementations in this scope: (source_type, target_type) -> implementation_function_name
     local_implementations: IndexMap<(String, String), String>,
+    /// The frame of a call to a top-level function. A name lookup that
+    /// reaches it goes on to the namespace, never into the caller's frames.
+    /// Frames of lambdas and of functions defined in another function's body
+    /// aren't boundaries: their lookups continue into their definer's frames.
+    is_boundary: bool,
+    /// Unique across VMs, so a `FrameLink` can tell whether this scope is
+    /// still the one it was created in.
+    frame_id: u64,
+    /// For a lambda call's frame, where the lambda was created: lookups
+    /// continue there instead of in the caller's frames.
+    link: Option<crate::lang::bytecode::FrameLink>,
+    /// The frame of a call (a function's or a lambda's), not a scope a call
+    /// opens inside its frame, such as a flow's.
+    call: bool,
 }
 
 /// Flow execution context
@@ -320,12 +367,30 @@ struct ParallelFlowContext {
 }
 
 impl LexicalScope {
-    pub fn new(_scope_type: ScopeType, _parent_depth: Option<usize>) -> Self {
+    pub fn new(scope_type: ScopeType, _parent_depth: Option<usize>) -> Self {
         Self {
             variables: IndexMap::new(),
             local_types: IndexMap::new(),
             local_implementations: IndexMap::new(),
+            is_boundary: false,
+            frame_id: NEXT_FRAME_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+            link: None,
+            call: scope_type == ScopeType::Function,
         }
+    }
+
+    /// The frame of a call: its parameters bound to `args`, missing ones to
+    /// Null. Compiled code keeps its locals in registers, so this frame only
+    /// gives its name lookups their parameters and boundary.
+    fn call_frame(param_names: &[String], args: &[Val], is_boundary: bool) -> Self {
+        let mut frame = Self::new(ScopeType::Function, None);
+        frame.is_boundary = is_boundary;
+        for (idx, name) in param_names.iter().enumerate() {
+            frame
+                .variables
+                .insert(name.clone(), args.get(idx).cloned().unwrap_or(Val::Null));
+        }
+        frame
     }
 
     /// Add a local type constructor to this scope
@@ -363,6 +428,135 @@ impl LexicalScope {
 
 /// Default number of engine threads for parallel execution
 pub const DEFAULT_ENGINE_THREADS: usize = 4;
+
+/// One overload in a same-arity overload set (see `OverloadSet`).
+struct OverloadCandidate {
+    function_id: FunctionId,
+    /// Declared parameter types as written (`Str`, `Int | Dec`, `Str?`, ...).
+    param_types: Vec<String>,
+    lazy_params: Vec<bool>,
+}
+
+/// The same-arity overloads registered under one `name/N` key prefix: those
+/// with typed signature keys (`name/N:T1,T2`) plus the untyped one that owns
+/// `name/N`.
+struct OverloadSet {
+    prefix: String,
+    arity: usize,
+    candidates: Vec<OverloadCandidate>,
+}
+
+/// How specifically a declared parameter type accepts an argument; lower is
+/// more specific.
+const OVERLOAD_RANK_EXACT: u32 = 0;
+const OVERLOAD_RANK_LOOSE: u32 = 1;
+const OVERLOAD_RANK_ANY: u32 = 2;
+
+impl OverloadCandidate {
+    /// Summed rank over the parameters, or `None` when a parameter does not
+    /// accept its argument. `names` are the arguments' dispatch type names,
+    /// and `maps` whether each is structurally a Map.
+    fn rank(&self, names: &[std::borrow::Cow<'_, str>], maps: &[bool]) -> Option<u32> {
+        if self.param_types.len() != names.len() {
+            return None;
+        }
+        let mut total = 0;
+        for (i, (declared, name)) in self.param_types.iter().zip(names).enumerate() {
+            total += if self.lazy_params.get(i).copied().unwrap_or(false) {
+                // Lazy arguments arrive as thunks, so their type is unknown.
+                OVERLOAD_RANK_ANY
+            } else {
+                overload_param_rank(declared, name, maps.get(i).copied().unwrap_or(false))?
+            };
+        }
+        Some(total)
+    }
+}
+
+/// Rank how the declared parameter type `declared` accepts an argument with
+/// dispatch type name `actual`. Only builtin type names reject: a custom name
+/// may be a type alias, a literal union of builtin values, or the target of a
+/// coercion arrow, so it accepts without preference.
+fn overload_param_rank(declared: &str, actual: &str, is_map: bool) -> Option<u32> {
+    let declared = declared.trim();
+    if declared.is_empty() || declared == "Any" || actual == "Any" {
+        return Some(OVERLOAD_RANK_ANY);
+    }
+    let (body, nullable) = match declared.strip_suffix('?') {
+        Some(body) => (body, true),
+        None => (declared, false),
+    };
+    if nullable && actual == "Null" {
+        return Some(OVERLOAD_RANK_LOOSE);
+    }
+    let members = split_top_level(body, '|');
+    let single = members.len() == 1 && !nullable;
+    let mut best: Option<u32> = None;
+    let mut unknown = false;
+    for member in members {
+        let name = member.split('<').next().unwrap_or(member).trim();
+        let name = name.rsplit('/').next().unwrap_or(name);
+        let rank = if name == "Any" {
+            Some(OVERLOAD_RANK_ANY)
+        } else if name == actual
+            || actual
+                .strip_prefix(name)
+                .is_some_and(|rest| rest.starts_with('.'))
+        {
+            // The same type, or a variant of the declared enum (`Shape.Circle`).
+            Some(if single {
+                OVERLOAD_RANK_EXACT
+            } else {
+                OVERLOAD_RANK_LOOSE
+            })
+        } else if name == "Map" && is_map {
+            // A typed record is structurally a Map.
+            Some(OVERLOAD_RANK_LOOSE)
+        } else {
+            unknown |= !matches!(
+                name,
+                "Str"
+                    | "Int"
+                    | "Dec"
+                    | "Bool"
+                    | "Null"
+                    | "Vec"
+                    | "Map"
+                    | "Bytes"
+                    | "Byte"
+                    | "Fn"
+                    | "Namespace"
+                    | "Var"
+            );
+            None
+        };
+        best = match (best, rank) {
+            (Some(best), Some(rank)) => Some(best.min(rank)),
+            (best, rank) => best.or(rank),
+        };
+    }
+    best.or(unknown.then_some(OVERLOAD_RANK_ANY))
+}
+
+/// Split `s` on `sep` outside `<...>`, where type parameters can contain it.
+fn split_top_level(s: &str, sep: char) -> Vec<&str> {
+    let mut parts = Vec::new();
+    let mut depth = 0usize;
+    let mut start = 0;
+    for (i, c) in s.char_indices() {
+        match c {
+            '<' => depth += 1,
+            '>' => depth = depth.saturating_sub(1),
+            c if c == sep && depth == 0 => {
+                parts.push(&s[start..i]);
+                start = i + c.len_utf8();
+            }
+            _ => {}
+        }
+    }
+    parts.push(&s[start..]);
+    parts
+}
 
 /// High-performance virtual machine for Hot bytecode
 pub struct VirtualMachine {
@@ -442,7 +636,6 @@ pub struct VirtualMachine {
     /// If true, convert runtime errors into Result-style maps instead of aborting
     pub(crate) error_capture_active: bool,
     /// Suppress automatic Result checking during lazy thunk evaluation
-    suppress_result_checking: bool,
     /// Set while a `where` predicate runs (see `constraints`).
     constraint: Option<constraints::ConstraintGuard>,
     /// Constraint specs of named types, from the program's table.
@@ -478,6 +671,16 @@ pub struct VirtualMachine {
     /// `Source -> Target` coercions when the runtime arg types differ from
     /// the declared param types (the type checker has already vetted the call).
     coercion_param_cache: AHashMap<FunctionId, Option<Vec<String>>>,
+    /// Per-function-id cache of the same-arity overload set a function belongs
+    /// to (`None` when it has no same-arity siblings), used for runtime
+    /// overload dispatch (`overload_for_args`).
+    overload_set_cache: AHashMap<FunctionId, Option<std::rc::Rc<OverloadSet>>>,
+    /// Overload chosen per (resolved function, runtime argument type names)
+    /// hash, so repeated calls skip ranking.
+    overload_choice_cache: AHashMap<u64, FunctionId>,
+    /// Indices into `function_mapping` sorted by key, so the keys sharing a
+    /// `name/N` prefix are found by binary search. Built on first use.
+    sorted_key_indices: Option<Vec<usize>>,
     /// JIT configuration, code-memory status, and per-function profiling state.
     jit: JitRuntimeState,
     /// Per-function cache of detected HOF fusion pipelines. The plans depend
@@ -586,7 +789,6 @@ impl VirtualMachine {
             user_function_depth: 0,
             call_function_depth: 0,
             error_capture_active: false,
-            suppress_result_checking: false,
             constraint: None,
             constraint_spec_cache: Default::default(),
             pending_proven: None,
@@ -599,6 +801,9 @@ impl VirtualMachine {
             parallel_flow_context: None,
             dispatch_cache: AHashMap::new(),
             coercion_param_cache: AHashMap::new(),
+            overload_set_cache: AHashMap::new(),
+            overload_choice_cache: AHashMap::new(),
+            sorted_key_indices: None,
             jit,
             hof_plan_cache: AHashMap::new(),
             function_active_depth: vec![0; function_count],
@@ -1158,16 +1363,6 @@ impl VirtualMachine {
         &self,
     ) -> Option<Arc<parking_lot::Mutex<tokio::sync::mpsc::Receiver<Val>>>> {
         self.task_receiver.clone()
-    }
-
-    /// Get the suppress_result_checking flag
-    pub fn get_suppress_result_checking(&self) -> bool {
-        self.suppress_result_checking
-    }
-
-    /// Set the suppress_result_checking flag
-    pub fn set_suppress_result_checking(&mut self, suppress: bool) {
-        self.suppress_result_checking = suppress;
     }
 
     /// Set the execution context for emitter events
@@ -1735,6 +1930,7 @@ impl VirtualMachine {
                         // Clone and populate the closure environment
                         let mut captured_lambda = lambda_info.clone();
                         captured_lambda.closure_env.clear();
+                        captured_lambda.defining_frame = self.current_frame_link();
 
                         for var_name in &captured_lambda.capture_vars {
                             // In parallel flow context, skip variable capture - defer to execution time
@@ -2406,14 +2602,16 @@ impl VirtualMachine {
                     args_count
                 );
 
-                // Collect arguments from consecutive registers and unwrap Results if they are "ok"
+                // Collect arguments from consecutive registers, prepared
+                // for the callee's parameters
                 let mut args = Vec::with_capacity(args_count as usize);
                 for i in 0..args_count {
                     let arg_reg = args_start + i as RegisterId;
                     let arg_val = self.get_register(arg_reg)?.clone();
                     tracing::trace!("VM: Call arg {}: {:?}", i, arg_val);
-                    args.push(self.prepare_call_arg(arg_val)?);
+                    args.push(arg_val);
                 }
+                let args = self.prepare_args_for_register(function as RegisterId, args)?;
 
                 // Get function information from the program
                 tracing::trace!(
@@ -2454,14 +2652,12 @@ impl VirtualMachine {
                     let arg_val = self.get_register(arg_reg)?.clone();
                     tracing::trace!("VM: CallWithSpread arg {}: {:?}", i, arg_val);
 
-                    // Automatically unwrap "ok" Results for function arguments
-                    let unwrapped_arg = self.unwrap_result_if_ok(&arg_val)?;
-                    // Evaluate boxed AstNodes in the argument (e.g., in maps/vectors)
-                    let resolved_arg = self.resolve_variable_references_in_val(&unwrapped_arg)?;
-
                     // Check if this argument should be spread
                     if (spread_mask >> i) & 1 == 1 {
-                        // Spread this argument - it should be a Vec
+                        // The spread operand is consumed: it must be a Vec.
+                        let unwrapped_arg = self.unwrap_result_if_ok(&arg_val)?;
+                        let resolved_arg =
+                            self.resolve_variable_references_in_val(&unwrapped_arg)?;
                         match &resolved_arg {
                             Val::Vec(elements) => {
                                 tracing::trace!(
@@ -2481,9 +2677,11 @@ impl VirtualMachine {
                             }
                         }
                     } else {
-                        args.push(resolved_arg);
+                        args.push(arg_val);
                     }
                 }
+                // Every argument, spread or not, is prepared for the callee.
+                let args = self.prepare_args_for_register(function as RegisterId, args)?;
 
                 tracing::trace!("VM: CallWithSpread final args count: {}", args.len());
 
@@ -2504,18 +2702,6 @@ impl VirtualMachine {
                 let function = *function;
                 let args_start = *args_start;
                 let args_count = *args_count;
-                // Collect arguments from consecutive registers and unwrap Results if they are "ok"
-                let mut args = Vec::with_capacity(args_count as usize);
-                for i in 0..args_count {
-                    let arg_reg = args_start + i as RegisterId;
-                    let arg_val = self.get_register(arg_reg)?.clone();
-                    // Automatically unwrap "ok" Results for function arguments
-                    let unwrapped_arg = self.unwrap_result_if_ok(&arg_val)?;
-                    // Evaluate boxed AstNodes in the argument (e.g., in maps/vectors)
-                    let resolved_arg = self.resolve_variable_references_in_val(&unwrapped_arg)?;
-                    args.push(resolved_arg);
-                }
-
                 // Get function information to determine if this is a variable lookup
                 let function_info =
                     self.program
@@ -2530,6 +2716,15 @@ impl VirtualMachine {
 
                 // This is a direct native function call
                 let function_name = format!("{}/{}", namespace, name);
+
+                // Collect arguments from consecutive registers, prepared for
+                // the native
+                let mut args = Vec::with_capacity(args_count as usize);
+                for i in 0..args_count {
+                    let arg_reg = args_start + i as RegisterId;
+                    args.push(self.get_register(arg_reg)?.clone());
+                }
+                let args = self.prepare_call_args(CallTarget::Native(&function_name), args)?;
                 let result = match self.call_hotlib_function(&function_name, &args) {
                     Ok(v) => v,
                     Err(e) => {
@@ -2559,17 +2754,14 @@ impl VirtualMachine {
                 // Get the lambda from the register
                 let lambda_val = self.get_register(lambda)?.clone();
 
-                // Collect arguments from consecutive registers (no lazy metadata for lambdas yet)
+                // Collect arguments from consecutive registers, prepared for
+                // the lambda's parameters
                 let mut args = Vec::with_capacity(args_count as usize);
                 for i in 0..args_count {
                     let arg_reg = args_start + i as RegisterId;
-                    let arg_val = self.get_register(arg_reg)?.clone();
-                    // Automatically unwrap "ok" Results for function arguments
-                    let unwrapped_arg = self.unwrap_result_if_ok(&arg_val)?;
-                    // Evaluate boxed AstNodes in the argument (e.g., in maps/vectors)
-                    let resolved_arg = self.resolve_variable_references_in_val(&unwrapped_arg)?;
-                    args.push(resolved_arg);
+                    args.push(self.get_register(arg_reg)?.clone());
                 }
+                let args = self.prepare_call_args(CallTarget::Value(&lambda_val), args)?;
 
                 // Execute the lambda
                 let result = match self.execute_lambda(&lambda_val, &args) {
@@ -2595,7 +2787,7 @@ impl VirtualMachine {
                 args_count,
             } => {
                 let dest = *dest;
-                let function_id = *function_id;
+                let mut function_id = *function_id;
                 let args_start = *args_start;
                 let args_count = *args_count;
                 tracing::trace!(
@@ -2608,23 +2800,30 @@ impl VirtualMachine {
                 let mut args = Vec::with_capacity(args_count as usize);
                 for i in 0..args_count {
                     let arg_reg = args_start + i as RegisterId;
-                    let arg_val = self.get_register(arg_reg)?.clone();
-                    // Automatically unwrap "ok" Results for function arguments
-                    let unwrapped_arg = self.unwrap_result_if_ok(&arg_val)?;
-                    // Evaluate boxed AstNodes in the argument (e.g., in maps/vectors)
-                    let resolved_arg = self.resolve_variable_references_in_val(&unwrapped_arg)?;
-                    args.push(resolved_arg);
+                    args.push(self.get_register(arg_reg)?.clone());
                 }
 
-                // Implicit coercion at the static-dispatch boundary. The
-                // compiler may have picked `function_id` from the arity-only
-                // key (because compile-time arg types weren't known); if a
-                // typed signature exists and the actual arg types differ but
-                // a unique `Source -> Target` arrow exists, coerce in place.
+                // Overload dispatch and implicit coercion at the
+                // static-dispatch boundary. The compiler may have picked
+                // `function_id` from the arity-only key (because compile-time
+                // arg types weren't known), so a same-arity sibling that fits
+                // the actual arg types better is called instead (see
+                // `overload_for_args`), with the arguments prepared for its
+                // parameters: one that declares a `Result` receives an Err.
+                // Otherwise, if a typed signature exists and the actual arg
+                // types differ but a unique `Source -> Target` arrow exists,
+                // coerce in place.
                 // The type checker has already vetted the call, so any miss
                 // here just falls back to invoking the function with the
                 // original args (preserves prior behavior).
-                if let Some(expected) = self.lookup_typed_param_signature(function_id) {
+                let dispatched = self.overload_for_args(function_id, &args);
+                if let Some(chosen) = dispatched {
+                    function_id = chosen;
+                }
+                let mut args = self.prepare_call_args(CallTarget::Function(function_id), args)?;
+                if dispatched.is_none()
+                    && let Some(expected) = self.lookup_typed_param_signature(function_id)
+                {
                     let actual: Vec<String> =
                         args.iter().map(|a| self.get_val_type_name(a)).collect();
                     if actual != expected {
@@ -2675,72 +2874,11 @@ impl VirtualMachine {
                 parts_count,
             } => {
                 let dest = *dest;
-                let parts_start = *parts_start;
-                let parts_count = *parts_count;
-                // Check for template literal recursion
-                if self.template_recursion_depth > 15 {
-                    tracing::warn!(
-                        "Template recursion limit hit at depth {}",
-                        self.template_recursion_depth
-                    );
-                    self.set_register(dest, Val::from("<template-recursion>"))?;
-                    self.instruction_pointer += 1;
-                    return Ok(());
-                }
-
-                // Execute template literal interpolation
-                let mut result = String::new();
-                let max_template_bytes = crate::lang::runtime::limits::max_string_bytes();
-
-                // Temporarily increment recursion depth
-                self.template_recursion_depth += 1;
-
-                for i in 0..parts_count {
-                    let part_reg = parts_start + i as RegisterId;
-                    let part_val = self.get_register(part_reg)?.clone();
-
-                    // Automatically unwrap Results in template literals
-                    let unwrapped_val = self.unwrap_result_if_ok(&part_val)?;
-
-                    // Convert value to string using Str constructor (supports type implementations)
-                    let string_repr: String =
-                        match crate::lang::hot::r#type::str_constructor(self, &[unwrapped_val]) {
-                            crate::lang::hot::r#type::HotResult::Ok(Val::Str(s)) => (*s).to_owned(),
-                            crate::lang::hot::r#type::HotResult::Ok(other) => other.to_string(),
-                            crate::lang::hot::r#type::HotResult::Err(e) => e.to_string(),
-                        };
-                    // Bound the produced template length up-front using checked
-                    // arithmetic so a single template can't drive an unbounded
-                    // String allocation (which would call the allocator and
-                    // potentially abort on OOM).
-                    let projected_len =
-                        result.len().checked_add(string_repr.len()).ok_or_else(|| {
-                            VmError::runtime("Template literal length overflows usize".to_string())
-                        })?;
-                    if projected_len > max_template_bytes {
-                        // Restore recursion depth before bailing out.
-                        self.template_recursion_depth -= 1;
-                        return Err(VmError::runtime(format!(
-                            "Template literal too large: would produce {} bytes (limit {}). \
-                             Raise HOT_MAX_STRING_BYTES if this is intentional.",
-                            projected_len, max_template_bytes
-                        )));
-                    }
-                    if let Err(e) = crate::lang::runtime::limits::try_reserve_string(
-                        "template literal",
-                        &mut result,
-                        string_repr.len(),
-                    ) {
-                        self.template_recursion_depth -= 1;
-                        return Err(VmError::runtime(e.to_string()));
-                    }
-                    result.push_str(&string_repr);
-                }
-
-                // Restore recursion depth
-                self.template_recursion_depth -= 1;
-
-                self.set_register(dest, Val::from(result))?;
+                let parts = (0..*parts_count)
+                    .map(|i| self.get_register(parts_start + i as RegisterId).cloned())
+                    .collect::<VmResult<Vec<Val>>>()?;
+                let value = self.interpolate_template(&parts)?;
+                self.set_register(dest, value)?;
                 self.instruction_pointer += 1;
             }
 
@@ -3188,27 +3326,10 @@ impl VirtualMachine {
                 let value = *value;
                 let val = self.get_register(value)?.clone();
 
-                // If the value is a lazy thunk (LambdaInfo), force-evaluate it
-                // with Result auto-unwrapping suppressed so the Result stays intact.
-                // This handles `fn match (r: Result) { Result.Ok => ... Result.Err => ... }`
-                // where the parameter was marked lazy to preserve the Result through
-                // the call boundary.
-                let val = if let Val::Box(ref b) = val {
-                    if b.as_any()
-                        .downcast_ref::<crate::lang::bytecode::LambdaInfo>()
-                        .is_some()
-                    {
-                        let prev = self.suppress_result_checking;
-                        self.suppress_result_checking = true;
-                        let evaluated = self.execute_lambda(&val, &[]);
-                        self.suppress_result_checking = prev;
-                        evaluated?
-                    } else {
-                        val
-                    }
-                } else {
-                    val
-                };
+                // A lazy value (a `fn match` over Result arms takes its first
+                // parameter lazily) is forced here: an Err value comes back
+                // intact, and a halt while computing it propagates.
+                let val = self.force_lazy(&val)?;
 
                 let type_path = self.get_value_type_path(&val);
                 // If already a Result type, leave unchanged
@@ -4715,6 +4836,136 @@ impl VirtualMachine {
         self.unified_variable_lookup(name)
     }
 
+    /// A binding visible from the current frame: what a lambda created here
+    /// would capture.
+    fn lookup_in_current_call(&self, name: &str) -> Option<Val> {
+        self.lookup_from(self.scope_stack.len(), name)
+    }
+
+    /// A binding in the scopes below `start`, innermost first. The walk
+    /// stops at the frame of a top-level function call, and at a lambda
+    /// call's frame it continues in the frames the lambda was created in,
+    /// while they are live, rather than in its caller's.
+    fn lookup_from(&self, start: usize, name: &str) -> Option<Val> {
+        let mut idx = start.min(self.scope_stack.len());
+        while idx > 0 {
+            idx -= 1;
+            let scope = &self.scope_stack[idx];
+            if let Some(value) = scope.variables.get(name) {
+                return Some(value.clone());
+            }
+            if scope.is_boundary {
+                return None;
+            }
+            if let Some(link) = scope.link {
+                match self.live_link_target(link) {
+                    // Continue at the target: the loop steps down to it.
+                    Some(target) if target < idx => idx = target + 1,
+                    _ => return None,
+                }
+            }
+        }
+        None
+    }
+
+    /// The live scope a lambda's frame link points at: where it was created,
+    /// or failing that its defining top-level call's frame.
+    fn live_link_target(&self, link: crate::lang::bytecode::FrameLink) -> Option<usize> {
+        let live = |(index, frame_id): (usize, u64)| {
+            self.scope_stack
+                .get(index)
+                .is_some_and(|scope| scope.frame_id == frame_id)
+                .then_some(index)
+        };
+        live(link.scope).or_else(|| link.boundary.and_then(live))
+    }
+
+    /// A binding visible where `lambda` was created, while that call is
+    /// live. A native given a lazy argument uses it to see the caller's
+    /// locals, as the argument's own code would.
+    pub(crate) fn lookup_in_lambda_definer(
+        &self,
+        lambda: &crate::lang::bytecode::LambdaInfo,
+        name: &str,
+    ) -> Option<Val> {
+        let target = self.live_link_target(lambda.defining_frame?)?;
+        self.lookup_from(target + 1, name)
+    }
+
+    /// A binding in the call that created a lambda, whose innermost scope
+    /// then was `definer`: the scopes that call has opened since (a parallel
+    /// flow's, holding its branches' results), then `definer` and what it
+    /// sees. A scope above another call's frame belongs to that call.
+    fn lookup_in_definer_call(&self, definer: usize, name: &str) -> Option<Val> {
+        let opened_since = self.scope_stack.get(definer + 1..).unwrap_or_default();
+        let opened_since = &opened_since[..opened_since
+            .iter()
+            .position(|scope| scope.call)
+            .unwrap_or(opened_since.len())];
+        opened_since
+            .iter()
+            .rev()
+            .find_map(|scope| scope.variables.get(name).cloned())
+            .or_else(|| self.lookup_from(definer + 1, name))
+    }
+
+    /// A name's value in `namespace` or core, where no call's frame is in
+    /// scope.
+    fn lookup_outside_calls(&self, namespace: &str, name: &str) -> Option<Val> {
+        if name.starts_with("::") && name.contains('/') {
+            return self.lookup_qualified_variable_immutable(name);
+        }
+        self.namespace_variables
+            .get(namespace)
+            .and_then(|vars| vars.get(name).cloned())
+            .or_else(|| self.lookup_core_variable(name))
+    }
+
+    /// The frames a lambda created now is defined in.
+    fn current_frame_link(&self) -> Option<crate::lang::bytecode::FrameLink> {
+        let innermost = self.scope_stack.len().checked_sub(1)?;
+        let boundary = self
+            .scope_stack
+            .iter()
+            .enumerate()
+            .rev()
+            .find(|(_, scope)| scope.is_boundary)
+            .map(|(index, scope)| (index, scope.frame_id));
+        Some(crate::lang::bytecode::FrameLink {
+            scope: (innermost, self.scope_stack[innermost].frame_id),
+            boundary,
+        })
+    }
+
+    /// `value` with every capture it couldn't resolve at creation filled from
+    /// the current call's frames, if it is a lambda. For running it on a
+    /// fresh VM (a parallel branch, `pmap`), which has none of these frames.
+    pub(crate) fn with_captures_resolved(&self, value: &Val) -> Val {
+        let Val::Box(boxed) = value else {
+            return value.clone();
+        };
+        let Some(lambda) = boxed
+            .as_any()
+            .downcast_ref::<crate::lang::bytecode::LambdaInfo>()
+        else {
+            return value.clone();
+        };
+        let mut lambda = lambda.clone();
+        for name in &lambda.capture_vars {
+            if lambda
+                .closure_env
+                .get(name)
+                .is_some_and(|value| !matches!(value, Val::Null))
+            {
+                continue;
+            }
+            if let Some(found) = self.lookup_in_current_call(name) {
+                lambda.closure_env.insert(name.clone(), found);
+            }
+        }
+        Val::Box(Box::new(lambda))
+    }
+
     /// Get a variable from the VM's namespace registry (similar to lang1's get_var)
     /// This is used to extract variables after execution is complete
     pub fn get_var(&self, namespace_path: Option<&str>, var_name: &str) -> Option<Val> {
@@ -4984,16 +5235,6 @@ impl VirtualMachine {
     /// Extract a human-readable message from a Result.Err payload so the
     /// escalation halt carries the underlying failure (a connect error,
     /// an HTTP status, ...) instead of an opaque placeholder.
-    /// The user-facing message for a hotlib error payload. Val's Display
-    /// renders strings Hot-literal-style (quoted), so extract Str content
-    /// directly to avoid quote-wrapped messages.
-    fn hotlib_err_message(err_val: &Val) -> String {
-        match err_val {
-            Val::Str(msg) => (**msg).to_owned(),
-            other => other.to_string(),
-        }
-    }
-
     fn result_err_message(err_val: &Val) -> String {
         match err_val {
             Val::Str(s) => (**s).to_owned(),
@@ -5024,16 +5265,70 @@ impl VirtualMachine {
     ///
     /// Call this only at ordinary Result-consumption boundaries. Callers that
     /// support non-consuming inspection must handle those exceptions first.
+    /// Interpolate a template literal's parts, for the interpreter and the
+    /// JIT alike: each part's Result is consumed, so an Err halts, and each
+    /// value converts with `Str` (which honors type implementations).
+    pub(crate) fn interpolate_template(&mut self, parts: &[Val]) -> VmResult<Val> {
+        // Check for template literal recursion
+        if self.template_recursion_depth > 15 {
+            tracing::warn!(
+                "Template recursion limit hit at depth {}",
+                self.template_recursion_depth
+            );
+            return Ok(Val::from("<template-recursion>"));
+        }
+        self.template_recursion_depth += 1;
+        let result = self.interpolate_template_parts(parts);
+        self.template_recursion_depth -= 1;
+        result.map(Val::from)
+    }
+
+    fn interpolate_template_parts(&mut self, parts: &[Val]) -> VmResult<String> {
+        let mut result = String::new();
+        let max_template_bytes = crate::lang::runtime::limits::max_string_bytes();
+        for part_val in parts {
+            // Automatically unwrap Results in template literals
+            let unwrapped_val = self.unwrap_result_if_ok(part_val)?;
+
+            // Convert value to string using Str constructor (supports type implementations)
+            let string_repr: String =
+                match crate::lang::hot::r#type::str_constructor(self, &[unwrapped_val]) {
+                    crate::lang::hot::r#type::HotResult::Ok(Val::Str(s)) => (*s).to_owned(),
+                    crate::lang::hot::r#type::HotResult::Ok(other) => other.to_string(),
+                    crate::lang::hot::r#type::HotResult::Err(e) => e.to_string(),
+                };
+            // Bound the produced template length up-front using checked
+            // arithmetic so a single template can't drive an unbounded
+            // String allocation (which would call the allocator and
+            // potentially abort on OOM).
+            let projected_len = result.len().checked_add(string_repr.len()).ok_or_else(|| {
+                VmError::runtime("Template literal length overflows usize".to_string())
+            })?;
+            if projected_len > max_template_bytes {
+                return Err(VmError::runtime(format!(
+                    "Template literal too large: would produce {} bytes (limit {}). \
+                     Raise HOT_MAX_STRING_BYTES if this is intentional.",
+                    projected_len, max_template_bytes
+                )));
+            }
+            crate::lang::runtime::limits::try_reserve_string(
+                "template literal",
+                &mut result,
+                string_repr.len(),
+            )
+            .map_err(|e| VmError::runtime(e.to_string()))?;
+            result.push_str(&string_repr);
+        }
+        Ok(result)
+    }
+
     pub(crate) fn unwrap_result_if_ok(&mut self, val: &Val) -> VmResult<Val> {
         // Cache the debug-env check: this runs per argument per call, and
         // std::env::var is far too expensive for that hot path.
         static DBG_UNWRAP: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
         let dbg_unwrap = *DBG_UNWRAP.get_or_init(|| std::env::var("HOT_DBG_UNWRAP").is_ok());
         if dbg_unwrap && val.is_err() {
-            eprintln!(
-                "DBG unwrap_result_if_ok on Err (suppress={})",
-                self.suppress_result_checking
-            );
+            eprintln!("DBG unwrap_result_if_ok on Err");
         }
         // Don't unwrap if this is a lambda - lazy values should not be unwrapped
         if let Val::Box(b) = val
@@ -5041,11 +5336,6 @@ impl VirtualMachine {
                 .downcast_ref::<crate::lang::bytecode::LambdaInfo>()
                 .is_some()
         {
-            return Ok(val.clone());
-        }
-
-        // Skip Result checking if suppressed (e.g., during lazy thunk evaluation)
-        if self.suppress_result_checking {
             return Ok(val.clone());
         }
 
@@ -5068,7 +5358,7 @@ impl VirtualMachine {
                 // Set VM failure state and return error. The run/task boundary
                 // emits terminal status if this halt is not explicitly
                 // contained by try-call / if-err.
-                self.set_failure(msg.clone(), err_val.clone());
+                self.set_consumed_failure(msg.clone(), err_val.clone());
 
                 return Err(VmError::runtime(format!("Result error: {}", msg)));
             }
@@ -5076,6 +5366,145 @@ impl VirtualMachine {
 
         // Not a Result type, return as-is
         Ok(val.clone())
+    }
+
+    /// Prepare a call's arguments for its callee. A parameter that is lazy or
+    /// declared `Result`, or an argument of a Result-aware native, receives
+    /// its argument as it is; every other parameter consumes it: Ok unwraps,
+    /// Err halts. Every call path prepares arguments here, so a function
+    /// treats its arguments the same however it is called.
+    pub(crate) fn prepare_call_args(
+        &mut self,
+        target: CallTarget<'_>,
+        args: Vec<Val>,
+    ) -> VmResult<Vec<Val>> {
+        // Only a Result needs the callee's parameters; any other value is
+        // prepared the same way for every callee.
+        let keeps = if args.iter().any(Self::is_result_shaped) {
+            self.kept_args(target, &args)
+        } else {
+            Vec::new()
+        };
+        args.into_iter()
+            .enumerate()
+            .map(|(index, arg)| {
+                if keeps.get(index).copied().unwrap_or(false) {
+                    self.resolve_variable_references_in_val(&arg)
+                } else {
+                    self.prepare_call_arg(arg)
+                }
+            })
+            .collect()
+    }
+
+    /// Keep a halt that a native saw while running Hot code (a callback, a
+    /// forced lazy argument) a halt. Unless `fail()`, `cancel()` or a
+    /// consumed Err already recorded it, record it here, so the native's
+    /// error return escalates at its boundary instead of becoming an Err
+    /// value.
+    pub(crate) fn record_halt(&self, err: &VmError) {
+        if !self.has_failed() && !self.has_cancelled() {
+            self.set_failure_plain_vm_error(Self::halt_message(err), Val::Null);
+        }
+    }
+
+    /// A halt's message without the error kind's prefix.
+    pub(crate) fn halt_message(err: &VmError) -> String {
+        match err {
+            VmError::RuntimeError(error) if error.location.is_none() => error.message.clone(),
+            other => other.to_string(),
+        }
+    }
+
+    /// The value of a lazy argument: its thunk is evaluated as if its
+    /// expression were written here (an Err value comes back as a value; a
+    /// halt inside it propagates). Any other value, a function value
+    /// included, is returned as it is.
+    pub(crate) fn force_lazy(&mut self, value: &Val) -> VmResult<Val> {
+        if let Val::Box(boxed) = value
+            && let Some(lambda) = boxed
+                .as_any()
+                .downcast_ref::<crate::lang::bytecode::LambdaInfo>()
+            && lambda.is_lazy_param
+            && lambda.parameters.is_empty()
+        {
+            return self.execute_lambda(value, &[]);
+        }
+        Ok(value.clone())
+    }
+
+    /// `prepare_call_args` for a callee held in a register, read only when
+    /// an argument is a Result.
+    fn prepare_args_for_register(
+        &mut self,
+        function_register: RegisterId,
+        args: Vec<Val>,
+    ) -> VmResult<Vec<Val>> {
+        if !args.iter().any(Self::is_result_shaped) {
+            return args
+                .into_iter()
+                .map(|arg| self.prepare_call_arg(arg))
+                .collect();
+        }
+        let callee = self.get_register(function_register)?.clone();
+        self.prepare_call_args(CallTarget::Value(&callee), args)
+    }
+
+    /// Which arguments of a call to `target` pass as they are.
+    fn kept_args(&mut self, target: CallTarget<'_>, args: &[Val]) -> Vec<bool> {
+        match target {
+            CallTarget::Function(function_id) => (0..args.len())
+                .map(|index| self.program.keeps_param(function_id, index))
+                .collect(),
+            CallTarget::Lambda(lambda) => (0..args.len())
+                .map(|index| lambda.keeps_param(index))
+                .collect(),
+            CallTarget::Native(name) => vec![Self::is_result_aware_native(name); args.len()],
+            CallTarget::Value(value) => {
+                let mut value = value;
+                if let Val::Map(map) = value
+                    && crate::val::tagged_type_name(map) == Some("::hot::type/Fn")
+                    && let Some(inner) = map.get(&Val::from("$val"))
+                {
+                    value = inner;
+                }
+                let name = match value {
+                    Val::Box(boxed) => {
+                        if let Some(lambda) = boxed
+                            .as_any()
+                            .downcast_ref::<crate::lang::bytecode::LambdaInfo>()
+                        {
+                            return self.kept_args(CallTarget::Lambda(lambda), args);
+                        }
+                        match boxed
+                            .as_any()
+                            .downcast_ref::<crate::lang::runtime::function_ref::FunctionRef>()
+                        {
+                            Some(function_ref) => function_ref.name.clone(),
+                            None => return Vec::new(),
+                        }
+                    }
+                    Val::Str(name) => name.to_string(),
+                    _ => return Vec::new(),
+                };
+                // `call-lib` and `call` hand their arguments on themselves.
+                if name == "call-lib" || name == "call" {
+                    return Vec::new();
+                }
+                let name = self.resolve_function_name(&name).unwrap_or(name);
+                match self.find_best_function_overload(&name, args) {
+                    // The sibling a by-name call dispatches to (see
+                    // `execute_user_function_cached`) decides.
+                    Some(function_id) => {
+                        let function_id = self
+                            .overload_for_args(function_id, args)
+                            .unwrap_or(function_id);
+                        self.kept_args(CallTarget::Function(function_id), args)
+                    }
+                    None => self.kept_args(CallTarget::Native(&name), args),
+                }
+            }
+        }
     }
 
     fn prepare_call_arg(&mut self, val: Val) -> VmResult<Val> {
@@ -5204,11 +5633,21 @@ impl VirtualMachine {
             {
                 type_name.hash(&mut hasher);
             }
+            if let Val::Map(_) | Val::Box(_) = arg {
+                // Overload dispatch tells boxed functions, namespaces and
+                // iterators apart, and an Ok by its value's type (see
+                // `dispatch_type_name`).
+                Self::dispatch_type_name(arg).hash(&mut hasher);
+            }
         }
         hasher.finish()
     }
 
-    /// Execute a user function and cache the dispatch for future calls
+    /// Execute a user function and cache the dispatch for future calls.
+    /// Name lookups resolve bare and arity-only keys, which ignore argument
+    /// types, so the same-arity sibling that best fits the runtime argument
+    /// types is called instead (see `overload_for_args`). The cache key
+    /// distinguishes argument types at least as finely as that choice.
     #[inline(always)]
     fn execute_user_function_cached(
         &mut self,
@@ -5216,6 +5655,9 @@ impl VirtualMachine {
         function_id: FunctionId,
         args: &[Val],
     ) -> VmResult<Val> {
+        let function_id = self
+            .overload_for_args(function_id, args)
+            .unwrap_or(function_id);
         self.dispatch_cache.insert(cache_key, function_id);
         self.execute_user_function(function_id, args)
     }
@@ -5335,7 +5777,7 @@ impl VirtualMachine {
                     crate::lang::hot::libmap::HotLibFn::LibFn(f) => match f(args) {
                         crate::lang::hot::r#type::HotResult::Ok(val) => Ok(val),
                         crate::lang::hot::r#type::HotResult::Err(err_val) => {
-                            Err(VmError::runtime(Self::hotlib_err_message(&err_val)))
+                            self.dispatch_hotlib_err(err_val)
                         }
                     },
                     crate::lang::hot::libmap::HotLibFn::VmAwareFn(f)
@@ -5343,7 +5785,7 @@ impl VirtualMachine {
                     {
                         crate::lang::hot::r#type::HotResult::Ok(val) => Ok(val),
                         crate::lang::hot::r#type::HotResult::Err(err_val) => {
-                            Err(VmError::runtime(Self::hotlib_err_message(&err_val)))
+                            self.dispatch_hotlib_err(err_val)
                         }
                     },
                 };
@@ -5508,7 +5950,7 @@ impl VirtualMachine {
                     crate::lang::hot::libmap::HotLibFn::LibFn(f) => match f(args) {
                         crate::lang::hot::r#type::HotResult::Ok(val) => Ok(val),
                         crate::lang::hot::r#type::HotResult::Err(err_val) => {
-                            Err(VmError::runtime(Self::hotlib_err_message(&err_val)))
+                            self.dispatch_hotlib_err(err_val)
                         }
                     },
                     crate::lang::hot::libmap::HotLibFn::VmAwareFn(f)
@@ -5516,7 +5958,7 @@ impl VirtualMachine {
                     {
                         crate::lang::hot::r#type::HotResult::Ok(val) => Ok(val),
                         crate::lang::hot::r#type::HotResult::Err(err_val) => {
-                            Err(VmError::runtime(Self::hotlib_err_message(&err_val)))
+                            self.dispatch_hotlib_err(err_val)
                         }
                     },
                 };
@@ -5558,14 +6000,14 @@ impl VirtualMachine {
                 crate::lang::hot::libmap::HotLibFn::LibFn(f) => match f(args) {
                     crate::lang::hot::r#type::HotResult::Ok(val) => Ok(val),
                     crate::lang::hot::r#type::HotResult::Err(err_val) => {
-                        Err(VmError::runtime(err_val.to_string()))
+                        self.dispatch_hotlib_err(err_val)
                     }
                 },
                 crate::lang::hot::libmap::HotLibFn::VmAwareFn(f)
                 | crate::lang::hot::libmap::HotLibFn::VmAwareJitFn(f, _) => match f(self, args) {
                     crate::lang::hot::r#type::HotResult::Ok(val) => Ok(val),
                     crate::lang::hot::r#type::HotResult::Err(err_val) => {
-                        Err(VmError::runtime(err_val.to_string()))
+                        self.dispatch_hotlib_err(err_val)
                     }
                 },
             };
@@ -5645,15 +6087,10 @@ impl VirtualMachine {
             return self.lookup_qualified_variable(var_name);
         }
 
-        // 2a) Lexical scope (innermost first)
-        let mut lexical_found: Option<Val> = None;
-        for scope in self.scope_stack.iter().rev() {
-            if let Some(val) = scope.variables.get(var_name) {
-                lexical_found = Some(val.clone());
-                break;
-            }
-        }
-        if let Some(val) = lexical_found {
+        // 2a) Lexical scope: the current call's frames, then (for a lambda
+        // or local function) its definer's, down to the frame of a top-level
+        // function call. Never the frames of an unrelated caller.
+        if let Some(val) = self.lookup_in_current_call(var_name) {
             // Strings are just strings - no automatic resolution to function references
             return Ok(val);
         }
@@ -5787,19 +6224,22 @@ impl VirtualMachine {
         // Resolve to a function name for normal dispatch paths.
         // Arc<str> so the common Val::Str case is a refcount bump, not a
         // fresh String allocation on every dispatched call.
-        let function_name: Arc<str> = match function_val {
-            Val::Str(name) => name,
-            Val::Box(boxed_val) => {
+        let function_name: Arc<str> = match &function_val {
+            Val::Str(name) => Arc::clone(name),
+            Val::Box(boxed_val)
                 if let Some(function_ref) = boxed_val
                     .as_any()
                     .downcast_ref::<crate::lang::runtime::function_ref::FunctionRef>(
-                ) {
-                    Arc::from(function_ref.name.as_str())
-                } else {
-                    return Ok(Val::Null);
-                }
+                ) =>
+            {
+                Arc::from(function_ref.name.as_str())
             }
-            _ => return Ok(Val::Null),
+            _ => {
+                // Not a function: neither a name nor a dispatch function, so
+                // the depth taken above is given back.
+                self.decrement_function_call_depth("");
+                return Ok(self.not_callable(&function_val));
+            }
         };
         let function_name: &str = &function_name;
 
@@ -5835,6 +6275,7 @@ impl VirtualMachine {
                     return Ok($val);
                 }};
             }
+            // A native's failure is an Err value, as through `call-lib`.
             macro_rules! fast_return_hr {
                 ($hr:expr) => {
                     match $hr {
@@ -5843,7 +6284,7 @@ impl VirtualMachine {
                             if !is_dispatch_function {
                                 self.decrement_function_call_depth(function_name);
                             }
-                            return Err(VmError::runtime(err_val.to_string()));
+                            return self.dispatch_hotlib_err(err_val);
                         }
                     }
                 };
@@ -6032,16 +6473,10 @@ impl VirtualMachine {
             && let (Val::Int(a), Val::Int(b)) = (&args[0], &args[1])
         {
             let result = match function_name {
-                "add" => Some(Val::Int(a.wrapping_add(*b))),
-                "sub" => Some(Val::Int(a.wrapping_sub(*b))),
-                "mul" => Some(Val::Int(a.wrapping_mul(*b))),
-                "mod" => {
-                    if *b == 0 {
-                        None
-                    } else {
-                        Some(Val::Int(a % b))
-                    }
-                }
+                "add" => Some(crate::lang::hot::math::fast_add_int(*a, *b)),
+                "sub" => Some(crate::lang::hot::math::fast_sub_int(*a, *b)),
+                "mul" => Some(crate::lang::hot::math::fast_mul_int(*a, *b)),
+                "mod" => crate::lang::hot::math::fast_mod_int(*a, *b),
                 "lt" => Some(Val::Bool(a < b)),
                 "gt" => Some(Val::Bool(a > b)),
                 "lte" => Some(Val::Bool(a <= b)),
@@ -6141,10 +6576,7 @@ impl VirtualMachine {
                         match func(args) {
                             crate::lang::hot::r#type::HotResult::Ok(val) => return Ok(val),
                             crate::lang::hot::r#type::HotResult::Err(err) => {
-                                return Err(VmError::runtime_with_ip(
-                                    format!("Hotlib function '{}' error: {:?}", function_name, err),
-                                    self.instruction_pointer,
-                                ));
+                                return self.dispatch_hotlib_err(err);
                             }
                         }
                     }
@@ -6154,13 +6586,7 @@ impl VirtualMachine {
                         match func(self, args) {
                             crate::lang::hot::r#type::HotResult::Ok(val) => return Ok(val),
                             crate::lang::hot::r#type::HotResult::Err(err) => {
-                                return Err(VmError::runtime_with_ip(
-                                    format!(
-                                        "VM-aware hotlib function '{}' error: {:?}",
-                                        function_name, err
-                                    ),
-                                    self.instruction_pointer,
-                                ));
+                                return self.dispatch_hotlib_err(err);
                             }
                         }
                     }
@@ -6259,18 +6685,7 @@ impl VirtualMachine {
                     return self.call_function_value(&inner.clone(), args);
                 }
 
-                // Not a callable wrapper. Single-arg "construction" sugar: a non-callable
-                // map called with one arg yields that arg unchanged. Multi-arg calls on a
-                // non-callable map are a no-op returning Null.
-                if args.len() == 1 {
-                    tracing::trace!(
-                        "VM: Non-callable map value with single arg - returning arg as constructed value"
-                    );
-                    return Ok(args[0].clone());
-                }
-
-                tracing::trace!("VM: Attempted to call non-callable map value; returning Null");
-                Ok(Val::Null)
+                Ok(self.not_callable(function_val))
             }
             Val::Str(function_name) => {
                 // String function name - call directly
@@ -6281,23 +6696,18 @@ impl VirtualMachine {
                     self.execute_function_call_by_name(function_name, args)
                 }
             }
-            _ => {
-                // Non-callable values are returned unchanged when "called" with 1 arg,
-                // enabling type constructor maps like `City({ ... })` to just yield
-                // the provided map as the constructed value. This matches Hot semantics
-                // for user-defined types where constructors simply tag values.
-                if args.len() == 1 {
-                    tracing::trace!(
-                        "VM: Non-callable function value with single arg - returning arg as constructed value"
-                    );
-                    return Ok(args[0].clone());
-                }
-
-                // Otherwise, attempting to call a non-callable is a no-op -> null
-                tracing::trace!("VM: Attempted to call non-callable value; returning Null");
-                Ok(Val::Null)
-            }
+            _ => Ok(self.not_callable(function_val)),
         }
+    }
+
+    /// The Err a call gets when the value it calls isn't a function, as a
+    /// native's type error does.
+    fn not_callable(&self, value: &Val) -> Val {
+        let type_path = self.get_value_type_path(value);
+        let type_name = type_path.strip_prefix("::hot::type/").unwrap_or(&type_path);
+        Val::err(Val::from(format!(
+            "Cannot call a value of type {type_name}"
+        )))
     }
 
     /// Find the best matching function overload based on arity and type compatibility
@@ -6541,6 +6951,287 @@ impl VirtualMachine {
         found
     }
 
+    /// The same-arity overload set `function_id` belongs to: the overloads
+    /// registered under its `name/N` key prefix. `None` for the common case of
+    /// a function without same-arity siblings, and for variadic functions.
+    /// Cached per function.
+    fn overload_set(&mut self, function_id: FunctionId) -> Option<std::rc::Rc<OverloadSet>> {
+        if let Some(cached) = self.overload_set_cache.get(&function_id) {
+            return cached.clone();
+        }
+        if self.sorted_key_indices.is_none() {
+            let mapping = &self.function_mapping;
+            let mut order: Vec<usize> = (0..mapping.len()).collect();
+            order.sort_unstable_by(|&a, &b| {
+                let key = |i| mapping.get_index(i).map(|(key, _)| key.as_str());
+                key(a).cmp(&key(b))
+            });
+            self.sorted_key_indices = Some(order);
+        }
+        let set = self.build_overload_set(function_id).map(std::rc::Rc::new);
+        self.overload_set_cache.insert(function_id, set.clone());
+        set
+    }
+
+    fn build_overload_set(&self, function_id: FunctionId) -> Option<OverloadSet> {
+        let info = self.program.functions.get(function_id as usize)?;
+        if info.is_variadic {
+            return None;
+        }
+        let arity = info.arity as usize;
+        let prefix = format!("{}/{}", info.name, arity);
+        // Declared types per overload, from its longest typed key: the
+        // signature as written (constructors also register a key that keeps
+        // only the first member of a union).
+        let order = self.sorted_key_indices.as_deref().unwrap_or(&[]);
+        let key_at = |i: usize| self.function_mapping.get_index(i);
+        let start = order
+            .partition_point(|&i| key_at(i).is_some_and(|(key, _)| key.as_str() < prefix.as_str()));
+        let mut typed: IndexMap<FunctionId, &str> = IndexMap::new();
+        let mut arity_key_owner = None;
+        for &i in &order[start..] {
+            let Some((key, &id)) = key_at(i) else {
+                continue;
+            };
+            // Keys with this prefix are contiguous in sorted order.
+            let Some(rest) = key.strip_prefix(prefix.as_str()) else {
+                break;
+            };
+            if rest.is_empty() {
+                arity_key_owner = Some(id);
+            } else if let Some(types) = rest.strip_prefix(':') {
+                let entry = typed.entry(id).or_insert(types);
+                if types.len() > entry.len() {
+                    *entry = types;
+                }
+            }
+        }
+        // An untyped overload has no typed key; it owns the arity-only key.
+        let untyped = arity_key_owner.filter(|id| !typed.contains_key(id));
+        let mut candidates: Vec<OverloadCandidate> = typed
+            .iter()
+            .map(|(&id, types)| {
+                let params = split_top_level(types, ',')
+                    .into_iter()
+                    .map(|t| t.trim().to_string())
+                    .collect();
+                (id, params)
+            })
+            .chain(untyped.map(|id| (id, vec!["Any".to_string(); arity])))
+            .filter_map(|(id, param_types): (FunctionId, Vec<String>)| {
+                let overload = self.program.functions.get(id as usize)?;
+                (!overload.is_variadic && param_types.len() == arity).then(|| OverloadCandidate {
+                    function_id: id,
+                    param_types,
+                    lazy_params: overload.lazy_params.clone(),
+                })
+            })
+            .collect();
+        candidates.sort_by_key(|c| c.function_id);
+        candidates.dedup_by_key(|c| c.function_id);
+        let belongs = candidates.iter().any(|c| c.function_id == function_id);
+        (candidates.len() > 1 && belongs).then_some(OverloadSet {
+            prefix,
+            arity,
+            candidates,
+        })
+    }
+
+    /// The type name overload dispatch matches declared parameter types
+    /// against, and whether the value is structurally a Map: as
+    /// `get_val_type_name`, but boxed functions, namespaces and iterators are
+    /// told apart so that `Fn` parameters can be selected. An Ok is matched
+    /// by its value, which any parameter but a `Result` one receives; an Err
+    /// matches `Result`, and isn't a Map.
+    fn dispatch_type_name(val: &Val) -> (std::borrow::Cow<'_, str>, bool) {
+        let name = match val {
+            Val::Str(_) => "Str",
+            Val::Int(_) => "Int",
+            Val::Dec(_) => "Dec",
+            Val::Bool(_) => "Bool",
+            Val::Vec(_) => "Vec",
+            Val::Bytes(_) => "Bytes",
+            Val::Byte(_) => "Byte",
+            Val::Null => "Null",
+            Val::Map(map) => match crate::val::tagged_type_name(map) {
+                Some("::hot::type/Result.Ok") => {
+                    return match map.get(&Val::from("$val")) {
+                        Some(value) => Self::dispatch_type_name(value),
+                        None => (std::borrow::Cow::Borrowed("Null"), false),
+                    };
+                }
+                Some(type_name) => {
+                    // A typed record or variant is structurally a Map; an Err
+                    // is not.
+                    return (
+                        std::borrow::Cow::Borrowed(
+                            type_name.rsplit('/').next().unwrap_or(type_name),
+                        ),
+                        type_name != "::hot::type/Result.Err",
+                    );
+                }
+                None => return (std::borrow::Cow::Borrowed("Map"), true),
+            },
+            Val::Box(boxed) => {
+                let any = boxed.as_any();
+                if any.is::<crate::lang::runtime::function_ref::FunctionRef>()
+                    || any.is::<crate::lang::bytecode::LambdaInfo>()
+                {
+                    "Fn"
+                } else if any.is::<crate::lang::refs::NamespaceRef>() {
+                    "Namespace"
+                } else if any.is::<crate::lang::hot::iter::IteratorBox>() {
+                    "Iter"
+                } else {
+                    "Any"
+                }
+            }
+        };
+        (std::borrow::Cow::Borrowed(name), false)
+    }
+
+    /// Runtime overload dispatch for a call resolved without the argument
+    /// types. The compiler only knows literal argument types, so it falls back
+    /// to the arity-only key (the untyped overload, else the one declared
+    /// last), and name lookups ignore types entirely. Among the same-arity
+    /// overloads, the one declared with exactly the runtime argument types
+    /// wins, as it does at compile time; failing that, the most specific one
+    /// that accepts them (a single type, then a union or nullable type, then
+    /// `Any`). The resolved overload is kept on ties and when nothing else
+    /// accepts the arguments, so implicit coercion still applies to it.
+    /// Returns the overload to call instead, if any.
+    pub(crate) fn overload_for_args(
+        &mut self,
+        function_id: FunctionId,
+        args: &[Val],
+    ) -> Option<FunctionId> {
+        let set = self.overload_set(function_id)?;
+        if args.len() != set.arity {
+            return None;
+        }
+        let (names, maps): (Vec<std::borrow::Cow<'_, str>>, Vec<bool>) =
+            args.iter().map(Self::dispatch_type_name).unzip();
+        let cache_key = {
+            use std::hash::{Hash, Hasher};
+            let mut hasher = ahash::AHasher::default();
+            function_id.hash(&mut hasher);
+            for (name, is_map) in names.iter().zip(&maps) {
+                name.hash(&mut hasher);
+                is_map.hash(&mut hasher);
+            }
+            hasher.finish()
+        };
+        let chosen = match self.overload_choice_cache.get(&cache_key) {
+            Some(&chosen) => chosen,
+            None => {
+                let chosen = self.choose_overload(&set, function_id, &names, &maps);
+                self.overload_choice_cache.insert(cache_key, chosen);
+                chosen
+            }
+        };
+        (chosen != function_id).then_some(chosen)
+    }
+
+    fn choose_overload(
+        &self,
+        set: &OverloadSet,
+        function_id: FunctionId,
+        names: &[std::borrow::Cow<'_, str>],
+        maps: &[bool],
+    ) -> FunctionId {
+        // The call site evaluated its arguments for the resolved overload's
+        // lazy parameters, so only a sibling that defers the same ones can
+        // take them.
+        let Some(resolved) = set.candidates.iter().find(|c| c.function_id == function_id) else {
+            return function_id;
+        };
+        let eligible = |c: &&OverloadCandidate| c.lazy_params == resolved.lazy_params;
+        let exact_key = format!("{}:{}", set.prefix, names.join(","));
+        if let Some(&id) = self.function_mapping.get(&exact_key)
+            && set
+                .candidates
+                .iter()
+                .filter(eligible)
+                .any(|c| c.function_id == id)
+        {
+            return id;
+        }
+        let mut best = resolved.rank(names, maps).map(|rank| (rank, function_id));
+        for candidate in set.candidates.iter().filter(eligible) {
+            if candidate.function_id == function_id {
+                continue;
+            }
+            if let Some(rank) = candidate.rank(names, maps)
+                && best.is_none_or(|(best_rank, _)| rank < best_rank)
+            {
+                best = Some((rank, candidate.function_id));
+            }
+        }
+        best.map_or(function_id, |(_, id)| id)
+    }
+
+    /// Compiled code makes self calls natively, skipping the runtime overload
+    /// dispatch in `overload_for_args`. A function that calls itself while
+    /// sharing its arity with sibling overloads therefore stays interpreted
+    /// (marked do-not-JIT) so those calls keep dispatching on the runtime
+    /// argument types.
+    fn jit_blocked_by_overload_dispatch(&mut self, function_id: FunctionId) -> bool {
+        if self.overload_set(function_id).is_none() {
+            return false;
+        }
+        let program = Arc::clone(&self.program);
+        let blocked = program
+            .functions
+            .get(function_id as usize)
+            .is_some_and(|info| {
+                Self::instructions_call_function(&program, &info.instructions, function_id, 0)
+            });
+        if blocked {
+            self.jit.mark_do_not_jit(function_id);
+        }
+        blocked
+    }
+
+    /// Whether `instructions`, or a lambda or lazy thunk they load, call
+    /// `function_id` directly (`CallUserFunction` or `TailCall`).
+    fn instructions_call_function(
+        program: &BytecodeProgram,
+        instructions: &[Instruction],
+        function_id: FunctionId,
+        depth: usize,
+    ) -> bool {
+        // Lambda constants nest finitely; the cap only bounds pathological
+        // bytecode.
+        const MAX_LAMBDA_DEPTH: usize = 16;
+        instructions.iter().any(|instruction| match instruction {
+            Instruction::CallUserFunction {
+                function_id: callee,
+                ..
+            }
+            | Instruction::TailCall {
+                function_id: callee,
+                ..
+            } => *callee == function_id,
+            Instruction::LoadConst { constant, .. } if depth < MAX_LAMBDA_DEPTH => {
+                match program.constants.get(*constant as usize) {
+                    Some(Constant::Val(Val::Box(boxed))) => boxed
+                        .as_any()
+                        .downcast_ref::<crate::lang::bytecode::LambdaInfo>()
+                        .is_some_and(|lambda| {
+                            Self::instructions_call_function(
+                                program,
+                                &lambda.instructions,
+                                function_id,
+                                depth + 1,
+                            )
+                        }),
+                    _ => false,
+                }
+            }
+            _ => false,
+        })
+    }
+
     /// Look up a coercion arrow whose source type matches `src` and whose
     /// target type is either `tgt` exactly or a variant of it (`tgt.X`).
     /// Returns the actual target key (used to resolve the impl function via
@@ -6657,6 +7348,11 @@ impl VirtualMachine {
                 qualified_name,
                 function_id
             );
+            // An arity-only match ignores the argument types; prefer the
+            // same-arity overload that fits them (no coercion here).
+            let function_id = self
+                .overload_for_args(function_id, args)
+                .unwrap_or(function_id);
             return self.execute_user_function(function_id, args);
         } else {
             tracing::trace!(
@@ -7051,15 +7747,13 @@ impl VirtualMachine {
         Ok(args)
     }
 
-    /// The `::hot::type` Result natives take Result values as arguments by
-    /// contract (the sanctioned inspection points of the error model), and
-    /// the `::hot::bool` truthiness natives do too: Err is falsy in the
-    /// unified truthiness (matching `if`/`cond`, whose lazy conditions
-    /// already receive Errs), so or/and/not/is-truthy must see the value.
+    /// The natives whose hot-std signatures declare `Result` parameters,
+    /// and so receive a Result as it is: the Result inspectors, `is-type`,
+    /// `tap`, and the truthiness natives (an Err is falsy).
     fn is_result_aware_native(function_name: &str) -> bool {
-        let name = function_name
-            .strip_prefix("::hot::type/")
-            .or_else(|| function_name.strip_prefix("::hot::bool/"))
+        let name = ["::hot::type/", "::hot::bool/", "::hot::io/"]
+            .iter()
+            .find_map(|prefix| function_name.strip_prefix(prefix))
             .unwrap_or(function_name);
         matches!(
             name,
@@ -7070,6 +7764,8 @@ impl VirtualMachine {
                 | "is-result"
                 | "ok-value"
                 | "err-value"
+                | "is-type"
+                | "tap"
                 | "is-truthy"
                 | "not"
                 | "or"
@@ -7077,7 +7773,7 @@ impl VirtualMachine {
         )
     }
 
-    fn is_result_shaped(val: &Val) -> bool {
+    pub(crate) fn is_result_shaped(val: &Val) -> bool {
         if let Val::Map(map) = val
             && let Some(type_str) = crate::val::tagged_type_name(map)
         {
@@ -7191,53 +7887,8 @@ impl VirtualMachine {
                 }
                 crate::lang::hot::r#type::HotResult::Err(err) => {
                     tracing::trace!("VM: Hotlib function '{}' failed: {:?}", function_name, err);
-
-                    // Extract clean error message from Val::Str if possible
-                    let clean_message: String = match &err {
-                        Val::Str(msg) => (**msg).to_owned(),
-                        _ => format!("{:?}", err),
-                    };
-
-                    // Create a RuntimeError with function context and source location if available
-                    let mut runtime_error = RuntimeError::new(clean_message)
-                        .with_function(function_name.to_string())
-                        .with_instruction_pointer(self.instruction_pointer);
-
-                    // Try to get source location from the source map
-                    tracing::trace!(
-                        "Looking for source location at instruction pointer {}",
-                        self.instruction_pointer
-                    );
-                    if let Some(source_location) = self
-                        .program
-                        .source_map
-                        .get_location(self.instruction_pointer)
-                    {
-                        tracing::trace!(
-                            "Found source location: {}:{}:{}",
-                            source_location
-                                .file
-                                .as_ref()
-                                .unwrap_or(&"<unknown>".to_string()),
-                            source_location.line,
-                            source_location.column
-                        );
-                        let runtime_source_location = crate::lang::runtime::error::SourceLocation {
-                            file: source_location.file.as_ref().map(std::path::PathBuf::from),
-                            line: source_location.line,
-                            column: source_location.column,
-                            position: source_location.position,
-                            length: source_location.length,
-                        };
-                        runtime_error.location = Some(runtime_source_location);
-                    } else {
-                        tracing::trace!(
-                            "No source location found for instruction pointer {}",
-                            self.instruction_pointer
-                        );
-                    }
-
-                    Err(VmError::RuntimeError(runtime_error))
+                    // A native's failure is an Err value, as through `call-lib`.
+                    self.dispatch_hotlib_err(err)
                 }
             }
         } else {
@@ -7329,14 +7980,27 @@ impl VirtualMachine {
                 // Slow path: need to populate closure_env, so clone
                 let mut lambda_info_owned = lambda_info_ref.clone();
 
-                // Populate or refresh placeholder compile-time captures. If a
-                // value genuinely captured as Null is no longer resolvable in
-                // the active scope, keep the existing Null.
-
-                // Populate closure environment with current variable values
+                // Fill the captures that creation couldn't resolve, such as a
+                // local function that calls one defined after it. Those
+                // bindings sit in the definer's frames while its call is live.
+                // Once they are gone (a lambda returned from its definer, or
+                // one compiled code created), the name means what it means in
+                // the lambda's namespace: no other call's frame is searched. A
+                // value captured at creation is kept; one genuinely captured as
+                // Null and no longer resolvable stays Null.
                 for var_name in &lambda_info_owned.capture_vars.clone() {
-                    // Try to capture from current lexical scope first
-                    if let Ok(var_value) = self.lookup_variable(var_name) {
+                    if lambda_info_owned
+                        .closure_env
+                        .get(var_name)
+                        .is_some_and(|value| !matches!(value, Val::Null))
+                    {
+                        continue;
+                    }
+                    let from_definer = lambda_info_owned
+                        .defining_frame
+                        .and_then(|link| self.live_link_target(link))
+                        .and_then(|target| self.lookup_in_definer_call(target, var_name));
+                    if let Some(var_value) = from_definer {
                         lambda_info_owned
                             .closure_env
                             .insert(var_name.clone(), var_value);
@@ -7347,14 +8011,20 @@ impl VirtualMachine {
                         );
                         continue;
                     }
-
-                    if let Ok(var_value) = self.unified_variable_lookup(var_name) {
-                        // Fall back to unified lookup (namespace + core variables)
+                    // The lambda's namespace and core. The frames on the stack
+                    // now are its caller's, which it doesn't see. (Code with no
+                    // namespace declaration runs in the current one.)
+                    let namespace = if lambda_info_owned.defining_namespace.is_empty() {
+                        self.current_namespace.as_str()
+                    } else {
+                        lambda_info_owned.defining_namespace.as_str()
+                    };
+                    if let Some(var_value) = self.lookup_outside_calls(namespace, var_name) {
                         lambda_info_owned
                             .closure_env
                             .insert(var_name.clone(), var_value);
                         tracing::trace!(
-                            "VM: Captured variable '{}' from unified lookup = {:?}",
+                            "VM: Captured variable '{}' from its namespace = {:?}",
                             var_name,
                             lambda_info_owned.closure_env.get(var_name)
                         );
@@ -7406,8 +8076,10 @@ impl VirtualMachine {
                 std::borrow::Cow::Owned(lambda_info_owned)
             };
 
-        // Create a new lexical scope for lambda execution
+        // Create a new lexical scope for lambda execution. Its lookups
+        // continue in the frames the lambda was created in.
         let mut lambda_scope = LexicalScope::new(ScopeType::Function, Some(self.scope_stack.len()));
+        lambda_scope.link = lambda_info.defining_frame;
 
         // Bind captured variables to closure environment FIRST
         // (so parameters can shadow them if names conflict)
@@ -7565,6 +8237,7 @@ impl VirtualMachine {
                             ) {
                                 let mut captured_lambda = inner_lambda_info.clone();
                                 captured_lambda.closure_env.clear();
+                                captured_lambda.defining_frame = self.current_frame_link();
 
                                 for var_name in &captured_lambda.capture_vars {
                                     if let Ok(var_value) = self.lookup_variable(var_name) {
@@ -7656,17 +8329,15 @@ impl VirtualMachine {
                         args_count,
                     } => {
                         // Mirror the main interpreter loop's Call handler:
-                        // arguments follow the normal auto-unwrap rules (Ok
-                        // unwraps, Err escalates with its payload message).
-                        // Without this, an Err bound inside a lambda body
-                        // reached natives raw and produced misleading type
-                        // errors instead of the Err's own message.
+                        // arguments are prepared for the callee's parameters
+                        // (Ok unwraps, Err escalates with its payload message,
+                        // unless the parameter is lazy or declared `Result`).
                         let mut args = Vec::new();
                         for i in 0..*args_count {
                             let arg_reg = args_start + i as RegisterId;
-                            let arg_val = self.get_register(arg_reg)?.clone();
-                            args.push(self.prepare_call_arg(arg_val)?);
+                            args.push(self.get_register(arg_reg)?.clone());
                         }
+                        let args = self.prepare_args_for_register(*function as RegisterId, args)?;
                         let result = self.execute_function_call(*function, &args)?;
                         self.set_register(*dest, result)?;
                         last_result = self.get_register(*dest)?.clone();
@@ -7746,6 +8417,17 @@ impl VirtualMachine {
 
     /// Execute a user function
     fn try_jit_call(&mut self, function_id: u32, args: &[Val]) -> Result<Option<Val>, String> {
+        let Some(compiled) = self.jit.compiled_function(function_id, args) else {
+            return Ok(None);
+        };
+        // Code that never looks up a name or runs other Hot code needs
+        // neither the call's frame nor its namespace.
+        if !compiled.needs_vm_scope() {
+            let prev = crate::lang::runtime::jit::set_jit_vm_ptr(self as *mut VirtualMachine);
+            let result = compiled.try_call(args);
+            crate::lang::runtime::jit::set_jit_vm_ptr(prev);
+            return result;
+        }
         let function_info = self
             .program
             .functions
@@ -7757,41 +8439,23 @@ impl VirtualMachine {
                 )
             });
         let saved_namespace = self.current_namespace.clone();
-        let mut saved_namespace_bindings: Vec<(String, Option<Val>)> = Vec::new();
+        let saved_scope_depth = self.scope_stack.len();
         if let Some((namespace, param_names)) = &function_info {
             self.current_namespace = namespace.clone();
             if let Err(err) = self.ensure_namespace_has_ns_variable(namespace) {
                 self.current_namespace = saved_namespace;
                 return Err(err.to_string());
             }
-            let namespace_vars = self
-                .namespace_variables
-                .entry(namespace.clone())
-                .or_default();
-            saved_namespace_bindings.reserve(param_names.len());
-            for (idx, param_name) in param_names.iter().enumerate() {
-                let arg_value = args.get(idx).cloned().unwrap_or(Val::Null);
-                saved_namespace_bindings.push((
-                    param_name.clone(),
-                    namespace_vars.insert(param_name.clone(), arg_value),
-                ));
-            }
+            // The compiled call's frame, as an interpreted call has.
+            let is_boundary = !self.program.local_functions.contains(&function_id);
+            self.scope_stack
+                .push(LexicalScope::call_frame(param_names, args, is_boundary));
         }
 
         let prev = crate::lang::runtime::jit::set_jit_vm_ptr(self as *mut VirtualMachine);
-        let result = self.jit.try_call_compiled(function_id, args);
+        let result = compiled.try_call(args);
         crate::lang::runtime::jit::set_jit_vm_ptr(prev);
-        if let Some((namespace, _)) = &function_info
-            && let Some(namespace_vars) = self.namespace_variables.get_mut(namespace)
-        {
-            for (name, previous) in saved_namespace_bindings {
-                if let Some(value) = previous {
-                    namespace_vars.insert(name, value);
-                } else {
-                    namespace_vars.shift_remove(&name);
-                }
-            }
-        }
+        self.scope_stack.truncate(saved_scope_depth);
         self.current_namespace = saved_namespace;
         result
     }
@@ -7831,15 +8495,44 @@ impl VirtualMachine {
         }
 
         let program = Arc::clone(&self.program);
-        let saved_namespace = self.current_namespace.clone();
-        self.current_namespace = lambda_info.defining_namespace.clone();
+        let Some((compiled, effective_args)) = self
+            .jit
+            .compiled_lambda(&program, lambda_info, &normalized_args, &captures)
+            .map_err(|msg| VmError::RuntimeError(RuntimeError::new(msg)))?
+        else {
+            return Ok(None);
+        };
         let was_halted = self.has_failed() || self.has_cancelled();
         let prev = crate::lang::runtime::jit::set_jit_vm_ptr(self as *mut VirtualMachine);
-        let result =
-            self.jit
-                .try_call_compiled_lambda(&program, lambda_info, &normalized_args, &captures);
+        let result = if compiled.needs_vm_scope() {
+            let saved_namespace = std::mem::replace(
+                &mut self.current_namespace,
+                lambda_info.defining_namespace.clone(),
+            );
+            // The compiled lambda's frame, as an interpreted lambda call has:
+            // what it captured, then its parameters.
+            let saved_scope_depth = self.scope_stack.len();
+            let mut frame =
+                LexicalScope::call_frame(&lambda_info.parameters, &normalized_args, false);
+            frame.link = lambda_info.defining_frame;
+            for (name, value) in &lambda_info.closure_env {
+                frame
+                    .variables
+                    .entry(name.clone())
+                    .or_insert_with(|| value.clone());
+            }
+            self.scope_stack.push(frame);
+            let result =
+                crate::lang::runtime::jit::call_compiled_lambda(&compiled, &effective_args);
+            self.scope_stack.truncate(saved_scope_depth);
+            self.current_namespace = saved_namespace;
+            result
+        } else {
+            // Code that never looks up a name or runs other Hot code needs
+            // neither the call's frame nor its namespace.
+            crate::lang::runtime::jit::call_compiled_lambda(&compiled, &effective_args)
+        };
         crate::lang::runtime::jit::set_jit_vm_ptr(prev);
-        self.current_namespace = saved_namespace;
 
         let result = result.map_err(|msg| VmError::RuntimeError(RuntimeError::new(msg)))?;
         self.propagate_jit_halt(was_halted)?;
@@ -7857,6 +8550,13 @@ impl VirtualMachine {
     /// native stack overflow (which bypasses catch_unwind) instead of
     /// returning a structured error.
     fn execute_user_function(&mut self, function_id: u32, args: &[Val]) -> VmResult<Val> {
+        // Arguments the call site proved, for this call's prologue only. Take
+        // them before anything can return early, so a failed call can't leave
+        // them for a later one.
+        let proven = self
+            .pending_proven
+            .take()
+            .filter(|(id, _)| *id == function_id);
         let max_depth = max_recursion_depth();
         if self.user_function_depth >= max_depth {
             return Err(VmError::runtime(format!(
@@ -7902,16 +8602,16 @@ impl VirtualMachine {
             *slot += 1;
         }
 
-        // Arguments the call site proved, for this call's prologue only.
-        let proven = self
-            .pending_proven
-            .take()
-            .filter(|(id, _)| *id == function_id);
         let saved_proven = std::mem::replace(&mut self.entry_proven, proven);
         self.user_function_depth += 1;
         let result = self.execute_user_function_impl(function_id, args);
         self.user_function_depth -= 1;
         self.entry_proven = saved_proven;
+        if result.is_err() {
+            // A call that failed after its `ProvenArgs` never reached the
+            // callee; its proof must not reach whatever the caller runs next.
+            self.pending_proven = None;
+        }
 
         if let Some(slot) = self.function_active_depth.get_mut(fid) {
             *slot = slot.saturating_sub(1);
@@ -7963,7 +8663,9 @@ impl VirtualMachine {
             })?;
             let function_name = &function_info.name;
 
-            if self.jit.should_compile_now(function_id, args) {
+            if self.jit.should_compile_now(function_id, args)
+                && !self.jit_blocked_by_overload_dispatch(function_id)
+            {
                 let compile_result =
                     self.jit
                         .compile_function(&program, function_id, function_info, args);
@@ -8144,6 +8846,8 @@ impl VirtualMachine {
                 crate::lang::bytecode::ScopeType::Function,
                 Some(self.scope_stack.len()),
             );
+            let is_boundary = !self.program.local_functions.contains(&function_id);
+            function_scope.is_boundary = is_boundary;
 
             // Bind parameters to arguments (handle argument count mismatch gracefully)
             // For variadic functions, the last param collects all remaining args as a Vec
@@ -8198,14 +8902,6 @@ impl VirtualMachine {
                 .rfind('/')
                 .map(|namespace_end| function_name[..namespace_end].to_string());
 
-            // Snapshot of namespace-registry entries we shadow with the
-            // function's parameters, so we can restore them after the call.
-            // Without this, calling `::hot::coll/get(map: Map<K,V>, ...)`
-            // leaves the *function* slot for `map` permanently overwritten
-            // by the caller's Map literal, which then breaks any later
-            // function in the same namespace that references `map`.
-            let mut ns_param_shadows: Vec<(String, Option<Val>)> = Vec::new();
-
             if let Some(ref namespace) = function_namespace {
                 tracing::trace!(
                     "VM: Switching to function namespace '{}' for function '{}'",
@@ -8220,41 +8916,9 @@ impl VirtualMachine {
                     self.current_namespace = saved_namespace;
                     return Err(err);
                 }
-
-                // Mirror all current function parameters/locals into the namespace registry
-                // so closures and VM-aware hotlibs can resolve them when needed.
-                // We capture each prior value first so the call can be unwound
-                // cleanly without leaking parameter bindings across invocations.
-                if let Some(scope) = self.scope_stack.last() {
-                    let ns_entry = self
-                        .namespace_variables
-                        .entry(self.current_namespace.clone())
-                        .or_default();
-                    for (k, v) in &scope.variables {
-                        let prev = ns_entry.insert(k.clone(), v.clone());
-                        ns_param_shadows.push((k.clone(), prev));
-                    }
-                }
-            } else if !function_param_names.is_empty()
-                && let Some(scope) = self.scope_stack.last()
-            {
-                // Unqualified function name: historically the first TCO-loop
-                // iteration mirrored params into the *caller's* namespace
-                // without shadow capture. Preserve that behavior now that the
-                // loop only rebinds on actual tail calls.
-                let params: Vec<(String, Val)> = scope
-                    .variables
-                    .iter()
-                    .map(|(k, v)| (k.clone(), v.clone()))
-                    .collect();
-                let ns_entry = self
-                    .namespace_variables
-                    .entry(self.current_namespace.clone())
-                    .or_default();
-                for (k, v) in params {
-                    ns_entry.insert(k, v);
-                }
             }
+            // Parameters live in the function scope only. They are never
+            // written to the namespace, where other functions would see them.
 
             // Execute function instructions
             // Snapshot register usage to avoid unbounded growth across many function calls
@@ -8291,10 +8955,8 @@ impl VirtualMachine {
 
                 // TCO Loop: Execute instructions, and if we get a TailCall result,
                 // update parameters and re-execute instead of recursing.
-                // Parameters were already bound into the function scope (and
-                // mirrored into the namespace registry) above, so only actual
-                // tail-call iterations rebind — the previous version re-bound
-                // and re-mirrored every parameter a second time on every call.
+                // Parameters were already bound into the function scope above,
+                // so only actual tail-call iterations rebind.
                 let mut tail_args: Option<Vec<Val>> = None;
                 // The body runs in a closure so that an error still reaches
                 // the cleanup below. A caller that contains the error (a JIT
@@ -8303,38 +8965,29 @@ impl VirtualMachine {
                 (|| -> VmResult<Val> {
                     Ok(loop {
                         if let Some(current_args) = tail_args.take() {
-                            // Update parameter bindings with the tail call's args
-                            let mut namespace_param_updates: Vec<(String, Val)> =
-                                Vec::with_capacity(function_param_names.len());
-                            if let Some(scope) = self.scope_stack.last_mut() {
-                                for (i, param_name) in function_param_names.iter().enumerate() {
-                                    let value = if function_is_variadic && i == variadic_param_index
-                                    {
-                                        // Variadic parameter - collect remaining args
-                                        let variadic_args: Vec<Val> = if i < current_args.len() {
-                                            current_args[i..].to_vec()
-                                        } else {
-                                            vec![]
-                                        };
-                                        Val::Vec(variadic_args)
-                                    } else if i < current_args.len() {
-                                        current_args[i].clone()
+                            // A tail call is a new call: a fresh frame with the
+                            // tail call's args, without the previous
+                            // iteration's locals or leftover flow scopes.
+                            self.scope_stack.truncate(saved_scope_depth);
+                            let mut frame = LexicalScope::new(ScopeType::Function, None);
+                            frame.is_boundary = is_boundary;
+                            for (i, param_name) in function_param_names.iter().enumerate() {
+                                let value = if function_is_variadic && i == variadic_param_index {
+                                    // Variadic parameter - collect remaining args
+                                    let variadic_args: Vec<Val> = if i < current_args.len() {
+                                        current_args[i..].to_vec()
                                     } else {
-                                        Val::Null
+                                        vec![]
                                     };
-                                    scope.variables.insert(param_name.clone(), value.clone());
-                                    namespace_param_updates.push((param_name.clone(), value));
-                                }
+                                    Val::Vec(variadic_args)
+                                } else if i < current_args.len() {
+                                    current_args[i].clone()
+                                } else {
+                                    Val::Null
+                                };
+                                frame.variables.insert(param_name.clone(), value);
                             }
-                            if !namespace_param_updates.is_empty() {
-                                let ns_entry = self
-                                    .namespace_variables
-                                    .entry(self.current_namespace.clone())
-                                    .or_default();
-                                for (param_name, value) in namespace_param_updates {
-                                    ns_entry.insert(param_name, value);
-                                }
-                            }
+                            self.scope_stack.push(frame);
                         }
 
                         // Execute the function instructions - borrow from outer Arc clone
@@ -8381,7 +9034,9 @@ impl VirtualMachine {
                                 // as ONE call and never compiles.
                                 if self.jit.config.is_enabled() && !self.in_constraint_predicate() {
                                     self.jit.record_call(function_id, &new_args);
-                                    if self.jit.should_compile_now(function_id, &new_args) {
+                                    if self.jit.should_compile_now(function_id, &new_args)
+                                        && !self.jit_blocked_by_overload_dispatch(function_id)
+                                    {
                                         match self.jit.compile_function(
                                             &program,
                                             function_id,
@@ -8402,6 +9057,13 @@ impl VirtualMachine {
                                     // call like try_jit_call does or a mid-loop
                                     // switch to compiled code sees no VM.
                                     let was_halted = self.has_failed() || self.has_cancelled();
+                                    // The compiled iteration's frame, as in `try_jit_call`.
+                                    self.scope_stack.truncate(saved_scope_depth);
+                                    self.scope_stack.push(LexicalScope::call_frame(
+                                        function_param_names,
+                                        &new_args,
+                                        is_boundary,
+                                    ));
                                     let prev =
                                         super::jit::set_jit_vm_ptr(self as *mut VirtualMachine);
                                     let call_result =
@@ -8446,25 +9108,6 @@ impl VirtualMachine {
             // Restore register usage to pre-call values to prevent accumulation
             if self.registers.len() > saved_register_count_for_call {
                 self.registers.truncate(saved_register_count_for_call);
-            }
-
-            // Unwind the namespace-registry shadows installed for this
-            // call's parameters. Restore prior bindings (or remove if there
-            // was none) so caller-frame parameters never leak into siblings
-            // or future calls in the same namespace.
-            if let Some(ref namespace) = function_namespace
-                && let Some(ns_entry) = self.namespace_variables.get_mut(namespace)
-            {
-                for (k, prev) in ns_param_shadows.into_iter().rev() {
-                    match prev {
-                        Some(v) => {
-                            ns_entry.insert(k, v);
-                        }
-                        None => {
-                            ns_entry.shift_remove(&k);
-                        }
-                    }
-                }
             }
 
             // Restore the saved namespace
@@ -8938,6 +9581,16 @@ impl VirtualMachine {
                 self.thread_count
             );
 
+            // Task VMs have none of this call's frames, so each branch takes
+            // the parameters and locals it uses from here.
+            let level_thunks: Vec<(String, Val)> = level_thunks
+                .into_iter()
+                .map(|(name, thunk)| {
+                    let thunk = self.with_captures_resolved(&thunk);
+                    (name, thunk)
+                })
+                .collect();
+
             // Get the current namespace so task VMs use the same one
             let main_namespace = self.current_namespace.clone();
 
@@ -9270,15 +9923,9 @@ impl VirtualMachine {
             // Lexical scope variable (function parameter, local variable)
             tracing::trace!("VM: Storing lexical variable '{}' in scope", name);
             if let Some(scope) = self.scope_stack.last_mut() {
+                // A local stays in its scope. It is never written to the
+                // namespace, where other functions would see it.
                 scope.variables.insert(name.to_string(), value);
-                // Mirror local variable into current namespace registry for resilient lookups within flows
-                self.namespace_variables
-                    .entry(self.current_namespace.clone())
-                    .or_default()
-                    .insert(
-                        name.to_string(),
-                        scope.variables.get(name).cloned().unwrap_or(Val::Null),
-                    );
                 Ok(())
             } else {
                 Err(VmError::runtime(
@@ -9353,17 +10000,28 @@ impl VirtualMachine {
     /// Set the VM failure state (thread-safe, first failure wins)
     /// Returns true if this was the first failure, false if already failed
     pub fn set_failure(&self, msg: String, data: Val) -> bool {
-        self.set_failure_state(msg, data, false)
+        self.set_failure_state(msg, data, false, false)
     }
 
     /// Record a plain `VmError` halt raised inside a JIT'd frame. Same
     /// first-failure-wins semantics as `set_failure`, but marks the entry so
     /// the JIT boundary re-raises the message without the Result prefix.
     pub(crate) fn set_failure_plain_vm_error(&self, msg: String, data: Val) -> bool {
-        self.set_failure_state(msg, data, true)
+        self.set_failure_state(msg, data, true, false)
     }
 
-    fn set_failure_state(&self, msg: String, data: Val, plain_vm_error: bool) -> bool {
+    /// Record the halt of a consumed `Result.Err`.
+    fn set_consumed_failure(&self, msg: String, data: Val) -> bool {
+        self.set_failure_state(msg, data, false, true)
+    }
+
+    fn set_failure_state(
+        &self,
+        msg: String,
+        data: Val,
+        plain_vm_error: bool,
+        consumed: bool,
+    ) -> bool {
         // Use compare_exchange to atomically check and set failed flag
         if self
             .failure_state
@@ -9377,6 +10035,7 @@ impl VirtualMachine {
                     msg,
                     data,
                     plain_vm_error,
+                    consumed,
                 });
             }
             tracing::trace!("VM: Failure state set (first failure)");
@@ -9406,21 +10065,19 @@ impl VirtualMachine {
         }
         if self.has_failed() {
             let failure = self.get_failure();
-            // Plain VmErrors re-raise verbatim (the interpreter never
-            // prefixes them); Result.Err consumption halts carry the same
-            // `Result error:` prefix `unwrap_result_if_ok` raises.
+            // The same message the interpreter raises: a consumed Err reads
+            // `Result error: <message>`, `fail()` its message alone.
             let msg = match &failure {
                 Some(f) if f.plain_vm_error => {
                     // Plain helper failures are only the JIT's transport for
-                    // an ordinary VmError. Once reconstructed, clear that
-                    // transport state so HOF callers do not mistake it for an
-                    // explicit `fail()` raised by the callback.
+                    // an ordinary VmError, re-raised verbatim; once it is
+                    // reconstructed as one, clear that transport state.
                     let msg = f.msg.clone();
                     self.reset_failure_state();
                     msg
                 }
-                Some(f) => format!("Result error: {}", f.msg),
-                None => "Result error: halted".to_string(),
+                Some(f) => f.halt_message(),
+                None => "halted".to_string(),
             };
             return Err(VmError::runtime_with_ip(msg, self.instruction_pointer));
         }
@@ -9765,16 +10422,10 @@ impl VirtualMachine {
         }
     }
 
-    /// Assignment always consumes a Result, even while a surrounding lazy
-    /// Result-aware call temporarily suppresses ordinary argument unwrapping.
-    /// Restore normal checking for this boundary and return the propagation
-    /// error instead of assuming the helper must fail and panicking the VM.
+    /// Assignment always consumes a Result: return the propagation error
+    /// instead of assuming the helper must fail and panicking the VM.
     fn propagate_assignment_result_err(&mut self, value: &Val) -> VmResult<()> {
-        let previous = self.suppress_result_checking;
-        self.suppress_result_checking = false;
-        let result = self.unwrap_result_if_ok(value).map(|_| ());
-        self.suppress_result_checking = previous;
-        result
+        self.unwrap_result_if_ok(value).map(|_| ())
     }
 
     /// Access a property of a value (supports both map keys and vector indices)
@@ -9991,7 +10642,7 @@ impl VirtualMachine {
         if self.has_failed() {
             let msg = self
                 .get_failure()
-                .map(|f| f.msg)
+                .map(|f| f.halt_message())
                 .unwrap_or_else(|| match &err {
                     Val::Str(s) => (**s).to_owned(),
                     other => format!("{:?}", other),
@@ -10080,7 +10731,7 @@ impl VirtualMachine {
                     );
                     // An update keeps a typed value's type, so it must keep
                     // the type's constraints too.
-                    return self.check_updated_value(function_name, val);
+                    return self.check_updated_value(function_name, args, val);
                 }
                 crate::lang::hot::r#type::HotResult::Err(err) => {
                     tracing::trace!("VM: Hotlib function '{}' failed: {:?}", function_name, err);
@@ -10280,18 +10931,25 @@ impl VirtualMachine {
                 let mut new_args = Vec::with_capacity(*args_count as usize);
                 for i in 0..*args_count {
                     let arg_reg = args_start + i as RegisterId;
-                    let arg_val = self.get_register(arg_reg)?.clone();
-                    // Unwrap Results if they are "ok"
-                    let unwrapped_arg = self.unwrap_result_if_ok(&arg_val)?;
-                    // Resolve variable references
-                    let resolved_arg = self.resolve_variable_references_in_val(&unwrapped_arg)?;
-                    new_args.push(resolved_arg);
+                    new_args.push(self.get_register(arg_reg)?.clone());
                 }
+
+                // The compiler only emits TailCall for a call it resolved to
+                // the current function, but runtime args can still select a
+                // same-arity sibling (e.g. an `(x: Vec)` overload passing a
+                // Str element back to its own name). The TCO loop runs that
+                // as a regular call. The args are prepared for the function
+                // called.
+                let function_id = self
+                    .overload_for_args(*function_id, &new_args)
+                    .unwrap_or(*function_id);
+                let new_args =
+                    self.prepare_call_args(CallTarget::Function(function_id), new_args)?;
 
                 // Restore instruction pointer before returning tail call request
                 self.instruction_pointer = saved_instruction_pointer;
                 return Ok(FunctionExecutionResult::TailCall {
-                    function_id: *function_id,
+                    function_id,
                     args: new_args,
                 });
             }

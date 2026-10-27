@@ -1,0 +1,103 @@
+::hot::test::constructor-dispatch ns
+meta ["test"]
+
+// Regression: a Map passed to a type constructor reaches the type's default
+// Map constructor, not a custom 1-arity overload. Field-less `Name type fn`
+// types had no default constructor, so `Email({value,})` inside the
+// `(value: Str)` constructor called that constructor again and never
+// returned. Maps that are not literals (variables, call results) were also
+// dispatched to the `(value: Str)` overload, which stored the stringified Map.
+
+Email type fn
+(value: Str): Email { Email({value,}) },
+(local: Str, domain: Str): Email { Email({value: `${local}@${domain}`}) }
+
+Point type fn (x: Int, y: Int): Point { Point({x, y}) }
+
+// Builds its Map first, so the inner call's argument is not a literal and the
+// overload is chosen at runtime.
+Slug type fn (value: Str): Slug {
+    data {value: lowercase(value)}
+    Slug(data)
+}
+
+Label type {
+    text: Str
+}
+
+Label fn (text: Str): Label { Label({text,}) }
+
+// Declared twice: fields, then custom constructors. The custom constructors
+// build through the default constructor of the declaration with the fields,
+// which checks them.
+Spot type {
+    x: Int,
+    y: Int
+}
+
+Spot type fn (x: Int, y: Int): Spot { Spot({x: mul(x, 10), y}) }
+
+// Field-less, building a Map in a variable for its own default constructor.
+Pair type fn (a: Int, b: Int): Pair {
+    m {a, b}
+    Pair(m)
+}
+
+label-data fn (): Map { {text: "from-call"} }
+
+describe fn
+(x: Str): Str { "str" },
+(x: Map): Str { "map" }
+
+describe-rev fn
+(x: Map): Str { "map" },
+(x: Str): Str { "str" }
+
+test-field-less-constructors-build-through-default-map-constructor
+meta ["test"] fn () {
+    e Email("a@b.com")
+    assert-eq("a@b.com", e.value, "Email(Str)")
+    assert(is-type(e, Email), "Email(Str) is an Email")
+    assert-eq("x@y.com", Email("x", "y.com").value, "Email(Str, Str)")
+    assert-eq("m@b.com", Email({value: "m@b.com"}).value, "Email(Map)")
+
+    p Point(10, 20)
+    assert-eq(10, p.x, "Point x")
+    assert-eq(20, p.y, "Point y")
+
+    assert-eq("hello", Slug("Hello").value, "Slug self tail call with a Map")
+}
+
+test-non-literal-map-reaches-default-map-constructor
+meta ["test"] fn () {
+    data {text: "from-var"}
+    assert-eq("from-var", Label(data).text, "Map in a variable")
+    assert-eq("from-call", Label(label-data()).text, "Map from a call")
+    assert-eq("from-str", Label("from-str").text, "Str overload")
+}
+
+test-same-arity-overloads-dispatch-on-runtime-types
+meta ["test"] fn () {
+    m {a: 1}
+    s "hi"
+    assert-eq("map", describe(m), "Map arg, Map overload declared last")
+    assert-eq("str", describe(s), "Str arg, Map overload declared last")
+    assert-eq("map", describe-rev(m), "Map arg, Str overload declared last")
+    assert-eq("str", describe-rev(s), "Str arg, Str overload declared last")
+}
+
+test-core-type-constructors-still-convert-maps
+meta ["test"] fn () {
+    m {a: 1}
+    assert-eq("{a: 1}", Str(m), "Str(Map)")
+    assert-eq({a: 1}, Map(m), "Map(Map)")
+    assert(is-err(Int(m)), "Int(Map) is still an Err")
+}
+
+test-a-type-declared-twice-keeps-its-field-checks
+meta ["test"] fn () {
+    assert(is-err(Spot({x: 1})), "a missing field is an Err")
+    assert-eq(10, Spot(1, 2).x, "custom constructor")
+    assert-eq(1, Spot({x: 1, y: 2}).x, "default constructor")
+    assert-eq(2, Pair(1, 2).b, "Map in a variable in a custom constructor")
+}

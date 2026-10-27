@@ -703,7 +703,7 @@ fn test_parallel_flow_respects_dependencies() {
     );
 
     let exec_result = vm.execute();
-    assert!(exec_result.is_ok());
+    assert!(exec_result.is_ok(), "{exec_result:?}");
 
     // Check that the chain was executed in order
     let result_val = vm.get_var(None, "result");

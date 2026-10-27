@@ -3,9 +3,12 @@
 //! This module provides functions to convert Hot type annotations (strings)
 //! to JSON Schema format for MCP tool definitions.
 
-use crate::lang::ast::{FnArg, Ref, TypeDef, TypeField, Value};
+use crate::lang::ast::{
+    FnArg, LiteralType, Ref, TypeDef, TypeExpr, TypeField, Value, split_top_level,
+};
 use crate::val::Val;
 use ahash::{AHashMap, AHashSet};
+use fastnum::D256;
 use indexmap::IndexMap;
 
 /// Registry of type definitions for resolving custom types
@@ -36,6 +39,12 @@ pub struct TypeDefInfo {
     pub type_alias: Option<String>,
     /// What the type's `where` clause contributes, when it has one.
     pub refinement: Option<RefinementSchema>,
+    /// For literal-union aliases (`"a" | "b"`, `1 | 2`, `"a" | null`), the
+    /// members in declaration order. Open unions accumulate members across
+    /// repeated declarations.
+    pub literals: Option<Vec<LiteralType>>,
+    /// True for `open` declarations
+    pub is_open: bool,
 }
 
 /// What a `where` clause contributes to a type's schema.
@@ -71,12 +80,7 @@ impl TypeRegistry {
 
     /// Register a type definition
     pub fn register(&mut self, name: &str, type_def: &TypeDef) {
-        let info = TypeDefInfo {
-            fields: type_def.fields.clone(),
-            variants: variants_from_type_def(type_def),
-            type_alias: type_def.type_alias.as_ref().map(|ta| ta.to_string()),
-            refinement: None,
-        };
+        let info = self.info_for(name, type_def);
 
         // Register with simple name
         self.types.insert(name.to_string(), info.clone());
@@ -90,12 +94,7 @@ impl TypeRegistry {
 
     /// Register a type with its fully qualified name
     pub fn register_qualified(&mut self, qualified_name: &str, type_def: &TypeDef) {
-        let info = TypeDefInfo {
-            fields: type_def.fields.clone(),
-            variants: variants_from_type_def(type_def),
-            type_alias: type_def.type_alias.as_ref().map(|ta| ta.to_string()),
-            refinement: None,
-        };
+        let info = self.info_for(qualified_name, type_def);
 
         self.types.insert(qualified_name.to_string(), info.clone());
 
@@ -114,6 +113,39 @@ impl TypeRegistry {
                 info.refinement = Some(refinement.clone());
             }
         }
+    }
+
+    /// Build the info for `type_def` registered under `key`. A repeated
+    /// open literal-union declaration (`HttpMethod type open | "TRACE"`)
+    /// extends the prior entry's members; any other redeclaration
+    /// replaces it.
+    fn info_for(&self, key: &str, type_def: &TypeDef) -> TypeDefInfo {
+        let mut info = TypeDefInfo {
+            fields: type_def.fields.clone(),
+            variants: variants_from_type_def(type_def),
+            type_alias: type_def.type_alias.as_ref().map(|ta| ta.to_string()),
+            refinement: None,
+            literals: type_def.type_alias.as_ref().and_then(literal_members),
+            is_open: type_def.is_open,
+        };
+
+        if let Some(prior) = self.types.get(key)
+            && (prior.is_open || info.is_open)
+            && let (Some(prior_members), Some(members)) = (&prior.literals, &info.literals)
+        {
+            let mut merged = prior_members.clone();
+            for member in members {
+                if !merged.contains(member) {
+                    merged.push(member.clone());
+                }
+            }
+            let alias = TypeExpr::Union(merged.iter().cloned().map(TypeExpr::Literal).collect());
+            info.type_alias = Some(alias.to_string());
+            info.literals = Some(merged);
+            info.is_open = true;
+        }
+
+        info
     }
 
     /// Look up a type by name, returning the (possibly fully-qualified) match key alongside it.
@@ -155,6 +187,22 @@ fn variants_from_type_def(type_def: &TypeDef) -> Option<Vec<VariantInfo>> {
             })
             .collect()
     })
+}
+
+/// Members of a literal-union alias (`"a" | "b"`, `1 | 2`, `"a" | null`),
+/// or `None` if any member is not a literal.
+fn literal_members(alias: &TypeExpr) -> Option<Vec<LiteralType>> {
+    match alias {
+        TypeExpr::Literal(lit) => Some(vec![lit.clone()]),
+        TypeExpr::Union(members) => members
+            .iter()
+            .map(|member| match member {
+                TypeExpr::Literal(lit) => Some(lit.clone()),
+                _ => None,
+            })
+            .collect(),
+        _ => None,
+    }
 }
 
 /// Schema-generation context — accumulates `$defs` for cyclic types
@@ -274,6 +322,10 @@ fn type_to_schema_ctx(type_str: &str, registry: &TypeRegistry, ctx: &mut SchemaC
         return optional_to_schema_ctx(inner_type, registry, ctx);
     }
 
+    if let Some(literal) = LiteralType::parse(type_str) {
+        return literals_to_schema(&[literal]);
+    }
+
     if let Some((base, params)) = parse_generic(type_str) {
         return generic_to_schema_ctx(&base, &params, registry, ctx);
     }
@@ -312,37 +364,14 @@ fn is_builtin_type(type_str: &str) -> bool {
     )
 }
 
-/// Parse union type "T | U | V" into parts
+/// Parse union type "T | U | V" into parts. A `|` inside a string literal
+/// (`"a|b"`) does not split.
 fn parse_union(type_str: &str) -> Option<Vec<String>> {
-    let mut parts = Vec::new();
-    let mut current = String::new();
-    let mut depth = 0;
-
-    for ch in type_str.chars() {
-        match ch {
-            '<' => {
-                depth += 1;
-                current.push(ch);
-            }
-            '>' => {
-                depth -= 1;
-                current.push(ch);
-            }
-            '|' if depth == 0 => {
-                let part = current.trim().to_string();
-                if !part.is_empty() {
-                    parts.push(part);
-                }
-                current.clear();
-            }
-            _ => current.push(ch),
-        }
-    }
-
-    let part = current.trim().to_string();
-    if !part.is_empty() {
-        parts.push(part);
-    }
+    let parts: Vec<String> = split_top_level(type_str, '|')
+        .into_iter()
+        .filter(|part| !part.is_empty())
+        .map(str::to_string)
+        .collect();
 
     if parts.len() > 1 { Some(parts) } else { None }
 }
@@ -357,47 +386,79 @@ fn parse_generic(type_str: &str) -> Option<(String, Vec<String>)> {
     }
 
     let base = type_str[..start].trim().to_string();
-    let params_str = &type_str[start + 1..end];
-
-    let mut params = Vec::new();
-    let mut current = String::new();
-    let mut depth = 0;
-
-    for ch in params_str.chars() {
-        match ch {
-            '<' => {
-                depth += 1;
-                current.push(ch);
-            }
-            '>' => {
-                depth -= 1;
-                current.push(ch);
-            }
-            ',' if depth == 0 => {
-                let param = current.trim().to_string();
-                if !param.is_empty() {
-                    params.push(param);
-                }
-                current.clear();
-            }
-            _ => current.push(ch),
-        }
-    }
-
-    let param = current.trim().to_string();
-    if !param.is_empty() {
-        params.push(param);
-    }
+    let params = split_top_level(&type_str[start + 1..end], ',')
+        .into_iter()
+        .filter(|param| !param.is_empty())
+        .map(str::to_string)
+        .collect();
 
     Some((base, params))
 }
 
 /// Convert union types to JSON Schema "anyOf"
 fn union_to_schema_ctx(parts: &[String], registry: &TypeRegistry, ctx: &mut SchemaContext) -> Val {
+    if let Some(literals) = parts
+        .iter()
+        .map(|p| LiteralType::parse(p))
+        .collect::<Option<Vec<_>>>()
+    {
+        return literals_to_schema(&literals);
+    }
+
     let schemas: Vec<Val> = parts
         .iter()
         .map(|p| type_to_schema_ctx(p, registry, ctx))
         .collect();
+    let mut map = IndexMap::new();
+    map.insert(Val::from("anyOf"), Val::Vec(schemas));
+    Val::Map(Box::new(map))
+}
+
+/// Convert literal members to typed `enum` schemas, one per JSON type
+/// (`1 | 2.5` shares a `number` enum). A lone group is returned as is;
+/// several groups, or a `null` member, become an `anyOf` like `T?` does.
+fn literals_to_schema(literals: &[LiteralType]) -> Val {
+    let has_dec = literals.iter().any(|l| matches!(l, LiteralType::Dec(_)));
+    let mut groups: IndexMap<&str, Vec<Val>> = IndexMap::new();
+    let mut has_null = false;
+
+    for literal in literals {
+        let (json_type, val) = match literal {
+            LiteralType::Str(s) => ("string", Val::from(s.as_str())),
+            LiteralType::Int(n) if has_dec => ("number", Val::Int(*n)),
+            LiteralType::Int(n) => ("integer", Val::Int(*n)),
+            LiteralType::Dec(d) => match d.parse::<D256>() {
+                Ok(dec) => ("number", Val::Dec(dec)),
+                Err(_) => continue,
+            },
+            LiteralType::Bool(b) => ("boolean", Val::Bool(*b)),
+            LiteralType::Null => {
+                has_null = true;
+                continue;
+            }
+        };
+        let members = groups.entry(json_type).or_default();
+        if !members.contains(&val) {
+            members.push(val);
+        }
+    }
+
+    let mut schemas: Vec<Val> = groups
+        .into_iter()
+        .map(|(json_type, members)| {
+            let mut map = IndexMap::new();
+            map.insert(Val::from("type"), Val::from(json_type));
+            map.insert(Val::from("enum"), Val::Vec(members));
+            Val::Map(Box::new(map))
+        })
+        .collect();
+    if has_null {
+        schemas.push(builtin_to_schema("Null"));
+    }
+
+    if schemas.len() == 1 {
+        return schemas.remove(0);
+    }
     let mut map = IndexMap::new();
     map.insert(Val::from("anyOf"), Val::Vec(schemas));
     Val::Map(Box::new(map))
@@ -554,7 +615,9 @@ fn custom_type_to_schema_ctx(
     ctx.visited.insert(resolved_key.clone());
 
     let schema = if let Some(type_info) = registry.get(&resolved_key) {
-        let schema = if let Some(ref alias) = type_info.type_alias {
+        let schema = if let Some(ref literals) = type_info.literals {
+            literals_to_schema(literals)
+        } else if let Some(ref alias) = type_info.type_alias {
             type_to_schema_ctx(alias, registry, ctx)
         } else if let Some(ref variants) = type_info.variants {
             enum_to_schema_ctx(&resolved_key, variants, registry, ctx)
@@ -593,8 +656,9 @@ fn custom_type_to_schema_ctx(
 }
 
 /// Add a refinement's keywords to its base type's schema. Length bounds
-/// become `minLength`/`maxLength` on strings and `minItems`/`maxItems` on
-/// arrays; a predicate with no schema form is described.
+/// become `minItems`/`maxItems` on arrays. On strings they are described
+/// instead: Hot's `length` counts UTF-8 bytes, and `minLength`/`maxLength`
+/// count characters. A predicate with no schema form is described.
 fn apply_refinement(schema: Val, refinement: &RefinementSchema) -> Val {
     let Val::Map(mut map) = schema else {
         return schema;
@@ -607,10 +671,14 @@ fn apply_refinement(schema: Val, refinement: &RefinementSchema) -> Val {
         })
         .unwrap_or_default();
     let mut describe = refinement.describe;
+    let mut byte_length = false;
     for (keyword, value) in &refinement.keywords {
         let keyword = match (keyword.as_str(), base_type.as_str()) {
-            ("$minLength", "string") => "minLength",
-            ("$maxLength", "string") => "maxLength",
+            ("$minLength" | "$maxLength", "string") => {
+                describe = true;
+                byte_length = true;
+                continue;
+            }
             ("$minLength", "array") => "minItems",
             ("$maxLength", "array") => "maxItems",
             ("$minLength" | "$maxLength", _) => {
@@ -622,7 +690,10 @@ fn apply_refinement(schema: Val, refinement: &RefinementSchema) -> Val {
         map.insert(Val::from(keyword), value.clone());
     }
     if describe {
-        let text = format!("Must satisfy: {}", refinement.source);
+        let mut text = format!("Must satisfy: {}", refinement.source);
+        if byte_length {
+            text.push_str(" (length counts UTF-8 bytes)");
+        }
         let description = match map.get(&Val::from("description")) {
             Some(Val::Str(existing)) => format!("{existing}. {text}"),
             _ => text,
@@ -662,6 +733,80 @@ fn is_param(value: &Value, param: &str) -> bool {
                     || var_ref.var.sym.name() == "__placeholder_1__")
         }
         _ => false,
+    }
+}
+
+/// The namespaces whose function a predicate's schema keyword stands for,
+/// by function name.
+fn canonical_predicate_namespaces(name: &str) -> &'static [&'static str] {
+    match name {
+        "between" | "eq" | "gt" | "gte" | "in" | "lt" | "lte" => &["::hot::cmp"],
+        "and" => &["::hot::bool"],
+        "length" => &["::hot::coll", "::hot::str"],
+        "is-match" => &["::hot::regex"],
+        _ => &[],
+    }
+}
+
+/// Whether every call in a `where` predicate body that a schema keyword or
+/// the fast check would read (`gt`, `between`, `length`, `is-match`, ...)
+/// names that standard function, not another one with the same name: one
+/// defined or imported in `namespace`, or reached through an alias of
+/// another namespace. Reading a lookalike as the standard function would
+/// enforce or advertise the wrong rule.
+pub fn predicate_calls_are_canonical(
+    body: &Value,
+    namespace: &crate::lang::ast::Namespace,
+) -> bool {
+    let canonical_ns = |name: &str, ns: &crate::lang::ast::NsPath| {
+        let ns = namespace.aliases.get(ns).unwrap_or(ns).to_string();
+        canonical_predicate_namespaces(name).contains(&ns.as_str())
+    };
+    match body {
+        Value::FnCall(call) => {
+            let callee = match call.function.as_ref() {
+                Value::Ref(Ref::Ns(ns_ref)) => match ns_ref.function_name.as_deref() {
+                    Some(name) if !canonical_predicate_namespaces(name).is_empty() => {
+                        canonical_ns(name, &ns_ref.ns)
+                    }
+                    _ => true,
+                },
+                Value::Ref(Ref::Var(var_ref)) => {
+                    let name = var_ref.var.sym.name();
+                    if canonical_predicate_namespaces(name).is_empty() {
+                        true
+                    } else {
+                        let mut local = namespace
+                            .scope
+                            .vars
+                            .iter()
+                            .filter(|(var, _)| var.sym.name() == name)
+                            .peekable();
+                        if local.peek().is_none() {
+                            // `is-match` isn't a core function; the others are.
+                            name != "is-match"
+                        } else {
+                            local.all(|(_, value)| {
+                                matches!(value, Value::Ref(Ref::Ns(ns_ref))
+                                    if ns_ref.function_name.as_deref() == Some(name)
+                                        && canonical_ns(name, &ns_ref.ns))
+                            })
+                        }
+                    }
+                }
+                _ => true,
+            };
+            callee
+                && call
+                    .args
+                    .iter()
+                    .all(|arg| predicate_calls_are_canonical(&arg.value, namespace))
+        }
+        Value::Flow(flow) => flow
+            .expressions
+            .iter()
+            .all(|expr| predicate_calls_are_canonical(expr, namespace)),
+        _ => true,
     }
 }
 
@@ -1019,6 +1164,7 @@ pub fn return_type_to_output_schema(return_type: Option<&str>) -> Option<Val> {
 mod tests {
     use super::*;
     use crate::lang::ast::{Sym, TypeExpr};
+    use serde_json::json;
 
     #[test]
     fn test_builtin_types() {
@@ -1502,5 +1648,221 @@ mod tests {
         } else {
             panic!("Expected items schema");
         }
+    }
+
+    fn parse(source: &str) -> crate::lang::ast::Program {
+        crate::lang::parser::parse_hot(source).expect("source should parse")
+    }
+
+    /// Register the program's types the way `build_type_registry` does.
+    fn register_program(registry: &mut TypeRegistry, program: &crate::lang::ast::Program) {
+        for (ns_path, namespace) in &program.namespaces {
+            for (var, value) in &namespace.scope.vars {
+                if let crate::lang::ast::Value::TypeDef(type_def) = value {
+                    let qualified_name = format!("{}/{}", ns_path, var.sym.name());
+                    registry.register_qualified(&qualified_name, type_def);
+                }
+            }
+        }
+    }
+
+    fn registry_from_source(source: &str) -> TypeRegistry {
+        let mut registry = TypeRegistry::new();
+        register_program(&mut registry, &parse(source));
+        registry
+    }
+
+    fn schema_json(type_str: &str, registry: &TypeRegistry) -> serde_json::Value {
+        serde_json::to_value(type_to_json_schema_with_registry(type_str, registry)).unwrap()
+    }
+
+    #[test]
+    fn test_literal_union_param_emits_enum() {
+        let program = parse(
+            r#"
+::probe::thirteen ns
+Fruit type "apple" | "banana"
+search fn (query: Str, fruit: Fruit): Vec<Str> { [] }
+"#,
+        );
+        let mut registry = TypeRegistry::new();
+        register_program(&mut registry, &program);
+        let fn_def = program
+            .namespaces
+            .values()
+            .flat_map(|ns| ns.scope.vars.iter())
+            .find_map(|(var, value)| match value {
+                crate::lang::ast::Value::Fn(fn_defs) if var.sym.name() == "search" => {
+                    fn_defs.first()
+                }
+                _ => None,
+            })
+            .expect("search fn");
+
+        let schema = args_to_input_schema_with_registry(&fn_def.args.args, &registry);
+        assert_eq!(
+            serde_json::to_value(schema).unwrap(),
+            json!({
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string"},
+                    "fruit": {"type": "string", "enum": ["apple", "banana"]}
+                },
+                "required": ["query", "fruit"]
+            })
+        );
+    }
+
+    #[test]
+    fn test_literal_union_aliases_emit_typed_enums() {
+        let registry = registry_from_source(
+            r#"
+::t ns
+Roll type 1 | 2 | 3
+Ratio type 0.5 | 1.5
+Step type 1 | 2.5
+Flag type true | false
+Sep type "a|b" | "c"
+Only type "A"
+"#,
+        );
+
+        let cases = [
+            ("Roll", json!({"type": "integer", "enum": [1, 2, 3]})),
+            ("Ratio", json!({"type": "number", "enum": [0.5, 1.5]})),
+            ("Step", json!({"type": "number", "enum": [1, 2.5]})),
+            ("Flag", json!({"type": "boolean", "enum": [true, false]})),
+            ("Sep", json!({"type": "string", "enum": ["a|b", "c"]})),
+            ("Only", json!({"type": "string", "enum": ["A"]})),
+            ("::t/Roll", json!({"type": "integer", "enum": [1, 2, 3]})),
+        ];
+        for (type_str, expected) in cases {
+            assert_eq!(schema_json(type_str, &registry), expected, "{type_str}");
+        }
+    }
+
+    #[test]
+    fn test_nullable_literal_union() {
+        let registry = registry_from_source(
+            r#"
+::t ns
+Size type "s" | "m" | null
+Fruit type "apple" | "banana"
+Mixed type "auto" | 0 | null
+"#,
+        );
+
+        let nullable_size = json!({
+            "anyOf": [{"type": "string", "enum": ["s", "m"]}, {"type": "null"}]
+        });
+        assert_eq!(schema_json("Size", &registry), nullable_size);
+        assert_eq!(
+            schema_json("Fruit?", &registry),
+            json!({
+                "anyOf": [{"type": "string", "enum": ["apple", "banana"]}, {"type": "null"}]
+            })
+        );
+        assert_eq!(
+            schema_json("Mixed", &registry),
+            json!({
+                "anyOf": [
+                    {"type": "string", "enum": ["auto"]},
+                    {"type": "integer", "enum": [0]},
+                    {"type": "null"}
+                ]
+            })
+        );
+    }
+
+    #[test]
+    fn test_open_literal_union_accumulates_declarations() {
+        let mut registry = registry_from_source(
+            r#"
+::t ns
+HttpMethod type open "GET" | "POST"
+HttpMethod type open | "TRACE"
+HttpMethod type open "POST" | "OPTIONS"
+"#,
+        );
+        let expected = json!({
+            "type": "string",
+            "enum": ["GET", "POST", "TRACE", "OPTIONS"]
+        });
+        assert_eq!(schema_json("HttpMethod", &registry), expected);
+        assert_eq!(schema_json("::t/HttpMethod", &registry), expected);
+
+        // A same-named open union in another namespace stays separate.
+        register_program(
+            &mut registry,
+            &parse(
+                r#"
+::other ns
+HttpMethod type open "BREW"
+"#,
+            ),
+        );
+        assert_eq!(schema_json("::t/HttpMethod", &registry), expected);
+        assert_eq!(
+            schema_json("::other/HttpMethod", &registry),
+            json!({"type": "string", "enum": ["BREW"]})
+        );
+
+        // Redeclaring a closed union replaces it.
+        let registry = registry_from_source(
+            r#"
+::t ns
+Fruit type "apple"
+Fruit type "banana"
+"#,
+        );
+        assert_eq!(
+            schema_json("Fruit", &registry),
+            json!({"type": "string", "enum": ["banana"]})
+        );
+    }
+
+    #[test]
+    fn test_inline_literal_annotations() {
+        let cases = [
+            (
+                r#""fast" | "slow""#,
+                json!({"type": "string", "enum": ["fast", "slow"]}),
+            ),
+            (
+                r#"Vec<"a|b" | "c,d">"#,
+                json!({
+                    "type": "array",
+                    "items": {"type": "string", "enum": ["a|b", "c,d"]}
+                }),
+            ),
+            (
+                "Str | null",
+                json!({"anyOf": [{"type": "string"}, {"type": "null"}]}),
+            ),
+            (
+                r#""auto" | Int"#,
+                json!({
+                    "anyOf": [{"type": "string", "enum": ["auto"]}, {"type": "integer"}]
+                }),
+            ),
+        ];
+        for (type_str, expected) in cases {
+            let schema = serde_json::to_value(type_to_json_schema(type_str)).unwrap();
+            assert_eq!(schema, expected, "{type_str}");
+        }
+    }
+
+    #[test]
+    fn test_enum_variants_output_unchanged() {
+        let registry = registry_from_source(
+            r#"
+::t ns
+Direction enum { Up, Down }
+"#,
+        );
+        assert_eq!(
+            schema_json("Direction", &registry),
+            json!({"enum": ["Up", "Down"]})
+        );
     }
 }

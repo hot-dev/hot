@@ -5035,6 +5035,8 @@ mod tests {
             is_lazy_param: true,
             used_registers: vec![],
             structural_hash_cache: Default::default(),
+            defining_frame: None,
+            result_params: Vec::new(),
         };
 
         let boxed = Val::Box(Box::new(lambda));
@@ -5075,6 +5077,8 @@ mod tests {
             is_lazy_param: true,
             used_registers: vec![],
             structural_hash_cache: Default::default(),
+            defining_frame: None,
+            result_params: Vec::new(),
         };
 
         let boxed = Val::Box(Box::new(lambda));

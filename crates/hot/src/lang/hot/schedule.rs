@@ -285,8 +285,19 @@ pub fn cancel_schedule(
             }
         };
 
+        // A schedule ID only names a schedule within the caller's environment.
+        let Some(env_id) = vm
+            .get_execution_context()
+            .as_ref()
+            .and_then(|ctx| ctx.env_id)
+        else {
+            return HotResult::Err(Val::from(
+                "No env_id in execution context - cannot cancel schedule".to_string(),
+            ));
+        };
+
         let result = tokio::runtime::Handle::current()
-            .block_on(async { Schedule::cancel_schedule(&db, &schedule_id).await });
+            .block_on(async { Schedule::cancel_schedule_in_env(&db, &schedule_id, &env_id).await });
 
         return match result {
             Ok(cancelled) => {

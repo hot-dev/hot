@@ -9,7 +9,7 @@ description: >
   languages - always check these references before writing Hot code.
 metadata:
   author: hotdev
-  version: "1.1.1"
+  version: "1.2.0"
   license: Apache-2.0
 ---
 
@@ -26,18 +26,27 @@ provides detailed reference documentation for the Hot programming language.
 
 ## Critical Syntax Rules
 
-**These are non-negotiable - violating them causes parse errors:**
+**These are non-negotiable - violating them causes parse errors or silently
+wrong code:**
 
 | ❌ Wrong | ✅ Correct | Rule |
 |----------|-----------|------|
 | `name = "Alice"` | `name "Alice"` | No `=` for assignment |
 | `a + b` | `add(a, b)` | No infix operators |
 | `a == b` | `eq(a, b)` | Comparison is a function |
-| `if (x) { } else { }` | `if(x, then, else)` or `cond` flow | No if/else blocks |
+| `if (x) { } else { }` | `if(x, then, else)` or `cond` flow | No if/else blocks: `if` is a function, and `if (x) {` binds a variable named `if` |
 | `for x in items` | `map(items, ...)` or `for-each(iter, ...)` | No loops |
 | `items.0` | `items[0]` | Use brackets for array indexing |
-| `add (1, 2)` | `add(1, 2)` | No space before `(` when calling |
+| `add (1, 2)` | `add(1, 2)` | A space before `(` never calls: `add (1, 2)` binds a variable named `add` |
 | `{x}` for a map | `{x,}` or `{x: x}` | Single-key punning needs comma |
+| `map(gs, filter(%, gt(%, 0)))` | `map(gs, filter(%, (n) { gt(n, 0) }))` | No nested implicit `%` lambdas (`nested-placeholder`) |
+| `(a, b)` then `{` on the next line | `(a, b) {` | A lambda's `{` goes on the line of its `)` |
+
+`hot check` warns (`binding-shadows-function`) when a spaced-paren binding
+shadows a function, and `hot test` warns about a test with no assertions.
+Parameter lists can span lines, in named functions and lambdas: put one or
+more parameters per line, then `): Ret {` on the closing line. A named
+function's `{` may also start the next line; a lambda's may not.
 
 ## Semantic Rules Agents Must Preserve
 
@@ -55,8 +64,11 @@ provides detailed reference documentation for the Hot programming language.
 - Function return annotations name the successful value, not a visible
   `Result` wrapper. Do not add `ok(...)` around every successful return.
 - Binding a `Result` preserves it. Ordinary consumption unwraps `Ok` or
-  propagates `Err`. Lazy helpers inspect the intact Result; `match` selects by
-  variant and exposes its payload inside the selected arm.
+  propagates `Err`. A parameter declared `Result` (as in `is-err`) receives the
+  intact Result, however the function is called; `match` selects by variant and
+  exposes its payload inside the selected arm. Result checks never catch a
+  halt (`fail()`, `cancel()`, a consumed `Err`), and `lazy` only defers
+  evaluation.
 - Records are structurally compatible where their fields are known. Custom
   types and enum variants also carry nominal tags used for matching and
   dispatch.
@@ -67,6 +79,13 @@ provides detailed reference documentation for the Hot programming language.
   may be expensive or effectful.
 - Prefer `map`, `filter`, `reduce`, iterators, and `for-each` for iteration.
   Recursive calls are stack-safe only when they are genuinely in tail position.
+- Closed literal unions are enforced at runtime at every boundary
+  (parameters, typed fields, constructors, returns, updates). A value outside
+  the union is `Err(ConstraintError.Violation)`. Declare a union `open` when
+  its values come from outside your code, such as API responses or JSON.
+- `where` predicates run at namespace scope: they can use top-level values
+  and functions, but not parameters or locals. `where` is reserved and can't
+  name a binding or function.
 
 ## File Structure
 
@@ -286,7 +305,7 @@ This skill includes detailed reference files:
 | [references/hot-std.md](references/hot-std.md) | Full standard library documentation |
 | [references/flows.md](references/flows.md) | Flow patterns, `if()` vs `cond`, flow result shapes |
 | [references/types.md](references/types.md) | Type system, type coercion |
-| [references/error-handling.md](references/error-handling.md) | Auto-unwrapping, lazy arguments, Result patterns |
+| [references/error-handling.md](references/error-handling.md) | Auto-unwrapping, `Result` parameters, lazy arguments, Result patterns |
 | [references/sequences.md](references/sequences.md) | Eager collections, lazy iterators, the `Next` type |
 | [references/meta.md](references/meta.md) | Metadata for tests, events, schedules, MCP tools, webhooks, and context |
 
@@ -296,7 +315,7 @@ See the [examples/](examples/) directory for working Hot code:
 - `basic.hot` - Variables, functions, conditionals, pipes
 - `types-and-enums.hot` - Custom types, enums (closed + open), literal unions (closed + open), arrow enrollment, exhaustive match, type coercion
 - `flows.hot` - Parallel, cond-all, match-all, flow result shapes
-- `error-handling.hot` - Auto-unwrapping, lazy arguments, Result patterns
+- `error-handling.hot` - Auto-unwrapping, `Result` parameters, lazy arguments, Result patterns
 - `sequences.hot` - Eager collections, lazy iterators, range functions
 - `event-handlers.hot` - Events, schedules, retry patterns
 - `http-service.hot` - HTTP requests, API integration

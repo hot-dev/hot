@@ -3986,15 +3986,22 @@ async fn process_container_task(
                 .and_then(|task| task.container_id)
             {
                 Some(id) => cancellation_quota::runtime_stopped(&executor, &id).await,
-                None => false,
+                // Setup failed before a container ID was saved: exited if no
+                // container for this task exists on this worker's runtime.
+                None => cancellation_quota::no_local_container(&executor, &task_id).await,
             },
         };
         let compute_units = limits.size.compute_units(duration_ms);
+        let termination = if terminated {
+            cancellation_quota::Termination::Confirmed
+        } else {
+            cancellation_quota::Termination::Unconfirmed
+        };
         cancellation_quota::settle(
             &db,
             &task_id,
             &worker_id,
-            terminated,
+            termination,
             Some((compute_units, duration_ms)),
         )
         .await;
@@ -4587,6 +4594,16 @@ async fn process_code_task(
         )
         .await;
 
+        // A build this runtime can't run, made with another major version of
+        // Hot, never runs here, even after its project is redeployed.
+        if let Ok(build) = Build::get_build(&db, &build_id).await
+            && let Some(reason) = build.runtime_version_error_message()
+        {
+            return Err(format!(
+                "{reason}. Redeploy the project, and start the task again"
+            ));
+        }
+
         let (cached, blocking_execution_permit) = load_bytecode(
             &build_id,
             Arc::clone(&bytecode_cache),
@@ -4689,11 +4706,23 @@ async fn process_code_task(
     let inbox_tx_clone = inbox_tx.clone();
     let stream_pub_clone = Arc::clone(&stream_publisher);
     let task_id_for_sub = task_id;
+    let task_env_id = env_id;
     let cancel_notify_fwd = Arc::clone(&cancel_notify);
     let inbox_forwarder = tokio::spawn(async move {
         match stream_pub_clone.subscribe(task_id_for_sub).await {
             Ok(mut sub) => loop {
                 match sub.next().await {
+                    // `::hot::task/send` and `cancel` check the task's env
+                    // before publishing; drop anything that doesn't name it.
+                    StreamNext::Event(StreamEvent::TaskMessage {
+                        env_id: sender_env, ..
+                    }) if sender_env != Some(task_env_id) => {
+                        tracing::warn!(
+                            task_id = %task_id_for_sub,
+                            sender_env = ?sender_env,
+                            "Dropping task message from another environment"
+                        );
+                    }
                     StreamNext::Event(StreamEvent::TaskMessage { payload, .. }) => {
                         let is_cancel = payload
                             .as_object()
@@ -7935,7 +7964,11 @@ mod tests {
 
         let (_request, cancelled_task, _, _, _) = make_task_request_and_row();
         insert_test_task(&db, &cancelled_task).await;
-        assert!(Task::cancel(&db, &cancelled_task.task_id).await.unwrap());
+        assert!(
+            Task::cancel(&db, &cancelled_task.task_id, &cancelled_task.env_id)
+                .await
+                .unwrap()
+        );
         assert!(
             !persist_terminal_task(
                 &db,
@@ -8194,7 +8227,11 @@ mod tests {
         // ::hot::task/cancel flips the row to Cancelled (result NULL) BEFORE
         // publishing the $cancel message, so the worker's cancel branch
         // always finds the row already Cancelled.
-        assert!(Task::cancel(&db, &task.task_id).await.unwrap());
+        assert!(
+            Task::cancel(&db, &task.task_id, &task.env_id)
+                .await
+                .unwrap()
+        );
         assert!(
             Task::get(&db, &task.task_id)
                 .await
@@ -8307,7 +8344,11 @@ mod tests {
         // publish_task_alert and maybe_retry_task.
         let (_request, task, _, _, _) = make_task_request_and_row();
         insert_test_task(&db, &task).await;
-        assert!(Task::cancel(&db, &task.task_id).await.unwrap());
+        assert!(
+            Task::cancel(&db, &task.task_id, &task.env_id)
+                .await
+                .unwrap()
+        );
         let error = task_failure_json("boom", None);
         assert!(
             !complete_task_with_event(
@@ -8446,7 +8487,11 @@ mod tests {
         task.options = Some(retry_options.clone());
         insert_test_task(&db, &task).await;
         Task::mark_running(&db, &task.task_id).await.unwrap();
-        assert!(Task::cancel(&db, &task.task_id).await.unwrap());
+        assert!(
+            Task::cancel(&db, &task.task_id, &task.env_id)
+                .await
+                .unwrap()
+        );
         maybe_retry_task(&db, &queue, &task.task_id, &request).await;
         assert_eq!(
             Task::get_count_by_env(&db, &task.env_id).await.unwrap(),

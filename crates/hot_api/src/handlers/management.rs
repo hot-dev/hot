@@ -98,6 +98,17 @@ pub async fn management_auth_middleware(
     let key = ManagementKey::verify_token(&db, token)
         .await
         .map_err(|_| StatusCode::UNAUTHORIZED)?;
+    // Management calls spend the account's request budget like runtime calls.
+    if let Err(exceeded) = crate::rate_limit::check_org_rate_limit(
+        &db,
+        &key.root_org_id,
+        crate::rate_limit::PublicRateLimitMode::Enforce,
+        "management",
+    )
+    .await
+    {
+        return Ok(crate::rate_limit::rate_limit_response(exceeded));
+    }
     let audit_db = db.with_scope(DatabaseScope::Organization {
         org_id: key.root_org_id,
     });

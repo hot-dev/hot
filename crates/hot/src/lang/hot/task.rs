@@ -34,6 +34,16 @@ fn err_val(msg: String) -> Val {
     Val::err(Val::from(msg))
 }
 
+/// The environment the calling code runs in. A task ID only names a task
+/// within it: RLS doesn't cover SQLite or pub/sub, so every native that
+/// takes a task ID checks ownership against this env itself.
+fn caller_env_id(vm: &VirtualMachine, native: &str) -> Result<Uuid, Val> {
+    vm.get_execution_context()
+        .as_ref()
+        .and_then(|ctx| ctx.env_id)
+        .ok_or_else(|| err_val(format!("{native}: no env_id in execution context")))
+}
+
 // ---------------------------------------------------------------------------
 // TaskRequest — serialized into the task queue for the hot_task_worker
 // ---------------------------------------------------------------------------
@@ -386,7 +396,14 @@ pub fn send(vm: &mut VirtualMachine, args: &[Val]) -> HotResult<Val> {
     }
 
     let task_id = match &args[0] {
-        Val::Str(s) => s.to_string(),
+        Val::Str(s) => match Uuid::parse_str(s) {
+            Ok(id) => id,
+            Err(_) => {
+                return HotResult::Err(err_val(
+                    "::hot::task/send: invalid task-id UUID".to_string(),
+                ));
+            }
+        },
         _ => {
             return HotResult::Err(err_val(
                 "::hot::task/send: task-id must be a string".to_string(),
@@ -394,36 +411,75 @@ pub fn send(vm: &mut VirtualMachine, args: &[Val]) -> HotResult<Val> {
         }
     };
 
+    let env_id = match caller_env_id(vm, "::hot::task/send") {
+        Ok(id) => id,
+        Err(e) => return HotResult::Err(e),
+    };
+
     let data = &args[1];
     let payload_json: serde_json::Value = data.into();
 
-    // Use the stream publisher to publish to the task's channel
-    let publisher = vm.get_stream_publisher();
-    match publisher {
-        Some(pub_sub) => {
-            let event = crate::stream::StreamEvent::TaskMessage {
-                task_id: task_id.clone(),
-                payload: payload_json,
-            };
+    let Some(db) = vm.get_database_pool() else {
+        return HotResult::Err(err_val(
+            "::hot::task/send: no database available".to_string(),
+        ));
+    };
+    let Some(pub_sub) = vm.get_stream_publisher() else {
+        return HotResult::Err(err_val(
+            "::hot::task/send: no stream publisher available".to_string(),
+        ));
+    };
 
-            let published = tokio::runtime::Handle::current().block_on(async {
-                tokio::time::timeout(TASK_NATIVE_IO_TIMEOUT, pub_sub.publish(event)).await
-            });
-            match published {
-                Ok(Ok(())) => HotResult::Ok(Val::from(true)),
-                Ok(Err(e)) => HotResult::Err(err_val(format!(
-                    "::hot::task/send: failed to publish: {}",
+    let sent = tokio::runtime::Handle::current().block_on(async {
+        // Only a task in the caller's own environment may receive the message.
+        match tokio::time::timeout(
+            TASK_NATIVE_IO_TIMEOUT,
+            crate::db::Task::get_in_env(&db, &task_id, &env_id),
+        )
+        .await
+        {
+            Ok(Ok(_)) => {}
+            Ok(Err(crate::db::TaskError::NotFound)) => {
+                return Err(err_val(format!(
+                    "::hot::task/send: task not found: {}",
+                    task_id
+                )));
+            }
+            Ok(Err(e)) => {
+                return Err(err_val(format!(
+                    "::hot::task/send: task lookup failed: {}",
                     e
-                ))),
-                Err(_) => HotResult::Err(err_val(format!(
-                    "::hot::task/send: publish timed out after {}s",
+                )));
+            }
+            Err(_) => {
+                return Err(err_val(format!(
+                    "::hot::task/send: database read timed out after {}s",
                     TASK_NATIVE_IO_TIMEOUT.as_secs()
-                ))),
+                )));
             }
         }
-        None => HotResult::Err(err_val(
-            "::hot::task/send: no stream publisher available".to_string(),
-        )),
+
+        let event = crate::stream::StreamEvent::TaskMessage {
+            task_id: task_id.to_string(),
+            env_id: Some(env_id),
+            payload: payload_json,
+        };
+        match tokio::time::timeout(TASK_NATIVE_IO_TIMEOUT, pub_sub.publish(event)).await {
+            Ok(Ok(())) => Ok(()),
+            Ok(Err(e)) => Err(err_val(format!(
+                "::hot::task/send: failed to publish: {}",
+                e
+            ))),
+            Err(_) => Err(err_val(format!(
+                "::hot::task/send: publish timed out after {}s",
+                TASK_NATIVE_IO_TIMEOUT.as_secs()
+            ))),
+        }
+    });
+
+    match sent {
+        Ok(()) => HotResult::Ok(Val::from(true)),
+        Err(e) => HotResult::Err(e),
     }
 }
 
@@ -524,6 +580,11 @@ pub fn cancel(vm: &mut VirtualMachine, args: &[Val]) -> HotResult<Val> {
         }
     };
 
+    let env_id = match caller_env_id(vm, "::hot::task/cancel") {
+        Ok(id) => id,
+        Err(e) => return HotResult::Err(e),
+    };
+
     let db = vm.get_database_pool();
     let publisher = vm.get_stream_publisher();
 
@@ -531,7 +592,7 @@ pub fn cancel(vm: &mut VirtualMachine, args: &[Val]) -> HotResult<Val> {
         let was_cancelled = if let Some(db) = &db {
             match tokio::time::timeout(
                 TASK_NATIVE_IO_TIMEOUT,
-                crate::db::Task::cancel(db, &task_id),
+                crate::db::Task::cancel(db, &task_id, &env_id),
             )
             .await
             {
@@ -558,6 +619,7 @@ pub fn cancel(vm: &mut VirtualMachine, args: &[Val]) -> HotResult<Val> {
         {
             let event = crate::stream::StreamEvent::TaskMessage {
                 task_id: task_id_str.clone(),
+                env_id: Some(env_id),
                 payload: serde_json::json!({"$cancel": true}),
             };
             match tokio::time::timeout(TASK_NATIVE_IO_TIMEOUT, pub_sub.publish(event)).await {
@@ -629,6 +691,11 @@ pub fn await_task(vm: &mut VirtualMachine, args: &[Val]) -> HotResult<Val> {
         }
     };
 
+    let env_id = match caller_env_id(vm, "::hot::task/await") {
+        Ok(id) => id,
+        Err(e) => return HotResult::Err(e),
+    };
+
     let execution_context = vm.get_execution_context().clone();
 
     // Capture the cancellation token so the poll loop can release the blocking
@@ -658,28 +725,32 @@ pub fn await_task(vm: &mut VirtualMachine, args: &[Val]) -> HotResult<Val> {
             }
         };
 
-        let task =
-            match tokio::time::timeout(lookup_budget, crate::db::Task::get(&db, &task_id)).await {
-                Ok(Ok(t)) => t,
-                Ok(Err(crate::db::TaskError::NotFound)) => {
-                    return Err(err_val(format!(
-                        "::hot::task/await: task not found: {}",
-                        task_id
-                    )));
-                }
-                Ok(Err(e)) => {
-                    return Err(err_val(format!(
-                        "::hot::task/await: task lookup failed: {}",
-                        e
-                    )));
-                }
-                Err(_) => {
-                    return Err(err_val(format!(
-                        "::hot::task/await: database read timed out after {}ms",
-                        lookup_budget.as_millis()
-                    )));
-                }
-            };
+        let task = match tokio::time::timeout(
+            lookup_budget,
+            crate::db::Task::get_in_env(&db, &task_id, &env_id),
+        )
+        .await
+        {
+            Ok(Ok(t)) => t,
+            Ok(Err(crate::db::TaskError::NotFound)) => {
+                return Err(err_val(format!(
+                    "::hot::task/await: task not found: {}",
+                    task_id
+                )));
+            }
+            Ok(Err(e)) => {
+                return Err(err_val(format!(
+                    "::hot::task/await: task lookup failed: {}",
+                    e
+                )));
+            }
+            Err(_) => {
+                return Err(err_val(format!(
+                    "::hot::task/await: database read timed out after {}ms",
+                    lookup_budget.as_millis()
+                )));
+            }
+        };
 
         let timeout_ms = task.timeout_ms.clamp(1000, MAX_TIMEOUT_MS) as u64;
         let requested_wait = std::time::Duration::from_millis(timeout_ms);
@@ -705,7 +776,12 @@ pub fn await_task(vm: &mut VirtualMachine, args: &[Val]) -> HotResult<Val> {
             deadline,
             &is_cancelled,
             move |read_timeout| async move {
-                match tokio::time::timeout(read_timeout, crate::db::Task::get(db, &task_id)).await {
+                match tokio::time::timeout(
+                    read_timeout,
+                    crate::db::Task::get_in_env(db, &task_id, &env_id),
+                )
+                .await
+                {
                     Ok(Ok(t)) => Ok(t),
                     Ok(Err(crate::db::TaskError::NotFound)) => Err(PollFailure::NotFound),
                     Ok(Err(e)) => Err(PollFailure::Transport(e.to_string())),
@@ -1184,10 +1260,15 @@ pub fn restore(vm: &mut VirtualMachine, args: &[Val]) -> HotResult<Val> {
         }
     };
 
+    let env_id = match caller_env_id(vm, "::hot::task/restore") {
+        Ok(id) => id,
+        Err(e) => return HotResult::Err(e),
+    };
+
     let result = tokio::runtime::Handle::current().block_on(async {
         tokio::time::timeout(
             TASK_NATIVE_IO_TIMEOUT,
-            crate::db::Task::get_checkpoint(&db, &task_id),
+            crate::db::Task::get_checkpoint(&db, &task_id, &env_id),
         )
         .await
     });

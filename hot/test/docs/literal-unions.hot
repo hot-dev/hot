@@ -139,3 +139,28 @@ meta ["test"] fn () {
   t: TrueOnly true
   assert(t, "TrueOnly type should hold true")
 }
+
+// =============================================================================
+// Inline Literal Unions (no named type)
+// =============================================================================
+
+set-speed fn (mode: "fast" | "slow", retries: 0 | 1 | 3, note: Str | null): Str {
+  `Running ${mode} with ${retries} retries`
+}
+
+default-speed: "fast" | "slow" "slow"
+
+pick-tag (tag: "x" | "y" | null) { tag }
+
+test-inline-literal-union-params
+meta ["test"] fn () {
+  assert-eq("Running fast with 3 retries", set-speed("fast", 3, null), "inline literal params")
+  assert-eq("Running slow with 0 retries", set-speed("slow", 0, "quiet"), "note may be text")
+}
+
+test-inline-literal-union-bindings
+meta ["test"] fn () {
+  assert-eq("slow", default-speed, "inline literal binding")
+  assert-eq("x", pick-tag("x"), "inline literal lambda param")
+  assert(::hot::type/is-null(pick-tag(null)), "null member")
+}

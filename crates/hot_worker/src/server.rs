@@ -1308,6 +1308,34 @@ fn is_event_setup_timeout_error(error: &str) -> bool {
     error.contains("[event-setup-timeout]")
 }
 
+/// Work for a deployment this runtime can't run, made with another major
+/// version of Hot, waits until the project is redeployed: minutes at best.
+const AWAITING_REDEPLOY_BACKOFF_MS: u64 = 300_000;
+
+/// Whether to log now that work waits on `key`, an account (run admission) or
+/// a build (a redeploy): at most once a minute per key, so a pending backlog
+/// can't flood the logs.
+fn wait_log_due(key: Uuid) -> bool {
+    static LAST_LOGGED: OnceLock<std::sync::Mutex<AHashMap<Uuid, std::time::Instant>>> =
+        OnceLock::new();
+    const INTERVAL: std::time::Duration = std::time::Duration::from_secs(60);
+    let mut last = LAST_LOGGED
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let now = std::time::Instant::now();
+    if last.len() > 10_000 {
+        last.retain(|_, at| now.duration_since(*at) < INTERVAL);
+    }
+    match last.get(&key) {
+        Some(at) if now.duration_since(*at) < INTERVAL => false,
+        _ => {
+            last.insert(key, now);
+            true
+        }
+    }
+}
+
 /// Whether a failed handler should stay pending without spending a delivery:
 /// only for the engine's own run-admission deferral (a suspended account or a
 /// transient lookup), which happens before any user code, and only when no
@@ -1703,6 +1731,15 @@ async fn find_all_deployed_builds_for_env(
     }
 
     Ok(deployed_builds)
+}
+
+/// Whether the environment has a deployment this runtime can't run, made
+/// with another major version of Hot.
+async fn env_awaits_redeploy(db: &DatabasePool, env_id: &Uuid) -> Result<bool, String> {
+    Ok(find_all_deployed_builds_for_env(db, env_id)
+        .await?
+        .iter()
+        .any(|build| build.runtime_version_error_message().is_some()))
 }
 
 /// Extract the target function name from hot:call or hot:schedule event data
@@ -2685,6 +2722,9 @@ async fn prepare_bundle_runtime(
     if !build.is_bundle() {
         return Err(format!("Build {} is not a bundle build", build.build_id));
     }
+    if let Some(reason) = build.runtime_version_error_message() {
+        return Err(reason);
+    }
 
     let mut build_data = None;
     let mut existing_path = get_bundle_extracted_path(build, build_path_cache).await;
@@ -2706,17 +2746,27 @@ async fn prepare_bundle_runtime(
                 existing_path = Some(extract_dir);
             } else {
                 let data = retrieve_build_data(build, project, env, worker_conf).await?;
-                hot::bundle::extract_bundle_from_bytes(&data, &extract_dir).map_err(|e| {
-                    format!(
-                        "Failed to extract build {} to {}: {}",
-                        build.build_id,
-                        extract_dir.display(),
-                        e
-                    )
-                })?;
-
-                let manifest = hot::bundle::read_bundle_manifest(&extract_dir)?;
-                compile_bundle_cache(extract_dir.clone(), manifest).await?;
+                let prepared = async {
+                    hot::bundle::extract_bundle_from_bytes(&data, &extract_dir).map_err(|e| {
+                        format!(
+                            "Failed to extract build {} to {}: {}",
+                            build.build_id,
+                            extract_dir.display(),
+                            e
+                        )
+                    })?;
+                    // Recorded before the version check, so a build this
+                    // runtime can't run is known without fetching it again.
+                    persist_bundle_manifest_versions(db, build, project, env, &extract_dir).await;
+                    let manifest = hot::bundle::read_bundle_manifest(&extract_dir)?;
+                    compile_bundle_cache(extract_dir.clone(), manifest).await
+                }
+                .await;
+                if let Err(error) = prepared {
+                    // A partial extraction would make every later one fail.
+                    let _ = std::fs::remove_dir_all(&extract_dir);
+                    return Err(error);
+                }
                 BuildPathCache::mark_extraction_complete(&extract_dir);
                 build_path_cache.insert(build.build_id, extract_dir.clone());
                 existing_path = Some(extract_dir);
@@ -2751,7 +2801,7 @@ async fn persist_bundle_manifest_versions(
     env: &Env,
     extract_dir: &std::path::Path,
 ) {
-    let Ok(manifest) = hot::bundle::read_bundle_manifest(extract_dir) else {
+    let Ok(manifest) = hot::bundle::read_bundle_manifest_unchecked(extract_dir) else {
         return;
     };
     let compatibility = hot::version::check_runtime_version_compatibility(
@@ -3022,8 +3072,13 @@ async fn warm_ready_bundle_runtimes(
 
     let mut prepared_count = 0usize;
     let mut failed_count = 0usize;
+    let mut awaiting_redeploy = 0usize;
 
     for build in builds {
+        if build.runtime_version_error_message().is_some() {
+            awaiting_redeploy += 1;
+            continue;
+        }
         let (project, env) = match resolve_build_project_env(db, &build).await {
             Ok(pair) => pair,
             Err(e) => {
@@ -3067,6 +3122,12 @@ async fn warm_ready_bundle_runtimes(
         "hot.dev: WORKER startup warm-up finished (prepared={}, failed={})",
         prepared_count, failed_count
     );
+    if awaiting_redeploy > 0 {
+        warn!(
+            "hot.dev: WORKER found {} deployed build(s) made with another major version of Hot. Their work waits until they're redeployed: run `hot db redeploy`.",
+            awaiting_redeploy
+        );
+    }
 }
 
 /// Re-prepare and activate bundle deployments left interrupted (pending/loading/
@@ -3495,6 +3556,14 @@ async fn find_build_for_function(
 
         // Route based on explicit build type - no fall-throughs
         match build.build_type.as_str() {
+            "bundle" if build.runtime_version_error_message().is_some() => {
+                tracing::debug!(
+                    "ROUTING: Bundle build {} (project {}) awaits a redeploy for this runtime, skipping",
+                    build.build_id,
+                    project.name
+                );
+                continue;
+            }
             "bundle" => {
                 // BUNDLE BUILD: Must have an extracted path with manifest and cache
                 let mut extracted_path = get_bundle_extracted_path(&build, build_path_cache).await;
@@ -6985,6 +7054,14 @@ pub async fn run_with_components_shared_context_and_db(
                                                                             }
                                                                         }
                                                                         Ok(None) => {
+                                                                            // A deployment this runtime can't run may have it:
+                                                                            // the call waits for its redeploy.
+                                                                            if env_awaits_redeploy(db, &env_id).await.map_err(|e| worker_infrastructure_retry_error(e, infra_retry_backoff_ms.max(5_000)))? {
+                                                                                return Err(worker_infrastructure_retry_error(
+                                                                                    format!("Function '{}' waits for a deployment to be redeployed for this version of Hot", target_fn),
+                                                                                    infra_retry_backoff_ms.max(AWAITING_REDEPLOY_BACKOFF_MS),
+                                                                                ));
+                                                                            }
                                                                             // Function not in any active build — expected during deploy transitions
                                                                             // when previously enqueued events/schedules reference old code
                                                                             let err_msg = format!(
@@ -7042,26 +7119,74 @@ pub async fn run_with_components_shared_context_and_db(
                                                         // handler can execute. Durable IDs prevent infra redelivery
                                                         // from consuming additional monthly run slots.
                                                         let mut admitted_handlers = Vec::new();
+                                                        // Handlers of a deployment this runtime can't run.
+                                                        let mut awaiting_redeploy = Vec::new();
                                                         for event_handler in handlers_to_execute {
                                                             let handler_build = Build::get_build(db, &event_handler.build_id).await
                                                                 .map_err(|e| worker_infrastructure_retry_error(format!("Cannot resolve handler build: {e}"), infra_retry_backoff_ms.max(5_000)))?;
                                                             if !handler_build.deployed || !handler_build.active || handler_build.runtime_status != Build::RUNTIME_STATUS_READY {
                                                                 continue;
                                                             }
+                                                            if let Some(reason) = handler_build.runtime_version_error_message() {
+                                                                // Work bound to the build can never run here.
+                                                                if exact_target_build.is_some() {
+                                                                    return Err(worker_error(format!(
+                                                                        "{reason}. Redeploy the project, and send its work again"
+                                                                    )));
+                                                                }
+                                                                awaiting_redeploy.push((handler_build.build_id, reason));
+                                                                continue;
+                                                            }
                                                             let identity = format!("{}:{}:{}", event_message.body.event.event_id, event_handler.event_handler_id, event_message.body.execution_context.retry_attempt);
                                                             let run_id = Uuid::new_v5(&Uuid::NAMESPACE_OID, identity.as_bytes());
                                                             admitted_handlers.push((event_handler, handler_build, run_id));
+                                                        }
+                                                        if let Some((build_id, reason)) = awaiting_redeploy.first() {
+                                                            // An event only such deployments handle waits for
+                                                            // their redeploy. Others run their handlers without it.
+                                                            let waits = admitted_handlers.is_empty();
+                                                            if wait_log_due(*build_id) {
+                                                                warn!(
+                                                                    event_id = %event_message.body.event.event_id,
+                                                                    %build_id,
+                                                                    "hot.dev: WORKER {} {} the handlers of {} deployment(s) waiting for a redeploy for event '{}': {}",
+                                                                    worker_id,
+                                                                    if waits { "holds the event for" } else { "skips" },
+                                                                    awaiting_redeploy.len(),
+                                                                    event_message.body.event.event_type,
+                                                                    reason
+                                                                );
+                                                            }
+                                                            if waits {
+                                                                return Err(worker_infrastructure_retry_error(
+                                                                    format!("{reason}; the event waits for a redeploy"),
+                                                                    infra_retry_backoff_ms.max(AWAITING_REDEPLOY_BACKOFF_MS),
+                                                                ));
+                                                            }
                                                         }
                                                         let run_ids: Vec<Uuid> = admitted_handlers.iter().map(|(_, _, id)| *id).collect();
                                                         let org_id = event_message.body.execution_context.org_id.ok_or_else(|| worker_error("Hydrated event has no organization"))?;
                                                         hot::db::run::Run::admit_executions(db, &org_id, &env_id, &run_ids).await
                                                             .map_err(|e| match e {
-                                                                // Suspension and database errors leave accepted work pending.
-                                                                hot::db::run::RunError::Suspended(_) | hot::db::run::RunError::Database(_) => {
+                                                                // Database errors leave accepted work pending.
+                                                                hot::db::run::RunError::Database(_) => {
                                                                     worker_infrastructure_retry_error(e.to_string(), infra_retry_backoff_ms.max(5_000))
                                                                 }
-                                                                // A reached account limit cannot clear by redelivery: use the
-                                                                // bounded retry path so the event dead-letters visibly.
+                                                                // A suspended account or environment, or a reached account
+                                                                // limit, also leaves the event pending: it runs once the
+                                                                // account resumes, the period rolls over or the limit is raised.
+                                                                hot::db::run::RunError::Suspended(_) | hot::db::run::RunError::QuotaExceeded(_) => {
+                                                                    if wait_log_due(org_id) {
+                                                                        warn!(
+                                                                            event_id = %event_message.body.event.event_id,
+                                                                            %org_id,
+                                                                            "hot.dev: WORKER {} events wait for run admission: {}",
+                                                                            worker_id,
+                                                                            e
+                                                                        );
+                                                                    }
+                                                                    worker_infrastructure_retry_error(e.to_string(), infra_retry_backoff_ms.max(60_000))
+                                                                }
                                                                 _ => worker_error(e.to_string()),
                                                             })?;
 
@@ -7547,7 +7672,7 @@ pub async fn run_with_components_shared_context_and_db(
                                             if let Some(ref db) = db_ref {
                                                 for task in &maint_message.body.tasks {
                                                     let operation = match task.as_str() {
-                                                        "session_cleanup" | "inactive_schedule_cleanup" | "upload_cleanup" | "call_retention_cleanup" => MaintenanceOperation::Retention,
+                                                        "session_cleanup" | "inactive_schedule_cleanup" | "upload_cleanup" | "call_retention_cleanup" | "run_admission_cleanup" => MaintenanceOperation::Retention,
                                                         "blob_cleanup" => MaintenanceOperation::BlobGc,
                                                         _ => MaintenanceOperation::Queue,
                                                     };
@@ -7563,6 +7688,18 @@ pub async fn run_with_components_shared_context_and_db(
                                                                 }
                                                                 Err(e) => {
                                                                     error!("hot.dev: WORKER {} maintenance: session cleanup failed: {}", worker_id, e);
+                                                                }
+                                                            }
+                                                        }
+                                                        "run_admission_cleanup" => {
+                                                            match hot::db::Run::delete_admissions_older_than(db, hot::db::run::ADMISSION_RETENTION_DAYS, 10_000).await {
+                                                                Ok(count) => {
+                                                                    if count > 0 {
+                                                                        debug!("hot.dev: WORKER {} maintenance: pruned {} run admission(s)", worker_id, count);
+                                                                    }
+                                                                }
+                                                                Err(e) => {
+                                                                    error!("hot.dev: WORKER {} maintenance: run admission cleanup failed: {}", worker_id, e);
                                                                 }
                                                             }
                                                         }
@@ -8534,6 +8671,14 @@ mod tests {
         .await
         .expect("freed capacity must admit immediately");
         drop(permit);
+    }
+
+    #[test]
+    fn admission_wait_logs_once_a_minute_per_account() {
+        let (a, b) = (Uuid::now_v7(), Uuid::now_v7());
+        assert!(wait_log_due(a));
+        assert!(!wait_log_due(a));
+        assert!(wait_log_due(b));
     }
 
     #[test]

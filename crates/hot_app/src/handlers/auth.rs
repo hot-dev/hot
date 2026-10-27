@@ -1,4 +1,4 @@
-use crate::auth::{JWT_COOKIE_NAME, generate_token};
+use crate::auth::{generate_token, jwt_cookie_name};
 use crate::email::{AppEmailEnqueuer, AppEmailSender};
 use crate::templates;
 use ahash::AHashMap;
@@ -88,7 +88,7 @@ pub async fn signin_post_handler(
     // The CSRF cookie value is also what error re-renders embed as the form
     // token, so the user can correct and resubmit without a page reload.
     let csrf_cookie_value = cookies
-        .get(crate::auth::CSRF_COOKIE_NAME)
+        .get(crate::auth::csrf_cookie_name())
         .map(|c| c.value().to_string())
         .unwrap_or_default();
 
@@ -150,7 +150,7 @@ pub async fn signin_post_handler(
             match generate_token(&user.user_id, &conf) {
                 Ok(token) => {
                     let updated_cookies = cookies.add(crate::auth::build_cookie(
-                        JWT_COOKIE_NAME,
+                        jwt_cookie_name(),
                         token,
                         time::Duration::days(crate::auth::SESSION_COOKIE_DAYS),
                     ));
@@ -212,12 +212,12 @@ pub async fn signout_handler(cookies: CookieJar) -> (CookieJar, Redirect) {
     }
 
     let cookies_cleared = cookies
-        .add(crate::auth::build_removal_cookie(JWT_COOKIE_NAME))
+        .add(crate::auth::build_removal_cookie(jwt_cookie_name()))
         .add(crate::auth::build_removal_cookie(
-            crate::auth::CURRENT_ORG_COOKIE_NAME,
+            crate::auth::current_org_cookie_name(),
         ))
         .add(crate::auth::build_removal_cookie(
-            crate::auth::CURRENT_ENV_COOKIE_NAME,
+            crate::auth::current_env_cookie_name(),
         ));
 
     // Remove cross-subdomain presence cookie
@@ -329,7 +329,7 @@ pub async fn signup_post_handler(
     // Error re-renders embed the existing CSRF cookie value so the user can
     // correct and resubmit without reloading the page.
     let csrf_cookie_value = cookies
-        .get(crate::auth::CSRF_COOKIE_NAME)
+        .get(crate::auth::csrf_cookie_name())
         .map(|c| c.value().to_string())
         .unwrap_or_default();
 
@@ -579,7 +579,7 @@ async fn sign_in_cookies(
 ) -> Result<CookieJar, String> {
     let token = generate_token(user_id, conf)?;
     let updated_cookies = cookies.add(crate::auth::build_cookie(
-        JWT_COOKIE_NAME,
+        jwt_cookie_name(),
         token,
         time::Duration::days(crate::auth::SESSION_COOKIE_DAYS),
     ));
@@ -841,7 +841,7 @@ pub async fn resend_verification_handler(
     }
 
     let form_token = cookies
-        .get(crate::auth::CSRF_COOKIE_NAME)
+        .get(crate::auth::csrf_cookie_name())
         .map(|c| c.value().to_string())
         .unwrap_or_default();
 
@@ -1169,7 +1169,7 @@ pub async fn claim_handle_post_handler(
         .await;
 
         let updated_cookies = cookies.add(crate::auth::build_cookie(
-            crate::auth::CURRENT_ORG_COOKIE_NAME,
+            crate::auth::current_org_cookie_name(),
             existing.org_id.to_string(),
             time::Duration::days(365),
         ));
@@ -1259,7 +1259,7 @@ pub async fn claim_handle_post_handler(
 
     // Set the newly created org as current
     let updated_cookies = cookies.add(crate::auth::build_cookie(
-        crate::auth::CURRENT_ORG_COOKIE_NAME,
+        crate::auth::current_org_cookie_name(),
         org_id.to_string(),
         time::Duration::days(365),
     ));

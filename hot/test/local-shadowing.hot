@@ -1,0 +1,40 @@
+::hot::test::local-shadowing ns
+meta ["test"]
+
+// Regression: a parameter or local binding shadows a function of the same
+// name. The compiler used to call the namespace or core function whenever it
+// was registered before the body was compiled, so the result depended on
+// declaration order.
+
+scale fn (x: Any): Int { 0 }
+
+apply-scale fn (x: Int, scale: Fn): Int { scale(x) }
+
+apply-later fn (x: Int, later: Fn): Int { later(x) }
+
+later fn (x: Any): Int { 0 }
+
+local-scale fn (x: Int): Int {
+    scale: Fn (v) { mul(v, 5) }
+    scale(x)
+}
+
+apply-first fn (xs: Vec, first: Fn): Any { first(xs) }
+
+test-param-shadows-namespace-function
+meta ["test"] fn () {
+    assert-eq(12, apply-scale(4, mul(%, 3)), "declared before")
+    assert-eq(12, apply-later(4, mul(%, 3)), "declared after")
+    assert-eq(0, scale(1), "the namespace function itself")
+}
+
+test-local-shadows-namespace-function
+meta ["test"] fn () {
+    assert-eq(10, local-scale(2), "local binding")
+}
+
+test-param-shadows-core-function
+meta ["test"] fn () {
+    assert-eq("custom", apply-first([1, 2], (v) { "custom" }), "param named first")
+    assert-eq(1, first([1, 2]), "core first itself")
+}

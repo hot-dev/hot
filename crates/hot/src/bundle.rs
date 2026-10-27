@@ -1551,8 +1551,17 @@ fn validate_bundle_runtime_compatibility(bundle_engine_version: &str) -> Result<
     Ok(())
 }
 
-/// Read and parse manifest.hot from an extracted bundle directory
+/// Read and parse manifest.hot from an extracted bundle directory, refusing a
+/// bundle this runtime can't run.
 pub fn read_bundle_manifest(extract_dir: &Path) -> Result<BundleManifest, String> {
+    let manifest = read_bundle_manifest_unchecked(extract_dir)?;
+    validate_bundle_runtime_compatibility(&manifest.engine_version)?;
+    Ok(manifest)
+}
+
+/// Read and parse manifest.hot from an extracted bundle directory, whatever
+/// version of Hot made the bundle.
+pub fn read_bundle_manifest_unchecked(extract_dir: &Path) -> Result<BundleManifest, String> {
     let manifest_path = extract_dir.join("manifest.hot");
 
     if !manifest_path.exists() {
@@ -1610,7 +1619,6 @@ pub fn read_bundle_manifest(extract_dir: &Path) -> Result<BundleManifest, String
     let bundle_hash = get_str("bundle_hash");
     let engine_version = get_str("engine_version");
     let hot_std_version = get_str("hot_std_version");
-    validate_bundle_runtime_compatibility(&engine_version)?;
 
     // Extract file hashes from the files array
     let mut file_hashes = Vec::new();

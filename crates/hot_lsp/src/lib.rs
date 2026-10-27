@@ -57,6 +57,9 @@ pub struct Backend {
     program: std::sync::Arc<tokio::sync::Mutex<Option<Program>>>,
     /// REPL session for stateful evaluation
     repl_session: std::sync::Arc<tokio::sync::Mutex<Option<ReplSession>>>,
+    /// How each hidden inline-refinement type (`$Where-…`) in `program` reads
+    /// in source, for hover and signature help.
+    refinement_displays: std::sync::Arc<std::sync::RwLock<AHashMap<String, String>>>,
 }
 
 #[derive(Default, Clone)]
@@ -793,7 +796,7 @@ impl Backend {
                 },
             },
             severity: Some(DiagnosticSeverity::ERROR),
-            code: Some(NumberOrString::String("parse-error".to_string())),
+            code: Some(NumberOrString::String(parse_error.code().to_string())),
             code_description: None,
             source: Some("hot".to_string()),
             message,
@@ -854,6 +857,7 @@ impl Backend {
 
         // Store the comprehensive program for type lookups
         {
+            self.set_refinement_displays(&comprehensive_program);
             let mut program_lock = self.program.lock().await;
             *program_lock = Some(comprehensive_program.clone());
         }
@@ -1182,6 +1186,7 @@ impl Backend {
             *unified_resolver = Some(resolver);
 
             // Store the program for type lookup
+            self.set_refinement_displays(&program);
             let mut program_lock = self.program.lock().await;
             *program_lock = Some(program);
         }
@@ -1550,10 +1555,19 @@ impl Backend {
         }
     }
 
+    fn set_refinement_displays(&self, program: &Program) {
+        let displays = hot::lang::ast::inline_refinement_displays(program.namespaces.values());
+        *self
+            .refinement_displays
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = displays;
+    }
+
     /// Format type annotation from debug format to readable Hot syntax
     fn format_type_annotation(&self, type_annotation: &str) -> String {
         // Convert debug format like "Union([Builtin(Int), Builtin(Dec)])" to "Int | Dec"
-        if type_annotation.starts_with("Union([") && type_annotation.ends_with("])") {
+        let formatted = if type_annotation.starts_with("Union([") && type_annotation.ends_with("])")
+        {
             // Extract the inner types from Union([...])
             let inner = &type_annotation[7..type_annotation.len() - 2]; // Remove "Union([" and "])"
             let types: Vec<&str> = inner.split(", ").collect();
@@ -1563,7 +1577,12 @@ impl Backend {
         } else {
             // Handle single types or other formats
             self.format_single_type(type_annotation)
-        }
+        };
+        let displays = self
+            .refinement_displays
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        hot::lang::ast::display_inline_refinements(&formatted, &displays)
     }
 
     /// Format a single type from debug format to readable format
@@ -3790,6 +3809,7 @@ pub async fn run_stdio() -> anyhow::Result<()> {
         unified_resolver: std::sync::Arc::new(tokio::sync::Mutex::new(None)),
         program: std::sync::Arc::new(tokio::sync::Mutex::new(None)),
         repl_session: std::sync::Arc::new(tokio::sync::Mutex::new(None)),
+        refinement_displays: Default::default(),
     })
     .custom_method("hot/eval", Backend::handle_eval)
     .custom_method("hot/resetRepl", Backend::handle_reset_repl)

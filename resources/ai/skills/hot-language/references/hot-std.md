@@ -80,12 +80,12 @@ gte fn (a: Int | Dec, b: Int | Dec): Bool               // Greater than or equal
 ### Logic
 
 ```hot
-is-truthy fn (value: Any): Bool                         // Not false, null, or 0
-not fn cond (x: Any): Bool                              // Negate truthiness
-and fn (x: Any, ...rest): Any                           // First falsy value, or last (short-circuits)
-or fn (x: Any, ...rest): Any                            // First truthy value, or last (short-circuits)
-if fn cond (pred: Any, lazy then: Any): Any             // If pred, evaluate then; else null
-if fn cond (pred: Any, lazy then: Any, lazy else: Any): Any  // If pred, evaluate then; else evaluate else
+is-truthy fn (value: Result): Bool                      // Not false, null, or Err
+not fn (x: Result): Bool                                // Negate truthiness
+and fn (x: Result, lazy ...rest: Result): Any           // First falsy value, or last (short-circuits)
+or fn (x: Result, lazy ...rest: Result): Any            // First truthy value, or last (short-circuits)
+if fn cond (pred: Result, lazy then: Any): Any          // If pred, evaluate then; else null
+if fn cond (pred: Result, lazy then: Any, lazy else: Any): Any  // If pred, evaluate then; else evaluate else
 ```
 
 ### Collections (Eager)
@@ -202,17 +202,17 @@ pad-end fn (s: Str, width: Int, pad: Str): Str           // Pad right with custo
 Result enum { Ok(Any), Err(Any) }                        // Success/error union type
 ok fn (value: Any): Result                               // Wrap in Result.Ok
 err fn (value: Any): Result                              // Wrap in Result.Err
-is-ok fn (lazy result: Any): Bool                        // true if result is Ok
-is-err fn (lazy result: Any): Bool                       // true if result is Err
-is-result fn (value: Any): Bool                          // true if value is a Result
-if-ok fn (lazy result, handler): Any                     // Ok → apply fn/use value; Err → pass through
-if-err fn (lazy result, handler): Any                    // Err → apply fn/use value; Ok → pass through
+is-ok fn (result: Result): Bool                         // true if result is Ok
+is-err fn (result: Result): Bool                        // true if result is Err
+is-result fn (value: Result): Bool                       // true if value is a Result
+if-ok fn (result: Result, handler): Any                 // Ok → apply fn/use value; Err → pass through
+if-err fn (result: Result, handler): Any                // Err → apply fn/use value; Ok → pass through
 ```
 
 ### Type Checks
 
 ```hot
-is-type fn (lazy val, type-ref): Bool                    // Check if val conforms to type-ref
+is-type fn (val: Result, type-ref): Bool                // Check if val conforms to type-ref
 is-null fn (value: Any): Bool                            // true if null
 is-some fn (value: Any): Bool                            // true if not null
 is-str fn (value: Any): Bool                             // true if Str
@@ -308,8 +308,8 @@ in fn (value: Any, coll: Vec): Bool                      // Membership test: tru
 ### Utility (core)
 
 ```hot
-tap fn (value: Any): Any                                 // Print value to stderr, return unchanged
-tap fn (value: Any, label: Str): Any                     // Print "label: value" to stderr, return unchanged
+tap fn (value: Result): Any                              // Print value to stderr, return unchanged
+tap fn (value: Result, label: Str): Any                  // Print "label: value" to stderr, return unchanged
 print fn (val: Any): Str                                 // Print to stdout (no newline)
 println fn (val: Any): Str                               // Print to stdout with newline
 assert fn (actual: Any): Bool                            // Assert truthy

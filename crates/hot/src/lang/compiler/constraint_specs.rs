@@ -107,13 +107,20 @@ impl Compiler {
     /// Record the program's type declarations, so constraint specs can be
     /// built for any annotation during emission.
     pub(super) fn collect_constraint_types(&mut self, program: &crate::lang::ast::Program) {
+        let mut declared = Vec::new();
         for (ns_path, namespace) in &program.namespaces {
+            if !namespace.aliases.is_empty() {
+                self.constraint_ns_aliases
+                    .insert(ns_path.to_string(), namespace.aliases.clone());
+            }
             for (var, value) in &namespace.scope.vars {
                 let name = var.sym.name();
                 match value {
                     crate::lang::ast::Value::TypeDef(type_def) => {
+                        let qualified = format!("{ns_path}/{name}");
                         self.constraint_type_defs
-                            .insert(format!("{ns_path}/{name}"), type_def.clone());
+                            .insert(qualified.clone(), type_def.clone());
+                        declared.push(qualified);
                     }
                     crate::lang::ast::Value::Fn(defs) => {
                         if crate::lang::ast::is_where_predicate(name)
@@ -124,8 +131,10 @@ impl Compiler {
                                 format!("{ns_path}/{name}"),
                                 (param.var.sym.name().to_string(), def.body.clone()),
                             );
-                            if !is_match_calls_are_hot_regex(&def.body, namespace) {
-                                self.foreign_regex_predicates
+                            if !crate::lang::json_schema::predicate_calls_are_canonical(
+                                &def.body, namespace,
+                            ) {
+                                self.non_canonical_predicates
                                     .insert(format!("{ns_path}/{name}"));
                             }
                         } else if FAST_FUNCTIONS.contains(&name)
@@ -143,6 +152,11 @@ impl Compiler {
         }
         self.constrained_types.clear();
         self.constraint_spec_ids = self.program.constraint_types.iter().cloned().collect();
+        // A type declared again (a REPL input redefining it) gets a fresh spec;
+        // the VM reads the table's last entry for a name.
+        for qualified in &declared {
+            self.constraint_spec_ids.remove(qualified);
+        }
         self.collect_param_annotations(program);
     }
 
@@ -272,6 +286,11 @@ impl Compiler {
         if self.constraint_type_defs.contains_key(name) {
             return Some(name.to_string());
         }
+        if let Some(dealiased) = self.dealias_type_name(name)
+            && self.constraint_type_defs.contains_key(&dealiased)
+        {
+            return Some(dealiased);
+        }
         let (resolved, _) = self.resolve_type_path(name);
         if self.constraint_type_defs.contains_key(&resolved) {
             return Some(resolved);
@@ -280,6 +299,17 @@ impl Compiler {
         self.constraint_type_defs
             .contains_key(&local)
             .then_some(local)
+    }
+
+    /// `::alias/Type` with the alias replaced by the namespace it names in the
+    /// current namespace, or `None` when the prefix isn't one of its aliases.
+    fn dealias_type_name(&self, name: &str) -> Option<String> {
+        let (ns, type_name) = name.strip_prefix("::")?.rsplit_once('/')?;
+        let source = self
+            .constraint_ns_aliases
+            .get(&self.current_namespace)?
+            .get(&crate::lang::ast::NsPath::from(ns))?;
+        Some(format!("{source}/{type_name}"))
     }
 
     /// Whether a declared type carries a constraint: a refinement, a closed
@@ -448,15 +478,15 @@ impl Compiler {
         if self.shadowing_namespaces.contains(namespace) {
             return None;
         }
+        if self
+            .non_canonical_predicates
+            .contains(&refinement.predicate)
+        {
+            return None;
+        }
         let (param, body) = self.constraint_predicates.get(&refinement.predicate)?;
         let schema = crate::lang::json_schema::refinement_schema(body, param, &refinement.source);
-        if schema.describe
-            || schema.keywords.is_empty()
-            || (self
-                .foreign_regex_predicates
-                .contains(&refinement.predicate)
-                && schema.keywords.iter().any(|(k, _)| k == "pattern"))
-        {
+        if schema.describe || schema.keywords.is_empty() {
             return None;
         }
         Some(Val::map_from_iter(
@@ -491,49 +521,6 @@ impl Compiler {
             test,
         });
         dest
-    }
-}
-
-/// Whether every `is-match` call in a predicate body is
-/// `::hot::regex/is-match`: written in full, through a namespace alias, or
-/// through a var alias in `namespace`. The fast form tests a `pattern` with
-/// that function's own matcher, so any other `is-match` needs the call.
-fn is_match_calls_are_hot_regex(
-    body: &crate::lang::ast::Value,
-    namespace: &crate::lang::ast::Namespace,
-) -> bool {
-    use crate::lang::ast::{NsRef, Ref, Value};
-    let is_hot_regex = |ns_ref: &NsRef| {
-        let ns = namespace.aliases.get(&ns_ref.ns).unwrap_or(&ns_ref.ns);
-        ns_ref.function_name.as_deref() == Some("is-match") && ns.to_string() == "::hot::regex"
-    };
-    match body {
-        Value::FnCall(call) => {
-            let callee = match call.function.as_ref() {
-                Value::Ref(Ref::Ns(ns_ref))
-                    if ns_ref.function_name.as_deref() == Some("is-match") =>
-                {
-                    is_hot_regex(ns_ref)
-                }
-                Value::Ref(Ref::Var(var_ref)) if var_ref.var.sym.name() == "is-match" => {
-                    namespace.scope.vars.iter().any(|(var, value)| {
-                        var.sym.name() == "is-match"
-                            && matches!(value, Value::Ref(Ref::Ns(ns_ref)) if is_hot_regex(ns_ref))
-                    })
-                }
-                _ => true,
-            };
-            callee
-                && call
-                    .args
-                    .iter()
-                    .all(|arg| is_match_calls_are_hot_regex(&arg.value, namespace))
-        }
-        Value::Flow(flow) => flow
-            .expressions
-            .iter()
-            .all(|expr| is_match_calls_are_hot_regex(expr, namespace)),
-        _ => true,
     }
 }
 

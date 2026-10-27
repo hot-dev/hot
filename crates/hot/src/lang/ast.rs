@@ -260,6 +260,34 @@ impl std::fmt::Display for LiteralType {
     }
 }
 
+impl LiteralType {
+    /// Parse a literal as `Display` renders it (`"a"`, `42`, `1.5`, `true`,
+    /// `null`). Function and binding annotations are stored in that form.
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "true" => return Some(LiteralType::Bool(true)),
+            "false" => return Some(LiteralType::Bool(false)),
+            "null" => return Some(LiteralType::Null),
+            _ => {}
+        }
+
+        if let Some(inner) = s.strip_prefix('"').and_then(|rest| rest.strip_suffix('"')) {
+            return Some(LiteralType::Str(inner.to_string()));
+        }
+
+        let unsigned = s.strip_prefix('-').unwrap_or(s);
+        if !unsigned.starts_with(|c: char| c.is_ascii_digit()) {
+            return None;
+        }
+        if let Ok(n) = s.parse::<i64>() {
+            return Some(LiteralType::Int(n));
+        }
+        s.parse::<fastnum::D256>()
+            .ok()
+            .map(|_| LiteralType::Dec(s.to_string()))
+    }
+}
+
 // Type expressions for type checking
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum TypeExpr {
@@ -292,6 +320,32 @@ impl std::fmt::Display for TypeExpr {
             TypeExpr::Any => write!(f, "Any"),
         }
     }
+}
+
+/// Split a rendered type annotation at each top-level `sep`, trimming the
+/// parts. A separator inside `<...>` or a string literal (`"a | b"`) does
+/// not split.
+pub fn split_top_level(annotation: &str, sep: char) -> Vec<&str> {
+    let mut parts = Vec::new();
+    let mut start = 0;
+    let mut depth = 0;
+    let mut in_str = false;
+
+    for (i, ch) in annotation.char_indices() {
+        match ch {
+            '"' => in_str = !in_str,
+            _ if in_str => {}
+            '<' => depth += 1,
+            '>' => depth -= 1,
+            _ if ch == sep && depth == 0 => {
+                parts.push(annotation[start..i].trim());
+                start = i + ch.len_utf8();
+            }
+            _ => {}
+        }
+    }
+    parts.push(annotation[start..].trim());
+    parts
 }
 
 // Built-in types
@@ -1156,6 +1210,86 @@ pub const WHERE_TYPE_PREFIX: &str = "$Where-";
 pub fn is_inline_refinement_type(name: &str) -> bool {
     let short = name.rsplit('/').next().unwrap_or(name);
     short.starts_with(WHERE_TYPE_PREFIX)
+}
+
+/// How an inline refinement type reads in source, such as `Int where gt(%, 0)`.
+pub fn inline_refinement_display(def: &TypeDef) -> Option<String> {
+    Some(format!(
+        "{} where {}",
+        def.type_alias.as_ref()?,
+        def.refinement.as_ref()?.source
+    ))
+}
+
+/// How each hidden inline-refinement type in `namespaces` reads in source,
+/// keyed by its short `$Where-…` name.
+pub fn inline_refinement_displays<'a>(
+    namespaces: impl IntoIterator<Item = &'a Namespace>,
+) -> AHashMap<String, String> {
+    let mut displays = AHashMap::new();
+    for namespace in namespaces {
+        for (var, value) in &namespace.scope.vars {
+            if let Value::TypeDef(def) = value
+                && is_inline_refinement_type(var.sym.name())
+                && let Some(shown) = inline_refinement_display(def)
+            {
+                displays.insert(var.sym.name().to_string(), shown);
+            }
+        }
+    }
+    displays
+}
+
+/// `annotation` with each hidden inline-refinement type name, bare or
+/// namespace-qualified, replaced by how it reads in source, so messages and
+/// docs show `x: Int where gt(%, 0)` rather than `x: $Where-…`. A name
+/// missing from `displays` stays as it is.
+pub fn display_inline_refinements(annotation: &str, displays: &AHashMap<String, String>) -> String {
+    if !annotation.contains(WHERE_TYPE_PREFIX) {
+        return annotation.to_string();
+    }
+    let is_name_char = |c: char| c.is_alphanumeric() || matches!(c, '-' | '_' | ':' | '/' | '.');
+    let mut out = String::with_capacity(annotation.len());
+    let mut rest = annotation;
+    while let Some(start) = rest.find(WHERE_TYPE_PREFIX) {
+        // Include a `::ns/` qualifier written directly before the name.
+        let qualified_start = rest[..start]
+            .char_indices()
+            .rev()
+            .take_while(|(_, c)| is_name_char(*c))
+            .last()
+            .map_or(start, |(i, _)| i);
+        let after_prefix = start + WHERE_TYPE_PREFIX.len();
+        let end = rest[after_prefix..]
+            .find(|c: char| !(c.is_ascii_alphanumeric() || c == '-'))
+            .map_or(rest.len(), |i| after_prefix + i);
+        out.push_str(&rest[..qualified_start]);
+        match displays.get(&rest[start..end]) {
+            Some(shown) => out.push_str(shown),
+            None => out.push_str(&rest[qualified_start..end]),
+        }
+        rest = &rest[end..];
+    }
+    out.push_str(rest);
+    out
+}
+
+/// Metadata key marking a binding written `name (…)`. A call never has a
+/// space before `(`, so such a binding that hides a function is usually a
+/// mistaken call, which `hot check` reports as `binding-shadows-function`.
+pub const SPACED_PAREN_BINDING: &str = "spaced-paren-binding";
+
+/// The metadata that marks a binding written `name (…)`.
+pub fn spaced_paren_binding_meta() -> Meta {
+    Meta {
+        val: crate::val!({"spaced-paren-binding": true}),
+    }
+}
+
+/// Whether `meta` is the `name (…)` binding marker.
+pub fn is_spaced_paren_binding_meta(meta: &Meta) -> bool {
+    matches!(&meta.val, crate::val::Val::Map(map)
+        if map.len() == 1 && map.contains_key(&crate::val::Val::from(SPACED_PAREN_BINDING)))
 }
 
 /// True for the hidden function that holds a `where` predicate.

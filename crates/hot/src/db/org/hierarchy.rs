@@ -804,10 +804,11 @@ fn environment_limit(plan: Option<&Value>, overrides: Option<&Value>) -> i64 {
     Features::resolve(plan, overrides).get_i64_or("environments", -1)
 }
 fn child_limit(plan: Option<&Value>, overrides: Option<&Value>, hosted: bool) -> i64 {
-    if !hosted && plan.is_none() && overrides.is_none() {
-        return -1;
+    // A hosted account without a plan stays on the conservative defaults.
+    if hosted {
+        return Features::resolve(plan, overrides).sub_orgs();
     }
-    Features::resolve(plan, overrides).sub_orgs()
+    Features::for_account(plan, overrides).sub_orgs()
 }
 
 #[cfg(test)]

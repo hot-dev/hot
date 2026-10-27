@@ -70,6 +70,7 @@ pub fn lower_program(program: &mut Program) -> CompilerResult<()> {
             for site in registry.nested.borrow_mut().drain(..) {
                 errors.push(site.into_error(&var, namespace.source_file.as_ref()));
             }
+            registry.implicit.borrow_mut().clear();
         }
     }
 
@@ -118,6 +119,17 @@ struct SignatureRegistry {
     /// Nested implicit lambdas found while lowering the current variable.
     /// Drained by [`lower_program`], which knows the enclosing binding.
     nested: RefCell<Vec<NestedPlaceholderSite>>,
+    /// Implicit lambdas made while lowering the current variable, in the
+    /// order they were made, so a nested one can name the inner lambda.
+    implicit: RefCell<Vec<ImplicitLambdaSite>>,
+}
+
+/// An argument that became an implicit `%` lambda.
+#[derive(Clone)]
+struct ImplicitLambdaSite {
+    /// The call the argument belongs to.
+    function: String,
+    src: Option<Source>,
 }
 
 /// A call whose `Fn` argument would become an implicit `%` lambda that
@@ -126,15 +138,23 @@ struct NestedPlaceholderSite {
     function: String,
     parameter: Option<String>,
     src: Option<Source>,
+    /// The implicit lambda inside the argument.
+    inner: Option<ImplicitLambdaSite>,
 }
 
 impl NestedPlaceholderSite {
     /// `var` is the top-level binding the call was found in.
     fn into_error(self, var: &Var, namespace_file: Option<&PathBuf>) -> CompilerError {
+        let (inner_function, inner_src) = match self.inner {
+            Some(inner) => (Some(inner.function), inner.src),
+            None => (None, None),
+        };
         CompilerError::NestedPlaceholder {
             function: self.function,
             parameter: self.parameter,
             location: self.src.map(|s| error_location(&s, var, namespace_file)),
+            inner_function,
+            inner_location: inner_src.map(|s| error_location(&s, var, namespace_file)),
         }
     }
 }
@@ -209,6 +229,7 @@ impl SignatureRegistry {
             by_qualified,
             by_short_name,
             nested: RefCell::new(Vec::new()),
+            implicit: RefCell::new(Vec::new()),
         }
     }
 
@@ -343,6 +364,7 @@ fn lower_value_inner(
                 .enumerate()
                 .map(|(i, mut arg)| {
                     let param_index = i + arg_index_offset;
+                    let implicit_before = registry.implicit.borrow().len();
                     let is_fn_slot = signature_args
                         .get(param_index)
                         .and_then(|(annotation, _)| annotation.as_deref())
@@ -365,12 +387,20 @@ fn lower_value_inner(
                         if !matches!(lowered, Value::Placeholder(_))
                             && count_placeholder_lambdas(&lowered) > lambdas_before
                         {
+                            let inner = registry.implicit.borrow().get(implicit_before).cloned();
                             registry.nested.borrow_mut().push(NestedPlaceholderSite {
                                 function: function_name.clone(),
                                 parameter: signature_args
                                     .get(param_index)
                                     .map(|(_, name)| name.clone()),
                                 src: call_src.clone(),
+                                inner,
+                            });
+                        }
+                        if !matches!(lowered, Value::Placeholder(_)) {
+                            registry.implicit.borrow_mut().push(ImplicitLambdaSite {
+                                function: function_name.clone(),
+                                src: arg.src.clone(),
                             });
                         }
                         wrap_placeholder_arg(lowered)

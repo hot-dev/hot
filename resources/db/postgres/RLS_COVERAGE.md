@@ -27,7 +27,7 @@ The scope settings are trusted backend context, not customer SQL credentials.
 | `agent` | Explicit policy in migration 013 |
 | `workflow` | Explicit policy in migration 013 |
 | `build` | Explicit policy in migration 013 |
-| `call` | Exact `env_id`, validated against its run; direct policies in 017 |
+| `call` | Exact `env_id`, validated against its run; direct policies in migration 013 |
 | `event_handler` | Explicit policy in migration 013 |
 | `mcp_tool` | Explicit policy in migration 013 |
 | `webhook` | Explicit policy in migration 013 |
@@ -102,7 +102,7 @@ rewritten automatically. SQLite applies the same retained-data preflight.
 | Admission extension | Coverage |
 | --- | --- |
 | `task.reserved_compute_units`, `task.reserved_duration_ms` (014) | Existing exact task policies; root-locked admission narrows to env before claiming |
-| `run_admission` (014) | Exact env or Billing root SELECT; Billing root INSERT validates org/env/root association; no runtime UPDATE/DELETE |
+| `run_admission` (014, 015) | Exact env or Billing root SELECT; Billing root INSERT validates org/env/root association; Retention SELECT/DELETE prunes rows past the retention window; no runtime UPDATE, and no DELETE outside Retention |
 
 Run-admission backfill enumerates metadata under Membership and reads each
 account under Billing, so a schema owner without BYPASSRLS retains existing

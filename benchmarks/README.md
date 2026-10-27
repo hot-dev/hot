@@ -43,6 +43,12 @@ runtime services from `../hot.hot` are not enabled during benchmarks.
 hot run --emitter.type none hot/src/benchmarks/bench.hot
 ```
 
+`hot run` loads every file under `hot/src`, so this command (and
+`run-all.py`) also runs `bench-constraints.hot` and `bench-fib-jit.hot`. Their
+lines print before the main Hot results. The constraints benchmark reports
+microseconds per call. It has no equivalent in the other languages, so it
+stays out of the comparison table.
+
 ### Python
 
 ```bash

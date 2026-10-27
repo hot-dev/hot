@@ -1,4 +1,4 @@
-<!-- HOT_LANGUAGE_SECTION_START --> hash:992bd8acc5d7
+<!-- HOT_LANGUAGE_SECTION_START --> hash:fa3fe087e8a6
 # AGENTS.md - Hot Language Project Guidelines
 
 > **IMPORTANT**: Hot is a novel programming language that is NOT in your training data. Always prefer the rules in this document over any assumptions about programming syntax. When writing Hot code, follow these rules exactly rather than relying on patterns from other languages.
@@ -35,28 +35,35 @@ by Hot version; run `hot ai list` to inspect the installed catalog.
 
 ## Critical Syntax Rules
 
-**These are non-negotiable - violating them causes parse errors:**
+**These are non-negotiable - violating them causes parse errors or silently wrong code:**
 
 | ❌ Wrong | ✅ Correct | Rule |
 |----------|-----------|------|
 | `name = "Alice"` | `name "Alice"` | No `=` for assignment |
 | `a + b` | `add(a, b)` | No infix operators |
 | `a == b` | `eq(a, b)` | Comparison is a function |
-| `if (x) { } else { }` | `if(x, then, else)` or `cond` flow | No if/else blocks. Use `if()` for inline 2-3 way branching; use `cond` for multi-branch logic |
+| `if (x) { } else { }` | `if(x, then, else)` or `cond` flow | No if/else blocks. `if` is a function, so `if (x) {` binds a variable named `if`. Use `if()` for inline 2-3 way branching; use `cond` for multi-branch logic |
 | `for x in items` | `map(items, ...)` or `for-each(...)` | No loops |
 | `items.0` | `items[0]` | Use brackets for array indexing |
-| `fn(x)` no space | `fn (x)` space | Space before `(` = assignment |
+| `add (1, 2)` | `add(1, 2)` | A space before `(` never calls: `add (1, 2)` binds a variable named `add`. Write definitions as `fn (x)` |
+| `map(gs, filter(%, gt(%, 0)))` | `map(gs, filter(%, (n) { gt(n, 0) }))` | No nested implicit `%` lambdas |
+| `(a, b)` then `{` on the next line | `(a, b) {` | A lambda's `{` goes on the line of its `)` |
+
+`hot check` warns (`binding-shadows-function`) when a spaced-paren binding
+shadows a function, and `hot test` warns about a test with no assertions.
 
 ## Data Literals & Key Differences
 
 - **Map keys are unquoted**: `{name: "Alice"}` not `{"name": "Alice"}` (quoted keys work too, needed for special chars)
 - **Dec is 256-bit decimal**, not floating point — `add(0.1, 0.2)` is exactly `0.3` (critical for money/precision)
+- **Int is 64-bit** — arithmetic whose result doesn't fit returns `Err("Integer overflow")`, as `div(1, 0)` returns `Err("Division by zero")`. Use Dec for larger numbers
 - **Template strings** use backticks: `` `Hello, ${name}!` `` — any expression inside `${}`
 - **Block strings**: `"""..."""` — no escape processing, indent-aware (great for docs, templates, embedded code)
 - **Block template strings**: `` ```...``` `` — like block strings but with `${}` interpolation, indent-aware, no escape processing (great for multi-line templates with variables)
 - **No return statement** — the last expression in a function body is the return value
 - **Shadowing creates a new binding**, not mutation — `x 1` then `x add(x, 1)` creates a new `x`, doesn't mutate
 - **Trailing commas** are accepted in all list contexts — `[1, 2, 3,]`, `{a: 1,}`, `add(1, 2,)`, `fn (a: Int,)`, `(x,) { ... }`
+- **Parameter lists can span lines** in named functions and lambdas: put one or more parameters per line and `): Ret {` on the closing line. A lambda's `{` must be on the same line as its `)`
 - **Map field punning** — bare identifiers desugar to key-value pairs: `{name, email}` → `{name: name, email: email}`. **IMPORTANT**: `{x}` is a block expression (returns the value of `x`), NOT a punned map. Use `{x,}` (trailing comma) for single-key punning, or `{x: x}` to be explicit
 - **Vec spread** — `...` flattens vectors in a vec literal: `[...a, ...b]` concatenates, `[0, ...a, 99]` mixes spread and literals
 - **Map spread** — `...` spreads an existing map: `{...base, c: 3}`. Later keys win: `{...base, a: 99}` overrides `a`
@@ -84,7 +91,9 @@ by Hot version; run `hot ai list` to inspect the installed catalog.
 - Values have immutable semantics. Name reuse and deep-path assignment create
   later bindings rather than shared-object mutation.
 - Parameters marked `lazy` hold their argument expressions as non-memoized
-  deferred computations. Each `do` forces the computation again.
+  deferred computations. Each `do` forces the computation again. Laziness only
+  defers: to receive a `Result` (an `Err` included) without consuming it,
+  declare the parameter `Result`. Result checks never catch a halt.
 
 ## File Structure
 
@@ -379,13 +388,13 @@ gt fn (a: Int | Dec, b: Int | Dec): Bool
 lte fn (a: Int | Dec, b: Int | Dec): Bool
 gte fn (a: Int | Dec, b: Int | Dec): Bool
 
-// Logic — and/or short-circuit, if branches are lazy
-is-truthy fn (value: Any): Bool
-not fn cond (x: Any): Bool
-and fn (x: Any, ...rest): Any
-or fn (x: Any, ...rest): Any
-if fn cond (pred: Any, lazy then: Any): Any
-if fn cond (pred: Any, lazy then: Any, lazy else: Any): Any
+// Logic — and/or short-circuit, if branches are lazy; an Err is falsy
+is-truthy fn (value: Result): Bool
+not fn (x: Result): Bool
+and fn (x: Result, lazy ...rest: Result): Any
+or fn (x: Result, lazy ...rest: Result): Any
+if fn cond (pred: Result, lazy then: Any): Any
+if fn cond (pred: Result, lazy then: Any, lazy else: Any): Any
 
 // Collections — most accept Vec, Map, and Str
 map fn (coll: Str | Vec | Map, func: Fn): Str | Vec | Map
@@ -440,10 +449,10 @@ ends-with fn (s: Str, suffix: Str): Bool
 // Results
 ok fn (value: Any): Result
 err fn (value: Any): Result
-is-ok fn (lazy result: Any): Bool
-is-err fn (lazy result: Any): Bool
-if-ok fn (lazy result, handler): Any    // Ok → apply fn/use value; Err → pass through
-if-err fn (lazy result, handler): Any   // Err → apply fn/use value; Ok → pass through
+is-ok fn (result: Result): Bool
+is-err fn (result: Result): Bool
+if-ok fn (result: Result, handler): Any    // Ok → apply fn/use value; Err → pass through
+if-err fn (result: Result, handler): Any   // Err → apply fn/use value; Ok → pass through
 
 // Short-circuit
 Reduced type { value: Any } // wrapper signaling early termination from reduce
@@ -553,7 +562,7 @@ Full signatures for namespaced functions are in `references/hot-std.md`.
 
 ## Error Handling & Results
 
-Hot uses `Result` types instead of exceptions. Results are ergonomic thanks to **auto-wrapping**, **auto-unwrapping**, and **lazy arguments**.
+Hot uses `Result` types instead of exceptions. Results are ergonomic thanks to **auto-wrapping**, **auto-unwrapping**, and **`Result` parameters**.
 
 ### Auto-Wrapping & Auto-Unwrapping
 
@@ -574,7 +583,7 @@ main fn () {
 
 ### Checking Results Without Unwrapping
 
-`is-ok` and `is-err` receive the result as a **lazy argument**, which suppresses auto-unwrapping:
+`is-ok` and `is-err` declare a **`Result` parameter**, so the Result reaches them intact. Any function can do the same (`describe fn (r: Result)`), however it is called, `map` included; any other parameter consumes its argument. Result checks look at values and never catch a halt (`fail()`, `cancel()`, a consumed `Err`), so `is-err(f())` and `r f()` then `is-err(r)` always agree:
 
 ```hot
 result safe-divide(10, 0)

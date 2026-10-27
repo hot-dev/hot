@@ -838,13 +838,17 @@ pub fn generate_namespace_html_with_registry_and_aliases(
                         html.push_str(&param.name);
                         if let Some(type_ann) = &param.type_annotation {
                             html.push_str(": ");
-                            html.push_str(type_ann);
+                            html.push_str(&html_escape(type_ann));
                         }
                     }
                     html.push(')');
+                    if let Some(precondition) = &sig.precondition {
+                        html.push_str(" where ");
+                        html.push_str(&html_escape(precondition));
+                    }
                     if let Some(ret) = &sig.return_type {
                         html.push_str(": ");
-                        html.push_str(ret);
+                        html.push_str(&html_escape(ret));
                     }
                 }
                 html.push_str("</code></pre>\n");
@@ -966,40 +970,50 @@ pub fn generate_namespace_html_with_registry_and_aliases(
                         html.push_str(&param.name);
                         if let Some(type_ann) = &param.type_annotation {
                             html.push_str(": ");
-                            html.push_str(type_ann);
+                            html.push_str(&html_escape(type_ann));
                         }
                     }
                     html.push(')');
+                    if let Some(precondition) = &ctor.precondition {
+                        html.push_str(" where ");
+                        html.push_str(&html_escape(precondition));
+                    }
                     if let Some(ret) = &ctor.return_type {
                         html.push_str(": ");
-                        html.push_str(ret);
+                        html.push_str(&html_escape(ret));
                     }
                 }
                 html.push_str("</code></pre>\n");
             }
 
+            let refinement = typ
+                .refinement
+                .as_ref()
+                .map(|r| format!(" where {}", html_escape(r)))
+                .unwrap_or_default();
             if let Some(type_alias) = &typ.type_alias {
                 html.push_str("<pre><code class=\"language-hot\">");
                 html.push_str(&format!(
-                    "{} type {}",
+                    "{} type {}{}",
                     html_escape(&typ.name),
-                    html_escape(type_alias)
+                    html_escape(type_alias),
+                    refinement
                 ));
                 html.push_str("</code></pre>\n");
             } else if !typ.fields.is_empty() {
                 html.push_str("<pre><code class=\"language-hot\">");
-                html.push_str(&format!("{} type {{\n", typ.name));
+                html.push_str(&format!("{} type {{\n", html_escape(&typ.name)));
                 let field_count = typ.fields.len();
                 for (i, field) in typ.fields.iter().enumerate() {
                     let type_ann = field
                         .type_annotation
                         .as_ref()
-                        .map(|t| format!(": {}", t))
+                        .map(|t| format!(": {}", html_escape(t)))
                         .unwrap_or_default();
                     let comma = if i < field_count - 1 { "," } else { "" };
                     html.push_str(&format!("    {}{}{}\n", field.name, type_ann, comma));
                 }
-                html.push_str("}</code></pre>\n");
+                html.push_str(&format!("}}{}</code></pre>\n", refinement));
             }
 
             if let Some(doc) = &typ.doc {
@@ -1731,6 +1745,7 @@ chat-with-tools(
                 fields: Vec::new(),
                 constructors: Vec::new(),
                 type_alias: None,
+                refinement: None,
                 alias_of: None,
             }],
             ctx: Some(CtxRequirements {

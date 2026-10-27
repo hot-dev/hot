@@ -1,0 +1,21 @@
+::hot::test::constraint-lookalikes ns
+meta {
+    doc: """A namespace whose `gt` means "at most", for `where` checks that must call it instead of the standard `gt`."""
+}
+
+gt fn (a: Int, b: Int): Bool {
+    lte(a, b)
+}
+
+// `gt` here is this namespace's function, not `::hot::cmp/gt`.
+AtMostFive type Int where gt(%, 5)
+
+dynamic fn (value: Any): Any {
+    value
+}
+
+test-a-local-lookalike-keeps-its-meaning
+meta ["test"] fn () {
+    assert-eq(3, AtMostFive(dynamic(3)), "3 is at most 5")
+    assert(is-err(AtMostFive(dynamic(9))), "9 isn't")
+}

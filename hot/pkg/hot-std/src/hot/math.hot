@@ -59,7 +59,8 @@ add
 meta {
     core: true,
     doc: """
-    Add `x` and `y`.
+    Add `x` and `y`. An Int sum that doesn't fit in an Int is
+    `Err("Integer overflow")`.
 
     **Example**
 
@@ -79,7 +80,8 @@ sub
 meta {
     core: true,
     doc: """
-    Subtract `y` from `x`.
+    Subtract `y` from `x`. An Int difference that doesn't fit in an Int is
+    `Err("Integer overflow")`.
 
     **Example**
 
@@ -99,7 +101,8 @@ mul
 meta {
     core: true,
     doc: """
-    Multiply `x` by `y`.
+    Multiply `x` by `y`. An Int product that doesn't fit in an Int is
+    `Err("Integer overflow")`.
 
     **Example**
 
@@ -119,7 +122,7 @@ div
 meta {
     core: true,
     doc: """
-    Divide `x` by `y`.
+    Divide `x` by `y`. Dividing by zero is `Err("Division by zero")`.
 
     **Example**
 
@@ -139,7 +142,7 @@ mod
 meta {
     core: true,
     doc: """
-    Remainder of `x` divided by `y`.
+    Remainder of `x` divided by `y`. A zero `y` is `Err("Modulo by zero")`.
 
     **Example**
 
@@ -160,7 +163,8 @@ pow
 meta {
     core: true,
     doc: """
-    Raise `base` to the power `exp`.
+    Raise `base` to the power `exp`. An Int power that doesn't fit in an Int
+    is `Err("Integer overflow")`.
 
     **Example**
 
@@ -181,7 +185,8 @@ abs
 meta {
     core: true,
     doc: """
-    Absolute value of `x`.
+    Absolute value of `x`. The smallest Int has no Int absolute value:
+    `abs` of it is `Err("Integer overflow")`.
 
     **Example**
 
@@ -241,7 +246,8 @@ ceil
 meta {
     core: true,
     doc: """
-    Round `x` up to the nearest integer.
+    Round `x` up to the nearest integer. A Dec too large for an Int gives
+    `Err("Integer overflow")`.
 
     **Example**
 
@@ -261,7 +267,8 @@ floor
 meta {
     core: true,
     doc: """
-    Round `x` down to the nearest integer.
+    Round `x` down to the nearest integer. A Dec too large for an Int gives
+    `Err("Integer overflow")`.
 
     **Example**
 
@@ -282,6 +289,7 @@ meta {
     core: true,
     doc: """
     Round `x` to the nearest integer. Halfway values round away from zero.
+    A Dec too large for an Int gives `Err("Integer overflow")`.
 
     **Example**
 

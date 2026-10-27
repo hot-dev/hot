@@ -273,14 +273,26 @@ See [Retries](/docs/retries) for retry fields, backoff behavior, and platform li
 
 ## Context Requirements
 
-The `ctx` field declares context variables (secrets and configuration) that a namespace requires:
+The `ctx` field declares context variables (secrets and configuration) that a function requires:
 
 ```hot
-::myapp::api ns
+openai-key
 meta {ctx: {
   "openai.api.key": {required: true},
   "rate.limit": {required: false, default: 1000, secret: false}
 }}
+fn (): Str {
+  ::hot::ctx/get("openai.api.key")
+}
+```
+
+`hot run` and `hot eval` refuse to start while a required key of a function they can reach is unset. `hot check` reports it as a `missing-context` warning instead, so projects can be checked without their secrets. Pass `--check.deny-warnings` to make it fail.
+
+A namespace can declare `ctx` too. There it documents the keys the namespace's functions use, and generated docs list them, but nothing checks them. Declare a key on the functions that read it to have it checked.
+
+```hot
+::myapp::api ns
+meta {ctx: {"openai.api.key": {required: true}}}
 ```
 
 ### Per-Key Properties
@@ -290,8 +302,6 @@ meta {ctx: {
 | `required` | bool | `true` | Must be provided at runtime |
 | `default` | any | none | Value if not provided (implies `required: false`) |
 | `secret` | bool | `true` | If true, value will be masked in call logs |
-
-`hot run` and `hot eval` refuse to start while a required key is unset. `hot check` reports it as a `missing-context` warning instead, so projects can be checked without their secrets. Pass `--check.deny-warnings` to make it fail.
 
 ### Examples
 

@@ -3,7 +3,7 @@
 use hot::val::Val;
 
 use crate::cli::GlobalOptions;
-use crate::command::deploy::{is_ad_hoc_default_db, setup_live_build_for_dev_with_context};
+use crate::command::deploy::{runs_without_database, setup_live_build_for_dev_with_context};
 use crate::conf::{
     create_emitter, create_event_publisher, get_merged_src_paths, get_merged_test_paths,
 };
@@ -168,13 +168,13 @@ pub(crate) async fn run_run(
     // Reuse live-build compilation for runtime metadata preflight before any
     // live-build records are mutated. None means an explicit empty key set,
     // not structural-only validation.
-    let ad_hoc_default_db = is_ad_hoc_default_db(conf);
+    let ad_hoc_default_db = runs_without_database(conf);
     let available_context_keys = context_storage
         .as_ref()
         .map(|storage| storage.keys().cloned().collect())
         .unwrap_or_default();
     // A fresh checkout's local SQLite database is created on first use.
-    crate::command::init::initialize_missing_local_database(conf, providers).await?;
+    crate::command::init::prepare_local_database(conf, providers).await?;
     setup_live_build_for_dev_with_context(
         conf,
         global_options,

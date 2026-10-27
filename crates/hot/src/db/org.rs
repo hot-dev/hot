@@ -669,7 +669,7 @@ impl OrgUser {
                     let limit=if plan.is_none() && overrides.is_none(){-1}else{
                         let plan=plan.map(|s|serde_json::from_str(&s)).transpose().map_err(|_|OrgError::Invalid("invalid account features".into()))?;
                         let overrides=overrides.map(|s|serde_json::from_str(&s)).transpose().map_err(|_|OrgError::Invalid("invalid account features".into()))?;
-                        super::Features::resolve(plan.as_ref(),overrides.as_ref()).team_members()
+                        super::Features::for_account(plan.as_ref(),overrides.as_ref()).team_members()
                     };
                     let seats:i64=sqlx::query_scalar("SELECT (SELECT COUNT(*) FROM org_user WHERE org_id=$1 AND active=true)+(SELECT COUNT(DISTINCT lower(email)) FROM invite WHERE org_id=$1 AND active=true AND invite_status_id=1 AND expires_at>$2)")
                         .bind(root_id).bind(Utc::now()).fetch_one(&mut *tx).await?;

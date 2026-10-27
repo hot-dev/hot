@@ -1,6 +1,6 @@
 # Hot Error Handling Reference
 
-Hot makes error handling ergonomic through automatic wrapping, automatic unwrapping, and lazy argument evaluation.
+Hot makes error handling ergonomic through automatic wrapping, automatic unwrapping, and `Result` parameters.
 
 ## The Result Type
 
@@ -58,12 +58,13 @@ interpolation, and ordinary field or index access consume it:
 
 ```hot
 result fetch-user(id) // Result remains intact
-valid is-ok(result)   // lazy inspection preserves the tag
+valid is-ok(result)   // inspects the Result without consuming it
 page render(result)   // Ok unwraps; Err propagates here
 ```
 
-Use Result-aware lazy functions or `match` when code needs to inspect the
-tagged value rather than trigger propagation. See
+Use the Result checks (`is-ok`, `is-err`, `if-ok`, `if-err`), a parameter
+declared `Result`, or `match` when code needs to inspect the tagged value
+rather than trigger propagation. See
 [Pattern Matching on Results](#pattern-matching-on-results) for the match-arm
 payload rule.
 
@@ -79,7 +80,28 @@ if(is-ok(result),
     "Cannot divide by zero")
 ```
 
-These functions receive the Result as a **lazy argument**, which prevents auto-unwrapping during the check.
+These functions declare a `Result` parameter, so the Result reaches them intact. They check the value their argument produces and never catch a halt: `fail()`, `cancel()`, or an `Err` consumed while computing the argument halts as anywhere else. So `is-err(f())` and binding `r f()` then `is-err(r)` always agree.
+
+## Accepting a Result
+
+A parameter declared `Result` receives its argument as it is, an `Err`
+included. Any other parameter consumes it: `Ok` unwraps, `Err` halts before the
+body runs. This holds however the function is called, directly, through `map`
+and other higher-order functions, or with `call`:
+
+```hot
+describe fn (r: Result): Str {
+    if(is-err(r), "failed", "succeeded")
+}
+
+describe(err("boom"))                                // "failed"
+results map(items, process-item(%), OnErr.Preserve)  // Errs stay as values
+labels map(results, describe)                        // per-item labels
+map(results, (r: Result) { describe(r) })            // a lambda declares it too
+```
+
+If a halt fires when a preserved `Result.Err` reaches a function, declare the
+receiving parameter `Result`.
 
 ## Pattern Matching on Results
 
@@ -107,19 +129,22 @@ the payload.
 ## Lazy Arguments
 
 Ordinary arguments are eager. When a parameter is marked `lazy`, its argument
-expression is deferred until the function forces it with `do`. This enables:
+expression is deferred until the function forces it with `do`, exactly as if it
+were written there. Laziness changes only when an argument runs, never how a
+Result is handled: an `Err` value comes back from `do` as a value, and an `Err`
+consumed inside it halts. It enables:
 
-1. **Safe Result inspection** — `is-ok` and `is-err` can receive Results without triggering auto-unwrap
-2. **Short-circuit evaluation** — `and` and `or` don't evaluate unused branches
-3. **Deferred execution** — Expensive computations only run when needed
+1. **Short-circuit evaluation** — `if`, `and`, and `or` don't evaluate unused branches
+2. **Deferred execution** — Expensive computations only run when needed
 
 ### How if() Works
 
 The `if` function declares lazy parameters for its branches:
 
 ```hot
-// 'then' and 'else' are lazy parameters - only the selected argument is evaluated
-if fn cond (pred: Any, lazy then: Any, lazy else: Any): Any {
+// 'then' and 'else' are lazy parameters - only the selected argument is evaluated.
+// 'pred' is a Result parameter, so an Err condition is falsy.
+if fn cond (pred: Result, lazy then: Any, lazy else: Any): Any {
     pred => { do then }
     => { do else }
 }
@@ -134,8 +159,8 @@ maybe-run fn (should-run: Bool, lazy action: Any): Any {
 ```
 
 Lazy arguments are not memoized. Each `do` forces the deferred computation
-again inside the lazy context and preserves any Result it produces. Bind the
-forced result before reusing it when evaluation is expensive or effectful.
+again and returns any Result it produces. Bind the forced result before reusing
+it when evaluation is expensive or effectful.
 
 ### Short-Circuit Evaluation
 

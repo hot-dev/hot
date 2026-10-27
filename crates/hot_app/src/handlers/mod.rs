@@ -651,7 +651,7 @@ pub async fn set_default_org_env_cookies(
 
     // Set organization cookie (365d, matching the claim-handle/verify paths)
     let mut updated_cookies = cookies.add(crate::auth::build_cookie(
-        crate::auth::CURRENT_ORG_COOKIE_NAME,
+        crate::auth::current_org_cookie_name(),
         earliest_org.org_id.to_string(),
         time::Duration::days(365),
     ));
@@ -659,7 +659,7 @@ pub async fn set_default_org_env_cookies(
     // Set environment cookie if available
     if let Some(earliest_env) = org_envs.first() {
         updated_cookies = updated_cookies.add(crate::auth::build_cookie(
-            crate::auth::CURRENT_ENV_COOKIE_NAME,
+            crate::auth::current_env_cookie_name(),
             earliest_env.env_id.to_string(),
             time::Duration::days(365),
         ));
@@ -721,23 +721,23 @@ pub async fn switch_org_handler(
         .await
         .map_err(|_| Html("Unable to select environment".to_string()))?;
     let mut cookies = cookies.add(crate::auth::build_cookie(
-        crate::auth::CURRENT_ORG_COOKIE_NAME,
+        crate::auth::current_org_cookie_name(),
         org_id.to_string(),
         time::Duration::days(30),
     ));
     let redirect = if let Some(env) = envs.first().filter(|_| org.is_admitting()) {
         cookies = cookies.add(crate::auth::build_cookie(
-            crate::auth::CURRENT_ENV_COOKIE_NAME,
+            crate::auth::current_env_cookie_name(),
             env.env_id.to_string(),
             time::Duration::days(30),
         ));
         format!("/dashboard?org_id={}&env_id={}", org_id, env.env_id)
     } else {
-        cookies = cookies.remove(
-            axum_extra::extract::cookie::Cookie::build((crate::auth::CURRENT_ENV_COOKIE_NAME, ""))
-                .path("/")
-                .build(),
-        );
+        // A `__Host-` cookie is only cleared by a removal that is `Secure`,
+        // as `build_removal_cookie` makes it outside local development.
+        cookies = cookies.add(crate::auth::build_removal_cookie(
+            crate::auth::current_env_cookie_name(),
+        ));
         format!("/@{}", org.slug)
     };
     Ok((cookies, Redirect::to(&redirect)))
@@ -763,7 +763,7 @@ pub async fn switch_env_handler(
     // Set the environment cookie
     let new_cookies = cookies.add(
         axum_extra::extract::cookie::Cookie::build((
-            crate::auth::CURRENT_ENV_COOKIE_NAME,
+            crate::auth::current_env_cookie_name(),
             env_id.to_string(),
         ))
         .path("/")
