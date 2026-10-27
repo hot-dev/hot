@@ -58,6 +58,20 @@ Point type {
 alice-point Point({x: 10, y: 20})
 // @end: type-as-constructor
 
+// @doc: type-named-arguments
+Account type {
+  owner: Str,
+  plan: Str,
+  seats: Int?
+}
+
+// Name each field. A field that allows null can be left out.
+team-account Account(owner: "Ada", plan: "team")
+
+// The same value, built from a Map
+map-account Account({owner: "Ada", plan: "team"})
+// @end: type-named-arguments
+
 // @doc: type-custom-constructor
 // Struct definition + constructor function in single declaration
 Point2D type {
@@ -249,6 +263,18 @@ meta ["test"] fn () {
 // alice-point.x → 10
 // alice-point.y → 20
 // @end: type-as-constructor
+
+test-named-arguments
+meta ["test"] fn () {
+  assert-eq(map-account, team-account, "named and Map forms build the same value")
+  assert-eq("Ada", team-account.owner, "account owner")
+  assert(is-null(team-account.seats), "seats left out")
+}
+// @result: type-named-arguments
+// team-account.owner          → "Ada"
+// team-account.seats          → null
+// eq(team-account, map-account) → true
+// @end: type-named-arguments
 
 test-custom-constructor
 meta ["test"] fn () {

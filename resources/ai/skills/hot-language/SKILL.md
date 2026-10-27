@@ -195,8 +195,9 @@ process fn (data: Map): Map {
 ### Types
 
 ```hot
-// Struct type
+// Struct type: construct by naming the fields, or from one Map
 User type { id: Str, email: Str, active: Bool }
+user User(id: "1", email: "a@b.com", active: true)
 user User({id: "1", email: "a@b.com", active: true})
 
 // Enum type — `match` must cover every variant or use a `_` default arm

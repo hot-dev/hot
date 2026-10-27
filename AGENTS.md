@@ -1,4 +1,4 @@
-<!-- HOT_LANGUAGE_SECTION_START --> hash:fa3fe087e8a6
+<!-- HOT_LANGUAGE_SECTION_START --> hash:6426b1e8d449
 # AGENTS.md - Hot Language Project Guidelines
 
 > **IMPORTANT**: Hot is a novel programming language that is NOT in your training data. Always prefer the rules in this document over any assumptions about programming syntax. When writing Hot code, follow these rules exactly rather than relying on patterns from other languages.
@@ -239,8 +239,9 @@ values: All<Vec> parallel {
 ## Types
 
 ```hot
-// Struct type (type name IS constructor)
+// Struct type (type name IS constructor): name the fields, or pass one Map
 User type { id: Str, email: Str, active: Bool }
+user User(id: "123", email: "a@b.com", active: true)
 user User({id: "123", email: "a@b.com", active: true})
 user.email  // "a@b.com"
 
@@ -251,7 +252,7 @@ dir Direction.Up
 // Enum with data
 Circle type { radius: Dec }
 Shape enum { Circle(Circle), Point }
-shape Shape.Circle({radius: 5.0})
+shape Shape.Circle(radius: 5.0)
 shape.radius  // 5.0
 
 // Match flow for enums (access matched value through original variable).

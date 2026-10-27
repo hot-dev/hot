@@ -13,12 +13,20 @@ User type {
     active: Bool
 }
 
-// Create instance (type name IS the constructor)
-alice User({
+// Create instance (type name IS the constructor): name each field...
+alice User(
     id: "user-1",
     email: "alice@example.com",
     name: "Alice",
     active: true,
+)
+
+// ...or pass one Map, which can be built at runtime
+bob User({
+    id: "user-2",
+    email: "bob@example.com",
+    name: "Bob",
+    active: false,
 })
 
 // Access fields

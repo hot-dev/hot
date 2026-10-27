@@ -422,6 +422,7 @@ impl Parser {
                 lazy: false,
                 spread: false,
                 src: None,
+                name: None,
             }],
             result_path: None,
             src: None,
@@ -5267,8 +5268,11 @@ impl Parser {
                 break;
             }
 
+            // Named argument: `name: value`
+            let (name, name_src) = self.parse_arg_name(&args)?.unzip();
+
             // Check for spread operator (...)
-            let spread = if self.check(&TokenType::DotDotDot) {
+            let spread = if name.is_none() && self.check(&TokenType::DotDotDot) {
                 self.next(); // consume "..."
                 true
             } else {
@@ -5279,6 +5283,7 @@ impl Parser {
             let arg_value = self.parse_value()?;
 
             let arg_src = match &arg_value {
+                _ if name_src.is_some() => name_src,
                 Value::Ref(Ref::Var(var_ref)) => var_ref.src.clone(),
                 Value::Ref(Ref::Ns(ns_ref)) => ns_ref.src.clone(),
                 Value::FnCall(fn_call) => fn_call.src.clone(),
@@ -5298,6 +5303,7 @@ impl Parser {
                 spread,
                 value: arg_value,
                 src: arg_src,
+                name,
             });
 
             while self.check(&TokenType::Newline) {
@@ -5361,8 +5367,13 @@ impl Parser {
                 break;
             }
 
+            // Named argument: `name: value`
+            let (name, name_src) = self.parse_arg_name(&args)?.unzip();
+
             // Check for lazy argument
-            let lazy = if let Some(token) = self.peek() {
+            let lazy = if let Some(token) = self.peek()
+                && name.is_none()
+            {
                 if let TokenType::Identifier(name) = &token.token_type {
                     if name == "lazy" {
                         self.next(); // consume "lazy"
@@ -5378,7 +5389,7 @@ impl Parser {
             };
 
             // Check for spread operator (...)
-            let spread = if self.check(&TokenType::DotDotDot) {
+            let spread = if name.is_none() && self.check(&TokenType::DotDotDot) {
                 self.next(); // consume "..."
                 true
             } else {
@@ -5389,6 +5400,7 @@ impl Parser {
             let arg_value = self.parse_value()?;
 
             let arg_src = match &arg_value {
+                _ if name_src.is_some() => name_src,
                 Value::Ref(Ref::Var(var_ref)) => var_ref.src.clone(),
                 Value::Ref(Ref::Ns(ns_ref)) => ns_ref.src.clone(),
                 Value::FnCall(fn_call) => fn_call.src.clone(),
@@ -5408,6 +5420,7 @@ impl Parser {
                 lazy,
                 spread,
                 src: arg_src,
+                name,
             });
 
             // Skip newlines after argument
@@ -6767,6 +6780,7 @@ impl Parser {
                 lazy: false,
                 spread: false,
                 src: None,
+                name: None,
             }],
             result_path: None,
             src: Some(clause.src.clone()),
@@ -7018,6 +7032,53 @@ impl Parser {
         } else {
             Err(self.error("Expected identifier, got EOF"))
         }
+    }
+
+    /// Consume a named argument's `name:` and return the name with its span,
+    /// or `None` when the next argument is positional. `args` holds the call's
+    /// earlier arguments: a positional argument can't follow a named one, and
+    /// a name can't repeat.
+    fn parse_arg_name(&mut self, args: &[FnCallArg]) -> ParseResult<Option<(String, Source)>> {
+        let Some(token) = self.peek().cloned() else {
+            return Ok(None);
+        };
+        let name = match &token.token_type {
+            TokenType::Identifier(name) => Some(name.clone()),
+            TokenType::Keyword(kw) => Some(kw.as_str().to_string()),
+            _ => None,
+        }
+        .filter(|_| {
+            self.peek_n(1)
+                .is_some_and(|t| matches!(t.token_type, TokenType::Colon))
+        });
+        let Some(name) = name else {
+            if args.iter().any(|arg| arg.name.is_some()) {
+                return Err(self.error_at(
+                    &token,
+                    "A positional argument can't follow a named argument",
+                ));
+            }
+            return Ok(None);
+        };
+        if args
+            .iter()
+            .any(|arg| arg.name.as_deref() == Some(name.as_str()))
+        {
+            return Err(self.error_at(&token, &format!("`{}` is named twice", name)));
+        }
+        self.next(); // the name
+        self.next(); // ':'
+        while self.check(&TokenType::Newline) {
+            self.next();
+        }
+        let src = Source::new(
+            self.file_path.as_ref().map(|p| p.display().to_string()),
+            token.line as usize,
+            token.column as usize,
+            token.position,
+            token.length,
+        );
+        Ok(Some((name, src)))
     }
 
     fn error(&mut self, message: &str) -> ParseError {

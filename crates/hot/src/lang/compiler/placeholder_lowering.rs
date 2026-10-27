@@ -23,6 +23,7 @@
 
 use crate::lang::ast::*;
 use crate::lang::compiler::core_registry::CoreVariableRegistry;
+use crate::lang::compiler::named_args::{RecordTypes, into_map_call};
 use crate::lang::errors::{CompilerError, CompilerErrors, CompilerResult, ErrorLocation};
 use crate::lang::parser::{contains_placeholder, count_placeholder_lambdas, wrap_placeholder_arg};
 use crate::val::Val;
@@ -69,6 +70,15 @@ pub fn lower_program(program: &mut Program) -> CompilerResult<()> {
             *slot = lowered;
             for site in registry.nested.borrow_mut().drain(..) {
                 errors.push(site.into_error(&var, namespace.source_file.as_ref()));
+            }
+            for site in registry.records.sites.borrow_mut().drain(..) {
+                errors.push(CompilerError::NamedArgument {
+                    callee: site.callee,
+                    message: site.message,
+                    location: site
+                        .src
+                        .map(|s| error_location(&s, &var, namespace.source_file.as_ref())),
+                });
             }
             registry.implicit.borrow_mut().clear();
         }
@@ -122,6 +132,8 @@ struct SignatureRegistry {
     /// Implicit lambdas made while lowering the current variable, in the
     /// order they were made, so a nested one can name the inner lambda.
     implicit: RefCell<Vec<ImplicitLambdaSite>>,
+    /// Record types, for calls with named arguments.
+    records: RecordTypes,
 }
 
 /// An argument that became an implicit `%` lambda.
@@ -230,6 +242,7 @@ impl SignatureRegistry {
             by_short_name,
             nested: RefCell::new(Vec::new()),
             implicit: RefCell::new(Vec::new()),
+            records: RecordTypes::build(program),
         }
     }
 
@@ -333,26 +346,47 @@ fn lower_value_inner(
 ) -> Value {
     match value {
         Value::FnCall(mut call) => {
+            // A named call (`User(name: "Ada")`) checks its names against the
+            // callee's fields. Each argument's field is its parameter slot,
+            // and the call becomes its Map form once its arguments are lowered.
+            let named_fields = if call.args.iter().any(|arg| arg.name.is_some()) {
+                let piped = arg_index_offset > 0;
+                match registry
+                    .records
+                    .named_fields(&call, piped, &current_ns.to_string())
+                {
+                    Ok(fields) => Some(fields),
+                    Err(site) => {
+                        registry.records.sites.borrow_mut().push(site);
+                        None
+                    }
+                }
+            } else {
+                None
+            };
             // Effective arity for signature lookup includes the piped LHS, if any.
             let effective_arity = call.args.len() + arg_index_offset;
             // (type annotation, parameter name) per declared parameter.
-            let signature_args: Vec<(Option<String>, String)> = registry
-                .lookup(&call.function, effective_arity, current_ns, aliases)
-                .map(|args| {
-                    args.args
-                        .iter()
-                        .map(|a| (a.type_annotation.clone(), a.var.sym.name().to_string()))
-                        .collect()
-                })
-                .unwrap_or_else(|| {
-                    // A `where` predicate's wrapper takes a function even when
-                    // hot-std isn't loaded to declare it.
-                    if crate::lang::compiler::refinements::is_predicate_call(&call.function) {
-                        vec![(Some("Fn".to_string()), "f".to_string())]
-                    } else {
-                        Vec::new()
-                    }
-                });
+            let signature_args: Vec<(Option<String>, String)> = match &named_fields {
+                Some(fields) => fields.clone(),
+                None => registry
+                    .lookup(&call.function, effective_arity, current_ns, aliases)
+                    .map(|args| {
+                        args.args
+                            .iter()
+                            .map(|a| (a.type_annotation.clone(), a.var.sym.name().to_string()))
+                            .collect()
+                    })
+                    .unwrap_or_else(|| {
+                        // A `where` predicate's wrapper takes a function even when
+                        // hot-std isn't loaded to declare it.
+                        if crate::lang::compiler::refinements::is_predicate_call(&call.function) {
+                            vec![(Some("Fn".to_string()), "f".to_string())]
+                        } else {
+                            Vec::new()
+                        }
+                    }),
+            };
 
             call.function = Box::new(lower_value(*call.function, current_ns, aliases, registry));
             let function_name = callee_name(&call.function);
@@ -411,11 +445,19 @@ fn lower_value_inner(
                 })
                 .collect();
             call.args = new_args;
+            if named_fields.is_some() {
+                return Value::FnCall(into_map_call(call));
+            }
             Value::FnCall(call)
         }
 
         Value::Flow(mut flow) => {
             let is_pipe = matches!(flow.flow_type, FlowType::Pipe);
+            // Types and aliases the block declares can be named in its calls.
+            let pushed = registry
+                .records
+                .enter_block(&flow.expressions, &flow.aliases);
+            let mark = registry.records.shadow([]);
             flow.expressions = flow
                 .expressions
                 .into_iter()
@@ -425,9 +467,23 @@ fn lower_value_inner(
                     // implicit leading arg (the previous result). Account
                     // for that when looking up the callee signature.
                     let offset = if is_pipe && i > 0 { 1 } else { 0 };
-                    lower_value_inner(e, current_ns, aliases, registry, offset)
+                    let lowered = lower_value_inner(e, current_ns, aliases, registry, offset);
+                    // A local shadows a type of its name from the next
+                    // expression on. Functions and types a body defines don't.
+                    if let Value::MultipleValues(binding) = &lowered
+                        && let [Value::Ref(Ref::Var(name)), value] = binding.as_slice()
+                        && !matches!(
+                            value,
+                            Value::Fn(_) | Value::TypeDef(_) | Value::TypeImplementation(_)
+                        )
+                    {
+                        registry.records.shadow([name.var.sym.name().to_string()]);
+                    }
+                    lowered
                 })
                 .collect();
+            registry.records.unshadow(mark);
+            registry.records.leave_block(pushed);
             Value::Flow(flow)
         }
 
@@ -438,7 +494,17 @@ fn lower_value_inner(
             let new_defs = fn_defs
                 .into_iter()
                 .map(|mut fn_def| {
+                    // Lazy parameters hold thunks, which don't shadow.
+                    let mark = registry.records.shadow(
+                        fn_def
+                            .args
+                            .args
+                            .iter()
+                            .filter(|arg| !arg.lazy)
+                            .map(|arg| arg.var.sym.name().to_string()),
+                    );
                     fn_def.body = lower_value(fn_def.body, current_ns, aliases, registry);
+                    registry.records.unshadow(mark);
                     fn_def
                 })
                 .collect();
@@ -446,7 +512,15 @@ fn lower_value_inner(
         }
 
         Value::Lambda(mut lambda) => {
+            let mark = registry.records.shadow(
+                lambda
+                    .args
+                    .args
+                    .iter()
+                    .map(|arg| arg.var.sym.name().to_string()),
+            );
             lambda.body = Box::new(lower_value(*lambda.body, current_ns, aliases, registry));
+            registry.records.unshadow(mark);
             Value::Lambda(lambda)
         }
 
