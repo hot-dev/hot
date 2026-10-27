@@ -238,8 +238,9 @@ values: All<Vec> parallel {
 ## Types
 
 ```hot
-// Struct type (type name IS constructor)
+// Struct type (type name IS constructor): name the fields, or pass one Map
 User type { id: Str, email: Str, active: Bool }
+user User(id: "123", email: "a@b.com", active: true)
 user User({id: "123", email: "a@b.com", active: true})
 user.email  // "a@b.com"
 
@@ -250,7 +251,7 @@ dir Direction.Up
 // Enum with data
 Circle type { radius: Dec }
 Shape enum { Circle(Circle), Point }
-shape Shape.Circle({radius: 5.0})
+shape Shape.Circle(radius: 5.0)
 shape.radius  // 5.0
 
 // Match flow for enums (access matched value through original variable).

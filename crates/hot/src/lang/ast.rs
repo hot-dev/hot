@@ -1057,6 +1057,10 @@ pub struct FnCallArg {
     /// If true, the value should be spread as multiple arguments (e.g., `...vec`)
     #[serde(default)]
     pub spread: bool,
+    /// The name of a named argument, `a` in `User(a: 1)`. Named arguments
+    /// are lowered before compilation (see `compiler::named_args`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
     pub src: Option<Source>,
 }
 
@@ -1662,6 +1666,9 @@ impl Display for FnCallArg {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         if self.spread {
             write!(f, "...")?;
+        }
+        if let Some(name) = &self.name {
+            write!(f, "{}: ", name)?;
         }
         write!(f, "{}", self.value)
     }

@@ -322,6 +322,15 @@ pub enum CompilerError {
         inner_function: Option<String>,
         inner_location: Option<ErrorLocation>,
     },
+    /// A call with named arguments, `T(a: 1, b: 2)`, that doesn't fit its
+    /// callee: a name that isn't a field, a missing required field, a name
+    /// given twice, or a callee that takes no named arguments.
+    NamedArgument {
+        /// The callee as written, such as `User` or `Shape.Circle`.
+        callee: String,
+        message: String,
+        location: Option<ErrorLocation>,
+    },
     /// A binding or return type annotation names a type the value can never
     /// be (e.g. `x: Int "hello"`). This is a *warning*: annotations are not
     /// enforced at runtime, but a definite mismatch is always a bug — either
@@ -1178,6 +1187,28 @@ impl fmt::Display for CompilerError {
                     write!(f, "{}", body)
                 }
             }
+            CompilerError::NamedArgument {
+                callee,
+                message,
+                location,
+            } => {
+                if let Some(loc) = location {
+                    write!(
+                        f,
+                        "{}:{}:{}: {}: {}",
+                        loc.file
+                            .as_ref()
+                            .map(|p| p.display().to_string())
+                            .unwrap_or_else(|| "<source>".to_string()),
+                        loc.line,
+                        loc.column,
+                        callee,
+                        message
+                    )
+                } else {
+                    write!(f, "{}: {}", callee, message)
+                }
+            }
             CompilerError::AnnotationMismatch {
                 name,
                 annotation,
@@ -1337,6 +1368,7 @@ impl CompilerErrors {
             CompilerError::UnknownField { location, .. } => location.as_ref(),
             CompilerError::MissingContext { location, .. } => location.as_ref(),
             CompilerError::NestedPlaceholder { location, .. } => location.as_ref(),
+            CompilerError::NamedArgument { location, .. } => location.as_ref(),
             CompilerError::Constraint { location, .. } => location.as_ref(),
             CompilerError::AnnotationMismatch { location, .. } => location.as_ref(),
         }?;
@@ -1889,6 +1921,18 @@ impl CompilerErrors {
                 report =
                     report.with_help(nested_placeholder_help(inner_function.as_deref(), function));
             }
+            CompilerError::NamedArgument {
+                callee, message, ..
+            } => {
+                report = report
+                    .with_code("named-argument")
+                    .with_message(format!("Named arguments to {}", callee))
+                    .with_label(
+                        Label::new((source_name.as_str(), span_start..span_end))
+                            .with_message(message)
+                            .with_color(label_color),
+                    );
+            }
             CompilerError::AnnotationMismatch {
                 name,
                 annotation,
@@ -1985,6 +2029,7 @@ impl CompilerError {
             CompilerError::UnknownField { location, .. } => location.as_ref(),
             CompilerError::MissingContext { location, .. } => location.as_ref(),
             CompilerError::NestedPlaceholder { location, .. } => location.as_ref(),
+            CompilerError::NamedArgument { location, .. } => location.as_ref(),
             CompilerError::Constraint { location, .. } => location.as_ref(),
             CompilerError::AnnotationMismatch { location, .. } => location.as_ref(),
         }
@@ -2045,6 +2090,7 @@ impl CompilerError {
             CompilerError::UnknownField { .. } => "unknown-field",
             CompilerError::MissingContext { .. } => "missing-context",
             CompilerError::NestedPlaceholder { .. } => "nested-placeholder",
+            CompilerError::NamedArgument { .. } => "named-argument",
             CompilerError::Constraint { code, .. } => code,
             CompilerError::AnnotationMismatch { .. } => "annotation-mismatch",
         }
@@ -2408,6 +2454,15 @@ mod diagnostic_tests {
             }
             .code(),
             "arity-mismatch"
+        );
+        assert_eq!(
+            CompilerError::NamedArgument {
+                callee: "User".into(),
+                message: "msg".into(),
+                location: None,
+            }
+            .code(),
+            "named-argument"
         );
     }
 }

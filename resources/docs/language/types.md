@@ -186,6 +186,22 @@ The type name is also its constructor function:
 
 > **Key Concept:** In Hot, **types are functions that return values of that type**. When you define a type, you're also defining a constructor function with the same name. This unifies type definitions and value creation into a single concept.
 
+### Named Arguments
+
+A record type's constructor takes its fields by name, or one Map:
+
+{{snippet:types#type-named-arguments}}
+
+{{result:types#type-named-arguments}}
+
+- Name every field you pass, in any order. Positional arguments, `...` spreads, and pipes can't be mixed in.
+- A field whose type allows `null` can be left out. Every other field is required.
+- The compiler checks the names. A name that isn't a field or a missing required field is a `named-argument` error, and a name given twice doesn't parse. The Map form checks required fields when it runs.
+- A `%` in a field typed `Fn` becomes a lambda there.
+- Enum variants with a record payload take names too: `Shape.Circle(radius: 5.0)`.
+- On a type with custom constructors, named arguments go to the default constructor, as the Map form does. The custom constructors don't run, and `where` constraints are still checked.
+- A type with a one-parameter constructor that takes a Map doesn't take named arguments: that constructor decides which keys it reads. Pass it the Map.
+
 ### Types with Custom Constructors
 
 Add a constructor function for validation or convenience by combining the struct definition with a function:
@@ -508,7 +524,7 @@ untype(order)
 ## Summary
 
 - Types are **optional** — add them where they help
-- **Types are constructors**: `Person({name: "Alice"})` creates a Person
+- **Types are constructors**: `Person(name: "Alice", age: 30)` or `Person({name: "Alice", age: 30})` creates a Person
 - Use `?` for optional/nullable types: `Str?`
 - Use `|` for union types: `Int | Str`
 - Use **literal unions** for exact value sets: `"apple" | "banana"`

@@ -231,6 +231,21 @@ greet fn
 `Str?` means "may be null"; it does not make the argument omittable. Pass
 `null` explicitly or define another arity.
 
+### Named Arguments
+
+A record type's constructor takes its fields by name:
+
+```hot
+User type { name: Str, email: Str, age: Int? }
+
+ada User(name: "Ada", email: "ada@example.com")   // age may be left out
+circle Shape.Circle(radius: 5.0)                  // enum variant payload
+```
+
+Named arguments are for record types and enum variants only, for now. A
+function call is positional. See [types.md](types.md#named-arguments) for the
+rules.
+
 ### Function Aliases
 
 Bind local names to functions or types from another namespace. Aliases can

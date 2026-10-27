@@ -2514,3 +2514,46 @@ fn where_helpers_precede_their_declaration() {
         );
     }
 }
+
+/// `name: value` in a call is a named argument. The name can be any
+/// identifier or keyword, `lazy` included, and the call prints back the way
+/// it was written.
+#[test]
+fn named_arguments_parse_in_calls() {
+    for source in [
+        "User(name: \"Ada\", lazy: true, type: \"admin\")",
+        "Shape.Circle(radius: 2.5)",
+        "::geo/Circle(radius: 2.5)",
+        "User(\n    name: \"Ada\",\n    email:\n        \"ada@example.com\",\n)",
+    ] {
+        let value = parse_hot_expression(source).unwrap_or_else(|e| panic!("{source:?}: {e}"));
+        let Value::FnCall(call) = value else {
+            panic!("{source:?} is not a call");
+        };
+        assert!(
+            call.args.iter().all(|arg| arg.name.is_some() && !arg.lazy),
+            "{source:?}: {:?}",
+            call.args
+        );
+    }
+    let value = parse_hot_expression("User(age: 3, lazy: true)").unwrap();
+    assert_eq!(value.to_string(), "User(age: 3, lazy: true)");
+}
+
+#[test]
+fn named_arguments_come_last_and_once() {
+    for (source, message) in [
+        (
+            "User(name: \"Ada\", \"x\")",
+            "A positional argument can't follow a named argument",
+        ),
+        ("User(name: \"Ada\", name: \"Bo\")", "`name` is named twice"),
+        (
+            "f(a: 1, lazy: 2, b)",
+            "A positional argument can't follow a named argument",
+        ),
+    ] {
+        let err = format!("{:?}", parse_hot_expression(source).expect_err(source));
+        assert!(err.contains(message), "{source:?}: {err}");
+    }
+}

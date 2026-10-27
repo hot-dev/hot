@@ -31,8 +31,8 @@ impl CacheType {
     /// These are separate because the formats evolve independently
     pub fn format_version(&self) -> u32 {
         match self {
-            CacheType::Bytecode => 13, // Bumped for BytecodeProgram.result_params and LambdaInfo.result_params
-            CacheType::Ast => 5, // Bumped for template `where` predicates, match-arm sources and spaced-paren binding markers
+            CacheType::Bytecode => 14, // Bumped for named call arguments in the embedded AST
+            CacheType::Ast => 6,       // Bumped for named call arguments (FnCallArg.name)
         }
     }
 }

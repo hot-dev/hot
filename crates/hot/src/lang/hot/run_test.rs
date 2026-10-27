@@ -717,6 +717,181 @@ m {a: 1}
     }
 
     #[test]
+    fn named_arguments_build_records_and_variants() {
+        let src = r#"::t ns
+User type { name: Str, email: Str, age: Int? }
+Circle type { radius: Dec }
+Shape enum { Circle(Circle), Dot }
+Bird type { species: Str }
+Animal enum open { Dog }
+Bird -> Animal.Bird
+Handler type { on-value: Fn }
+Address type { city: Str }
+Person type { name: Str, address: Address }
+Window type { start: Int, finish: Int } where lte(%.start, %.finish)
+
+probe fn (): Vec {
+    a User(name: "Ada", email: "ada@example.com")
+    b User({name: "Ada", email: "ada@example.com"})
+    c User(
+        age: 30,
+        email: "bo@example.com",
+        name: "Bo",
+    )
+    circle Shape.Circle(radius: 2.5)
+    bird Animal.Bird(species: "Eagle")
+    handler Handler(on-value: add(%, 1))
+    on-value handler.on-value
+    person Person(name: "Cy", address: {city: "Paris"})
+    qualified ::t/User(name: "Di", email: "di@example.com")
+    ::here ::t
+    aliased ::here/User(name: "Ev", email: "ev@example.com")
+    Local type { n: Int }
+    local Local(n: 7)
+    names map(["x", "y"], User(name: %, email: "e@example.com")) |> map(%.name)
+    [eq(a, b), is-type(a, User), a.age, c.age, c.name,
+     eq(circle.radius, 2.5), is-type(circle, Shape), bird.species, on-value(1),
+     is-type(person.address, Address), person.address.city, qualified.name, local.n,
+     names, is-err(Window(start: 5, finish: 1)), aliased.name]
+}
+probe()
+probe()"#;
+        assert_same_with_and_without_jit(
+            src,
+            &crate::val!([
+                true,
+                true,
+                null,
+                30,
+                "Bo",
+                true,
+                true,
+                "Eagle",
+                2,
+                true,
+                "Paris",
+                "Di",
+                7,
+                ["x", "y"],
+                true,
+                "Ev"
+            ]),
+        );
+    }
+
+    /// Like the Map form, a named call on a type with custom constructors goes
+    /// to the default constructor, which still checks `where` constraints.
+    /// A type declared twice takes names in either order, and a one-parameter
+    /// constructor taking `Any` leaves the Map to the default constructor.
+    #[test]
+    fn named_arguments_build_types_with_custom_constructors() {
+        let src = r#"::t ns
+Tag type { name: Str }
+fn (name: Str): Tag { Tag({name: `ctor:${name}`}) }
+Spot type { x: Int, y: Int }
+Spot type fn (x: Int, y: Int): Spot { Spot({x: mul(x, 10), y}) }
+Pair type fn (a: Int, b: Int): Pair { Pair({a: mul(a, 10), b}) }
+Pair type { a: Int, b: Int }
+Box type { value: Any }
+fn (v: Any): Box { Box({value: [v]}) }
+Age type { years: Int where gte(%, 0) }
+fn (years: Int): Age { Age({years: add(years, 1)}) }
+
+probe fn (): Vec {
+    tag Tag(name: "a")
+    spot Spot(x: 1, y: 2)
+    pair Pair(a: 1, b: 2)
+    box Box(value: 3)
+    [tag.name, Tag("b").name, is-type(tag, Tag), spot.x, Spot(1, 2).x, pair.a,
+     Pair(1, 2).a, box.value, Box(3).value, is-err(Age(years: -1))]
+}
+probe()
+probe()"#;
+        assert_same_with_and_without_jit(
+            src,
+            &val!(["a", "ctor:b", true, 1, 10, 1, 10, 3, [3], true]),
+        );
+    }
+
+    #[test]
+    fn named_arguments_must_fit_the_callee() {
+        let types = r#"::t ns
+User type { name: Str, email: Str, age: Int? }
+Shape enum { Circle(Circle), Dot }
+Circle type { radius: Dec }
+Point type fn (x: Int, y: Int): Point { Point({x, y}) }
+Temp type { celsius: Dec }
+fn (m: Map): Temp { Temp({celsius: m.c}) }
+Box type { value: Any }
+fn (v: Str | Map): Box { Box({value: [v]}) }
+greet fn (name: Str): Str { name }
+"#;
+        for (call, message) in [
+            (
+                r#"User(nme: "Ada", email: "a@b.c")"#,
+                "`User` has no field `nme`. Did you mean `name`?",
+            ),
+            (r#"User(name: "Ada")"#, "Missing required field `email`."),
+            (r#"User(age: 3)"#, "Missing required fields `name`, `email`."),
+            (r#"User("Ada", email: "a@b.c")"#, "Pass every field by name"),
+            (r#"greet(name: "Ada")"#, "`greet` isn't a record type."),
+            (r#"Point(x: 1, y: 2)"#, "`Point` has no fields to name."),
+            (
+                r#"Temp(celsius: 1.0)"#,
+                "`Temp` has a constructor that takes one Map, `(m: Map)`",
+            ),
+            (r#"Box(value: 1)"#, "takes one Map, `(v: Str | Map)`"),
+            (r#"Shape(radius: 1.0)"#, "`Shape` is an enum."),
+            (r#"Shape.Dot(radius: 1.0)"#, "`Shape.Dot` carries no data."),
+            (r#"Shape.Square(side: 1.0)"#, "`Shape` has no variant `Square`."),
+            (
+                r#""Ada" |> User(email: "a@b.c")"#,
+                "A piped value can't fill a named field.",
+            ),
+        ] {
+            let src = format!("{types}probe fn () {{ {call} }}\nprobe()");
+            let err = compile_and_run_with_std(&src).expect_err(call);
+            assert!(err.contains(message), "{call}: {err}");
+            assert!(err.contains("NamedArgument"), "{call}: {err}");
+        }
+    }
+
+    /// A parameter or local named like a type shadows it, so a call by that
+    /// name goes to the local value and takes no named arguments. A
+    /// qualified call, a lazy parameter, and a call before the local is bound
+    /// still build the type.
+    #[test]
+    fn named_arguments_respect_locals_that_shadow_a_type() {
+        let types = "::t ns\nShape type { radius: Dec }\n";
+        for body in [
+            "draw fn (Shape: Fn) { Shape(radius: 1.0) }\ndraw((m) { m })",
+            "probe fn () {\n    Shape (m) { m }\n    Shape(radius: 1.0)\n}\nprobe()",
+            "map([1], (Shape) { Shape(radius: 1.0) })",
+        ] {
+            let err = compile_and_run_with_std(&format!("{types}{body}")).expect_err(body);
+            assert!(err.contains("`Shape` is a local value here"), "{body}: {err}");
+            assert!(err.contains("NamedArgument"), "{body}: {err}");
+        }
+        let src = [
+            types,
+            r#"draw fn (Shape: Fn) { ::t/Shape(radius: 1.0) }
+late fn (lazy Shape: Any) { Shape(radius: 2.0) }
+probe fn () {
+    before Shape(radius: 3.0)
+    Shape (m) { m }
+    before
+}
+check fn (s: Any, radius: Dec): Vec { [is-type(s, ::t/Shape), eq(s.radius, radius)] }
+[check(draw((m) { m }), 1.0), check(late(1), 2.0), check(probe(), 3.0)]"#,
+        ]
+        .concat();
+        assert_same_with_and_without_jit(
+            &src,
+            &val!([[true, true], [true, true], [true, true]]),
+        );
+    }
+
+    #[test]
     fn jit_user_call_halts_on_strict_err_argument() {
         // The halt now propagates out of the JIT frame as a run failure
         // (matching the interpreter), rather than surfacing as an Err value

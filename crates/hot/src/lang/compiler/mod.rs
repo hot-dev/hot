@@ -24,6 +24,7 @@ mod constraint_specs;
 pub mod core_registry;
 pub mod ctx_checker;
 pub mod dependency_graph;
+mod named_args;
 pub mod placeholder_lowering;
 pub mod refinements;
 pub mod resolver;
@@ -5972,7 +5973,7 @@ impl Compiler {
         Val::Map(Box::new(type_info))
     }
 
-    fn type_expr_allows_null(type_expr: &TypeExpr) -> bool {
+    pub(super) fn type_expr_allows_null(type_expr: &TypeExpr) -> bool {
         match type_expr {
             TypeExpr::Optional(_) => true,
             TypeExpr::Union(parts) => parts.iter().any(Self::type_expr_allows_null),
