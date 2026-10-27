@@ -2,7 +2,8 @@
 meta ["test"]
 
 // Regression: a Map passed to a type constructor reaches the type's default
-// Map constructor, not a custom 1-arity overload. Field-less `Name type fn`
+// Map constructor, not a custom 1-arity overload, unless that overload's type
+// takes a Map (see `Reading` below). Field-less `Name type fn`
 // types had no default constructor, so `Email({value,})` inside the
 // `(value: Str)` constructor called that constructor again and never
 // returned. Maps that are not literals (variables, call results) were also
@@ -42,6 +43,23 @@ Pair type fn (a: Int, b: Int): Pair {
     m {a, b}
     Pair(m)
 }
+
+// A one-parameter constructor whose type takes a Map gets Maps wherever `Map`
+// appears in its type. It passes its Map on to the default constructor.
+Reading type {
+    celsius: Dec
+}
+fn (reading: Str | Map): Reading {
+    data if(is-str(reading), {celsius: Dec(reading)}, {celsius: reading.c})
+    Reading(data)
+}
+
+// A lazy parameter doesn't defer a Map literal meant for the default
+// constructor.
+Deferred type {
+    value: Any
+}
+fn (lazy value: Str): Deferred { Deferred({value: `lazy:${do(value)}`}) }
 
 label-data fn (): Map { {text: "from-call"} }
 
@@ -100,4 +118,18 @@ meta ["test"] fn () {
     assert-eq(10, Spot(1, 2).x, "custom constructor")
     assert-eq(1, Spot({x: 1, y: 2}).x, "default constructor")
     assert-eq(2, Pair(1, 2).b, "Map in a variable in a custom constructor")
+}
+
+test-a-constructor-whose-type-takes-a-map-gets-maps
+meta ["test"] fn () {
+    m {c: 30.0}
+    assert-eq(21.5, Reading("21.5").celsius, "Str")
+    assert-eq(30.0, Reading({c: 30.0}).celsius, "Map literal")
+    assert-eq(30.0, Reading(m).celsius, "Map in a variable")
+}
+
+test-a-lazy-constructor-leaves-map-literals-to-the-default
+meta ["test"] fn () {
+    assert-eq(2, Deferred({value: 2}).value, "Map literal")
+    assert-eq("lazy:s", Deferred("s").value, "Str")
 }
