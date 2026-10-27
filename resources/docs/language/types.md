@@ -199,7 +199,8 @@ A record type's constructor takes its fields by name, or one Map:
 - The compiler checks the names. A name that isn't a field or a missing required field is a `named-argument` error, and a name given twice doesn't parse. The Map form checks required fields when it runs.
 - A `%` in a field typed `Fn` becomes a lambda there.
 - Enum variants with a record payload take names too: `Shape.Circle(radius: 5.0)`.
-- A type with custom constructors doesn't take named arguments yet. Call a constructor, or pass a Map.
+- On a type with custom constructors, named arguments go to the default constructor, as the Map form does. The custom constructors don't run, and `where` constraints are still checked.
+- A type with a one-parameter constructor that takes a Map doesn't take named arguments: that constructor decides which keys it reads. Pass it the Map.
 
 ### Types with Custom Constructors
 

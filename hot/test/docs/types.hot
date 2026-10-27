@@ -281,6 +281,7 @@ meta ["test"] fn () {
   p Point2D(10, 20)
   assert-eq(10, p.x, "point2d x")
   assert-eq(20, p.y, "point2d y")
+  assert-eq(p, Point2D(x: 10, y: 20), "named arguments use the default constructor")
 }
 // @result: type-custom-constructor
 // Point2D(10, 20) → {x: 10, y: 20}

@@ -86,8 +86,12 @@ is-active user.active
   `Handler(on-event: println(%))`.
 - Enum variants with a record payload take names too:
   `Shape.Circle(radius: 5.0)`.
-- A type with custom constructors (`type fn`) doesn't take named arguments
-  yet. Call a constructor, or pass a Map.
+- On a type with custom constructors (`type fn`), named arguments go to the
+  default constructor, as the Map form does. The custom constructors don't
+  run, and `where` constraints are still checked.
+- A type with a one-parameter constructor that takes a Map doesn't take
+  named arguments: that constructor decides which keys it reads. Pass it the
+  Map.
 
 ### Custom Constructors
 

@@ -659,6 +659,40 @@ probe()"#;
         );
     }
 
+    /// Like the Map form, a named call on a type with custom constructors goes
+    /// to the default constructor, which still checks `where` constraints.
+    /// A type declared twice takes names in either order, and a one-parameter
+    /// constructor taking `Any` leaves the Map to the default constructor.
+    #[test]
+    fn named_arguments_build_types_with_custom_constructors() {
+        let src = r#"::t ns
+Tag type { name: Str }
+fn (name: Str): Tag { Tag({name: `ctor:${name}`}) }
+Spot type { x: Int, y: Int }
+Spot type fn (x: Int, y: Int): Spot { Spot({x: mul(x, 10), y}) }
+Pair type fn (a: Int, b: Int): Pair { Pair({a: mul(a, 10), b}) }
+Pair type { a: Int, b: Int }
+Box type { value: Any }
+fn (v: Any): Box { Box({value: [v]}) }
+Age type { years: Int where gte(%, 0) }
+fn (years: Int): Age { Age({years: add(years, 1)}) }
+
+probe fn (): Vec {
+    tag Tag(name: "a")
+    spot Spot(x: 1, y: 2)
+    pair Pair(a: 1, b: 2)
+    box Box(value: 3)
+    [tag.name, Tag("b").name, is-type(tag, Tag), spot.x, Spot(1, 2).x, pair.a,
+     Pair(1, 2).a, box.value, Box(3).value, is-err(Age(years: -1))]
+}
+probe()
+probe()"#;
+        assert_same_with_and_without_jit(
+            src,
+            &val!(["a", "ctor:b", true, 1, 10, 1, 10, 3, [3], true]),
+        );
+    }
+
     #[test]
     fn named_arguments_must_fit_the_callee() {
         let types = r#"::t ns
@@ -666,6 +700,10 @@ User type { name: Str, email: Str, age: Int? }
 Shape enum { Circle(Circle), Dot }
 Circle type { radius: Dec }
 Point type fn (x: Int, y: Int): Point { Point({x, y}) }
+Temp type { celsius: Dec }
+fn (m: Map): Temp { Temp({celsius: m.c}) }
+Box type { value: Any }
+fn (v: Str | Map): Box { Box({value: [v]}) }
 greet fn (name: Str): Str { name }
 "#;
         for (call, message) in [
@@ -677,7 +715,12 @@ greet fn (name: Str): Str { name }
             (r#"User(age: 3)"#, "Missing required fields `name`, `email`."),
             (r#"User("Ada", email: "a@b.c")"#, "Pass every field by name"),
             (r#"greet(name: "Ada")"#, "`greet` isn't a record type."),
-            (r#"Point(x: 1, y: 2)"#, "`Point` has custom constructors"),
+            (r#"Point(x: 1, y: 2)"#, "`Point` has no fields to name."),
+            (
+                r#"Temp(celsius: 1.0)"#,
+                "`Temp` has a constructor that takes one Map, `(m: Map)`",
+            ),
+            (r#"Box(value: 1)"#, "takes one Map, `(v: Str | Map)`"),
             (r#"Shape(radius: 1.0)"#, "`Shape` is an enum."),
             (r#"Shape.Dot(radius: 1.0)"#, "`Shape.Dot` carries no data."),
             (r#"Shape.Square(side: 1.0)"#, "`Shape` has no variant `Square`."),

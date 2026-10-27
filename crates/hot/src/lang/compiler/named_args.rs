@@ -10,16 +10,20 @@
 //! ([`into_map_call`]): `User({name: "Ada", active: true})`. Later phases
 //! only see that form.
 //!
-//! The callee must be a record type without custom constructors, or an enum
-//! variant whose payload is a record. Every name must be a field, every
-//! field that doesn't allow `null` must be given, and every argument must be
-//! named. A type with `type fn` constructors is rejected for now: named
-//! arguments there will bind the constructors' parameters. A parameter or
-//! local named like the type shadows it, as it does for any call, so a named
-//! call by that name is rejected too.
+//! The callee must be a record type, or an enum variant whose payload is a
+//! record. Every name must be a field, every field that doesn't allow `null`
+//! must be given, and every argument must be named. Like the Map form, a
+//! named call on a type with custom constructors (`type fn`) goes to the
+//! default constructor, so the custom ones don't run. A type declared twice,
+//! once with its fields and once with its constructors, is one type. A type
+//! with a one-parameter constructor that takes a Map is rejected: that
+//! constructor decides which keys it reads. A parameter or local named like
+//! the type shadows it, as it does for any call, so a named call by that
+//! name is rejected too.
 
 use crate::lang::ast::{
     AstNode, DeepPath, FnCall, FnCallArg, NsPath, Program, Ref, Source, TypeDef, TypeField, Value,
+    split_top_level,
 };
 use crate::lang::compiler::Compiler;
 use crate::lang::compiler::core_registry::CoreVariableRegistry;
@@ -95,9 +99,14 @@ impl RecordTypes {
                                 .entry(name.to_string())
                                 .or_insert_with(|| ns.clone());
                         }
-                        types
-                            .declared
-                            .insert((ns.clone(), name.to_string()), def.clone());
+                        match types.declared.get_mut(&(ns.clone(), name.to_string())) {
+                            Some(declared) => merge_declaration(declared, def),
+                            None => {
+                                types
+                                    .declared
+                                    .insert((ns.clone(), name.to_string()), def.clone());
+                            }
+                        }
                     }
                     Value::Ref(Ref::Ns(ns_ref)) => {
                         if let Some(target) = &ns_ref.function_name {
@@ -317,10 +326,10 @@ impl RecordTypes {
                     "`{callee}` is an enum. Name a variant, as in `{callee}.Variant(...)`."
                 ));
             }
-            if def.constructor_functions.is_some() {
+            if let Some(constructor) = map_constructor(&def) {
                 return Err(format!(
-                    "`{callee}` has custom constructors, so it doesn't take named arguments \
-                     yet. Call a constructor, or pass a Map: `{callee}({{...}})`."
+                    "`{callee}` has a constructor that takes one Map, `{constructor}`, which \
+                     decides the keys it reads. Pass the Map: `{callee}({{...}})`."
                 ));
             }
             return def
@@ -371,13 +380,18 @@ impl RecordTypes {
     fn find(&self, ns: &str, name: &str) -> Option<(TypeDef, String, String)> {
         if !name.contains('/') {
             let local = self.local.borrow();
-            let found = local
-                .iter()
-                .rev()
-                .flat_map(|frame| frame.iter().rev())
-                .find(|(local_name, _)| local_name == name);
-            if let Some((_, def)) = found {
-                return Some((def.clone(), ns.to_string(), name.to_string()));
+            for frame in local.iter().rev() {
+                let mut defs = frame
+                    .iter()
+                    .filter(|(local_name, _)| local_name == name)
+                    .map(|(_, def)| def);
+                if let Some(first) = defs.next() {
+                    let mut def = first.clone();
+                    for later in defs {
+                        merge_declaration(&mut def, later);
+                    }
+                    return Some((def, ns.to_string(), name.to_string()));
+                }
             }
         }
         let (def_ns, def_name) = self.resolve(ns, name)?;
@@ -461,6 +475,49 @@ fn callee_display(function: &Value) -> String {
     }
 }
 
+/// Fold a later declaration of the same type into `def`. A type declared as
+/// `Spot type { ... }` and again as `Spot type fn ...` is one type, with the
+/// fields of one and the constructors of the other, in either order.
+fn merge_declaration(def: &mut TypeDef, later: &TypeDef) {
+    if later.fields.is_some() {
+        def.fields = later.fields.clone();
+    }
+    if let Some(constructors) = &later.constructor_functions {
+        def.constructor_functions
+            .get_or_insert_with(Vec::new)
+            .extend(constructors.iter().cloned());
+    }
+}
+
+/// A custom constructor of `def` with one parameter that takes a Map, as
+/// written: `(m: Map)`.
+fn map_constructor(def: &TypeDef) -> Option<String> {
+    def.constructor_functions
+        .iter()
+        .flatten()
+        .find_map(|constructor| match constructor.args.args.as_slice() {
+            [param] => {
+                let annotation = param.type_annotation.as_deref()?;
+                takes_map(annotation).then(|| {
+                    let lazy = if param.lazy { "lazy " } else { "" };
+                    format!("({lazy}{}: {annotation})", param.var.sym.name())
+                })
+            }
+            _ => None,
+        })
+}
+
+/// Whether a parameter type takes a Map: `Map`, with or without type
+/// arguments or `?`, or a union with such a member. `Any` doesn't count, as
+/// a Map argument still goes to the default constructor then.
+fn takes_map(annotation: &str) -> bool {
+    split_top_level(annotation, '|').into_iter().any(|member| {
+        let member = member.trim_end_matches('?');
+        let name = member.split('<').next().unwrap_or(member).trim();
+        matches!(name, "Map" | "::hot::type/Map")
+    })
+}
+
 fn unknown_field(callee: &str, name: &str, fields: &[TypeField]) -> String {
     let names: Vec<&str> = fields.iter().map(|field| field.name.name()).collect();
     if names.is_empty() {
@@ -524,5 +581,21 @@ mod tests {
         assert_eq!(closest("zzzzzz", &names), None);
         // Every edit of a short name is a different word, not a typo.
         assert_eq!(closest("id", &["ab"]), None);
+    }
+
+    #[test]
+    fn map_parameter_types_take_a_map() {
+        for annotation in [
+            "Map",
+            "Map?",
+            "Map<Str, Any>",
+            "Str | Map",
+            "::hot::type/Map",
+        ] {
+            assert!(takes_map(annotation), "{annotation}");
+        }
+        for annotation in ["Any", "Str", "Vec<Map>", "MapEntry", "::hot::store/Map"] {
+            assert!(!takes_map(annotation), "{annotation}");
+        }
     }
 }
