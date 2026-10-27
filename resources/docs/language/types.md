@@ -216,6 +216,23 @@ You can also define multiple constructor arities:
 
 {{result:types#type-custom-constructor-overloaded}}
 
+A Map argument goes to the default constructor, which is how a custom constructor builds its value with `Name({...})`. A one-parameter constructor whose type takes a Map gets Maps instead. Its type can be `Map`, `Map<K, V>`, `Map?`, or a union with `Map` in any position:
+
+```hot
+Temp type {
+    celsius: Dec
+}
+fn (reading: Str | Map): Temp {
+    data if(is-str(reading), {celsius: Dec(reading)}, {celsius: reading.c})
+    Temp(data)
+}
+
+Temp("21.5").celsius     // 21.5
+Temp({c: 30.0}).celsius  // 30.0
+```
+
+Inside the custom constructors, `Temp({...})` still calls the default constructor, and so does `Temp(data)` in the constructor that takes Maps. If several constructors take a Map, one typed `Map` gets them before a union or nullable type.
+
 ### Empty Types (Markers)
 
 Types with no fields work as markers or tags:

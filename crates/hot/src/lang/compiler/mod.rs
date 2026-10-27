@@ -3211,6 +3211,63 @@ impl Compiler {
             .cloned()
     }
 
+    /// The overload a call's argument types select at compile time: the
+    /// function registered as `name/N:T1,T2` when every argument's type is
+    /// known (literals). A plain name is tried in the current namespace
+    /// first, and a local of that name shadows functions. Returns the key and
+    /// the function.
+    fn typed_overload(&self, fn_call: &FnCall) -> Option<(String, FunctionId)> {
+        if fn_call.args.iter().any(|arg| arg.spread) {
+            return None;
+        }
+        let names = match fn_call.function.as_ref() {
+            Value::Ref(Ref::Var(var_ref)) if var_ref.var.deep_path.is_none() => {
+                let name = var_ref.var.sym.name();
+                if self.is_local_name(name) {
+                    return None;
+                }
+                vec![
+                    format!("{}/{}", self.current_namespace, name),
+                    name.to_string(),
+                ]
+            }
+            Value::Ref(Ref::Ns(ns_ref)) => {
+                let resolved_ns_ref = self.resolve_ns_ref_alias(ns_ref);
+                let function_name = resolved_ns_ref.function_name.as_ref()?;
+                vec![format!("{}/{}", resolved_ns_ref.ns, function_name)]
+            }
+            _ => return None,
+        };
+        let types = fn_call
+            .args
+            .iter()
+            .map(|arg| Self::infer_compile_time_type(&arg.value))
+            .collect::<Option<Vec<_>>>()?
+            .join(",");
+        names.into_iter().find_map(|name| {
+            let key = format!("{}/{}:{}", name, fn_call.args.len(), types);
+            let function_id = *self.function_mapping.get(&key)?;
+            Some((key, function_id))
+        })
+    }
+
+    /// The lazy parameters a call defers arguments for, and whether a
+    /// variadic rest parameter is lazy: those of the overload its argument
+    /// types select, else of the function its name finds.
+    fn call_lazy_params(&self, fn_call: &FnCall) -> (Vec<bool>, bool) {
+        let typed = self
+            .typed_overload(fn_call)
+            .and_then(|(_, function_id)| self.program.functions.get(function_id as usize));
+        match typed {
+            Some(function_info) => (
+                function_info.lazy_params.clone(),
+                function_info.is_variadic
+                    && function_info.lazy_params.last().copied().unwrap_or(false),
+            ),
+            None => self.get_function_lazy_params(fn_call),
+        }
+    }
+
     /// Get lazy parameter information for a function call
     /// Returns (lazy_params, is_variadic_with_lazy_rest)
     /// If the function is variadic and the last (variadic) param is lazy,
@@ -3700,7 +3757,7 @@ impl Compiler {
 
             // Try to determine if the target function has lazy parameters
             let (target_function_lazy_params, is_variadic_with_lazy_rest) =
-                self.get_function_lazy_params(fn_call);
+                self.call_lazy_params(fn_call);
 
             for (i, arg) in fn_call.args.iter().enumerate() {
                 let target_reg = first_arg_reg + i as RegisterId;
@@ -3934,14 +3991,6 @@ impl Compiler {
                 let qualified_function_name =
                     format!("{}/{}", self.current_namespace, function_name);
 
-                // FIX #2: Try type-based lookup first when we can infer argument types at compile time
-                // This allows distinguishing TypeName({...}) from TypeName(int_value) at compile time
-                let compile_time_types: Vec<Option<String>> = fn_call
-                    .args
-                    .iter()
-                    .map(|arg| Self::infer_compile_time_type(&arg.value))
-                    .collect();
-
                 let mut function_id: FunctionId = 0;
                 let mut lookup_key = String::new();
 
@@ -3950,28 +3999,11 @@ impl Compiler {
                 // scope before any function.
                 let shadowed_by_local = self.is_local_name(function_name);
 
-                // If we have type info for all args, try type-based lookup first
-                if !shadowed_by_local && compile_time_types.iter().all(|t| t.is_some()) {
-                    let type_strs: Vec<&str> = compile_time_types
-                        .iter()
-                        .map(|t| t.as_ref().unwrap().as_str())
-                        .collect();
-                    let type_sig = type_strs.join(",");
-
-                    // Try qualified typed key first
-                    let qualified_typed_key =
-                        format!("{}/{}:{}", qualified_function_name, arity, type_sig);
-                    if let Some(&id) = self.function_mapping.get(&qualified_typed_key) {
-                        function_id = id;
-                        lookup_key = qualified_typed_key;
-                    } else {
-                        // Try unqualified typed key
-                        let typed_key = format!("{}/{}:{}", function_name, arity, type_sig);
-                        if let Some(&id) = self.function_mapping.get(&typed_key) {
-                            function_id = id;
-                            lookup_key = typed_key;
-                        }
-                    }
+                // FIX #2: Try type-based lookup first when we can infer argument types at compile time
+                // This allows distinguishing TypeName({...}) from TypeName(int_value) at compile time
+                if let Some((key, id)) = self.typed_overload(fn_call) {
+                    function_id = id;
+                    lookup_key = key;
                 }
 
                 // Fallback to arity-based lookup (qualified first for correct scoping)
@@ -4196,7 +4228,11 @@ impl Compiler {
                         function_name_reg,
                         spread_mask
                     );
-                } else if let Some(&function_id) = self.function_mapping.get(&full_function_name) {
+                } else if let Some(function_id) = self
+                    .typed_overload(fn_call)
+                    .map(|(_, function_id)| function_id)
+                    .or_else(|| self.function_mapping.get(&full_function_name).copied())
+                {
                     self.emit_instruction(Instruction::CallUserFunction {
                         dest: dest_reg,
                         function_id,
@@ -5149,6 +5185,22 @@ impl Compiler {
         }
     }
 
+    /// How a constructor parameter of type `annotation` takes a Map argument
+    /// from the default constructor: `Some(0)` for `Map` or `Map<K, V>`,
+    /// `Some(1)` for a nullable type or a union with a `Map` member in any
+    /// position, and `None` when it doesn't. `Any` and untyped parameters
+    /// leave Maps to the default constructor.
+    fn map_param_rank(annotation: &str) -> Option<u8> {
+        let members = crate::lang::ast::split_top_level(annotation, '|');
+        let takes_map = members.iter().any(|member| {
+            let member = member.trim_end_matches('?');
+            let name = member.split('<').next().unwrap_or(member).trim();
+            matches!(name, "Map" | "::hot::type/Map")
+        });
+        let exact = members.len() == 1 && !annotation.trim_end().ends_with('?');
+        takes_map.then_some(if exact { 0 } else { 1 })
+    }
+
     /// Compile a type definition as a callable constructor function
     fn compile_type_constructor(
         &mut self,
@@ -5239,8 +5291,9 @@ impl Compiler {
         }
 
         // `Name(data)` in a custom constructor's body calls the default
-        // constructor directly, as runtime dispatch would choose it for a Map.
-        // A 1-argument custom constructor takes the key below.
+        // constructor directly, as runtime dispatch chooses it for a Map
+        // unless a constructor takes Maps. A 1-argument custom constructor
+        // takes the key below.
         if custom_with_default && let Some(default_fn_id) = default_map_constructor {
             self.function_mapping
                 .insert(format!("{}/1", constructor_name), default_fn_id);
@@ -5258,14 +5311,56 @@ impl Compiler {
                 })
                 .map(|fn_def| fn_def.args.args.len())
                 .collect();
-            for fn_def in constructor_functions {
+            // A Map argument goes to the default constructor unless a
+            // one-parameter constructor's type takes a Map (`map_param_rank`).
+            // That constructor gets the `Name/1:Map` key: of several, one
+            // typed `Map` or `Map<K, V>` before a union or nullable type, then
+            // the one declared last. The key is registered once every body is
+            // compiled, so `Name({...})` in a custom constructor still calls
+            // the default constructor.
+            let map_owner = constructor_functions
+                .iter()
+                .enumerate()
+                .filter_map(|(index, fn_def)| match fn_def.args.args.as_slice() {
+                    [param] if custom_with_default => param
+                        .type_annotation
+                        .as_deref()
+                        .and_then(Self::map_param_rank)
+                        .map(|rank| (rank, std::cmp::Reverse(index))),
+                    _ => None,
+                })
+                .min()
+                .map(|(_, std::cmp::Reverse(index))| index);
+            let leaves_map_key = |key: &str| map_owner.is_some() && key == map_typed_key;
+            let mut map_owner_id = None;
+            let arity_one_key = format!("{}/1", constructor_name);
+            for (index, fn_def) in constructor_functions.iter().enumerate() {
+                // The constructor that takes the Map passes it on with
+                // `Name(map)`, so `Name(x)` in its body calls the default
+                // constructor, whichever constructors were declared before it.
+                let is_map_owner = map_owner == Some(index);
+                let displaced = match default_map_constructor {
+                    Some(default_fn_id) if is_map_owner => self
+                        .function_mapping
+                        .insert(arity_one_key.clone(), default_fn_id),
+                    _ => None,
+                };
                 // Type constructors don't have Var source, use None
                 let function_id =
                     self.compile_function_definition_and_get_id(&constructor_name, fn_def, None)?;
+                if let Some(previous) = displaced {
+                    self.function_mapping
+                        .insert(arity_one_key.clone(), previous);
+                }
+                if is_map_owner {
+                    map_owner_id = Some(function_id);
+                }
 
                 // Create signature and arity keys for overload resolution
                 let signature = self.create_function_signature(&constructor_name, fn_def);
-                self.function_mapping.insert(signature.clone(), function_id);
+                if !leaves_map_key(&signature) {
+                    self.function_mapping.insert(signature.clone(), function_id);
+                }
 
                 let arity = fn_def.args.args.len();
                 let arity_key = format!("{}/{}", constructor_name, arity);
@@ -5290,7 +5385,9 @@ impl Compiler {
                     })
                     .collect();
                 let typed_key = format!("{}/{}:{}", constructor_name, arity, param_types.join(","));
-                self.function_mapping.insert(typed_key.clone(), function_id);
+                if !leaves_map_key(&typed_key) {
+                    self.function_mapping.insert(typed_key.clone(), function_id);
+                }
 
                 tracing::trace!(
                     "Compiler: Registered typed constructor overload: '{}' -> function ID {}",
@@ -5310,6 +5407,10 @@ impl Compiler {
                     signature,
                     function_id
                 );
+            }
+            if let Some(owner_id) = map_owner_id {
+                self.function_mapping
+                    .insert(map_typed_key.clone(), owner_id);
             }
         } else if !has_struct_fields {
             // No struct fields and no explicit constructors (e.g., empty marker types)

@@ -277,6 +277,126 @@ Slug type fn (value: Str): Slug {
         assert_same_with_and_without_jit(own_body, &strs(&["hello", "world", "again"]));
     }
 
+    /// A Map reaches a one-parameter custom constructor whose type takes a
+    /// Map wherever `Map` appears in it. Only `Map | Str` used to: the
+    /// constructor was keyed by the first member of its union, so with
+    /// `Str | Map`, `Map?` or `Map<Str, Any>` Maps went to the default
+    /// constructor instead.
+    #[test]
+    fn map_args_reach_a_constructor_whose_type_takes_a_map() {
+        for param in ["Map | Str", "Str | Map", "Map?", "Map<Str, Any>"] {
+            let src = format!(
+                r#"::t ns
+Box type {{ value: Any }}
+fn (m: {param}) {{ Box({{value: ["custom", m]}}) }}
+m {{value: 2}}
+[Box({{value: 1}}).value, Box(m).value, ::t/Box({{value: 3}}).value]"#
+            );
+            assert_same_with_and_without_jit(
+                &src,
+                &crate::val!([
+                    ["custom", {"value": 1}],
+                    ["custom", {"value": 2}],
+                    ["custom", {"value": 3}]
+                ]),
+            );
+        }
+
+        // `Any` and untyped parameters leave Maps to the default constructor.
+        for param in ["v: Any", "v"] {
+            let src = format!(
+                r#"::t ns
+Box type {{ value: Any }}
+fn ({param}) {{ Box({{value: ["custom", v]}}) }}
+[Box(1).value, Box({{value: 2}}).value]"#
+            );
+            assert_same_with_and_without_jit(&src, &crate::val!([["custom", 1], 2]));
+        }
+    }
+
+    /// Of two constructors that take a Map, the one typed `Map` gets Maps
+    /// before a union, in either declaration order.
+    #[test]
+    fn a_map_constructor_takes_maps_before_a_union_constructor() {
+        let constructors = [
+            "(m: Map) { Box({value: [\"map\", m]}) }",
+            "(m: Str | Map) { Box({value: [\"union\", m]}) }",
+        ];
+        for [first, second] in [constructors, [constructors[1], constructors[0]]] {
+            let src = format!(
+                r#"::t ns
+Box type {{ value: Any }}
+fn {first},
+{second}
+m {{value: 2}}
+[Box({{value: 1}}).value, Box(m).value, Box("s").value]"#
+            );
+            assert_same_with_and_without_jit(
+                &src,
+                &crate::val!([["map", {"value": 1}], ["map", {"value": 2}], ["union", "s"]]),
+            );
+        }
+    }
+
+    /// Custom constructors still build through the default constructor when
+    /// another one takes Maps. A Map literal in any constructor's body calls
+    /// the default one, and the constructor that takes the Map can pass it on
+    /// with `Name(map)`. Both used to depend on declaration order: a body
+    /// reached a Map constructor declared before it, and passing the Map on
+    /// after another one-parameter constructor recursed until the limit.
+    #[test]
+    fn constructors_build_through_the_default_when_another_takes_maps() {
+        let literal_in_later_body = r#"::t ns
+Box type { value: Any }
+fn (m: Map) { Box({value: ["map", m]}) },
+(s: Str) { Box({value: s}) }
+[Box("s").value, Box({value: 1}).value]"#;
+        assert_same_with_and_without_jit(
+            literal_in_later_body,
+            &crate::val!(["s", ["map", {"value": 1}]]),
+        );
+
+        let pass_the_map_on = r#"::t ns
+Box type { value: Any }
+fn (n: Int) { Box({value: n}) },
+(m: Str | Map) { Box(merge(m, {value: ["seen", m.value]})) }
+m {value: 3}
+[Box(1).value, Box({value: 2}).value, Box(m).value]"#;
+        assert_same_with_and_without_jit(
+            pass_the_map_on,
+            &crate::val!([1, ["seen", 2], ["seen", 3]]),
+        );
+    }
+
+    /// A call defers its arguments for the overload it resolves to. With a
+    /// lazy one-parameter constructor, `Box({value: 2})` resolves to the
+    /// default constructor but deferred the Map for the lazy one, so the
+    /// default constructor got a thunk. Plain functions whose overloads mix
+    /// lazy and evaluated parameters had the same problem.
+    #[test]
+    fn calls_defer_arguments_for_the_overload_they_resolve_to() {
+        let lazy_constructor = r#"::t ns
+Box type { value: Any }
+fn (lazy v: Str) { Box({value: `lazy:${do(v)}`}) }
+[Box({value: 2}).value, Box({value: add(1, 1)}).value, ::t/Box({value: 3}).value, Box("s").value]"#;
+        assert_same_with_and_without_jit(lazy_constructor, &crate::val!([2, 2, 3, "lazy:s"]));
+
+        let overloads = [
+            "(lazy x: Str): Str { `lazy:${do(x)}` }",
+            "(x: Int): Str { Str(add(x, 1)) }",
+        ];
+        for [first, second] in [overloads, [overloads[1], overloads[0]]] {
+            let src = format!(
+                r#"::t ns
+g fn
+{first},
+{second}
+[g("a"), g(1), ::t/g("b"), ::t/g(2)]"#
+            );
+            assert_same_with_and_without_jit(&src, &strs(&["lazy:a", "2", "lazy:b", "3"]));
+        }
+    }
+
     /// Same-arity overloads dispatch on runtime argument types whichever
     /// overload is declared last (the compiler's arity-only fallback key), for
     /// direct calls, self tail calls, and calls made from JIT-compiled code.

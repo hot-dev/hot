@@ -143,6 +143,8 @@ Or different parameter types:
 
 Hot dispatches to the correct version based on arguments.
 
+When overloads of the same arity differ in which parameters are `lazy`, only literal arguments choose between them. A call defers its arguments before their types are known.
+
 ## Variadic Functions
 
 A variadic parameter declared with `...` accepts any number of arguments:
