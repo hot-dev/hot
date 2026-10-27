@@ -620,9 +620,27 @@ async fn authenticate_token_inner(
 /// On success, inserts both an `AuthContext` and (for backward compatibility) an `ApiKey`
 /// into the request extensions.
 pub async fn api_key_auth_middleware(
+    state: State<ApiStateData>,
+    request: Request,
+    next: Next,
+) -> Result<Response, StatusCode> {
+    auth_middleware_inner(state, request, next, true).await
+}
+
+/// Production routers place action authorization inside rate limiting and logging.
+pub async fn authentication_middleware(
+    state: State<ApiStateData>,
+    request: Request,
+    next: Next,
+) -> Result<Response, StatusCode> {
+    auth_middleware_inner(state, request, next, false).await
+}
+
+async fn auth_middleware_inner(
     State((db, _storage, _conf, _stream_pubsub)): State<ApiStateData>,
     mut request: Request,
     next: Next,
+    authorize: bool,
 ) -> Result<Response, StatusCode> {
     // Get the Authorization header
     let auth_header = request
@@ -650,21 +668,56 @@ pub async fn api_key_auth_middleware(
     // Authenticate via the shared path
     let authenticated = authenticate_token(&db, token).await?;
 
+    let scope = authenticated.scope;
+    request.extensions_mut().insert(scope.clone());
+    // Insert AuthContext for new handlers
+    request.extensions_mut().insert(authenticated.auth_ctx);
+
+    // Also insert ApiKey for backward compatibility with existing handlers
+    request.extensions_mut().insert(authenticated.api_key);
+
+    if authorize {
+        request = match authorize_request(request).await {
+            Ok(request) => request,
+            Err(response) => return Ok(*response),
+        };
+    }
+    Ok(with_database_scope(scope, next.run(request)).await)
+}
+
+/// Action and selector denials pass through the account rate limiter and audit.
+pub async fn route_authorization_middleware(request: Request, next: Next) -> Response {
+    match authorize_request(request).await {
+        Ok(request) => next.run(request).await,
+        Err(response) => *response,
+    }
+}
+
+async fn authorize_request(mut request: Request) -> Result<Request, Box<Response>> {
+    let auth_ctx = request
+        .extensions()
+        .get::<AuthContext>()
+        .cloned()
+        .ok_or_else(|| StatusCode::UNAUTHORIZED.into_response())?;
+    let scope = request
+        .extensions()
+        .get::<DatabaseScope>()
+        .cloned()
+        .ok_or_else(|| StatusCode::FORBIDDEN.into_response())?;
     // If a custom domain was resolved, verify the credential belongs to the same environment.
     // This prevents using credentials from env A to access a custom domain pointing to env B.
     if let Some(resolved) = request.extensions().get::<ResolvedDomain>()
-        && authenticated.auth_ctx.env_id() != resolved.env_id
+        && auth_ctx.env_id() != resolved.env_id
     {
         debug!(
             "Credential env_id {} does not match custom domain '{}' env_id {}",
-            authenticated.auth_ctx.env_id(),
+            auth_ctx.env_id(),
             resolved.domain,
             resolved.env_id
         );
-        return Err(StatusCode::FORBIDDEN);
+        return Err(Box::new(StatusCode::FORBIDDEN.into_response()));
     }
 
-    let scope = authenticated.scope;
     if let DatabaseScope::Environment { org_id, env_id } = &scope {
         for (name, value) in
             url::form_urlencoded::parse(request.uri().query().unwrap_or("").as_bytes())
@@ -672,13 +725,14 @@ pub async fn api_key_auth_middleware(
             let expected = match name.as_ref() {
                 "org_id" => Some(*org_id),
                 "env_id" => Some(*env_id),
-                "tenant_id" => return Err(StatusCode::BAD_REQUEST),
+                "tenant_id" => return Err(Box::new(StatusCode::BAD_REQUEST.into_response())),
                 _ => None,
             };
             if let Some(expected) = expected {
-                let supplied = Uuid::parse_str(&value).map_err(|_| StatusCode::BAD_REQUEST)?;
+                let supplied =
+                    Uuid::parse_str(&value).map_err(|_| StatusCode::BAD_REQUEST.into_response())?;
                 if supplied != expected {
-                    return Err(StatusCode::FORBIDDEN);
+                    return Err(Box::new(StatusCode::FORBIDDEN.into_response()));
                 }
             }
         }
@@ -687,19 +741,17 @@ pub async fn api_key_auth_middleware(
     let route = parts
         .extensions
         .get::<MatchedPath>()
-        .ok_or(StatusCode::FORBIDDEN)?
+        .ok_or_else(|| StatusCode::FORBIDDEN.into_response())?
         .as_str()
         .to_owned();
     let params = RawPathParams::from_request_parts(&mut parts, &())
         .await
-        .map_err(|_| StatusCode::BAD_REQUEST)?;
+        .map_err(|_| StatusCode::BAD_REQUEST.into_response())?;
     let params = params
         .iter()
         .map(|(key, value)| (key.to_owned(), value.to_owned()))
         .collect();
-    if let Err(status) =
-        route_permissions::authorize(&authenticated.auth_ctx, &parts.method, &route, &params)
-    {
+    if let Err(status) = route_permissions::authorize(&auth_ctx, &parts.method, &route, &params) {
         let error = if status == StatusCode::BAD_REQUEST {
             crate::models::ApiErrorResponse::bad_request("Invalid route parameters")
         } else {
@@ -708,16 +760,10 @@ pub async fn api_key_auth_middleware(
                 "Credential does not authorize this API action",
             )
         };
-        return Ok((status, Json(error)).into_response());
+        return Err(Box::new((status, Json(error)).into_response()));
     }
     request = Request::from_parts(parts, body);
-    // Insert AuthContext for new handlers
-    request.extensions_mut().insert(authenticated.auth_ctx);
-
-    // Also insert ApiKey for backward compatibility with existing handlers
-    request.extensions_mut().insert(authenticated.api_key);
-
-    Ok(with_database_scope(scope, next.run(request)).await)
+    Ok(request)
 }
 
 #[cfg(test)]

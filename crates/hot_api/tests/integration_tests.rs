@@ -233,6 +233,86 @@ async fn test_status_endpoint() {
     assert!(!git_sha.is_empty(), "git_sha should not be empty");
 }
 
+/// Authentication runs outermost, but a route the credential may not call is
+/// denied inside the layers that rate-limit and audit requests.
+#[tokio::test]
+async fn route_denial_runs_inside_rate_limit_and_access_log_layers() {
+    use hot::db::api_key::ApiKey;
+    use hot::db::get_default_org_and_user_ids;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let state = create_test_db().await;
+    let (_, user_id) = get_default_org_and_user_ids(&state.0).await.unwrap();
+    let env = Env::get_default_env(&state.0).await.unwrap();
+    let api_key_id = Uuid::new_v4();
+    let (token, key_data) = ApiKey::generate_api_key(&api_key_id).unwrap();
+    ApiKey::insert_api_key(
+        &state.0,
+        &api_key_id,
+        &env.env_id,
+        "read-only",
+        &serde_json::from_str(&key_data).unwrap(),
+        &user_id,
+        &json!({"project:*": ["read"]}),
+    )
+    .await
+    .unwrap();
+
+    // Stands in for the rate limiter and access log.
+    let seen = Arc::new(AtomicUsize::new(0));
+    let counter = seen.clone();
+    let app = axum::Router::new()
+        .route(
+            "/v1/projects",
+            axum::routing::get(hot_api::handlers::list_projects)
+                .post(hot_api::handlers::create_project),
+        )
+        .route_layer(axum::middleware::from_fn(
+            hot_api::auth::route_authorization_middleware,
+        ))
+        .route_layer(axum::middleware::from_fn(
+            move |request: axum::extract::Request, next: axum::middleware::Next| {
+                let counter = counter.clone();
+                async move {
+                    counter.fetch_add(1, Ordering::SeqCst);
+                    next.run(request).await
+                }
+            },
+        ))
+        .route_layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            hot_api::auth::authentication_middleware,
+        ))
+        .with_state(state.clone());
+
+    let (status, _) = make_request(
+        &app,
+        Method::POST,
+        "/v1/projects",
+        &token,
+        Some(json!({"name": "denied"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert_eq!(
+        seen.load(Ordering::SeqCst),
+        1,
+        "the denial reached the inner layers"
+    );
+
+    let (status, _) = make_request(&app, Method::GET, "/v1/projects", &token, None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(seen.load(Ordering::SeqCst), 2);
+
+    let (status, _) = make_request(&app, Method::GET, "/v1/projects", "hot_invalid", None).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    assert_eq!(
+        seen.load(Ordering::SeqCst),
+        2,
+        "unauthenticated requests stop at the outer layer"
+    );
+}
+
 #[tokio::test]
 async fn test_projects_crud() {
     let db = create_test_db().await;
