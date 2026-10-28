@@ -25,6 +25,7 @@ pub mod core_registry;
 pub mod ctx_checker;
 pub mod dependency_graph;
 mod named_args;
+mod namespace_order;
 pub mod placeholder_lowering;
 pub mod refinements;
 pub mod resolver;
@@ -1244,8 +1245,9 @@ impl Compiler {
         tracing::debug!("Compiler: Pass 2 - Compiling all other declarations");
         tracing::trace!("Total namespaces to compile: {}", program.namespaces.len());
 
-        // Create a compilation order that ensures ::hot::main (target file namespace) is processed last
-        let mut namespace_order: Vec<_> = program.namespaces.iter().collect();
+        // Namespaces run after the namespaces whose values they read, and
+        // ::hot::main (target file namespace) runs last.
+        let mut namespace_order = namespace_order::initialization_order(program);
 
         // Find ::hot::main namespace and move it to the end if it exists
         if let Some(main_pos) = namespace_order
