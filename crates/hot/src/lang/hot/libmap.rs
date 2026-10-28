@@ -1117,6 +1117,22 @@ pub fn get_hotlib_map() -> &'static HotLibMap {
             "::hot::test/is-test".to_string(),
             HotLibFn::vm_callback(meta::is_test),
         );
+        // Test harness: the clock a test fixes, and the events and schedules
+        // it delivers itself. Each errs outside a `hot test` run.
+        for (name, func) in [
+            ("set-now", test::set_now as LibFnType),
+            ("advance", test::advance),
+            ("clear-now", test::clear_now),
+            ("fixed-now", test::fixed_now_fn),
+            ("reset", test::reset),
+            ("take-sent", test::take_sent),
+            ("arm-schedule", test::arm_schedule),
+            ("cancel-schedule", test::cancel_schedule),
+            ("schedules", test::schedules),
+            ("take-due", test::take_due),
+        ] {
+            map.insert(format!("::hot::test/{name}"), HotLibFn::LibFn(func));
+        }
         map.insert(
             "::hot::meta/source".to_string(),
             HotLibFn::vm_callback(meta::source),

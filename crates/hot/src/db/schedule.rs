@@ -175,6 +175,15 @@ impl ScheduleType {
 ///
 /// Returns a ScheduleType that can be converted to the database format.
 pub fn parse_schedule_expression(expr: &str) -> Result<ScheduleType, String> {
+    parse_schedule_expression_at(expr, Utc::now())
+}
+
+/// Parse a schedule expression with relative times ("in 10 minutes")
+/// measured from `now` instead of the system clock.
+pub fn parse_schedule_expression_at(
+    expr: &str,
+    now: DateTime<Utc>,
+) -> Result<ScheduleType, String> {
     let expr = expr.trim();
 
     // 1. Try ISO 8601 datetime first
@@ -191,7 +200,7 @@ pub fn parse_schedule_expression(expr: &str) -> Result<ScheduleType, String> {
         .trim();
 
     if let Ok(duration) = humantime::parse_duration(duration_str) {
-        let run_at = Utc::now()
+        let run_at = now
             + chrono::Duration::from_std(duration)
                 .map_err(|e| format!("Duration conversion error: {}", e))?;
         return Ok(ScheduleType::At(run_at));
