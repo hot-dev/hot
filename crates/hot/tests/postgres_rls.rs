@@ -722,6 +722,113 @@ async fn scoped_pool_enforces_isolation_under_a_restricted_login()
         .execute(&admin)
         .await?;
 
+    // Service scopes read the directories they deliver to (migration 017):
+    // alert recipients, billing emails, deactivated members an org can
+    // reactivate, and the root administrators a child inherits.
+    let member = Uuid::new_v4();
+    let former = Uuid::new_v4();
+    for (id, name) in [(member, "member"), (former, "former")] {
+        sqlx::query(
+            "INSERT INTO hot.\"user\" (user_id,email,created_by_user_id) VALUES ($1,$2,$1)",
+        )
+        .bind(id)
+        .bind(format!("{name}-{id}@rls.example.test"))
+        .execute(&admin)
+        .await?;
+    }
+    // A child grant requires an active root membership.
+    for (org, member_id, role, active) in [
+        (root, user, 2_i16, true),
+        (root, member, 1, true),
+        (root, former, 1, true),
+        (child_a, member, 1, true),
+        (child_a, former, 1, false),
+    ] {
+        sqlx::query("INSERT INTO hot.org_user (org_id,user_id,org_user_role_id,active,created_by_user_id) VALUES ($1,$2,$3,$4,$5)")
+            .bind(org).bind(member_id).bind(role).bind(active).bind(user).execute(&admin).await?;
+    }
+    let directory_users = [user, member, former];
+    let users_seen = |scope: DatabaseScope| {
+        let pool = pool.with_scope(scope);
+        async move {
+            sqlx::query_scalar::<_, i64>("SELECT count(*) FROM hot.\"user\" WHERE user_id=ANY($1)")
+                .bind(directory_users.to_vec())
+                .fetch_one(&pool)
+                .await
+        }
+    };
+    let alerts_scope = DatabaseScope::Maintenance {
+        operation: db::MaintenanceOperation::Alerts,
+        org_id: None,
+    };
+    let billing_scope = DatabaseScope::Maintenance {
+        operation: db::MaintenanceOperation::Billing,
+        org_id: Some(root),
+    };
+    let child_scope = DatabaseScope::Organization { org_id: child_a };
+    assert_eq!(users_seen(alerts_scope.clone()).await?, 3);
+    assert_eq!(users_seen(billing_scope.clone()).await?, 3);
+    assert_eq!(users_seen(child_scope.clone()).await?, 3);
+    assert_eq!(
+        users_seen(DatabaseScope::Organization { org_id: child_b }).await?,
+        1,
+        "a sibling sees only the inherited root administrator"
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM hot.org_user WHERE (org_id=$1 AND user_id=$2) OR user_id=ANY($3)"
+        )
+        .bind(root)
+        .bind(user)
+        .bind(vec![member, former])
+        .fetch_one(&pool.with_scope(alerts_scope.clone()))
+        .await?,
+        5
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM hot.org_user WHERE org_id=$1")
+            .bind(root)
+            .fetch_one(&pool.with_scope(child_scope))
+            .await?,
+        1,
+        "a child reads the root administrator it inherits"
+    );
+    let billing = pool.with_scope(billing_scope);
+    sqlx::query("INSERT INTO hot.org_note (org_id,category,note_type,message) VALUES ($1,'billing','compute-units.threshold','80%')")
+        .bind(root)
+        .execute(&billing)
+        .await?;
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM hot.org_note WHERE org_id=$1 AND note_type='compute-units.threshold'"
+        )
+        .bind(root)
+        .fetch_one(&billing)
+        .await?,
+        1
+    );
+    assert!(
+        sqlx::query("INSERT INTO hot.org_note (org_id,category,note_type,message) VALUES ($1,'billing','compute-units.threshold','80%')")
+            .bind(child_a)
+            .execute(&pool.with_scope(DatabaseScope::Maintenance {
+                operation: db::MaintenanceOperation::Billing,
+                org_id: Some(child_b),
+            }))
+            .await
+            .is_err(),
+        "billing writes notes only for its own account"
+    );
+    sqlx::query("DELETE FROM hot.org_note WHERE org_id=$1")
+        .bind(root)
+        .execute(&admin)
+        .await?;
+    sqlx::query("DELETE FROM hot.org_user WHERE (org_id=$1 AND user_id=$2) OR user_id=ANY($3)")
+        .bind(root)
+        .bind(user)
+        .bind(vec![member, former])
+        .execute(&admin)
+        .await?;
+
     // Delivery ownership is checked even under the cross-account alert worker
     // scope. A same-org subscription in another env is also a foreign target.
     let alerts = pool.with_scope(DatabaseScope::Maintenance {
