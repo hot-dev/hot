@@ -178,6 +178,12 @@ at compile time. Union arms (`A | B`) count every variant they name toward
 coverage, and an `Any` arm covers everything (it also satisfies the
 open-enum default requirement below).
 
+A `match` on a closed literal union (`Severity type "low" | "medium" |
+"high"`, or an inline `"low" | "high"` parameter) follows the same rule:
+every value needs an arm, or a default, `Any`, or type arm (`Str`) covers
+the rest. The error lists the missing values. A nullable subject
+(`Severity?`) also needs a `null` arm.
+
 A `match` on an `open enum` MUST include a `_` / bare `=>` default arm,
 because additional variants can be enrolled later via
 `Source -> Enum.Variant` arrows. Missing the default produces

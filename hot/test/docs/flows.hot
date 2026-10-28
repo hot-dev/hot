@@ -440,6 +440,23 @@ meta ["test"] fn () {
   assert-eq("horizontal", classify(Direction.Right), "Right in horizontal union")
 }
 
+Level type "low" | "medium" | "high"
+
+test-match-literal-union-exhaustive
+meta ["test"] fn () {
+  // A closed literal union is checked like a closed enum: these arms cover
+  // every value (and null for the nullable subject) without a default arm
+  rate fn match (l: Level?): Int {
+    "low" => { 1 }
+    "medium" | "high" => { 2 }
+    null => { 0 }
+  }
+
+  assert-eq(1, rate("low"), "low has its own arm")
+  assert-eq(2, rate("high"), "high in the union arm")
+  assert-eq(0, rate(null), "null arm")
+}
+
 test-match-optional-sugar-and-any
 meta ["test"] fn () {
   greet fn (name: Str?): Str {

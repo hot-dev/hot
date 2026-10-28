@@ -325,6 +325,23 @@ classify fn match (d: Direction): Str {
 }
 ```
 
+The same rule applies to a `match` on a closed literal union, named or
+inline: every member needs an arm, unless a `_`, `Any`, or type arm (such as
+`Str`) covers the rest. A union arm counts each value it names. The error
+lists the missing values. A nullable subject (`Severity?`) also needs a `null`
+arm. An `open` literal union isn't checked this way, since other declarations
+can add members.
+
+```hot
+Severity type "low" | "medium" | "high"
+
+// [non-exhaustive-match]: missing arms for `"medium"`
+rate fn match (s: Severity): Int {
+  "low" => { 1 }
+  "high" => { 3 }
+}
+```
+
 ### Open Enums
 
 Add the `open` modifier to declare an extensible enum. Other modules add

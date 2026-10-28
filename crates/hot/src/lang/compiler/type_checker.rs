@@ -95,6 +95,18 @@ fn walk_values<'a>(value: &'a Value, visit: &mut impl FnMut(&'a Value)) {
     }
 }
 
+/// A `match` subject typed as a literal union, for exhaustiveness checks.
+struct LiteralUnionSubject {
+    /// Name used in diagnostics: `Severity`, `Severity?`, or `"a" | "b"`.
+    name: String,
+    /// `name` without the nullable `?`; a type arm with this name covers
+    /// every non-null member.
+    base_name: String,
+    /// Members in declaration order, plus `null` for a nullable subject.
+    members: Vec<LiteralType>,
+    is_open: bool,
+}
+
 /// Literal types for enum-style unions (e.g., "apple" | "banana" | "orange")
 #[derive(Debug, Clone, PartialEq)]
 pub enum LiteralType {
@@ -1352,14 +1364,16 @@ impl TypeChecker {
                     && let Some(primitive) = self.try_resolve_builtin_type(&short)
                 {
                     primitive
-                } else if let Some(td) = self.context.types.get(&short)
+                } else if let Some(td) = self.context.types.get(&qualified)
                     && td.is_literal_union
                 {
                     // Build the resolved type from the *accumulated*
                     // literal members so re-declarations of an open
                     // literal union update the union's shape. For closed
                     // literal unions this is identical to the original
-                    // alias (one declaration, no accumulation).
+                    // alias (one declaration, no accumulation). The
+                    // qualified entry, not the short-name one, which also
+                    // holds same-named types from other namespaces.
                     Self::literal_members_to_type_expr(&td.literal_members)
                 } else if let Some(alias) = &type_def.type_alias {
                     // Mixed/non-literal aliases (e.g. `Foo type Int | Str`)
@@ -1408,6 +1422,10 @@ impl TypeChecker {
     ///   match handles every future case.
     /// - Closed `enum` subjects must either name every declared variant
     ///   or include a `_` default arm.
+    /// - Closed literal-union subjects (`Severity`, `Severity?`, an inline
+    ///   `"a" | "b"`) must cover every member, `null` included for a
+    ///   nullable subject, or include a default arm. Open literal unions
+    ///   aren't checked.
     ///
     /// When the subject type can't be tied to a declared enum (e.g.
     /// matches on `Int`/`Str` literals, on `Any`, on the result of a
@@ -1443,6 +1461,11 @@ impl TypeChecker {
         arms: &[&MatchArm],
         location: Option<ErrorLocation>,
     ) {
+        if let Some(subject) = self.literal_union_subject(subject_type) {
+            self.check_literal_union_exhaustiveness(subject, arms, location);
+            return;
+        }
+
         let Some(short_name) = Self::type_expr_short_name(subject_type) else {
             return;
         };
@@ -1519,8 +1542,235 @@ impl TypeChecker {
             self.errors.add(CompilerError::NonExhaustiveMatch {
                 enum_name: short_name,
                 missing_variants: sorted,
+                literal_values: false,
                 location,
             });
+        }
+    }
+
+    /// Describe a `match` subject typed as a literal union (`Severity`,
+    /// `Severity?`, `"a" | "b"`), or `None` for any other subject.
+    ///
+    /// Annotations resolve a named literal union to its bare member union,
+    /// dropping the name, so an unnamed union takes the name and openness
+    /// of a declared literal union with the same members.
+    fn literal_union_subject(&self, subject_type: &TypeExpr) -> Option<LiteralUnionSubject> {
+        let mut members = Vec::new();
+        let mut is_open = false;
+        if !self.collect_literal_members(subject_type, &mut members, &mut is_open)
+            || !members.iter().any(|m| *m != LiteralType::Null)
+        {
+            return None;
+        }
+        let (base, nullable) = match subject_type {
+            TypeExpr::Optional(inner) => (inner.as_ref(), true),
+            other => (other, false),
+        };
+        let base_name = match base {
+            TypeExpr::Named(name) => Self::short_type_name(name),
+            _ => {
+                let base_members: Vec<LiteralType> = if nullable {
+                    members
+                        .iter()
+                        .filter(|m| **m != LiteralType::Null)
+                        .cloned()
+                        .collect()
+                } else {
+                    members.clone()
+                };
+                match self.declared_literal_union(&base_members) {
+                    Some((name, open)) => {
+                        is_open |= open;
+                        name
+                    }
+                    None => base.to_string(),
+                }
+            }
+        };
+        Some(LiteralUnionSubject {
+            name: if nullable {
+                format!("{}?", base_name)
+            } else {
+                base_name.clone()
+            },
+            base_name,
+            members,
+            is_open,
+        })
+    }
+
+    /// Flatten a literal-union type into `members`, setting `is_open` when
+    /// any part is an open literal union. Returns false for a type with a
+    /// non-literal part (`Str | "a"`, `Int?`, a struct, ...).
+    fn collect_literal_members(
+        &self,
+        t: &TypeExpr,
+        members: &mut Vec<LiteralType>,
+        is_open: &mut bool,
+    ) -> bool {
+        fn push(members: &mut Vec<LiteralType>, lit: LiteralType) {
+            if !members.contains(&lit) {
+                members.push(lit);
+            }
+        }
+        match t {
+            TypeExpr::Literal(lit) => push(members, lit.clone()),
+            TypeExpr::Null => push(members, LiteralType::Null),
+            TypeExpr::Constrained(inner, _) => {
+                return self.collect_literal_members(inner, members, is_open);
+            }
+            TypeExpr::Optional(inner) => {
+                if !self.collect_literal_members(inner, members, is_open) {
+                    return false;
+                }
+                push(members, LiteralType::Null);
+            }
+            TypeExpr::Named(name) => match self.literal_union_def(name) {
+                Some(td) => {
+                    *is_open |= td.is_open;
+                    for lit in &td.literal_members {
+                        push(members, lit.clone());
+                    }
+                }
+                _ => return false,
+            },
+            TypeExpr::Union(parts) => {
+                let mut own = Vec::new();
+                for part in parts {
+                    if !self.collect_literal_members(part, &mut own, is_open) {
+                        return false;
+                    }
+                }
+                // A resolved open alias arrives here as a bare union.
+                if let Some((_, true)) = self.declared_literal_union(&own) {
+                    *is_open = true;
+                }
+                for lit in own {
+                    push(members, lit);
+                }
+            }
+            _ => return false,
+        }
+        true
+    }
+
+    /// The literal-union definition `name` refers to. A qualified name has
+    /// its own entry; a short-name entry merges every namespace's type of
+    /// that name, so it counts only when no enum or struct shares it.
+    fn literal_union_def(&self, name: &str) -> Option<&TypeDefinition> {
+        self.context
+            .types
+            .get(name)
+            .or_else(|| self.context.types.get(&Self::short_type_name(name)))
+            .filter(|td| td.is_literal_union && !td.is_enum && !td.is_struct)
+    }
+
+    /// The declared literal union whose members are exactly `members`, as
+    /// `(short name, is_open)`. An open match wins, so an ambiguous union is
+    /// never checked as closed; otherwise the first name in sort order wins.
+    fn declared_literal_union(&self, members: &[LiteralType]) -> Option<(String, bool)> {
+        self.context
+            .types
+            .iter()
+            // Qualified entries only: short-name entries merge namespaces.
+            .filter(|(name, td)| {
+                name.contains('/')
+                    && td.is_literal_union
+                    && td.literal_members.len() == members.len()
+                    && members.iter().all(|m| td.literal_members.contains(m))
+            })
+            .map(|(name, td)| (Self::short_type_name(name), td.is_open))
+            .min_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)))
+    }
+
+    /// Exhaustiveness for a `match` on a closed literal union: every member
+    /// needs a value arm unless a default, `Any`, or covering type arm
+    /// handles the rest. An open literal union can gain members from other
+    /// declarations, so it isn't checked here.
+    fn check_literal_union_exhaustiveness(
+        &mut self,
+        subject: LiteralUnionSubject,
+        arms: &[&MatchArm],
+        location: Option<ErrorLocation>,
+    ) {
+        if subject.is_open {
+            return;
+        }
+        let mut covered = vec![false; subject.members.len()];
+        for arm in arms {
+            let is_default = arm.type_name.is_none()
+                && arm.variant.is_none()
+                && arm.value_literal.is_none()
+                && arm.alternatives.is_empty();
+            if is_default {
+                return;
+            }
+            let atoms = std::iter::once((&arm.type_name, &arm.variant, &arm.value_literal)).chain(
+                arm.alternatives
+                    .iter()
+                    .map(|alt| (&alt.type_name, &alt.variant, &alt.value_literal)),
+            );
+            for (type_name, variant, value_literal) in atoms {
+                if let Some(literal) = value_literal {
+                    let Value::Val(val, _) = literal.as_ref() else {
+                        continue;
+                    };
+                    for (i, member) in subject.members.iter().enumerate() {
+                        if Self::literal_equals_val(member, val) {
+                            covered[i] = true;
+                        }
+                    }
+                    continue;
+                }
+                let (Some(type_name), None) = (type_name, variant) else {
+                    continue;
+                };
+                let short = Self::short_type_name(type_name);
+                if short == "Any" {
+                    return;
+                }
+                for (i, member) in subject.members.iter().enumerate() {
+                    let kind = match member {
+                        LiteralType::Str(_) => "Str",
+                        LiteralType::Int(_) => "Int",
+                        LiteralType::Dec(_) => "Dec",
+                        LiteralType::Bool(_) => "Bool",
+                        LiteralType::Null => "Null",
+                    };
+                    let named_cover = short == subject.base_name && *member != LiteralType::Null;
+                    if short == kind || named_cover {
+                        covered[i] = true;
+                    }
+                }
+            }
+        }
+        let missing: Vec<String> = subject
+            .members
+            .iter()
+            .zip(&covered)
+            .filter(|(_, covered)| !**covered)
+            .map(|(member, _)| member.to_string())
+            .collect();
+        if !missing.is_empty() {
+            self.errors.add(CompilerError::NonExhaustiveMatch {
+                enum_name: subject.name,
+                missing_variants: missing,
+                literal_values: true,
+                location,
+            });
+        }
+    }
+
+    /// Whether a match arm's literal value equals a literal-union member,
+    /// mirroring the runtime's equality test for value arms.
+    fn literal_equals_val(member: &LiteralType, val: &Val) -> bool {
+        match (member, val) {
+            (LiteralType::Str(a), Val::Str(b)) => a.as_str() == &**b,
+            (LiteralType::Int(a), Val::Int(b)) => a == b,
+            (LiteralType::Dec(a), Val::Dec(b)) => a.parse::<fastnum::D256>().is_ok_and(|a| a == *b),
+            (LiteralType::Bool(a), Val::Bool(b)) => a == b,
+            (LiteralType::Null, Val::Null) => true,
+            _ => false,
         }
     }
 
@@ -5535,6 +5785,206 @@ mod tests {
             "closed-enum match with `_` arm should not error: {:?}",
             checker.errors.errors
         );
+    }
+
+    /// Exhaustiveness errors from checking `source`, rendered as
+    /// `(type name, missing members)` pairs.
+    fn literal_union_match_errors(source: &str) -> Vec<(String, Vec<String>)> {
+        use crate::lang::errors::CompilerError;
+        use crate::lang::parser::parse_hot;
+
+        let program = parse_hot(source).expect("parse");
+        let mut checker = TypeChecker::new();
+        let _ = checker.check_program(&program);
+        checker
+            .errors
+            .errors
+            .iter()
+            .filter_map(|e| match e {
+                CompilerError::NonExhaustiveMatch {
+                    enum_name,
+                    missing_variants,
+                    ..
+                } => Some((enum_name.clone(), missing_variants.clone())),
+                CompilerError::OpenEnumMatchMissingDefault { enum_name, .. } => {
+                    Some((enum_name.clone(), Vec::new()))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn test_closed_literal_union_non_exhaustive_match_is_error() {
+        let errors = literal_union_match_errors(
+            r#"
+        ::ep::b ns
+        Severity type "low" | "medium" | "high"
+        rate fn match (s: Severity): Int {
+            "low" => { 1 }
+            "high" => { 3 }
+        }
+        "#,
+        );
+        assert_eq!(
+            errors,
+            vec![("Severity".to_string(), vec![r#""medium""#.to_string()])],
+        );
+    }
+
+    #[test]
+    fn test_closed_literal_union_non_exhaustive_message_names_values() {
+        use crate::lang::errors::CompilerError;
+        use crate::lang::parser::parse_hot;
+
+        let program = parse_hot(
+            r#"
+        DiceRoll type 1 | 2 | 3
+        name fn match (d: DiceRoll): Str {
+            1 => { "one" }
+        }
+        "#,
+        )
+        .expect("parse");
+        let mut checker = TypeChecker::new();
+        let _ = checker.check_program(&program);
+        let messages: Vec<String> = checker
+            .errors
+            .errors
+            .iter()
+            .filter(|e| matches!(e, CompilerError::NonExhaustiveMatch { .. }))
+            .map(|e| e.to_string())
+            .collect();
+        assert_eq!(messages.len(), 1, "{:?}", checker.errors.errors);
+        assert!(
+            messages[0].ends_with("non-exhaustive `match` on `DiceRoll`: missing `2`, `3`"),
+            "{}",
+            messages[0]
+        );
+    }
+
+    #[test]
+    fn test_closed_literal_union_covered_match_is_ok() {
+        for arms in [
+            r#""low" => { 1 }  "medium" => { 2 }  "high" => { 3 }"#,
+            r#""low" => { 1 }  _ => { 0 }"#,
+            r#""low" => { 1 }  => { 0 }"#,
+            r#""low" => { 1 }  Any => { 0 }"#,
+            r#""low" | "medium" | "high" => { 1 }"#,
+            r#""low" => { 1 }  "medium" | "high" => { 2 }"#,
+            r#"Severity => { 1 }"#,
+            r#"Str => { 1 }"#,
+        ] {
+            let source = format!(
+                "Severity type \"low\" | \"medium\" | \"high\"\n\
+                 rate fn match (s: Severity): Int {{\n{}\n}}\n",
+                arms.replace("  ", "\n")
+            );
+            let errors = literal_union_match_errors(&source);
+            assert!(errors.is_empty(), "arms {:?} gave {:?}", arms, errors);
+        }
+    }
+
+    #[test]
+    fn test_optional_literal_union_match_needs_null_arm() {
+        let errors = literal_union_match_errors(
+            r#"
+        Severity type "low" | "high"
+        rate fn match (s: Severity?): Int {
+            "low" => { 1 }
+            "high" => { 3 }
+        }
+        "#,
+        );
+        assert_eq!(
+            errors,
+            vec![("Severity?".to_string(), vec!["null".to_string()])],
+        );
+
+        let errors = literal_union_match_errors(
+            r#"
+        Severity type "low" | "high"
+        rate fn match (s: Severity?): Int {
+            "low" | "high" => { 1 }
+            null => { 0 }
+        }
+        "#,
+        );
+        assert!(errors.is_empty(), "{:?}", errors);
+    }
+
+    #[test]
+    fn test_standalone_match_on_closed_literal_union_is_checked() {
+        let errors = literal_union_match_errors(
+            r#"
+        Severity type "low" | "medium" | "high"
+        rate fn (s: Severity): Int {
+            match s {
+                "low" => { 1 }
+            }
+        }
+        "#,
+        );
+        assert_eq!(
+            errors,
+            vec![(
+                "Severity".to_string(),
+                vec![r#""medium""#.to_string(), r#""high""#.to_string()]
+            )],
+        );
+    }
+
+    #[test]
+    fn test_inline_literal_union_match_is_checked() {
+        let errors = literal_union_match_errors(
+            r#"
+        rate fn match (s: "low" | "high"): Int {
+            "low" => { 1 }
+        }
+        "#,
+        );
+        assert_eq!(
+            errors,
+            vec![(
+                r#""low" | "high""#.to_string(),
+                vec![r#""high""#.to_string()]
+            )],
+        );
+    }
+
+    #[test]
+    fn test_enum_match_ignores_literal_union_of_same_name_elsewhere() {
+        let errors = literal_union_match_errors(
+            r#"
+        ::app::unions ns
+        Status type "pending" | "active"
+
+        ::app::enums ns
+        Status enum { Pending, Active }
+        describe fn (st: Status): Str {
+            match st {
+                Status.Pending => { "pending" }
+                Status.Active => { "active" }
+            }
+        }
+        "#,
+        );
+        assert!(errors.is_empty(), "{:?}", errors);
+    }
+
+    #[test]
+    fn test_open_literal_union_match_is_not_checked_as_closed() {
+        let errors = literal_union_match_errors(
+            r#"
+        Fruit type open "apple" | "banana"
+        Fruit type open | "cherry"
+        pick fn match (f: Fruit): Int {
+            "apple" => { 1 }
+            _ => { 0 }
+        }
+        "#,
+        );
+        assert!(errors.is_empty(), "{:?}", errors);
     }
 
     #[test]
