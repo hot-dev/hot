@@ -7,6 +7,43 @@ use sqlx::{Executor, postgres::PgPoolOptions};
 use std::time::Duration;
 use uuid::Uuid;
 
+struct TestRoleCleanup {
+    options: sqlx::postgres::PgConnectOptions,
+    role: String,
+}
+impl Drop for TestRoleCleanup {
+    fn drop(&mut self) {
+        let options = self.options.clone();
+        let role = self.role.clone();
+        let _ = std::thread::spawn(move || {
+            if let Ok(runtime) = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+            {
+                runtime.block_on(async {
+                    let cleanup = async {
+                        if let Ok(pool) = PgPoolOptions::new()
+                            .max_connections(1)
+                            .connect_with(options)
+                            .await
+                        {
+                            let _ = pool
+                                .execute(sqlx::AssertSqlSafe(format!("DROP OWNED BY {role}")))
+                                .await;
+                            let _ = pool
+                                .execute(sqlx::AssertSqlSafe(format!("DROP ROLE IF EXISTS {role}")))
+                                .await;
+                            pool.close().await;
+                        }
+                    };
+                    let _ = tokio::time::timeout(Duration::from_secs(10), cleanup).await;
+                });
+            }
+        })
+        .join();
+    }
+}
+
 async fn upsert_test_webhook(
     db: &db::DatabasePool,
     webhook_id: &Uuid,
@@ -48,6 +85,10 @@ async fn scoped_pool_enforces_isolation_under_a_restricted_login()
     let password = Uuid::new_v4().simple().to_string();
     // Both interpolated values are generated identifier-safe UUID strings.
     admin.execute(sqlx::AssertSqlSafe(format!("CREATE ROLE {role} LOGIN PASSWORD '{password}' NOSUPERUSER NOBYPASSRLS NOINHERIT NOCREATEDB NOCREATEROLE"))).await?;
+    let _role_cleanup = TestRoleCleanup {
+        options: admin.connect_options().as_ref().clone(),
+        role: role.clone(),
+    };
     admin
         .execute(sqlx::AssertSqlSafe(format!(
             "GRANT USAGE ON SCHEMA hot TO {role}"
@@ -1524,17 +1565,21 @@ async fn scoped_pool_enforces_isolation_under_a_restricted_login()
         .bind(run_b)
         .fetch_one(&b)
         .await?;
+    let reserve = db::task::TaskQuotaReservation {
+        compute_units: 1,
+        ..reserve
+    };
     let period_task = Uuid::new_v4();
     let period_claim = Uuid::new_v4();
     for (id, env, stream, build, connection) in [
         (period_task, env_a, stream_a, build_a, &a),
         (period_claim, env_b, stream_b, build_b, &b),
     ] {
-        sqlx::query("INSERT INTO task(task_id,env_id,stream_id,build_id,function_name,task_type) VALUES($1,$2,$3,$4,'period-test','code')")
+        sqlx::query("INSERT INTO task(task_id,env_id,stream_id,build_id,function_name,task_type) VALUES($1,$2,$3,$4,'period-test','container')")
             .bind(id).bind(env).bind(stream).bind(build).execute(connection).await?;
     }
     sqlx::query("UPDATE hot.org SET features=$1 WHERE org_id=$2")
-        .bind(serde_json::json!({"compute_units_budget":1000000,"runs_per_month":-1}))
+        .bind(serde_json::json!({"compute_units_budget":1000000,"runs_per_month":-1,"box_concurrent_tasks":-1,"compute_units_per_month":-1}))
         .bind(root)
         .execute(&admin)
         .await?;
@@ -1634,8 +1679,8 @@ async fn scoped_pool_enforces_isolation_under_a_restricted_login()
     )
     .await;
     assert!(
-        matches!(rejected, Err(db::task::TaskError::QuotaExceeded(_))),
-        "a full account must refuse the claim as retryable"
+        matches!(rejected, Err(db::task::TaskError::QuotaExhausted(_))),
+        "an account with containers disabled refuses the claim for good"
     );
     let initialized: bool = sqlx::query_scalar(
         "SELECT bool_and(period_start <= now()) FROM hot.usage_task WHERE org_id=ANY($1)",
@@ -1816,13 +1861,16 @@ async fn scoped_pool_enforces_isolation_under_a_restricted_login()
             .await?,
         0
     );
-    assert!(
+    let denied =
         sqlx::query("INSERT INTO usage_storage(env_id,org_id,slot,call_bytes) VALUES($1,$2,0,1)")
             .bind(env_a)
             .bind(child_a)
             .execute(&b)
             .await
-            .is_err()
+            .unwrap_err();
+    assert_eq!(
+        denied.as_database_error().and_then(|e| e.code()).as_deref(),
+        Some("42501")
     );
     assert_eq!(
         sqlx::query_scalar::<_, i64>("SELECT count(*) FROM usage_task WHERE env_id=$1")
@@ -1831,13 +1879,15 @@ async fn scoped_pool_enforces_isolation_under_a_restricted_login()
             .await?,
         0
     );
-    assert!(
-        sqlx::query("INSERT INTO usage_task(env_id,org_id) VALUES($1,$2)")
+    let denied = sqlx::query("INSERT INTO usage_task(env_id,org_id) VALUES($1,$2) ON CONFLICT(env_id) DO UPDATE SET compute_units=usage_task.compute_units+1")
             .bind(env_a)
             .bind(child_a)
             .execute(&b)
             .await
-            .is_err()
+            .unwrap_err();
+    assert_eq!(
+        denied.as_database_error().and_then(|e| e.code()).as_deref(),
+        Some("42501")
     );
     assert_eq!(
         sqlx::query_scalar::<_, i64>("SELECT count(*) FROM usage_run")
@@ -1845,12 +1895,16 @@ async fn scoped_pool_enforces_isolation_under_a_restricted_login()
             .await?,
         0
     );
-    assert!(
-        sqlx::query("INSERT INTO usage_run(root_org_id,period_start) VALUES($1,now())")
-            .bind(root)
-            .execute(&b)
-            .await
-            .is_err()
+    // A NOT NULL violation would also be an error; only a policy denial (42501)
+    // shows that the counter itself is protected.
+    let denied = sqlx::query("INSERT INTO usage_run(root_org_id,period_start,admitted) VALUES($1,now(),1) ON CONFLICT(root_org_id,period_start) DO UPDATE SET admitted=usage_run.admitted+1")
+        .bind(root)
+        .execute(&b)
+        .await
+        .unwrap_err();
+    assert_eq!(
+        denied.as_database_error().and_then(|e| e.code()).as_deref(),
+        Some("42501")
     );
     // Ownership guards skip updates that keep ownership, so trace and counter
     // writes do not pay for them, but still reject reassignment.
