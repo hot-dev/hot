@@ -193,6 +193,7 @@ pub async fn store_detail_handler(
                 hot::store::ListOptions {
                     limit: Some(ENTRIES_PER_PAGE as usize),
                     offset: Some(offset as usize),
+                    prefix: None,
                 },
             )
             .await
@@ -217,6 +218,7 @@ pub async fn store_detail_handler(
                 hot::store::ListOptions {
                     limit: Some(ENTRIES_PER_PAGE as usize),
                     offset: Some(offset as usize),
+                    prefix: None,
                 },
             )
             .await

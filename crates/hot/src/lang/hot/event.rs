@@ -37,6 +37,21 @@ pub fn send_event(
         }
     };
 
+    // A `hot test` run keeps the event for `::hot::test/deliver`, which runs
+    // its handlers inside the test, instead of publishing it.
+    if crate::lang::hot::test::record_sent(&event_type, &args[1]) {
+        let ctx = vm.get_execution_context().as_ref();
+        let time_nanos = crate::lang::hot::time::now_epoch_nanos().unwrap_or_default();
+        return HotResult::Ok(Val::ok(event_info(
+            uuid::Uuid::now_v7(),
+            event_type,
+            time_nanos as i64,
+            ctx.map(|ctx| ctx.stream_id).unwrap_or_default(),
+            ctx.and_then(|ctx| ctx.env_id),
+            ctx.and_then(|ctx| ctx.env_name.clone()),
+        )));
+    }
+
     // Extract event_data argument - can be any value
     let event_data = args[1].clone();
 
@@ -132,54 +147,14 @@ pub fn send_event(
 
                     publisher.publish(ctx, event);
 
-                    // Build the EventInfo return value
-                    let event_time_instant = crate::val!({
-                        "$type": "::hot::time/Instant",
-                        "$val": {
-                            "epochNanoseconds": event_time.timestamp_nanos_opt().unwrap_or(0)
-                        }
-                    });
-
-                    let event_detail = crate::val!({
-                        "$type": "::hot::event/EventDetail",
-                        "$val": {
-                            "id": event_id.to_string(),
-                            "type": event_type_str,
-                            "time": event_time_instant
-                        }
-                    });
-
-                    let stream = crate::val!({
-                        "$type": "::hot::stream/Stream",
-                        "$val": {
-                            "id": event_stream_id.to_string()
-                        }
-                    });
-
-                    // Helper to convert Option<String> to Val (null if None)
-                    let env_name_val = match event_env_name {
-                        Some(s) => Val::from(s),
-                        None => Val::Null,
-                    };
-
-                    let env = crate::val!({
-                        "$type": "::hot::info/Env",
-                        "$val": {
-                            "id": event_env_id.to_string(),
-                            "name": env_name_val
-                        }
-                    });
-
-                    let event_info = crate::val!({
-                        "$type": "::hot::event/EventInfo",
-                        "$val": {
-                            "event": event_detail,
-                            "stream": stream,
-                            "env": env
-                        }
-                    });
-
-                    HotResult::Ok(Val::ok(event_info))
+                    HotResult::Ok(Val::ok(event_info(
+                        event_id,
+                        event_type_str,
+                        event_time.timestamp_nanos_opt().unwrap_or(0),
+                        event_stream_id,
+                        Some(event_env_id),
+                        event_env_name,
+                    )))
                 }
                 None => {
                     // No execution context configured
@@ -196,6 +171,67 @@ pub fn send_event(
             ))
         }
     }
+}
+
+/// The EventInfo `send` returns: the event's id, type and time, its stream,
+/// and its environment.
+fn event_info(
+    event_id: uuid::Uuid,
+    event_type: String,
+    time_nanos: i64,
+    stream_id: uuid::Uuid,
+    env_id: Option<uuid::Uuid>,
+    env_name: Option<String>,
+) -> Val {
+    let event_time_instant = crate::val!({
+        "$type": "::hot::time/Instant",
+        "$val": {
+            "epochNanoseconds": time_nanos
+        }
+    });
+
+    let event_detail = crate::val!({
+        "$type": "::hot::event/EventDetail",
+        "$val": {
+            "id": event_id.to_string(),
+            "type": event_type,
+            "time": event_time_instant
+        }
+    });
+
+    let stream = crate::val!({
+        "$type": "::hot::stream/Stream",
+        "$val": {
+            "id": stream_id.to_string()
+        }
+    });
+
+    // Helper to convert Option<String> to Val (null if None)
+    let env_name_val = match env_name {
+        Some(s) => Val::from(s),
+        None => Val::Null,
+    };
+    let env_id_val = match env_id {
+        Some(id) => Val::from(id.to_string()),
+        None => Val::Null,
+    };
+
+    let env = crate::val!({
+        "$type": "::hot::info/Env",
+        "$val": {
+            "id": env_id_val,
+            "name": env_name_val
+        }
+    });
+
+    crate::val!({
+        "$type": "::hot::event/EventInfo",
+        "$val": {
+            "event": event_detail,
+            "stream": stream,
+            "env": env
+        }
+    })
 }
 
 /// Listen for events
