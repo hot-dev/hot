@@ -1795,6 +1795,15 @@ impl Schedule {
         limit: Option<i64>,
         offset: Option<i64>,
     ) -> Result<Vec<Schedule>, ScheduleError> {
+        Self::get_schedules_for_environment(db, limit, offset, None).await
+    }
+
+    pub async fn get_schedules_for_environment(
+        db: &crate::db::DatabasePool,
+        limit: Option<i64>,
+        offset: Option<i64>,
+        env_id: Option<Uuid>,
+    ) -> Result<Vec<Schedule>, ScheduleError> {
         let limit = limit.unwrap_or(1000); // Default to a large number since this is for scheduler sync
         let offset = offset.unwrap_or(0);
 
@@ -1805,12 +1814,15 @@ impl Schedule {
                      FROM schedule s
                      JOIN build b ON s.build_id = b.build_id
                      JOIN project p ON b.project_id = p.project_id
-                     WHERE s.active = true AND b.deployed = true AND b.runtime_status = 'ready' AND b.active = true AND p.active = true
+                     JOIN env qe ON qe.env_id=p.env_id JOIN org qo ON qo.org_id=qe.org_id JOIN org qr ON qr.org_id=COALESCE(qo.parent_org_id,qo.org_id)
+                     WHERE qe.active=true AND qo.active=true AND qr.active=true AND qo.lifecycle_state='active' AND qr.lifecycle_state='active' AND s.active = true AND b.deployed = true AND b.runtime_status = 'ready' AND b.active = true AND p.active = true
+                     AND ($3::uuid IS NULL OR qe.env_id=$3)
                      ORDER BY s.cron, s.ns, s.var
                      LIMIT $1 OFFSET $2"
                 )
                 .bind(limit)
                 .bind(offset)
+                .bind(env_id)
                 .fetch_all(pg_pool)
                 .await?;
                 Ok(schedules)
@@ -1821,10 +1833,14 @@ impl Schedule {
                      FROM schedule s
                      JOIN build b ON s.build_id = b.build_id
                      JOIN project p ON b.project_id = p.project_id
-                     WHERE s.active = 1 AND b.deployed = 1 AND b.runtime_status = 'ready' AND b.active = 1 AND p.active = 1
+                     JOIN env qe ON qe.env_id=p.env_id JOIN org qo ON qo.org_id=qe.org_id JOIN org qr ON qr.org_id=COALESCE(qo.parent_org_id,qo.org_id)
+                     WHERE qe.active=true AND qo.active=true AND qr.active=true AND qo.lifecycle_state='active' AND qr.lifecycle_state='active' AND s.active = 1 AND b.deployed = 1 AND b.runtime_status = 'ready' AND b.active = 1 AND p.active = 1
+                     AND (? IS NULL OR qe.env_id=?)
                      ORDER BY s.cron, s.ns, s.var
                      LIMIT ? OFFSET ?"
                 )
+                .bind(env_id)
+                .bind(env_id)
                 .bind(limit)
                 .bind(offset)
                 .fetch_all(sqlite_pool)
@@ -1840,6 +1856,14 @@ impl Schedule {
         db: &crate::db::DatabasePool,
         now: DateTime<Utc>,
     ) -> Result<Vec<ScheduleWithProject>, ScheduleError> {
+        Self::get_due_at_schedules_for_environment(db, now, None).await
+    }
+
+    pub async fn get_due_at_schedules_for_environment(
+        db: &crate::db::DatabasePool,
+        now: DateTime<Utc>,
+        env_id: Option<Uuid>,
+    ) -> Result<Vec<ScheduleWithProject>, ScheduleError> {
         let now_str = now.to_rfc3339();
         let at_prefix = format!("{}%", AT_SCHEDULE_PREFIX);
 
@@ -1852,17 +1876,20 @@ impl Schedule {
                      FROM schedule s
                      JOIN build b ON s.build_id = b.build_id
                      JOIN project p ON b.project_id = p.project_id
-                     WHERE s.active = true
+                     JOIN env qe ON qe.env_id=p.env_id JOIN org qo ON qo.org_id=qe.org_id JOIN org qr ON qr.org_id=COALESCE(qo.parent_org_id,qo.org_id)
+                     WHERE qe.active=true AND qo.active=true AND qr.active=true AND qo.lifecycle_state='active' AND qr.lifecycle_state='active' AND s.active = true
                        AND b.deployed = true
                        AND b.runtime_status = 'ready'
                        AND b.active = true
                        AND p.active = true
                        AND s.cron LIKE $1
                        AND CAST(SUBSTRING(s.cron FROM 5) AS TIMESTAMPTZ) <= $2
+                     AND ($3::uuid IS NULL OR qe.env_id=$3)
                      ORDER BY CAST(SUBSTRING(s.cron FROM 5) AS TIMESTAMPTZ)"
                 )
                 .bind(&at_prefix)
                 .bind(now)
+                .bind(env_id)
                 .fetch_all(pg_pool)
                 .await?;
                 Ok(schedules)
@@ -1875,17 +1902,21 @@ impl Schedule {
                      FROM schedule s
                      JOIN build b ON s.build_id = b.build_id
                      JOIN project p ON b.project_id = p.project_id
-                     WHERE s.active = 1
+                     JOIN env qe ON qe.env_id=p.env_id JOIN org qo ON qo.org_id=qe.org_id JOIN org qr ON qr.org_id=COALESCE(qo.parent_org_id,qo.org_id)
+                     WHERE qe.active=true AND qo.active=true AND qr.active=true AND qo.lifecycle_state='active' AND qr.lifecycle_state='active' AND s.active = 1
                        AND b.deployed = 1
                        AND b.runtime_status = 'ready'
                        AND b.active = 1
                        AND p.active = 1
                        AND s.cron LIKE ?
                        AND SUBSTR(s.cron, 5) <= ?
+                     AND (? IS NULL OR qe.env_id=?)
                      ORDER BY SUBSTR(s.cron, 5)"
                 )
                 .bind(&at_prefix)
                 .bind(&now_str)
+                .bind(env_id)
+                .bind(env_id)
                 .fetch_all(sqlite_pool)
                 .await?;
                 Ok(schedules)
@@ -2739,6 +2770,44 @@ mod tests {
             .collect();
         schedules.insert(cron.to_string(), entries);
         schedules
+    }
+
+    #[tokio::test]
+    async fn scheduler_discovery_filters_selected_environment() {
+        let db = crate::db::test_db().await;
+        let data = crate::db::insert_test_data(&db).await.unwrap();
+        let now = Utc::now();
+        Schedule::insert_schedules_for_build(
+            &db,
+            &data.build_id,
+            &scheduled_functions(
+                &format!("@at:{}", (now - chrono::Duration::minutes(1)).to_rfc3339()),
+                1,
+            ),
+            &crate::lang::compiler::SendTargets::new(),
+        )
+        .await
+        .unwrap();
+        crate::db::Build::deploy_build(&db, &data.build_id, &data.user_id)
+            .await
+            .unwrap();
+        for env in [Some(Uuid::now_v7()), Some(data.env_id), None] {
+            let expected = usize::from(env.is_none() || env == Some(data.env_id));
+            assert_eq!(
+                Schedule::get_schedules_for_environment(&db, None, None, env)
+                    .await
+                    .unwrap()
+                    .len(),
+                expected
+            );
+            assert_eq!(
+                Schedule::get_due_at_schedules_for_environment(&db, now, env)
+                    .await
+                    .unwrap()
+                    .len(),
+                expected
+            );
+        }
     }
 
     #[tokio::test]
