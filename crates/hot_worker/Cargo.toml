@@ -24,9 +24,9 @@ reqwest = { workspace = true }
 fd-lock = { workspace = true }
 zstd = { workspace = true }
 parking_lot = { workspace = true }
+sqlx = { workspace = true }
 
 [dev-dependencies]
-sqlx = { workspace = true }
 tempfile = { workspace = true }
 
 # ONNX Runtime (used by fastembed) has no prebuilt binaries for Windows ARM64

@@ -1754,6 +1754,87 @@ fn extract_target_function_from_event(event_data: &Val) -> Option<String> {
     }
 }
 
+#[derive(Debug)]
+struct ParkedEvent;
+impl std::fmt::Display for ParkedEvent {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Event is durably parked until its environment or project is active")
+    }
+}
+impl std::error::Error for ParkedEvent {}
+
+async fn park_event(db: &DatabasePool, message: &EventMessage) -> Result<(), WorkerError> {
+    let payload = serde_json::to_string(message)?;
+    let sql = "INSERT INTO parked_event(message_id,env_id,build_id,payload) VALUES($1,$2,$3,$4) ON CONFLICT(message_id) DO NOTHING";
+    match db {
+        DatabasePool::Postgres(pool) => {
+            sqlx::query(sql)
+                .bind(message.id)
+                .bind(message.body.event.env_id)
+                .bind(message.body.execution_context.build_id)
+                .bind(payload)
+                .execute(pool)
+                .await?;
+        }
+        DatabasePool::Sqlite(pool) => {
+            sqlx::query(sql)
+                .bind(message.id)
+                .bind(message.body.event.env_id)
+                .bind(message.body.execution_context.build_id)
+                .bind(payload)
+                .execute(pool)
+                .await?;
+        }
+    }
+    Ok(())
+}
+
+async fn replay_parked_events(
+    db: &DatabasePool,
+    queue: &ProcessingQueue<Message>,
+) -> Result<(), WorkerError> {
+    let now = chrono::Utc::now();
+    let lease = now + chrono::Duration::seconds(90);
+    let sql = "UPDATE parked_event SET leased_until=$2 WHERE message_id IN (
+        SELECT pe.message_id FROM parked_event pe JOIN env e ON e.env_id=pe.env_id
+        JOIN org o ON o.org_id=e.org_id JOIN org r ON r.org_id=COALESCE(o.parent_org_id,o.org_id)
+        LEFT JOIN build b ON b.build_id=pe.build_id LEFT JOIN project p ON p.project_id=b.project_id
+        WHERE pe.leased_until <= $1 AND e.active=true AND o.active=true AND r.active=true
+        AND o.lifecycle_state='active' AND r.lifecycle_state='active'
+        AND (pe.build_id IS NULL OR p.active=true) ORDER BY pe.leased_until LIMIT 100
+    ) AND leased_until <= $1 RETURNING message_id,payload";
+    let rows: Vec<(Uuid, String)> = match db {
+        DatabasePool::Postgres(pool) => {
+            sqlx::query_as(sql)
+                .bind(now)
+                .bind(lease)
+                .fetch_all(pool)
+                .await?
+        }
+        DatabasePool::Sqlite(pool) => {
+            sqlx::query_as(sql)
+                .bind(now)
+                .bind(lease)
+                .fetch_all(pool)
+                .await?
+        }
+    };
+    for (id, payload) in rows {
+        let message: EventMessage = serde_json::from_str(&payload)?;
+        queue.enqueue(message.into()).await?;
+        let sql = "DELETE FROM parked_event WHERE message_id=$1 AND leased_until=$2";
+        match db {
+            DatabasePool::Postgres(pool) => {
+                sqlx::query(sql).bind(id).bind(lease).execute(pool).await?;
+            }
+            DatabasePool::Sqlite(pool) => {
+                sqlx::query(sql).bind(id).bind(lease).execute(pool).await?;
+            }
+        }
+    }
+    Ok(())
+}
+
 async fn hydrate_event_message_from_db(
     worker_id: usize,
     db: &DatabasePool,
@@ -1812,20 +1893,6 @@ async fn hydrate_event_message_from_db(
             infra_retry_backoff_ms,
         )
     })?;
-    if !hot::db::Org::is_environment_admitted(db, &stored_env.env_id)
-        .await
-        .map_err(|e| {
-            worker_infrastructure_retry_error(
-                format!("Failed to verify execution admission: {e}"),
-                infra_retry_backoff_ms,
-            )
-        })?
-    {
-        return Err(worker_infrastructure_retry_error(
-            "environment is suspended; event remains pending",
-            infra_retry_backoff_ms.max(5_000),
-        ));
-    }
     if event_message
         .body
         .execution_context
@@ -1842,6 +1909,18 @@ async fn hydrate_event_message_from_db(
         return Err(worker_error(
             "Queued event scope does not match durable event ownership",
         ));
+    }
+    if !hot::db::Org::is_environment_admitted(db, &stored_env.env_id)
+        .await
+        .map_err(|e| {
+            worker_infrastructure_retry_error(
+                format!("Failed to verify execution admission: {e}"),
+                infra_retry_backoff_ms,
+            )
+        })?
+    {
+        park_event(db, &event_message).await?;
+        return Err(Box::new(ParkedEvent));
     }
     let scoped_db = db.with_scope(DatabaseScope::Environment {
         org_id: stored_env.org_id,
@@ -1926,6 +2005,13 @@ async fn hydrate_event_message_from_db(
     } else {
         None
     };
+    if authoritative_build
+        .as_ref()
+        .is_some_and(|(_, project)| !project.active)
+    {
+        park_event(db, &event_message).await?;
+        return Err(Box::new(ParkedEvent));
+    }
     if !(0..=100).contains(&claimed_context.retry_attempt) {
         return Err(worker_error(format!(
             "Invalid retry attempt {} for event {}",
@@ -6270,6 +6356,27 @@ pub async fn run_with_components_shared_context_and_db(
 
     // Channel to signal workers to shutdown
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
+    // Republish events parked while their environment or project was inactive.
+    // The coordinator pool already runs under the Queue operation.
+    if let Some(parked_db) = db.clone() {
+        let parked_queue = event_queue.clone();
+        let mut parked_shutdown = shutdown_rx.clone();
+        tokio::spawn(async move {
+            let mut ticks = tokio::time::interval(std::time::Duration::from_secs(30));
+            loop {
+                tokio::select! {
+                    changed = parked_shutdown.changed() => {
+                        if changed.is_err() || *parked_shutdown.borrow() { break; }
+                    }
+                    _ = ticks.tick() => {
+                        if let Err(error) = replay_parked_events(&parked_db, &parked_queue).await {
+                            warn!(%error, "Could not replay parked events; retrying on the next tick");
+                        }
+                    }
+                }
+            }
+        });
+    }
 
     if let Some(ref db_pool) = db
         && worker_conf.get_bool_or_default("worker.startup-runtime-repair", true)
@@ -6897,7 +7004,7 @@ pub async fn run_with_components_shared_context_and_db(
 
                                                 debug!("TIMING: event {} dequeued, starting processing", event_message.id);
 
-                                                let mut event_message =
+                                                let mut event_message = match
                                                     hydrate_event_message_from_db(
                                                         worker_id,
                                                         db,
@@ -6905,7 +7012,11 @@ pub async fn run_with_components_shared_context_and_db(
                                                         event_message,
                                                         infra_retry_backoff_ms,
                                                     )
-                                                    .await?;
+                                                    .await {
+                                                        Ok(message) => message,
+                                                        Err(error) if error.downcast_ref::<ParkedEvent>().is_some() => return Ok(()),
+                                                        Err(error) => return Err(error),
+                                                    };
                                                 let scoped_db = Arc::new(db.with_scope(DatabaseScope::Environment {
                                                     org_id: event_message.body.execution_context.org_id.ok_or_else(|| worker_error("Hydrated event has no org scope"))?,
                                                     env_id: event_message.body.event.env_id,
@@ -9582,14 +9693,41 @@ handler fn () { initialized }
             .await
             .unwrap_err();
         assert!(
-            held.downcast_ref::<QueueInfrastructureError>().is_some(),
-            "Suspension must defer work without consuming the poison-message retry budget"
+            held.downcast_ref::<ParkedEvent>().is_some(),
+            "Suspension must park work without consuming the queue retry budget"
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM parked_event WHERE message_id=?")
+                .bind(thin_message.id)
+                .fetch_one(pool)
+                .await
+                .unwrap(),
+            1
         );
         sqlx::query("UPDATE org SET lifecycle_state = 'active' WHERE org_id = ?")
             .bind(test_data.org_id)
             .execute(pool)
             .await
             .unwrap();
+        // Reactivation republishes the parked event and releases its row.
+        let replay_queue = ProcessingQueue::<Message>::new(
+            QueueType::Memory,
+            "hot:event-parked-test".to_string(),
+            None,
+            Serialization::Json,
+        )
+        .expect("memory queue should build");
+        replay_parked_events(&db, &replay_queue)
+            .await
+            .expect("parked events should replay");
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM parked_event WHERE message_id=?")
+                .bind(thin_message.id)
+                .fetch_one(pool)
+                .await
+                .unwrap(),
+            0
+        );
 
         let hydrated = hydrate_event_message_from_db(0, &db, None, thin_message, 0)
             .await
