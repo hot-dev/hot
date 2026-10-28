@@ -982,6 +982,41 @@ mod type_checking_tests {
         );
     }
 
+    // A core type declared in two hot-std namespaces resolves by load order,
+    // so only deliberate pairs may exist: `::hot::exec` re-declares `run`'s
+    // `Failure` and `Cancellation` as its context-aware forms.
+    #[test]
+    fn test_hot_std_core_types_are_declared_once() {
+        use hot::lang::compiler::core_registry::CoreVariableRegistry;
+        use std::collections::{BTreeMap, BTreeSet};
+
+        let program = build_program_with_hot_std(parser::parse_hot("::test ns").unwrap());
+        let mut declared: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+        for (ns_path, namespace) in &program.namespaces {
+            for (var, value) in &namespace.scope.vars {
+                if matches!(value, hot::lang::ast::Value::TypeDef(_))
+                    && CoreVariableRegistry::has_core_metadata(var)
+                {
+                    declared
+                        .entry(var.sym.name().to_string())
+                        .or_default()
+                        .insert(ns_path.to_string());
+                }
+            }
+        }
+        let duplicated: Vec<&str> = declared
+            .iter()
+            .filter(|(_, namespaces)| namespaces.len() > 1)
+            .map(|(name, _)| name.as_str())
+            .collect();
+        assert_eq!(
+            duplicated,
+            vec!["Cancellation", "Failure"],
+            "hot-std core types declared in more than one namespace: {:?}",
+            declared
+        );
+    }
+
     #[test]
     fn test_core_enum_variant_from_other_namespace_is_not_unknown_field() {
         let source = r#"
