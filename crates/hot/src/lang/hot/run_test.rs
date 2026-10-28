@@ -836,6 +836,74 @@ probe()"#;
         );
     }
 
+    /// A type from another namespace takes named arguments when it is
+    /// imported in a body, as `Sh ::geo/Shape`, as well as at the top of the
+    /// namespace. The local import names the type it is bound to, even over
+    /// a type of the same name, rather than shadowing types as a local value.
+    #[test]
+    fn named_arguments_build_variants_of_imported_enums() {
+        let src = r#"::geo ns
+Circle type { radius: Dec }
+Shape enum { Circle(Circle), Dot }
+Bird type { species: Str }
+Animal enum open { Dog }
+Bird -> Animal.Bird
+Label type { text: Str }
+
+::t ns
+Shape ::geo/Shape
+::g ::geo
+Label type { name: Str }
+
+probe fn (): Vec {
+    imported Shape.Circle(radius: 1.0)
+    Sh ::geo/Shape
+    local Sh.Circle(radius: 2.0)
+    mapped Sh.Circle({radius: 3.0})
+    Fauna ::g/Animal
+    enrolled Fauna.Bird(species: "Eagle")
+    outer Label(name: "outer")
+    Label ::geo/Label
+    inner Label(text: "inner")
+    [imported.radius, local.radius, mapped.radius, is-type(local, ::geo/Shape),
+     enrolled.species, outer.name, inner.text]
+}
+probe()
+probe()"#;
+        assert_same_with_and_without_jit(
+            src,
+            &val!([1.0, 2.0, 3.0, true, "Eagle", "outer", "inner"]),
+        );
+    }
+
+    /// At the top of a namespace, the project pipeline points a reference to
+    /// an import at what it imports. A reference with a path keeps it, so
+    /// `Shape.Circle(...)` on an imported enum builds the variant, by name or
+    /// from a Map, and `config.port` on an imported value reads the field.
+    /// The rewrite used to drop the path, leaving `::geo/Shape(...)`.
+    #[test]
+    fn imported_enum_variants_at_namespace_scope() {
+        let src = r#"::geo ns
+Circle type { radius: Dec }
+Shape enum { Circle(Circle), Dot }
+config {port: 8080}
+
+::t ns
+Shape ::geo/Shape
+config ::geo/config
+named Shape.Circle(radius: 1.0)
+mapped Shape.Circle({radius: 2.0})
+dot Shape.Dot
+port config.port
+[named.radius, mapped.radius, is-type(named, ::geo/Shape), is-type(dot, ::geo/Shape), port]"#;
+        let expected = val!([1.0, 2.0, true, true, 8080]);
+        for conf in [None, Some(val!({"jit": {"threshold": 1}}))] {
+            let out = compile_and_run_project_with_std_conf(src, conf)
+                .unwrap_or_else(|e| panic!("run failed: {e}"));
+            assert_eq!(out, expected);
+        }
+    }
+
     /// Like the Map form, a named call on a type with custom constructors goes
     /// to the default constructor, which still checks `where` constraints.
     /// A type declared twice takes names in either order, and a one-parameter
@@ -2634,6 +2702,24 @@ caller(true)"#;
         source: &str,
         conf: Option<Val>,
     ) -> Result<Val, String> {
+        compile_and_run_with_std_inner(source, conf, false)
+    }
+
+    /// Like [`compile_and_run_with_std_conf`], with the project pipeline's
+    /// namespace-import pass (`resolve_all_variable_references`), which
+    /// rewrites namespace-scope references to imports.
+    fn compile_and_run_project_with_std_conf(
+        source: &str,
+        conf: Option<Val>,
+    ) -> Result<Val, String> {
+        compile_and_run_with_std_inner(source, conf, true)
+    }
+
+    fn compile_and_run_with_std_inner(
+        source: &str,
+        conf: Option<Val>,
+        resolve_imports: bool,
+    ) -> Result<Val, String> {
         use crate::lang::ast::Program;
         use std::path::Path;
 
@@ -2668,6 +2754,11 @@ caller(true)"#;
         // Add test program namespaces
         for (ns_path, namespace) in test_program.namespaces {
             combined_program.namespaces.insert(ns_path, namespace);
+        }
+        if resolve_imports {
+            crate::lang::compiler::resolver::resolve_all_variable_references(
+                &mut combined_program,
+            );
         }
 
         compiler

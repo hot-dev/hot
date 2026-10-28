@@ -615,6 +615,9 @@ pub struct TypeChecker {
     /// `unresolved-type` errors because the inference paths involved
     /// (Union vs Union compatibility, dot-access value typing, generic-aware
     /// annotation parsing) have known gaps that produce false positives.
+    /// The one exception is a call that a scalar literal argument rules out
+    /// under every overload: a literal's type is exact, so no inference gap
+    /// is involved (see `validate_function_call_arguments`).
     /// `arity-mismatch` errors are always emitted — that's the whole point
     /// of walking bodies. Top-level expressions still get the full check,
     /// so nothing existing is lost.
@@ -865,6 +868,7 @@ impl TypeChecker {
 
         // First pass: collect all type names from the program
         self.collect_known_types(program);
+        self.warn_duplicate_core_types(program);
 
         // Second pass: collect cross-namespace variable types so that
         // `Ref::Ns` references and var imports resolve to a real type instead
@@ -998,6 +1002,40 @@ impl TypeChecker {
     /// sees the same row-preserved record shapes as diagnostics.
     pub fn infer_value_type_for_lsp(&mut self, value: &Value) -> TypeExpr {
         self.infer_value_type(value)
+    }
+
+    /// Warn when a type is declared `core: true` in more than one namespace.
+    /// The last declaration wins everywhere, as in the runtime core
+    /// registry, which silently overrides the earlier one. hot-std's own
+    /// overrides (`::hot::exec/Failure` over `::hot::run/Failure`) are
+    /// deliberate, so pairs inside `::hot::*` are left alone.
+    fn warn_duplicate_core_types(&mut self, program: &Program) {
+        let mut declared: AHashMap<String, String> = AHashMap::new();
+        for (ns_path, namespace) in &program.namespaces {
+            let ns = ns_path.to_string();
+            for (var, value) in &namespace.scope.vars {
+                if !matches!(value, Value::TypeDef(_))
+                    || !CoreVariableRegistry::has_core_metadata(var)
+                {
+                    continue;
+                }
+                let name = var.sym.name().to_string();
+                let Some(shadowed) = declared.insert(name.clone(), ns.clone()) else {
+                    continue;
+                };
+                if shadowed == ns || (shadowed.starts_with("::hot::") && ns.starts_with("::hot::"))
+                {
+                    continue;
+                }
+                let location = var.src.as_ref().map(|s| self.source_to_error_location(s));
+                self.errors.add_warning(CompilerError::DuplicateCoreName {
+                    name,
+                    shadowed,
+                    winner: ns.clone(),
+                    location,
+                });
+            }
+        }
     }
 
     /// Collect all type names from the program for type resolution
@@ -1841,6 +1879,17 @@ impl TypeChecker {
         }
     }
 
+    /// Whether `value` is a Str, Int, Dec, or Bool literal, whose type is
+    /// exact. `null` is left out: the runtime accepts it for parameters not
+    /// marked `?`, and overloads rely on that to delegate with `null`
+    /// defaults.
+    fn is_scalar_literal(value: &Value) -> bool {
+        matches!(
+            value,
+            Value::Val(Val::Str(_) | Val::Int(_) | Val::Dec(_) | Val::Bool(_), _)
+        )
+    }
+
     /// Convert the parser's `ast::TypeExpr` to the type-checker's `TypeExpr`.
     /// The two enums cover the same conceptual ground but were defined
     /// independently; this bridge lets us reuse alias info that the parser
@@ -2468,13 +2517,13 @@ impl TypeChecker {
                         // `meta {core: true}` in another namespace) resolve to
                         // their qualified type instead of `Any`. If multiple
                         // namespaces declare the same core name, take the
-                        // first registered match — short-name variable
-                        // shadowing across modules is rare; ambiguous cases
-                        // would be flagged by the resolver pass.
+                        // last registered match: the runtime core registry
+                        // keeps the last registration, so a project's core
+                        // `Next` enum overrides hot-std's core `Next` struct.
                         .or_else(|| {
                             self.core_variables
                                 .get(*var_name)
-                                .and_then(|qualifieds| qualifieds.first())
+                                .and_then(|qualifieds| qualifieds.last())
                                 .and_then(|qualified| {
                                     self.qualified_variables.get(qualified).cloned()
                                 })
@@ -2559,9 +2608,17 @@ impl TypeChecker {
 
             Value::Match(match_expr) => {
                 let subject_type = self.infer_value_type(&match_expr.value);
+                let subject_name = match &*match_expr.value {
+                    Value::Ref(Ref::Var(var_ref))
+                        if var_ref.var.deep_path.is_none() && var_ref.var.deep_set.is_none() =>
+                    {
+                        Some(var_ref.var.sym.name().to_string())
+                    }
+                    _ => None,
+                };
                 let mut last_type = TypeExpr::Any;
                 for arm in &match_expr.arms {
-                    last_type = self.infer_value_type(&arm.body);
+                    last_type = self.infer_match_arm_body(arm, subject_name.as_deref());
                 }
                 if !match_expr.match_all {
                     let arm_refs: Vec<&MatchArm> = match_expr.arms.iter().collect();
@@ -2575,7 +2632,7 @@ impl TypeChecker {
                     let arm_types: Vec<TypeExpr> = match_expr
                         .arms
                         .iter()
-                        .map(|arm| self.infer_value_type(&arm.body))
+                        .map(|arm| self.infer_match_arm_body(arm, subject_name.as_deref()))
                         .collect();
                     self.flow_result_type(
                         match_expr.result_modifier.as_ref(),
@@ -2587,7 +2644,7 @@ impl TypeChecker {
                     let arm_types: Vec<TypeExpr> = match_expr
                         .arms
                         .iter()
-                        .map(|arm| self.infer_value_type(&arm.body))
+                        .map(|arm| self.infer_match_arm_body(arm, subject_name.as_deref()))
                         .collect();
                     self.flow_result_type(
                         match_expr.result_modifier.as_ref(),
@@ -2947,6 +3004,49 @@ impl TypeChecker {
             field_name: field_name.to_string(),
             location,
         });
+    }
+
+    /// Walk a match arm's body. Inside an `Enum.Variant` arm the matched name
+    /// holds that variant's payload, so `subject` is rebound to the payload
+    /// type for the arm.
+    fn infer_match_arm_body(&mut self, arm: &MatchArm, subject: Option<&str>) -> TypeExpr {
+        let narrowed = match (subject, &arm.type_name, &arm.variant) {
+            (Some(subject), Some(type_name), Some(variant)) if arm.alternatives.is_empty() => self
+                .variant_payload_type(type_name, variant)
+                .map(|payload| (subject, payload)),
+            _ => None,
+        };
+        let Some((subject, payload)) = narrowed else {
+            return self.infer_value_type(&arm.body);
+        };
+        self.context.push_scope();
+        self.context.add_variable(subject.to_string(), payload);
+        let body_type = self.infer_value_type(&arm.body);
+        self.context.pop_scope();
+        body_type
+    }
+
+    /// The declared payload type of `enum_name.variant`, resolved in the
+    /// enum's own namespace. `None` for payload-free variants and for names
+    /// that are not known enums.
+    fn variant_payload_type(&self, enum_name: &str, variant: &str) -> Option<TypeExpr> {
+        let TypeExpr::Named(enum_fqn) = self
+            .try_resolve_local_type(enum_name)
+            .or_else(|| self.try_resolve_core_type(enum_name))
+            .or_else(|| self.try_resolve_namespaced_type(enum_name))?
+        else {
+            return None;
+        };
+        let td = self
+            .named_type_definition(&enum_fqn)
+            .filter(|td| td.is_enum)?;
+        let payload = td.variant_payloads.get(variant)?.clone();
+        let enum_ns = td.declaring_namespace.clone();
+        if let Some(builtin) = self.try_resolve_builtin_type(&payload) {
+            return Some(builtin);
+        }
+        let payload_fqn = self.resolve_to_fqn(&payload, &enum_ns);
+        self.qualified_types.get(&payload_fqn).cloned()
     }
 
     /// Check if two types are compatible (for assignment, parameter passing, etc.)
@@ -4303,6 +4403,9 @@ impl TypeChecker {
         // wildly different overload would just produce noise.
         let param_offset = if in_pipe_flow { 1 } else { 0 };
         let mut best_errors: Option<Vec<(usize, TypeExpr, TypeExpr)>> = None;
+        // Whether every rejecting overload rejects a scalar literal argument.
+        // Only then can a body report the call without trusting inference.
+        let mut literal_rules_out_all = true;
         for sig in matching_arity_sigs {
             let mut type_errors = Vec::new();
 
@@ -4339,6 +4442,13 @@ impl TypeChecker {
                 return;
             }
 
+            if !type_errors
+                .iter()
+                .any(|(i, _, _)| Self::is_scalar_literal(&fn_call.args[*i].value))
+            {
+                literal_rules_out_all = false;
+            }
+
             // Track the closest-matching signature so we can report against
             // it if no overload ends up accepting the call.
             match &best_errors {
@@ -4347,14 +4457,19 @@ impl TypeChecker {
             }
         }
 
-        // No overload accepted the call. Suppress when walking inside a fn /
-        // lambda body (see `in_fn_body` docs) to avoid surfacing latent
-        // inference gaps as false positives. Arity errors above are still
-        // emitted regardless.
-        if self.in_fn_body == 0
+        // No overload accepted the call. Inside a fn / lambda body (see
+        // `in_fn_body` docs), report only the scalar literal arguments, and
+        // only when a literal rules out every overload, to avoid surfacing
+        // latent inference gaps as false positives. Arity errors above are
+        // still emitted regardless.
+        let in_fn_body = self.in_fn_body > 0;
+        if (!in_fn_body || literal_rules_out_all)
             && let Some(type_errors) = best_errors
         {
             for (i, expected_type, actual_type) in type_errors {
+                if in_fn_body && !Self::is_scalar_literal(&fn_call.args[i].value) {
+                    continue;
+                }
                 let location = fn_call.args[i]
                     .src
                     .as_ref()
@@ -4997,6 +5112,78 @@ mod tests {
             "only `caller` should mismatch, got: {:?}",
             checker.errors.errors
         );
+    }
+
+    #[test]
+    fn test_body_literal_argument_mismatch_is_error() {
+        use crate::lang::errors::CompilerError;
+        use crate::lang::parser::parse_hot;
+
+        // A literal argument has an exact type, so a body reports it as the
+        // top level does: in a fn body, in a lambda body, and against a
+        // user-defined signature.
+        let source = r#"
+        ::t ns
+        takes-int fn (n: Int): Int { n }
+        body-mismatch fn (): Int { add("a", 1) }
+        lambda-mismatch fn (xs: Vec): Vec { map(xs, (x) { add(x, true) }) }
+        user-mismatch fn (): Int { takes-int("a") }
+        "#;
+        let program = parse_hot(source).expect("parse");
+        let mut checker = TypeChecker::new();
+        let _ = checker.check_program(&program);
+
+        let mut funcs: Vec<&str> = checker
+            .errors
+            .errors
+            .iter()
+            .filter_map(|e| match e {
+                CompilerError::TypeMismatch { message, .. } => Some(message.as_str()),
+                _ => None,
+            })
+            .filter_map(|m| m.split('\'').nth(1))
+            .collect();
+        funcs.sort();
+        assert_eq!(
+            funcs,
+            vec!["add", "add", "takes-int"],
+            "got: {:?}",
+            checker.errors.errors
+        );
+    }
+
+    #[test]
+    fn test_body_mismatch_stays_quiet_without_literal_proof() {
+        use crate::lang::parser::parse_hot;
+
+        // Bodies still trust the argument unless a literal proves the call
+        // wrong: `Any` and untyped parameters, untyped call results, values
+        // bound to a name, and `null` (which the runtime accepts for a
+        // parameter not marked `?`) are not errors. Nor is a literal that
+        // only some overloads reject, when the others fail on an inferred
+        // argument instead.
+        let source = r#"
+        ::t ns
+        takes-int fn (n: Int): Int { n }
+        two-ways fn (a: Str, b: Str): Int { 0 }, (a: Int, b: Int): Int { a }
+        untyped fn () { "x" }
+        any-arg fn (v: Any): Int { add(v, 1) }
+        untyped-arg fn (v): Int { add(v, 1) }
+        untyped-result fn (): Int { add(untyped(), 1) }
+        bound fn (): Int {
+            s "a"
+            takes-int(s)
+        }
+        null-arg fn (): Int { takes-int(null) }
+        overload fn (): Int {
+            s "a"
+            two-ways(s, 1)
+        }
+        "#;
+        let program = parse_hot(source).expect("parse");
+        let mut checker = TypeChecker::new();
+        let result = checker.check_program(&program);
+        assert!(result.is_ok(), "no errors expected: {:?}", result);
     }
 
     #[test]

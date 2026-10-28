@@ -1055,6 +1055,11 @@ impl Compiler {
         // Select the resolved/lowered copies of extension declarations out of
         // the merged AST. Exact Var identity includes source spans, so this
         // selects a shadowing declaration without re-emitting the base one.
+        // Resolution rewrites the names in meta, so match without it.
+        let without_meta = |var: &Var| Var {
+            meta: None,
+            ..var.clone()
+        };
         let mut emission_program = Program {
             namespaces: IndexMap::new(),
             current_namespace: extension_program.current_namespace.clone(),
@@ -1066,14 +1071,20 @@ impl Compiler {
             let mut emission_namespace = extension_namespace.clone();
             emission_namespace.aliases = validation_namespace.aliases.clone();
             emission_namespace.scope.vars.clear();
+            let resolved_by_declaration: AHashMap<Var, (&Var, &Value)> = validation_namespace
+                .scope
+                .vars
+                .iter()
+                .map(|(var, value)| (without_meta(var), (var, value)))
+                .collect();
             for (var, _) in &extension_namespace.scope.vars {
                 if let Some((resolved_var, resolved_value)) =
-                    validation_namespace.scope.vars.get_key_value(var)
+                    resolved_by_declaration.get(&without_meta(var))
                 {
                     emission_namespace
                         .scope
                         .vars
-                        .insert(resolved_var.clone(), resolved_value.clone());
+                        .insert((*resolved_var).clone(), (*resolved_value).clone());
                 }
             }
             if !emission_namespace.scope.vars.is_empty() {

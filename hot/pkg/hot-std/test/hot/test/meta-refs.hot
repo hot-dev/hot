@@ -1,0 +1,68 @@
+::hot::test::meta-refs::text ns
+
+Clause type {
+    section: Str,
+    heading: Str
+}
+
+s4 Clause({section: "§4", heading: "Reporting a possible error"})
+
+::hot::test::meta-refs ns
+
+assert-eq ::hot::test/assert-eq
+assert ::hot::test/assert
+
+::text ::hot::test::meta-refs::text
+s4 ::hot::test::meta-refs::text/s4
+
+found-at fn (w: Map): Str { w.found-at }
+
+// Each bare name in meta names one definition, whatever form it is
+// written in: an alias path, a var-import, the full path, or a local name.
+duty
+meta {
+    cites: [::text/s4, s4, ::hot::test::meta-refs::text/s4],
+    clock-from: found-at,
+    kind: ::text/Clause,
+}
+fn () { 1 }
+
+check-duty-meta fn (m: Map) {
+    clause ::hot::test::meta-refs::text/s4
+    assert-eq(clause, m.cites[0], "an alias path reads as the value it names")
+    assert-eq(clause, m.cites[1], "a var-import reads as the value it imports")
+    assert-eq(clause, m.cites[2], "a full path reads as the value it names")
+    assert-eq("§4", m.cites[1].section, "a meta value keeps its fields")
+    clock m.clock-from
+    assert(is-fn(clock), "a function named in meta is a function")
+    assert-eq("2026-10-02", clock({found-at: "2026-10-02"}), "a function named in meta can be called")
+    assert-eq(::hot::test::meta-refs::text/Clause, m.kind, "a type named in meta reads as the type")
+}
+
+test-meta-refs-resolve-in-defining-namespace
+meta ["test"]
+fn () {
+    check-duty-meta(::hot::meta/get(duty))
+}
+
+::hot::test::meta-refs::reader ns
+
+// This namespace has no `::text` alias and no `s4` import: the meta must
+// not depend on the namespace that reads it.
+test-meta-refs-do-not-depend-on-the-reader
+meta ["test"]
+fn () {
+    ::hot::test::meta-refs/check-duty-meta(::hot::meta/get(::hot::test::meta-refs/duty))
+}
+
+// A short name read inside a function means this namespace's `duty`, not
+// the first `duty` in any namespace.
+duty
+meta {cites: []}
+fn () { 2 }
+
+test-meta-get-reads-the-short-name-in-its-own-namespace
+meta ["test"]
+fn () {
+    ::hot::test/assert-eq([], ::hot::meta/get(duty).cites, "the reader's own duty")
+}
