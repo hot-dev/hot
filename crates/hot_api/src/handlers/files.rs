@@ -381,7 +381,7 @@ pub async fn upload_file(
 
     let storage_limit = features.storage_bytes();
     if storage_limit >= 0 {
-        let current_usage = file::get_storage_usage_by_org(&db, org_id)
+        let current_usage = file::get_storage_usage_by_account(&db, org_id)
             .await
             .unwrap_or(0)
             - replaced_size(&db, &path, org_id, api_key.env_id).await;
@@ -566,7 +566,7 @@ pub async fn initiate_upload(
 
         let storage_limit = features.storage_bytes();
         if storage_limit >= 0 {
-            let current_usage = file::get_storage_usage_by_org(&db, org_id)
+            let current_usage = file::get_storage_usage_by_account(&db, org_id)
                 .await
                 .unwrap_or(0)
                 - replaced_size(&db, &normalized_path, org_id, api_key.env_id).await;
@@ -615,7 +615,7 @@ pub async fn initiate_upload(
     let max_pending_uploads = conf
         .get_int_or_default("file.multipart.max-pending-uploads", 16)
         .max(1);
-    let current_usage = file::get_storage_usage_by_org(&db, org_id)
+    let current_usage = file::get_storage_usage_by_account(&db, org_id)
         .await
         .unwrap_or(0);
     let storage_limit = features.storage_bytes();
@@ -644,6 +644,15 @@ pub async fn initiate_upload(
     .await;
     let upload_record = match upload_record_result {
         Ok(record) => record,
+        Err(e) if e == file_upload::RESERVATION_LIMIT_EXCEEDED => {
+            let _ = file_storage
+                .abort_multipart_upload(&backend_upload_id, &normalized_path, &ctx)
+                .await;
+            return Err((
+                StatusCode::PAYLOAD_TOO_LARGE,
+                Json(ApiErrorResponse::new("upload_reservation_exceeded", e)),
+            ));
+        }
         Err(e) => {
             let _ = file_storage
                 .abort_multipart_upload(&backend_upload_id, &normalized_path, &ctx)
@@ -1033,7 +1042,7 @@ pub async fn complete_upload(
     let features = Features::resolve_for_org(&db, &org_id).await;
     let storage_limit = features.storage_bytes();
     if storage_limit >= 0 {
-        let current_usage = file::get_storage_usage_by_org(&db, org_id)
+        let current_usage = file::get_storage_usage_by_account(&db, org_id)
             .await
             .unwrap_or(0)
             - replaced_size(&db, &record.path, org_id, api_key.env_id).await;

@@ -20,6 +20,66 @@ use super::{CompilationArtifacts, Engine, PipelineMode};
 use ahash::AHashMap;
 use std::sync::Arc;
 
+// Only generated private fixtures are eligible for cleanup. Configured integration
+// databases and user file storage never pass through this owner.
+struct PrivateTestArtifacts {
+    db: std::path::PathBuf,
+    files: std::path::PathBuf,
+}
+
+impl PrivateTestArtifacts {
+    fn sweep(directory: &std::path::Path) {
+        let Ok(entries) = std::fs::read_dir(directory) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            if entry.file_type().is_ok_and(|kind| kind.is_symlink()) {
+                continue;
+            }
+            let name = entry.file_name();
+            let Some(name) = name.to_str() else {
+                continue;
+            };
+            let id = name
+                .strip_prefix("test-files-")
+                .or_else(|| name.strip_prefix("test-")?.strip_suffix(".db"));
+            if !id.is_some_and(|id| {
+                uuid::Uuid::parse_str(id).is_ok_and(|id| id.get_version_num() == 7)
+            }) {
+                continue;
+            }
+            let Ok(metadata) = entry.metadata() else {
+                continue;
+            };
+            if !metadata
+                .modified()
+                .ok()
+                .and_then(|at| at.elapsed().ok())
+                .is_some_and(|age| age > std::time::Duration::from_secs(7 * 24 * 3600))
+            {
+                continue;
+            }
+            let path = entry.path();
+            if metadata.is_dir() {
+                let _ = std::fs::remove_dir_all(path);
+            } else if metadata.is_file() {
+                let _ = std::fs::remove_file(&path);
+                let _ = std::fs::remove_file(format!("{}-wal", path.display()));
+                let _ = std::fs::remove_file(format!("{}-shm", path.display()));
+            }
+        }
+    }
+}
+
+impl Drop for PrivateTestArtifacts {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.db);
+        let _ = std::fs::remove_file(format!("{}-wal", self.db.display()));
+        let _ = std::fs::remove_file(format!("{}-shm", self.db.display()));
+        let _ = std::fs::remove_dir_all(&self.files);
+    }
+}
+
 pub(super) struct EvalRuntimeOptions<'a> {
     pub(super) conf: Option<&'a crate::val::Val>,
     pub(super) emitter: Option<Arc<dyn crate::lang::emitter::EngineEventEmitter>>,
@@ -38,6 +98,34 @@ pub(super) struct EvalRuntimeOptions<'a> {
 }
 
 impl Engine {
+    /// Admit the run, then initialize module state. The run is recorded from
+    /// admission on, so a module whose initialization fails leaves a failed
+    /// run instead of an admitted one with no record.
+    fn initialize_cached_run(
+        vm: &mut crate::lang::runtime::vm::VirtualMachine,
+        instructions: usize,
+        emitter: Option<&Arc<dyn crate::lang::emitter::EngineEventEmitter>>,
+    ) -> Result<(), String> {
+        vm.admit_execution()
+            .map_err(crate::lang::runtime::vm::admission_failure)?;
+        vm.sync_secret_keys_to_execution_context();
+        if let (Some(emitter), Some(context)) = (emitter, vm.get_execution_context()) {
+            emitter.emit(crate::lang::emitter::EngineEvent::run_start(context));
+        }
+        if instructions > 0
+            && let Err(error) = vm.execute()
+        {
+            if let (Some(emitter), Some(context)) = (emitter, vm.get_execution_context()) {
+                emitter.emit(crate::lang::emitter::EngineEvent::run_fail(
+                    context,
+                    crate::val::Val::from(error.to_string()),
+                ));
+            }
+            return Err(format!("Failed to initialize program: {error}"));
+        }
+        Ok(())
+    }
+
     /// Convert VM terminal states into the same value shape as explicit Hot
     /// terminal results. The emitter has already recorded run:fail/run:cancel;
     /// callers should not treat these as worker/runtime infrastructure errors.
@@ -119,8 +207,15 @@ impl Engine {
 
         // Generate unique test ID for this test run
         let test_id = uuid::Uuid::now_v7().simple().to_string();
+        let _private_artifacts = (!is_integration).then(|| {
+            PrivateTestArtifacts::sweep(std::path::Path::new(".hot"));
+            PrivateTestArtifacts {
+                db: format!(".hot/test-{test_id}.db").into(),
+                files: format!(".hot/test-files-{test_id}").into(),
+            }
+        });
 
-        let (temp_db_path, database_pool) = if let Some((db, _)) = &integration_execution {
+        let (_temp_db_path, database_pool) = if let Some((db, _)) = &integration_execution {
             (None, Some(db.clone()))
         } else {
             let path = format!(".hot/test-{}.db", test_id);
@@ -147,7 +242,7 @@ impl Engine {
         };
 
         // File storage: in integration mode, use the path from conf; otherwise ephemeral
-        let (temp_file_storage_path, file_storage): (
+        let (_temp_file_storage_path, file_storage): (
             Option<String>,
             Option<Arc<dyn crate::file_storage::FileStorage>>,
         ) = if is_integration {
@@ -264,23 +359,6 @@ impl Engine {
                 .await
                 .map_err(|error| format!("Cannot persist integration test result: {error}"))?;
         }
-
-        // Clean up ephemeral test artifacts (only for non-integration mode)
-        if let Some(ref path) = temp_db_path {
-            tracing::debug!("Cleaning up temporary test database: {}", path);
-            let _ = std::fs::remove_file(path);
-            let _ = std::fs::remove_file(format!("{}-shm", path));
-            let _ = std::fs::remove_file(format!("{}-wal", path));
-        }
-
-        if let Some(ref path) = temp_file_storage_path {
-            tracing::debug!("Cleaning up temporary test file storage: {}", path);
-            let _ = std::fs::remove_dir_all(path);
-        }
-
-        // The ::hot::store backend now lives in the same SQLite file as the rest
-        // of the test database, so cleanup of `temp_db_path` above already covers
-        // its rows. There is no longer a separate `.hot/test-store-*` directory.
 
         result
     }
@@ -691,40 +769,22 @@ impl Engine {
         if let Some(ref context) = execution_context {
             vm.set_execution_context(context.clone());
         }
-        vm.admit_execution()
-            .map_err(crate::lang::runtime::vm::admission_failure)?;
+        let module_init_started = std::time::Instant::now();
+        Self::initialize_cached_run(&mut vm, instruction_count, emitter.as_ref())?;
+        tracing::debug!(
+            "TIMING [{}]: vm_module_init_execute: {:?}",
+            timing_id,
+            module_init_started.elapsed()
+        );
 
-        // Initialize global state WITHOUT emitter (don't record initialization as a run)
-        if instruction_count > 0 {
-            tracing::debug!(
-                "Initializing program state ({} instructions) without run recording",
-                instruction_count
-            );
-            let module_init_started = std::time::Instant::now();
-            vm.execute()
-                .map_err(|e| format!("Failed to initialize program: {}", e))?;
-            tracing::debug!(
-                "TIMING [{}]: vm_module_init_execute: {:?}",
-                timing_id,
-                module_init_started.elapsed()
-            );
-        }
-
-        // NOW set up emitter and execution context for the function call
-        // Keep local references for manual run event emission
+        // NOW set up the emitter for the function call. The execution context
+        // stays as module initialization left it: resetting it would drop the
+        // secret hashes initialization recorded, and leave values unmasked.
         let emitter_for_run = emitter.clone();
-        let execution_context_for_run = execution_context.clone();
-
         let run_context_started = std::time::Instant::now();
         if let Some(ref em) = emitter {
             vm.set_emitter(Arc::clone(em));
         }
-        if let Some(ref ctx) = execution_context {
-            vm.set_execution_context(ctx.clone());
-        }
-
-        // Sync secret keys to execution context NOW that it's been set
-        // (the earlier sync_secret_keys_to_execution_context call happened before ctx was set)
         vm.sync_secret_keys_to_execution_context();
         tracing::debug!(
             "TIMING [{}]: vm_run_context_setup: {:?}",
@@ -738,24 +798,6 @@ impl Engine {
             function_name
         );
 
-        // Emit run:start manually since call_function_bypassing_unified_lookup doesn't do it
-        if let (Some(emitter), Some(execution_context)) =
-            (&emitter_for_run, &execution_context_for_run)
-        {
-            tracing::debug!(
-                "Engine: Emitting run:start for direct function call run_id={}",
-                execution_context.run_id
-            );
-            let run_start_emit_started = std::time::Instant::now();
-            let start_event = crate::lang::emitter::EngineEvent::run_start(execution_context);
-            emitter.emit(start_event);
-            tracing::debug!(
-                "TIMING [{}]: vm_run_start_emit: {:?}",
-                timing_id,
-                run_start_emit_started.elapsed()
-            );
-        }
-
         let function_call_started = std::time::Instant::now();
         let result = vm.call_function_bypassing_unified_lookup(function_name, args);
         tracing::debug!(
@@ -766,6 +808,7 @@ impl Engine {
 
         // Emit run:stop, run:fail, or run:cancel manually based on result and VM state
         let terminal_emit_started = std::time::Instant::now();
+        let execution_context_for_run = vm.get_execution_context().clone();
         match &result {
             Ok(result_val) => {
                 if vm.has_failed() {
@@ -1042,37 +1085,20 @@ impl Engine {
         if let Some(ref context) = execution_context {
             vm.set_execution_context(context.clone());
         }
-        vm.admit_execution()
-            .map_err(crate::lang::runtime::vm::admission_failure)?;
+        Self::initialize_cached_run(&mut vm, instruction_count, emitter.as_ref())?;
 
-        // Initialize global state WITHOUT emitter
-        if instruction_count > 0 {
-            vm.execute()
-                .map_err(|e| format!("Failed to initialize program: {}", e))?;
-        }
-
-        // Set emitter and execution context for the function call
+        // Set the emitter for the function call; keep the execution context
+        // module initialization left, with its secret hashes.
         let emitter_for_run = emitter.clone();
-        let execution_context_for_run = execution_context.clone();
-
         if let Some(ref em) = emitter {
             vm.set_emitter(Arc::clone(em));
         }
-        if let Some(ref ctx) = execution_context {
-            vm.set_execution_context(ctx.clone());
-        }
         vm.sync_secret_keys_to_execution_context();
-
-        // Emit run:start
-        if let (Some(emitter), Some(execution_context)) =
-            (&emitter_for_run, &execution_context_for_run)
-        {
-            let start_event = crate::lang::emitter::EngineEvent::run_start(execution_context);
-            emitter.emit(start_event);
-        }
 
         let result = vm.call_function_bypassing_unified_lookup(function_name, args);
 
+        // Secret values can be discovered during the function itself.
+        let execution_context_for_run = vm.get_execution_context().clone();
         // Emit run:stop/fail/cancel
         match &result {
             Ok(result_val) => {
@@ -1388,6 +1414,36 @@ impl Engine {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn private_test_cleanup_preserves_recent_and_user_databases() {
+        let directory = tempfile::tempdir().unwrap();
+        let old = directory
+            .path()
+            .join(format!("test-{}.db", uuid::Uuid::now_v7().simple()));
+        let recent = directory
+            .path()
+            .join(format!("test-{}.db", uuid::Uuid::now_v7().simple()));
+        let configured = directory.path().join("test-my-project.db");
+        for path in [&old, &recent, &configured] {
+            std::fs::write(path, "fixture").unwrap();
+        }
+        let week_ago = filetime::FileTime::from_system_time(
+            std::time::SystemTime::now() - std::time::Duration::from_secs(8 * 24 * 3600),
+        );
+        filetime::set_file_mtime(&old, week_ago).unwrap();
+        filetime::set_file_mtime(&configured, week_ago).unwrap();
+        super::PrivateTestArtifacts::sweep(directory.path());
+        assert!(!old.exists());
+        assert!(recent.exists());
+        assert!(configured.exists());
+        let artifacts = super::PrivateTestArtifacts {
+            db: recent.clone(),
+            files: directory.path().join("files"),
+        };
+        drop(artifacts);
+        assert!(!recent.exists());
+    }
     use super::*;
     use crate::lang::ast::HotAst;
     use crate::lang::compiler::Compiler;

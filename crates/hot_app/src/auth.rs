@@ -571,6 +571,13 @@ impl Session {
             Some(plan) => plan.get_plan(db).await.ok().map(|plan| plan.plan_name),
             None => None,
         };
+        // A user without a timezone of their own sees the selected org's.
+        self.display_timezone = crate::timezone::resolve_display_timezone(
+            self.user.get_display_timezone().as_deref(),
+            org.get_display_timezone().as_deref(),
+        );
+        self.timezone_abbreviation =
+            crate::timezone::get_timezone_abbreviation(&self.display_timezone);
         self.current_org = Some(org);
         Ok(())
     }
@@ -902,8 +909,18 @@ fn is_scope_selection_path(path: &str) -> bool {
         || (path.starts_with("/envs/") && path.ends_with("/switch"))
 }
 
+/// Pages about the signed-in user rather than the selected org. An admin of
+/// a suspended account can always reach them and switch away from it.
+fn is_personal_path(path: &str) -> bool {
+    is_scope_selection_path(path)
+        || matches!(
+            path,
+            "/account" | "/account/notifications" | "/orgs/new" | "/claim-handle"
+        )
+}
+
 fn is_recovery_path(path: &str, method: &axum::http::Method) -> bool {
-    if is_scope_selection_path(path) {
+    if is_personal_path(path) {
         return true;
     }
     let read = *method == axum::http::Method::GET || *method == axum::http::Method::HEAD;
@@ -914,7 +931,14 @@ fn is_recovery_path(path: &str, method: &axum::http::Method) -> bool {
     {
         return true;
     }
-    if read && (path == "/orgs" || path == "/account" || path == "/account/billing") {
+    if read && (path == "/" || path == "/orgs" || path == "/account/billing") {
+        return true;
+    }
+    // Revoking a credential only removes access.
+    if *method == axum::http::Method::POST
+        && path.starts_with("/service-keys/")
+        && path.ends_with("/revoke")
+    {
         return true;
     }
     let Some(tail) = path.strip_prefix("/@") else {
@@ -928,7 +952,10 @@ fn is_recovery_path(path: &str, method: &axum::http::Method) -> bool {
     segments.last() == Some(&"lifecycle")
         || (segments.get(1) == Some(&"management-keys") && segments.last() == Some(&"revoke"))
         || (segments.get(1) == Some(&"billing")
-            && matches!(segments.last(), Some(&"cancel" | &"reactivate")))
+            && matches!(
+                segments.last(),
+                Some(&"cancel" | &"reactivate" | &"checkout")
+            ))
 }
 
 fn is_org_control_path(path: &str) -> bool {
@@ -1565,5 +1592,49 @@ mod scope_contract_tests {
             "/billing/create-checkout",
             &axum::http::Method::POST
         ));
+        assert!(is_recovery_path(
+            &format!("/@{}/billing/checkout", child.slug),
+            &axum::http::Method::POST
+        ));
+        assert!(is_recovery_path(
+            &format!("/service-keys/{}/revoke", Uuid::now_v7()),
+            &axum::http::Method::POST
+        ));
+        assert!(!is_recovery_path(
+            "/service-keys/new",
+            &axum::http::Method::POST
+        ));
+        assert!(is_recovery_path("/", &axum::http::Method::GET));
+    }
+
+    /// Only root admins keep access to a suspended account (other members
+    /// lose it entirely), so the recovery list is what stands between an
+    /// admin with a stale org cookie and a 403 on every page.
+    #[tokio::test]
+    async fn suspended_account_keeps_personal_pages_and_dashboard_for_admins() {
+        let (db, mut admin, _child, _env_id) = fixture().await;
+        let root = admin.current_org.clone().unwrap();
+        Org::set_lifecycle(
+            &db,
+            &root.org_id,
+            &admin.current_user_id(),
+            OrgLifecycle::Suspended,
+        )
+        .await
+        .unwrap();
+        for path in ["/", "/account", "/account/notifications", "/orgs/new"] {
+            assert_eq!(
+                admin.select_request_scope(&db, &request("GET", path)).await,
+                Ok(()),
+                "{path}"
+            );
+        }
+        assert_eq!(
+            admin
+                .select_request_scope(&db, &request("GET", "/runs"))
+                .await,
+            Err(StatusCode::FORBIDDEN)
+        );
+        assert!(is_personal_path(&format!("/switch-org/{}", root.org_id)));
     }
 }

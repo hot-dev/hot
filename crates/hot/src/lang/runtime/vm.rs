@@ -600,6 +600,8 @@ pub struct VirtualMachine {
     execution_context: Option<crate::lang::event::ExecutionContext>,
     /// Last durable admission on this VM; retries also deduplicate in SQL.
     admitted_execution: Option<(uuid::Uuid, uuid::Uuid, uuid::Uuid)>,
+    /// When this VM last confirmed its environment admits new durable work.
+    work_admitted_at: Option<std::time::Instant>,
     /// Database pool for file storage and other operations
     database_pool: Option<Arc<crate::db::DatabasePool>>,
     /// File storage backend for file operations
@@ -775,6 +777,7 @@ impl VirtualMachine {
             emitter: None,
             execution_context: None,
             admitted_execution: None,
+            work_admitted_at: None,
             database_pool: None,
             file_storage: None,
             store: None,
@@ -1444,6 +1447,46 @@ impl VirtualMachine {
     /// Admit a host execution before any customer bytecode or run:start side
     /// effect. VM hosts execute on blocking threads, like async storage syscalls.
     /// The durable ledger makes independent VM instances/retries idempotent.
+    /// Refuse to create durable work (tasks, events, schedules) in an
+    /// environment that has stopped admitting it, such as one suspended while
+    /// this run executes: held work would only retry until reactivation. A
+    /// confirmation holds for a few seconds so tight loops don't query each time.
+    pub(crate) fn require_work_admission(&mut self) -> Result<(), String> {
+        const RECHECK_AFTER: std::time::Duration = std::time::Duration::from_secs(10);
+        if self
+            .work_admitted_at
+            .is_some_and(|at| at.elapsed() < RECHECK_AFTER)
+        {
+            return Ok(());
+        }
+        let Some(pool) = self.database_pool.clone() else {
+            return Ok(());
+        };
+        let Some(env_id) = self.execution_context.as_ref().and_then(|ctx| ctx.env_id) else {
+            // Like run admission, only PostgreSQL requires a canonical scope.
+            return if matches!(pool.as_ref(), crate::db::DatabasePool::Postgres(_)) {
+                Err("Work creation requires an execution environment".into())
+            } else {
+                Ok(())
+            };
+        };
+        match tokio::runtime::Handle::current().block_on(async {
+            tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                crate::db::Org::is_environment_admitted(&pool, &env_id),
+            )
+            .await
+        }) {
+            Ok(Ok(true)) => {
+                self.work_admitted_at = Some(std::time::Instant::now());
+                Ok(())
+            }
+            Ok(Ok(false)) => Err("Environment is not admitting new work".into()),
+            Ok(Err(error)) => Err(format!("Cannot check work admission: {error}")),
+            Err(_) => Err("Work admission lookup timed out".into()),
+        }
+    }
+
     pub(crate) fn admit_execution(&mut self) -> VmResult<()> {
         let Some(pool) = self.database_pool.as_ref() else {
             return Ok(());

@@ -37,6 +37,7 @@ pub mod runtime_budget;
 pub mod secret_scan;
 pub mod signal;
 pub mod skill_codegen;
+pub mod slug;
 pub mod storage;
 pub mod store;
 pub mod stream;

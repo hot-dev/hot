@@ -1718,8 +1718,6 @@ impl Schedule {
                      JOIN build b ON s.build_id = b.build_id
                      WHERE s.active = true
                        AND b.deployed = true
-                       AND b.runtime_status = 'ready'
-                       AND b.active = true
                        AND b.project_id = $1",
                 )
                 .bind(project_id)
@@ -1733,8 +1731,6 @@ impl Schedule {
                      JOIN build b ON s.build_id = b.build_id
                      WHERE s.active = 1
                        AND b.deployed = 1
-                       AND b.runtime_status = 'ready'
-                       AND b.active = 1
                        AND b.project_id = ?",
                 )
                 .bind(project_id)
@@ -1776,7 +1772,7 @@ impl Schedule {
         let current_org = Self::get_active_count_by_account(db, org_id).await?;
         let current_project = Self::get_active_count_by_project(db, project_id).await?;
         let projected = current_org - current_project + new_project_schedules.max(0);
-        if projected > policy.max_active_per_org {
+        if projected > policy.max_active_per_org.max(current_org) {
             return Err(ScheduleError::PolicyError(format!(
                 "Active schedule limit exceeded: deploying this build would leave {} active schedule(s), above the org limit of {}",
                 projected, policy.max_active_per_org
@@ -1798,7 +1794,7 @@ impl Schedule {
 
         let current = Self::get_active_count_by_account(db, org_id).await?;
         let projected = current + additional_schedules.max(0);
-        if projected > policy.max_active_per_org {
+        if projected > policy.max_active_per_org.max(current) {
             return Err(ScheduleError::PolicyError(format!(
                 "Active schedule limit exceeded: {} active schedule(s) plus {} new schedule(s) would exceed the org limit of {}",
                 current,
@@ -1816,6 +1812,15 @@ impl Schedule {
         limit: Option<i64>,
         offset: Option<i64>,
     ) -> Result<Vec<Schedule>, ScheduleError> {
+        Self::get_schedules_for_environment(db, limit, offset, None).await
+    }
+
+    pub async fn get_schedules_for_environment(
+        db: &crate::db::DatabasePool,
+        limit: Option<i64>,
+        offset: Option<i64>,
+        env_id: Option<Uuid>,
+    ) -> Result<Vec<Schedule>, ScheduleError> {
         let limit = limit.unwrap_or(1000); // Default to a large number since this is for scheduler sync
         let offset = offset.unwrap_or(0);
 
@@ -1826,12 +1831,15 @@ impl Schedule {
                      FROM schedule s
                      JOIN build b ON s.build_id = b.build_id
                      JOIN project p ON b.project_id = p.project_id
-                     WHERE s.active = true AND b.deployed = true AND b.runtime_status = 'ready' AND b.active = true AND p.active = true
+                     JOIN env qe ON qe.env_id=p.env_id JOIN org qo ON qo.org_id=qe.org_id JOIN org qr ON qr.org_id=COALESCE(qo.parent_org_id,qo.org_id)
+                     WHERE qe.active=true AND qo.active=true AND qr.active=true AND qo.lifecycle_state='active' AND qr.lifecycle_state='active' AND s.active = true AND b.deployed = true AND b.runtime_status = 'ready' AND b.active = true AND p.active = true
+                     AND ($3::uuid IS NULL OR qe.env_id=$3)
                      ORDER BY s.cron, s.ns, s.var
                      LIMIT $1 OFFSET $2"
                 )
                 .bind(limit)
                 .bind(offset)
+                .bind(env_id)
                 .fetch_all(pg_pool)
                 .await?;
                 Ok(schedules)
@@ -1842,10 +1850,14 @@ impl Schedule {
                      FROM schedule s
                      JOIN build b ON s.build_id = b.build_id
                      JOIN project p ON b.project_id = p.project_id
-                     WHERE s.active = 1 AND b.deployed = 1 AND b.runtime_status = 'ready' AND b.active = 1 AND p.active = 1
+                     JOIN env qe ON qe.env_id=p.env_id JOIN org qo ON qo.org_id=qe.org_id JOIN org qr ON qr.org_id=COALESCE(qo.parent_org_id,qo.org_id)
+                     WHERE qe.active=true AND qo.active=true AND qr.active=true AND qo.lifecycle_state='active' AND qr.lifecycle_state='active' AND s.active = 1 AND b.deployed = 1 AND b.runtime_status = 'ready' AND b.active = 1 AND p.active = 1
+                     AND (? IS NULL OR qe.env_id=?)
                      ORDER BY s.cron, s.ns, s.var
                      LIMIT ? OFFSET ?"
                 )
+                .bind(env_id)
+                .bind(env_id)
                 .bind(limit)
                 .bind(offset)
                 .fetch_all(sqlite_pool)
@@ -1861,6 +1873,14 @@ impl Schedule {
         db: &crate::db::DatabasePool,
         now: DateTime<Utc>,
     ) -> Result<Vec<ScheduleWithProject>, ScheduleError> {
+        Self::get_due_at_schedules_for_environment(db, now, None).await
+    }
+
+    pub async fn get_due_at_schedules_for_environment(
+        db: &crate::db::DatabasePool,
+        now: DateTime<Utc>,
+        env_id: Option<Uuid>,
+    ) -> Result<Vec<ScheduleWithProject>, ScheduleError> {
         let now_str = now.to_rfc3339();
         let at_prefix = format!("{}%", AT_SCHEDULE_PREFIX);
 
@@ -1873,17 +1893,20 @@ impl Schedule {
                      FROM schedule s
                      JOIN build b ON s.build_id = b.build_id
                      JOIN project p ON b.project_id = p.project_id
-                     WHERE s.active = true
+                     JOIN env qe ON qe.env_id=p.env_id JOIN org qo ON qo.org_id=qe.org_id JOIN org qr ON qr.org_id=COALESCE(qo.parent_org_id,qo.org_id)
+                     WHERE qe.active=true AND qo.active=true AND qr.active=true AND qo.lifecycle_state='active' AND qr.lifecycle_state='active' AND s.active = true
                        AND b.deployed = true
                        AND b.runtime_status = 'ready'
                        AND b.active = true
                        AND p.active = true
                        AND s.cron LIKE $1
                        AND CAST(SUBSTRING(s.cron FROM 5) AS TIMESTAMPTZ) <= $2
+                     AND ($3::uuid IS NULL OR qe.env_id=$3)
                      ORDER BY CAST(SUBSTRING(s.cron FROM 5) AS TIMESTAMPTZ)"
                 )
                 .bind(&at_prefix)
                 .bind(now)
+                .bind(env_id)
                 .fetch_all(pg_pool)
                 .await?;
                 Ok(schedules)
@@ -1896,17 +1919,21 @@ impl Schedule {
                      FROM schedule s
                      JOIN build b ON s.build_id = b.build_id
                      JOIN project p ON b.project_id = p.project_id
-                     WHERE s.active = 1
+                     JOIN env qe ON qe.env_id=p.env_id JOIN org qo ON qo.org_id=qe.org_id JOIN org qr ON qr.org_id=COALESCE(qo.parent_org_id,qo.org_id)
+                     WHERE qe.active=true AND qo.active=true AND qr.active=true AND qo.lifecycle_state='active' AND qr.lifecycle_state='active' AND s.active = 1
                        AND b.deployed = 1
                        AND b.runtime_status = 'ready'
                        AND b.active = 1
                        AND p.active = 1
                        AND s.cron LIKE ?
                        AND SUBSTR(s.cron, 5) <= ?
+                     AND (? IS NULL OR qe.env_id=?)
                      ORDER BY SUBSTR(s.cron, 5)"
                 )
                 .bind(&at_prefix)
                 .bind(&now_str)
+                .bind(env_id)
+                .bind(env_id)
                 .fetch_all(sqlite_pool)
                 .await?;
                 Ok(schedules)
@@ -2808,6 +2835,44 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn scheduler_discovery_filters_selected_environment() {
+        let db = crate::db::test_db().await;
+        let data = crate::db::insert_test_data(&db).await.unwrap();
+        let now = Utc::now();
+        Schedule::insert_schedules_for_build(
+            &db,
+            &data.build_id,
+            &scheduled_functions(
+                &format!("@at:{}", (now - chrono::Duration::minutes(1)).to_rfc3339()),
+                1,
+            ),
+            &crate::lang::compiler::SendTargets::new(),
+        )
+        .await
+        .unwrap();
+        crate::db::Build::deploy_build(&db, &data.build_id, &data.user_id)
+            .await
+            .unwrap();
+        for env in [Some(Uuid::now_v7()), Some(data.env_id), None] {
+            let expected = usize::from(env.is_none() || env == Some(data.env_id));
+            assert_eq!(
+                Schedule::get_schedules_for_environment(&db, None, None, env)
+                    .await
+                    .unwrap()
+                    .len(),
+                expected
+            );
+            assert_eq!(
+                Schedule::get_due_at_schedules_for_environment(&db, now, env)
+                    .await
+                    .unwrap()
+                    .len(),
+                expected
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn test_active_schedule_limit_replaces_current_project_count() {
         let db = crate::db::test_db().await;
         let data = crate::db::insert_test_data(&db).await.unwrap();
@@ -2919,6 +2984,27 @@ mod tests {
         .await
         .unwrap_err();
         assert!(err.to_string().contains("Active schedule limit exceeded"));
+        // A downgraded account may keep or reduce its schedules. The
+        // projection counts all deployed builds just like atomic activation.
+        if let crate::db::DatabasePool::Sqlite(pool) = &db {
+            sqlx::query("UPDATE build SET active=0 WHERE project_id=?")
+                .bind(data.project_id)
+                .execute(pool)
+                .await
+                .unwrap();
+        }
+        Schedule::enforce_active_count_for_org_replacing_project(
+            &db,
+            &data.org_id,
+            &data.project_id,
+            1,
+            SchedulePolicy {
+                max_active_per_org: 1,
+                ..policy
+            },
+        )
+        .await
+        .unwrap();
     }
 
     #[tokio::test]

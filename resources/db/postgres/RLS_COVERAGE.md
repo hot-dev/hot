@@ -122,6 +122,14 @@ scope and rights, without SECURITY DEFINER or owner bypass. Scope policies on
 the counter rows reject a sibling's env or org. Runtime access to arbitrary SQL
 and construction of maintenance authority remain outside this boundary.
 
+| Service access extension | Coverage |
+| --- | --- |
+| `org_user` (017) | Alerts reads the directory to resolve Org, Team and User recipients; a child Organization scope reads its root's active administrators |
+| `user` (017) | Alerts reads recipients; an Organization scope reads its members, deactivated ones included; Billing reads its account's members; a child Organization scope reads its inherited administrators |
+| `org_note` (017) | Billing reads and inserts its account's notes, which deduplicate compute-unit threshold alerts |
+| `alert_subscription_channel` (017) | An org-wide subscription may link one of its org's environment channels |
+| `parked_event` (018) | Queue operation reads, parks and replays held events; an exact environment scope reads and writes its own |
+
 Migration 013 backfills `call.env_id` from its existing run, makes it required,
 and validates the pair with a composite foreign key. Both ownership fields are
 immutable. Call policies and retention queries use the local environment field,

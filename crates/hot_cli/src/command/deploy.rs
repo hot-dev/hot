@@ -40,9 +40,38 @@ fn resolve_local_build_storage_path(
     Ok(Path::new(build_dir).join(storage_path))
 }
 
+pub(crate) fn scan_cli_inputs(
+    conf: &Val,
+    options: &GlobalOptions,
+    src: &[String],
+    tests: &[String],
+) -> Result<(), String> {
+    let project = options
+        .project
+        .clone()
+        .unwrap_or_else(|| hot::project::get_default_project_name(conf));
+    let (paths, respect, excludes) = resource_bundle_options(
+        conf,
+        &project,
+        &options.resource_paths,
+        options.no_gitignore,
+    );
+    let context = hot::build::BuildContext::new(
+        None,
+        None,
+        None,
+        None,
+        project,
+        src.to_vec(),
+        tests.to_vec(),
+    )
+    .with_resources(paths, respect, excludes);
+    hot::build::scan_build_inputs(&context, Some(conf))
+}
+
 pub(crate) fn is_ad_hoc_default_db(conf: &Val) -> bool {
     let db_uri = hot::db::get_db_uri_from_conf(conf);
-    !hot::lang::cache::paths::has_project_config()
+    !Path::new("hot.hot").exists()
         && conf.get_bool_or_default("__host.ad-hoc-default-db", false)
         && (db_uri == hot::db::DEFAULT_DB_URI
             || db_uri.starts_with("sqlite:.hot/")
@@ -674,11 +703,11 @@ async fn upload_via_api(build_uuid: Uuid, conf: &Val) -> Result<Uuid, String> {
         .await
         .map_err(|_| format!("Build {} not found in local database", build_uuid))?;
 
-    // Get profile info (org_id and env_id) for storage operations
-    let (org_id, env_id) =
+    // Get profile info (user, org and env) for attribution and storage operations
+    let (user_id, org_id, env_id) =
         if let Some((user_email, org_slug, env_name)) = extract_profile_identifiers(conf)? {
             match resolve_profile_to_uuids(&db, &user_email, &org_slug, &env_name).await {
-                Ok((_user_uuid, env_uuid, org_uuid)) => (org_uuid, env_uuid),
+                Ok((user_uuid, env_uuid, org_uuid)) => (user_uuid, org_uuid, env_uuid),
                 Err(e) => return Err(format!("Failed to resolve profile: {}", e)),
             }
         } else {
@@ -732,9 +761,12 @@ async fn upload_via_api(build_uuid: Uuid, conf: &Val) -> Result<Uuid, String> {
             })
             .unwrap_or_else(|| vec!["hot/src".to_string()]);
 
-        // Create bundle build - we now have org_id and env_id from earlier
+        // Create bundle build - we now have the profile's user, org and env.
+        // Without a user, build_create falls back to the database's first
+        // user, who can be someone else and whom a child org's scope may not
+        // see at all.
         let build_context = hot::build::BuildContext::new(
-            None, // user_id - will be inferred from context
+            Some(user_id),
             Some(env_id),
             Some(org_id),
             None, // Will generate new project_id if needed

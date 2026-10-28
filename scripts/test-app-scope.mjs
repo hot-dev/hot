@@ -106,3 +106,23 @@ test('the store filter keeps the old tab scope when rebuilding its URL', () => {
   filter.applyFilters();
   assert.equal(h.window.location.href, '/stores?search=customer+records&org_id=org-a&env_id=env-a');
 });
+
+test('an environment switch from an old tab keeps its org but not its environment', () => {
+  const h = harness();
+  assert.equal(h.window.hotScopeUrl('/switch-env/env-b'), '/switch-env/env-b?org_id=org-a');
+  // The environment menus submit these forms.
+  const menu = new h.Form('/envs/env-b/switch', 'post');
+  h.handlers.get('submit')({ target: menu });
+  assert.equal(menu.action, '/envs/env-b/switch?org_id=org-a');
+  assert.deepEqual(menu.inputs, []);
+  const form = new h.Form('/switch-env/env-b');
+  h.handlers.get('submit')({ target: form });
+  assert.deepEqual(form.inputs.map(({ name, value }) => [name, value]), [['org_id', 'org-a']]);
+  h.window.fetch('/envs/env-b/switch', { method: 'POST' });
+  const headers = h.requests[0][1].headers;
+  assert.equal(headers.get('X-Hot-Org-Id'), 'org-a');
+  assert.equal(headers.get('X-Hot-Env-Id'), null);
+  const detail = { path: '/envs/env-b/switch', headers: {} };
+  h.handlers.get('htmx:configRequest')({ detail });
+  assert.deepEqual(detail.headers, { 'X-Hot-Org-Id': 'org-a' });
+});

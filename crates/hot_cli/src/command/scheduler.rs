@@ -58,6 +58,20 @@ pub(crate) async fn run_scheduler(env: Env, conf: Val) {
         }
     };
 
+    let selected_env = if matches!(env, Env::Development) {
+        match crate::profile::resolve_cli_identity(db.as_ref().expect("connected database"), &conf)
+            .await
+        {
+            Ok((_, env_id, _)) => Some(env_id),
+            Err(error) => {
+                error!(%error, "Cannot resolve development scheduler profile");
+                return;
+            }
+        }
+    } else {
+        None
+    };
+
     let scheduler_conf = conf.get("scheduler");
 
     // Extract scheduler intervals from configuration.
@@ -94,7 +108,7 @@ pub(crate) async fn run_scheduler(env: Env, conf: Val) {
     // singleton lock, exits non-zero so its supervisor restarts it.
     let exit_on_error = matches!(env, Env::Production);
     let server = tokio::spawn(async move {
-        match hot_scheduler::server::run(
+        match hot_scheduler::server::run_for_environment(
             queue_type,
             redis_uri,
             redis_cluster,
@@ -106,6 +120,7 @@ pub(crate) async fn run_scheduler(env: Env, conf: Val) {
             backfill_enabled,
             schedule_policy,
             singleton,
+            selected_env,
         )
         .await
         {

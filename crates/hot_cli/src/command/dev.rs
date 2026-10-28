@@ -476,7 +476,7 @@ pub(crate) async fn run_dev(
 
     // Run database migrations to ensure schema is up to date
     // This is safe to run every time - migrations are idempotent
-    if !conf.get_str("db.uri").is_empty() {
+    if !conf.get_str("db.uri").is_empty() && hot::db::schema_changes_enabled(&conf) {
         info!("hot.dev: Running database migrations...");
         if let Err(e) = crate::run_migrations_with_bootstrap(&conf, providers).await {
             crate::report_migration_failure("Failed to run database migrations", &e);

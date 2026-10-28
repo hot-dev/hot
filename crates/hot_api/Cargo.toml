@@ -33,8 +33,9 @@ url = { workspace = true }
 jsonschema = { workspace = true }
 ipnet = { workspace = true }
 
+sqlx = { workspace = true }
+
 [dev-dependencies]
 hot = { workspace = true, features = ["s3-storage", "test-utils"] }
 tower = { workspace = true, features = ["util"] }
-sqlx = { workspace = true }
 async-trait = { workspace = true }

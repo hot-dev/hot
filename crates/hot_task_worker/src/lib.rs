@@ -2071,10 +2071,7 @@ async fn claim_task_for_execution(
     match hot::db::Org::is_environment_admitted(db, &task.env_id).await {
         Ok(true) => {}
         Ok(false) => {
-            return Err(QueueInfrastructureError::new(
-                "environment is suspended; task remains pending",
-                backoff.max(std::time::Duration::from_secs(5)),
-            ));
+            return Ok(TaskClaim::NotClaimable);
         }
         Err(error) => {
             return Err(QueueInfrastructureError::new(
@@ -2091,6 +2088,7 @@ async fn claim_task_for_execution(
     {
         Ok(Ok(true)) => Ok(TaskClaim::Claimed),
         Ok(Ok(false)) => Ok(TaskClaim::NotClaimable),
+        Ok(Err(hot::db::TaskError::Suspended)) => Ok(TaskClaim::NotClaimable),
         Ok(Err(hot::db::TaskError::QuotaExhausted(reason))) => Ok(TaskClaim::Refused(reason)),
         Ok(Err(e)) => {
             let backoff = if matches!(e, hot::db::TaskError::QuotaExceeded(_)) {
@@ -2268,10 +2266,7 @@ async fn process_task(
         return Err("Queued task organization does not match durable ownership".into());
     }
     if !hot::db::Org::is_environment_admitted(&db, &env.env_id).await? {
-        return Err(Box::new(QueueInfrastructureError::new(
-            "environment is suspended; task remains pending",
-            std::time::Duration::from_millis(infra_retry_backoff_ms.max(5_000)),
-        )));
+        return Ok(()); // Durable queued task is rediscovered after reactivation.
     }
     let db = Arc::new(db.with_scope(DatabaseScope::Environment {
         org_id: env.org_id,
@@ -2281,6 +2276,9 @@ async fn process_task(
     let project = Project::get_project(&db, &build.project_id).await?;
     if project.env_id != task.env_id {
         return Err("Task build does not belong to durable task environment".into());
+    }
+    if !project.active {
+        return Ok(());
     }
     let mut request = synthesize_task_request_from_row(&task);
     request.org_id = Some(env.org_id.to_string());
@@ -2662,7 +2660,7 @@ async fn finish_container_setup_timeout<G: Send>(
         &format!("Container task timed out during {phase}"),
         Some(serde_json::json!({"phase": phase})),
     );
-    let persisted = complete_task_with_event(
+    let persisted = complete_container_setup(
         db,
         stream_publisher,
         task_id,
@@ -2738,7 +2736,7 @@ async fn process_container_task(
         let error = task_failure_json("Missing 'image' in container task args", None);
         // Pre-claim failure: the row was never claimed by this worker, so no
         // ownership fence applies here (or at the other pre-claim sites).
-        if complete_task_with_event(
+        if complete_container_setup(
             &db,
             &stream_publisher,
             &task_id,
@@ -2816,7 +2814,14 @@ async fn process_container_task(
 
     // -- Resolve features for limit/quota checks --
     let features = if let Some(oid) = &org_id {
-        hot::db::features::Features::resolve_for_org(&db, oid).await
+        hot::db::features::Features::try_resolve_for_org(&db, oid)
+            .await
+            .map_err(|error| {
+                QueueInfrastructureError::new(
+                    format!("Cannot resolve container entitlements: {error}"),
+                    std::time::Duration::from_secs(5),
+                )
+            })?
     } else {
         hot::db::features::Features::unlimited()
     };
@@ -2852,9 +2857,10 @@ async fn process_container_task(
             // usage counters. This early check only gives an exhausted free plan
             // a clear failure, so usage that cannot be read skips it.
             let usage = if is_free {
-                let period_start = subscription
-                    .current_period_start
-                    .unwrap_or_else(chrono::Utc::now);
+                let period_start = hot::db::subscription::monthly_usage_start(
+                    chrono::Utc::now(),
+                    subscription.current_period_start,
+                );
                 cached_usage_stats(
                     &db,
                     *oid,
@@ -2868,7 +2874,7 @@ async fn process_container_task(
             };
             if let Some(msg) = exhausted_free_plan_message(&features, usage.as_ref()) {
                 let error = task_failure_json(&msg, None);
-                if complete_task_with_event(
+                if complete_container_setup(
                     &db,
                     &stream_publisher,
                     &task_id,
@@ -2921,7 +2927,7 @@ async fn process_container_task(
         }
         Err(e) => {
             let error = task_failure_json(&e.to_string(), None);
-            if complete_task_with_event(
+            if complete_container_setup(
                 &db,
                 &stream_publisher,
                 &task_id,
@@ -2960,7 +2966,7 @@ async fn process_container_task(
                 &format!("Requested /data volume could not be provisioned: {e}"),
                 None,
             );
-            if complete_task_with_event(
+            if complete_container_setup(
                 &db,
                 &stream_publisher,
                 &task_id,
@@ -3060,7 +3066,8 @@ async fn process_container_task(
     // one deadline, so storage/file-server preparation cannot pin a running
     // row outside the advertised task budget. Billing deliberately does NOT
     // share this anchor — see `execution_start` below.
-    let total_timeout = std::time::Duration::from_millis(timeout_ms);
+    let total_timeout =
+        std::time::Duration::from_millis(timeout_ms.min(limits.timeout_secs.saturating_mul(1000)));
     let task_deadline = tokio::time::Instant::now() + total_timeout;
 
     let trace_id = request.task_id.clone();
@@ -3170,7 +3177,7 @@ async fn process_container_task(
                 );
                 // Post-claim: this worker owns the row, so fence the terminal
                 // write with its id (likewise at the later sites below).
-                if complete_task_with_event(
+                if complete_container_setup(
                     &db,
                     &stream_publisher,
                     &task_id,
@@ -3259,7 +3266,7 @@ async fn process_container_task(
                  Kata support is in progress",
                 None,
             );
-            if complete_task_with_event(
+            if complete_container_setup(
                 &db,
                 &stream_publisher,
                 &task_id,
@@ -3301,7 +3308,7 @@ async fn process_container_task(
                             &format!("failed to extract bundle for mounts: {}", e),
                             None,
                         );
-                        if complete_task_with_event(
+                        if complete_container_setup(
                             &db,
                             &stream_publisher,
                             &task_id,
@@ -3361,7 +3368,7 @@ async fn process_container_task(
                     "container 'mounts' requires an org_id on the task request",
                     None,
                 );
-                if complete_task_with_event(
+                if complete_container_setup(
                     &db,
                     &stream_publisher,
                     &task_id,
@@ -3448,7 +3455,7 @@ async fn process_container_task(
 
         if let Some(err_msg) = mount_error {
             let error = task_failure_json(&err_msg, None);
-            if complete_task_with_event(
+            if complete_container_setup(
                 &db,
                 &stream_publisher,
                 &task_id,
@@ -3491,7 +3498,7 @@ async fn process_container_task(
                 Err(e) => {
                     tracing::error!("Failed to reserve vsock port: {}", e);
                     let error = task_failure_json("Failed to reserve vsock port", None);
-                    complete_task_with_event(
+                    complete_container_setup(
                         &db,
                         &stream_publisher,
                         &task_id,
@@ -3530,7 +3537,7 @@ async fn process_container_task(
             Some(id) => id,
             None => {
                 let error = task_failure_json("File server failed to start — no org_id", None);
-                complete_task_with_event(
+                complete_container_setup(
                     &db,
                     &stream_publisher,
                     &task_id,
@@ -3562,7 +3569,7 @@ async fn process_container_task(
                 tracing::error!("File server storage init failed: {}", e);
                 let error =
                     task_failure_json("File server failed to start — storage init failed", None);
-                complete_task_with_event(
+                complete_container_setup(
                     &db,
                     &stream_publisher,
                     &task_id,
@@ -5524,6 +5531,67 @@ async fn complete_task_with_event(
     true
 }
 
+/// Finish a container task that failed before any container started. It used
+/// nothing, so it records zero compute units and duration, which releases its
+/// reservation without charging it. If a cancellation won the terminal race,
+/// that cancellation is settled at zero too instead of at the full reservation.
+#[allow(clippy::too_many_arguments)]
+async fn complete_container_setup(
+    db: &DatabasePool,
+    publisher: &StreamPubSub,
+    task_id: &Uuid,
+    env_id: Uuid,
+    stream_id: Uuid,
+    function_name: &str,
+    task_type: &str,
+    status: TaskStatus,
+    result: Option<&serde_json::Value>,
+    _duration_ms_override: Option<i64>,
+    fence_worker: Option<&str>,
+) -> bool {
+    let mut result = result.cloned().unwrap_or_else(|| serde_json::json!({}));
+    if let Some(map) = result.as_object_mut() {
+        map.insert("compute-units".into(), serde_json::json!(0));
+    }
+    let completed = complete_task_with_event(
+        db,
+        publisher,
+        task_id,
+        env_id,
+        stream_id,
+        function_name,
+        task_type,
+        status,
+        Some(&result),
+        Some(0),
+        fence_worker,
+    )
+    .await;
+    if !completed
+        && fence_worker.is_some()
+        && matches!(
+            tokio::time::timeout(DB_CALL_TIMEOUT, Task::get(db, task_id)).await,
+            Ok(Ok(task)) if task.task_status_id == TaskStatus::Cancelled.as_id()
+        )
+    {
+        let _ = complete_task_with_event(
+            db,
+            publisher,
+            task_id,
+            env_id,
+            stream_id,
+            function_name,
+            task_type,
+            TaskStatus::Cancelled,
+            Some(&result),
+            Some(0),
+            fence_worker,
+        )
+        .await;
+    }
+    completed
+}
+
 /// Publish a `task:failed` or `task:cancelled` alert.
 async fn publish_task_alert(
     db: &DatabasePool,
@@ -5588,11 +5656,28 @@ async fn check_cus_thresholds(
 async fn check_cus_thresholds_inner(
     db: &DatabasePool,
     org_id: Option<Uuid>,
-    env_id: Uuid,
+    _env_id: Uuid,
     usage_stats_cache: &UsageStatsCache,
 ) {
     let Some(org_id) = org_id else { return };
 
+    let root_id = match hot::db::Org::billing_owner_id_for(db, &org_id).await {
+        Ok(root) => root,
+        Err(_) => return,
+    };
+    let billing = db.with_scope(DatabaseScope::Maintenance {
+        operation: MaintenanceOperation::Billing,
+        org_id: Some(root_id),
+    });
+    let db = &billing;
+    let org_id = root_id;
+    let env_id = match hot::db::Env::get_envs_by_org(db, &root_id).await {
+        Ok(envs) => match envs.first() {
+            Some(env) => env.env_id,
+            None => return,
+        },
+        Err(_) => return,
+    };
     let features = hot::db::features::Features::resolve_for_org(db, &org_id).await;
     let cus_limit = features.compute_units_per_month();
     if cus_limit <= 0 {
@@ -5600,11 +5685,13 @@ async fn check_cus_thresholds_inner(
     }
 
     let subscription = hot::db::subscription::OrgPlan::get_by_org_id(db, &org_id).await;
-    let period_start = subscription
-        .as_ref()
-        .ok()
-        .and_then(|s| s.current_period_start)
-        .unwrap_or_else(chrono::Utc::now);
+    let period_start = hot::db::subscription::monthly_usage_start(
+        chrono::Utc::now(),
+        subscription
+            .as_ref()
+            .ok()
+            .and_then(|s| s.current_period_start),
+    );
 
     let Some(usage) = cached_usage_stats(
         db,
@@ -5647,7 +5734,13 @@ async fn check_cus_thresholds_inner(
                     "timestamp": chrono::Utc::now().to_rfc3339(),
                 });
 
-                let _ = hot::db::alert::publish_alert(db, &org_id, &env_id, channel, &data).await;
+                let alert_db = db.with_scope(DatabaseScope::Environment { org_id, env_id });
+                if let Err(error) =
+                    hot::db::alert::publish_alert(&alert_db, &org_id, &env_id, channel, &data).await
+                {
+                    tracing::warn!(%error,"Compute usage alert could not be published");
+                    continue;
+                }
                 let _ = hot::db::OrgNote::create_system(
                     db,
                     &org_id,
@@ -7449,7 +7542,7 @@ mod tests {
             },
         )
         .await;
-        assert!(result.unwrap_err().to_string().contains("suspended"));
+        assert!(matches!(result.unwrap(), TaskClaim::NotClaimable));
         assert_eq!(
             Task::get(&db, &task.task_id).await.unwrap().task_status_id,
             TaskStatus::Queued.as_id()

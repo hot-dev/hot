@@ -102,6 +102,29 @@ impl TryFrom<KeyRow> for ManagementKey {
 
 const SELECT_KEY: &str = "SELECT management_key_id, root_org_id, created_by_user_id, name, secret_hash, CAST(capabilities AS TEXT) AS capabilities, CAST(target_org_ids AS TEXT) AS target_org_ids, all_children, CAST(delegation_permissions AS TEXT) AS delegation_permissions, expires_at, revoked_at, created_at FROM management_key";
 
+/// A missing or RLS-hidden row denies the key; any other database failure is
+/// reported as one, so callers can retry instead of treating it as a denial.
+fn lookup_error(error: sqlx::Error) -> ManagementKeyError {
+    match error {
+        sqlx::Error::RowNotFound => ManagementKeyError::Unauthorized,
+        error => ManagementKeyError::Database(error),
+    }
+}
+
+fn org_lookup_error(error: crate::db::org::OrgError) -> ManagementKeyError {
+    match error {
+        crate::db::org::OrgError::Database(error) => lookup_error(error),
+        _ => ManagementKeyError::Unauthorized,
+    }
+}
+
+fn env_lookup_error(error: crate::db::env::EnvError) -> ManagementKeyError {
+    match error {
+        crate::db::env::EnvError::Database(error) => lookup_error(error),
+        crate::db::env::EnvError::NotFound => ManagementKeyError::Unauthorized,
+    }
+}
+
 impl ManagementKey {
     pub fn is_active(&self) -> bool {
         self.revoked_at.is_none() && self.expires_at > Utc::now()
@@ -170,10 +193,10 @@ impl ManagementKey {
         let lookup = db.with_scope(DatabaseScope::Bootstrap(BootstrapOperation::Membership));
         let root = Org::get_org_uncached(&lookup, &root_id)
             .await
-            .map_err(|_| ManagementKeyError::Unauthorized)?;
+            .map_err(org_lookup_error)?;
         let access = Org::resolve_user_access(&lookup, &root_id, &user_id)
             .await
-            .map_err(|_| ManagementKeyError::Unauthorized)?;
+            .map_err(org_lookup_error)?;
         if root.parent_org_id.is_some()
             || !access.is_some_and(|grant| grant.is_admin && grant.can_manage_account)
         {
@@ -194,7 +217,7 @@ impl ManagementKey {
         let lookup = db.with_scope(DatabaseScope::Bootstrap(BootstrapOperation::Membership));
         let root = Org::get_org_uncached(&lookup, &root_id)
             .await
-            .map_err(|_| ManagementKeyError::Unauthorized)?;
+            .map_err(org_lookup_error)?;
         if !root.is_admitting() {
             return Err(ManagementKeyError::Unauthorized);
         }
@@ -288,7 +311,7 @@ impl ManagementKey {
     ) -> Result<(), ManagementKeyError> {
         Self::require_root_admin(db, root_id, user_id).await?;
         let scoped = db.with_scope(DatabaseScope::Organization { org_id: root_id });
-        let sql = "UPDATE management_key SET revoked_at = CURRENT_TIMESTAMP WHERE management_key_id = $1 AND root_org_id = $2";
+        let sql = "UPDATE management_key SET revoked_at = COALESCE(revoked_at,CURRENT_TIMESTAMP) WHERE management_key_id = $1 AND root_org_id = $2";
         super::org_note::OrgNote::create(
             &scoped,
             &root_id,
@@ -300,21 +323,22 @@ impl ManagementKey {
         )
         .await
         .map_err(|e| ManagementKeyError::Invalid(e.to_string()))?;
-        match &scoped {
-            DatabasePool::Postgres(pool) => {
-                sqlx::query(sql)
-                    .bind(id)
-                    .bind(root_id)
-                    .execute(pool)
-                    .await?;
-            }
-            DatabasePool::Sqlite(pool) => {
-                sqlx::query(sql)
-                    .bind(id)
-                    .bind(root_id)
-                    .execute(pool)
-                    .await?;
-            }
+        let changed = match &scoped {
+            DatabasePool::Postgres(pool) => sqlx::query(sql)
+                .bind(id)
+                .bind(root_id)
+                .execute(pool)
+                .await?
+                .rows_affected(),
+            DatabasePool::Sqlite(pool) => sqlx::query(sql)
+                .bind(id)
+                .bind(root_id)
+                .execute(pool)
+                .await?
+                .rows_affected(),
+        };
+        if changed == 0 {
+            return Err(ManagementKeyError::Unauthorized);
         }
         Ok(())
     }
@@ -346,7 +370,7 @@ impl ManagementKey {
     async fn validate_root(&self, db: &DatabasePool) -> Result<(), ManagementKeyError> {
         let root = Org::get_org_uncached(db, &self.root_org_id)
             .await
-            .map_err(|_| ManagementKeyError::Unauthorized)?;
+            .map_err(org_lookup_error)?;
         if root.parent_org_id.is_some() || !root.is_admitting() {
             return Err(ManagementKeyError::Unauthorized);
         }
@@ -369,7 +393,7 @@ impl ManagementKey {
         self.validate_root(&lookup).await?;
         let child = Org::get_org_uncached(&lookup, &child_id)
             .await
-            .map_err(|_| ManagementKeyError::Unauthorized)?;
+            .map_err(org_lookup_error)?;
         if child.parent_org_id != Some(self.root_org_id)
             || (!self.all_children && !self.target_org_ids.contains(&child_id))
             || (require_active && !child.is_admitting())
@@ -410,7 +434,7 @@ impl ManagementKey {
         let issuer = Self::get(&lookup, id).await?;
         let env = Env::get_env_uncached(&lookup, &api_key.env_id)
             .await
-            .map_err(|_| ManagementKeyError::Unauthorized)?;
+            .map_err(env_lookup_error)?;
         issuer
             .authorize_child(&lookup, env.org_id, "runtime-keys:create", true)
             .await?;
@@ -438,7 +462,7 @@ impl ManagementKey {
         let lookup = db.with_scope(DatabaseScope::Bootstrap(BootstrapOperation::Authentication));
         let env = Env::get_env_uncached(&lookup, &env_id)
             .await
-            .map_err(|_| ManagementKeyError::Unauthorized)?;
+            .map_err(env_lookup_error)?;
         if env.org_id != child_id || !env.active || description.trim().is_empty() {
             return Err(ManagementKeyError::Unauthorized);
         }
@@ -551,6 +575,74 @@ mod tests {
         assert!(ManagementKey::validate_request(&request).is_ok());
         request.capabilities.push("human-grants:write".into());
         assert!(ManagementKey::validate_request(&request).is_err());
+    }
+
+    #[tokio::test]
+    async fn revoking_keeps_the_first_time_and_rejects_unknown_keys() {
+        let db = crate::db::test_db().await;
+        let data = crate::db::insert_test_data(&db).await.unwrap();
+        let DatabasePool::Sqlite(pool) = &db else {
+            unreachable!()
+        };
+        sqlx::query("UPDATE org SET org_type='organization' WHERE org_id=?")
+            .bind(data.org_id)
+            .execute(pool)
+            .await
+            .unwrap();
+        let (key, _token) = ManagementKey::create_for_user(
+            &db,
+            data.org_id,
+            data.user_id,
+            &CreateManagementKey {
+                name: "reader".into(),
+                capabilities: vec!["children:read".into()],
+                target_org_ids: Vec::new(),
+                all_children: true,
+                delegation_permissions: None,
+                expires_in_seconds: 3600,
+            },
+        )
+        .await
+        .unwrap();
+        let revoked_at = || async {
+            sqlx::query_scalar::<_, String>(
+                "SELECT CAST(revoked_at AS TEXT) FROM management_key WHERE management_key_id=?",
+            )
+            .bind(key.management_key_id)
+            .fetch_one(pool)
+            .await
+            .unwrap()
+        };
+        ManagementKey::revoke_for_user(&db, data.org_id, data.user_id, key.management_key_id)
+            .await
+            .unwrap();
+        let first = revoked_at().await;
+        // CURRENT_TIMESTAMP has one-second resolution.
+        tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
+        ManagementKey::revoke_for_user(&db, data.org_id, data.user_id, key.management_key_id)
+            .await
+            .unwrap();
+        assert_eq!(revoked_at().await, first);
+        assert!(matches!(
+            ManagementKey::revoke_for_user(&db, data.org_id, data.user_id, Uuid::now_v7()).await,
+            Err(ManagementKeyError::Unauthorized)
+        ));
+    }
+
+    #[test]
+    fn lookup_failures_are_database_errors_but_missing_rows_deny() {
+        assert!(matches!(
+            lookup_error(sqlx::Error::RowNotFound),
+            ManagementKeyError::Unauthorized
+        ));
+        assert!(matches!(
+            lookup_error(sqlx::Error::PoolTimedOut),
+            ManagementKeyError::Database(_)
+        ));
+        assert!(matches!(
+            env_lookup_error(crate::db::env::EnvError::NotFound),
+            ManagementKeyError::Unauthorized
+        ));
     }
     #[test]
     fn provisioning_cannot_implicitly_expand_target_scope() {

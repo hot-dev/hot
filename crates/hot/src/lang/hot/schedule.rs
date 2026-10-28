@@ -20,6 +20,9 @@ pub fn create_schedule(
     vm: &mut crate::lang::runtime::vm::VirtualMachine,
     args: &[Val],
 ) -> HotResult<Val> {
+    if let Err(error) = vm.require_work_admission() {
+        return HotResult::Err(Val::from(error));
+    }
     if args.len() != 3 {
         return HotResult::Err(Val::from(format!(
             "::hot::schedule/create expects 3 arguments (fn, args, schedule), got {}",

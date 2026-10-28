@@ -75,10 +75,29 @@ fn management_error(error: ManagementKeyError) -> ApiError {
     }
 }
 fn org_error(error: hot::db::org::OrgError) -> ApiError {
-    (
-        StatusCode::BAD_REQUEST,
-        Json(ApiErrorResponse::bad_request(&error.to_string())),
-    )
+    use hot::db::org::OrgError;
+    let (status, body) = match error {
+        OrgError::NotFound | OrgError::Database(sqlx::Error::RowNotFound) => (
+            StatusCode::NOT_FOUND,
+            ApiErrorResponse::new("not_found", "Organization not found"),
+        ),
+        OrgError::Database(error) => {
+            tracing::error!(%error, "Organization operation failed");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                ApiErrorResponse::internal_error("Organization operation failed"),
+            )
+        }
+        OrgError::Forbidden => (
+            StatusCode::FORBIDDEN,
+            ApiErrorResponse::new("forbidden", "Organization access denied"),
+        ),
+        error => (
+            StatusCode::BAD_REQUEST,
+            ApiErrorResponse::bad_request(&error.to_string()),
+        ),
+    };
+    (status, Json(body))
 }
 
 pub async fn management_auth_middleware(
@@ -164,6 +183,8 @@ pub async fn create_child(
     if !key.has_capability("children:create") || !key.all_children {
         return Err(denied());
     }
+    hot::slug::validate_format_with_extra(&body.slug, &hot::slug::extra_reserved_from_conf(&conf))
+        .map_err(|error| org_error(hot::db::org::OrgError::Invalid(error.message().to_string())))?;
     let request = CreateChild {
         name: body.name,
         slug: body.slug,
@@ -384,6 +405,60 @@ mod tests {
             serde_json::from_slice(&bytes).unwrap()
         };
         (status, body)
+    }
+
+    #[tokio::test]
+    async fn management_router_rejects_reserved_child_slugs() {
+        let db = Arc::new(hot::db::test_db().await);
+        let data = hot::db::insert_test_data(&db).await.unwrap();
+        let DatabasePool::Sqlite(pool) = db.as_ref() else {
+            unreachable!("SQLite fixture");
+        };
+        sqlx::query("UPDATE org SET org_type = 'organization' WHERE org_id = ?")
+            .bind(data.org_id)
+            .execute(pool)
+            .await
+            .unwrap();
+        let (_, manager_token) = ManagementKey::create_for_user(
+            &db,
+            data.org_id,
+            data.user_id,
+            &CreateManagementKey {
+                name: "reserved slugs".into(),
+                capabilities: vec!["children:create".into()],
+                target_org_ids: Vec::new(),
+                all_children: true,
+                delegation_permissions: None,
+                expires_in_seconds: 3600,
+            },
+        )
+        .await
+        .unwrap();
+        let storage_dir = tempfile::tempdir().unwrap();
+        let state: ApiStateData = (
+            db.clone(),
+            Arc::new(Box::new(hot::storage::LocalBuildStorage::new(
+                storage_dir.path().to_path_buf(),
+            ))),
+            Arc::new(hot::val!({"org": {"reserved-slugs": ["acme-internal"]}})),
+            None,
+        );
+        let app = router(state.clone()).with_state(state);
+        for slug in ["api", "acme-internal"] {
+            let (status, body) = request(
+                &app,
+                "POST",
+                "/v1/management/children",
+                &manager_token,
+                Some(json!({
+                    "name": "Reserved",
+                    "slug": slug,
+                    "idempotency_key": format!("reserved-{slug}")
+                })),
+            )
+            .await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{slug}: {body}");
+        }
     }
 
     #[tokio::test]

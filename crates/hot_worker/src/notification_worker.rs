@@ -26,6 +26,15 @@ pub fn spawn_notification_worker(
     email_queue: ProcessingQueue<Message>,
     mut shutdown_rx: watch::Receiver<bool>,
 ) {
+    // Callers pass an unscoped pool; each queue runs under its own operation.
+    let alert_db = db.with_scope(hot::db::DatabaseScope::Maintenance {
+        operation: hot::db::MaintenanceOperation::Alerts,
+        org_id: None,
+    });
+    let email_db = db.with_scope(hot::db::DatabaseScope::Maintenance {
+        operation: hot::db::MaintenanceOperation::Email,
+        org_id: None,
+    });
     tokio::spawn(async move {
         tracing::info!("Notification worker started (alert + email queue consumer)");
 
@@ -64,7 +73,7 @@ pub fn spawn_notification_worker(
                 }
                 result = run_one_alert(
                     &alert_queue,
-                    &db,
+                    &alert_db,
                     &conf,
                     &http_client,
                     &alert_email_sender,
@@ -76,7 +85,7 @@ pub fn spawn_notification_worker(
                 }
                 result = run_one_email(
                     &email_queue,
-                    &db,
+                    &email_db,
                     &conf,
                     &app_email_sender,
                     app_email_available,

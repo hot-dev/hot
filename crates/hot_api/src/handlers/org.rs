@@ -280,10 +280,6 @@ pub(super) async fn account_plan_details(
         Features::resolve(plan_features.as_ref(), overrides.as_ref())
     };
     let now = chrono::Utc::now();
-    let default_start = chrono::Utc
-        .with_ymd_and_hms(now.year(), now.month(), 1, 0, 0, 0)
-        .single()
-        .unwrap_or(now);
     let (year, month) = if now.month() == 12 {
         (now.year() + 1, 1)
     } else {
@@ -293,10 +289,10 @@ pub(super) async fn account_plan_details(
         .with_ymd_and_hms(year, month, 1, 0, 0, 0)
         .single()
         .unwrap_or(now);
-    let period_start = subscription
-        .as_ref()
-        .and_then(|s| s.current_period_start)
-        .unwrap_or(default_start);
+    let period_start = hot::db::subscription::monthly_usage_start(
+        now,
+        subscription.as_ref().and_then(|s| s.current_period_start),
+    );
     let period_end = subscription
         .as_ref()
         .and_then(|s| s.current_period_end)

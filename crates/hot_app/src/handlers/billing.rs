@@ -367,7 +367,7 @@ pub async fn view_usage_handler(
     axum::extract::Extension(session): axum::extract::Extension<Session>,
 ) -> Result<Html<String>, (StatusCode, String)> {
     use crate::templates;
-    use chrono::{Datelike, NaiveDate, Utc};
+    use chrono::Utc;
     use hot::db::{Features, Plan};
 
     // Get current org
@@ -392,25 +392,22 @@ pub async fn view_usage_handler(
         Features::resolve_for_org(&db, &org.org_id).await
     };
 
-    // Match the period used by run and compute admission. Unsubscribed local
-    // accounts use the calendar month.
-    let now = Utc::now();
-    let calendar_start = now
-        .date_naive()
-        .with_day(1)
-        .and_then(|d: NaiveDate| d.and_hms_opt(0, 0, 0))
-        .map(|dt| chrono::DateTime::<Utc>::from_naive_utc_and_offset(dt, Utc))
-        .unwrap_or(now);
-    let month_start = subscription
-        .as_ref()
-        .and_then(|subscription| subscription.current_period_start)
-        .unwrap_or(calendar_start);
+    // Match the monthly window run and compute admission count from.
+    // Unsubscribed local accounts use the calendar month.
+    let month_start = hot::db::subscription::monthly_usage_start(
+        Utc::now(),
+        subscription
+            .as_ref()
+            .and_then(|subscription| subscription.current_period_start),
+    );
+
+    // The stats partial covers the whole account only for a root
+    // administrator; everyone else sees this org's own usage.
+    let account_wide =
+        !org.is_child() && is_org_admin(&db, &session.user.user_id, &org.org_id).await;
 
     // Determine if user can upgrade (false for Scale plan)
-    let can_upgrade = if org.is_child()
-        || !is_org_admin(&db, &session.user.user_id, &org.org_id).await
-        || hot::product::is_no_nag(&conf)
-    {
+    let can_upgrade = if !account_wide || hot::product::is_no_nag(&conf) {
         false
     } else if hot::product::billing_enabled(&conf) {
         plan.as_ref()
@@ -431,6 +428,7 @@ pub async fn view_usage_handler(
         features,
         month_start,
         can_upgrade,
+        account_wide,
     };
 
     Ok(Html(
@@ -446,7 +444,7 @@ pub async fn usage_stats_handler(
     axum::extract::Extension(session): axum::extract::Extension<Session>,
 ) -> Result<Html<String>, (StatusCode, String)> {
     use crate::templates;
-    use chrono::{Datelike, NaiveDate, Utc};
+    use chrono::Utc;
     use hot::db::{Features, OrgUsageStats, Plan};
 
     // Get current org
@@ -471,18 +469,13 @@ pub async fn usage_stats_handler(
         Features::resolve_for_org(&db, &org.org_id).await
     };
 
-    // Use the same account period as admission, including mid-month renewals.
-    let now = Utc::now();
-    let calendar_start = now
-        .date_naive()
-        .with_day(1)
-        .and_then(|d: NaiveDate| d.and_hms_opt(0, 0, 0))
-        .map(|dt| chrono::DateTime::<Utc>::from_naive_utc_and_offset(dt, Utc))
-        .unwrap_or(now);
-    let month_start = subscription
-        .as_ref()
-        .and_then(|subscription| subscription.current_period_start)
-        .unwrap_or(calendar_start);
+    // Use the same monthly window as admission, including mid-month renewals.
+    let month_start = hot::db::subscription::monthly_usage_start(
+        Utc::now(),
+        subscription
+            .as_ref()
+            .and_then(|subscription| subscription.current_period_start),
+    );
 
     // Get call retention days from features
     let retention_days = features.call_retention_days();

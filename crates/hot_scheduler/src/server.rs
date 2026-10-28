@@ -134,6 +134,39 @@ pub async fn run(
     schedule_policy: SchedulePolicy,
     singleton: bool,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    run_for_environment(
+        queue_type,
+        redis_uri,
+        redis_cluster,
+        serialization,
+        db,
+        sync_interval_seconds,
+        retry_interval_seconds,
+        at_interval_seconds,
+        backfill_enabled,
+        schedule_policy,
+        singleton,
+        None,
+    )
+    .await
+}
+
+/// Local development binds scheduler discovery to its selected profile.
+#[allow(clippy::too_many_arguments)]
+pub async fn run_for_environment(
+    queue_type: QueueType,
+    redis_uri: Option<String>,
+    redis_cluster: bool,
+    serialization: Serialization,
+    db: Option<DatabasePool>,
+    sync_interval_seconds: Option<u64>,
+    retry_interval_seconds: Option<u64>,
+    at_interval_seconds: Option<u64>,
+    backfill_enabled: bool,
+    schedule_policy: SchedulePolicy,
+    singleton: bool,
+    env_id: Option<Uuid>,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     debug!("hot.dev: SCHEDULER starting");
     debug!(
         "hot.dev: SCHEDULER schedule policy: min_interval={}s, min_delay={}s, max_active_per_org={}",
@@ -288,6 +321,7 @@ pub async fn run(
                             &db_clone,
                             backfill_enabled,
                             schedule_policy,
+                            env_id,
                         )
                         .await
                         {
@@ -313,7 +347,7 @@ pub async fn run(
             loop {
                 tokio::select! {
                     _ = retry_timer.tick() => {
-                        if let Err(e) = process_pending_retries(&retry_db_clone, &retry_queue_clone).await {
+                        if let Err(e) = process_pending_retries(&retry_db_clone, &retry_queue_clone, env_id).await {
                             error!("hot.dev: SCHEDULER retry processor failed: {}", e);
                         }
                     }
@@ -336,7 +370,7 @@ pub async fn run(
             loop {
                 tokio::select! {
                     _ = at_timer.tick() => {
-                        if let Err(e) = process_due_at_schedules(&at_db_clone, &at_queue_clone).await {
+                        if let Err(e) = process_due_at_schedules(&at_db_clone, &at_queue_clone, env_id).await {
                             error!("hot.dev: SCHEDULER @at schedule processor failed: {}", e);
                         }
                     }
@@ -567,6 +601,7 @@ async fn sync_with_database(
     db: &Arc<DatabasePool>,
     backfill_enabled: bool,
     schedule_policy: SchedulePolicy,
+    env_id: Option<Uuid>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let now = Utc::now();
 
@@ -592,7 +627,7 @@ async fn sync_with_database(
     }
 
     // Get all schedules for deployed builds
-    let schedules = Schedule::get_schedules_for_deployed_builds(db, None, None)
+    let schedules = Schedule::get_schedules_for_environment(db, None, None, env_id)
         .await
         .map_err(|e| {
             error!(
@@ -1353,9 +1388,10 @@ fn format_duration(duration: chrono::Duration) -> String {
 async fn process_pending_retries(
     db: &Arc<DatabasePool>,
     event_queue: &Arc<dyn Queue<Message>>,
+    env_id: Option<Uuid>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // Get runs pending retry (batch of 50)
-    let pending_runs = hot::db::run::Run::get_pending_retries(db, 50)
+    let pending_runs = hot::db::run::Run::get_pending_retries_for_environment(db, 50, env_id)
         .await
         .map_err(|e| {
             error!("Failed to get pending retries: {}", e);
@@ -1539,14 +1575,17 @@ async fn process_pending_retries(
 async fn process_due_at_schedules(
     db: &Arc<DatabasePool>,
     event_queue: &Arc<dyn Queue<Message>>,
+    env_id: Option<Uuid>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let now = Utc::now();
 
     // Get all active @at: schedules that are due (run_at <= now)
-    let due_schedules = Schedule::get_due_at_schedules(db, now).await.map_err(|e| {
-        error!("Failed to get due @at schedules from database: {}", e);
-        e
-    })?;
+    let due_schedules = Schedule::get_due_at_schedules_for_environment(db, now, env_id)
+        .await
+        .map_err(|e| {
+            error!("Failed to get due @at schedules from database: {}", e);
+            e
+        })?;
 
     if due_schedules.is_empty() {
         return Ok(());
@@ -1815,7 +1854,14 @@ mod tests {
             MemQueue::new(format!("test:retry-deadline:{}", Uuid::now_v7())).expect("memory queue"),
         );
 
-        process_pending_retries(&db, &queue)
+        process_pending_retries(&db, &queue, Some(Uuid::now_v7()))
+            .await
+            .unwrap();
+        assert!(
+            queue.is_empty().await.unwrap(),
+            "Another profile's retries remain pending"
+        );
+        process_pending_retries(&db, &queue, Some(data.env_id))
             .await
             .expect("process_pending_retries should succeed");
 
@@ -1864,7 +1910,7 @@ mod tests {
                 .expect("memory queue"),
         );
 
-        process_pending_retries(&db, &queue).await.unwrap();
+        process_pending_retries(&db, &queue, None).await.unwrap();
 
         assert!(
             queue.dequeue().await.unwrap().is_none(),

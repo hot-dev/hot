@@ -868,6 +868,68 @@ async fn claim_handle_adopts_orphan_org_owned_by_user() {
     assert_eq!(current.org_id, orphan_org_id);
 }
 
+/// Creating an org once is not a standing grant: a creator who was removed
+/// while other members remain must not rejoin it through /claim-handle.
+#[tokio::test]
+async fn claim_handle_does_not_readopt_an_org_the_creator_was_removed_from() {
+    let mut client = TestClient::new().await;
+    let creator_id = Uuid::now_v7();
+    let member_id = Uuid::now_v7();
+    for (user_id, email) in [
+        (creator_id, "alice@example.com"),
+        (member_id, "bob@example.com"),
+    ] {
+        hot::db::User::insert_user(client.db(), &user_id, email, None, Some(&user_id))
+            .await
+            .expect("insert user");
+    }
+    let org_id = Uuid::now_v7();
+    hot::db::org::Org::insert_org(
+        client.db(),
+        &org_id,
+        "Alice",
+        "alice",
+        "organization",
+        &creator_id,
+    )
+    .await
+    .expect("insert org");
+    hot::db::org::OrgUser::insert_org_user(
+        client.db(),
+        &Uuid::now_v7(),
+        &org_id,
+        &member_id,
+        Some(2),
+        &member_id,
+    )
+    .await
+    .expect("insert remaining member");
+
+    client.login_as(&creator_id);
+    let form = vec![
+        ("account_type", "organization".to_string()),
+        ("org_name", "Alice".to_string()),
+        ("org_slug", "alice".to_string()),
+    ];
+    let resp = client
+        .post_form(
+            "/claim-handle?plan=hot-free&billing=monthly",
+            &as_form_slice(&form),
+        )
+        .await;
+    assert_ne!(
+        resp.location(),
+        Some("/@alice/billing/checkout?plan=hot-free&billing=monthly")
+    );
+    let orgs = hot::db::org::Org::get_orgs_by_user(client.db(), &creator_id)
+        .await
+        .expect("query orgs");
+    assert!(
+        orgs.iter().all(|org| org.org_id != org_id),
+        "the removed creator must not regain membership"
+    );
+}
+
 /// Companion: if the user submits /claim-handle for a slug they already own
 /// AND have a proper membership for (i.e. back-button after a successful
 /// claim), just forward to billing — no duplicate insert, no error.

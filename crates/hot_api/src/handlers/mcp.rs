@@ -2714,6 +2714,7 @@ async fn handle_tools_call_streaming(
         stream_db,
         stream_auth,
         stream_scope,
+        Vec::new(),
     ))
     .keep_alive(KeepAlive::default())
     .into_response();
@@ -3074,6 +3075,7 @@ async fn mcp_sse_handler_core(
         stream_db,
         stream_auth,
         stream_scope,
+        Vec::new(),
     ))
     .keep_alive(KeepAlive::default()))
 }

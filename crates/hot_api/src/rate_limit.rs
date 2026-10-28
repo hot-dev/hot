@@ -452,15 +452,18 @@ pub fn rate_limit_response(exceeded: RateLimitExceeded) -> Response {
         .into_response()
 }
 
-async fn org_rate_limit_rps(db: &hot::db::DatabasePool, org_id: &Uuid) -> i64 {
+async fn org_rate_limit_rps(
+    db: &hot::db::DatabasePool,
+    org_id: &Uuid,
+) -> Result<i64, hot::db::subscription::PlanError> {
     if let Some(rps) = STATE.features.get(org_id) {
-        return rps;
+        return Ok(rps);
     }
 
-    let features = Features::resolve_for_org(db, org_id).await;
+    let features = Features::try_resolve_for_org(db, org_id).await?;
     let rps = features.rate_limit_rps();
     STATE.features.insert(*org_id, rps);
-    rps
+    Ok(rps)
 }
 
 pub async fn check_org_rate_limit(
@@ -476,7 +479,9 @@ pub async fn check_org_rate_limit(
         let Ok(root_id) = hot::db::Org::billing_owner_id_for(db, org_id).await else {
             return Ok(());
         };
-        let rate_limit_rps = org_rate_limit_rps(db, &root_id).await;
+        let Ok(rate_limit_rps) = org_rate_limit_rps(db, &root_id).await else {
+            return Ok(());
+        };
         if STATE.observed.check(&root_id, rate_limit_rps).is_err() {
             tracing::warn!(context, %org_id, %root_id, "Account RPS limit would have been hit");
         }
@@ -488,7 +493,12 @@ pub async fn check_org_rate_limit(
             retry_after_secs: 1,
             message: "Unable to resolve account request budget".into(),
         })?;
-    let rate_limit_rps = org_rate_limit_rps(db, &root_id).await;
+    let rate_limit_rps = org_rate_limit_rps(db, &root_id)
+        .await
+        .map_err(|_| RateLimitExceeded {
+            retry_after_secs: 1,
+            message: "Unable to load account rate limit".into(),
+        })?;
     let admitted = hot::db::Org::try_acquire_account_request(db, &root_id, rate_limit_rps)
         .await
         .map_err(|_| RateLimitExceeded {
@@ -518,7 +528,12 @@ pub async fn check_public_org_inflight(
             message: "Unable to resolve account connection budget".into(),
         })?;
     let org_id = &root_id;
-    let rate_limit_rps = org_rate_limit_rps(db, org_id).await;
+    let rate_limit_rps = org_rate_limit_rps(db, org_id)
+        .await
+        .map_err(|_| RateLimitExceeded {
+            retry_after_secs: 1,
+            message: "Unable to load account connection budget".into(),
+        })?;
     if rate_limit_rps < 0 {
         return Ok(None);
     }

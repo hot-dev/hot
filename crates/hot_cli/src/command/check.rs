@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use hot::val::Val;
 
 use crate::cli::GlobalOptions;
-use crate::command::deploy::setup_live_build_for_dev;
+use crate::command::deploy::scan_cli_inputs;
 use crate::conf::{get_merged_src_paths, get_merged_test_paths};
 
 // Helper function to run check compilation using engine. Prints any
@@ -37,9 +37,7 @@ async fn run_check_compilation(conf: &Val, global_options: &GlobalOptions) -> Re
         .unwrap_or_else(|| hot::project::get_default_project_name(conf));
 
     // Static checks disable shared database writes by default.
-    if !hot::db::get_db_uri_from_conf(conf).is_empty() {
-        setup_live_build_for_dev(conf, global_options, &src_paths, &test_paths).await?;
-    }
+    scan_cli_inputs(conf, global_options, &src_paths, &test_paths)?;
 
     let color = hot::env::is_local_dev();
     let mut warnings = hot::lang::errors::CompilerErrors::new();
@@ -278,9 +276,7 @@ pub(crate) async fn run_check_with_raw(
         .clone()
         .unwrap_or_else(|| hot::project::get_default_project_name(conf));
 
-    if !hot::db::get_db_uri_from_conf(conf).is_empty() {
-        setup_live_build_for_dev(conf, global_options, &src_paths, &test_paths).await?;
-    }
+    scan_cli_inputs(conf, global_options, &src_paths, &test_paths)?;
 
     let fmt = format.unwrap_or("pretty").to_lowercase();
     let json_mode = fmt == "json" || fmt == "json-min";

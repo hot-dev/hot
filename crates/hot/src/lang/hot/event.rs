@@ -16,6 +16,9 @@ pub fn send_event(
     vm: &mut crate::lang::runtime::vm::VirtualMachine,
     args: &[Val],
 ) -> HotResult<Val> {
+    if let Err(error) = vm.require_work_admission() {
+        return HotResult::Err(Val::from(error));
+    }
     if args.len() != 2 {
         return HotResult::Err(Val::from(format!(
             "::hot::event/send expects exactly 2 arguments (event-type, event-data), got {}",

@@ -309,7 +309,10 @@ impl Domain {
         let domain_name = domain_name.trim().to_lowercase();
 
         // Check for a soft-deleted domain with the same name still awaiting cleanup
-        if Self::is_pending_deletion(db, &domain_name).await? {
+        let availability = db.with_scope(crate::db::DatabaseScope::Bootstrap(
+            crate::db::BootstrapOperation::Routing,
+        ));
+        if Self::is_pending_deletion(&availability, &domain_name).await? {
             return Err(DomainError::PendingDeletion);
         }
 
@@ -340,7 +343,7 @@ impl Domain {
                     .bind(root)
                     .execute(&mut *tx)
                     .await?;
-                let (plan,overrides):(Option<String>,Option<String>)=sqlx::query_as("SELECT CAST(p.features AS TEXT),CAST(o.features AS TEXT) FROM org o LEFT JOIN org_plan op ON op.org_id=o.org_id LEFT JOIN plan p ON p.plan_uuid=op.plan_uuid WHERE o.org_id=$1")
+                let (plan,overrides):(Option<String>,Option<String>)=sqlx::query_as("SELECT CASE WHEN p.plan_uuid IS NULL THEN NULL ELSE CAST(COALESCE(p.features,'{}') AS TEXT) END,CAST(o.features AS TEXT) FROM org o LEFT JOIN org_plan op ON op.org_id=o.org_id LEFT JOIN plan p ON p.plan_uuid=op.plan_uuid WHERE o.org_id=$1")
                     .bind(root).fetch_one(&mut *tx).await?;
                 let limit = domain_limit(plan, overrides)?;
                 let count:i64=sqlx::query_scalar("SELECT COUNT(*) FROM domain d JOIN env e ON e.env_id=d.env_id JOIN org o ON o.org_id=e.org_id WHERE d.deleted_at IS NULL AND (o.org_id=$1 OR o.parent_org_id=$1)")
@@ -359,11 +362,11 @@ impl Domain {
             }
             DatabasePool::Sqlite(pool) => {
                 let mut tx = pool.begin().await?;
-                sqlx::query("UPDATE org SET org_id=org_id WHERE org_id=?")
+                sqlx::query("UPDATE org SET updated_at=updated_at WHERE org_id=?")
                     .bind(root)
                     .execute(&mut *tx)
                     .await?;
-                let (plan,overrides):(Option<String>,Option<String>)=sqlx::query_as("SELECT CAST(p.features AS TEXT),CAST(o.features AS TEXT) FROM org o LEFT JOIN org_plan op ON op.org_id=o.org_id LEFT JOIN plan p ON p.plan_uuid=op.plan_uuid WHERE o.org_id=?")
+                let (plan,overrides):(Option<String>,Option<String>)=sqlx::query_as("SELECT CASE WHEN p.plan_uuid IS NULL THEN NULL ELSE CAST(COALESCE(p.features,'{}') AS TEXT) END,CAST(o.features AS TEXT) FROM org o LEFT JOIN org_plan op ON op.org_id=o.org_id LEFT JOIN plan p ON p.plan_uuid=op.plan_uuid WHERE o.org_id=?")
                     .bind(root).fetch_one(&mut *tx).await?;
                 let limit = domain_limit(plan, overrides)?;
                 let count:i64=sqlx::query_scalar("SELECT COUNT(*) FROM domain d JOIN env e ON e.env_id=d.env_id JOIN org o ON o.org_id=e.org_id WHERE d.deleted_at IS NULL AND (o.org_id=? OR o.parent_org_id=?)")
