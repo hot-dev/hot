@@ -312,9 +312,18 @@ limit: Int fetch-limit() where gt(%, 0)   // binding; `where` may start the next
   `where` needs a declared type (`where-requires-type`); refined `lazy`
   parameters are `unsupported-constraint`; a predicate that isn't a function
   of one value, or a parameter predicate that uses another parameter, is
-  `invalid-constraint`. `hot check` reports literals that fail
-  (`constraint-violation`), non-Bool predicates (`constraint-not-bool`), and
-  impure ones (`impure-constraint`).
+  `invalid-constraint`. `hot check` reports non-Bool predicates
+  (`constraint-not-bool`) and impure ones (`impure-constraint`).
+- `hot check` reports a literal that fails (`constraint-violation`) when it is
+  a typed binding's value (top level or in a body), a refined type's
+  argument (`Port(0)`), an argument to a constrained parameter, or a field of
+  a record constructor call, named or Map form (the error names the field
+  path). A record invariant is checked when every field it reads is a
+  literal. It evaluates core comparisons, `between`, `in`, `and`/`or`/`not`,
+  `if`, `is-null`, `length`, `starts-with`/`ends-with`/`contains`, top-level
+  literal values, and the program's own functions with untyped or
+  `Str`/`Int`/`Dec`/`Bool`/`Any` parameters, within a budget. Anything else
+  (a computed value, another function) is checked only at run time.
 - `where` is reserved: it can't name a binding or a function.
 
 ## Enum Types
