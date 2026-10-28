@@ -38,6 +38,34 @@ pub(super) struct EvalRuntimeOptions<'a> {
 }
 
 impl Engine {
+    /// Admit the run, then initialize module state. The run is recorded from
+    /// admission on, so a module whose initialization fails leaves a failed
+    /// run instead of an admitted one with no record.
+    fn initialize_cached_run(
+        vm: &mut crate::lang::runtime::vm::VirtualMachine,
+        instructions: usize,
+        emitter: Option<&Arc<dyn crate::lang::emitter::EngineEventEmitter>>,
+    ) -> Result<(), String> {
+        vm.admit_execution()
+            .map_err(crate::lang::runtime::vm::admission_failure)?;
+        vm.sync_secret_keys_to_execution_context();
+        if let (Some(emitter), Some(context)) = (emitter, vm.get_execution_context()) {
+            emitter.emit(crate::lang::emitter::EngineEvent::run_start(context));
+        }
+        if instructions > 0
+            && let Err(error) = vm.execute()
+        {
+            if let (Some(emitter), Some(context)) = (emitter, vm.get_execution_context()) {
+                emitter.emit(crate::lang::emitter::EngineEvent::run_fail(
+                    context,
+                    crate::val::Val::from(error.to_string()),
+                ));
+            }
+            return Err(format!("Failed to initialize program: {error}"));
+        }
+        Ok(())
+    }
+
     /// Convert VM terminal states into the same value shape as explicit Hot
     /// terminal results. The emitter has already recorded run:fail/run:cancel;
     /// callers should not treat these as worker/runtime infrastructure errors.
@@ -691,40 +719,22 @@ impl Engine {
         if let Some(ref context) = execution_context {
             vm.set_execution_context(context.clone());
         }
-        vm.admit_execution()
-            .map_err(crate::lang::runtime::vm::admission_failure)?;
+        let module_init_started = std::time::Instant::now();
+        Self::initialize_cached_run(&mut vm, instruction_count, emitter.as_ref())?;
+        tracing::debug!(
+            "TIMING [{}]: vm_module_init_execute: {:?}",
+            timing_id,
+            module_init_started.elapsed()
+        );
 
-        // Initialize global state WITHOUT emitter (don't record initialization as a run)
-        if instruction_count > 0 {
-            tracing::debug!(
-                "Initializing program state ({} instructions) without run recording",
-                instruction_count
-            );
-            let module_init_started = std::time::Instant::now();
-            vm.execute()
-                .map_err(|e| format!("Failed to initialize program: {}", e))?;
-            tracing::debug!(
-                "TIMING [{}]: vm_module_init_execute: {:?}",
-                timing_id,
-                module_init_started.elapsed()
-            );
-        }
-
-        // NOW set up emitter and execution context for the function call
-        // Keep local references for manual run event emission
+        // NOW set up the emitter for the function call. The execution context
+        // stays as module initialization left it: resetting it would drop the
+        // secret hashes initialization recorded, and leave values unmasked.
         let emitter_for_run = emitter.clone();
-        let execution_context_for_run = execution_context.clone();
-
         let run_context_started = std::time::Instant::now();
         if let Some(ref em) = emitter {
             vm.set_emitter(Arc::clone(em));
         }
-        if let Some(ref ctx) = execution_context {
-            vm.set_execution_context(ctx.clone());
-        }
-
-        // Sync secret keys to execution context NOW that it's been set
-        // (the earlier sync_secret_keys_to_execution_context call happened before ctx was set)
         vm.sync_secret_keys_to_execution_context();
         tracing::debug!(
             "TIMING [{}]: vm_run_context_setup: {:?}",
@@ -738,24 +748,6 @@ impl Engine {
             function_name
         );
 
-        // Emit run:start manually since call_function_bypassing_unified_lookup doesn't do it
-        if let (Some(emitter), Some(execution_context)) =
-            (&emitter_for_run, &execution_context_for_run)
-        {
-            tracing::debug!(
-                "Engine: Emitting run:start for direct function call run_id={}",
-                execution_context.run_id
-            );
-            let run_start_emit_started = std::time::Instant::now();
-            let start_event = crate::lang::emitter::EngineEvent::run_start(execution_context);
-            emitter.emit(start_event);
-            tracing::debug!(
-                "TIMING [{}]: vm_run_start_emit: {:?}",
-                timing_id,
-                run_start_emit_started.elapsed()
-            );
-        }
-
         let function_call_started = std::time::Instant::now();
         let result = vm.call_function_bypassing_unified_lookup(function_name, args);
         tracing::debug!(
@@ -766,6 +758,7 @@ impl Engine {
 
         // Emit run:stop, run:fail, or run:cancel manually based on result and VM state
         let terminal_emit_started = std::time::Instant::now();
+        let execution_context_for_run = vm.get_execution_context().clone();
         match &result {
             Ok(result_val) => {
                 if vm.has_failed() {
@@ -1042,37 +1035,20 @@ impl Engine {
         if let Some(ref context) = execution_context {
             vm.set_execution_context(context.clone());
         }
-        vm.admit_execution()
-            .map_err(crate::lang::runtime::vm::admission_failure)?;
+        Self::initialize_cached_run(&mut vm, instruction_count, emitter.as_ref())?;
 
-        // Initialize global state WITHOUT emitter
-        if instruction_count > 0 {
-            vm.execute()
-                .map_err(|e| format!("Failed to initialize program: {}", e))?;
-        }
-
-        // Set emitter and execution context for the function call
+        // Set the emitter for the function call; keep the execution context
+        // module initialization left, with its secret hashes.
         let emitter_for_run = emitter.clone();
-        let execution_context_for_run = execution_context.clone();
-
         if let Some(ref em) = emitter {
             vm.set_emitter(Arc::clone(em));
         }
-        if let Some(ref ctx) = execution_context {
-            vm.set_execution_context(ctx.clone());
-        }
         vm.sync_secret_keys_to_execution_context();
-
-        // Emit run:start
-        if let (Some(emitter), Some(execution_context)) =
-            (&emitter_for_run, &execution_context_for_run)
-        {
-            let start_event = crate::lang::emitter::EngineEvent::run_start(execution_context);
-            emitter.emit(start_event);
-        }
 
         let result = vm.call_function_bypassing_unified_lookup(function_name, args);
 
+        // Secret values can be discovered during the function itself.
+        let execution_context_for_run = vm.get_execution_context().clone();
         // Emit run:stop/fail/cancel
         match &result {
             Ok(result_val) => {
