@@ -2094,3 +2094,158 @@ fn proven_parameters_skip_repeated_checks() {
         "binding it to the same type skips the binding check"
     );
 }
+
+const META_REFS_LIB: &str = r#"
+    ::mt::lib ns
+    Clause type { section: Str }
+    s4 Clause({section: "§4"})
+    SharedAgent meta {agent: {name: "Shared"}}
+    type {}
+"#;
+
+fn compile_meta_refs(source: &str) -> (Program, CompilerResult<()>) {
+    let mut program = parse_hot(&format!("{}\n{}", META_REFS_LIB, source)).expect("parses");
+    let mut compiler = Compiler::new();
+    let result = compiler.compile_program(&mut program);
+    (program, result)
+}
+
+fn top_level_meta(program: &Program, ns: &str, name: &str) -> Val {
+    let namespace = program
+        .namespaces
+        .get(&crate::lang::ast::NsPath::from_string(ns))
+        .expect("namespace");
+    namespace
+        .scope
+        .vars
+        .keys()
+        .find(|var| var.sym.name() == name && var.meta.is_some())
+        .and_then(|var| var.meta.as_ref())
+        .map(|meta| meta.val.clone())
+        .expect("meta")
+}
+
+#[test]
+fn meta_refs_that_do_not_resolve_are_compile_errors() {
+    let (_, result) = compile_meta_refs(
+        r#"
+    ::mt::duty ns
+    ::lib ::mt::lib
+    a meta {rule: no-such-rule}
+    fn () { 1 }
+    b meta {cites: [::lib/missing, ::nowhere/s4]}
+    fn () { 1 }
+    "#,
+    );
+    let errors = result.expect_err("unresolved meta names are errors").errors;
+    let mut found: Vec<(String, usize)> = errors
+        .iter()
+        .filter_map(|e| match e {
+            crate::lang::errors::CompilerError::UnresolvedVariable {
+                var_name, location, ..
+            }
+            | crate::lang::errors::CompilerError::UnresolvedFunction {
+                func_name: var_name,
+                location,
+                ..
+            } => Some((
+                var_name.clone(),
+                location.as_ref().expect("error has a location").line,
+            )),
+            _ => None,
+        })
+        .collect();
+    found.sort();
+    assert_eq!(
+        found,
+        vec![
+            ("::mt::lib/missing".to_string(), 13),
+            ("::nowhere/s4".to_string(), 13),
+            ("no-such-rule".to_string(), 11),
+        ],
+        "all errors: {:?}",
+        errors
+    );
+}
+
+#[test]
+fn meta_refs_compile_to_the_definition_they_name() {
+    let (program, result) = compile_meta_refs(
+        r#"
+    ::mt::duty ns
+    ::lib ::mt::lib
+    s4 ::mt::lib/s4
+    Imported ::mt::lib/SharedAgent
+    found-at fn (w: Map): Str { w.found-at }
+    te-01 meta {
+        agent: Imported,
+        cites: [::lib/s4, s4, ::mt::lib/s4],
+        clock-from: found-at,
+        kind: ::lib/Clause,
+        note: "plain text",
+    }
+    fn () { 1 }
+    "#,
+    );
+    result.expect("compiles");
+    let meta = top_level_meta(&program, "::mt::duty", "te-01");
+    assert_eq!(
+        meta.resolve_boxes(),
+        crate::val!({
+            "agent": "::mt::lib/SharedAgent",
+            "cites": ["::mt::lib/s4", "::mt::lib/s4", "::mt::lib/s4"],
+            "clock-from": "::mt::duty/found-at",
+            "kind": "::mt::lib/Clause",
+            "note": "plain text",
+        })
+    );
+}
+
+#[test]
+fn meta_type_refs_must_name_types() {
+    let (_, result) = compile_meta_refs(
+        r#"
+    ::mt::duty ns
+    Known meta {workflow: {name: "Known"}}
+    type {}
+    helper fn () { 1 }
+    odd meta {agent: NoSuchAgent, on-event: "x:y"}
+    fn (event) { 1 }
+    one meta {workflow: MissingOne, on-event: "a:b"}
+    fn (event) { 1 }
+    many meta {workflows: [Known, MissingTwo], on-event: "c:d"}
+    fn (event) { 1 }
+    not-a-type meta {agent: helper, on-event: "e:f"}
+    fn (event) { 1 }
+    plain meta {agent: "Anything", custom: {agent: helper}, on-event: "g:h"}
+    fn (event) { 1 }
+    "#,
+    );
+    let errors = result.expect_err("unresolved type refs are errors").errors;
+    let mut found: Vec<(String, usize)> = errors
+        .iter()
+        .filter_map(|e| match e {
+            crate::lang::errors::CompilerError::UnresolvedType {
+                type_name,
+                location,
+                ..
+            } => Some((
+                type_name.clone(),
+                location.as_ref().expect("error has a location").line,
+            )),
+            _ => None,
+        })
+        .collect();
+    found.sort();
+    assert_eq!(
+        found,
+        vec![
+            ("MissingOne".to_string(), 15),
+            ("MissingTwo".to_string(), 17),
+            ("NoSuchAgent".to_string(), 13),
+            ("helper".to_string(), 19),
+        ],
+        "all errors: {:?}",
+        errors
+    );
+}

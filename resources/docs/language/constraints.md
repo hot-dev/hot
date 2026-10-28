@@ -219,6 +219,25 @@ program:
 | `unknown-literal` | Warning | A literal outside an open union's known values |
 | `where-changes-representation` | Warning | A refined primitive type used with `is-type` or as a `match` arm |
 
+For `constraint-violation`, `hot check` evaluates a predicate on a literal
+(a number, string, `true`, `false` or `null`) written as:
+
+- the value of a typed binding, at top level or inside a body: `p: Port 0`;
+- the argument of a refined type: `Port(70000)`;
+- an argument to a constrained parameter: `listen(0)`;
+- a field of a record constructor call, named or in Map form, including an
+  enum variant's record payload and nested Map literals. The error names the
+  field: `` 0 fails `Port` (between(%, 1, 65535)) at `port` of `Server` ``. The
+  record's invariant is evaluated too, when every field it reads is a
+  literal.
+
+The evaluation follows comparisons, `between`, `in`, `and`, `or`, `not`, `if`,
+`is-null`, `length`, `starts-with`, `ends-with`, `contains`, top-level literal
+values, and calls to the program's own functions whose parameters are untyped
+or typed `Str`, `Int`, `Dec`, `Bool` or `Any`, within a fixed budget. When it
+can't decide, as for a computed value or any other function, `hot check`
+reports nothing and the predicate runs when the program does.
+
 ## Tool Schemas
 
 MCP and agent tool schemas include a constraint's common shapes:

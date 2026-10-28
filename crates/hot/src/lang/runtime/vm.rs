@@ -7798,10 +7798,13 @@ impl VirtualMachine {
         );
 
         // Check the core functions registry - this contains all functions with "core" metadata
-        // PRIORITIZE qualified names over unqualified names
+        // PRIORITIZE qualified names over unqualified names. When several
+        // namespaces declare the same core name, take the last one registered,
+        // as the core variable registry does, so `resolve("trim")` and
+        // parallel-flow captures pick the same function as a direct call.
         let mut unqualified_match = None;
 
-        for (registered_name, &function_id) in self.core_functions.iter() {
+        for (registered_name, &function_id) in self.core_functions.iter().rev() {
             // Check if this is a qualified name that ends with our unqualified name (PREFERRED)
             if registered_name.contains('/') && registered_name.ends_with(&format!("/{}", name)) {
                 tracing::trace!(
@@ -9376,6 +9379,53 @@ impl VirtualMachine {
                 }
             }
             _ => Ok(Val::Null),
+        }
+    }
+
+    /// Replace the names in a meta value with the values they name. The
+    /// resolver has already rewritten each one to the qualified name of its
+    /// definition, so this loads it the way compiled code loads that
+    /// qualified name: a function or type constructor as a function ref,
+    /// anything else as the namespace variable. The result does not depend on
+    /// which namespace reads the meta.
+    pub fn resolve_meta_refs(&mut self, val: &Val) -> VmResult<Val> {
+        match val {
+            Val::Map(map) => {
+                let mut resolved = indexmap::IndexMap::with_capacity(map.len());
+                for (key, value) in map.iter() {
+                    resolved.insert(key.clone(), self.resolve_meta_refs(value)?);
+                }
+                Ok(Val::Map(Box::new(resolved)))
+            }
+            Val::Vec(items) => Ok(Val::Vec(
+                items
+                    .iter()
+                    .map(|item| self.resolve_meta_refs(item))
+                    .collect::<VmResult<_>>()?,
+            )),
+            Val::Box(boxed) => match boxed.as_any().downcast_ref::<crate::lang::ast::AstNode>() {
+                Some(crate::lang::ast::AstNode(crate::lang::ast::Value::Ref(
+                    crate::lang::ast::Ref::Ns(ns_ref),
+                ))) if ns_ref.function_name.is_some() => {
+                    let qualified = format!(
+                        "{}/{}",
+                        ns_ref.ns,
+                        ns_ref.function_name.as_deref().unwrap_or_default()
+                    );
+                    if self.function_mapping.contains_key(&qualified)
+                        || self.core_functions.contains_key(&qualified)
+                    {
+                        Ok(crate::lang::runtime::function_ref::function_ref(qualified))
+                    } else {
+                        self.lookup_variable(&qualified)
+                    }
+                }
+                Some(crate::lang::ast::AstNode(
+                    value @ crate::lang::ast::Value::Ref(crate::lang::ast::Ref::Var(_)),
+                )) => self.convert_ast_value_to_runtime_val(value),
+                _ => Ok(val.clone()),
+            },
+            _ => Ok(val.clone()),
         }
     }
 
@@ -11267,6 +11317,47 @@ mod tests {
         assert_eq!(
             VirtualMachine::result_err_message(&Val::Null),
             "Error Result encountered"
+        );
+    }
+
+    // A core function declared in two namespaces must resolve the same way
+    // by name (`resolve`, parallel-flow captures) as through the core
+    // variable registry (direct calls, `map(xs, f)`): the last declaration.
+    #[test]
+    fn test_core_function_lookup_takes_last_declaration() {
+        let source = r#"
+            ::first ns
+
+            shout meta {core: true} fn (s: Str): Str { "first" }
+
+            ::second ns
+
+            shout meta {core: true} fn (s: Str): Str { "second" }
+        "#;
+        let mut program = parse_hot(source).expect("test source should parse");
+        let core_variables =
+            crate::lang::compiler::core_registry::extract_core_variables_from_ast(&program);
+        let mut compiler = Compiler::new();
+        compiler
+            .compile_program_unchecked(&mut program)
+            .expect("test source should compile");
+        let vm = VirtualMachine::new(
+            compiler.get_program_arc(),
+            None,
+            compiler.get_function_mapping_arc(),
+            compiler.get_core_functions_arc(),
+            compiler.get_type_implementations_arc(),
+            Arc::new(core_variables),
+            None,
+        );
+
+        assert_eq!(
+            vm.lookup_core_function_name("shout").as_deref(),
+            Some("::second/shout")
+        );
+        assert_eq!(
+            vm.lookup_core_variable("shout"),
+            Some(Val::from("::second/shout"))
         );
     }
 
