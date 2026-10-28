@@ -19,7 +19,9 @@
 //! with a one-parameter constructor that takes a Map is rejected: that
 //! constructor decides which keys it reads. A parameter or local named like
 //! the type shadows it, as it does for any call, so a named call by that
-//! name is rejected too.
+//! name is rejected too. A local bound to a qualified name, such as
+//! `Shape ::geo/Shape` in a function body, is a local import: a named call by
+//! that name goes to the type it names.
 
 use crate::lang::ast::{
     AstNode, DeepPath, FnCall, FnCallArg, NsPath, Program, Ref, Source, TypeDef, TypeField, Value,
@@ -63,7 +65,8 @@ pub(super) struct RecordTypes {
     /// The parameters and locals in scope where calls are being lowered,
     /// innermost last. A call by one of these names goes to the local value,
     /// not to a type of the same name (see the compiler's `local_names`).
-    shadowing: RefCell<Vec<String>>,
+    /// A local import carries the qualified name it is bound to.
+    shadowing: RefCell<Vec<(String, Option<String>)>>,
     /// Named calls that don't fit, found while lowering the current binding.
     pub sites: RefCell<Vec<NamedArgSite>>,
 }
@@ -199,8 +202,15 @@ impl RecordTypes {
     pub(super) fn shadow(&self, names: impl IntoIterator<Item = String>) -> usize {
         let mut shadowing = self.shadowing.borrow_mut();
         let mark = shadowing.len();
-        shadowing.extend(names);
+        shadowing.extend(names.into_iter().map(|name| (name, None)));
         mark
+    }
+
+    /// Bring a block's local import into scope: `name` stands for the
+    /// qualified `target` (`::geo/Shape`) from here on, in place of any
+    /// type of the same name. [`Self::unshadow`] ends it with the block.
+    pub(super) fn import_locally(&self, name: String, target: String) {
+        self.shadowing.borrow_mut().push((name, Some(target)));
     }
 
     pub(super) fn unshadow(&self, mark: usize) {
@@ -310,8 +320,21 @@ impl RecordTypes {
             _ => return Err(ONLY_RECORDS.to_string()),
         };
 
-        let shadowed = !type_name.contains('/') && self.shadowing.borrow().contains(&type_name);
-        let found = self.find(ns, &type_name);
+        let local = if type_name.contains('/') {
+            None
+        } else {
+            self.shadowing
+                .borrow()
+                .iter()
+                .rev()
+                .find(|(name, _)| *name == type_name)
+                .map(|(_, target)| target.clone())
+        };
+        let shadowed = matches!(local, Some(None));
+        let found = match &local {
+            Some(Some(target)) => self.find(ns, target),
+            _ => self.find(ns, &type_name),
+        };
         let Some((def, def_ns, def_name)) = found.filter(|_| !shadowed) else {
             if shadowed {
                 return Err(format!(

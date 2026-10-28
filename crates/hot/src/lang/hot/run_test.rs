@@ -779,6 +779,46 @@ probe()"#;
         );
     }
 
+    /// A type from another namespace takes named arguments when it is
+    /// imported in a body, as `Sh ::geo/Shape`, as well as at the top of the
+    /// namespace. The local import names the type it is bound to, even over
+    /// a type of the same name, rather than shadowing types as a local value.
+    #[test]
+    fn named_arguments_build_variants_of_imported_enums() {
+        let src = r#"::geo ns
+Circle type { radius: Dec }
+Shape enum { Circle(Circle), Dot }
+Bird type { species: Str }
+Animal enum open { Dog }
+Bird -> Animal.Bird
+Label type { text: Str }
+
+::t ns
+Shape ::geo/Shape
+::g ::geo
+Label type { name: Str }
+
+probe fn (): Vec {
+    imported Shape.Circle(radius: 1.0)
+    Sh ::geo/Shape
+    local Sh.Circle(radius: 2.0)
+    mapped Sh.Circle({radius: 3.0})
+    Fauna ::g/Animal
+    enrolled Fauna.Bird(species: "Eagle")
+    outer Label(name: "outer")
+    Label ::geo/Label
+    inner Label(text: "inner")
+    [imported.radius, local.radius, mapped.radius, is-type(local, ::geo/Shape),
+     enrolled.species, outer.name, inner.text]
+}
+probe()
+probe()"#;
+        assert_same_with_and_without_jit(
+            src,
+            &val!([1.0, 2.0, 3.0, true, "Eagle", "outer", "inner"]),
+        );
+    }
+
     /// Like the Map form, a named call on a type with custom constructors goes
     /// to the default constructor, which still checks `where` constraints.
     /// A type declared twice takes names in either order, and a one-parameter
