@@ -1794,7 +1794,7 @@ impl CompilerErrors {
                             .with_message(message)
                             .with_color(label_color),
                     )
-                    .with_help(crate::db::RECURRING_SCHEDULE_FORMS);
+                    .with_help(crate::lang::schedule::RECURRING_SCHEDULE_FORMS);
             }
             CompilerError::InvalidEventHandler {
                 func_name,

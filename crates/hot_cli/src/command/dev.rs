@@ -1202,9 +1202,9 @@ pub(crate) async fn run_dev_file_watcher(
 mod tests {
     use super::*;
     use hot::data::serialization::Serialization;
-    use hot::lang::parser::{ErrorLocation, ParseError};
     use hot::queue::Queue;
     use hot::queue::sqlite::SqliteQueue;
+    use hot_lang::lang::parser::{ErrorLocation, ParseError};
 
     #[test]
     fn project_dev_lock_excludes_a_second_holder() {
