@@ -22,8 +22,10 @@
 hot.set.profile "noisy"
 hot.set.project "noisy-load"
 
-hot.profile.noisy.user.email "noisy@hot.dev"
-hot.profile.noisy.org.slug "noisy"
+// `hot init` provisions only the local identity in an empty database, so the
+// benchmark's profile uses it.
+hot.profile.noisy.user.email "local@hot.dev"
+hot.profile.noisy.org.slug "local"
 hot.profile.noisy.env.name "development"
 
 hot.project.noisy-load.src.paths ["./src"]
