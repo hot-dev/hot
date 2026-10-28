@@ -68,6 +68,9 @@ impl CreateChild {
         {
             return Err(OrgError::Invalid("invalid organization slug".into()));
         }
+        if crate::slug::is_reserved(&self.slug) {
+            return Err(OrgError::Invalid("reserved organization slug".into()));
+        }
         if self.idempotency_key.trim().is_empty() || self.idempotency_key.len() > 128 {
             return Err(OrgError::Invalid(
                 "idempotency key must contain 1–128 bytes".into(),
@@ -1226,6 +1229,15 @@ mod tests {
     fn hosted_child_creation_is_disabled_without_entitlement() {
         assert_eq!(child_limit(None, None, true), 0);
         assert_eq!(child_limit(None, None, false), -1);
+    }
+
+    #[tokio::test]
+    async fn child_orgs_cannot_take_reserved_slugs() {
+        let (db, root, admin, _member) = fixture().await;
+        assert!(matches!(
+            Org::create_child(&db, &root, &admin, &request("admin")).await,
+            Err(OrgError::Invalid(_))
+        ));
     }
 
     /// A plan whose features are NULL is still a plan: it gets the plan
