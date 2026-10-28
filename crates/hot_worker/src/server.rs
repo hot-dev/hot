@@ -7551,6 +7551,7 @@ pub async fn run_with_components_shared_context_and_db(
                                                                                                                 status_err);
                                                                                                         }
                                                                                                     }
+                                                                                                    Err(hot::db::build::BuildError::Database(error))=>return Err(worker_infrastructure_retry_error(format!("Build activation is waiting for its database: {error}"),5_000)),
                                                                                                     Err(e) => {
                                                                                                         let err_msg = format!("Failed to activate build {}: {}", build.build_id, e);
                                                                                                         error!("hot.dev: WORKER {} {}", worker_id, err_msg);
