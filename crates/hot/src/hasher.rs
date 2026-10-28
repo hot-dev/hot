@@ -53,9 +53,10 @@ impl CacheKeyBuilder {
         // Include git SHA to invalidate cache when runtime code changes
         // This catches deploys where version wasn't bumped but code changed
         hasher.update(crate::build_info::GIT_SHA.as_bytes());
-        // Include the actual compiler/runtime source tree. Local dirty builds
+        // Include the actual runtime and compiler (`hot_lang`) source trees. Local dirty builds
         // can share a Git SHA while having incompatible cache wire behavior.
         hasher.update(crate::build_info::BUILD_FINGERPRINT.as_bytes());
+        hasher.update(hot_lang::SOURCE_FINGERPRINT.as_bytes());
         // Include cache-type-specific format version
         hasher.update(&cache_type.format_version().to_le_bytes());
         Self { hasher }
