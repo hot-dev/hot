@@ -6,15 +6,20 @@
     function localScope(raw) {
         const url = new URL(raw, window.location.href);
         if (url.origin !== window.location.origin || !orgId || url.pathname.startsWith('/@') ||
-            /^\/(switch-org|switch-env|auth|signout)(\/|$)/.test(url.pathname) ||
-            /^\/envs\/[^/]+\/switch$/.test(url.pathname)) return null;
+            /^\/(switch-org|auth|signout)(\/|$)/.test(url.pathname)) return null;
         return url;
+    }
+    // An environment switch names its target in the path. It carries this
+    // tab's org, so a stale tab doesn't look the target up in the org the
+    // cookie now names, but not this tab's environment, which it replaces.
+    function switchesEnv(url) {
+        return /^\/(switch-env\/|envs\/[^/]+\/switch$)/.test(url.pathname);
     }
     function scopedUrl(raw) {
         const url = localScope(raw);
         if (!url) return raw;
         if (!url.searchParams.has('org_id')) url.searchParams.set('org_id', orgId);
-        if (envId && !url.searchParams.has('env_id')) url.searchParams.set('env_id', envId);
+        if (envId && !switchesEnv(url) && !url.searchParams.has('env_id')) url.searchParams.set('env_id', envId);
         return url.pathname + url.search + url.hash;
     }
     // Programmatic navigation must carry the same immutable scope as links.
@@ -23,6 +28,7 @@
         const url = localScope(form.action);
         if (form.method.toLowerCase() !== 'get' || !url) return;
         for (const [name, value] of [['org_id', url.searchParams.get('org_id') || orgId], ['env_id', url.searchParams.get('env_id') || envId]]) {
+            if (name === 'env_id' && switchesEnv(url)) continue;
             if (!value || form.querySelector(`[name="${name}"]`)) continue;
             const input = document.createElement('input');
             input.type = 'hidden'; input.name = name; input.value = value;
@@ -64,7 +70,7 @@
         const url = localScope(event.detail.path);
         if (!url) return;
         event.detail.headers['X-Hot-Org-Id'] = url.searchParams.get('org_id') || orgId;
-        if (envId) event.detail.headers['X-Hot-Env-Id'] = url.searchParams.get('env_id') || envId;
+        if (envId && !switchesEnv(url)) event.detail.headers['X-Hot-Env-Id'] = url.searchParams.get('env_id') || envId;
     });
     const originalFetch = window.fetch;
     window.fetch = function(input, init = {}) {
@@ -73,7 +79,7 @@
         const headers = new Headers(input instanceof Request ? input.headers : undefined);
         new Headers(init.headers).forEach((value, name) => headers.set(name, value));
         if (!headers.has('X-Hot-Org-Id')) headers.set('X-Hot-Org-Id', url.searchParams.get('org_id') || orgId);
-        if (envId && !headers.has('X-Hot-Env-Id')) headers.set('X-Hot-Env-Id', url.searchParams.get('env_id') || envId);
+        if (envId && !switchesEnv(url) && !headers.has('X-Hot-Env-Id')) headers.set('X-Hot-Env-Id', url.searchParams.get('env_id') || envId);
         return originalFetch.call(this, input, { ...init, headers });
     };
     const OriginalEventSource = window.EventSource;

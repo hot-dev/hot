@@ -673,3 +673,70 @@ async fn child_org_tabs_leave_out_billing() {
     page.assert_status(StatusCode::OK);
     assert!(!page.body.contains(&child_billing), "{}", page.body);
 }
+
+#[tokio::test]
+async fn a_stale_tab_switches_environments_within_its_own_org() {
+    let mut client = TestClient::new().await;
+    let td = insert_test_data(client.db()).await.unwrap();
+    let staging = Uuid::now_v7();
+    Env::insert_env(client.db(), &staging, &td.org_id, "staging", &td.user_id)
+        .await
+        .unwrap();
+    let other = Uuid::now_v7();
+    Org::insert_org(
+        client.db(),
+        &other,
+        "Other",
+        "other-org",
+        "organization",
+        &td.user_id,
+    )
+    .await
+    .unwrap();
+    OrgUser::insert_org_user(
+        client.db(),
+        &Uuid::now_v7(),
+        &other,
+        &td.user_id,
+        Some(2),
+        &td.user_id,
+    )
+    .await
+    .unwrap();
+    Env::insert_env(
+        client.db(),
+        &Uuid::now_v7(),
+        &other,
+        "production",
+        &td.user_id,
+    )
+    .await
+    .unwrap();
+    client.login_as(&td.user_id);
+    // This tab renders the first org; another tab then moves the navigation
+    // cookies to the other org.
+    client
+        .get(&format!("/envs?org_id={}", td.org_id))
+        .await
+        .assert_status(StatusCode::OK);
+    client
+        .post_form(&format!("/switch-org/{other}"), &[])
+        .await
+        .assert_status(StatusCode::SEE_OTHER);
+
+    // The scope script sends the tab's org with an environment switch;
+    // without it the target is looked up in the cookie's org.
+    let switch = format!("/envs/{staging}/switch");
+    let response = client.post_form(&switch, &[]).await;
+    assert!(
+        response
+            .body
+            .contains("You don't have access to this environment"),
+        "{}",
+        response.body
+    );
+    client
+        .post_form(&format!("{switch}?org_id={}", td.org_id), &[])
+        .await
+        .assert_redirect_to(&format!("/dashboard?org_id={}&env_id={staging}", td.org_id));
+}
