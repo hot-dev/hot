@@ -388,6 +388,7 @@ meta ["test"] fn () {
     Reply.Sized (c) => { c }
     _ => { null }
   }
+
   assert(is-type(sized, Reply.Sized), "a record variant arm keeps the variant")
 }
 
