@@ -3687,7 +3687,7 @@ mod tests {
         .await
         .unwrap();
         sqlx::raw_sql(include_str!(
-            "../../../resources/db/sqlite/migrations/016_retire_file_objects.sql"
+            "../../../resources/db/sqlite/migrations/021_retire_file_objects.sql"
         ))
         .execute(&pool)
         .await
