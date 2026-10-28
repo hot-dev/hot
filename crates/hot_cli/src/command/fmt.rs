@@ -52,7 +52,7 @@ pub(crate) async fn run_fmt(
     for file in files.iter() {
         match std::fs::read_to_string(file) {
             Ok(content) => {
-                let formatted = match hot::lang::fmt::format_str(&content, 4) {
+                let formatted = match hot_lang::lang::fmt::format_str(&content, 4) {
                     Ok(f) => f,
                     Err(e) => {
                         tracing::warn!("formatter failed for {}: {}", file.display(), e);

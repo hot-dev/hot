@@ -347,7 +347,7 @@ pub(crate) async fn prepare_local_database(
 ) -> Result<(), String> {
     prepare_local_database_in(
         conf,
-        hot::lang::cache::paths::has_project_config(),
+        hot_lang::lang::cache::paths::has_project_config(),
         providers,
     )
     .await

@@ -3162,6 +3162,7 @@ dependencies = [
  "hex",
  "hickory-resolver",
  "hkdf",
+ "hot_lang",
  "humantime",
  "ignore",
  "indexmap 2.14.2",
@@ -3292,6 +3293,7 @@ dependencies = [
  "hot",
  "hot_api",
  "hot_app",
+ "hot_lang",
  "hot_lsp",
  "hot_scheduler",
  "hot_task_worker",
@@ -3330,12 +3332,35 @@ dependencies = [
 ]
 
 [[package]]
+name = "hot_lang"
+version = "3.0.0"
+dependencies = [
+ "ahash",
+ "ariadne",
+ "base64 0.23.1",
+ "blake3",
+ "croner",
+ "english-to-cron",
+ "fastnum",
+ "indexmap 2.14.2",
+ "libc",
+ "parking_lot",
+ "postcard",
+ "regex",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tracing",
+]
+
+[[package]]
 name = "hot_lsp"
 version = "3.0.0"
 dependencies = [
  "ahash",
  "anyhow",
  "hot",
+ "hot_lang",
  "serde",
  "tokio",
  "tower-lsp",
