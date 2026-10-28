@@ -3374,21 +3374,7 @@ impl Parser {
                 && matches!(token.token_type, TokenType::LeftParen)
             {
                 self.next(); // consume (
-
-                // Parse type reference: `Type` or `::ns/Type`
-                let type_name = if self.check(&TokenType::DoubleColon) {
-                    self.parse_namespaced_type_name()?
-                } else {
-                    self.expect_identifier()?
-                };
-
-                // Consume closing paren
-                if !self.check(&TokenType::RightParen) {
-                    return Err(self.error("Expected ')' after variant type reference"));
-                }
-                self.next(); // consume )
-
-                Some(type_name)
+                Some(self.parse_variant_payload()?)
             } else {
                 None // Unit variant
             };
@@ -3463,21 +3449,7 @@ impl Parser {
                 && matches!(token.token_type, TokenType::LeftParen)
             {
                 self.next(); // consume (
-
-                // Parse type reference: `Type` or `::ns/Type`
-                let type_name = if self.check(&TokenType::DoubleColon) {
-                    self.parse_namespaced_type_name()?
-                } else {
-                    self.expect_identifier()?
-                };
-
-                // Consume closing paren
-                if !self.check(&TokenType::RightParen) {
-                    return Err(self.error("Expected ')' after variant type reference"));
-                }
-                self.next(); // consume )
-
-                Some(type_name)
+                Some(self.parse_variant_payload()?)
             } else {
                 None // Unit variant
             };
@@ -3502,6 +3474,18 @@ impl Parser {
         }
 
         Ok(variants)
+    }
+
+    /// Parse a variant's payload type after its `(`, through the `)`: any
+    /// type expression (`Type`, `::ns/Type`, `Vec<Type>`, `Type?`, `A | B`),
+    /// kept as its annotation text.
+    fn parse_variant_payload(&mut self) -> ParseResult<String> {
+        let payload = self.parse_union_type()?;
+        if !self.check(&TokenType::RightParen) {
+            return Err(self.error("Expected ')' after variant type reference"));
+        }
+        self.next(); // consume )
+        Ok(payload.to_string())
     }
 
     /// Parse a value.

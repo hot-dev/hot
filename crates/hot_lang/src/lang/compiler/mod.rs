@@ -5592,16 +5592,38 @@ impl Compiler {
             // First validates data through the associated type's constructor using ConstructTyped,
             // then wraps with {$type: "::namespace/Type.Variant", $val: typed_data}
 
-            // Resolve the associated type reference to fully qualified name
-            let (resolved_type_ref, _) = self.resolve_type_path(type_ref);
+            // A payload written as a type expression (`Vec<Ask>`, `Ask?`,
+            // `Ask | Bid`) checks its data as a record field of that type
+            // would, and takes the data as given, tags included.
+            let payload_expr =
+                crate::lang::parser::parse_type_annotation(type_ref).filter(|expr| {
+                    !matches!(
+                        expr,
+                        TypeExpr::Named(_)
+                            | TypeExpr::Simple(_)
+                            | TypeExpr::Builtin(_)
+                            | TypeExpr::Any
+                    )
+                });
+            let data_reg = if payload_expr.is_some() { 1 } else { 6 };
 
-            // Build type_info for the associated type (for ConstructTyped instruction)
-            let mut associated_type_info = indexmap::IndexMap::new();
-            associated_type_info.insert(Val::from("$type"), Val::from(resolved_type_ref.clone()));
-            // Mark this as a nested type reference (no $all_fields means VM will call the constructor)
+            let associated_type_info = match &payload_expr {
+                Some(expr) => self.build_field_type_info_from_expr(expr, true),
+                None => {
+                    // Resolve the associated type reference to fully qualified name
+                    let (resolved_type_ref, _) = self.resolve_type_path(type_ref);
+
+                    // Build type_info for the associated type (for ConstructTyped instruction)
+                    let mut associated_type_info = indexmap::IndexMap::new();
+                    associated_type_info
+                        .insert(Val::from("$type"), Val::from(resolved_type_ref.clone()));
+                    // Mark this as a nested type reference (no $all_fields means VM will call the constructor)
+                    Val::Map(Box::new(associated_type_info))
+                }
+            };
             let associated_type_info_constant = self
                 .program
-                .add_constant(Constant::Val(Val::Map(Box::new(associated_type_info))));
+                .add_constant(Constant::Val(associated_type_info));
 
             let empty_map_constant = self.program.add_constant(Constant::Val(Val::map_empty()));
             let data_var_constant = self.program.add_constant(Constant::Val(Val::from("data")));
@@ -5630,7 +5652,7 @@ impl Compiler {
                     // Returns {$type: "Circle", $val: {radius: 5.0}} on success, or error on failure
                     Instruction::ConstructTyped {
                         dest: 7,
-                        src: 6,
+                        src: data_reg,
                         type_info: associated_type_info_constant,
                     },
                     // If validation failed (error), return the error immediately

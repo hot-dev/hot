@@ -251,6 +251,17 @@ Variants can carry data by referencing other types:
 
 {{snippet:types#enum-with-data}}
 
+A payload can be any type expression, such as a list of records or an optional record. The variant checks its data the way a record field of that type is checked:
+
+```hot
+Ask type { key: Str }
+Status enum { One(Ask), Many(Vec<Ask>), Maybe(Ask?), Done }
+
+one Status.One(key: "a")
+many Status.Many([Ask(key: "a"), {key: "b"}])   // each item is built as an Ask
+none Status.Maybe(null)
+```
+
 ### Built-in Variant Types
 
 Hot uses variant unions for core types:
