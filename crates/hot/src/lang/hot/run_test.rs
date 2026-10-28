@@ -752,7 +752,7 @@ probe fn (): Vec {
     [eq(a, b), is-type(a, User), a.age, c.age, c.name,
      eq(circle.radius, 2.5), is-type(circle, Shape), bird.species, on-value(1),
      is-type(person.address, Address), person.address.city, qualified.name, local.n,
-     names, is-err(Window(start: 5, finish: 1)), aliased.name]
+     names, is-err(Window(start: 5, finish: add(0, 1))), aliased.name]
 }
 probe()
 probe()"#;
