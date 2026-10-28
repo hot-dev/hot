@@ -64,7 +64,7 @@ impl Admission {
             }
             DatabasePool::Sqlite(pool) => {
                 let mut tx = pool.begin().await?;
-                sqlx::query("UPDATE org SET org_id=org_id WHERE org_id=?")
+                sqlx::query("UPDATE org SET updated_at=updated_at WHERE org_id=?")
                     .bind(root)
                     .execute(&mut *tx)
                     .await?;

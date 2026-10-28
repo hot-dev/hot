@@ -147,7 +147,7 @@ async fn begin_storage_write(
             let (plan, overrides) = read_limits(&mut tx).await?;
             if storage_limit(plan.as_ref(), overrides.as_ref()) >= 0 {
                 // Take the write lock, then read the limits again under it.
-                sqlx::query("UPDATE org SET org_id=org_id WHERE org_id=?")
+                sqlx::query("UPDATE org SET updated_at=updated_at WHERE org_id=?")
                     .bind(root_id)
                     .execute(&mut *tx)
                     .await

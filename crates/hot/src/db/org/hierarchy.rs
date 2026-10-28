@@ -395,7 +395,7 @@ impl Org {
             DatabasePool::Sqlite(pool) => {
                 let mut tx = pool.begin().await?;
                 // First statement is a write: serializes admission before taking a read snapshot.
-                sqlx::query("UPDATE org SET org_id = org_id WHERE org_id = ?")
+                sqlx::query("UPDATE org SET updated_at = updated_at WHERE org_id = ?")
                     .bind(root_id)
                     .execute(&mut *tx)
                     .await?;
@@ -528,7 +528,7 @@ impl Org {
             }
             DatabasePool::Sqlite(pool) => {
                 let mut tx = pool.begin().await?;
-                sqlx::query("UPDATE org SET org_id=org_id WHERE org_id=?")
+                sqlx::query("UPDATE org SET updated_at=updated_at WHERE org_id=?")
                     .bind(root_id)
                     .execute(&mut *tx)
                     .await?;
@@ -637,7 +637,7 @@ impl Org {
             }
             DatabasePool::Sqlite(pool) => {
                 let mut tx = pool.begin().await?;
-                sqlx::query("UPDATE org SET org_id=org_id WHERE org_id=?")
+                sqlx::query("UPDATE org SET updated_at=updated_at WHERE org_id=?")
                     .bind(root_id)
                     .execute(&mut *tx)
                     .await?;
@@ -719,7 +719,7 @@ impl Org {
             }
             DatabasePool::Sqlite(pool) => {
                 let mut tx = pool.begin().await?;
-                sqlx::query("UPDATE org SET org_id=org_id WHERE org_id=?")
+                sqlx::query("UPDATE org SET updated_at=updated_at WHERE org_id=?")
                     .bind(access.root_org_id)
                     .execute(&mut *tx)
                     .await?;

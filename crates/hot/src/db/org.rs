@@ -685,7 +685,7 @@ impl OrgUser {
                 update_locked!(pool, "SELECT org_id FROM org WHERE org_id=$1 FOR UPDATE")
             }
             crate::db::DatabasePool::Sqlite(pool) => {
-                update_locked!(pool, "UPDATE org SET org_id=org_id WHERE org_id=$1")
+                update_locked!(pool, "UPDATE org SET updated_at=updated_at WHERE org_id=$1")
             }
         }
         Ok(())

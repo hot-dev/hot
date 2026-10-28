@@ -101,7 +101,7 @@ impl Run {
             DatabasePool::Sqlite(pool) => {
                 let mut tx = pool.begin().await?;
                 // Acquire the SQLite writer lock before reading inside this tx.
-                sqlx::query("UPDATE org SET org_id=org_id WHERE org_id=$1")
+                sqlx::query("UPDATE org SET updated_at=updated_at WHERE org_id=$1")
                     .bind(root_id)
                     .execute(&mut *tx)
                     .await?;
@@ -199,7 +199,7 @@ admission!(
 admission!(
     admit_sqlite,
     sqlx::SqliteConnection,
-    "UPDATE org SET org_id=org_id WHERE org_id=$1",
+    "UPDATE org SET updated_at=updated_at WHERE org_id=$1",
     true,
     run_usage_sqlite
 );

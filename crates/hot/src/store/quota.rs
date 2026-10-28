@@ -222,7 +222,7 @@ begin!(
     sqlx::Sqlite,
     Sqlite,
     begin_sqlite_tx,
-    "UPDATE org SET org_id=org_id WHERE org_id=$1",
+    "UPDATE org SET updated_at=updated_at WHERE org_id=$1",
     narrow_sqlite
 );
 
@@ -277,7 +277,7 @@ mod tests {
         });
         let (mut tx, budget) = begin_sqlite(&db, org, env, QuotaKind::Store).await.unwrap();
         // The first write after admission's reads must not hit SQLITE_BUSY.
-        sqlx::query("UPDATE org SET org_id=org_id WHERE org_id=?")
+        sqlx::query("UPDATE org SET updated_at=updated_at WHERE org_id=?")
             .bind(org)
             .execute(&mut *tx)
             .await
