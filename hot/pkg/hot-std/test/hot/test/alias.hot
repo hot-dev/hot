@@ -276,6 +276,7 @@ fn () {
         ::hot::type/Result.Ok => { success }
         ::hot::type/Result.Err => { 0 }
     }
+
     assert-eq(7, result, "Qualified variants should match")
 }
 
