@@ -153,9 +153,11 @@ async fn begin_storage_write(
                     .await
                     .map_err(fwe)?;
                 let (plan, overrides) = read_limits(&mut tx).await?;
-                let usage: i64 = sqlx::query_scalar(
-                    "SELECT COALESCE(SUM(f.size),0) FROM file f JOIN org o ON o.org_id=f.org_id WHERE f.active=1 AND (o.org_id=? OR o.parent_org_id=?) AND (? IS NULL OR f.file_id<>?)"
-                ).bind(root_id).bind(root_id).bind(file_id).bind(file_id).fetch_one(&mut *tx).await.map_err(fwe)?;
+                // The account's active file bytes, kept per environment and
+                // organization by triggers on `file` (migration 016).
+                let counted: i64 = sqlx::query_scalar(
+                    "SELECT CAST(COALESCE(SUM(u.active_bytes),0) AS INTEGER) FROM usage_file u JOIN org o ON o.org_id=u.org_id WHERE o.org_id=? OR o.parent_org_id=?"
+                ).bind(root_id).bind(root_id).fetch_one(&mut *tx).await.map_err(fwe)?;
                 let replaced: Option<i64> = match file_id {
                     Some(file_id) => {
                         sqlx::query_scalar("SELECT size FROM file WHERE file_id=? AND active=1")
@@ -166,6 +168,8 @@ async fn begin_storage_write(
                     }
                     None => None,
                 };
+                // The usage besides the file this write replaces.
+                let usage = counted - replaced.unwrap_or(0);
                 validate_storage_limit(
                     plan.as_ref(),
                     overrides.as_ref(),
@@ -2346,7 +2350,7 @@ pub async fn get_file_by_id_with_env_check(
 
 /// The account's active file bytes, the root's and its children's, which is
 /// what the storage quota limits. Upload prechecks use it so a child can't pass
-/// a check that the commit-time quota then refuses. PostgreSQL reads the
+/// a check that the commit-time quota then refuses. It reads the
 /// per-environment counters of migration 016 rather than summing every file.
 pub async fn get_storage_usage_by_account(db: &DatabasePool, org_id: Uuid) -> Result<i64, String> {
     let root = super::Org::billing_owner_id_for(db, &org_id)
@@ -2365,7 +2369,7 @@ pub async fn get_storage_usage_by_account(db: &DatabasePool, org_id: Uuid) -> Re
         .await
         .map_err(|e| e.to_string()),
         DatabasePool::Sqlite(pool) => sqlx::query_scalar(
-            "SELECT CAST(COALESCE(SUM(f.size),0) AS INTEGER) FROM file f JOIN org o ON o.org_id=f.org_id WHERE f.active=1 AND (o.org_id=? OR o.parent_org_id=?)",
+            "SELECT CAST(COALESCE(SUM(u.active_bytes),0) AS INTEGER) FROM usage_file u JOIN org o ON o.org_id=u.org_id WHERE o.org_id=? OR o.parent_org_id=?",
         )
         .bind(root)
         .bind(root)
@@ -2429,6 +2433,23 @@ pub(crate) async fn seed_storage_quota_test_org(db: &DatabasePool, org_id: Uuid)
         CREATE TABLE IF NOT EXISTS plan (plan_uuid blob PRIMARY KEY, features text);
         CREATE TABLE IF NOT EXISTS org_plan (org_id blob PRIMARY KEY, plan_uuid blob);")
         .execute(pool).await.unwrap();
+    // The quota reads the counters migration 016 keeps; install them on the
+    // fixture's `file` table once, from the migration itself.
+    let counted: bool =
+        sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM sqlite_master WHERE name='usage_file')")
+            .fetch_one(pool)
+            .await
+            .unwrap();
+    if !counted {
+        let migration = crate::resources::get_migration_path("sqlite")
+            .unwrap()
+            .join("016_file_usage_counter.sql");
+        let sql = std::fs::read_to_string(migration).unwrap();
+        sqlx::raw_sql(sqlx::AssertSqlSafe(sql))
+            .execute(pool)
+            .await
+            .unwrap();
+    }
     sqlx::query(
         "INSERT INTO org (org_id,name,slug,created_by_user_id) VALUES (?,'Storage test',?,?)",
     )

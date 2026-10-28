@@ -57,3 +57,21 @@ should use its own cloud migration ledger and backfill path to transform old
 cloud billing tables such as `subscription_plan` and `subscription` into the
 public `plan` / `org_plan` tables plus cloud-owned provider tables. Public
 `hot` migrations must not carry that Stripe/customer/payment lifecycle state.
+
+## Keeping SQLite and PostgreSQL in lockstep
+
+Both backends carry a migration file of the same name for every version, so
+"migration 019" means the same schema on either database. A change one engine
+does not need still gets a file in the other (a comment and `SELECT 1;`), as
+SQLite's `017_repair_service_scopes.sql` does for a PostgreSQL RLS repair.
+Migration 019 reconciled the chains after they drifted; SQLite skipped no
+numbers to get there, filling 015-017 and moving its held-events migration to
+018.
+
+`crates/hot/tests/schema_parity.rs` enforces this. It always checks that the
+two directories list the same file names, and with `HOT_TEST_POSTGRES_URI` set
+it builds a fresh database with each chain and compares tables, columns,
+nullability, primary and foreign keys, defaults, index definitions and names,
+reference rows, and ownership-guard coverage. The differences the engines
+force are listed at the top of that test with their reasons; anything else
+that differs fails it.
