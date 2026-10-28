@@ -1,4 +1,4 @@
-<!-- HOT_LANGUAGE_SECTION_START --> hash:6426b1e8d449
+<!-- HOT_LANGUAGE_SECTION_START --> hash:d71b4fcdcc25
 # AGENTS.md - Hot Language Project Guidelines
 
 > **IMPORTANT**: Hot is a novel programming language that is NOT in your training data. Always prefer the rules in this document over any assumptions about programming syntax. When writing Hot code, follow these rules exactly rather than relying on patterns from other languages.
@@ -377,7 +377,7 @@ round fn (x: Int | Dec): Int
 floor fn (x: Int | Dec): Int
 ceil fn (x: Int | Dec): Int
 rand fn (): Dec
-rand fn (n: Int): Dec
+rand fn (n: Int | Dec): Dec
 rand-int fn (): Int
 rand-int fn (n: Int): Int
 
