@@ -150,7 +150,8 @@ impl ExistingRows {
         Ok(rows)
     }
 
-    async fn add_delegated_issuer(&self, pool: &SqlitePool) -> TestResult {
+    /// A 3.0.0 management credential and the runtime key it issued, before 015.
+    async fn add_management_issuer(&self, pool: &SqlitePool) -> TestResult {
         sqlx::query("INSERT INTO management_key(management_key_id,root_org_id,created_by_user_id,name,secret_hash,capabilities,expires_at) VALUES(?,?,?,'existing issuer',x'010203','[\"keys:issue\"]','2099-01-01T00:00:00Z')")
             .bind(self.issuer).bind(self.org).bind(self.user).execute(pool).await?;
         sqlx::query(
@@ -163,7 +164,20 @@ impl ExistingRows {
         Ok(())
     }
 
-    async fn assert_preserved_and_protected(&self, pool: &SqlitePool) -> TestResult {
+    /// An org key and the environment key it minted, after 015.
+    async fn add_org_key_issuer(&self, pool: &SqlitePool) -> TestResult {
+        sqlx::query("INSERT INTO org_api_key(org_api_key_id,org_id,description,key_data,permissions,created_by_user_id) VALUES(?,?,'existing issuer','{}','{\"org:*\":[\"read\"]}',?)")
+            .bind(self.issuer).bind(self.org).bind(self.user).execute(pool).await?;
+        sqlx::query("INSERT INTO api_key_issuer(api_key_id,issuer_org_api_key_id) VALUES(?,?)")
+            .bind(self.key)
+            .bind(self.issuer)
+            .execute(pool)
+            .await?;
+        Ok(())
+    }
+
+    /// `retired` says whether a management credential issued the key before 015.
+    async fn assert_preserved_and_protected(&self, pool: &SqlitePool, retired: bool) -> TestResult {
         assert_eq!(
             sqlx::query_scalar::<_, Uuid>("SELECT env_id FROM call WHERE call_id=?")
                 .bind(self.call)
@@ -200,26 +214,29 @@ impl ExistingRows {
                 "retained retry".to_string()
             )
         );
-        let key: (Uuid, String, String) =
-            sqlx::query_as("SELECT env_id,key_data,permissions FROM api_key WHERE api_key_id=?")
-                .bind(self.key)
-                .fetch_one(pool)
-                .await?;
+        // 015 retires management credentials. A key one issued is kept but
+        // deactivated, never turned into an independent key.
+        let key: (Uuid, String, String, bool) = sqlx::query_as(
+            "SELECT env_id,key_data,permissions,active FROM api_key WHERE api_key_id=?",
+        )
+        .bind(self.key)
+        .fetch_one(pool)
+        .await?;
         assert_eq!(
             key,
             (
                 self.env,
                 "{}".to_string(),
-                "{\"file:allowed/*\":[\"read\"]}".to_string()
+                "{\"file:allowed/*\":[\"read\"]}".to_string(),
+                !retired
             )
         );
-        let issuer: Uuid = sqlx::query_scalar(
-            "SELECT management_key_id FROM api_key_management_issuer WHERE api_key_id=?",
+        let retired_tables: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM sqlite_master WHERE name IN ('management_key','api_key_management_issuer','management_key_scope_immutable','api_key_management_issuer_no_delete')",
         )
-        .bind(self.key)
         .fetch_one(pool)
         .await?;
-        assert_eq!(issuer, self.issuer);
+        assert_eq!(retired_tables, 0);
         let result: String = sqlx::query_scalar("SELECT result FROM run WHERE run_id=?")
             .bind(self.run)
             .fetch_one(pool)
@@ -237,6 +254,7 @@ impl ExistingRows {
                 .await
                 .is_err()
         );
+        // Org-key lineage cannot be detached, reassigned or deleted around.
         assert!(
             sqlx::query("DELETE FROM api_key WHERE api_key_id=?")
                 .bind(self.key)
@@ -245,14 +263,14 @@ impl ExistingRows {
                 .is_err()
         );
         assert!(
-            sqlx::query("DELETE FROM api_key_management_issuer WHERE api_key_id=?")
+            sqlx::query("DELETE FROM api_key_issuer WHERE api_key_id=?")
                 .bind(self.key)
                 .execute(pool)
                 .await
                 .is_err()
         );
         assert!(
-            sqlx::query("UPDATE management_key SET root_org_id=? WHERE management_key_id=?")
+            sqlx::query("UPDATE org_api_key SET org_id=? WHERE org_api_key_id=?")
                 .bind(self.other_org)
                 .bind(self.issuer)
                 .execute(pool)
@@ -272,7 +290,7 @@ impl ExistingRows {
 }
 
 #[tokio::test]
-async fn sqlite_upgrades_preserve_populated_data_and_delegated_credentials() -> TestResult {
+async fn sqlite_upgrades_preserve_populated_data_and_retire_management_credentials() -> TestResult {
     for baseline in [9, 13] {
         let directory = tempfile::tempdir()?;
         let path = directory.path().join("existing.db");
@@ -286,7 +304,7 @@ async fn sqlite_upgrades_preserve_populated_data_and_delegated_credentials() -> 
                 .await?;
             assert_eq!(trace_size, ("[\"é\"]".len() + "☃".len() + 50) as i64);
         }
-        rows.add_delegated_issuer(&pool).await?;
+        rows.add_management_issuer(&pool).await?;
         let previous_ledger = ledger(&pool).await?;
         pool.close().await;
         let conf = hot::val!({"uri": format!("sqlite:{}", path.display())});
@@ -324,7 +342,8 @@ async fn sqlite_upgrades_preserve_populated_data_and_delegated_credentials() -> 
                 "2026-09-01 12:00:00".to_string()
             )
         );
-        rows.assert_preserved_and_protected(&pool).await?;
+        rows.add_org_key_issuer(&pool).await?;
+        rows.assert_preserved_and_protected(&pool, true).await?;
         pool.close().await;
         // A real deployment retry must neither replay DDL nor alter checksums.
         db::run_migrations(&conf).await?;
@@ -420,8 +439,8 @@ async fn sqlite_013_rejects_legacy_mismatches_atomically_and_allows_reviewed_ret
         .execute(&pool)
         .await?;
         migrations_through(i64::MAX).await?.run(&pool).await?;
-        rows.add_delegated_issuer(&pool).await?;
-        rows.assert_preserved_and_protected(&pool).await?;
+        rows.add_org_key_issuer(&pool).await?;
+        rows.assert_preserved_and_protected(&pool, false).await?;
         pool.close().await;
     }
     Ok(())

@@ -225,9 +225,12 @@ reject real API values on Hot 3.0, so upgrade them:
   environment and adds `env_id`, `usage_scope`, and `limits_scope`.
   `team_members` is `0`. A request whose `org_id` or `env_id` doesn't match
   the credential returns 403.
-- **New management API.** Root administrators can create child organizations
-  and manage them with `hm_` credentials. See
-  [Sub-organizations](/docs/api/management).
+- **Org API keys.** Root administrators can create child organizations and
+  manage them with org-scoped API keys. See
+  [Sub-organizations](/docs/api/management). Hot 3.0.0 shipped this as
+  `hm_` management credentials and `/v1/management/*`; both are removed.
+  The upgrade deactivates runtime keys an `hm_` credential issued. Create an
+  org key in the app and mint new keys through `/v1/orgs`.
 
 ### Account Limits
 

@@ -17,8 +17,7 @@ Official client libraries for the Hot API, released in lockstep versions:
 Every SDK covers the thirteen runtime API v1 resources ([Endpoints](api)),
 SSE run-stream subscriptions with automatic reconnection across the API's
 5-minute stream timeout, durable run and task waiters, structured API errors,
-and escape hatches for endpoints that do not yet have a helper. SDK 1.3.0 also
-provides a separate client for the sub-organization management API.
+and escape hatches for endpoints that do not yet have a helper.
 
 Authenticated clients should run server-side. Browser apps and untrusted
 clients should call your own backend route instead of exposing a Hot API key
@@ -201,179 +200,20 @@ try (StreamEvents events = client.streams().subscribeWithEvent(Map.of(
 
 ## Manage Sub-organizations
 
-Management helpers require SDK **1.3.0 or newer** and a matching Hot server
-with the [management API](/docs/api/management). Use a separate management client with
-an `hm_` credential issued by a root administrator. Its capabilities, allowed
-children, and delegation ceiling control which operations it can perform.
-Management credentials expire within 90 days and cannot issue other management
-credentials or grant human access.
+The SDKs do not wrap the [org API](/docs/api/management) yet. Call it over
+HTTP with an org API key, then use the minted environment key with any SDK
+client:
 
-Create a child, issue a permission-scoped key for its default environment, and
-use a runtime client with that key:
-
-<!-- tabs:start -->
-#### **JavaScript**
-
-```javascript
-import { HotClient, HotManagementClient } from "@hot-dev/sdk";
-
-const management = new HotManagementClient({
-  token: process.env.HOT_MANAGEMENT_KEY,
-});
-const child = await management.createChild({
-  name: "Customer", slug: "customer-123", idempotency_key: "customer-123-v1",
-});
-const key = await management.createApiKey(child.org.org_id, child.env_id, {
-  description: "Customer backend", permissions: { "event:support:*": ["create"] },
-});
-const customer = new HotClient({ token: key.token });
-await customer.events.publish({
-  event_type: "support:ask", event_data: { question: "Where is my order?" },
-});
+```bash
+child=$(curl -s https://api.hot.dev/v1/orgs \
+  -H "Authorization: Bearer $HOT_ORG_KEY" -H "Content-Type: application/json" \
+  -d '{"name":"Customer","slug":"customer-123","idempotency_key":"customer-123-v1"}')
+org_id=$(echo "$child" | jq -r .data.org.org_id)
+env_id=$(echo "$child" | jq -r .data.env_id)
+curl -s "https://api.hot.dev/v1/orgs/$org_id/envs/$env_id/api-keys" \
+  -H "Authorization: Bearer $HOT_ORG_KEY" -H "Content-Type: application/json" \
+  -d '{"description":"Customer backend","permissions":{"event:support:*":["create"]}}'
 ```
-
-#### **Python**
-
-```python
-import os
-from hot import HotClient, HotManagementClient
-
-with HotManagementClient(token=os.environ["HOT_MANAGEMENT_KEY"]) as management:
-    child = management.create_child({
-        "name": "Customer", "slug": "customer-123", "idempotency_key": "customer-123-v1",
-    })
-    key = management.create_api_key(child["org"]["org_id"], child["env_id"], {
-        "description": "Customer backend", "permissions": {"event:support:*": ["create"]},
-    })
-with HotClient(token=key["token"]) as customer:
-    customer.events.publish({
-        "event_type": "support:ask", "event_data": {"question": "Where is my order?"},
-    })
-```
-
-#### **Go**
-
-```go
-management, err := hot.NewManagementClient(hot.Config{Token: os.Getenv("HOT_MANAGEMENT_KEY")})
-if err != nil { return err }
-child, err := management.CreateChild(ctx, map[string]any{
-    "name": "Customer", "slug": "customer-123", "idempotency_key": "customer-123-v1",
-})
-if err != nil { return err }
-org := child["org"].(map[string]any)
-key, err := management.CreateAPIKey(ctx, org["org_id"].(string), child["env_id"].(string), map[string]any{
-    "description": "Customer backend", "permissions": map[string]any{"event:support:*": []string{"create"}},
-})
-if err != nil { return err }
-customer, err := hot.NewClient(hot.Config{Token: key["token"].(string)})
-if err != nil { return err }
-_, err = customer.Events.Publish(ctx, map[string]any{
-    "event_type": "support:ask", "event_data": map[string]any{"question": "Where is my order?"},
-})
-if err != nil { return err }
-```
-
-#### **Rust**
-
-```rust
-use hot_dev::{HotClient, HotManagementClient};
-use serde_json::json;
-
-let management = HotManagementClient::new(std::env::var("HOT_MANAGEMENT_KEY")?);
-let child = management.create_child(json!({
-    "name": "Customer", "slug": "customer-123", "idempotency_key": "customer-123-v1",
-})).await?;
-let key = management.create_api_key(
-    child["org"]["org_id"].as_str().unwrap(), child["env_id"].as_str().unwrap(),
-    json!({"description": "Customer backend", "permissions": {"event:support:*": ["create"]}}),
-).await?;
-let customer = HotClient::new(key["token"].as_str().unwrap());
-customer.events().publish(json!({
-    "event_type": "support:ask", "event_data": {"question": "Where is my order?"},
-})).await?;
-```
-
-#### **Java**
-
-```java
-HotManagementClient management = HotManagementClient
-    .builder(System.getenv("HOT_MANAGEMENT_KEY")).build();
-Map<String, Object> child = management.createChild(Map.of(
-    "name", "Customer", "slug", "customer-123", "idempotency_key", "customer-123-v1"));
-Map<?, ?> org = (Map<?, ?>) child.get("org");
-Map<String, Object> key = management.createApiKey(
-    (String) org.get("org_id"), (String) child.get("env_id"), Map.of(
-        "description", "Customer backend", "permissions", Map.of("event:support:*", List.of("create"))));
-HotClient customer = HotClient.builder((String) key.get("token")).build();
-customer.events().publish(Map.of(
-    "event_type", "support:ask", "event_data", Map.of("question", "Where is my order?")));
-```
-<!-- tabs:end -->
-
-All management clients expose six operations. Python and Rust use the
-`snake_case` equivalents of the JavaScript/Java method names below; Go prefixes
-the context argument and uses `CreateAPIKey` for key issuance.
-
-| Operation | JavaScript / Java | Python / Rust | Go |
-| --- | --- | --- | --- |
-| List authorized children | `listChildren` | `list_children` | `ListChildren` |
-| Create a child and default environment | `createChild` | `create_child` | `CreateChild` |
-| Set child lifecycle state | `setChildState` | `set_child_state` | `SetChildState` |
-| Provision a child environment | `createEnvironment` | `create_environment` | `CreateEnvironment` |
-| Issue a child environment API key | `createApiKey` | `create_api_key` | `CreateAPIKey` |
-| Read account-wide usage | `usage` | `usage` | `Usage` |
-
-Child creation requires a stable `idempotency_key`. Repeating the same request
-with that key returns the original child and default environment; changing the
-payload while reusing the key is rejected. Child listing returns `children` and
-`total` inside `data`; the SDK helpers return that data object. Listing accepts
-`limit` (maximum 500) and `offset`. Environment creation is idempotent within
-that child by exact name. Lifecycle changes accept `active`, `suspended`, or
-`archived` and return no response body. Account usage requires `usage:read` and
-explicit `all_children` authority. See the [management API](/docs/api/management) for
-capabilities and request fields.
-
-Python provides `AsyncHotManagementClient` with the same methods using `await`
-and `async with`. Java provides `AsyncHotManagementClient.wrap(management)`,
-which returns futures and accepts an optional executor. Rust's management client
-is async, like its runtime client.
-
-### Keep Runtime Scope Explicit
-
-Runtime API keys, service keys, and sessions access one environment. Use a
-separate runtime client for each environment credential. A root environment key
-cannot access child resources, and child keys cannot access siblings. Runtime
-methods have no tenant or org selector. A management token cannot authenticate
-to runtime endpoints, and a runtime token cannot call management endpoints.
-
-Each child owns its environments and deployments. Webhook helpers use the
-child's own org slug and environment name; custom domains bind to that same
-environment. There is no parent-resource fallback. In a multi-customer BFF,
-authorize the signed-in user's target on your server before choosing its Hot
-client. The JavaScript proxy helper uses the credential of the supplied client;
-org IDs or tokens in a browser request do not change it. Keep management and
-runtime credentials out of browser bundles.
-
-Service keys and sessions are created by a runtime API key in the selected
-child environment. Requested grants must fit the parent's effective permissions.
-A management issuer's expiry, revocation, or narrowed ceiling also restricts
-already issued API keys and their service/session descendants. Expanding a
-ceiling does not expand descendants' stored grants.
-
-Administrative runtime calls require an API key and resource/action grants.
-For example, listing projects requires `project:*` with `read`, while environment
-info and `org.usage` require `env:{env_id}` with `read`. The event-only key in the
-examples above can publish its allowed events and receives `403` for those
-administrative calls. Full-access `{"*:*": ["*"]}` API keys retain access.
-
-### Environment Usage and Shared Limits
-
-The runtime `org.usage` helper reports the credential's environment consumption:
-`env_id`, `usage_scope: "environment"`, and `limits_scope: "billing_account"`.
-Its limits and plan come from the billing root. Percentages compare this one
-environment with shared limits and do not describe remaining account capacity.
-`usage.team_members` is zero because directory seats belong to the account.
-Use the management client's `usage` operation for the root-and-children aggregate.
 
 ## Call a Hot Function
 

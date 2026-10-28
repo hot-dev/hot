@@ -1,6 +1,8 @@
 # Org-scoped API keys
 
-Status: design proposal, not implemented. Base: Hot 3.0.0 (`v3.0.0`, 552b582).
+Status: implemented on branch `claude/design-org-scoped-keys-6a137a`, base Hot 3.0.0
+(`v3.0.0`, 552b582). [Implementation](#implementation) records where the build
+differs from the proposal below and how each open question was settled.
 
 This note replaces the separate sub-organization management plane with orgs
 as ordinary API resources and one kind of API key. A key's **scope** says
@@ -18,6 +20,77 @@ Related documents:
 - Leela's starting proposal is `INTEGRATION.md` §2.1 in
   `leela-dev/plans/reglang/`. This note works it out and corrects it in
   several places (see [Changes to INTEGRATION §2.1](#changes-to-integration-21)).
+
+## Implementation
+
+What was built, and where it departs from the proposal that follows.
+
+**Storage: a separate `org_api_key` table, not a `scope` column.** SQLite
+cannot relax `api_key.env_id NOT NULL` without rebuilding the table and every
+foreign key to it, and the 013 RLS policies on `api_key` all key off
+`env_id`. A separate table leaves `api_key`, its policies and every existing
+query untouched, and makes the compile-time split natural: `OrgApiKey` and
+`ApiKey` are different types from different tables, so an environment code
+path cannot load an org key at all. Users still see one kind of key: the same
+`hot_<id>_<secret>` format, the same permission map, the same `/v1/api-keys`
+routes. Lineage is `org_api_key.issuer_org_api_key_id` for org keys and
+`api_key_issuer` for environment keys an org key minted; issuers are always
+org keys. `api_key` gains only `expires_at` and the rotation columns.
+Migrations: PostgreSQL `017_org_api_keys.sql`, SQLite `015_org_api_keys.sql`.
+
+**Compatibility: removed, not aliased.** 3.0.0 shipped `/v1/management/*` hours
+before this work, behind a `sub_orgs` limit that defaults to 0, with no
+released SDK. The migration deactivates any runtime key an `hm_` credential
+issued (it is never turned into an independent key), then drops
+`management_key` and `api_key_management_issuer`. There is no `hm_` parsing,
+no translation table, no deprecation window. §7 below describes the
+alternative that was not taken.
+
+**Org-qualified project routes: re-dispatch, not an `EnvTarget` refactor.**
+`/v1/orgs/{org}/envs/{env}/projects…` and `…/builds` authorize the org key,
+project its grants onto that environment, and re-dispatch the request to the
+same `/v1/projects…` handlers as an environment principal holding those
+projected grants. The existing `route_permissions` policy then applies
+unchanged. No project, context or build handler changed. The environment
+admin routes are defined once (`env_admin_routes` in `server.rs`) and serve
+both paths.
+
+**Errors.** A wrong-scope credential gets `403` with code `key_scope_mismatch`
+on both route families. A path naming an org outside the key's root, or an
+environment of a different org, is `404`.
+
+**Code map.** `crates/hot/src/permission.rs` (qualified URNs, segment matching,
+own-org rule, projection), `crates/hot/src/db/org_api_key.rs` (keys, chain,
+minting, rotation), `crates/hot/src/db/api_key.rs` (expiry, previous secret,
+rotation), `crates/hot_api/src/handlers/orgs.rs` (routes, auth middleware,
+re-dispatch), `crates/hot_api/src/auth.rs` (chain-limited environment keys,
+scope errors), `crates/hot_app/src/handlers/sub_orgs.rs` (App issuance).
+
+**Open questions, as settled in the build:**
+
+| # | Settled |
+| --- | --- |
+| Q1 | Segment-aware `org:`/`env:` selectors; inner URNs keep prefix matching |
+| Q2 | `api-key:`; service keys keep `key:` |
+| Q3 | One permission map; grants inside an environment are delegable only |
+| Q4 | Optional expiry, no per-root cap |
+| Q5 | No self-rotation or self-revocation |
+| Q6 | Org keys only in root orgs; no child org keys |
+| Q7 | Removed now (see above) |
+| Q8 | No adoption; `hm_`-issued keys are deactivated |
+| Q9 | Same `hot_` prefix |
+| Q10 | Audit on the key's own org for every request (not the target org, as recommended); the target is in the path |
+| Q11 | Not built: key minting has no idempotency key |
+| Q12 | IDs only in routes and grants |
+| Q13 | Environment keys an org key minted rotate through `/v1/api-keys/{id}/rotate`; no App rotate button yet |
+| Q14 | Org keys revoke irreversibly (`revoked_at`); environment keys still use the reversible `active` toggle |
+| Q15 | Projects, context, builds, schedules and event-handler reads |
+| Q16 | At most two org keys in a chain; environment keys below either |
+
+**Not built yet:** child-org usage (`/v1/orgs/{org}/usage` serves the root's
+account aggregate only), `PATCH /v1/orgs/{org}/envs/{env}`, closing an open
+stream when a rotation's overlap ends (it closes at reconnect), the SDK
+changes (§8), and an App view of minted keys.
 
 ## Summary
 

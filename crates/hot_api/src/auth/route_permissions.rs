@@ -5,7 +5,7 @@ use super::AuthContext;
 use axum::http::{Method, StatusCode};
 use std::collections::HashMap;
 
-pub(super) fn authorize(
+pub(crate) fn authorize(
     auth: &AuthContext,
     method: &Method,
     route: &str,

@@ -5,8 +5,8 @@ use axum::extract::{Form, Path, State};
 use axum::http::StatusCode;
 use axum::response::{Html, IntoResponse, Redirect, Response};
 use chrono::{DateTime, Datelike, TimeZone, Utc};
-use hot::db::management_key::{CreateManagementKey, ManagementKey};
 use hot::db::org::{CreateChild, Org, OrgLifecycle, OrgUser};
+use hot::db::org_api_key::{CreateOrgApiKey, OrgApiKey};
 use hot::db::{BootstrapOperation, DatabasePool, DatabaseScope};
 use hot::val::Val;
 use serde::Deserialize;
@@ -43,7 +43,8 @@ struct SubOrgsPage {
     overview: Vec<OrgOverview>,
     members: Vec<hot::db::org::OrgUserWithRole>,
     idempotency_key: Uuid,
-    management_keys: Vec<ManagementKey>,
+    org_api_keys: Vec<OrgApiKey>,
+    org_key_example: String,
     issued_token: Option<String>,
 }
 
@@ -201,14 +202,22 @@ async fn render_page(
     root: Org,
     issued_token: Option<String>,
 ) -> Result<Response, PageError> {
-    let management_keys = ManagementKey::list_for_user(db, root.org_id, session.current_user_id())
+    let org_api_keys = OrgApiKey::list_for_user(db, root.org_id, session.current_user_id())
         .await
         .map_err(|_| {
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                "Unable to load management credentials",
+                "Unable to load org API keys",
             )
         })?;
+    let org_key_example = serde_json::to_string_pretty(&serde_json::json!({
+        "org:*": ["create", "read", "update"],
+        "org:*/env:*": ["create", "read"],
+        "org:*/env:*/api-key:*": ["create", "read", "update", "delete"],
+        "org:*/env:*/event:*": ["create"],
+        "org:*/env:*/run:*": ["read"],
+    }))
+    .unwrap_or_default();
     let children = Org::list_children(db, &root.org_id).await.map_err(|_| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -239,7 +248,8 @@ async fn render_page(
         overview,
         members,
         idempotency_key: Uuid::now_v7(),
-        management_keys,
+        org_api_keys,
+        org_key_example,
         issued_token,
     };
     let html = template.render().map_err(|_| {
@@ -357,70 +367,56 @@ pub async fn grant(
 }
 
 #[derive(Deserialize)]
-pub struct ManagementKeyForm {
-    name: String,
-    capabilities: String,
-    target_org_ids: String,
-    all_children: Option<bool>,
-    expires_in_days: u32,
-    delegation_permissions: Option<String>,
+pub struct OrgApiKeyForm {
+    description: String,
+    permissions: String,
+    expires_in_days: Option<String>,
 }
 
-pub async fn create_management_key(
+pub async fn create_org_api_key(
     Path(slug): Path<String>,
     State(db): State<Arc<DatabasePool>>,
     axum::Extension(session): axum::Extension<Session>,
-    Form(form): Form<ManagementKeyForm>,
+    Form(form): Form<OrgApiKeyForm>,
 ) -> Result<Response, PageError> {
     let root = root_for_admin(&db, &session, &slug).await?;
-    let request = CreateManagementKey {
-        name: form.name,
-        capabilities: form
-            .capabilities
-            .split(',')
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .map(str::to_string)
-            .collect(),
-        target_org_ids: form
-            .target_org_ids
-            .split(',')
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .map(Uuid::parse_str)
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|_| (StatusCode::BAD_REQUEST, "Invalid child identifier"))?,
-        all_children: form.all_children.unwrap_or(false),
-        delegation_permissions: form
-            .delegation_permissions
-            .filter(|s| !s.trim().is_empty())
-            .map(|value| serde_json::from_str(&value))
-            .transpose()
-            .map_err(|_| {
-                (
-                    StatusCode::BAD_REQUEST,
-                    "Invalid delegation permissions JSON",
-                )
-            })?,
-        expires_in_seconds: form
-            .expires_in_days
-            .checked_mul(86400)
-            .ok_or((StatusCode::BAD_REQUEST, "Invalid expiry"))?,
+    let expires_at = match form.expires_in_days.as_deref().map(str::trim) {
+        None | Some("") => None,
+        Some(days) => {
+            let days: i64 = days
+                .parse()
+                .ok()
+                .filter(|days| (1..=3650).contains(days))
+                .ok_or((StatusCode::BAD_REQUEST, "Expiry must be 1–3650 days"))?;
+            Some(Utc::now() + chrono::Duration::days(days))
+        }
     };
-    let (_, token) = ManagementKey::create_for_user(&db, root.org_id, session.current_user_id(), &request).await
-        .map_err(|_| (StatusCode::BAD_REQUEST, "Unable to issue credential; check capabilities, targets, expiry, and delegation ceiling"))?;
+    let request = CreateOrgApiKey {
+        description: form.description,
+        permissions: serde_json::from_str(&form.permissions)
+            .map_err(|_| (StatusCode::BAD_REQUEST, "Invalid permissions JSON"))?,
+        expires_at,
+    };
+    let (_, token) = OrgApiKey::create_for_user(&db, root.org_id, session.current_user_id(), &request)
+        .await
+        .map_err(|_| {
+            (
+                StatusCode::BAD_REQUEST,
+                "Unable to create org API key; permissions must use org: URNs such as org:* or org:{org}/env:*/project:*",
+            )
+        })?;
     render_page(&db, &session, root, Some(token)).await
 }
 
-pub async fn revoke_management_key(
+pub async fn revoke_org_api_key(
     Path((slug, key_id)): Path<(String, Uuid)>,
     State(db): State<Arc<DatabasePool>>,
     axum::Extension(session): axum::Extension<Session>,
 ) -> Result<Redirect, PageError> {
     let root = root_for_admin(&db, &session, &slug).await?;
-    ManagementKey::revoke_for_user(&db, root.org_id, session.current_user_id(), key_id)
+    OrgApiKey::revoke_for_user(&db, root.org_id, session.current_user_id(), key_id)
         .await
-        .map_err(|_| (StatusCode::BAD_REQUEST, "Unable to revoke credential"))?;
+        .map_err(|_| (StatusCode::BAD_REQUEST, "Unable to revoke org API key"))?;
     Ok(Redirect::to(&format!("/@{}/children", root.slug)))
 }
 

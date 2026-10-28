@@ -316,7 +316,8 @@ impl ExistingRows {
         Ok(rows)
     }
 
-    async fn add_delegated_issuer(&self, pool: &PgPool) -> TestResult {
+    /// A 3.0.0 management credential and the runtime key it issued, before 017.
+    async fn add_management_issuer(&self, pool: &PgPool) -> TestResult {
         sqlx::query("INSERT INTO management_key(management_key_id,root_org_id,created_by_user_id,name,secret_hash,capabilities,expires_at) VALUES($1,$2,$3,'existing issuer',decode('010203','hex'),'[\"keys:issue\"]','2099-01-01T00:00:00Z')")
             .bind(self.issuer).bind(self.org).bind(self.user).execute(pool).await?;
         sqlx::query(
@@ -326,6 +327,18 @@ impl ExistingRows {
         .bind(self.issuer)
         .execute(pool)
         .await?;
+        Ok(())
+    }
+
+    /// An org key and the environment key it minted, after 017.
+    async fn add_org_key_issuer(&self, pool: &PgPool) -> TestResult {
+        sqlx::query("INSERT INTO org_api_key(org_api_key_id,org_id,description,key_data,permissions,created_by_user_id) VALUES($1,$2,'existing issuer','{}','{\"org:*\":[\"read\"]}',$3)")
+            .bind(self.issuer).bind(self.org).bind(self.user).execute(pool).await?;
+        sqlx::query("INSERT INTO api_key_issuer(api_key_id,issuer_org_api_key_id) VALUES($1,$2)")
+            .bind(self.key)
+            .bind(self.issuer)
+            .execute(pool)
+            .await?;
         Ok(())
     }
 }
@@ -388,19 +401,19 @@ async fn assert_runtime_contract(fixture: &UpgradeDatabase, rows: &ExistingRows)
         0
     );
     assert_eq!(
-        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM management_key")
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM org_api_key")
             .fetch_one(&env)
             .await?,
         0
     );
     assert_eq!(
-        sqlx::query_scalar::<_, Uuid>("SELECT management_key_id FROM management_key")
+        sqlx::query_scalar::<_, Uuid>("SELECT org_api_key_id FROM org_api_key")
             .fetch_one(&organization)
             .await?,
         rows.issuer
     );
     assert_eq!(
-        sqlx::query_scalar::<_, Uuid>("SELECT management_key_id FROM api_key_management_issuer")
+        sqlx::query_scalar::<_, Uuid>("SELECT issuer_org_api_key_id FROM api_key_issuer")
             .fetch_one(&env)
             .await?,
         rows.issuer
@@ -596,7 +609,7 @@ async fn populated_upgrades_use_non_bypass_owner_and_reprovision_runtime_grants(
         let fixture = UpgradeDatabase::new(&admin_uri, baseline).await?;
         let result: TestResult = async {
             let rows = ExistingRows::seed(&fixture.admin).await?;
-            if baseline >= 13 { rows.add_delegated_issuer(&fixture.admin).await?; }
+            if baseline >= 13 { rows.add_management_issuer(&fixture.admin).await?; }
             let old_ledger = ledger(&fixture.owner).await?;
             let owner_privileged: bool = sqlx::query_scalar("SELECT rolsuper OR rolbypassrls OR rolcreaterole OR rolcreatedb FROM pg_roles WHERE rolname=current_user")
                 .fetch_one(&fixture.owner).await?;
@@ -607,7 +620,12 @@ async fn populated_upgrades_use_non_bypass_owner_and_reprovision_runtime_grants(
             assert_latest_ledger(&fixture.owner).await?;
             fixture.upgrade().await?;
             assert_eq!(ledger(&fixture.owner).await?, final_ledger);
-            if baseline < 13 { rows.add_delegated_issuer(&fixture.admin).await?; }
+            // 017 retires management credentials: the key one issued is kept
+            // but deactivated, and the management tables are gone.
+            let retired: (bool, bool, bool) = sqlx::query_as("SELECT active, to_regclass('hot.management_key') IS NULL, to_regclass('hot.api_key_management_issuer') IS NULL FROM api_key WHERE api_key_id=$1")
+                .bind(rows.key).fetch_one(&fixture.admin).await?;
+            assert_eq!(retired, (baseline < 13, true, true));
+            rows.add_org_key_issuer(&fixture.admin).await?;
             // Every baseline precedes 014, which backfills admissions; 013
             // reconciles the sizes of traces written before it.
             let admission: (Uuid,Uuid,Uuid,bool) = sqlx::query_as("SELECT root_org_id,org_id,env_id,admitted_at='2026-09-01 12:00:00+00'::timestamptz FROM run_admission WHERE run_id=$1")
@@ -683,7 +701,7 @@ async fn alert_delivery_mismatch_aborts_013_and_rolls_back_all_ddl_then_retries_
                 .bind(rows.subscription).bind(rows.destination).bind(rows.delivery).execute(&fixture.owner).await?;
             fixture.upgrade().await?;
             assert_latest_ledger(&fixture.owner).await?;
-            rows.add_delegated_issuer(&fixture.admin).await?;
+            rows.add_org_key_issuer(&fixture.admin).await?;
             fixture.provision_ok().await?;
             assert_runtime_contract(&fixture,&rows).await?;
             Ok(())

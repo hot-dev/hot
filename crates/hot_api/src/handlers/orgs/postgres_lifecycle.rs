@@ -3,7 +3,7 @@
 //! child provisioning, credentials and every HTTP operation use the runtime role.
 use super::*;
 use axum::body::{Body, to_bytes};
-use hot::db::management_key::CreateManagementKey;
+use hot::db::org_api_key::CreateOrgApiKey;
 use hot::db::{self, DatabasePool};
 use hot::queue::Queue;
 use hot::stream::{StreamPubSub, StreamPubSubType};
@@ -220,7 +220,7 @@ async fn create_child(app: &Router, manager_token: &str, label: &str) -> Child {
     let child = expect(
         app,
         "POST",
-        "/v1/management/children",
+        "/v1/orgs",
         manager_token,
         Some(payload.clone()),
         StatusCode::CREATED,
@@ -229,7 +229,7 @@ async fn create_child(app: &Router, manager_token: &str, label: &str) -> Child {
     let repeated = expect(
         app,
         "POST",
-        "/v1/management/children",
+        "/v1/orgs",
         manager_token,
         Some(payload),
         StatusCode::CREATED,
@@ -243,7 +243,7 @@ async fn create_child(app: &Router, manager_token: &str, label: &str) -> Child {
     );
     assert_eq!(child["data"]["env_id"], repeated["data"]["env_id"]);
     let org = Uuid::parse_str(child["data"]["org"]["org_id"].as_str().unwrap()).unwrap();
-    let env_path = format!("/v1/management/children/{org}/environments");
+    let env_path = format!("/v1/orgs/{org}/envs");
     let env = expect(
         app,
         "POST",
@@ -309,7 +309,7 @@ async fn restricted_runtime_sub_org_lifecycle_through_production_router() -> Tes
     // complete HTTP/queue roundtrip deterministic under workspace parallelism.
     if std::env::var_os("HOT_SUB_ORG_LIFECYCLE_TEST_CHILD").is_none() {
         let output = tokio::process::Command::new(std::env::current_exe()?)
-            .args(["--exact","handlers::management::postgres_lifecycle::restricted_runtime_sub_org_lifecycle_through_production_router","--nocapture"])
+            .args(["--exact","handlers::orgs::postgres_lifecycle::restricted_runtime_sub_org_lifecycle_through_production_router","--nocapture"])
             .env("HOT_SUB_ORG_LIFECYCLE_TEST_CHILD","1")
             .output().await?;
         assert!(
@@ -326,20 +326,20 @@ async fn restricted_runtime_sub_org_lifecycle_through_production_router() -> Tes
     }
     let fixture = Fixture::new(&admin_uri).await?;
     let result: TestResult = async {
-        let (manager, manager_token) = ManagementKey::create_for_user(
+        let (manager, manager_token) = OrgApiKey::create_for_user(
             &fixture.runtime,
             fixture.root,
             fixture.user,
-            &CreateManagementKey {
-                name: "Account automation".into(),
-                capabilities: hot::db::management_key::CAPABILITIES
-                    .iter()
-                    .map(|s| (*s).into())
-                    .collect(),
-                target_org_ids: vec![],
-                all_children: true,
-                delegation_permissions: Some(json!({"*:*": ["*"]})),
-                expires_in_seconds: 3600,
+            &CreateOrgApiKey {
+                description: "Account automation".into(),
+                permissions: json!({
+                    "org:*": ["create", "read", "update"],
+                    "org:*/env:*": ["create", "read"],
+                    "org:*/env:*/api-key:*": ["create", "read", "update", "delete"],
+                    "org:*/env:*/*:*": ["*"],
+                    format!("org:{}/usage:*", fixture.root): ["read"],
+                }),
+                expires_at: Some(chrono::Utc::now() + chrono::Duration::hours(1)),
             },
         )
         .await?;
@@ -398,15 +398,16 @@ async fn restricted_runtime_sub_org_lifecycle_through_production_router() -> Tes
             .await;
             assert_eq!(list["data"].as_array().unwrap().len(), 1);
             assert_eq!(list["data"][0]["project_id"], own.project.to_string());
-            expect(
+            let mismatch = expect(
                 &app,
                 "GET",
-                "/v1/management/children",
+                "/v1/orgs",
                 &own.api_token,
                 None,
-                StatusCode::UNAUTHORIZED,
+                StatusCode::FORBIDDEN,
             )
             .await;
+            assert_eq!(mismatch["error"]["code"], "key_scope_mismatch");
             expect(
                 &app,
                 "POST",
@@ -417,15 +418,16 @@ async fn restricted_runtime_sub_org_lifecycle_through_production_router() -> Tes
             )
             .await;
         }
-        expect(
+        let mismatch = expect(
             &app,
             "GET",
             "/v1/env",
             &manager_token,
             None,
-            StatusCode::UNAUTHORIZED,
+            StatusCode::FORBIDDEN,
         )
         .await;
+        assert_eq!(mismatch["error"]["code"], "key_scope_mismatch");
         for (own, other) in [(&a, &b), (&b, &a)] {
             expect(
                 &app,
@@ -475,13 +477,10 @@ async fn restricted_runtime_sub_org_lifecycle_through_production_router() -> Tes
             expect(
                 &app,
                 "POST",
-                &format!(
-                    "/v1/management/children/{}/environments/{}/api-keys",
-                    own.org, other.env
-                ),
+                &format!("/v1/orgs/{}/envs/{}/api-keys", own.org, other.env),
                 &manager_token,
                 Some(json!({"description":"invalid owner","permissions":{"env:*": ["read"]}})),
-                StatusCode::FORBIDDEN,
+                StatusCode::NOT_FOUND,
             )
             .await;
         }
@@ -606,14 +605,14 @@ async fn restricted_runtime_sub_org_lifecycle_through_production_router() -> Tes
             StatusCode::OK,
         )
         .await;
-        let state_path = format!("/v1/management/children/{}/state", a.org);
+        let state_path = format!("/v1/orgs/{}", a.org);
         expect(
             &app,
             "PATCH",
             &state_path,
             &manager_token,
             Some(json!({"state":"suspended"})),
-            StatusCode::NO_CONTENT,
+            StatusCode::OK,
         )
         .await;
         let work_before = event_work_snapshot(&fixture.admin, &event_queue).await?;
@@ -643,7 +642,7 @@ async fn restricted_runtime_sub_org_lifecycle_through_production_router() -> Tes
         expect(
             &app,
             "POST",
-            &format!("/v1/management/children/{}/environments", a.org),
+            &format!("/v1/orgs/{}/envs", a.org),
             &manager_token,
             Some(json!({"name":"blocked"})),
             StatusCode::FORBIDDEN,
@@ -655,7 +654,7 @@ async fn restricted_runtime_sub_org_lifecycle_through_production_router() -> Tes
             &state_path,
             &manager_token,
             Some(json!({"state":"active"})),
-            StatusCode::NO_CONTENT,
+            StatusCode::OK,
         )
         .await;
         expect(
@@ -673,7 +672,7 @@ async fn restricted_runtime_sub_org_lifecycle_through_production_router() -> Tes
             &state_path,
             &manager_token,
             Some(json!({"state":"archived"})),
-            StatusCode::NO_CONTENT,
+            StatusCode::OK,
         )
         .await;
         let work_before = event_work_snapshot(&fixture.admin, &event_queue).await?;
@@ -703,7 +702,7 @@ async fn restricted_runtime_sub_org_lifecycle_through_production_router() -> Tes
             &state_path,
             &manager_token,
             Some(json!({"state":"suspended"})),
-            StatusCode::NO_CONTENT,
+            StatusCode::OK,
         )
         .await;
         expect(
@@ -712,7 +711,7 @@ async fn restricted_runtime_sub_org_lifecycle_through_production_router() -> Tes
             &state_path,
             &manager_token,
             Some(json!({"state":"active"})),
-            StatusCode::NO_CONTENT,
+            StatusCode::OK,
         )
         .await;
         expect(
@@ -730,13 +729,11 @@ async fn restricted_runtime_sub_org_lifecycle_through_production_router() -> Tes
         let DatabasePool::Postgres(root_pool) = &root_db else {
             unreachable!()
         };
-        sqlx::query(
-            "UPDATE management_key SET delegation_permissions=$1 WHERE management_key_id=$2",
-        )
-        .bind(json!({"event:*": ["read"],"env:*": ["read"]}))
-        .bind(manager.management_key_id)
-        .execute(root_pool)
-        .await?;
+        sqlx::query("UPDATE org_api_key SET permissions=$1 WHERE org_api_key_id=$2")
+            .bind(json!({"org:*/env:*/event:*": ["read"],"org:*/env:*/env:*": ["read"]}))
+            .bind(manager.org_api_key_id)
+            .execute(root_pool)
+            .await?;
         expect(
             &app,
             "POST",
@@ -755,11 +752,11 @@ async fn restricted_runtime_sub_org_lifecycle_through_production_router() -> Tes
             StatusCode::OK,
         )
         .await;
-        ManagementKey::revoke_for_user(
+        OrgApiKey::revoke_for_user(
             &fixture.runtime,
             fixture.root,
             fixture.user,
-            manager.management_key_id,
+            manager.org_api_key_id,
         )
         .await?;
         for token in [
@@ -792,7 +789,7 @@ async fn restricted_runtime_sub_org_lifecycle_through_production_router() -> Tes
             );
         }
         let notes: i64 = sqlx::query_scalar(
-            "SELECT count(*) FROM hot.org_note WHERE org_id=$1 AND note_type='management.request'",
+            "SELECT count(*) FROM hot.org_note WHERE org_id=$1 AND note_type='org-api.request'",
         )
         .bind(fixture.root)
         .fetch_one(&fixture.admin)

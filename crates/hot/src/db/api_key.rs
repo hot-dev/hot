@@ -715,16 +715,119 @@ impl ApiKey {
         if !key_record.active {
             return Ok(None);
         }
+        let state = Self::get_credential_state(db, &api_key_id).await?;
+        if state.is_expired() {
+            return Ok(None);
+        }
 
         // Verify the random portion directly against the stored hash data
-        let key_data_str = serde_json::to_string(&key_record.key_data)
-            .map_err(|_| ApiKeyError::SerializationError)?;
-
-        match crate::auth::verify_password(&random_hex, &key_data_str) {
-            Ok(true) => Ok(Some(key_record)),
-            Ok(false) => Ok(None),
-            Err(_) => Err(ApiKeyError::HashingError),
+        if Self::secret_matches(&random_hex, &key_record.key_data)? {
+            return Ok(Some(key_record));
         }
+        // A rotated key's previous secret works until its overlap ends.
+        match (&state.previous_key_data, state.previous_key_expires_at) {
+            (Some(previous), Some(until))
+                if until > Utc::now() && Self::secret_matches(&random_hex, previous)? =>
+            {
+                Ok(Some(key_record))
+            }
+            _ => Ok(None),
+        }
+    }
+
+    pub(crate) fn secret_matches(
+        random_hex: &str,
+        key_data: &serde_json::Value,
+    ) -> Result<bool, ApiKeyError> {
+        let key_data_str =
+            serde_json::to_string(key_data).map_err(|_| ApiKeyError::SerializationError)?;
+        crate::auth::verify_password(random_hex, &key_data_str)
+            .map_err(|_| ApiKeyError::HashingError)
+    }
+
+    /// Expiry and rotation state. Kept out of `ApiKey` so existing queries and
+    /// constructors do not change.
+    pub async fn get_credential_state(
+        db: &crate::db::DatabasePool,
+        api_key_id: &Uuid,
+    ) -> Result<ApiKeyCredentialState, ApiKeyError> {
+        type Row = (Option<DateTime<Utc>>, Option<String>, Option<DateTime<Utc>>);
+        let sql = "SELECT expires_at, CAST(previous_key_data AS TEXT), previous_key_expires_at FROM api_key WHERE api_key_id = $1";
+        let row: Row = match db {
+            crate::db::DatabasePool::Sqlite(pool) => {
+                sqlx::query_as(sql).bind(api_key_id).fetch_one(pool).await
+            }
+            crate::db::DatabasePool::Postgres(pool) => {
+                sqlx::query_as(sql).bind(api_key_id).fetch_one(pool).await
+            }
+        }
+        .map_err(|e| match e {
+            sqlx::Error::RowNotFound => ApiKeyError::NotFound,
+            other => ApiKeyError::Database(other),
+        })?;
+        Ok(ApiKeyCredentialState {
+            expires_at: row.0,
+            previous_key_data: row
+                .1
+                .map(|value| serde_json::from_str(&value))
+                .transpose()
+                .map_err(|_| ApiKeyError::SerializationError)?,
+            previous_key_expires_at: row.2,
+        })
+    }
+
+    /// Issue a new secret for the same key ID. The previous secret keeps
+    /// working until `overlap` ends; lineage, grants and expiry are unchanged.
+    pub async fn rotate(
+        db: &crate::db::DatabasePool,
+        api_key_id: &Uuid,
+        overlap: chrono::Duration,
+        updated_by_user_id: &Uuid,
+    ) -> Result<String, ApiKeyError> {
+        let (token, hash) = Self::generate_api_key(api_key_id)?;
+        let key_data: serde_json::Value =
+            serde_json::from_str(&hash).map_err(|_| ApiKeyError::SerializationError)?;
+        let until = Utc::now() + overlap;
+        let result = match db {
+            crate::db::DatabasePool::Sqlite(pool) => {
+                sqlx::query("UPDATE api_key SET previous_key_data = key_data, previous_key_expires_at = ?, key_data = ?, updated_at = CURRENT_TIMESTAMP, updated_by_user_id = ? WHERE api_key_id = ? AND active = 1")
+                    .bind(until)
+                    .bind(key_data.to_string())
+                    .bind(updated_by_user_id)
+                    .bind(api_key_id)
+                    .execute(pool)
+                    .await?
+                    .rows_affected()
+            }
+            crate::db::DatabasePool::Postgres(pool) => {
+                sqlx::query("UPDATE api_key SET previous_key_data = key_data, previous_key_expires_at = $1, key_data = $2, updated_at = now(), updated_by_user_id = $3 WHERE api_key_id = $4 AND active")
+                    .bind(until)
+                    .bind(&key_data)
+                    .bind(updated_by_user_id)
+                    .bind(api_key_id)
+                    .execute(pool)
+                    .await?
+                    .rows_affected()
+            }
+        };
+        if result == 0 {
+            return Err(ApiKeyError::NotFound);
+        }
+        Ok(token)
+    }
+}
+
+/// Expiry and rotation state of an environment API key.
+#[derive(Debug, Clone, Default)]
+pub struct ApiKeyCredentialState {
+    pub expires_at: Option<DateTime<Utc>>,
+    pub previous_key_data: Option<serde_json::Value>,
+    pub previous_key_expires_at: Option<DateTime<Utc>>,
+}
+
+impl ApiKeyCredentialState {
+    pub fn is_expired(&self) -> bool {
+        self.expires_at.is_some_and(|at| at <= Utc::now())
     }
 }
 

@@ -7,6 +7,10 @@ credentials, and runtime data. The root owns the subscription and the human
 member directory. Authorized root administrators can operate children.
 Siblings stay isolated.
 
+Org-scoped API keys have replaced the management credentials described under
+[Management credentials](#management-credentials): see
+[Org-scoped API keys](org-scoped-keys.md). The rest of this design stands.
+
 Related documents:
 
 - [Sub-organization management](../../resources/docs/api/management.md) is the

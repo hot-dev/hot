@@ -304,56 +304,11 @@ pub async fn run_with_stream_pubsub(conf: Val, shared_stream_pubsub: Option<Arc<
     info!("hot.dev: API shutdown complete");
 }
 
-/// Assemble the production routes independently of listener startup so runtime
-/// role integration tests exercise the same middleware and routing boundaries.
-pub(crate) fn build_router(
-    state: crate::ApiStateData,
-    file_storage: Arc<Box<dyn hot::file_storage::FileStorage>>,
-    blob_store: Option<Arc<hot::blob::BlobStore>>,
-    client_ip_policy: Arc<ClientIpPolicy>,
-    max_body_size: usize,
-    public_concurrency_limit: usize,
-) -> Router {
-    let db = state.0.clone();
-    // Create routes that don't require authentication
-    let public_routes = Router::new()
-        .route("/", get(root_handler))
-        .route("/status", get(status_handler))
-        // Webhook endpoints — single catch-all handles both standard and custom domain routes:
-        //   Standard:      /webhook/{org}/{env}/{service}/{path...}/{token}
-        //   Custom domain: /webhook/{service}/{path...}/{token}
-        // Per-endpoint auth is handled inside the handler based on meta.
-        .route(
-            "/webhook/{*full_path}",
-            axum::routing::any(webhook_catch_all_handler),
-        )
-        // MCP (Model Context Protocol) — public route with per-tool auth
-        // URL includes env_name for explicit environment targeting (like webhooks)
-        // Streamable HTTP (POST) + deprecated HTTP+SSE compatibility (GET)
-        .route(
-            "/mcp/{org_slug}/{env_name}/{service}",
-            axum::routing::post(mcp_handler).get(mcp_sse_handler),
-        )
-        // MCP HTTP+SSE transport — message POST endpoint
-        .route(
-            "/mcp/{org_slug}/{env_name}/{service}/messages",
-            axum::routing::post(mcp_http_sse_messages_handler),
-        )
-        // Custom domain routes (org/env resolved from domain)
-        .route(
-            "/mcp/{service}",
-            axum::routing::post(mcp_handler_domain).get(mcp_sse_handler_domain),
-        )
-        .route(
-            "/mcp/{service}/messages",
-            axum::routing::post(mcp_http_sse_messages_handler_domain),
-        )
-        .merge(SwaggerUi::new("/docs/api").url("/openapi.json", ApiDoc::openapi()))
-        .layer(DefaultBodyLimit::max(10 * 1024 * 1024)) // 10 MB for webhooks/MCP
-        .layer(GlobalConcurrencyLimitLayer::new(public_concurrency_limit));
-
-    // Create API v1 routes that require authentication
-    let api_v1_routes = Router::new()
+/// Project, build and context routes of one environment. Environment keys call
+/// them directly; org keys reach the same handlers through
+/// `/v1/orgs/{org}/envs/{env}/...`, with grants projected onto that environment.
+fn env_admin_routes() -> Router<crate::ApiStateData> {
+    Router::new()
         // Projects
         .route("/v1/projects", get(list_projects).post(create_project))
         .route(
@@ -407,6 +362,69 @@ pub(crate) fn build_router(
             "/v1/projects/{project_id_or_slug}/context/{key}",
             axum::routing::put(update_context_variable).delete(delete_context_variable),
         )
+        // Event Handlers (read-only, project-scoped)
+        .route(
+            "/v1/projects/{project_id_or_slug}/event-handlers",
+            get(list_project_event_handlers),
+        )
+        // Schedules (read-only, project-scoped)
+        .route(
+            "/v1/projects/{project_id_or_slug}/schedules",
+            get(list_project_schedules),
+        )
+}
+
+/// Assemble the production routes independently of listener startup so runtime
+/// role integration tests exercise the same middleware and routing boundaries.
+pub(crate) fn build_router(
+    state: crate::ApiStateData,
+    file_storage: Arc<Box<dyn hot::file_storage::FileStorage>>,
+    blob_store: Option<Arc<hot::blob::BlobStore>>,
+    client_ip_policy: Arc<ClientIpPolicy>,
+    max_body_size: usize,
+    public_concurrency_limit: usize,
+) -> Router {
+    let db = state.0.clone();
+    // Create routes that don't require authentication
+    let public_routes = Router::new()
+        .route("/", get(root_handler))
+        .route("/status", get(status_handler))
+        // Webhook endpoints — single catch-all handles both standard and custom domain routes:
+        //   Standard:      /webhook/{org}/{env}/{service}/{path...}/{token}
+        //   Custom domain: /webhook/{service}/{path...}/{token}
+        // Per-endpoint auth is handled inside the handler based on meta.
+        .route(
+            "/webhook/{*full_path}",
+            axum::routing::any(webhook_catch_all_handler),
+        )
+        // MCP (Model Context Protocol) — public route with per-tool auth
+        // URL includes env_name for explicit environment targeting (like webhooks)
+        // Streamable HTTP (POST) + deprecated HTTP+SSE compatibility (GET)
+        .route(
+            "/mcp/{org_slug}/{env_name}/{service}",
+            axum::routing::post(mcp_handler).get(mcp_sse_handler),
+        )
+        // MCP HTTP+SSE transport — message POST endpoint
+        .route(
+            "/mcp/{org_slug}/{env_name}/{service}/messages",
+            axum::routing::post(mcp_http_sse_messages_handler),
+        )
+        // Custom domain routes (org/env resolved from domain)
+        .route(
+            "/mcp/{service}",
+            axum::routing::post(mcp_handler_domain).get(mcp_sse_handler_domain),
+        )
+        .route(
+            "/mcp/{service}/messages",
+            axum::routing::post(mcp_http_sse_messages_handler_domain),
+        )
+        .merge(SwaggerUi::new("/docs/api").url("/openapi.json", ApiDoc::openapi()))
+        .layer(DefaultBodyLimit::max(10 * 1024 * 1024)) // 10 MB for webhooks/MCP
+        .layer(GlobalConcurrencyLimitLayer::new(public_concurrency_limit));
+
+    // Create API v1 routes that require authentication
+    let api_v1_routes = Router::new()
+        .merge(env_admin_routes())
         // Runs
         .route("/v1/runs", get(list_runs))
         .route("/v1/runs/stats", get(get_run_stats))
@@ -422,16 +440,6 @@ pub(crate) fn build_router(
         )
         .route("/v1/events/{event_id}", get(get_event))
         .route("/v1/events/{event_id}/runs", get(get_event_runs))
-        // Event Handlers (read-only, project-scoped)
-        .route(
-            "/v1/projects/{project_id_or_slug}/event-handlers",
-            get(list_project_event_handlers),
-        )
-        // Schedules (read-only, project-scoped)
-        .route(
-            "/v1/projects/{project_id_or_slug}/schedules",
-            get(list_project_schedules),
-        )
         // Sessions
         .route(
             "/v1/sessions",
@@ -521,7 +529,8 @@ pub(crate) fn build_router(
             api_key_auth_middleware,
         ));
 
-    let management_routes = crate::handlers::management::router(state.clone());
+    let org_routes =
+        crate::handlers::orgs::router(state.clone(), env_admin_routes(), max_body_size);
 
     // Domain resolution cache for custom domains (mcp.example.com, etc.)
     let domain_cache = DomainCache::new();
@@ -531,7 +540,7 @@ pub(crate) fn build_router(
     Router::new()
         .merge(public_routes)
         .merge(api_v1_routes)
-        .merge(management_routes)
+        .merge(org_routes)
         .layer(middleware::from_fn_with_state(
             client_ip_policy,
             client_ip_middleware,

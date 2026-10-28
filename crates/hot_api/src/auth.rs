@@ -1,4 +1,5 @@
 mod route_permissions;
+pub(crate) use route_permissions::authorize as authorize_route;
 
 use crate::ApiStateData;
 use crate::domain_resolver::ResolvedDomain;
@@ -63,11 +64,9 @@ impl AuthContext {
                     return Err(StatusCode::UNAUTHORIZED);
                 }
                 let issuer_permissions =
-                    hot::db::management_key::ManagementKey::effective_runtime_permissions(
-                        db, &parent,
-                    )
-                    .await
-                    .map_err(|_| StatusCode::UNAUTHORIZED)?;
+                    hot::db::org_api_key::OrgApiKey::effective_env_permissions(db, &parent)
+                        .await
+                        .map_err(|_| StatusCode::UNAUTHORIZED)?;
                 parent.permissions = issuer_permissions.to_json();
                 let current = match self {
                     Self::ApiKey(_) => Self::ApiKey(parent),
@@ -429,10 +428,6 @@ async fn authenticate_token_inner(
     db: &Arc<DatabasePool>,
     token: &str,
 ) -> Result<(AuthContext, ApiKey), StatusCode> {
-    // Management credentials are a separate control-plane principal.
-    if token.starts_with("hm_") {
-        return Err(StatusCode::UNAUTHORIZED);
-    }
     if Session::is_session_token(token) {
         // ================================================================
         // Session token flow
@@ -464,7 +459,7 @@ async fn authenticate_token_inner(
         );
 
         parent_key.permissions =
-            hot::db::management_key::ManagementKey::effective_runtime_permissions(db, &parent_key)
+            hot::db::org_api_key::OrgApiKey::effective_env_permissions(db, &parent_key)
                 .await
                 .map_err(|_| StatusCode::UNAUTHORIZED)?
                 .to_json();
@@ -484,7 +479,7 @@ async fn authenticate_token_inner(
         match ApiKey::verify_api_key(db, token).await {
             Ok(Some(mut key)) => {
                 key.permissions =
-                    hot::db::management_key::ManagementKey::effective_runtime_permissions(db, &key)
+                    hot::db::org_api_key::OrgApiKey::effective_env_permissions(db, &key)
                         .await
                         .map_err(|_| StatusCode::UNAUTHORIZED)?
                         .to_json();
@@ -534,7 +529,7 @@ async fn authenticate_token_inner(
         );
 
         parent_key.permissions =
-            hot::db::management_key::ManagementKey::effective_runtime_permissions(db, &parent_key)
+            hot::db::org_api_key::OrgApiKey::effective_env_permissions(db, &parent_key)
                 .await
                 .map_err(|_| StatusCode::UNAUTHORIZED)?
                 .to_json();
@@ -594,7 +589,15 @@ pub async fn api_key_auth_middleware(
     let token = &auth_header[7..]; // Remove "Bearer " prefix
 
     // Authenticate via the shared path
-    let authenticated = authenticate_token(&db, token).await?;
+    let authenticated = match authenticate_token(&db, token).await {
+        Ok(authenticated) => authenticated,
+        Err(StatusCode::UNAUTHORIZED) if is_org_key_token(&db, token).await => {
+            return Ok(key_scope_mismatch(
+                "This route needs an environment API key; org API keys call /v1/orgs and /v1/api-keys",
+            ));
+        }
+        Err(status) => return Err(status),
+    };
 
     // If a custom domain was resolved, verify the credential belongs to the same environment.
     // This prevents using credentials from env A to access a custom domain pointing to env B.
@@ -664,6 +667,26 @@ pub async fn api_key_auth_middleware(
     request.extensions_mut().insert(authenticated.api_key);
 
     Ok(with_database_scope(scope, next.run(request)).await)
+}
+
+/// Whether a token that failed environment authentication is a valid org
+/// key, so the caller learns which kind of key the route needs.
+pub(crate) async fn is_org_key_token(db: &DatabasePool, token: &str) -> bool {
+    token.starts_with("hot_")
+        && hot::db::org_api_key::OrgApiKey::verify_token(db, token)
+            .await
+            .is_ok()
+}
+
+pub(crate) fn key_scope_mismatch(message: &str) -> Response {
+    (
+        StatusCode::FORBIDDEN,
+        Json(crate::models::ApiErrorResponse::new(
+            "key_scope_mismatch",
+            message,
+        )),
+    )
+        .into_response()
 }
 
 #[cfg(test)]
@@ -798,9 +821,9 @@ mod scope_tests {
     }
 
     #[tokio::test]
-    async fn management_ancestor_limits_runtime_keys_and_grandchildren() {
-        use hot::db::management_key::{CreateManagementKey, ManagementKey};
+    async fn org_key_ancestor_limits_minted_keys_and_their_sessions() {
         use hot::db::org::{CreateChild, Org};
+        use hot::db::org_api_key::{CreateOrgApiKey, MintEnvApiKey, OrgApiKey};
         let db = Arc::new(hot::db::test_db().await);
         let data = hot::db::insert_test_data(&db).await.unwrap();
         let DatabasePool::Sqlite(pool) = db.as_ref() else {
@@ -825,33 +848,42 @@ mod scope_tests {
         )
         .await
         .unwrap();
-        let (manager, manager_token) = ManagementKey::create_for_user(
+        let child_id = child.org.org_id;
+        let (issuer, issuer_token) = OrgApiKey::create_for_user(
             &db,
             data.org_id,
             data.user_id,
-            &CreateManagementKey {
-                name: "issuer".into(),
-                capabilities: vec!["runtime-keys:create".into()],
-                target_org_ids: vec![child.org.org_id],
-                all_children: false,
-                delegation_permissions: Some(json!({"event:*": ["create", "read"]})),
-                expires_in_seconds: 3600,
+            &CreateOrgApiKey {
+                description: "issuer".into(),
+                permissions: json!({
+                    format!("org:{child_id}/env:*/api-key:*"): ["create"],
+                    format!("org:{child_id}/env:*/event:*"): ["create", "read"],
+                }),
+                expires_at: None,
             },
         )
         .await
         .unwrap();
-        assert!(authenticate_token(&db, &manager_token).await.is_err());
-        let (key_id, token) = manager
-            .issue_runtime_key(
+        // An org key is never a runtime principal.
+        assert!(authenticate_token(&db, &issuer_token).await.is_err());
+        assert!(is_org_key_token(&db, &issuer_token).await);
+        let effective = issuer.effective(&db).await.unwrap();
+        let (key_id, token, _) = issuer
+            .mint_env_key(
                 &db,
-                child.org.org_id,
+                &effective,
+                child_id,
                 child.env_id,
-                "child key",
-                &json!({"event:*": ["create", "read"]}),
+                &MintEnvApiKey {
+                    description: "child key".into(),
+                    permissions: json!({"event:*": ["create", "read"]}),
+                    expires_at: None,
+                },
             )
             .await
             .unwrap();
-        assert!(ManagementKey::verify_token(&db, &token).await.is_err());
+        assert!(OrgApiKey::verify_token(&db, &token).await.is_err());
+        assert!(!is_org_key_token(&db, &token).await);
         let (_, session_token) = Session::create(
             &db,
             &key_id,
@@ -869,34 +901,42 @@ mod scope_tests {
                 .auth_ctx
                 .has_permission("event:order", "read")
         );
-        sqlx::query(
-            "UPDATE management_key SET delegation_permissions = ? WHERE management_key_id = ?",
-        )
-        .bind(json!({"event:*": ["create"]}).to_string())
-        .bind(manager.management_key_id)
-        .execute(pool)
-        .await
-        .unwrap();
+        sqlx::query("UPDATE org_api_key SET permissions = ? WHERE org_api_key_id = ?")
+            .bind(json!({format!("org:{child_id}/env:*/event:*"): ["create"]}).to_string())
+            .bind(issuer.org_api_key_id)
+            .execute(pool)
+            .await
+            .unwrap();
         let narrowed = authenticate_token(&db, &session_token)
             .await
             .unwrap()
             .auth_ctx;
         assert!(narrowed.has_permission("event:order", "create"));
         assert!(!narrowed.has_permission("event:order", "read"));
+        // org:{child} grants never reach the root's own environment.
         assert!(
-            manager
-                .issue_runtime_key(
+            issuer
+                .mint_env_key(
                     &db,
+                    &issuer.effective(&db).await.unwrap(),
                     data.org_id,
                     data.env_id,
-                    "wrong target",
-                    &json!({"event:*": ["create"]})
+                    &MintEnvApiKey {
+                        description: "wrong target".into(),
+                        permissions: json!({"event:*": ["create"]}),
+                        expires_at: None,
+                    },
                 )
                 .await
                 .is_err()
         );
-        sqlx::query("UPDATE management_key SET expires_at = '2000-01-01T00:00:00Z' WHERE management_key_id = ?")
-            .bind(manager.management_key_id).execute(pool).await.unwrap();
+        sqlx::query(
+            "UPDATE org_api_key SET expires_at = '2000-01-01T00:00:00Z' WHERE org_api_key_id = ?",
+        )
+        .bind(issuer.org_api_key_id)
+        .execute(pool)
+        .await
+        .unwrap();
         assert!(authenticate_token(&db, &token).await.is_err());
         assert!(authenticate_token(&db, &session_token).await.is_err());
         assert!(narrowed.revalidate(&db).await.is_err());
