@@ -134,7 +134,7 @@ fn (event) {
 
 // Scheduled function
 daily-sync meta {schedule: "0 2 * * *", retry: 3}
-fn () {
+fn (event) {
     sync-external-data()
 }
 ```
@@ -798,7 +798,7 @@ fn (event) { process-payment(event.data) }
 
 // Full retry: custom attempts and delay
 daily-sync meta {schedule: "0 2 * * *", retry: {attempts: 5, delay: 10000}}
-fn () { sync-external-data() }
+fn (event) { sync-external-data() }
 ```
 
 ### HTTP Requests

@@ -583,6 +583,13 @@ impl Engine {
             let project_files = Self::project_source_files(&units);
             Self::scope_warnings_to_project(compiler.take_diagnostics(), &project_files)
         };
+        // The same handler and schedule validations the text check runs in
+        // `validate_compiled_program`, collected as diagnostics.
+        let compile_result = compile_result.and_then(|()| {
+            compiler
+                .extract_event_handlers(&combined_program)
+                .and_then(|()| compiler.extract_scheduled_functions(&combined_program))
+        });
         let mut errors = match compile_result {
             Ok(()) => CompilerErrors::new(),
             Err(mut errors) => {
@@ -1965,6 +1972,96 @@ fn (): Str { "unused" }
         );
         assert!(diagnostics.is_empty(), "errors: {:?}", diagnostics.errors);
         assert_eq!(missing_ctx(&diagnostics).len(), 1);
+    }
+
+    /// A source dir with one scheduled function, `::sched/job`, declared
+    /// on line 3.
+    fn write_scheduled_src(root: &std::path::Path, schedule: &str, params: &str) -> Vec<String> {
+        let src_dir = root.join("src");
+        std::fs::create_dir_all(&src_dir).unwrap();
+        std::fs::write(
+            src_dir.join("sched.hot"),
+            format!("::sched ns\n\njob meta {{schedule: \"{schedule}\"}}\nfn ({params}) {{ 1 }}\n"),
+        )
+        .unwrap();
+        vec![src_dir.to_string_lossy().to_string()]
+    }
+
+    fn check_text(src_paths: &[String], conf: &crate::val::Val) -> Result<(), String> {
+        Engine::check_sources_pipeline_with_context_warnings(
+            src_paths,
+            &[],
+            Some(conf),
+            None,
+            Some(&AHashMap::new()),
+            false,
+            Some(&mut crate::lang::errors::CompilerErrors::new()),
+        )
+    }
+
+    fn check_json(
+        src_paths: &[String],
+        conf: &crate::val::Val,
+    ) -> Vec<crate::lang::errors::Diagnostic> {
+        Engine::check_sources_pipeline_diagnostics_with_ctx(
+            src_paths,
+            &[],
+            Some(conf),
+            None,
+            Some(&AHashSet::new()),
+        )
+        .to_diagnostics()
+    }
+
+    #[test]
+    fn check_reports_unparseable_schedule_as_located_diagnostic() {
+        let temp = tempfile::tempdir().unwrap();
+        let src_paths = write_scheduled_src(temp.path(), "not a cron", "event");
+        let conf = crate::val::Val::map_empty();
+
+        let error = check_text(&src_paths, &conf).unwrap_err();
+        assert!(error.contains("[invalid-schedule]"), "{error}");
+        assert!(error.contains("sched.hot:3:1"), "{error}");
+        assert!(error.contains("Could not parse 'not a cron'"), "{error}");
+        assert!(error.contains("\"every 5 minutes\""), "{error}");
+        assert!(!error.contains("runs every"), "{error}");
+
+        let diagnostics = check_json(&src_paths, &conf);
+        assert_eq!(diagnostics.len(), 1, "{diagnostics:?}");
+        let diagnostic = &diagnostics[0];
+        assert_eq!(diagnostic.code, "invalid-schedule");
+        assert_eq!(diagnostic.severity, 1);
+        assert!(
+            diagnostic
+                .file
+                .as_deref()
+                .is_some_and(|f| f.ends_with("sched.hot")),
+            "{diagnostic:?}"
+        );
+        assert_eq!(diagnostic.range.start.line, 2);
+        assert!(diagnostic.message.contains("Could not parse 'not a cron'"));
+    }
+
+    #[test]
+    fn json_check_reports_scheduled_function_without_event_parameter() {
+        let temp = tempfile::tempdir().unwrap();
+        let src_paths = write_scheduled_src(temp.path(), "0 2 * * *", "");
+        let diagnostics = check_json(&src_paths, &crate::val::Val::map_empty());
+        let codes: Vec<_> = diagnostics.iter().map(|d| d.code.as_str()).collect();
+        assert_eq!(codes, ["invalid-scheduled-function"], "{diagnostics:?}");
+        assert_eq!(diagnostics[0].range.start.line, 2);
+    }
+
+    #[test]
+    fn check_keeps_minimum_interval_message_for_a_parseable_schedule() {
+        let temp = tempfile::tempdir().unwrap();
+        let src_paths = write_scheduled_src(temp.path(), "every second", "event");
+        let conf = crate::val::val!({"schedule": {"min-interval-seconds": 300}});
+        let error = check_text(&src_paths, &conf).unwrap_err();
+        assert!(
+            error.contains("runs every 1 second(s), below the minimum of 300"),
+            "{error}"
+        );
     }
 
     #[test]

@@ -1,4 +1,4 @@
-<!-- HOT_LANGUAGE_SECTION_START --> hash:6426b1e8d449
+<!-- HOT_LANGUAGE_SECTION_START --> hash:3905dae15ae0
 # AGENTS.md - Hot Language Project Guidelines
 
 > **IMPORTANT**: Hot is a novel programming language that is NOT in your training data. Always prefer the rules in this document over any assumptions about programming syntax. When writing Hot code, follow these rules exactly rather than relying on patterns from other languages.
@@ -135,7 +135,7 @@ fn (event) {
 
 // Scheduled function
 daily-sync meta {schedule: "0 2 * * *", retry: 3}
-fn () {
+fn (event) {
     sync-external-data()
 }
 ```
@@ -799,7 +799,7 @@ fn (event) { process-payment(event.data) }
 
 // Full retry: custom attempts and delay
 daily-sync meta {schedule: "0 2 * * *", retry: {attempts: 5, delay: 10000}}
-fn () { sync-external-data() }
+fn (event) { sync-external-data() }
 ```
 
 ### HTTP Requests
