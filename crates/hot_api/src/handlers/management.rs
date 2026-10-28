@@ -75,10 +75,29 @@ fn management_error(error: ManagementKeyError) -> ApiError {
     }
 }
 fn org_error(error: hot::db::org::OrgError) -> ApiError {
-    (
-        StatusCode::BAD_REQUEST,
-        Json(ApiErrorResponse::bad_request(&error.to_string())),
-    )
+    use hot::db::org::OrgError;
+    let (status, body) = match error {
+        OrgError::NotFound | OrgError::Database(sqlx::Error::RowNotFound) => (
+            StatusCode::NOT_FOUND,
+            ApiErrorResponse::new("not_found", "Organization not found"),
+        ),
+        OrgError::Database(error) => {
+            tracing::error!(%error, "Organization operation failed");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                ApiErrorResponse::internal_error("Organization operation failed"),
+            )
+        }
+        OrgError::Forbidden => (
+            StatusCode::FORBIDDEN,
+            ApiErrorResponse::new("forbidden", "Organization access denied"),
+        ),
+        error => (
+            StatusCode::BAD_REQUEST,
+            ApiErrorResponse::bad_request(&error.to_string()),
+        ),
+    };
+    (status, Json(body))
 }
 
 pub async fn management_auth_middleware(
