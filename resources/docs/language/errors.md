@@ -96,6 +96,18 @@ message match result {
 The `match` chooses an arm using the `Result.Ok` or `Result.Err` tag. Within the
 selected arm, `result` evaluates to that variant's payload.
 
+Other arms can sit beside the Result arms. They test the value an `Ok` holds
+and never match an `Err`. `Any` and `_` still match either variant:
+
+```hot
+label match find-status(id) {
+  Result.Err => "lookup failed"
+  "active" => "on"            // matches Ok("active")
+  Str (s) => `other: ${s}`    // s is the Str the Ok holds
+  _ => "not a string"
+}
+```
+
 ## Accepting a Result
 
 A parameter declared `Result` receives its argument as it is, an `Err`
