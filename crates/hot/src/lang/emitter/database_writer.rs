@@ -343,7 +343,7 @@ impl RunScopes {
 pub struct DatabaseWriter {
     shards: Arc<Vec<DatabaseWriterShard>>,
     run_scopes: Arc<StdMutex<RunScopes>>,
-    failed_runs: Arc<StdMutex<AHashSet<Uuid>>>,
+    failed_runs: Arc<StdMutex<AHashMap<Uuid, Instant>>>,
     pressure_stats: Option<Arc<DatabaseWriterPressureStats>>,
 }
 
@@ -354,7 +354,7 @@ impl DatabaseWriter {
         let database_required = db.try_read().map(|state| state.is_some()).unwrap_or(true);
         let mut shards = Vec::with_capacity(shard_count);
         let pressure_stats = Self::pressure_stats_from_env();
-        let failed_runs = Arc::new(StdMutex::new(AHashSet::new()));
+        let failed_runs = Arc::new(StdMutex::new(AHashMap::new()));
 
         for shard_idx in 0..shard_count {
             let (write_sender, mut write_receiver) = mpsc::unbounded_channel::<ScopedWrite>();
@@ -582,7 +582,7 @@ impl DatabaseWriter {
                     self.failed_runs
                         .lock()
                         .unwrap_or_else(|error| error.into_inner())
-                        .insert(run_id);
+                        .insert(run_id, Instant::now());
                     tracing::error!(%run_id, "DatabaseWriter rejected a changed execution scope");
                     return;
                 }
@@ -685,12 +685,13 @@ impl DatabaseWriter {
     }
 
     fn check_failures(&self, run_id: Option<Uuid>) -> Result<(), String> {
-        let failed = self
+        let mut failed = self
             .failed_runs
             .lock()
             .unwrap_or_else(|error| error.into_inner());
+        failed.retain(|_, at| at.elapsed() < std::time::Duration::from_secs(3600));
         let has_failure = match run_id {
-            Some(id) => failed.contains(&id),
+            Some(id) => failed.contains_key(&id),
             None => !failed.is_empty(),
         };
         if has_failure {
@@ -743,14 +744,23 @@ impl DatabaseWriter {
         shard_idx: usize,
         trigger: DatabaseWriterFlushTrigger,
         pressure_stats: Option<&DatabaseWriterPressureStats>,
-        failed_runs: &StdMutex<AHashSet<Uuid>>,
+        failed_runs: &StdMutex<AHashMap<Uuid, Instant>>,
         database_required: bool,
     ) {
+        failed_runs
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .retain(|_, at| at.elapsed() < std::time::Duration::from_secs(3600));
         // A shard is a scheduling optimization, not an authorization boundary.
         // Preserve per-run ordering but never mix owners in a transaction.
         let mut groups: Vec<(Option<DatabaseScope>, Vec<DatabaseWrite>)> = Vec::new();
         for entry in std::mem::take(writes) {
-            if let Some((_, batch)) = groups.iter_mut().find(|(scope, _)| *scope == entry.scope) {
+            if let Some((_, batch)) = groups.iter_mut().find(|(scope, batch)| {
+                *scope == entry.scope
+                    && batch
+                        .first()
+                        .is_some_and(|write| write.run_id() == entry.write.run_id())
+            }) {
                 batch.push(entry.write);
             } else {
                 groups.push((entry.scope, vec![entry.write]));
@@ -761,11 +771,9 @@ impl DatabaseWriter {
             failed_runs
                 .lock()
                 .unwrap_or_else(|error| error.into_inner())
-                .extend(
-                    groups
-                        .iter()
-                        .flat_map(|(_, batch)| batch.iter().map(DatabaseWrite::run_id)),
-                );
+                .extend(groups.iter().flat_map(|(_, batch)| {
+                    batch.iter().map(|write| (write.run_id(), Instant::now()))
+                }));
             tracing::error!("Configured database disappeared before emitter flush");
             return;
         }
@@ -778,7 +786,7 @@ impl DatabaseWriter {
                     failed_runs
                         .lock()
                         .unwrap_or_else(|error| error.into_inner())
-                        .extend(batch.iter().map(DatabaseWrite::run_id));
+                        .extend(batch.iter().map(|write| (write.run_id(), Instant::now())));
                     tracing::error!(
                         writes = batch.len(),
                         "DatabaseWriter rejected missing execution scope"
@@ -802,7 +810,7 @@ impl DatabaseWriter {
                 failed_runs
                     .lock()
                     .unwrap_or_else(|error| error.into_inner())
-                    .extend(run_ids);
+                    .extend(run_ids.into_iter().map(|id| (id, Instant::now())));
             }
         }
     }
