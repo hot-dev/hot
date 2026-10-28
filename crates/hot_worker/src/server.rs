@@ -1229,6 +1229,18 @@ impl TryFrom<Message> for ResponseMessage {
 
 pub const DEFAULT_WORKER_THREADS: usize = 2;
 pub const DEFAULT_RUN_TIMEOUT_SECONDS: u64 = 300; // 5 minutes
+/// Default cap on a function's own `timeout` meta (`worker.max-run-timeout`).
+///
+/// One hour is twice the half-hour model loops that motivated per-handler
+/// timeouts, while still bounding how long one run can hold an executor slot
+/// and a blocking VM thread. The cap also sets the hot:event orphan-reclaim
+/// floor (see `min_event_orphan_idle_floor_ms`), so raising it slows the
+/// redelivery of a crashed worker's in-flight events by the same amount.
+/// Longer work belongs in a task, whose timeout goes to 24 hours.
+pub const DEFAULT_MAX_RUN_TIMEOUT_SECONDS: u64 = 3_600; // 1 hour
+/// Ceiling for `worker.max-run-timeout`: a run must end well before the
+/// maintenance reaper fails runs still `running` after 25 hours.
+pub const MAX_RUN_TIMEOUT_CEILING_SECONDS: u64 = 86_400; // 24 hours
 /// Extra grace period granted after `run-timeout` for a cooperatively-cancelled
 /// VM to unwind before the worker hard-detaches the blocking thread and frees the
 /// executor slot. Only applied when `worker.cancel-on-timeout` is enabled.
@@ -1449,9 +1461,12 @@ async fn acquire_blocking_execution_slot(
 /// A handler that claimed an event may legally spend up to
 /// `EVENT_SOURCE_RETRIEVAL_TIMEOUT` resolving sources (including a cold
 /// bundle download), plus `EVENT_SETUP_TIMEOUT` in post-retrieval
-/// preparation (including blocking-slot admission), then `run-timeout` plus
+/// preparation (including blocking-slot admission), then its run budget plus
 /// `RUN_TIMEOUT_HARD_GRACE` executing, before the worker gives up — and the
-/// event is only ACKed after that. This floor budgets that FULL legal
+/// event is only ACKed after that. A run's budget is its function's `timeout`
+/// meta (else `run-timeout`) up to `max-run-timeout`, and reclaim applies one
+/// idle threshold to every delivery, so the floor takes the cap: no run a
+/// worker allows can outlive it. This floor budgets that FULL legal
 /// pre-ACK lifetime: for a SINGLE-handler event, reclaiming below it would
 /// XAUTOCLAIM an un-ACKed event whose handler is still legally live and start
 /// a duplicate execution on another worker. The extra 5s covers result-flush
@@ -1478,8 +1493,8 @@ async fn acquire_blocking_execution_slot(
 /// `queue.event-orphan-idle-ms` (the configured value is only floored here,
 /// never lowered) is therefore no longer required for multi-handler events,
 /// though it remains available for a wider reclaim margin.
-fn min_event_orphan_idle_floor_ms(run_timeout: std::time::Duration) -> u64 {
-    run_timeout
+fn min_event_orphan_idle_floor_ms(max_run_timeout: std::time::Duration) -> u64 {
+    max_run_timeout
         .saturating_add(EVENT_SOURCE_RETRIEVAL_TIMEOUT)
         .saturating_add(EVENT_SETUP_TIMEOUT)
         .saturating_add(RUN_TIMEOUT_HARD_GRACE)
@@ -4325,7 +4340,13 @@ async fn execute_single_event_handler_inner(
         event_message.body.execution_context.retry_attempt
     };
 
-    let run_timeout = get_run_timeout(worker_conf);
+    // Until the run's program loads and names its function's own budget, it
+    // has the default one.
+    let default_budget = RunBudget::new(
+        None,
+        get_run_timeout(worker_conf),
+        get_max_run_timeout(worker_conf),
+    );
 
     let mut _execution_context = ExecutionContext::new_with_event_and_origin(
         run_id,
@@ -4360,6 +4381,17 @@ async fn execute_single_event_handler_inner(
 
     // Build the function name in the format expected: namespace/variable
     let function_name = format!("{}/{}", event_handler.ns, event_handler.var);
+    // The function whose `timeout` meta sets the run's budget: the target of
+    // a call or a schedule, which run through hot-std's generic handlers, or
+    // else the handler itself.
+    let timeout_function = if event_message.body.event.event_type == "hot:call"
+        || event_message.body.event.event_type == "hot:schedule"
+    {
+        extract_target_function_from_event(&event_message.body.event.event_data)
+    } else {
+        None
+    }
+    .unwrap_or_else(|| function_name.clone());
 
     debug!(
         "Executing event handler function: {} with event: {}",
@@ -4844,12 +4876,13 @@ async fn execute_single_event_handler_inner(
     // setup watchdog immediately before starting the independent run budget.
     let _ = setup_complete.send(());
 
-    // Align the propagated parent deadline with the timeout clock that starts
-    // immediately below. Time spent queued behind detached blocking work is
-    // backpressure, not part of the newly admitted handler's run budget.
-    _execution_context.deadline_at = chrono::Duration::from_std(run_timeout)
-        .ok()
-        .map(|duration| chrono::Utc::now() + duration);
+    // The run budget starts now. Time spent queued behind detached blocking
+    // work is backpressure, not part of the newly admitted handler's budget.
+    // The blocking thread stamps the propagated parent deadline once it has
+    // resolved the function's own budget (see `arm_run_budget`).
+    let run_started = tokio::time::Instant::now();
+    let run_started_at = chrono::Utc::now();
+    let (budget_tx, budget_rx) = tokio::sync::oneshot::channel();
     let execution_context_for_events = _execution_context.clone();
 
     let external_cancel = if worker_conf.get_bool_or_default("worker.cancel-on-timeout", true) {
@@ -4859,14 +4892,6 @@ async fn execute_single_event_handler_inner(
     } else {
         None
     };
-    let cancel_timer = external_cancel.as_ref().map(|token| {
-        let token = Arc::clone(token);
-        let timeout = run_timeout;
-        tokio::spawn(async move {
-            tokio::time::sleep(timeout).await;
-            token.store(true, std::sync::atomic::Ordering::Relaxed);
-        })
-    });
 
     let handle = {
         // Clone/move all data needed for the blocking task
@@ -4874,7 +4899,8 @@ async fn execute_single_event_handler_inner(
         let event_object = event_object.clone();
         let worker_conf = worker_conf.clone();
         let emitter_for_events = emitter_for_events.clone();
-        let execution_context_for_events = execution_context_for_events.clone();
+        let mut execution_context_for_events = execution_context_for_events.clone();
+        let timeout_function = timeout_function.clone();
         let event_publisher = event_publisher.clone();
         let db = db.clone();
         let stream_publisher = stream_publisher.clone();
@@ -4923,6 +4949,14 @@ async fn execute_single_event_handler_inner(
                     debug!(
                         "✓ Calling function with cached bytecode for project '{}' (no parsing!)",
                         project_name
+                    );
+                    arm_run_budget(
+                        &cached.ast_program,
+                        &timeout_function,
+                        &worker_conf,
+                        run_started_at,
+                        &mut execution_context_for_events,
+                        budget_tx,
                     );
                     let call_started = std::time::Instant::now();
                     let result = hot::lang::engine::Engine::call_function_with_cached_bytecode(
@@ -5133,6 +5167,14 @@ async fn execute_single_event_handler_inner(
 
                     match cached_result {
                         Ok(cached) => {
+                            arm_run_budget(
+                                &cached.ast_program,
+                                &timeout_function,
+                                &worker_conf,
+                                run_started_at,
+                                &mut execution_context_for_events,
+                                budget_tx,
+                            );
                             let call_started = std::time::Instant::now();
                             let result =
                                 hot::lang::engine::Engine::call_function_with_cached_bytecode(
@@ -5173,8 +5215,10 @@ async fn execute_single_event_handler_inner(
 
     // Hard run-timeout backstop.
     //
-    // The cooperative cancel token (when `worker.cancel-on-timeout` is enabled)
-    // fires at `run-timeout` and asks the VM to unwind. This select! guarantees
+    // The run's budget is its function's `timeout` meta, else `run-timeout`,
+    // capped at `max-run-timeout` (see `run_budget_expired`). The cooperative
+    // cancel token (when `worker.cancel-on-timeout` is enabled) fires at the
+    // budget and asks the VM to unwind. This select! guarantees
     // the executor slot is freed even when the VM cannot observe cancellation
     // (tight native loop, blocking syscall, or `cancel-on-timeout` disabled). On
     // the backstop we record the run as failed and detach the blocking thread:
@@ -5186,11 +5230,12 @@ async fn execute_single_event_handler_inner(
     // non-cooperative orphan is still executing. Cooperative VMs unwind promptly
     // and avoid overlap; for non-cooperative ones the two can briefly run
     // concurrently, which is why event handlers must be idempotent.
-    let hard_timeout = if external_cancel.is_some() {
-        run_timeout.saturating_add(RUN_TIMEOUT_HARD_GRACE)
-    } else {
-        run_timeout
-    };
+    let budget_expired = run_budget_expired(
+        run_started,
+        default_budget,
+        budget_rx,
+        external_cancel.clone(),
+    );
     let vm_wait_started = std::time::Instant::now();
     let result = tokio::select! {
         joined = handle => {
@@ -5213,19 +5258,15 @@ async fn execute_single_event_handler_inner(
             );
             joined_result
         }
-        _ = tokio::time::sleep(hard_timeout) => {
-            if let Some(timer) = &cancel_timer {
-                timer.abort();
-            }
+        budget = budget_expired => {
             if let Some(token) = &external_cancel {
                 token.store(true, std::sync::atomic::Ordering::Relaxed);
             }
-            let timeout_secs = run_timeout.as_secs();
             error!(
                 "Event handler '{}' timed out after {}s for event '{}' (run {}); freeing executor slot",
-                function_name, timeout_secs, event_message.body.event.event_type, run_id
+                function_name, budget.timeout.as_secs(), event_message.body.event.event_type, run_id
             );
-            let timeout_error = format!("Run timed out after {} seconds", timeout_secs);
+            let timeout_error = budget.timeout_error();
             // Route the timeout through the emitter so it is treated like any other
             // run failure: the database writer applies the handler/schedule retry
             // policy (a timed-out run may be retried) and publishes the standard
@@ -5289,9 +5330,6 @@ async fn execute_single_event_handler_inner(
             return Err(timeout_error);
         }
     };
-    if let Some(timer) = cancel_timer {
-        timer.abort();
-    }
 
     // Handle result (rest of function continues as before)
     let result = match result {
@@ -5488,6 +5526,7 @@ pub fn get_resolved_conf(conf: Val) -> Val {
     let default_conf = val!({
         "threads": DEFAULT_WORKER_THREADS as i64,
         "run-timeout": DEFAULT_RUN_TIMEOUT_SECONDS as i64,
+        "max-run-timeout": DEFAULT_MAX_RUN_TIMEOUT_SECONDS as i64,
         "shutdown-timeout": DEFAULT_SHUTDOWN_TIMEOUT_SECONDS as i64,
         "vm-concurrency": "auto",
         "vm-memory-mb": 256i64,
@@ -5517,6 +5556,151 @@ pub fn get_run_timeout(worker_conf: &Val) -> std::time::Duration {
         DEFAULT_RUN_TIMEOUT_SECONDS
     };
     std::time::Duration::from_secs(timeout)
+}
+
+/// Get the cap on a function's own `timeout` meta from worker config (in
+/// seconds). It never falls below `worker.run-timeout`, so a function may
+/// always ask for the default, and never rises above
+/// `MAX_RUN_TIMEOUT_CEILING_SECONDS`.
+pub fn get_max_run_timeout(worker_conf: &Val) -> std::time::Duration {
+    let cap_secs = worker_conf.get_int_or_default(
+        "worker.max-run-timeout",
+        DEFAULT_MAX_RUN_TIMEOUT_SECONDS as i64,
+    );
+    let cap = if cap_secs > 0 {
+        (cap_secs as u64).min(MAX_RUN_TIMEOUT_CEILING_SECONDS)
+    } else {
+        DEFAULT_MAX_RUN_TIMEOUT_SECONDS
+    };
+    std::time::Duration::from_secs(cap).max(get_run_timeout(worker_conf))
+}
+
+/// How long one run may take: the `timeout` meta of the function it runs,
+/// else `worker.run-timeout`, capped at `worker.max-run-timeout`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct RunBudget {
+    timeout: std::time::Duration,
+    /// The meta's seconds, when the cap lowered them.
+    capped_from: Option<u64>,
+}
+
+impl RunBudget {
+    fn new(
+        meta_timeout: Option<u64>,
+        default: std::time::Duration,
+        cap: std::time::Duration,
+    ) -> Self {
+        match meta_timeout {
+            Some(secs) if std::time::Duration::from_secs(secs) > cap => Self {
+                timeout: cap,
+                capped_from: Some(secs),
+            },
+            Some(secs) => Self {
+                timeout: std::time::Duration::from_secs(secs),
+                capped_from: None,
+            },
+            None => Self {
+                timeout: default,
+                capped_from: None,
+            },
+        }
+    }
+
+    /// Resolve the budget of a run of `function` (`::ns/var`) from that
+    /// function's meta in the program the run executes. A value `hot check`
+    /// rejects leaves the default in place.
+    fn for_function(program: &hot::lang::ast::Program, function: &str, worker_conf: &Val) -> Self {
+        let meta_timeout = function
+            .rsplit_once('/')
+            .and_then(|(ns, var)| {
+                hot::lang::compiler::artifact_extraction::effective_function_meta(program, ns, var)
+            })
+            .and_then(|meta| hot::lang::compiler::artifact_extraction::run_timeout_from_meta(&meta))
+            .and_then(|timeout| match timeout {
+                Ok(secs) => Some(secs),
+                Err(message) => {
+                    warn!(function, "Ignoring invalid timeout meta: {}", message);
+                    None
+                }
+            });
+        let budget = Self::new(
+            meta_timeout,
+            get_run_timeout(worker_conf),
+            get_max_run_timeout(worker_conf),
+        );
+        if let Some(requested) = budget.capped_from {
+            warn!(
+                function,
+                requested_secs = requested,
+                timeout_secs = budget.timeout.as_secs(),
+                "Function timeout meta exceeds worker.max-run-timeout; capping the run"
+            );
+        }
+        budget
+    }
+
+    /// The failure a run records when it outlives this budget.
+    fn timeout_error(&self) -> String {
+        match self.capped_from {
+            Some(requested) => format!(
+                "Run timed out after {} seconds (its timeout of {} seconds is capped by worker.max-run-timeout)",
+                self.timeout.as_secs(),
+                requested
+            ),
+            None => format!("Run timed out after {} seconds", self.timeout.as_secs()),
+        }
+    }
+
+    /// `start` plus this budget, saturating far in the future.
+    fn deadline(&self, start: tokio::time::Instant) -> tokio::time::Instant {
+        start
+            .checked_add(self.timeout)
+            .unwrap_or_else(|| start + std::time::Duration::from_secs(86_400 * 365 * 30))
+    }
+}
+
+/// Time a run against its budget. Until its program loads a run has the
+/// default budget; the blocking thread then sends the function's own budget,
+/// which moves the deadline to `run_started` plus that budget. At the
+/// deadline the cooperative cancel token fires, and after
+/// `RUN_TIMEOUT_HARD_GRACE` more (none without a token) this returns the
+/// budget so the caller frees the executor slot.
+async fn run_budget_expired(
+    run_started: tokio::time::Instant,
+    default_budget: RunBudget,
+    mut budget_rx: tokio::sync::oneshot::Receiver<RunBudget>,
+    cancel: Option<Arc<std::sync::atomic::AtomicBool>>,
+) -> RunBudget {
+    let budget = tokio::select! {
+        biased;
+        Ok(budget) = &mut budget_rx => budget,
+        _ = tokio::time::sleep_until(default_budget.deadline(run_started)) => default_budget,
+    };
+    tokio::time::sleep_until(budget.deadline(run_started)).await;
+    if let Some(token) = cancel {
+        token.store(true, std::sync::atomic::Ordering::Relaxed);
+        tokio::time::sleep(RUN_TIMEOUT_HARD_GRACE).await;
+    }
+    budget
+}
+
+/// On the blocking thread, once a run's program has loaded: resolve the run's
+/// budget, stamp the deadline the VM caps child waits to, and hand the budget
+/// to `run_budget_expired`. A program that took longer than the default
+/// budget to load has already been timed out by then.
+fn arm_run_budget(
+    program: &hot::lang::ast::Program,
+    function: &str,
+    worker_conf: &Val,
+    run_started_at: chrono::DateTime<chrono::Utc>,
+    context: &mut ExecutionContext,
+    budget_tx: tokio::sync::oneshot::Sender<RunBudget>,
+) {
+    let budget = RunBudget::for_function(program, function, worker_conf);
+    context.deadline_at = chrono::Duration::from_std(budget.timeout)
+        .ok()
+        .and_then(|timeout| run_started_at.checked_add_signed(timeout));
+    let _ = budget_tx.send(budget);
 }
 
 pub async fn run(
@@ -5643,18 +5827,21 @@ pub async fn run_with_components_shared_context_and_db(
     // Invariant: reclaim idle must exceed the longest an un-ACKed
     // single-handler event can legally be alive on a healthy worker —
     // source retrieval plus post-retrieval setup (including blocking-slot
-    // admission) plus run budget plus hard grace. Events whose serial
-    // multi-handler execution outlives this window stay reclaim-safe via
-    // the PEL-touch keepalive (`spawn_event_lease_keepalive`), for which
-    // this floor is the crash backstop; see
-    // `min_event_orphan_idle_floor_ms`.
-    let min_event_orphan_idle_ms = min_event_orphan_idle_floor_ms(get_run_timeout(&worker_conf));
+    // admission) plus run budget plus hard grace. A function's `timeout`
+    // meta can raise its run budget up to `worker.max-run-timeout`, and the
+    // reclaim idle is one value for the whole stream, so it budgets that cap.
+    // Events whose serial multi-handler execution outlives this window stay
+    // reclaim-safe via the PEL-touch keepalive
+    // (`spawn_event_lease_keepalive`), for which this floor is the crash
+    // backstop; see `min_event_orphan_idle_floor_ms`.
+    let min_event_orphan_idle_ms =
+        min_event_orphan_idle_floor_ms(get_max_run_timeout(&worker_conf));
     let event_orphan_idle_ms = queue_orphan_idle_ms.max(min_event_orphan_idle_ms);
     if event_orphan_idle_ms != queue_orphan_idle_ms {
         tracing::warn!(
             configured_ms = queue_orphan_idle_ms,
             effective_ms = event_orphan_idle_ms,
-            "Raising hot:event orphan reclaim idle to stay beyond blocking-slot admission plus worker.run-timeout and avoid duplicate live handler execution"
+            "Raising hot:event orphan reclaim idle to stay beyond blocking-slot admission plus worker.max-run-timeout and avoid duplicate live handler execution"
         );
     }
 
@@ -9252,8 +9439,16 @@ mod tests {
 
     #[test]
     fn event_orphan_reclaim_floor_covers_slot_admission_wait() {
-        let run_timeout = std::time::Duration::from_secs(DEFAULT_RUN_TIMEOUT_SECONDS);
-        let legal_lifetime_ms = run_timeout
+        let worker_conf = val!({"worker": {"max-run-timeout": 7200}});
+        // The longest budget any function's `timeout` meta can get.
+        let longest = RunBudget::new(
+            Some(u64::MAX / 2),
+            get_run_timeout(&worker_conf),
+            get_max_run_timeout(&worker_conf),
+        );
+        assert_eq!(longest.timeout, std::time::Duration::from_secs(7200));
+        let legal_lifetime_ms = longest
+            .timeout
             .saturating_add(EVENT_SOURCE_RETRIEVAL_TIMEOUT)
             .saturating_add(EVENT_SETUP_TIMEOUT)
             .saturating_add(RUN_TIMEOUT_HARD_GRACE)
@@ -9262,12 +9457,120 @@ mod tests {
         // The floor must exceed the longest an un-ACKed SINGLE-handler event
         // can legally be alive on a healthy worker (source retrieval +
         // post-retrieval setup incl. admission wait + run budget + hard
-        // grace), or reclaim would start a duplicate live execution.
+        // grace), or reclaim would start a duplicate live execution. The run
+        // budget is the cap, since reclaim cannot know a delivery's own.
         // Multi-handler events can legally exceed the floor; the PEL-touch
         // keepalive keeps those visibly alive, with this floor as its crash
         // backstop — see `min_event_orphan_idle_floor_ms` docs.
-        assert!(min_event_orphan_idle_floor_ms(run_timeout) > legal_lifetime_ms);
+        assert!(
+            min_event_orphan_idle_floor_ms(get_max_run_timeout(&worker_conf)) > legal_lifetime_ms
+        );
         assert!(min_event_orphan_idle_floor_ms(std::time::Duration::MAX) > 0);
+    }
+
+    #[test]
+    fn max_run_timeout_defaults_and_stays_between_the_default_and_the_ceiling() {
+        let secs = std::time::Duration::from_secs;
+        assert_eq!(get_max_run_timeout(&val!({})), secs(3_600));
+        assert_eq!(
+            get_max_run_timeout(&val!({"worker": {"max-run-timeout": 1800}})),
+            secs(1_800)
+        );
+        assert_eq!(
+            get_max_run_timeout(&val!({"worker": {"max-run-timeout": 0}})),
+            secs(3_600)
+        );
+        // A function may always ask for the default.
+        assert_eq!(
+            get_max_run_timeout(&val!({"worker": {"run-timeout": 600, "max-run-timeout": 60}})),
+            secs(600)
+        );
+        // A run ends before the maintenance reaper's 25-hour cutoff.
+        assert_eq!(
+            get_max_run_timeout(&val!({"worker": {"max-run-timeout": 200_000}})),
+            secs(86_400)
+        );
+    }
+
+    #[test]
+    fn run_budget_takes_the_function_timeout_up_to_the_cap() {
+        let secs = std::time::Duration::from_secs;
+        let (default, cap) = (secs(300), secs(3_600));
+
+        let none = RunBudget::new(None, default, cap);
+        assert_eq!(none.timeout, default);
+        assert_eq!(none.timeout_error(), "Run timed out after 300 seconds");
+        assert_eq!(RunBudget::new(Some(2), default, cap).timeout, secs(2));
+        assert_eq!(
+            RunBudget::new(Some(1_800), default, cap).timeout,
+            secs(1_800)
+        );
+        assert_eq!(RunBudget::new(Some(3_600), default, cap).capped_from, None);
+
+        let capped = RunBudget::new(Some(7_200), default, cap);
+        assert_eq!(capped.timeout, cap);
+        assert_eq!(capped.capped_from, Some(7_200));
+        assert_eq!(
+            capped.timeout_error(),
+            "Run timed out after 3600 seconds (its timeout of 7200 seconds is capped by worker.max-run-timeout)"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn run_budget_timer_moves_to_the_function_budget_then_grants_the_grace() {
+        let secs = std::time::Duration::from_secs;
+        let default = RunBudget::new(None, secs(300), secs(3_600));
+        let started = tokio::time::Instant::now();
+        let (budget_tx, budget_rx) = tokio::sync::oneshot::channel();
+        let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let timer = tokio::spawn(run_budget_expired(
+            started,
+            default,
+            budget_rx,
+            Some(Arc::clone(&cancel)),
+        ));
+        budget_tx
+            .send(RunBudget::new(Some(1_800), secs(300), secs(3_600)))
+            .unwrap();
+
+        // Past the default, short of the function's own budget.
+        tokio::time::sleep(secs(1_799)).await;
+        assert!(!cancel.load(std::sync::atomic::Ordering::Relaxed));
+        tokio::time::sleep(secs(2)).await;
+        assert!(
+            cancel.load(std::sync::atomic::Ordering::Relaxed),
+            "the cooperative cancel fires at the function's own budget"
+        );
+        assert!(!timer.is_finished(), "the hard grace follows the cancel");
+
+        let budget = timer.await.unwrap();
+        assert_eq!(budget.timeout, secs(1_800));
+        assert_eq!(started.elapsed(), secs(1_800) + RUN_TIMEOUT_HARD_GRACE);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn run_budget_timer_keeps_the_default_until_a_budget_arrives() {
+        let secs = std::time::Duration::from_secs;
+        let default = RunBudget::new(None, secs(300), secs(3_600));
+        let started = tokio::time::Instant::now();
+        // A program still loading at the default deadline gets the default,
+        // and without a cancel token there is no grace to wait out.
+        let (_budget_tx, budget_rx) = tokio::sync::oneshot::channel();
+        assert_eq!(
+            run_budget_expired(started, default, budget_rx, None).await,
+            default
+        );
+        assert_eq!(started.elapsed(), secs(300));
+
+        // So does a run whose load failed before it could send one.
+        let started = tokio::time::Instant::now();
+        let (budget_tx, budget_rx) = tokio::sync::oneshot::channel();
+        drop(budget_tx);
+        assert_eq!(
+            run_budget_expired(started, default, budget_rx, None).await,
+            default
+        );
+        assert_eq!(started.elapsed(), secs(300));
     }
 
     #[test]
@@ -9288,7 +9591,7 @@ mod tests {
         // gets at least two touch opportunities per reclaim window, so one
         // missed/failed touch cannot orphan it.
         let floor = min_event_orphan_idle_floor_ms(std::time::Duration::from_secs(
-            DEFAULT_RUN_TIMEOUT_SECONDS,
+            DEFAULT_MAX_RUN_TIMEOUT_SECONDS,
         ));
         assert!(event_keepalive_interval_ms(floor) * 3 <= floor);
     }
@@ -9626,6 +9929,273 @@ mod tests {
         }
         let _ = std::fs::remove_file(db_path);
         let _ = std::fs::remove_dir_all(cache_dir);
+    }
+
+    /// Answer `GET /<ms>` after that many milliseconds, so a handler can wait
+    /// on a real call for as long as a test needs.
+    async fn spawn_slow_http_server() -> String {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            while let Ok((mut socket, _)) = listener.accept().await {
+                tokio::spawn(async move {
+                    let mut request = Vec::new();
+                    let mut buffer = [0u8; 1024];
+                    while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+                        match socket.read(&mut buffer).await {
+                            Ok(0) | Err(_) => return,
+                            Ok(read) => request.extend_from_slice(&buffer[..read]),
+                        }
+                    }
+                    let delay_ms = String::from_utf8_lossy(&request)
+                        .split_whitespace()
+                        .nth(1)
+                        .and_then(|path| path.trim_start_matches('/').parse().ok())
+                        .unwrap_or(0);
+                    tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
+                    let _ = socket
+                        .write_all(
+                            b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok",
+                        )
+                        .await;
+                });
+            }
+        });
+        format!("http://{address}")
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn function_timeout_meta_sets_the_run_budget_up_to_the_cap() {
+        let (db, db_path) = migrated_sqlite_file_db().await;
+        let test_data = hot::db::insert_test_data(&db).await.unwrap();
+        let slow_server = spawn_slow_http_server().await;
+
+        // A deployed bundle of handlers that wait on the slow server.
+        let workspace = tempfile::tempdir().unwrap();
+        let src_dir = workspace.path().join("src");
+        std::fs::create_dir_all(&src_dir).unwrap();
+        std::fs::write(
+            src_dir.join("timeout_test.hot"),
+            r#"::timeout-test ns
+
+::http ::hot::http
+
+quick meta {on-event: "timeout-test:quick", timeout: 2}
+fn (event) {
+    ::http/get(`${event.data.url}/${event.data.wait}`).status
+}
+
+patient meta {on-event: "timeout-test:patient", timeout: 10}
+fn (event) {
+    ::http/get(`${event.data.url}/${event.data.wait}`).status
+}
+
+greedy meta {on-event: "timeout-test:greedy", timeout: 60}
+fn (event) {
+    ::http/get(`${event.data.url}/${event.data.wait}`).status
+}
+
+called meta {timeout: 10}
+fn (url: Str, wait: Int): Int {
+    ::http/get(`${url}/${wait}`).status
+}
+"#,
+        )
+        .unwrap();
+        // Like a deploy, the bundle leaves hot-std to the runtime.
+        let bundle = hot::bundle::create_bundle(
+            "timeout-test",
+            &[src_dir.to_string_lossy().to_string()],
+            &[],
+            &[],
+            true,
+            &[],
+        )
+        .unwrap();
+        let zip_path =
+            hot::bundle::write_bundle_zip(&bundle, &workspace.path().join("build")).unwrap();
+        let build_id = Uuid::now_v7();
+        Build::insert_build(
+            &db,
+            &build_id,
+            &test_data.project_id,
+            "timeout-test",
+            0,
+            Build::BUILD_TYPE_BUNDLE,
+            &test_data.user_id,
+        )
+        .await
+        .unwrap();
+        let build = Build::get_build(&db, &build_id).await.unwrap();
+        let prepared = extract_and_precompile_event_bundle(
+            std::fs::read(&zip_path).unwrap(),
+            workspace.path().join("extracted"),
+            build_id,
+            "timeout-test".to_string(),
+        )
+        .unwrap();
+        let build_path_cache = Arc::new(BuildPathCache::new());
+        build_path_cache.insert(build_id, prepared.extract_dir);
+
+        let execution_services =
+            Arc::new(WorkerExecutionServices::new(Arc::new(db.clone()), &val!({})).await);
+        let cache = Arc::new(hot::lang::cache::bytecode_cache::BytecodeCache::new(
+            workspace.path().join("cache"),
+        ));
+        let task_queue = Arc::new(
+            ProcessingQueue::<TaskRequest>::new(
+                QueueType::Memory,
+                format!("worker-timeout-meta-test-{}", Uuid::new_v4()),
+                None,
+                Serialization::Json,
+            )
+            .unwrap(),
+        );
+        // Run one event through the worker, timing it from the moment the
+        // handler is handed over.
+        let run = |event_type: &str, handler: (&str, &str), event_data: Val, worker_conf: Val| {
+            let event_id = Uuid::now_v7();
+            let stream_id = Uuid::now_v7();
+            let event_message = EventMessage {
+                id: event_id,
+                head: AHashMap::new(),
+                body: hot::lang::event::queue::EventMessageBody {
+                    event: hot::lang::event::Event {
+                        event_id,
+                        env_id: test_data.env_id,
+                        stream_id,
+                        event_type: event_type.to_string(),
+                        event_data,
+                        event_time: chrono::Utc::now(),
+                        target_project_id: None,
+                        target_project_name: None,
+                    },
+                    execution_context: ExecutionContext::new(
+                        Uuid::now_v7(),
+                        stream_id,
+                        hot::db::run::RunType::Event.as_id(),
+                        Some(test_data.env_id),
+                        Some(test_data.user_id),
+                        Some(test_data.org_id),
+                        None,
+                    ),
+                },
+            };
+            let event_handler = EventHandler {
+                event_handler_id: Uuid::now_v7(),
+                build_id,
+                event_type: event_type.to_string(),
+                ns: handler.0.to_string(),
+                var: handler.1.to_string(),
+                meta: None,
+                value: None,
+                file: None,
+                line: None,
+                column: None,
+                position: None,
+            };
+            let (db, build, cache, build_path_cache, task_queue, execution_services) = (
+                db.clone(),
+                build.clone(),
+                Arc::clone(&cache),
+                Arc::clone(&build_path_cache),
+                Arc::clone(&task_queue),
+                Arc::clone(&execution_services),
+            );
+            let env_id = test_data.env_id;
+            async move {
+                let shutdown_coordinator = Arc::new(ShutdownCoordinator::new(1));
+                let run_id = Uuid::now_v7();
+                shutdown_coordinator.register_run(run_id);
+                let started = std::time::Instant::now();
+                let result = execute_single_event_handler(
+                    &db,
+                    &build,
+                    &env_id,
+                    &worker_conf,
+                    &event_handler,
+                    &event_message,
+                    None,
+                    None,
+                    None,
+                    cache,
+                    shutdown_coordinator,
+                    run_id,
+                    build_path_cache,
+                    None,
+                    None,
+                    task_queue,
+                    execution_services,
+                    Arc::new(Semaphore::new(4)),
+                )
+                .await;
+                (result, started.elapsed())
+            }
+        };
+        let secs = std::time::Duration::from_secs_f64;
+        // A detached VM keeps waiting on its call after a hard timeout, so
+        // the hard timeout lands exactly at the budget without the grace.
+        let no_cancel = |run_timeout: i64, max_run_timeout: i64| {
+            val!({"worker": {
+                "run-timeout": run_timeout,
+                "max-run-timeout": max_run_timeout,
+                "cancel-on-timeout": false,
+            }})
+        };
+
+        // `timeout: 2` ends the run at 2 seconds, well short of the default.
+        let (result, elapsed) = run(
+            "timeout-test:quick",
+            ("::timeout-test", "quick"),
+            val!({"url": slow_server.clone(), "wait": 30_000}),
+            no_cancel(30, 3_600),
+        )
+        .await;
+        assert_eq!(result.unwrap_err(), "Run timed out after 2 seconds");
+        assert!(elapsed >= secs(2.0) && elapsed < secs(10.0), "{elapsed:?}");
+
+        // `timeout: 10` outlives a 2-second default.
+        let (result, elapsed) = run(
+            "timeout-test:patient",
+            ("::timeout-test", "patient"),
+            val!({"url": slow_server.clone(), "wait": 3_500}),
+            no_cancel(2, 3_600),
+        )
+        .await;
+        result.unwrap();
+        assert!(elapsed >= secs(3.5), "{elapsed:?}");
+
+        // `timeout: 60` above a 3-second cap ends at the cap, and says so.
+        let (result, elapsed) = run(
+            "timeout-test:greedy",
+            ("::timeout-test", "greedy"),
+            val!({"url": slow_server.clone(), "wait": 30_000}),
+            no_cancel(2, 3),
+        )
+        .await;
+        assert_eq!(
+            result.unwrap_err(),
+            "Run timed out after 3 seconds (its timeout of 60 seconds is capped by worker.max-run-timeout)"
+        );
+        assert!(elapsed >= secs(3.0) && elapsed < secs(10.0), "{elapsed:?}");
+
+        // A call takes the called function's timeout, not the generic
+        // call handler's default.
+        let (result, elapsed) = run(
+            "hot:call",
+            ("::hot::lang", "call-event-handler"),
+            val!({"fn": "::timeout-test/called", "args": [slow_server.clone(), 3_500]}),
+            no_cancel(2, 3_600),
+        )
+        .await;
+        result.unwrap();
+        assert!(elapsed >= secs(3.5), "{elapsed:?}");
+
+        if let DatabasePool::Sqlite(pool) = &db {
+            pool.close().await;
+        }
+        let _ = std::fs::remove_file(db_path);
     }
 
     #[tokio::test]

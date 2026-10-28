@@ -89,6 +89,48 @@ trace.
 
 Runs with `"retry"` metadata that fail are temporarily set to `pending_retry` until the retry executes. See [Retries](/docs/retries) for details.
 
+### Run Timeouts
+
+Each run has a timeout: the [`timeout` metadata](/docs/language/meta#run-timeout)
+of the function it starts with, in seconds, or else the worker's
+`worker.run-timeout`. The worker caps a function's own timeout at
+`worker.max-run-timeout`.
+
+```hot
+draft-policy
+meta {on-event: "drafting:requested", timeout: 1800}
+fn (event) {
+  run-drafting-loop(event.data)
+}
+```
+
+| Setting | Environment variable | Default | Meaning |
+|---------|----------------------|---------|---------|
+| `worker.run-timeout` | `HOT_WORKER_RUN_TIMEOUT` | `300` | Timeout of a run whose function sets none |
+| `worker.max-run-timeout` | `HOT_WORKER_MAX_RUN_TIMEOUT` | `3600` | Cap on a function's own `timeout`; at most `86400` |
+| `worker.cancel-on-timeout` | `HOT_WORKER_CANCEL_ON_TIMEOUT` | `true` | Ask a timed-out run to stop before freeing its slot |
+
+The clock starts when the worker hands the run to a VM thread, so loading the
+program counts against it, and until the program has loaded the run has the
+default timeout. Waits inside the run, such as `::hot::task/await`, are capped
+to the time it has left.
+
+When a run reaches its timeout, the worker asks it to stop and gives it 5 more
+seconds to unwind. Then it records the run as `failed` with
+`Run timed out after N seconds` and frees the executor slot. When the cap
+lowered the function's own timeout, the message says so:
+`Run timed out after 3600 seconds (its timeout of 7200 seconds is capped by worker.max-run-timeout)`.
+A timed-out run is retried under its `retry` policy, like any other failure.
+
+The cap also sets how long Hot waits before another worker takes over an event
+whose worker stopped responding. A run may legally last up to the cap, so the
+reclaim window (`queue.event-orphan-idle-ms`, raised as needed) always covers
+the cap plus handler setup. A working worker keeps its claim fresh for as long
+as a run executes, so a long run is not handed to another worker while it is
+alive. The cost of a higher cap is that a crashed worker's in-flight events
+wait that much longer to run again. For work longer than an hour, start a
+[task](/docs/tasks) instead.
+
 ### Run Data
 
 Every run captures:
@@ -266,7 +308,7 @@ Hot guarantees **at-least-once delivery** for events:
 
 Delivery is optimized for durability and throughput, not strict global ordering. Concurrent workers may process different events from the same stream at the same time, and retries or infrastructure redelivery can arrive after newer events. Queue message fields are additive so rolling deploys can read older messages; workers hydrate the authoritative event payload from the database before routing.
 
-Handlers should be idempotent when they perform external side effects, because the same event can be delivered more than once after a retry, worker crash, Redis pending-entry reclaim, or task reconciliation pass. This also applies to run timeouts: when a handler exceeds its run timeout it is recorded as a failure and retried according to its retry policy. The worker cancels the timed-out run cooperatively, but a handler stuck in non-cooperative work (a tight native loop or blocking syscall) can keep running in the background while its retry begins, so the two attempts may briefly overlap.
+Handlers should be idempotent when they perform external side effects, because the same event can be delivered more than once after a retry, worker crash, Redis pending-entry reclaim, or task reconciliation pass. This also applies to [run timeouts](#run-timeouts): when a handler exceeds its run timeout it is recorded as a failure and retried according to its retry policy. The worker cancels the timed-out run cooperatively, but a handler stuck in non-cooperative work (a tight native loop or blocking syscall) can keep running in the background while its retry begins, so the two attempts may briefly overlap.
 
 ## Streams
 
