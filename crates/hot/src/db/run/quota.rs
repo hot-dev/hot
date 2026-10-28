@@ -124,6 +124,12 @@ impl Run {
 // inserts that reference the org, and only when the account has a run limit:
 // an unlimited account has no count to protect, and a racing delivery of the
 // same run is settled by the ledger's primary key.
+
+/// The task an infrastructure retry ultimately retries: walk parent_task_id
+/// while the current row is an infrastructure retry, within the run's
+/// environment. A run that isn't a task, or isn't a retry, maps to itself.
+const LOGICAL_RUN: &str = "WITH RECURSIVE lineage(task_id,parent_task_id,infra_retry_count,depth) AS (SELECT task_id,parent_task_id,infra_retry_count,0 FROM task WHERE task_id=$1 AND env_id=$2 UNION ALL SELECT p.task_id,p.parent_task_id,p.infra_retry_count,l.depth+1 FROM task p JOIN lineage l ON p.task_id=l.parent_task_id WHERE l.infra_retry_count>0 AND l.depth<100 AND p.env_id=$2) SELECT task_id FROM lineage ORDER BY depth DESC LIMIT 1";
+
 macro_rules! admission {
     ($name:ident, $connection:ty, $lock:literal, $lock_first:literal, $usage:ident) => {
         pub(crate) async fn $name(
@@ -159,6 +165,11 @@ macro_rules! admission {
             if !admitted {
                 return Err(RunError::Suspended("Run environment or account is suspended".into()));
             }
+            // An infrastructure retry is the run it retries, so it reuses that
+            // admission; a user-requested retry (infra_retry_count 0) is new.
+            let logical: Option<Uuid> = sqlx::query_scalar(LOGICAL_RUN)
+                .bind(run_id).bind(env_id).fetch_optional(&mut *conn).await?;
+            let run_id = logical.unwrap_or(run_id);
             let prior: Option<(Uuid, Uuid)> = sqlx::query_as(
                 "SELECT org_id,env_id FROM run_admission WHERE run_id=$1"
             ).bind(run_id).fetch_optional(&mut *conn).await?;
@@ -309,6 +320,34 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(left, vec![recent]);
+    }
+
+    #[tokio::test]
+    async fn infrastructure_retries_reuse_the_original_tasks_admission() {
+        let (db, _, children) = fixture(1).await;
+        let DatabasePool::Sqlite(pool) = &db else {
+            unreachable!()
+        };
+        let (org, env) = children[0];
+        let original = Uuid::now_v7();
+        let retry = Uuid::now_v7();
+        for (task, parent, retries) in [(original, None, 0), (retry, Some(original), 1)] {
+            sqlx::query("INSERT INTO task(task_id,env_id,stream_id,build_id,function_name,task_type,parent_task_id,infra_retry_count) VALUES(?,?,?,?,'::app/work','code',?,?)")
+                .bind(task).bind(env).bind(Uuid::now_v7()).bind(Uuid::now_v7())
+                .bind(parent).bind(retries).execute(pool).await.unwrap();
+        }
+        Run::admit_execution(&db, &org, &env, &original)
+            .await
+            .unwrap();
+        // The month's one run is the original task, and its retry is that run.
+        Run::admit_execution(&db, &org, &env, &retry)
+            .await
+            .expect("an infrastructure retry reuses its task's admission");
+        assert!(
+            Run::admit_execution(&db, &org, &env, &Uuid::now_v7())
+                .await
+                .is_err()
+        );
     }
 
     /// An annual plan, or a free plan that never renews, keeps its first
