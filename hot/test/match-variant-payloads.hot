@@ -1,0 +1,100 @@
+// Inside an `Enum.Variant` match arm, the arm's binding and the matched
+// variable hold the variant's payload when it is not a record: a Vec, a Str,
+// an Int. Previously they held the variant, which only field access reads
+// through, so a Vec payload had a length of 2 (its `$type` and `$val`). A
+// record variant keeps the variant: its fields read through, and it can
+// still be passed on as the enum.
+::hot::test::match-variant-payloads ns
+meta ["test"]
+
+Ask type { step: Str }
+Circle type { radius: Dec }
+
+Status enum { Open(Vec), NotOwed(Str), Count(Int), Ring(Circle), Done }
+
+Creature enum open { Dog }
+Label type Str where gt(length(%), 0)
+Label -> Creature.Named
+
+open-steps fn (): Status {
+    Status.Open([Ask(step: "a"), Ask(step: "b"), Ask(step: "c")])
+}
+
+owed fn match (s: Status): Any {
+    Status.Open => { s }
+    Status.NotOwed => { s }
+    Status.Count => { s }
+    Status.Ring => { s }
+    Status.Done => { s }
+}
+
+test-vec-payload-binding
+meta ["test"] fn () {
+    steps match open-steps() {
+        Status.Open (owed) => { owed }
+        _ => { null }
+    }
+    assert(is-vec(steps), "the binding is the Vec payload")
+    assert-eq(3, length(steps), "the Vec keeps every step")
+    assert(is-type(first(steps), Ask), "the steps keep their type")
+    assert-eq("b", steps[1].step, "the steps index like a Vec")
+}
+
+test-vec-payload-subject
+meta ["test"] fn () {
+    s open-steps()
+    steps match s {
+        Status.Open => { map(s, %.step) }
+        _ => { null }
+    }
+    assert-eq(["a", "b", "c"], steps, "the matched variable is the Vec payload")
+    assert(is-type(s, Status.Open), "outside the arm it is still the variant")
+}
+
+test-scalar-payloads
+meta ["test"] fn () {
+    reason match Status.NotOwed("why") {
+        Status.NotOwed (why) => { why }
+        _ => { null }
+    }
+    assert-eq("why", reason, "a Str payload binds as the Str")
+    assert(is-str(reason), "the Str payload is a Str")
+    assert-eq(8, match Status.Count(7) { Status.Count (n) => { add(n, 1) } _ => { 0 } },
+        "an Int payload binds as the Int")
+}
+
+test-record-payload-keeps-the-variant
+meta ["test"] fn () {
+    ring match Status.Ring(radius: 2.0) {
+        Status.Ring (c) => { c }
+        _ => { null }
+    }
+    assert(is-type(ring, Status.Ring), "a record variant arm keeps the variant")
+    assert-eq(2.0, ring.radius, "its payload fields read through")
+}
+
+test-fn-match-parameter-is-payload
+meta ["test"] fn () {
+    assert-eq("why", owed(Status.NotOwed("why")), "a fn match parameter is the payload")
+    assert-eq(3, length(owed(open-steps())), "a Vec payload through fn match")
+    assert(is-type(owed(Status.Done), Status.Done), "a unit variant stays the variant")
+}
+
+test-arrow-variant-payload
+meta ["test"] fn () {
+    name match Creature.Named("Rex") {
+        Creature.Named (n) => { n }
+        _ => { null }
+    }
+    assert-eq("Rex", name, "an arrow-enrolled variant binds its Str payload")
+}
+
+test-field-subject-is-not-shadowed
+meta ["test"] fn () {
+    order {id: "o-1", status: Status.NotOwed("paid")}
+    seen match order.status {
+        Status.NotOwed (why) => { [order.id, why] }
+        _ => { null }
+    }
+    assert-eq(["o-1", "paid"], seen, "matching a field leaves the outer variable alone")
+}
