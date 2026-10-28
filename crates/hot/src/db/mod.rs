@@ -178,8 +178,10 @@ pub use org_note::{OrgNote, OrgNoteError};
 pub use project::{Project, ProjectError};
 pub use run::{Run, RunError, RunStatus, RunStatusParseError};
 pub use schedule::{
-    AT_SCHEDULE_PREFIX, Schedule, ScheduleError, SchedulePolicy, ScheduleType, ScheduleWithProject,
-    parse_schedule_expression, validate_recurring_schedule_interval,
+    AT_SCHEDULE_PREFIX, RECURRING_SCHEDULE_FORMS, Schedule, ScheduleError,
+    ScheduleIntervalValidation, SchedulePolicy, ScheduleType, ScheduleWithProject,
+    normalize_recurring_schedule_expression, parse_schedule_expression,
+    validate_recurring_schedule_interval,
 };
 pub use schedule_log::{ScheduleLog, ScheduleLogError};
 pub use scheduler_state::{SchedulerState, SchedulerStateError};

@@ -77,23 +77,52 @@ fn stricter_limit(a: i64, b: i64) -> i64 {
     }
 }
 
+/// The recurring schedule forms `meta {schedule: ...}` accepts, for
+/// diagnostics on a schedule that does not parse.
+pub const RECURRING_SCHEDULE_FORMS: &str = "Use a cron expression such as \"0 2 * * *\" or \"0 30 9 * * MON\" (with seconds), a shortcut such as \"@daily\" or \"@hourly\", or an English schedule such as \"every 5 minutes\", \"every day at 9am\" or \"every Monday at 2 PM\"";
+
 #[derive(Debug, Clone)]
-pub struct ScheduleIntervalValidation {
-    pub original: String,
-    pub normalized_cron: String,
-    pub observed_interval_secs: i64,
-    pub required_interval_secs: i64,
+pub enum ScheduleIntervalValidation {
+    /// The schedule is not a cron expression or a supported English schedule.
+    Unparseable { original: String, reason: String },
+    /// The schedule parses but has no upcoming run to measure.
+    NoOccurrence {
+        original: String,
+        normalized_cron: String,
+        reason: String,
+    },
+    TooFrequent {
+        original: String,
+        normalized_cron: String,
+        observed_interval_secs: i64,
+        required_interval_secs: i64,
+    },
 }
 
 impl ScheduleIntervalValidation {
     pub fn message(&self) -> String {
-        format!(
-            "Schedule '{}' runs every {} second(s), below the minimum of {} second(s) (normalized cron: '{}')",
-            self.original,
-            self.observed_interval_secs,
-            self.required_interval_secs,
-            self.normalized_cron
-        )
+        match self {
+            Self::Unparseable { reason, .. } => {
+                format!("{}. {}", reason, RECURRING_SCHEDULE_FORMS)
+            }
+            Self::NoOccurrence {
+                original,
+                normalized_cron,
+                reason,
+            } => format!(
+                "Schedule '{}' has no upcoming run (normalized cron: '{}'): {}",
+                original, normalized_cron, reason
+            ),
+            Self::TooFrequent {
+                original,
+                normalized_cron,
+                observed_interval_secs,
+                required_interval_secs,
+            } => format!(
+                "Schedule '{}' runs every {} second(s), below the minimum of {} second(s) (normalized cron: '{}')",
+                original, observed_interval_secs, required_interval_secs, normalized_cron
+            ),
+        }
     }
 }
 
@@ -245,9 +274,9 @@ pub fn normalize_recurring_schedule_expression(expr: &str) -> Result<String, Str
             })?;
             Ok(converted_cron)
         }
-        Err(e) => Err(format!(
-            "Could not parse '{}' as cron or supported English schedule: {:?}",
-            expr, e
+        Err(_) => Err(format!(
+            "Could not parse '{}' as a cron expression or a supported English schedule",
+            expr
         )),
     }
 }
@@ -257,44 +286,32 @@ pub fn validate_recurring_schedule_interval(
     min_interval_secs: i64,
 ) -> Result<(), ScheduleIntervalValidation> {
     let required = min_interval_secs.max(TECHNICAL_MIN_RECURRING_INTERVAL_SECS);
-    let normalized = normalize_recurring_schedule_expression(expr).map_err(|message| {
-        ScheduleIntervalValidation {
+    let normalized = normalize_recurring_schedule_expression(expr).map_err(|reason| {
+        ScheduleIntervalValidation::Unparseable {
             original: expr.to_string(),
-            normalized_cron: message,
-            observed_interval_secs: 0,
-            required_interval_secs: required,
+            reason,
         }
     })?;
 
-    let cron = parse_cron(&normalized).map_err(|e| ScheduleIntervalValidation {
+    let cron = parse_cron(&normalized).map_err(|e| ScheduleIntervalValidation::Unparseable {
         original: expr.to_string(),
-        normalized_cron: e.to_string(),
-        observed_interval_secs: 0,
-        required_interval_secs: required,
+        reason: format!("Could not parse '{}' as cron: {}", normalized, e),
     })?;
 
-    let mut prev = match cron.find_next_occurrence(&Utc::now(), false) {
-        Ok(dt) => dt,
-        Err(e) => {
-            return Err(ScheduleIntervalValidation {
-                original: expr.to_string(),
-                normalized_cron: e.to_string(),
-                observed_interval_secs: 0,
-                required_interval_secs: required,
-            });
-        }
+    let no_occurrence = |e: croner::errors::CronError| ScheduleIntervalValidation::NoOccurrence {
+        original: expr.to_string(),
+        normalized_cron: normalized.clone(),
+        reason: e.to_string(),
     };
+    let mut prev = cron
+        .find_next_occurrence(&Utc::now(), false)
+        .map_err(no_occurrence)?;
 
     let mut min_gap = i64::MAX;
     for _ in 0..64 {
-        let next =
-            cron.find_next_occurrence(&prev, false)
-                .map_err(|e| ScheduleIntervalValidation {
-                    original: expr.to_string(),
-                    normalized_cron: e.to_string(),
-                    observed_interval_secs: 0,
-                    required_interval_secs: required,
-                })?;
+        let next = cron
+            .find_next_occurrence(&prev, false)
+            .map_err(no_occurrence)?;
         let gap = (next - prev).num_seconds();
         if gap > 0 {
             min_gap = min_gap.min(gap);
@@ -303,7 +320,7 @@ pub fn validate_recurring_schedule_interval(
     }
 
     if min_gap < required {
-        Err(ScheduleIntervalValidation {
+        Err(ScheduleIntervalValidation::TooFrequent {
             original: expr.to_string(),
             normalized_cron: normalized,
             observed_interval_secs: min_gap,
@@ -2694,13 +2711,58 @@ mod tests {
         assert!(validate_recurring_schedule_interval("every 5 minutes", 300).is_ok());
         assert!(validate_recurring_schedule_interval("0 */5 * * * *", 300).is_ok());
 
-        let err = validate_recurring_schedule_interval("every second", 300).unwrap_err();
-        assert_eq!(err.observed_interval_secs, 1);
-        assert_eq!(err.required_interval_secs, 300);
+        for expr in ["every second", "*/1 * * * * *"] {
+            let err = validate_recurring_schedule_interval(expr, 300).unwrap_err();
+            let ScheduleIntervalValidation::TooFrequent {
+                observed_interval_secs,
+                required_interval_secs,
+                ..
+            } = &err
+            else {
+                panic!("expected TooFrequent for '{}', got {:?}", expr, err);
+            };
+            assert_eq!(*observed_interval_secs, 1);
+            assert_eq!(*required_interval_secs, 300);
+            assert!(err.message().contains("below the minimum of 300"));
+        }
+    }
 
-        let err = validate_recurring_schedule_interval("*/1 * * * * *", 300).unwrap_err();
-        assert_eq!(err.observed_interval_secs, 1);
-        assert_eq!(err.required_interval_secs, 300);
+    #[test]
+    fn test_schedule_interval_policy_reports_unparseable_schedule() {
+        let err = validate_recurring_schedule_interval("not a cron", 1).unwrap_err();
+        assert!(
+            matches!(err, ScheduleIntervalValidation::Unparseable { .. }),
+            "{:?}",
+            err
+        );
+        let message = err.message();
+        assert!(
+            message.contains("Could not parse 'not a cron'"),
+            "{}",
+            message
+        );
+        assert!(!message.contains("runs every"), "{}", message);
+        assert!(message.contains(RECURRING_SCHEDULE_FORMS), "{}", message);
+    }
+
+    #[test]
+    fn test_recurring_schedule_forms_examples_parse() {
+        for expr in [
+            "0 2 * * *",
+            "0 30 9 * * MON",
+            "@daily",
+            "@hourly",
+            "every 5 minutes",
+            "every day at 9am",
+            "every Monday at 2 PM",
+        ] {
+            assert!(RECURRING_SCHEDULE_FORMS.contains(&format!("\"{}\"", expr)));
+            assert!(
+                validate_recurring_schedule_interval(expr, 1).is_ok(),
+                "'{}' should be an accepted schedule",
+                expr
+            );
+        }
     }
 
     #[test]

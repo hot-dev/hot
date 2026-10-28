@@ -1817,19 +1817,30 @@ impl Compiler {
                 let target = resolve_alias_target(program, ns_name, value);
                 let arity_value = target.map(|(_, v)| v).unwrap_or(value);
                 let arity = Self::get_function_arity(arity_value);
+                // Meta values carry no spans, so diagnostics point at the var.
+                let location = var
+                    .src
+                    .as_ref()
+                    .map(|src| crate::lang::errors::ErrorLocation {
+                        line: src.line,
+                        column: src.column,
+                        position: src.position,
+                        length: var_name.len(),
+                        file: src.file.as_ref().map(std::path::PathBuf::from),
+                    });
+                if let Err(message) =
+                    crate::db::normalize_recurring_schedule_expression(&cron_expression)
+                {
+                    self.validation_errors.push(
+                        crate::lang::errors::CompilerError::InvalidSchedule {
+                            func_name: format!("{}/{}", ns_name, var_name),
+                            schedule: cron_expression.clone(),
+                            message,
+                            location: location.clone(),
+                        },
+                    );
+                }
                 if arity == 0 {
-                    // Extract source location from the var for error reporting
-                    let location = var
-                        .src
-                        .as_ref()
-                        .map(|src| crate::lang::errors::ErrorLocation {
-                            line: src.line,
-                            column: src.column,
-                            position: src.position,
-                            length: var_name.len(),
-                            file: src.file.as_ref().map(std::path::PathBuf::from),
-                        });
-
                     self.validation_errors.push(
                         crate::lang::errors::CompilerError::InvalidScheduledFunction {
                             func_name: format!("{}/{}", ns_name, var_name),

@@ -25,6 +25,7 @@ pub mod core_registry;
 pub mod ctx_checker;
 pub mod dependency_graph;
 mod named_args;
+mod namespace_order;
 pub mod placeholder_lowering;
 pub mod refinements;
 pub mod resolver;
@@ -1040,6 +1041,11 @@ impl Compiler {
         // Select the resolved/lowered copies of extension declarations out of
         // the merged AST. Exact Var identity includes source spans, so this
         // selects a shadowing declaration without re-emitting the base one.
+        // Resolution rewrites the names in meta, so match without it.
+        let without_meta = |var: &Var| Var {
+            meta: None,
+            ..var.clone()
+        };
         let mut emission_program = Program {
             namespaces: IndexMap::new(),
             current_namespace: extension_program.current_namespace.clone(),
@@ -1051,14 +1057,20 @@ impl Compiler {
             let mut emission_namespace = extension_namespace.clone();
             emission_namespace.aliases = validation_namespace.aliases.clone();
             emission_namespace.scope.vars.clear();
+            let resolved_by_declaration: AHashMap<Var, (&Var, &Value)> = validation_namespace
+                .scope
+                .vars
+                .iter()
+                .map(|(var, value)| (without_meta(var), (var, value)))
+                .collect();
             for (var, _) in &extension_namespace.scope.vars {
                 if let Some((resolved_var, resolved_value)) =
-                    validation_namespace.scope.vars.get_key_value(var)
+                    resolved_by_declaration.get(&without_meta(var))
                 {
                     emission_namespace
                         .scope
                         .vars
-                        .insert(resolved_var.clone(), resolved_value.clone());
+                        .insert((*resolved_var).clone(), (*resolved_value).clone());
                 }
             }
             if !emission_namespace.scope.vars.is_empty() {
@@ -1233,8 +1245,9 @@ impl Compiler {
         tracing::debug!("Compiler: Pass 2 - Compiling all other declarations");
         tracing::trace!("Total namespaces to compile: {}", program.namespaces.len());
 
-        // Create a compilation order that ensures ::hot::main (target file namespace) is processed last
-        let mut namespace_order: Vec<_> = program.namespaces.iter().collect();
+        // Namespaces run after the namespaces whose values they read, and
+        // ::hot::main (target file namespace) runs last.
+        let mut namespace_order = namespace_order::initialization_order(program);
 
         // Find ::hot::main namespace and move it to the end if it exists
         if let Some(main_pos) = namespace_order
