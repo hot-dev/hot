@@ -6,7 +6,7 @@ meta ["test"]
 // parameter. The original symptom was a runtime "Variable not found"
 // when an inner lambda tried to use an outer-function parameter.
 //
-// Two underlying bugs in `crates/hot/src/lang/compiler/mod.rs`:
+// Two underlying bugs in `crates/hot_lang/src/lang/compiler/mod.rs`:
 //
 //   1) Free-variable analysis didn't recurse into `Value::Val(Val::Map)` /
 //      `Val::Vec` literals. The parser stores non-literal map/vec entries

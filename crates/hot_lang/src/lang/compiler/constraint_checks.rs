@@ -27,7 +27,7 @@ use crate::lang::ast::{
     is_where_predicate,
 };
 use crate::lang::errors::{CompilerError, ErrorLocation};
-use crate::lang::hot::libmap::is_pure_native;
+use crate::lang::natives::is_pure_native;
 use crate::lang::parser::parse_type_annotation;
 use crate::val::Val;
 
