@@ -3352,24 +3352,37 @@ impl Run {
         db: &crate::db::DatabasePool,
         batch_size: i64,
     ) -> Result<Vec<Run>, RunError> {
+        Self::get_pending_retries_for_environment(db, batch_size, None).await
+    }
+
+    /// Pending retries, optionally limited to one environment, as a
+    /// profile-scoped development scheduler needs.
+    pub async fn get_pending_retries_for_environment(
+        db: &crate::db::DatabasePool,
+        batch_size: i64,
+        env_id: Option<Uuid>,
+    ) -> Result<Vec<Run>, RunError> {
         let now = chrono::Utc::now();
 
         match db {
             crate::db::DatabasePool::Postgres(pg_pool) => {
                 let runs = sqlx::query_as::<_, Run>(
-                    "SELECT r.run_id, r.env_id, r.stream_id, r.build_id, r.run_type_id, rt.run_type, r.origin_run_id, r.event_id, r.start_time, r.stop_time, r.status_id, rs.status, r.by_user_id, r.result, r.info, r.retry_attempt, r.next_retry_at, b.project_id, p.name as project_name, COALESCE(e.event_data->>'fn', (SELECT function_name FROM call WHERE run_id = r.run_id AND parent_call_id IS NULL LIMIT 1), (SELECT function_name FROM task WHERE run_id = r.run_id LIMIT 1)) as event_fn, e.created_at as queued_at FROM run r JOIN run_status rs ON r.status_id = rs.status_id JOIN run_type rt ON r.run_type_id = rt.run_type_id LEFT JOIN build b ON r.build_id = b.build_id LEFT JOIN project p ON b.project_id = p.project_id LEFT JOIN event e ON r.event_id = e.event_id WHERE r.status_id = 5 AND r.next_retry_at IS NOT NULL AND r.next_retry_at <= $1 ORDER BY r.next_retry_at ASC LIMIT $2"
+                    "SELECT r.run_id, r.env_id, r.stream_id, r.build_id, r.run_type_id, rt.run_type, r.origin_run_id, r.event_id, r.start_time, r.stop_time, r.status_id, rs.status, r.by_user_id, r.result, r.info, r.retry_attempt, r.next_retry_at, b.project_id, p.name as project_name, COALESCE(e.event_data->>'fn', (SELECT function_name FROM call WHERE run_id = r.run_id AND parent_call_id IS NULL LIMIT 1), (SELECT function_name FROM task WHERE run_id = r.run_id LIMIT 1)) as event_fn, e.created_at as queued_at FROM run r JOIN run_status rs ON r.status_id = rs.status_id JOIN run_type rt ON r.run_type_id = rt.run_type_id LEFT JOIN build b ON r.build_id = b.build_id LEFT JOIN project p ON b.project_id = p.project_id LEFT JOIN event e ON r.event_id = e.event_id WHERE r.status_id = 5 AND r.next_retry_at IS NOT NULL AND r.next_retry_at <= $1 AND ($3::uuid IS NULL OR r.env_id = $3) ORDER BY r.next_retry_at ASC LIMIT $2"
                 )
                 .bind(now)
                 .bind(batch_size)
+                .bind(env_id)
                 .fetch_all(pg_pool)
                 .await?;
                 Ok(runs)
             }
             crate::db::DatabasePool::Sqlite(sqlite_pool) => {
                 let runs = sqlx::query_as::<_, Run>(
-                    "SELECT r.run_id, r.env_id, r.stream_id, r.build_id, r.run_type_id, rt.run_type, r.origin_run_id, r.event_id, r.start_time, r.stop_time, r.status_id, rs.status, r.by_user_id, r.result, r.info, r.retry_attempt, r.next_retry_at, b.project_id, p.name as project_name, COALESCE(json_extract(e.event_data, '$.fn'), (SELECT function_name FROM call WHERE run_id = r.run_id AND parent_call_id IS NULL LIMIT 1), (SELECT function_name FROM task WHERE run_id = r.run_id LIMIT 1)) as event_fn, e.created_at as queued_at FROM run r JOIN run_status rs ON r.status_id = rs.status_id JOIN run_type rt ON r.run_type_id = rt.run_type_id LEFT JOIN build b ON r.build_id = b.build_id LEFT JOIN project p ON b.project_id = p.project_id LEFT JOIN event e ON r.event_id = e.event_id WHERE r.status_id = 5 AND r.next_retry_at IS NOT NULL AND r.next_retry_at <= ? ORDER BY r.next_retry_at ASC LIMIT ?"
+                    "SELECT r.run_id, r.env_id, r.stream_id, r.build_id, r.run_type_id, rt.run_type, r.origin_run_id, r.event_id, r.start_time, r.stop_time, r.status_id, rs.status, r.by_user_id, r.result, r.info, r.retry_attempt, r.next_retry_at, b.project_id, p.name as project_name, COALESCE(json_extract(e.event_data, '$.fn'), (SELECT function_name FROM call WHERE run_id = r.run_id AND parent_call_id IS NULL LIMIT 1), (SELECT function_name FROM task WHERE run_id = r.run_id LIMIT 1)) as event_fn, e.created_at as queued_at FROM run r JOIN run_status rs ON r.status_id = rs.status_id JOIN run_type rt ON r.run_type_id = rt.run_type_id LEFT JOIN build b ON r.build_id = b.build_id LEFT JOIN project p ON b.project_id = p.project_id LEFT JOIN event e ON r.event_id = e.event_id WHERE r.status_id = 5 AND r.next_retry_at IS NOT NULL AND r.next_retry_at <= ? AND (? IS NULL OR r.env_id = ?) ORDER BY r.next_retry_at ASC LIMIT ?"
                 )
                 .bind(now)
+                .bind(env_id)
+                .bind(env_id)
                 .bind(batch_size)
                 .fetch_all(sqlite_pool)
                 .await?;
