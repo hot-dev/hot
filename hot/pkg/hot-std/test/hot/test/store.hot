@@ -229,3 +229,122 @@ meta ["test"] fn () {
     assert-eq(2, ::store/get(s, "y"), "put-many entries are accessible")
     assert-eq(3, ::store/get(s, "z"), "put-many entries are accessible")
 }
+
+// Add one entry to the map stored at `key`, retrying until no other writer
+// changed it between the read and the write.
+add-entry fn (s: ::store/Map, key: Str, entry-key: Str, entry: Any): Map {
+    current ::store/get(s, key)
+    next assoc(if(is-null(current), {}, current), entry-key, entry)
+    cond {
+        ::store/put-if(s, key, current, next) => { next }
+        => { add-entry(s, key, entry-key, entry) }
+    }
+}
+
+test-put-if-writes-only-over-the-expected-value
+meta ["test"] fn () {
+    s ::store/Map({name: "test-put-if"})
+    ::store/clear(s)
+    assert(::store/put-if(s, "k", null, 1), "null expects a missing key and creates it")
+    assert(not(::store/put-if(s, "k", null, 2)), "null no longer matches once the key holds a value")
+    assert(not(::store/put-if(s, "k", 5, 2)), "a stale expectation does not write")
+    assert-eq(1, ::store/get(s, "k"), "a refused put-if leaves the value")
+    assert(::store/put-if(s, "k", 1, 2), "the current value matches")
+    assert-eq(2, ::store/get(s, "k"), "put-if wrote the new value")
+    assert-eq(["k"], ::store/keys(s), "put-if over an entry keeps one entry")
+}
+
+test-put-if-matches-a-value-read-back
+meta ["test"] fn () {
+    s ::store/Map({name: "test-put-if-read-back"})
+    ::store/clear(s)
+    ::store/put(s, "case", {zeta: [1, 2], alpha: {name: "x", amount: 1.5}, flag: null})
+    current ::store/get(s, "case")
+    next assoc(current, "answered", true)
+    assert(::store/put-if(s, "case", current, next), "a value read with get matches the stored value")
+    assert(not(::store/put-if(s, "case", current, {})), "the earlier read no longer matches")
+    assert-eq(next, ::store/get(s, "case"), "the matching write is the stored value")
+}
+
+test-put-if-keeps-every-concurrent-entry
+meta ["test"] fn () {
+    s ::store/Map({name: "test-put-if-concurrent"})
+    ::store/clear(s)
+    ids range(0, 48)
+    pmap(ids, (i) { add-entry(s, "case", `answer-${i}`, i) })
+    stored ::store/get(s, "case")
+    assert-eq(48, length(stored), "no concurrent entry is lost")
+    assert-eq(ids, map(ids, (i) { get(stored, `answer-${i}`) }), "each writer's entry holds its value")
+}
+
+test-increment-counts-from-zero
+meta ["test"] fn () {
+    s ::store/Map({name: "test-increment"})
+    ::store/clear(s)
+    assert-eq(1, ::store/increment(s, "n"), "a missing key counts from 0")
+    assert-eq(6, ::store/increment(s, "n", 5), "increment adds by")
+    assert-eq(4, ::store/increment(s, "n", -2), "by can be negative")
+    assert-eq(4, ::store/get(s, "n"), "the counter is a stored Int")
+    assert-eq(-3, ::store/increment(s, "m", -3), "a first negative increment starts from 0")
+}
+
+test-increment-refuses-what-it-cannot-count
+meta ["test"] fn () {
+    s ::store/Map({name: "test-increment-errors"})
+    ::store/clear(s)
+    ::store/put(s, "name", "case")
+    assert(is-err(::store/increment(s, "name")), "a non-Int value is an error")
+    assert-eq("case", ::store/get(s, "name"), "a refused increment leaves the value")
+    ::store/put(s, "max", 9223372036854775807)
+    assert(is-err(::store/increment(s, "max")), "an overflow is an error")
+    assert-eq(9223372036854775807, ::store/get(s, "max"), "an overflow leaves the counter")
+}
+
+test-increment-gives-each-concurrent-caller-its-own-value
+meta ["test"] fn () {
+    s ::store/Map({name: "test-increment-concurrent"})
+    ::store/clear(s)
+    seqs pmap(range(0, 48), (i) { ::store/increment(s, "seq") })
+    assert-eq(48, ::store/get(s, "seq"), "no concurrent increment is lost")
+    assert-eq(range(1, 49), sort(seqs), "each increment returned a distinct value")
+}
+
+test-list-and-keys-with-a-prefix
+meta ["test"] fn () {
+    s ::store/Map({name: "test-list-prefix"})
+    ::store/clear(s)
+    ::store/put(s, "case:2:b", 1)
+    ::store/put(s, "case:1:a", 2)
+    ::store/put(s, "case:10:a", 3)
+    ::store/put(s, "case:1:b", 4)
+    ::store/put(s, "cases", 5)
+    ::store/put(s, 42, 6)
+    entries ::store/list(s, {prefix: "case:1:"})
+    assert-eq(["case:1:a", "case:1:b"], map(entries, %.key), "only keys with the prefix, in insertion order")
+    assert-eq([2, 4], map(entries, %.value), "prefix entries carry their values")
+    page ::store/list(s, {prefix: "case:1", limit: 1, offset: 1})
+    assert-eq(["case:10:a"], map(page, %.key), "limit and offset page through the matches")
+    assert-eq(["case:2:b", "case:1:a", "case:10:a", "case:1:b"], ::store/keys(s, {prefix: "case:"}), "keys takes a prefix")
+    assert-eq(["case:1:a"], ::store/keys(s, {prefix: "case:", limit: 1, offset: 1}), "keys pages through the matches")
+    assert-eq(5, length(::store/keys(s, {prefix: ""})), "an empty prefix matches every Str key")
+    assert-eq([], ::store/list(s, {prefix: "nope"}), "no key has the prefix")
+}
+
+test-prefix-takes-characters-literally
+meta ["test"] fn () {
+    s ::store/Map({name: "test-prefix-literal"})
+    ::store/clear(s)
+    ::store/put(s, "100%", 1)
+    ::store/put(s, "100x", 2)
+    ::store/put(s, "a_b", 3)
+    ::store/put(s, "axb", 4)
+    ::store/put(s, "say \"hi\"", 5)
+    ::store/put(s, "back\\slash", 6)
+    ::store/put(s, "naïve", 7)
+    ::store/put(s, "naive", 8)
+    assert-eq(["100%"], ::store/keys(s, {prefix: "100%"}), "% is not a wildcard")
+    assert-eq(["a_b"], ::store/keys(s, {prefix: "a_"}), "_ is not a wildcard")
+    assert-eq(["say \"hi\""], ::store/keys(s, {prefix: "say \""}), "a quote matches itself")
+    assert-eq(["back\\slash"], ::store/keys(s, {prefix: "back\\"}), "a backslash matches itself")
+    assert-eq(["naïve"], ::store/keys(s, {prefix: "naï"}), "non-ASCII characters match themselves")
+}

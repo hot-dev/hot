@@ -192,6 +192,79 @@ fn (event) {
 }
 ```
 
+## Concurrent Store Writes
+
+Workers run different events at the same time, including events of one
+stream. When two handlers read the same [`::hot::store`](/pkg/hot.dev/hot-std/hot/store)
+entry and each write back a changed copy, the later `put` replaces the earlier
+one and its change is lost:
+
+```hot
+::store ::hot::store
+
+cases ::store/Map({name: "cases"})
+
+// Two answers that land together can lose one
+record-answer-unsafely fn (case-id: Str, answer-id: Str, answer: Any) {
+  current ::store/get(cases, case-id, {})
+  ::store/put(cases, case-id, assoc(current, answer-id, answer))
+}
+```
+
+The store's atomic writes compare and write in one database transaction that
+holds the entry's lock:
+
+| Write | Does |
+|-------|------|
+| `put-if-missing(store, key, value)` | Creates the entry only if the key is missing |
+| `put-if(store, key, expected, value)` | Replaces the value only if it still equals `expected`; `null` expects a missing key |
+| `increment(store, key, by)` | Adds to an Int and returns the new value; a missing key counts from 0 |
+
+To change a value, read it, compute the new one, and retry until `put-if`
+succeeds. The computation must be pure, because it can run more than once:
+
+```hot
+::store ::hot::store
+
+cases ::store/Map({name: "cases"})
+
+record-answer fn (case-id: Str, answer-id: Str, answer: Any): Map {
+  current ::store/get(cases, case-id)
+  next assoc(if(is-null(current), {}, current), answer-id, answer)
+  cond {
+    ::store/put-if(cases, case-id, current, next) => { next }
+    => { record-answer(case-id, answer-id, answer) }
+  }
+}
+```
+
+`increment` gives each caller its own value, so it can number a case's facts.
+Concurrent handlers can finish out of order, so sort by the number rather than
+relying on insertion order:
+
+```hot
+::store ::hot::store
+
+facts ::store/Map({name: "facts"})
+counters ::store/Map({name: "counters"})
+
+record-fact fn (case-id: Str, fact: Map) {
+  seq ::store/increment(counters, `${case-id}:seq`)
+  ::store/put(facts, `${case-id}:${seq}`, {...fact, seq})
+}
+
+case-facts fn (case-id: Str): Vec {
+  ::store/list(facts, {prefix: `${case-id}:`, limit: 500}) |> sort-by(%.value.seq)
+}
+```
+
+`list` and `keys` with a `prefix` read only the keys that start with it, from
+an index, and page with `limit` and `offset`. `filter` reads every entry.
+
+An `increment` or a `put-if` that adds an entry is not idempotent: a retried or
+redelivered event applies it again. Key the change by something the event
+carries, such as an answer id, when a repeat must not count twice.
+
 ## Observability
 
 All runs, events, retries, and tasks are visible in **Hot App**:
