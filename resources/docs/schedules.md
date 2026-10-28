@@ -286,3 +286,9 @@ fn (event) {
 Declare the parameter even if you don't use it — the scheduler always passes it.
 
 Scheduled runs are tracked and visible in the Hot App alongside event-triggered and API-triggered runs.
+
+## Testing Schedules
+
+In `hot test`, a delivered `hot:schedule:new` arms the schedule in the test,
+and `::hot::test/run-due` calls what is due by the test's clock. See
+[Events and schedules](/docs/cli#events-and-schedules) under `hot test`.

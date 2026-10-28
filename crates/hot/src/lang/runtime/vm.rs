@@ -9578,6 +9578,7 @@ impl VirtualMachine {
         let resource_registry = StdArc::new(crate::lang::hot::resource::get_registry());
         let tool_registry = StdArc::new(crate::lang::hot::internal_mcp::get_registry());
         let skill_registry = StdArc::new(crate::lang::hot::internal_skill::get_registry());
+        let test_harness = crate::lang::hot::test::current_harness();
 
         // Correlation ids for worker-thread logs. Parallel branches run user
         // code on detached threads, so without these a branch failure in a
@@ -9743,6 +9744,7 @@ impl VirtualMachine {
                 let resource_registry_worker = resource_registry.clone();
                 let tool_registry_worker = tool_registry.clone();
                 let skill_registry_worker = skill_registry.clone();
+                let test_harness_worker = test_harness.clone();
                 let namespace_snapshot_tmpl = namespace_snapshot.clone();
                 let namespace_tmpl = main_namespace.clone();
                 let computed_vars_tmpl = computed_vars_snapshot.clone();
@@ -9773,6 +9775,8 @@ impl VirtualMachine {
                             crate::lang::hot::internal_mcp::ThreadRegistryGuard::install(tool_registry_worker);
                         let _skill_scope =
                             crate::lang::hot::internal_skill::ThreadRegistryGuard::install(skill_registry_worker);
+                        let _test_harness =
+                            crate::lang::hot::test::ThreadHarnessGuard::install_some(test_harness_worker);
 
                         loop {
                             // Stop claiming new work once any branch has failed so
