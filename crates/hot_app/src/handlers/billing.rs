@@ -406,11 +406,13 @@ pub async fn view_usage_handler(
         .and_then(|subscription| subscription.current_period_start)
         .unwrap_or(calendar_start);
 
+    // The stats partial covers the whole account only for a root
+    // administrator; everyone else sees this org's own usage.
+    let account_wide =
+        !org.is_child() && is_org_admin(&db, &session.user.user_id, &org.org_id).await;
+
     // Determine if user can upgrade (false for Scale plan)
-    let can_upgrade = if org.is_child()
-        || !is_org_admin(&db, &session.user.user_id, &org.org_id).await
-        || hot::product::is_no_nag(&conf)
-    {
+    let can_upgrade = if !account_wide || hot::product::is_no_nag(&conf) {
         false
     } else if hot::product::billing_enabled(&conf) {
         plan.as_ref()
@@ -431,6 +433,7 @@ pub async fn view_usage_handler(
         features,
         month_start,
         can_upgrade,
+        account_wide,
     };
 
     Ok(Html(

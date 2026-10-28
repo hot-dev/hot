@@ -1,5 +1,6 @@
 //! Browser-level scope, hierarchy, and recovery checks through the real router.
 use axum::http::StatusCode;
+use hot::db::org::CreateChild;
 use hot::db::{DatabasePool, Env, Org, insert_test_data, org::OrgUser, user::User};
 use hot_app::test_support::TestClient;
 use uuid::Uuid;
@@ -223,4 +224,72 @@ async fn an_explicit_org_selector_shows_that_orgs_timezone() {
     let page = client.get(&format!("/envs?org_id={tokyo}")).await;
     page.assert_status(StatusCode::OK);
     assert!(page.body.contains(&in_tokyo), "{}", page.body);
+}
+
+#[tokio::test]
+async fn only_a_root_admin_sees_usage_labelled_as_the_account() {
+    let mut client = TestClient::new().await;
+    let td = insert_test_data(client.db()).await.unwrap();
+    sqlx::query("UPDATE org SET org_type='organization' WHERE org_id=?")
+        .bind(td.org_id)
+        .execute(sqlite(&client))
+        .await
+        .unwrap();
+    let root = Org::get_org_uncached(client.db(), &td.org_id)
+        .await
+        .unwrap();
+    let child = Org::create_child(
+        client.db(),
+        &td.org_id,
+        &td.user_id,
+        &CreateChild {
+            name: "Customer".into(),
+            slug: "usage-customer".into(),
+            external_id: None,
+            idempotency_key: "usage-customer".into(),
+            hosted: false,
+        },
+    )
+    .await
+    .unwrap()
+    .org;
+    let member = Uuid::now_v7();
+    User::insert_user(
+        client.db(),
+        &member,
+        "usage-member@example.test",
+        Some("Usage member"),
+        Some(&td.user_id),
+    )
+    .await
+    .unwrap();
+    OrgUser::insert_org_user(
+        client.db(),
+        &Uuid::now_v7(),
+        &td.org_id,
+        &member,
+        Some(1),
+        &td.user_id,
+    )
+    .await
+    .unwrap();
+    let account = "Account usage and limits";
+    let workspace = "This workspace's usage. Limits are shared with the account.";
+    let root_usage = format!("/@{}/usage", root.slug);
+
+    client.login_as(&td.user_id);
+    let page = client.get(&root_usage).await;
+    page.assert_status(StatusCode::OK);
+    assert!(page.body.contains(account));
+    let page = client.get(&format!("/@{}/usage", child.slug)).await;
+    page.assert_status(StatusCode::OK);
+    assert!(page.body.contains(workspace));
+    assert!(!page.body.contains(account));
+
+    // A plain member's stats cover only the root org itself.
+    client.login_as(&member);
+    let page = client.get(&root_usage).await;
+    page.assert_status(StatusCode::OK);
+    assert!(page.body.contains(workspace));
+    assert!(!page.body.contains(account));
 }
