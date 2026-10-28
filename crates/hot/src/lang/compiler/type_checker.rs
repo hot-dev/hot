@@ -2594,9 +2594,17 @@ impl TypeChecker {
 
             Value::Match(match_expr) => {
                 let subject_type = self.infer_value_type(&match_expr.value);
+                let subject_name = match &*match_expr.value {
+                    Value::Ref(Ref::Var(var_ref))
+                        if var_ref.var.deep_path.is_none() && var_ref.var.deep_set.is_none() =>
+                    {
+                        Some(var_ref.var.sym.name().to_string())
+                    }
+                    _ => None,
+                };
                 let mut last_type = TypeExpr::Any;
                 for arm in &match_expr.arms {
-                    last_type = self.infer_value_type(&arm.body);
+                    last_type = self.infer_match_arm_body(arm, subject_name.as_deref());
                 }
                 if !match_expr.match_all {
                     let arm_refs: Vec<&MatchArm> = match_expr.arms.iter().collect();
@@ -2610,7 +2618,7 @@ impl TypeChecker {
                     let arm_types: Vec<TypeExpr> = match_expr
                         .arms
                         .iter()
-                        .map(|arm| self.infer_value_type(&arm.body))
+                        .map(|arm| self.infer_match_arm_body(arm, subject_name.as_deref()))
                         .collect();
                     self.flow_result_type(
                         match_expr.result_modifier.as_ref(),
@@ -2622,7 +2630,7 @@ impl TypeChecker {
                     let arm_types: Vec<TypeExpr> = match_expr
                         .arms
                         .iter()
-                        .map(|arm| self.infer_value_type(&arm.body))
+                        .map(|arm| self.infer_match_arm_body(arm, subject_name.as_deref()))
                         .collect();
                     self.flow_result_type(
                         match_expr.result_modifier.as_ref(),
@@ -2982,6 +2990,49 @@ impl TypeChecker {
             field_name: field_name.to_string(),
             location,
         });
+    }
+
+    /// Walk a match arm's body. Inside an `Enum.Variant` arm the matched name
+    /// holds that variant's payload, so `subject` is rebound to the payload
+    /// type for the arm.
+    fn infer_match_arm_body(&mut self, arm: &MatchArm, subject: Option<&str>) -> TypeExpr {
+        let narrowed = match (subject, &arm.type_name, &arm.variant) {
+            (Some(subject), Some(type_name), Some(variant)) if arm.alternatives.is_empty() => self
+                .variant_payload_type(type_name, variant)
+                .map(|payload| (subject, payload)),
+            _ => None,
+        };
+        let Some((subject, payload)) = narrowed else {
+            return self.infer_value_type(&arm.body);
+        };
+        self.context.push_scope();
+        self.context.add_variable(subject.to_string(), payload);
+        let body_type = self.infer_value_type(&arm.body);
+        self.context.pop_scope();
+        body_type
+    }
+
+    /// The declared payload type of `enum_name.variant`, resolved in the
+    /// enum's own namespace. `None` for payload-free variants and for names
+    /// that are not known enums.
+    fn variant_payload_type(&self, enum_name: &str, variant: &str) -> Option<TypeExpr> {
+        let TypeExpr::Named(enum_fqn) = self
+            .try_resolve_local_type(enum_name)
+            .or_else(|| self.try_resolve_core_type(enum_name))
+            .or_else(|| self.try_resolve_namespaced_type(enum_name))?
+        else {
+            return None;
+        };
+        let td = self
+            .named_type_definition(&enum_fqn)
+            .filter(|td| td.is_enum)?;
+        let payload = td.variant_payloads.get(variant)?.clone();
+        let enum_ns = td.declaring_namespace.clone();
+        if let Some(builtin) = self.try_resolve_builtin_type(&payload) {
+            return Some(builtin);
+        }
+        let payload_fqn = self.resolve_to_fqn(&payload, &enum_ns);
+        self.qualified_types.get(&payload_fqn).cloned()
     }
 
     /// Check if two types are compatible (for assignment, parameter passing, etc.)

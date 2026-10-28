@@ -983,6 +983,116 @@ mod type_checking_tests {
     }
 
     #[test]
+    fn test_core_enum_variant_from_other_namespace_is_not_unknown_field() {
+        let source = r#"
+            ::a ns
+
+            Ask meta {core: true} type { step: Str }
+            Then meta {core: true} enum { Open(Ask), NotYet, Done(Str) }
+
+            ::b ns
+
+            wait fn (): Then { Then.NotYet }
+            open-named fn (): Then { Then.Open(step: "review") }
+            open-map fn (): Then { Then.Open({step: "review"}) }
+        "#;
+
+        let errors = compile_and_get_type_errors(source);
+        assert!(errors.is_empty(), "Should compile. Got: {:?}", errors);
+
+        let warnings = compile_and_get_warnings(source);
+        assert!(
+            warnings.is_empty(),
+            "Core enum variants should not warn. Got: {:?}",
+            warnings
+        );
+    }
+
+    #[test]
+    fn test_match_arm_exposes_variant_payload_fields() {
+        let source = r#"
+            ::a ns
+
+            Ask meta {core: true} type { step: Str }
+            Then meta {core: true} enum { Open(Ask), NotYet, Done(Str) }
+
+            Gate type { level: Int }
+            Check enum { Pass(Gate), Skip }
+
+            local-level fn (c: Check): Int {
+                match c {
+                    Check.Pass => { c.level }
+                    _ => { 0 }
+                }
+            }
+
+            ::b ns
+
+            opens fn (n: Then, step: Str): Bool {
+                match n {
+                    Then.Open => { eq(n.step, step) }
+                    _ => { false }
+                }
+            }
+        "#;
+
+        let errors = compile_and_get_type_errors(source);
+        assert!(errors.is_empty(), "Should compile. Got: {:?}", errors);
+
+        let warnings = compile_and_get_warnings(source);
+        assert!(
+            warnings.is_empty(),
+            "Payload fields inside a variant arm should resolve. Got: {:?}",
+            warnings
+        );
+    }
+
+    #[test]
+    fn test_match_arm_misspelled_payload_field_still_warns() {
+        let source = r#"
+            ::a ns
+
+            Ask meta {core: true} type { step: Str }
+            Then meta {core: true} enum { Open(Ask), NotYet, Done(Str) }
+
+            Gate type { level: Int }
+            Check enum { Pass(Gate), Skip }
+
+            local-level fn (c: Check): Int {
+                match c {
+                    Check.Pass => { c.levle }
+                    _ => { 0 }
+                }
+            }
+
+            ::b ns
+
+            opens fn (n: Then, step: Str): Bool {
+                match n {
+                    Then.Open => { eq(n.stepp, step) }
+                    _ => { false }
+                }
+            }
+        "#;
+
+        let errors = compile_and_get_type_errors(source);
+        assert!(errors.is_empty(), "Should compile. Got: {:?}", errors);
+
+        let warnings = compile_and_get_warnings(source);
+        let mut found = unknown_fields(&warnings);
+        found.sort();
+        assert_eq!(
+            found,
+            vec![
+                ("Ask".to_string(), "stepp".to_string()),
+                ("Gate".to_string(), "levle".to_string()),
+            ],
+            "Misspelled payload fields should warn against the payload type. Got: {:?}",
+            warnings
+        );
+    }
+
+    #[test]
     fn test_explicit_map_annotation_keeps_dynamic_field_access() {
         let source = r#"
             ::test ns
