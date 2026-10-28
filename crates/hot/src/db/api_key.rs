@@ -214,7 +214,9 @@ impl ApiKey {
         Ok(rows)
     }
 
-    /// Get the most recently created active API key for an environment.
+    /// Get the most recently created active API key for an environment that
+    /// no management key issued. Dashboard service keys take this key as
+    /// their parent, and an issued key's grants stay bounded by its issuer.
     pub async fn get_active_api_key_by_env(
         db: &crate::db::DatabasePool,
         env_id: &Uuid,
@@ -226,7 +228,7 @@ impl ApiKey {
                        created_by_user_id, created_at, updated_at, updated_by_user_id,
                        active_toggle_at, active_toggle_by_user_id, permissions
                 FROM api_key
-                WHERE env_id = ? AND active = 1
+                WHERE env_id = ? AND active = 1 AND NOT EXISTS (SELECT 1 FROM api_key_management_issuer m WHERE m.api_key_id=api_key.api_key_id)
                 ORDER BY created_at DESC
                 LIMIT 1
                 "#,
@@ -240,7 +242,7 @@ impl ApiKey {
                        created_by_user_id, created_at, updated_at, updated_by_user_id,
                        active_toggle_at, active_toggle_by_user_id, permissions
                 FROM api_key
-                WHERE env_id = $1 AND active = TRUE
+                WHERE env_id = $1 AND active = TRUE AND NOT EXISTS (SELECT 1 FROM api_key_management_issuer m WHERE m.api_key_id=api_key.api_key_id)
                 ORDER BY created_at DESC
                 LIMIT 1
                 "#,
@@ -731,6 +733,45 @@ impl ApiKey {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn default_environment_key_skips_management_issued_keys() {
+        let db = crate::db::test_db().await;
+        let data = crate::db::insert_test_data(&db).await.unwrap();
+        let crate::db::DatabasePool::Sqlite(pool) = &db else {
+            return;
+        };
+        let issued = Uuid::now_v7();
+        ApiKey::insert_api_key(
+            &db,
+            &issued,
+            &data.env_id,
+            "issued",
+            &serde_json::json!({}),
+            &data.user_id,
+            &serde_json::json!({"*:*": ["*"]}),
+        )
+        .await
+        .unwrap();
+        // The issued key is the environment's newest.
+        sqlx::query("UPDATE api_key SET created_at=datetime('now','+1 minute') WHERE api_key_id=?")
+            .bind(issued)
+            .execute(pool)
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO api_key_management_issuer(api_key_id,management_key_id) VALUES(?,?)",
+        )
+        .bind(issued)
+        .bind(Uuid::now_v7())
+        .execute(pool)
+        .await
+        .unwrap();
+        let chosen = ApiKey::get_active_api_key_by_env(&db, &data.env_id)
+            .await
+            .unwrap();
+        assert!(chosen.is_none_or(|key| key.api_key_id != issued));
+    }
 
     #[test]
     fn test_api_key_generation() {
