@@ -7897,7 +7897,7 @@ pub async fn run_with_components_shared_context_and_db(
                                             if let Some(ref db) = db_ref {
                                                 for task in &maint_message.body.tasks {
                                                     let operation = match task.as_str() {
-                                                        "session_cleanup" | "inactive_schedule_cleanup" | "upload_cleanup" | "call_retention_cleanup" | "run_admission_cleanup" => MaintenanceOperation::Retention,
+                                                        "session_cleanup" | "inactive_schedule_cleanup" | "upload_cleanup" | "file_object_cleanup" | "call_retention_cleanup" | "run_admission_cleanup" => MaintenanceOperation::Retention,
                                                         "blob_cleanup" => MaintenanceOperation::BlobGc,
                                                         _ => MaintenanceOperation::Queue,
                                                     };
@@ -8101,6 +8101,41 @@ pub async fn run_with_components_shared_context_and_db(
                                                                 }
                                                                 Err(e) => {
                                                                     error!("hot.dev: WORKER {} cleanup: list_pending_deletion failed: {}", worker_id, e);
+                                                                }
+                                                            }
+                                                        }
+                                                        "file_object_cleanup" => {
+                                                            // Objects retired by overwrites, deletes and interrupted
+                                                            // writes, once their grace period has passed.
+                                                            match hot::file_storage::file_storage_from_config(&worker_conf_ref).await {
+                                                                Ok(storage) => {
+                                                                    const BATCH: usize = 1_000;
+                                                                    // Batches until the backlog is cleared, within a
+                                                                    // budget well inside the 5-minute schedule.
+                                                                    let budget = std::time::Instant::now() + std::time::Duration::from_secs(60);
+                                                                    let retired_before = chrono::Utc::now()
+                                                                        - hot::file_storage::RETIRED_OBJECT_GRACE;
+                                                                    let mut deleted = 0;
+                                                                    loop {
+                                                                        match hot::file_storage::collect_retired_objects(db, storage.as_ref(), retired_before, BATCH as i64).await {
+                                                                            Ok(n) => {
+                                                                                deleted += n;
+                                                                                if n < BATCH || std::time::Instant::now() >= budget {
+                                                                                    break;
+                                                                                }
+                                                                            }
+                                                                            Err(e) => {
+                                                                                error!("hot.dev: WORKER {} file_object_cleanup: failed: {}", worker_id, e);
+                                                                                break;
+                                                                            }
+                                                                        }
+                                                                    }
+                                                                    if deleted > 0 {
+                                                                        info!("hot.dev: WORKER {} file_object_cleanup: deleted {} retired file object(s)", worker_id, deleted);
+                                                                    }
+                                                                }
+                                                                Err(e) => {
+                                                                    error!("hot.dev: WORKER {} file_object_cleanup: storage unavailable: {}", worker_id, e);
                                                                 }
                                                             }
                                                         }

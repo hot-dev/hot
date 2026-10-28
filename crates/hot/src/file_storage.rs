@@ -15,7 +15,7 @@ use uuid::Uuid;
 use crate::db::DatabasePool;
 use crate::db::file::{
     FileRecord, find_file_by_path, get_file_by_path, insert_file_record, mark_file_inactive,
-    update_file_record_if_storage_path,
+    update_file_record_if_active, update_file_record_if_storage_path,
 };
 use crate::val::Val;
 
@@ -416,6 +416,67 @@ pub trait FileStorage: Send + Sync {
     ) -> Result<(), String> {
         Err("Blob storage not supported by this storage backend".to_string())
     }
+
+    /// Delete a file object collection found unreferenced (see
+    /// [`collect_retired_objects`]). An object that is already gone, or that
+    /// lies outside this storage (another bucket or base directory), counts
+    /// as deleted: it is not this storage's to remove.
+    async fn delete_storage_object(&self, _storage_path: &str) -> Result<(), String> {
+        Err("Object collection is not supported by this storage backend".to_string())
+    }
+}
+
+/// How long a retired file object stays readable before collection deletes
+/// it: a read that resolved the object before an overwrite or delete
+/// replaced it can finish.
+pub const RETIRED_OBJECT_GRACE: std::time::Duration = std::time::Duration::from_secs(15 * 60);
+
+/// Delete the objects of `storage`'s backend that were retired before
+/// `retired_before` and that no active file version references. Returns how
+/// many were deleted; an object that can't be deleted now stays retired for
+/// the next collection.
+pub async fn collect_retired_objects(
+    db: &DatabasePool,
+    storage: &dyn FileStorage,
+    retired_before: DateTime<Utc>,
+    limit: i64,
+) -> Result<usize, String> {
+    use crate::db::file::{
+        collectable_retired_objects, forget_retired_object, retired_object_collectable,
+    };
+
+    let db = db.with_scope(crate::db::DatabaseScope::Maintenance {
+        operation: crate::db::MaintenanceOperation::Retention,
+        org_id: None,
+    });
+    let backend = storage.storage_type();
+    let mut collected = 0;
+    for storage_path in collectable_retired_objects(&db, backend, retired_before, limit).await? {
+        // Checked again right before deleting: a retried multipart completion
+        // can commit its (deterministic) object again meanwhile.
+        if !retired_object_collectable(&db, backend, &storage_path, retired_before).await? {
+            continue;
+        }
+        if let Err(error) = storage.delete_storage_object(&storage_path).await {
+            tracing::warn!(%error, "Could not delete a retired file object; the next collection retries it");
+            continue;
+        }
+        forget_retired_object(&db, backend, &storage_path, retired_before).await?;
+        collected += 1;
+    }
+    Ok(collected)
+}
+
+/// Register a staged object for collection just before committing it; see
+/// [`crate::db::file::register_staged_object`]. Multipart destinations are not
+/// registered: an upload's expiry aborts and removes one that never commits.
+async fn register_staged(
+    ctx: &FileStorageContext,
+    backend: &str,
+    storage_path: &str,
+) -> Result<(), String> {
+    crate::db::file::register_staged_object(&ctx.db, ctx.org_id, ctx.env_id, backend, storage_path)
+        .await
 }
 
 // ============================================================================
@@ -442,12 +503,38 @@ async fn check_write_quota(ctx: &FileStorageContext, content_len: i64) -> Result
     Ok(())
 }
 
+/// Longest file name a local filesystem accepts, in bytes (NAME_MAX).
+const LOCAL_NAME_MAX: usize = 255;
+
+/// Object stores bound whole keys, not their segments.
+const KEY_NAME_MAX: usize = usize::MAX;
+
+/// `normalized_path` with `suffix` appended to its file name. The suffix makes
+/// the location unique, so the name is shortened instead when the two would
+/// exceed `name_max` bytes.
+fn suffixed_rel_path(normalized_path: &str, suffix: &str, name_max: usize) -> String {
+    let (dir, name) = match normalized_path.rsplit_once('/') {
+        Some((dir, name)) => (Some(dir), name),
+        None => (None, normalized_path),
+    };
+    let mut keep = name.len().min(name_max.saturating_sub(suffix.len()));
+    while !name.is_char_boundary(keep) {
+        keep -= 1;
+    }
+    let name = &name[..keep];
+    match dir {
+        Some(dir) => format!("{dir}/{name}{suffix}"),
+        None => format!("{name}{suffix}"),
+    }
+}
+
 /// Unique per-attempt relative storage location for a conditional write.
 /// Each attempt stages its bytes at its own key and then swaps the record's
 /// storage_path to reference them, so no two attempts ever share a blob and
 /// a loser's cleanup can never delete a winner's bytes.
-fn cas_blob_rel_path(normalized_path: &str) -> String {
-    format!("{}.cas-{}", normalized_path, Uuid::new_v4().simple())
+fn cas_blob_rel_path(normalized_path: &str, name_max: usize) -> String {
+    let suffix = format!(".cas-{}", Uuid::new_v4().simple());
+    suffixed_rel_path(normalized_path, &suffix, name_max)
 }
 
 /// The record compare-and-swap behind write_file_if: conditional update when
@@ -458,9 +545,8 @@ fn cas_blob_rel_path(normalized_path: &str) -> String {
 /// this runs — the record swap is the commit point, and a reader may follow
 /// the new storage_path the instant the swap lands.
 ///
-/// Ok(None) = the CAS lost. On a win, the second tuple element carries the
-/// storage path the record previously referenced (now unreachable) so the
-/// caller can clean up the superseded blob.
+/// Ok(None) = the CAS lost. On a win, the superseded blob was retired for
+/// collection by the same statement.
 #[allow(clippy::too_many_arguments)]
 async fn cas_file_record(
     backend: &str,
@@ -471,7 +557,7 @@ async fn cas_file_record(
     content_type: Option<&str>,
     expected_etag: Option<&str>,
     ctx: &FileStorageContext,
-) -> Result<Option<(FileMetadata, Option<String>)>, String> {
+) -> Result<Option<FileMetadata>, String> {
     if let Err(e) = ctx.ensure_run_row().await {
         tracing::debug!(
             path = %normalized_path,
@@ -487,11 +573,6 @@ async fn cas_file_record(
                     // Deleted (or never existed) since checkout: the CAS loses.
                     Err(_) => return Ok(None),
                 };
-            // Accurate when the update below wins: a win means the record was
-            // untouched between this read and the swap (any interleaved write
-            // would have changed the etag and made the swap lose).
-            let previous_storage_path =
-                (!existing.storage_path.is_empty()).then(|| existing.storage_path.clone());
             let updated = crate::db::file::update_file_record_if_etag(
                 &ctx.db,
                 existing.file_id,
@@ -504,7 +585,7 @@ async fn cas_file_record(
                 ctx.run_id,
             )
             .await?;
-            Ok(updated.map(|r| (FileMetadata::from_file_record(r), previous_storage_path)))
+            Ok(updated.map(FileMetadata::from_file_record))
         }
         None => {
             match insert_file_record(
@@ -522,7 +603,7 @@ async fn cas_file_record(
             )
             .await
             {
-                Ok(rec) => Ok(Some((FileMetadata::from_file_record(rec), None))),
+                Ok(rec) => Ok(Some(FileMetadata::from_file_record(rec))),
                 // A concurrent creator won the unique index race: CAS lost.
                 Err(msg) if is_unique_violation(&msg) => Ok(None),
                 Err(e) => Err(e),
@@ -561,12 +642,9 @@ pub const COMPLETION_CONFLICT: &str = "Upload completion conflict";
 
 /// Outcome of [`commit_file_record`].
 enum Committed {
-    /// The record now references the new location. `previous` is the
-    /// location it replaced, which the caller deletes.
-    Swapped {
-        meta: FileMetadata,
-        previous: Option<String>,
-    },
+    /// The record now references the new location. The location it replaced
+    /// was retired for collection by the same statement.
+    Swapped(FileMetadata),
     /// The record already referenced the new location (a retried multipart
     /// completion whose earlier attempt committed).
     Already(FileMetadata),
@@ -576,10 +654,9 @@ enum Committed {
 
 impl Committed {
     /// The result of an unconditional write ([`CommitBase::Any`]).
-    fn into_write(self, normalized_path: &str) -> Result<(FileMetadata, Option<String>), String> {
+    fn into_write(self, normalized_path: &str) -> Result<FileMetadata, String> {
         match self {
-            Committed::Swapped { meta, previous } => Ok((meta, previous)),
-            Committed::Already(meta) => Ok((meta, None)),
+            Committed::Swapped(meta) | Committed::Already(meta) => Ok(meta),
             Committed::Conflict => Err(format!(
                 "{COMPLETION_CONFLICT}: {normalized_path} changed during the write"
             )),
@@ -593,14 +670,15 @@ const COMMIT_ATTEMPTS: usize = 8;
 /// Commit a write whose bytes are already durable at `storage_path`: swap
 /// the active record for the path to it, or insert one.
 ///
-/// The swap is a compare-and-swap on the location read just before it, so
-/// the replaced location handed back for cleanup is exactly the one this
-/// commit superseded: concurrent writers each delete only their own
-/// predecessor, and a write that races a delete re-inserts rather than
-/// landing on the deactivated row. A concurrent creator winning the unique
-/// index turns the insert into another swap attempt. Records owned by
-/// another backend are refused: an update would leave `storage_backend`
-/// pointing at the old backend.
+/// An unconditional write replaces whatever version is active, and a
+/// completion only the version it was claimed against. The location a swap
+/// replaces is retired for collection by the same statement, so concurrent
+/// writers never need to know which version they replaced, and contention
+/// alone never fails a write. A write that races a delete re-inserts rather
+/// than landing on the deactivated row, and a concurrent creator winning the
+/// unique index turns the insert into a swap. Records owned by another
+/// backend are refused: an update would leave `storage_backend` pointing at
+/// the old backend.
 #[allow(clippy::too_many_arguments)]
 async fn commit_file_record(
     backend: &str,
@@ -643,12 +721,7 @@ async fn commit_file_record(
             )
             .await
             {
-                Ok(rec) => {
-                    return Ok(Committed::Swapped {
-                        meta: FileMetadata::from_file_record(rec),
-                        previous: None,
-                    });
-                }
+                Ok(rec) => return Ok(Committed::Swapped(FileMetadata::from_file_record(rec))),
                 // A concurrent creator won the unique index: swap instead.
                 Err(msg) if is_unique_violation(&msg) => continue,
                 Err(e) => return Err(e),
@@ -658,31 +731,40 @@ async fn commit_file_record(
         if existing.storage_path == storage_path {
             return Ok(Committed::Already(FileMetadata::from_file_record(existing)));
         }
-        match base {
-            CommitBase::Any => {}
-            CommitBase::Path(path) if *path == existing.storage_path => {}
+        let updated = match base {
+            CommitBase::Any => {
+                update_file_record_if_active(
+                    &ctx.db,
+                    existing.file_id,
+                    content_len,
+                    etag,
+                    content_type,
+                    storage_path,
+                    ctx.user_id,
+                    ctx.run_id,
+                )
+                .await?
+            }
+            CommitBase::Path(path) if *path == existing.storage_path => {
+                update_file_record_if_storage_path(
+                    &ctx.db,
+                    existing.file_id,
+                    &existing.storage_path,
+                    content_len,
+                    etag,
+                    content_type,
+                    storage_path,
+                    ctx.user_id,
+                    ctx.run_id,
+                )
+                .await?
+            }
             CommitBase::Absent | CommitBase::Path(_) => return Ok(Committed::Conflict),
+        };
+        if let Some(updated) = updated {
+            return Ok(Committed::Swapped(FileMetadata::from_file_record(updated)));
         }
-        if let Some(updated) = update_file_record_if_storage_path(
-            &ctx.db,
-            existing.file_id,
-            &existing.storage_path,
-            content_len,
-            etag,
-            content_type,
-            storage_path,
-            ctx.user_id,
-            ctx.run_id,
-        )
-        .await?
-        {
-            let previous = (!existing.storage_path.is_empty()).then_some(existing.storage_path);
-            return Ok(Committed::Swapped {
-                meta: FileMetadata::from_file_record(updated),
-                previous,
-            });
-        }
-        // Changed or deleted since the read: look again.
+        // Deleted, or (for a claimed base) changed, since the read: look again.
     }
     Err(format!(
         "File record for {} kept changing during write; retry",
@@ -733,9 +815,10 @@ const READ_ATTEMPTS: usize = 3;
 
 /// Read the active record for `normalized_path` and hand it to `fetch`,
 /// which returns `Ok(None)` when the bytes it names are gone. An overwrite
-/// swaps the record and then deletes the superseded bytes, so a reader can
-/// lose that race between its lookup and its fetch; the record is read again
-/// and, if it moved, the fetch is retried.
+/// retires the superseded bytes, and collection deletes them after
+/// [`RETIRED_OBJECT_GRACE`], so a reader slower than that can lose the race
+/// between its lookup and its fetch; the record is read again and, if it
+/// moved, the fetch is retried.
 async fn fetch_current<'a, T>(
     ctx: &FileStorageContext,
     normalized_path: &str,
@@ -755,12 +838,12 @@ async fn fetch_current<'a, T>(
     Err(format!("File not found in storage: {}", normalized_path))
 }
 
-/// Deactivate the current version of `normalized_path` and return it, so the
-/// caller deletes exactly the bytes it deactivated; None when no file exists.
-/// An overwrite committing between the lookup and the deactivation moves the
-/// record to new bytes, so the compare-and-swap fails and the lookup repeats:
-/// deactivating by path alone would retire the new version and orphan its
-/// bytes outside the quota.
+/// Deactivate the current version of `normalized_path` and return it; None
+/// when no file exists. Deactivating retires the version's bytes for
+/// collection, except for a record that predates storage paths, whose bytes
+/// the caller removes. An overwrite committing between the lookup and the
+/// deactivation moves the record to new bytes, so the compare-and-swap fails
+/// and the lookup repeats: the returned version is the one deactivated.
 async fn deactivate_current(
     ctx: &FileStorageContext,
     normalized_path: &str,
@@ -826,14 +909,15 @@ async fn ensure_path_writable(
 /// Unique per-write object location. Each unconditional write stages its
 /// bytes at its own key and the record swap commits it, so concurrent
 /// writers never overwrite each other's bytes.
-fn unique_write_rel_path(normalized_path: &str) -> String {
-    format!("{}.v-{}", normalized_path, Uuid::new_v4().simple())
+fn unique_write_rel_path(normalized_path: &str, name_max: usize) -> String {
+    let suffix = format!(".v-{}", Uuid::new_v4().simple());
+    suffixed_rel_path(normalized_path, &suffix, name_max)
 }
 
 /// Location of a completed multipart upload: one per upload, so a retried
 /// completion finds what an earlier attempt assembled.
-fn multipart_rel_path(normalized_path: &str, upload: &str) -> String {
-    format!("{}.mp-{}", normalized_path, upload)
+fn multipart_rel_path(normalized_path: &str, upload: &str, name_max: usize) -> String {
+    suffixed_rel_path(normalized_path, &format!(".mp-{}", upload), name_max)
 }
 
 /// The error for a completion whose file changed after it was claimed.
@@ -1127,7 +1211,10 @@ impl FileStorage for LocalFileStorage {
         // Concurrent writers never share bytes, so the committed record's
         // size and etag always describe the file it references, and a
         // failed write leaves the current file untouched.
-        let staged_path = self.full_path(&unique_write_rel_path(&normalized_path), ctx);
+        let staged_path = self.full_path(
+            &unique_write_rel_path(&normalized_path, LOCAL_NAME_MAX),
+            ctx,
+        );
         if let Some(parent) = staged_path.parent() {
             tokio::fs::create_dir_all(parent)
                 .await
@@ -1138,6 +1225,10 @@ impl FileStorage for LocalFileStorage {
             return Err(format!("Failed to write file to storage: {}", e));
         }
         let storage_path = staged_path.to_string_lossy().to_string();
+        if let Err(e) = register_staged(ctx, "local", &storage_path).await {
+            let _ = tokio::fs::remove_file(&staged_path).await;
+            return Err(e);
+        }
 
         let committed = commit_file_record(
             "local",
@@ -1152,11 +1243,7 @@ impl FileStorage for LocalFileStorage {
         .await
         .and_then(|committed| committed.into_write(&normalized_path));
         match committed {
-            Ok((meta, previous)) => {
-                // The superseded file is unreachable now (best-effort).
-                if let Some(previous) = previous {
-                    let _ = tokio::fs::remove_file(&previous).await;
-                }
+            Ok(meta) => {
                 tracing::debug!("Wrote file {} to local storage", normalized_path);
                 Ok(meta)
             }
@@ -1193,7 +1280,7 @@ impl FileStorage for LocalFileStorage {
         // the commit point. A failure or lost race past this write leaves
         // only an unreferenced staged blob, never a record pointing at
         // missing or stale bytes.
-        let staged_path = self.full_path(&cas_blob_rel_path(&normalized_path), ctx);
+        let staged_path = self.full_path(&cas_blob_rel_path(&normalized_path, LOCAL_NAME_MAX), ctx);
         let storage_path = staged_path.to_string_lossy().to_string();
         if let Some(parent) = staged_path.parent() {
             tokio::fs::create_dir_all(parent)
@@ -1203,6 +1290,10 @@ impl FileStorage for LocalFileStorage {
         if let Err(e) = tokio::fs::write(&staged_path, content).await {
             let _ = tokio::fs::remove_file(&staged_path).await;
             return Err(format!("Failed to write file to storage: {}", e));
+        }
+        if let Err(e) = register_staged(ctx, "local", &storage_path).await {
+            let _ = tokio::fs::remove_file(&staged_path).await;
+            return Err(e);
         }
 
         match cas_file_record(
@@ -1217,16 +1308,7 @@ impl FileStorage for LocalFileStorage {
         )
         .await
         {
-            Ok(Some((meta, previous_storage_path))) => {
-                // The record now references the staged bytes; the superseded
-                // blob is unreachable and can go (best-effort).
-                if let Some(old) = previous_storage_path
-                    && old != storage_path
-                {
-                    let _ = tokio::fs::remove_file(&old).await;
-                }
-                Ok(Some(meta))
-            }
+            Ok(Some(meta)) => Ok(Some(meta)),
             Ok(None) => {
                 let _ = tokio::fs::remove_file(&staged_path).await;
                 Ok(None)
@@ -1296,19 +1378,16 @@ impl FileStorage for LocalFileStorage {
             return Ok(false);
         };
 
-        // Delete from the filesystem: the recorded storage path (which may be
-        // a conditional-write staged blob) plus the deterministic location.
-        let full_path = self.full_path(&normalized_path, ctx);
-        let mut targets = vec![full_path];
-        if record.storage_backend == "local" && !record.storage_path.is_empty() {
-            let recorded = PathBuf::from(&record.storage_path);
-            if !targets.contains(&recorded) {
-                targets.push(recorded);
-            }
-        }
-        for target in targets {
-            if target.exists() {
-                tokio::fs::remove_file(&target)
+        // Deactivating retired the recorded bytes for collection. A record
+        // that predates storage paths keeps its bytes at the path's own
+        // location, which can also be a directory of other files.
+        if record.storage_path.is_empty() {
+            let legacy = self.full_path(&normalized_path, ctx);
+            if tokio::fs::metadata(&legacy)
+                .await
+                .is_ok_and(|meta| meta.is_file())
+            {
+                tokio::fs::remove_file(&legacy)
                     .await
                     .map_err(|e| format!("Failed to delete file from storage: {}", e))?;
             }
@@ -1316,6 +1395,26 @@ impl FileStorage for LocalFileStorage {
 
         tracing::debug!("Deleted file {} from local storage", normalized_path);
         Ok(true) // File existed and was deleted
+    }
+
+    async fn delete_storage_object(&self, storage_path: &str) -> Result<(), String> {
+        let path = Path::new(storage_path);
+        let inside = path.starts_with(&self.base_path)
+            && path
+                .components()
+                .all(|part| !matches!(part, std::path::Component::ParentDir));
+        if !inside {
+            tracing::warn!(
+                storage_path,
+                "Not deleting a retired file object outside this storage directory"
+            );
+            return Ok(());
+        }
+        match tokio::fs::remove_file(path).await {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(format!("Failed to delete file object: {}", e)),
+        }
     }
 
     async fn file_exists(&self, path: &str, ctx: &FileStorageContext) -> Result<bool, String> {
@@ -1447,7 +1546,7 @@ impl FileStorage for LocalFileStorage {
 
         let upload_dir = self.base_path.join(".uploads").join(backend_upload_id);
         let dest = self.full_path(
-            &multipart_rel_path(&normalized_path, backend_upload_id),
+            &multipart_rel_path(&normalized_path, backend_upload_id, LOCAL_NAME_MAX),
             ctx,
         );
         let storage_path = dest.to_string_lossy().to_string();
@@ -1472,7 +1571,9 @@ impl FileStorage for LocalFileStorage {
                 .await
                 .map_err(|e| format!("Failed to create parent directories: {}", e))?;
         }
-        let tmp = PathBuf::from(format!("{}.tmp-{}", storage_path, Uuid::new_v4().simple()));
+        // A short name of its own: the destination's name may already be as
+        // long as the filesystem allows.
+        let tmp = dest.with_file_name(format!(".tmp-{}", Uuid::new_v4().simple()));
         let (etag, actual_size) = match Self::assemble_parts(&upload_dir, &sorted_parts, &tmp).await
         {
             Ok(assembled) => assembled,
@@ -1509,13 +1610,7 @@ impl FileStorage for LocalFileStorage {
         )
         .await;
         let meta = match committed {
-            Ok(Committed::Swapped { meta, previous }) => {
-                if let Some(previous) = previous {
-                    let _ = tokio::fs::remove_file(&previous).await;
-                }
-                meta
-            }
-            Ok(Committed::Already(meta)) => meta,
+            Ok(Committed::Swapped(meta) | Committed::Already(meta)) => meta,
             Ok(Committed::Conflict) => {
                 let _ = tokio::fs::remove_file(&dest).await;
                 return Err(completion_conflict(&normalized_path));
@@ -1556,7 +1651,7 @@ impl FileStorage for LocalFileStorage {
         // destination behind.
         let normalized_path = normalize_path(path)?;
         let dest = self.full_path(
-            &multipart_rel_path(&normalized_path, backend_upload_id),
+            &multipart_rel_path(&normalized_path, backend_upload_id, LOCAL_NAME_MAX),
             ctx,
         );
         if let StagedBytes::Unreferenced =
@@ -1815,7 +1910,7 @@ pub mod s3 {
                 .strip_prefix(MULTIPART_ID_PREFIX)
                 .and_then(|rest| rest.split_once(':'))
             {
-                let rel = multipart_rel_path(normalized_path, nonce);
+                let rel = multipart_rel_path(normalized_path, nonce, KEY_NAME_MAX);
                 (self.s3_key(&rel, ctx), upload_id.to_string())
             } else {
                 (
@@ -1851,7 +1946,7 @@ pub mod s3 {
             // point. Concurrent writers never share an object, so the
             // committed record's size and etag always describe the object it
             // references, and a failed write leaves the current file intact.
-            let key = self.s3_key(&unique_write_rel_path(&normalized_path), ctx);
+            let key = self.s3_key(&unique_write_rel_path(&normalized_path, KEY_NAME_MAX), ctx);
             let mut put_request = self
                 .client
                 .put_object()
@@ -1887,6 +1982,10 @@ pub mod s3 {
                 .trim_matches('"')
                 .to_string();
             let storage_path = format!("s3://{}/{}", self.bucket, key);
+            if let Err(e) = register_staged(ctx, "s3", &storage_path).await {
+                self.delete_location_best_effort(&storage_path).await;
+                return Err(e);
+            }
 
             let committed = commit_file_record(
                 "s3",
@@ -1901,11 +2000,7 @@ pub mod s3 {
             .await
             .and_then(|committed| committed.into_write(&normalized_path));
             match committed {
-                Ok((meta, previous)) => {
-                    // The superseded object is unreachable now (best-effort).
-                    if let Some(previous) = previous {
-                        self.delete_location_best_effort(&previous).await;
-                    }
+                Ok(meta) => {
                     tracing::debug!("Wrote file {} to S3: {}", normalized_path, storage_path);
                     Ok(meta)
                 }
@@ -1942,7 +2037,7 @@ pub mod s3 {
             // is the commit point. A failed upload or a lost race leaves
             // only an unreferenced staged object, never a record pointing
             // at missing or stale bytes.
-            let key = self.s3_key(&cas_blob_rel_path(&normalized_path), ctx);
+            let key = self.s3_key(&cas_blob_rel_path(&normalized_path, KEY_NAME_MAX), ctx);
             let storage_path = format!("s3://{}/{}", self.bucket, key);
 
             let byte_stream = ByteStream::from(content.to_vec());
@@ -1961,6 +2056,10 @@ pub mod s3 {
                     self.bucket, key, normalized_path, e
                 )
             })?;
+            if let Err(e) = register_staged(ctx, "s3", &storage_path).await {
+                self.delete_location_best_effort(&storage_path).await;
+                return Err(e);
+            }
 
             match cas_file_record(
                 "s3",
@@ -1974,23 +2073,7 @@ pub mod s3 {
             )
             .await
             {
-                Ok(Some((meta, previous_storage_path))) => {
-                    // The record now references the staged object; the
-                    // superseded blob is unreachable and can go (best-effort).
-                    if let Some(old) = previous_storage_path
-                        && old != storage_path
-                        && let Some((old_bucket, old_key)) = self.parse_storage_path(&old)
-                    {
-                        let _ = self
-                            .client
-                            .delete_object()
-                            .bucket(&old_bucket)
-                            .key(&old_key)
-                            .send()
-                            .await;
-                    }
-                    Ok(Some(meta))
-                }
+                Ok(Some(meta)) => Ok(Some(meta)),
                 Ok(None) => {
                     self.delete_location_best_effort(&storage_path).await;
                     Ok(None)
@@ -2101,15 +2184,14 @@ pub mod s3 {
                 return Ok(false);
             };
 
-            // Delete from S3 at the recorded storage path (which may be a
-            // conditional-write staged key), falling back to the
-            // deterministic key.
-            let (bucket, key) = if record.storage_backend == "s3" {
-                self.parse_storage_path(&record.storage_path)
-                    .unwrap_or_else(|| (self.bucket.clone(), self.s3_key(&normalized_path, ctx)))
-            } else {
-                (self.bucket.clone(), self.s3_key(&normalized_path, ctx))
-            };
+            // Deactivating retired the recorded object for collection. A
+            // record that predates storage paths keeps its object at the
+            // path's deterministic key.
+            if !record.storage_path.is_empty() {
+                tracing::debug!("Deleted file {} from S3", normalized_path);
+                return Ok(true);
+            }
+            let (bucket, key) = (self.bucket.clone(), self.s3_key(&normalized_path, ctx));
 
             let result = self
                 .client
@@ -2144,6 +2226,27 @@ pub mod s3 {
                     Err(error_msg)
                 }
             }
+        }
+
+        async fn delete_storage_object(&self, storage_path: &str) -> Result<(), String> {
+            let Some((bucket, key)) = self
+                .parse_storage_path(storage_path)
+                .filter(|(bucket, _)| *bucket == self.bucket)
+            else {
+                tracing::warn!(
+                    storage_path,
+                    "Not deleting a retired file object outside this bucket"
+                );
+                return Ok(());
+            };
+            self.client
+                .delete_object()
+                .bucket(&bucket)
+                .key(&key)
+                .send()
+                .await
+                .map(|_| ())
+                .map_err(|e| format!("Failed to delete S3 object {}: {}", key, e))
         }
 
         async fn file_exists(&self, path: &str, ctx: &FileStorageContext) -> Result<bool, String> {
@@ -2225,7 +2328,10 @@ pub mod s3 {
             ensure_path_writable("s3", &normalized_path, ctx).await?;
 
             let nonce = Uuid::new_v4().simple().to_string();
-            let key = self.s3_key(&multipart_rel_path(&normalized_path, &nonce), ctx);
+            let key = self.s3_key(
+                &multipart_rel_path(&normalized_path, &nonce, KEY_NAME_MAX),
+                ctx,
+            );
 
             let mut req = self
                 .client
@@ -2374,13 +2480,7 @@ pub mod s3 {
             )
             .await;
             let meta = match committed {
-                Ok(Committed::Swapped { meta, previous }) => {
-                    if let Some(previous) = previous {
-                        self.delete_location_best_effort(&previous).await;
-                    }
-                    meta
-                }
-                Ok(Committed::Already(meta)) => meta,
+                Ok(Committed::Swapped(meta) | Committed::Already(meta)) => meta,
                 Ok(Committed::Conflict) => {
                     self.delete_location_best_effort(&storage_path).await;
                     return Err(completion_conflict(&normalized_path));
@@ -2650,19 +2750,6 @@ pub mod gcs {
             }
         }
 
-        /// Best-effort delete of a location a record no longer references.
-        async fn delete_superseded(&self, previous: Option<String>) {
-            let Some(previous) = previous else { return };
-            match self.client.key_from_uri(&previous) {
-                Ok(key) => {
-                    if let Err(e) = self.client.delete(&key, None).await {
-                        tracing::warn!(error = %e, "Failed to delete superseded GCS object");
-                    }
-                }
-                Err(e) => tracing::warn!(error = %e, "Not deleting superseded foreign object"),
-            }
-        }
-
         /// Remove a finished upload's staging objects (best-effort; the
         /// staging lifecycle rule is the backstop).
         async fn cleanup_staging(&self, staging: &str) {
@@ -2764,7 +2851,7 @@ pub mod gcs {
                 .map(|s| s.to_string())
                 .or_else(|| detect_content_type(&normalized_path, content));
 
-            let key = self.object_key(&unique_write_rel_path(&normalized_path), ctx);
+            let key = self.object_key(&unique_write_rel_path(&normalized_path, KEY_NAME_MAX), ctx);
             let (_, generation) = self
                 .put_unique(
                     &key,
@@ -2775,6 +2862,10 @@ pub mod gcs {
                 .await
                 .map_err(|e| format!("Failed to upload file {} to GCS: {}", normalized_path, e))?;
             let storage_path = self.client.uri(&key);
+            if let Err(e) = register_staged(ctx, BACKEND_ID, &storage_path).await {
+                self.delete_key_best_effort(&key, Some(generation)).await;
+                return Err(e);
+            }
 
             let committed = commit_file_record(
                 BACKEND_ID,
@@ -2789,8 +2880,7 @@ pub mod gcs {
             .await
             .and_then(|committed| committed.into_write(&normalized_path));
             match committed {
-                Ok((meta, previous)) => {
-                    self.delete_superseded(previous).await;
+                Ok(meta) => {
                     tracing::debug!("Wrote file {} to GCS", normalized_path);
                     Ok(meta)
                 }
@@ -2826,7 +2916,7 @@ pub mod gcs {
             // Stage at a unique key; the record swap below is the commit
             // point. Hot's application ETag (MD5) is independent of the GCS
             // generation, which only guards this object's own lifecycle.
-            let key = self.object_key(&cas_blob_rel_path(&normalized_path), ctx);
+            let key = self.object_key(&cas_blob_rel_path(&normalized_path, KEY_NAME_MAX), ctx);
             let (_, generation) = self
                 .put_unique(
                     &key,
@@ -2837,6 +2927,10 @@ pub mod gcs {
                 .await
                 .map_err(|e| format!("Failed to upload file {} to GCS: {}", normalized_path, e))?;
             let storage_path = self.client.uri(&key);
+            if let Err(e) = register_staged(ctx, BACKEND_ID, &storage_path).await {
+                self.delete_key_best_effort(&key, Some(generation)).await;
+                return Err(e);
+            }
 
             match cas_file_record(
                 BACKEND_ID,
@@ -2850,11 +2944,7 @@ pub mod gcs {
             )
             .await
             {
-                Ok(Some((meta, previous))) => {
-                    self.delete_superseded(previous.filter(|old| *old != storage_path))
-                        .await;
-                    Ok(Some(meta))
-                }
+                Ok(Some(meta)) => Ok(Some(meta)),
                 // Only this attempt's generation is ever removed.
                 Ok(None) => {
                     self.delete_key_best_effort(&key, Some(generation)).await;
@@ -2923,25 +3013,28 @@ pub mod gcs {
         async fn delete_file(&self, path: &str, ctx: &FileStorageContext) -> Result<bool, String> {
             let normalized_path = normalize_path(path)?;
             validate_path_security(&normalized_path)?;
-            let Some(record) = deactivate_current(ctx, &normalized_path).await? else {
+            // Deactivating retired the recorded object for collection.
+            if deactivate_current(ctx, &normalized_path).await?.is_none() {
                 return Ok(false);
-            };
-
-            match self.record_key(&record) {
-                Ok(key) => {
-                    self.client.delete(&key, None).await.map_err(|e| {
-                        format!(
-                            "File {} was deleted but its GCS object could not be removed: {}",
-                            normalized_path, e
-                        )
-                    })?;
-                }
-                // The record is gone either way; bytes owned by another
-                // backend are left for the migration to reconcile.
-                Err(e) => tracing::warn!("Deleted file record without removing bytes: {}", e),
             }
             tracing::debug!("Deleted file {} from GCS", normalized_path);
             Ok(true)
+        }
+
+        async fn delete_storage_object(&self, storage_path: &str) -> Result<(), String> {
+            let key = match self.client.key_from_uri(storage_path) {
+                Ok(key) => key,
+                Err(e) => {
+                    tracing::warn!(error = %e, "Not deleting a retired file object outside this bucket");
+                    return Ok(());
+                }
+            };
+            // An object that is already gone is reported as deleted.
+            self.client
+                .delete(&key, None)
+                .await
+                .map(|_| ())
+                .map_err(|e| format!("Failed to delete GCS object {}: {}", key, e))
         }
 
         async fn file_exists(&self, path: &str, ctx: &FileStorageContext) -> Result<bool, String> {
@@ -3080,7 +3173,7 @@ pub mod gcs {
                 (META_MANIFEST, digest.as_str()),
             ];
             let dest = self.object_key(
-                &multipart_rel_path(&normalized_path, backend_upload_id),
+                &multipart_rel_path(&normalized_path, backend_upload_id, KEY_NAME_MAX),
                 ctx,
             );
             let storage_path = self.client.uri(&dest);
@@ -3182,11 +3275,7 @@ pub mod gcs {
             )
             .await;
             let meta = match committed {
-                Ok(Committed::Swapped { meta, previous }) => {
-                    self.delete_superseded(previous).await;
-                    meta
-                }
-                Ok(Committed::Already(meta)) => meta,
+                Ok(Committed::Swapped(meta) | Committed::Already(meta)) => meta,
                 Ok(Committed::Conflict) => {
                     self.delete_key_best_effort(&dest, Some(dest_generation))
                         .await;
@@ -3220,7 +3309,7 @@ pub mod gcs {
             // destination outside the staging prefix.
             let normalized_path = normalize_path(path)?;
             let dest = self.object_key(
-                &multipart_rel_path(&normalized_path, backend_upload_id),
+                &multipart_rel_path(&normalized_path, backend_upload_id, KEY_NAME_MAX),
                 ctx,
             );
             if let StagedBytes::Unreferenced =
@@ -3597,6 +3686,12 @@ mod tests {
         .execute(&pool)
         .await
         .unwrap();
+        sqlx::raw_sql(include_str!(
+            "../../../resources/db/sqlite/migrations/016_retire_file_objects.sql"
+        ))
+        .execute(&pool)
+        .await
+        .unwrap();
 
         let db = crate::db::DatabasePool::Sqlite(pool);
         let db_arc = std::sync::Arc::new(db);
@@ -3617,6 +3712,84 @@ mod tests {
         };
 
         (storage, ctx, temp_dir)
+    }
+
+    /// Collect every retired object, as if its grace period had passed.
+    async fn collect_retired(storage: &dyn FileStorage, ctx: &FileStorageContext) -> usize {
+        let after_grace = Utc::now() + chrono::Duration::days(1);
+        collect_retired_objects(&ctx.db, storage, after_grace, 1_000)
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn many_concurrent_writers_all_commit() {
+        let (storage, ctx, _temp) = setup_test_storage().await;
+        let writes = (0..16).map(|i| {
+            let (storage, ctx) = (&storage, &ctx);
+            async move {
+                let body = format!("version-{i}");
+                storage
+                    .write_file("busy.txt", body.as_bytes(), None, ctx)
+                    .await
+            }
+        });
+        for result in futures::future::join_all(writes).await {
+            result.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn longest_file_names_are_storable() {
+        let (storage, ctx, _temp) = setup_test_storage().await;
+        let name = format!("dir/{}", "n".repeat(255));
+        storage.write_file(&name, b"one", None, &ctx).await.unwrap();
+        let etag = storage.get_file_metadata(&name, &ctx).await.unwrap().etag;
+        storage
+            .write_file_if(&name, b"two", None, etag.as_deref(), &ctx)
+            .await
+            .unwrap()
+            .expect("the etag matches");
+        assert_eq!(storage.read_file(&name, &ctx).await.unwrap(), b"two");
+
+        let upload = storage
+            .initiate_multipart_upload(&name, None, &ctx)
+            .await
+            .unwrap();
+        let part = storage
+            .upload_part(&upload, &name, 1, b"three", &ctx)
+            .await
+            .unwrap();
+        storage
+            .complete_multipart_upload(
+                &upload,
+                &name,
+                &[(1, part)],
+                5,
+                None,
+                &CommitBase::Any,
+                &ctx,
+            )
+            .await
+            .unwrap();
+        assert_eq!(storage.read_file(&name, &ctx).await.unwrap(), b"three");
+        assert!(storage.delete_file(&name, &ctx).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn deleting_a_file_leaves_a_directory_of_the_same_name() {
+        let (storage, ctx, _temp) = setup_test_storage().await;
+        storage
+            .write_file("data/x", b"child", None, &ctx)
+            .await
+            .unwrap();
+        storage
+            .write_file("data", b"parent", None, &ctx)
+            .await
+            .unwrap();
+        assert!(storage.delete_file("data", &ctx).await.unwrap());
+        assert!(!storage.file_exists("data", &ctx).await.unwrap());
+        assert_eq!(storage.read_file("data/x", &ctx).await.unwrap(), b"child");
     }
 
     #[tokio::test]
@@ -3762,7 +3935,7 @@ mod tests {
         );
 
         // Conditional update with the current etag wins; the superseded
-        // staged blob is cleaned up.
+        // staged blob stays readable until collection removes it.
         let v1_storage_path = v1.storage_path.clone();
         let v2 = storage
             .write_file_if("dbs/app.db", b"version-2", None, v1.etag.as_deref(), &ctx)
@@ -3773,6 +3946,8 @@ mod tests {
             storage.read_file("dbs/app.db", &ctx).await.unwrap(),
             b"version-2"
         );
+        assert!(std::path::Path::new(&v1_storage_path).exists());
+        collect_retired(&storage, &ctx).await;
         assert!(!std::path::Path::new(&v1_storage_path).exists());
 
         // A writer still holding the old etag loses; content stays intact
@@ -3828,7 +4003,8 @@ mod tests {
             .expect("create should win");
 
         assert!(storage.delete_file("dbs/cycle.db", &ctx).await.unwrap());
-        // The CAS blob is gone from disk too.
+        // Collection removes the CAS blob from disk too.
+        collect_retired(&storage, &ctx).await;
         assert!(!std::path::Path::new(&v1.storage_path).exists());
 
         // An update expecting the pre-delete etag must lose (the active
@@ -4080,8 +4256,8 @@ mod tests {
     async fn test_concurrent_writes_leave_no_orphaned_bytes() {
         let (storage, ctx, _temp_dir) = setup_test_storage().await;
 
-        // Overlapping writers each delete exactly the version they replaced,
-        // so only the committed version is left on disk.
+        // Overlapping writers each retire the version they replaced, so once
+        // collection runs only the committed version is left on disk.
         for round in 0..10 {
             let one = format!("one-{round}");
             let two = format!("two-two-{round}");
@@ -4095,6 +4271,7 @@ mod tests {
             b.unwrap();
             c.unwrap();
         }
+        collect_retired(&storage, &ctx).await;
         let names: Vec<String> = std::fs::read_dir(storage.full_path("race", &ctx))
             .unwrap()
             .map(|entry| entry.unwrap().file_name().into_string().unwrap())
@@ -4123,7 +4300,7 @@ mod tests {
         // A completion claimed against v0 commits, and retrying it is a no-op.
         assert!(matches!(
             commit(&claimed_at_v0).await,
-            Committed::Swapped { .. }
+            Committed::Swapped(_)
         ));
         assert!(matches!(
             commit(&claimed_at_v0).await,
@@ -4149,7 +4326,7 @@ mod tests {
         // A completion claimed while the path was empty creates the file.
         assert!(matches!(
             commit(&CommitBase::Absent).await,
-            Committed::Swapped { previous: None, .. }
+            Committed::Swapped(_)
         ));
     }
 
@@ -4221,8 +4398,9 @@ mod tests {
             .await
             .unwrap();
 
-        // The reader looked up v1 just before a writer replaced and deleted
-        // it; the read follows the record to the new version.
+        // The reader looked up v1 so long before a writer replaced it that
+        // collection deleted it; the read follows the record to the new
+        // version.
         let mut stale = true;
         let (record, bytes) = fetch_current(&ctx, "race/read.txt", |record| {
             let overwrite = std::mem::replace(&mut stale, false);
@@ -4234,6 +4412,7 @@ mod tests {
                         .write_file("race/read.txt", b"two", None, ctx)
                         .await
                         .unwrap();
+                    collect_retired(storage, ctx).await;
                 }
                 match tokio::fs::read(&location).await {
                     Ok(bytes) => Ok(Some(bytes)),
@@ -4283,7 +4462,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_overwrite_removes_superseded_bytes() {
+    async fn test_collection_removes_superseded_and_deleted_bytes() {
         let (storage, ctx, _temp_dir) = setup_test_storage().await;
         let v1 = storage
             .write_file("docs/a.txt", b"one", None, &ctx)
@@ -4294,10 +4473,67 @@ mod tests {
             .await
             .unwrap();
         assert_ne!(v1.storage_path, v2.storage_path);
+        // A read that resolved v1 before the overwrite can still finish.
+        assert_eq!(tokio::fs::read(&v1.storage_path).await.unwrap(), b"one");
+        let within_grace = Utc::now() - chrono::Duration::minutes(1);
+        assert_eq!(
+            collect_retired_objects(&ctx.db, &storage, within_grace, 100)
+                .await
+                .unwrap(),
+            0
+        );
+        assert!(Path::new(&v1.storage_path).exists());
+
+        assert_eq!(collect_retired(&storage, &ctx).await, 1);
         assert!(!Path::new(&v1.storage_path).exists());
-        assert!(Path::new(&v2.storage_path).exists());
+        assert_eq!(storage.read_file("docs/a.txt", &ctx).await.unwrap(), b"two");
         assert!(storage.delete_file("docs/a.txt", &ctx).await.unwrap());
+        assert!(Path::new(&v2.storage_path).exists());
+        assert_eq!(collect_retired(&storage, &ctx).await, 1);
         assert!(!Path::new(&v2.storage_path).exists());
+        assert_eq!(collect_retired(&storage, &ctx).await, 0);
+    }
+
+    #[tokio::test]
+    async fn interrupted_writes_are_collected_but_referenced_objects_never() {
+        let (storage, ctx, _temp_dir) = setup_test_storage().await;
+        let live = storage
+            .write_file("docs/live.txt", b"live", None, &ctx)
+            .await
+            .unwrap();
+        // A write that staged and registered its bytes, then never committed.
+        let staged = storage.full_path(".interrupted.v-1", &ctx);
+        tokio::fs::write(&staged, b"orphan").await.unwrap();
+        let staged = staged.to_string_lossy().to_string();
+        register_staged(&ctx, "local", &staged).await.unwrap();
+        // A retired entry for an object a record still references.
+        register_staged(&ctx, "local", &live.storage_path)
+            .await
+            .unwrap();
+
+        assert_eq!(collect_retired(&storage, &ctx).await, 1);
+        assert!(!Path::new(&staged).exists());
+        assert_eq!(
+            storage.read_file("docs/live.txt", &ctx).await.unwrap(),
+            b"live"
+        );
+    }
+
+    #[test]
+    fn staged_names_keep_their_unique_suffix_within_the_name_limit() {
+        let long = format!("dir/{}", "é".repeat(200));
+        let staged = unique_write_rel_path(&long, LOCAL_NAME_MAX);
+        let name = staged.rsplit_once('/').unwrap().1;
+        assert!(name.len() <= LOCAL_NAME_MAX, "{}", name.len());
+        assert!(staged.starts_with("dir/é"));
+        assert!(name.contains(".v-"));
+        assert_ne!(staged, unique_write_rel_path(&long, LOCAL_NAME_MAX));
+        // Object store keys keep the whole name.
+        assert!(unique_write_rel_path(&long, KEY_NAME_MAX).starts_with(&long));
+        assert_eq!(
+            multipart_rel_path("a/b.txt", "u", LOCAL_NAME_MAX),
+            "a/b.txt.mp-u"
+        );
     }
 
     #[tokio::test]
@@ -4507,6 +4743,10 @@ mod tests {
             assert!(!storage.file_exists("contract/a.json", ctx).await.unwrap());
             assert!(storage.read_file("contract/a.json", ctx).await.is_err());
             assert!(!storage.delete_file("contract/a.json", ctx).await.unwrap());
+
+            // Both versions were retired, and collection deletes them once.
+            assert!(collect_retired(storage, ctx).await >= 2);
+            assert_eq!(collect_retired(storage, ctx).await, 0);
         }
 
         async fn assert_env_isolation(storage: &dyn FileStorage, ctx: &FileStorageContext) {

@@ -129,6 +129,8 @@ and construction of maintenance authority remain outside this boundary.
 | `org_note` (017) | Billing reads and inserts its account's notes, which deduplicate compute-unit threshold alerts |
 | `alert_subscription_channel` (017) | An org-wide subscription may link one of its org's environment channels |
 | `parked_event` (018) | Queue operation reads, parks and replays held events; an exact environment scope reads and writes its own |
+| `retired_file_object` (019) | A file's own environment or org scope retires and registers its objects, through the `file` triggers and before a commit; Retention reads and deletes them when collecting |
+| `file` (019) | Retention reads which objects active versions still reference, so collection never deletes one |
 
 Migration 013 backfills `call.env_id` from its existing run, makes it required,
 and validates the pair with a composite foreign key. Both ownership fields are

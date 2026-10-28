@@ -364,6 +364,17 @@ impl ExistingRows {
             .bind(rows.delivery).bind(rows.alert).bind(rows.subscription).bind(rows.destination).execute(pool).await?;
         sqlx::query("INSERT INTO api_key(api_key_id,env_id,description,key_data,created_by_user_id,permissions) VALUES($1,$2,'retained credential','{}',$3,'{\"file:allowed/*\":[\"read\"]}')")
             .bind(rows.key).bind(rows.env).bind(rows.user).execute(pool).await?;
+        // A deleted file, a live one, and an older deleted version that still
+        // shares the live version's object.
+        for (name, storage_path, active) in [
+            ("gone.txt", "/files/gone", false),
+            ("kept.txt", "/files/kept", true),
+            ("kept.txt", "/files/kept", false),
+        ] {
+            sqlx::query("INSERT INTO file(file_id,path,size,storage_backend,storage_path,org_id,env_id,created_by_user_id,active) VALUES($1,$2,1,'local',$3,$4,$5,$6,$7)")
+                .bind(Uuid::new_v4()).bind(name).bind(storage_path).bind(rows.org).bind(rows.env).bind(rows.user).bind(active)
+                .execute(pool).await?;
+        }
         Ok(rows)
     }
 
@@ -670,6 +681,11 @@ async fn populated_upgrades_use_non_bypass_owner_and_reprovision_runtime_grants(
             }
             let retained: serde_json::Value = sqlx::query_scalar("SELECT result FROM run WHERE run_id=$1").bind(rows.run).fetch_one(&fixture.admin).await?;
             assert_eq!(retained,serde_json::json!("retained result"));
+            // 019 retires a deleted file's object, though not one a live
+            // version shares, even under the non-bypass owner.
+            let retired: Vec<String> = sqlx::query_scalar("SELECT storage_path FROM retired_file_object")
+                .fetch_all(&fixture.admin).await?;
+            assert_eq!(retired, ["/files/gone"]);
             // Existing direct grants can come from several historical scripts.
             // Table-level REVOKE alone cannot remove the column ACLs below.
             for grant in [
