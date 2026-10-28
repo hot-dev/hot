@@ -85,6 +85,9 @@ pub fn start(vm: &mut VirtualMachine, args: &[Val]) -> HotResult<Val> {
             "::hot::task/start: expected 1-3 args (task-fn [, args [, options]])".to_string(),
         ));
     }
+    if let Err(error) = vm.require_work_admission() {
+        return HotResult::Err(err_val(error));
+    }
 
     // Extract function qualified name
     let function_name = match extract_function_name("::hot::task/start", &args[0]) {
@@ -1695,6 +1698,46 @@ mod tests {
             core_variables,
             None,
         )
+    }
+
+    /// A run that started before its environment was suspended must not
+    /// create more work: held tasks would only retry until reactivation.
+    #[test]
+    fn task_start_refuses_work_in_a_suspended_environment() {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let (db, data) = runtime.block_on(async {
+            let db = crate::db::test_db().await;
+            let data = crate::db::insert_test_data(&db).await.unwrap();
+            (db, data)
+        });
+        let crate::db::DatabasePool::Sqlite(pool) = &db else {
+            return;
+        };
+        runtime
+            .block_on(
+                sqlx::query("UPDATE env SET active=0 WHERE env_id=?")
+                    .bind(data.env_id)
+                    .execute(pool),
+            )
+            .unwrap();
+        let _entered = runtime.enter();
+        let mut vm = create_test_vm();
+        vm.set_database_pool(Arc::new(db.clone()));
+        vm.set_execution_context(crate::lang::event::ExecutionContext::new(
+            Uuid::now_v7(),
+            data.stream_id,
+            crate::db::run::RunType::Run.as_id(),
+            Some(data.env_id),
+            Some(data.user_id),
+            Some(data.org_id),
+            Some(data.build_id),
+        ));
+        let refused = vm.require_work_admission().unwrap_err();
+        assert!(refused.contains("not admitting"), "{refused}");
+        assert!(matches!(
+            start(&mut vm, &[Val::from("::app/work")]),
+            HotResult::Err(_)
+        ));
     }
 
     #[test]
