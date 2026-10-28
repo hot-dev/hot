@@ -5037,8 +5037,14 @@ impl VirtualMachine {
                 if let Some(namespace) = hot_ast.namespaces.namespaces.get(&ns_path) {
                     for (var, value) in namespace.scope.vars.iter() {
                         if var.sym.name() == var_name {
+                            // The initializer names things in its own
+                            // namespace, not the reader's.
                             let value_clone = value.clone();
-                            return self.convert_ast_value_to_runtime_val(&value_clone);
+                            let reader_namespace =
+                                std::mem::replace(&mut self.current_namespace, full_namespace);
+                            let result = self.convert_ast_value_to_runtime_val(&value_clone);
+                            self.current_namespace = reader_namespace;
+                            return result;
                         }
                     }
                     // Variable not found in namespace - don't error yet, try function lookup below

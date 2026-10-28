@@ -224,6 +224,75 @@ make-error(3)"#;
         Val::Vec(values.iter().map(|s| Val::from(*s)).collect())
     }
 
+    /// A value imported from another namespace evaluates in its home
+    /// namespace: its initializer finds that namespace's types, functions,
+    /// and aliases, which the importer need not have.
+    #[test]
+    fn imported_value_evaluates_in_its_home_namespace() {
+        let src = r#"::mp::duty ns
+s4 ::mp::text/s4
+s4-title ::mp::text/s4-title
+s4-loud ::mp::text/s4-loud
+shape ::mp::text/shape
+heading ::mp::text/heading-of-s4()
+probe fn (): Vec {
+    [s4.section, s4-title, s4-loud, shape.section, heading]
+}
+
+::mp::text ns
+::fmt ::mp::fmt
+Clause type { section: Str, heading: Str, text: Str }
+Shape enum { Circle(Clause), Dot }
+title fn (c: Clause): Str { `${c.section} ${c.heading}` }
+s4 Clause(section: "§4", heading: "Reporting", text: "Log it.")
+s4-title title(s4)
+s4-loud ::fmt/loud(s4.heading)
+shape Shape.Circle({section: "§5", heading: "Holds", text: "Hold it."})
+heading-of-s4 fn (): Str { s4.heading }
+
+::mp::fmt ns
+loud fn (s: Str): Str { uppercase(s) }
+
+::mp::main ns
+::mp::duty/probe()
+::mp::duty/probe()"#;
+        assert_same_with_and_without_jit(
+            src,
+            &strs(&["§4", "§4 Reporting", "REPORTING", "§5", "Reporting"]),
+        );
+        assert_eq!(
+            compile_and_run_with_std_ast(src).as_ref(),
+            Ok(&strs(&["§4", "§4 Reporting", "REPORTING", "§5", "Reporting"])),
+        );
+    }
+
+    /// Namespaces that read each other's values run in source order, so the
+    /// first reads a value its partner has not stored yet. The VM then
+    /// evaluates that value's initializer from the AST, in its home
+    /// namespace.
+    #[test]
+    fn value_read_before_its_namespace_runs_evaluates_in_its_home_namespace() {
+        let src = r#"::mp::a ns
+z "from a"
+x ::mp::b/y
+
+::mp::b ns
+Note type { text: Str }
+y Note(text: "from b")
+w ::mp::a/z
+
+::mp::c ns
+probe fn (): Vec {
+    x ::mp::a/x
+    [x.text, ::mp::b/w]
+}
+probe()"#;
+        assert_eq!(
+            compile_and_run_with_std_ast(src).as_ref(),
+            Ok(&strs(&["from b", "from a"])),
+        );
+    }
+
     /// `Name({...})` inside a custom constructor of a field-less `Name type fn`
     /// type reaches the default Map constructor. These types had no default
     /// constructor, so the inner call resolved back to a custom overload and
@@ -2572,6 +2641,16 @@ caller(true)"#;
         source: &str,
         conf: Option<Val>,
     ) -> Result<Val, String> {
+        run_with_std(source, conf, false)
+    }
+
+    /// Like [`compile_and_run_with_std_conf`], but the VM also holds the
+    /// program's AST, as it does when the CLI runs a project.
+    fn compile_and_run_with_std_ast(source: &str) -> Result<Val, String> {
+        run_with_std(source, None, true)
+    }
+
+    fn run_with_std(source: &str, conf: Option<Val>, with_ast: bool) -> Result<Val, String> {
         use crate::lang::ast::Program;
         use std::path::Path;
 
@@ -2612,10 +2691,12 @@ caller(true)"#;
             .compile_program(&mut combined_program)
             .map_err(|e| format!("Compile error: {:?}", e))?;
 
+        let hot_ast = with_ast
+            .then(|| Arc::new(crate::lang::ast::HotAst::from_program(combined_program)));
         let program_arc = compiler.get_program_arc();
         let mut vm = VirtualMachine::new(
             program_arc,
-            None,
+            hot_ast,
             compiler.get_function_mapping_arc(),
             compiler.get_core_functions_arc(),
             compiler.get_type_implementations_arc(),
