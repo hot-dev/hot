@@ -1835,6 +1835,14 @@ pub fn get_hotlib_map() -> &'static HotLibMap {
             HotLibFn::VmAwareFn(store::put_if_missing),
         );
         map.insert(
+            "::hot::store/put-if".to_string(),
+            HotLibFn::VmAwareFn(store::put_if),
+        );
+        map.insert(
+            "::hot::store/increment".to_string(),
+            HotLibFn::VmAwareFn(store::increment),
+        );
+        map.insert(
             "::hot::store/get".to_string(),
             HotLibFn::VmAwareFn(store::get),
         );

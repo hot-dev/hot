@@ -1231,6 +1231,39 @@ async fn scoped_pool_enforces_isolation_under_a_restricted_login()
             .value,
         serde_json::json!("v")
     );
+    // Conditional writes lock the entry under the runtime role's policies and
+    // are admitted against the same shared budget.
+    let put_if = |expected: &str, value: &str| {
+        winning_store.put_if(
+            "quota",
+            serde_json::json!("k"),
+            serde_json::json!(expected),
+            serde_json::json!(value),
+            Some(vec![1.0]),
+            Some("ab".into()),
+        )
+    };
+    assert!(put_if("v", "larger").await.is_err());
+    assert!(!put_if("stale", "w").await?);
+    assert!(put_if("v", "w").await?);
+    assert!(
+        winning_store
+            .increment("quota", serde_json::json!("n"), 1)
+            .await
+            .is_err(),
+        "a new counter needs storage the account no longer has"
+    );
+    let prefixed = winning_store
+        .list(
+            "quota",
+            hot::store::ListOptions {
+                prefix: Some("k".into()),
+                ..Default::default()
+            },
+        )
+        .await?;
+    assert_eq!(prefixed.len(), 1);
+    assert_eq!(prefixed[0].value, serde_json::json!("w"));
 
     // Files share the account's storage budget the same way, counted by the
     // usage_file triggers (migration 016) rather than a sum over every file.

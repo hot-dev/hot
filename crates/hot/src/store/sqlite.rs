@@ -62,76 +62,159 @@ impl SqliteStore {
         )
         .await?;
         let mut written = Vec::with_capacity(entries.len());
-        for (key, value, embedding, text_content) in entries {
-            let key_data = serde_json::to_string(&key).map_err(|e| e.to_string())?;
-            let value_data = serde_json::to_string(&value).map_err(|e| e.to_string())?;
-            let embedding_data = embedding.as_ref().map(|e| Self::embedding_to_bytes(e));
-            let now = Utc::now().to_rfc3339();
+        for write in entries {
+            let key_data = serde_json::to_string(&write.0).map_err(|e| e.to_string())?;
             let old:Option<i64>=sqlx::query_scalar("SELECT size FROM store_map_entry WHERE org_id=$1 AND env_id=$2 AND store_name=$3 AND key=$4")
                 .bind(self.org_id).bind(self.env_id).bind(store_name).bind(&key_data).fetch_optional(&mut *tx).await.map_err(|e|e.to_string())?;
             if only_missing && old.is_some() {
                 continue;
             }
-            let embedding_bytes = embedding
-                .as_ref()
-                .map_or(Some(0), |e| e.len().checked_mul(4))
-                .ok_or("Store embedding is too large")?;
-            let size = super::quota::entry_size(
-                key.to_string().len(),
-                value.to_string().len(),
-                text_content.as_ref().map_or(0, |s| s.len()),
-                embedding_bytes,
-            )?;
-            budget.replace(old.unwrap_or(0), size)?;
-            let query = if only_missing {
-                "INSERT INTO store_map_entry (org_id, env_id, store_name, key, value, embedding, text_content, size, created_at, updated_at)
-             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$9)
-             ON CONFLICT (org_id,env_id,store_name,key) DO NOTHING
-             RETURNING seq,created_at,updated_at"
-            } else {
-                "INSERT INTO store_map_entry (org_id, env_id, store_name, key, value, embedding, text_content, size, created_at, updated_at)
-             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$9)
-             ON CONFLICT (org_id,env_id,store_name,key) DO UPDATE SET value=EXCLUDED.value,embedding=EXCLUDED.embedding,text_content=EXCLUDED.text_content,size=EXCLUDED.size,updated_at=EXCLUDED.updated_at
-             RETURNING seq,created_at,updated_at"
-            };
-            let row = sqlx::query(query)
-                .bind(self.org_id)
-                .bind(self.env_id)
-                .bind(store_name)
-                .bind(&key_data)
-                .bind(&value_data)
-                .bind(&embedding_data)
-                .bind(&text_content)
-                .bind(size)
-                .bind(&now)
-                .fetch_optional(&mut *tx)
-                .await
-                .map_err(|e| format!("store write failed: {e}"))?;
-            let Some(row) = row else {
-                continue;
-            };
-            let seq: i64 = row.try_get("seq").map_err(|e| e.to_string())?;
-            let created_at = Self::parse_datetime(
-                &row.try_get::<String, _>("created_at")
-                    .map_err(|e| e.to_string())?,
-            );
-            let updated_at = Self::parse_datetime(
-                &row.try_get::<String, _>("updated_at")
-                    .map_err(|e| e.to_string())?,
-            );
-            written.push(StoreEntry {
-                key,
-                value,
-                seq,
-                embedding,
-                created_at,
-                updated_at,
-            });
+            if let Some(entry) = self
+                .write_entry(&mut tx, &mut budget, store_name, write, old, only_missing)
+                .await?
+            {
+                written.push(entry);
+            }
         }
         tx.commit()
             .await
             .map_err(|e| format!("store commit failed: {e}"))?;
         Ok(written)
+    }
+
+    /// The stored value and size at `key`. Store transactions begin
+    /// IMMEDIATE, so they already hold SQLite's writer lock: nothing changes
+    /// the entry between this read and the transaction's write.
+    async fn stored(
+        &self,
+        tx: &mut sqlx::SqliteConnection,
+        store_name: &str,
+        key: &serde_json::Value,
+    ) -> Result<Option<(serde_json::Value, i64)>, String> {
+        let key_data = serde_json::to_string(key).map_err(|e| e.to_string())?;
+        let row: Option<(String, i64)> = sqlx::query_as(
+            "SELECT value, size FROM store_map_entry WHERE org_id=$1 AND env_id=$2 AND store_name=$3 AND key=$4",
+        )
+        .bind(self.org_id)
+        .bind(self.env_id)
+        .bind(store_name)
+        .bind(&key_data)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(|e| e.to_string())?;
+        row.map(|(value, size)| {
+            serde_json::from_str(&value)
+                .map(|value| (value, size))
+                .map_err(|e| format!("Bad value JSON: {e}"))
+        })
+        .transpose()
+    }
+
+    /// Write one entry whose stored size was `old` (`None` when missing),
+    /// after admitting its size to `budget`. With `only_missing` a concurrent
+    /// creator wins: nothing is written, the admission is returned, and this
+    /// gives `None`.
+    async fn write_entry(
+        &self,
+        tx: &mut sqlx::SqliteConnection,
+        budget: &mut super::quota::Budget,
+        store_name: &str,
+        (key, value, embedding, text_content): super::StoreWrite,
+        old: Option<i64>,
+        only_missing: bool,
+    ) -> Result<Option<StoreEntry>, String> {
+        let key_data = serde_json::to_string(&key).map_err(|e| e.to_string())?;
+        let value_data = serde_json::to_string(&value).map_err(|e| e.to_string())?;
+        let embedding_data = embedding.as_ref().map(|e| Self::embedding_to_bytes(e));
+        let now = Utc::now().to_rfc3339();
+        let embedding_bytes = embedding
+            .as_ref()
+            .map_or(Some(0), |e| e.len().checked_mul(4))
+            .ok_or("Store embedding is too large")?;
+        let size = super::quota::entry_size(
+            key.to_string().len(),
+            value.to_string().len(),
+            text_content.as_ref().map_or(0, |s| s.len()),
+            embedding_bytes,
+        )?;
+        budget.replace(old.unwrap_or(0), size)?;
+        let query = if only_missing {
+            "INSERT INTO store_map_entry (org_id, env_id, store_name, key, value, embedding, text_content, size, created_at, updated_at)
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$9)
+             ON CONFLICT (org_id,env_id,store_name,key) DO NOTHING
+             RETURNING seq,created_at,updated_at"
+        } else {
+            "INSERT INTO store_map_entry (org_id, env_id, store_name, key, value, embedding, text_content, size, created_at, updated_at)
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$9)
+             ON CONFLICT (org_id,env_id,store_name,key) DO UPDATE SET value=EXCLUDED.value,embedding=EXCLUDED.embedding,text_content=EXCLUDED.text_content,size=EXCLUDED.size,updated_at=EXCLUDED.updated_at
+             RETURNING seq,created_at,updated_at"
+        };
+        let row = sqlx::query(query)
+            .bind(self.org_id)
+            .bind(self.env_id)
+            .bind(store_name)
+            .bind(&key_data)
+            .bind(&value_data)
+            .bind(&embedding_data)
+            .bind(&text_content)
+            .bind(size)
+            .bind(&now)
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(|e| format!("store write failed: {e}"))?;
+        let Some(row) = row else {
+            budget.replace(size, old.unwrap_or(0))?;
+            return Ok(None);
+        };
+        let seq: i64 = row.try_get("seq").map_err(|e| e.to_string())?;
+        let created_at = Self::parse_datetime(
+            &row.try_get::<String, _>("created_at")
+                .map_err(|e| e.to_string())?,
+        );
+        let updated_at = Self::parse_datetime(
+            &row.try_get::<String, _>("updated_at")
+                .map_err(|e| e.to_string())?,
+        );
+        Ok(Some(StoreEntry {
+            key,
+            value,
+            seq,
+            embedding,
+            created_at,
+            updated_at,
+        }))
+    }
+
+    /// The key range `[low, high)` that holds the keys starting with `prefix`.
+    /// Keys are stored as JSON text, and a JSON string's encoding starts with
+    /// its prefix's encoding exactly when the string starts with the prefix,
+    /// so the read is one range of the unique
+    /// `(org_id, env_id, store_name, key)` index.
+    fn prefix_range(prefix: Option<&str>) -> Result<Option<(String, String)>, String> {
+        let Some(prefix) = prefix else {
+            return Ok(None);
+        };
+        let mut low = serde_json::to_string(prefix).map_err(|e| e.to_string())?;
+        // Drop the closing quote: what remains starts every matching key.
+        low.pop();
+        let high = super::prefix_upper_bound(&low)
+            .ok_or("A JSON string encoding always has an upper bound")?;
+        Ok(Some((low, high)))
+    }
+
+    /// A page of `columns` in insertion order, binding org, env, store name,
+    /// the prefix range's two ends when there is one, limit and offset.
+    fn listing_sql(columns: &str, range: &Option<(String, String)>) -> String {
+        let terms = match range {
+            Some(_) => " AND key >= ? AND key < ?",
+            None => "",
+        };
+        format!(
+            "SELECT {columns}
+             FROM store_map_entry
+             WHERE org_id = ? AND env_id = ? AND store_name = ?{terms}
+             ORDER BY seq LIMIT ? OFFSET ?"
+        )
     }
 
     fn row_to_entry(row: &sqlx::sqlite::SqliteRow) -> Result<StoreEntry, String> {
@@ -322,6 +405,66 @@ impl Store for SqliteStore {
             .is_empty())
     }
 
+    async fn put_if(
+        &self,
+        store_name: &str,
+        key: serde_json::Value,
+        expected: serde_json::Value,
+        value: serde_json::Value,
+        embedding: Option<Vec<f32>>,
+        text_content: Option<String>,
+    ) -> Result<bool, String> {
+        let (mut tx, mut budget) = super::quota::begin_sqlite(
+            &self.pool,
+            self.org_id,
+            self.env_id,
+            super::quota::QuotaKind::Store,
+        )
+        .await?;
+        let stored = self.stored(&mut tx, store_name, &key).await?;
+        if !super::stored_value_matches(stored.as_ref().map(|(value, _)| value), &expected) {
+            return Ok(false);
+        }
+        let old = stored.map(|(_, size)| size);
+        let write = (key, value, embedding, text_content);
+        let wrote = self
+            .write_entry(&mut tx, &mut budget, store_name, write, old, old.is_none())
+            .await?
+            .is_some();
+        tx.commit()
+            .await
+            .map_err(|e| format!("store commit failed: {e}"))?;
+        Ok(wrote)
+    }
+
+    async fn increment(
+        &self,
+        store_name: &str,
+        key: serde_json::Value,
+        by: i64,
+    ) -> Result<i64, String> {
+        let (mut tx, mut budget) = super::quota::begin_sqlite(
+            &self.pool,
+            self.org_id,
+            self.env_id,
+            super::quota::QuotaKind::Store,
+        )
+        .await?;
+        let stored = self.stored(&mut tx, store_name, &key).await?;
+        let next = super::incremented(stored.as_ref().map(|(value, _)| value), by)?;
+        let old = stored.map(|(_, size)| size);
+        let write = (key, serde_json::Value::from(next), None, None);
+        // The writer lock is held from the read, so a missing key cannot be
+        // created by anyone else before this insert.
+        self.write_entry(&mut tx, &mut budget, store_name, write, old, old.is_none())
+            .await?
+            .ok_or("store increment lost its entry while holding the writer lock")?;
+        tx.commit()
+            .await
+            .map_err(|e| format!("store commit failed: {e}"))?;
+        Ok(next)
+    }
+
     async fn get(
         &self,
         store_name: &str,
@@ -508,16 +651,19 @@ impl Store for SqliteStore {
         let pool = self.sqlite_pool()?;
         let limit = options.limit.unwrap_or(1000) as i64;
         let offset = options.offset.unwrap_or(0) as i64;
+        let range = Self::prefix_range(options.prefix.as_deref())?;
 
-        let rows = sqlx::query(
-            "SELECT key, value, seq, embedding, created_at, updated_at
-             FROM store_map_entry
-             WHERE org_id = ? AND env_id = ? AND store_name = ?
-             ORDER BY seq LIMIT ? OFFSET ?",
-        )
+        let rows = sqlx::query(sqlx::AssertSqlSafe(Self::listing_sql(
+            "key, value, seq, embedding, created_at, updated_at",
+            &range,
+        )))
         .bind(self.org_id)
         .bind(self.env_id)
-        .bind(store_name)
+        .bind(store_name);
+        let rows = match &range {
+            Some((low, high)) => rows.bind(low).bind(high),
+            None => rows,
+        }
         .bind(limit)
         .bind(offset)
         .fetch_all(pool)
@@ -535,18 +681,21 @@ impl Store for SqliteStore {
         let pool = self.sqlite_pool()?;
         let limit = options.limit.unwrap_or(1000) as i64;
         let offset = options.offset.unwrap_or(0) as i64;
+        let range = Self::prefix_range(options.prefix.as_deref())?;
 
-        let rows = sqlx::query(
-            "SELECT key, seq,
+        let rows = sqlx::query(sqlx::AssertSqlSafe(Self::listing_sql(
+            "key, seq,
                     CASE WHEN embedding IS NULL THEN NULL ELSE length(embedding) / 4 END AS embedding_dimensions,
-                    created_at, updated_at
-             FROM store_map_entry
-             WHERE org_id = ? AND env_id = ? AND store_name = ?
-             ORDER BY seq LIMIT ? OFFSET ?",
-        )
+                    created_at, updated_at",
+            &range,
+        )))
         .bind(self.org_id)
         .bind(self.env_id)
-        .bind(store_name)
+        .bind(store_name);
+        let rows = match &range {
+            Some((low, high)) => rows.bind(low).bind(high),
+            None => rows,
+        }
         .bind(limit)
         .bind(offset)
         .fetch_all(pool)
@@ -1298,6 +1447,157 @@ mod tests {
         assert_eq!(store.length("t").await.unwrap(), 1);
     }
 
+    /// A file database behind a real pool, so concurrent writers contend for
+    /// SQLite's writer lock from separate connections as workers do.
+    async fn file_store() -> (tempfile::TempDir, Arc<SqliteStore>) {
+        let dir = tempfile::tempdir().unwrap();
+        let conf =
+            crate::val!({"uri": format!("sqlite:{}", dir.path().join("store.db").display())});
+        crate::db::run_migrations(&conf).await.unwrap();
+        let db = Arc::new(crate::db::create_db_pool(&conf).await.unwrap());
+        let data = crate::db::insert_test_data(&db).await.unwrap();
+        let store = SqliteStore::new(db, data.org_id, data.env_id);
+        store.ensure_store(&plain_config("t")).await.unwrap();
+        (dir, Arc::new(store))
+    }
+
+    #[tokio::test]
+    async fn test_put_if_writes_only_over_the_expected_value() {
+        let (store, _pool, _org, _env) = temp_store().await;
+        store.ensure_store(&plain_config("t")).await.unwrap();
+        let put_if = |expected, value| store.put_if("t", json!("k"), expected, value, None, None);
+
+        assert!(
+            put_if(serde_json::Value::Null, json!({"a": 1}))
+                .await
+                .unwrap()
+        );
+        assert!(!put_if(serde_json::Value::Null, json!(2)).await.unwrap());
+        assert!(!put_if(json!({"a": 2}), json!(2)).await.unwrap());
+        assert_eq!(
+            store.get("t", &json!("k")).await.unwrap().unwrap().value,
+            json!({"a": 1})
+        );
+        assert!(put_if(json!({"a": 1}), json!([1])).await.unwrap());
+        assert_eq!(
+            store.get("t", &json!("k")).await.unwrap().unwrap().value,
+            json!([1])
+        );
+        assert_eq!(store.length("t").await.unwrap(), 1);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+    async fn test_concurrent_put_if_keeps_every_entry() {
+        let (_dir, store) = file_store().await;
+        crate::store::contention::put_if_keeps_every_entry(store, "t")
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_increment_counts_ints_from_zero() {
+        let (store, _pool, _org, _env) = temp_store().await;
+        store.ensure_store(&plain_config("t")).await.unwrap();
+
+        assert_eq!(store.increment("t", json!("n"), 2).await.unwrap(), 2);
+        assert_eq!(store.increment("t", json!("n"), -5).await.unwrap(), -3);
+        store
+            .put("t", json!("name"), json!("x"), None, None)
+            .await
+            .unwrap();
+        assert!(store.increment("t", json!("name"), 1).await.is_err());
+        assert_eq!(
+            store.get("t", &json!("name")).await.unwrap().unwrap().value,
+            json!("x")
+        );
+        assert_eq!(
+            store.keys("t").await.unwrap(),
+            vec![json!("n"), json!("name")]
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+    async fn test_concurrent_increments_count_exactly() {
+        let (_dir, store) = file_store().await;
+        crate::store::contention::increments_count_exactly(store, "t")
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_list_with_prefix_reads_only_matching_string_keys() {
+        let (store, _pool, _org, _env) = temp_store().await;
+        store.ensure_store(&plain_config("t")).await.unwrap();
+        for key in [
+            json!("case:1:b"),
+            json!("case:10"),
+            json!("case:1:a"),
+            json!("case;"),
+            json!(17),
+            json!("say \"case:1:\""),
+        ] {
+            store.put("t", key, json!(1), None, None).await.unwrap();
+        }
+        let keys = |prefix: &str, limit, offset| {
+            let options = ListOptions {
+                limit,
+                offset,
+                prefix: Some(prefix.to_string()),
+            };
+            let store = &store;
+            async move {
+                let entries = store.list("t", options.clone()).await.unwrap();
+                let infos = store.list_info("t", options).await.unwrap();
+                let keys: Vec<_> = entries.into_iter().map(|e| e.key).collect();
+                assert_eq!(keys, infos.into_iter().map(|i| i.key).collect::<Vec<_>>());
+                keys
+            }
+        };
+
+        assert_eq!(
+            keys("case:1:", None, None).await,
+            [json!("case:1:b"), json!("case:1:a")]
+        );
+        assert_eq!(keys("case:1", Some(1), Some(1)).await, [json!("case:10")]);
+        assert_eq!(keys("say \"", None, None).await, [json!("say \"case:1:\"")]);
+        assert_eq!(keys("", None, None).await.len(), 5);
+    }
+
+    #[tokio::test]
+    async fn test_prefix_listing_reads_a_key_index_range() {
+        let (store, pool, _org, _env) = temp_store().await;
+        let range = SqliteStore::prefix_range(Some("case:1:")).unwrap();
+        let sql = format!(
+            "EXPLAIN QUERY PLAN {}",
+            SqliteStore::listing_sql("key, value, seq, embedding, created_at, updated_at", &range)
+        );
+        let (low, high) = range.unwrap();
+        let DatabasePool::Sqlite(pool) = pool.as_ref() else {
+            unreachable!()
+        };
+        let plan: Vec<String> = sqlx::query(sqlx::AssertSqlSafe(sql))
+            .bind(store.org_id)
+            .bind(store.env_id)
+            .bind("t")
+            .bind(low)
+            .bind(high)
+            .bind(10i64)
+            .bind(0i64)
+            .fetch_all(pool)
+            .await
+            .unwrap()
+            .iter()
+            .map(|row| row.get::<String, _>("detail"))
+            .collect();
+        assert!(
+            plan.iter().any(
+                |step| step.contains("INDEX sqlite_autoindex_store_map_entry")
+                    && step.contains("key>? AND key<?")
+            ),
+            "the prefix read should be a range of the unique key index: {plan:?}"
+        );
+    }
+
     #[tokio::test]
     async fn test_delete() {
         let (store, _pool, _org, _env) = temp_store().await;
@@ -1401,6 +1701,7 @@ mod tests {
                 ListOptions {
                     limit: Some(2),
                     offset: Some(1),
+                    prefix: None,
                 },
             )
             .await

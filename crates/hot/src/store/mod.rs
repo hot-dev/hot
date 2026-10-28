@@ -174,6 +174,55 @@ pub struct SearchOptions {
 pub struct ListOptions {
     pub limit: Option<usize>,
     pub offset: Option<usize>,
+    /// Only entries whose key is a string starting with this prefix. Both
+    /// backends read the range from an index on the key.
+    pub prefix: Option<String>,
+}
+
+/// The least string above every string that starts with `prefix`, in code
+/// point order (UTF-8 byte order), or `None` when no string is above them.
+/// A prefix read is the key range `[prefix, upper bound)`.
+pub(crate) fn prefix_upper_bound(prefix: &str) -> Option<String> {
+    let mut chars: Vec<char> = prefix.chars().collect();
+    while let Some(last) = chars.pop() {
+        let next = match last {
+            '\u{D7FF}' => Some('\u{E000}'),
+            char::MAX => None,
+            c => char::from_u32(c as u32 + 1),
+        };
+        if let Some(next) = next {
+            chars.push(next);
+            return Some(chars.into_iter().collect());
+        }
+    }
+    None
+}
+
+/// Whether a stored value (`None` for a missing key) is the one a `put-if`
+/// caller expects. Both sides are compared as Hot values after the same JSON
+/// round trip, so a value read with `get` always matches itself, and a
+/// backend that reorders object keys (PostgreSQL jsonb) still matches. A
+/// `null` expectation matches a missing key, as `get` returns null for one.
+pub(crate) fn stored_value_matches(stored: Option<&JsonValue>, expected: &JsonValue) -> bool {
+    let as_val = |json: &JsonValue| serde_json::from_value::<Val>(json.clone()).ok();
+    match stored {
+        Some(stored) => as_val(stored).is_some_and(|stored| Some(stored) == as_val(expected)),
+        None => expected.is_null(),
+    }
+}
+
+/// The counter value after adding `by` to `stored` (`None` for a missing key,
+/// which counts from 0).
+pub(crate) fn incremented(stored: Option<&JsonValue>, by: i64) -> Result<i64, String> {
+    let current = match stored {
+        None => 0,
+        Some(value) => value.as_i64().ok_or_else(|| {
+            format!("::hot::store/increment expects the stored value to be an Int, found {value}")
+        })?,
+    };
+    current
+        .checked_add(by)
+        .ok_or_else(|| "Integer overflow".to_string())
 }
 
 #[async_trait]
@@ -201,6 +250,30 @@ pub trait Store: Send + Sync {
         embedding: Option<Vec<f32>>,
         text_content: Option<String>,
     ) -> Result<bool, String>;
+
+    /// Write `value` only while the stored value still matches `expected`
+    /// (see [`stored_value_matches`]). The compare and the write happen in
+    /// one transaction holding the entry's lock. Returns true when this call
+    /// wrote.
+    async fn put_if(
+        &self,
+        store_name: &str,
+        key: serde_json::Value,
+        expected: serde_json::Value,
+        value: serde_json::Value,
+        embedding: Option<Vec<f32>>,
+        text_content: Option<String>,
+    ) -> Result<bool, String>;
+
+    /// Add `by` to the Int stored at `key` in one transaction holding the
+    /// entry's lock, and return the new value. A missing key counts from 0.
+    /// Counters carry no embedding or search text.
+    async fn increment(
+        &self,
+        store_name: &str,
+        key: serde_json::Value,
+        by: i64,
+    ) -> Result<i64, String>;
 
     /// Get a value by key. Returns None if not found.
     async fn get(
@@ -703,9 +776,125 @@ pub fn embedding_conf_field(conf: Option<&JsonValue>) -> Option<String> {
         .map(ToString::to_string)
 }
 
+/// Contention checks both backends run: many concurrent writers on one key
+/// must leave exactly the value a serial run would.
+#[cfg(test)]
+pub(crate) mod contention {
+    use super::Store;
+    use serde_json::{Value as JsonValue, json};
+    use std::sync::Arc;
+
+    pub(crate) const WRITERS: i64 = 32;
+
+    /// Each writer adds its own entry to the map stored at one key, which
+    /// starts missing, with a read then `put_if` retry loop.
+    pub(crate) async fn put_if_keeps_every_entry(
+        store: Arc<dyn Store>,
+        name: &str,
+    ) -> Result<(), String> {
+        let writers: Vec<_> = (0..WRITERS)
+            .map(|i| {
+                let (store, name) = (store.clone(), name.to_string());
+                tokio::spawn(async move {
+                    loop {
+                        let current = store.get(&name, &json!("case")).await?.map(|e| e.value);
+                        let mut next = current.clone().unwrap_or_else(|| json!({}));
+                        next[format!("answer-{i}")] = json!(i);
+                        let expected = current.unwrap_or(JsonValue::Null);
+                        if store
+                            .put_if(&name, json!("case"), expected, next, None, None)
+                            .await?
+                        {
+                            return Ok::<_, String>(());
+                        }
+                    }
+                })
+            })
+            .collect();
+        for writer in writers {
+            writer.await.map_err(|e| e.to_string())??;
+        }
+
+        let stored = store.get(name, &json!("case")).await?.ok_or("missing")?;
+        let expected: serde_json::Map<String, JsonValue> = (0..WRITERS)
+            .map(|i| (format!("answer-{i}"), json!(i)))
+            .collect();
+        assert_eq!(stored.value, JsonValue::Object(expected));
+        assert_eq!(store.length(name).await?, 1);
+        Ok(())
+    }
+
+    /// Concurrent increments of one key, which starts missing, each get a
+    /// distinct value and none is lost.
+    pub(crate) async fn increments_count_exactly(
+        store: Arc<dyn Store>,
+        name: &str,
+    ) -> Result<(), String> {
+        let writers: Vec<_> = (0..WRITERS)
+            .map(|_| {
+                let (store, name) = (store.clone(), name.to_string());
+                tokio::spawn(async move { store.increment(&name, json!("seq"), 1).await })
+            })
+            .collect();
+        let mut seen = Vec::new();
+        for writer in writers {
+            seen.push(writer.await.map_err(|e| e.to_string())??);
+        }
+        seen.sort();
+        assert_eq!(seen, (1..=WRITERS).collect::<Vec<_>>());
+        let stored = store.get(name, &json!("seq")).await?.ok_or("missing")?;
+        assert_eq!(stored.value, json!(WRITERS));
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn prefix_upper_bound_is_the_next_string_in_code_point_order() {
+        assert_eq!(prefix_upper_bound("case:1:").as_deref(), Some("case:1;"));
+        assert_eq!(prefix_upper_bound("\"a").as_deref(), Some("\"b"));
+        assert_eq!(
+            prefix_upper_bound("a\u{D7FF}").as_deref(),
+            Some("a\u{E000}")
+        );
+        assert_eq!(
+            prefix_upper_bound(&format!("a{}", char::MAX)).as_deref(),
+            Some("b")
+        );
+        assert_eq!(prefix_upper_bound(&char::MAX.to_string()), None);
+        assert_eq!(prefix_upper_bound(""), None);
+    }
+
+    #[test]
+    fn stored_values_match_as_hot_values() {
+        // jsonb returns object keys in its own order.
+        assert!(stored_value_matches(
+            Some(&json!({"b": 1, "a": [1, 2]})),
+            &json!({"a": [1, 2], "b": 1})
+        ));
+        assert!(!stored_value_matches(Some(&json!([2, 1])), &json!([1, 2])));
+        assert!(!stored_value_matches(Some(&json!(1)), &json!("1")));
+        assert!(stored_value_matches(None, &JsonValue::Null));
+        assert!(stored_value_matches(
+            Some(&JsonValue::Null),
+            &JsonValue::Null
+        ));
+        assert!(!stored_value_matches(None, &json!(0)));
+        assert!(!stored_value_matches(Some(&json!(0)), &JsonValue::Null));
+    }
+
+    #[test]
+    fn increments_count_ints_from_zero() {
+        assert_eq!(incremented(None, 3), Ok(3));
+        assert_eq!(incremented(Some(&json!(5)), -7), Ok(-2));
+        assert!(incremented(Some(&json!(i64::MAX)), 1).is_err());
+        assert!(incremented(Some(&json!(1.5)), 1).is_err());
+        assert!(incremented(Some(&json!("1")), 1).is_err());
+        assert!(incremented(Some(&JsonValue::Null), 1).is_err());
+    }
 
     fn map_val(name: &str) -> Val {
         let mut inner = indexmap::IndexMap::new();
