@@ -5864,6 +5864,11 @@ pub async fn run_with_components_shared_context_and_db(
     // This purges both pending (delivered but un-ACKed) and undelivered stream entries.
     if hot::env::is_local_dev() {
         const LOCAL_DEV_MAX_AGE_MS: u64 = 60 * 60 * 1000; // 1 hour
+        for queue in [&alert_queue, &email_queue] {
+            if let Err(error) = queue.purge_old_pending(LOCAL_DEV_MAX_AGE_MS).await {
+                warn!(%error,"Could not purge stale local notifications");
+            }
+        }
         if let Err(e) = event_queue.purge_old_pending(LOCAL_DEV_MAX_AGE_MS).await {
             warn!(
                 "hot.dev: WORKER failed to purge old pending messages: {}",
