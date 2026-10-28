@@ -296,12 +296,12 @@ pub fn routes(
             axum::routing::post(crate::handlers::sub_orgs::grant),
         )
         .route(
-            "/@{org_slug}/management-keys",
-            axum::routing::post(crate::handlers::sub_orgs::create_management_key),
+            "/@{org_slug}/org-api-keys",
+            axum::routing::post(crate::handlers::sub_orgs::create_org_api_key),
         )
         .route(
-            "/@{org_slug}/management-keys/{key_id}/revoke",
-            axum::routing::post(crate::handlers::sub_orgs::revoke_management_key),
+            "/@{org_slug}/org-api-keys/{key_id}/revoke",
+            axum::routing::post(crate::handlers::sub_orgs::revoke_org_api_key),
         )
         .route(
             "/@{org_slug}/edit",

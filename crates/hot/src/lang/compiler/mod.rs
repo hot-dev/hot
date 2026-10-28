@@ -30,6 +30,7 @@ pub mod placeholder_lowering;
 pub mod refinements;
 pub mod resolver;
 pub mod type_checker;
+mod variant_payloads;
 
 #[cfg(test)]
 mod tests;
@@ -171,6 +172,10 @@ pub struct Compiler {
     /// The known functions that construct a unit enum variant (`::ns/Type.Variant`
     /// with no payload). A reference to one is the variant's value.
     unit_variants: AHashSet<String>,
+    /// Enum variants (`::ns/Type.Variant`) whose payload is not a record
+    /// (`Open(Vec)`, `NotOwed(Str)`). A `match` arm on one binds the payload
+    /// (see `variant_payloads`).
+    plain_payload_variants: AHashSet<String>,
     /// Monotonic counter used to give every emitted cond/match flow a globally
     /// unique branch-name suffix. This is critical because `BytecodeProgram::add_constant`
     /// interns string constants — without a unique suffix, branch names like
@@ -229,6 +234,7 @@ pub struct CompilerSeed {
     core_lazy_function_names: IndexMap<String, String>,
     known_functions: AHashSet<String>,
     unit_variants: AHashSet<String>,
+    plain_payload_variants: AHashSet<String>,
     next_cond_id: u64,
     constraint_type_defs: AHashMap<String, crate::lang::ast::TypeDef>,
     constraint_ns_aliases: AHashMap<String, crate::lang::ast::NamespaceAliases>,
@@ -322,6 +328,7 @@ impl Compiler {
             core_lazy_function_names: IndexMap::new(),
             known_functions: AHashSet::new(),
             unit_variants: AHashSet::new(),
+            plain_payload_variants: AHashSet::new(),
             next_cond_id: 0,
             diagnostics: crate::lang::errors::CompilerErrors::new(),
             constraint_type_defs: AHashMap::new(),
@@ -354,6 +361,7 @@ impl Compiler {
             core_lazy_function_names: self.core_lazy_function_names.clone(),
             known_functions: self.known_functions.clone(),
             unit_variants: self.unit_variants.clone(),
+            plain_payload_variants: self.plain_payload_variants.clone(),
             next_cond_id: self.next_cond_id,
             constraint_type_defs: self.constraint_type_defs.clone(),
             constraint_ns_aliases: self.constraint_ns_aliases.clone(),
@@ -376,6 +384,7 @@ impl Compiler {
         compiler.core_lazy_function_names = seed.core_lazy_function_names;
         compiler.known_functions = seed.known_functions;
         compiler.unit_variants = seed.unit_variants;
+        compiler.plain_payload_variants = seed.plain_payload_variants;
         compiler.next_cond_id = seed.next_cond_id;
         compiler.constraint_type_defs = seed.constraint_type_defs;
         compiler.constraint_ns_aliases = seed.constraint_ns_aliases;
@@ -409,6 +418,7 @@ impl Compiler {
         compiler.extract_lazy_params(base_program);
         compiler.extract_known_functions(base_program);
         compiler.collect_constraint_types(base_program);
+        compiler.collect_plain_payload_variants(base_program);
         compiler.seed()
     }
 
@@ -1168,6 +1178,7 @@ impl Compiler {
         self.extract_lazy_params(program);
         self.extract_known_functions(program);
         self.collect_constraint_types(program);
+        self.collect_plain_payload_variants(program);
 
         // Pass 0.5: Register namespace imports (type aliases) before type definitions
         // This ensures imports like `FileMeta ::hot::file/FileMeta` are available
@@ -1362,6 +1373,7 @@ impl Compiler {
         // Extract lazy parameter info and known functions before bytecode compilation
         self.extract_lazy_params(program);
         self.extract_known_functions(program);
+        self.collect_plain_payload_variants(program);
 
         // Compile each namespace
         for (ns_path, namespace) in &program.namespaces {
@@ -6241,40 +6253,51 @@ impl Compiler {
             return Ok(());
         };
 
+        // A qualified enum may name its namespace by an alias
+        // (`Extra -> ::k/Kind.Extra`).
         let enum_full = if enum_path.starts_with("::") {
-            enum_path.to_string()
+            self.resolve_type_path(enum_path).0
         } else {
             format!("{}/{}", self.current_namespace, enum_path)
         };
 
-        let mut idx_to_update: Option<usize> = None;
-        let mut existing_variants: indexmap::IndexMap<String, Option<String>> =
-            indexmap::IndexMap::new();
-        let mut existing_name = String::new();
-        for (idx, c) in self.program.constants.iter().enumerate() {
-            if let Constant::VariantTypeRef(tr) = c
-                && (tr.name == enum_full || tr.name.ends_with(&format!("/{}", enum_path)))
-            {
-                existing_variants = tr.variants.clone();
-                existing_name = tr.name.clone();
-                idx_to_update = Some(idx);
-                break;
-            }
-        }
-
-        let Some(idx) = idx_to_update else {
+        let named = |tr: &crate::lang::refs::TypeRef| tr.name == enum_full;
+        let suffixed =
+            |tr: &crate::lang::refs::TypeRef| tr.name.ends_with(&format!("/{}", enum_path));
+        let find = |matches: &dyn Fn(&crate::lang::refs::TypeRef) -> bool| {
+            self.program.constants.iter().find_map(|c| match c {
+                Constant::VariantTypeRef(tr) if matches(tr) => Some(tr.name.clone()),
+                _ => None,
+            })
+        };
+        let Some(existing_name) = find(&named).or_else(|| find(&suffixed)) else {
             return Ok(());
         };
 
-        if existing_variants.contains_key(variant_name) {
-            return Ok(());
+        // Every TypeRef constant for the enum learns the variant: besides
+        // the declaration's, a core enum gets one wherever another namespace
+        // names it (those already list the variants arrows enroll).
+        let (resolved_source, _) = self.resolve_type_path(source_type);
+        for c in self.program.constants.iter_mut() {
+            if let Constant::VariantTypeRef(tr) = c
+                && tr.name == existing_name
+                && !tr.variants.contains_key(variant_name)
+            {
+                let mut variants = tr.variants.clone();
+                variants.insert(variant_name.to_string(), Some(resolved_source.clone()));
+                *c = Constant::VariantTypeRef(crate::lang::refs::TypeRef::new(
+                    existing_name.clone(),
+                    variants,
+                ));
+            }
         }
 
-        let (resolved_source, _) = self.resolve_type_path(source_type);
-        existing_variants.insert(variant_name.to_string(), Some(resolved_source));
-
-        let updated_tr = crate::lang::refs::TypeRef::new(existing_name.clone(), existing_variants);
-        self.program.constants[idx] = Constant::VariantTypeRef(updated_tr);
+        if self
+            .function_mapping
+            .contains_key(&format!("{}.{}", existing_name, variant_name))
+        {
+            return Ok(());
+        }
 
         let synthesized_variant = crate::lang::ast::VariantDef {
             name: crate::lang::ast::Sym::String(variant_name.to_string()),
@@ -7701,8 +7724,82 @@ impl Compiler {
             }
         }
 
+        self.enroll_core_enum_arrows(program);
+
         tracing::trace!("Extracted {} core variables total", core_var_count);
         Ok(())
+    }
+
+    /// Add the variants that `Source -> Enum.Variant` arrows enroll in a core
+    /// enum to its registry entry. Another namespace names a core enum by
+    /// building its `TypeRef` from this entry, so without them
+    /// `Enum.Variant(...)` there fails with "does not have variant". An arrow
+    /// enrolls a variant in the core enum when its target names the enum by
+    /// its qualified path, or by its bare name in a namespace with no
+    /// declaration or import of its own by that name.
+    fn enroll_core_enum_arrows(&mut self, program: &Program) {
+        let mut enrolled: Vec<(String, String, String)> = Vec::new();
+        for (ns_path, namespace) in &program.namespaces {
+            let ns = ns_path.to_string();
+            let local = |name: &str| {
+                namespace
+                    .scope
+                    .vars
+                    .iter()
+                    .find_map(|(var, value)| (var.sym.name() == name).then_some(value))
+            };
+            for value in namespace.scope.vars.values() {
+                let Value::TypeImplementation(arrow) = value else {
+                    continue;
+                };
+                let Some((enum_path, variant)) = arrow.target_type.rsplit_once('.') else {
+                    continue;
+                };
+                let (enum_ns, enum_name) = match enum_path.rsplit_once('/') {
+                    Some((path, name)) => {
+                        let path = namespace
+                            .aliases
+                            .iter()
+                            .find(|(alias, _)| alias.to_string() == path)
+                            .map(|(_, target)| target.to_string())
+                            .unwrap_or_else(|| path.to_string());
+                        (path, name.to_string())
+                    }
+                    None => match local(enum_path) {
+                        Some(Value::TypeDef(_)) => (ns.clone(), enum_path.to_string()),
+                        Some(Value::Ref(Ref::Ns(import))) => match &import.function_name {
+                            Some(name) => (import.ns.to_string(), name.clone()),
+                            None => continue,
+                        },
+                        Some(_) => continue,
+                        None => match self.core_variables.get(enum_path) {
+                            Some(core) => (core.namespace_path.clone(), enum_path.to_string()),
+                            None => continue,
+                        },
+                    },
+                };
+                let source = if arrow.source_type.starts_with("::") {
+                    arrow.source_type.clone()
+                } else if matches!(local(&arrow.source_type), Some(Value::TypeDef(_))) {
+                    format!("{}/{}", ns, arrow.source_type)
+                } else if let Some(core) = self.core_variables.get(&arrow.source_type) {
+                    format!("{}/{}", core.namespace_path, arrow.source_type)
+                } else {
+                    arrow.source_type.clone()
+                };
+                if self
+                    .core_variables
+                    .get(&enum_name)
+                    .is_some_and(|core| core.namespace_path == enum_ns)
+                {
+                    enrolled.push((enum_name, variant.to_string(), source));
+                }
+            }
+        }
+        for (enum_name, variant, source) in enrolled {
+            self.core_variables
+                .enroll_variant(&enum_name, variant, source);
+        }
     }
 
     /// Compile a pipe flow with result modifier using flow context
@@ -8648,6 +8745,25 @@ impl Compiler {
         })
     }
 
+    /// Whether `arm` is a single `Enum.Variant` atom whose variant carries a
+    /// payload other than a record.
+    fn arm_binds_plain_payload(&self, arm: &crate::lang::ast::MatchArm) -> bool {
+        let (Some(type_name), Some(variant)) = (&arm.type_name, &arm.variant) else {
+            return false;
+        };
+        if !arm.alternatives.is_empty() {
+            return false;
+        }
+        let (enum_name, _) = self.resolve_type_path(type_name);
+        let enum_name = if enum_name.starts_with("::") {
+            enum_name
+        } else {
+            format!("::{enum_name}")
+        };
+        self.plain_payload_variants
+            .contains(&format!("{enum_name}.{variant}"))
+    }
+
     /// Human-readable name for one match-arm pattern atom, used for match-all
     /// result keys and branch names (union arms join their atoms with " | ").
     fn match_atom_branch_name(
@@ -8840,10 +8956,13 @@ impl Compiler {
         let value_reg = self.compile_value(&match_expr.value)?;
 
         // Extract the match subject variable name (if any) for auto-shadowing
-        // in Result variant arms. When users write `match result { Result.Err => { ... } }`,
+        // in variant arms. When users write `match result { Result.Err => { ... } }`,
         // `result` inside the arm should refer to the unwrapped $val payload.
+        // A path (`match order.status`) names a field, not a variable to shadow.
         let match_subject_var_name = match match_expr.value.as_ref() {
-            crate::lang::ast::Value::Ref(crate::lang::ast::Ref::Var(var_ref)) => {
+            crate::lang::ast::Value::Ref(crate::lang::ast::Ref::Var(var_ref))
+                if var_ref.var.deep_path.is_none() && var_ref.var.deep_set.is_none() =>
+            {
                 Some(var_ref.var.sym.name().to_string())
             }
             _ => None,
@@ -9043,8 +9162,27 @@ impl Compiler {
                 {
                     self.store_variable(var_name, unwrapped_reg);
                 }
+            } else if self.arm_binds_plain_payload(arm) {
+                // An `Enum.Variant` arm whose payload is not a record (a Vec,
+                // a Str): field access can't reach it through the variant,
+                // so the binding and the subject are the payload, as for
+                // Result. A record variant keeps the variant, whose fields
+                // read through to the payload.
+                let payload_reg = self.allocate_register();
+                self.emit_instruction(Instruction::ExtractInnerVal {
+                    dest: payload_reg,
+                    src: value_reg,
+                });
+                if let Some(binding) = &arm.binding {
+                    self.store_variable(binding, payload_reg);
+                }
+                if let Some(ref var_name) = match_subject_var_name
+                    && arm.binding.as_deref() != Some(var_name)
+                {
+                    self.store_variable(var_name, payload_reg);
+                }
             } else {
-                // Non-Result arms: use the full value for bindings
+                // Other arms: use the full value for bindings
                 if let Some(binding) = &arm.binding {
                     self.store_variable(binding, value_reg);
                 }

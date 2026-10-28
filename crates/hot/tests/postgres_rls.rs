@@ -552,27 +552,29 @@ async fn scoped_pool_enforces_isolation_under_a_restricted_login()
         },
     )
     .await?;
-    let (management, token) = db::management_key::ManagementKey::create_for_user(
+    let child_id = provisioned.org.org_id;
+    let (org_key, token) = db::org_api_key::OrgApiKey::create_for_user(
         &runtime_db,
         root,
         user,
-        &db::management_key::CreateManagementKey {
-            name: "test".into(),
-            capabilities: vec!["children:read".into(), "runtime-keys:create".into()],
-            target_org_ids: vec![provisioned.org.org_id],
-            all_children: false,
-            delegation_permissions: Some(serde_json::json!({"event:*": ["create"]})),
-            expires_in_seconds: 60,
+        &db::org_api_key::CreateOrgApiKey {
+            description: "test".into(),
+            permissions: serde_json::json!({
+                "org:*": ["read"],
+                format!("org:{child_id}/env:*/api-key:*"): ["create"],
+                format!("org:{child_id}/env:*/event:*"): ["create"],
+            }),
+            expires_at: Some(chrono::Utc::now() + chrono::Duration::seconds(60)),
         },
     )
     .await?;
     assert!(
-        db::management_key::ManagementKey::verify_token(&runtime_db, &token)
+        db::org_api_key::OrgApiKey::verify_token(&runtime_db, &token)
             .await
             .is_ok()
     );
     let root_env = Uuid::new_v4();
-    sqlx::query("INSERT INTO hot.env(env_id,org_id,name,created_by_user_id) VALUES($1,$2,'management-isolation',$3)")
+    sqlx::query("INSERT INTO hot.env(env_id,org_id,name,created_by_user_id) VALUES($1,$2,'org-key-isolation',$3)")
         .bind(root_env).bind(root).bind(user).execute(&admin).await?;
     let root_runtime = pool.with_scope(DatabaseScope::Environment {
         org_id: root,
@@ -584,24 +586,24 @@ async fn scoped_pool_enforces_isolation_under_a_restricted_login()
     });
     for forbidden in [&root_runtime, &root_read_set, &a] {
         assert_eq!(
-            sqlx::query_scalar::<_, i64>("SELECT count(*) FROM management_key")
+            sqlx::query_scalar::<_, i64>("SELECT count(*) FROM org_api_key")
                 .fetch_one(forbidden)
                 .await?,
             0
         );
-        assert!(sqlx::query("INSERT INTO management_key(management_key_id,root_org_id,created_by_user_id,name,secret_hash,capabilities,expires_at) VALUES($1,$2,$3,'forged',$4,'[\"children:create\"]',now()+interval '1 hour')")
-            .bind(Uuid::new_v4()).bind(root).bind(user).bind(vec![0u8; 32]).execute(forbidden).await.is_err());
+        assert!(sqlx::query("INSERT INTO org_api_key(org_api_key_id,org_id,description,key_data,permissions,created_by_user_id) VALUES($1,$2,'forged','{}','{\"org:*\":[\"create\"]}',$3)")
+            .bind(Uuid::new_v4()).bind(root).bind(user).execute(forbidden).await.is_err());
     }
     assert_eq!(
-        sqlx::query("UPDATE management_key SET revoked_at=now() WHERE management_key_id=$1")
-            .bind(management.management_key_id)
+        sqlx::query("UPDATE org_api_key SET revoked_at=now() WHERE org_api_key_id=$1")
+            .bind(org_key.org_api_key_id)
             .execute(&root_runtime)
             .await?
             .rows_affected(),
         0
     );
     assert!(
-        db::management_key::ManagementKey::verify_token(&runtime_db, &token)
+        db::org_api_key::OrgApiKey::verify_token(&runtime_db, &token)
             .await
             .is_ok()
     );
@@ -609,13 +611,18 @@ async fn scoped_pool_enforces_isolation_under_a_restricted_login()
         .bind(root_env)
         .execute(&admin)
         .await?;
-    let (delegated_id, _) = management
-        .issue_runtime_key(
+    let effective = org_key.effective(&runtime_db).await?;
+    let (delegated_id, _, _) = org_key
+        .mint_env_key(
             &runtime_db,
-            provisioned.org.org_id,
+            &effective,
+            child_id,
             provisioned.env_id,
-            "delegated",
-            &serde_json::json!({"event:*": ["create"]}),
+            &db::org_api_key::MintEnvApiKey {
+                description: "delegated".into(),
+                permissions: serde_json::json!({"event:*": ["create"]}),
+                expires_at: None,
+            },
         )
         .await?;
     let delegated_pool = pool.with_scope(DatabaseScope::Environment {
@@ -625,15 +632,12 @@ async fn scoped_pool_enforces_isolation_under_a_restricted_login()
     let delegated_db = db::DatabasePool::Postgres(delegated_pool.clone());
     let delegated_key = db::api_key::ApiKey::get_api_key(&delegated_db, &delegated_id).await?;
     assert!(
-        db::management_key::ManagementKey::effective_runtime_permissions(
-            &runtime_db,
-            &delegated_key
-        )
-        .await
-        .is_ok()
+        db::org_api_key::OrgApiKey::effective_env_permissions(&runtime_db, &delegated_key)
+            .await
+            .is_ok()
     );
     assert_eq!(
-        sqlx::query("DELETE FROM api_key_management_issuer WHERE api_key_id=$1")
+        sqlx::query("DELETE FROM api_key_issuer WHERE api_key_id=$1")
             .bind(delegated_id)
             .execute(&delegated_pool)
             .await?
@@ -647,31 +651,23 @@ async fn scoped_pool_enforces_isolation_under_a_restricted_login()
             .await
             .is_err()
     );
-    db::management_key::ManagementKey::revoke_for_user(
-        &runtime_db,
-        root,
-        user,
-        management.management_key_id,
-    )
-    .await?;
+    db::org_api_key::OrgApiKey::revoke_for_user(&runtime_db, root, user, org_key.org_api_key_id)
+        .await?;
     assert!(
-        db::management_key::ManagementKey::verify_token(&runtime_db, &token)
+        db::org_api_key::OrgApiKey::verify_token(&runtime_db, &token)
             .await
             .is_err()
     );
     assert!(
-        db::management_key::ManagementKey::effective_runtime_permissions(
-            &runtime_db,
-            &delegated_key
-        )
-        .await
-        .is_err()
+        db::org_api_key::OrgApiKey::effective_env_permissions(&runtime_db, &delegated_key)
+            .await
+            .is_err()
     );
     sqlx::query("UPDATE api_key SET active=false WHERE api_key_id=$1")
         .bind(delegated_id)
         .execute(&delegated_pool)
         .await?;
-    sqlx::query("DELETE FROM hot.api_key_management_issuer WHERE api_key_id=$1")
+    sqlx::query("DELETE FROM hot.api_key_issuer WHERE api_key_id=$1")
         .bind(delegated_id)
         .execute(&admin)
         .await?;
@@ -732,7 +728,7 @@ async fn scoped_pool_enforces_isolation_under_a_restricted_login()
         .execute(&admin)
         .await?;
 
-    sqlx::query("DELETE FROM hot.management_key WHERE root_org_id=$1")
+    sqlx::query("DELETE FROM hot.org_api_key WHERE org_id=$1")
         .bind(root)
         .execute(&admin)
         .await?;
@@ -1363,6 +1359,37 @@ async fn scoped_pool_enforces_isolation_under_a_restricted_login()
     .fetch_one(&admin)
     .await?;
     assert_eq!(summed, 10, "the counters agree with the files");
+    // The overwrite and the delete retired the objects they replaced, under
+    // the file's own scope. Retention collects only objects no active version
+    // references, and a sibling can't register objects in another environment.
+    let file_retention = db::DatabasePool::Postgres(pool.with_scope(DatabaseScope::Maintenance {
+        operation: db::MaintenanceOperation::Retention,
+        org_id: None,
+    }));
+    let after_grace = chrono::Utc::now() + chrono::Duration::days(1);
+    let mut retired =
+        db::file::collectable_retired_objects(&file_retention, "local", after_grace, 100).await?;
+    retired.sort();
+    let mut expected = vec![file.storage_path.clone(), "quota/new".to_string()];
+    expected.sort();
+    assert_eq!(retired, expected);
+    let db::DatabasePool::Postgres(other_pg) = other_db else {
+        unreachable!()
+    };
+    let visible: i64 = sqlx::query_scalar("SELECT count(*) FROM hot.retired_file_object")
+        .fetch_one(other_pg)
+        .await?;
+    assert_eq!(visible, 0, "a sibling sees no other environment's objects");
+    assert!(
+        db::file::register_staged_object(other_db, file.org_id, file.env_id, "local", "forged")
+            .await
+            .is_err()
+    );
+    db::file::forget_retired_object(&file_retention, "local", "quota/new", after_grace).await?;
+    assert_eq!(
+        db::file::collectable_retired_objects(&file_retention, "local", after_grace, 100).await?,
+        vec![file.storage_path.clone()]
+    );
 
     // A full trace budget rejects trace payloads while both terminal run writes
     // still persist. The SQL size includes JSONB formatting and UTF-8 errors.

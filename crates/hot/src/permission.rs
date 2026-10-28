@@ -14,6 +14,19 @@
 //! - `path` is the resource identifier, may contain `/` for hierarchy and `*` for suffix wildcard
 //!
 //! Actions: create, read, update, delete, execute, * (wildcard)
+//!
+//! Environment-scoped credentials use those URNs within their own environment.
+//! Org-scoped API keys use only qualified URNs, which name an organization and
+//! optionally one of its environments:
+//!
+//! - `org:{org}` — the organization itself (`org:*` is the children collection)
+//! - `org:{org}/api-key:{key}`, `org:{org}/usage:*` — org-level resources
+//! - `org:{org}/env:{env}` — an environment (`org:{org}/env:*` is the collection)
+//! - `org:{org}/env:{env}/{urn}` — any environment URN inside that environment
+//!
+//! Org and env selectors are a canonical UUID or `*`, and `*` matches exactly one
+//! segment: `org:*` never covers `org:{id}/env:{env}/api-key:*`. The inner URN
+//! keeps the suffix-wildcard matching above. `*:*` never matches a qualified URN.
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -61,6 +74,12 @@ pub mod resource_types {
     pub const FILE: &str = "file";
     pub const BLOB: &str = "blob";
     pub const DOMAIN: &str = "domain";
+    /// Qualified org URN prefix; valid only on org-scoped API keys.
+    pub const ORG: &str = "org";
+    /// API keys (org- or environment-scoped). `key` remains service keys.
+    pub const API_KEY: &str = "api-key";
+    /// Usage of an organization (for a root: the account aggregate).
+    pub const USAGE: &str = "usage";
 
     /// All known resource types
     pub const ALL: &[&str] = &[
@@ -97,6 +116,8 @@ pub mod resource_types {
             FILE => Some(&[CREATE, READ, DELETE]),
             BLOB => Some(&[READ]),
             DOMAIN => Some(&[CREATE, READ, UPDATE, DELETE]),
+            API_KEY => Some(&[CREATE, READ, UPDATE, DELETE]),
+            USAGE => Some(&[READ]),
             _ => None,
         }
     }
@@ -145,6 +166,11 @@ pub enum PermissionError {
     DisallowedResourceType {
         resource_type: String,
         allowed: Vec<String>,
+    },
+    /// A URN form is not valid for this key's scope
+    WrongScope {
+        resource: String,
+        scope: &'static str,
     },
     /// The requested permissions exceed what the parent allows
     Escalation { resource: String, action: String },
@@ -200,6 +226,18 @@ impl fmt::Display for PermissionError {
                     allowed.join(", ")
                 )
             }
+            PermissionError::WrongScope { resource, scope } => match *scope {
+                "org" => write!(
+                    f,
+                    "Resource '{}' is not valid on an org-scoped key. Use a qualified URN such as org:*, org:{{org}}/env:*, or org:{{org}}/env:{{env}}/project:*",
+                    resource
+                ),
+                _ => write!(
+                    f,
+                    "Resource '{}' is valid only on an org-scoped key",
+                    resource
+                ),
+            },
             PermissionError::Escalation { resource, action } => {
                 write!(
                     f,
@@ -316,6 +354,12 @@ impl Permissions {
             // Validate resource URN format (must be `type:path` or `*:*`)
             let resource_type = parse_resource_type(resource)
                 .ok_or_else(|| PermissionError::InvalidResource(resource.clone()))?;
+            if resource_type == resource_types::ORG {
+                return Err(PermissionError::WrongScope {
+                    resource: resource.clone(),
+                    scope: "env",
+                });
+            }
 
             // Reject empty action lists — they are meaningless (grant nothing)
             if action_list.is_empty() {
@@ -433,9 +477,7 @@ impl Permissions {
             for action in action_list {
                 let effective_action = if action == actions::WILDCARD {
                     // Wildcard means all actions - check each valid action for this resource type
-                    let resource_type = parse_resource_type(resource).unwrap_or("*");
-                    let valid =
-                        resource_types::valid_actions(resource_type).unwrap_or(actions::ALL);
+                    let valid = urn_valid_actions(resource).unwrap_or(actions::ALL);
                     for va in valid {
                         if !parent.has_permission(resource, va) {
                             return Err(PermissionError::Escalation {
@@ -458,6 +500,213 @@ impl Permissions {
             }
         }
         Ok(())
+    }
+
+    // ========================================================================
+    // Org-scoped keys
+    // ========================================================================
+
+    /// Validate grants for an org-scoped API key: every URN is qualified, its
+    /// selectors are canonical UUIDs or `*`, and each action fits its resource.
+    pub fn validate_org_key(&self) -> Result<(), PermissionError> {
+        for (resource, action_list) in &self.0 {
+            let qualified =
+                parse_qualified(resource).ok_or_else(|| PermissionError::WrongScope {
+                    resource: resource.clone(),
+                    scope: "org",
+                })?;
+            if let Some(inner) = qualified.inner {
+                let inner_type = parse_resource_type(inner)
+                    .ok_or_else(|| PermissionError::InvalidResource(resource.clone()))?;
+                let path = inner.split_once(':').map_or("", |(_, path)| path);
+                let valid_inner = match (qualified.env, inner_type) {
+                    // Org-level resources.
+                    (None, resource_types::API_KEY) => is_selector(path),
+                    (None, resource_types::USAGE) => path == "*",
+                    (None, _) => false,
+                    // Environment resources: today's grammar, plus API keys.
+                    (Some(_), resource_types::ORG) => false,
+                    (Some(_), resource_types::API_KEY) => is_selector(path),
+                    (Some(_), _) => true,
+                };
+                if !valid_inner {
+                    return Err(PermissionError::InvalidResource(resource.clone()));
+                }
+            }
+            if action_list.is_empty() {
+                return Err(PermissionError::EmptyActionList(resource.clone()));
+            }
+            let valid = urn_valid_actions(resource);
+            for action in action_list {
+                if !actions::is_valid(action) {
+                    return Err(PermissionError::InvalidAction(action.clone()));
+                }
+                if action == actions::WILDCARD {
+                    continue;
+                }
+                if let Some(valid) = valid
+                    && !valid.contains(&action.as_str())
+                {
+                    return Err(PermissionError::ActionNotValidForResource {
+                        action: action.clone(),
+                        resource: resource.clone(),
+                        valid_actions: valid.iter().map(|s| s.to_string()).collect(),
+                    });
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Split qualified grants into those naming `own_org` literally and the
+    /// rest. `org:*` means the org's children, never the org itself, so the
+    /// two halves are compared only with the same half of another grant set.
+    fn split_own_org(&self, own_org: &str) -> (Self, Self) {
+        let mut own = HashMap::new();
+        let mut rest = HashMap::new();
+        for (resource, action_list) in &self.0 {
+            let target = if parse_qualified(resource).is_some_and(|q| q.org == own_org) {
+                &mut own
+            } else {
+                &mut rest
+            };
+            target.insert(resource.clone(), action_list.clone());
+        }
+        (Self(own), Self(rest))
+    }
+
+    fn merged(mut self, other: Self) -> Self {
+        for (resource, action_list) in other.0 {
+            let entry = self.0.entry(resource).or_default();
+            for action in action_list {
+                if !entry.contains(&action) {
+                    entry.push(action);
+                }
+            }
+        }
+        for actions in self.0.values_mut() {
+            actions.sort();
+        }
+        self
+    }
+
+    /// Whether an org-scoped key of `own_org` holding these grants may act on
+    /// `resource`. A resource in `own_org` needs a grant naming it literally.
+    pub fn org_key_allows(&self, own_org: &uuid::Uuid, resource: &str, action: &str) -> bool {
+        let own_org = own_org.to_string();
+        let (own, rest) = self.split_own_org(&own_org);
+        if parse_qualified(resource).is_some_and(|q| q.org == own_org) {
+            own.has_permission(resource, action)
+        } else {
+            rest.has_permission(resource, action)
+        }
+    }
+
+    /// Org-key grants allowed by both sets, keeping own-org grants apart.
+    pub fn org_key_intersection(&self, issuer: &Self, own_org: &uuid::Uuid) -> Self {
+        let own_org = own_org.to_string();
+        let (own, rest) = self.split_own_org(&own_org);
+        let (issuer_own, issuer_rest) = issuer.split_own_org(&own_org);
+        own.intersection(&issuer_own)
+            .merged(rest.intersection(&issuer_rest))
+    }
+
+    /// Validate org-key grants against an issuer's, keeping own-org grants apart.
+    pub fn validate_org_key_subset_of(
+        &self,
+        issuer: &Self,
+        own_org: &uuid::Uuid,
+    ) -> Result<(), PermissionError> {
+        let own_org = own_org.to_string();
+        let (own, rest) = self.split_own_org(&own_org);
+        let (issuer_own, issuer_rest) = issuer.split_own_org(&own_org);
+        own.validate_subset_of(&issuer_own)?;
+        rest.validate_subset_of(&issuer_rest)
+    }
+
+    /// The part of an org key's grants that applies inside one environment,
+    /// with the qualifier removed. `key_org` is the key's own org: inside it,
+    /// only grants naming it literally apply.
+    pub fn project_to_env(
+        &self,
+        key_org: &uuid::Uuid,
+        org_id: &uuid::Uuid,
+        env_id: &uuid::Uuid,
+    ) -> Self {
+        let org = org_id.to_string();
+        let env = env_id.to_string();
+        let wildcard_org_applies = key_org != org_id;
+        let mut projected: HashMap<String, Vec<String>> = HashMap::new();
+        for (pattern, action_list) in &self.0 {
+            let Some(q) = parse_qualified(pattern) else {
+                continue;
+            };
+            let (Some(env_selector), Some(inner)) = (q.env, q.inner) else {
+                continue;
+            };
+            let org_applies = if q.org == "*" {
+                wildcard_org_applies
+            } else {
+                q.org == org
+            };
+            if org_applies && selector_matches(env_selector, &env) {
+                let entry = projected.entry(inner.to_string()).or_default();
+                for action in action_list {
+                    if !entry.contains(action) {
+                        entry.push(action.clone());
+                    }
+                }
+            }
+        }
+        for actions in projected.values_mut() {
+            actions.sort();
+        }
+        Self(projected)
+    }
+}
+
+/// Qualified URN builders for org-scoped authorization checks.
+pub mod org_urn {
+    use uuid::Uuid;
+
+    /// The children collection of the key's org.
+    pub const CHILDREN: &str = "org:*";
+
+    pub fn org(org: &Uuid) -> String {
+        format!("org:{org}")
+    }
+    pub fn envs(org: &Uuid) -> String {
+        format!("org:{org}/env:*")
+    }
+    pub fn env(org: &Uuid, env: &Uuid) -> String {
+        format!("org:{org}/env:{env}")
+    }
+    pub fn org_api_keys(org: &Uuid) -> String {
+        format!("org:{org}/api-key:*")
+    }
+    pub fn org_api_key(org: &Uuid, key: &Uuid) -> String {
+        format!("org:{org}/api-key:{key}")
+    }
+    pub fn env_api_keys(org: &Uuid, env: &Uuid) -> String {
+        format!("org:{org}/env:{env}/api-key:*")
+    }
+    pub fn env_api_key(org: &Uuid, env: &Uuid, key: &Uuid) -> String {
+        format!("org:{org}/env:{env}/api-key:{key}")
+    }
+    pub fn usage(org: &Uuid) -> String {
+        format!("org:{org}/usage:*")
+    }
+    /// Qualify each grant of an environment-scoped key with its environment.
+    pub fn qualify(org: &Uuid, env: &Uuid, grants: &super::Permissions) -> super::Permissions {
+        super::Permissions::from_map(
+            grants
+                .inner()
+                .iter()
+                .map(|(resource, actions)| {
+                    (format!("org:{org}/env:{env}/{resource}"), actions.clone())
+                })
+                .collect(),
+        )
     }
 }
 
@@ -510,6 +759,98 @@ fn parse_resource_type(urn: &str) -> Option<&str> {
     Some(resource_type)
 }
 
+/// A URN qualified by an organization: `org:{org}`, `org:{org}/{inner}`,
+/// `org:{org}/env:{env}`, or `org:{org}/env:{env}/{inner}`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Qualified<'a> {
+    org: &'a str,
+    env: Option<&'a str>,
+    inner: Option<&'a str>,
+}
+
+fn parse_qualified(urn: &str) -> Option<Qualified<'_>> {
+    let rest = urn.strip_prefix("org:")?;
+    let (org, rest) = match rest.split_once('/') {
+        Some((org, rest)) => (org, Some(rest)),
+        None => (rest, None),
+    };
+    if !is_selector(org) {
+        return None;
+    }
+    let Some(rest) = rest else {
+        return Some(Qualified {
+            org,
+            env: None,
+            inner: None,
+        });
+    };
+    if let Some(env_rest) = rest.strip_prefix("env:") {
+        let (env, inner) = match env_rest.split_once('/') {
+            Some((env, inner)) => (env, Some(inner)),
+            None => (env_rest, None),
+        };
+        if !is_selector(env) || inner.is_some_and(str::is_empty) {
+            return None;
+        }
+        Some(Qualified {
+            org,
+            env: Some(env),
+            inner,
+        })
+    } else if rest.is_empty() {
+        None
+    } else {
+        Some(Qualified {
+            org,
+            env: None,
+            inner: Some(rest),
+        })
+    }
+}
+
+/// A selector is `*` or a canonical (lowercase, hyphenated) UUID, so string
+/// equality is identity equality.
+fn is_selector(segment: &str) -> bool {
+    segment == "*"
+        || uuid::Uuid::parse_str(segment).is_ok_and(|id| id.hyphenated().to_string() == segment)
+}
+
+/// `*` matches exactly one segment, including the literal `*` collection; a
+/// literal selector matches only itself.
+fn selector_matches(pattern: &str, segment: &str) -> bool {
+    pattern == "*" || pattern == segment
+}
+
+fn qualified_matches(pattern: Qualified<'_>, resource: Qualified<'_>) -> bool {
+    selector_matches(pattern.org, resource.org)
+        && match (pattern.env, resource.env) {
+            (None, None) => true,
+            (Some(p), Some(r)) => selector_matches(p, r),
+            _ => false,
+        }
+        && match (pattern.inner, resource.inner) {
+            (None, None) => true,
+            (Some(p), Some(r)) => resource_matches(p, r),
+            _ => false,
+        }
+}
+
+const ENTITY_ACTIONS: &[&str] = &[actions::CREATE, actions::READ, actions::UPDATE];
+
+/// Valid actions for a URN, qualified or not. None means any action.
+fn urn_valid_actions(urn: &str) -> Option<&'static [&'static str]> {
+    if let Some(q) = parse_qualified(urn) {
+        return match q.inner {
+            None => Some(ENTITY_ACTIONS),
+            Some(inner) => match parse_resource_type(inner) {
+                Some("*") | None => None,
+                Some(resource_type) => resource_types::valid_actions(resource_type),
+            },
+        };
+    }
+    parse_resource_type(urn).and_then(resource_types::valid_actions)
+}
+
 /// Check if a resource URN pattern matches a concrete resource.
 ///
 /// Rules:
@@ -519,6 +860,15 @@ fn parse_resource_type(urn: &str) -> Option<&str> {
 /// - `mcp:weather/*` matches `mcp:weather/get-forecast`
 /// - `event:order:*` matches `event:order:placed`
 fn resource_matches(pattern: &str, resource: &str) -> bool {
+    // Qualified URNs match only qualified URNs, segment by segment. Neither
+    // `*:*` nor a string-prefix wildcard crosses into another org's scope.
+    if pattern.starts_with("org:") || resource.starts_with("org:") {
+        return match (parse_qualified(pattern), parse_qualified(resource)) {
+            (Some(pattern), Some(resource)) => qualified_matches(pattern, resource),
+            _ => false,
+        };
+    }
+
     // Universal wildcard
     if pattern == "*:*" {
         return true;
@@ -1644,5 +1994,260 @@ mod tests {
         assert!(msg.contains("stream"));
         assert!(msg.contains("event"));
         assert!(msg.contains("run"));
+    }
+
+    // ========================================================================
+    // Org-scoped keys
+    // ========================================================================
+
+    const ROOT: &str = "00000000-0000-7000-8000-000000000001";
+    const CHILD_A: &str = "00000000-0000-7000-8000-00000000000a";
+    const CHILD_B: &str = "00000000-0000-7000-8000-00000000000b";
+    const ENV_A: &str = "00000000-0000-7000-8000-0000000000e1";
+    const ENV_B: &str = "00000000-0000-7000-8000-0000000000e2";
+
+    fn id(value: &str) -> uuid::Uuid {
+        uuid::Uuid::parse_str(value).unwrap()
+    }
+
+    #[test]
+    fn org_wildcard_matches_one_segment_only() {
+        let children = perms(&[("org:*", &["create", "read", "update"])]);
+        assert!(children.has_permission("org:*", "create"));
+        assert!(children.has_permission(&format!("org:{CHILD_A}"), "update"));
+        for resource in [
+            format!("org:{CHILD_A}/env:*"),
+            format!("org:{CHILD_A}/env:{ENV_A}"),
+            format!("org:{CHILD_A}/api-key:*"),
+            format!("org:{CHILD_A}/env:{ENV_A}/api-key:*"),
+            format!("org:{CHILD_A}/env:{ENV_A}/project:p"),
+            format!("org:{CHILD_A}/usage:*"),
+        ] {
+            assert!(!children.has_permission(&resource, "create"), "{resource}");
+            assert!(!children.has_permission(&resource, "read"), "{resource}");
+        }
+        let envs = perms(&[("org:*/env:*", &["create", "read"])]);
+        assert!(envs.has_permission(&format!("org:{CHILD_A}/env:*"), "create"));
+        assert!(envs.has_permission(&format!("org:{CHILD_A}/env:{ENV_A}"), "read"));
+        assert!(!envs.has_permission(&format!("org:{CHILD_A}/env:{ENV_A}/project:*"), "read"));
+        let inner = perms(&[(&format!("org:{CHILD_A}/env:*/*:*"), &["*"])]);
+        assert!(inner.has_permission(&format!("org:{CHILD_A}/env:{ENV_A}/build:b"), "execute"));
+        assert!(!inner.has_permission(&format!("org:{CHILD_B}/env:{ENV_A}/build:b"), "execute"));
+        assert!(!inner.has_permission(&format!("org:{CHILD_A}/api-key:*"), "create"));
+    }
+
+    #[test]
+    fn literal_selectors_do_not_cover_collections() {
+        let one = perms(&[(&format!("org:{CHILD_A}"), &["read"])]);
+        assert!(!one.has_permission("org:*", "read"));
+        let one_env = perms(&[(&format!("org:{CHILD_A}/env:{ENV_A}/project:*"), &["read"])]);
+        assert!(!one_env.has_permission(&format!("org:{CHILD_A}/env:*/project:*"), "read"));
+    }
+
+    #[test]
+    fn universal_and_unqualified_grants_never_match_qualified_urns() {
+        let full = perms(&[("*:*", &["*"])]);
+        assert!(!full.has_permission("org:*", "create"));
+        assert!(!full.has_permission(&format!("org:{CHILD_A}/env:{ENV_A}/project:*"), "read"));
+        let qualified = perms(&[("org:*/env:*/*:*", &["*"])]);
+        assert!(!qualified.has_permission("project:*", "read"));
+        assert!(!qualified.has_permission("event:*", "create"));
+    }
+
+    #[test]
+    fn environment_keys_reject_org_urns_and_org_keys_require_them() {
+        assert!(perms(&[("org:*", &["read"])]).validate().is_err());
+        assert!(
+            perms(&[("project:*", &["read"])])
+                .validate_org_key()
+                .is_err()
+        );
+        assert!(perms(&[("*:*", &["*"])]).validate_org_key().is_err());
+        assert!(
+            perms(&[("org:*", &["execute"])])
+                .validate_org_key()
+                .is_err()
+        );
+        assert!(perms(&[("org:*", &["delete"])]).validate_org_key().is_err());
+        assert!(
+            perms(&[("org:customer-slug", &["read"])])
+                .validate_org_key()
+                .is_err()
+        );
+        assert!(
+            perms(&[("org:00000000-0000-7000-8000-00000000000A", &["read"])])
+                .validate_org_key()
+                .is_err(),
+            "selectors must be canonical"
+        );
+        assert!(
+            perms(&[("org:*/project:*", &["read"])])
+                .validate_org_key()
+                .is_err()
+        );
+        assert!(
+            perms(&[("org:*/env:*/org:*", &["read"])])
+                .validate_org_key()
+                .is_err()
+        );
+        assert!(
+            perms(&[("org:*/usage:*", &["update"])])
+                .validate_org_key()
+                .is_err()
+        );
+        assert!(
+            perms(&[("org:*/env:*/build:*", &["delete"])])
+                .validate_org_key()
+                .is_err()
+        );
+        perms(&[
+            ("org:*", &["create", "read", "update"]),
+            ("org:*/env:*", &["create", "read"]),
+            (
+                "org:*/env:*/api-key:*",
+                &["create", "read", "update", "delete"],
+            ),
+            ("org:*/env:*/project:*", &["*"]),
+            ("org:*/env:*/event:*", &["create"]),
+            ("org:*/env:*/*:*", &["read"]),
+            (&format!("org:{ROOT}/api-key:*"), &["create"]),
+            (&format!("org:{ROOT}/usage:*"), &["read"]),
+        ])
+        .validate_org_key()
+        .unwrap();
+    }
+
+    #[test]
+    fn org_wildcard_never_selects_the_keys_own_org() {
+        let root = id(ROOT);
+        let grants = perms(&[("org:*", &["read"]), ("org:*/env:*/project:*", &["read"])]);
+        assert!(grants.org_key_allows(&root, &format!("org:{CHILD_A}"), "read"));
+        assert!(!grants.org_key_allows(&root, &format!("org:{ROOT}"), "read"));
+        assert!(grants.project_to_env(&root, &root, &id(ENV_A)).is_empty());
+        assert!(
+            grants
+                .project_to_env(&root, &id(CHILD_A), &id(ENV_A))
+                .has_permission("project:p", "read")
+        );
+        let own = perms(&[(&format!("org:{ROOT}/env:*/project:*"), &["read"])]);
+        assert!(
+            own.project_to_env(&root, &root, &id(ENV_A))
+                .has_permission("project:p", "read")
+        );
+        assert!(
+            own.project_to_env(&root, &id(CHILD_A), &id(ENV_A))
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn projection_strips_the_qualifier_for_one_environment() {
+        let root = id(ROOT);
+        let grants = perms(&[
+            ("org:*/env:*/event:*", &["create"]),
+            (&format!("org:{CHILD_A}/env:{ENV_A}/run:*"), &["read"]),
+            (&format!("org:{CHILD_A}/env:{ENV_B}/build:*"), &["execute"]),
+            ("org:*/env:*/*:*", &["read"]),
+            ("org:*/env:*", &["create"]),
+            (&format!("org:{CHILD_A}/api-key:*"), &["create"]),
+        ]);
+        let projected = grants.project_to_env(&root, &id(CHILD_A), &id(ENV_A));
+        assert_eq!(
+            projected,
+            perms(&[
+                ("event:*", &["create"]),
+                ("run:*", &["read"]),
+                ("*:*", &["read"]),
+            ])
+        );
+        let other = grants.project_to_env(&root, &id(CHILD_B), &id(ENV_A));
+        assert_eq!(
+            other,
+            perms(&[("event:*", &["create"]), ("*:*", &["read"])])
+        );
+    }
+
+    #[test]
+    fn minted_environment_keys_fit_inside_the_projection() {
+        let root = id(ROOT);
+        let issuer = perms(&[
+            ("org:*/env:*/event:*", &["create"]),
+            ("org:*/env:*/run:*", &["read"]),
+        ]);
+        let ceiling = issuer.project_to_env(&root, &id(CHILD_A), &id(ENV_A));
+        perms(&[("event:*", &["create"]), ("run:*", &["read"])])
+            .validate_subset_of(&ceiling)
+            .unwrap();
+        assert!(
+            perms(&[("event:*", &["read"])])
+                .validate_subset_of(&ceiling)
+                .is_err()
+        );
+        assert!(
+            perms(&[("*:*", &["*"])])
+                .validate_subset_of(&ceiling)
+                .is_err()
+        );
+        assert!(
+            perms(&[("project:*", &["read"])])
+                .validate_subset_of(&ceiling)
+                .is_err()
+        );
+        let full = perms(&[(&format!("org:{CHILD_A}/env:{ENV_A}/*:*"), &["*"])]);
+        perms(&[("*:*", &["*"])])
+            .validate_subset_of(&full.project_to_env(&root, &id(CHILD_A), &id(ENV_A)))
+            .unwrap();
+    }
+
+    #[test]
+    fn org_key_subsets_and_intersections_keep_own_org_apart() {
+        let root = id(ROOT);
+        let issuer = perms(&[("org:*/env:*/project:*", &["read"]), ("org:*", &["read"])]);
+        let own_grant = perms(&[(&format!("org:{ROOT}/env:*/project:*"), &["read"])]);
+        assert!(
+            own_grant
+                .validate_org_key_subset_of(&issuer, &root)
+                .is_err()
+        );
+        assert!(own_grant.org_key_intersection(&issuer, &root).is_empty());
+        let child_grant = perms(&[(&format!("org:{CHILD_A}/env:*/project:*"), &["read"])]);
+        child_grant
+            .validate_org_key_subset_of(&issuer, &root)
+            .unwrap();
+        assert_eq!(
+            child_grant.org_key_intersection(&issuer, &root),
+            child_grant
+        );
+        // An issuer's own-org grant never widens a child's org:* grant to the root.
+        let issuer_own = perms(&[(&format!("org:{ROOT}/env:*/project:*"), &["read"])]);
+        let wildcard = perms(&[("org:*/env:*/project:*", &["read"])]);
+        assert!(wildcard.org_key_intersection(&issuer_own, &root).is_empty());
+        assert!(
+            wildcard
+                .validate_org_key_subset_of(&issuer_own, &root)
+                .is_err()
+        );
+        // Wildcard actions on a qualified resource expand to its valid actions.
+        perms(&[("org:*/env:*/api-key:*", &["*"])])
+            .validate_org_key_subset_of(
+                &perms(&[(
+                    "org:*/env:*/api-key:*",
+                    &["create", "read", "update", "delete"],
+                )]),
+                &root,
+            )
+            .unwrap();
+    }
+
+    #[test]
+    fn qualify_round_trips_through_projection() {
+        let root = id(ROOT);
+        let grants = perms(&[("event:*", &["create"]), ("*:*", &["read"])]);
+        let qualified = super::org_urn::qualify(&id(CHILD_A), &id(ENV_A), &grants);
+        qualified.validate_org_key().unwrap();
+        assert_eq!(
+            qualified.project_to_env(&root, &id(CHILD_A), &id(ENV_A)),
+            grants
+        );
     }
 }

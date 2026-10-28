@@ -129,9 +129,9 @@ pub mod file;
 pub mod file_upload;
 pub mod hierarchy;
 pub mod invite;
-pub mod management_key;
 pub mod mcp_tool;
 pub mod org;
+pub mod org_api_key;
 pub mod org_note;
 pub mod port;
 pub mod project;
@@ -1244,6 +1244,19 @@ pub async fn test_db() -> DatabasePool {
     pool.execute("PRAGMA foreign_keys = OFF;")
         .await
         .expect("Failed to disable foreign keys");
+    // The ownership-integrity triggers are foreign-key checks the pragma cannot
+    // reach; drop them for the same reason. schema_parity covers them.
+    let integrity: Vec<String> = sqlx::query_scalar(
+        "SELECT name FROM sqlite_master WHERE type='trigger' AND name LIKE '%resource_scope_integrity%'",
+    )
+    .fetch_all(&pool)
+    .await
+    .expect("Failed to list integrity triggers");
+    for trigger in integrity {
+        pool.execute(sqlx::AssertSqlSafe(format!("DROP TRIGGER {trigger}")))
+            .await
+            .expect("Failed to drop integrity trigger");
+    }
 
     DatabasePool::Sqlite(pool)
 }

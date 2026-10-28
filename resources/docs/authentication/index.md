@@ -11,13 +11,14 @@ The [Hot runtime API](/docs/api) supports three credential types for authenticat
 | **API Key** | `hot_<uuid>_<secret>` | Long-lived | Full environment access for you and your team |
 | **Service Key** | `<uuid>_<secret>` | Long-lived (optional expiry) | Permission-scoped access for your customers and integrations |
 | **Session** | `s_<uuid>_<secret>` | Short-lived (1h default, 24h max) | Ephemeral, permission-scoped access for browser clients |
+| **Org API Key** | `hot_<uuid>_<secret>` | Long-lived (optional expiry) | Creating and managing child organizations, their environments and API keys |
 
 Children own independent environments and deployments. Use a child's environment
 credential to access its resources. A parent's runtime key does not inherit child
 access, and service-key metadata cannot change scope. Root administrators can
-issue separate `hm_` [management credentials](/docs/api/management) for child
-provisioning and delegated runtime-key issuance; those tokens cannot execute
-workflows or access runtime endpoints.
+create [org API keys](/docs/api/management) for child provisioning and for
+minting child environment keys; org keys cannot execute workflows or call
+runtime endpoints.
 
 ```bash
 curl -H "Authorization: Bearer $TOKEN" https://api.hot.dev/v1/projects

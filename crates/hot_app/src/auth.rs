@@ -950,7 +950,7 @@ fn is_recovery_path(path: &str, method: &axum::http::Method) -> bool {
             || matches!(segments.get(1), Some(&"children" | &"billing" | &"usage"));
     }
     segments.last() == Some(&"lifecycle")
-        || (segments.get(1) == Some(&"management-keys") && segments.last() == Some(&"revoke"))
+        || (segments.get(1) == Some(&"org-api-keys") && segments.last() == Some(&"revoke"))
         || (segments.get(1) == Some(&"billing")
             && matches!(
                 segments.last(),

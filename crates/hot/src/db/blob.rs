@@ -335,7 +335,7 @@ pub async fn insert_ref(
                      blob_ref_id, blob_object_id, org_id, env_id, source_kind, source_id, \
                      json_paths, created_by_run_id, active, created_at \
                  ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?) \
-                 ON CONFLICT (org_id, COALESCE(env_id, X''), source_kind, COALESCE(source_id, ''), blob_object_id) \
+                 ON CONFLICT (org_id, COALESCE(env_id, X'00000000000000000000000000000000'), source_kind, COALESCE(source_id, ''), blob_object_id) \
                  DO UPDATE SET active = 1, deactivated_at = NULL";
             sqlx::query(query)
                 .bind(blob_ref_id)

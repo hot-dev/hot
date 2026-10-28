@@ -1123,6 +1123,18 @@ fn reformat_inline_type_blocks(input: &str, indent_spaces: usize) -> String {
                         }
                         k += 1;
                     }
+                    if k < chars.len()
+                        && depth == 0
+                        && !has_newline
+                        && chars[open_brace_idx + 1..k]
+                            .iter()
+                            .all(|ch| ch.is_whitespace())
+                    {
+                        // Empty body (`type {}`) has no fields to expand
+                        result.push_str("type {}");
+                        i = k + 1;
+                        continue;
+                    }
                     if k < chars.len() && depth == 0 && !has_newline {
                         // Inline struct found: reformat
                         // Determine current line's indentation by scanning backwards for newline
@@ -1321,6 +1333,35 @@ fn (data: Bytes): Str {
         assert_formats_in_one_pass(
             "::fmt ns\n\nhook\nmeta {webhook: {service: \"leads\", path: \"/signup\", method: \"POST\"}, secret-headers: [\"x-signature\"]}\nhandle\n\nhandle fn (request: Map): Map { request }\n",
         );
+    }
+
+    #[test]
+    fn test_empty_type_body_stays_inline() {
+        let input = "::x::w ns\n\nTradeErrors type {}\n";
+        assert_eq!(format_str(input, 4).unwrap(), input);
+        assert_formats_in_one_pass(input);
+        // Whitespace inside the braces collapses
+        assert_eq!(
+            format_str("::x::w ns\n\nTradeErrors type {  }\n", 4).unwrap(),
+            input
+        );
+    }
+
+    #[test]
+    fn test_empty_type_body_with_meta_stays_inline() {
+        let input = r#"::x::w ns
+
+TradeErrors
+meta {
+    doc: "A named workflow.",
+    workflow: {
+        name: "Trade Errors",
+    },
+}
+type {}
+"#;
+        assert_eq!(format_str(input, 4).unwrap(), input);
+        assert_formats_in_one_pass(input);
     }
 
     #[test]

@@ -55,12 +55,23 @@ struct BinaryUploadBody {
     ),
     paths(
         status_doc,
-        management_list_children_doc,
-        management_create_child_doc,
-        management_child_state_doc,
-        management_environment_doc,
-        management_runtime_key_doc,
-        management_usage_doc,
+        orgs_list_doc,
+        orgs_create_doc,
+        orgs_get_doc,
+        orgs_update_doc,
+        orgs_usage_doc,
+        orgs_list_envs_doc,
+        orgs_create_env_doc,
+        orgs_get_env_doc,
+        orgs_list_env_keys_doc,
+        orgs_mint_env_key_doc,
+        orgs_list_org_keys_doc,
+        orgs_mint_org_key_doc,
+        api_keys_get_doc,
+        api_keys_update_doc,
+        api_keys_revoke_doc,
+        api_keys_rotate_doc,
+        orgs_env_projects_doc,
         list_projects_doc,
         create_project_doc,
         get_project_doc,
@@ -209,6 +220,7 @@ struct BinaryUploadBody {
     modifiers(&SecurityAddon),
     tags(
         (name = "Status", description = "Health and metadata endpoints"),
+        (name = "Orgs", description = "Organizations, environments and API keys, for org-scoped API keys"),
         (name = "Projects", description = "Project management"),
         (name = "Builds", description = "Build listing, upload, download, and deployment"),
         (name = "Context", description = "Encrypted project context variables"),
@@ -232,20 +244,11 @@ impl Modify for SecurityAddon {
     fn modify(&self, openapi: &mut utoipa::openapi::OpenApi) {
         if let Some(components) = openapi.components.as_mut() {
             components.add_security_scheme(
-                "management_auth",
-                SecurityScheme::Http(
-                    HttpBuilder::new()
-                        .scheme(HttpAuthScheme::Bearer)
-                        .bearer_format("hm_ root management credential; runtime keys are rejected")
-                        .build(),
-                ),
-            );
-            components.add_security_scheme(
                 "bearer_auth",
                 SecurityScheme::Http(
                     HttpBuilder::new()
                         .scheme(HttpAuthScheme::Bearer)
-                        .bearer_format("API key, service key, or session token")
+                        .bearer_format("API key (org- or environment-scoped), service key, or session token. Org keys call /v1/orgs and /v1/api-keys; every other route needs an environment credential")
                         .build(),
                 ),
             );
@@ -936,11 +939,16 @@ mod tests {
 
         for path in [
             "/v1/projects",
-            "/v1/management/children",
-            "/v1/management/children/{child_id}/state",
-            "/v1/management/children/{child_id}/environments",
-            "/v1/management/children/{child_id}/environments/{env_id}/api-keys",
-            "/v1/management/usage",
+            "/v1/orgs",
+            "/v1/orgs/{org_id}",
+            "/v1/orgs/{org_id}/usage",
+            "/v1/orgs/{org_id}/envs",
+            "/v1/orgs/{org_id}/envs/{env_id}",
+            "/v1/orgs/{org_id}/envs/{env_id}/api-keys",
+            "/v1/orgs/{org_id}/envs/{env_id}/projects",
+            "/v1/orgs/{org_id}/api-keys",
+            "/v1/api-keys/{key_id}",
+            "/v1/api-keys/{key_id}/rotate",
             "/v1/builds",
             "/v1/runs/stats",
             "/v1/runs/{run_id}/subscribe",
@@ -968,33 +976,104 @@ mod tests {
     }
 }
 
-#[utoipa::path(get, path = "/v1/management/children", tag = "Management",
-    security(("management_auth" = [])),
+#[utoipa::path(get, path = "/v1/orgs", tag = "Orgs", security(("bearer_auth" = [])),
+    description = "Children of the key's organization that it may read (`org:*` or `org:{org}` with `read`).",
     params(("limit" = Option<i64>, Query), ("offset" = Option<i64>, Query)),
-    responses((status = 200, description = "Authorized children and total", body = serde_json::Value), (status = "default", body = ApiErrorResponse)))]
-fn management_list_children_doc() {}
+    responses((status = 200, description = "Child organizations", body = serde_json::Value), (status = "default", body = ApiErrorResponse)))]
+fn orgs_list_doc() {}
 
-#[utoipa::path(post, path = "/v1/management/children", tag = "Management",
-    security(("management_auth" = [])), request_body = crate::handlers::management::CreateChildRequest,
+#[utoipa::path(post, path = "/v1/orgs", tag = "Orgs", security(("bearer_auth" = [])),
+    description = "Create a child organization and its default environment (`org:*` with `create`). Idempotent by `idempotency_key`.",
+    request_body = crate::handlers::orgs::CreateOrgRequest,
     responses((status = 201, description = "Child organization, default environment ID, and created flag", body = serde_json::Value), (status = "default", body = ApiErrorResponse)))]
-fn management_create_child_doc() {}
+fn orgs_create_doc() {}
 
-#[utoipa::path(patch, path = "/v1/management/children/{child_id}/state", tag = "Management",
-    security(("management_auth" = [])), params(("child_id" = Uuid, Path)), request_body = crate::handlers::management::ChildStateRequest,
-    responses((status = 204, description = "Lifecycle updated"), (status = "default", body = ApiErrorResponse)))]
-fn management_child_state_doc() {}
+#[utoipa::path(get, path = "/v1/orgs/{org_id}", tag = "Orgs", security(("bearer_auth" = [])),
+    description = "The key's organization or one of its children (`org:{org}` with `read`).",
+    params(("org_id" = Uuid, Path)),
+    responses((status = 200, description = "Organization", body = serde_json::Value), (status = "default", body = ApiErrorResponse)))]
+fn orgs_get_doc() {}
 
-#[utoipa::path(post, path = "/v1/management/children/{child_id}/environments", tag = "Management",
-    security(("management_auth" = [])), params(("child_id" = Uuid, Path)), request_body = crate::handlers::management::CreateEnvironmentRequest,
+#[utoipa::path(patch, path = "/v1/orgs/{org_id}", tag = "Orgs", security(("bearer_auth" = [])),
+    description = "Change a child's lifecycle state (`org:{org}` with `update`).",
+    params(("org_id" = Uuid, Path)), request_body = crate::handlers::orgs::UpdateOrgRequest,
+    responses((status = 200, description = "Updated organization", body = serde_json::Value), (status = "default", body = ApiErrorResponse)))]
+fn orgs_update_doc() {}
+
+#[utoipa::path(get, path = "/v1/orgs/{org_id}/usage", tag = "Orgs", security(("bearer_auth" = [])),
+    description = "Account usage across the root and its children (`org:{root}/usage:*` with `read`).",
+    params(("org_id" = Uuid, Path)),
+    responses((status = 200, description = "Account usage", body = serde_json::Value), (status = "default", body = ApiErrorResponse)))]
+fn orgs_usage_doc() {}
+
+#[utoipa::path(get, path = "/v1/orgs/{org_id}/envs", tag = "Orgs", security(("bearer_auth" = [])),
+    description = "Environments of an organization (`org:{org}/env:*` with `read`).",
+    params(("org_id" = Uuid, Path)),
+    responses((status = 200, description = "Environments", body = serde_json::Value), (status = "default", body = ApiErrorResponse)))]
+fn orgs_list_envs_doc() {}
+
+#[utoipa::path(post, path = "/v1/orgs/{org_id}/envs", tag = "Orgs", security(("bearer_auth" = [])),
+    description = "Create an environment (`org:{org}/env:*` with `create`). Idempotent by exact name.",
+    params(("org_id" = Uuid, Path)), request_body = crate::handlers::orgs::CreateEnvRequest,
     responses((status = 201, description = "Environment created or existing exact-name environment returned", body = serde_json::Value), (status = "default", body = ApiErrorResponse)))]
-fn management_environment_doc() {}
+fn orgs_create_env_doc() {}
 
-#[utoipa::path(post, path = "/v1/management/children/{child_id}/environments/{env_id}/api-keys", tag = "Management",
-    security(("management_auth" = [])), params(("child_id" = Uuid, Path), ("env_id" = Uuid, Path)), request_body = crate::handlers::management::IssueRuntimeKeyRequest,
-    responses((status = 201, description = "Child runtime API key; token returned once", body = serde_json::Value), (status = "default", body = ApiErrorResponse)))]
-fn management_runtime_key_doc() {}
+#[utoipa::path(get, path = "/v1/orgs/{org_id}/envs/{env_id}", tag = "Orgs", security(("bearer_auth" = [])),
+    description = "One environment (`org:{org}/env:{env}` with `read`).",
+    params(("org_id" = Uuid, Path), ("env_id" = Uuid, Path)),
+    responses((status = 200, description = "Environment", body = serde_json::Value), (status = "default", body = ApiErrorResponse)))]
+fn orgs_get_env_doc() {}
 
-#[utoipa::path(get, path = "/v1/management/usage", tag = "Management",
-    security(("management_auth" = [])),
-    responses((status = 200, description = "Account aggregate usage", body = serde_json::Value), (status = "default", body = ApiErrorResponse)))]
-fn management_usage_doc() {}
+#[utoipa::path(get, path = "/v1/orgs/{org_id}/envs/{env_id}/api-keys", tag = "Orgs", security(("bearer_auth" = [])),
+    description = "Environment API keys (`org:{org}/env:{env}/api-key:*` with `read`).",
+    params(("org_id" = Uuid, Path), ("env_id" = Uuid, Path), ("limit" = Option<i64>, Query), ("offset" = Option<i64>, Query)),
+    responses((status = 200, description = "API keys, without secrets", body = serde_json::Value), (status = "default", body = ApiErrorResponse)))]
+fn orgs_list_env_keys_doc() {}
+
+#[utoipa::path(post, path = "/v1/orgs/{org_id}/envs/{env_id}/api-keys", tag = "Orgs", security(("bearer_auth" = [])),
+    description = "Mint an environment API key (`org:{org}/env:{env}/api-key:*` with `create`). Its grants must fit inside the org key's grants for that environment, and its expiry inside the org key's.",
+    params(("org_id" = Uuid, Path), ("env_id" = Uuid, Path)), request_body = crate::handlers::orgs::CreateApiKeyRequest,
+    responses((status = 201, description = "Environment API key; token returned once", body = serde_json::Value), (status = "default", body = ApiErrorResponse)))]
+fn orgs_mint_env_key_doc() {}
+
+#[utoipa::path(get, path = "/v1/orgs/{org_id}/api-keys", tag = "Orgs", security(("bearer_auth" = [])),
+    description = "Org API keys of the key's own organization (`org:{org}/api-key:*` with `read`).",
+    params(("org_id" = Uuid, Path)),
+    responses((status = 200, description = "Org API keys, without secrets", body = serde_json::Value), (status = "default", body = ApiErrorResponse)))]
+fn orgs_list_org_keys_doc() {}
+
+#[utoipa::path(post, path = "/v1/orgs/{org_id}/api-keys", tag = "Orgs", security(("bearer_auth" = [])),
+    description = "Mint an org API key in the key's own organization (`org:{org}/api-key:*` with `create`). Its grants must fit inside the issuer's; chains are at most two org keys deep.",
+    params(("org_id" = Uuid, Path)), request_body = crate::handlers::orgs::CreateApiKeyRequest,
+    responses((status = 201, description = "Org API key; token returned once", body = serde_json::Value), (status = "default", body = ApiErrorResponse)))]
+fn orgs_mint_org_key_doc() {}
+
+#[utoipa::path(get, path = "/v1/api-keys/{key_id}", tag = "Orgs", security(("bearer_auth" = [])),
+    description = "An org or environment API key in the caller's organization or a child (`api-key:{key}` with `read`, qualified by its org and environment).",
+    params(("key_id" = Uuid, Path)),
+    responses((status = 200, description = "API key, without its secret", body = serde_json::Value), (status = "default", body = ApiErrorResponse)))]
+fn api_keys_get_doc() {}
+
+#[utoipa::path(patch, path = "/v1/api-keys/{key_id}", tag = "Orgs", security(("bearer_auth" = [])),
+    description = "Replace a key's grants with ones inside the caller's own (`update`). The caller must have issued the key, directly or through keys it issued.",
+    params(("key_id" = Uuid, Path)), request_body = crate::handlers::orgs::UpdateApiKeyRequest,
+    responses((status = 200, description = "Updated API key", body = serde_json::Value), (status = "default", body = ApiErrorResponse)))]
+fn api_keys_update_doc() {}
+
+#[utoipa::path(delete, path = "/v1/api-keys/{key_id}", tag = "Orgs", security(("bearer_auth" = [])),
+    description = "Revoke a key the caller issued (`delete`). Keys it issued stop working too.",
+    params(("key_id" = Uuid, Path)),
+    responses((status = 204, description = "Revoked"), (status = "default", body = ApiErrorResponse)))]
+fn api_keys_revoke_doc() {}
+
+#[utoipa::path(post, path = "/v1/api-keys/{key_id}/rotate", tag = "Orgs", security(("bearer_auth" = [])),
+    description = "Issue a new secret for a key the caller issued (`update`). The key ID, lineage and keys it issued are unchanged; the previous secret works until the overlap ends.",
+    params(("key_id" = Uuid, Path)), request_body(content = Option<crate::handlers::orgs::RotateApiKeyRequest>),
+    responses((status = 200, description = "API key with its new token", body = serde_json::Value), (status = "default", body = ApiErrorResponse)))]
+fn api_keys_rotate_doc() {}
+
+#[utoipa::path(get, path = "/v1/orgs/{org_id}/envs/{env_id}/projects", tag = "Orgs", security(("bearer_auth" = [])),
+    description = "Every `/v1/projects…` and `/v1/builds` route is also served under `/v1/orgs/{org_id}/envs/{env_id}` for org keys. The org key's grants for that environment (`org:{org}/env:{env}/project:*`, `…/context:*`, `…/build:*`) are checked exactly as an environment key's grants are.",
+    params(("org_id" = Uuid, Path), ("env_id" = Uuid, Path)),
+    responses((status = 200, description = "Projects in the environment", body = serde_json::Value), (status = "default", body = ApiErrorResponse)))]
+fn orgs_env_projects_doc() {}

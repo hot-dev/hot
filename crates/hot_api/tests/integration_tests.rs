@@ -3439,6 +3439,18 @@ async fn test_interrupted_abort_is_reclaimable() {
 
 /// Helper to build an authenticated app with file routes and file storage
 async fn build_file_app() -> (axum::Router, String, tempfile::TempDir) {
+    let (app, api_key, temp_dir, _) = build_file_app_with_collection().await;
+    (app, api_key, temp_dir)
+}
+
+/// The file app, plus a collector that deletes every retired file object as
+/// if its grace period had passed.
+async fn build_file_app_with_collection() -> (
+    axum::Router,
+    String,
+    tempfile::TempDir,
+    impl AsyncFn() -> usize,
+) {
     let state = create_test_db().await;
     let (_, api_key) = create_test_api_key(&state.0).await;
 
@@ -3446,8 +3458,15 @@ async fn build_file_app() -> (axum::Router, String, tempfile::TempDir) {
     let file_storage: Arc<Box<dyn FileStorage>> = Arc::new(Box::new(LocalFileStorage::new(
         temp_dir.path().to_path_buf(),
     )));
+    let (db, storage) = (Arc::clone(&state.0), Arc::clone(&file_storage));
+    let collect = async move || {
+        let after_grace = chrono::Utc::now() + chrono::Duration::days(1);
+        hot::file_storage::collect_retired_objects(&db, &**storage, after_grace, 100)
+            .await
+            .unwrap()
+    };
 
-    (file_router(state, file_storage), api_key, temp_dir)
+    (file_router(state, file_storage), api_key, temp_dir, collect)
 }
 
 fn file_router(
@@ -4250,7 +4269,7 @@ async fn test_file_download() {
 
 #[tokio::test]
 async fn test_file_delete() {
-    let (app, api_key, _temp_dir) = build_file_app().await;
+    let (app, api_key, _temp_dir, collect) = build_file_app_with_collection().await;
 
     let (_, body) = make_raw_request(
         &app,
@@ -4275,7 +4294,10 @@ async fn test_file_delete() {
     )
     .await;
     assert_eq!(status, StatusCode::NO_CONTENT);
-    // The stored bytes go with the record.
+    // The stored bytes go with the record once collection runs: until then a
+    // read that resolved them can finish.
+    assert_eq!(stored_files(_temp_dir.path()).len(), 1);
+    assert_eq!(collect().await, 1);
     assert!(stored_files(_temp_dir.path()).is_empty());
 
     let (status, _) = make_request(

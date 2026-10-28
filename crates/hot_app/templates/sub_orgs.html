@@ -42,24 +42,22 @@
         </form>
     </section>
     {% match issued_token %}{% when Some with (token) %}
-    <section class="rounded-lg border p-4"><h2 class="font-semibold">Save this management token now</h2><p class="text-sm">It will not be shown again. Revoking it also removes access from runtime credentials issued through it.</p><code class="block break-all mt-2">{{ token }}</code></section>
+    <section class="rounded-lg border p-4"><h2 class="font-semibold">Save this org API key now</h2><p class="text-sm">It will not be shown again. Revoking it also stops every key it created.</p><code class="block break-all mt-2">{{ token }}</code></section>
     {% when None %}{% endmatch %}
     <details class="rounded-lg border border-gray-200 dark:border-gray-700 p-4">
-        <summary class="font-semibold cursor-pointer">Management credentials</summary>
-        <p class="my-3 text-sm text-gray-500">These credentials manage child workspaces. Runtime API and service keys remain scoped to one child environment.</p>
-        <form method="post" action="/@{{ root.slug }}/management-keys" class="space-y-3">
-            <label class="block text-sm">Name <input class="form-input block w-full" name="name" required maxlength="200"></label>
-            <label class="block text-sm">Capabilities (comma separated) <input class="form-input block w-full" name="capabilities" value="children:read" required></label>
-            <p class="text-xs text-gray-500">children:read, children:create, children:update, environments:create, runtime-keys:create, usage:read</p>
-            <label class="block text-sm">Allowed child IDs (comma separated) <input class="form-input block w-full" name="target_org_ids"></label>
-            <label class="block text-sm"><input type="checkbox" name="all_children" value="true"> Allow all existing and future children (required to create children)</label>
-            <label class="block text-sm">Expires in days <input class="form-input" type="number" name="expires_in_days" value="30" min="1" max="90" required></label>
-            <label class="block text-sm">Runtime permission ceiling (JSON; required only for runtime-keys:create) <textarea class="form-input block w-full" name="delegation_permissions" rows="3"></textarea></label>
-            <button class="btn btn-primary" type="submit">Issue management credential</button>
+        <summary class="font-semibold cursor-pointer">Org API keys</summary>
+        <p class="my-3 text-sm text-gray-500">An org API key manages child organizations, their environments and API keys through <code>/v1/orgs</code> and <code>/v1/api-keys</code>. It cannot call runtime routes: environment API keys and service keys stay bound to one environment. <code>org:*</code> means this organization's children, never this organization itself; grant <code>org:{{ root.org_id }}/…</code> explicitly for that.</p>
+        <form method="post" action="/@{{ root.slug }}/org-api-keys" class="space-y-3">
+            <label class="block text-sm">Description <input class="form-input block w-full" name="description" required maxlength="200"></label>
+            <label class="block text-sm">Permissions (JSON) <textarea class="form-input block w-full font-mono" name="permissions" rows="8" required>{{ org_key_example }}</textarea></label>
+            <p class="text-xs text-gray-500">Grants inside an environment, such as <code>org:*/env:*/event:*</code>, only set the ceiling for environment keys this key creates. Creating more org keys needs <code>org:{{ root.org_id }}/api-key:*</code> with <code>create</code>.</p>
+            <label class="block text-sm">Expires in days (optional) <input class="form-input" type="number" name="expires_in_days" min="1" max="3650"></label>
+            <button class="btn btn-primary" type="submit">Create org API key</button>
         </form>
-        {% for key in management_keys %}
-        <div class="mt-4 border-t pt-3"><p>{{ key.name }} · expires {{ key.expires_at }}</p>
-            {% if key.is_active() %}<form method="post" action="/@{{ root.slug }}/management-keys/{{ key.management_key_id }}/revoke"><button class="btn btn-secondary" type="submit">Revoke</button></form>{% else %}<p class="text-sm text-gray-500">Inactive</p>{% endif %}
+        {% for key in org_api_keys %}
+        <div class="mt-4 border-t pt-3"><p>{{ key.description }} · {{ key.org_api_key_id }}{% match key.expires_at %}{% when Some with (at) %} · expires {{ at }}{% when None %}{% endmatch %}{% match key.issuer_org_api_key_id %}{% when Some with (issuer) %} · created by key {{ issuer }}{% when None %}{% endmatch %}</p>
+            <pre class="text-xs text-gray-500 whitespace-pre-wrap">{{ key.permissions }}</pre>
+            {% if key.is_usable() %}<form method="post" action="/@{{ root.slug }}/org-api-keys/{{ key.org_api_key_id }}/revoke"><button class="btn btn-secondary" type="submit">Revoke</button></form>{% else %}<p class="text-sm text-gray-500">Inactive</p>{% endif %}
         </div>
         {% endfor %}
     </details>

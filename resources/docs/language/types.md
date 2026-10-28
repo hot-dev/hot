@@ -307,6 +307,20 @@ Use `match` to check variant types (preferred):
 
 {{snippet:types#match-variant}}
 
+### Matching a Variant's Payload
+
+Inside an `Enum.Variant` arm, the matched name and the arm's binding hold that
+variant's payload: a `Vec`, a `Str`, an `Int`, and so on. A record payload is
+the exception: the arm keeps the variant, whose fields read through to the
+payload, so it can still be passed on as the enum. A unit variant has no
+payload, so its arm keeps the variant too. Outside the arm the matched name is
+still the variant:
+
+{{snippet:types#match-payload}}
+
+A union arm (`Reply.Steps | Reply.Declined =>`) and a type-level arm
+(`Reply =>`) keep the whole variant, since their payloads can differ.
+
 Use `is-type` for dynamic type checking:
 
 {{snippet:types#type-checking}}

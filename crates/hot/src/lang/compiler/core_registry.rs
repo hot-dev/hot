@@ -73,6 +73,21 @@ impl CoreVariableRegistry {
             .push(var_name);
     }
 
+    /// Add a variant that a `Source -> Enum.Variant` arrow enrolls to a core
+    /// enum, unless the enum already has a variant by that name.
+    pub fn enroll_variant(&mut self, enum_name: &str, variant: String, source_type: String) {
+        if let Some(info) = self.variables.get_mut(enum_name)
+            && let Value::TypeDef(def) = &mut info.value
+            && let Some(variants) = &mut def.variants
+            && !variants.iter().any(|v| v.name.name() == variant)
+        {
+            variants.push(crate::lang::ast::VariantDef {
+                name: crate::lang::ast::Sym::String(variant),
+                type_ref: Some(source_type),
+            });
+        }
+    }
+
     /// Get a core variable by name
     pub fn get(&self, var_name: &str) -> Option<&CoreVariableInfo> {
         self.variables.get(var_name)

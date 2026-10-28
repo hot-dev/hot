@@ -61,13 +61,14 @@ Reference tables deliberately have no RLS; runtime receives SELECT only:
 `alert_delivery_status`, `alert_destination_type`, `plan`.
 
 SQLx migration metadata is deployment control state and receives no runtime grants.
-Management credential tables in migration 013 carry their own policies.
+Org API key tables carry their own policies. Migration 020 replaced 013's
+management credential tables (`management_key`, `api_key_management_issuer`).
 
 | Added control table | Ownership and operation |
 | --- | --- |
 | `account_request_window` | Exact root; Billing only (013) |
-| `management_key` | Exact root Organization; Authentication read; immutable root (013) |
-| `api_key_management_issuer` | API key environment (writes need an exact environment scope); Authentication read; immutable issuer; delegated parent deletion restricted (013) |
+| `org_api_key` | Exact owning Organization; Authentication read; no delete; immutable org and issuer (020) |
+| `api_key_issuer` | API key environment (writes need an exact environment scope); Authentication read; no update or delete; issued key and issuer deletion restricted (020) |
 
 `StoreProvisioning` can read only `store_map` configuration; index DDL uses the
 separately supplied schema-owner credentials. `Retention` reads session/plan
@@ -129,6 +130,8 @@ and construction of maintenance authority remain outside this boundary.
 | `org_note` (017) | Billing reads and inserts its account's notes, which deduplicate compute-unit threshold alerts |
 | `alert_subscription_channel` (017) | An org-wide subscription may link one of its org's environment channels |
 | `parked_event` (018) | Queue operation reads, parks and replays held events; an exact environment scope reads and writes its own |
+| `retired_file_object` (021) | A file's own environment or org scope retires and registers its objects, through the `file` triggers and before a commit; Retention reads and deletes them when collecting |
+| `file` (021) | Retention reads which objects active versions still reference, so collection never deletes one |
 
 Migration 013 backfills `call.env_id` from its existing run, makes it required,
 and validates the pair with a composite foreign key. Both ownership fields are
