@@ -327,7 +327,7 @@ impl Compiler {
             "Installing tool-spec registry with {} entries",
             registry.entries.len()
         );
-        crate::lang::hot::internal_mcp::set_registry(registry);
+        crate::lang::registry::mcp::set_registry(registry);
         Ok(())
     }
 
@@ -339,9 +339,9 @@ impl Compiler {
     pub fn build_tool_specs(
         &self,
         program: &Program,
-    ) -> crate::lang::hot::internal_mcp::ToolSpecRegistry {
+    ) -> crate::lang::registry::mcp::ToolSpecRegistry {
         let type_registry = self.build_type_registry(program);
-        let mut registry = crate::lang::hot::internal_mcp::ToolSpecRegistry::default();
+        let mut registry = crate::lang::registry::mcp::ToolSpecRegistry::default();
 
         for (ns_path, namespace) in &program.namespaces {
             let ns_str = ns_path.to_string();
@@ -394,7 +394,7 @@ impl Compiler {
 
                 registry.entries.insert(
                     fq_name.clone(),
-                    crate::lang::hot::internal_mcp::ToolSpecEntry {
+                    crate::lang::registry::mcp::ToolSpecEntry {
                         name: fq_name,
                         input_schema,
                         output_schema,
@@ -430,7 +430,7 @@ impl Compiler {
             "Installing skill-spec registry with {} entries",
             registry.entries.len()
         );
-        crate::lang::hot::internal_skill::set_registry(registry);
+        crate::lang::registry::skill::set_registry(registry);
         Ok(())
     }
 
@@ -441,8 +441,8 @@ impl Compiler {
     pub fn build_skill_specs(
         &self,
         program: &Program,
-    ) -> crate::lang::hot::internal_skill::SkillSpecRegistry {
-        let mut registry = crate::lang::hot::internal_skill::SkillSpecRegistry::default();
+    ) -> crate::lang::registry::skill::SkillSpecRegistry {
+        let mut registry = crate::lang::registry::skill::SkillSpecRegistry::default();
 
         for (ns_path, namespace) in &program.namespaces {
             let ns_str = ns_path.to_string();
@@ -485,7 +485,7 @@ impl Compiler {
                 let fq_name = format!("{}/{}", ns_str, var_name);
                 registry.entries.insert(
                     fq_name.clone(),
-                    crate::lang::hot::internal_skill::SkillSpecEntry {
+                    crate::lang::registry::skill::SkillSpecEntry {
                         name: fq_name,
                         skill_meta: skill_val.clone(),
                     },
@@ -1829,7 +1829,7 @@ impl Compiler {
                         file: src.file.as_ref().map(std::path::PathBuf::from),
                     });
                 if let Err(message) =
-                    crate::db::normalize_recurring_schedule_expression(&cron_expression)
+                    crate::lang::schedule::normalize_recurring_schedule_expression(&cron_expression)
                 {
                     self.validation_errors.push(
                         crate::lang::errors::CompilerError::InvalidSchedule {

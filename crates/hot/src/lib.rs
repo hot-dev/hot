@@ -42,6 +42,6 @@ pub mod storage;
 pub mod store;
 pub mod stream;
 pub mod time_range;
-pub mod val;
+pub use hot_lang::val;
 pub mod version;
 pub mod webhook_url;

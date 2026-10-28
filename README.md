@@ -130,7 +130,8 @@ hot ai add                # Add AGENTS.md + bundled Hot skills for AI tools
 
 ```text
 crates/
-  hot/                    # Core language, runtime, storage, and internals
+  hot/                    # Runtime, storage, and internals
+  hot_lang/               # Language without the runtime: parser, type checker, compiler
   hot_cli/                # CLI binary
   hot_api/                # API service
   hot_app/                # App/Dashboard

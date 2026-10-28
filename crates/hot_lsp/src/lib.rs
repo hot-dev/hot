@@ -2,15 +2,15 @@
 // This is a simplified version that focuses on basic functionality
 
 use ahash::{AHashMap, AHashSet};
-use hot::lang::ast::Program;
-use hot::lang::bytecode::NamespaceRegistry;
-use hot::lang::compiler::Compiler;
-use hot::lang::compiler::core_registry::CoreVariableRegistry;
-use hot::lang::compiler::type_checker::{TypeChecker, TypeExpr};
-use hot::lang::errors::{CompilerError, CompilerErrors};
 use hot::lang::repl::{ReplConfig, ReplSession};
-use hot::lang::runtime::resolution::UnifiedResolver;
-use hot::val::Val;
+use hot_lang::lang::ast::Program;
+use hot_lang::lang::bytecode::NamespaceRegistry;
+use hot_lang::lang::compiler::Compiler;
+use hot_lang::lang::compiler::core_registry::CoreVariableRegistry;
+use hot_lang::lang::compiler::type_checker::{TypeChecker, TypeExpr};
+use hot_lang::lang::errors::{CompilerError, CompilerErrors};
+use hot_lang::lang::runtime::resolution::UnifiedResolver;
+use hot_lang::val::Val;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -49,7 +49,7 @@ pub struct EvalResult {
 
 pub struct Backend {
     client: Client,
-    conf: std::sync::Arc<tokio::sync::Mutex<hot::val::Val>>,
+    conf: std::sync::Arc<tokio::sync::Mutex<hot_lang::val::Val>>,
     src_paths: std::sync::Arc<tokio::sync::Mutex<Vec<PathBuf>>>,
     docs: tokio::sync::Mutex<AHashMap<Url, String>>,
     symbol_index: std::sync::Arc<tokio::sync::Mutex<Option<SymbolIndex>>>,
@@ -76,9 +76,9 @@ struct SymbolVar {
     kind: CompletionItemKind,
     detail: Option<String>,
     doc_markdown: Option<String>,
-    ast_value: hot::lang::ast::Value,
+    ast_value: hot_lang::lang::ast::Value,
     /// Source location of this symbol's definition (file, line, col)
-    def_source: Option<hot::lang::ast::Source>,
+    def_source: Option<hot_lang::lang::ast::Source>,
 }
 
 fn normalize_file_path(path: &Path) -> PathBuf {
@@ -775,7 +775,7 @@ impl Backend {
 
     fn parse_error_diagnostic(
         text: &str,
-        parse_error: &hot::lang::parser::ParseError,
+        parse_error: &hot_lang::lang::parser::ParseError,
     ) -> Diagnostic {
         let loc = &parse_error.location;
         let start_line = loc.line.saturating_sub(1) as u32;
@@ -823,14 +823,14 @@ impl Backend {
         let current_program = match uri.to_file_path() {
             Ok(ref path) => {
                 let path_str = path.to_string_lossy();
-                match hot::lang::parser::parse_hot_file(&text, path_str.as_ref()) {
+                match hot_lang::lang::parser::parse_hot_file(&text, path_str.as_ref()) {
                     Ok(program) => program,
                     Err(ref parse_error) => {
                         return vec![Self::parse_error_diagnostic(&text, parse_error)];
                     }
                 }
             }
-            Err(_) => match hot::lang::parser::parse_hot(&text) {
+            Err(_) => match hot_lang::lang::parser::parse_hot(&text) {
                 Ok(program) => program,
                 Err(ref parse_error) => {
                     return vec![Self::parse_error_diagnostic(&text, parse_error)];
@@ -909,9 +909,9 @@ impl Backend {
         &self,
         conf: &Val,
         src_paths: &[PathBuf],
-        current_program: &hot::lang::ast::Program,
-    ) -> Result<hot::lang::ast::Program, String> {
-        use hot::lang::ast::Program;
+        current_program: &hot_lang::lang::ast::Program,
+    ) -> Result<hot_lang::lang::ast::Program, String> {
+        use hot_lang::lang::ast::Program;
 
         let current_files: AHashSet<PathBuf> = current_program
             .namespaces
@@ -929,7 +929,7 @@ impl Backend {
             .discover_and_parse_hot_files_excluding(&current_files)
             .await
         {
-            hot::lang::engine::discover::merge_program_namespaces_strict(
+            hot_lang::lang::merge::merge_program_namespaces_strict(
                 &mut comprehensive_program.namespaces,
                 hot_std_program.namespaces,
             )?;
@@ -950,12 +950,12 @@ impl Backend {
                             continue;
                         }
                         if let Ok(content) = std::fs::read_to_string(&normalized_file)
-                            && let Ok(parsed_program) = hot::lang::parser::parse_hot_file(
+                            && let Ok(parsed_program) = hot_lang::lang::parser::parse_hot_file(
                                 &content,
                                 normalized_file.to_string_lossy().as_ref(),
                             )
                         {
-                            hot::lang::engine::discover::merge_program_namespaces_strict(
+                            hot_lang::lang::merge::merge_program_namespaces_strict(
                                 &mut comprehensive_program.namespaces,
                                 parsed_program.namespaces,
                             )?;
@@ -976,12 +976,12 @@ impl Backend {
                         continue;
                     }
                     if let Ok(content) = std::fs::read_to_string(&normalized_file)
-                        && let Ok(parsed_program) = hot::lang::parser::parse_hot_file(
+                        && let Ok(parsed_program) = hot_lang::lang::parser::parse_hot_file(
                             &content,
                             normalized_file.to_string_lossy().as_ref(),
                         )
                     {
-                        hot::lang::engine::discover::merge_program_namespaces_strict(
+                        hot_lang::lang::merge::merge_program_namespaces_strict(
                             &mut comprehensive_program.namespaces,
                             parsed_program.namespaces,
                         )?;
@@ -991,7 +991,7 @@ impl Backend {
         }
 
         // 4. Add the current file's program
-        hot::lang::engine::discover::merge_program_namespaces_strict(
+        hot_lang::lang::merge::merge_program_namespaces_strict(
             &mut comprehensive_program.namespaces,
             current_program.namespaces.clone(),
         )?;
@@ -1060,14 +1060,16 @@ impl Backend {
         // Warnings (e.g. deprecated-usage) render through the warning channel
         // so the ariadne report shows "warning"; everything else is an error.
         let severity = match error.severity() {
-            hot::lang::errors::DiagnosticSeverity::Warning => DiagnosticSeverity::WARNING,
-            hot::lang::errors::DiagnosticSeverity::Information => DiagnosticSeverity::INFORMATION,
-            hot::lang::errors::DiagnosticSeverity::Hint => DiagnosticSeverity::HINT,
-            hot::lang::errors::DiagnosticSeverity::Error => DiagnosticSeverity::ERROR,
+            hot_lang::lang::errors::DiagnosticSeverity::Warning => DiagnosticSeverity::WARNING,
+            hot_lang::lang::errors::DiagnosticSeverity::Information => {
+                DiagnosticSeverity::INFORMATION
+            }
+            hot_lang::lang::errors::DiagnosticSeverity::Hint => DiagnosticSeverity::HINT,
+            hot_lang::lang::errors::DiagnosticSeverity::Error => DiagnosticSeverity::ERROR,
         };
         let message = if matches!(
             error.severity(),
-            hot::lang::errors::DiagnosticSeverity::Warning
+            hot_lang::lang::errors::DiagnosticSeverity::Warning
         ) {
             batch.add_warning(error.clone());
             batch.format_warnings(false)
@@ -1107,8 +1109,8 @@ impl Backend {
                 for (var, var_value) in &namespace.scope.vars {
                     let var_name_str = var.sym.name();
                     // `where` clauses' hidden predicates and alias types.
-                    if hot::lang::ast::is_where_predicate(var_name_str)
-                        || hot::lang::ast::is_inline_refinement_type(var_name_str)
+                    if hot_lang::lang::ast::is_where_predicate(var_name_str)
+                        || hot_lang::lang::ast::is_inline_refinement_type(var_name_str)
                     {
                         continue;
                     }
@@ -1126,10 +1128,10 @@ impl Backend {
                     });
 
                     // Add to namespace registry for UnifiedResolver
-                    use hot::lang::bytecode::{VariableInfo, VariableType};
+                    use hot_lang::lang::bytecode::{VariableInfo, VariableType};
                     let var_info = VariableInfo {
                         name: var_name_str.to_string(),
-                        var_type: if matches!(var_value, hot::lang::ast::Value::Fn(_)) {
+                        var_type: if matches!(var_value, hot_lang::lang::ast::Value::Fn(_)) {
                             VariableType::Function
                         } else {
                             VariableType::Value
@@ -1143,14 +1145,15 @@ impl Backend {
                     let is_core = self.is_core_variable_from_metadata(var)
                         || self.is_core_type_def(var, var_value);
                     if is_core {
-                        use hot::lang::compiler::core_registry::CoreVariableType;
-                        let variable_type = if matches!(var_value, hot::lang::ast::Value::Fn(_)) {
-                            CoreVariableType::Function
-                        } else if matches!(var_value, hot::lang::ast::Value::TypeDef(_)) {
-                            CoreVariableType::TypeConstructor
-                        } else {
-                            CoreVariableType::Constant
-                        };
+                        use hot_lang::lang::compiler::core_registry::CoreVariableType;
+                        let variable_type =
+                            if matches!(var_value, hot_lang::lang::ast::Value::Fn(_)) {
+                                CoreVariableType::Function
+                            } else if matches!(var_value, hot_lang::lang::ast::Value::TypeDef(_)) {
+                                CoreVariableType::TypeConstructor
+                            } else {
+                                CoreVariableType::Constant
+                            };
                         core_variables.add_core_variable(
                             var_name_str.to_string(),
                             var_value.clone(),
@@ -1160,8 +1163,8 @@ impl Backend {
 
                         // Also add to index.core_vars for LSP completions
                         let kind = match var_value {
-                            hot::lang::ast::Value::Fn(_) => CompletionItemKind::FUNCTION,
-                            hot::lang::ast::Value::TypeDef(_) => CompletionItemKind::STRUCT,
+                            hot_lang::lang::ast::Value::Fn(_) => CompletionItemKind::FUNCTION,
+                            hot_lang::lang::ast::Value::TypeDef(_) => CompletionItemKind::STRUCT,
                             _ => CompletionItemKind::CONSTANT,
                         };
                         index.core_vars.push(SymbolVar {
@@ -1273,8 +1276,10 @@ impl Backend {
         // Parse all discovered files into a single program
         let mut program = Program {
             namespaces: Default::default(), // Use Default::default() for IndexMap
-            current_namespace: hot::lang::ast::NsPath::from_vec(vec![
-                hot::lang::ast::NsPathPart::Sym(hot::lang::ast::Sym::String("hot".to_string())),
+            current_namespace: hot_lang::lang::ast::NsPath::from_vec(vec![
+                hot_lang::lang::ast::NsPathPart::Sym(hot_lang::lang::ast::Sym::String(
+                    "hot".to_string(),
+                )),
             ]),
         };
 
@@ -1284,12 +1289,12 @@ impl Backend {
                 continue;
             }
             if let Ok(content) = std::fs::read_to_string(&normalized_file)
-                && let Ok(parsed_program) = hot::lang::parser::parse_hot_file(
+                && let Ok(parsed_program) = hot_lang::lang::parser::parse_hot_file(
                     &content,
                     normalized_file.to_string_lossy().as_ref(),
                 )
             {
-                hot::lang::engine::discover::merge_program_namespaces_strict(
+                hot_lang::lang::merge::merge_program_namespaces_strict(
                     &mut program.namespaces,
                     parsed_program.namespaces,
                 )?;
@@ -1315,8 +1320,8 @@ impl Backend {
     /// Extract metadata (function signature and documentation) from a variable
     fn extract_var_metadata(
         &self,
-        var: &hot::lang::ast::Var,
-        var_value: &hot::lang::ast::Value,
+        var: &hot_lang::lang::ast::Var,
+        var_value: &hot_lang::lang::ast::Value,
     ) -> (Option<String>, Option<String>) {
         // Try to extract documentation from metadata
         let doc_markdown = if let Some(meta) = self.get_var_meta(var) {
@@ -1341,7 +1346,7 @@ impl Backend {
         // First, try to find the type in core_vars
         for var in &index.core_vars {
             if var.name == type_name
-                && let hot::lang::ast::Value::TypeDef(type_def) = &var.ast_value
+                && let hot_lang::lang::ast::Value::TypeDef(type_def) = &var.ast_value
             {
                 return self.fields_to_completion_items(type_def);
             }
@@ -1368,7 +1373,7 @@ impl Backend {
             if let Some(vars) = index.ns_to_vars.get(&resolved_ns) {
                 for var in vars {
                     if var.name == base_type_name
-                        && let hot::lang::ast::Value::TypeDef(type_def) = &var.ast_value
+                        && let hot_lang::lang::ast::Value::TypeDef(type_def) = &var.ast_value
                     {
                         return self.fields_to_completion_items(type_def);
                     }
@@ -1380,7 +1385,7 @@ impl Backend {
         for vars in index.ns_to_vars.values() {
             for var in vars {
                 if var.name == base_type_name
-                    && let hot::lang::ast::Value::TypeDef(type_def) = &var.ast_value
+                    && let hot_lang::lang::ast::Value::TypeDef(type_def) = &var.ast_value
                 {
                     return self.fields_to_completion_items(type_def);
                 }
@@ -1393,7 +1398,7 @@ impl Backend {
     /// Convert TypeDef fields to CompletionItems
     fn fields_to_completion_items(
         &self,
-        type_def: &hot::lang::ast::TypeDef,
+        type_def: &hot_lang::lang::ast::TypeDef,
     ) -> Option<Vec<CompletionItem>> {
         let fields = type_def.fields.as_ref()?;
 
@@ -1434,7 +1439,7 @@ impl Backend {
         synthetic.push_str(&ctx.base_expr);
         synthetic.push('\n');
 
-        let program = hot::lang::parser::parse_hot(&synthetic).ok()?;
+        let program = hot_lang::lang::parser::parse_hot(&synthetic).ok()?;
         let expr_value = program.namespaces.values().find_map(|namespace| {
             namespace.scope.vars.iter().find_map(|(var, value)| {
                 (var.sym.name() == "__hot_lsp_expr").then(|| value.clone())
@@ -1468,13 +1473,13 @@ impl Backend {
     }
 
     /// Get metadata from a variable (the Var itself, not the Value)
-    fn get_var_meta(&self, var: &hot::lang::ast::Var) -> Option<hot::val::Val> {
+    fn get_var_meta(&self, var: &hot_lang::lang::ast::Var) -> Option<hot_lang::val::Val> {
         var.meta.as_ref().map(|m| m.val.clone())
     }
 
     /// Extract documentation string from metadata
-    fn extract_doc_from_meta(&self, meta: &hot::val::Val) -> Option<String> {
-        use hot::val::Val;
+    fn extract_doc_from_meta(&self, meta: &hot_lang::val::Val) -> Option<String> {
+        use hot_lang::val::Val;
 
         // Metadata should now be a proper Val::Map thanks to parser fix
         if let Val::Map(map) = meta
@@ -1487,27 +1492,27 @@ impl Backend {
     }
 
     /// Get flow modifier string for display
-    fn get_flow_modifier(flow_type: &hot::lang::ast::FlowType) -> &'static str {
+    fn get_flow_modifier(flow_type: &hot_lang::lang::ast::FlowType) -> &'static str {
         match flow_type {
-            hot::lang::ast::FlowType::Serial => "",
-            hot::lang::ast::FlowType::Parallel => " parallel",
-            hot::lang::ast::FlowType::Cond => " cond",
-            hot::lang::ast::FlowType::CondAll => " cond-all",
-            hot::lang::ast::FlowType::SerialShort => " serial",
-            hot::lang::ast::FlowType::ParallelShort => " parallel",
-            hot::lang::ast::FlowType::CondShort => " cond",
-            hot::lang::ast::FlowType::CondAllShort => " cond-all",
-            hot::lang::ast::FlowType::Pipe => " pipe",
-            hot::lang::ast::FlowType::Match => " match",
-            hot::lang::ast::FlowType::MatchAll => " match-all",
-            hot::lang::ast::FlowType::MatchShort => " match",
-            hot::lang::ast::FlowType::MatchAllShort => " match-all",
+            hot_lang::lang::ast::FlowType::Serial => "",
+            hot_lang::lang::ast::FlowType::Parallel => " parallel",
+            hot_lang::lang::ast::FlowType::Cond => " cond",
+            hot_lang::lang::ast::FlowType::CondAll => " cond-all",
+            hot_lang::lang::ast::FlowType::SerialShort => " serial",
+            hot_lang::lang::ast::FlowType::ParallelShort => " parallel",
+            hot_lang::lang::ast::FlowType::CondShort => " cond",
+            hot_lang::lang::ast::FlowType::CondAllShort => " cond-all",
+            hot_lang::lang::ast::FlowType::Pipe => " pipe",
+            hot_lang::lang::ast::FlowType::Match => " match",
+            hot_lang::lang::ast::FlowType::MatchAll => " match-all",
+            hot_lang::lang::ast::FlowType::MatchShort => " match",
+            hot_lang::lang::ast::FlowType::MatchAllShort => " match-all",
         }
     }
 
     /// Extract function signature from a function definition
-    fn extract_function_signature(&self, var_value: &hot::lang::ast::Value) -> Option<String> {
-        use hot::lang::ast::Value;
+    fn extract_function_signature(&self, var_value: &hot_lang::lang::ast::Value) -> Option<String> {
+        use hot_lang::lang::ast::Value;
         match var_value {
             Value::Fn(fn_defs) => {
                 // Handle multiple function definitions (different arities)
@@ -1556,7 +1561,7 @@ impl Backend {
     }
 
     fn set_refinement_displays(&self, program: &Program) {
-        let displays = hot::lang::ast::inline_refinement_displays(program.namespaces.values());
+        let displays = hot_lang::lang::ast::inline_refinement_displays(program.namespaces.values());
         *self
             .refinement_displays
             .write()
@@ -1582,7 +1587,7 @@ impl Backend {
             .refinement_displays
             .read()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        hot::lang::ast::display_inline_refinements(&formatted, &displays)
+        hot_lang::lang::ast::display_inline_refinements(&formatted, &displays)
     }
 
     /// Format a single type from debug format to readable format
@@ -1618,7 +1623,7 @@ impl Backend {
 
                 for (var, value) in &namespace.scope.vars {
                     // Check if this is a type definition with matching name
-                    if let hot::lang::ast::Value::TypeDef(type_def) = value {
+                    if let hot_lang::lang::ast::Value::TypeDef(type_def) = value {
                         let type_def_name = type_def.name.name();
                         tracing::debug!(
                             "Found TypeDef: {} (var name: {})",
@@ -1686,9 +1691,9 @@ impl Backend {
     async fn format_type_hover(
         &self,
         fully_qualified_name: &str,
-        type_def: &hot::lang::ast::TypeDef,
+        type_def: &hot_lang::lang::ast::TypeDef,
         doc_markdown: &Option<String>,
-        var_meta: &Option<hot::val::Val>,
+        var_meta: &Option<hot_lang::val::Val>,
     ) -> String {
         let mut content = format!("### {}\n```hot\ntype\n```\n\n", fully_qualified_name);
 
@@ -1748,11 +1753,12 @@ impl Backend {
         if let Some(constructors) = &type_def.constructor_functions {
             for constructor in constructors.iter() {
                 // Determine the flow type from the function body
-                let flow_modifier = if let hot::lang::ast::Value::Flow(flow) = &constructor.body {
-                    Self::get_flow_modifier(&flow.flow_type)
-                } else {
-                    ""
-                };
+                let flow_modifier =
+                    if let hot_lang::lang::ast::Value::Flow(flow) = &constructor.body {
+                        Self::get_flow_modifier(&flow.flow_type)
+                    } else {
+                        ""
+                    };
 
                 let args: Vec<String> = constructor
                     .args
@@ -1785,15 +1791,16 @@ impl Backend {
 
             for (target_type, impl_fn) in &implementations {
                 // Extract signature from implementation function
-                if let hot::lang::ast::Value::Fn(fn_defs) = impl_fn
+                if let hot_lang::lang::ast::Value::Fn(fn_defs) = impl_fn
                     && let Some(first_fn) = fn_defs.first()
                 {
                     // Determine the flow type from the function body
-                    let flow_modifier = if let hot::lang::ast::Value::Flow(flow) = &first_fn.body {
-                        Self::get_flow_modifier(&flow.flow_type)
-                    } else {
-                        ""
-                    };
+                    let flow_modifier =
+                        if let hot_lang::lang::ast::Value::Flow(flow) = &first_fn.body {
+                            Self::get_flow_modifier(&flow.flow_type)
+                        } else {
+                            ""
+                        };
 
                     let args: Vec<String> = first_fn
                         .args
@@ -1837,15 +1844,16 @@ impl Backend {
 
             for (source_type, impl_fn) in &incoming_implementations {
                 // Extract signature from implementation function
-                if let hot::lang::ast::Value::Fn(fn_defs) = impl_fn
+                if let hot_lang::lang::ast::Value::Fn(fn_defs) = impl_fn
                     && let Some(first_fn) = fn_defs.first()
                 {
                     // Determine the flow type from the function body
-                    let flow_modifier = if let hot::lang::ast::Value::Flow(flow) = &first_fn.body {
-                        Self::get_flow_modifier(&flow.flow_type)
-                    } else {
-                        ""
-                    };
+                    let flow_modifier =
+                        if let hot_lang::lang::ast::Value::Flow(flow) = &first_fn.body {
+                            Self::get_flow_modifier(&flow.flow_type)
+                        } else {
+                            ""
+                        };
 
                     let args: Vec<String> = first_fn
                         .args
@@ -1902,7 +1910,7 @@ impl Backend {
     async fn get_type_implementations(
         &self,
         type_name: &str,
-    ) -> Vec<(String, hot::lang::ast::Value)> {
+    ) -> Vec<(String, hot_lang::lang::ast::Value)> {
         let program = self.program.lock().await;
         let mut implementations = Vec::new();
 
@@ -1910,7 +1918,7 @@ impl Backend {
             // Search for implementations of this type
             for (_ns_path, namespace) in &prog.namespaces {
                 for (_var, value) in &namespace.scope.vars {
-                    if let hot::lang::ast::Value::TypeImplementation(type_impl) = value
+                    if let hot_lang::lang::ast::Value::TypeImplementation(type_impl) = value
                         && type_impl.source_type == type_name
                     {
                         implementations.push((
@@ -1929,7 +1937,7 @@ impl Backend {
     async fn get_implementations_to_type(
         &self,
         type_name: &str,
-    ) -> Vec<(String, hot::lang::ast::Value)> {
+    ) -> Vec<(String, hot_lang::lang::ast::Value)> {
         let program = self.program.lock().await;
         let mut implementations = Vec::new();
 
@@ -1937,7 +1945,7 @@ impl Backend {
             // Search for implementations where target_type matches this type
             for (_ns_path, namespace) in &prog.namespaces {
                 for (_var, value) in &namespace.scope.vars {
-                    if let hot::lang::ast::Value::TypeImplementation(type_impl) = value
+                    if let hot_lang::lang::ast::Value::TypeImplementation(type_impl) = value
                         && type_impl.target_type == type_name
                     {
                         implementations.push((
@@ -1958,7 +1966,7 @@ impl Backend {
         namespace: &str,
         var_name: &str,
         _index: &SymbolIndex,
-    ) -> Option<hot::val::Val> {
+    ) -> Option<hot_lang::val::Val> {
         // Get the program to access the actual Var structure
         let program = self.program.lock().await;
         if let Some(prog) = &*program {
@@ -1977,8 +1985,8 @@ impl Backend {
     }
 
     /// Format metadata section for hover display (excluding "doc")
-    fn format_meta_section(&self, meta: &hot::val::Val) -> String {
-        use hot::val::Val;
+    fn format_meta_section(&self, meta: &hot_lang::val::Val) -> String {
+        use hot_lang::val::Val;
 
         let mut result = String::new();
 
@@ -2029,8 +2037,8 @@ impl Backend {
 
     /// Format a Val for display in metadata
     #[allow(clippy::only_used_in_recursion)]
-    fn format_val_for_display(&self, val: &hot::val::Val) -> String {
-        use hot::val::Val;
+    fn format_val_for_display(&self, val: &hot_lang::val::Val) -> String {
+        use hot_lang::val::Val;
 
         match val {
             Val::Str(s) => format!("`\"{}\"`", s),
@@ -2065,8 +2073,8 @@ impl Backend {
     /// Extract type information from AST Value (much cleaner than string parsing!)
     /// Extract type information from AST Value (much cleaner than string parsing!)
     /// Note: The parser fills in inferred types for TypeImplementations, so type annotations are always present
-    async fn extract_type_info_from_ast(&self, ast_value: &hot::lang::ast::Value) -> String {
-        use hot::lang::ast::Value;
+    async fn extract_type_info_from_ast(&self, ast_value: &hot_lang::lang::ast::Value) -> String {
+        use hot_lang::lang::ast::Value;
 
         // Handle TypeImplementation - extract from the inner function
         if let Value::TypeImplementation(type_impl) = ast_value {
@@ -2152,7 +2160,7 @@ impl Backend {
             }
         };
 
-        use hot::lang::ast::{Ref, Value};
+        use hot_lang::lang::ast::{Ref, Value};
         if let Value::Ref(Ref::Ns(ns_ref)) = &ast_value
             && let Some(function_name) = &ns_ref.function_name
         {
@@ -2243,7 +2251,7 @@ impl Backend {
     }
 
     /// Add the current file's symbols to the symbol index for hover and completion
-    async fn add_current_file_to_symbol_index(&self, program: &hot::lang::ast::Program) {
+    async fn add_current_file_to_symbol_index(&self, program: &hot_lang::lang::ast::Program) {
         let mut symbol_index = self.symbol_index.lock().await;
         if let Some(index) = symbol_index.as_mut() {
             // Add symbols from the current file to the index
@@ -2260,8 +2268,8 @@ impl Backend {
                 for (var, var_value) in &namespace.scope.vars {
                     let var_name_str = var.sym.name();
                     // `where` clauses' hidden predicates and alias types.
-                    if hot::lang::ast::is_where_predicate(var_name_str)
-                        || hot::lang::ast::is_inline_refinement_type(var_name_str)
+                    if hot_lang::lang::ast::is_where_predicate(var_name_str)
+                        || hot_lang::lang::ast::is_inline_refinement_type(var_name_str)
                     {
                         continue;
                     }
@@ -2271,7 +2279,7 @@ impl Backend {
 
                     vars.push(SymbolVar {
                         name: var_name_str.to_string(),
-                        kind: if matches!(var_value, hot::lang::ast::Value::Fn(_)) {
+                        kind: if matches!(var_value, hot_lang::lang::ast::Value::Fn(_)) {
                             CompletionItemKind::FUNCTION
                         } else {
                             CompletionItemKind::VARIABLE
@@ -2433,7 +2441,7 @@ impl Backend {
             // Check each function in this namespace
             for (var, value) in &namespace.scope.vars {
                 let fn_defs = match value {
-                    hot::lang::ast::Value::Fn(defs) => defs,
+                    hot_lang::lang::ast::Value::Fn(defs) => defs,
                     _ => continue,
                 };
 
@@ -2647,7 +2655,7 @@ impl Backend {
         &self,
         symbol: &str,
         index: &'a SymbolIndex,
-        resolution_info: &hot::lang::runtime::resolution::ResolutionInfo,
+        resolution_info: &hot_lang::lang::runtime::resolution::ResolutionInfo,
     ) -> Option<(String, String, &'a SymbolVar)> {
         // 1. FULLY QUALIFIED NAMES - Direct namespace lookup
         if symbol.contains('/')
@@ -2742,23 +2750,23 @@ impl Backend {
     /// - meta ["core"] - vector containing "core" string
     /// - #"core" - direct "core" string
     /// - meta {core: true} - map with core key set to true
-    fn is_core_variable_from_metadata(&self, var: &hot::lang::ast::Var) -> bool {
+    fn is_core_variable_from_metadata(&self, var: &hot_lang::lang::ast::Var) -> bool {
         if let Some(meta) = &var.meta {
             match &meta.val {
                 // Check for meta ["core"] - vector containing "core" string
-                hot::val::Val::Vec(tags) => tags.iter().any(|tag| {
-                    if let hot::val::Val::Str(tag_str) = tag {
+                hot_lang::val::Val::Vec(tags) => tags.iter().any(|tag| {
+                    if let hot_lang::val::Val::Str(tag_str) = tag {
                         &**tag_str == "core"
                     } else {
                         false
                     }
                 }),
                 // Check for #"core" - direct "core" string
-                hot::val::Val::Str(tag_str) => &**tag_str == "core",
+                hot_lang::val::Val::Str(tag_str) => &**tag_str == "core",
                 // Check for meta {core: true} - map with core key set to true
-                hot::val::Val::Map(map) => {
-                    if let Some(core_val) = map.get(&hot::val::Val::from("core")) {
-                        matches!(core_val, hot::val::Val::Bool(true))
+                hot_lang::val::Val::Map(map) => {
+                    if let Some(core_val) = map.get(&hot_lang::val::Val::from("core")) {
+                        matches!(core_val, hot_lang::val::Val::Bool(true))
                     } else {
                         false
                     }
@@ -2771,23 +2779,27 @@ impl Backend {
     }
 
     /// Check if a Value is a TypeDef with core metadata (on the var)
-    fn is_core_type_def(&self, var: &hot::lang::ast::Var, value: &hot::lang::ast::Value) -> bool {
-        if !matches!(value, hot::lang::ast::Value::TypeDef(_)) {
+    fn is_core_type_def(
+        &self,
+        var: &hot_lang::lang::ast::Var,
+        value: &hot_lang::lang::ast::Value,
+    ) -> bool {
+        if !matches!(value, hot_lang::lang::ast::Value::TypeDef(_)) {
             return false;
         }
         if let Some(meta) = &var.meta {
             match &meta.val {
-                hot::val::Val::Vec(tags) => tags.iter().any(|tag| {
-                    if let hot::val::Val::Str(tag_str) = tag {
+                hot_lang::val::Val::Vec(tags) => tags.iter().any(|tag| {
+                    if let hot_lang::val::Val::Str(tag_str) = tag {
                         tag_str.as_ref() == "core"
                     } else {
                         false
                     }
                 }),
-                hot::val::Val::Str(tag_str) => tag_str.as_ref() == "core",
-                hot::val::Val::Map(map) => {
-                    if let Some(core_val) = map.get(&hot::val::Val::from("core")) {
-                        matches!(core_val, hot::val::Val::Bool(true))
+                hot_lang::val::Val::Str(tag_str) => tag_str.as_ref() == "core",
+                hot_lang::val::Val::Map(map) => {
+                    if let Some(core_val) = map.get(&hot_lang::val::Val::from("core")) {
+                        matches!(core_val, hot_lang::val::Val::Bool(true))
                     } else {
                         false
                     }
@@ -2908,7 +2920,7 @@ impl Backend {
             // Check core_vars first
             for var in &index.core_vars {
                 if var.name == symbol
-                    && let hot::lang::ast::Value::TypeDef(type_def) = &var.ast_value
+                    && let hot_lang::lang::ast::Value::TypeDef(type_def) = &var.ast_value
                 {
                     return Some(self.type_def_to_signatures(type_def));
                 }
@@ -2918,7 +2930,7 @@ impl Backend {
             for vars in index.ns_to_vars.values() {
                 for var in vars {
                     if var.name == symbol
-                        && let hot::lang::ast::Value::TypeDef(type_def) = &var.ast_value
+                        && let hot_lang::lang::ast::Value::TypeDef(type_def) = &var.ast_value
                     {
                         return Some(self.type_def_to_signatures(type_def));
                     }
@@ -2932,7 +2944,7 @@ impl Backend {
     /// Convert a TypeDef to signature information
     fn type_def_to_signatures(
         &self,
-        type_def: &hot::lang::ast::TypeDef,
+        type_def: &hot_lang::lang::ast::TypeDef,
     ) -> Vec<SignatureInformation> {
         let mut signatures = Vec::new();
         let type_name = type_def.name.name();
@@ -3040,7 +3052,7 @@ impl Backend {
     }
 
     /// Find function definitions for a symbol (searches all namespaces)
-    async fn find_function_defs(&self, symbol: &str) -> Option<Vec<hot::lang::ast::FnDef>> {
+    async fn find_function_defs(&self, symbol: &str) -> Option<Vec<hot_lang::lang::ast::FnDef>> {
         // Try to parse Hot files to get the actual function definitions
         if let Ok(program) = self.discover_and_parse_hot_files().await {
             // First, check if it's a fully qualified name
@@ -3061,7 +3073,7 @@ impl Backend {
                         if var.sym.name() == symbol {
                             // Check if it's a core variable
                             if self.is_core_variable_from_metadata(var)
-                                && let hot::lang::ast::Value::Fn(fn_defs) = value
+                                && let hot_lang::lang::ast::Value::Fn(fn_defs) = value
                             {
                                 return Some(fn_defs.clone());
                             }
@@ -3073,7 +3085,7 @@ impl Backend {
                 for (_ns_path, ns) in &program.namespaces {
                     for (var, value) in &ns.scope.vars {
                         if var.sym.name() == symbol
-                            && let hot::lang::ast::Value::Fn(fn_defs) = value
+                            && let hot_lang::lang::ast::Value::Fn(fn_defs) = value
                         {
                             return Some(fn_defs.clone());
                         }
@@ -3088,15 +3100,15 @@ impl Backend {
     /// Find function in a specific namespace
     fn find_function_in_namespace(
         &self,
-        program: &hot::lang::ast::Program,
+        program: &hot_lang::lang::ast::Program,
         namespace: &str,
         var_name: &str,
-    ) -> Option<Vec<hot::lang::ast::FnDef>> {
+    ) -> Option<Vec<hot_lang::lang::ast::FnDef>> {
         for (ns_path, ns) in &program.namespaces {
             if ns_path.to_string() == namespace {
                 for (var, value) in &ns.scope.vars {
                     if var.sym.name() == var_name
-                        && let hot::lang::ast::Value::Fn(fn_defs) = value
+                        && let hot_lang::lang::ast::Value::Fn(fn_defs) = value
                     {
                         return Some(fn_defs.clone());
                     }
@@ -3483,7 +3495,7 @@ fn active_parameter_from_call_args(left: &str) -> u32 {
     active
 }
 
-fn source_to_location(src: &hot::lang::ast::Source) -> Option<Location> {
+fn source_to_location(src: &hot_lang::lang::ast::Source) -> Option<Location> {
     let file_path = src.file.as_ref()?;
     let uri = Url::from_file_path(file_path).ok()?;
     let line = src.line.saturating_sub(1) as u32;
@@ -3702,11 +3714,11 @@ fn find_function_body_range(file_content: &str, def_line: usize) -> Option<(usiz
 /// Collect local variable bindings from a flow body AST that appear before the cursor line.
 /// Detects the `Ref::Var` + value pair pattern used for assignments in Hot.
 fn collect_local_bindings_from_ast(
-    body: &hot::lang::ast::Value,
+    body: &hot_lang::lang::ast::Value,
     cursor_line: u32,
     scope_names: &mut Vec<String>,
 ) {
-    use hot::lang::ast::{Ref, Value};
+    use hot_lang::lang::ast::{Ref, Value};
 
     let flow = match body {
         Value::Flow(f) => f,
@@ -3754,8 +3766,8 @@ fn collect_local_bindings_from_ast(
 }
 
 /// Extract source info from a Value if available.
-fn get_value_source(value: &hot::lang::ast::Value) -> Option<&hot::lang::ast::Source> {
-    use hot::lang::ast::{Ref, Value};
+fn get_value_source(value: &hot_lang::lang::ast::Value) -> Option<&hot_lang::lang::ast::Source> {
+    use hot_lang::lang::ast::{Ref, Value};
     match value {
         Value::Ref(Ref::Var(vr)) => vr.src.as_ref(),
         Value::FnCall(fc) => fc.src.as_ref(),
