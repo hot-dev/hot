@@ -56,9 +56,10 @@ tracing-appender = { version = "0.2" }
 ariadne = "0.6"
 axum = { version = "0.8.9", features = ["multipart"] }
 http-body-util = "0.1"
-fastnum = { version = "0.7", features = ["serde", "sqlx", "tokio-postgres"] }
+fastnum = { version = "0.7", features = ["serde"] }
 clap = "4.6"
 hot = { path = "crates/hot" }
+hot_lang = { path = "crates/hot_lang" }
 hot_docs = { path = "crates/hot_docs" }
 hot_app = { path = "crates/hot_app" }
 hot_worker = { path = "crates/hot_worker" }
