@@ -720,10 +720,39 @@ pub async fn pending_sqlite_migrations(uri: &str) -> Result<Vec<i64>, DatabaseEr
         .collect())
 }
 
+/// `db.migration-uri` changes the schema the runtime login reads, so it must
+/// be PostgreSQL and name the runtime's database. Hosts may differ, for
+/// example a pooler for the runtime and a direct connection for migrations.
+fn check_migration_target(runtime_uri: &str, migration_uri: &str) -> Result<(), DatabaseError> {
+    if !matches!(
+        DatabaseType::from_uri(migration_uri)?,
+        DatabaseType::Postgres
+    ) {
+        return Err(DatabaseError::Migration(
+            "db.migration-uri must be a PostgreSQL URI when db.uri is PostgreSQL".into(),
+        ));
+    }
+    let database = |uri: &str, name: &str| {
+        url::Url::parse(uri)
+            .map(|url| url.path().trim_start_matches('/').to_string())
+            .map_err(|_| DatabaseError::Migration(format!("Invalid {name} database URI")))
+    };
+    if database(runtime_uri, "db.uri")? != database(migration_uri, "db.migration-uri")? {
+        return Err(DatabaseError::Migration(
+            "db.uri and db.migration-uri must name the same database".into(),
+        ));
+    }
+    Ok(())
+}
+
 /// Run database migrations
 pub async fn run_migrations(conf: &Val) -> Result<(), DatabaseError> {
     let runtime_uri = get_db_uri_from_conf(conf);
     let migration_uri = get_migration_uri_from_conf(conf);
+    if !migration_uri.is_empty() {
+        // A migration URI survives only beside a PostgreSQL runtime.
+        check_migration_target(&runtime_uri, &migration_uri)?;
+    }
     let uri = if migration_uri.is_empty() {
         if matches!(
             DatabaseType::from_uri(&runtime_uri)?,
@@ -1220,6 +1249,14 @@ pub async fn test_db() -> DatabasePool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn migration_uri_must_name_the_runtime_database() {
+        let runtime = "postgres://hot_runtime@pooler:6432/hot";
+        assert!(check_migration_target(runtime, "postgres://hot_owner@db:5432/hot").is_ok());
+        assert!(check_migration_target(runtime, "postgres://hot_owner@db:5432/staging").is_err());
+        assert!(check_migration_target(runtime, "sqlite:.hot/db/hot.sqlite.db").is_err());
+    }
 
     // ========================================================================
     // merge_sends_into_meta tests
