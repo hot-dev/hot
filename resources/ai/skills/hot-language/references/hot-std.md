@@ -61,7 +61,7 @@ is-zero fn (x: Int | Dec): Bool                         // true if x is 0
 is-pos fn (x: Int | Dec): Bool                          // true if x > 0
 is-neg fn (x: Int | Dec): Bool                          // true if x < 0
 rand fn (): Dec                                         // Random decimal 0-1
-rand fn (n: Int): Dec                                   // Random decimal 0-n
+rand fn (n: Int | Dec): Dec                             // Random decimal 0-n
 rand-int fn (): Int                                     // Random integer
 rand-int fn (n: Int): Int                               // Random integer 0 to n-1
 ```
