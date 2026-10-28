@@ -365,6 +365,42 @@ impl Features {
         Self { inner: merged }
     }
 
+    /// Like `resolve_for_org`, but a lookup the database can't answer is an
+    /// error rather than conservative cloud defaults, so a caller that enforces
+    /// limits can retry instead of holding a paying account to the free tier.
+    /// An org that doesn't exist still gets the conservative defaults.
+    pub async fn try_resolve_for_org(
+        db: &DatabasePool,
+        org_id: &Uuid,
+    ) -> Result<Self, super::subscription::PlanError> {
+        use super::subscription::{OrgPlan, PlanError};
+        let root_id = match super::org::Org::billing_owner_id_for(db, org_id).await {
+            Ok(id) => id,
+            Err(super::org::OrgError::NotFound)
+            | Err(super::org::OrgError::Database(sqlx::Error::RowNotFound)) => {
+                return Ok(Self::resolve(None, None));
+            }
+            Err(error) => return Err(PlanError::InvalidOrganization(error.to_string())),
+        };
+        let db = db.with_scope(super::DatabaseScope::Maintenance {
+            operation: super::MaintenanceOperation::Billing,
+            org_id: Some(root_id),
+        });
+        let plan = match OrgPlan::get_by_org_id(&db, &root_id).await {
+            Ok(subscription) => Some(
+                subscription
+                    .get_plan(&db)
+                    .await?
+                    .features
+                    .unwrap_or_else(|| serde_json::json!({})),
+            ),
+            Err(PlanError::NotFound) => None,
+            Err(error) => return Err(error),
+        };
+        let overrides = Self::get_org_features(&db, &root_id).await?;
+        Ok(Self::for_account(plan.as_ref(), overrides.as_ref()))
+    }
+
     /// Resolve features for an organization by looking up plan + org overrides.
     /// Falls back to unlimited defaults if no plan exists (self-hosted / local dev).
     pub async fn resolve_for_org(db: &DatabasePool, org_id: &Uuid) -> Self {
@@ -774,6 +810,37 @@ impl Features {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[tokio::test]
+    async fn fallible_resolution_reports_lookup_failures() {
+        let db = crate::db::test_db().await;
+        let data = crate::db::insert_test_data(&db).await.unwrap();
+        // No plan: self-hosted entitlements, as resolve_for_org gives.
+        let features = Features::try_resolve_for_org(&db, &data.org_id)
+            .await
+            .unwrap();
+        assert!(features.is_unlimited_runs());
+        // An org that doesn't exist keeps the conservative defaults.
+        let unknown = Features::try_resolve_for_org(&db, &Uuid::now_v7())
+            .await
+            .unwrap();
+        assert!(!unknown.is_unlimited_runs());
+        // A database that can't answer is an error, not the free tier.
+        let DatabasePool::Sqlite(pool) = &db else {
+            return;
+        };
+        pool.close().await;
+        assert!(
+            Features::try_resolve_for_org(&db, &data.org_id)
+                .await
+                .is_err()
+        );
+        assert!(
+            !Features::resolve_for_org(&db, &data.org_id)
+                .await
+                .is_unlimited_runs()
+        );
+    }
 
     #[test]
     fn test_unlimited_defaults() {

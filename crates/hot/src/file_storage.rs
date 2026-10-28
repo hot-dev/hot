@@ -427,7 +427,9 @@ pub trait FileStorage: Send + Sync {
 async fn check_write_quota(ctx: &FileStorageContext, content_len: i64) -> Result<(), String> {
     use crate::db::Features;
 
-    let features = Features::resolve_for_org(&ctx.db, &ctx.org_id).await;
+    let features = Features::try_resolve_for_org(&ctx.db, &ctx.org_id)
+        .await
+        .map_err(|e| e.to_string())?;
     let max_file_bytes = ctx.effective_file_max_bytes(features.file_upload_max_bytes());
     if content_len > max_file_bytes {
         return Err(format!(
