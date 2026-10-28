@@ -2071,10 +2071,7 @@ async fn claim_task_for_execution(
     match hot::db::Org::is_environment_admitted(db, &task.env_id).await {
         Ok(true) => {}
         Ok(false) => {
-            return Err(QueueInfrastructureError::new(
-                "environment is suspended; task remains pending",
-                backoff.max(std::time::Duration::from_secs(5)),
-            ));
+            return Ok(TaskClaim::NotClaimable);
         }
         Err(error) => {
             return Err(QueueInfrastructureError::new(
@@ -2091,6 +2088,7 @@ async fn claim_task_for_execution(
     {
         Ok(Ok(true)) => Ok(TaskClaim::Claimed),
         Ok(Ok(false)) => Ok(TaskClaim::NotClaimable),
+        Ok(Err(hot::db::TaskError::Suspended)) => Ok(TaskClaim::NotClaimable),
         Ok(Err(hot::db::TaskError::QuotaExhausted(reason))) => Ok(TaskClaim::Refused(reason)),
         Ok(Err(e)) => {
             let backoff = if matches!(e, hot::db::TaskError::QuotaExceeded(_)) {
@@ -2268,10 +2266,7 @@ async fn process_task(
         return Err("Queued task organization does not match durable ownership".into());
     }
     if !hot::db::Org::is_environment_admitted(&db, &env.env_id).await? {
-        return Err(Box::new(QueueInfrastructureError::new(
-            "environment is suspended; task remains pending",
-            std::time::Duration::from_millis(infra_retry_backoff_ms.max(5_000)),
-        )));
+        return Ok(()); // Durable queued task is rediscovered after reactivation.
     }
     let db = Arc::new(db.with_scope(DatabaseScope::Environment {
         org_id: env.org_id,
@@ -2281,6 +2276,9 @@ async fn process_task(
     let project = Project::get_project(&db, &build.project_id).await?;
     if project.env_id != task.env_id {
         return Err("Task build does not belong to durable task environment".into());
+    }
+    if !project.active {
+        return Ok(());
     }
     let mut request = synthesize_task_request_from_row(&task);
     request.org_id = Some(env.org_id.to_string());
@@ -7544,7 +7542,7 @@ mod tests {
             },
         )
         .await;
-        assert!(result.unwrap_err().to_string().contains("suspended"));
+        assert!(matches!(result.unwrap(), TaskClaim::NotClaimable));
         assert_eq!(
             Task::get(&db, &task.task_id).await.unwrap().task_status_id,
             TaskStatus::Queued.as_id()

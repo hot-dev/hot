@@ -187,9 +187,7 @@ impl Task {
                 let admitted: bool = sqlx::query_scalar("SELECT e.active AND o.active AND o.lifecycle_state='active' AND r.active AND r.lifecycle_state='active' FROM env e JOIN org o ON o.org_id=e.org_id JOIN org r ON r.org_id=COALESCE(o.parent_org_id,o.org_id) WHERE e.env_id=$1")
                     .bind(task.env_id).fetch_one(&mut *tx).await?;
                 if !admitted {
-                    return Err(TaskError::QuotaExceeded(
-                        "Task environment is suspended".into(),
-                    ));
+                    return Err(TaskError::Suspended);
                 }
                 let plan: Option<TaskAccountPlan<Value>> = sqlx::query_as(
                     "SELECT COALESCE(p.features,'{}'),p.plan_id,op.current_period_start FROM org_plan op JOIN plan p ON p.plan_uuid=op.plan_uuid WHERE op.org_id=$1"
@@ -268,9 +266,7 @@ impl Task {
                 let admitted: bool = sqlx::query_scalar("SELECT e.active AND o.active AND o.lifecycle_state='active' AND r.active AND r.lifecycle_state='active' FROM env e JOIN org o ON o.org_id=e.org_id JOIN org r ON r.org_id=COALESCE(o.parent_org_id,o.org_id) WHERE e.env_id=?")
                     .bind(task.env_id).fetch_one(&mut *tx).await?;
                 if !admitted {
-                    return Err(TaskError::QuotaExceeded(
-                        "Task environment is suspended".into(),
-                    ));
+                    return Err(TaskError::Suspended);
                 }
                 let plan: Option<TaskAccountPlan<String>> = sqlx::query_as(
                     "SELECT COALESCE(p.features,'{}'),p.plan_id,op.current_period_start FROM org_plan op JOIN plan p ON p.plan_uuid=op.plan_uuid WHERE op.org_id=?"
@@ -334,7 +330,7 @@ fn parse_features(json: Option<String>) -> Result<Option<Value>, TaskError> {
 fn admission_error(error: crate::db::run::RunError) -> TaskError {
     match error {
         crate::db::run::RunError::Database(error) => TaskError::Database(error),
-        crate::db::run::RunError::Suspended(_) => TaskError::QuotaExceeded(error.to_string()),
+        crate::db::run::RunError::Suspended(_) => TaskError::Suspended,
         _ => TaskError::QuotaExhausted(error.to_string()),
     }
 }

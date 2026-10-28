@@ -20,6 +20,8 @@ pub enum TaskError {
     /// (or ever, for an invalid request); the claimant should fail it.
     #[error("Task quota exhausted: {0}")]
     QuotaExhausted(String),
+    #[error("Task environment is suspended")]
+    Suspended,
     #[error("Task not found")]
     NotFound,
 }
@@ -1084,8 +1086,11 @@ impl Task {
                 let q = format!(
                     "SELECT t.*, ts.name as status, {TASK_ORIGIN_FN_PG} \
                      FROM task t JOIN task_status ts ON t.task_status_id = ts.task_status_id \
+                     JOIN env qe ON qe.env_id=t.env_id JOIN org qo ON qo.org_id=qe.org_id JOIN org qr ON qr.org_id=COALESCE(qo.parent_org_id,qo.org_id) \
+                     JOIN build qb ON qb.build_id=t.build_id JOIN project qp ON qp.project_id=qb.project_id \
                      {TASK_ORIGIN_JOIN} \
                      WHERE t.task_status_id = $1 \
+                       AND qe.active=true AND qo.active=true AND qr.active=true AND qo.lifecycle_state='active' AND qr.lifecycle_state='active' AND qp.active=true \
                        AND t.created_at <= $2 \
                        AND (t.next_retry_at IS NULL OR t.next_retry_at <= $3) \
                      ORDER BY t.created_at ASC LIMIT $4"
@@ -1103,8 +1108,11 @@ impl Task {
                 let q = format!(
                     "SELECT t.*, ts.name as status, {TASK_ORIGIN_FN_SQLITE} \
                      FROM task t JOIN task_status ts ON t.task_status_id = ts.task_status_id \
+                     JOIN env qe ON qe.env_id=t.env_id JOIN org qo ON qo.org_id=qe.org_id JOIN org qr ON qr.org_id=COALESCE(qo.parent_org_id,qo.org_id) \
+                     JOIN build qb ON qb.build_id=t.build_id JOIN project qp ON qp.project_id=qb.project_id \
                      {TASK_ORIGIN_JOIN} \
                      WHERE t.task_status_id = ? \
+                       AND qe.active=true AND qo.active=true AND qr.active=true AND qo.lifecycle_state='active' AND qr.lifecycle_state='active' AND qp.active=true \
                        AND t.created_at <= ? \
                        AND (t.next_retry_at IS NULL OR t.next_retry_at <= ?) \
                      ORDER BY t.created_at ASC LIMIT ?"
@@ -2479,7 +2487,9 @@ mod tests {
     #[tokio::test]
     async fn test_get_stale_queued_throttles_by_next_retry_at() {
         let db = crate::db::test_db().await;
-        let (task_id, env_id, stream_id, build_id, _, _) = test_ids();
+        let data = crate::db::insert_test_data(&db).await.unwrap();
+        let (task_id, env_id, stream_id, build_id) =
+            (Uuid::now_v7(), data.env_id, data.stream_id, data.build_id);
         Task::insert(
             &db, &task_id, &env_id, &stream_id, &build_id, None, "::app/fn", None, None, "code",
             60_000, None,
