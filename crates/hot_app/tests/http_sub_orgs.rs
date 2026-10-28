@@ -627,3 +627,49 @@ async fn the_account_overview_counts_each_environments_runs() {
     );
     assert!(child_row.contains(&long_ago.format("%Y-%m-%d %H:%M UTC").to_string()));
 }
+
+#[tokio::test]
+async fn child_org_tabs_leave_out_billing() {
+    let mut client = TestClient::new().await;
+    let td = insert_test_data(client.db()).await.unwrap();
+    sqlx::query("UPDATE org SET org_type='organization' WHERE org_id=?")
+        .bind(td.org_id)
+        .execute(sqlite(&client))
+        .await
+        .unwrap();
+    let root = Org::get_org_uncached(client.db(), &td.org_id)
+        .await
+        .unwrap();
+    let child = Org::create_child(
+        client.db(),
+        &td.org_id,
+        &td.user_id,
+        &CreateChild {
+            name: "Customer".into(),
+            slug: "billing-customer".into(),
+            external_id: None,
+            idempotency_key: "billing-customer".into(),
+            hosted: false,
+        },
+    )
+    .await
+    .unwrap()
+    .org;
+    client.login_as(&td.user_id);
+
+    let page = client.get(&format!("/@{}/usage", root.slug)).await;
+    page.assert_status(StatusCode::OK);
+    assert!(
+        page.body
+            .contains(&format!("href=\"/@{}/billing\"", root.slug))
+    );
+    // Billing belongs to the root, so the child's billing page refuses everyone.
+    let child_billing = format!("/@{}/billing", child.slug);
+    client
+        .get(&child_billing)
+        .await
+        .assert_status(StatusCode::FORBIDDEN);
+    let page = client.get(&format!("/@{}/usage", child.slug)).await;
+    page.assert_status(StatusCode::OK);
+    assert!(!page.body.contains(&child_billing), "{}", page.body);
+}
