@@ -20,6 +20,66 @@ use super::{CompilationArtifacts, Engine, PipelineMode};
 use ahash::AHashMap;
 use std::sync::Arc;
 
+// Only generated private fixtures are eligible for cleanup. Configured integration
+// databases and user file storage never pass through this owner.
+struct PrivateTestArtifacts {
+    db: std::path::PathBuf,
+    files: std::path::PathBuf,
+}
+
+impl PrivateTestArtifacts {
+    fn sweep(directory: &std::path::Path) {
+        let Ok(entries) = std::fs::read_dir(directory) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            if entry.file_type().is_ok_and(|kind| kind.is_symlink()) {
+                continue;
+            }
+            let name = entry.file_name();
+            let Some(name) = name.to_str() else {
+                continue;
+            };
+            let id = name
+                .strip_prefix("test-files-")
+                .or_else(|| name.strip_prefix("test-")?.strip_suffix(".db"));
+            if !id.is_some_and(|id| {
+                uuid::Uuid::parse_str(id).is_ok_and(|id| id.get_version_num() == 7)
+            }) {
+                continue;
+            }
+            let Ok(metadata) = entry.metadata() else {
+                continue;
+            };
+            if !metadata
+                .modified()
+                .ok()
+                .and_then(|at| at.elapsed().ok())
+                .is_some_and(|age| age > std::time::Duration::from_secs(7 * 24 * 3600))
+            {
+                continue;
+            }
+            let path = entry.path();
+            if metadata.is_dir() {
+                let _ = std::fs::remove_dir_all(path);
+            } else if metadata.is_file() {
+                let _ = std::fs::remove_file(&path);
+                let _ = std::fs::remove_file(format!("{}-wal", path.display()));
+                let _ = std::fs::remove_file(format!("{}-shm", path.display()));
+            }
+        }
+    }
+}
+
+impl Drop for PrivateTestArtifacts {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.db);
+        let _ = std::fs::remove_file(format!("{}-wal", self.db.display()));
+        let _ = std::fs::remove_file(format!("{}-shm", self.db.display()));
+        let _ = std::fs::remove_dir_all(&self.files);
+    }
+}
+
 pub(super) struct EvalRuntimeOptions<'a> {
     pub(super) conf: Option<&'a crate::val::Val>,
     pub(super) emitter: Option<Arc<dyn crate::lang::emitter::EngineEventEmitter>>,
@@ -147,8 +207,15 @@ impl Engine {
 
         // Generate unique test ID for this test run
         let test_id = uuid::Uuid::now_v7().simple().to_string();
+        let _private_artifacts = (!is_integration).then(|| {
+            PrivateTestArtifacts::sweep(std::path::Path::new(".hot"));
+            PrivateTestArtifacts {
+                db: format!(".hot/test-{test_id}.db").into(),
+                files: format!(".hot/test-files-{test_id}").into(),
+            }
+        });
 
-        let (temp_db_path, database_pool) = if let Some((db, _)) = &integration_execution {
+        let (_temp_db_path, database_pool) = if let Some((db, _)) = &integration_execution {
             (None, Some(db.clone()))
         } else {
             let path = format!(".hot/test-{}.db", test_id);
@@ -175,7 +242,7 @@ impl Engine {
         };
 
         // File storage: in integration mode, use the path from conf; otherwise ephemeral
-        let (temp_file_storage_path, file_storage): (
+        let (_temp_file_storage_path, file_storage): (
             Option<String>,
             Option<Arc<dyn crate::file_storage::FileStorage>>,
         ) = if is_integration {
@@ -292,23 +359,6 @@ impl Engine {
                 .await
                 .map_err(|error| format!("Cannot persist integration test result: {error}"))?;
         }
-
-        // Clean up ephemeral test artifacts (only for non-integration mode)
-        if let Some(ref path) = temp_db_path {
-            tracing::debug!("Cleaning up temporary test database: {}", path);
-            let _ = std::fs::remove_file(path);
-            let _ = std::fs::remove_file(format!("{}-shm", path));
-            let _ = std::fs::remove_file(format!("{}-wal", path));
-        }
-
-        if let Some(ref path) = temp_file_storage_path {
-            tracing::debug!("Cleaning up temporary test file storage: {}", path);
-            let _ = std::fs::remove_dir_all(path);
-        }
-
-        // The ::hot::store backend now lives in the same SQLite file as the rest
-        // of the test database, so cleanup of `temp_db_path` above already covers
-        // its rows. There is no longer a separate `.hot/test-store-*` directory.
 
         result
     }
@@ -1364,6 +1414,36 @@ impl Engine {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn private_test_cleanup_preserves_recent_and_user_databases() {
+        let directory = tempfile::tempdir().unwrap();
+        let old = directory
+            .path()
+            .join(format!("test-{}.db", uuid::Uuid::now_v7().simple()));
+        let recent = directory
+            .path()
+            .join(format!("test-{}.db", uuid::Uuid::now_v7().simple()));
+        let configured = directory.path().join("test-my-project.db");
+        for path in [&old, &recent, &configured] {
+            std::fs::write(path, "fixture").unwrap();
+        }
+        let week_ago = filetime::FileTime::from_system_time(
+            std::time::SystemTime::now() - std::time::Duration::from_secs(8 * 24 * 3600),
+        );
+        filetime::set_file_mtime(&old, week_ago).unwrap();
+        filetime::set_file_mtime(&configured, week_ago).unwrap();
+        super::PrivateTestArtifacts::sweep(directory.path());
+        assert!(!old.exists());
+        assert!(recent.exists());
+        assert!(configured.exists());
+        let artifacts = super::PrivateTestArtifacts {
+            db: recent.clone(),
+            files: directory.path().join("files"),
+        };
+        drop(artifacts);
+        assert!(!recent.exists());
+    }
     use super::*;
     use crate::lang::ast::HotAst;
     use crate::lang::compiler::Compiler;
