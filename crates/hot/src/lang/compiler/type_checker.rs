@@ -4291,11 +4291,13 @@ impl TypeChecker {
             // Only accept the dotted form if the enum actually exists and
             // the named variant is one we know about (declared, or enrolled
             // via an arrow). Otherwise fall through so the user gets an
-            // UnresolvedType error at the original type_name.
+            // UnresolvedType error at the original type_name. The enum may
+            // be qualified (`::app/Shape.Tri`, `::alias/Shape.Tri`);
+            // `context.types` is keyed by short name.
             let known_enum = self
                 .context
                 .types
-                .get(enum_name)
+                .get(&Self::short_type_name(enum_name))
                 .filter(|td| td.is_enum && (td.enum_is_open || td.variants.contains(variant_name)))
                 .is_some();
             if known_enum

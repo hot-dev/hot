@@ -905,6 +905,40 @@ probe()"#;
         );
     }
 
+    /// An arrow may name its enum by a namespace alias or in full. The
+    /// checker used to read `::k/Kind.Extra` as a type of its own, so the
+    /// arrow failed with "Implementation body returns ::geo/Kind, but should
+    /// return ::geo/Kind.Extra", and the compiler did not resolve the alias,
+    /// so no constructor was emitted for the variant.
+    #[test]
+    fn arrows_name_their_enum_by_alias_or_in_full() {
+        let src = r#"::geo ns
+Kind enum open { A }
+
+::ext ns
+::k ::geo
+Extra type { n: Int }
+Extra -> ::k/Kind.Extra
+Full type { s: Str }
+Full -> ::geo/Kind.Full
+
+::t ns
+::k ::geo
+label fn match (x: ::k/Kind): Str {
+    ::k/Kind.A => { "a" }
+    ::k/Kind.Extra => { Str(x.n) }
+    ::k/Kind.Full => { x.s }
+    _ => { "other" }
+}
+[label(::k/Kind.Extra({n: 2})), label(::geo/Kind.Full(s: "f")), label(::k/Kind.A)]"#;
+        let expected = strs(&["2", "f", "a"]);
+        for conf in [None, Some(val!({"jit": {"threshold": 1}}))] {
+            let out = compile_and_run_project_with_std_conf(src, conf)
+                .unwrap_or_else(|e| panic!("run failed: {e}"));
+            assert_eq!(out, expected);
+        }
+    }
+
     /// A type from another namespace takes named arguments when it is
     /// imported in a body, as `Sh ::geo/Shape`, as well as at the top of the
     /// namespace. The local import names the type it is bound to, even over

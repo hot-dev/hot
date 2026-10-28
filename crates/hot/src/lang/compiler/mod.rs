@@ -6219,8 +6219,10 @@ impl Compiler {
             return Ok(());
         };
 
+        // A qualified enum may name its namespace by an alias
+        // (`Extra -> ::k/Kind.Extra`).
         let enum_full = if enum_path.starts_with("::") {
-            enum_path.to_string()
+            self.resolve_type_path(enum_path).0
         } else {
             format!("{}/{}", self.current_namespace, enum_path)
         };
