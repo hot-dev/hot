@@ -615,6 +615,9 @@ pub struct TypeChecker {
     /// `unresolved-type` errors because the inference paths involved
     /// (Union vs Union compatibility, dot-access value typing, generic-aware
     /// annotation parsing) have known gaps that produce false positives.
+    /// The one exception is a call that a scalar literal argument rules out
+    /// under every overload: a literal's type is exact, so no inference gap
+    /// is involved (see `validate_function_call_arguments`).
     /// `arity-mismatch` errors are always emitted — that's the whole point
     /// of walking bodies. Top-level expressions still get the full check,
     /// so nothing existing is lost.
@@ -1839,6 +1842,17 @@ impl TypeChecker {
             },
             _ => None,
         }
+    }
+
+    /// Whether `value` is a Str, Int, Dec, or Bool literal, whose type is
+    /// exact. `null` is left out: the runtime accepts it for parameters not
+    /// marked `?`, and overloads rely on that to delegate with `null`
+    /// defaults.
+    fn is_scalar_literal(value: &Value) -> bool {
+        matches!(
+            value,
+            Value::Val(Val::Str(_) | Val::Int(_) | Val::Dec(_) | Val::Bool(_), _)
+        )
     }
 
     /// Convert the parser's `ast::TypeExpr` to the type-checker's `TypeExpr`.
@@ -4303,6 +4317,9 @@ impl TypeChecker {
         // wildly different overload would just produce noise.
         let param_offset = if in_pipe_flow { 1 } else { 0 };
         let mut best_errors: Option<Vec<(usize, TypeExpr, TypeExpr)>> = None;
+        // Whether every rejecting overload rejects a scalar literal argument.
+        // Only then can a body report the call without trusting inference.
+        let mut literal_rules_out_all = true;
         for sig in matching_arity_sigs {
             let mut type_errors = Vec::new();
 
@@ -4339,6 +4356,13 @@ impl TypeChecker {
                 return;
             }
 
+            if !type_errors
+                .iter()
+                .any(|(i, _, _)| Self::is_scalar_literal(&fn_call.args[*i].value))
+            {
+                literal_rules_out_all = false;
+            }
+
             // Track the closest-matching signature so we can report against
             // it if no overload ends up accepting the call.
             match &best_errors {
@@ -4347,14 +4371,19 @@ impl TypeChecker {
             }
         }
 
-        // No overload accepted the call. Suppress when walking inside a fn /
-        // lambda body (see `in_fn_body` docs) to avoid surfacing latent
-        // inference gaps as false positives. Arity errors above are still
-        // emitted regardless.
-        if self.in_fn_body == 0
+        // No overload accepted the call. Inside a fn / lambda body (see
+        // `in_fn_body` docs), report only the scalar literal arguments, and
+        // only when a literal rules out every overload, to avoid surfacing
+        // latent inference gaps as false positives. Arity errors above are
+        // still emitted regardless.
+        let in_fn_body = self.in_fn_body > 0;
+        if (!in_fn_body || literal_rules_out_all)
             && let Some(type_errors) = best_errors
         {
             for (i, expected_type, actual_type) in type_errors {
+                if in_fn_body && !Self::is_scalar_literal(&fn_call.args[i].value) {
+                    continue;
+                }
                 let location = fn_call.args[i]
                     .src
                     .as_ref()
@@ -4997,6 +5026,78 @@ mod tests {
             "only `caller` should mismatch, got: {:?}",
             checker.errors.errors
         );
+    }
+
+    #[test]
+    fn test_body_literal_argument_mismatch_is_error() {
+        use crate::lang::errors::CompilerError;
+        use crate::lang::parser::parse_hot;
+
+        // A literal argument has an exact type, so a body reports it as the
+        // top level does: in a fn body, in a lambda body, and against a
+        // user-defined signature.
+        let source = r#"
+        ::t ns
+        takes-int fn (n: Int): Int { n }
+        body-mismatch fn (): Int { add("a", 1) }
+        lambda-mismatch fn (xs: Vec): Vec { map(xs, (x) { add(x, true) }) }
+        user-mismatch fn (): Int { takes-int("a") }
+        "#;
+        let program = parse_hot(source).expect("parse");
+        let mut checker = TypeChecker::new();
+        let _ = checker.check_program(&program);
+
+        let mut funcs: Vec<&str> = checker
+            .errors
+            .errors
+            .iter()
+            .filter_map(|e| match e {
+                CompilerError::TypeMismatch { message, .. } => Some(message.as_str()),
+                _ => None,
+            })
+            .filter_map(|m| m.split('\'').nth(1))
+            .collect();
+        funcs.sort();
+        assert_eq!(
+            funcs,
+            vec!["add", "add", "takes-int"],
+            "got: {:?}",
+            checker.errors.errors
+        );
+    }
+
+    #[test]
+    fn test_body_mismatch_stays_quiet_without_literal_proof() {
+        use crate::lang::parser::parse_hot;
+
+        // Bodies still trust the argument unless a literal proves the call
+        // wrong: `Any` and untyped parameters, untyped call results, values
+        // bound to a name, and `null` (which the runtime accepts for a
+        // parameter not marked `?`) are not errors. Nor is a literal that
+        // only some overloads reject, when the others fail on an inferred
+        // argument instead.
+        let source = r#"
+        ::t ns
+        takes-int fn (n: Int): Int { n }
+        two-ways fn (a: Str, b: Str): Int { 0 }, (a: Int, b: Int): Int { a }
+        untyped fn () { "x" }
+        any-arg fn (v: Any): Int { add(v, 1) }
+        untyped-arg fn (v): Int { add(v, 1) }
+        untyped-result fn (): Int { add(untyped(), 1) }
+        bound fn (): Int {
+            s "a"
+            takes-int(s)
+        }
+        null-arg fn (): Int { takes-int(null) }
+        overload fn (): Int {
+            s "a"
+            two-ways(s, 1)
+        }
+        "#;
+        let program = parse_hot(source).expect("parse");
+        let mut checker = TypeChecker::new();
+        let result = checker.check_program(&program);
+        assert!(result.is_ok(), "no errors expected: {:?}", result);
     }
 
     #[test]
