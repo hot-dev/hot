@@ -87,6 +87,7 @@ process fn (order: Map): Str {
 
 ### Branch Syntax
 
+<!-- hot-check: skip -->
 ```hot
 condition => { result }     // With condition
 => { result }               // Default (always matches)
@@ -140,6 +141,7 @@ process fn (order: Map): Map {
 
 **Branch names are required** in `cond-all` to key the result map:
 
+<!-- hot-check: skip -->
 ```hot
 condition => name { result }
 => default-name { result }
@@ -315,6 +317,11 @@ process fn (result: Result): Str {
 After matching, access the value directly through the matched variable:
 
 ```hot
+Click type { x: Int, y: Int, target: Str }
+KeyPress type { key: Str }
+Event enum { Click(Click), KeyPress(KeyPress) }
+Action enum { Navigate(Str), Input(Str) }
+
 handle fn (event: Event): Action {
     action match event {
         Event.Click => {

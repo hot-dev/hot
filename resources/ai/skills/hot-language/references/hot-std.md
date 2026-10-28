@@ -44,6 +44,7 @@ These functions have `meta {core: true}` and are available everywhere without na
 
 Math functions accept both `Int` and `Dec`. When mixing types, the result is `Dec`.
 
+<!-- hot-check: skip -->
 ```hot
 add fn (x: Int | Dec, y: Int | Dec): Int | Dec          // Addition
 sub fn (x: Int | Dec, y: Int | Dec): Int | Dec          // Subtraction
@@ -68,6 +69,7 @@ rand-int fn (n: Int): Int                               // Random integer 0 to n
 
 ### Comparison
 
+<!-- hot-check: skip -->
 ```hot
 eq fn (a: Any, b: Any): Bool                            // Equality
 ne fn (a: Any, b: Any): Bool                            // Not equal
@@ -79,6 +81,7 @@ gte fn (a: Int | Dec, b: Int | Dec): Bool               // Greater than or equal
 
 ### Logic
 
+<!-- hot-check: skip -->
 ```hot
 is-truthy fn (value: Result): Bool                      // Not false, null, or Err
 not fn (x: Result): Bool                                // Negate truthiness
@@ -92,6 +95,7 @@ if fn cond (pred: Result, lazy then: Any, lazy else: Any): Any  // If pred, eval
 
 Most collection functions work on `Vec`, `Map`, and `Str`.
 
+<!-- hot-check: skip -->
 ```hot
 // Transform
 map fn (coll: Str | Vec | Map, func: Fn): Str | Vec | Map           // Apply func to each element
@@ -177,6 +181,7 @@ postwalk-replace fn (replacement-map: Map, form: Any): Any  // Replace values vi
 
 ### Strings
 
+<!-- hot-check: skip -->
 ```hot
 split fn (s: Str, delim: Str): Vec<Str>                 // Split by delimiter
 join fn (values: Vec<Str>, delim: Str): Str              // Join with delimiter
@@ -198,6 +203,7 @@ pad-end fn (s: Str, width: Int, pad: Str): Str           // Pad right with custo
 
 ### Results
 
+<!-- hot-check: skip -->
 ```hot
 Result enum { Ok(Any), Err(Any) }                        // Success/error union type
 ok fn (value: Any): Result                               // Wrap in Result.Ok
@@ -211,6 +217,7 @@ if-err fn (result: Result, handler): Any                // Err → apply fn/use 
 
 ### Type Checks
 
+<!-- hot-check: skip -->
 ```hot
 is-type fn (val: Result, type-ref): Bool                // Check if val conforms to type-ref
 is-null fn (value: Any): Bool                            // true if null
@@ -228,6 +235,7 @@ is-byte fn (value: Any): Bool                            // true if Byte
 
 ### Type Constructors & Coercion
 
+<!-- hot-check: skip -->
 ```hot
 Str type fn (value: Any): Str                            // Coerce to string
 Int type fn (value: Int | Dec): Int                      // Coerce to integer (truncates)
@@ -247,6 +255,7 @@ untype fn (form: Any): Any                               // Strip internal type 
 
 ### JSON
 
+<!-- hot-check: skip -->
 ```hot
 from-json fn (s: Str): Any                               // Parse JSON string
 to-json fn (value: Any): Str                             // Serialize to JSON string
@@ -254,6 +263,7 @@ to-json fn (value: Any): Str                             // Serialize to JSON st
 
 ### UUID (core)
 
+<!-- hot-check: skip -->
 ```hot
 Uuid fn (): Str                                          // Generate new UUID v4
 is-uuid fn (value: Any): Bool                            // true if value is a valid UUID
@@ -261,6 +271,7 @@ is-uuid fn (value: Any): Bool                            // true if value is a v
 
 ### Random (core)
 
+<!-- hot-check: skip -->
 ```hot
 random-bytes fn (n: Int): Bytes                          // Generate n random bytes
 random-string fn (n: Int): Str                           // Generate random alphanumeric string of length n
@@ -269,6 +280,7 @@ secure-compare fn (a: Str, b: Str): Bool                 // Constant-time string
 
 ### XML (core)
 
+<!-- hot-check: skip -->
 ```hot
 from-xml fn (s: Str): Map                                // Parse XML string to map
 to-xml fn (value: Map): Str                              // Convert map to XML string
@@ -281,6 +293,7 @@ at fn (node: Map, path: Str): Any                        // Navigate XML path
 
 ### File I/O (core)
 
+<!-- hot-check: skip -->
 ```hot
 read-file fn (path: Str): Str                            // Read file as UTF-8 string
 read-file-bytes fn (path: Str): Bytes                    // Read file as bytes
@@ -294,12 +307,14 @@ list-files fn (path: Str): Vec<Str>                      // List files in direct
 
 ### Events (core)
 
+<!-- hot-check: skip -->
 ```hot
 send fn (event-name: Str, data: Any): Map                // Send event for async processing
 ```
 
 ### Predicates (core)
 
+<!-- hot-check: skip -->
 ```hot
 between fn (x: Int | Dec, low: Int | Dec, high: Int | Dec): Bool  // Inclusive range check: low <= x <= high
 in fn (value: Any, coll: Vec): Bool                      // Membership test: true if value is in coll
@@ -307,6 +322,7 @@ in fn (value: Any, coll: Vec): Bool                      // Membership test: tru
 
 ### Utility (core)
 
+<!-- hot-check: skip -->
 ```hot
 tap fn (value: Result): Any                              // Print value to stderr, return unchanged
 tap fn (value: Result, label: Str): Any                  // Print "label: value" to stderr, return unchanged
@@ -331,6 +347,7 @@ These functions are NOT auto-imported. You must use the full qualified path (`::
 
 Environment variables.
 
+<!-- hot-check: skip -->
 ```hot
 ::env ::hot::env
 
@@ -342,6 +359,7 @@ get-all fn (): Map<Str, Str>                             // Get all env vars
 
 Execution context for secrets and configuration.
 
+<!-- hot-check: skip -->
 ```hot
 ::ctx ::hot::ctx
 
@@ -356,6 +374,7 @@ set-secret fn (ctx-map: Map): Any                        // Set multiple secret 
 
 HTTP client functions.
 
+<!-- hot-check: skip -->
 ```hot
 ::http ::hot::http
 
@@ -396,6 +415,7 @@ response ::http/request(HttpRequest({
 
 URI parsing, building, encoding, and validation.
 
+<!-- hot-check: skip -->
 ```hot
 ::uri ::hot::uri
 
@@ -417,6 +437,7 @@ is-valid fn (uri: Str): Bool                             // Check if valid URI
 
 ### ::hot::base64
 
+<!-- hot-check: skip -->
 ```hot
 ::b64 ::hot::base64
 
@@ -429,6 +450,7 @@ is-valid fn (s: Str): Bool                               // Check if valid base6
 
 ### ::hot::regex
 
+<!-- hot-check: skip -->
 ```hot
 ::re ::hot::regex
 
@@ -446,6 +468,7 @@ escape fn (value: Str): Str                              // Escape special regex
 
 ### ::hot::hash
 
+<!-- hot-check: skip -->
 ```hot
 ::hash ::hot::hash
 
@@ -457,6 +480,7 @@ sha512 fn (data: Str | Bytes): Str                       // SHA-512 (128-char he
 
 ### ::hot::hmac
 
+<!-- hot-check: skip -->
 ```hot
 ::hmac ::hot::hmac
 
@@ -468,6 +492,7 @@ hmac-sha1 fn (key: Str | Bytes, data: Str | Bytes): Str    // HMAC-SHA1 (legacy)
 
 Types: `Instant`, `PlainDate`, `PlainTime`, `PlainDateTime`, `ZonedDateTime`, `Duration`
 
+<!-- hot-check: skip -->
 ```hot
 ::time ::hot::time
 
@@ -539,6 +564,7 @@ ZonedDateTime(PlainDateTime(2026, 3, 8, 2, 30, 0), "US/Central") // From PlainDa
 
 Run control functions. `fail`, `cancel`, `exit`, and `info` are also core (auto-imported).
 
+<!-- hot-check: skip -->
 ```hot
 fail fn (msg: Str): Failure                              // Halt with error
 fail fn (msg: Str, data: Any): Failure                   // Halt with error and data
@@ -566,6 +592,7 @@ if(gt(i.run.retry-attempt, 0),
 Language-level helpers. Rely on normal `Result` propagation — there is no
 halt-catching helper (`try` / `try-call` were removed in Hot 2.6.0).
 
+<!-- hot-check: skip -->
 ```hot
 call fn (f: Fn, args: Vec<Any>): Any                     // Force domain Err by default
 call fn (f: Fn, args: Vec<Any>, on-err: OnErr): Any      // Use OnErr.Preserve to return domain Err as value
@@ -587,6 +614,7 @@ failures filter(results, is-err)
 
 Lazy iterator functions. `Iter`, `next`, `collect`, `for-each`, `take` are also core.
 
+<!-- hot-check: skip -->
 ```hot
 Iter fn (coll: Vec): Iter                                // Create iterator from collection
 next fn (iter: Iter): Next                               // Get next value ({value, done})
@@ -599,6 +627,7 @@ range fn (start: Int, end: Int, step: Int): Iter         // Range iterator with 
 
 ### ::hot::bytes
 
+<!-- hot-check: skip -->
 ```hot
 ::bytes ::hot::bytes
 
@@ -614,6 +643,7 @@ to-vec fn (bytes: Bytes): Vec<Int>                       // Bytes to vector of i
 
 ### ::hot::bit
 
+<!-- hot-check: skip -->
 ```hot
 ::bit ::hot::bit
 
@@ -627,6 +657,7 @@ shift-right fn (a: Int | Byte, n: Int): Int | Byte      // Arithmetic shift righ
 
 ### ::hot::hex
 
+<!-- hot-check: skip -->
 ```hot
 ::hex ::hot::hex
 
@@ -635,6 +666,7 @@ is-valid fn (s: Str): Bool                               // true if valid hexade
 
 ### ::hot::meta
 
+<!-- hot-check: skip -->
 ```hot
 ::meta ::hot::meta
 
@@ -645,6 +677,7 @@ get fn (lazy var: Any): Any                              // Get metadata attache
 
 Long-running task execution. Start tasks from runs, send/receive messages, checkpoint state.
 
+<!-- hot-check: skip -->
 ```hot
 ::task ::hot::task
 
@@ -677,6 +710,7 @@ restore fn (task-id: Str): Any?                          // Get checkpoint for a
 Persistent ordered maps with optional embedding and semantic search.
 Available in CLI, event handlers, and tasks.
 
+<!-- hot-check: skip -->
 ```hot
 ::store ::hot::store
 

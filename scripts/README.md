@@ -19,6 +19,9 @@ package documentation, and local integration tests.
   skill; filtered sync preserves every unrelated manifest hash so CI still
   detects unsynchronized source changes. A full sync removes mirror directories
   whose canonical skill was deleted.
+  `check-doc-hot-blocks.sh` runs `hot check` on every ```hot block in the AI
+  docs, with stubs for the helpers they leave undefined; mark a block that is
+  not meant to compile with `<!-- hot-check: skip -->` on the line before it.
 - `integration/*.sh` contains package integration test runners. Use the package
   or service name as the filename, for example `integration/resend.sh`.
 - `noisy-load-benchmark.sh` runs the `hot/test/noisy-load` stress project
