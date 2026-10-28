@@ -2812,6 +2812,40 @@ async fn process_container_task(
         })
     });
 
+    // A private image's credential was sealed by `box/start` for this task's
+    // environment; open it only for the pull. Errors name the secret, never
+    // its contents.
+    let registry_auth = match hot::lang::hot::r#box::registry_auth::open(
+        args,
+        &image,
+        &env_id,
+        org_id.as_ref(),
+        hot::lang::hot::r#box::registry_auth::encryption_key,
+    ) {
+        Ok(credential) => credential.map(Arc::new),
+        Err(msg) => {
+            let error = task_failure_json(&format!("::hot::box/start: {msg}"), None);
+            if complete_container_setup(
+                &db,
+                &stream_publisher,
+                &task_id,
+                env_id,
+                stream_id,
+                &function_name,
+                &request.task_type,
+                TaskStatus::Failed,
+                Some(&error),
+                None,
+                None,
+            )
+            .await
+            {
+                publish_task_alert(&db, org_id, env_id, &task_id, "task:failed", &error).await;
+            }
+            return Ok(());
+        }
+    };
+
     // -- Resolve features for limit/quota checks --
     let features = if let Some(oid) = &org_id {
         hot::db::features::Features::try_resolve_for_org(&db, oid)
@@ -3234,6 +3268,8 @@ async fn process_container_task(
         data_volume.as_ref(),
         executor.backend(),
     );
+
+    extras.registry_auth = registry_auth;
 
     // Writable rootfs is on by default; set writable: false to disable
     extras.writable_rootfs = args
@@ -3691,6 +3727,7 @@ async fn process_container_task(
         && !extras.writable_rootfs
         && extras.entrypoint.is_none()
         && extras.data_volume_path.is_none()
+        && extras.registry_auth.is_none()
     {
         None
     } else {
