@@ -185,6 +185,23 @@ the set (from JSON, say) fails where it enters the type, as a
 values of its base type at runtime, so use `open` for values an external
 service sends, which it may add to.
 
+A `match` on a closed literal union (named or inline) must be
+**exhaustive**, like a closed enum: every member needs an arm, unless a
+`_`, `Any`, or type arm (`Str`) covers the rest. A union arm counts each
+value it names. A nullable subject (`Fruit?`) also needs a `null` arm.
+Otherwise the compiler reports `non-exhaustive-match` with the missing
+values:
+
+```hot
+Severity type "low" | "medium" | "high"
+
+// non-exhaustive-match: missing arms for `"medium"`
+rate fn match (s: Severity): Int {
+    "low" => { 1 }
+    "high" => { 3 }
+}
+```
+
 ### Open Literal Unions
 
 A literal union may be declared `open` to allow other namespaces (or

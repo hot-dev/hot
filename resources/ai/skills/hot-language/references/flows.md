@@ -177,6 +177,12 @@ toward coverage, and an `Any` arm covers everything (it also satisfies
 the open-enum default requirement below). Missing variants produce
 **`non-exhaustive-match`** at compile time.
 
+A `match` on a closed literal union (`Severity type "low" | "medium" |
+"high"`, or an inline `"low" | "high"` parameter) follows the same rule:
+every value needs an arm, or a default, `Any`, or type arm (`Str`) covers
+the rest, and the error lists the missing values. A nullable subject
+(`Severity?`) also needs a `null` arm.
+
 A `match` on an `open enum` MUST include a `_` / bare `=>` default arm,
 because new variants can be enrolled at any time via arrows. Missing the
 default produces **`open-enum-match-missing-default`**.
