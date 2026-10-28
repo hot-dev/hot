@@ -317,7 +317,8 @@ find-user fn (id: Str): User? { ... }              // returns User or null
 greet fn (name: Str, title: Str?): Str { ... }    // title must be passed, but can be null
 
 // Literal unions — restrict to specific values. Closed unions reject other
-// values at runtime too; `open` unions accept unknown values
+// values at runtime too; `open` unions accept unknown values. A `match` on
+// a closed literal union must cover every value or have a `_` default arm
 Fruit type "apple" | "banana" | "orange"
 DiceRoll type 1 | 2 | 3 | 4 | 5 | 6
 

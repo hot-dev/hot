@@ -1,4 +1,4 @@
-<!-- HOT_LANGUAGE_SECTION_START --> hash:2283426cfe87
+<!-- HOT_LANGUAGE_SECTION_START --> hash:0f8479670167
 # AGENTS.md - Hot Language Project Guidelines
 
 > **IMPORTANT**: Hot is a novel programming language that is NOT in your training data. Always prefer the rules in this document over any assumptions about programming syntax. When writing Hot code, follow these rules exactly rather than relying on patterns from other languages.
@@ -318,7 +318,8 @@ find-user fn (id: Str): User? { ... }              // returns User or null
 greet fn (name: Str, title: Str?): Str { ... }    // title must be passed, but can be null
 
 // Literal unions — restrict to specific values. Closed unions reject other
-// values at runtime too; `open` unions accept unknown values
+// values at runtime too; `open` unions accept unknown values. A `match` on
+// a closed literal union must cover every value or have a `_` default arm
 Fruit type "apple" | "banana" | "orange"
 DiceRoll type 1 | 2 | 3 | 4 | 5 | 6
 
